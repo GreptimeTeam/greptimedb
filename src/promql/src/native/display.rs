@@ -100,6 +100,25 @@ fn describe(node: &NativeNode) -> String {
             format!("{}() on grid {}", date.name(), grid_of(node))
         }
         NativeExpr::VectorOf { .. } => "vector()".to_string(),
+        NativeExpr::ScalarOf { .. } => "scalar()".to_string(),
+        NativeExpr::ParameterizedTopK { op, .. } => match op {
+            BoundVectorOp::TopK { top: true, .. } => "parameterized topk".to_string(),
+            BoundVectorOp::TopK { top: false, .. } => "parameterized bottomk".to_string(),
+            _ => "parameterized topk".to_string(),
+        },
+        NativeExpr::ParameterizedHistogram { op, parameters, .. } => {
+            format!(
+                "{} ({} parameters)",
+                match op {
+                    BoundVectorOp::Histogram(HistogramFunction::Quantile(_)) =>
+                        "histogram_quantile",
+                    BoundVectorOp::Histogram(HistogramFunction::Fraction { .. }) =>
+                        "histogram_fraction",
+                    _ => "histogram",
+                },
+                parameters.len()
+            )
+        }
         NativeExpr::ParameterizedMap { op, .. } => match op {
             ParameterizedOp::Round => "round".to_string(),
             ParameterizedOp::Clamp => "clamp".to_string(),
@@ -409,7 +428,10 @@ fn kind(expr: &NativeExpr) -> &'static str {
         NativeExpr::Binary { .. } => "Binary",
         NativeExpr::EvalTime { .. } => "EvalTime",
         NativeExpr::VectorOf { .. } => "VectorOf",
+        NativeExpr::ScalarOf { .. } => "ScalarOf",
         NativeExpr::ParameterizedMap { .. } => "ParameterizedMap",
+        NativeExpr::ParameterizedTopK { .. } => "ParameterizedTopK",
+        NativeExpr::ParameterizedHistogram { .. } => "ParameterizedHistogram",
         NativeExpr::Set { .. } => "Set",
         NativeExpr::Info { .. } => "Info",
     }
@@ -437,7 +459,22 @@ fn display_node(
         | NativeExpr::Timestamp { input }
         | NativeExpr::Aggregate { input, .. }
         | NativeExpr::Vector { input, .. }
-        | NativeExpr::VectorOf { input } => display_node(f, input, depth + 1, "input")?,
+        | NativeExpr::VectorOf { input }
+        | NativeExpr::ScalarOf { input } => display_node(f, input, depth + 1, "input")?,
+        NativeExpr::ParameterizedHistogram {
+            input, parameters, ..
+        } => {
+            display_node(f, input, depth + 1, "input")?;
+            for parameter in parameters {
+                display_node(f, parameter, depth + 1, "parameter")?;
+            }
+        }
+        NativeExpr::ParameterizedTopK {
+            input, parameter, ..
+        } => {
+            display_node(f, input, depth + 1, "input")?;
+            display_node(f, parameter, depth + 1, "parameter")?;
+        }
         NativeExpr::ParameterizedMap {
             input, parameters, ..
         } => {

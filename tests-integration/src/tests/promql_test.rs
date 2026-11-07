@@ -1849,6 +1849,23 @@ impl NativePlanObserver {
     fn fused(&self) -> Option<Arc<dyn datafusion::physical_plan::ExecutionPlan>> {
         self.0.lock().unwrap().clone()
     }
+
+    /// The name of the node that answers the statement, when it is one of the native nodes.
+    ///
+    /// [`Self::fused`] answers whether *some* fused node exists, and a split plan holds two: the
+    /// partition-local producer below the state router and the merge above it. A test that means
+    /// "the whole statement runs natively" therefore has to say which node answers it, not that one
+    /// was captured. The search is breadth first, so the shallowest native node is the one reported.
+    fn answering_node(&self) -> Option<String> {
+        let mut queue = std::collections::VecDeque::from([self.root_plan()]);
+        while let Some(node) = queue.pop_front() {
+            if node.name() == "FusedSeriesExec" {
+                return Some(node.name().to_string());
+            }
+            queue.extend(node.children().into_iter().cloned());
+        }
+        None
+    }
 }
 
 /// Unique physical nodes reachable from the frontend and separately wrapped region trees.
@@ -8327,36 +8344,44 @@ async fn native_promql_declines_a_selection_that_depends_on_arrival_order() {
     )
     .await;
 
-    let query = "native_order_left and on(host) limitk(1, native_order_right)";
-    let sql = format!("TQL EVAL (0, 0, '1s') {query}");
+    for query in [
+        "native_order_left and on(host) limitk(1, native_order_right)",
+        // The same selection under a `vector(scalar(...))` wrapper. The wrapper answers one value
+        // from its input, so the order-dependent selection is still in the tree: a walk that read
+        // `vector()` as a leaf would admit this shape and answer `10` or `12` depending on which
+        // partition the gather handed over first.
+        "vector(scalar(limitk(1, native_order_left))) + on() native_order_right",
+    ] {
+        let sql = format!("TQL EVAL (0, 0, '1s') {query}");
 
-    // The route declines, so the statement is planned by the one that was always its answer.
-    observer.clear();
-    let native = instance
-        .do_query(&sql, native_query_context(true, 4))
-        .await
-        .remove(0);
-    assert!(
-        observer.fused().is_none(),
-        "{query}: the route must decline a selection whose answer depends on arrival order"
-    );
-    let legacy = instance
-        .do_query(&sql, native_query_context(false, 4))
-        .await
-        .remove(0);
-    // Both routes report the same outcome: the decline leads to the plan this statement already had,
-    // not to an answer the schedule could change.
-    assert_eq!(
-        native.is_err(),
-        legacy.is_err(),
-        "{query}: the route must not change whether the statement is answerable"
-    );
-    if let (Err(native_error), Err(legacy_error)) = (native, legacy) {
-        assert_eq!(
-            native_error.to_string(),
-            legacy_error.to_string(),
-            "{query}: the decline must lead to the plan this statement already had"
+        // The route declines, so the statement is planned by the one that was always its answer.
+        observer.clear();
+        let native = instance
+            .do_query(&sql, native_query_context(true, 4))
+            .await
+            .remove(0);
+        assert!(
+            observer.fused().is_none(),
+            "{query}: the route must decline a selection whose answer depends on arrival order"
         );
+        let legacy = instance
+            .do_query(&sql, native_query_context(false, 4))
+            .await
+            .remove(0);
+        // Both routes report the same outcome: the decline leads to the plan this statement already
+        // had, not to an answer the schedule could change.
+        assert_eq!(
+            native.is_err(),
+            legacy.is_err(),
+            "{query}: the route must not change whether the statement is answerable"
+        );
+        if let (Err(native_error), Err(legacy_error)) = (native, legacy) {
+            assert_eq!(
+                native_error.to_string(),
+                legacy_error.to_string(),
+                "{query}: the decline must lead to the plan this statement already had"
+            );
+        }
     }
 }
 
@@ -9144,6 +9169,75 @@ async fn native_promql_dynamic_scalars_match_prometheus_and_legacy() {
         \n+---------------------+-------+--------+\
         \n| 1970-01-01T00:00:00 | 1.0   | 1      |\
         \n+---------------------+-------+--------+"
+    );
+}
+
+/// A same-table scalar broadcast gathers simultaneous series from distinct physical regions.
+/// `scalar(m)` is NaN for two series, so `m == bool scalar(m)` answers zero for both. Evaluating
+/// the scalar separately in each region would instead compare each series to itself and answer one.
+#[tokio::test(flavor = "multi_thread")]
+async fn native_promql_same_table_partitioned_scalar_broadcast_gathers_whole_vector() {
+    let (standalone, observer) = native_test_instance(GreptimeDbStandaloneBuilder::new(
+        "native_promql_partitioned_scalar_broadcast",
+    ))
+    .await;
+    let instance = standalone.fe_instance().clone();
+    execute_all(
+        &instance,
+        "CREATE TABLE native_partitioned_scalar (host STRING, ts TIMESTAMP TIME INDEX, \
+         val DOUBLE, PRIMARY KEY(host)) PARTITION ON COLUMNS (host) (host < 'm', host >= 'm'); \
+         INSERT INTO native_partitioned_scalar VALUES ('a', 5000, 2), ('z', 5000, 7)",
+        QueryContext::arc(),
+    )
+    .await;
+
+    let sql =
+        "TQL EVAL (5, 5, '1s') native_partitioned_scalar == bool scalar(native_partitioned_scalar)";
+    observer.clear();
+    let rows = native_result_rows(native_tql_output(&instance, sql, true).await).await;
+    assert_eq!(
+        rows,
+        vec![(5_000, "a".to_string(), 0.0), (5_000, "z".to_string(), 0.0)],
+        "the global scalar is NaN and equality is false for both series"
+    );
+
+    let root = observer.root_plan();
+    let fused = find_plan_node(&root, "FusedSeriesExec").unwrap_or_else(|| {
+        panic!(
+            "the frontend must answer natively: {}",
+            display_plan_tree(&root)
+        )
+    });
+    assert_eq!(
+        observer.answering_node().as_deref(),
+        Some("FusedSeriesExec")
+    );
+    assert_eq!(
+        fused.children().len(),
+        2,
+        "one input per selector: {}",
+        display_plan_tree(&root)
+    );
+    assert_eq!(
+        fused.output_partitioning().partition_count(),
+        1,
+        "the whole vector is gathered: {}",
+        display_plan_tree(&root)
+    );
+    let shape = native_plan_shape(&root);
+    assert_eq!(
+        shape.regions_per_scan,
+        vec![2, 2],
+        "each selector reads both declared host ranges: {}",
+        display_plan_tree(&root)
+    );
+    // The disjoint declared ranges place `a` and `z` in different physical regions; both scans
+    // select those regions. Compare the two NaN equalities with a literal false control as well.
+    let literal = "TQL EVAL (5, 5, '1s') native_partitioned_scalar == bool 0";
+    let legacy = native_result_rows(native_tql_output(&instance, literal, false).await).await;
+    assert_eq!(
+        rows, legacy,
+        "a literal false comparison yields the same labelled rows"
     );
 }
 
@@ -10516,6 +10610,447 @@ async fn native_promql_real_query_q04_namespace_cpu_requests() {
             .count(),
         1
     );
+}
+
+/// A multi-field `scalar()` input declines the native route and keeps the existing plan.
+#[tokio::test(flavor = "multi_thread")]
+async fn native_promql_scalar_multi_field_falls_back() {
+    common_telemetry::init_default_ut_logging();
+    let (standalone, observer) = native_test_instance(GreptimeDbStandaloneBuilder::new(
+        "native_promql_scalar_multi_field_fallback",
+    ))
+    .await;
+    let instance = standalone.fe_instance().clone();
+    execute_all(
+        &instance,
+        "CREATE TABLE native_scalar_multi (host STRING, ts TIMESTAMP TIME INDEX, val DOUBLE, val2 DOUBLE, PRIMARY KEY(host)); \
+         INSERT INTO native_scalar_multi (host, ts, val, val2) VALUES ('a', 0, 1, 10)",
+        QueryContext::arc(),
+    )
+    .await;
+    let sql = "TQL EVAL (0, 0, '1s') scalar(native_scalar_multi)";
+    let error = instance
+        .do_query(sql, native_query_context(true, 4))
+        .await
+        .remove(0)
+        .unwrap_err();
+    assert!(
+        format!("{error:?}").contains("Multi fields calculation is not supported in scalar"),
+        "unexpected multi-field scalar error: {error:?}"
+    );
+    assert!(
+        observer.fused().is_none(),
+        "multi-field scalar() must fall back"
+    );
+}
+
+/// A dynamic classic histogram quantile matches each equivalent constant-phi evaluation.
+#[tokio::test(flavor = "multi_thread")]
+async fn native_promql_dynamic_histogram_quantile() {
+    common_telemetry::init_default_ut_logging();
+    let config = mito2::config::MitoConfig {
+        experimental_series_scan_v2: true,
+        ..Default::default()
+    };
+    let (standalone, observer) = native_test_instance(
+        GreptimeDbStandaloneBuilder::new("native_dynamic_histogram_quantile")
+            .with_mito_config(config),
+    )
+    .await;
+    let instance = standalone.fe_instance().clone();
+    execute_all(&instance, "CREATE TABLE native_dyn_hist (ts TIMESTAMP TIME INDEX, le STRING, v DOUBLE, PRIMARY KEY(le)); INSERT INTO native_dyn_hist (ts, le, v) VALUES (-60000, '1', 0), (0, '1', 5), (60000, '1', 10), (-60000, '2', 0), (0, '2', 9), (60000, '2', 18), (-60000, '+Inf', 0), (0, '+Inf', 10), (60000, '+Inf', 20)", QueryContext::arc()).await;
+    let query = "sum by(le)(rate(native_dyn_hist[5m]))";
+    let sql = format!("TQL EVAL (0, 60, '60s') histogram_quantile(time() / 150 + 0.5, {query})");
+    observer.clear();
+    let native = native_labelled_rows(native_tql_output(&instance, &sql, true).await).await;
+    assert!(
+        observer.fused().is_some(),
+        "dynamic histogram query did not run natively"
+    );
+    // The legacy planner requires literal histogram parameters, so compare each point with its constant-phi equivalent.
+    let mut expected = Vec::new();
+    for (t, phi) in [(0, 0.5), (60, 0.9)] {
+        let literal = format!("TQL EVAL ({t}, {t}, '60s') histogram_quantile({phi}, {query})");
+        let (_, mut rows) =
+            native_labelled_rows(native_tql_output(&instance, &literal, false).await).await;
+        expected.append(&mut rows);
+    }
+    let mut actual = native.1;
+    actual.sort_by_key(|row| row.0);
+    expected.sort_by_key(|row| row.0);
+    assert_eq!(actual, expected);
+
+    // A literal lower bound and a dynamic upper bound exercise both parameter paths together.
+    let fraction_sql =
+        format!("TQL EVAL (0, 60, '60s') histogram_fraction(0, time() / 150 + 0.5, {query})");
+    observer.clear();
+    let fraction_native =
+        native_labelled_rows(native_tql_output(&instance, &fraction_sql, true).await).await;
+    assert!(
+        observer.fused().is_some(),
+        "dynamic histogram fraction did not run natively: {fraction_sql}"
+    );
+    let mut fraction_expected = Vec::new();
+    for (t, upper) in [(0, 0.5), (60, 0.9)] {
+        let literal = format!("TQL EVAL ({t}, {t}, '60s') histogram_fraction(0, {upper}, {query})");
+        let (_, mut rows) =
+            native_labelled_rows(native_tql_output(&instance, &literal, false).await).await;
+        fraction_expected.append(&mut rows);
+    }
+    let mut fraction_actual = fraction_native.1;
+    fraction_actual.sort_by_key(|row| row.0);
+    fraction_expected.sort_by_key(|row| row.0);
+    assert_eq!(fraction_actual, fraction_expected, "{fraction_sql}");
+
+    let wrapped_query =
+        "abs(histogram_quantile(time() / 150 + 0.5, sum by(le)(rate(native_dyn_hist[5m]))))";
+    let wrapped_sql = format!("TQL EVAL (0, 60, '60s') {wrapped_query}");
+    observer.clear();
+    let wrapped_native =
+        native_labelled_rows(native_tql_output(&instance, &wrapped_sql, true).await).await;
+    assert!(
+        observer.fused().is_some(),
+        "wrapped dynamic histogram query did not run natively: {wrapped_sql}"
+    );
+    let mut wrapped_expected = Vec::new();
+    for (t, phi) in [(0, 0.5), (60, 0.9)] {
+        let literal = format!("TQL EVAL ({t}, {t}, '60s') abs(histogram_quantile({phi}, {query}))");
+        let (_, mut rows) =
+            native_labelled_rows(native_tql_output(&instance, &literal, false).await).await;
+        wrapped_expected.append(&mut rows);
+    }
+    let mut wrapped_actual = wrapped_native.1;
+    wrapped_actual.sort_by_key(|row| row.0);
+    wrapped_expected.sort_by_key(|row| row.0);
+    assert_eq!(wrapped_actual, wrapped_expected, "{wrapped_sql}");
+}
+
+/// A dynamic `topk` parameter is evaluated at each TQL evaluation timestamp. `time() / 60 + 1`
+/// truncates to k = 1, 2, 3 at 0s, 60s, and 120s respectively.
+#[tokio::test(flavor = "multi_thread")]
+async fn native_promql_dynamic_topk_matches_legacy() {
+    common_telemetry::init_default_ut_logging();
+    let config = mito2::config::MitoConfig {
+        experimental_series_scan_v2: true,
+        ..Default::default()
+    };
+    let (standalone, observer) = native_test_instance(
+        GreptimeDbStandaloneBuilder::new("native_promql_dynamic_topk_e2e").with_mito_config(config),
+    )
+    .await;
+    let instance = standalone.fe_instance().clone();
+    execute_all(
+        &instance,
+        r#"CREATE TABLE native_dyn_topk (host STRING, ts TIMESTAMP TIME INDEX, val DOUBLE, PRIMARY KEY(host));
+         INSERT INTO native_dyn_topk (host, ts, val) VALUES
+         ('h0', -60000, 0), ('h0', 0, 1), ('h0', 60000, 2), ('h0', 120000, 3),
+         ('h1', -60000, 0), ('h1', 0, 2), ('h1', 60000, 4), ('h1', 120000, 6),
+         ('h2', -60000, 0), ('h2', 0, 3), ('h2', 60000, 6), ('h2', 120000, 9),
+         ('h3', -60000, 0), ('h3', 0, 4), ('h3', 60000, 8), ('h3', 120000, 12),
+         ('h4', -60000, 0), ('h4', 0, 5), ('h4', 60000, 10), ('h4', 120000, 15),
+         ('h5', -60000, 0), ('h5', 0, 6), ('h5', 60000, 12), ('h5', 120000, 18),
+         ('h6', -60000, 0), ('h6', 0, 7), ('h6', 60000, 14), ('h6', 120000, 21),
+         ('h7', -60000, 0), ('h7', 0, 8), ('h7', 60000, 16), ('h7', 120000, 24)"#,
+        QueryContext::arc(),
+    )
+    .await;
+    let query_body = "sum by(host)(rate(native_dyn_topk[5m]))";
+    let sql = format!("TQL EVAL (0, 120, '60s') topk(time() / 60 + 1, {query_body})");
+    observer.clear();
+    let native = native_labelled_rows(native_tql_output(&instance, &sql, true).await).await;
+    assert!(
+        observer.fused().is_some(),
+        "dynamic topk did not run natively"
+    );
+    let counts = [0, 60_000, 120_000].map(|timestamp| {
+        native
+            .1
+            .iter()
+            .filter(|(ts, _, _)| *ts == timestamp)
+            .count()
+    });
+    assert_eq!(counts, [1, 2, 3], "k = 1, 2, 3 at 0s, 60s, 120s");
+    // The legacy planner requires a literal topk parameter, so compare each timestamp against
+    // its equivalent literal-k query (the k values are computed above from `time() / 60 + 1`).
+    let mut legacy_rows = Vec::new();
+    for (timestamp_seconds, k) in [(0, 1), (60, 2), (120, 3)] {
+        let legacy_sql = format!(
+            "TQL EVAL ({timestamp_seconds}, {timestamp_seconds}, '60s') topk({k}, {query_body})"
+        );
+        let (_, mut rows) =
+            native_labelled_rows(native_tql_output(&instance, &legacy_sql, false).await).await;
+        legacy_rows.append(&mut rows);
+    }
+    let mut native_rows = native.1.clone();
+    native_rows.sort_by(|left, right| (&left.0, &left.1).cmp(&(&right.0, &right.1)));
+    legacy_rows.sort_by(|left, right| (&left.0, &left.1).cmp(&(&right.0, &right.1)));
+    assert_eq!(native_rows, legacy_rows);
+
+    for is_abs in [true, false] {
+        let wrapped_query = if is_abs {
+            format!("abs(topk(time() / 60 + 1, {query_body}))")
+        } else {
+            format!("topk(time() / 60 + 1, {query_body}) + 1")
+        };
+        let wrapped_sql = format!("TQL EVAL (0, 120, '60s') {wrapped_query}");
+        observer.clear();
+        let wrapped_native =
+            native_labelled_rows(native_tql_output(&instance, &wrapped_sql, true).await).await;
+        assert!(
+            observer.fused().is_some(),
+            "wrapped dynamic topk did not run natively: {wrapped_sql}"
+        );
+        let mut wrapped_expected = Vec::new();
+        for (timestamp_seconds, k) in [(0, 1), (60, 2), (120, 3)] {
+            let wrapped_literal = if is_abs {
+                format!("abs(topk({k}, {query_body}))")
+            } else {
+                format!("topk({k}, {query_body}) + 1")
+            };
+            let literal_sql = format!(
+                "TQL EVAL ({timestamp_seconds}, {timestamp_seconds}, '60s') {wrapped_literal}"
+            );
+            let (_, mut rows) =
+                native_labelled_rows(native_tql_output(&instance, &literal_sql, false).await).await;
+            wrapped_expected.append(&mut rows);
+        }
+        let mut wrapped_actual = wrapped_native.1;
+        wrapped_actual.sort_by(|left, right| (&left.0, &left.1).cmp(&(&right.0, &right.1)));
+        wrapped_expected.sort_by(|left, right| (&left.0, &left.1).cmp(&(&right.0, &right.1)));
+        assert_eq!(wrapped_actual, wrapped_expected, "{wrapped_sql}");
+    }
+
+    let outer_sql =
+        format!("TQL EVAL (0, 120, '60s') topk(1, topk(time() / 60 + 1, {query_body}))");
+    observer.clear();
+    let outer_native =
+        native_labelled_rows(native_tql_output(&instance, &outer_sql, true).await).await;
+    // `topk` above a split aggregate needs a whole-vector boundary, so no split answers this
+    // statement: the one fused node that reads the series answers it whole.
+    assert_eq!(
+        observer.answering_node().as_deref(),
+        Some("FusedSeriesExec"),
+        "outer constant topk over a dynamic topk did not answer natively: {outer_sql}"
+    );
+    let mut outer_expected = Vec::new();
+    for (timestamp_seconds, k) in [(0, 1), (60, 2), (120, 3)] {
+        let literal = format!(
+            "TQL EVAL ({timestamp_seconds}, {timestamp_seconds}, '60s') topk(1, topk({k}, {query_body}))"
+        );
+        let (_, mut rows) =
+            native_labelled_rows(native_tql_output(&instance, &literal, false).await).await;
+        outer_expected.append(&mut rows);
+    }
+    let mut outer_actual = outer_native.1;
+    outer_actual.sort_by(|left, right| (&left.0, &left.1).cmp(&(&right.0, &right.1)));
+    outer_expected.sort_by(|left, right| (&left.0, &left.1).cmp(&(&right.0, &right.1)));
+    assert_eq!(outer_actual, outer_expected, "{outer_sql}");
+
+    let literal_sql = format!("TQL EVAL (0, 120, '60s') topk(3, {query_body})");
+    observer.clear();
+    let literal_native =
+        native_labelled_rows(native_tql_output(&instance, &literal_sql, true).await).await;
+    assert!(
+        observer.fused().is_some(),
+        "literal topk did not run natively"
+    );
+    let literal_legacy =
+        native_labelled_rows(native_tql_output(&instance, &literal_sql, false).await).await;
+    // The value column keeps the compiled tree's field name on this route, which the existing
+    // planner names after its own rewrite, so only the rows are comparable.
+    assert_eq!(literal_native.1, literal_legacy.1);
+
+    // A bare per-point ranking over one plain scan: nothing splits, and the whole vector is ranked
+    // where every series of it is gathered rather than per partition.
+    let bare_dynamic_sql = "TQL EVAL (0, 120, '60s') topk(time() / 60 + 1, native_dyn_topk)";
+    observer.clear();
+    let bare_dynamic_native =
+        native_labelled_rows(native_tql_output(&instance, bare_dynamic_sql, true).await).await;
+    let bare_dynamic_answering = observer.answering_node();
+    assert_eq!(
+        bare_dynamic_answering.as_deref(),
+        Some("FusedSeriesExec"),
+        "a bare per-point ranking must answer natively: {bare_dynamic_sql}"
+    );
+    assert!(
+        !bare_dynamic_native.1.is_empty(),
+        "a bare per-point ranking must produce rows: {bare_dynamic_sql}"
+    );
+    let mut bare_dynamic_expected = Vec::new();
+    for (timestamp_seconds, k) in [(0, 1), (60, 2), (120, 3)] {
+        let literal = format!(
+            "TQL EVAL ({timestamp_seconds}, {timestamp_seconds}, '60s') topk({k}, native_dyn_topk)"
+        );
+        let (_, mut rows) =
+            native_labelled_rows(native_tql_output(&instance, &literal, false).await).await;
+        bare_dynamic_expected.append(&mut rows);
+    }
+    let mut bare_dynamic_actual = bare_dynamic_native.1;
+    bare_dynamic_actual.sort_by(|left, right| (&left.0, &left.1).cmp(&(&right.0, &right.1)));
+    bare_dynamic_expected.sort_by(|left, right| (&left.0, &left.1).cmp(&(&right.0, &right.1)));
+    assert_eq!(
+        bare_dynamic_actual, bare_dynamic_expected,
+        "{bare_dynamic_sql}"
+    );
+
+    // The same ranking with a parameter that is *only* `time()`: this is the shape a per-point
+    // `same_source` guard misclassifies, because the value it carries is a bare per-point constant
+    // rather than an arithmetic expression over one. `k` is 0, 60 and 120 at 0s, 60s and 120s, so
+    // the first point selects nothing and the other two select every series.
+    let bare_time_sql = "TQL EVAL (0, 120, '60s') topk(time(), native_dyn_topk)";
+    observer.clear();
+    let bare_time_native =
+        native_labelled_rows(native_tql_output(&instance, bare_time_sql, true).await).await;
+    let bare_time_answering = observer.answering_node();
+    assert_eq!(
+        bare_time_answering.as_deref(),
+        Some("FusedSeriesExec"),
+        "a bare topk whose k is `time()` must answer natively: {bare_time_sql}"
+    );
+    let mut bare_time_expected = Vec::new();
+    for (timestamp_seconds, k) in [(0, 0), (60, 60), (120, 120)] {
+        let literal = format!(
+            "TQL EVAL ({timestamp_seconds}, {timestamp_seconds}, '60s') topk({k}, native_dyn_topk)"
+        );
+        let (_, mut rows) =
+            native_labelled_rows(native_tql_output(&instance, &literal, false).await).await;
+        bare_time_expected.append(&mut rows);
+    }
+    assert_eq!(
+        bare_time_native.1.len(),
+        bare_time_expected.len(),
+        "{bare_time_sql}"
+    );
+    assert!(
+        !bare_time_native.1.is_empty(),
+        "a bare topk at k = time() must produce rows: {bare_time_sql}"
+    );
+    let mut bare_time_actual = bare_time_native.1;
+    bare_time_actual.sort_by(|left, right| (&left.0, &left.1).cmp(&(&right.0, &right.1)));
+    bare_time_expected.sort_by(|left, right| (&left.0, &left.1).cmp(&(&right.0, &right.1)));
+    assert_eq!(bare_time_actual, bare_time_expected, "{bare_time_sql}");
+
+    // A bare `topk` has no aggregate beneath it, so there is nothing for the split to cut: the
+    // whole statement is one whole-vector node over the scan, and it must answer exactly what the
+    // existing planner does.
+    let bare_sql = "TQL EVAL (0, 120, '60s') topk(3, native_dyn_topk)";
+    observer.clear();
+    let bare_native =
+        native_labelled_rows(native_tql_output(&instance, bare_sql, true).await).await;
+    let bare_answering = observer.answering_node();
+    let bare_legacy =
+        native_labelled_rows(native_tql_output(&instance, bare_sql, false).await).await;
+    assert_eq!(
+        bare_answering.as_deref(),
+        Some("FusedSeriesExec"),
+        "a bare topk above no aggregate runs natively: {bare_sql}"
+    );
+    assert_eq!(bare_native, bare_legacy);
+}
+
+/// A `scalar()` parameter that reads its own selector runs natively: the parameter reads a metric
+/// logical table of the same physical table, so the split declines and the multi-input path answers
+/// the statement itself.
+///
+/// The parameter may read a different selector than the input (`topk(scalar(a), sum by(host)(b))`),
+/// which makes the planner prepare two sources and the compiler bind both; a metric logical table's
+/// id is part of the identity its scan reads, so the two are one table's two metrics and no split
+/// can be cut between them.
+#[tokio::test(flavor = "multi_thread")]
+async fn native_promql_scalar_parameter_reads_its_own_selector() {
+    common_telemetry::init_default_ut_logging();
+    let (standalone, observer) = native_test_instance(GreptimeDbStandaloneBuilder::new(
+        "native_promql_scalar_param_selector",
+    ))
+    .await;
+    let instance = standalone.fe_instance().clone();
+    execute_all(
+        &instance,
+        "CREATE TABLE native_scalar_param_phy (ts TIMESTAMP TIME INDEX, v DOUBLE) ENGINE=metric WITH ('physical_metric_table'='true'); \
+         CREATE TABLE native_scalar_param_a (host STRING, ts TIMESTAMP TIME INDEX, v DOUBLE, PRIMARY KEY(host)) ENGINE=metric WITH ('on_physical_table'='native_scalar_param_phy'); \
+         CREATE TABLE native_scalar_param_b (host STRING, ts TIMESTAMP TIME INDEX, v DOUBLE, PRIMARY KEY(host)) ENGINE=metric WITH ('on_physical_table'='native_scalar_param_phy'); \
+         INSERT INTO native_scalar_param_a (host, ts, v) VALUES ('h1', 0, 2), ('h1', 60000, 4); \
+         INSERT INTO native_scalar_param_b (host, ts, v) VALUES ('h1', 0, 10), ('h1', 60000, 20)",
+        QueryContext::arc(),
+    )
+    .await;
+    // `scalar(native_scalar_param_a)` is 2 at t=0 and 4 at t=60s, so the parameter differs per
+    // point.
+    //
+    // `topk` over one metric whose `k` reads another: a per-point `k` from a second prepared
+    // source, in the order the compiler binds them (`b` first, then the parameter's `a`).
+    let sql = "TQL EVAL (0, 60, '60s') topk(scalar(native_scalar_param_a), sum by(host)(native_scalar_param_b))";
+    observer.clear();
+    let topk_native = native_labelled_rows(native_tql_output(&instance, sql, true).await).await;
+    let fused = observer.fused();
+    let answering = observer.answering_node();
+    assert!(
+        fused.is_some(),
+        "a scalar() parameter that reads a selector must run natively: {sql}"
+    );
+    assert_eq!(
+        answering.as_deref(),
+        Some("FusedSeriesExec"),
+        "the fused node must answer a scalar() parameter that reads a selector: {sql}"
+    );
+    assert_eq!(
+        topk_native.1.len(),
+        2,
+        "one row per evaluation point: {sql}"
+    );
+    assert_eq!(
+        topk_native.1.iter().map(|row| row.0).collect::<Vec<_>>(),
+        vec![0, 60_000],
+        "the expected evaluation timestamps: {sql}"
+    );
+    // The existing planner rejects `scalar()` over a selector, so each evaluation point is compared
+    // against the same statement with the scalar's value at that point written as a literal `k`.
+    let mut topk_expected = Vec::new();
+    for (t, k) in [(0, 2), (60, 4)] {
+        let literal =
+            format!("TQL EVAL ({t}, {t}, '60s') topk({k}, sum by(host)(native_scalar_param_b))");
+        let (_, mut rows) =
+            native_labelled_rows(native_tql_output(&instance, &literal, false).await).await;
+        topk_expected.append(&mut rows);
+    }
+    topk_expected.sort_by(|left, right| (&left.0, &left.1).cmp(&(&right.0, &right.1)));
+    let mut topk_actual = topk_native.1;
+    topk_actual.sort_by(|left, right| (&left.0, &left.1).cmp(&(&right.0, &right.1)));
+    assert_eq!(topk_actual, topk_expected, "{sql}");
+
+    // The same per-point value as a `clamp` bound and as a broadcast operand.
+    //
+    // `clamp_max` is the bound the scalar actually decides here: `b` is 10 and 20 while `a` is 2
+    // and 4, so the answer is `a` at both points and a node that ignored the parameter would answer
+    // `b` instead. `clamp_min` cannot tell those apart - `b` is above `a` everywhere, so it answers
+    // `b` either way - but it is the statement that used to *fail* before the wait was added, and
+    // that failure is what it still pins.
+    for expression in [
+        "clamp_min(native_scalar_param_b, scalar(native_scalar_param_a))",
+        "clamp_max(native_scalar_param_b, scalar(native_scalar_param_a))",
+        "native_scalar_param_b + scalar(native_scalar_param_a)",
+    ] {
+        let sql = format!("TQL EVAL (0, 60, '60s') {expression}");
+        observer.clear();
+        let native = native_labelled_rows(native_tql_output(&instance, &sql, true).await).await;
+        assert_eq!(
+            observer.answering_node().as_deref(),
+            Some("FusedSeriesExec"),
+            "cross-table dynamic scalar must run natively: {sql}"
+        );
+        let mut expected = Vec::new();
+        for (t, value) in [(0, 2), (60, 4)] {
+            let literal = expression.replace("scalar(native_scalar_param_a)", &value.to_string());
+            let literal_sql = format!("TQL EVAL ({t}, {t}, '60s') {literal}");
+            let (_, mut rows) =
+                native_labelled_rows(native_tql_output(&instance, &literal_sql, false).await).await;
+            expected.append(&mut rows);
+        }
+        let mut actual = native.1;
+        actual.sort_by(|left, right| (&left.0, &left.1).cmp(&(&right.0, &right.1)));
+        expected.sort_by(|left, right| (&left.0, &left.1).cmp(&(&right.0, &right.1)));
+        assert_eq!(actual, expected, "{sql}");
+    }
 }
 
 /// `round` and the `clamp` functions read a varying parameter at each step, as Prometheus does. A

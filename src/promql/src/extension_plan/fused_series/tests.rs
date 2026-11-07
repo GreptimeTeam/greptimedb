@@ -94,7 +94,7 @@ use crate::native::execute::{InputId, NativeExecutionState, NativeExecutor};
 use crate::native::plan::{
     AggregateKind, AggregateStage, AggregateStateSchema, BoundAggregate, BoundInput, BoundInstant,
     BoundMap, BoundScalar, BoundVectorOp, BoundWindow, Grouping, InstantValue, MapOp, NativeExpr,
-    NativeNode, NativeTree, NativeType,
+    NativeNode, NativeTree, NativeType, ParameterizedOp,
 };
 use crate::range_eval::{RangeFunction, RangeWindow};
 use crate::vector_match::{BinaryMatching, BinaryOp, Cardinality, FillValues, MatchingLabels};
@@ -405,6 +405,67 @@ fn evaluated_of(schema: &SeriesSchema, grid: &Arc<EvalGrid>) -> NativeType {
     }))
 }
 
+#[test]
+fn duplicate_evidence_detects_binaries_in_dynamic_nodes() {
+    use crate::histogram_eval::HistogramFunction;
+    use crate::native::plan::BoundVectorOp;
+
+    let grid = grid();
+    let binary = binary_tree(raw_schema(), raw_schema()).root().clone();
+    let scalar_of = |input| NativeNode {
+        expr: NativeExpr::ScalarOf {
+            input: Box::new(input),
+        },
+        output: NativeType::Scalar(Arc::clone(&grid)),
+    };
+    let no_binary = instant_of(0, &grid);
+    let literal = scalar_tree(Arc::clone(&grid), 1.0).root().clone();
+    let topk = |input: NativeNode, parameter| NativeNode {
+        output: input.output.clone(),
+        expr: NativeExpr::ParameterizedTopK {
+            input: Box::new(input),
+            op: BoundVectorOp::TopK {
+                k: 0.0,
+                top: true,
+                group: Grouping::By(Arc::from([])),
+            },
+            parameter: Box::new(parameter),
+        },
+    };
+    let histogram = |input: NativeNode, parameters| NativeNode {
+        output: input.output.clone(),
+        expr: NativeExpr::ParameterizedHistogram {
+            input: Box::new(input),
+            op: BoundVectorOp::Histogram(HistogramFunction::Fraction {
+                lower: 0.0,
+                upper: 0.0,
+            }),
+            parameters,
+        },
+    };
+    let has_binary = super::native_tree_has_vector_binary;
+    assert!(has_binary(&scalar_of(binary.clone())));
+    assert!(!has_binary(&scalar_of(no_binary.clone())));
+    assert!(has_binary(&topk(binary.clone(), literal.clone())));
+    assert!(has_binary(&topk(
+        no_binary.clone(),
+        scalar_of(binary.clone())
+    )));
+    assert!(!has_binary(&topk(no_binary.clone(), literal.clone())));
+    assert!(has_binary(&histogram(
+        binary.clone(),
+        vec![literal.clone(), literal.clone()]
+    )));
+    assert!(has_binary(&histogram(
+        no_binary.clone(),
+        vec![literal.clone(), scalar_of(binary)]
+    )));
+    assert!(!has_binary(&histogram(
+        no_binary,
+        vec![literal.clone(), literal]
+    )));
+}
+
 /// `tree` with the orderings its input nodes declare replaced, in the order the nodes are reached.
 ///
 /// The fixtures here declare `Contiguous`, which is what the plans below them present, so a test
@@ -428,7 +489,8 @@ fn declaring_orderings(tree: &NativeTree, orderings: &[SeriesOrdering]) -> Nativ
             | NativeExpr::Timestamp { input }
             | NativeExpr::Aggregate { input, .. }
             | NativeExpr::Vector { input, .. }
-            | NativeExpr::VectorOf { input } => {
+            | NativeExpr::VectorOf { input }
+            | NativeExpr::ScalarOf { input } => {
                 **input = rewrite(input, orderings, seen);
             }
             NativeExpr::Binary { left, right, .. }
@@ -440,6 +502,20 @@ fn declaring_orderings(tree: &NativeTree, orderings: &[SeriesOrdering]) -> Nativ
             } => {
                 **left = rewrite(left, orderings, seen);
                 **right = rewrite(right, orderings, seen);
+            }
+            NativeExpr::ParameterizedHistogram {
+                input, parameters, ..
+            } => {
+                **input = rewrite(input, orderings, seen);
+                for parameter in parameters {
+                    *parameter = rewrite(parameter, orderings, seen);
+                }
+            }
+            NativeExpr::ParameterizedTopK {
+                input, parameter, ..
+            } => {
+                **input = rewrite(input, orderings, seen);
+                **parameter = rewrite(parameter, orderings, seen);
             }
             NativeExpr::ParameterizedMap {
                 input, parameters, ..
@@ -761,6 +837,303 @@ fn math_map_matching_key_preservation_controls_locality() {
         super::input_locality(host_tree.root()),
         super::InputLocality::MatchingLocal(_)
     ));
+}
+
+/// The inner ranking's per-point parameter children finish before the outer ranking settles.
+/// Dropping those children must not prevent the outer `topk` from returning its suffix rows.
+#[tokio::test]
+async fn constant_topk_over_parameterized_topk_keeps_suffix_rows() {
+    let grid = Arc::new(EvalGrid::try_new(GridSpec::try_new(0, 60_000, 3).unwrap()).unwrap());
+    let raw = NativeType::Samples(raw_schema());
+    let output = evaluated_of(&raw_schema(), &grid);
+    let window = NativeNode {
+        expr: NativeExpr::Window {
+            input: Box::new(NativeNode {
+                expr: NativeExpr::Input(BoundInput {
+                    source_index: 0,
+                    output: raw.clone(),
+                    ordering: SeriesOrdering::Contiguous,
+                }),
+                output: raw,
+            }),
+            op: BoundWindow {
+                function: RangeFunction::LastOverTime,
+                window: RangeWindow {
+                    range_ms: 60_000,
+                    offset_ms: 0,
+                    anchor_ms: None,
+                    modifier: None,
+                },
+                input_grid: None,
+                output_grid: Arc::clone(&grid),
+            },
+        },
+        output: output.clone(),
+    };
+    let ceil = NativeNode {
+        expr: NativeExpr::Map {
+            input: Box::new(window),
+            op: BoundMap {
+                ops: Arc::from([MapOp::Math(crate::map::MathOp::Ceil)]),
+            },
+        },
+        output: output.clone(),
+    };
+    let sum = NativeNode {
+        expr: NativeExpr::Aggregate {
+            input: Box::new(ceil),
+            op: BoundAggregate {
+                kind: AggregateKind::Sum,
+                group: Grouping::By(Arc::from([Arc::from(HOST)])),
+                stage: AggregateStage::Complete,
+            },
+        },
+        output: output.clone(),
+    };
+    let scalar = |value| NativeNode {
+        expr: NativeExpr::Scalar(BoundScalar { value }),
+        output: NativeType::Scalar(Arc::clone(&grid)),
+    };
+    let binary = |left, right, op| NativeNode {
+        expr: NativeExpr::Binary {
+            left: Box::new(left),
+            right: Box::new(right),
+            matching: BinaryMatching {
+                op,
+                return_bool: false,
+                labels: MatchingLabels::Ignoring(Vec::new()),
+                cardinality: Cardinality::OneToOne,
+                fill: FillValues::default(),
+            },
+        },
+        output: NativeType::Scalar(Arc::clone(&grid)),
+    };
+    let time = NativeNode {
+        expr: NativeExpr::EvalTime { date: None },
+        output: NativeType::Scalar(Arc::clone(&grid)),
+    };
+    let parameter = binary(
+        binary(time, scalar(1.0 / 60.0), BinaryOp::Mul),
+        scalar(1.0),
+        BinaryOp::Add,
+    );
+    let rank = |k| BoundVectorOp::TopK {
+        k,
+        top: true,
+        group: Grouping::By(Arc::from([])),
+    };
+    let inner = NativeNode {
+        expr: NativeExpr::ParameterizedTopK {
+            input: Box::new(sum),
+            op: rank(0.0),
+            parameter: Box::new(parameter),
+        },
+        output: output.clone(),
+    };
+    let tree = NativeTree::try_new(NativeNode {
+        expr: NativeExpr::Vector {
+            input: Box::new(inner),
+            op: rank(1.0),
+        },
+        output,
+    })
+    .unwrap();
+
+    // `h0` through `h7` sum to 0 through 7. Splitting `h7` across the two physical
+    // partitions also proves that the gathered execution reads both contributions: partition 0
+    // alone would rank `h6=6` over its `h7=3` fragment.
+    let mut partitions = vec![Vec::new(), Vec::new()];
+    for host in 0..8 {
+        let host_name = format!("h{host}");
+        let parts: Vec<(usize, &str, f64)> = if host == 7 {
+            vec![(0, "a", 3.0), (1, "b", 4.0)]
+        } else {
+            vec![(host % 2, "a", host as f64)]
+        };
+        for (partition, job, value) in parts {
+            let key = format!("{host_name}-{job}");
+            let samples = [
+                (-60_000, value),
+                (0, value),
+                (60_000, value),
+                (120_000, value),
+            ];
+            partitions[partition].push(frame(&labelled_chunk(
+                &key,
+                &[(HOST, &host_name), (JOB, job)],
+                &samples,
+                true,
+            )));
+        }
+    }
+    assert!(matches!(
+        super::input_locality(tree.root()),
+        super::InputLocality::SinglePartition
+    ));
+    let exec = plan(tree, memory_exec_partitioned(partitions)).unwrap();
+    let mut actual = rows(
+        &collect(exec, SessionContext::default().task_ctx())
+            .await
+            .unwrap(),
+    );
+    actual.sort_by_key(|row| row.0);
+    assert_eq!(
+        actual,
+        vec![
+            (0, Some(7.0), Some("h7".to_string()), None),
+            (60_000, Some(7.0), Some("h7".to_string()), None),
+            (120_000, Some(7.0), Some("h7".to_string()), None),
+        ]
+    );
+}
+
+/// A node that reads the whole vector at a point answers one value (or a whole ranking) rather than
+/// one output series per input series, so it cannot keep a source's matching key: it needs every
+/// series of that source in one place.
+///
+/// Each of these shapes takes a per-point `time()` or a literal parameter, which is exactly the case
+/// a parameter-shaped `same_source` arm was tempted to pass through. Answering `PartitionLocal` here
+/// does not only cost parallelism: a `topk` or a histogram function run once per partition answers
+/// the union of the per-partition rankings.
+#[test]
+fn whole_vector_parameter_nodes_need_every_series_in_one_partition() {
+    let grid = grid();
+    let eval_time = || NativeNode {
+        expr: NativeExpr::EvalTime { date: None },
+        output: NativeType::Scalar(Arc::clone(&grid)),
+    };
+    let single_partition = |tree: NativeTree| {
+        assert!(
+            matches!(
+                super::input_locality(tree.root()),
+                super::InputLocality::SinglePartition
+            ),
+            "a whole-vector node must read its source in one partition: {tree}"
+        );
+    };
+
+    // `scalar(m)`: which series carries the one value at a point decides the answer.
+    let instant = instant_of(0, &grid);
+    single_partition(
+        NativeTree::try_new(NativeNode {
+            expr: NativeExpr::ScalarOf {
+                input: Box::new(instant),
+            },
+            output: NativeType::Scalar(Arc::clone(&grid)),
+        })
+        .expect("scalar() over a raw selection is a legal tree"),
+    );
+
+    // A per-point `k` decides which of the whole vector's series survive.
+    let instant = instant_of(0, &grid);
+    let output = instant.output.clone();
+    single_partition(
+        NativeTree::try_new(NativeNode {
+            expr: NativeExpr::ParameterizedTopK {
+                input: Box::new(instant),
+                op: BoundVectorOp::TopK {
+                    k: 0.0,
+                    top: true,
+                    group: Grouping::By(Arc::from([])),
+                },
+                parameter: Box::new(eval_time()),
+            },
+            output,
+        })
+        .expect("topk with a per-point k over a raw selection is a legal tree"),
+    );
+
+    // The histogram function folds the bucket series of the whole vector into one.
+    let rate = rate_tree();
+    let output = rate.root().output.clone();
+    single_partition(
+        NativeTree::try_new(NativeNode {
+            expr: NativeExpr::ParameterizedHistogram {
+                input: Box::new(rate.root().clone()),
+                op: BoundVectorOp::Histogram(HistogramFunction::Quantile(0.5)),
+                parameters: vec![eval_time()],
+            },
+            output,
+        })
+        .expect("a histogram function over a raw rate window is a legal tree"),
+    );
+
+    // `b * scalar(a)`: the scalar side is not source-free, so its broadcast has to wait until the
+    // whole of its own vector is gathered.
+    let vector_side = instant_of(0, &grid);
+    let output = vector_side.output.clone();
+    let scalar_side = NativeNode {
+        expr: NativeExpr::ScalarOf {
+            input: Box::new(instant_of(1, &grid)),
+        },
+        output: NativeType::Scalar(Arc::clone(&grid)),
+    };
+    single_partition(
+        NativeTree::try_new(NativeNode {
+            expr: NativeExpr::Binary {
+                left: Box::new(vector_side),
+                right: Box::new(scalar_side),
+                matching: BinaryMatching {
+                    op: BinaryOp::Mul,
+                    return_bool: false,
+                    labels: MatchingLabels::Ignoring(Vec::new()),
+                    cardinality: Cardinality::OneToOne,
+                    fill: FillValues::default(),
+                },
+            },
+            output,
+        })
+        .expect("a scalar broadcast over a raw selection is a legal tree"),
+    );
+
+    // `clamp_min(b, scalar(a))`: a parameterized map is only as local as its parameter.
+    let instant = instant_of(0, &grid);
+    let output = instant.output.clone();
+    single_partition(
+        NativeTree::try_new(NativeNode {
+            expr: NativeExpr::ParameterizedMap {
+                input: Box::new(instant),
+                op: ParameterizedOp::ClampMin,
+                parameters: vec![NativeNode {
+                    expr: NativeExpr::ScalarOf {
+                        input: Box::new(instant_of(1, &grid)),
+                    },
+                    output: NativeType::Scalar(Arc::clone(&grid)),
+                }],
+            },
+            output,
+        })
+        .expect("a parameterized map over a scalar() parameter is a legal tree"),
+    );
+
+    // `(a + on(job) b) * scalar(c)`: the match sits under a broadcast whose scalar side reads a
+    // third source, so the match's key is not the unit of locality. Routing by it would answer
+    // `scalar(c)` once per key class, and a statement whose global answer is NaN — two `c` series
+    // at one point — would answer one finite threshold per class instead.
+    let matched = binary_tree_over_sources(BinaryOp::Add, raw_schema(), raw_schema(), 0, 1);
+    let output = matched.root().output.clone();
+    single_partition(
+        NativeTree::try_new(NativeNode {
+            expr: NativeExpr::Binary {
+                left: Box::new(matched.root().clone()),
+                right: Box::new(NativeNode {
+                    expr: NativeExpr::ScalarOf {
+                        input: Box::new(instant_of(2, &grid)),
+                    },
+                    output: NativeType::Scalar(Arc::clone(&grid)),
+                }),
+                matching: BinaryMatching {
+                    op: BinaryOp::Mul,
+                    return_bool: false,
+                    labels: MatchingLabels::Ignoring(Vec::new()),
+                    cardinality: Cardinality::OneToOne,
+                    fill: FillValues::default(),
+                },
+            },
+            output,
+        })
+        .expect("a match under a scalar() broadcast is a legal tree"),
+    );
 }
 
 /// `x - 2 * x`: one source read at both operands, with a scalar multiplier on the right.
@@ -6588,6 +6961,26 @@ fn histogram_over_sum_tree(group: Grouping, function: HistogramFunction) -> Nati
     .unwrap()
 }
 
+/// The same histogram over the same fold, with its parameters evaluated at every grid point instead
+/// of bound as constants: `histogram_quantile(<parameter>, sum by (...) (rate(x[5m])))`.
+fn histogram_parameterized_over_sum(
+    histogram: NativeTree,
+    parameters: Vec<NativeNode>,
+) -> NativeTree {
+    let NativeExpr::Vector { input, op } = &histogram.root().expr else {
+        unreachable!("`histogram_over_sum_tree` builds a literal histogram")
+    };
+    NativeTree::try_new(NativeNode {
+        expr: NativeExpr::ParameterizedHistogram {
+            input: input.clone(),
+            op: op.clone(),
+            parameters,
+        },
+        output: histogram.root().output.clone(),
+    })
+    .expect("a parameterized histogram over the same fold is a legal tree")
+}
+
 fn histogram_routing() -> SeriesRouting {
     SeriesRouting::CanonicalLabelsExcept(
         ["le", "__name__", "__type__", "__unit__"]
@@ -6755,6 +7148,91 @@ fn histogram_split_allows_single_owner_routing_label_rewrites() {
             );
         }
     }
+}
+
+#[test]
+fn histogram_split_carries_a_per_point_parameter() {
+    let grid = grid();
+    let base = histogram_over_sum_tree(
+        Grouping::By(Arc::from([Arc::from("le")])),
+        HistogramFunction::Quantile(0.99),
+    );
+    // `histogram_quantile(time() / 150, sum by (le) (rate(x[5m])))`, with the parameter bound the
+    // way the compiler binds a per-point argument: the evaluation time broadcast over a constant.
+    let eval_time = NativeNode {
+        expr: NativeExpr::EvalTime { date: None },
+        output: NativeType::Scalar(Arc::clone(&grid)),
+    };
+    let divisor = NativeNode {
+        expr: NativeExpr::Scalar(BoundScalar { value: 150.0 }),
+        output: NativeType::Scalar(Arc::clone(&grid)),
+    };
+    let parameter = NativeNode {
+        expr: NativeExpr::Binary {
+            left: Box::new(eval_time),
+            right: Box::new(divisor),
+            matching: BinaryMatching {
+                op: BinaryOp::Div,
+                return_bool: false,
+                labels: MatchingLabels::Ignoring(Vec::new()),
+                cardinality: Cardinality::OneToOne,
+                fill: FillValues::default(),
+            },
+        },
+        output: NativeType::Scalar(Arc::clone(&grid)),
+    };
+    let tree = histogram_parameterized_over_sum(base.clone(), vec![parameter.clone()]);
+    let (partial, final_tree) = FusedSeries::split_aggregate(&tree, TIME)
+        .unwrap_or_else(|error| panic!("a per-point parameter must split, not fail: {error}"))
+        .unwrap_or_else(|| panic!("a per-point constant parameter must split: {tree}"));
+    assert!(matches!(
+        &partial.root().expr,
+        NativeExpr::Aggregate { op, .. } if op.stage == AggregateStage::Partial
+    ));
+    let NativeExpr::ParameterizedHistogram {
+        input,
+        op,
+        parameters,
+    } = &final_tree.root().expr
+    else {
+        panic!("the parameterized histogram must run above the Final aggregate: {final_tree}");
+    };
+    assert_eq!(
+        &BoundVectorOp::Histogram(HistogramFunction::Quantile(0.99)),
+        op
+    );
+    assert!(matches!(
+        &input.expr,
+        NativeExpr::Aggregate { op, .. } if op.stage == AggregateStage::Final
+    ));
+    // The parameter is carried untouched: it reads no series, so it means the same above the cut.
+    assert_eq!(vec![parameter], *parameters);
+
+    // A parameter that reads the series the split reads has no source above the cut, so it must
+    // decline rather than be answered from the merged values: `histogram_quantile(scalar(sum(
+    // rate(x[5m]))), sum by (le) (rate(x[5m])))`, whose parameter holds the window the prefix reads.
+    let NativeExpr::Vector {
+        input: aggregate, ..
+    } = &base.root().expr
+    else {
+        unreachable!("`histogram_over_sum_tree` builds a literal histogram")
+    };
+    let NativeExpr::Aggregate { input: window, .. } = &aggregate.expr else {
+        unreachable!("`histogram_over_sum_tree` folds the rate window")
+    };
+    let scalar_of_window = NativeNode {
+        expr: NativeExpr::ScalarOf {
+            input: window.clone(),
+        },
+        output: NativeType::Scalar(Arc::clone(&grid)),
+    };
+    let reading = histogram_parameterized_over_sum(base, vec![scalar_of_window]);
+    assert!(
+        FusedSeries::split_aggregate(&reading, TIME)
+            .unwrap()
+            .is_none(),
+        "`histogram_quantile(scalar(sum(rate(x[5m]))), sum by (le) (rate(x[5m])))` must decline: {reading}"
+    );
 }
 
 #[test]

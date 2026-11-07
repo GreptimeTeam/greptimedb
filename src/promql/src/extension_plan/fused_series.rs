@@ -1239,6 +1239,21 @@ pub enum InputLocality {
     SinglePartition,
 }
 
+/// Whether `node` answers its values without reading any source.
+///
+/// The set is the planner's `data_free` one: a constant, the evaluation time, a binary operation
+/// between those and `vector()` of one. It is what [`same_source`] needs on the scalar side of a
+/// broadcast: a scalar is not the same thing as a source-free value, because `scalar(a)` is a scalar
+/// that has read a whole vector to become one.
+fn reads_no_source(node: &NativeNode) -> bool {
+    match &node.expr {
+        NativeExpr::Scalar(_) | NativeExpr::EvalTime { .. } => true,
+        NativeExpr::Binary { left, right, .. } => reads_no_source(left) && reads_no_source(right),
+        NativeExpr::VectorOf { input } => reads_no_source(input),
+        _ => false,
+    }
+}
+
 /// The one source every leaf of `node` reads, when the tree keeps the matching key of that source.
 fn same_source(node: &NativeNode) -> Option<usize> {
     match &node.expr {
@@ -1277,7 +1292,7 @@ fn same_source(node: &NativeNode) -> Option<usize> {
             left,
             right,
             matching,
-        } if matches!(left.output, NativeType::Scalar(_)) => {
+        } if matches!(left.output, NativeType::Scalar(_)) && reads_no_source(left) => {
             let _ = matching;
             same_source(right)
         }
@@ -1285,7 +1300,7 @@ fn same_source(node: &NativeNode) -> Option<usize> {
             left,
             right,
             matching,
-        } if matches!(right.output, NativeType::Scalar(_)) => {
+        } if matches!(right.output, NativeType::Scalar(_)) && reads_no_source(right) => {
             let _ = matching;
             same_source(left)
         }
@@ -1310,7 +1325,12 @@ fn same_source(node: &NativeNode) -> Option<usize> {
         | NativeExpr::Scalar(_)
         | NativeExpr::EvalTime { .. }
         | NativeExpr::Map { .. }
-        | NativeExpr::ParameterizedMap { .. } => None,
+        | NativeExpr::ParameterizedMap { .. }
+        // `scalar()`, `topk` and a histogram function read the whole vector at a point, so they
+        // answer one value (or a whole ranking) rather than one output series per input series.
+        | NativeExpr::ScalarOf { .. }
+        | NativeExpr::ParameterizedTopK { .. }
+        | NativeExpr::ParameterizedHistogram { .. } => None,
     }
 }
 
@@ -1441,8 +1461,15 @@ fn needs_vector_matching(node: &NativeNode) -> bool {
         | NativeExpr::VectorOf { input }
         | NativeExpr::Merge { input }
         | NativeExpr::Aggregate { input, .. }
-        | NativeExpr::Vector { input, .. } => needs_vector_matching(input),
+        | NativeExpr::Vector { input, .. }
+        | NativeExpr::ScalarOf { input } => needs_vector_matching(input),
         NativeExpr::ParameterizedMap {
+            input, parameters, ..
+        } => needs_vector_matching(input) || parameters.iter().any(needs_vector_matching),
+        NativeExpr::ParameterizedTopK {
+            input, parameter, ..
+        } => needs_vector_matching(input) || needs_vector_matching(parameter),
+        NativeExpr::ParameterizedHistogram {
             input, parameters, ..
         } => needs_vector_matching(input) || parameters.iter().any(needs_vector_matching),
         NativeExpr::Set { left, right, .. } => {
@@ -1456,7 +1483,11 @@ fn needs_vector_matching(node: &NativeNode) -> bool {
 /// The vector/vector match this tree performs, looking through the pointwise nodes wrapped on top.
 ///
 /// A match pairs series of two whole vectors, so where it sits — including under a scalar
-/// broadcast or a pointwise wrapper — is the place that needs matching-key co-location.
+/// broadcast or a pointwise wrapper — is the place that needs matching-key co-location. The scalar
+/// side has to be a value that reads no source for that to hold: a scalar-output side that read a
+/// whole vector (`scalar(c)`) only exists once every series of it is gathered, so a match under it is
+/// not the unit of locality and the tree needs one partition instead. Answering `None` here leaves
+/// that decision to [`reads_across_series`].
 fn matching_site(node: &NativeNode) -> Option<(&NativeNode, &NativeNode, &MatchingLabels)> {
     match &node.expr {
         NativeExpr::Binary {
@@ -1464,7 +1495,9 @@ fn matching_site(node: &NativeNode) -> Option<(&NativeNode, &NativeNode, &Matchi
             right,
             matching,
         } => {
-            let scalar = |side: &NativeNode| matches!(side.output, NativeType::Scalar(_));
+            let scalar = |side: &NativeNode| {
+                matches!(side.output, NativeType::Scalar(_)) && reads_no_source(side)
+            };
             if scalar(left) {
                 matching_site(right)
             } else if scalar(right) {
@@ -1546,14 +1579,24 @@ fn tree_inputs_for_locality(root: &NativeNode) -> Vec<&crate::native::plan::Boun
             | NativeExpr::VectorOf { input }
             | NativeExpr::Merge { input }
             | NativeExpr::Aggregate { input, .. }
-            | NativeExpr::Vector { input, .. } => visit(input, inputs),
+            | NativeExpr::Vector { input, .. }
+            | NativeExpr::ScalarOf { input } => visit(input, inputs),
             NativeExpr::ParameterizedMap {
+                input, parameters, ..
+            }
+            | NativeExpr::ParameterizedHistogram {
                 input, parameters, ..
             } => {
                 visit(input, inputs);
                 for parameter in parameters {
                     visit(parameter, inputs);
                 }
+            }
+            NativeExpr::ParameterizedTopK {
+                input, parameter, ..
+            } => {
+                visit(input, inputs);
+                visit(parameter, inputs);
             }
             NativeExpr::Binary { left, right, .. } | NativeExpr::Set { left, right, .. } => {
                 visit(left, inputs);
@@ -1586,6 +1629,12 @@ fn state_routing(root: &NativeNode) -> Option<(StateGroup, SeriesRouting)> {
                 input,
                 histogram || matches!(op, crate::native::plan::BoundVectorOp::Histogram(_)),
             ),
+            // A parameterized histogram is a histogram suffix too: its function folds the bounds of
+            // one histogram, so every bound has to meet where it runs.
+            NativeExpr::ParameterizedHistogram { input, op, .. } => find(
+                input,
+                histogram || matches!(op, crate::native::plan::BoundVectorOp::Histogram(_)),
+            ),
             NativeExpr::Instant { input, .. }
             | NativeExpr::Window { input, .. }
             | NativeExpr::Merge { input }
@@ -1593,6 +1642,8 @@ fn state_routing(root: &NativeNode) -> Option<(StateGroup, SeriesRouting)> {
             | NativeExpr::Timestamp { input }
             | NativeExpr::VectorOf { input }
             | NativeExpr::ParameterizedMap { input, .. }
+            | NativeExpr::ScalarOf { input }
+            | NativeExpr::ParameterizedTopK { input, .. }
             | NativeExpr::Aggregate { input, .. } => find(input, histogram),
             NativeExpr::Binary { left, right, .. } | NativeExpr::Set { left, right, .. } => {
                 find(left, histogram).or_else(|| find(right, histogram))
@@ -1680,7 +1731,22 @@ fn tree_inputs(tree: &NativeTree) -> Vec<&crate::native::plan::BoundInput> {
             | NativeExpr::Timestamp { input }
             | NativeExpr::Aggregate { input, .. }
             | NativeExpr::Vector { input, .. }
-            | NativeExpr::VectorOf { input } => collect(input, inputs),
+            | NativeExpr::VectorOf { input }
+            | NativeExpr::ScalarOf { input } => collect(input, inputs),
+            NativeExpr::ParameterizedHistogram {
+                input, parameters, ..
+            } => {
+                collect(input, inputs);
+                for parameter in parameters {
+                    collect(parameter, inputs);
+                }
+            }
+            NativeExpr::ParameterizedTopK {
+                input, parameter, ..
+            } => {
+                collect(input, inputs);
+                collect(parameter, inputs);
+            }
             NativeExpr::ParameterizedMap {
                 input, parameters, ..
             } => {
@@ -1728,14 +1794,24 @@ fn partitioned_window_sources(node: &NativeNode) -> DataFusionResult<Vec<usize>>
             | NativeExpr::Timestamp { input }
             | NativeExpr::Aggregate { input, .. }
             | NativeExpr::Vector { input, .. }
-            | NativeExpr::VectorOf { input } => visit(input, sources)?,
+            | NativeExpr::VectorOf { input }
+            | NativeExpr::ScalarOf { input } => visit(input, sources)?,
             NativeExpr::ParameterizedMap {
+                input, parameters, ..
+            }
+            | NativeExpr::ParameterizedHistogram {
                 input, parameters, ..
             } => {
                 visit(input, sources)?;
                 for parameter in parameters {
                     visit(parameter, sources)?;
                 }
+            }
+            NativeExpr::ParameterizedTopK {
+                input, parameter, ..
+            } => {
+                visit(input, sources)?;
+                visit(parameter, sources)?;
             }
             NativeExpr::Binary { left, right, .. }
             | NativeExpr::Set { left, right, .. }
@@ -2071,6 +2147,7 @@ fn native_tree_has_vector_binary(node: &NativeNode) -> bool {
                 || native_tree_has_vector_binary(right)
         }
         NativeExpr::VectorOf { input }
+        | NativeExpr::ScalarOf { input }
         | NativeExpr::Instant { input, .. }
         | NativeExpr::Merge { input }
         | NativeExpr::Window { input, .. }
@@ -2078,7 +2155,13 @@ fn native_tree_has_vector_binary(node: &NativeNode) -> bool {
         | NativeExpr::Timestamp { input }
         | NativeExpr::Aggregate { input, .. }
         | NativeExpr::Vector { input, .. } => native_tree_has_vector_binary(input),
+        NativeExpr::ParameterizedTopK {
+            input, parameter, ..
+        } => native_tree_has_vector_binary(input) || native_tree_has_vector_binary(parameter),
         NativeExpr::ParameterizedMap {
+            input, parameters, ..
+        }
+        | NativeExpr::ParameterizedHistogram {
             input, parameters, ..
         } => {
             native_tree_has_vector_binary(input)

@@ -1550,12 +1550,19 @@ fn node_children(expr: &NativeExpr) -> Vec<&NativeNode> {
         | NativeExpr::Map { input, .. }
         | NativeExpr::Timestamp { input }
         | NativeExpr::Aggregate { input, .. }
-        | NativeExpr::Vector { input, .. } => vec![input],
+        | NativeExpr::Vector { input, .. }
+        | NativeExpr::ScalarOf { input } => vec![input],
         NativeExpr::ParameterizedMap {
+            input, parameters, ..
+        }
+        | NativeExpr::ParameterizedHistogram {
             input, parameters, ..
         } => std::iter::once(input.as_ref())
             .chain(parameters.iter())
             .collect(),
+        NativeExpr::ParameterizedTopK {
+            input, parameter, ..
+        } => vec![input, parameter],
         NativeExpr::Binary { left, right, .. } | NativeExpr::Set { left, right, .. } => {
             vec![left, right]
         }
@@ -1594,6 +1601,21 @@ fn with_node_children(
             op: *op,
             parameters: (0..parameters.len()).map(|_| next()).collect(),
         },
+        NativeExpr::ScalarOf { .. } => NativeExpr::ScalarOf {
+            input: Box::new(next()),
+        },
+        NativeExpr::ParameterizedTopK { op, .. } => NativeExpr::ParameterizedTopK {
+            input: Box::new(next()),
+            op: op.clone(),
+            parameter: Box::new(next()),
+        },
+        NativeExpr::ParameterizedHistogram { op, parameters, .. } => {
+            NativeExpr::ParameterizedHistogram {
+                input: Box::new(next()),
+                op: op.clone(),
+                parameters: (0..parameters.len()).map(|_| next()).collect(),
+            }
+        }
         NativeExpr::Timestamp { .. } => NativeExpr::Timestamp {
             input: Box::new(next()),
         },
@@ -2694,10 +2716,7 @@ fn aggregate_reads_histogram(node: &NativeNode, input_kind: FieldKind) -> bool {
             !matches!(input.output_field_kind(input_kind), Some(FieldKind::Float))
                 || aggregate_reads_histogram(input, input_kind)
         }
-        NativeExpr::Input(_)
-        | NativeExpr::Scalar(_)
-        | NativeExpr::EvalTime { .. }
-        | NativeExpr::VectorOf { .. } => false,
+        NativeExpr::Input(_) | NativeExpr::Scalar(_) | NativeExpr::EvalTime { .. } => false,
         NativeExpr::Instant { input, .. }
         | NativeExpr::Merge { input }
         | NativeExpr::Window { input, .. }
@@ -2705,6 +2724,27 @@ fn aggregate_reads_histogram(node: &NativeNode, input_kind: FieldKind) -> bool {
         | NativeExpr::Timestamp { input }
         | NativeExpr::Vector { input, .. } => aggregate_reads_histogram(input, input_kind),
         NativeExpr::ParameterizedMap {
+            input, parameters, ..
+        } => {
+            aggregate_reads_histogram(input, input_kind)
+                || parameters
+                    .iter()
+                    .any(|node| aggregate_reads_histogram(node, input_kind))
+        }
+        // `vector()` answers one float series, but the walk asks about aggregates anywhere in
+        // the tree: `vector(scalar(sum(h)))` still folds histogram input. `scalar()` also reads
+        // its input, and both wrappers can hide an aggregate that must be refused.
+        NativeExpr::VectorOf { input } | NativeExpr::ScalarOf { input } => {
+            aggregate_reads_histogram(input, input_kind)
+        }
+        // The dynamic nodes read their parameters beside their input, so every child matters.
+        NativeExpr::ParameterizedTopK {
+            input, parameter, ..
+        } => {
+            aggregate_reads_histogram(input, input_kind)
+                || aggregate_reads_histogram(parameter, input_kind)
+        }
+        NativeExpr::ParameterizedHistogram {
             input, parameters, ..
         } => {
             aggregate_reads_histogram(input, input_kind)
@@ -2872,6 +2912,20 @@ fn native_output_tags(node: &NativeNode, source_tags: &[Vec<String>]) -> Option<
         NativeExpr::ParameterizedMap { input, .. } => {
             Some(without_metric_name(native_output_tags(input, source_tags)?))
         }
+        // `scalar()` reports one value and no labels, like the scalar it produces.
+        NativeExpr::ScalarOf { .. } => Some(Vec::new()),
+        // Ranking keeps each selected series' own labels, and its parameter is a scalar.
+        NativeExpr::ParameterizedTopK { input, .. } => native_output_tags(input, source_tags),
+        // A parameterized histogram function drops the bucket bound and the metadata labels, as its
+        // bound counterpart does; its parameters are scalars and carry no labels.
+        NativeExpr::ParameterizedHistogram { input, .. } => native_output_tags(input, source_tags)
+            .map(|tags| {
+                tags.into_iter()
+                    .filter(|tag| {
+                        tag != "le" && tag != "__name__" && tag != "__type__" && tag != "__unit__"
+                    })
+                    .collect()
+            }),
         NativeExpr::Vector { input, op } => match op {
             BoundVectorOp::TopK { .. }
             | BoundVectorOp::LimitK { .. }
@@ -3059,17 +3113,25 @@ fn data_free(node: &NativeNode) -> bool {
 /// split declines `LimitK` for the same reason, and only a multi-input node repeats that refusal.
 fn depends_on_input_order(node: &NativeNode) -> bool {
     match &node.expr {
-        NativeExpr::Input(_)
-        | NativeExpr::Scalar(_)
-        | NativeExpr::EvalTime { .. }
-        | NativeExpr::VectorOf { .. } => false,
+        NativeExpr::Input(_) | NativeExpr::Scalar(_) | NativeExpr::EvalTime { .. } => false,
         NativeExpr::Instant { input, .. }
         | NativeExpr::Merge { input }
         | NativeExpr::Window { input, .. }
         | NativeExpr::Map { input, .. }
         | NativeExpr::Timestamp { input }
-        | NativeExpr::Aggregate { input, .. } => depends_on_input_order(input),
+        | NativeExpr::Aggregate { input, .. }
+        // `vector()` and `scalar()` answer one series or one value from their input, and since
+        // `scalar()` exists their input can hold an order-dependent selection:
+        // `vector(scalar(limitk(1, a)))` keeps whichever `a` series the gather handed over first.
+        | NativeExpr::VectorOf { input }
+        | NativeExpr::ScalarOf { input } => depends_on_input_order(input),
         NativeExpr::ParameterizedMap {
+            input, parameters, ..
+        } => depends_on_input_order(input) || parameters.iter().any(depends_on_input_order),
+        NativeExpr::ParameterizedTopK {
+            input, parameter, ..
+        } => depends_on_input_order(input) || depends_on_input_order(parameter),
+        NativeExpr::ParameterizedHistogram {
             input, parameters, ..
         } => depends_on_input_order(input) || parameters.iter().any(depends_on_input_order),
         NativeExpr::Vector { input, op } => {
@@ -3105,6 +3167,9 @@ fn groups_by_metric_name(node: &NativeNode) -> bool {
         | NativeExpr::Scalar(_)
         | NativeExpr::EvalTime { .. }
         | NativeExpr::VectorOf { .. } => false,
+        // `scalar()` answers one value with no labels at all, so a grouping by the metric name
+        // below it cannot leave two groups under one label set: the walk stops there.
+        NativeExpr::ScalarOf { .. } => false,
         NativeExpr::Instant { input, .. }
         | NativeExpr::Merge { input }
         | NativeExpr::Window { input, .. }
@@ -3114,6 +3179,12 @@ fn groups_by_metric_name(node: &NativeNode) -> bool {
             grouping_names_metric(op) || groups_by_metric_name(input)
         }
         NativeExpr::ParameterizedMap {
+            input, parameters, ..
+        } => groups_by_metric_name(input) || parameters.iter().any(groups_by_metric_name),
+        NativeExpr::ParameterizedTopK {
+            input, parameter, ..
+        } => groups_by_metric_name(input) || groups_by_metric_name(parameter),
+        NativeExpr::ParameterizedHistogram {
             input, parameters, ..
         } => groups_by_metric_name(input) || parameters.iter().any(groups_by_metric_name),
         NativeExpr::Vector { input, op } => {
@@ -3163,11 +3234,15 @@ pub(crate) fn pointwise_operand(node: &NativeNode) -> bool {
                 }
         }
         // An aggregate folds a group, a vector operation reads the whole vector, and a bare input or
-        // scalar is not a per-series evaluation.
+        // scalar is not a per-series evaluation. A parameterized topk or histogram reads the whole
+        // vector, and `scalar()` answers from it.
         NativeExpr::Input(_)
         | NativeExpr::Scalar(_)
         | NativeExpr::EvalTime { .. }
         | NativeExpr::VectorOf { .. }
+        | NativeExpr::ScalarOf { .. }
+        | NativeExpr::ParameterizedTopK { .. }
+        | NativeExpr::ParameterizedHistogram { .. }
         | NativeExpr::Aggregate { .. }
         | NativeExpr::Vector { .. }
         | NativeExpr::Set { .. }
@@ -3237,6 +3312,20 @@ fn collect_selectors<'a>(
         // Literals contribute no selector; the compiler decides which scalar forms can be bound.
         PromExpr::NumberLiteral(_) => return true,
         PromExpr::Unary(unary) => return collect_selectors(stmt, &unary.expr, out),
+        // `histogram_quantile` and `histogram_fraction` take their vector last, and the compiler
+        // compiles that vector before the arguments in front of it, so the walk reads it first: the
+        // scan prepared at a position has to be the one the compiler binds there.
+        PromExpr::Call(call)
+            if matches!(call.func.name, "histogram_quantile" | "histogram_fraction") =>
+        {
+            let Some((vector, parameters)) = call.args.args.split_last() else {
+                return false;
+            };
+            return collect_selectors(stmt, vector, out)
+                && parameters
+                    .iter()
+                    .all(|parameter| collect_selectors(stmt, parameter, out));
+        }
         PromExpr::Call(call) => {
             if matches!(call.func.name, "label_replace" | "label_join") {
                 let arity_valid = if call.func.name == "label_replace" {
@@ -3254,7 +3343,18 @@ fn collect_selectors<'a>(
                 }
             }
         }
-        PromExpr::Aggregate(aggregate) => return collect_selectors(stmt, &aggregate.expr, out),
+        // The compiler compiles an aggregate's input and then its parameter (`topk`/`bottomk` take
+        // an expression where the others take a number or a label), so a parameter that reads a
+        // selector is a second source bound after the input. Walking both here is what keeps the
+        // prepared scan and the bound input at the same position; a literal or a grouping-only
+        // parameter contributes no selector, so the walk is a no-op for it.
+        PromExpr::Aggregate(aggregate) => {
+            return collect_selectors(stmt, &aggregate.expr, out)
+                && match &aggregate.param {
+                    Some(param) => collect_selectors(stmt, param, out),
+                    None => true,
+                };
+        }
         PromExpr::Subquery(_) => return false,
         _ => {}
     }
@@ -3314,11 +3414,21 @@ fn calls_rate_or_increase(expr: &PromExpr) -> bool {
                 || call.args.args.iter().any(|arg| calls_rate_or_increase(arg))
         }
         PromExpr::Paren(ParenExpr { expr }) => calls_rate_or_increase(expr),
+        PromExpr::Subquery(subquery) => calls_rate_or_increase(&subquery.expr),
         PromExpr::Binary(binary) => {
             calls_rate_or_increase(&binary.lhs) || calls_rate_or_increase(&binary.rhs)
         }
         PromExpr::Unary(unary) => calls_rate_or_increase(&unary.expr),
-        PromExpr::Aggregate(aggregate) => calls_rate_or_increase(&aggregate.expr),
+        // An aggregate's parameter is an expression, so `topk(scalar(sum(rate(x[5m]))), y)` reaches
+        // `rate` only through it. The gate is about the whole statement, and a delta-temporality
+        // table answers an increment there as it does anywhere else.
+        PromExpr::Aggregate(aggregate) => {
+            calls_rate_or_increase(&aggregate.expr)
+                || aggregate
+                    .param
+                    .as_ref()
+                    .is_some_and(|param| calls_rate_or_increase(param))
+        }
         _ => false,
     }
 }
@@ -3337,10 +3447,27 @@ mod tests {
 
     use super::{
         ArrowDataType, ArrowTimeUnit, FieldKind, METRIC_NAME, NATIVE_PROMQL_EXTENSION_KEY,
-        NativeType, collect_selectors, cut_segments, fused_output_schema, fused_output_tags,
-        hybrid_binary_admitted, independent_scan_pair, native_output_tags, native_promql_requested,
-        native_raw_plan_bounds_region_reads, scan_time_filter,
+        NativeType, aggregate_reads_histogram, calls_rate_or_increase, collect_selectors,
+        cut_segments, fused_output_schema, fused_output_tags, hybrid_binary_admitted,
+        independent_scan_pair, native_output_tags, native_promql_requested,
+        native_raw_plan_bounds_region_reads, node_children, scan_time_filter,
     };
+
+    #[test]
+    fn delta_temporality_guard_finds_rate_and_increase_inside_subqueries() {
+        for query in [
+            "rate(x[5m])",
+            "increase(x[5m])",
+            "avg_over_time(rate(x[5m])[10m:1m])",
+            "avg_over_time(increase(x[5m])[10m:1m])",
+        ] {
+            let expr = promql_parser::parser::parse(query).unwrap();
+            assert!(calls_rate_or_increase(&expr), "{query}");
+        }
+        let query = "avg_over_time(abs(x)[10m:1m])";
+        let expr = promql_parser::parser::parse(query).unwrap();
+        assert!(!calls_rate_or_increase(&expr), "{query}");
+    }
 
     #[test]
     fn native_raw_region_read_budget_needs_the_native_topology() {
@@ -3396,31 +3523,23 @@ mod tests {
         .tree
     }
 
+    #[test]
+    fn aggregate_histogram_walk_descends_through_scalar_vector_wrappers() {
+        let tree = compiled_test_tree("scalar(vector(scalar(sum(some_metric))))");
+        assert_eq!(input_sources(tree.root()), vec![0]);
+        assert!(aggregate_reads_histogram(tree.root(), FieldKind::Histogram));
+        assert!(!aggregate_reads_histogram(tree.root(), FieldKind::Float));
+    }
+
     fn input_sources(root: &NativeNode) -> Vec<usize> {
         fn collect(node: &NativeNode, sources: &mut Vec<usize>) {
             match &node.expr {
                 NativeExpr::Input(input) => sources.push(input.source_index),
-                NativeExpr::Instant { input, .. }
-                | NativeExpr::Window { input, .. }
-                | NativeExpr::Merge { input }
-                | NativeExpr::Map { input, .. }
-                | NativeExpr::Timestamp { input } => collect(input, sources),
-                NativeExpr::Binary { left, right, .. }
-                | NativeExpr::Set { left, right, .. }
-                | NativeExpr::Info {
-                    base: left,
-                    info: right,
-                    ..
-                } => {
-                    collect(left, sources);
-                    collect(right, sources);
+                expr => {
+                    for child in node_children(expr) {
+                        collect(child, sources);
+                    }
                 }
-                NativeExpr::Scalar(_)
-                | NativeExpr::EvalTime { .. }
-                | NativeExpr::VectorOf { .. }
-                | NativeExpr::ParameterizedMap { .. }
-                | NativeExpr::Aggregate { .. }
-                | NativeExpr::Vector { .. } => {}
             }
         }
 
@@ -3447,6 +3566,34 @@ mod tests {
             .collect()
     }
 
+    /// The metric names the compiler binds selectors to, in the order it binds them.
+    fn compiled_selector_order(query: &str) -> Vec<String> {
+        let statement = promql_parser::parser::EvalStmt {
+            expr: promql_parser::parser::parse(query).expect("the query parses"),
+            start: UNIX_EPOCH,
+            end: UNIX_EPOCH + Duration::from_secs(10),
+            interval: Duration::from_secs(5),
+            lookback_delta: Duration::from_secs(5),
+        };
+        let schema = Arc::new(SeriesSchema {
+            fields: Arc::from([FieldSpec { name: "v0".into() }]),
+            eval_grid: None,
+        });
+        let bound = std::cell::RefCell::new(Vec::new());
+        crate::promql::native_compile::compile_selectors(
+            &statement,
+            &|requirement| {
+                bound
+                    .borrow_mut()
+                    .push(requirement.metric.clone().unwrap_or_default());
+                Ok(Arc::clone(&schema))
+            },
+            SeriesOrdering::KeyThenTime,
+        )
+        .expect("the compiler binds every selector of this query");
+        bound.into_inner()
+    }
+
     #[test]
     fn selector_walk_keeps_plain_selector_identity() {
         for (query, expected) in [
@@ -3471,6 +3618,33 @@ mod tests {
             "sum without (instance) (rate(x[5m]))",
         ] {
             assert_eq!(collected_selectors(query), vec!["x"], "{query}");
+        }
+        // A parameter is an expression of its own, and the compiler compiles the input before it, so
+        // a parameter that reads a selector is a second source bound after the input. The order here
+        // is that binding order, which is the one the planner prepares its scans in.
+        for (query, expected) in [
+            ("topk(scalar(a), b)", vec!["b", "a"]),
+            ("bottomk(scalar(a), b)", vec!["b", "a"]),
+            // A literal parameter and a label parameter contribute no selector at all.
+            ("topk(3, b)", vec!["b"]),
+            ("count_values(\"x\", b)", vec!["b"]),
+            (
+                "histogram_quantile(scalar(a), sum by (le) (rate(h[5m])))",
+                vec!["h", "a"],
+            ),
+            (
+                "histogram_fraction(scalar(a), scalar(b), sum by (le) (rate(h[5m])))",
+                vec!["h", "a", "b"],
+            ),
+        ] {
+            assert_eq!(collected_selectors(query), expected, "{query}");
+            // The walk's contract is the compiler's binding order, so the two are compared rather
+            // than kept in step by hand.
+            assert_eq!(
+                collected_selectors(query),
+                compiled_selector_order(query),
+                "{query}: the walk and the compiler must bind the same selectors in the same order"
+            );
         }
     }
 
@@ -3716,10 +3890,27 @@ mod tests {
             Some(vec!["host".to_string(), "job".to_string()]),
             native_output_tags(absent.root(), &sources)
         );
+        // A per-point `k` keeps the input's labels too: it selects the same series the bound form
+        // selects, so it reports the same set. Its parameter reads a source of its own, so this tree
+        // binds two.
+        assert_eq!(
+            Some(vec!["hostname".to_string()]),
+            native_output_tags(
+                compiled_test_tree("topk(scalar(x), sum by (hostname) (rate(x[5m])))").root(),
+                &[vec!["hostname".to_string()], vec!["hostname".to_string()]]
+            ),
+            "a per-point k reports its input's labels"
+        );
         let count_values =
             compiled_test_tree("count_values by (host) (\"sample\", sum by (host) (x))");
         assert_eq!(
             Some(vec!["host".to_string(), "sample".to_string()]),
+            native_output_tags(count_values.root(), &sources)
+        );
+        // A destination already present in the grouping is reported once, not duplicated.
+        let count_values = compiled_test_tree("count_values by (host) (\"host\", x)");
+        assert_eq!(
+            Some(vec!["host".to_string()]),
             native_output_tags(count_values.root(), &sources)
         );
         // Selecting some series keeps each one's own labels, whatever the grouping was.
@@ -3801,6 +3992,13 @@ mod tests {
         let count_values = compiled_test_tree("count_values without (instance) (\"sample\", x)");
         assert_eq!(
             Some(vec!["job".to_string(), "sample".to_string()]),
+            native_output_tags(count_values.root(), &sources)
+        );
+
+        let count_values =
+            compiled_test_tree("count_values without (sample, instance) (\"sample\", x)");
+        assert_eq!(
+            Some(vec!["job".to_string()]),
             native_output_tags(count_values.root(), &sources)
         );
     }

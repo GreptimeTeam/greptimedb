@@ -252,6 +252,47 @@ fn add() -> BinaryMatching {
     }
 }
 
+#[test]
+fn parameterized_topk_validates_scalar_and_grid() {
+    let out = grid(0, 60_000, 4);
+    let vector = map_over(window_on(input(), None, Arc::clone(&out)));
+    let make = |parameter, op| NativeNode {
+        expr: NativeExpr::ParameterizedTopK {
+            input: Box::new(vector.clone()),
+            op,
+            parameter: Box::new(parameter),
+        },
+        output: vector.output.clone(),
+    };
+    let op = BoundVectorOp::TopK {
+        k: 0.0,
+        top: true,
+        group: Grouping::By(Arc::from([])),
+    };
+    assert!(
+        make(scalar_on(1.0, Arc::clone(&out)), op.clone())
+            .validate()
+            .is_ok()
+    );
+    assert!(
+        make(scalar_on(1.0, grid(0, 30_000, 8)), op.clone())
+            .validate()
+            .is_err()
+    );
+    assert!(make(vector.clone(), op.clone()).validate().is_err());
+    assert!(
+        make(
+            scalar_on(1.0, out),
+            BoundVectorOp::LimitK {
+                k: 1.0,
+                group: Grouping::By(Arc::from([]))
+            }
+        )
+        .validate()
+        .is_err()
+    );
+}
+
 /// A compiled tree is accepted when every node's contract holds.
 #[test]
 fn a_window_over_raw_samples_is_valid() {
@@ -951,6 +992,14 @@ fn a_constant_operand_reads_one_series_at_a_time() {
         aggregate,
         scalar_on(100.0, Arc::clone(&shared))
     )));
+    // `scalar(rate(v0[5m]))` must inspect all the series at each point.
+    let scalar_of = NativeNode {
+        expr: NativeExpr::ScalarOf {
+            input: Box::new(vector()),
+        },
+        output: NativeType::Scalar(Arc::clone(&shared)),
+    };
+    assert!(reads_across_series(&scalar_of));
     // `rate(v0[5m]) + rate(v0[5m])` matches two vectors by label.
     assert!(reads_across_series(&binary(vector(), vector())));
     // `1 + 2` answers one value for every series there is.
@@ -2043,6 +2092,173 @@ fn native_tree_depth_limit_holds_across_lifecycle_on_named_worker_stack() {
         .unwrap()
         .join()
         .unwrap();
+}
+
+#[test]
+fn native_tree_depth_limit_checks_dynamic_children() {
+    use super::{MAX_NATIVE_NODE_DEPTH, ParameterizedOp, ensure_native_node_depth};
+    use crate::histogram_eval::HistogramFunction;
+
+    let grid = grid(0, 60_000, 1);
+    let mut deep = input_on(Arc::clone(&grid));
+    for _ in 0..MAX_NATIVE_NODE_DEPTH - 1 {
+        deep = map_over(deep);
+    }
+    let scalar_of = |input| NativeNode {
+        expr: NativeExpr::ScalarOf {
+            input: Box::new(input),
+        },
+        output: NativeType::Scalar(Arc::clone(&grid)),
+    };
+    let scalar = scalar_on(1.0, Arc::clone(&grid));
+    let input = input_on(Arc::clone(&grid));
+    let topk = |input: NativeNode, parameter| NativeNode {
+        output: input.output.clone(),
+        expr: NativeExpr::ParameterizedTopK {
+            input: Box::new(input),
+            op: BoundVectorOp::TopK {
+                k: 0.0,
+                top: true,
+                group: Grouping::By(Arc::from([])),
+            },
+            parameter: Box::new(parameter),
+        },
+    };
+    let histogram = |input: NativeNode, parameters| NativeNode {
+        output: input.output.clone(),
+        expr: NativeExpr::ParameterizedHistogram {
+            input: Box::new(input),
+            op: BoundVectorOp::Histogram(HistogramFunction::Fraction {
+                lower: 0.0,
+                upper: 0.0,
+            }),
+            parameters,
+        },
+    };
+    let map = |input: NativeNode, parameters| NativeNode {
+        output: input.output.clone(),
+        expr: NativeExpr::ParameterizedMap {
+            input: Box::new(input),
+            op: ParameterizedOp::Clamp,
+            parameters,
+        },
+    };
+    assert!(ensure_native_node_depth(&deep).is_ok());
+    for root in [
+        scalar_of(deep.clone()),
+        topk(deep.clone(), scalar.clone()),
+        topk(input.clone(), scalar_of(deep.clone())),
+        histogram(deep.clone(), vec![scalar.clone(), scalar.clone()]),
+        histogram(input.clone(), vec![scalar.clone(), scalar_of(deep.clone())]),
+        map(deep.clone(), vec![scalar.clone(), scalar.clone()]),
+        map(input, vec![scalar, scalar_of(deep)]),
+    ] {
+        assert!(matches!(
+            NativeTree::try_new(root),
+            Err(DataFusionError::NotImplemented(_))
+        ));
+    }
+}
+
+/// The index postcard writes for a [`NativeExpr`] variant is a wire contract, not an implementation
+/// detail: postcard encodes a variant as its index, and a version 3 `FusedSeries` envelope carries
+/// the whole tree rather than a prefix of it, so a variant inserted anywhere but the end renames
+/// every variant after it for a reader of an earlier build.
+///
+/// The numbers here are the ones already written to the wire. New variants are appended after
+/// `Info`; every variant above them keeps the index below.
+#[test]
+fn native_expr_variant_indices_are_a_wire_contract() {
+    use crate::histogram_eval::HistogramFunction;
+
+    // A node carries its expression first, so this is also the tag of any node or tree holding it.
+    fn tag(expr: &NativeExpr) -> u8 {
+        let encoded = postcard::to_stdvec(expr).expect("a native expression encodes");
+        *encoded.first().expect("a variant tag is the first byte")
+    }
+
+    let on_grid = || grid(0, 60_000, 1);
+    let vector = || map_over(input_on(on_grid()));
+    let scalar = || scalar_on(1.0, on_grid());
+    let cases = [
+        (
+            NativeExpr::Input(BoundInput {
+                source_index: 0,
+                output: raw(),
+                ordering: SeriesOrdering::KeyThenTime,
+            }),
+            0u8,
+            "Input",
+        ),
+        (NativeExpr::Scalar(BoundScalar { value: 1.0 }), 1, "Scalar"),
+        (NativeExpr::EvalTime { date: None }, 2, "EvalTime"),
+        (
+            NativeExpr::VectorOf {
+                input: Box::new(scalar()),
+            },
+            3,
+            "VectorOf",
+        ),
+        (
+            NativeExpr::Merge {
+                input: Box::new(vector()),
+            },
+            5,
+            "Merge",
+        ),
+        (
+            NativeExpr::Timestamp {
+                input: Box::new(vector()),
+            },
+            9,
+            "Timestamp",
+        ),
+        (
+            NativeExpr::Aggregate {
+                input: Box::new(vector()),
+                op: BoundAggregate {
+                    kind: AggregateKind::Sum,
+                    group: Grouping::By(Arc::new(["job".into()])),
+                    stage: AggregateStage::Complete,
+                },
+            },
+            10,
+            "Aggregate",
+        ),
+        // The dynamic forms are the last three, which is what keeps every index above them.
+        (
+            NativeExpr::ScalarOf {
+                input: Box::new(vector()),
+            },
+            15,
+            "ScalarOf",
+        ),
+        (
+            NativeExpr::ParameterizedTopK {
+                input: Box::new(vector()),
+                op: BoundVectorOp::TopK {
+                    k: 1.0,
+                    top: true,
+                    group: Grouping::By(Arc::from([])),
+                },
+                parameter: Box::new(scalar()),
+            },
+            16,
+            "ParameterizedTopK",
+        ),
+        (
+            NativeExpr::ParameterizedHistogram {
+                input: Box::new(vector()),
+                op: BoundVectorOp::Histogram(HistogramFunction::Quantile(0.9)),
+                parameters: vec![scalar()],
+            },
+            17,
+            "ParameterizedHistogram",
+        ),
+    ];
+    for (expr, index, variant) in cases {
+        assert_eq!(index, tag(&expr), "{variant} changed the index it encodes");
+    }
 }
 
 #[test]

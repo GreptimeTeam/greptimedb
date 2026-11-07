@@ -289,6 +289,23 @@ fn a_long_statement_grid_is_deferred() {
     assert_eq!(grid_of(tree.root()), (0, 1, 86_400_001));
 }
 
+#[test]
+fn literal_topk_keeps_the_constant_vector_plan() {
+    let tree = compile(
+        &eval_stmt("topk(3, x)"),
+        raw_schema(),
+        SeriesOrdering::KeyThenTime,
+    )
+    .unwrap();
+    assert!(matches!(
+        tree.root().expr,
+        NativeExpr::Vector {
+            op: promql::native::plan::BoundVectorOp::TopK { k: 3.0, .. },
+            ..
+        }
+    ));
+}
+
 /// `rate(x[5m])` becomes a window over the raw input, on the statement's grid.
 #[test]
 fn a_rate_over_a_selector_becomes_a_window_over_raw_input() {
@@ -2247,6 +2264,13 @@ fn a_math_function_with_a_varying_parameter_binds_its_parameters_as_scalars() {
         NativeExpr::EvalTime { date: None }
     ));
 
+    let scalar_tree =
+        compile_statement(&eval_stmt("topk(scalar(vector(time())), vector(time()))")).unwrap();
+    let NativeExpr::ParameterizedTopK { parameter, .. } = &scalar_tree.root().expr else {
+        panic!("expected parameterized topk")
+    };
+    assert!(matches!(parameter.expr, NativeExpr::ScalarOf { .. }));
+
     let tree = compiled("round(x, 2 * 5)").tree;
     assert!(matches!(
         map_op(tree.root()),
@@ -2860,20 +2884,30 @@ fn the_aggregates_that_are_not_a_fold_bind_a_vector_operation() {
         assert_eq!(root, format!("  root Vector {op}"), "`{query}`");
     }
 
-    let error = compile(
+    let compiled = compile_selectors(
         &eval_stmt("topk(scalar(x), x)"),
+        &|_| Ok(raw_schema()),
+        SeriesOrdering::KeyThenTime,
+    )
+    .expect("scalar(selector) is now compiled as a dynamic k");
+    let NativeExpr::ParameterizedTopK { parameter, .. } = &compiled.tree.root().expr else {
+        panic!("expected parameterized topk")
+    };
+    assert!(matches!(parameter.expr, NativeExpr::ScalarOf { .. }));
+
+    // `limitk` has no policy for a `k` that changes per point, so it keeps the constant rejection
+    // and its message is the one that quotes the shapes this compiler accepts.
+    let error = compile(
+        &eval_stmt("limitk(scalar(x), x)"),
         raw_schema(),
         SeriesOrdering::KeyThenTime,
     )
     .expect_err("a run-time k compiled");
-    assert!(
-        matches!(error, DataFusionError::NotImplemented(_)),
-        "{error}"
-    );
     let message = error.to_string();
     assert!(message.contains("first argument"), "{message}");
-    // The rejection quotes the accepted subset, so that quote has to name every aggregator this
-    // compiler takes: one stale word there makes every rejection lie about what it binds.
+    // That quote is the only description a reader of a rejection gets, so it has to name every
+    // aggregator this compiler takes: one stale word there makes every rejection lie about what it
+    // binds.
     for aggregator in [
         "sum",
         "avg",
@@ -4283,6 +4317,7 @@ fn whole_vector_functions_bind_a_vector_operation() {
             "histogram_quantile(1 - 0.1, rate(x[5m]))",
             "histogram_quantile 0.9",
         ),
+        ("histogram_quantile(0.9, x)", "histogram_quantile 0.9"),
         ("histogram_fraction(0, 0.5, x)", "histogram_fraction 0 0.5"),
         ("absent(rate(x[5m]))", "absent {}"),
     ];
@@ -5142,7 +5177,8 @@ fn validate_inputs_rejects_misbound_occurrences_and_accepts_scalar_wrappers() {
             | NativeExpr::Timestamp { input }
             | NativeExpr::Vector { input, .. }
             | NativeExpr::Aggregate { input, .. }
-            | NativeExpr::VectorOf { input } => set_input_source(input, source),
+            | NativeExpr::VectorOf { input }
+            | NativeExpr::ScalarOf { input } => set_input_source(input, source),
             NativeExpr::Binary { left, right, .. }
             | NativeExpr::Set { left, right, .. }
             | NativeExpr::Info {
@@ -5152,6 +5188,20 @@ fn validate_inputs_rejects_misbound_occurrences_and_accepts_scalar_wrappers() {
             } => {
                 set_input_source(left, source);
                 set_input_source(right, source);
+            }
+            NativeExpr::ParameterizedTopK {
+                input, parameter, ..
+            } => {
+                set_input_source(input, source);
+                set_input_source(parameter, source);
+            }
+            NativeExpr::ParameterizedHistogram {
+                input, parameters, ..
+            } => {
+                set_input_source(input, source);
+                for parameter in parameters {
+                    set_input_source(parameter, source);
+                }
             }
             NativeExpr::ParameterizedMap {
                 input, parameters, ..

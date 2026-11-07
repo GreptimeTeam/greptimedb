@@ -2429,8 +2429,13 @@ async fn native_fused_supports_constant_roots_and_selector_broadcasts() {
     }
 }
 
-/// A statement that reads no data plans without a scan. `scalar(v)` has no native node, so a
-/// statement that calls it keeps the existing plan.
+/// A statement that reads no data plans without a scan, and one that reads a scan through a scalar
+/// keeps the native route.
+///
+/// `scalar(v)` binds `NativeExpr::ScalarOf`, and a tree that holds it reads the whole vector: it is
+/// classified `SinglePartition`, so it is not cut per series and the statement plans natively. It
+/// must not be mistaken for a tree that keeps its source's matching key — that reading used to send
+/// it, and `topk`/`histogram_quantile` with it, back to the previous planner.
 #[tokio::test]
 async fn native_fused_plans_dynamic_scalars() {
     for query in ["time() - 60", "vector(time())", "hour()"] {
@@ -2592,13 +2597,81 @@ async fn native_fused_plans_dynamic_scalars() {
     let (_, batches) = execute(plan, &build_query_engine_state()).await;
     assert!(!batches.is_empty(), "{query}");
 
-    for query in [
-        "scalar(some_metric)",
-        "some_metric > bool scalar(some_metric)",
-    ] {
-        let plan = build_native_fused_plan(query, true).await;
-        assert!(find_fused_series(&plan).is_none(), "{query}");
+    // `scalar(m)` reads the whole vector: which series carries the one value at a point decides the
+    // answer, so the tree runs where every series of `m` is gathered rather than per partition. That
+    // still plans natively, as one fused node over the scan.
+    let plan = build_native_fused_plan("scalar(some_metric)", true).await;
+    let fused = find_fused_series(&plan)
+        .unwrap_or_else(|| panic!("scalar() over a scan uses the native route: {plan}"));
+    assert!(
+        matches!(fused.tree().root().expr, NativeExpr::ScalarOf { .. }),
+        "scalar() binds its own node: {plan}"
+    );
+    // The scalar side of a broadcast reads the whole vector, even when both sides read the same
+    // table. Both selector occurrences bind their own source and the tree gathers before evaluation.
+    let query = "some_metric > bool scalar(some_metric)";
+    let plan = build_native_fused_plan(query, true).await;
+    let fused = find_fused_series(&plan)
+        .unwrap_or_else(|| panic!("same-table scalar broadcast uses the native route: {plan}"));
+    assert_eq!(2, fused.inputs().len(), "{query}: {plan}");
+    assert_eq!(
+        vec!["some_metric".to_string(), "some_metric".to_string()],
+        fused_input_metrics(&plan),
+        "{query}: each selector occurrence binds its own source: {plan}"
+    );
+    assert!(
+        matches!(
+            input_locality(fused.tree().root()),
+            InputLocality::SinglePartition
+        ),
+        "{query}: scalar() must see the whole vector: {plan}"
+    );
+}
+
+/// An aggregate's parameter is part of the tree a data-free statement names its value field from.
+///
+/// `topk(scalar(sum by (value) (vector(1))), vector(2))` groups by a label called `value`, so the
+/// value field has to step aside for it: an aggregate refuses to group by the field it folds, and
+/// the parameter is where that label is bound. Left out of the walk over the tree, the statement
+/// keeps the field name `value` and fails when the node is built for execution instead of answering
+/// `2`.
+#[tokio::test]
+async fn native_fused_plans_a_dynamic_topk_parameter_grouped_by_the_value_field() {
+    let query = "topk(scalar(sum by (value) (vector(1))), vector(2))";
+    let plan = build_native_fused_plan(query, true).await;
+    {
+        let fused = find_fused_series(&plan).expect("a data-free topk uses the native route");
+        assert!(fused.children().is_empty(), "{query}");
+        assert_eq!(
+            vec!["native_value_0"],
+            fused
+                .tree()
+                .root()
+                .output
+                .samples()
+                .unwrap()
+                .fields
+                .iter()
+                .map(|field| field.name.as_ref())
+                .collect::<Vec<_>>(),
+            "{query} native value field"
+        );
     }
+    let (_, batches) = execute(plan, &build_query_engine_state()).await;
+    let mut answers = Vec::new();
+    for batch in &batches {
+        let values = batch
+            .column(1)
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .unwrap();
+        answers.extend((0..batch.num_rows()).map(|row| values.value(row)));
+    }
+    assert!(!answers.is_empty(), "{query} answered nothing");
+    assert!(
+        answers.iter().all(|value| *value == 2.0),
+        "{query} answered {answers:?}"
+    );
 }
 
 /// A map whose parameter reads no data runs per partition over its scan.
@@ -3490,6 +3563,21 @@ async fn native_fused_binary_keeps_independent_scan_occurrences() {
                     sources(left, out);
                     sources(right, out);
                 }
+                NativeExpr::ParameterizedTopK {
+                    input, parameter, ..
+                } => {
+                    sources(input, out);
+                    sources(parameter, out);
+                }
+                NativeExpr::ParameterizedHistogram {
+                    input, parameters, ..
+                } => {
+                    sources(input, out);
+                    for parameter in parameters {
+                        sources(parameter, out);
+                    }
+                }
+                NativeExpr::ScalarOf { input } => sources(input, out),
                 NativeExpr::Scalar(_)
                 | NativeExpr::EvalTime { .. }
                 | NativeExpr::VectorOf { .. }
@@ -4123,14 +4211,24 @@ async fn native_fused_three_selector_trees_bind_every_occurrence() {
                 | NativeExpr::Timestamp { input }
                 | NativeExpr::Vector { input, .. }
                 | NativeExpr::Aggregate { input, .. }
+                | NativeExpr::ScalarOf { input }
                 | NativeExpr::VectorOf { input } => child(input),
                 NativeExpr::ParameterizedMap {
+                    input, parameters, ..
+                }
+                | NativeExpr::ParameterizedHistogram {
                     input, parameters, ..
                 } => {
                     child(input);
                     for parameter in parameters.iter() {
                         child(parameter);
                     }
+                }
+                NativeExpr::ParameterizedTopK {
+                    input, parameter, ..
+                } => {
+                    child(input);
+                    child(parameter);
                 }
                 NativeExpr::Binary { left, right, .. } | NativeExpr::Set { left, right, .. } => {
                     child(left);
@@ -4260,6 +4358,10 @@ async fn native_fused_aggregate_splits_into_a_final_over_a_partial_producer() {
         // A map between the two: the constant is broadcast over a map above the fold, so the prefix
         // stays the selection and the suffix is `abs` over the merged value, then the multiply.
         "abs(sum(some_metric)) * 2",
+        // A histogram whose parameter is a per-point constant is carried like the literal form: the
+        // argument reads no series, so it means the same above the merged values and stays native.
+        "histogram_quantile(time() / 150, sum by (le) (rate(some_metric[5m])))",
+        "histogram_fraction(time() / 150, time() / 75 + 0.5, sum by (le) (rate(some_metric[5m])))",
     ] {
         let plan = build_native_fused_plan(query, true).await;
         let display = plan.display_indent().to_string();
@@ -4273,6 +4375,22 @@ async fn native_fused_aggregate_splits_into_a_final_over_a_partial_producer() {
             final_display.matches(" final").count(),
             "`{query}`: the merge must be a Final aggregate: {final_display}"
         );
+        // A per-point parameter keeps the function native: the node the compiler bound for it sits
+        // above the Final aggregate rather than the literal `Histogram` op the constant form binds.
+        match query {
+            "histogram_quantile(time() / 150, sum by (le) (rate(some_metric[5m])))" => assert!(
+                final_display.contains("ParameterizedHistogram histogram_quantile"),
+                "`{query}`: the split must carry the per-point parameter: {final_display}"
+            ),
+            "histogram_fraction(time() / 150, time() / 75 + 0.5, sum by (le) (rate(some_metric[5m])))" =>
+            {
+                assert!(
+                    final_display.contains("ParameterizedHistogram histogram_fraction"),
+                    "`{query}`: the split must carry the per-point parameters: {final_display}"
+                )
+            }
+            _ => {}
+        }
         let partial = partial_below(final_node).expect("the final node reads a partial producer");
         // The physical final must accept the producer's state and classify its own output fields.
         let input = Arc::new(datafusion::physical_plan::empty::EmptyExec::new(
@@ -4347,12 +4465,70 @@ async fn native_fused_aggregate_splits_into_a_final_over_a_partial_producer() {
             "100 / sum(some_metric)" => &["field_0", "timestamp"],
             "-sum(some_metric)" => &["field_0", "timestamp"],
             "abs(sum(some_metric)) * 2" => &["field_0", "timestamp"],
+            "histogram_quantile(time() / 150, sum by (le) (rate(some_metric[5m])))" => {
+                &["field_0", "timestamp"]
+            }
+            "histogram_fraction(time() / 150, time() / 75 + 0.5, sum by (le) (rate(some_metric[5m])))" => {
+                &["field_0", "timestamp"]
+            }
             _ => panic!("missing exact native schema expectation for `{query}`"),
         };
         assert_eq!(
             expected_names,
             sorted_column_names(&plan).as_slice(),
             "exact native output columns for `{query}`"
+        );
+    }
+}
+
+/// A whole-vector node over a bare scan is native, whichever form writes it: it reads every series of
+/// its source, so it is classified `SinglePartition` and never cut per series.
+///
+/// This is the regression for a `same_source` arm that passed the node through when its parameter was
+/// a per-point constant: that claimed the tree keeps its source's matching key, so the planner asked
+/// for `PartitionLocal`, refused its own `reads_across_series` answer and fell back to the previous
+/// planner for the per-point form only — while a tree inside `multi_input` would instead have ranked
+/// per partition and answered the union.
+#[tokio::test]
+async fn native_fused_whole_vector_nodes_over_a_bare_scan_stay_native() {
+    for query in [
+        // The literal ranking, which never had a `same_source` arm to go wrong.
+        "topk(3, some_metric)",
+        // The per-point ranking and the scalar, whose parameters are per-point constants. `time()`
+        // is the bare constant a parameter-shaped `same_source` guard passes through; an arithmetic
+        // expression over it never matched that guard, so both forms are pinned here.
+        "topk(time() / 60 + 1, some_metric)",
+        "topk(time(), some_metric)",
+        "scalar(some_metric)",
+    ] {
+        let plan = build_native_fused_plan(query, true).await;
+        assert!(
+            find_fused_series(&plan).is_some(),
+            "`{query}` reads whole series at a point, so it must stay native: {plan}"
+        );
+    }
+}
+
+/// `topk` over a split aggregate needs a whole-vector boundary whether its `k` is bound or answered
+/// per point, so the two forms take the same route: native, and not split.
+#[tokio::test]
+async fn native_fused_topk_above_aggregate_declines_the_split_in_every_form() {
+    for query in [
+        // The literal `k` binds a constant `TopK` op, which `split` refuses above the cut.
+        "topk(3, sum(some_metric))",
+        // A per-point `k` ranks the same whole vector, so it refuses for the same reason rather
+        // than becoming the one admitted form.
+        "topk(time() / 1000, sum(some_metric))",
+    ] {
+        let plan = build_native_fused_plan(query, true).await;
+        let display = plan.display_indent().to_string();
+        assert!(
+            find_fused_series(&plan).is_some(),
+            "`{query}` must stay native: {display}"
+        );
+        assert!(
+            find_final_split(&plan).is_none(),
+            "`{query}` must not split: {display}"
         );
     }
 }
@@ -4950,9 +5126,9 @@ async fn native_fused_histogram_quantile_binary_drops_le_from_operand_matching()
     }
 }
 
-/// A shape neither the split nor the node can keep correct keeps the existing plan: a sibling a
-/// call computes has no native node at all, a group by a value field cannot be named by the state
-/// rows, and a kernel the compiler does not fold keeps it too.
+/// A shape neither the split nor the node can keep correct keeps the existing plan: a group by a
+/// value field cannot be named by the state rows, and a kernel the compiler does not fold keeps it
+/// too.
 ///
 /// `sum(m) / m` and `m + sum(m)` are not on this list. The fold and the plain selector are two
 /// occurrences, so each reads its own source and the operation above them answers over both; the
@@ -4968,9 +5144,6 @@ async fn native_fused_unsplittable_aggregate_falls_back() {
     for query in [
         "quantile(0.5, some_metric)",
         "sum(quantile(0.5, some_metric))",
-        // A scalar a call computes is not a literal the split could keep: `scalar(...)` has no
-        // native node, so the statement keeps the existing plan.
-        "sum(some_metric) / scalar(some_metric)",
         "sum by (field_0) (some_metric)",
     ] {
         let native = build_native_fused_plan(query, true).await;
@@ -4993,14 +5166,15 @@ async fn native_fused_unsplittable_aggregate_falls_back() {
     }
 }
 
-/// A fold beside a plain selector is two occurrences, so each reads its own source and the fold and
-/// the match run above both. No partition needs to hold the whole of the input for that: the inputs
-/// are reconciled before the node evaluates them.
+/// A fold beside an independent selector is two occurrences, so each reads its own source and the
+/// operation runs above both. A scalar over the second occurrence requires the whole vector and
+/// therefore gathers the inputs before evaluation.
 #[tokio::test]
 async fn native_fused_aggregate_above_an_independent_selector_is_admitted() {
     for query in [
         "sum(some_metric) / some_metric",
         "some_metric + sum(some_metric)",
+        "sum(some_metric) / scalar(some_metric)",
     ] {
         let native = build_native_fused_plan(query, true).await;
         let fused = find_fused_series(&native).unwrap_or_else(|| panic!("`{query}`: {native}"));
@@ -5010,6 +5184,15 @@ async fn native_fused_aggregate_above_an_independent_selector_is_admitted() {
             fused_input_metrics(&native),
             "`{query}`: each selector occurrence reads its own source: {native}"
         );
+        if query.contains("scalar(") {
+            assert!(
+                matches!(
+                    input_locality(fused.tree().root()),
+                    InputLocality::SinglePartition
+                ),
+                "`{query}`: scalar() must see the whole vector: {native}"
+            );
+        }
         assert!(
             find_final_split(&native).is_none(),
             "`{query}`: a tree over two inputs is not a one-input split: {native}"
@@ -12946,5 +13129,57 @@ async fn eval_times_before_epoch() {
     // represent this SystemTime.
     if let Some(too_early) = UNIX_EPOCH.checked_sub(Duration::from_secs(10_000_000_000_000_000)) {
         assert!(plan(too_early, too_early).await.is_err());
+    }
+}
+
+/// A grouping by the metric name inside `scalar()` cannot reach the output: the scalar clears the
+/// labels, so the walk must stop there instead of refusing the statement.
+///
+/// Refusing it is not a quiet fallback - the existing planner takes both operands as vector inputs
+/// and reports `MultipleVector`, so a valid query fails outright.
+#[tokio::test]
+async fn native_fused_scalar_clears_metric_name_grouping() {
+    let tables = [
+        (DEFAULT_SCHEMA_NAME.to_string(), "a".to_string()),
+        (DEFAULT_SCHEMA_NAME.to_string(), "b".to_string()),
+    ];
+    let query = "clamp_min(b, scalar(sum by (__name__) (a)))";
+    let provider = build_test_table_provider_with_tsid(&tables, 2, 1).await;
+    let plan = build_native_fused_plan_with_provider(query, true, provider).await;
+    let fused = find_fused_series(&plan).unwrap_or_else(|| panic!("{query}: {plan}"));
+    assert_eq!(fused.inputs().len(), 2, "{query}");
+}
+
+/// Count-values output includes its generated label after grouping across logical tables.
+#[tokio::test]
+async fn native_fused_metric_engine_count_values_output_labels() {
+    let tables = [
+        (DEFAULT_SCHEMA_NAME.to_string(), "a".to_string()),
+        (DEFAULT_SCHEMA_NAME.to_string(), "b".to_string()),
+    ];
+    for (query, expected_tags) in [
+        (r#"count_values("sample", a or b)"#, vec!["sample"]),
+        (
+            r#"count_values("sample", a or b) by (tag_0)"#,
+            vec!["sample", "tag_0"],
+        ),
+        (
+            r#"count_values("sample", a or b) without (sample)"#,
+            vec!["tag_0", "tag_1"],
+        ),
+    ] {
+        let provider = build_test_table_provider_with_tsid(&tables, 2, 1).await;
+        let plan = build_native_fused_plan_with_provider(query, true, provider).await;
+        let fused = find_fused_series(&plan).unwrap_or_else(|| panic!("{query}: {plan}"));
+        assert_eq!(fused.inputs().len(), 2, "{query}");
+        let mut expected = expected_tags
+            .into_iter()
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        expected.push("timestamp".to_string());
+        // The value column keeps the compiled tree's field name rather than the expression text.
+        expected.push("field_0".to_string());
+        expected.sort();
+        assert_eq!(sorted_column_names(&plan), expected, "{query}");
     }
 }
