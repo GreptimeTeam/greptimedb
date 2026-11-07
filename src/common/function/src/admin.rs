@@ -14,6 +14,7 @@
 
 mod build_index_table;
 mod discard_unflushed_data;
+mod drain_node;
 mod flush_compact_region;
 mod flush_compact_table;
 mod gc;
@@ -36,6 +37,7 @@ use reconcile_table::ReconcileTableFunction;
 
 use crate::admin::build_index_table::{BuildIndexFunction, BuildSeriesIndexFunction};
 use crate::admin::discard_unflushed_data::DiscardUnflushedDataFunction;
+use crate::admin::drain_node::DrainNodeFunction;
 use crate::flush_flow::FlushFlowFunction;
 use crate::function_registry::FunctionRegistry;
 
@@ -62,6 +64,7 @@ impl AdminFunction {
 
     /// Register functions that must only be resolved by an ADMIN statement.
     pub fn register_admin_only(registry: &FunctionRegistry) {
+        registry.register(DrainNodeFunction::factory());
         registry.register(DiscardUnflushedDataFunction::factory());
         #[cfg(feature = "enterprise")]
         registry.register(PurgeTableFunction::factory());

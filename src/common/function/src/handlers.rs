@@ -98,6 +98,9 @@ pub trait ProcedureServiceHandler: Send + Sync {
         request: MigrateRegionRequest,
     ) -> Result<Option<String>>;
 
+    /// Drain a datanode, returning the submitted procedure id.
+    async fn drain_node(&self, query_ctx: QueryContextRef, datanode_id: u64) -> Result<String>;
+
     /// Reconcile a table, database or catalog, returns the procedure id if success.
     async fn reconcile(&self, request: ReconcileRequest) -> Result<Option<String>>;
 

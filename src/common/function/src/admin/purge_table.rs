@@ -151,6 +151,9 @@ mod tests {
         ) -> Result<Option<String>> {
             unreachable!()
         }
+        async fn drain_node(&self, _: QueryContextRef, _: u64) -> Result<String> {
+            unreachable!()
+        }
         async fn reconcile(&self, _: ReconcileRequest) -> Result<Option<String>> {
             unreachable!()
         }
