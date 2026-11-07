@@ -31,6 +31,7 @@ pub mod promql;
 pub mod query_engine;
 mod range_select;
 pub mod region_query;
+pub mod scan_sequence_binding;
 pub mod sql;
 pub(crate) mod window_sort;
 

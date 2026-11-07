@@ -12,12 +12,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
-use common_recordbatch::adapter::{RecordBatchMetrics, RegionWatermarkEntry};
+use common_recordbatch::adapter::{
+    RecordBatchMetrics, RegionWatermarkEntry, ScanRegionWatermarkEntry,
+};
 use common_recordbatch::{OrderOption, RecordBatch, RecordBatchStream, SendableRecordBatchStream};
 use common_telemetry::warn;
 use datafusion::physical_plan::ExecutionPlan;
@@ -27,6 +30,7 @@ use futures_util::ready;
 use lazy_static::lazy_static;
 use prometheus::*;
 use session::context::QueryContextRef;
+use table::table::scan::RegionScanExec;
 
 use crate::dist_plan::MergeScanExec;
 use crate::error::Result;
@@ -212,6 +216,11 @@ impl RecordBatchStream for RegionWatermarkMetricsStream {
         if !region_watermarks.is_empty() {
             metrics.region_watermarks = region_watermarks;
         }
+        let scan_region_watermarks =
+            merge_scan_region_watermarks(collect_scan_region_watermarks(self.plan.clone()));
+        if !scan_region_watermarks.is_empty() {
+            metrics.scan_region_watermarks = scan_region_watermarks;
+        }
         Some(metrics)
     }
 }
@@ -252,12 +261,14 @@ pub fn maybe_attach_region_watermark_metrics(
 pub fn terminal_recordbatch_metrics_from_plan(
     plan: Arc<dyn ExecutionPlan>,
 ) -> Option<RecordBatchMetrics> {
-    let region_watermarks = collect_region_watermarks(plan);
-    if region_watermarks.is_empty() {
+    let region_watermarks = collect_region_watermarks(plan.clone());
+    let scan_region_watermarks = merge_scan_region_watermarks(collect_scan_region_watermarks(plan));
+    if region_watermarks.is_empty() && scan_region_watermarks.is_empty() {
         None
     } else {
         Some(RecordBatchMetrics {
             region_watermarks,
+            scan_region_watermarks,
             ..Default::default()
         })
     }
@@ -296,6 +307,80 @@ fn collect_region_watermarks(plan: Arc<dyn ExecutionPlan>) -> Vec<RegionWatermar
     }
 
     finalize_region_watermarks(merged)
+}
+
+/// Collects the per-scan completion proofs of every bound scan in `plan`.
+///
+/// A scan contributes a proof only when every one of its output partitions
+/// finished: a partially read scan cannot prove it drained the range it was
+/// bound to. Scans the query layer did not bind (no scan id) contribute nothing,
+/// because a proof cannot be attributed to a plan position without one.
+///
+/// Entries are returned unmerged, so a repeated `(scan_id, region_id)` from
+/// independent instances still gets the conservative treatment in
+/// [`merge_scan_region_watermarks`].
+fn collect_scan_region_watermarks(plan: Arc<dyn ExecutionPlan>) -> Vec<ScanRegionWatermarkEntry> {
+    let mut collected = Vec::new();
+    let mut stack = vec![plan];
+
+    while let Some(plan) = stack.pop() {
+        if let Some(scan) = plan.downcast_ref::<RegionScanExec>()
+            && let (Some(scan_id), Some(watermark)) = (scan.scan_id(), scan.sequence_upper_bound())
+            && scan.completion().all_finished()
+        {
+            collected.push(ScanRegionWatermarkEntry {
+                scan_id,
+                region_id: scan.region_id().as_u64(),
+                watermark: Some(watermark),
+            });
+        }
+
+        if let Some(merge_scan) = plan.downcast_ref::<MergeScanExec>() {
+            for metrics in merge_scan.sub_stage_metrics() {
+                collected.extend(metrics.scan_region_watermarks);
+            }
+        }
+
+        stack.extend(plan.children().into_iter().cloned());
+    }
+
+    collected
+}
+
+/// Merges per-scan proofs, keyed by `(scan_id, region_id)`.
+///
+/// Two scans of one region are not interchangeable: a proof of one says nothing
+/// about the other, so their keys never meet. Proofs of the same key come from
+/// independent instances of one logical scan and merge conservatively: agreeing
+/// values stay proved, disagreeing values degrade to unproved.
+fn merge_scan_region_watermarks(
+    entries: impl IntoIterator<Item = ScanRegionWatermarkEntry>,
+) -> Vec<ScanRegionWatermarkEntry> {
+    let mut merged = BTreeMap::<(u32, u64), Option<u64>>::new();
+
+    for entry in entries {
+        match merged.entry((entry.scan_id, entry.region_id)) {
+            Entry::Vacant(vacant) => {
+                vacant.insert(entry.watermark);
+            }
+            Entry::Occupied(mut occupied) => {
+                if *occupied.get() != entry.watermark {
+                    occupied.insert(None);
+                }
+            }
+        }
+    }
+
+    merged
+        .into_iter()
+        .map(
+            |((scan_id, region_id), watermark)| ScanRegionWatermarkEntry {
+                scan_id,
+                region_id,
+                watermark,
+            },
+        )
+        .collect()
 }
 
 /// Merge a batch of per-region watermark entries into the global merged state.
@@ -476,6 +561,72 @@ mod tests {
                 .collect(),
             ..Default::default()
         }
+    }
+
+    fn scan_entry(
+        scan_id: u32,
+        region_id: u64,
+        watermark: Option<u64>,
+    ) -> ScanRegionWatermarkEntry {
+        ScanRegionWatermarkEntry {
+            scan_id,
+            region_id,
+            watermark,
+        }
+    }
+
+    #[test]
+    fn merge_scan_region_watermarks_keeps_agreeing_proofs() {
+        let merged = merge_scan_region_watermarks([
+            scan_entry(0, 42, Some(120)),
+            scan_entry(0, 42, Some(120)),
+        ]);
+
+        assert_eq!(merged, vec![scan_entry(0, 42, Some(120))]);
+    }
+
+    #[test]
+    fn merge_scan_region_watermarks_degrades_disagreeing_proofs() {
+        let merged = merge_scan_region_watermarks([
+            scan_entry(0, 42, Some(120)),
+            scan_entry(0, 42, Some(121)),
+        ]);
+
+        assert_eq!(merged, vec![scan_entry(0, 42, None)]);
+    }
+
+    #[test]
+    fn merge_scan_region_watermarks_degrades_proof_followed_by_absence() {
+        let merged =
+            merge_scan_region_watermarks([scan_entry(0, 42, Some(120)), scan_entry(0, 42, None)]);
+
+        assert_eq!(merged, vec![scan_entry(0, 42, None)]);
+    }
+
+    #[test]
+    fn merge_scan_region_watermarks_never_combines_scans_of_one_region() {
+        let merged =
+            merge_scan_region_watermarks([scan_entry(0, 42, Some(120)), scan_entry(4, 42, None)]);
+
+        // The two proofs belong to different plan positions: the unproved one
+        // must not veto the proved one.
+        assert_eq!(
+            merged,
+            vec![scan_entry(0, 42, Some(120)), scan_entry(4, 42, None)]
+        );
+    }
+
+    #[test]
+    fn merge_scan_region_watermarks_keeps_regions_of_one_scan_independent() {
+        let merged = merge_scan_region_watermarks([
+            scan_entry(0, 42, Some(120)),
+            scan_entry(0, 43, Some(90)),
+        ]);
+
+        assert_eq!(
+            merged,
+            vec![scan_entry(0, 42, Some(120)), scan_entry(0, 43, Some(90))]
+        );
     }
 
     fn test_merge_scan_exec(table_id: u32, query_ctx: QueryContextRef) -> Arc<dyn ExecutionPlan> {
