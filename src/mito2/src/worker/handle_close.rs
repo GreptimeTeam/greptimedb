@@ -36,6 +36,14 @@ impl<S: LogStore> RegionWorkerLoop<S> {
 
         info!("Try to close region {}, worker: {}", region_id, self.id);
 
+        if region.is_staging() {
+            // A staging region cannot flush, so it leaves staging before the close-time flush
+            // below. The manifest lock lets a successful end of staging in progress finish first,
+            // after which the region may already be out of staging.
+            let _manager = region.manifest_ctx.manifest_manager.write().await;
+            let _ = region.exit_staging();
+        }
+
         // Memtables containing skip-WAL writes must be flushed before closing.
         // Followers cannot flush; explicit flush-on-close and region WAL options
         // retain their existing behavior.

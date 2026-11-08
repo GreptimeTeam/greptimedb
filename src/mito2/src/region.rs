@@ -96,7 +96,7 @@ impl RegionUsage {
 pub enum RegionLeaderState {
     /// The region is opened and is writable.
     Writable,
-    /// The region is in staging mode - writable but no checkpoint/compaction.
+    /// The region is in staging mode - writable but no checkpoint/compaction/flush.
     Staging,
     /// The region is entering staging mode. - write requests will be stalled.
     EnteringStaging,
@@ -1140,30 +1140,6 @@ impl MitoRegion {
 
         // Return the hook payload; the caller invokes the hook after dropping the lock.
         Ok(Some(pending))
-    }
-
-    /// Returns the partition expression string for this region.
-    ///
-    /// If the region is currently in staging state, this returns the partition expression held in
-    /// the staging partition field. Otherwise, it returns the partition expression from the primary
-    /// region metadata (current committed version).
-    pub fn maybe_staging_partition_expr_str(&self) -> Option<String> {
-        let is_staging = self.is_staging();
-        if is_staging {
-            let staging_partition_info = self.manifest_ctx.staging_partition_info();
-            if staging_partition_info.is_none() {
-                warn!(
-                    "Staging partition expr is none for region {} in staging state",
-                    self.region_id
-                );
-            }
-            staging_partition_info
-                .as_ref()
-                .and_then(|info| info.partition_expr().map(ToString::to_string))
-        } else {
-            let version = self.version();
-            version.metadata.partition_expr.clone()
-        }
     }
 
     pub fn expected_partition_expr_version(&self) -> u64 {

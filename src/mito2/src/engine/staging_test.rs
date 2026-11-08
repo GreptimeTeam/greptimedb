@@ -14,16 +14,18 @@
 
 //! Integration tests for staging state functionality.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 use std::{assert_matches, fs};
 
-use api::v1::{ArrowIpc, Rows};
+use api::v1::{ArrowIpc, ColumnSchema, Rows};
 use common_error::ext::{ErrorExt, RetryHint};
 use common_error::status_code::StatusCode;
 use common_function::utils::partition_expr_version;
 use common_grpc::flight;
 use common_recordbatch::RecordBatches;
+use common_time::util::current_time_millis;
 use datatypes::arrow::array::{ArrayRef, Float64Array, StringArray, TimestampMillisecondArray};
 use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::value::Value;
@@ -33,28 +35,35 @@ use object_store::layers::mock::{
     MockLayerBuilder, OpDelete, Result as MockResult, Write, Writer,
 };
 use partition::expr::{PartitionExpr, col};
+use store_api::mito_engine_options::WRITE_BUFFER_SIZE_KEY;
 use store_api::region_engine::{
-    RegionEngine, RemapManifestsRequest, SetRegionRoleStateResponse, SettableRegionRoleState,
+    RegionEngine, RegionRole, RemapManifestsRequest, SetRegionRoleStateResponse,
+    SettableRegionRoleState,
 };
 use store_api::region_request::{
     ApplyStagingManifestRequest, EnterStagingRequest, RegionAlterRequest, RegionBulkInsertsRequest,
-    RegionFlushRequest, RegionPutRequest, RegionRequest, RegionTruncateRequest,
-    StagingPartitionDirective,
+    RegionCloseRequest, RegionFlushReason, RegionFlushRequest, RegionPutRequest, RegionRequest,
+    RegionTruncateRequest, StagingPartitionDirective,
 };
 use store_api::storage::{RegionId, ScanRequest};
 
 use crate::config::MitoConfig;
-use crate::engine::listener::NotifyEnterStagingResultListener;
+use crate::engine::MitoEngine;
+use crate::engine::listener::{FlushListener, NotifyEnterStagingResultListener};
 use crate::error::Error;
+use crate::flush::WriteBufferManager;
 use crate::manifest::action::{
     RegionChange, RegionEdit, RegionMetaAction, RegionMetaActionList, RegionPartitionExprChange,
 };
-use crate::region::{RegionLeaderState, RegionRoleState, parse_partition_expr};
+use crate::region::{RegionLeaderState, RegionRoleState};
 use crate::request::WorkerRequest;
 use crate::sst::FormatType;
 use crate::test_util::{
-    CheckpointTaskBlocker, CreateRequestBuilder, TestEnv, build_rows, put_rows, rows_schema,
+    CheckpointTaskBlocker, CreateRequestBuilder, MockWriteBufferManager, TestEnv, build_rows,
+    flush_region, put_rows, reopen_region, rows_schema,
 };
+use crate::time_provider::mock::MockTimeProvider;
+use crate::worker::MAX_INITIAL_CHECK_DELAY_SECS;
 
 fn range_expr(col_name: &str, start: i64, end: i64) -> PartitionExpr {
     col(col_name)
@@ -436,13 +445,6 @@ async fn test_staging_write_partition_expr_version_with_format(flat_format: bool
         .await
         .unwrap();
     assert_eq!(result.affected_rows, 3);
-    engine
-        .handle_request(
-            region_id,
-            RegionRequest::Flush(RegionFlushRequest::default()),
-        )
-        .await
-        .unwrap();
 
     let result = engine
         .remap_manifests(RemapManifestsRequest {
@@ -551,9 +553,6 @@ async fn test_staging_manifest_directory_with_format(flat_format: bool) {
     let region_id = RegionId::new(1024, 0);
     let request = CreateRequestBuilder::new().build();
 
-    // Get column schemas before consuming the request
-    let column_schemas = rows_schema(&request);
-
     // Check manifest files after region creation (before staging mode)
     // Create region
     engine
@@ -637,22 +636,6 @@ async fn test_staging_manifest_directory_with_format(flat_format: bool) {
         Error::StagingPartitionExprMismatch { .. }
     );
 
-    // Put some data and flush in staging mode
-    let rows_data = Rows {
-        schema: column_schemas.clone(),
-        rows: build_rows(0, 3),
-    };
-    put_rows(&engine, region_id, rows_data).await;
-
-    // Force flush to generate manifest files in staging mode
-    engine
-        .handle_request(
-            region_id,
-            RegionRequest::Flush(RegionFlushRequest::default()),
-        )
-        .await
-        .unwrap();
-
     // Check that manifest files are in staging directory
     let staging_manifest_dir = format!("{}/staging/manifest", region_dir);
     assert!(
@@ -708,7 +691,7 @@ async fn test_staging_exit_success_with_manifests_with_format(flat_format: bool)
         .await
         .unwrap();
 
-    // Add some data and flush in staging mode to generate staging manifests
+    // This data is flushed when entering staging mode.
     let rows_data = Rows {
         schema: column_schemas.clone(),
         rows: build_rows(0, 3),
@@ -728,55 +711,55 @@ async fn test_staging_exit_success_with_manifests_with_format(flat_format: bool)
         .await
         .unwrap();
 
-    // Add some data and flush in staging mode to generate staging manifests
+    // Rows written during staging stay in the memtable.
     let rows_data = Rows {
         schema: column_schemas.clone(),
-        rows: build_rows(3, 8),
+        rows: build_rows(3, 10),
     };
     put_rows(&engine, region_id, rows_data).await;
 
-    // Force flush to generate staging manifests
+    // A source region provides the files that staging imports.
+    let source_region_id = RegionId::new(1024, 1);
     engine
         .handle_request(
-            region_id,
-            RegionRequest::Flush(RegionFlushRequest::default()),
+            source_region_id,
+            RegionRequest::Create(CreateRequestBuilder::new().build()),
         )
         .await
         .unwrap();
-
-    // Add more data and flush again to generate multiple staging manifests
-    let rows_data2 = Rows {
-        schema: column_schemas.clone(),
-        rows: build_rows(8, 10),
-    };
-    put_rows(&engine, region_id, rows_data2).await;
-
+    for (start, end) in [(10, 13), (13, 15)] {
+        let rows_data = Rows {
+            schema: column_schemas.clone(),
+            rows: build_rows(start, end),
+        };
+        put_rows(&engine, source_region_id, rows_data).await;
+        flush_region(&engine, source_region_id, None).await;
+    }
+    let source_files = engine
+        .get_region(source_region_id)
+        .unwrap()
+        .manifest_ctx
+        .manifest()
+        .await
+        .files
+        .values()
+        .cloned()
+        .collect::<Vec<_>>();
     engine
         .handle_request(
-            region_id,
-            RegionRequest::Flush(RegionFlushRequest::default()),
+            source_region_id,
+            RegionRequest::Close(RegionCloseRequest::default()),
         )
         .await
         .unwrap();
 
     let region = engine.get_region(region_id).unwrap();
-    let file = {
-        let manager = region.manifest_ctx.manifest_manager.read().await;
-        manager
-            .staging_manifest()
-            .unwrap()
-            .files
-            .values()
-            .next()
-            .unwrap()
-            .clone()
-    };
-    for expected in [11, 12] {
+    for (file, expected) in source_files.into_iter().zip([11, 12]) {
         engine
             .edit_region(
                 region_id,
                 RegionEdit {
-                    files_to_add: vec![file.clone()],
+                    files_to_add: vec![file],
                     files_to_remove: vec![],
                     timestamp_ms: None,
                     compaction_time_window: None,
@@ -803,37 +786,19 @@ async fn test_staging_exit_success_with_manifests_with_format(flat_format: bool)
         .unwrap();
     assert_eq!(
         staging_files_before.len(),
-        // Two flushes, two edits and entering staging mode.
-        5,
-        "Staging manifest directory should contain 5 files before exit, got: {:?}",
+        // Two edits and entering staging mode.
+        3,
+        "Staging manifest directory should contain 3 files before exit, got: {:?}",
         staging_files_before
     );
     {
         let manager = region.manifest_ctx.manifest_manager.read().await;
         let staging_manifest = manager.staging_manifest().unwrap();
         assert_eq!(staging_manifest.files.len(), 3);
-        let parquet_bytes: u64 = staging_manifest
-            .files
-            .values()
-            .map(|file| file.file_size)
-            .sum();
-        assert_eq!(
-            region.region_statistic().flushed_parquet_bytes,
-            parquet_bytes
-        );
         assert_eq!(
             staging_manifest.metadata.partition_expr.as_ref().unwrap(),
             &partition_expr
         );
-        let expr = parse_partition_expr(Some(partition_expr.as_str()))
-            .unwrap()
-            .unwrap();
-        for file in staging_manifest.files.values() {
-            let Some(file_expr) = file.partition_expr.as_ref() else {
-                continue;
-            };
-            assert_eq!(*file_expr, expr);
-        }
     }
 
     // Count normal manifest files before exit
@@ -851,7 +816,7 @@ async fn test_staging_exit_success_with_manifests_with_format(flat_format: bool)
         "Normal manifest directory should initially contain 2 files"
     );
 
-    // Try read data before exiting staging, SST files should be invisible
+    // Try read data before exiting staging, imported SST files should be invisible
     let request = ScanRequest::default();
     let scanner = engine.scanner(region_id, request).await.unwrap();
     assert_eq!(
@@ -861,15 +826,15 @@ async fn test_staging_exit_success_with_manifests_with_format(flat_format: bool)
     );
     assert_eq!(
         scanner.num_memtables(),
-        0,
-        "Memtables should be removed in staging before exit"
+        1,
+        "Memtables should be kept in staging before exit"
     );
     let stream = scanner.scan().await.unwrap();
     let batches = RecordBatches::try_collect(stream).await.unwrap();
     let total_rows: usize = batches.iter().map(|rb| rb.num_rows()).sum();
     assert_eq!(
-        total_rows, 3,
-        "3 rows should be readable before exit staging mode"
+        total_rows, 10,
+        "10 rows should be readable before exit staging mode"
     );
 
     // Inspect SSTs from manifest
@@ -1048,7 +1013,7 @@ async fn test_staging_exit_success_with_manifests_with_format(flat_format: bool)
     let stream = scanner.scan().await.unwrap();
     let batches = RecordBatches::try_collect(stream).await.unwrap();
     let total_rows: usize = batches.iter().map(|rb| rb.num_rows()).sum();
-    assert_eq!(total_rows, 10, "Expected to read all staged rows");
+    assert_eq!(total_rows, 15, "Expected to read all staged rows");
 
     // Inspect SSTs from manifest
     let sst_entries = engine.all_ssts_from_manifest().await;
@@ -1522,4 +1487,476 @@ async fn test_enter_staging_save_staging_manifest_error_with_format(flat_format:
         .unwrap();
     let mut env = TestEnv::new().await.with_mock_layer(mock_layer);
     test_enter_staging_error(&mut env, flat_format).await;
+}
+
+async fn enter_staging(engine: &MitoEngine, region_id: RegionId) {
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::EnterStaging(EnterStagingRequest {
+                partition_directive: StagingPartitionDirective::UpdatePartitionExpr(
+                    float_range_expr("field_0", 0., 100.).as_json_str().unwrap(),
+                ),
+            }),
+        )
+        .await
+        .unwrap();
+}
+
+/// Creates a region and enters staging, returning its schema and table dir.
+async fn create_staging_region(
+    engine: &MitoEngine,
+    region_id: RegionId,
+) -> (Vec<ColumnSchema>, String) {
+    let request = CreateRequestBuilder::new().build();
+    let schema = rows_schema(&request);
+    let table_dir = request.table_dir.clone();
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+    enter_staging(engine, region_id).await;
+    (schema, table_dir)
+}
+
+async fn create_writable_region(engine: &MitoEngine, region_id: RegionId) {
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::Create(CreateRequestBuilder::new().build()),
+        )
+        .await
+        .unwrap();
+}
+
+async fn put_range(
+    engine: &MitoEngine,
+    region_id: RegionId,
+    schema: &[ColumnSchema],
+    range: (usize, usize),
+) {
+    let rows = Rows {
+        schema: schema.to_vec(),
+        rows: build_rows(range.0, range.1),
+    };
+    put_rows(engine, region_id, rows).await;
+}
+
+/// Sends a put that the engine is expected to refuse with a retryable error.
+async fn assert_put_rejected(engine: &MitoEngine, region_id: RegionId, schema: &[ColumnSchema]) {
+    let err = engine
+        .handle_request(
+            region_id,
+            RegionRequest::Put(RegionPutRequest {
+                rows: Rows {
+                    schema: schema.to_vec(),
+                    rows: build_rows(50, 51),
+                },
+                hint: None,
+                partition_expr_version: None,
+                skip_wal: false,
+            }),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(RetryHint::Retryable, err.retry_hint());
+}
+
+async fn count_rows(engine: &MitoEngine, region_id: RegionId) -> usize {
+    let scanner = engine
+        .scanner(region_id, ScanRequest::default())
+        .await
+        .unwrap();
+    let batches = RecordBatches::try_collect(scanner.scan().await.unwrap())
+        .await
+        .unwrap();
+    batches.iter().map(|batch| batch.num_rows()).sum()
+}
+
+/// Returns the numbers of SST files and memtables that a scan reads.
+async fn scan_inputs(engine: &MitoEngine, region_id: RegionId) -> (usize, usize) {
+    let scanner = engine
+        .scanner(region_id, ScanRequest::default())
+        .await
+        .unwrap();
+    (scanner.num_files(), scanner.num_memtables())
+}
+
+/// Asserts that no flush has been scheduled for the rows in the region's memtable.
+async fn assert_unflushed(engine: &MitoEngine, region_id: RegionId) {
+    let version = engine.get_region(region_id).unwrap().version();
+    assert!(version.memtables.immutables().is_empty());
+    assert_eq!((0, 1), scan_inputs(engine, region_id).await);
+}
+
+#[tokio::test]
+async fn test_memory_pressure_keeps_staging_rows_after_rollback() {
+    let mut write_buffer_manager = MockWriteBufferManager::default();
+    write_buffer_manager.set_flush_limit(1 << 20);
+    write_buffer_manager.reserve_mem(1 << 25);
+    let write_buffer_manager = Arc::new(write_buffer_manager);
+    let listener = Arc::new(FlushListener::default());
+    let mut env = TestEnv::new().await;
+    let engine = env
+        .create_engine_with(
+            MitoConfig {
+                num_workers: 1,
+                ..Default::default()
+            },
+            Some(write_buffer_manager.clone()),
+            Some(listener.clone()),
+            None,
+        )
+        .await;
+    let staging_region_id = RegionId::new(1024, 0);
+    let writable_region_id = RegionId::new(1024, 1);
+    let (schema, table_dir) = create_staging_region(&engine, staging_region_id).await;
+    create_writable_region(&engine, writable_region_id).await;
+    put_range(&engine, writable_region_id, &schema, (0, 3)).await;
+    put_range(&engine, staging_region_id, &schema, (0, 3)).await;
+
+    write_buffer_manager.set_should_flush(true);
+    put_range(&engine, staging_region_id, &schema, (3, 5)).await;
+    listener.wait().await;
+    write_buffer_manager.set_should_flush(false);
+
+    assert_eq!((1, 0), scan_inputs(&engine, writable_region_id).await);
+    assert_unflushed(&engine, staging_region_id).await;
+
+    engine
+        .set_region_role(staging_region_id, RegionRole::Leader)
+        .unwrap();
+    assert_eq!(5, count_rows(&engine, staging_region_id).await);
+    reopen_region(&engine, staging_region_id, table_dir, true, HashMap::new()).await;
+    assert_eq!(5, count_rows(&engine, staging_region_id).await);
+}
+
+#[tokio::test]
+async fn test_periodic_flush_skips_staging_region() {
+    let listener = Arc::new(FlushListener::default());
+    let now = current_time_millis();
+    let time_provider = Arc::new(MockTimeProvider::new(now));
+    let mut env = TestEnv::new().await;
+    let engine = env
+        .create_engine_with_time(
+            MitoConfig {
+                auto_flush_interval: Duration::from_secs(300),
+                num_workers: 1,
+                ..Default::default()
+            },
+            None,
+            Some(listener.clone()),
+            time_provider.clone(),
+        )
+        .await;
+    let staging_region_id = RegionId::new(1024, 0);
+    let writable_region_id = RegionId::new(1024, 1);
+    let (schema, _) = create_staging_region(&engine, staging_region_id).await;
+    create_writable_region(&engine, writable_region_id).await;
+    put_range(&engine, staging_region_id, &schema, (0, 3)).await;
+    put_range(&engine, writable_region_id, &schema, (0, 3)).await;
+
+    time_provider.set_now(now + 600_000);
+    time_provider.set_elapsed((MAX_INITIAL_CHECK_DELAY_SECS as i64 + 1) * 1000);
+    tokio::time::timeout(Duration::from_secs(3), listener.wait())
+        .await
+        .unwrap();
+
+    assert_eq!((1, 0), scan_inputs(&engine, writable_region_id).await);
+    assert_unflushed(&engine, staging_region_id).await;
+}
+
+#[tokio::test]
+async fn test_region_write_buffer_limit_rejects_staging_writes_without_flush() {
+    let mut env = TestEnv::new().await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+    let region_id = RegionId::new(1024, 0);
+    let request = CreateRequestBuilder::new()
+        .insert_option(WRITE_BUFFER_SIZE_KEY, "1B")
+        .build();
+    let schema = rows_schema(&request);
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+    enter_staging(&engine, region_id).await;
+
+    put_range(&engine, region_id, &schema, (0, 3)).await;
+    assert_put_rejected(&engine, region_id, &schema).await;
+
+    assert_unflushed(&engine, region_id).await;
+}
+
+#[tokio::test]
+async fn test_region_write_buffer_limit_does_not_queue_staging_writes() {
+    let mut env = TestEnv::new().await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+    let probe_region_id = RegionId::new(1024, 0);
+    let (schema, _) = create_staging_region(&engine, probe_region_id).await;
+    put_range(&engine, probe_region_id, &schema, (0, 3)).await;
+    let usage = engine
+        .get_region(probe_region_id)
+        .unwrap()
+        .region_statistic()
+        .memtable_size;
+
+    let region_id = RegionId::new(1024, 1);
+    let request = CreateRequestBuilder::new()
+        .insert_option(WRITE_BUFFER_SIZE_KEY, &format!("{usage}B"))
+        .build();
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+    enter_staging(&engine, region_id).await;
+    put_range(&engine, region_id, &schema, (0, 3)).await;
+
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        put_range(&engine, region_id, &schema, (3, 6)),
+    )
+    .await
+    .unwrap();
+    assert_unflushed(&engine, region_id).await;
+    assert_eq!(6, count_rows(&engine, region_id).await);
+}
+
+#[tokio::test]
+async fn test_staging_memtable_cap_rejects_only_staging_writes() {
+    let mut write_buffer_manager = MockWriteBufferManager::default();
+    // The staging regions of the node may hold at most one byte.
+    write_buffer_manager.set_flush_limit(2);
+    let mut env = TestEnv::new().await;
+    let engine = env
+        .create_engine_with(
+            MitoConfig {
+                num_workers: 2,
+                ..Default::default()
+            },
+            Some(Arc::new(write_buffer_manager)),
+            None,
+            None,
+        )
+        .await;
+    // The two staging regions belong to different workers.
+    let first_region_id = RegionId::new(1024, 0);
+    let second_region_id = RegionId::new(1024, 1);
+    let writable_region_id = RegionId::new(1024, 2);
+    let (schema, _) = create_staging_region(&engine, first_region_id).await;
+    create_staging_region(&engine, second_region_id).await;
+    create_writable_region(&engine, writable_region_id).await;
+
+    put_range(&engine, first_region_id, &schema, (0, 3)).await;
+    assert_put_rejected(&engine, second_region_id, &schema).await;
+    put_range(&engine, writable_region_id, &schema, (0, 3)).await;
+
+    engine
+        .set_region_role(first_region_id, RegionRole::Leader)
+        .unwrap();
+    put_range(&engine, second_region_id, &schema, (0, 3)).await;
+}
+
+#[tokio::test]
+async fn test_flush_request_on_staging_region_with_data_is_retryable() {
+    let mut env = TestEnv::new().await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+    let region_id = RegionId::new(1024, 0);
+    let (schema, _) = create_staging_region(&engine, region_id).await;
+    flush_region(&engine, region_id, None).await;
+    put_range(&engine, region_id, &schema, (0, 3)).await;
+
+    for reason in [None, Some(RegionFlushReason::Repartition)] {
+        let err = engine
+            .handle_request(
+                region_id,
+                RegionRequest::Flush(RegionFlushRequest {
+                    reason,
+                    ..Default::default()
+                }),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(RetryHint::Retryable, err.retry_hint());
+        assert_matches!(
+            err.into_inner().as_any().downcast_ref::<Error>().unwrap(),
+            Error::RegionBusy { .. }
+        );
+    }
+
+    assert_unflushed(&engine, region_id).await;
+}
+
+#[tokio::test]
+async fn test_migration_and_wal_prune_flushes_leave_staging_region_unflushed() {
+    let mut env = TestEnv::new().await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+    let region_id = RegionId::new(1024, 0);
+    let (schema, _) = create_staging_region(&engine, region_id).await;
+    put_range(&engine, region_id, &schema, (0, 3)).await;
+
+    for reason in [
+        RegionFlushReason::RegionMigration,
+        RegionFlushReason::RemoteWalPrune,
+    ] {
+        engine
+            .handle_request(
+                region_id,
+                RegionRequest::Flush(RegionFlushRequest {
+                    reason: Some(reason),
+                    ..Default::default()
+                }),
+            )
+            .await
+            .unwrap();
+    }
+
+    assert_unflushed(&engine, region_id).await;
+}
+
+#[tokio::test]
+async fn test_successful_staging_end_keeps_rows_of_rejected_flush() {
+    let mut env = TestEnv::new().await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+    let region_id = RegionId::new(1024, 0);
+    let request = CreateRequestBuilder::new().build();
+    let schema = rows_schema(&request);
+    let table_dir = request.table_dir.clone();
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+    put_range(&engine, region_id, &schema, (0, 3)).await;
+    enter_staging(&engine, region_id).await;
+    put_range(&engine, region_id, &schema, (3, 5)).await;
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::Flush(RegionFlushRequest::default()),
+        )
+        .await
+        .unwrap_err();
+
+    let imported_file = engine
+        .get_region(region_id)
+        .unwrap()
+        .manifest_ctx
+        .manifest()
+        .await
+        .files
+        .values()
+        .next()
+        .unwrap()
+        .clone();
+    engine
+        .edit_region(
+            region_id,
+            RegionEdit {
+                files_to_add: vec![imported_file],
+                files_to_remove: vec![],
+                timestamp_ms: None,
+                compaction_time_window: None,
+                flushed_entry_id: None,
+                flushed_sequence: None,
+                committed_sequence: None,
+            },
+        )
+        .await
+        .unwrap();
+    engine
+        .set_region_role_state_gracefully(region_id, SettableRegionRoleState::Leader)
+        .await
+        .unwrap();
+
+    assert_eq!(5, count_rows(&engine, region_id).await);
+    reopen_region(&engine, region_id, table_dir, true, HashMap::new()).await;
+    assert_eq!(5, count_rows(&engine, region_id).await);
+}
+
+#[tokio::test]
+async fn test_downgrade_flushes_staging_rows_to_normal_manifest() {
+    let mut env = TestEnv::new().await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+    let region_id = RegionId::new(1024, 0);
+    let (schema, table_dir) = create_staging_region(&engine, region_id).await;
+    put_range(&engine, region_id, &schema, (0, 3)).await;
+
+    engine
+        .set_region_role_state_gracefully(region_id, SettableRegionRoleState::DowngradingLeader)
+        .await
+        .unwrap();
+    flush_region(&engine, region_id, None).await;
+
+    assert_eq!((1, 0), scan_inputs(&engine, region_id).await);
+    reopen_region(&engine, region_id, table_dir, true, HashMap::new()).await;
+    assert_eq!(3, count_rows(&engine, region_id).await);
+}
+
+#[tokio::test]
+async fn test_staging_rows_survive_restart() {
+    let mut env = TestEnv::new().await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+    let region_id = RegionId::new(1024, 0);
+    let (schema, table_dir) = create_staging_region(&engine, region_id).await;
+    put_range(&engine, region_id, &schema, (0, 3)).await;
+
+    let engine = env.reopen_engine(engine, MitoConfig::default()).await;
+    reopen_region(&engine, region_id, table_dir, true, HashMap::new()).await;
+
+    assert_eq!(3, count_rows(&engine, region_id).await);
+}
+
+#[tokio::test]
+async fn test_close_flushes_skip_wal_rows_of_staging_region() {
+    let mut env = TestEnv::new().await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+    let region_id = RegionId::new(1024, 0);
+    let (schema, table_dir) = create_staging_region(&engine, region_id).await;
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::Put(RegionPutRequest {
+                rows: Rows {
+                    schema,
+                    rows: build_rows(0, 3),
+                },
+                hint: None,
+                partition_expr_version: None,
+                skip_wal: true,
+            }),
+        )
+        .await
+        .unwrap();
+
+    reopen_region(&engine, region_id, table_dir, true, HashMap::new()).await;
+
+    assert_eq!((1, 0), scan_inputs(&engine, region_id).await);
+    assert_eq!(3, count_rows(&engine, region_id).await);
+}
+
+#[tokio::test]
+async fn test_close_waits_for_manifest_commit_of_staging_end() {
+    let mut env = TestEnv::new().await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+    let region_id = RegionId::new(1024, 0);
+    create_staging_region(&engine, region_id).await;
+    let region = engine.get_region(region_id).unwrap();
+
+    let manager = region.manifest_ctx.manifest_manager.write().await;
+    let close_engine = engine.clone();
+    let mut close = tokio::spawn(async move {
+        close_engine
+            .handle_request(
+                region_id,
+                RegionRequest::Close(RegionCloseRequest::default()),
+            )
+            .await
+    });
+    tokio::time::timeout(Duration::from_millis(100), &mut close)
+        .await
+        .unwrap_err();
+    assert!(region.is_staging());
+
+    drop(manager);
+    close.await.unwrap().unwrap();
+    assert!(!region.is_staging());
 }
