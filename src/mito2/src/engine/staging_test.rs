@@ -2119,8 +2119,45 @@ async fn check_close_during_staged_edit_flushes_skip_wal_rows(graceful: bool) {
     assert_eq!(5, count_rows(&engine, region_id).await);
 }
 
+/// Waits until a writer is queued on the region's manifest lock while the caller holds it shared.
+async fn wait_for_queued_manifest_writer(region: &MitoRegionRef) {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while region.manifest_ctx.manifest_manager.try_read().is_ok() {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await
+    .unwrap();
+}
+
 #[tokio::test]
 async fn test_close_waits_for_manifest_lock_before_leaving_staging() {
+    let mut env = TestEnv::new().await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+    let region_id = RegionId::new(1024, 0);
+    create_staging_region(&engine, region_id).await;
+    let region = engine.get_region(region_id).unwrap();
+
+    let manager = region.manifest_ctx.manifest_manager.read().await;
+    let close_engine = engine.clone();
+    let close = tokio::spawn(async move {
+        close_engine
+            .handle_request(
+                region_id,
+                RegionRequest::Close(RegionCloseRequest::default()),
+            )
+            .await
+    });
+    wait_for_queued_manifest_writer(&region).await;
+    assert!(region.is_staging());
+
+    drop(manager);
+    close.await.unwrap().unwrap();
+    assert!(!region.is_staging());
+}
+
+#[tokio::test]
+async fn test_close_after_end_of_staging_is_queued_keeps_committed_result() {
     let mut env = TestEnv::new().await;
     let listener = Arc::new(RequestCountListener::default());
     let engine = env
@@ -2135,13 +2172,45 @@ async fn test_close_waits_for_manifest_lock_before_leaving_staging() {
         )
         .await;
     let region_id = RegionId::new(1024, 0);
-    create_staging_region(&engine, region_id).await;
+    let request = CreateRequestBuilder::new().build();
+    let schema = rows_schema(&request);
+    let table_dir = request.table_dir.clone();
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+    put_range(&engine, region_id, &schema, (0, 3)).await;
+    enter_staging(&engine, region_id).await;
+    put_range(&engine, region_id, &schema, (3, 5)).await;
     let region = engine.get_region(region_id).unwrap();
+    let file = first_file(&region).await;
+    engine
+        .edit_region(
+            region_id,
+            RegionEdit {
+                files_to_add: vec![file],
+                files_to_remove: vec![],
+                timestamp_ms: None,
+                compaction_time_window: None,
+                flushed_entry_id: None,
+                flushed_sequence: None,
+                committed_sequence: None,
+            },
+        )
+        .await
+        .unwrap();
 
-    let manager = region.manifest_ctx.manifest_manager.write().await;
+    let manager = region.manifest_ctx.manifest_manager.read().await;
+    let end_engine = engine.clone();
+    let end = tokio::spawn(async move {
+        end_engine
+            .set_region_role_state_gracefully(region_id, SettableRegionRoleState::Leader)
+            .await
+    });
+    wait_for_queued_manifest_writer(&region).await;
     let received = listener.count.load(Ordering::Relaxed);
     let close_engine = engine.clone();
-    let mut close = tokio::spawn(async move {
+    let close = tokio::spawn(async move {
         close_engine
             .handle_request(
                 region_id,
@@ -2150,12 +2219,15 @@ async fn test_close_waits_for_manifest_lock_before_leaving_staging() {
             .await
     });
     listener.wait_received_after(received).await;
-    tokio::time::timeout(Duration::from_millis(100), &mut close)
-        .await
-        .unwrap_err();
-    assert!(region.is_staging());
-
     drop(manager);
+
+    end.await.unwrap().unwrap();
     close.await.unwrap().unwrap();
-    assert!(!region.is_staging());
+    reopen_region(&engine, region_id, table_dir, true, HashMap::new()).await;
+    let reopened = engine.get_region(region_id).unwrap();
+    assert_eq!(
+        Some(float_range_expr("field_0", 0., 100.).as_json_str().unwrap()),
+        reopened.metadata().partition_expr
+    );
+    assert_eq!(5, count_rows(&engine, region_id).await);
 }
