@@ -182,6 +182,15 @@ impl PartialEq for RegionManifest {
     }
 }
 
+impl RegionManifest {
+    /// Rejects prototype task state before deserializing, so callers cannot
+    /// silently drop recovery evidence that this build cannot interpret.
+    pub(crate) fn decode(bytes: &[u8]) -> Result<Self> {
+        crate::manifest::compat::validate_manifest(bytes)?;
+        serde_json::from_slice(bytes).context(SerdeJsonSnafu)
+    }
+}
+
 #[derive(Debug, Default)]
 pub struct RegionManifestBuilder {
     metadata: Option<RegionMetadataRef>,

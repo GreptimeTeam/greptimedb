@@ -216,8 +216,15 @@ impl FilePurger for LocalFilePurger {
     }
 
     fn purge_file(&self, file_meta: FileMeta) {
-        // This lifetime covers one logical reference, not other targets sharing the SST.
         if file_meta.level == crate::sst::file::LEVEL_SHARED {
+            // This lifetime covers one logical reference, not other targets sharing the SST,
+            // so the SST object itself is left to global GC. The range index is keyed by
+            // this region and all of its readers are gone, so it must not leak.
+            schedule_range_index_deletion(
+                &self.scheduler,
+                self.range_index_deleter.as_ref(),
+                file_meta.file_id,
+            );
             return;
         }
         self.delete_file(file_meta);
@@ -270,13 +277,11 @@ impl FilePurger for ObjectStoreFilePurger {
     }
 
     fn purge_file(&self, file_meta: FileMeta) {
-        if file_meta.level != crate::sst::file::LEVEL_SHARED {
-            schedule_range_index_deletion(
-                &self.scheduler,
-                self.range_index_deleter.as_ref(),
-                file_meta.file_id,
-            );
-        }
+        schedule_range_index_deletion(
+            &self.scheduler,
+            self.range_index_deleter.as_ref(),
+            file_meta.file_id,
+        );
     }
 
     fn file_ref_manager(&self) -> Option<FileReferenceManagerRef> {
@@ -525,7 +530,8 @@ mod tests {
         );
         assert_eq!(
             index_store.exists(&index_path).await.unwrap(),
-            !is_delete || level == LEVEL_SHARED
+            !is_delete,
+            "range index is region-scoped and must be deleted with the last reader"
         );
         if update_index {
             for index_version in 1..=2 {

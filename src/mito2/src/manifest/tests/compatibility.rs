@@ -14,7 +14,9 @@
 
 use serde_json::json;
 
-use crate::manifest::action::{RegionCheckpoint, RegionMetaAction, RegionMetaActionList};
+use crate::manifest::action::{
+    RegionCheckpoint, RegionManifest, RegionMetaAction, RegionMetaActionList,
+};
 use crate::sst::file::FileMeta;
 
 const EDIT: &str =
@@ -67,6 +69,22 @@ fn test_file_only_manifest_compatibility() {
             "level {level}"
         );
     }
+}
+
+#[rstest::rstest]
+#[case("table_compaction")]
+#[case("extensions")]
+#[test]
+fn test_staging_manifest_prototype_state_is_rejected(#[case] field: &str) {
+    // Staging blobs are parsed as standalone manifests, so they need the same gate
+    // as checkpoints and deltas instead of silently dropping recovery evidence.
+    assert!(RegionManifest::decode(MANIFEST.as_bytes()).is_ok());
+    let mut manifest: serde_json::Value = serde_json::from_str(MANIFEST).unwrap();
+    manifest[field] = json!({"legacy_state": true});
+    assert!(matches!(
+        RegionManifest::decode(&serde_json::to_vec(&manifest).unwrap()),
+        Err(crate::error::Error::UnsupportedOperation { .. })
+    ));
 }
 
 #[rstest::rstest]
