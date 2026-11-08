@@ -47,12 +47,10 @@
 //! satisfy. No other counter query reads that tag: an aggregate drops the labels it does not group
 //! by, so their answers are the ones the untagged fixture gives.
 //!
-//! A query the native route declines is checked the other way round. [`check_fallback_case`] runs
-//! shapes the compiler has no node for - `scalar(v)` and a subquery - with the native request on and
-//! with it off, and requires that no native node ran in either plan and that both runs report rows
-//! derived from the fixture by hand. A hint that quietly
-//! took the route for one of them would show a fused producer or a frontend merge in the plans that
-//! executed, which is what is observed.
+//! Two shapes that used to be declined are checked on the plans that really ran. `scalar(v)` reads
+//! the whole vector in one fused node and needs no merge; a subquery over a fold splits into one
+//! producer and one frontend merge. A hint that quietly kept the existing route would show no native
+//! node, which is what the plan observer checks, and both routes must answer the hand-derived rows.
 //!
 //! A binary operation whose sibling is a literal scalar is carried by the split on either side of
 //! the fold: below the aggregate it is computed in the per-series prefix (`sum(8 * rate(...))`,
@@ -1603,41 +1601,6 @@ fn assert_finalize_reads_region_state(
             field.name(),
             state.kind
         );
-    }
-}
-
-/// Checks one query the native route declines: it must stay declined on both routes, and both must
-/// answer what the fixture derives by hand.
-///
-/// The native request is on for one run and off for the other, so the hint being asked for and the
-/// hint being absent are both exercised: neither plan may hold a fused producer or a frontend merge,
-/// and the rows - labels, evaluation time, values and their multiplicity - are the same hand-derived
-/// ones for both. The observer is asked to have seen a plan at all, because a run that handed nothing
-/// over would otherwise satisfy "no native node" without observing anything.
-async fn check_fallback_case(
-    instance: &Arc<Instance>,
-    observer: &NativePlanObserver,
-    case: &AggregateCase,
-) {
-    let promql = case.promql.as_str();
-    let query = tql_eval(promql);
-    for native in [false, true] {
-        let route = if native { "native" } else { "legacy" };
-        let mark = observer.mark();
-        let (result, capture) = run_query(instance, promql, native, observer).await;
-        assert!(
-            observer.mark() > mark,
-            "`{query}`: the {route} run handed no plan to the observer, so nothing about the plan \
-             that ran was observed"
-        );
-        assert!(
-            capture.fused.is_empty() && capture.finalize.is_empty(),
-            "`{query}`: the {route} run must keep the existing plan, but the plans that ran held {} \
-             fused producers and {} frontend merges",
-            capture.fused.len(),
-            capture.finalize.len()
-        );
-        assert_rows(&result.rows, &case.expected, &format!("{route} `{query}`"));
     }
 }
 
