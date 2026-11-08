@@ -792,7 +792,6 @@ pub(crate) fn version_builder_from_manifest(
     region_options: RegionOptions,
 ) -> VersionBuilder {
     VersionBuilder::new(metadata, mutable)
-        .extensions(manifest.extensions.clone())
         .add_files(file_purger, manifest.files.values().cloned())
         .flushed_entry_id(manifest.flushed_entry_id)
         .flushed_sequence(manifest.flushed_sequence)
@@ -1514,7 +1513,6 @@ mod tests {
 
     fn build_test_manifest(sst_format: FormatType) -> RegionManifest {
         RegionManifest {
-            extensions: Default::default(),
             metadata: Arc::new(sst_region_metadata()),
             files: HashMap::new(),
             removed_files: RemovedFilesRecord::default(),

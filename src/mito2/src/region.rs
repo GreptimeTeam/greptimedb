@@ -1457,7 +1457,6 @@ impl ManifestContext {
         committed.index_version = updated.index_version;
 
         let edit = crate::manifest::action::RegionEdit {
-            extensions: Default::default(),
             files_to_add: vec![committed.clone()],
             files_to_remove: Vec::new(),
             timestamp_ms: Some(chrono::Utc::now().timestamp_millis()),
@@ -1565,26 +1564,25 @@ impl ManifestContext {
                 continue;
             };
 
-            // A plan can be accepted before Adopt installs its Version, even after
-            // the manifest reclassification. Fence stale ordinary edits under the
-            // same lock as publication, including overwrites using the old file ID.
-            if edit.extensions.is_empty() {
-                ensure!(
-                    edit.files_to_add
-                        .iter()
-                        .chain(&edit.files_to_remove)
-                        .all(|file| {
-                            file.level != crate::sst::file::LEVEL_SHARED
-                                && manifest.files.get(&file.file_id).is_none_or(|current| {
-                                    current.level != crate::sst::file::LEVEL_SHARED
-                                })
-                        }),
-                    InvalidRequestSnafu {
-                        region_id: manifest.metadata.region_id,
-                        reason: "Ordinary manifest edits cannot modify shared SSTs",
-                    }
-                );
-            }
+            // Imports may add shared references, but ordinary edits must not retire
+            // or overwrite them. Table publication performs its own locked input check.
+            ensure!(
+                edit.files_to_remove.iter().all(|file| {
+                    file.level != crate::sst::file::LEVEL_SHARED
+                        && manifest
+                            .files
+                            .get(&file.file_id)
+                            .is_none_or(|current| current.level != crate::sst::file::LEVEL_SHARED)
+                }) && edit.files_to_add.iter().all(|file| {
+                    manifest.files.get(&file.file_id).is_none_or(|current| {
+                        current.level != crate::sst::file::LEVEL_SHARED || current == file
+                    })
+                }),
+                InvalidRequestSnafu {
+                    region_id: manifest.metadata.region_id,
+                    reason: "Ordinary manifest edits cannot modify shared SSTs",
+                }
+            );
 
             // Checks whether the region is truncated.
             let Some(truncated_entry_id) = manifest.truncated_entry_id else {
@@ -2441,7 +2439,6 @@ mod tests {
 
     fn empty_edit() -> RegionEdit {
         RegionEdit {
-            extensions: Default::default(),
             files_to_add: Vec::new(),
             files_to_remove: Vec::new(),
             timestamp_ms: None,
@@ -2478,7 +2475,6 @@ mod tests {
 
         let file_id = FileId::random();
         let action_list = RegionMetaActionList::with_action(RegionMetaAction::Edit(RegionEdit {
-            extensions: Default::default(),
             files_to_add: vec![crate::sst::file::FileMeta {
                 region_id: region.region_id,
                 file_id,

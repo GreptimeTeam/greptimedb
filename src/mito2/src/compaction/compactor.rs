@@ -442,7 +442,6 @@ impl CompactionContext {
         merge_output: MergeOutput,
     ) -> Result<(RegionEdit, ManifestVersion)> {
         let edit = RegionEdit {
-            extensions: Default::default(),
             files_to_add: merge_output.files_to_add,
             files_to_remove: merge_output.files_to_remove,
             timestamp_ms: Some(chrono::Utc::now().timestamp_millis()),
@@ -1137,7 +1136,6 @@ mod tests {
                 .await
                 .update(
                     RegionMetaActionList::with_action(RegionMetaAction::Edit(RegionEdit {
-                        extensions: Default::default(),
                         committed_sequence: Some(committed_sequence),
                         files_to_add: vec![],
                         files_to_remove: vec![],

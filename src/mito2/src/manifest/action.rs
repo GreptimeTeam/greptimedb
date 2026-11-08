@@ -27,7 +27,6 @@ use store_api::storage::{FileId, IndexVersion, RegionId, SequenceNumber};
 use strum::Display;
 
 use crate::error::{RegionMetadataNotFoundSnafu, Result, SerdeJsonSnafu, Utf8Snafu};
-use crate::manifest::extension::{ManifestExtensionEdit, ManifestExtensions};
 use crate::manifest::manager::RemoveFileOptions;
 use crate::region::ManifestStats;
 use crate::sst::FormatType;
@@ -96,9 +95,6 @@ pub struct RegionEdit {
     pub flushed_entry_id: Option<EntryId>,
     pub flushed_sequence: Option<SequenceNumber>,
     pub committed_sequence: Option<SequenceNumber>,
-    /// Feature-owned operations participate in the same transaction as the file list.
-    #[serde(flatten)]
-    pub extensions: ManifestExtensionEdit,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -170,8 +166,6 @@ pub struct RegionManifest {
     /// Whether the region is in append mode.
     #[serde(default)]
     pub append_mode: Option<bool>,
-    #[serde(flatten)]
-    pub extensions: ManifestExtensions,
 }
 
 #[cfg(test)]
@@ -185,7 +179,6 @@ impl PartialEq for RegionManifest {
             && self.truncated_entry_id == other.truncated_entry_id
             && self.compaction_time_window == other.compaction_time_window
             && self.committed_sequence == other.committed_sequence
-            && self.extensions == other.extensions
     }
 }
 
@@ -202,7 +195,6 @@ pub struct RegionManifestBuilder {
     committed_sequence: Option<SequenceNumber>,
     sst_format: FormatType,
     append_mode: Option<bool>,
-    extensions: ManifestExtensions,
 }
 
 impl RegionManifestBuilder {
@@ -230,7 +222,6 @@ impl RegionManifestBuilder {
                 committed_sequence: s.committed_sequence,
                 sst_format: s.sst_format,
                 append_mode: s.append_mode,
-                extensions: s.extensions,
             }
         } else {
             Default::default()
@@ -271,8 +262,6 @@ impl RegionManifestBuilder {
     pub fn apply_edit(&mut self, manifest_version: ManifestVersion, edit: RegionEdit) {
         self.manifest_version = manifest_version;
 
-        self.extensions.retire_files(&edit.files_to_remove);
-        self.extensions.apply(edit.extensions);
         let mut removed_files = vec![];
         for file in edit.files_to_add {
             if let Some(old_file) = self.files.insert(file.file_id, file.clone())
@@ -333,7 +322,6 @@ impl RegionManifestBuilder {
                         .timestamp_ms
                         .unwrap_or_else(|| Utc::now().timestamp_millis()),
                 );
-                self.extensions.retire_files(self.files.values());
                 self.files.clear();
             }
             TruncateKind::Partial { files_to_remove } => {
@@ -351,7 +339,6 @@ impl RegionManifestBuilder {
                         .timestamp_ms
                         .unwrap_or_else(|| Utc::now().timestamp_millis()),
                 );
-                self.extensions.retire_files(&files_to_remove);
                 for file in files_to_remove {
                     self.files.remove(&file.file_id);
                 }
@@ -382,7 +369,6 @@ impl RegionManifestBuilder {
             compaction_time_window: self.compaction_time_window,
             sst_format: self.sst_format,
             append_mode: self.append_mode,
-            extensions: self.extensions,
         })
     }
 }
@@ -540,7 +526,7 @@ impl RegionCheckpoint {
 
     pub fn decode(bytes: &[u8]) -> Result<Self> {
         let data = std::str::from_utf8(bytes).context(Utf8Snafu)?;
-
+        crate::manifest::compat::validate_checkpoint(data)?;
         serde_json::from_str(data).context(SerdeJsonSnafu)
     }
 }
@@ -570,7 +556,6 @@ impl RegionMetaActionList {
         RegionEdit,
     ) {
         let mut edit = RegionEdit {
-            extensions: Default::default(),
             files_to_add: Vec::new(),
             files_to_remove: Vec::new(),
             timestamp_ms: None,
@@ -590,7 +575,6 @@ impl RegionMetaActionList {
                     region_change = Some(change);
                 }
                 RegionMetaAction::Edit(region_edit) => {
-                    edit.extensions.merge(region_edit.extensions);
                     // Merge file adds/removes
                     edit.files_to_add.extend(region_edit.files_to_add);
                     edit.files_to_remove.extend(region_edit.files_to_remove);
@@ -630,7 +614,7 @@ impl RegionMetaActionList {
 
     pub fn decode(bytes: &[u8]) -> Result<Self> {
         let data = std::str::from_utf8(bytes).context(Utf8Snafu)?;
-
+        crate::manifest::compat::validate_actions(data)?;
         serde_json::from_str(data).context(SerdeJsonSnafu)
     }
 }
@@ -909,7 +893,6 @@ mod tests {
         let metadata: RegionMetadataRef =
             serde_json::from_str(region_metadata).expect("Failed to parse region metadata");
         let manifest = RegionManifest {
-            extensions: Default::default(),
             metadata: metadata.clone(),
             files: HashMap::new(),
             flushed_entry_id: 0,
@@ -957,7 +940,6 @@ mod tests {
         builder.apply_edit(
             1,
             RegionEdit {
-                extensions: Default::default(),
                 files_to_add: vec![current.clone()],
                 files_to_remove: Vec::new(),
                 timestamp_ms: None,
@@ -970,7 +952,6 @@ mod tests {
         builder.apply_edit(
             2,
             RegionEdit {
-                extensions: Default::default(),
                 files_to_add: Vec::new(),
                 files_to_remove: vec![stale.clone()],
                 timestamp_ms: Some(42),
@@ -990,7 +971,6 @@ mod tests {
         builder.apply_edit(
             1,
             RegionEdit {
-                extensions: Default::default(),
                 files_to_add: vec![current],
                 files_to_remove: Vec::new(),
                 timestamp_ms: None,
@@ -1101,7 +1081,6 @@ mod tests {
         assert_eq!(
             new_from_old,
             RegionManifest {
-                extensions: Default::default(),
                 metadata: metadata.clone(),
                 files: HashMap::new(),
                 removed_files: Default::default(),
@@ -1117,7 +1096,6 @@ mod tests {
         );
 
         let new_manifest = RegionManifest {
-            extensions: Default::default(),
             metadata: metadata.clone(),
             files: HashMap::new(),
             removed_files: Default::default(),
@@ -1166,7 +1144,6 @@ mod tests {
         let new_from_old: RegionEdit = serde_json::from_str(&json).unwrap();
         assert_eq!(
             RegionEdit {
-                extensions: Default::default(),
                 files_to_add: vec![],
                 files_to_remove: vec![],
                 timestamp_ms: None,
@@ -1180,7 +1157,6 @@ mod tests {
 
         // test new version with timestamp_ms set can deserialize to old version
         let new = RegionEdit {
-            extensions: Default::default(),
             files_to_add: vec![],
             files_to_remove: vec![],
             timestamp_ms: Some(42),

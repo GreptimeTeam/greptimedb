@@ -307,7 +307,6 @@ async fn test_gc_reclaims_obsolete_index_after_readers_and_linger_release(
             .update_manifest(
                 RegionLeaderState::Writable,
                 RegionMetaActionList::with_action(RegionMetaAction::Edit(RegionEdit {
-                    extensions: Default::default(),
                     files_to_add: vec![meta],
                     files_to_remove: vec![],
                     timestamp_ms: Some(removed_at),
@@ -1390,9 +1389,7 @@ impl RegionHook for BlockingProtectionHook {
 #[case::published(ProtectionOutcome::PublishedDuringLookup)]
 #[case::unprotected(ProtectionOutcome::Unprotected)]
 #[tokio::test]
-async fn test_gc_table_compaction_protection_and_manifest_recheck(
-    #[case] outcome: ProtectionOutcome,
-) {
+async fn test_gc_protection_and_manifest_recheck(#[case] outcome: ProtectionOutcome) {
     let mut env = TestEnv::new().await;
     let hook = Arc::new(BlockingProtectionHook {
         outcome,

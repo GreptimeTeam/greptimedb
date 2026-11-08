@@ -105,7 +105,6 @@ impl RegionEditQueue {
                 && edit.flushed_entry_id.is_none()
                 && edit.flushed_sequence.is_none()
                 && edit.committed_sequence.is_none()
-                && edit.extensions.is_empty()
         }
 
         let mut merged = self.requests.pop_front()?;
@@ -404,7 +403,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
 
         if !Arc::ptr_eq(&region, &edit_result.origin) {
             // The durable edit will be recovered by open. Never replay its old
-            // completion over newer receipts, or change the new incarnation's queues.
+            // completion over newer files, or change the new incarnation's queues.
             edit_result.waiters.reply_with(|| {
                 RegionNotFoundSnafu {
                     region_id: edit_result.region_id,
@@ -423,8 +422,8 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         if let Err(error) = &edit_result.result
             && requires_reopen
         {
-            // An ambiguous table-protocol write requires reopen/replay. Keeping
-            // the old Version writable could discard an already durable receipt.
+            // An uncertain manifest write requires replay before the old Version
+            // can become writable again.
             self.remove_region(edit_result.region_id).await;
             edit_result.waiters.reply_with(|| {
                 Err(error.clone()).context(EditRegionSnafu {
@@ -587,7 +586,6 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             // WAL after a restart skips everything the memtables held. The WAL must be
             // durable through that entry before the manifest names it.
             let edit = RegionEdit {
-                extensions: Default::default(),
                 files_to_add: Vec::new(),
                 files_to_remove: Vec::new(),
                 timestamp_ms: None,
@@ -706,40 +704,67 @@ impl<S: LogStore> RegionWorkerLoop<S> {
 }
 
 fn prepare_region_edit(region: &MitoRegionRef, edit: &mut RegionEdit) -> Result<()> {
-    #[cfg(feature = "enterprise")]
-    if crate::worker::table_compaction::prepare_remap(region, edit)? {
-        return Ok(());
-    }
+    use crate::sst::file::{LEVEL_SHARED, is_supported_level};
     let region_id = region.region_id;
     let current = region.version_control.current();
-    let shared = &current.version.ssts.levels()[crate::sst::file::LEVEL_SHARED as usize].files;
+    let shared = &current.version.ssts.levels()[LEVEL_SHARED as usize].files;
     snafu::ensure!(
-        edit.extensions.is_empty()
+        edit.files_to_remove
+            .iter()
+            .all(|file| file.level < LEVEL_SHARED && !shared.contains_key(&file.file_id))
             && edit
                 .files_to_add
                 .iter()
-                .chain(&edit.files_to_remove)
-                .all(|file| {
-                    file.level < crate::sst::file::LEVEL_SHARED
-                        && !shared.contains_key(&file.file_id)
-                }),
+                .all(|file| is_supported_level(file.level)
+                    && (file.level != LEVEL_SHARED
+                        || file.region_id.table_id() == region_id.table_id())),
         crate::error::InvalidRequestSnafu {
             region_id,
-            reason: "Shared SSTs require a supported extension edit"
+            reason: "Invalid shared SST import or removal"
         }
     );
+    for file in &edit.files_to_add {
+        if let Some(existing) = shared.get(&file.file_id) {
+            let mut imported = file.clone();
+            imported.sequence = existing.meta_ref().sequence;
+            imported.preserve_row_sequence = false;
+            snafu::ensure!(
+                &imported == existing.meta_ref(),
+                crate::error::InvalidRequestSnafu {
+                    region_id,
+                    reason: "Shared SST import conflicts with a visible reference",
+                }
+            );
+        }
+    }
+    let existing_sequence = |file: &crate::sst::file::FileMeta| {
+        shared
+            .get(&file.file_id)
+            .and_then(|handle| handle.meta_ref().sequence)
+    };
+    // A repeat of a still-visible shared import is not a new admission. Retired
+    // imports are not tracked: compaction retries must never re-import old inputs.
+    let same_import = !edit.files_to_add.is_empty()
+        && edit.files_to_remove.is_empty()
+        && edit
+            .files_to_add
+            .iter()
+            .all(|file| existing_sequence(file).is_some());
     let sequence =
-        current
-            .last_sequence
-            .checked_add(1)
-            .context(crate::error::InvalidRequestSnafu {
-                region_id,
-                reason: "Region sequence exhausted",
-            })?;
-    edit.committed_sequence = Some(sequence);
+        if same_import {
+            None
+        } else {
+            let sequence = current.last_sequence.checked_add(1).context(
+                crate::error::InvalidRequestSnafu {
+                    region_id,
+                    reason: "Region sequence exhausted",
+                },
+            )?;
+            edit.committed_sequence = Some(sequence);
+            NonZeroU64::new(sequence)
+        };
     for file in &mut edit.files_to_add {
-        file.sequence = NonZeroU64::new(sequence);
-        // Imported physical row sequences are not trusted in the destination domain.
+        file.sequence = existing_sequence(file).or(sequence);
         file.preserve_row_sequence = false;
     }
     Ok(())
@@ -833,18 +858,15 @@ async fn edit_region(
         region_id, is_staging
     );
 
-    let carries_extensions = !edit.extensions.is_empty();
     let action_list = RegionMetaActionList::with_action(RegionMetaAction::Edit(edit));
     let result = region
         .manifest_ctx
         .update_manifest(RegionLeaderState::Editing, action_list, is_staging)
         .await;
-    if carries_extensions
-        && let Err(error) = &result
+    if let Err(error) = &result
         && error.may_have_persisted_manifest_update()
     {
-        // Recover extension state with the file list before accepting another edit
-        // after an uncertain write.
+        // Recover the file list before accepting another edit after an uncertain write.
         region
             .manifest_ctx
             .manifest_manager

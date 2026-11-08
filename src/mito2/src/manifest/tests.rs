@@ -13,4 +13,5 @@
 // limitations under the License.
 
 mod checkpoint;
+mod compatibility;
 pub mod utils;

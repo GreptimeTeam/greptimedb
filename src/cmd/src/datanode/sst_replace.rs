@@ -201,7 +201,6 @@ impl SstReplaceCommand {
             })?;
 
         let edit = RegionEdit {
-            extensions: Default::default(),
             files_to_add: vec![new_file],
             files_to_remove: vec![],
             timestamp_ms: None,

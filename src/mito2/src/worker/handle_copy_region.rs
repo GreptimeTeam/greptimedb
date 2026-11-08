@@ -86,7 +86,12 @@ impl<S> RegionWorkerLoop<S> {
             };
 
             match region_edit {
-                Some(region_edit) if !region_edit.extensions.is_empty() => {
+                Some(region_edit)
+                    if region_edit
+                        .files_to_add
+                        .iter()
+                        .any(|file| file.level == LEVEL_SHARED) =>
+                {
                     // Shared references and their target admission sequence must enter
                     // the serialized edit lane, not the asynchronous physical-copy path.
                     // The response lists installed references, including shared SSTs
@@ -195,8 +200,6 @@ impl<S> RegionWorkerLoop<S> {
             })?;
         let mut new_file_metas = vec![];
         let target_region_manifest = region.manifest_ctx.manifest().await;
-        let mut extensions = target_region_manifest.extensions.clone();
-        extensions.merge_from(&source_region_manifest.extensions, target_region_id)?;
         let source_file_ids = source_region_manifest
             .files
             .keys()
@@ -215,7 +218,7 @@ impl<S> RegionWorkerLoop<S> {
                 });
             }
         }
-        if new_file_metas.is_empty() && extensions == target_region_manifest.extensions {
+        if new_file_metas.is_empty() {
             return Ok((None, source_file_ids));
         }
 
@@ -236,7 +239,6 @@ impl<S> RegionWorkerLoop<S> {
             )
             .await?;
         let edit = RegionEdit {
-            extensions: extensions.into_edit(),
             files_to_add: new_file_metas,
             files_to_remove: vec![],
             timestamp_ms: Some(chrono::Utc::now().timestamp_millis()),
@@ -245,7 +247,11 @@ impl<S> RegionWorkerLoop<S> {
             flushed_sequence: None,
             committed_sequence: None,
         };
-        if !edit.extensions.is_empty() {
+        if edit
+            .files_to_add
+            .iter()
+            .any(|file| file.level == LEVEL_SHARED)
+        {
             return Ok((Some(edit), source_file_ids));
         }
         let action_list = RegionMetaActionList::with_action(RegionMetaAction::Edit(edit.clone()));

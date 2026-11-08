@@ -776,7 +776,6 @@ async fn test_staging_exit_success_with_manifests_with_format(flat_format: bool)
             .edit_region(
                 region_id,
                 RegionEdit {
-                    extensions: Default::default(),
                     files_to_add: vec![file.clone()],
                     files_to_remove: vec![],
                     timestamp_ms: None,
@@ -933,7 +932,6 @@ async fn test_staging_exit_success_with_manifests_with_format(flat_format: bool)
                 .await
                 .update(
                     RegionMetaActionList::new(vec![RegionMetaAction::Edit(RegionEdit {
-                        extensions: Default::default(),
                         files_to_add: vec![metadata.clone()],
                         files_to_remove: vec![],
                         timestamp_ms: None,
@@ -1174,7 +1172,6 @@ async fn test_staging_exit_conflict_partition_expr_change_and_change_with_format
                     append_mode: None,
                 }),
                 RegionMetaAction::Edit(RegionEdit {
-                    extensions: Default::default(),
                     files_to_add: Vec::new(),
                     files_to_remove: Vec::new(),
                     timestamp_ms: None,

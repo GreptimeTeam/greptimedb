@@ -219,7 +219,6 @@ pub(crate) fn apply_edit(
 
     version_control.apply_edit(
         Some(RegionEdit {
-            extensions: Default::default(),
             files_to_add,
             files_to_remove: files_to_remove.to_vec(),
             timestamp_ms: None,

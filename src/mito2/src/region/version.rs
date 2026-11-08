@@ -32,7 +32,6 @@ use store_api::storage::{RegionId, SequenceNumber};
 
 use crate::error::Result;
 use crate::manifest::action::{RegionEdit, TruncateKind};
-use crate::manifest::extension::ManifestExtensions;
 use crate::memtable::time_partition::TimePartitions;
 use crate::memtable::version::{MemtableVersion, MemtableVersionRef};
 use crate::memtable::{MemtableBuilderRef, MemtableId};
@@ -400,7 +399,6 @@ pub(crate) struct Version {
     pub(crate) compaction_time_window: Option<Duration>,
     /// Options of the region.
     pub(crate) options: RegionOptions,
-    pub(crate) extensions: Arc<ManifestExtensions>,
 }
 
 pub(crate) type VersionRef = Arc<Version>;
@@ -415,7 +413,6 @@ pub(crate) struct VersionBuilder {
     truncated_entry_id: Option<EntryId>,
     compaction_time_window: Option<Duration>,
     options: RegionOptions,
-    extensions: Arc<ManifestExtensions>,
 }
 
 impl VersionBuilder {
@@ -430,7 +427,6 @@ impl VersionBuilder {
             truncated_entry_id: None,
             compaction_time_window: None,
             options: RegionOptions::default(),
-            extensions: Arc::default(),
         }
     }
 
@@ -445,7 +441,6 @@ impl VersionBuilder {
             truncated_entry_id: version.truncated_entry_id,
             compaction_time_window: version.compaction_time_window,
             options: version.options.clone(),
-            extensions: version.extensions.clone(),
         }
     }
 
@@ -494,19 +489,8 @@ impl VersionBuilder {
         self
     }
 
-    /// Restores extension state from the same checkpoint as the file list.
-    pub(crate) fn extensions(mut self, state: ManifestExtensions) -> Self {
-        self.extensions = Arc::new(state);
-        self
-    }
-
     /// Apply edit to the builder.
     pub(crate) fn apply_edit(mut self, edit: RegionEdit, file_purger: FilePurgerRef) -> Self {
-        if !edit.files_to_remove.is_empty() || !edit.extensions.is_empty() {
-            let state = Arc::make_mut(&mut self.extensions);
-            state.retire_files(&edit.files_to_remove);
-            state.apply(edit.extensions);
-        }
         if let Some(entry_id) = edit.flushed_entry_id {
             self.flushed_entry_id = self.flushed_entry_id.max(entry_id);
         }
@@ -550,10 +534,8 @@ impl VersionBuilder {
     }
 
     pub(crate) fn remove_files(mut self, files: impl Iterator<Item = FileMeta>) -> Self {
-        let files: Vec<_> = files.collect();
-        Arc::make_mut(&mut self.extensions).retire_files(&files);
         let mut ssts = (*self.ssts).clone();
-        ssts.remove_files(files.into_iter());
+        ssts.remove_files(files);
         self.ssts = Arc::new(ssts);
 
         self
@@ -561,13 +543,6 @@ impl VersionBuilder {
 
     /// Clear all files in the builder.
     pub(crate) fn clear_files(mut self) -> Self {
-        Arc::make_mut(&mut self.extensions).retire_files(
-            self.ssts
-                .levels()
-                .iter()
-                .flat_map(|level| level.files())
-                .map(|file| file.meta_ref()),
-        );
         self.ssts = Arc::new(SstVersion::new(self.metadata.clone()));
         self
     }
@@ -598,7 +573,6 @@ impl VersionBuilder {
             truncated_entry_id: self.truncated_entry_id,
             compaction_time_window,
             options: self.options,
-            extensions: self.extensions,
         }
     }
 }
@@ -640,7 +614,6 @@ mod tests {
         for sequence in [25, 11] {
             vc.apply_edit(
                 Some(RegionEdit {
-                    extensions: Default::default(),
                     files_to_add: vec![],
                     files_to_remove: vec![],
                     timestamp_ms: None,

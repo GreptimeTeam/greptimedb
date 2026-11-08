@@ -1173,7 +1173,6 @@ async fn test_pick_result_refreshes_replaced_selected_file() {
     replacement.index_file_size = 128;
     version_control.apply_edit(
         Some(crate::manifest::action::RegionEdit {
-            extensions: Default::default(),
             files_to_add: vec![replacement],
             files_to_remove: Vec::new(),
             timestamp_ms: None,

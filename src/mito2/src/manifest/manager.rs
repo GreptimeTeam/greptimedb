@@ -214,7 +214,6 @@ impl RegionManifestManager {
         })];
         if flushed_entry_id > 0 {
             actions.push(RegionMetaAction::Edit(RegionEdit {
-                extensions: Default::default(),
                 files_to_add: vec![],
                 files_to_remove: vec![],
                 timestamp_ms: None,
@@ -1036,7 +1035,6 @@ mod test {
             manager
                 .update(
                     RegionMetaActionList::new(vec![RegionMetaAction::Edit(RegionEdit {
-                        extensions: Default::default(),
                         files_to_add: vec![],
                         files_to_remove: vec![],
                         timestamp_ms: None,

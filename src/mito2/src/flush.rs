@@ -528,7 +528,6 @@ impl RegionFlushTask {
         }
 
         let edit = RegionEdit {
-            extensions: Default::default(),
             files_to_add: file_metas,
             files_to_remove: Vec::new(),
             timestamp_ms: Some(chrono::Utc::now().timestamp_millis()),
@@ -1932,7 +1931,6 @@ mod tests {
                 senders: vec![OutputTx::new(output_tx)],
                 _timer: FLUSH_ELAPSED.with_label_values(&["total"]).start_timer(),
                 edit: RegionEdit {
-                    extensions: Default::default(),
                     files_to_add: Vec::new(),
                     files_to_remove: Vec::new(),
                     timestamp_ms: None,
@@ -2189,7 +2187,6 @@ mod tests {
         // Assumes the flush job is finished.
         version_control.apply_edit(
             Some(RegionEdit {
-                extensions: Default::default(),
                 files_to_add: Vec::new(),
                 files_to_remove: Vec::new(),
                 timestamp_ms: None,
@@ -2499,7 +2496,6 @@ mod tests {
         // Assumes the flush job is finished.
         version_control.apply_edit(
             Some(RegionEdit {
-                extensions: Default::default(),
                 files_to_add: Vec::new(),
                 files_to_remove: Vec::new(),
                 timestamp_ms: None,
@@ -2574,7 +2570,6 @@ mod tests {
         let version_data = version_control.current();
         version_control.apply_edit(
             Some(RegionEdit {
-                extensions: Default::default(),
                 files_to_add: Vec::new(),
                 files_to_remove: Vec::new(),
                 timestamp_ms: None,

@@ -16,10 +16,8 @@
 
 pub mod action;
 mod checkpointer;
-pub mod extension;
+mod compat;
 pub mod manager;
 pub mod storage;
-#[cfg(feature = "enterprise")]
-pub mod table_compaction;
 #[cfg(test)]
 mod tests;

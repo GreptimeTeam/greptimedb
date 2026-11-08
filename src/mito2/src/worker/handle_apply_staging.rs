@@ -118,15 +118,8 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 return;
             }
 
-            let mut extensions = staging_manifest.extensions.clone();
-            let target = region.manifest_ctx.manifest().await;
-            if let Err(error) = extensions.merge_from(&target.extensions, region_id) {
-                sender.send(Err(error));
-                return;
-            }
             let files_to_add = staging_manifest.files.values().cloned().collect::<Vec<_>>();
             let edit = RegionEdit {
-                extensions: extensions.into_edit(),
                 files_to_add,
                 files_to_remove: vec![],
                 timestamp_ms: Some(Utc::now().timestamp_millis()),
