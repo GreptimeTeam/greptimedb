@@ -12527,13 +12527,15 @@ async fn native_promql_aggregate_subquery_operands_keep_the_existing_plan() {
         "TQL EVAL (180, 180, '1m') native_pm + on(job, host) avg_over_time((sum by (job, host) (native_pn))[5m:1m])",
     ] {
         observer.clear();
-        let mut native = native_rows(native_tql_output(&instance, sql, true).await, None).await;
+        let (_, mut native) =
+            native_labelled_rows(native_tql_output(&instance, sql, true).await).await;
         assert!(
             !native.is_empty(),
             "{sql} answered no rows: {:#?}",
             observer.root_plan()
         );
-        let mut legacy = native_rows(native_tql_output(&instance, sql, false).await, None).await;
+        let (_, mut legacy) =
+            native_labelled_rows(native_tql_output(&instance, sql, false).await).await;
         native.sort_by(|a, b| (a.0, &a.1).cmp(&(b.0, &b.1)).then(a.2.total_cmp(&b.2)));
         legacy.sort_by(|a, b| (a.0, &a.1).cmp(&(b.0, &b.1)).then(a.2.total_cmp(&b.2)));
         assert_eq!(native, legacy, "{sql}");

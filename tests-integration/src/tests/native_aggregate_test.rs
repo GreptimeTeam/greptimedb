@@ -737,9 +737,16 @@ async fn native_hybrid_binary_05_06_08() {
     );
     let (legacy, legacy_capture) = run_query(&instance, &subquery, false, &observer).await;
     let (native, native_capture) = run_query(&instance, &subquery, true, &observer).await;
+    // A subquery now runs on the native route, so the existing plan must hold no native node while
+    // the native run must exercise one. The rows below are what says the route answers what the
+    // existing plan does.
     assert!(
-        legacy_capture.fused.is_empty() && native_capture.fused.is_empty(),
-        "hybrid must be disabled inside subquery: {subquery}"
+        legacy_capture.fused.is_empty(),
+        "the existing route must not plan native nodes: {subquery}"
+    );
+    assert!(
+        !native_capture.fused.is_empty(),
+        "the subquery must run on the native route: {subquery}"
     );
     assert_eq!(
         legacy.rows.len(),
