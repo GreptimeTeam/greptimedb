@@ -23,7 +23,7 @@ pub(crate) mod version;
 use std::cell::OnceCell;
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Instant;
 
@@ -412,7 +412,7 @@ impl MitoRegion {
         match self.manifest_ctx.state.load() {
             RegionRoleState::Leader(RegionLeaderState::Staging) => true,
             RegionRoleState::Leader(RegionLeaderState::Editing) => {
-                self.manifest_ctx.staged_edit.load(Ordering::Relaxed)
+                self.manifest_ctx.staging_partition_info().is_some()
             }
             _ => false,
         }
@@ -499,9 +499,6 @@ impl MitoRegion {
     /// Sets the editing state.
     /// You should call this method in the worker loop.
     pub(crate) fn set_editing(&self, expect: RegionLeaderState) -> Result<()> {
-        self.manifest_ctx
-            .staged_edit
-            .store(expect == RegionLeaderState::Staging, Ordering::Relaxed);
         self.compare_exchange_state(expect, RegionRoleState::Leader(RegionLeaderState::Editing))
     }
 
@@ -1282,8 +1279,6 @@ pub(crate) struct ManifestContext {
     /// During the staging mode, the region metadata in [`VersionControlRef`] is not updated,
     /// so we need to store the partition info separately.
     staging_partition_info: Mutex<Option<StagingPartitionInfo>>,
-    /// Whether the edit in progress started in staging. Only meaningful in the `Editing` state.
-    staged_edit: AtomicBool,
     /// Optional region hook for observing manifest mutations.
     hook: Option<RegionHookRef>,
 }
@@ -1300,7 +1295,6 @@ impl ManifestContext {
             downgrade_started_at: Mutex::new(Instant::now()),
             leader_deadline: Deadline::default(),
             staging_partition_info: Mutex::new(None),
-            staged_edit: AtomicBool::new(false),
             hook,
         }
     }

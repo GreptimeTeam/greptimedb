@@ -1823,26 +1823,8 @@ async fn test_staging_memtable_cap_rejects_only_staging_writes() {
     put_range(&engine, second_region_id, &schema, (0, 3)).await;
 }
 
-/// Enters staging through the request repartition sends or through the role-state API.
-async fn enter_staging_by(engine: &MitoEngine, region_id: RegionId, graceful: bool) {
-    if graceful {
-        engine
-            .set_region_role_state_gracefully(region_id, SettableRegionRoleState::StagingLeader)
-            .await
-            .unwrap();
-    } else {
-        enter_staging(engine, region_id).await;
-    }
-}
-
 #[tokio::test]
 async fn test_staging_memtable_cap_counts_region_during_staged_edit() {
-    for graceful in [false, true] {
-        check_staging_memtable_cap_counts_region_during_staged_edit(graceful).await;
-    }
-}
-
-async fn check_staging_memtable_cap_counts_region_during_staged_edit(graceful: bool) {
     let mut write_buffer_manager = MockWriteBufferManager::default();
     write_buffer_manager.set_flush_limit(2);
     let mut env = TestEnv::new().await;
@@ -1867,7 +1849,7 @@ async fn check_staging_memtable_cap_counts_region_during_staged_edit(graceful: b
         .unwrap();
     put_range(&engine, edited_region_id, &schema, (0, 3)).await;
     flush_region(&engine, edited_region_id, None).await;
-    enter_staging_by(&engine, edited_region_id, graceful).await;
+    enter_staging(&engine, edited_region_id).await;
     put_range(&engine, edited_region_id, &schema, (3, 5)).await;
     create_staging_region(&engine, other_region_id).await;
 
@@ -2063,12 +2045,6 @@ impl EventListener for RequestCountListener {
 
 #[tokio::test]
 async fn test_close_during_staged_edit_flushes_skip_wal_rows() {
-    for graceful in [false, true] {
-        check_close_during_staged_edit_flushes_skip_wal_rows(graceful).await;
-    }
-}
-
-async fn check_close_during_staged_edit_flushes_skip_wal_rows(graceful: bool) {
     let mut env = TestEnv::new().await;
     let listener = Arc::new(RequestCountListener::default());
     let engine = env
@@ -2092,7 +2068,7 @@ async fn check_close_during_staged_edit_flushes_skip_wal_rows(graceful: bool) {
         .unwrap();
     put_range(&engine, region_id, &schema, (0, 3)).await;
     flush_region(&engine, region_id, None).await;
-    enter_staging_by(&engine, region_id, graceful).await;
+    enter_staging(&engine, region_id).await;
     put_range_skip_wal(&engine, region_id, &schema, (3, 5)).await;
 
     let region = engine.get_region(region_id).unwrap();

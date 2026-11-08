@@ -50,7 +50,7 @@ pub enum SettableRegionRoleState {
     DowngradingLeader,
     /// Exit staging mode and return to normal leader state. Only allowed from staging state.
     Leader,
-    /// Enter staging mode. Region remains writable but disables checkpoint and compaction. Only allowed from normal leader state.
+    /// Enter staging mode. Region remains writable but disables checkpoint, compaction and flush. Only allowed from normal leader state.
     StagingLeader,
 }
 
@@ -605,7 +605,7 @@ pub struct RegionStatistic {
     pub written_bytes: u64,
     /// Total Parquet bytes committed by flushes since the region opened.
     ///
-    /// Includes staging flushes, but excludes index files, compaction and imported SSTs.
+    /// Excludes index files, compaction and imported SSTs.
     /// Resets when the region instance is recreated; manifest replay does not increment it.
     #[serde(default)]
     pub flushed_parquet_bytes: u64,
