@@ -12374,6 +12374,55 @@ async fn native_promql_subqueries_match_legacy() {
         assert_eq!(native, legacy, "{sql}");
     }
 
+    // The anchored shape is compared with the existing route only at its anchor. Past the anchor the
+    // existing route re-folds the subquery's window on every outer step, and the split must not copy
+    // that bug, so the later steps are held to the invariant on the native answer alone: an anchored
+    // subquery's range vector is fixed at 180, so each outer step has to publish 180's value for a
+    // series rather than fold a fresh one.
+    let anchored = "TQL EVAL (180, 360, '1m') \
+                    avg_over_time((sum by (job, host) (rate(native_subq[2m])))[2m:1m] @ 180)";
+    observer.clear();
+    let anchored_rows = native_rows(native_tql_output(&instance, anchored, true).await, None).await;
+    assert!(
+        observer.fused().is_some(),
+        "{anchored} did not execute a FusedSeriesExec: {:#?}",
+        observer.root_plan()
+    );
+    // Every label column names the series, so `job` is part of the key as well as `host`.
+    let mut series =
+        std::collections::BTreeMap::<&str, std::collections::BTreeMap<i64, f64>>::new();
+    for (ts, label, value) in &anchored_rows {
+        assert!(
+            series
+                .entry(label.as_str())
+                .or_default()
+                .insert(*ts, *value)
+                .is_none(),
+            "{anchored} answered {label} twice at {ts}"
+        );
+    }
+    assert!(
+        !series.is_empty(),
+        "{anchored} answered no series: {:#?}",
+        observer.root_plan()
+    );
+    for step in [180000, 240000, 300000] {
+        assert!(
+            series.values().all(|steps| steps.contains_key(&step)),
+            "{anchored} did not answer {step} for every series: {anchored_rows:?}"
+        );
+    }
+    // An anchored subquery must not re-fold when the outer step advances.
+    for (label, steps) in &series {
+        let anchor = steps[&180000];
+        for (step, value) in steps {
+            assert_eq!(
+                anchor, *value,
+                "{anchored}: {label} holds the anchored value at 180000 but folded {value} at {step}"
+            );
+        }
+    }
+
     // A fold over a subquery whose input is not a bare selection. The window is not itself cut as a
     // segment - it drops the metric name, so the analyzer reads it as cross-series - and what keeps
     // the scan width is the per-series prefix below it or the canonical boundary a rewrite needs.
