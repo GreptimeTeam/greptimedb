@@ -399,20 +399,3 @@ The local series-index cache has a root `version` marker independent of this
 format version. Before workers start, a missing or incompatible marker causes
 the entire derived cache (including samples, ranges, and catalogs) to be reset.
 Matching-version restarts preserve the cache.
-
-## Additive label compatibility during prepared reads
-
-Stored labels are matched to the pinned physical schema by column ID, name, and
-string type. Older artifacts may omit labels added after their construction;
-prepared discovery supplies nulls before evaluating label predicates and retaining
-candidate labels. Candidates keep batch-backed labels separately from their
-region-qualified table-ID/TSID identities. Absence and explicit null therefore
-agree during duplicate-label checks. Actual conflicting label values for the same
-table ID and TSID remain errors.
-
-This normalization is performed once during candidate discovery rather than for
-each sample. Predicates referencing absent artifact columns are evaluated after
-normalization. Incompatible series schemas use encoded keys from the assigned
-source SSTs for discovery; sample-artifact eligibility is independent. Read or
-format corruption errors are propagated rather than silently masked as missing
-coverage. No format-version change is required for additive labels.
