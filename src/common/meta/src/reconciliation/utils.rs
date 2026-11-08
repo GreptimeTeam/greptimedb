@@ -434,11 +434,29 @@ pub(crate) fn build_table_meta_from_column_metadatas(
         );
     }
 
+    let mut ordered_column_metadatas = Vec::with_capacity(column_metadata.len());
+    let mut existing_names = HashSet::with_capacity(column_schemas.len());
+
+    // Preserves the original table column order from `table_meta.schema`.
+    for col_schema in column_schemas {
+        if let Some(col) = column_in_column_metadata.get(col_schema.name.as_str()) {
+            ordered_column_metadatas.push(*col);
+            existing_names.insert(col_schema.name.as_str());
+        }
+    }
+
+    // Appends any newly added columns from `column_metadata`.
+    for col in column_metadata {
+        if !existing_names.contains(col.column_schema.name.as_str()) {
+            ordered_column_metadatas.push(col);
+        }
+    }
+
     let mut new_raw_table_meta = table_meta.clone();
     let primary_key_indices = &mut new_raw_table_meta.primary_key_indices;
     let partition_key_indices = &mut new_raw_table_meta.partition_key_indices;
     let value_indices = &mut new_raw_table_meta.value_indices;
-    let mut columns = Vec::with_capacity(column_metadata.len());
+    let mut columns = Vec::with_capacity(ordered_column_metadatas.len());
     let column_ids = &mut new_raw_table_meta.column_ids;
     let next_column_id = &mut new_raw_table_meta.next_column_id;
 
@@ -447,24 +465,47 @@ pub(crate) fn build_table_meta_from_column_metadatas(
     primary_key_indices.clear();
     partition_key_indices.clear();
 
-    for (idx, col) in column_metadata.iter().enumerate() {
-        if partition_key_names.contains(&col.column_schema.name.as_str()) {
-            partition_key_indices.push(idx);
-        }
+    for (idx, col) in ordered_column_metadatas.iter().enumerate() {
         match col.semantic_type {
-            SemanticType::Tag => {
-                primary_key_indices.push(idx);
-            }
-            SemanticType::Field => {
-                value_indices.push(idx);
-            }
-            SemanticType::Timestamp => {
+            SemanticType::Tag => {}
+            SemanticType::Field | SemanticType::Timestamp => {
                 value_indices.push(idx);
             }
         }
 
         columns.push(col.column_schema.clone());
         column_ids.push(col.column_id);
+    }
+
+    // Preserves the order of primary keys as defined in the original table info.
+    for old_idx in &table_meta.primary_key_indices {
+        if let Some(col_schema) = column_schemas.get(*old_idx) {
+            if let Some(new_idx) = columns.iter().position(|c| c.name == col_schema.name) {
+                primary_key_indices.push(new_idx);
+            }
+        }
+    }
+    // Appends any newly added tag columns that were not part of the original primary keys.
+    for (idx, col) in ordered_column_metadatas.iter().enumerate() {
+        if col.semantic_type == SemanticType::Tag && !primary_key_indices.contains(&idx) {
+            primary_key_indices.push(idx);
+        }
+    }
+
+    // Preserves the order of partition keys as defined in the original table info.
+    for old_idx in &table_meta.partition_key_indices {
+        if let Some(col_schema) = column_schemas.get(*old_idx) {
+            if let Some(new_idx) = columns.iter().position(|c| c.name == col_schema.name) {
+                partition_key_indices.push(new_idx);
+            }
+        }
+    }
+    for (idx, col) in ordered_column_metadatas.iter().enumerate() {
+        if partition_key_names.contains(&col.column_schema.name.as_str())
+            && !partition_key_indices.contains(&idx)
+        {
+            partition_key_indices.push(idx);
+        }
     }
 
     *next_column_id = column_ids
@@ -1263,6 +1304,151 @@ mod tests {
         )
         .unwrap_err();
         assert_matches!(err, Error::MissingColumnInColumnMetadata { .. });
+    }
+
+    #[test]
+    fn test_build_table_meta_preserves_column_order_and_primary_key_indices() {
+        let column_schemas = vec![
+            ColumnSchema::new(
+                "ts",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            )
+            .with_time_index(true),
+            ColumnSchema::new("a", ConcreteDataType::string_datatype(), true),
+            ColumnSchema::new("b", ConcreteDataType::string_datatype(), true),
+        ];
+        let schema = SchemaBuilder::try_from(column_schemas)
+            .unwrap()
+            .version(1)
+            .build()
+            .unwrap();
+
+        let mut table_meta_builder = TableMetaBuilder::empty();
+        let table_meta = table_meta_builder
+            .schema(Arc::new(schema))
+            .primary_key_indices(vec![2, 1])
+            .next_column_id(4)
+            .build()
+            .unwrap();
+        let mut table_meta = table_meta;
+        table_meta.column_ids = vec![1, 2, 3];
+
+        let table_id = 100;
+        let table_ref = TableReference::full("test_catalog", "test_schema", "test_table");
+        let name_to_ids = HashMap::from([
+            ("ts".to_string(), 1),
+            ("a".to_string(), 2),
+            ("b".to_string(), 3),
+        ]);
+
+        let region_column_metadatas = vec![
+            ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "ts",
+                    ConcreteDataType::timestamp_millisecond_datatype(),
+                    false,
+                )
+                .with_time_index(true),
+                semantic_type: SemanticType::Timestamp,
+                column_id: 1,
+            },
+            ColumnMetadata {
+                column_schema: ColumnSchema::new("a", ConcreteDataType::string_datatype(), true),
+                semantic_type: SemanticType::Tag,
+                column_id: 2,
+            },
+            ColumnMetadata {
+                column_schema: ColumnSchema::new("b", ConcreteDataType::string_datatype(), true),
+                semantic_type: SemanticType::Tag,
+                column_id: 3,
+            },
+        ];
+
+        // 1. Consistent case where region columns match table schema order:
+        // Table meta must remain identical (including column order and PK indices [2, 1]).
+        let new_table_meta = build_table_meta_from_column_metadatas(
+            table_id,
+            table_ref,
+            &table_meta,
+            Some(name_to_ids.clone()),
+            &region_column_metadatas,
+        )
+        .unwrap();
+
+        assert_eq!(new_table_meta, table_meta);
+        assert_eq!(
+            new_table_meta
+                .schema
+                .column_schemas()
+                .iter()
+                .map(|c| c.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["ts", "a", "b"]
+        );
+        assert_eq!(new_table_meta.primary_key_indices, vec![2, 1]);
+        assert_eq!(new_table_meta.column_ids, vec![1, 2, 3]);
+
+        // 2. Case where input column metadata has reordered tags (e.g. ts, b, a):
+        // Table schema column order must still be preserved according to table_meta.schema.
+        let reordered_column_metadatas = vec![
+            region_column_metadatas[0].clone(),
+            region_column_metadatas[2].clone(),
+            region_column_metadatas[1].clone(),
+        ];
+        let new_table_meta = build_table_meta_from_column_metadatas(
+            table_id,
+            table_ref,
+            &table_meta,
+            Some(name_to_ids.clone()),
+            &reordered_column_metadatas,
+        )
+        .unwrap();
+
+        assert_eq!(new_table_meta, table_meta);
+        assert_eq!(
+            new_table_meta
+                .schema
+                .column_schemas()
+                .iter()
+                .map(|c| c.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["ts", "a", "b"]
+        );
+        assert_eq!(new_table_meta.primary_key_indices, vec![2, 1]);
+        assert_eq!(new_table_meta.column_ids, vec![1, 2, 3]);
+
+        // 3. Case where a new field column is added:
+        let mut extended_column_metadatas = region_column_metadatas.clone();
+        extended_column_metadatas.push(ColumnMetadata {
+            column_schema: ColumnSchema::new("c", ConcreteDataType::int32_datatype(), true),
+            semantic_type: SemanticType::Field,
+            column_id: 4,
+        });
+        let mut extended_name_to_ids = name_to_ids;
+        extended_name_to_ids.insert("c".to_string(), 4);
+
+        let new_table_meta = build_table_meta_from_column_metadatas(
+            table_id,
+            table_ref,
+            &table_meta,
+            Some(extended_name_to_ids),
+            &extended_column_metadatas,
+        )
+        .unwrap();
+
+        assert_eq!(
+            new_table_meta
+                .schema
+                .column_schemas()
+                .iter()
+                .map(|c| c.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["ts", "a", "b", "c"]
+        );
+        assert_eq!(new_table_meta.primary_key_indices, vec![2, 1]);
+        assert_eq!(new_table_meta.value_indices, vec![0, 3]);
+        assert_eq!(new_table_meta.column_ids, vec![1, 2, 3, 4]);
     }
 
     #[test]

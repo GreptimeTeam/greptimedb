@@ -26,7 +26,7 @@ use crate::reconciliation::reconcile_table::update_table_info::UpdateTableInfo;
 use crate::reconciliation::reconcile_table::{ReconcileTableContext, State, TableMetadataState};
 use crate::reconciliation::utils::{
     ResolveColumnMetadataResult, build_reconciliation_column_metadata,
-    check_column_metadatas_consistent, reorder_tag_columns, resolve_column_metadatas_with_latest,
+    check_column_metadatas_consistent, resolve_column_metadatas_with_latest,
     resolve_column_metadatas_with_metasrv,
 };
 
@@ -92,8 +92,6 @@ impl State for ResolveColumnMetadata {
         ctx.persistent_ctx.table_info_value = Some(table_info_value);
 
         if let Some(column_metadatas) = check_column_metadatas_consistent(&self.region_metadata) {
-            let column_metadatas =
-                reorder_tag_columns(&column_metadatas, &self.region_metadata[0].primary_key)?;
             // Safety: fetched in the above.
             let table_info_value = ctx.persistent_ctx.table_info_value.clone().unwrap();
             info!(
