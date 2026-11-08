@@ -2036,10 +2036,22 @@ async fn test_close_flushes_skip_wal_rows_of_staging_region() {
     assert_eq!(3, count_rows(&engine, region_id).await);
 }
 
-/// Counts the requests that workers have received.
 #[derive(Default)]
 struct RequestCountListener {
     count: AtomicUsize,
+}
+
+impl RequestCountListener {
+    /// Waits until a worker has received a request batch after the count reached `received`.
+    async fn wait_received_after(&self, received: usize) {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while self.count.load(Ordering::Relaxed) == received {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .unwrap();
+    }
 }
 
 #[async_trait]
@@ -2098,13 +2110,7 @@ async fn check_close_during_staged_edit_flushes_skip_wal_rows(graceful: bool) {
             .await
     });
     // The worker has the close request before the edit, still waiting for the lock, can finish.
-    tokio::time::timeout(Duration::from_secs(5), async {
-        while listener.count.load(Ordering::Relaxed) == received {
-            tokio::time::sleep(Duration::from_millis(1)).await;
-        }
-    })
-    .await
-    .unwrap();
+    listener.wait_received_after(received).await;
     drop(manager);
     close.await.unwrap().unwrap();
     let _ = edit.await;
@@ -2114,14 +2120,26 @@ async fn check_close_during_staged_edit_flushes_skip_wal_rows(graceful: bool) {
 }
 
 #[tokio::test]
-async fn test_close_waits_for_manifest_commit_of_staging_end() {
+async fn test_close_waits_for_manifest_lock_before_leaving_staging() {
     let mut env = TestEnv::new().await;
-    let engine = env.create_engine(MitoConfig::default()).await;
+    let listener = Arc::new(RequestCountListener::default());
+    let engine = env
+        .create_engine_with(
+            MitoConfig {
+                num_workers: 1,
+                ..Default::default()
+            },
+            None,
+            Some(listener.clone()),
+            None,
+        )
+        .await;
     let region_id = RegionId::new(1024, 0);
     create_staging_region(&engine, region_id).await;
     let region = engine.get_region(region_id).unwrap();
 
     let manager = region.manifest_ctx.manifest_manager.write().await;
+    let received = listener.count.load(Ordering::Relaxed);
     let close_engine = engine.clone();
     let mut close = tokio::spawn(async move {
         close_engine
@@ -2131,6 +2149,7 @@ async fn test_close_waits_for_manifest_commit_of_staging_end() {
             )
             .await
     });
+    listener.wait_received_after(received).await;
     tokio::time::timeout(Duration::from_millis(100), &mut close)
         .await
         .unwrap_err();

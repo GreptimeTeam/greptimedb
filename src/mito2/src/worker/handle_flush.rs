@@ -226,7 +226,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             if region.is_staging() {
                 // Staging regions don't flush, so waiting would not release their memory. Writes
                 // are rejected at twice the region limit or at half of the engine's flush limit,
-                // which keeps staging memtables from making other regions flush.
+                // which reserves memory headroom for other regions.
                 let staging_usage = self.staging_regions.record_and_memtable_usage(&region);
                 if status.should_reject
                     || staging_usage >= self.write_buffer_manager.flush_limit() / 2
