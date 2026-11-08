@@ -407,6 +407,17 @@ impl MitoRegion {
         self.manifest_ctx.state.load() == RegionRoleState::Leader(RegionLeaderState::Staging)
     }
 
+    /// Returns whether the region is in staging mode, counting a staged edit in progress.
+    pub(crate) fn is_staging_or_staged_edit(&self) -> bool {
+        match self.manifest_ctx.state.load() {
+            RegionRoleState::Leader(RegionLeaderState::Staging) => true,
+            RegionRoleState::Leader(RegionLeaderState::Editing) => {
+                self.manifest_ctx.staging_partition_info().is_some()
+            }
+            _ => false,
+        }
+    }
+
     /// Returns whether the region is entering staging mode.
     pub(crate) fn is_enter_staging(&self) -> bool {
         self.manifest_ctx.state.load()
@@ -525,6 +536,29 @@ impl MitoRegion {
             self.region_id,
             RegionRoleState::Leader(RegionLeaderState::Writable),
         )
+    }
+
+    /// Leaves staging without committing it, abandoning a staged edit in progress.
+    ///
+    /// You should call this method in the worker loop, which is what restores the state of an
+    /// edit, and only when [Self::is_staging_or_staged_edit] holds.
+    pub(crate) fn abort_staging(&self) {
+        let aborted = self
+            .manifest_ctx
+            .state
+            .fetch_update(|state| {
+                matches!(
+                    state,
+                    RegionRoleState::Leader(
+                        RegionLeaderState::Staging | RegionLeaderState::Editing
+                    )
+                )
+                .then_some(RegionRoleState::Leader(RegionLeaderState::Writable))
+            })
+            .is_ok();
+        if aborted {
+            self.manifest_ctx.clear_staging_partition_info();
+        }
     }
 
     /// Sets the region role state gracefully. This acquires the manifest write lock.
