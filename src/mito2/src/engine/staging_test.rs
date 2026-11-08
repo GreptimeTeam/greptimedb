@@ -16,10 +16,12 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 use std::{assert_matches, fs};
 
 use api::v1::{ArrowIpc, ColumnSchema, Rows};
+use async_trait::async_trait;
 use common_error::ext::{ErrorExt, RetryHint};
 use common_error::status_code::StatusCode;
 use common_function::utils::partition_expr_version;
@@ -49,7 +51,7 @@ use store_api::storage::{RegionId, ScanRequest};
 
 use crate::config::MitoConfig;
 use crate::engine::MitoEngine;
-use crate::engine::listener::{FlushListener, NotifyEnterStagingResultListener};
+use crate::engine::listener::{EventListener, FlushListener, NotifyEnterStagingResultListener};
 use crate::error::Error;
 use crate::flush::WriteBufferManager;
 use crate::manifest::action::{
@@ -1821,8 +1823,26 @@ async fn test_staging_memtable_cap_rejects_only_staging_writes() {
     put_range(&engine, second_region_id, &schema, (0, 3)).await;
 }
 
+/// Enters staging through the request repartition sends or through the role-state API.
+async fn enter_staging_by(engine: &MitoEngine, region_id: RegionId, graceful: bool) {
+    if graceful {
+        engine
+            .set_region_role_state_gracefully(region_id, SettableRegionRoleState::StagingLeader)
+            .await
+            .unwrap();
+    } else {
+        enter_staging(engine, region_id).await;
+    }
+}
+
 #[tokio::test]
 async fn test_staging_memtable_cap_counts_region_during_staged_edit() {
+    for graceful in [false, true] {
+        check_staging_memtable_cap_counts_region_during_staged_edit(graceful).await;
+    }
+}
+
+async fn check_staging_memtable_cap_counts_region_during_staged_edit(graceful: bool) {
     let mut write_buffer_manager = MockWriteBufferManager::default();
     write_buffer_manager.set_flush_limit(2);
     let mut env = TestEnv::new().await;
@@ -1846,7 +1866,8 @@ async fn test_staging_memtable_cap_counts_region_during_staged_edit() {
         .await
         .unwrap();
     put_range(&engine, edited_region_id, &schema, (0, 3)).await;
-    enter_staging(&engine, edited_region_id).await;
+    flush_region(&engine, edited_region_id, None).await;
+    enter_staging_by(&engine, edited_region_id, graceful).await;
     put_range(&engine, edited_region_id, &schema, (3, 5)).await;
     create_staging_region(&engine, other_region_id).await;
 
@@ -2015,10 +2036,40 @@ async fn test_close_flushes_skip_wal_rows_of_staging_region() {
     assert_eq!(3, count_rows(&engine, region_id).await);
 }
 
+/// Counts the requests that workers have received.
+#[derive(Default)]
+struct RequestCountListener {
+    count: AtomicUsize,
+}
+
+#[async_trait]
+impl EventListener for RequestCountListener {
+    fn on_recv_requests(&self, request_num: usize) {
+        self.count.fetch_add(request_num, Ordering::Relaxed);
+    }
+}
+
 #[tokio::test]
 async fn test_close_during_staged_edit_flushes_skip_wal_rows() {
+    for graceful in [false, true] {
+        check_close_during_staged_edit_flushes_skip_wal_rows(graceful).await;
+    }
+}
+
+async fn check_close_during_staged_edit_flushes_skip_wal_rows(graceful: bool) {
     let mut env = TestEnv::new().await;
-    let engine = env.create_engine(MitoConfig::default()).await;
+    let listener = Arc::new(RequestCountListener::default());
+    let engine = env
+        .create_engine_with(
+            MitoConfig {
+                num_workers: 1,
+                ..Default::default()
+            },
+            None,
+            Some(listener.clone()),
+            None,
+        )
+        .await;
     let region_id = RegionId::new(1024, 0);
     let request = CreateRequestBuilder::new().build();
     let schema = rows_schema(&request);
@@ -2028,13 +2079,15 @@ async fn test_close_during_staged_edit_flushes_skip_wal_rows() {
         .await
         .unwrap();
     put_range(&engine, region_id, &schema, (0, 3)).await;
-    enter_staging(&engine, region_id).await;
+    flush_region(&engine, region_id, None).await;
+    enter_staging_by(&engine, region_id, graceful).await;
     put_range_skip_wal(&engine, region_id, &schema, (3, 5)).await;
 
     let region = engine.get_region(region_id).unwrap();
     let file = first_file(&region).await;
     let manager = region.manifest_ctx.manifest_manager.write().await;
     let edit = start_staged_edit(&engine, &region, file).await;
+    let received = listener.count.load(Ordering::Relaxed);
     let close_engine = engine.clone();
     let close = tokio::spawn(async move {
         close_engine
@@ -2044,6 +2097,14 @@ async fn test_close_during_staged_edit_flushes_skip_wal_rows() {
             )
             .await
     });
+    // The worker has the close request before the edit, still waiting for the lock, can finish.
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while listener.count.load(Ordering::Relaxed) == received {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await
+    .unwrap();
     drop(manager);
     close.await.unwrap().unwrap();
     let _ = edit.await;
