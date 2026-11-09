@@ -453,7 +453,7 @@ fn mock_region_stat(
         min_timestamp: None,
         max_timestamp: None,
         written_bytes: 0,
-        flushed_parquet_bytes: 0,
+        ingested_parquet_bytes: 0,
         query_cpu_time: 0,
         query_scanned_bytes: 0,
     }
