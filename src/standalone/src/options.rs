@@ -340,13 +340,17 @@ concurrent_query_limiter_timeout = "250ms""#,
     }
 
     #[test]
-    fn test_pipeline_host_access_config_forwarding() {
+    fn test_pipeline_config_forwarding() {
         let defaults: StandaloneOptions = toml::from_str("").unwrap();
         assert!(!defaults.pipeline.allow_vrl_host_access);
         assert!(!defaults.frontend_options().pipeline.allow_vrl_host_access);
+        assert!(!defaults.pipeline.ignore_errors);
+        assert!(!defaults.frontend_options().pipeline.ignore_errors);
         let options: StandaloneOptions =
-            toml::from_str("[pipeline]\nallow_vrl_host_access = true").unwrap();
+            toml::from_str("[pipeline]\nallow_vrl_host_access = true\nignore_errors = true")
+                .unwrap();
         assert!(options.frontend_options().pipeline.allow_vrl_host_access);
+        assert!(options.frontend_options().pipeline.ignore_errors);
         let serialized = toml::to_string(&options).unwrap();
         let restored: StandaloneOptions = toml::from_str(&serialized).unwrap();
         assert_eq!(options.pipeline, restored.pipeline);
