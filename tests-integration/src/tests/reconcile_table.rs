@@ -541,6 +541,66 @@ async fn test_renamed_table() {
     check_output_stream(output.data, expected).await;
 }
 
+#[tokio::test]
+async fn test_reconcile_table_preserves_column_order_and_pk_order() {
+    let builder =
+        GreptimeDbClusterBuilder::new("test_reconcile_table_preserves_column_order_and_pk_order")
+            .await;
+    let mut test_context = TestContext::new(MockInstanceBuilder::Distributed(builder)).await;
+    let frontend = test_context.frontend();
+    let metasrv = test_context.metasrv();
+    let reconciliation_manager = metasrv.reconciliation_manager();
+
+    // 1. CREATE TABLE q8 with columns ts, a, b and non-column-ordered PRIMARY KEY (b, a)
+    let output = execute_sql(
+        &frontend,
+        "CREATE TABLE q8 (ts TIMESTAMP TIME INDEX, a STRING, b STRING, PRIMARY KEY(b, a));",
+    )
+    .await;
+    assert_affected_rows(output.data).await;
+
+    // 2. Positional INSERT before reconcile
+    let output = execute_sql(
+        &frontend,
+        "INSERT INTO q8 VALUES ('1970-01-01 00:00:01', 'a1', 'b1');",
+    )
+    .await;
+    assert_affected_rows(output.data).await;
+
+    // 3. Reconcile the table
+    reconcile_table(metasrv.procedure_manager(), reconciliation_manager, "q8").await;
+
+    // 4. Positional INSERT after reconcile (must still insert into ts, a, b)
+    let output = execute_sql(
+        &frontend,
+        "INSERT INTO q8 VALUES ('1970-01-01 00:00:02', 'a2', 'b2');",
+    )
+    .await;
+    assert_affected_rows(output.data).await;
+
+    // 5. SELECT * asserts columns are ts, a, b and positional inserts landed correctly
+    let output = execute_sql(&frontend, "SELECT * FROM q8 ORDER BY ts").await;
+    let expected = r#"+---------------------+----+----+
+| ts                  | a  | b  |
++---------------------+----+----+
+| 1970-01-01T00:00:01 | a1 | b1 |
+| 1970-01-01T00:00:02 | a2 | b2 |
++---------------------+----+----+"#;
+    check_output_stream(output.data, expected).await;
+
+    // 6. SHOW CREATE TABLE q8 asserts columns ts, a, b and PRIMARY KEY (b, a)
+    let output = execute_sql(&frontend, "SHOW CREATE TABLE q8").await;
+    let batches = match output.data {
+        OutputData::Stream(stream) => collect_batches(stream).await.unwrap(),
+        _ => unreachable!(),
+    };
+    let formatted = common_recordbatch::util::print_batches(&batches).unwrap();
+    assert!(formatted.contains("`ts` TIMESTAMP(3) NOT NULL"));
+    assert!(formatted.contains("`a` STRING NULL"));
+    assert!(formatted.contains("`b` STRING NULL"));
+    assert!(formatted.contains("PRIMARY KEY (`b`, `a`)"));
+}
+
 async fn unwrap_err(output: OutputData) -> String {
     let error = match output {
         OutputData::Stream(stream) => collect_batches(stream).await.unwrap_err(),

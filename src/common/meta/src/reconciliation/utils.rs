@@ -358,15 +358,22 @@ pub(crate) fn check_column_metadata_invariants(
     Ok(())
 }
 
-/// Builds a [`TableMeta`] from the provided [`ColumnMetadata`]s.
+/// Builds a [`TableMeta`] from the provided [`ColumnMetadata`]s, preserving schema column order
+/// and primary key order from `table_meta`.
+///
+/// The input [`ColumnMetadata`]s determine which columns currently exist in region metadata:
+/// - Columns present in `table_meta` but missing from `column_metadata` are dropped.
+/// - Columns present in both retain the column order from `table_meta.schema`.
+/// - Columns present only in `column_metadata` are appended.
+/// - Primary key order is preserved from `table_meta.primary_key_indices`, and any newly added
+///   tag columns from `column_metadata` are appended to the primary key.
 ///
 /// Returns an error if:
 /// - Any column is missing in the `name_to_ids`(if `name_to_ids` is provided).
 /// - The column id in table metadata is not the same as the column id in the column metadata.(if `name_to_ids` is provided)
 /// - The table index is missing in the column metadata.
+/// - Any mapped primary key column is not [`SemanticType::Tag`].
 /// - The primary key or partition key columns are missing in the column metadata.
-///
-/// TODO(weny): add tests
 pub(crate) fn build_table_meta_from_column_metadatas(
     table_id: TableId,
     table_ref: TableReference,
@@ -457,6 +464,7 @@ pub(crate) fn build_table_meta_from_column_metadatas(
     let partition_key_indices = &mut new_raw_table_meta.partition_key_indices;
     let value_indices = &mut new_raw_table_meta.value_indices;
     let mut columns = Vec::with_capacity(ordered_column_metadatas.len());
+    let mut column_name_to_index = HashMap::with_capacity(ordered_column_metadatas.len());
     let column_ids = &mut new_raw_table_meta.column_ids;
     let next_column_id = &mut new_raw_table_meta.next_column_id;
 
@@ -475,36 +483,44 @@ pub(crate) fn build_table_meta_from_column_metadatas(
 
         columns.push(col.column_schema.clone());
         column_ids.push(col.column_id);
+        column_name_to_index.insert(col.column_schema.name.as_str(), idx);
     }
+
+    let mut seen_primary_key_indices = HashSet::with_capacity(ordered_column_metadatas.len());
 
     // Preserves the order of primary keys as defined in the original table info.
     for old_idx in &table_meta.primary_key_indices {
         if let Some(col_schema) = column_schemas.get(*old_idx) {
-            if let Some(new_idx) = columns.iter().position(|c| c.name == col_schema.name) {
+            if let Some(&new_idx) = column_name_to_index.get(col_schema.name.as_str()) {
+                let col_meta = ordered_column_metadatas[new_idx];
+                ensure!(
+                    col_meta.semantic_type == SemanticType::Tag,
+                    UnexpectedSnafu {
+                        err_msg: format!(
+                            "Primary key column '{}' has invalid semantic type '{:?}', expected Tag, table: {}, table_id: {}",
+                            col_schema.name, col_meta.semantic_type, table_ref, table_id
+                        ),
+                    }
+                );
                 primary_key_indices.push(new_idx);
+                seen_primary_key_indices.insert(new_idx);
             }
         }
     }
     // Appends any newly added tag columns that were not part of the original primary keys.
     for (idx, col) in ordered_column_metadatas.iter().enumerate() {
-        if col.semantic_type == SemanticType::Tag && !primary_key_indices.contains(&idx) {
+        if col.semantic_type == SemanticType::Tag && !seen_primary_key_indices.contains(&idx) {
             primary_key_indices.push(idx);
+            seen_primary_key_indices.insert(idx);
         }
     }
 
     // Preserves the order of partition keys as defined in the original table info.
     for old_idx in &table_meta.partition_key_indices {
         if let Some(col_schema) = column_schemas.get(*old_idx) {
-            if let Some(new_idx) = columns.iter().position(|c| c.name == col_schema.name) {
+            if let Some(&new_idx) = column_name_to_index.get(col_schema.name.as_str()) {
                 partition_key_indices.push(new_idx);
             }
-        }
-    }
-    for (idx, col) in ordered_column_metadatas.iter().enumerate() {
-        if partition_key_names.contains(&col.column_schema.name.as_str())
-            && !partition_key_indices.contains(&idx)
-        {
-            partition_key_indices.push(idx);
         }
     }
 
@@ -1449,6 +1465,79 @@ mod tests {
         assert_eq!(new_table_meta.primary_key_indices, vec![2, 1]);
         assert_eq!(new_table_meta.value_indices, vec![0, 3]);
         assert_eq!(new_table_meta.column_ids, vec![1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn test_build_table_meta_rejects_non_tag_primary_key() {
+        let column_schemas = vec![
+            ColumnSchema::new(
+                "ts",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            )
+            .with_time_index(true),
+            ColumnSchema::new("a", ConcreteDataType::string_datatype(), true),
+            ColumnSchema::new("b", ConcreteDataType::string_datatype(), true),
+        ];
+        let schema = SchemaBuilder::try_from(column_schemas)
+            .unwrap()
+            .version(1)
+            .build()
+            .unwrap();
+
+        let mut table_meta_builder = TableMetaBuilder::empty();
+        let table_meta = table_meta_builder
+            .schema(Arc::new(schema))
+            .primary_key_indices(vec![2, 1])
+            .next_column_id(4)
+            .build()
+            .unwrap();
+        let mut table_meta = table_meta;
+        table_meta.column_ids = vec![1, 2, 3];
+
+        let table_id = 100;
+        let table_ref = TableReference::full("test_catalog", "test_schema", "test_table");
+        let name_to_ids = HashMap::from([
+            ("ts".to_string(), 1),
+            ("a".to_string(), 2),
+            ("b".to_string(), 3),
+        ]);
+
+        // Input column metadata erroneously reports primary key column 'b' as Field instead of Tag
+        let invalid_column_metadatas = vec![
+            ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "ts",
+                    ConcreteDataType::timestamp_millisecond_datatype(),
+                    false,
+                )
+                .with_time_index(true),
+                semantic_type: SemanticType::Timestamp,
+                column_id: 1,
+            },
+            ColumnMetadata {
+                column_schema: ColumnSchema::new("a", ConcreteDataType::string_datatype(), true),
+                semantic_type: SemanticType::Tag,
+                column_id: 2,
+            },
+            ColumnMetadata {
+                column_schema: ColumnSchema::new("b", ConcreteDataType::string_datatype(), true),
+                semantic_type: SemanticType::Field,
+                column_id: 3,
+            },
+        ];
+
+        let err = build_table_meta_from_column_metadatas(
+            table_id,
+            table_ref,
+            &table_meta,
+            Some(name_to_ids),
+            &invalid_column_metadatas,
+        )
+        .unwrap_err();
+
+        assert_matches!(err, Error::Unexpected { .. });
+        assert!(err.to_string().contains("expected Tag"));
     }
 
     #[test]
