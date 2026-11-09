@@ -48,8 +48,8 @@ use futures::StreamExt;
 use meta_srv::metasrv::SelectTarget;
 use meta_srv::selector::round_robin::RoundRobinSelector;
 use query::dist_plan::{
-    MergeScanLogicalPlan, build_group_read_plan, build_group_read_plan_with_combine,
-    build_group_read_plan_with_concurrency, peek_group_read_envelope,
+    MAX_GROUP_READ_PAYLOAD_BYTES, MergeScanLogicalPlan, build_group_read_plan,
+    build_group_read_plan_with_combine, peek_group_read_envelope,
 };
 use query::query_engine::DefaultSerializer;
 use servers::grpc::region_server::RegionServerHandler;
@@ -58,6 +58,7 @@ use session::context::QueryContext;
 use store_api::storage::RegionId;
 use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
 use table::table::adapter::DfTableProviderAdapter;
+use table::table::scan::REGION_SCAN_EXEC_NAME;
 
 use crate::cluster::{GreptimeDbCluster, GreptimeDbClusterBuilder};
 
@@ -405,14 +406,7 @@ async fn grouped_read_rdf_and_rejections() {
     for datanode_id in cluster.datanode_instances.keys().copied() {
         let mut own_regions = region_ids_of_datanode(&fe, TABLE, datanode_id).await;
         own_regions.sort();
-        let max_concurrent = own_regions.len().min(2);
-        let envelope = build_group_read_plan_with_concurrency(
-            &own_regions,
-            info.table_id(),
-            &nested,
-            max_concurrent,
-        )
-        .unwrap();
+        let envelope = build_group_read_plan(&own_regions, info.table_id(), &nested).unwrap();
         let bytes = encode(&envelope);
         let payload = peek_group_read_envelope(&bytes).unwrap().unwrap();
         assert_eq!(
@@ -420,7 +414,6 @@ async fn grouped_read_rdf_and_rejections() {
             payload.region_ids().to_vec(),
             "the envelope must name exactly the regions of datanode {datanode_id}"
         );
-        assert_eq!(max_concurrent, payload.max_concurrent());
         let server = cluster
             .datanode_instances
             .get(&datanode_id)
@@ -451,9 +444,25 @@ async fn grouped_read_rdf_and_rejections() {
         let metrics = stream
             .metrics()
             .expect("a finished grouped stream must report cumulative member metrics");
+        let region_scans = metrics
+            .plan_metrics
+            .iter()
+            .filter(|plan| plan.plan_name == REGION_SCAN_EXEC_NAME)
+            .collect::<Vec<_>>();
         assert!(
-            !metrics.plan_metrics.is_empty(),
-            "the grouped metrics must contain the member plan metrics: {metrics:?}"
+            region_scans.len() >= own_regions.len(),
+            "each member region must contribute its own RegionScanExec metrics, expected at least              {} entries: {metrics:?}",
+            own_regions.len()
+        );
+        let scanned_bytes = region_scans
+            .iter()
+            .flat_map(|plan| &plan.metrics)
+            .filter(|(name, _)| name == "output_bytes")
+            .map(|(_, value)| *value)
+            .sum::<usize>();
+        assert!(
+            scanned_bytes > 0,
+            "the cumulative metrics must include region scan bytes: {metrics:?}"
         );
         assert!(
             metrics.region_watermarks.is_empty(),
@@ -525,6 +534,24 @@ async fn grouped_read_rdf_and_rejections() {
         );
         error
     };
+
+    // The whole request is bounded before the request-scoped decoder runs. Padding uses an
+    // unknown protobuf field so the root still peeks as a valid GroupRead.
+    let mut oversized = bytes.clone();
+    oversized.push(0x7a); // field 15, wire type 2
+    let padding = MAX_GROUP_READ_PAYLOAD_BYTES + 1024 - oversized.len() - 4;
+    push_varint(padding, &mut oversized);
+    oversized.resize(MAX_GROUP_READ_PAYLOAD_BYTES + 1024, 0);
+    let error = assert_rejected(
+        "a request above the total size bound",
+        server
+            .handle_remote_read(request_for(own_regions[0], oversized), QueryContext::arc())
+            .await,
+    );
+    assert!(
+        error.to_string().contains("above the") && error.to_string().contains("byte bound"),
+        "{error}"
+    );
 
     let anchor_missing = mutate_payload(&bytes, |payload| {
         payload["region_ids"] = serde_json::json!([own_regions[0].as_u64()]);
@@ -633,7 +660,9 @@ async fn grouped_read_rdf_and_rejections() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn grouped_read_sum_over_union_all_region_plans_returns_one_partial_per_datanode() {
+async fn dn_level_poc_group_read_sum_over_union_all_returns_partial_rows() {
+    // DN-level POC only: the test drives GroupRead directly and sums the per-datanode partial
+    // rows itself. FE SQL/Flight aggregate pushdown is not part of this case.
     common_telemetry::init_default_ut_logging();
     let cluster = build_cluster("dn_grouped_read_sum").await;
     let fe = cluster.fe_instance().clone();
@@ -662,18 +691,13 @@ async fn grouped_read_sum_over_union_all_region_plans_returns_one_partial_per_da
     for datanode_id in cluster.datanode_instances.keys().copied() {
         let mut own_regions = region_ids_of_datanode(&fe, TABLE, datanode_id).await;
         own_regions.sort();
-        let envelope = build_group_read_plan_with_combine(
-            &own_regions,
-            info.table_id(),
-            &nested,
-            2,
-            |union| {
+        let envelope =
+            build_group_read_plan_with_combine(&own_regions, info.table_id(), &nested, |union| {
                 LogicalPlanBuilder::from(union)
                     .aggregate(Vec::<datafusion_expr::Expr>::new(), vec![sum(col("v"))])?
                     .build()
-            },
-        )
-        .unwrap();
+            })
+            .unwrap();
         let stream = cluster
             .datanode_instances
             .get(&datanode_id)
@@ -839,16 +863,10 @@ async fn grouped_read_active_remote_filter_update_and_cancel_releases_permit() {
             .get()
     };
 
-    let mut stream = server
+    let stream = server
         .handle_remote_read(request(), ctx.clone())
         .await
         .unwrap();
-    let first = tokio::time::timeout(Duration::from_secs(5), stream.next())
-        .await
-        .unwrap()
-        .unwrap()
-        .unwrap();
-    assert!(first.num_rows() > 0, "the first region has begun scanning");
     // A live grouped stream holds the only permit, not one per region. A second read times out.
     let blocked = server.handle_remote_read(request(), ctx.clone()).await;
     assert!(
@@ -858,20 +876,23 @@ async fn grouped_read_active_remote_filter_update_and_cancel_releases_permit() {
         ),
         "a live grouped stream must retain the single permit"
     );
+    // The stream has completed preflight and has not polled a region yet. The filters are
+    // registered without a scan runtime, so the update is either buffered or applied; when the
+    // first poll starts the query engine, both region scans must consume the false filter.
     let applied = counter("applied");
+    let buffered = counter("buffered");
     server.handle(update()).await.unwrap();
     assert!(
-        counter("applied") > applied,
-        "the real remote update must apply to an installed filter"
+        counter("applied") > applied || counter("buffered") > buffered,
+        "the real remote update must reach the registered grouped filter"
     );
-    let rest = common_recordbatch::util::collect_batches(stream)
+    let batches = common_recordbatch::util::collect_batches(stream)
         .await
         .unwrap();
     assert_eq!(
         0,
-        rest.iter().map(|batch| batch.num_rows()).sum::<usize>(),
-        "the active false update must filter the remaining grouped region, which has {} baseline rows",
-        counts[1]
+        batches.iter().map(|batch| batch.num_rows()).sum::<usize>(),
+        "the false update must filter both regions, whose baseline row counts are {counts:?}"
     );
     let missing = counter("missing_registration");
     server.handle(update()).await.unwrap();
@@ -914,7 +935,8 @@ async fn grouped_read_active_remote_filter_update_and_cancel_releases_permit() {
         .handle_remote_read(request(), ctx.clone())
         .await
         .unwrap();
-    assert!(failed.next().await.unwrap().unwrap().num_rows() > 0);
+    // The lazy stream has not started the query engine yet. Closing one member before the first
+    // poll makes the scan-time failure deterministic.
     server
         .handle_request(
             regions[1],
@@ -929,7 +951,7 @@ async fn grouped_read_active_remote_filter_update_and_cancel_releases_permit() {
         .unwrap();
     assert!(
         matches!(error, Some(Err(_))),
-        "the failing member must fail the whole grouped stream"
+        "the failing member must fail the whole grouped stream: {error:?}"
     );
     let missing = counter("missing_registration");
     server.handle(update()).await.unwrap();
@@ -998,6 +1020,14 @@ async fn grouped_read_active_remote_filter_update_and_cancel_releases_permit() {
             "{key}"
         );
     }
+}
+
+fn push_varint(mut value: usize, out: &mut Vec<u8>) {
+    while value >= 0x80 {
+        out.push((value as u8) | 0x80);
+        value >>= 7;
+    }
+    out.push(value as u8);
 }
 
 fn encode(plan: &datafusion_expr::LogicalPlan) -> Vec<u8> {

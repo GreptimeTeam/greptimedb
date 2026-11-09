@@ -20,6 +20,7 @@
 //! the resulting ordinary multi-input tree through the query engine. There is no physical-input
 //! registry or combine-plan field: a `UnionAll` is literally a DataFusion `Union`.
 
+use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
@@ -31,16 +32,23 @@ use common_query::request::QueryRequest;
 use common_recordbatch::adapter::RecordBatchMetrics;
 use common_recordbatch::{OrderOption, RecordBatch, RecordBatchStream, SendableRecordBatchStream};
 use datafusion_expr::LogicalPlan;
+use datatypes::schema::{Schema, SchemaRef};
 use futures::Stream;
-use query::dist_plan::{GroupReadPayload, RegionPlanResolver, decode_group_read_request};
+use query::dist_plan::{
+    GroupReadPayload, MAX_GROUP_READ_PAYLOAD_BYTES, RegionPlanResolver, decode_group_read_request,
+};
 use session::context::QueryContextRef;
-use snafu::ResultExt;
+use snafu::{IntoError, ResultExt};
 use store_api::storage::RegionId;
 use tokio::sync::OwnedSemaphorePermit;
 
 use crate::error::{DecodeLogicalPlanSnafu, NewPlanDecoderSnafu, Result, UnexpectedSnafu};
 use crate::region_server::RegionServer;
 use crate::region_server::catalog::NameAwareCatalogList;
+use crate::region_server::remote_dyn_filter::RemoteDynFilterRegistrationGuard;
+
+type GroupedReadInitFuture =
+    Pin<Box<dyn Future<Output = Result<SendableRecordBatchStream>> + Send>>;
 
 impl RegionServer {
     /// Decodes and executes a `GroupRead` request.
@@ -65,6 +73,16 @@ impl RegionServer {
         payload
             .validate_for_request(anchor)
             .map_err(|reason| UnexpectedSnafu { violated: reason }.build())?;
+        if request.plan.len() > MAX_GROUP_READ_PAYLOAD_BYTES {
+            return UnexpectedSnafu {
+                violated: format!(
+                    "GroupRead request is {} bytes, above the {} byte bound",
+                    request.plan.len(),
+                    MAX_GROUP_READ_PAYLOAD_BYTES
+                ),
+            }
+            .fail();
+        }
 
         let engine_ctx = self
             .inner
@@ -92,20 +110,32 @@ impl RegionServer {
             }
         }
 
-        let stream = self
-            .inner
-            .handle_read(
-                QueryRequest {
-                    header: request.header,
-                    region_id: anchor,
-                    plan,
-                },
-                query_ctx,
-            )
-            .await?;
-        let stream = guards
-            .into_iter()
-            .fold(stream, super::wrap_remote_dyn_filter_guarded_stream);
+        let schema = SchemaRef::from(Schema::try_from(plan.schema().clone()).map_err(|error| {
+            UnexpectedSnafu {
+                violated: format!("GroupRead combine tree has an invalid schema: {error}"),
+            }
+            .build()
+        })?);
+        let read_query_ctx = query_ctx.clone();
+        let inner = self.inner.clone();
+        let init: GroupedReadInitFuture = Box::pin(async move {
+            inner
+                .handle_read(
+                    QueryRequest {
+                        header: request.header,
+                        region_id: anchor,
+                        plan,
+                    },
+                    read_query_ctx,
+                )
+                .await
+        });
+        let stream: SendableRecordBatchStream = Box::pin(GroupedReadLazyStream {
+            schema,
+            init: Some(init),
+            inner: None,
+            guards,
+        });
         Ok(match permit {
             Some(permit) => Box::pin(GroupedReadPermitStream {
                 inner: stream,
@@ -113,6 +143,69 @@ impl RegionServer {
             }),
             None => stream,
         })
+    }
+}
+
+/// Starts the query engine on the first poll, after the request has already returned to the
+/// caller. This lets a remote dynamic-filter update that arrives before the first batch affect
+/// every region scan, and keeps the scan from running during request preflight.
+struct GroupedReadLazyStream {
+    schema: SchemaRef,
+    init: Option<GroupedReadInitFuture>,
+    inner: Option<SendableRecordBatchStream>,
+    guards: Vec<RemoteDynFilterRegistrationGuard>,
+}
+
+impl Stream for GroupedReadLazyStream {
+    type Item = std::result::Result<RecordBatch, common_recordbatch::error::Error>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        if self.inner.is_none() {
+            match self.init.as_mut().map(|init| init.as_mut().poll(cx)) {
+                Some(Poll::Pending) => return Poll::Pending,
+                Some(Poll::Ready(Ok(stream))) => {
+                    self.init = None;
+                    let stream = std::mem::take(&mut self.guards)
+                        .into_iter()
+                        .fold(stream, super::wrap_remote_dyn_filter_guarded_stream);
+                    self.inner = Some(stream);
+                }
+                Some(Poll::Ready(Err(error))) => {
+                    self.init = None;
+                    self.guards.clear();
+                    return Poll::Ready(Some(Err(common_recordbatch::error::ExternalSnafu
+                        .into_error(common_error::ext::BoxedError::new(error)))));
+                }
+                None => {}
+            }
+        }
+        match self.inner.as_mut() {
+            Some(inner) => inner.as_mut().poll_next(cx),
+            None => Poll::Ready(None),
+        }
+    }
+}
+
+impl RecordBatchStream for GroupedReadLazyStream {
+    fn name(&self) -> &str {
+        self.inner
+            .as_ref()
+            .map(|inner| inner.name())
+            .unwrap_or("GroupedReadLazyStream")
+    }
+
+    fn schema(&self) -> SchemaRef {
+        self.schema.clone()
+    }
+
+    fn output_ordering(&self) -> Option<&[OrderOption]> {
+        self.inner
+            .as_ref()
+            .and_then(|inner| inner.output_ordering())
+    }
+
+    fn metrics(&self) -> Option<RecordBatchMetrics> {
+        self.inner.as_ref().and_then(|inner| inner.metrics())
     }
 }
 

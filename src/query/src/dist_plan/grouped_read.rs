@@ -32,6 +32,7 @@ use std::cmp::Ordering;
 use std::collections::BTreeSet;
 use std::fmt;
 use std::hash::{Hash, Hasher};
+use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
@@ -40,6 +41,7 @@ use datafusion::common::Result as DataFusionResult;
 use datafusion::datasource::DefaultTableSource;
 use datafusion::execution::FunctionRegistry;
 use datafusion::execution::context::SessionState;
+use datafusion_common::tree_node::{TreeNode, TreeNodeRecursion};
 use datafusion_common::{DFSchema, DFSchemaRef, DataFusionError, TableReference};
 use datafusion_expr::{
     Expr, Extension, LogicalPlan, LogicalPlanBuilder, UserDefinedLogicalNodeCore,
@@ -48,8 +50,10 @@ use datatypes::schema::{Schema, SchemaRef};
 use prost::Message;
 use serde::{Deserialize, Serialize};
 use store_api::storage::RegionId;
-use substrait::df_logical_plan::consumer::SubstraitConsumer;
-use substrait::substrait_proto_df::proto::{ExtensionLeafRel, ExtensionSingleRel, ReadRel};
+use substrait::df_logical_plan::consumer::{SubstraitConsumer, from_substrait_rel};
+use substrait::substrait_proto_df::proto::{
+    ExtensionLeafRel, ExtensionSingleRel, ReadRel, Rel, rel,
+};
 use substrait::{DFLogicalSubstraitConvertor, Extensions, SubstraitPlan};
 use table::metadata::TableType;
 use table::table::adapter::DfTableProviderAdapter;
@@ -73,16 +77,6 @@ pub const MAX_GROUP_READ_REGIONS: usize = 1024;
 /// Upper bound on the serialized grouped-read request.
 pub const MAX_GROUP_READ_PAYLOAD_BYTES: usize = 8 * 1024 * 1024;
 
-/// Upper bound on region leaves a datanode may run concurrently.
-///
-/// The value is carried for preflight and observability. The default `UnionAll` combine tree is
-/// executed by the query engine, whose scheduling is bounded by the session target partitions.
-pub const MAX_GROUP_READ_CONCURRENCY: usize = 16;
-
-fn default_max_concurrent() -> usize {
-    1
-}
-
 fn check_region_list(region_ids: &[u64]) -> std::result::Result<(), String> {
     if region_ids.is_empty() {
         return Err("a grouped read names no region".to_string());
@@ -102,34 +96,11 @@ fn check_region_list(region_ids: &[u64]) -> std::result::Result<(), String> {
     Ok(())
 }
 
-fn check_concurrency(
-    max_concurrent: usize,
-    region_count: usize,
-) -> std::result::Result<(), String> {
-    if max_concurrent == 0 {
-        return Err("a grouped read allows no concurrent region".to_string());
-    }
-    if max_concurrent > MAX_GROUP_READ_CONCURRENCY {
-        return Err(format!(
-            "a grouped read allows {max_concurrent} concurrent regions, above the \
-             {MAX_GROUP_READ_CONCURRENCY} bound"
-        ));
-    }
-    if max_concurrent > region_count {
-        return Err(format!(
-            "a grouped read of {region_count} regions allows {max_concurrent} concurrent regions"
-        ));
-    }
-    Ok(())
-}
-
 /// Metadata of the `GroupRead` root marker.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct GroupReadPayload {
     version: u32,
     region_ids: Vec<u64>,
-    #[serde(default = "default_max_concurrent")]
-    max_concurrent: usize,
     table_id: u32,
     table_name: String,
 }
@@ -140,19 +111,9 @@ impl GroupReadPayload {
         table_id: u32,
         table_name: String,
     ) -> std::result::Result<Self, String> {
-        Self::try_new_with_concurrency(region_ids, table_id, table_name, 1)
-    }
-
-    pub fn try_new_with_concurrency(
-        region_ids: Vec<u64>,
-        table_id: u32,
-        table_name: String,
-        max_concurrent: usize,
-    ) -> std::result::Result<Self, String> {
         let payload = Self {
             version: GROUP_READ_VERSION,
             region_ids,
-            max_concurrent,
             table_id,
             table_name,
         };
@@ -166,10 +127,6 @@ impl GroupReadPayload {
 
     pub fn region_ids(&self) -> &[u64] {
         &self.region_ids
-    }
-
-    pub fn max_concurrent(&self) -> usize {
-        self.max_concurrent
     }
 
     pub fn table_id(&self) -> u32 {
@@ -228,7 +185,6 @@ impl GroupReadPayload {
             ));
         }
         check_region_list(&self.region_ids)?;
-        check_concurrency(self.max_concurrent, self.region_ids.len())?;
         if self.table_name.is_empty() {
             return Err("a grouped read names no table".to_string());
         }
@@ -514,13 +470,12 @@ impl UserDefinedLogicalNodeCore for GroupReadPlan {
         };
         write!(
             f,
-            "{}: version={}, table_id={}, table={}, regions={:?}, max_concurrent={}",
+            "{}: version={}, table_id={}, table={}, regions={:?}",
             Self::name(),
             payload.version,
             payload.table_id,
             payload.table_name,
-            payload.region_ids,
-            payload.max_concurrent
+            payload.region_ids
         )
     }
 
@@ -675,7 +630,6 @@ pub fn build_region_plan_union(
     regions: &[RegionId],
     table_id: u32,
     nested_plan: &LogicalPlan,
-    max_concurrent: usize,
 ) -> DataFusionResult<LogicalPlan> {
     let Some(table) = nested_plan_table(nested_plan) else {
         return Err(DataFusionError::Plan(format!(
@@ -683,7 +637,6 @@ pub fn build_region_plan_union(
             nested_plan.display_indent()
         )));
     };
-    check_concurrency(max_concurrent, regions.len()).map_err(DataFusionError::Plan)?;
     if regions.iter().any(|region| region.table_id() != table_id) {
         return Err(DataFusionError::Plan(format!(
             "the RegionPlan list names a region outside table {table_id}"
@@ -730,7 +683,6 @@ pub fn build_group_read_plan_with_combine(
     regions: &[RegionId],
     table_id: u32,
     nested_plan: &LogicalPlan,
-    max_concurrent: usize,
     combine: impl FnOnce(LogicalPlan) -> DataFusionResult<LogicalPlan>,
 ) -> DataFusionResult<LogicalPlan> {
     let Some(table) = nested_plan_table(nested_plan) else {
@@ -739,13 +691,12 @@ pub fn build_group_read_plan_with_combine(
             nested_plan.display_indent()
         )));
     };
-    let union = build_region_plan_union(regions, table_id, nested_plan, max_concurrent)?;
+    let union = build_region_plan_union(regions, table_id, nested_plan)?;
     let combine = combine(union)?;
-    let payload = GroupReadPayload::try_new_with_concurrency(
+    let payload = GroupReadPayload::try_new(
         regions.iter().map(RegionId::as_u64).collect(),
         table_id,
         table.table_name,
-        max_concurrent,
     )
     .map_err(DataFusionError::Plan)?;
     let node = GroupReadPlan::try_new(payload, combine).map_err(DataFusionError::Plan)?;
@@ -758,17 +709,7 @@ pub fn build_group_read_plan(
     table_id: u32,
     nested_plan: &LogicalPlan,
 ) -> DataFusionResult<LogicalPlan> {
-    build_group_read_plan_with_concurrency(regions, table_id, nested_plan, 1)
-}
-
-/// Builds the default append-equivalent grouped read with an explicit concurrency bound.
-pub fn build_group_read_plan_with_concurrency(
-    regions: &[RegionId],
-    table_id: u32,
-    nested_plan: &LogicalPlan,
-    max_concurrent: usize,
-) -> DataFusionResult<LogicalPlan> {
-    build_group_read_plan_with_combine(regions, table_id, nested_plan, max_concurrent, Ok)
+    build_group_read_plan_with_combine(regions, table_id, nested_plan, Ok)
 }
 
 /// Whether `plan` is a shape a grouped read may carry: one ordinary table scan under projections,
@@ -859,6 +800,11 @@ pub fn validate_region_plan(
     plan: &LogicalPlan,
 ) -> std::result::Result<(), String> {
     payload.validate_for_request(region_id)?;
+    if plan_has_forbidden_nodes(plan) {
+        return Err(format!(
+            "region {region_id} decoded a plan with a subquery or DML node"
+        ));
+    }
     let Some(table_name) = nested_plan_table(plan) else {
         return Err(format!(
             "region {region_id} decoded a plan that is not a single ordinary table read: `{}`",
@@ -872,6 +818,35 @@ pub fn validate_region_plan(
         ));
     }
     Ok(())
+}
+
+fn expr_has_subquery(expr: &Expr) -> bool {
+    let mut found = false;
+    expr.apply(|expr| {
+        if matches!(
+            expr,
+            Expr::ScalarSubquery(_)
+                | Expr::InSubquery(_)
+                | Expr::Exists(_)
+                | Expr::SetComparison(_)
+        ) {
+            found = true;
+            Ok(TreeNodeRecursion::Stop)
+        } else {
+            Ok(TreeNodeRecursion::Continue)
+        }
+    })
+    .unwrap();
+    found
+}
+
+fn plan_has_forbidden_nodes(plan: &LogicalPlan) -> bool {
+    matches!(plan, LogicalPlan::Dml(_))
+        || plan.expressions().iter().any(expr_has_subquery)
+        || plan
+            .inputs()
+            .iter()
+            .any(|input| plan_has_forbidden_nodes(input))
 }
 
 /// Resolves one `RegionPlan` leaf against its region catalog.
@@ -909,12 +884,16 @@ pub async fn decode_group_read_request(
         outer_schemas: Mutex::new(Vec::new()),
         consumed: Mutex::new(BTreeSet::new()),
         expected_schema: Mutex::new(None),
+        root_seen: AtomicBool::new(false),
     };
     let decoded = DFLogicalSubstraitConvertor
         .decode_with_consumer(&plan, state, &consumer)
         .await
         .map_err(|error| format!("cannot decode GroupRead combine tree: {error}"))?;
     consumer.validate_complete()?;
+    if plan_has_forbidden_nodes(&decoded) {
+        return Err("the GroupRead combine tree contains a subquery or DML node".to_string());
+    }
     Ok(decoded)
 }
 
@@ -926,6 +905,7 @@ struct GroupReadRequestConsumer<'a> {
     outer_schemas: Mutex<Vec<Arc<DFSchema>>>,
     consumed: Mutex<BTreeSet<u64>>,
     expected_schema: Mutex<Option<SchemaRef>>,
+    root_seen: AtomicBool,
 }
 
 impl GroupReadRequestConsumer<'_> {
@@ -991,6 +971,24 @@ impl SubstraitConsumer for GroupReadRequestConsumer<'_> {
             .and_then(|idx| schemas.get(idx).cloned())
     }
 
+    async fn consume_rel(&self, rel: &Rel) -> datafusion::common::Result<LogicalPlan> {
+        let allowed = matches!(
+            rel.rel_type.as_ref(),
+            Some(rel::RelType::Set(_))
+                | Some(rel::RelType::Project(_))
+                | Some(rel::RelType::Filter(_))
+                | Some(rel::RelType::Aggregate(_))
+                | Some(rel::RelType::ExtensionLeaf(_))
+                | Some(rel::RelType::ExtensionSingle(_))
+        );
+        if !allowed {
+            return Err(group_read_error(
+                "only UnionAll, Projection, Filter, Aggregate and RegionPlan are allowed in a                  GroupRead combine tree",
+            ));
+        }
+        from_substrait_rel(self, rel).await
+    }
+
     async fn consume_read(&self, _rel: &ReadRel) -> datafusion::common::Result<LogicalPlan> {
         Err(group_read_error(
             "plain table read outside a RegionPlan is not allowed in a GroupRead combine tree",
@@ -1047,6 +1045,9 @@ impl SubstraitConsumer for GroupReadRequestConsumer<'_> {
         &self,
         rel: &ExtensionSingleRel,
     ) -> datafusion::common::Result<LogicalPlan> {
+        if self.root_seen.swap(true, AtomicOrdering::SeqCst) {
+            return Err(group_read_error("nested GroupRead is not allowed"));
+        }
         let detail = rel
             .detail
             .as_ref()
@@ -1077,21 +1078,12 @@ impl SubstraitConsumer for GroupReadRequestConsumer<'_> {
 pub struct DatanodeReadGroup {
     target: RegionQueryTarget,
     regions: Vec<RegionId>,
-    max_concurrent: usize,
 }
 
 impl DatanodeReadGroup {
     pub fn try_new(
         target: RegionQueryTarget,
         regions: Vec<RegionId>,
-    ) -> std::result::Result<Self, String> {
-        Self::try_new_with_concurrency(target, regions, 1)
-    }
-
-    pub fn try_new_with_concurrency(
-        target: RegionQueryTarget,
-        regions: Vec<RegionId>,
-        max_concurrent: usize,
     ) -> std::result::Result<Self, String> {
         if regions.is_empty() {
             return Err("a grouped read group names no region".to_string());
@@ -1102,18 +1094,13 @@ impl DatanodeReadGroup {
                 regions.len()
             ));
         }
-        check_concurrency(max_concurrent, regions.len())?;
         let mut seen = std::collections::BTreeSet::new();
         for region_id in &regions {
             if !seen.insert(*region_id) {
                 return Err(format!("group {target:?} names region {region_id} twice"));
             }
         }
-        Ok(Self {
-            target,
-            regions,
-            max_concurrent,
-        })
+        Ok(Self { target, regions })
     }
 
     pub fn target(&self) -> &RegionQueryTarget {
@@ -1122,10 +1109,6 @@ impl DatanodeReadGroup {
 
     pub fn regions(&self) -> &[RegionId] {
         &self.regions
-    }
-
-    pub fn max_concurrent(&self) -> usize {
-        self.max_concurrent
     }
 }
 
@@ -1255,6 +1238,95 @@ mod tests {
         assert!(error.contains("does not name the grouped regions exactly once"));
     }
 
+    #[tokio::test]
+    async fn group_read_consumer_rejects_join_sort_and_nested_group_read() {
+        use datafusion::execution::SessionStateBuilder;
+
+        let plan = project_scan();
+        let state = SessionStateBuilder::new().build();
+
+        let join = build_group_read_plan_with_combine(&regions(2), 1024, &plan, |_union| {
+            let right = LogicalPlanBuilder::from(project_scan())
+                .alias("right")?
+                .build()?;
+            LogicalPlanBuilder::from(project_scan())
+                .cross_join(right)?
+                .build()
+        })
+        .unwrap();
+        let error = decode_group_read_request(
+            &DFLogicalSubstraitConvertor
+                .encode(&join, DefaultSerializer)
+                .unwrap(),
+            &state,
+            peek_group_read_envelope(
+                &DFLogicalSubstraitConvertor
+                    .encode(&join, DefaultSerializer)
+                    .unwrap(),
+            )
+            .unwrap()
+            .unwrap(),
+            &TestRegionPlanResolver,
+        )
+        .await
+        .unwrap_err();
+        assert!(error.contains("GroupRead combine tree"), "{error}");
+
+        let sorted = build_group_read_plan_with_combine(&regions(2), 1024, &plan, |union| {
+            LogicalPlanBuilder::from(union)
+                .sort(vec![col("ts").sort(true, false)])?
+                .build()
+        })
+        .unwrap();
+        let sorted_bytes = DFLogicalSubstraitConvertor
+            .encode(&sorted, DefaultSerializer)
+            .unwrap();
+        let error = decode_group_read_request(
+            &sorted_bytes,
+            &state,
+            peek_group_read_envelope(&sorted_bytes).unwrap().unwrap(),
+            &TestRegionPlanResolver,
+        )
+        .await
+        .unwrap_err();
+        assert!(error.contains("GroupRead combine tree"), "{error}");
+
+        let inner = build_group_read_plan(&regions(1), 1024, &plan).unwrap();
+        let nested =
+            build_group_read_plan_with_combine(&regions(1), 1024, &plan, |_| Ok(inner)).unwrap();
+        let nested_bytes = DFLogicalSubstraitConvertor
+            .encode(&nested, DefaultSerializer)
+            .unwrap();
+        let error = decode_group_read_request(
+            &nested_bytes,
+            &state,
+            peek_group_read_envelope(&nested_bytes).unwrap().unwrap(),
+            &TestRegionPlanResolver,
+        )
+        .await
+        .unwrap_err();
+        assert!(error.contains("GroupRead combine tree"), "{error}");
+    }
+
+    #[test]
+    fn subquery_expressions_are_forbidden() {
+        use datafusion_expr::Subquery;
+
+        let plan = LogicalPlanBuilder::from(project_scan())
+            .project(vec![
+                Expr::ScalarSubquery(Subquery {
+                    subquery: Arc::new(project_scan()),
+                    outer_ref_columns: vec![],
+                    spans: Default::default(),
+                })
+                .alias("subq"),
+            ])
+            .unwrap()
+            .build()
+            .unwrap();
+        assert!(plan_has_forbidden_nodes(&plan));
+    }
+
     #[test]
     fn region_plan_payload_carries_region_and_complete_plan() {
         let plan = project_scan();
@@ -1266,18 +1338,6 @@ mod tests {
             payload,
             RegionPlanPayload::decode(&payload.encode().unwrap()).unwrap()
         );
-    }
-
-    #[test]
-    fn grouped_read_metadata_defaults_old_payload_to_serial() {
-        let legacy = serde_json::json!({
-            "version": GROUP_READ_VERSION,
-            "region_ids": [RegionId::new(1024, 1).as_u64()],
-            "table_id": 1024,
-            "table_name": "metrics",
-        });
-        let decoded = GroupReadPayload::decode(&serde_json::to_vec(&legacy).unwrap()).unwrap();
-        assert_eq!(1, decoded.max_concurrent());
     }
 
     #[test]
@@ -1305,15 +1365,6 @@ mod tests {
                 ],
                 1024,
                 "metrics".to_string(),
-            )
-            .is_err()
-        );
-        assert!(
-            GroupReadPayload::try_new_with_concurrency(
-                vec![RegionId::new(1024, 1).as_u64()],
-                1024,
-                "metrics".to_string(),
-                2,
             )
             .is_err()
         );

@@ -70,7 +70,7 @@ use crate::dist_plan::dyn_filter_bridge::{
     register_dyn_filter_subscribers_for_region, register_remote_dyn_filters,
     resolve_scalar_subquery_dyn_filters,
 };
-use crate::dist_plan::grouped_read::{DatanodeReadGroup, build_group_read_plan_with_concurrency};
+use crate::dist_plan::grouped_read::{DatanodeReadGroup, build_group_read_plan};
 use crate::dist_plan::{
     FilterId, RemoteDynFilterProducerId, RemoteDynFilterRegistryLease, Subscriber,
 };
@@ -962,10 +962,10 @@ impl MergeScanExec {
     ///
     /// The envelope of a group names every region of that group and carries the same plain
     /// per-region plan the ordinary path would send, so the datanode decodes it once per region
-    /// against that region's own catalog. The datanode may keep `group.max_concurrent()` member
-    /// streams active, so batches of different regions may interleave; grouping is only chosen for
-    /// shapes that promise no ordering. Nothing is merged across regions here: the batches of the
-    /// group are yielded as they arrive.
+    /// against that region's own catalog and executes the resulting ordinary multi-input plan. The
+    /// query engine schedules the combine tree; grouping is only chosen for shapes that promise no
+    /// ordering. Nothing is merged across regions here: the batches of the group are yielded as
+    /// they arrive.
     fn to_grouped_stream(
         &self,
         context: Arc<TaskContext>,
@@ -1044,16 +1044,11 @@ impl MergeScanExec {
                         }
                         SubscriberRollbackGuard::new(lease.registry(), added)
                     });
-                let grouped_plan = build_group_read_plan_with_concurrency(
-                    group.regions(),
-                    anchor.table_id(),
-                    &plan,
-                    group.max_concurrent(),
-                )
-                .map_err(|error| {
-                    MERGE_SCAN_ERRORS_TOTAL.inc();
-                    error
-                })?;
+                let grouped_plan = build_group_read_plan(group.regions(), anchor.table_id(), &plan)
+                    .map_err(|error| {
+                        MERGE_SCAN_ERRORS_TOTAL.inc();
+                        error
+                    })?;
                 let region_query_ctx = query_context_with_refreshed_initial_dyn_filter_regs(
                     &query_ctx,
                     anchor,
@@ -2340,8 +2335,7 @@ mod tests {
             .build()
             .unwrap();
         let regions = vec![RegionId::new(1024, 1), RegionId::new(1024, 2)];
-        let group = DatanodeReadGroup::try_new_with_concurrency(test_target(7), regions.clone(), 2)
-            .unwrap();
+        let group = DatanodeReadGroup::try_new(test_target(7), regions.clone()).unwrap();
         let exec = MergeScanExec::new(
             &SessionStateBuilder::new().build(),
             TableName::new("catalog", "schema", "table"),
