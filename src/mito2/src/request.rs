@@ -1370,6 +1370,8 @@ pub(crate) struct RegionEditRequest {
     pub(crate) preload_sst_cache: bool,
     /// The waiters that are waiting for this region edit's result.
     pub(crate) waiters: Waiters,
+    /// Whether the edit belongs to the current staging and must not run after it has ended.
+    pub(crate) staging_only: bool,
 }
 
 impl RegionEditRequest {
@@ -1384,7 +1386,14 @@ impl RegionEditRequest {
             edit,
             preload_sst_cache,
             waiters: Waiters::one(waiter),
+            staging_only: false,
         }
+    }
+
+    /// Marks the edit as belonging to the current staging.
+    pub(crate) fn staging_only(mut self) -> Self {
+        self.staging_only = true;
+        self
     }
 }
 

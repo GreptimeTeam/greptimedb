@@ -42,6 +42,8 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             // after which the region is already out of staging.
             let _manager = region.manifest_ctx.manifest_manager.write().await;
             region.abort_staging();
+            // Edits queued behind a staged edit belong to the staging that has just ended.
+            self.reject_region_edit_queue_as_not_found(region_id);
         }
 
         // Memtables containing skip-WAL writes must be flushed before closing.

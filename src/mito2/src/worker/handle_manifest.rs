@@ -30,7 +30,9 @@ use store_api::storage::{RegionId, SequenceNumber};
 use crate::cache::CacheManagerRef;
 use crate::cache::file_cache::{FileType, IndexKey};
 use crate::config::IndexBuildMode;
-use crate::error::{EditRegionSnafu, RegionBusySnafu, RegionNotFoundSnafu, Result};
+use crate::error::{
+    EditRegionSnafu, RegionBusySnafu, RegionNotFoundSnafu, RegionStateSnafu, Result,
+};
 use crate::manifest::action::{
     RegionChange, RegionEdit, RegionMetaAction, RegionMetaActionList, RegionTruncate, TruncateKind,
 };
@@ -319,6 +321,20 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             return RegionEditDispatch::Rejected;
         }
 
+        // A close may have abandoned the staging this edit belongs to, even if its flush failed.
+        if request.staging_only && region.manifest_ctx.staging_partition_info().is_none() {
+            let state = region.state();
+            request.waiters.reply_with(|| {
+                RegionStateSnafu {
+                    region_id,
+                    state,
+                    expect: RegionRoleState::Leader(RegionLeaderState::Staging),
+                }
+                .fail()
+            });
+            return RegionEditDispatch::Rejected;
+        }
+
         if !region.is_writable() || self.flush_scheduler.has_pending_alter(region_id) {
             if matches!(
                 region.state(),
@@ -343,6 +359,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             mut edit,
             waiters,
             preload_sst_cache,
+            staging_only: _,
         } = request;
         let file_sequence = region.version_control.current().last_sequence + 1;
         edit.committed_sequence = Some(file_sequence);

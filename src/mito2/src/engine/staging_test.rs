@@ -16,7 +16,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 use std::{assert_matches, fs};
 
@@ -58,7 +58,7 @@ use crate::manifest::action::{
     RegionChange, RegionEdit, RegionMetaAction, RegionMetaActionList, RegionPartitionExprChange,
 };
 use crate::region::{MitoRegionRef, RegionLeaderState, RegionRoleState};
-use crate::request::WorkerRequest;
+use crate::request::{RegionEditRequest, WorkerRequest};
 use crate::sst::FormatType;
 use crate::sst::file::FileMeta;
 use crate::test_util::{
@@ -1398,6 +1398,30 @@ impl Write for MockWriter {
     }
 }
 
+/// Fails closing Parquet files while `fail_parquet` is set.
+struct ParquetFailWriter {
+    path: String,
+    inner: Writer,
+    fail_parquet: Arc<AtomicBool>,
+}
+
+impl Write for ParquetFailWriter {
+    async fn write(&mut self, bs: Buffer) -> MockResult<()> {
+        self.inner.write(bs).await
+    }
+
+    async fn close(&mut self) -> MockResult<Metadata> {
+        if self.fail_parquet.load(Ordering::Relaxed) && self.path.ends_with(".parquet") {
+            return Err(MockError::new(ErrorKind::Unexpected, "mock error"));
+        }
+        self.inner.close().await
+    }
+
+    async fn abort(&mut self) -> MockResult<()> {
+        self.inner.abort().await
+    }
+}
+
 struct MockDeleter {
     inner: Deleter,
 }
@@ -1594,32 +1618,30 @@ async fn first_file(region: &MitoRegionRef) -> FileMeta {
     manifest.files.values().next().unwrap().clone()
 }
 
-/// Starts an edit importing `file` and waits until the region is `Editing`.
-/// The caller holds the manifest write lock so that the edit cannot finish.
+fn edit_adding(file: FileMeta) -> RegionEdit {
+    RegionEdit {
+        files_to_add: vec![file],
+        files_to_remove: vec![],
+        timestamp_ms: None,
+        compaction_time_window: None,
+        flushed_entry_id: None,
+        flushed_sequence: None,
+        committed_sequence: None,
+    }
+}
+
+/// Spawns an edit importing `file`.
 fn spawn_edit(
     engine: &MitoEngine,
     region_id: RegionId,
     file: FileMeta,
 ) -> tokio::task::JoinHandle<crate::error::Result<()>> {
     let edit_engine = engine.clone();
-    tokio::spawn(async move {
-        edit_engine
-            .edit_region(
-                region_id,
-                RegionEdit {
-                    files_to_add: vec![file],
-                    files_to_remove: vec![],
-                    timestamp_ms: None,
-                    compaction_time_window: None,
-                    flushed_entry_id: None,
-                    flushed_sequence: None,
-                    committed_sequence: None,
-                },
-            )
-            .await
-    })
+    tokio::spawn(async move { edit_engine.edit_region(region_id, edit_adding(file)).await })
 }
 
+/// Starts an edit importing `file` and waits until the region is `Editing`.
+/// The caller holds the manifest write lock so that the edit cannot finish.
 async fn start_staged_edit(
     engine: &MitoEngine,
     region: &MitoRegionRef,
@@ -2143,7 +2165,7 @@ async fn test_close_time_flush_rejects_queued_and_late_edits() {
     // The close-time flush is held back, so both edits arrive while the region waits for it.
     let _ = edit.await;
     let err = queued.await.unwrap().unwrap_err();
-    assert_eq!(StatusCode::RegionBusy, err.status_code());
+    assert_eq!(StatusCode::RegionNotFound, err.status_code());
     let err = spawn_edit(&engine, region_id, late_file.clone())
         .await
         .unwrap()
@@ -2159,6 +2181,72 @@ async fn test_close_time_flush_rejects_queued_and_late_edits() {
     assert!(!manifest.files.contains_key(&queued_file.file_id));
     assert!(!manifest.files.contains_key(&late_file.file_id));
     assert_eq!(5, count_rows(&engine, region_id).await);
+}
+
+#[tokio::test]
+async fn test_staging_only_edit_rejected_after_close_time_flush_fails() {
+    let fail_parquet = Arc::new(AtomicBool::new(false));
+    let writer_flag = fail_parquet.clone();
+    let mock_layer = MockLayerBuilder::default()
+        .writer_factory(Arc::new(move |path, _args, inner| {
+            Box::new(ParquetFailWriter {
+                path: path.to_string(),
+                inner,
+                fail_parquet: writer_flag.clone(),
+            })
+        }))
+        .build()
+        .unwrap();
+    let mut env = TestEnv::new().await.with_mock_layer(mock_layer);
+    let engine = env.create_engine(MitoConfig::default()).await;
+    let region_id = RegionId::new(1024, 0);
+    let request = CreateRequestBuilder::new().build();
+    let schema = rows_schema(&request);
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+    put_range(&engine, region_id, &schema, (0, 3)).await;
+    flush_region(&engine, region_id, None).await;
+    enter_staging(&engine, region_id).await;
+    put_range_skip_wal(&engine, region_id, &schema, (3, 5)).await;
+
+    fail_parquet.store(true, Ordering::Relaxed);
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::Close(RegionCloseRequest::default()),
+        )
+        .await
+        .unwrap_err();
+
+    // The close failed, so the region is open, writable and no longer in staging.
+    let region = engine.get_region(region_id).unwrap();
+    assert_eq!(
+        RegionRoleState::Leader(RegionLeaderState::Writable),
+        region.state()
+    );
+    let file = FileMeta {
+        file_id: FileId::random(),
+        ..first_file(&region).await
+    };
+    let file_id = file.file_id;
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    engine
+        .inner
+        .workers
+        .submit_to_worker(
+            region_id,
+            WorkerRequest::EditRegion(
+                RegionEditRequest::new(region_id, edit_adding(file), false, tx).staging_only(),
+            ),
+        )
+        .await
+        .unwrap();
+
+    assert_matches!(rx.await.unwrap().unwrap_err(), Error::RegionState { .. });
+    let manifest = region.manifest_ctx.manifest().await;
+    assert!(!manifest.files.contains_key(&file_id));
 }
 
 #[tokio::test]
