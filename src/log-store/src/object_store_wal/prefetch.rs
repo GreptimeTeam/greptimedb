@@ -24,7 +24,7 @@ use tokio_util::task::AbortOnDropHandle;
 
 use crate::error::{InvalidWalObjectSnafu, Result, WalSegmentFetchSnafu};
 use crate::object_store_wal::format::{FooterEntry, Record, decode_segment};
-use crate::object_store_wal::io::WalObjectIo;
+use crate::object_store_wal::io::WalObjectRead;
 
 /// Number of segments a read fetches ahead of the one whose entries it
 /// yields. On S3 a replay that fetched each segment after the previous one
@@ -49,7 +49,7 @@ pub(crate) const READ_PREFETCH_BYTES: usize = 64 * 1024 * 1024;
 /// decode the error is returned as [`crate::error::Error::InvalidWalObject`]. A failed fetch
 /// is returned as is.
 async fn fetch_segment(
-    io: &dyn WalObjectIo,
+    io: &dyn WalObjectRead,
     object_seq: u64,
     entry: &FooterEntry,
 ) -> Result<Vec<Record>> {
@@ -80,7 +80,7 @@ fn try_reserve_prefetch_bytes(
 /// dropped read does, aborts the task; a task that panics fails the fetch with
 /// [`crate::error::Error::WalSegmentFetch`].
 fn spawn_fetch_segment(
-    io: Arc<dyn WalObjectIo>,
+    io: Arc<dyn WalObjectRead>,
     object_seq: u64,
     entry: FooterEntry,
     permit: Option<OwnedSemaphorePermit>,
@@ -106,7 +106,7 @@ fn spawn_fetch_segment(
 /// Fetches segments in order, retaining prefetch permits until the consumer
 /// advances. Errors are yielded for the caller to apply its own recovery policy.
 pub(crate) fn segments(
-    io: Arc<dyn WalObjectIo>,
+    io: Arc<dyn WalObjectRead>,
     objects: Vec<(u64, FooterEntry)>,
     budget: Arc<Semaphore>,
 ) -> BoxStream<'static, (u64, FooterEntry, Result<Vec<Record>>)> {

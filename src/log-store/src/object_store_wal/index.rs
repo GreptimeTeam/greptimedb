@@ -27,7 +27,7 @@ use crate::object_store_wal::format::{
     FixedTrailer, FooterEntry, HEADER_LEN, Header, MIN_OBJECT_LEN, RELEASE_REGION_ID, TRAILER_LEN,
     decode_footer, decode_header, decode_trailer, footer_range, verify_segment_ranges,
 };
-use crate::object_store_wal::io::{ListedObject, WalObjectIo};
+use crate::object_store_wal::io::{ListedObject, WalObjectRead};
 
 /// Bytes recovery reads from the end of an object in one request. The window
 /// holds the trailer and the footer of an object with up to 1364 regions of
@@ -121,7 +121,7 @@ pub(crate) fn chain_from(
 /// object store no longer has is returned as vanished; a failed listing or
 /// any other failure abandons the remaining fetches.
 pub(crate) async fn fetch_footers(
-    io: &dyn WalObjectIo,
+    io: &dyn WalObjectRead,
     objects: impl Stream<Item = Result<ListedObject>>,
     concurrency: usize,
 ) -> Result<FetchedObjects> {
@@ -168,7 +168,7 @@ pub(crate) fn is_not_found(error: &Error) -> bool {
 /// of the object are read concurrently, and the footer is read separately only
 /// when it starts before the window.
 pub(crate) async fn fetch_footer(
-    io: &dyn WalObjectIo,
+    io: &dyn WalObjectRead,
     object: &ListedObject,
 ) -> Result<(Header, Vec<FooterEntry>, Option<Bytes>)> {
     let ListedObject {

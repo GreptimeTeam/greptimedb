@@ -3218,7 +3218,7 @@ mod tests {
     use crate::object_store_wal::index::{
         MAX_KEPT_RELEASE_BYTES, RECOVERY_TAIL_WINDOW, fetch_footer, is_not_found,
     };
-    use crate::object_store_wal::io::ListedObject;
+    use crate::object_store_wal::io::{ListedObject, WalObjectRead};
     use crate::object_store_wal::prefetch::READ_PREFETCH_DEPTH;
 
     const PREFIX: &str = "wal/datanodes/1/epochs/2";
@@ -9513,6 +9513,29 @@ mod tests {
     }
 
     #[async_trait::async_trait]
+    impl WalObjectRead for LostResponseIo {
+        async fn get(&self, object_seq: u64) -> Result<Bytes> {
+            self.inner.get(object_seq).await
+        }
+
+        async fn get_range(&self, object_seq: u64, offset: u64, len: u64) -> Result<Bytes> {
+            self.inner.get_range(object_seq, offset, len).await
+        }
+
+        async fn list(&self) -> Result<Vec<ListedObject>> {
+            self.inner.list().await
+        }
+
+        fn object_path(&self, object_seq: u64) -> String {
+            self.inner.object_path(object_seq)
+        }
+
+        fn storage(&self) -> String {
+            self.inner.storage()
+        }
+    }
+
+    #[async_trait::async_trait]
     impl WalObjectIo for LostResponseIo {
         async fn put_if_absent(&self, object_seq: u64, content: Bytes) -> Result<PutResult> {
             let result = self.inner.put_if_absent(object_seq, content).await?;
@@ -9529,16 +9552,26 @@ mod tests {
             })
         }
 
+        async fn delete(&self, object_seq: u64) -> Result<()> {
+            self.inner.delete(object_seq).await
+        }
+    }
+
+    /// Object access whose first create lets another object land at a given
+    /// sequence first, as a create issued before recovery would.
+    struct RacingIo {
+        inner: ObjectStoreIo,
+        late: Mutex<Option<(u64, Bytes)>>,
+    }
+
+    #[async_trait::async_trait]
+    impl WalObjectRead for RacingIo {
         async fn get(&self, object_seq: u64) -> Result<Bytes> {
             self.inner.get(object_seq).await
         }
 
         async fn get_range(&self, object_seq: u64, offset: u64, len: u64) -> Result<Bytes> {
             self.inner.get_range(object_seq, offset, len).await
-        }
-
-        async fn delete(&self, object_seq: u64) -> Result<()> {
-            self.inner.delete(object_seq).await
         }
 
         async fn list(&self) -> Result<Vec<ListedObject>> {
@@ -9552,13 +9585,6 @@ mod tests {
         fn storage(&self) -> String {
             self.inner.storage()
         }
-    }
-
-    /// Object access whose first create lets another object land at a given
-    /// sequence first, as a create issued before recovery would.
-    struct RacingIo {
-        inner: ObjectStoreIo,
-        late: Mutex<Option<(u64, Bytes)>>,
     }
 
     #[async_trait::async_trait]
@@ -9571,28 +9597,8 @@ mod tests {
             self.inner.put_if_absent(object_seq, content).await
         }
 
-        async fn get(&self, object_seq: u64) -> Result<Bytes> {
-            self.inner.get(object_seq).await
-        }
-
-        async fn get_range(&self, object_seq: u64, offset: u64, len: u64) -> Result<Bytes> {
-            self.inner.get_range(object_seq, offset, len).await
-        }
-
         async fn delete(&self, object_seq: u64) -> Result<()> {
             self.inner.delete(object_seq).await
-        }
-
-        async fn list(&self) -> Result<Vec<ListedObject>> {
-            self.inner.list().await
-        }
-
-        fn object_path(&self, object_seq: u64) -> String {
-            self.inner.object_path(object_seq)
-        }
-
-        fn storage(&self) -> String {
-            self.inner.storage()
         }
     }
 
@@ -9672,6 +9678,35 @@ mod tests {
     }
 
     #[async_trait::async_trait]
+    impl WalObjectRead for ParkedIo {
+        async fn get(&self, object_seq: u64) -> Result<Bytes> {
+            if !self.park_creates && !self.park(object_seq).await {
+                return injected_failure("read", self.object_path(object_seq));
+            }
+            self.inner.get(object_seq).await
+        }
+
+        async fn get_range(&self, object_seq: u64, offset: u64, len: u64) -> Result<Bytes> {
+            if self.range_reads_parked.load(Ordering::SeqCst) && !self.park(object_seq).await {
+                return injected_failure("read", self.object_path(object_seq));
+            }
+            self.inner.get_range(object_seq, offset, len).await
+        }
+
+        async fn list(&self) -> Result<Vec<ListedObject>> {
+            self.inner.list().await
+        }
+
+        fn object_path(&self, object_seq: u64) -> String {
+            self.inner.object_path(object_seq)
+        }
+
+        fn storage(&self) -> String {
+            self.inner.storage()
+        }
+    }
+
+    #[async_trait::async_trait]
     impl WalObjectIo for ParkedIo {
         async fn put_if_absent(&self, object_seq: u64, content: Bytes) -> Result<PutResult> {
             if self.park_creates
@@ -9694,37 +9729,11 @@ mod tests {
             self.inner.put_if_absent(object_seq, content).await
         }
 
-        async fn get(&self, object_seq: u64) -> Result<Bytes> {
-            if !self.park_creates && !self.park(object_seq).await {
-                return injected_failure("read", self.object_path(object_seq));
-            }
-            self.inner.get(object_seq).await
-        }
-
-        async fn get_range(&self, object_seq: u64, offset: u64, len: u64) -> Result<Bytes> {
-            if self.range_reads_parked.load(Ordering::SeqCst) && !self.park(object_seq).await {
-                return injected_failure("read", self.object_path(object_seq));
-            }
-            self.inner.get_range(object_seq, offset, len).await
-        }
-
         async fn delete(&self, object_seq: u64) -> Result<()> {
             if self.deletes_parked.load(Ordering::SeqCst) && !self.park(object_seq).await {
                 return injected_failure("delete", self.object_path(object_seq));
             }
             self.inner.delete(object_seq).await
-        }
-
-        async fn list(&self) -> Result<Vec<ListedObject>> {
-            self.inner.list().await
-        }
-
-        fn object_path(&self, object_seq: u64) -> String {
-            self.inner.object_path(object_seq)
-        }
-
-        fn storage(&self) -> String {
-            self.inner.storage()
         }
     }
 
@@ -9796,26 +9805,7 @@ mod tests {
     }
 
     #[async_trait::async_trait]
-    impl WalObjectIo for RecordingIo {
-        async fn put_if_absent(&self, object_seq: u64, content: Bytes) -> Result<PutResult> {
-            if let Some(error) = self.fail_next_put.lock().unwrap().take() {
-                return Err(error).context(WalObjectStoreSnafu {
-                    operation: "write",
-                    path: self.object_path(object_seq),
-                });
-            }
-            if self.duplicate_next_put.swap(false, Ordering::Relaxed) {
-                self.inner
-                    .put_if_absent(object_seq, content.clone())
-                    .await?;
-            }
-            let result = self.inner.put_if_absent(object_seq, content).await?;
-            if self.fail_after_next_put.swap(false, Ordering::Relaxed) {
-                return injected_failure("write", self.object_path(object_seq));
-            }
-            Ok(result)
-        }
-
+    impl WalObjectRead for RecordingIo {
         async fn get(&self, object_seq: u64) -> Result<Bytes> {
             self.inner.get(object_seq).await
         }
@@ -9859,10 +9849,6 @@ mod tests {
             Ok(bytes)
         }
 
-        async fn delete(&self, object_seq: u64) -> Result<()> {
-            self.inner.delete(object_seq).await
-        }
-
         async fn list(&self) -> Result<Vec<ListedObject>> {
             if self.fail_next_list.swap(false, Ordering::Relaxed) {
                 return injected_failure("list", PREFIX.to_string());
@@ -9876,6 +9862,32 @@ mod tests {
 
         fn storage(&self) -> String {
             self.inner.storage()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl WalObjectIo for RecordingIo {
+        async fn put_if_absent(&self, object_seq: u64, content: Bytes) -> Result<PutResult> {
+            if let Some(error) = self.fail_next_put.lock().unwrap().take() {
+                return Err(error).context(WalObjectStoreSnafu {
+                    operation: "write",
+                    path: self.object_path(object_seq),
+                });
+            }
+            if self.duplicate_next_put.swap(false, Ordering::Relaxed) {
+                self.inner
+                    .put_if_absent(object_seq, content.clone())
+                    .await?;
+            }
+            let result = self.inner.put_if_absent(object_seq, content).await?;
+            if self.fail_after_next_put.swap(false, Ordering::Relaxed) {
+                return injected_failure("write", self.object_path(object_seq));
+            }
+            Ok(result)
+        }
+
+        async fn delete(&self, object_seq: u64) -> Result<()> {
+            self.inner.delete(object_seq).await
         }
     }
 
@@ -10039,11 +10051,7 @@ mod tests {
         }
 
         #[async_trait::async_trait]
-        impl WalObjectIo for CountingIo {
-            async fn put_if_absent(&self, object_seq: u64, content: Bytes) -> Result<PutResult> {
-                self.inner.put_if_absent(object_seq, content).await
-            }
-
+        impl WalObjectRead for CountingIo {
             async fn get(&self, object_seq: u64) -> Result<Bytes> {
                 self.gets.fetch_add(1, Ordering::Relaxed);
                 self.inner.get(object_seq).await
@@ -10054,16 +10062,8 @@ mod tests {
                 self.inner.get_range(object_seq, offset, len).await
             }
 
-            async fn delete(&self, object_seq: u64) -> Result<()> {
-                self.inner.delete(object_seq).await
-            }
-
             async fn list(&self) -> Result<Vec<ListedObject>> {
                 self.inner.list().await
-            }
-
-            fn list_ahead(&self) -> BoxStream<'_, Result<ListedObject>> {
-                self.inner.list_ahead()
             }
 
             fn object_path(&self, object_seq: u64) -> String {
@@ -10072,6 +10072,21 @@ mod tests {
 
             fn storage(&self) -> String {
                 self.inner.storage()
+            }
+        }
+
+        #[async_trait::async_trait]
+        impl WalObjectIo for CountingIo {
+            async fn put_if_absent(&self, object_seq: u64, content: Bytes) -> Result<PutResult> {
+                self.inner.put_if_absent(object_seq, content).await
+            }
+
+            async fn delete(&self, object_seq: u64) -> Result<()> {
+                self.inner.delete(object_seq).await
+            }
+
+            fn list_ahead(&self) -> BoxStream<'_, Result<ListedObject>> {
+                self.inner.list_ahead()
             }
         }
 
