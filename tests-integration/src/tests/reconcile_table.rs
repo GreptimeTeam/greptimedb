@@ -14,9 +14,9 @@
 
 use std::time::Duration;
 
-use client::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, OutputData};
-use common_meta::reconciliation::ResolveStrategy;
+use client::{OutputData, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_meta::reconciliation::manager::ReconciliationManagerRef;
+use common_meta::reconciliation::ResolveStrategy;
 use common_procedure::ProcedureManagerRef;
 use common_recordbatch::util::collect_batches;
 use common_test_util::recordbatch::check_output_stream;
@@ -25,8 +25,8 @@ use table::table_reference::TableReference;
 use crate::cluster::GreptimeDbClusterBuilder;
 use crate::test_util::execute_sql;
 use crate::tests::test_util::{
-    MockInstanceBuilder, RebuildableMockInstance, TestContext, dump_kvbackend, restore_kvbackend,
-    try_execute_sql, wait_procedure,
+    dump_kvbackend, restore_kvbackend, try_execute_sql, wait_procedure, MockInstanceBuilder,
+    RebuildableMockInstance, TestContext,
 };
 
 const CREATE_MONITOR_TABLE_SQL: &str = r#"
@@ -538,6 +538,50 @@ async fn test_renamed_table() {
 | grpc_latencies   |
 | numbers          |
 +------------------+"#;
+    check_output_stream(output.data, expected).await;
+}
+
+#[tokio::test]
+async fn test_reconcile_preserves_column_order_when_pk_differs() {
+    let builder =
+        GreptimeDbClusterBuilder::new("test_reconcile_preserves_column_order_when_pk_differs")
+            .await;
+    let test_context = TestContext::new(MockInstanceBuilder::Distributed(builder)).await;
+    let frontend = test_context.frontend();
+    let metasrv = test_context.metasrv();
+
+    let output = execute_sql(
+        &frontend,
+        "CREATE TABLE q8 (ts TIMESTAMP TIME INDEX, a STRING, b STRING, PRIMARY KEY(b, a))",
+    )
+    .await;
+    assert_affected_rows(output.data).await;
+
+    let output = execute_sql(&frontend, "INSERT INTO q8 VALUES (1000, 'a1', 'b1')").await;
+    assert_affected_rows(output.data).await;
+
+    reconcile_table(
+        metasrv.procedure_manager(),
+        metasrv.reconciliation_manager(),
+        "q8",
+    )
+    .await;
+    // Try best effort to wait for the cache to be invalidated.
+    tokio::time::sleep(Duration::from_secs(1)).await;
+
+    let output = execute_sql(&frontend, "INSERT INTO q8 VALUES (2000, 'a2', 'b2')").await;
+    assert_affected_rows(output.data).await;
+
+    let output = execute_sql(&frontend, "SELECT ts, a, b FROM q8 ORDER BY ts").await;
+    let expected = r#"+---------------------+----+----+
+| ts                  | a  | b  |
++---------------------+----+----+
+| 1970-01-01T00:00:01 | a1 | b1 |
+| 1970-01-01T00:00:02 | a2 | b2 |
++---------------------+----+----+"#;
+    check_output_stream(output.data, expected).await;
+
+    let output = execute_sql(&frontend, "SELECT * FROM q8 ORDER BY ts").await;
     check_output_stream(output.data, expected).await;
 }
 
