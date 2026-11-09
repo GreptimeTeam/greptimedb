@@ -614,12 +614,15 @@ impl DfLogicalPlanner {
                     alias: eval.alias.clone(),
                 };
                 let stmt = QueryLanguageParser::parse_promql(&prom_query, &query_ctx)?;
-                // A hybrid CTE registers this plan as a table the outer SQL query reads, so the
-                // `FusedSeries` node would sit under a SQL root. The in-process encodability
-                // exception is scoped to a plan whose root is the node, so here the node would be
-                // cut off and left in the frontend, where the physical planner cannot build it -
-                // a query that used to answer would fail instead. The route is therefore not
-                // offered for an embedded statement.
+                // A CTE registers this plan as a subplan the outer SQL query reads, so the
+                // CTE's alias sits above whatever node this statement plans. The in-process pair
+                // exception - a same-table multi-input node placed by the plan root - is recognised
+                // only at that root, under at most one column-only projection, and an alias is
+                // neither. Everywhere else the distributed planner applies its ordinary
+                // column-requirement rules, and those reject a node with several inputs, so a
+                // statement the existing plan answers would fail to plan. This is about placement,
+                // not encoding: `FusedSeries` does serialize. The route is therefore not offered
+                // for an embedded statement.
                 let QueryStatement::Promql(eval, _alias) = &stmt else {
                     unreachable!("a TQL eval parses to a PromQL statement");
                 };

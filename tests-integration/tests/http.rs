@@ -184,6 +184,7 @@ macro_rules! http_tests {
                 test_prometheus_promql_api,
                 test_prometheus_native_promql_route,
                 test_native_promql_route_plans_the_query,
+                test_promql_cte_tql_keeps_the_existing_route,
                 test_promql_over_non_millisecond_physical_tables,
                 test_prometheus_label_replace_response,
                 test_prom_http_api,
@@ -2613,6 +2614,117 @@ pub async fn test_native_promql_route_plans_the_query(store_type: StorageType) {
         legacy_rows.len()
     );
     assert_legacy_result_schema(&legacy_schema, &["host"], query);
+
+    instance.guard.remove_all().await;
+}
+
+/// Runs one SQL statement that embeds a TQL statement in a CTE through the public frontend handler
+/// and returns the plan it executed and its rows as the client renders them.
+async fn cte_tql_output(
+    frontend: &Arc<Instance>,
+    sql: &str,
+    native: bool,
+) -> (Arc<dyn ExecutionPlan>, String) {
+    let mut query_ctx = QueryContextBuilder::default();
+    if native {
+        query_ctx = query_ctx.set_extension(
+            "query.experimental_native_promql".to_string(),
+            "true".to_string(),
+        );
+    }
+    let output = SqlQueryHandler::do_query(frontend.as_ref(), sql, Arc::new(query_ctx.build()))
+        .await
+        .remove(0)
+        .unwrap_or_else(|error| panic!("`{sql}` failed: {error}"));
+    let plan = output
+        .meta
+        .plan
+        .clone()
+        .expect("a query reports the plan it executed");
+    let rows = output.data.pretty_print().await;
+    (plan, rows)
+}
+
+/// Runs `sql` with and without the native hint, asserting the hint does not move the statement off
+/// the existing route, and returns the rows it answered.
+async fn cte_tql_rows_keep_the_existing_route(frontend: &Arc<Instance>, sql: &str) -> String {
+    let (existing_plan, expected_rows) = cte_tql_output(frontend, sql, false).await;
+    let (hinted_plan, hinted_rows) = cte_tql_output(frontend, sql, true).await;
+
+    assert!(
+        !executes_fused_series(&existing_plan),
+        "`{sql}` executed the fused route without the hint: {existing_plan:?}"
+    );
+    // A TQL statement embedded in a CTE is registered as a subplan, so its fused node cannot take
+    // the in-process placement exception that is recognised at the plan root - and a same-table
+    // multi-input node reaches the frontend as a planning error instead. The route is therefore not
+    // offered here, and the hint changes nothing.
+    assert!(
+        !executes_fused_series(&hinted_plan),
+        "`{sql}` executed the fused route from inside a CTE: {hinted_plan:?}"
+    );
+    assert_eq!(
+        expected_rows, hinted_rows,
+        "`{sql}`: the hinted request answered different rows"
+    );
+    hinted_rows
+}
+
+/// A TQL statement embedded in a CTE keeps the existing plan even when the query asks for the
+/// native route.
+///
+/// The CTE registers the statement as a subplan the outer SQL reads, so the fused node does not sit
+/// at the plan root. The placement exception that lets a same-table multi-input fused node run in
+/// process is recognised only at that root, so the route cannot be offered for an embedded
+/// statement without breaking such a query; the statement answers from the existing plan instead,
+/// with the same rows as a request that never mentions the route.
+pub async fn test_promql_cte_tql_keeps_the_existing_route(store_type: StorageType) {
+    let mut instance = tests_integration::standalone::GreptimeDbStandaloneBuilder::new(
+        "promql_cte_existing_route",
+    )
+    .with_default_store_type(store_type)
+    .with_query_options(QueryOptions {
+        experimental_native_promql: true,
+        ..Default::default()
+    })
+    .build()
+    .await;
+    let frontend = instance.fe_instance();
+
+    // No tag columns: the CTE then names the two columns the existing plan answers with.
+    for (sql, expected) in [
+        (
+            "CREATE TABLE native_cte (ts TIMESTAMP(3) TIME INDEX, val DOUBLE)",
+            "Affected Rows: 0",
+        ),
+        (
+            "INSERT INTO native_cte VALUES (0, 1.0), (1000, 3.0), (2000, 6.0), (3000, 10.0)",
+            "Affected Rows: 4",
+        ),
+    ] {
+        execute_sql_and_expect(frontend, sql, expected).await;
+    }
+
+    // The rows are stated in time order: `SELECT` promises no order, so the test states the one it
+    // asserts instead of relying on whichever the plan happens to produce.
+    let rows = cte_tql_rows_keep_the_existing_route(
+        frontend,
+        "WITH tql(ts, the_value) AS (TQL EVAL (0, 3, '1s') rate(native_cte[5s])) \
+         SELECT * FROM tql ORDER BY ts",
+    )
+    .await;
+    assert_eq!(
+        "\
++---------------------+-----------+
+| ts                  | the_value |
++---------------------+-----------+
+| 1970-01-01T00:00:01 | 0.6       |
+| 1970-01-01T00:00:02 | 1.2       |
+| 1970-01-01T00:00:03 | 2.0       |
++---------------------+-----------+",
+        rows,
+        "the embedded statement answered different rows"
+    );
 
     instance.guard.remove_all().await;
 }
