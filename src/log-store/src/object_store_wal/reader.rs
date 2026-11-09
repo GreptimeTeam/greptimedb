@@ -18,6 +18,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::{Arc, Mutex, PoisonError, Weak};
 
 use async_stream::try_stream;
+use common_cache::Cache;
 use futures::{StreamExt, TryStreamExt};
 use object_store::ObjectStore;
 use snafu::{OptionExt, ResultExt, ensure};
@@ -25,11 +26,11 @@ use store_api::logstore::entry::{Entry, NaiveEntry};
 use store_api::logstore::provider::Provider;
 use store_api::logstore::{EntryId, SendableEntryStream};
 use store_api::storage::RegionId;
-use tokio::sync::{Mutex as AsyncMutex, Semaphore};
+use tokio::sync::Semaphore;
 
 use crate::error::{
     CorruptedWalObjectSnafu, Error, InvalidWalEntryRangeSnafu, InvalidWalObjectSnafu,
-    InvalidWalObjectStoreSnafu, MissingWalHistorySnafu, Result,
+    InvalidWalObjectStoreSnafu, MissingWalHistorySnafu, ObjectStoreWalSnafu, Result,
 };
 use crate::object_store_wal::batch::{
     OBJECT_SEQ_LIMIT, POSITION_BITS, POSITION_LIMIT, entry_id, sequence_floor,
@@ -138,7 +139,7 @@ impl ObjectStoreWalReaders {
                 self.store.clone(),
                 prefix.as_str(),
             )?),
-            indexes: AsyncMutex::new(BTreeMap::new()),
+            indexes: CachedObject::cache(),
             footer_budget: self.footer_budget.clone(),
             prefetch_budget: Arc::new(Semaphore::new(prefetch::READ_PREFETCH_BYTES)),
         });
@@ -152,8 +153,8 @@ impl ObjectStoreWalReaders {
 /// It does not own region roles, manifests, release positions or replay tasks.
 pub struct ObjectStoreWalReader {
     io: Arc<dyn WalObjectRead>,
-    /// Immutable object indexes keyed by sequence, shared by reads of this prefix.
-    indexes: AsyncMutex<BTreeMap<u64, Arc<CachedObject>>>,
+    /// Immutable indexes keyed by listed metadata, sharing loads within this prefix.
+    indexes: Cache<ListedObject, Arc<CachedObject>>,
     /// Footer-load concurrency shared by all readers in the node's registry.
     footer_budget: Arc<Semaphore>,
     /// Prefetched bytes shared by reads of this source prefix only.
@@ -165,6 +166,26 @@ struct CachedObject {
     object: ListedObject,
     header: Header,
     footer: Vec<FooterEntry>,
+}
+
+impl CachedObject {
+    /// Bounds retained index weight per source prefix. Eviction is asynchronous;
+    /// active reads can retain their own snapshots beyond this capacity.
+    fn cache() -> Cache<ListedObject, Arc<Self>> {
+        Cache::new(
+            "object_store_wal_indexes",
+            64 * 1024 * 1024,
+            |key: &ListedObject, value: &Arc<Self>| {
+                let bytes = std::mem::size_of::<ListedObject>()
+                    + key.path.capacity()
+                    + std::mem::size_of::<Self>()
+                    + value.object.path.capacity()
+                    + value.footer.capacity() * std::mem::size_of::<FooterEntry>();
+                u32::try_from(bytes).unwrap_or(u32::MAX)
+            },
+            |_, _, _| {},
+        )
+    }
 }
 
 impl ObjectStoreWalReader {
@@ -269,28 +290,13 @@ impl ObjectStoreWalReader {
             WalReadUpperBound::Listed(_) => 0,
         };
         let listed = self.io.list_from(start).await?;
-        let present = listed
-            .iter()
-            .map(|object| object.object_seq)
-            .collect::<HashSet<_>>();
-        // Each read owns its LIST snapshot. The shared cache only saves I/O;
-        // concurrent refreshes must not change the objects used to select a chain.
-        let mut objects = {
-            let mut cache = self.indexes.lock().await;
-            // Drop indexes outside this listing, including those below start.
-            // A later read with a lower start may fetch them again; retaining
-            // them here would accumulate old indexes as recovery advances.
-            cache.retain(|seq, _| present.contains(seq));
-            listed
-                .iter()
-                .filter_map(|object| {
-                    cache
-                        .get(&object.object_seq)
-                        .filter(|cached| cached.object == *object)
-                        .map(|cached| (object.object_seq, cached.clone()))
-                })
-                .collect::<BTreeMap<_, _>>()
-        };
+        let present = listed.iter().cloned().collect::<HashSet<_>>();
+        // Each read owns its LIST snapshot. Drop cached indexes outside it,
+        // accepting a refetch for later reads with a lower watermark. In-flight
+        // loads may still insert old indexes; capacity also bounds retention.
+        let _ = self
+            .indexes
+            .invalidate_if(move |object, _| !present.contains(object));
         ensure!(
             !listed.is_empty(),
             MissingWalHistorySnafu {
@@ -313,36 +319,35 @@ impl ObjectStoreWalReader {
                 }
             );
         }
-        let missing = listed
-            .into_iter()
-            .filter(|object| !objects.contains_key(&object.object_seq))
-            .collect::<Vec<_>>();
-        let fetched = futures::stream::iter(missing)
+        let objects = futures::stream::iter(listed)
             .map(|object| async move {
-                // The registry owns this semaphore and never closes it.
-                let _permit = self.footer_budget.acquire().await.map_err(|_| {
-                    CorruptedWalObjectSnafu {
-                        reason: "remote WAL footer budget closed".to_string(),
-                    }
-                    .build()
-                })?;
-                let fetched = index::fetch_footer(self.io.as_ref(), &object).await?;
-                Ok::<_, Error>(Arc::new(CachedObject {
-                    object,
-                    header: fetched.header,
-                    footer: fetched.footer,
-                }))
+                let seq = object.object_seq;
+                // Include listing metadata in the key so a load for a changed
+                // object cannot join an older in-flight load of the same sequence.
+                let cached = self
+                    .indexes
+                    .try_get_with(&object, async {
+                        // Waiters share the loader without consuming footer permits.
+                        let _permit = self.footer_budget.acquire().await.map_err(|_| {
+                            CorruptedWalObjectSnafu {
+                                reason: "remote WAL footer budget closed".to_string(),
+                            }
+                            .build()
+                        })?;
+                        let fetched = index::fetch_footer(self.io.as_ref(), &object).await?;
+                        Ok::<_, Error>(Arc::new(CachedObject {
+                            object: object.clone(),
+                            header: fetched.header,
+                            footer: fetched.footer,
+                        }))
+                    })
+                    .await
+                    .context(ObjectStoreWalSnafu)?;
+                Ok::<_, Error>((seq, cached))
             })
             .buffer_unordered(FOOTER_CONCURRENCY)
-            .try_collect::<Vec<_>>()
+            .try_collect::<BTreeMap<_, _>>()
             .await?;
-        {
-            let mut cache = self.indexes.lock().await;
-            for object in fetched {
-                cache.insert(object.object.object_seq, object.clone());
-                objects.insert(object.object.object_seq, object);
-            }
-        }
         let headers = objects
             .iter()
             .map(|(seq, object)| (*seq, &object.header))

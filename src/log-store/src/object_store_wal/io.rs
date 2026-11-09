@@ -51,7 +51,7 @@ pub(crate) enum PutResult {
 }
 
 /// An object discovered by a LIST.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct ListedObject {
     pub(crate) object_seq: u64,
     pub(crate) path: String,

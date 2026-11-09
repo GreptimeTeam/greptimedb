@@ -142,7 +142,7 @@ fn observed(io: ObjectStoreIo, gate: Option<Arc<Semaphore>>) -> Arc<ObservedIo> 
 fn reader(io: Arc<dyn WalObjectRead>, budget: Arc<Semaphore>) -> Arc<ObjectStoreWalReader> {
     Arc::new(ObjectStoreWalReader {
         io,
-        indexes: AsyncMutex::new(BTreeMap::new()),
+        indexes: CachedObject::cache(),
         footer_budget: budget,
         prefetch_budget: Arc::new(Semaphore::new(prefetch::READ_PREFETCH_BYTES)),
     })
@@ -608,37 +608,28 @@ async fn test_same_reader_prepares_regions_concurrently() {
     })
     .await
     .unwrap();
-    let second = tokio::spawn({
-        let reader = reader.clone();
-        async move { reader.prepare(RegionId::new(1, 2), 0, upper).await }
-    });
-    // The second LIST and footer GET must start while the first GET is parked.
-    let overlapped = tokio::time::timeout(Duration::from_secs(2), async {
-        while observed.active.load(Ordering::SeqCst) != 2 {
-            tokio::task::yield_now().await;
-        }
-    })
-    .await;
-    if overlapped.is_err() {
-        first.abort();
-        second.abort();
-        panic!("same-prefix prepares serialized behind remote I/O");
-    }
+    // Poll the second preparation into its pending load while the first GET is
+    // parked. Its LIST must finish independently, but its footer load is shared.
+    let second = reader.prepare(RegionId::new(1, 2), 0, upper);
+    tokio::pin!(second);
+    assert!(futures::poll!(&mut second).is_pending());
     assert_eq!(*observed.lists.lock().unwrap(), vec![0, 0]);
-    assert_eq!(budget.available_permits(), FOOTER_CONCURRENCY - 2);
-    gate.add_permits(2);
+    assert_eq!(observed.active.load(Ordering::SeqCst), 1);
+    assert_eq!(budget.available_permits(), FOOTER_CONCURRENCY - 1);
+    gate.add_permits(1);
     assert_eq!(
         first.await.unwrap().unwrap().region_max_entry_id(region()),
         Some(entry_id(1, 1))
     );
     assert_eq!(
-        second
+        tokio::time::timeout(Duration::from_secs(10), second)
             .await
             .unwrap()
             .unwrap()
             .region_max_entry_id(RegionId::new(1, 2)),
         None
     );
+    assert_eq!(*observed.gets.lock().unwrap(), BTreeMap::from([(1, 1)]));
     assert_eq!(budget.available_permits(), FOOTER_CONCURRENCY);
 }
 
@@ -658,32 +649,35 @@ async fn test_last_entry_evicts_indexes_as_watermark_advances() {
     }
     let upper = WalReadUpperBound::LastEntry(entry_id(6, 2));
     reader.prepare(region(), 0, upper).await.unwrap();
+    let listed = io.list().await.unwrap();
     for start in 2..=6 {
-        let old = Arc::downgrade(&reader.indexes.lock().await[&(start - 1)]);
+        let old = Arc::downgrade(
+            &reader
+                .indexes
+                .get(&listed[(start - 2) as usize])
+                .await
+                .unwrap(),
+        );
         io.delete(start - 1).await.unwrap();
         reader
             .prepare(region(), entry_id(start, 1), upper)
             .await
             .unwrap();
+        reader.indexes.run_pending_tasks().await;
         assert_eq!(
-            reader
-                .indexes
-                .lock()
-                .await
-                .keys()
-                .copied()
-                .collect::<Vec<_>>(),
+            cached_sequences(&reader, &listed).await,
             (start..=6).collect::<Vec<_>>()
         );
         assert!(old.upgrade().is_none(), "obsolete index remains allocated");
     }
-    let last = Arc::downgrade(&reader.indexes.lock().await[&6]);
+    let last = Arc::downgrade(&reader.indexes.get(&listed[5]).await.unwrap());
     io.delete(6).await.unwrap();
     assert!(matches!(
         reader.prepare(region(), entry_id(6, 1), upper).await,
         Err(Error::MissingWalHistory { .. })
     ));
-    assert!(reader.indexes.lock().await.is_empty());
+    reader.indexes.run_pending_tasks().await;
+    assert_eq!(reader.indexes.entry_count(), 0);
     assert!(last.upgrade().is_none());
 }
 
@@ -698,32 +692,16 @@ async fn test_last_entry_refetches_evicted_indexes_for_lower_watermark() {
         .prepare(region(), entry_id(2, 1), upper)
         .await
         .unwrap();
-    assert_eq!(
-        reader
-            .indexes
-            .lock()
-            .await
-            .keys()
-            .copied()
-            .collect::<Vec<_>>(),
-        vec![2]
-    );
+    let listed = io.list().await.unwrap();
+    reader.indexes.run_pending_tasks().await;
+    assert_eq!(cached_sequences(&reader, &listed).await, vec![2]);
     let before = observed.gets.lock().unwrap().clone();
     let catalog = reader.prepare(region(), 0, upper).await.unwrap();
     assert_eq!(catalog.region_max_entry_id(region()), Some(entry_id(2, 2)));
     let after = observed.gets.lock().unwrap().clone();
     assert_eq!(after[&1], before[&1] + 1);
     assert_eq!(after[&2], before[&2]);
-    assert_eq!(
-        reader
-            .indexes
-            .lock()
-            .await
-            .keys()
-            .copied()
-            .collect::<Vec<_>>(),
-        vec![1, 2]
-    );
+    assert_eq!(cached_sequences(&reader, &listed).await, vec![1, 2]);
 }
 
 #[test]
@@ -769,4 +747,45 @@ fn test_node_prefix_validates_layout_and_exposes_provider_identity() {
             "{invalid}"
         );
     }
+}
+
+async fn cached_sequences(reader: &ObjectStoreWalReader, listed: &[ListedObject]) -> Vec<u64> {
+    let mut sequences = Vec::new();
+    for object in listed {
+        if reader.indexes.get(object).await.is_some() {
+            sequences.push(object.object_seq);
+        }
+    }
+    sequences
+}
+
+#[tokio::test]
+async fn test_changed_listing_metadata_refetches_index() {
+    let (store, io, observed, reader) = fixture();
+    put(&io, 1, 1, None, 0, &[record(1, 1)]).await;
+    reader
+        .prepare(region(), 0, WalReadUpperBound::LastEntry(entry_id(1, 1)))
+        .await
+        .unwrap();
+    let before = observed.gets.lock().unwrap()[&1];
+    let replacement = encode_object(
+        Header {
+            object_seq: 1,
+            epoch: 1,
+            prev: None,
+            reclaim_boundary: 0,
+        },
+        &[record(1, 1), record(1, 2)],
+    )
+    .unwrap();
+    store
+        .write(&io.object_path(1), replacement.bytes)
+        .await
+        .unwrap();
+    let catalog = reader
+        .prepare(region(), 0, WalReadUpperBound::LastEntry(entry_id(1, 2)))
+        .await
+        .unwrap();
+    assert_eq!(catalog.region_max_entry_id(region()), Some(entry_id(1, 2)));
+    assert_eq!(observed.gets.lock().unwrap()[&1], before + 1);
 }
