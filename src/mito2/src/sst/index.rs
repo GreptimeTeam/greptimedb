@@ -26,6 +26,7 @@ pub mod kind;
 mod primary_key;
 pub mod puffin_manager;
 pub mod registry;
+pub mod sketch_reader;
 #[cfg(test)]
 mod sparse_test;
 mod statistics;
