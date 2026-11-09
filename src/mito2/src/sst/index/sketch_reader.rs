@@ -19,7 +19,6 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use common_error::ext::BoxedError;
-use common_time::Timestamp;
 use store_api::metadata::RegionMetadataRef;
 use store_api::sketch::{SketchRequest, SketchResponse, SketchTimeRange};
 
@@ -45,8 +44,8 @@ impl SketchReadFiles {
     /// Visits intersecting files without cloning handles or allocating a selection.
     /// Iteration scans snapshot metadata; it performs no file I/O and has no order guarantee.
     pub fn iter(&self) -> impl Iterator<Item = &FileHandle> {
-        let start = Timestamp::new_millisecond(self.time_range.start_ms);
-        let end = Timestamp::new_millisecond(self.time_range.end_ms);
+        let start = self.time_range.start;
+        let end = self.time_range.end;
         self.snapshot
             .levels()
             .iter()
@@ -119,7 +118,8 @@ mod tests {
             (millis(-1), millis(999), false),
             (millis(999), millis(1000), true),
             (millis(1000), millis(1000), true),
-            (millis(1999), millis(2000), true),
+            (millis(1999), millis(2001), true),
+            (millis(0), millis(3000), true),
             (millis(2000), millis(2001), false),
             (Timestamp::new_second(1), Timestamp::new_second(1), true),
             (
@@ -152,8 +152,8 @@ mod tests {
         let selection = SketchReadFiles::new(
             Arc::new(version),
             SketchTimeRange {
-                start_ms: 1000,
-                end_ms: 2000,
+                start: millis(1000),
+                end: millis(2000),
             },
         );
         let mut actual: Vec<_> = selection
@@ -166,8 +166,47 @@ mod tests {
     }
 
     #[test]
+    fn test_sketch_files_submillisecond_range() {
+        let nanos = Timestamp::new_nanosecond;
+        let cases = [
+            (nanos(999_999), nanos(1_000_999), false),
+            (nanos(1_000_999), nanos(1_001_000), true),
+            (nanos(1_001_500), nanos(1_002_500), true),
+            (nanos(1_000_000), nanos(1_003_000), true),
+            (nanos(1_002_000), nanos(1_002_999), false),
+        ];
+        let mut version = SstVersion::new(metadata_for_test());
+        let mut expected = std::collections::HashSet::new();
+        version.add_files(
+            new_noop_file_purger(),
+            cases.into_iter().map(|(start, end, included)| {
+                let meta = file(start, end);
+                if included {
+                    expected.insert(meta.file_id);
+                }
+                meta
+            }),
+        );
+        let selected = SketchReadFiles::new(
+            Arc::new(version),
+            SketchTimeRange {
+                start: Timestamp::new_microsecond(1001),
+                end: Timestamp::new_microsecond(1002),
+            },
+        );
+        assert_eq!(
+            selected
+                .iter()
+                .map(|handle| handle.file_id().file_id())
+                .collect::<std::collections::HashSet<_>>(),
+            expected
+        );
+    }
+
+    #[test]
     fn test_sketch_files_borrowed_selection_matches_eager_filter() {
         let mut version = SstVersion::new(metadata_for_test());
+        let mut ids = Vec::new();
         version.add_files(
             new_noop_file_purger(),
             (0..16_384).map(|index| {
@@ -175,37 +214,39 @@ mod tests {
                 let end = Timestamp::new_millisecond(index - 8192 + 100);
                 let mut meta = file(start, end);
                 meta.level = (index % 2) as u8;
+                ids.push(meta.file_id);
                 meta
             }),
         );
         let snapshot = Arc::new(version);
-        for (start_ms, end_ms) in [(-10_000, -9_000), (-100, 100), (0, 20_000)] {
-            let range = SketchTimeRange { start_ms, end_ms };
-            let expected: Vec<_> = snapshot
-                .levels()
-                .iter()
-                .flat_map(|level| level.files())
-                .filter(|handle| {
-                    let (start, end) = handle.meta_ref().time_range;
-                    start < Timestamp::new_millisecond(end_ms)
-                        && end >= Timestamp::new_millisecond(start_ms)
-                })
-                .collect();
+        for (start_ms, end_ms, indices) in [
+            (-10_000, -9_000, 0..0),
+            (-100, 100, 7992..8292),
+            (0, 20_000, 8092..16384),
+        ] {
+            let range = SketchTimeRange {
+                start: Timestamp::new_millisecond(start_ms),
+                end: Timestamp::new_millisecond(end_ms),
+            };
+            let expected: std::collections::HashSet<_> = ids[indices].iter().copied().collect();
             let selection = SketchReadFiles::new(snapshot.clone(), range);
             let first: Vec<_> = selection.iter().take(1).collect();
             assert_eq!(first.len(), expected.len().min(1));
             if let Some(first) = first.first() {
-                assert!(std::ptr::eq(*first, expected[0]));
+                let original = snapshot
+                    .levels()
+                    .iter()
+                    .flat_map(|level| level.files())
+                    .find(|handle| handle.file_id() == first.file_id())
+                    .unwrap();
+                assert!(std::ptr::eq(*first, original));
             }
             assert_eq!(
                 selection
                     .iter()
-                    .map(|handle| handle.file_id())
-                    .collect::<Vec<_>>(),
-                expected
-                    .iter()
-                    .map(|handle| handle.file_id())
-                    .collect::<Vec<_>>(),
+                    .map(|handle| handle.file_id().file_id())
+                    .collect::<std::collections::HashSet<_>>(),
+                expected,
             );
         }
     }
@@ -238,8 +279,8 @@ mod tests {
         version.add_files(purger.clone(), [old.clone(), outside.clone()].into_iter());
         let mut latest = Arc::new(version);
         let range = SketchTimeRange {
-            start_ms: 0,
-            end_ms: 30,
+            start: Timestamp::new_millisecond(0),
+            end: Timestamp::new_millisecond(30),
         };
         let selected = SketchReadFiles::new(latest.clone(), range);
 
