@@ -2184,7 +2184,7 @@ async fn test_close_time_flush_rejects_queued_and_late_edits() {
 }
 
 #[tokio::test]
-async fn test_staging_only_edit_rejected_after_close_time_flush_fails() {
+async fn test_stale_staging_edit_rejected_after_close_time_flush_fails() {
     let fail_parquet = Arc::new(AtomicBool::new(false));
     let writer_flag = fail_parquet.clone();
     let mock_layer = MockLayerBuilder::default()
@@ -2231,6 +2231,41 @@ async fn test_staging_only_edit_rejected_after_close_time_flush_fails() {
         ..first_file(&region).await
     };
     let file_id = file.file_id;
+    let stale_expr = float_range_expr("field_0", 0., 100.).as_json_str().unwrap();
+    let result = submit_staging_edit(&engine, region_id, file.clone(), stale_expr.clone()).await;
+    assert_matches!(result.unwrap_err(), Error::RegionState { .. });
+
+    // A later staging for another partition expression does not take the stale edit either.
+    fail_parquet.store(false, Ordering::Relaxed);
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::EnterStaging(EnterStagingRequest {
+                partition_directive: StagingPartitionDirective::UpdatePartitionExpr(
+                    float_range_expr("field_0", 0., 50.).as_json_str().unwrap(),
+                ),
+            }),
+        )
+        .await
+        .unwrap();
+    let result = submit_staging_edit(&engine, region_id, file, stale_expr).await;
+    assert_matches!(result.unwrap_err(), Error::RegionState { .. });
+
+    let manager = region.manifest_ctx.manifest_manager.read().await;
+    assert!(!manager.manifest().files.contains_key(&file_id));
+    assert!(
+        manager
+            .staging_manifest()
+            .is_none_or(|staging| !staging.files.contains_key(&file_id))
+    );
+}
+
+async fn submit_staging_edit(
+    engine: &MitoEngine,
+    region_id: RegionId,
+    file: FileMeta,
+    partition_expr: String,
+) -> crate::error::Result<()> {
     let (tx, rx) = tokio::sync::oneshot::channel();
     engine
         .inner
@@ -2238,15 +2273,13 @@ async fn test_staging_only_edit_rejected_after_close_time_flush_fails() {
         .submit_to_worker(
             region_id,
             WorkerRequest::EditRegion(
-                RegionEditRequest::new(region_id, edit_adding(file), false, tx).staging_only(),
+                RegionEditRequest::new(region_id, edit_adding(file), false, tx)
+                    .for_staging(partition_expr),
             ),
         )
         .await
         .unwrap();
-
-    assert_matches!(rx.await.unwrap().unwrap_err(), Error::RegionState { .. });
-    let manifest = region.manifest_ctx.manifest().await;
-    assert!(!manifest.files.contains_key(&file_id));
+    rx.await.unwrap()
 }
 
 #[tokio::test]

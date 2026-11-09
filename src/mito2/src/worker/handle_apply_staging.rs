@@ -141,7 +141,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                         // we don't need to preload sst cache during repartition, as it may cause extra network overhead.
                         false, tx,
                     )
-                    .staging_only(),
+                    .for_staging(request.partition_expr),
                 )))
                 .await;
 

@@ -322,7 +322,14 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         }
 
         // A close may have abandoned the staging this edit belongs to, even if its flush failed.
-        if request.staging_only && region.manifest_ctx.staging_partition_info().is_none() {
+        if let Some(expected) = &request.staging_partition_expr
+            && region
+                .manifest_ctx
+                .staging_partition_info()
+                .as_ref()
+                .and_then(|info| info.partition_expr())
+                != Some(expected.as_str())
+        {
             let state = region.state();
             request.waiters.reply_with(|| {
                 RegionStateSnafu {
@@ -359,7 +366,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             mut edit,
             waiters,
             preload_sst_cache,
-            staging_only: _,
+            staging_partition_expr: _,
         } = request;
         let file_sequence = region.version_control.current().last_sequence + 1;
         edit.committed_sequence = Some(file_sequence);

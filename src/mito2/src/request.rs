@@ -1370,8 +1370,9 @@ pub(crate) struct RegionEditRequest {
     pub(crate) preload_sst_cache: bool,
     /// The waiters that are waiting for this region edit's result.
     pub(crate) waiters: Waiters,
-    /// Whether the edit belongs to the current staging and must not run after it has ended.
-    pub(crate) staging_only: bool,
+    /// The partition expression of the staging this edit belongs to, if any.
+    /// The edit must not run unless the region is staging for that expression.
+    pub(crate) staging_partition_expr: Option<String>,
 }
 
 impl RegionEditRequest {
@@ -1386,13 +1387,13 @@ impl RegionEditRequest {
             edit,
             preload_sst_cache,
             waiters: Waiters::one(waiter),
-            staging_only: false,
+            staging_partition_expr: None,
         }
     }
 
-    /// Marks the edit as belonging to the current staging.
-    pub(crate) fn staging_only(mut self) -> Self {
-        self.staging_only = true;
+    /// Binds the edit to the staging for `partition_expr`.
+    pub(crate) fn for_staging(mut self, partition_expr: String) -> Self {
+        self.staging_partition_expr = Some(partition_expr);
         self
     }
 }
