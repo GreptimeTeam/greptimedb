@@ -6002,6 +6002,66 @@ fn repeated_source_with_state_and_samples_is_refused() {
     assert!(error.to_string().contains("disagrees on input kind"));
 }
 
+/// The declared schema and its error mapping match the evaluated stream packer exactly.
+#[test]
+fn series_frame_output_schema_matches_evaluated_packer() {
+    for fields in [
+        vec![FieldSpec { name: VALUE.into() }],
+        vec![
+            FieldSpec { name: VALUE.into() },
+            FieldSpec { name: OTHER.into() },
+        ],
+    ] {
+        let schema = Arc::new(SeriesSchema {
+            fields: fields.into(),
+            eval_grid: Some(grid()),
+        });
+        let declared = super::series_frame_output_schema(&schema).unwrap();
+        let packed = pack_evaluated_series(Box::pin(futures::stream::empty()), schema).unwrap();
+        assert_eq!(declared, packed.schema());
+        let declaration = SeriesFrameDeclaration::parse(declared.as_ref()).unwrap();
+        assert_eq!(FrameContent::Evaluated, declaration.content());
+        assert_eq!(FrameLabelMode::Explicit, declaration.labels());
+        assert_eq!(
+            SeriesOrdering::Contiguous,
+            series_frame_ordering(declared.as_ref()).unwrap()
+        );
+    }
+
+    let invalid = Arc::new(SeriesSchema {
+        fields: Arc::from([]),
+        eval_grid: Some(grid()),
+    });
+    let packed_error =
+        pack_evaluated_series(Box::pin(futures::stream::empty()), Arc::clone(&invalid))
+            .err()
+            .expect("the packer rejects a frame without fields");
+    let error = super::series_frame_output_schema(&invalid)
+        .expect_err("the declaration rejects a frame without fields");
+    assert!(matches!(
+        error,
+        DataFusionError::Plan(ref message)
+            if *message == format!("FusedSeries cannot declare frame schema: {packed_error}")
+    ));
+
+    let output = NativeType::Samples(raw_schema());
+    let raw_tree = NativeTree::try_new(NativeNode {
+        expr: NativeExpr::Input(BoundInput {
+            output: output.clone(),
+            source_index: 0,
+            ordering: SeriesOrdering::Contiguous,
+        }),
+        output,
+    })
+    .unwrap();
+    let error = FusedSeries::series_frame_schema(&raw_tree).unwrap_err();
+    assert!(matches!(
+        error,
+        DataFusionError::Plan(ref message)
+            if message == "FusedSeries frame output requires evaluated samples with a grid"
+    ));
+}
+
 /// Frame output is planned from the evaluated root and is emitted without flattening to rows.
 #[tokio::test]
 async fn series_frame_output_uses_evaluated_codec_schema() {

@@ -2870,6 +2870,36 @@ async fn native_fused_partitioned_table_label_rewrite_falls_back() {
     );
 }
 
+/// A collapsing rewrite on an unsplit table lowers the same canonical tree to its producer.
+#[tokio::test]
+async fn native_fused_label_rewrite_lowers_canonical_boundary() {
+    let query = r#"label_replace(some_metric, "tag_0", "same", "tag_0", ".*")"#;
+    let plan = build_native_fused_plan(query, true).await;
+    let consumer = find_fused_series(&plan).expect("the canonical boundary has a consumer");
+    assert!(matches!(consumer.tree().root().expr, NativeExpr::Input(_)));
+    let [child] = consumer.children() else {
+        panic!("the consumer must read one canonical producer: {plan}");
+    };
+    let producer = find_fused_series(child).expect("the boundary has a canonical producer");
+    assert!(producer.is_canonical_producer(), "{plan}");
+    assert!(matches!(
+        producer.tree().root().expr,
+        NativeExpr::Merge { .. }
+    ));
+    assert!(
+        producer
+            .schema()
+            .fields()
+            .iter()
+            .any(|field| field.name() == "labels"),
+        "the producer exports labeled frames: {plan}"
+    );
+    assert!(
+        sorted_column_names(&plan).contains(&"tag_0".to_string()),
+        "the consumer retains the rewritten output label: {plan}"
+    );
+}
+
 /// Metric logical scans retain their table-id restriction on the direct fused scan input.
 #[tokio::test]
 async fn native_fused_metric_engine_table_is_accepted() {
@@ -4843,6 +4873,50 @@ async fn native_fused_multi_source_matching_segment_is_constructed() {
             .contains("PromSeriesDivide"),
         "must not fall back to legacy: {plan}"
     );
+}
+
+/// A split-series table keeps each cut's field and source binding on its evaluated frame.
+#[tokio::test]
+async fn native_fused_segment_preserves_time_partitioned_source_fields() {
+    let plan = build_native_fused_plan_with_provider(
+        "sum(topk(1, rate(some_metric[5m])))",
+        true,
+        native_engine_provider(vec![1]).await,
+    )
+    .await;
+    let parent = find_fused_series(&plan).expect("the segmented tree stays native");
+    let segments = parent
+        .children()
+        .iter()
+        .filter_map(find_fused_series)
+        .collect::<Vec<_>>();
+    assert!(
+        !segments.is_empty(),
+        "expected an evaluated segment: {plan}"
+    );
+    for segment in segments {
+        let [LogicalPlan::Extension(Extension { node })] = segment.children() else {
+            panic!("the segment must read its raw source: {plan}");
+        };
+        let source = node
+            .as_any()
+            .downcast_ref::<RawSeriesSource>()
+            .expect("the split series must read a raw source");
+        assert_eq!("some_metric", source.metric_name());
+        assert_eq!(["field_0"], source.fields());
+        assert_eq!(
+            vec![source.fields().to_vec()],
+            promql::extension_plan::tree_source_fields(segment.tree()).unwrap()
+        );
+        assert!(
+            segment
+                .schema()
+                .fields()
+                .iter()
+                .any(|field| field.name() == "labels"),
+            "the segment exports an explicit-label frame: {plan}"
+        );
+    }
 }
 
 /// A two-source whole-vector statement uses two per-source prefix segments under one parent, and
