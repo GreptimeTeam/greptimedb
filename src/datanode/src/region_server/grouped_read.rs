@@ -35,7 +35,8 @@ use datafusion_expr::LogicalPlan;
 use datatypes::schema::{Schema, SchemaRef};
 use futures::Stream;
 use query::dist_plan::{
-    GroupReadPayload, MAX_GROUP_READ_PAYLOAD_BYTES, RegionPlanResolver, decode_group_read_request,
+    GROUP_READ_CONTEXT_EXTENSION, GroupReadPayload, MAX_GROUP_READ_PAYLOAD_BYTES,
+    RegionPlanResolver, decode_group_read_request,
 };
 use session::context::QueryContextRef;
 use snafu::{IntoError, ResultExt};
@@ -84,6 +85,13 @@ impl RegionServer {
             .fail();
         }
 
+        // One RegionScanExec partition per RegionPlan: the membership budget already bounds the
+        // number of region plans in this request, so forcing one partition per scan bounds the
+        // request's active scans without claiming a datanode-global scheduler.
+        let mut grouped_ctx = (*query_ctx).clone();
+        grouped_ctx.set_extension("query.parallelism", "1");
+        grouped_ctx.set_extension(GROUP_READ_CONTEXT_EXTENSION, "true");
+        let query_ctx = Arc::new(grouped_ctx);
         let engine_ctx = self
             .inner
             .query_engine

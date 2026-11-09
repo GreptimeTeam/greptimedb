@@ -388,6 +388,10 @@ impl RegionScanExec {
             .add_dyn_filter_to_predicate(filter_exprs)
     }
 
+    pub fn region_id(&self) -> store_api::storage::RegionId {
+        self.scanner.lock().unwrap().metadata().region_id
+    }
+
     pub fn query_load_region_id(&self) -> Option<u64> {
         self.scanner
             .lock()

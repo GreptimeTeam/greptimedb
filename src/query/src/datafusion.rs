@@ -30,7 +30,9 @@ use common_error::ext::BoxedError;
 use common_function::function::FunctionContext;
 use common_function::function_factory::ScalarFunctionFactory;
 use common_query::{Output, OutputData, OutputMeta};
-use common_recordbatch::adapter::{RecordBatchStreamAdapter, RegionQueryStatCounters};
+use common_recordbatch::adapter::{
+    RecordBatchStreamAdapter, RegionQueryStatCounters, RegionQueryStatOwner,
+};
 use common_recordbatch::{EmptyRecordBatchStream, SendableRecordBatchStream};
 use common_telemetry::tracing;
 use datafusion::catalog::TableFunction;
@@ -55,6 +57,7 @@ use tracing::Span;
 
 use crate::analyze::DistAnalyzeExec;
 pub use crate::datafusion::planner::DfContextProviderAdapter;
+use crate::dist_plan::GROUP_READ_CONTEXT_EXTENSION;
 use crate::dist_plan::{MergeScanLogicalPlan, RemoteDynFilterReceiverInjectorRef};
 use crate::error::{
     CatalogSnafu, CreateRecordBatchSnafu, MissingTableMutationHandlerSnafu,
@@ -136,6 +139,41 @@ fn query_stat_counters(plan: &Arc<dyn ExecutionPlan>) -> Option<RegionQueryStatC
     }
 
     counters
+}
+
+/// Collects one independent counter/metrics owner per region scan.
+///
+/// Composite GroupRead plans contain several RegionScanExec nodes. Each scan owns its region
+/// identity, counters and metrics source; shared Union/Aggregate execution cost is deliberately
+/// not charged to every region.
+fn query_stat_owners(plan: &Arc<dyn ExecutionPlan>) -> Vec<RegionQueryStatOwner> {
+    let mut owners: Vec<RegionQueryStatOwner> = Vec::new();
+    let mut stack = vec![plan.clone()];
+
+    while let Some(plan) = stack.pop() {
+        if plan.name() == REGION_SCAN_EXEC_NAME
+            && let Some(scan) = plan.downcast_ref::<RegionScanExec>()
+            && let Some(counters) = scan.query_stat_counters()
+            && !owners.iter().any(|owner| Arc::ptr_eq(&owner.plan, &plan))
+        {
+            owners.push(RegionQueryStatOwner {
+                region_id: scan.region_id().as_u64(),
+                counters,
+                plan: plan.clone(),
+            });
+        }
+        stack.extend(plan.children().into_iter().cloned());
+    }
+
+    owners
+}
+
+fn use_region_owners(query_ctx: &QueryContextRef, owners_len: usize) -> bool {
+    owners_len > 1
+        && query_ctx
+            .extensions()
+            .get(GROUP_READ_CONTEXT_EXTENSION)
+            .is_some_and(|value| value == "true")
 }
 
 pub struct DatafusionQueryEngine {
@@ -652,8 +690,21 @@ impl QueryExecutor for DatafusionQueryEngine {
                     .map_err(BoxedError::new)
                     .context(QueryExecutionSnafu)?;
                 stream.set_metrics2(plan.clone());
-                stream.set_query_load_region_id(query_load_region_id(plan));
-                stream.set_query_stat_counters(query_stat_counters(plan));
+                let owners = query_stat_owners(plan);
+                let owners_enabled = use_region_owners(&query_ctx, owners.len());
+                stream.set_query_load_region_id(if owners_enabled {
+                    None
+                } else {
+                    query_load_region_id(plan)
+                });
+                stream.set_query_stat_counters(if owners_enabled {
+                    None
+                } else {
+                    query_stat_counters(plan)
+                });
+                if owners_enabled {
+                    stream.set_query_stat_owners(owners);
+                }
                 stream.set_explain_verbose(explain_verbose);
                 let stream = OnDone::new(Box::pin(stream), move || {
                     let exec_cost = exec_timer.stop_and_record();
@@ -687,8 +738,21 @@ impl QueryExecutor for DatafusionQueryEngine {
                     .map_err(BoxedError::new)
                     .context(QueryExecutionSnafu)?;
                 stream.set_metrics2(plan.clone());
-                stream.set_query_load_region_id(query_load_region_id(plan));
-                stream.set_query_stat_counters(query_stat_counters(plan));
+                let owners = query_stat_owners(plan);
+                let owners_enabled = use_region_owners(&query_ctx, owners.len());
+                stream.set_query_load_region_id(if owners_enabled {
+                    None
+                } else {
+                    query_load_region_id(plan)
+                });
+                stream.set_query_stat_counters(if owners_enabled {
+                    None
+                } else {
+                    query_stat_counters(plan)
+                });
+                if owners_enabled {
+                    stream.set_query_stat_owners(owners);
+                }
                 stream.set_explain_verbose(explain_verbose);
                 let stream = OnDone::new(Box::pin(stream), move || {
                     let exec_cost = exec_timer.stop_and_record();
@@ -960,6 +1024,39 @@ mod tests {
             &actual.query_scanned_bytes,
             &counters.query_scanned_bytes
         ));
+    }
+
+    #[test]
+    fn query_stat_owners_keeps_same_region_distinct_sources() {
+        use datafusion::physical_plan::union::UnionExec;
+
+        let left = build_query_stat_counter_region_scan(query_stat_counters_for_test());
+        let right = build_query_stat_counter_region_scan(query_stat_counters_for_test());
+        let plan = UnionExec::try_new(vec![left.clone(), right.clone()]).unwrap();
+        let owners = super::query_stat_owners(&plan);
+        assert_eq!(2, owners.len());
+        assert_eq!(owners[0].region_id, owners[1].region_id);
+        assert!(!Arc::ptr_eq(&owners[0].plan, &owners[1].plan));
+        assert!(!Arc::ptr_eq(
+            &owners[0].counters.query_cpu_time,
+            &owners[1].counters.query_cpu_time
+        ));
+
+        let duplicate = UnionExec::try_new(vec![left.clone(), left]).unwrap();
+        assert_eq!(1, super::query_stat_owners(&duplicate).len());
+    }
+
+    #[test]
+    fn region_owner_path_requires_grouped_multi_source_context() {
+        use session::context::QueryContext;
+
+        let plain = QueryContext::arc();
+        assert!(!super::use_region_owners(&plain, 2));
+        let mut grouped = QueryContext::with("greptime", "public");
+        grouped.set_extension(crate::dist_plan::GROUP_READ_CONTEXT_EXTENSION, "true");
+        let grouped = Arc::new(grouped);
+        assert!(!super::use_region_owners(&grouped, 1));
+        assert!(super::use_region_owners(&grouped, 2));
     }
 
     #[test]

@@ -35,6 +35,7 @@ use common_query::request::{
     DynFilterPayload, INITIAL_REMOTE_DYN_FILTER_REGISTRATIONS_EXTENSION_KEY, InitialDynFilterReg,
     InitialDynFilterRegs, REMOTE_DYN_FILTER_PAYLOAD_MAX_BYTES,
 };
+use common_recordbatch::adapter::region_scan_output_bytes;
 use datafusion::common::TableReference;
 use datafusion::datasource::DefaultTableSource;
 use datafusion::functions_aggregate::sum::sum;
@@ -67,12 +68,13 @@ const BASE_MILLIS: i64 = 1_700_000_000_000;
 
 /// `(ts offset seconds, host, k, v)`; the `>= 'd'` range of the table stays empty, and two rows
 /// carry a null tag and a null value.
-const ROWS: [(i64, &str, Option<&str>, Option<f64>); 5] = [
+const ROWS: [(i64, &str, Option<&str>, Option<f64>); 6] = [
     (1, "a0", Some("k0"), Some(1.0)),
     (2, "a1", None, None),
     (3, "b0", Some("k1"), Some(3.0)),
     (4, "c0", Some("k2"), Some(4.0)),
     (5, "c1", None, None),
+    (6, "c2", Some("k3"), Some(5.0)),
 ];
 
 async fn build_cluster(name: &str) -> GreptimeDbCluster {
@@ -279,7 +281,12 @@ async fn grouped_read_batches_one_request_per_datanode_and_keeps_rows() {
     // Independent expectation: the fixture's three non-null rows, in the rows' `host` column.
     let hosts = grouped.iter().map(|row| row[1].clone()).collect::<Vec<_>>();
     assert_eq!(
-        vec!["a0".to_string(), "b0".to_string(), "c0".to_string()],
+        vec![
+            "a0".to_string(),
+            "b0".to_string(),
+            "c0".to_string(),
+            "c2".to_string(),
+        ],
         hosts,
         "unexpected rows:\n{grouped:#?}"
     );
@@ -301,7 +308,7 @@ async fn grouped_read_batches_one_request_per_datanode_and_keeps_rows() {
         "the multi-region group and the singleton group must be one request each, got \
          {pruned_requests:?}"
     );
-    assert_eq!(2, pruned.len(), "unexpected pruned rows: {pruned:#?}");
+    assert_eq!(3, pruned.len(), "unexpected pruned rows: {pruned:#?}");
 
     // A limit must keep its semantics as well: at most two rows, in order.
     let limited_sql =
@@ -353,7 +360,7 @@ async fn grouped_read_rdf_and_rejections() {
         .map(|row| row[1].clone())
         .collect::<Vec<_>>();
     assert_eq!(
-        vec!["b0".to_string(), "c0".to_string()],
+        vec!["b0".to_string(), "c0".to_string(), "c2".to_string()],
         rdf_hosts,
         "unexpected rows under a remotely pushed dynamic filter: {rdf_rows:#?}"
     );
@@ -406,6 +413,54 @@ async fn grouped_read_rdf_and_rejections() {
     for datanode_id in cluster.datanode_instances.keys().copied() {
         let mut own_regions = region_ids_of_datanode(&fe, TABLE, datanode_id).await;
         own_regions.sort();
+        let server = cluster
+            .datanode_instances
+            .get(&datanode_id)
+            .unwrap()
+            .region_server();
+        // Keep only regions with rows so the heartbeat assertions cover non-empty owners. A
+        // single-region GroupRead is the smallest way to establish the baseline.
+        let mut non_empty = Vec::new();
+        for region in &own_regions {
+            let probe = build_group_read_plan(&[*region], info.table_id(), &nested).unwrap();
+            let ctx = QueryContext::arc();
+            let mut probe = server
+                .handle_remote_read(
+                    RegionQueryRequest {
+                        header: Some(RegionRequestHeader {
+                            query_context: Some(ctx.as_ref().into()),
+                            ..Default::default()
+                        }),
+                        region_id: region.as_u64(),
+                        plan: encode(&probe),
+                    },
+                    ctx,
+                )
+                .await
+                .unwrap();
+            let mut rows = 0;
+            while let Some(batch) = probe.next().await {
+                rows += batch.unwrap().num_rows();
+            }
+            let expected_bytes = probe
+                .metrics()
+                .as_ref()
+                .map(region_scan_output_bytes)
+                .unwrap_or(0);
+            drop(probe);
+            if rows > 0 {
+                non_empty.push((*region, expected_bytes));
+            }
+        }
+        assert!(
+            !non_empty.is_empty(),
+            "datanode {datanode_id} must own a non-empty region"
+        );
+        assert!(
+            non_empty.iter().map(|(_, bytes)| bytes).sum::<usize>() > 0,
+            "the non-empty probe must report scan bytes"
+        );
+        let (own_regions, expected_bytes): (Vec<_>, Vec<_>) = non_empty.into_iter().unzip();
         let envelope = build_group_read_plan(&own_regions, info.table_id(), &nested).unwrap();
         let bytes = encode(&envelope);
         let payload = peek_group_read_envelope(&bytes).unwrap().unwrap();
@@ -414,11 +469,16 @@ async fn grouped_read_rdf_and_rejections() {
             payload.region_ids().to_vec(),
             "the envelope must name exactly the regions of datanode {datanode_id}"
         );
-        let server = cluster
-            .datanode_instances
-            .get(&datanode_id)
-            .unwrap()
-            .region_server();
+        if expected_bytes.len() >= 2 {
+            assert_ne!(
+                expected_bytes[0], expected_bytes[1],
+                "the two non-empty regions must have different scan byte sizes"
+            );
+        }
+        let stats_before = own_regions
+            .iter()
+            .map(|region| server.region_statistic(*region).unwrap())
+            .collect::<Vec<_>>();
         let mut stream = server
             .handle_remote_read(
                 RegionQueryRequest {
@@ -472,6 +532,23 @@ async fn grouped_read_rdf_and_rejections() {
             None, metrics.query_load_region_id,
             "a grouped request cannot attribute query load to one region"
         );
+        drop(stream);
+        for ((region, expected_bytes), before) in
+            own_regions.iter().zip(expected_bytes).zip(stats_before)
+        {
+            let after = server.region_statistic(*region).unwrap();
+            assert_eq!(
+                expected_bytes,
+                (after.query_scanned_bytes - before.query_scanned_bytes) as usize,
+                "region {region} heartbeat scanned bytes must match its own scan"
+            );
+            assert!(
+                after.query_cpu_time > before.query_cpu_time,
+                "region {region} heartbeat CPU time must increase: {} -> {}",
+                before.query_cpu_time,
+                after.query_cpu_time
+            );
+        }
         let mut rows = Vec::new();
         for batch in batches.iter() {
             let batch = batch.df_record_batch();
@@ -490,16 +567,19 @@ async fn grouped_read_rdf_and_rejections() {
             !rows.is_empty(),
             "datanode {datanode_id} owns regions, so its grouped read must return rows"
         );
-        base.get_or_insert((server, own_regions, bytes));
+        if own_regions.len() >= 2 {
+            base.get_or_insert((server, own_regions, bytes));
+        }
         rows_by_datanode.insert(datanode_id, rows);
     }
-    let (server, own_regions, bytes) = base.expect("the fixture has two datanodes");
+    let (server, own_regions, bytes) = base.expect("one datanode must own two non-empty regions");
+    assert!(own_regions.len() >= 2);
     let returned = rows_by_datanode
         .values()
         .flatten()
         .cloned()
         .collect::<std::collections::BTreeSet<_>>();
-    let all_rows = ["a0", "a1", "b0", "c0", "c1"]
+    let all_rows = ["a0", "a1", "b0", "c0", "c1", "c2"]
         .map(str::to_string)
         .into_iter()
         .collect::<std::collections::BTreeSet<_>>();
@@ -509,7 +589,7 @@ async fn grouped_read_rdf_and_rejections() {
          {rows_by_datanode:?}"
     );
     assert_eq!(
-        5,
+        6,
         rows_by_datanode.values().map(Vec::len).sum::<usize>(),
         "no row may be returned by both datanodes: {rows_by_datanode:?}"
     );
@@ -575,6 +655,20 @@ async fn grouped_read_rdf_and_rejections() {
             .handle_remote_read(request_for(own_regions[0], duplicate), QueryContext::arc())
             .await,
     );
+    let over_budget = mutate_payload(&bytes, |payload| {
+        payload["region_budget"] = serde_json::json!(1);
+    });
+    let error = assert_rejected(
+        "more RegionPlans than the per-request budget",
+        server
+            .handle_remote_read(
+                request_for(own_regions[0], over_budget),
+                QueryContext::arc(),
+            )
+            .await,
+    );
+    assert!(error.to_string().contains("per-request budget"), "{error}");
+
     let wrong_table = mutate_payload(&bytes, |payload| {
         payload["table_id"] = serde_json::json!(info.table_id() + 1);
     });
@@ -691,13 +785,18 @@ async fn dn_level_poc_group_read_sum_over_union_all_returns_partial_rows() {
     for datanode_id in cluster.datanode_instances.keys().copied() {
         let mut own_regions = region_ids_of_datanode(&fe, TABLE, datanode_id).await;
         own_regions.sort();
-        let envelope =
-            build_group_read_plan_with_combine(&own_regions, info.table_id(), &nested, |union| {
+        let envelope = build_group_read_plan_with_combine(
+            &own_regions,
+            info.table_id(),
+            &nested,
+            own_regions.len(),
+            |union| {
                 LogicalPlanBuilder::from(union)
                     .aggregate(Vec::<datafusion_expr::Expr>::new(), vec![sum(col("v"))])?
                     .build()
-            })
-            .unwrap();
+            },
+        )
+        .unwrap();
         let stream = cluster
             .datanode_instances
             .get(&datanode_id)
@@ -739,7 +838,7 @@ async fn dn_level_poc_group_read_sum_over_union_all_returns_partial_rows() {
     }
     assert_eq!(2, datanodes);
     assert_eq!(
-        8.0, total,
+        13.0, total,
         "the frontend sums the per-datanode partial SUM rows to the global SUM"
     );
 }
