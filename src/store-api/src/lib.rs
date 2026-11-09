@@ -27,6 +27,7 @@ pub mod path_utils;
 pub mod region_engine;
 pub mod region_info;
 pub mod region_request;
+pub mod sketch;
 pub mod sst_entry;
 pub mod storage;
 
