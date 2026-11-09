@@ -490,22 +490,24 @@ pub(crate) fn build_table_meta_from_column_metadatas(
 
     // Preserves the order of primary keys as defined in the original table info.
     for old_idx in &table_meta.primary_key_indices {
-        if let Some(col_schema) = column_schemas.get(*old_idx) {
-            if let Some(&new_idx) = column_name_to_index.get(col_schema.name.as_str()) {
-                let col_meta = ordered_column_metadatas[new_idx];
-                ensure!(
-                    col_meta.semantic_type == SemanticType::Tag,
-                    UnexpectedSnafu {
-                        err_msg: format!(
-                            "Primary key column '{}' has invalid semantic type '{:?}', expected Tag, table: {}, table_id: {}",
-                            col_schema.name, col_meta.semantic_type, table_ref, table_id
-                        ),
-                    }
-                );
-                primary_key_indices.push(new_idx);
-                seen_primary_key_indices.insert(new_idx);
+        let Some(col_schema) = column_schemas.get(*old_idx) else {
+            continue;
+        };
+        let Some(&new_idx) = column_name_to_index.get(col_schema.name.as_str()) else {
+            continue;
+        };
+        let col_meta = ordered_column_metadatas[new_idx];
+        ensure!(
+            col_meta.semantic_type == SemanticType::Tag,
+            UnexpectedSnafu {
+                err_msg: format!(
+                    "Primary key column '{}' has invalid semantic type '{:?}', expected Tag, table: {}, table_id: {}",
+                    col_schema.name, col_meta.semantic_type, table_ref, table_id
+                ),
             }
-        }
+        );
+        primary_key_indices.push(new_idx);
+        seen_primary_key_indices.insert(new_idx);
     }
     // Appends any newly added tag columns that were not part of the original primary keys.
     for (idx, col) in ordered_column_metadatas.iter().enumerate() {
@@ -517,11 +519,13 @@ pub(crate) fn build_table_meta_from_column_metadatas(
 
     // Preserves the order of partition keys as defined in the original table info.
     for old_idx in &table_meta.partition_key_indices {
-        if let Some(col_schema) = column_schemas.get(*old_idx) {
-            if let Some(&new_idx) = column_name_to_index.get(col_schema.name.as_str()) {
-                partition_key_indices.push(new_idx);
-            }
-        }
+        let Some(col_schema) = column_schemas.get(*old_idx) else {
+            continue;
+        };
+        let Some(&new_idx) = column_name_to_index.get(col_schema.name.as_str()) else {
+            continue;
+        };
+        partition_key_indices.push(new_idx);
     }
 
     *next_column_id = column_ids
