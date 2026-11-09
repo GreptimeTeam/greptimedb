@@ -762,6 +762,79 @@ async fn cached_sequences(reader: &ObjectStoreWalReader, listed: &[ListedObject]
 }
 
 #[tokio::test]
+async fn test_selected_chain_excludes_orphan_inside_read_range() {
+    let (_, io, _, reader) = fixture();
+    put(&io, 0, 1, None, 0, &[]).await;
+    put(&io, 1, 1, Some((0, 1)), 0, &[record(1, 1)]).await;
+    // Object 2 is an orphan from an unsuccessful write; object 3 links past it.
+    put(&io, 2, 1, Some((1, 1)), 0, &[record(2, 1)]).await;
+    put(&io, 3, 1, Some((1, 1)), 0, &[record(3, 1)]).await;
+    for upper in [
+        WalReadUpperBound::LastEntry(entry_id(3, 1)),
+        WalReadUpperBound::Listed(entry_id(3, POSITION_LIMIT - 1)),
+    ] {
+        assert_eq!(
+            collect(&reader, 0, upper).await.unwrap(),
+            expected(&[record(1, 1), record(3, 1)])
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_listing_must_reach_recorded_bound_even_with_valid_watermark() {
+    let (_, io, _, reader) = fixture();
+    put(&io, 0, 1, None, 0, &[]).await;
+    put(&io, 1, 1, Some((0, 1)), 0, &[record(1, 1)]).await;
+    let error = collect(
+        &reader,
+        entry_id(1, 1),
+        WalReadUpperBound::Listed(entry_id(2, POSITION_LIMIT - 1)),
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        matches!(error, Error::CorruptedWalObject { reason, .. } if reason.contains("does not reach recorded bound"))
+    );
+}
+
+#[tokio::test]
+async fn test_last_entry_uses_reclaim_boundary_from_later_object() {
+    let (_, io, _, reader) = fixture();
+    // L retains its original boundary, but a later object records reclamation
+    // of its predecessor. Known-L recovery must honor that newer boundary.
+    put(&io, 5, 1, Some((2, 1)), 0, &[record(5, 1)]).await;
+    put(&io, 6, 1, Some((5, 1)), 5, &[record(6, 1)]).await;
+    assert_eq!(
+        collect(&reader, 0, WalReadUpperBound::LastEntry(entry_id(5, 1)))
+            .await
+            .unwrap(),
+        expected(&[record(5, 1)])
+    );
+}
+
+#[tokio::test]
+async fn test_listed_history_end_includes_other_regions() {
+    let (_, io, _, reader) = fixture();
+    let other = |seq| Record {
+        region_id: RegionId::new(1, 2),
+        ..record(seq, 1)
+    };
+    put(&io, 0, 1, None, 0, &[]).await;
+    put(&io, 1, 1, Some((0, 1)), 0, &[record(1, 1), other(1)]).await;
+    put(&io, 2, 1, Some((1, 1)), 0, &[other(2)]).await;
+    assert!(
+        collect(
+            &reader,
+            entry_id(2, 1),
+            WalReadUpperBound::Listed(entry_id(2, POSITION_LIMIT - 1))
+        )
+        .await
+        .unwrap()
+        .is_empty()
+    );
+}
+
+#[tokio::test]
 async fn test_changed_listing_metadata_refetches_index() {
     let (store, io, observed, reader) = fixture();
     put(&io, 1, 1, None, 0, &[record(1, 1)]).await;

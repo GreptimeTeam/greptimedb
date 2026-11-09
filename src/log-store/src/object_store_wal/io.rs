@@ -495,6 +495,37 @@ mod tests {
         ObjectStore::new(Memory::default()).unwrap()
     }
 
+    #[tokio::test]
+    async fn test_list_from_passes_exclusive_predecessor_key() {
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let layer = MockLayerBuilder::default()
+            .lister_factory(Arc::new({
+                let seen = seen.clone();
+                move |path, args, inner| {
+                    seen.lock()
+                        .unwrap()
+                        .push((path.to_string(), args.start_after().map(str::to_string)));
+                    inner
+                }
+            }))
+            .build()
+            .unwrap();
+        let io =
+            ObjectStoreIo::new_readonly(memory_store().layer(layer), "wal/datanodes/1/epochs/0")
+                .unwrap();
+        for seq in [5, 1, 0] {
+            io.list_from(seq).await.unwrap();
+        }
+        assert_eq!(
+            *seen.lock().unwrap(),
+            vec![
+                (io.object_prefix.clone(), Some(io.object_path(4))),
+                (io.object_prefix.clone(), Some(io.object_path(0))),
+                (io.object_prefix.clone(), None),
+            ]
+        );
+    }
+
     /// A reader whose every read fails with a temporary error.
     struct FailingReader;
 
