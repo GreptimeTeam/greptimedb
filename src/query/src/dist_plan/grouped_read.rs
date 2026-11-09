@@ -1495,7 +1495,7 @@ mod tests {
         assert!(error.to_string().contains("region budget must be in"));
         assert!(!called.load(AtomicOrdering::SeqCst));
 
-        // Even with a legal budget, more than 1024 members are rejected before leaves.
+        // Even with the maximum legal budget of 1024, 1025 members are rejected before leaves.
         let error =
             build_group_read_plan_with_combine(&regions(1025), 1024, &project_scan(), 1025, |_| {
                 called.store(true, AtomicOrdering::SeqCst);
