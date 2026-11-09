@@ -6156,7 +6156,16 @@ async fn native_promql_discovery_names_each_metric_it_reads() {
     );
 }
 
-/// Both sides of `or` are planned natively when discovery finds no authorized metric.
+/// Both sides of `or` are planned natively when discovery finds no authorized metric, and so is an
+/// empty input beside a real one under an operator that is not a set operation.
+///
+/// The `or` rows already read the empty input through a tree that required placement sources. The
+/// arithmetic rows are the ones that pin the input binding: physical planning accepts either all
+/// raw frames or all bare scans and refuses a node over a mixture, so a plan holding one empty input
+/// has to bind every real input to a source of its own. Leave that out and `alpha_total` stays a
+/// bare scan beside the empty frame, which physical planning cannot convert
+/// (`No installed planner was able to convert the custom node`): the query errors instead of
+/// answering the empty vector that every one of these arithmetic expressions evaluates to.
 #[tokio::test(flavor = "multi_thread")]
 async fn native_promql_zero_match_or_real_tql() {
     common_telemetry::init_default_ut_logging();
@@ -6240,6 +6249,62 @@ async fn native_promql_zero_match_or_real_tql() {
         );
         assert_eq!(observed_series_scans(&observer).len(), 1, "{query}");
     }
+
+    // An empty input beside a real one under an arithmetic operator. Nothing above an empty
+    // selector here pairs it with a sibling operand, so its layout is the statement's; what these
+    // rows assert is the input binding and the answer.
+    for query in [
+        r#"alpha_total + {__name__=~"no_such_metric_.+"}"#,
+        r#"alpha_total + on(host) {__name__=~"no_such_metric_.+"}"#,
+        r#"{__name__=~"no_such_metric_.+"} + on(host) alpha_total"#,
+        r#"alpha_total * on(host) group_left {__name__=~"no_such_metric_.+"}"#,
+    ] {
+        // TQL does not prepare discovery scope itself; provide the same authorized scope that
+        // the Prometheus handler would provide, without comparing to the unsupported legacy path.
+        let mut ctx = QueryContext::with_db_name(None);
+        ctx.set_extension(QUERY_PARALLELISM_HINT, "4".to_string());
+        ctx.set_extension(NATIVE_PROMQL_EXTENSION_KEY, "true".to_string());
+        ctx.set_metric_discovery_scope(MetricDiscoveryScope::allowed([(
+            DEFAULT_CATALOG_NAME.to_string(),
+            DEFAULT_SCHEMA_NAME.to_string(),
+            "alpha_total".to_string(),
+        )]));
+        let sql = format!("TQL EVAL (0, 2, '1s', '1s') {query}");
+        observer.clear();
+        let output = instance
+            .do_query(&sql, Arc::new(ctx))
+            .await
+            .remove(0)
+            .unwrap();
+        // The statement's own tree is the one to read the shape from: the observer records the
+        // region-side plans too, and which of them was wrapped last says nothing about the shape
+        // that answers the statement.
+        let plan = observer.root_plan();
+        let fused = find_plan_node(&plan, "FusedSeriesExec")
+            .unwrap_or_else(|| panic!("`{query}` did not take the native route: {plan:?}"));
+        // One node over the real input's scan and the empty frame: the empty input is the node's
+        // sibling, and the one real selector is the only read.
+        let children = fused.children();
+        assert_eq!(children.len(), 2, "{query}: {fused:?}");
+        assert!(
+            children
+                .iter()
+                .any(|child| find_plan_node(child, "EmptyExec").is_some()),
+            "`{query}` does not read the zero-match selector as the node's input: {fused:?}"
+        );
+        assert!(
+            children
+                .iter()
+                .any(|child| find_plan_node(child, "MergeScanExec").is_some()),
+            "`{query}` does not read the real input's region: {fused:?}"
+        );
+        // No sample on the empty side means no pair to operate on: the vector answer is empty, and
+        // the node above is what answered it, not a fallback to the existing plan.
+        assert!(
+            native_result_rows(output).await.is_empty(),
+            "{query}: an empty input answered a sample"
+        );
+    }
 }
 
 /// A zero-match selector is laid out by the operand it is compared against, not by the statement.
@@ -6261,6 +6326,15 @@ async fn native_promql_zero_match_or_real_tql() {
 /// two fields, and the outer `or` then pairs two fields against `native_local_narrow`'s one, which
 /// the compiler refuses - and the existing plan refuses the `__name__` regex the branch is written
 /// with, so the query fails instead of answering the control's answer.
+///
+/// The sibling's first selector is not its answer's layout either: `native_local_wide + on(host)
+/// native_local_narrow` pairs two fields against one and keeps the shorter side's, so that operand
+/// answers one field while the first selector it reads carries two. An empty subtree compared
+/// against it therefore still takes a layout of two fields and the compiler refuses the operation,
+/// which is why `(Z or (native_local_wide + on(host) native_local_narrow))` - and its mirror image
+/// with the empty subtree on the right - is deliberately not asserted here: it falls back to the
+/// existing plan and fails on the regex. Laying the empty subtree out by the sibling operand's
+/// compiled answer instead of by its first selector is a separate change.
 #[tokio::test(flavor = "multi_thread")]
 async fn native_promql_zero_match_takes_the_layout_of_its_operand() {
     common_telemetry::init_default_ut_logging();
@@ -6312,6 +6386,23 @@ async fn native_promql_zero_match_takes_the_layout_of_its_operand() {
         (
             r#"native_local_wide + on(host) ((native_local_narrow or {__name__=~"no_such_a.+"}) or {__name__=~"no_such_b.+"})"#,
             2,
+        ),
+        // A non-bare empty operand: an aggregate, a unary negation or a label rewrite reads no real
+        // input either, so the whole subtree takes the layout of the operand it is compared against.
+        // An aggregate is also the operand that changes the shape it answers - `sum by (host)`
+        // answers a field of its own - which is why the layout has to reach the selector under it
+        // instead of being compared against the aggregate's answer.
+        (
+            r#"native_local_wide + on(host) (sum by (host) ({__name__=~"no_such_.+"}) or native_local_narrow)"#,
+            1,
+        ),
+        (
+            r#"native_local_wide + on(host) (-{__name__=~"no_such_.+"} or native_local_narrow)"#,
+            1,
+        ),
+        (
+            r#"native_local_wide + on(host) (label_replace({__name__=~"no_such_.+"}, "x", "y", "", "") or native_local_narrow)"#,
+            1,
         ),
     ];
     // The nodes named `name` reachable from `plan`.
