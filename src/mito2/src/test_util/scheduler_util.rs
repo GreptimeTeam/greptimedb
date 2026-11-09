@@ -155,6 +155,7 @@ impl SchedulerEnv {
                     checkpoint_distance: 10,
                     remove_file_options: Default::default(),
                     manifest_cache: None,
+                    conditional_publication: false,
                 },
                 FormatType::PrimaryKey,
                 false,
@@ -164,6 +165,7 @@ impl SchedulerEnv {
             .unwrap(),
             RegionRoleState::Leader(RegionLeaderState::Writable),
             None,
+            Default::default(),
         ))
     }
 

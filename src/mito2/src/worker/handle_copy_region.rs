@@ -64,8 +64,11 @@ impl<S> RegionWorkerLoop<S> {
             return;
         }
 
-        let region_metadata_loader =
-            RegionMetadataLoader::new(self.config.clone(), self.object_store_manager.clone());
+        let region_metadata_loader = RegionMetadataLoader::new(
+            self.config.clone(),
+            self.object_store_manager.clone(),
+            self.node_lease.is_enabled(),
+        );
         let worker_sender = self.sender.clone();
 
         common_runtime::spawn_global(async move {
@@ -154,7 +157,7 @@ impl<S> RegionWorkerLoop<S> {
             "Loading source region manifest from region dir: {region_dir}, target region: {target_region_id}"
         );
         let source_region_manifest = region_metadata_loader
-            .load_manifest(&region_dir, &region.version().options.storage)
+            .load_manifest(&region_dir, &region.version().options)
             .await?
             .context(MissingManifestSnafu {
                 region_id: source_region_id,

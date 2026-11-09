@@ -2334,6 +2334,7 @@ async fn test_compaction_bypass_in_staging_mode() {
                 checkpoint_distance: 10,
                 remove_file_options: Default::default(),
                 manifest_cache: None,
+                conditional_publication: false,
             },
             FormatType::PrimaryKey,
             false,
@@ -2345,6 +2346,7 @@ async fn test_compaction_bypass_in_staging_mode() {
             manager,
             RegionRoleState::Leader(RegionLeaderState::Staging),
             None,
+            Default::default(),
         ))
     };
 
