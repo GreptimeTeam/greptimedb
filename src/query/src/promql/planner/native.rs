@@ -2584,11 +2584,17 @@ fn segment_tree(
         )
     };
     let (segment_metric, segment_time_index) = segment_binding(&current_source_ids);
+    // A segment publishes on the grid its root declares, which is the grid its consumer reads it
+    // on. Segmentation recurses into a cut subtree with the caller's grid, and that subtree can sit
+    // inside a subquery window: the canonical segmentation of a collapsing rewrite cuts the window's
+    // input while its caller still holds the statement's grid. Binding the caller's grid here
+    // rejects such a segment, and the rejection aborts the whole route.
+    let publish_grid = fused_publish_grid(parent.root(), grid);
     let Ok(plan) = FusedSeries::try_new_with_format(
         Arc::from(prom_expr.to_string()),
         parent,
         FusedSeriesBinding {
-            grid: Arc::clone(grid),
+            grid: publish_grid,
             time_index: segment_time_index,
             tags: tags.to_vec(),
             metric_name: segment_metric,

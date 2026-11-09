@@ -12544,6 +12544,42 @@ async fn native_promql_subqueries_match_legacy() {
         legacy.sort_by(|a, b| (a.0, &a.1).cmp(&(b.0, &b.1)).then(a.2.total_cmp(&b.2)));
         assert_eq!(native, legacy, "{sql}");
     }
+
+    // A rewrite that writes a label the series already carry collapses them: the canonicalizer puts
+    // a merge at the statement root, and the segmentation below runs with canonical segmentation on.
+    // The fold inside the subquery is a global consumer, so it is cut recursively, and that nested
+    // segment answers the subquery's own grid - the two points at 120000 and 180000 - while the
+    // statement's grid holds the single point at 180000. Publishing the nested segment on the
+    // caller's grid rejects its binding, and the rejection aborts the whole route, so the statement
+    // has to stay native here and answer what the existing plan answers.
+    //
+    // `host="h0"` keeps one series: the rewrite makes every series' label set `host="all"`, and two
+    // of them meeting at one grid point is the overlap both routes report as an error.
+    let collapse = "TQL EVAL (180, 180, '1m') label_replace(avg_over_time((sum by (host) \
+                    (native_subq{host=\"h0\"}))[2m:1m]), \"host\", \"all\", \"\", \"\")";
+    observer.clear();
+    let collapse_native =
+        native_result_rows(native_tql_output(&instance, collapse, true).await).await;
+    assert!(
+        observer.fused().is_some(),
+        "{collapse} must run on the native route: {:#?}",
+        observer.root_plan()
+    );
+    observer.clear();
+    let collapse_legacy =
+        native_result_rows(native_tql_output(&instance, collapse, false).await).await;
+    assert!(
+        observer.fused().is_none(),
+        "{collapse} must keep the existing plan when the native route is off"
+    );
+    // `h0` sums to 10 + 40 at 120000 and 20 + 80 at 180000, so the fold over the subquery's two
+    // points averages to 75 at the statement's one step.
+    assert_eq!(
+        collapse_native,
+        vec![(180_000, "all".to_string(), 75.0)],
+        "{collapse}"
+    );
+    assert_eq!(collapse_native, collapse_legacy, "{collapse}");
 }
 
 /// An aggregate inside a subquery is still an aggregate, so it keeps that operand out of the
