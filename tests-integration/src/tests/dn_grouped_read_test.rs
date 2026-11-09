@@ -15,9 +15,9 @@
 //! Grouped datanode reads: one Flight request per datanode instead of one per region.
 //!
 //! The frontend groups the regions of one ordinary single-table scan by the datanode their leader
-//! lives on and sends one envelope per group. The datanode decodes the same nested plan once per
-//! region and concatenates the region plans' batches, so the rows are the rows of the ordinary
-//! one-request-per-region path.
+//! lives on and sends one GroupRead root around a combine tree per group. The datanode replaces
+//! every RegionPlan leaf with that region's bound logical subtree and executes the resulting
+//! ordinary multi-input plan, so the rows are the rows of the ordinary one-request-per-region path.
 //!
 //! The request counts below are the datanodes' own Flight `DoGet` counters, reached over real TCP
 //! (the fixture turns the in-process duplex lane off), not the planner's group bookkeeping.
@@ -37,7 +37,8 @@ use common_query::request::{
 };
 use datafusion::common::TableReference;
 use datafusion::datasource::DefaultTableSource;
-use datafusion::logical_expr::LogicalPlanBuilder;
+use datafusion::functions_aggregate::sum::sum;
+use datafusion::logical_expr::{LogicalPlanBuilder, col};
 use datafusion::physical_plan::PhysicalExpr;
 use datafusion::physical_plan::expressions::lit as physical_lit;
 use datanode::error::{Error as DatanodeError, Result as DatanodeResult};
@@ -47,8 +48,8 @@ use futures::StreamExt;
 use meta_srv::metasrv::SelectTarget;
 use meta_srv::selector::round_robin::RoundRobinSelector;
 use query::dist_plan::{
-    DatanodeGroupedReadPlan, MergeScanLogicalPlan, build_grouped_read_plan,
-    peek_grouped_read_envelope,
+    MergeScanLogicalPlan, build_group_read_plan, build_group_read_plan_with_combine,
+    build_group_read_plan_with_concurrency, peek_group_read_envelope,
 };
 use query::query_engine::DefaultSerializer;
 use servers::grpc::region_server::RegionServerHandler;
@@ -252,8 +253,8 @@ async fn grouped_read_batches_one_request_per_datanode_and_keeps_rows() {
     }
 
     // An ordered statement must stay globally ordered whether the scan below it is batched or not:
-    // grouping only concatenates the region streams in region order, which is exactly what the
-    // frontend sort already assumes of the ordinary path.
+    // the frontend sort does not rely on any region order below it, and the grouped Append path
+    // is not chosen for a scan that itself promises an order.
     let ordered_sql = format!("SELECT ts, host, k, v FROM {TABLE} WHERE v IS NOT NULL ORDER BY ts");
     let before = do_gets(&cluster);
     let ordered = run_rows_in_order(&fe, &ordered_sql).await;
@@ -404,20 +405,28 @@ async fn grouped_read_rdf_and_rejections() {
     for datanode_id in cluster.datanode_instances.keys().copied() {
         let mut own_regions = region_ids_of_datanode(&fe, TABLE, datanode_id).await;
         own_regions.sort();
-        let envelope = build_grouped_read_plan(&own_regions, info.table_id(), &nested).unwrap();
+        let max_concurrent = own_regions.len().min(2);
+        let envelope = build_group_read_plan_with_concurrency(
+            &own_regions,
+            info.table_id(),
+            &nested,
+            max_concurrent,
+        )
+        .unwrap();
         let bytes = encode(&envelope);
-        let payload = peek_grouped_read_envelope(&bytes).unwrap().unwrap();
+        let payload = peek_group_read_envelope(&bytes).unwrap().unwrap();
         assert_eq!(
             own_regions.iter().map(RegionId::as_u64).collect::<Vec<_>>(),
             payload.region_ids().to_vec(),
             "the envelope must name exactly the regions of datanode {datanode_id}"
         );
+        assert_eq!(max_concurrent, payload.max_concurrent());
         let server = cluster
             .datanode_instances
             .get(&datanode_id)
             .unwrap()
             .region_server();
-        let stream = server
+        let mut stream = server
             .handle_remote_read(
                 RegionQueryRequest {
                     header: Some(RegionRequestHeader {
@@ -433,9 +442,27 @@ async fn grouped_read_rdf_and_rejections() {
             .unwrap_or_else(|error| {
                 panic!("the grouped envelope must execute on datanode {datanode_id}: {error}")
             });
-        let batches = common_recordbatch::util::collect_batches(stream)
-            .await
-            .unwrap_or_else(|error| panic!("the grouped stream must produce batches: {error}"));
+        let mut batches = Vec::new();
+        while let Some(batch) = stream.next().await {
+            batches.push(batch.unwrap_or_else(|error| {
+                panic!("the grouped stream on datanode {datanode_id} failed: {error}")
+            }));
+        }
+        let metrics = stream
+            .metrics()
+            .expect("a finished grouped stream must report cumulative member metrics");
+        assert!(
+            !metrics.plan_metrics.is_empty(),
+            "the grouped metrics must contain the member plan metrics: {metrics:?}"
+        );
+        assert!(
+            metrics.region_watermarks.is_empty(),
+            "grouped reads reject Flow contexts, so they carry no Flow watermarks: {metrics:?}"
+        );
+        assert_eq!(
+            None, metrics.query_load_region_id,
+            "a grouped request cannot attribute query load to one region"
+        );
         let mut rows = Vec::new();
         for batch in batches.iter() {
             let batch = batch.df_record_batch();
@@ -499,7 +526,7 @@ async fn grouped_read_rdf_and_rejections() {
         error
     };
 
-    let anchor_missing = mutate_payload(&bytes, &nested, |payload| {
+    let anchor_missing = mutate_payload(&bytes, |payload| {
         payload["region_ids"] = serde_json::json!([own_regions[0].as_u64()]);
     });
     assert_rejected(
@@ -511,7 +538,7 @@ async fn grouped_read_rdf_and_rejections() {
             )
             .await,
     );
-    let duplicate = mutate_payload(&bytes, &nested, |payload| {
+    let duplicate = mutate_payload(&bytes, |payload| {
         payload["region_ids"] =
             serde_json::json!([own_regions[0].as_u64(), own_regions[0].as_u64()]);
     });
@@ -521,7 +548,7 @@ async fn grouped_read_rdf_and_rejections() {
             .handle_remote_read(request_for(own_regions[0], duplicate), QueryContext::arc())
             .await,
     );
-    let wrong_table = mutate_payload(&bytes, &nested, |payload| {
+    let wrong_table = mutate_payload(&bytes, |payload| {
         payload["table_id"] = serde_json::json!(info.table_id() + 1);
     });
     assert_rejected(
@@ -533,7 +560,7 @@ async fn grouped_read_rdf_and_rejections() {
             )
             .await,
     );
-    let misnamed = mutate_payload(&bytes, &nested, |payload| {
+    let misnamed = mutate_payload(&bytes, |payload| {
         payload["table_name"] = serde_json::json!("greptime.public.another_table");
     });
     assert_rejected(
@@ -542,7 +569,7 @@ async fn grouped_read_rdf_and_rejections() {
             .handle_remote_read(request_for(own_regions[0], misnamed), QueryContext::arc())
             .await,
     );
-    let unsupported_version = mutate_payload(&bytes, &nested, |payload| {
+    let unsupported_version = mutate_payload(&bytes, |payload| {
         payload["version"] = serde_json::json!(999);
     });
     assert_rejected(
@@ -556,7 +583,7 @@ async fn grouped_read_rdf_and_rejections() {
     );
     // An unrelated extension is owned by the ordinary decoder, not the grouped-read peek.
     let unknown_root = encode(&MergeScanLogicalPlan::new(nested.clone(), true).into_logical_plan());
-    assert!(peek_grouped_read_envelope(&unknown_root).unwrap().is_none());
+    assert!(peek_group_read_envelope(&unknown_root).unwrap().is_none());
 
     // An ineligible nested shape (a join) is rejected by the datanode even though the envelope
     // itself is well formed.
@@ -593,9 +620,7 @@ async fn grouped_read_rdf_and_rejections() {
     .unwrap();
     // The frontend refuses to build an envelope around a join, so the request is assembled from a
     // valid envelope with its nested plan replaced: the datanode has to reject the shape itself.
-    let joined_envelope = mutate_payload(&bytes, &nested, |payload| {
-        payload["nested_plan"] = serde_json::json!(encode(&joined));
-    });
+    let joined_envelope = mutate_region_plans(&bytes, &encode(&joined));
     assert_rejected(
         "a join nested plan",
         server
@@ -604,6 +629,94 @@ async fn grouped_read_rdf_and_rejections() {
                 QueryContext::arc(),
             )
             .await,
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn grouped_read_sum_over_union_all_region_plans_returns_one_partial_per_datanode() {
+    common_telemetry::init_default_ut_logging();
+    let cluster = build_cluster("dn_grouped_read_sum").await;
+    let fe = cluster.fe_instance().clone();
+    prepare_fixture(&fe).await;
+
+    let table = fe
+        .catalog_manager()
+        .table("greptime", "public", TABLE, None)
+        .await
+        .unwrap()
+        .unwrap();
+    let info = table.table_info();
+    let nested = LogicalPlanBuilder::scan(
+        TableReference::bare(TABLE),
+        Arc::new(DefaultTableSource::new(Arc::new(
+            DfTableProviderAdapter::new(table.clone()),
+        ))),
+        None,
+    )
+    .unwrap()
+    .build()
+    .unwrap();
+
+    let mut total = 0.0f64;
+    let mut datanodes = 0;
+    for datanode_id in cluster.datanode_instances.keys().copied() {
+        let mut own_regions = region_ids_of_datanode(&fe, TABLE, datanode_id).await;
+        own_regions.sort();
+        let envelope = build_group_read_plan_with_combine(
+            &own_regions,
+            info.table_id(),
+            &nested,
+            2,
+            |union| {
+                LogicalPlanBuilder::from(union)
+                    .aggregate(Vec::<datafusion_expr::Expr>::new(), vec![sum(col("v"))])?
+                    .build()
+            },
+        )
+        .unwrap();
+        let stream = cluster
+            .datanode_instances
+            .get(&datanode_id)
+            .unwrap()
+            .region_server()
+            .handle_remote_read(
+                RegionQueryRequest {
+                    header: Some(RegionRequestHeader {
+                        query_context: Some(QueryContext::arc().as_ref().into()),
+                        ..Default::default()
+                    }),
+                    region_id: own_regions[0].as_u64(),
+                    plan: encode(&envelope),
+                },
+                QueryContext::arc(),
+            )
+            .await
+            .unwrap_or_else(|error| {
+                panic!("SUM GroupRead failed on datanode {datanode_id}: {error}")
+            });
+        let batches = common_recordbatch::util::collect_batches(stream)
+            .await
+            .unwrap_or_else(|error| panic!("SUM GroupRead produced no batches: {error}"));
+        let rows = batches.iter().map(|batch| batch.num_rows()).sum::<usize>();
+        assert_eq!(
+            1, rows,
+            "Aggregate over UnionAll(RegionPlan...) must emit one partial row per datanode"
+        );
+        let batch = batches
+            .iter()
+            .next()
+            .expect("one partial SUM row")
+            .df_record_batch();
+        let values = batch
+            .column(0)
+            .as_primitive::<datatypes::arrow::datatypes::Float64Type>();
+        total += values.value(0);
+        datanodes += 1;
+    }
+    assert_eq!(2, datanodes);
+    assert_eq!(
+        8.0, total,
+        "the frontend sums the per-datanode partial SUM rows to the global SUM"
     );
 }
 
@@ -650,8 +763,7 @@ async fn grouped_read_active_remote_filter_update_and_cancel_releases_permit() {
         let mut counts = Vec::new();
         for region in &regions {
             let envelope =
-                build_grouped_read_plan(&[*region], table.table_info().table_id(), &nested)
-                    .unwrap();
+                build_group_read_plan(&[*region], table.table_info().table_id(), &nested).unwrap();
             let ctx = QueryContext::arc();
             let stream = server
                 .handle_remote_read(
@@ -680,7 +792,7 @@ async fn grouped_read_active_remote_filter_update_and_cancel_releases_permit() {
     let (server, regions, counts) =
         selected.expect("one datanode owns both nonempty first and third partitions");
     let bytes =
-        encode(&build_grouped_read_plan(&regions, table.table_info().table_id(), &nested).unwrap());
+        encode(&build_group_read_plan(&regions, table.table_info().table_id(), &nested).unwrap());
     let filter_id = "active-grouped-filter";
     let regs = InitialDynFilterRegs::new(vec![InitialDynFilterReg::new(filter_id, vec![])]);
     let mut ctx = QueryContext::with("greptime", "public");
@@ -895,20 +1007,72 @@ fn encode(plan: &datafusion_expr::LogicalPlan) -> Vec<u8> {
         .to_vec()
 }
 
-/// Rebuilds a valid envelope with a mutated payload, so a datanode's rejection can be observed.
-fn mutate_payload(
-    bytes: &[u8],
-    nested: &datafusion_expr::LogicalPlan,
-    mutate: impl FnOnce(&mut serde_json::Value),
-) -> Vec<u8> {
-    let payload = peek_grouped_read_envelope(bytes).unwrap().unwrap();
+/// Rebuilds a valid envelope with mutated GroupRead metadata, so a datanode's rejection can be
+/// observed without touching the combine tree.
+fn mutate_payload(bytes: &[u8], mutate: impl FnOnce(&mut serde_json::Value)) -> Vec<u8> {
+    use prost::Message;
+    use substrait::substrait_proto_df::proto::{Plan, plan_rel, rel};
+
+    let payload = peek_group_read_envelope(bytes).unwrap().unwrap();
     let mut value: serde_json::Value = serde_json::from_slice(&payload.encode().unwrap()).unwrap();
     mutate(&mut value);
-    let node = DatanodeGroupedReadPlan::from_raw_payload(
-        serde_json::to_vec(&value).unwrap(),
-        nested.schema().clone(),
-    );
-    encode(&node.into_logical_plan())
+    let value = serde_json::to_vec(&value).unwrap();
+
+    let mut plan = Plan::decode(bytes).unwrap();
+    let relation = plan.relations.first_mut().unwrap();
+    let root = match relation.rel_type.as_mut().unwrap() {
+        plan_rel::RelType::Rel(root) => root,
+        plan_rel::RelType::Root(root) => root.input.as_mut().unwrap(),
+    };
+    let rel::RelType::ExtensionSingle(single) = root.rel_type.as_mut().unwrap() else {
+        panic!("the fixture must have a GroupRead root");
+    };
+    single.detail.as_mut().unwrap().value = value.into();
+    plan.encode_to_vec()
+}
+
+/// Rewrites every RegionPlan leaf with another regional plan, keeping the outer tree shape.
+fn mutate_region_plans(bytes: &[u8], regional_plan: &[u8]) -> Vec<u8> {
+    use prost::Message;
+    use substrait::substrait_proto_df::proto::{Plan, plan_rel, rel};
+
+    fn walk(rel: &mut substrait::substrait_proto_df::proto::Rel, regional_plan: &[u8]) {
+        match rel.rel_type.as_mut().unwrap() {
+            rel::RelType::ExtensionLeaf(leaf) => {
+                let detail = leaf.detail.as_mut().unwrap();
+                if detail.type_url == query::dist_plan::REGION_PLAN_NAME {
+                    let payload =
+                        query::dist_plan::RegionPlanPayload::decode(&detail.value).unwrap();
+                    let payload = query::dist_plan::RegionPlanPayload::try_new(
+                        payload.region_id(),
+                        regional_plan.to_vec(),
+                    )
+                    .unwrap();
+                    detail.value = payload.encode().unwrap().into();
+                }
+            }
+            rel::RelType::ExtensionSingle(single) => {
+                if let Some(input) = single.input.as_mut() {
+                    walk(input, regional_plan);
+                }
+            }
+            rel::RelType::Set(set) => {
+                for input in &mut set.inputs {
+                    walk(input, regional_plan);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let mut plan = Plan::decode(bytes).unwrap();
+    let relation = plan.relations.first_mut().unwrap();
+    let root = match relation.rel_type.as_mut().unwrap() {
+        plan_rel::RelType::Rel(root) => root,
+        plan_rel::RelType::Root(root) => root.input.as_mut().unwrap(),
+    };
+    walk(root, regional_plan);
+    plan.encode_to_vec()
 }
 
 async fn region_ids(fe: &Arc<frontend::instance::Instance>, table: &str) -> Vec<RegionId> {

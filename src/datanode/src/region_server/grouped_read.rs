@@ -12,53 +12,43 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Grouped region reads: one request that names several regions of one table.
+//! Request-scoped decoding of `GroupRead`.
 //!
-//! The request is a versioned envelope (see `query::dist_plan::DatanodeGroupedReadPlan`) whose
-//! nested plan is one ordinary single-table plan. Every named region decodes that plan against its
-//! own region catalog, and the region plans are executed in the envelope's order, concatenating
-//! their batches. Nothing is merged or reduced across regions, so the frontend sees the same rows
-//! it would see from one request per region.
+//! The root is a `GroupRead` marker around a combine tree. Every `RegionPlan` leaf carries one
+//! region id and the complete plan for that region. The query crate resolves each leaf through
+//! the region resolver below, replaces it with the bound logical subtree, and the datanode runs
+//! the resulting ordinary multi-input tree through the query engine. There is no physical-input
+//! registry or combine-plan field: a `UnionAll` is literally a DataFusion `Union`.
 
-use std::collections::VecDeque;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
-use api::v1::region::RegionRequestHeader;
+use async_trait::async_trait;
 use bytes::Bytes;
-use common_error::ext::BoxedError;
+use common_query::logical_plan::SubstraitPlanDecoderRef;
 use common_query::request::QueryRequest;
 use common_recordbatch::adapter::RecordBatchMetrics;
-use common_recordbatch::error::ExternalSnafu;
 use common_recordbatch::{OrderOption, RecordBatch, RecordBatchStream, SendableRecordBatchStream};
-use datatypes::schema::{Schema, SchemaRef};
-use futures::{Stream, StreamExt};
-use query::dist_plan::{GroupedReadPayload, validate_grouped_read_nested_plan};
+use datafusion_expr::LogicalPlan;
+use futures::Stream;
+use query::dist_plan::{GroupReadPayload, RegionPlanResolver, decode_group_read_request};
 use session::context::QueryContextRef;
-use snafu::{IntoError, ResultExt};
+use snafu::ResultExt;
 use store_api::storage::RegionId;
 use tokio::sync::OwnedSemaphorePermit;
 
-use crate::error::{
-    DecodeLogicalPlanSnafu, InvalidQueryContextSnafu, NewPlanDecoderSnafu, Result, UnexpectedSnafu,
-};
+use crate::error::{DecodeLogicalPlanSnafu, NewPlanDecoderSnafu, Result, UnexpectedSnafu};
 use crate::region_server::RegionServer;
 use crate::region_server::catalog::NameAwareCatalogList;
-use crate::region_server::remote_dyn_filter::RemoteDynFilterRegistrationGuard;
 
 impl RegionServer {
-    /// Executes a grouped read envelope: one region plan per named region, in order.
-    ///
-    /// Decoding and validation happen before the stream is returned, so the stream's schema is
-    /// final when the frontend receives it and a dynamic filter update can be applied while the
-    /// grouped stream is still scanning. No region is skipped: a failing region fails the whole
-    /// stream, and the regions already emitted stay emitted (the stream never retries a prefix).
+    /// Decodes and executes a `GroupRead` request.
     pub(super) async fn handle_grouped_read_inner(
         &self,
         request: api::v1::region::QueryRequest,
         query_ctx: QueryContextRef,
-        payload: GroupedReadPayload,
+        payload: GroupReadPayload,
         permit: Option<OwnedSemaphorePermit>,
     ) -> Result<SendableRecordBatchStream> {
         if query_ctx
@@ -80,181 +70,110 @@ impl RegionServer {
             .inner
             .query_engine
             .engine_context(query_ctx)
-            .map_err(|error| {
-                InvalidQueryContextSnafu {
-                    reason: error.to_string(),
-                }
-                .build()
-            })?;
+            .context(NewPlanDecoderSnafu)?;
         let query_ctx = engine_ctx.query_ctx();
         let decoder = engine_ctx.new_plan_decoder().context(NewPlanDecoderSnafu)?;
-
-        // One decode per region, against that region's own catalog, before anything runs.
-        let mut plans = VecDeque::with_capacity(payload.region_ids().len());
-        let mut expected_schema: Option<SchemaRef> = None;
-        for region in payload.region_ids() {
-            let region_id = RegionId::from_u64(*region);
-            let catalog_list = Arc::new(NameAwareCatalogList::new(
-                self.clone(),
-                region_id,
-                query_ctx.clone(),
-            ));
-            let plan = decoder
-                .decode(
-                    Bytes::from(payload.nested_plan().to_vec()),
-                    catalog_list,
-                    false,
-                )
-                .await
-                .context(DecodeLogicalPlanSnafu)?;
-            validate_grouped_read_nested_plan(&payload, &plan)
-                .map_err(|reason| UnexpectedSnafu { violated: reason }.build())?;
-            let schema = SchemaRef::from(
-                Schema::try_from(plan.schema().clone()).map_err(|error| {
-                    UnexpectedSnafu {
-                        violated: format!(
-                            "region {region_id} decodes the grouped read plan to an invalid schema: \
-                             {error}"
-                        ),
-                    }
-                    .build()
-                })?,
-            );
-            match &expected_schema {
-                Some(expected) if expected != &schema => {
-                    return UnexpectedSnafu {
-                        violated: format!(
-                            "region {region_id} decodes the grouped read plan to a different schema"
-                        ),
-                    }
-                    .fail();
-                }
-                Some(_) => {}
-                None => expected_schema = Some(schema),
-            }
-            plans.push_back((region_id, plan));
-        }
-        let Some(schema) = expected_schema else {
-            return UnexpectedSnafu {
-                violated: "a grouped read names no region".to_string(),
-            }
-            .fail();
+        let region_ids = payload.region_ids().to_vec();
+        let resolver = DatanodeRegionPlanResolver {
+            server: self.clone(),
+            query_ctx: query_ctx.clone(),
+            decoder,
         };
+        let plan = decode_group_read_request(&request.plan, engine_ctx.state(), payload, &resolver)
+            .await
+            .map_err(|reason| UnexpectedSnafu { violated: reason }.build())?;
 
-        // Hold one registration guard per member region for the whole grouped stream. The initial
-        // registrations arrive in the shared request header, and an update that arrives while an
-        // earlier region is still scanning must find its own region's registration.
-        let mut guards = Vec::with_capacity(payload.region_ids().len());
-        for region in payload.region_ids() {
+        let mut guards = Vec::with_capacity(region_ids.len());
+        for region in region_ids {
             if let Some(guard) = self
-                .register_initial_remote_dyn_filter_cleanup(&query_ctx, RegionId::from_u64(*region))
+                .register_initial_remote_dyn_filter_cleanup(&query_ctx, RegionId::from_u64(region))
             {
                 guards.push(guard);
             }
         }
 
-        let state = GroupedReadStreamState {
-            server: self.clone(),
-            query_ctx,
-            header: request.header,
-            plans,
-            current: None,
-            failed: false,
-            permit,
-            _guards: guards,
-        };
-        let inner = Box::pin(futures::stream::unfold(state, |mut state| async move {
-            loop {
-                if state.failed {
-                    return None;
-                }
-                if let Some(current) = state.current.as_mut() {
-                    match current.next().await {
-                        Some(Ok(batch)) => return Some((Ok(batch), state)),
-                        Some(Err(error)) => {
-                            state.current = None;
-                            state.plans.clear();
-                            state.failed = true;
-                            state._guards.clear();
-                            state.permit.take();
-                            return Some((Err(error), state));
-                        }
-                        None => state.current = None,
-                    }
-                }
-                let Some((region_id, plan)) = state.plans.pop_front() else {
-                    return None;
-                };
-                let request = QueryRequest {
-                    header: state.header.clone(),
-                    region_id,
+        let stream = self
+            .inner
+            .handle_read(
+                QueryRequest {
+                    header: request.header,
+                    region_id: anchor,
                     plan,
-                };
-                match state
-                    .server
-                    .inner
-                    .handle_read(request, state.query_ctx.clone())
-                    .await
-                {
-                    Ok(stream) => state.current = Some(stream),
-                    Err(error) => {
-                        state.failed = true;
-                        state.plans.clear();
-                        state._guards.clear();
-                        state.permit.take();
-                        let error = ExternalSnafu.into_error(BoxedError::new(error));
-                        return Some((Err(error), state));
-                    }
-                }
-            }
-        }));
-
-        Ok(Box::pin(GroupedRecordBatchStream { schema, inner }))
+                },
+                query_ctx,
+            )
+            .await?;
+        let stream = guards
+            .into_iter()
+            .fold(stream, super::wrap_remote_dyn_filter_guarded_stream);
+        Ok(match permit {
+            Some(permit) => Box::pin(GroupedReadPermitStream {
+                inner: stream,
+                permit: Some(permit),
+            }),
+            None => stream,
+        })
     }
 }
 
-/// The lazy state of a grouped read: the region plans not started yet and the one being scanned.
-struct GroupedReadStreamState {
-    server: RegionServer,
-    query_ctx: QueryContextRef,
-    header: Option<RegionRequestHeader>,
-    plans: VecDeque<(RegionId, datafusion_expr::LogicalPlan)>,
-    current: Option<SendableRecordBatchStream>,
-    failed: bool,
+/// Holds the outer grouped-read permit until EOF, error or drop.
+struct GroupedReadPermitStream {
+    inner: SendableRecordBatchStream,
     permit: Option<OwnedSemaphorePermit>,
-    /// Released when the stream finishes, fails or is dropped.
-    _guards: Vec<RemoteDynFilterRegistrationGuard>,
 }
 
-/// A grouped read stream: the concatenation of the region streams, in envelope order.
-struct GroupedRecordBatchStream {
-    schema: SchemaRef,
-    inner: Pin<
-        Box<
-            dyn Stream<Item = std::result::Result<RecordBatch, common_recordbatch::error::Error>>
-                + Send,
-        >,
-    >,
-}
-
-impl Stream for GroupedRecordBatchStream {
+impl Stream for GroupedReadPermitStream {
     type Item = std::result::Result<RecordBatch, common_recordbatch::error::Error>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        self.inner.as_mut().poll_next(cx)
+        let result = self.inner.as_mut().poll_next(cx);
+        if matches!(result, Poll::Ready(None)) || matches!(result, Poll::Ready(Some(Err(_)))) {
+            self.permit.take();
+        }
+        result
     }
 }
 
-impl RecordBatchStream for GroupedRecordBatchStream {
-    fn schema(&self) -> SchemaRef {
-        self.schema.clone()
+impl RecordBatchStream for GroupedReadPermitStream {
+    fn name(&self) -> &str {
+        self.inner.name()
+    }
+
+    fn schema(&self) -> datatypes::schema::SchemaRef {
+        self.inner.schema()
     }
 
     fn output_ordering(&self) -> Option<&[OrderOption]> {
-        None
+        self.inner.output_ordering()
     }
 
     fn metrics(&self) -> Option<RecordBatchMetrics> {
-        None
+        self.inner.metrics()
+    }
+}
+
+struct DatanodeRegionPlanResolver {
+    server: RegionServer,
+    query_ctx: QueryContextRef,
+    decoder: SubstraitPlanDecoderRef,
+}
+
+#[async_trait]
+impl RegionPlanResolver for DatanodeRegionPlanResolver {
+    async fn resolve_region_plan(
+        &self,
+        region_id: RegionId,
+        plan: &[u8],
+    ) -> std::result::Result<LogicalPlan, String> {
+        let catalog_list = Arc::new(NameAwareCatalogList::new(
+            self.server.clone(),
+            region_id,
+            self.query_ctx.clone(),
+        ));
+        self.decoder
+            .decode(Bytes::from(plan.to_vec()), catalog_list, false)
+            .await
+            .context(DecodeLogicalPlanSnafu)
+            .map_err(|error| error.to_string())
     }
 }

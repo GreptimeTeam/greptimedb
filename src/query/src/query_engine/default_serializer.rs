@@ -42,7 +42,7 @@ use substrait::substrait_proto_df::proto::{
 };
 use substrait::{DFLogicalSubstraitConvertor, Extensions, SubstraitPlan};
 
-use crate::dist_plan::{DatanodeGroupedReadPlan, MergeScanLogicalPlan};
+use crate::dist_plan::{GroupReadPlan, MergeScanLogicalPlan, RegionPlan};
 use crate::query_engine::QueryEngineState;
 
 /// Extended [`substrait::extension_serializer::ExtensionSerializer`] but supports [`MergeScanLogicalPlan`] serialization.
@@ -69,14 +69,20 @@ impl SerializerRegistry for DefaultSerializer {
                 input,
             }
             .encode_to_vec())
-        } else if node.name() == DatanodeGroupedReadPlan::name() {
+        } else if node.name() == GroupReadPlan::name() {
             let grouped = node
                 .as_any()
-                .downcast_ref::<DatanodeGroupedReadPlan>()
-                .expect("Failed to downcast to DatanodeGroupedReadPlan");
-            // The envelope carries the payload bytes it was built with: the datanode validates
-            // them, so a malformed envelope reaches it to be rejected instead of failing to encode.
+                .downcast_ref::<GroupReadPlan>()
+                .expect("Failed to downcast to GroupReadPlan");
+            // The root carries the payload bytes it was built with: the datanode validates them,
+            // so a malformed envelope reaches it to be rejected instead of failing to encode.
             Ok(grouped.payload_bytes().to_vec())
+        } else if node.name() == RegionPlan::name() {
+            let region = node
+                .as_any()
+                .downcast_ref::<RegionPlan>()
+                .expect("Failed to downcast to RegionPlan");
+            Ok(region.payload_bytes().to_vec())
         } else {
             ExtensionSerializer.serialize_logical_plan(node)
         }
@@ -92,13 +98,12 @@ impl SerializerRegistry for DefaultSerializer {
             Err(DataFusionError::Substrait(format!(
                 "Unsupported plan node: {name}"
             )))
-        } else if name == DatanodeGroupedReadPlan::name() {
-            // The envelope's schema is the schema of the nested plan it carries, which is not in
-            // the payload. A datanode peeks the envelope before decoding, so reaching this branch
-            // means the request was decoded as an ordinary plan: reject it instead of executing
-            // it against a single anchor region.
+        } else if name == GroupReadPlan::name() || name == RegionPlan::name() {
+            // These nodes are resolved by the request-scoped GroupRead consumer, which has the
+            // region catalogs. An ordinary decoder reaching this branch must fail closed instead
+            // of executing a region leaf against one anchor region.
             Err(DataFusionError::Substrait(format!(
-                "Unsupported plan node: {name} (grouped read envelopes are decoded by the region server)"
+                "{name} is only decodable through a GroupRead request"
             )))
         } else {
             ExtensionSerializer.deserialize_logical_plan(name, bytes)
@@ -675,7 +680,7 @@ mod tests {
 
     #[tokio::test]
     async fn grouped_read_peek_preserves_other_root_decoder_and_rejects_own_envelope() {
-        use crate::dist_plan::{GroupedReadPayload, peek_grouped_read_envelope};
+        use crate::dist_plan::{build_group_read_plan, peek_group_read_envelope};
 
         let engine = QueryEngineFactory::new(
             numbers_catalog_manager(),
@@ -690,7 +695,7 @@ mod tests {
         let decoder = plan_decoder(engine.as_ref());
         let ordinary = merge_scan(numbers_scan(), true);
         let bytes = encode_plan(&ordinary);
-        assert!(peek_grouped_read_envelope(&bytes).unwrap().is_none());
+        assert!(peek_group_read_envelope(&bytes).unwrap().is_none());
         let decoded = decoder
             .decode(bytes, request_catalog_list(), false)
             .await
@@ -698,26 +703,32 @@ mod tests {
         assert!(matches!(decoded, LogicalPlan::Extension(_)));
 
         let region = store_api::storage::RegionId::new(NUMBERS_TABLE_ID, 1);
-        let payload = GroupedReadPayload::try_new(
-            vec![region.as_u64()],
+        let mut numbers_info = (*NumbersTable::table_info(
             NUMBERS_TABLE_ID,
             NUMBERS_TABLE_NAME.to_string(),
-            encode_plan(&numbers_scan()).to_vec(),
+            "test_engine".to_string(),
+        ))
+        .clone();
+        numbers_info.table_type = table::metadata::TableType::Base;
+        let numbers_table = table::test_util::EmptyTable::from_table_info(&numbers_info);
+        let numbers = LogicalPlanBuilder::scan(
+            NUMBERS_TABLE_NAME,
+            Arc::new(datafusion::datasource::DefaultTableSource::new(Arc::new(
+                table::table::adapter::DfTableProviderAdapter::new(numbers_table),
+            ))),
+            None,
         )
+        .unwrap()
+        .build()
         .unwrap();
-        let envelope = DatanodeGroupedReadPlan::try_new(payload, numbers_scan().schema().clone())
-            .unwrap()
-            .into_logical_plan();
+        let envelope = build_group_read_plan(&[region], NUMBERS_TABLE_ID, &numbers).unwrap();
         let bytes = encode_plan(&envelope);
-        assert!(peek_grouped_read_envelope(&bytes).unwrap().is_some());
+        assert!(peek_group_read_envelope(&bytes).unwrap().is_some());
         let error = decoder
             .decode(bytes, request_catalog_list(), false)
             .await
             .unwrap_err();
-        assert!(
-            format!("{error:?}").contains("DatanodeGroupedRead"),
-            "{error:?}"
-        );
+        assert!(format!("{error:?}").contains("GroupRead"), "{error:?}");
     }
 
     /// Payload table binding uses the engine catalog, not the request catalog.

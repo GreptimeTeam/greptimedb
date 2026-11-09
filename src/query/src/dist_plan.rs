@@ -28,11 +28,13 @@ mod remote_dyn_filter_registry;
 pub use analyzer::{DistPlannerAnalyzer, DistPlannerOptions};
 pub use filter_id::{FilterFingerprint, FilterId, ParseFilterIdError, RemoteDynFilterProducerId};
 pub use grouped_read::{
-    DATANODE_GROUPED_READ_NAME, DATANODE_GROUPED_READ_VERSION, DatanodeGroupedReadPlan,
-    DatanodeReadGroup, GroupedReadEnvelopeError, GroupedReadPayload,
-    MAX_GROUPED_READ_PAYLOAD_BYTES, MAX_GROUPED_READ_REGIONS, build_grouped_read_plan,
-    eligible_remote_plan, encode_nested_plan, nested_plan_table, peek_grouped_read_envelope,
-    validate_grouped_read_nested_plan,
+    DatanodeReadGroup, GROUP_READ_NAME, GROUP_READ_VERSION, GroupReadEnvelopeError,
+    GroupReadPayload, GroupReadPlan, MAX_GROUP_READ_CONCURRENCY, MAX_GROUP_READ_PAYLOAD_BYTES,
+    MAX_GROUP_READ_REGIONS, REGION_PLAN_NAME, RegionPlan, RegionPlanPayload, RegionPlanResolver,
+    build_group_read_plan, build_group_read_plan_with_combine,
+    build_group_read_plan_with_concurrency, build_region_plan_union, decode_group_read_request,
+    eligible_remote_plan, encode_nested_plan, nested_plan_table, peek_group_read_envelope,
+    validate_region_plan,
 };
 pub use merge_scan::{MergeScanExec, MergeScanLogicalPlan};
 pub(crate) use merge_sort::{MergeSortExec, MergeSortLogicalPlan};

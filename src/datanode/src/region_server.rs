@@ -59,9 +59,7 @@ use metric_engine::engine::MetricEngine;
 use mito2::engine::{MITO_ENGINE_NAME, MitoEngine};
 use prost::Message;
 use query::QueryEngineRef;
-use query::dist_plan::{
-    DATANODE_GROUPED_READ_VERSION, GroupedReadEnvelopeError, peek_grouped_read_envelope,
-};
+use query::dist_plan::{GROUP_READ_VERSION, GroupReadEnvelopeError, peek_group_read_envelope};
 pub use query::dummy_catalog::{
     DummyCatalogList, DummyTableProviderFactory, TableProviderFactoryRef,
 };
@@ -296,18 +294,18 @@ impl RegionServer {
     ) -> Result<SendableRecordBatchStream> {
         // Inspect only our root extension before constructing a region catalog. Other plans are
         // decoded normally, including extensions this grouped-read peek does not recognize.
-        let grouped = match peek_grouped_read_envelope(&request.plan) {
+        let grouped = match peek_group_read_envelope(&request.plan) {
             Ok(payload) => payload,
-            Err(GroupedReadEnvelopeError::UnsupportedVersion(version)) => {
+            Err(GroupReadEnvelopeError::UnsupportedVersion(version)) => {
                 return NotYetImplementedSnafu {
                     what: format!(
-                        "DatanodeGroupedRead version {version}, this datanode reads version \
-                         {DATANODE_GROUPED_READ_VERSION}"
+                        "GroupRead version {version}, this datanode reads version \
+                         {GROUP_READ_VERSION}"
                     ),
                 }
                 .fail();
             }
-            Err(GroupedReadEnvelopeError::Malformed(reason)) => {
+            Err(GroupReadEnvelopeError::Malformed(reason)) => {
                 return UnexpectedSnafu { violated: reason }.fail();
             }
         };

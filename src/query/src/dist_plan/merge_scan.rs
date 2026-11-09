@@ -70,7 +70,7 @@ use crate::dist_plan::dyn_filter_bridge::{
     register_dyn_filter_subscribers_for_region, register_remote_dyn_filters,
     resolve_scalar_subquery_dyn_filters,
 };
-use crate::dist_plan::grouped_read::{DatanodeReadGroup, build_grouped_read_plan};
+use crate::dist_plan::grouped_read::{DatanodeReadGroup, build_group_read_plan_with_concurrency};
 use crate::dist_plan::{
     FilterId, RemoteDynFilterProducerId, RemoteDynFilterRegistryLease, Subscriber,
 };
@@ -600,11 +600,11 @@ impl MergeScanExec {
     /// Attaches the frozen datanode groups of a grouped read.
     ///
     /// A grouped read is request batching: each group's envelope names exactly that group's regions
-    /// and the datanode executes them in order, so the groups have to cover the selected regions
-    /// exactly once each. A missing, duplicated or foreign region would drop or duplicate rows and
-    /// is rejected here rather than at execution time. The output partition count becomes the
-    /// number of groups, and the grouped path declares no ordering: the frontend only enables it
-    /// for plans whose remote shape has no ordering guarantee to break.
+    /// and the datanode executes them with bounded Append concurrency, so the groups have to cover
+    /// the selected regions exactly once each. A missing, duplicated or foreign region would drop
+    /// or duplicate rows and is rejected here rather than at execution time. The output partition
+    /// count becomes the number of groups, and the grouped path declares no ordering: the frontend
+    /// only enables it for plans whose remote shape has no ordering guarantee to break.
     pub fn with_datanode_groups(mut self, groups: Vec<DatanodeReadGroup>) -> Result<Self> {
         if groups.is_empty() {
             return Err(DataFusionError::Internal(
@@ -962,9 +962,10 @@ impl MergeScanExec {
     ///
     /// The envelope of a group names every region of that group and carries the same plain
     /// per-region plan the ordinary path would send, so the datanode decodes it once per region
-    /// against that region's own catalog and concatenates the region plans' batches in order.
-    /// Nothing is merged across regions here: the batches of the group are yielded as they arrive,
-    /// exactly as the batches of one region are on the ordinary path.
+    /// against that region's own catalog. The datanode may keep `group.max_concurrent()` member
+    /// streams active, so batches of different regions may interleave; grouping is only chosen for
+    /// shapes that promise no ordering. Nothing is merged across regions here: the batches of the
+    /// group are yielded as they arrive.
     fn to_grouped_stream(
         &self,
         context: Arc<TaskContext>,
@@ -1043,13 +1044,16 @@ impl MergeScanExec {
                         }
                         SubscriberRollbackGuard::new(lease.registry(), added)
                     });
-                let grouped_plan =
-                    build_grouped_read_plan(group.regions(), anchor.table_id(), &plan).map_err(
-                        |error| {
-                            MERGE_SCAN_ERRORS_TOTAL.inc();
-                            error
-                        },
-                    )?;
+                let grouped_plan = build_group_read_plan_with_concurrency(
+                    group.regions(),
+                    anchor.table_id(),
+                    &plan,
+                    group.max_concurrent(),
+                )
+                .map_err(|error| {
+                    MERGE_SCAN_ERRORS_TOTAL.inc();
+                    error
+                })?;
                 let region_query_ctx = query_context_with_refreshed_initial_dyn_filter_regs(
                     &query_ctx,
                     anchor,
@@ -2253,6 +2257,128 @@ mod tests {
         assert!(entry.subscribers().is_empty());
     }
 
+    struct GroupedMetricsHandler {
+        schema: Arc<Schema>,
+        batch: RecordBatch,
+        metrics: RecordBatchMetrics,
+    }
+
+    #[async_trait]
+    impl RegionQueryHandler for GroupedMetricsHandler {
+        async fn select_target(
+            &self,
+            _read_preference: ReadPreference,
+            _region_id: RegionId,
+        ) -> crate::error::Result<crate::region_query::RegionQueryTarget> {
+            Ok(test_target(7))
+        }
+
+        async fn do_get(
+            &self,
+            _target: &crate::region_query::RegionQueryTarget,
+            _request: common_query::request::QueryRequest,
+        ) -> crate::error::Result<common_recordbatch::SendableRecordBatchStream> {
+            Ok(Box::pin(TestRecordBatchStream {
+                schema: self.schema.clone(),
+                batches: vec![Ok(self.batch.clone())],
+                metrics: Some(self.metrics.clone()),
+            }))
+        }
+
+        async fn handle_remote_dyn_filter_update(
+            &self,
+            _target: &crate::region_query::RegionQueryTarget,
+            _query_id: String,
+            _update: api::v1::region::RemoteDynFilterUpdate,
+        ) -> crate::error::Result<()> {
+            unreachable!("the metrics test installs no dynamic filter")
+        }
+
+        async fn handle_remote_dyn_filter_unregister(
+            &self,
+            _target: &crate::region_query::RegionQueryTarget,
+            _query_id: String,
+            _unregister: api::v1::region::RemoteDynFilterUnregister,
+        ) -> crate::error::Result<()> {
+            unreachable!("the metrics test installs no dynamic filter")
+        }
+    }
+
+    #[tokio::test]
+    async fn grouped_read_frontend_collects_cumulative_member_metrics() {
+        use datafusion::datasource::{DefaultTableSource, empty::EmptyTable};
+
+        let schema = int64_schema(&["a"]);
+        let batch = record_batch(
+            schema.clone(),
+            vec![Arc::new(Int64Vector::from_slice([1])) as _],
+        );
+        let metrics = RecordBatchMetrics {
+            elapsed_compute: 42,
+            memory_usage: 7,
+            plan_metrics: vec![PlanMetrics {
+                plan: "RegionScanExec: region=1".to_string(),
+                plan_name: REGION_SCAN_EXEC_NAME.to_string(),
+                level: 0,
+                metrics: vec![("output_bytes".to_string(), 99)],
+            }],
+            query_load_region_id: None,
+            region_watermarks: vec![],
+        };
+        let handler = Arc::new(GroupedMetricsHandler {
+            schema: schema.clone(),
+            batch,
+            metrics: metrics.clone(),
+        });
+        let query_ctx = QueryContext::arc();
+        let state = query_engine_state(handler.clone());
+        let source = Arc::new(DefaultTableSource::new(Arc::new(EmptyTable::new(
+            schema.arrow_schema().clone(),
+        ))));
+        let plan = LogicalPlanBuilder::scan("table", source, None)
+            .unwrap()
+            .build()
+            .unwrap();
+        let regions = vec![RegionId::new(1024, 1), RegionId::new(1024, 2)];
+        let group = DatanodeReadGroup::try_new_with_concurrency(test_target(7), regions.clone(), 2)
+            .unwrap();
+        let exec = MergeScanExec::new(
+            &SessionStateBuilder::new().build(),
+            TableName::new("catalog", "schema", "table"),
+            regions,
+            plan,
+            schema.arrow_schema(),
+            handler,
+            query_ctx.clone(),
+            1,
+            Some(RemoteDynFilterProducerId::new(42)),
+            false,
+        )
+        .unwrap()
+        .with_datanode_groups(vec![group])
+        .unwrap();
+        let mut stream = exec
+            .to_grouped_stream(
+                task_context_with_engine_state(state, query_ctx),
+                0,
+                exec.datanode_groups.clone().unwrap(),
+            )
+            .unwrap();
+        while let Some(batch) = stream.next().await {
+            batch.unwrap();
+        }
+
+        let collected = exec.sub_stage_metrics();
+        assert_eq!(1, collected.len());
+        assert_eq!(metrics.elapsed_compute, collected[0].elapsed_compute);
+        assert_eq!(None, collected[0].query_load_region_id);
+        assert_eq!(
+            99,
+            region_scan_output_bytes(&collected[0]),
+            "the FE grouping path must receive the cumulative member scan bytes"
+        );
+    }
+
     #[tokio::test]
     async fn failed_do_get_preserves_preexisting_duplicate_subscriber() {
         let handler = Arc::new(FailingRegionQueryHandler::default());
@@ -2477,6 +2603,7 @@ mod tests {
     struct TestRecordBatchStream {
         schema: Arc<Schema>,
         batches: Vec<common_recordbatch::error::Result<RecordBatch>>,
+        metrics: Option<RecordBatchMetrics>,
     }
 
     impl Stream for TestRecordBatchStream {
@@ -2501,7 +2628,7 @@ mod tests {
         }
 
         fn metrics(&self) -> Option<RecordBatchMetrics> {
-            None
+            self.metrics.clone()
         }
     }
 
@@ -2884,6 +3011,7 @@ mod tests {
                         )),
                     })
                     .collect(),
+                metrics: None,
             }))
         }
 
