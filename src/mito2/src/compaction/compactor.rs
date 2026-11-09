@@ -53,7 +53,7 @@ use crate::region::version::VersionRef;
 use crate::region::{ManifestContext, RegionLeaderState, RegionRoleState};
 use crate::schedule::scheduler::LocalScheduler;
 use crate::sst::FormatType;
-use crate::sst::file::{FileHandle, FileMeta, UncommittedSsts};
+use crate::sst::file::{self, FileHandle, FileMeta, UncommittedSsts};
 use crate::sst::file_purger::LocalFilePurger;
 use crate::sst::index::intermediate::IntermediateManager;
 use crate::sst::index::puffin_manager::PuffinManagerFactory;
@@ -589,11 +589,11 @@ fn known_max_input_sequence(inputs: &[FileHandle]) -> Option<NonZeroU64> {
 
 fn validate_region_compaction_output(region_id: RegionId, output: &CompactionOutput) -> Result<()> {
     ensure!(
-        output.output_level < crate::sst::file::LEVEL_SHARED
+        output.output_level < file::LEVEL_SHARED
             && output
                 .inputs
                 .iter()
-                .all(|file| file.level() < crate::sst::file::LEVEL_SHARED),
+                .all(|file| file.level() < file::LEVEL_SHARED),
         error::InvalidRequestSnafu {
             region_id,
             reason: "Region compaction cannot consume or produce shared SSTs",
@@ -850,7 +850,7 @@ where
             picker_output
                 .expired_ssts
                 .iter()
-                .all(|file| file.level() < crate::sst::file::LEVEL_SHARED),
+                .all(|file| file.level() < file::LEVEL_SHARED),
             error::InvalidRequestSnafu {
                 region_id: compaction_region.region_id,
                 reason: "Region compaction cannot expire shared SSTs",

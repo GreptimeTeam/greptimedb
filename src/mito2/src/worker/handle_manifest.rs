@@ -46,7 +46,7 @@ use crate::request::{
     WorkerRequest, WorkerRequestWithTime,
 };
 use crate::sst::index::IndexBuildType;
-use crate::sst::location;
+use crate::sst::{file, location};
 use crate::wal::EntryId;
 use crate::worker::{RegionWorkerLoop, WorkerListener};
 
@@ -447,7 +447,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                     .edit
                     .files_to_add
                     .iter()
-                    .any(|file| file.level < crate::sst::file::LEVEL_SHARED);
+                    .any(|file| file.level < file::LEVEL_SHARED);
 
             // Only apply the edit if the result is ok and region is not in staging state.
             if edit_result.result.is_ok() {
@@ -704,20 +704,19 @@ impl<S: LogStore> RegionWorkerLoop<S> {
 }
 
 fn prepare_region_edit(region: &MitoRegionRef, edit: &mut RegionEdit) -> Result<()> {
-    use crate::sst::file::{LEVEL_SHARED, is_supported_level};
     let region_id = region.region_id;
     edit.validate_shared_reclassification(region_id)?;
     let current = region.version_control.current();
-    let shared = &current.version.ssts.levels()[LEVEL_SHARED as usize].files;
+    let shared = &current.version.ssts.levels()[file::LEVEL_SHARED as usize].files;
     snafu::ensure!(
         edit.files_to_remove
             .iter()
-            .all(|file| file.level < LEVEL_SHARED && !shared.contains_key(&file.file_id))
+            .all(|file| file.level < file::LEVEL_SHARED && !shared.contains_key(&file.file_id))
             && edit
                 .files_to_add
                 .iter()
-                .all(|file| is_supported_level(file.level)
-                    && (file.level != LEVEL_SHARED
+                .all(|file| file::is_supported_level(file.level)
+                    && (file.level != file::LEVEL_SHARED
                         || file.region_id.table_id() == region_id.table_id())),
         crate::error::InvalidRequestSnafu {
             region_id,
@@ -738,7 +737,7 @@ fn prepare_region_edit(region: &MitoRegionRef, edit: &mut RegionEdit) -> Result<
             );
         }
     }
-    let existing_sequence = |file: &crate::sst::file::FileMeta| {
+    let existing_sequence = |file: &file::FileMeta| {
         shared
             .get(&file.file_id)
             .and_then(|handle| handle.meta_ref().sequence)

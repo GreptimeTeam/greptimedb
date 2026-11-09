@@ -23,7 +23,7 @@ use crate::access_layer::AccessLayerRef;
 use crate::cache::CacheManagerRef;
 use crate::error::Result;
 use crate::schedule::scheduler::SchedulerRef;
-use crate::sst::file::{FileMeta, delete_files};
+use crate::sst::file::{self, FileMeta, delete_files};
 use crate::sst::file_ref::FileReferenceManagerRef;
 use crate::sst::range_index::RangeIndexDeleter;
 
@@ -216,7 +216,7 @@ impl FilePurger for LocalFilePurger {
     }
 
     fn purge_file(&self, file_meta: FileMeta) {
-        if file_meta.level == crate::sst::file::LEVEL_SHARED {
+        if file_meta.level == file::LEVEL_SHARED {
             // This lifetime covers one logical reference, not other targets sharing the SST,
             // so the SST object itself is left to global GC. The range index is keyed by
             // this region and all of its readers are gone, so it must not leak.

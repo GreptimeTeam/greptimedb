@@ -24,7 +24,7 @@ use crate::compaction::overlap::FileOverlapIndex;
 use crate::compaction::picker::{Picker, PickerOutput};
 use crate::compaction::twcs::TwcsPicker;
 use crate::error::{JoinSnafu, Result};
-use crate::sst::file::{FileHandle, RegionFileId};
+use crate::sst::file::{self, FileHandle, RegionFileId};
 
 /// Picker for [`MergeMode::LastNonNull`](crate::region::options::MergeMode).
 ///
@@ -170,7 +170,7 @@ fn build_closed_outputs(
         if !output
             .inputs
             .iter()
-            .any(|file| file.compacting() || file.level() == crate::sst::file::LEVEL_SHARED)
+            .any(|file| file.compacting() || file.level() == file::LEVEL_SHARED)
             && inputs_precede_memtables(&output.inputs, limits.memtable_min_sequence)
         {
             outputs.push(output);

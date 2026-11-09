@@ -27,7 +27,7 @@ use crate::compaction::window::WindowedCompactionPicker;
 use crate::compaction::{CompactionOutput, SerializedCompactionOutput};
 use crate::error::Result;
 use crate::region::options::{CompactionOptions, MergeMode, RegionOptions};
-use crate::sst::file::{FileHandle, FileMeta};
+use crate::sst::file::{self, FileHandle, FileMeta};
 use crate::sst::file_purger::FilePurger;
 use crate::sst::version::LevelMeta;
 
@@ -188,7 +188,7 @@ pub(super) fn get_expired_ssts(
 
     levels
         .iter()
-        .filter(|level| level.level < crate::sst::file::LEVEL_SHARED)
+        .filter(|level| level.level < file::LEVEL_SHARED)
         .flat_map(|l| l.get_expired_files(&now, &ttl).into_iter())
         .collect()
 }

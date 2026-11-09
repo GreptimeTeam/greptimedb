@@ -133,6 +133,7 @@ fn deserialize_level<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Resul
     }
     Ok(level)
 }
+
 /// Type to store index types for a column.
 pub type IndexTypes = SmallVec<[IndexType; 4]>;
 

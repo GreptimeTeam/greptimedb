@@ -30,7 +30,7 @@ use crate::error::{RegionMetadataNotFoundSnafu, Result, SerdeJsonSnafu, Utf8Snaf
 use crate::manifest::manager::RemoveFileOptions;
 use crate::region::ManifestStats;
 use crate::sst::FormatType;
-use crate::sst::file::FileMeta;
+use crate::sst::file::{self, FileMeta};
 use crate::wal::EntryId;
 
 /// Actions that can be applied to region manifest.
@@ -104,7 +104,7 @@ impl RegionEdit {
         let shared_ids: HashSet<_> = self
             .files_to_add
             .iter()
-            .filter(|file| file.level == crate::sst::file::LEVEL_SHARED)
+            .filter(|file| file.level == file::LEVEL_SHARED)
             .map(|file| file.file_id)
             .collect();
         snafu::ensure!(

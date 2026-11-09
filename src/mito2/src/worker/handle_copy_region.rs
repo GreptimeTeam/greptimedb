@@ -26,7 +26,7 @@ use crate::region::{
 use crate::request::{
     BackgroundNotify, CopyRegionFromFinished, CopyRegionFromRequest, WorkerRequest,
 };
-use crate::sst::file::{FileMeta, LEVEL_SHARED};
+use crate::sst::file::{self, FileMeta};
 use crate::sst::location::region_dir_from_table_dir;
 use crate::worker::{RegionWorkerLoop, WorkerRequestWithTime};
 
@@ -91,7 +91,7 @@ impl<S> RegionWorkerLoop<S> {
                     if region_edit
                         .files_to_add
                         .iter()
-                        .any(|file| file.level == LEVEL_SHARED) =>
+                        .any(|file| file.level == file::LEVEL_SHARED) =>
                 {
                     // Shared references and their target admission sequence must enter
                     // the serialized edit lane, not the asynchronous physical-copy path.
@@ -207,7 +207,7 @@ impl<S> RegionWorkerLoop<S> {
                 || source_region_manifest
                     .files
                     .values()
-                    .all(|file| file.level != LEVEL_SHARED),
+                    .all(|file| file.level != file::LEVEL_SHARED),
             InvalidRequestSnafu {
                 region_id: target_region_id,
                 reason: "Shared SST references are not supported in metadata-region copies",
@@ -226,7 +226,7 @@ impl<S> RegionWorkerLoop<S> {
         );
         for (file_id, file_meta) in &source_region_manifest.files {
             if !target_region_manifest.files.contains_key(file_id) {
-                new_file_metas.push(if file_meta.level == LEVEL_SHARED {
+                new_file_metas.push(if file_meta.level == file::LEVEL_SHARED {
                     file_meta.clone()
                 } else {
                     remap_copied_file_meta(file_meta, target_region_id)
@@ -239,7 +239,7 @@ impl<S> RegionWorkerLoop<S> {
 
         let file_descriptors = new_file_metas
             .iter()
-            .filter(|file| file.level != LEVEL_SHARED)
+            .filter(|file| file.level != file::LEVEL_SHARED)
             .flat_map(file_descriptors_for_meta)
             .collect();
         debug!("File descriptors to copy: {:?}", file_descriptors);
@@ -265,7 +265,7 @@ impl<S> RegionWorkerLoop<S> {
         if edit
             .files_to_add
             .iter()
-            .any(|file| file.level == LEVEL_SHARED)
+            .any(|file| file.level == file::LEVEL_SHARED)
         {
             return Ok((Some(edit), source_file_ids));
         }

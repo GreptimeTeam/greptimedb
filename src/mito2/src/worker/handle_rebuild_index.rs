@@ -33,7 +33,7 @@ use crate::metrics::INDEX_PUBLICATION_STALE_TOTAL;
 use crate::region::options::IndexOptions;
 use crate::region::{IndexBuildSource, MitoRegionRef, RegionLeaderState, RegionRoleState};
 use crate::request::{BuildIndexRequest, IndexBuildFinished, IndexBuildStopped, OptionOutputTx};
-use crate::sst::file::{FileHandle, FileMeta, RegionFileId, RegionIndexId};
+use crate::sst::file::{self, FileHandle, FileMeta, RegionFileId, RegionIndexId};
 use crate::sst::index::{
     IndexBuildOutcome, IndexBuildTask, IndexBuildType, IndexerBuilderImpl, ResultMpscSender,
     cleanup_stale_index_caches,
@@ -195,7 +195,7 @@ impl<S> RegionWorkerLoop<S> {
                 .filter(|(_, handle)| {
                     !handle.is_deleted()
                         && !handle.compacting()
-                        && handle.level() < crate::sst::file::LEVEL_SHARED
+                        && handle.level() < file::LEVEL_SHARED
                 })
                 .map(|(id, handle)| (*id, handle.clone()))
                 .collect();

@@ -21,7 +21,7 @@ use common_time::{TimeToLive, Timestamp};
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::{FileId, RegionId};
 
-use crate::sst::file::{FileHandle, FileMeta, FileTimeRange, Level, MAX_LEVEL};
+use crate::sst::file::{self, FileHandle, FileMeta, FileTimeRange, Level, MAX_LEVEL};
 use crate::sst::file_purger::FilePurgerRef;
 use crate::sst::primary_key::PrimaryKeyRangeMapper;
 
@@ -73,7 +73,7 @@ impl SstVersion {
     /// it will be overwritten with the new file.
     ///
     /// # Panics
-    /// Panics if level of [FileMeta] is greater than [MAX_LEVEL].
+    /// Panics if the level of [FileMeta] is greater than or equal to [MAX_LEVEL].
     pub(crate) fn add_files(
         &mut self,
         file_purger: FilePurgerRef,
@@ -85,7 +85,7 @@ impl SstVersion {
             let new_index_version = file.index_version;
             // A trusted L0 adoption changes classification, not the physical object.
             // Detach the old handle without marking it deleted (old readers may hold it).
-            if level == crate::sst::file::LEVEL_SHARED {
+            if level == file::LEVEL_SHARED {
                 levels[0].files.remove(&file.file_id);
             }
             // If the file already exists, then we should only replace the handle when the index is outdated.
@@ -117,7 +117,7 @@ impl SstVersion {
     /// Remove files from the version.
     ///
     /// # Panics
-    /// Panics if level of [FileMeta] is greater than [MAX_LEVEL].
+    /// Panics if the level of [FileMeta] is greater than or equal to [MAX_LEVEL].
     pub(crate) fn remove_files(&mut self, files_to_remove: impl Iterator<Item = FileMeta>) {
         let levels = Arc::make_mut(&mut self.levels);
         for file in files_to_remove {

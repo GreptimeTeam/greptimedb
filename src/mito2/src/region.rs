@@ -67,7 +67,7 @@ use crate::manifest::manager::RegionManifestManager;
 use crate::region::version::{VersionControlRef, VersionRef};
 use crate::request::{OnFailure, OptionOutputTx};
 use crate::series_index::{SeriesIndexVersion, SeriesIndexVersionControl};
-use crate::sst::file::FileMeta;
+use crate::sst::file::{self, FileMeta};
 use crate::sst::file_purger::FilePurgerRef;
 use crate::sst::location::{index_file_path, sst_file_path};
 use crate::time_provider::TimeProviderRef;
@@ -1569,14 +1569,14 @@ impl ManifestContext {
             // or overwrite them. Table publication performs its own locked input check.
             ensure!(
                 edit.files_to_remove.iter().all(|file| {
-                    file.level != crate::sst::file::LEVEL_SHARED
+                    file.level != file::LEVEL_SHARED
                         && manifest
                             .files
                             .get(&file.file_id)
-                            .is_none_or(|current| current.level != crate::sst::file::LEVEL_SHARED)
+                            .is_none_or(|current| current.level != file::LEVEL_SHARED)
                 }) && edit.files_to_add.iter().all(|file| {
                     manifest.files.get(&file.file_id).is_none_or(|current| {
-                        current.level != crate::sst::file::LEVEL_SHARED || current == file
+                        current.level != file::LEVEL_SHARED || current == file
                     })
                 }),
                 InvalidRequestSnafu {
