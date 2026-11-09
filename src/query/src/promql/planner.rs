@@ -1187,6 +1187,40 @@ impl PromPlanner {
             );
         }
 
+        // The same whole native binary the statement root was offered can sit below a
+        // legacy-only wrapper. A nested retry is valid only on the statement's own grid.
+        if self.native_fused
+            && self.ctx.start == self.ctx.stmt_start
+            && self.ctx.end == self.ctx.stmt_end
+        {
+            let saved = self.ctx.clone();
+            let native = self
+                .try_plan_native_fused(&PromExpr::Binary(binary_expr.clone()), query_engine_state)
+                .await;
+            self.ctx = saved;
+            if let Some(plan) = native? {
+                let mut fields = plan.schema().fields().iter();
+                if let Some(time) = fields.next().map(|field| field.name().clone()) {
+                    let values = fields
+                        .clone()
+                        .filter(|field| field.data_type() != &ArrowDataType::Utf8)
+                        .map(|field| field.name().clone())
+                        .collect();
+                    let tags = fields
+                        .filter(|field| field.data_type() == &ArrowDataType::Utf8)
+                        .map(|field| field.name().clone())
+                        .collect();
+                    self.ctx.reset();
+                    self.ctx.reset_table_name_and_schema();
+                    self.ctx.aggregation_field_labels.clear();
+                    self.ctx.time_index_column = Some(time);
+                    self.ctx.field_columns = values;
+                    self.ctx.tag_columns = tags;
+                    return Ok(plan);
+                }
+            }
+        }
+
         if let Some(plan) = self.try_plan_binary_island(binary_expr).await? {
             return Ok(plan);
         }
@@ -1377,32 +1411,14 @@ impl PromPlanner {
             }
             // both are columns. join them on time index
             (None, None) => {
-                let native_pair =
-                    self.native_fused && native::hybrid_binary_admitted(*op, modifier, lhs, rhs);
-                let native = if native_pair {
-                    match (
-                        self.try_plan_native_operand(lhs, query_engine_state)
-                            .await?,
-                        self.try_plan_native_operand(rhs, query_engine_state)
-                            .await?,
-                    ) {
-                        (Some(left), Some(right)) => Some((left, right)),
-                        _ => None,
-                    }
-                } else {
-                    None
+                // A declined binary uses the existing planner for its operands.
+                let (mut left_input, mut left_context, mut right_input, mut right_context) = {
+                    let left = self.prom_expr_to_plan(lhs, query_engine_state).await?;
+                    let left_ctx = self.ctx.clone();
+                    let right = self.prom_expr_to_plan(rhs, query_engine_state).await?;
+                    let right_ctx = self.ctx.clone();
+                    (left, left_ctx, right, right_ctx)
                 };
-                let used_native = native.is_some();
-                let (mut left_input, mut left_context, mut right_input, mut right_context) =
-                    if let Some(((left, left_ctx), (right, right_ctx))) = native {
-                        (left, left_ctx, right, right_ctx)
-                    } else {
-                        let left = self.prom_expr_to_plan(lhs, query_engine_state).await?;
-                        let left_ctx = self.ctx.clone();
-                        let right = self.prom_expr_to_plan(rhs, query_engine_state).await?;
-                        let right_ctx = self.ctx.clone();
-                        (left, left_ctx, right, right_ctx)
-                    };
                 let left_field_columns = left_context.field_columns.clone();
                 let left_time_index_column = left_context.time_index_column.clone();
                 self.ctx = left_context.clone();
@@ -1419,21 +1435,13 @@ impl PromPlanner {
                 // Both operands are planned first because only the planned contexts tell a tag
                 // from a value field. The rewrite merely adds matchers to a selector, so the
                 // table reference, time index and field columns captured above stay valid.
-                // Matcher propagation belongs to the legacy route: copying a matcher into the
-                // other operand's scan drops the groups that have no partner, which is exactly
-                // what lets the legacy join answer where Prometheus would report a duplicated
-                // match group. A native operand must not be rewritten this way - the native
-                // matcher checks the complete one-side groups itself, and filtering them first
-                // would hide that error. So the rewrite only runs when neither operand is native.
-                if !used_native
-                    && let Some(rewritten) = matching_filters::propagate(
-                        binary_expr,
-                        &left_context.tag_columns,
-                        &right_context.tag_columns,
-                        &left_context.aggregation_field_labels,
-                        &right_context.aggregation_field_labels,
-                    )
-                {
+                if let Some(rewritten) = matching_filters::propagate(
+                    binary_expr,
+                    &left_context.tag_columns,
+                    &right_context.tag_columns,
+                    &left_context.aggregation_field_labels,
+                    &right_context.aggregation_field_labels,
+                ) {
                     // A copied matcher belongs to the scan, not to the operand's identity:
                     // `absent()` turns `selector_matcher` into the labels it reports, so the
                     // re-planned context keeps the matchers the operand was written with.

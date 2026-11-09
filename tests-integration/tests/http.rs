@@ -199,6 +199,7 @@ macro_rules! http_tests {
                 test_remote_write_v2_histogram_float_prefix_native_route,
                 test_remote_write_v2_histogram_native_annotations,
                 test_remote_write_v2_histogram_native_arithmetic,
+                test_remote_write_v2_histogram_native_composition,
                 test_remote_write_v2_histogram_flush_native_consistency,
                 test_remote_write_v2_histogram_native_partitions,
                 test_remote_write_v2_histogram_native_range_function,
@@ -5642,6 +5643,402 @@ pub async fn test_remote_write_v2_histogram_native_arithmetic(store_type: Storag
         "FusedSeriesExec",
         "`2 / h` left the native route"
     );
+}
+
+/// Executes a public PromQL request and checks the binary node actually used, without assuming how
+/// many fused producers or children the physical plan contains.
+async fn native_histogram_composition_query(
+    client: &TestClient,
+    observer: &NativeFusedObserver,
+    route: &PromRouteObserver,
+    query: &str,
+    parameters: &str,
+) -> (StatusCode, Value) {
+    observer.clear();
+    let response = client
+        .get(&format!(
+            "/v1/prometheus/api/v1/{parameters}&query={}",
+            encode(query)
+        ))
+        .header("x-greptime-hints", "query.experimental_native_promql=true")
+        .send()
+        .await;
+    let status = response.status();
+    let body: Value = response.json().await;
+
+    let descriptions = observer
+        .take_all(query)
+        .iter()
+        .map(|node| {
+            datafusion::physical_plan::displayable(node.as_ref())
+                .one_line()
+                .to_string()
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        descriptions.iter().any(|description| {
+            description.lines().any(|line| {
+                let mut words = line.split_whitespace();
+                matches!(words.next(), Some("root" | "input" | "left" | "right"))
+                    && words.next() == Some("Binary")
+            })
+        }),
+        "`{query}` did not execute a native Binary: {descriptions:?}; response: {body}"
+    );
+    let nodes = plan_nodes(&route.take_plan());
+    assert!(
+        nodes
+            .iter()
+            .all(|node| { !node["name"].as_str().unwrap_or_default().contains("Join") }),
+        "`{query}` executed a legacy join: {nodes:?}"
+    );
+    (status, body)
+}
+
+/// Composed histogram frames retain their values, annotations and matching semantics over HTTP.
+pub async fn test_remote_write_v2_histogram_native_composition(store_type: StorageType) {
+    let observer = Arc::new(NativeFusedObserver::default());
+    let route = Arc::new(PromRouteObserver::default());
+    let plugins = Plugins::default();
+    let wrapper: PhysicalPlanWrapperRef = observer.clone();
+    plugins.insert(wrapper);
+    plugins.insert::<PromQueryInterceptorRef<servers::error::Error>>(route.clone());
+    let instance = tests_integration::standalone::GreptimeDbStandaloneBuilder::new(
+        "remote_write_v2_histogram_native_composition",
+    )
+    .with_default_store_type(store_type)
+    .with_query_options(QueryOptions {
+        experimental_native_promql: true,
+        ..Default::default()
+    })
+    .with_plugin(plugins)
+    .build()
+    .await;
+    let server = build_test_prom_server(instance.fe_instance().clone(), false, None)
+        .with_greptime_config_options(instance.opts.datanode_options().to_toml().unwrap())
+        .build();
+    let client = TestClient::new(server.build(server.make_app()).unwrap()).await;
+
+    for (metric, job, instance_label, timestamp, count, sum) in [
+        ("native_comp_h", "api", "a", 1_000, 10, 20.0),
+        // A later count of 1 makes losing the offset observable at the second range step.
+        ("native_comp_h", "api", "a", 121_000, 1, 2.0),
+        // For this other job, losing @ end() instead makes the first step return 3 rather than 4.
+        ("native_comp_h", "anchor", "a", 1_000, 1, 2.0),
+        ("native_comp_h", "anchor", "a", 61_000, 10, 20.0),
+        ("native_comp_h", "anchor", "a", 121_000, 1, 2.0),
+        ("native_comp_h2", "api", "a", 1_000, 4, 8.0),
+        ("native_comp_h2", "other", "a", 1_000, 4, 8.0),
+        ("native_comp_dups", "duplicate", "a", 1_000, 4, 8.0),
+        ("native_comp_dups", "duplicate", "b", 1_000, 4, 8.0),
+    ] {
+        write_native_histogram(
+            &client,
+            &[
+                (prom_store::METRIC_NAME_LABEL, metric),
+                ("job", job),
+                ("instance", instance_label),
+            ],
+            timestamp,
+            count,
+            sum,
+        )
+        .await;
+    }
+    for sql in [
+        "CREATE TABLE native_comp_f (ts TIMESTAMP TIME INDEX, val DOUBLE, job STRING, PRIMARY KEY (job))",
+        "INSERT INTO native_comp_f(job, val, ts) VALUES ('api', 2.0, 1000), ('duplicate', 2.0, 1000), ('api', 2.0, 61000), ('api', 9.0, 121000), ('anchor', 2.0, 61000), ('anchor', 9.0, 121000)",
+    ] {
+        tests_integration::test_util::execute_sql(instance.fe_instance(), sql).await;
+    }
+
+    // The first sample has two equal buckets of 5; h2 has two equal buckets of 2.
+    // Repeat the same public requests after flushing so the source can be memtable or SST.
+    for phase in ["memtable", "flushed"] {
+        if phase == "flushed" {
+            for table in [
+                "native_comp_h",
+                "native_comp_h2",
+                "native_comp_dups",
+                "native_comp_f",
+            ] {
+                tests_integration::test_util::execute_sql(
+                    instance.fe_instance(),
+                    &format!("ADMIN FLUSH_TABLE('{table}')"),
+                )
+                .await;
+            }
+        }
+
+        for (query, count, sum, bucket) in [
+            (
+                "native_comp_f{job=\"api\"} * on(job) native_comp_h",
+                "20",
+                "40",
+                "10",
+            ),
+            (
+                "native_comp_h / on(job) native_comp_f{job=\"api\"}",
+                "5",
+                "10",
+                "2.5",
+            ),
+            (
+                "native_comp_h + on(job) native_comp_h2{job=\"api\"}",
+                "14",
+                "28",
+                "7",
+            ),
+            (
+                "native_comp_h - on(job) native_comp_h2{job=\"api\"}",
+                "6",
+                "12",
+                "3",
+            ),
+        ] {
+            let (status, body) = native_histogram_composition_query(
+                &client,
+                &observer,
+                &route,
+                query,
+                "query?time=1",
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{phase}: {query}: {body}");
+            assert_eq!(
+                body,
+                json!({
+                    "status": "success",
+                    "data": {"resultType": "vector", "result": [{
+                        "metric": {"job": "api"},
+                        "histogram": [1.0, {"count": count, "sum": sum, "buckets": [
+                            [0, "0.7071067811865476", "1", bucket],
+                            [0, "1", "1.4142135623730951", bucket]
+                        ]}]
+                    }]}
+                }),
+                "{phase}: {query}"
+            );
+        }
+
+        // These selectors read one unpartitioned histogram table but hold disjoint match groups.
+        // The real histogram/histogram pair cannot emit for `*` or `/`, so only a synthetic float
+        // can produce a result. Whether that result carries the unsupported-pair Info follows the
+        // operation the synthesized sample enters, not whether the pair was synthesized:
+        // Prometheus runs the same `doBinOp` on a filled sample, so a pairing it supports
+        // (`float * histogram`, `histogram / float`) stays silent, while one it does not
+        // (`float / histogram`) is dropped and reported exactly as a matched pair would be.
+        let left = "native_comp_h{job=\"api\"}";
+        let right = "native_comp_h{job=\"anchor\"}";
+        for (operator, expected, dropped_op) in [
+            (
+                "* on(job) fill(1)",
+                vec![("anchor", "1", "2", "1"), ("api", "10", "20", "5")],
+                None,
+            ),
+            (
+                "* on(job) fill_left(1)",
+                vec![("anchor", "1", "2", "1")],
+                None,
+            ),
+            (
+                "* on(job) fill_right(1)",
+                vec![("api", "10", "20", "5")],
+                None,
+            ),
+            (
+                "/ on(job) fill_right(2)",
+                vec![("api", "5", "10", "2.5")],
+                None,
+            ),
+            // `fill_left(2)` answers the anchor series with the synthesized float on the left, so
+            // the pair is `float / histogram`: division by a histogram has no kernel, and the
+            // sample Prometheus would drop here is the one this reports.
+            ("/ on(job) fill_left(2)", vec![], Some("/")),
+        ] {
+            let query = format!("{left} {operator} {right}");
+            let (status, body) = native_histogram_composition_query(
+                &client,
+                &observer,
+                &route,
+                &query,
+                "query?time=1",
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{phase}: {query}: {body}");
+            assert_eq!(body["status"], "success", "{phase}: {query}: {body}");
+            assert_eq!(
+                body["data"]["resultType"], "vector",
+                "{phase}: {query}: {body}"
+            );
+            match dropped_op {
+                Some(op) => assert_eq!(
+                    body["infos"],
+                    json!([format!(
+                        "{op}: dropped native histogram samples because this binary operation is not supported for native histograms"
+                    )]),
+                    "{phase}: {query}: {body}"
+                ),
+                None => assert!(
+                    body.get("infos").is_none(),
+                    "a supported fill is not a dropped pair: {phase}: {query}: {body}"
+                ),
+            }
+            assert!(body.get("warnings").is_none(), "{phase}: {query}: {body}");
+            let mut rows = body["data"]["result"].as_array().unwrap().clone();
+            rows.sort_by(|a, b| {
+                a["metric"]["job"]
+                    .as_str()
+                    .cmp(&b["metric"]["job"].as_str())
+            });
+            let expected_rows: Vec<_> = expected
+                .into_iter()
+                .map(|(job, count, sum, bucket)| {
+                    // The anchor fixture's count=1 has bucket counts [0, 1]; the HTTP histogram
+                    // omits the first, zero-count bucket. The api fixture has two equal buckets.
+                    let buckets = if job == "anchor" {
+                        json!([[0, "1", "1.4142135623730951", bucket]])
+                    } else {
+                        json!([
+                            [0, "0.7071067811865476", "1", bucket],
+                            [0, "1", "1.4142135623730951", bucket]
+                        ])
+                    };
+                    json!({
+                        "metric": {"job": job},
+                        "histogram": [1.0, {"count": count, "sum": sum, "buckets": buckets}]
+                    })
+                })
+                .collect();
+            assert_eq!(rows, expected_rows, "{phase}: {query}: {body}");
+        }
+        // A present, matched histogram/histogram pair still drops and reports its existing Info.
+        let query = format!("{left} * on(job) {left}");
+        let (status, body) =
+            native_histogram_composition_query(&client, &observer, &route, &query, "query?time=1")
+                .await;
+        assert_eq!(status, StatusCode::OK, "{phase}: {query}: {body}");
+        assert_eq!(
+            body,
+            json!({
+                "status": "success",
+                "data": {"resultType": "vector", "result": []},
+                "infos": ["*: dropped native histogram samples because this binary operation is not supported for native histograms"]
+            }),
+            "{phase}: {query}"
+        );
+
+        // `clamp` is native-only here, so legacy fallback cannot produce these answers.
+        for (query, op) in [
+            (
+                "clamp(native_comp_f{job=\"api\"}, 1, 2) + on(job) native_comp_h",
+                "+",
+            ),
+            (
+                "native_comp_h + on(job) clamp(native_comp_f{job=\"api\"}, 1, 2)",
+                "+",
+            ),
+            ("native_comp_h * on(job) native_comp_h2{job=\"api\"}", "*"),
+        ] {
+            let (status, body) = native_histogram_composition_query(
+                &client,
+                &observer,
+                &route,
+                query,
+                "query?time=1",
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{phase}: {query}: {body}");
+            assert_eq!(
+                body,
+                json!({
+                    "status": "success",
+                    "data": {"resultType": "vector", "result": []},
+                    "infos": [format!("{op}: dropped native histogram samples because this binary operation is not supported for native histograms")]
+                }),
+                "{phase}: {query}"
+            );
+        }
+
+        // A different match group, or a selector with no samples, must not fabricate a drop Info.
+        for query in [
+            "clamp(native_comp_f{job=\"api\"}, 1, 2) + on(job) native_comp_h2{job=\"other\"}",
+            "native_comp_h * on(job) native_comp_h2{job=\"other\"}",
+            "clamp(native_comp_f{job=\"absent\"}, 1, 2) + on(job) native_comp_h",
+            "native_comp_h + on(job) clamp(native_comp_f{job=\"absent\"}, 1, 2)",
+        ] {
+            let (status, body) = native_histogram_composition_query(
+                &client,
+                &observer,
+                &route,
+                query,
+                "query?time=1",
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{phase}: {query}: {body}");
+            assert_eq!(
+                body,
+                json!({"status": "success", "data": {"resultType": "vector", "result": []}}),
+                "{phase}: {query}"
+            );
+        }
+
+        // The duplicate group is on the right. It is an error both when it matches and when it
+        // does not: both sides have samples, so the native matcher's presence gate is open.
+        for job in ["duplicate", "api"] {
+            let query =
+                format!("clamp(native_comp_f{{job=\"{job}\"}}, 1, 2) + on(job) native_comp_dups");
+            let (status, body) = native_histogram_composition_query(
+                &client,
+                &observer,
+                &route,
+                &query,
+                "query?time=1",
+            )
+            .await;
+            assert!(!status.is_success(), "{phase}: {query}: {body}");
+            assert_eq!(body["status"], "error", "{phase}: {query}: {body}");
+            let error = body["error"].as_str().expect("matching error message");
+            assert!(
+                error.contains("found duplicate series for the match group {job=\"duplicate\"} on the right hand-side of the operation at 1000 ms; many-to-many matching not allowed"),
+                "{phase}: {query}: {body}"
+            );
+        }
+
+        // The 121s end minus 1m reads the 61s histogram; @ start() reads the 61s float.
+        // Both are 2 after clamp, at both points. A 121s float of 9 exposes a lost @ start().
+        // The `anchor` job also exposes a lost @ end() at the first point; both jobs expose a
+        // lost offset at the second point. Neither expected series carries its metric name.
+        let query = "ceil(clamp(histogram_count(native_comp_h @ end() offset 1m), 1, 2) + on(job) native_comp_f{job=~\"api|anchor\"} @ start())";
+        let (status, body) = native_histogram_composition_query(
+            &client,
+            &observer,
+            &route,
+            query,
+            "query_range?start=61&end=121&step=60s",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{phase}: {query}: {body}");
+        assert_eq!(body["status"], "success", "{phase}: {query}: {body}");
+        assert_eq!(
+            body["data"]["resultType"], "matrix",
+            "{phase}: {query}: {body}"
+        );
+        let results = body["data"]["result"].as_array().expect("range result");
+        assert_eq!(results.len(), 2, "{phase}: {query}: {body}");
+        for job in ["api", "anchor"] {
+            let expected = json!({
+                "metric": {"job": job}, "values": [[61.0, "4.0"], [121.0, "4.0"]]
+            });
+            assert_eq!(
+                results.iter().filter(|result| **result == expected).count(),
+                1,
+                "{phase}: {query}: {body}"
+            );
+        }
+        assert!(body.get("infos").is_none(), "{phase}: {query}: {body}");
+        assert!(body.get("warnings").is_none(), "{phase}: {query}: {body}");
+    }
 }
 
 /// A native histogram query that has something to warn about puts it in the response.

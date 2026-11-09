@@ -46,9 +46,7 @@ use datafusion::common::{DFSchema, DFSchemaRef};
 use datafusion::error::DataFusionError;
 use datafusion::execution::memory_pool::UnboundedMemoryPool;
 use datafusion::logical_expr::UserDefinedLogicalNode;
-use datafusion::logical_expr::{
-    EmptyRelation, Extension, LogicalPlan, LogicalPlanBuilder, TableScanBuilder, Union,
-};
+use datafusion::logical_expr::{EmptyRelation, Extension, LogicalPlan, TableScanBuilder, Union};
 use datafusion::physical_plan::ExecutionPlan;
 use datafusion::prelude::Expr as DfExpr;
 use datafusion_expr::Expr;
@@ -57,6 +55,7 @@ use datatypes::series::SeriesOrdering;
 use datatypes::series::frame::{FrameContent, FrameLabelMode, SeriesFrameDeclaration};
 use datatypes::series::samples::{FieldSpec, SeriesSchema};
 use datatypes::series::time::EvalGrid;
+use futures::future::BoxFuture;
 use promql::extension_plan::{
     FieldKind, FusedOutputFormat, FusedSeries, FusedSeriesBinding, FusedSeriesExec, InputLocality,
     RawSeriesSource, input_locality, matching_operands_drop_key, tree_source_fields,
@@ -64,14 +63,14 @@ use promql::extension_plan::{
 use promql::native::execute::NativeExecutionState;
 use promql::native::plan::{
     BoundAggregate, BoundInput, BoundVectorOp, Grouping, InstantValue, MapOp, NativeExpr,
-    NativeNode, NativeTree, NativeType, fused_output_tags, reads_across_series, uniform_field_kind,
+    NativeNode, NativeTree, NativeType, binary_output_field_kind, fused_output_tags,
+    reads_across_series, uniform_field_kind,
 };
 use promql::vector_match::{Cardinality, MatchingLabels, SetOp};
 use promql_parser::label::{METRIC_NAME, MatchOp, Matchers};
 use promql_parser::parser::value::ValueType;
 use promql_parser::parser::{
-    BinModifier, EvalStmt, Expr as PromExpr, LabelModifier, MatrixSelector, ParenExpr,
-    SubqueryExpr, VectorMatchCardinality, VectorSelector, token,
+    EvalStmt, Expr as PromExpr, MatrixSelector, ParenExpr, SubqueryExpr, VectorSelector,
 };
 use session::context::{MetricDiscoveryScope, QueryContextRef};
 use snafu::ResultExt;
@@ -80,8 +79,8 @@ use store_api::region_engine::RawLabelSource;
 
 use crate::promql::error::{DataFusionPlanningSnafu, Result};
 use crate::promql::native_compile::{
-    InfoInput, compile_selectors_with_grid, compile_statement_with_grid, info_input,
-    statement_grid, subquery_child_grid,
+    InfoInput, bind_evaluated_binary, compile_selectors_with_grid, compile_statement_with_grid,
+    info_input, statement_grid, subquery_child_grid,
 };
 use crate::promql::planner::{DEFAULT_FIELD_COLUMN, DEFAULT_TIME_INDEX_COLUMN, PromPlanner};
 use crate::query_engine::QueryEngineState;
@@ -186,90 +185,49 @@ type PreparedInput = (
     bool,
 );
 
-pub(crate) fn hybrid_binary_admitted(
-    op: token::TokenType,
-    modifier: &Option<BinModifier>,
-    lhs: &PromExpr,
-    rhs: &PromExpr,
-) -> bool {
-    let supported_op = matches!(
-        op.id(),
-        token::T_ADD
-            | token::T_SUB
-            | token::T_MUL
-            | token::T_DIV
-            | token::T_MOD
-            | token::T_POW
-            | token::T_ATAN2
-    );
-    let supported_matching = match modifier {
-        None => true,
-        Some(modifier) => {
-            matches!(&modifier.card, VectorMatchCardinality::OneToOne)
-                && (matches!(&modifier.matching, Some(LabelModifier::Include(labels)) if !labels.labels.is_empty())
-                    || matches!(&modifier.matching, Some(LabelModifier::Exclude(labels)) if labels.labels.is_empty()))
-        }
-    };
-    supported_op
-        && supported_matching
-        && lhs.value_type() == ValueType::Vector
-        && rhs.value_type() == ValueType::Vector
-        && !contains_aggregate_expression(lhs)
-        && !contains_aggregate_expression(rhs)
-        && single_selector_operand(lhs)
-        && single_selector_operand(rhs)
+/// A fully placed native operand and the evaluated layout its frame carries.
+struct NativeFramePlan {
+    plan: LogicalPlan,
+    output: NativeType,
+    tags: Vec<String>,
+    kind: FieldKind,
+    time: String,
+    grid: Arc<EvalGrid>,
+}
+
+enum NativePlanned {
+    Rows(LogicalPlan),
+    Frame(NativeFramePlan),
+}
+
+fn native_planned(
+    plan: LogicalPlan,
+    metadata: Option<(NativeType, Vec<String>)>,
+    kind: FieldKind,
+    time: String,
+    grid: Arc<EvalGrid>,
+) -> NativePlanned {
+    match metadata {
+        Some((output, tags)) => NativePlanned::Frame(NativeFramePlan {
+            plan,
+            output,
+            tags,
+            kind,
+            time,
+            grid,
+        }),
+        None => NativePlanned::Rows(plan),
+    }
 }
 
 impl PromPlanner {
-    pub(super) async fn try_plan_native_operand(
-        &mut self,
-        expr: &PromExpr,
-        query_engine_state: &QueryEngineState,
-    ) -> Result<Option<(LogicalPlan, super::PromPlannerContext)>> {
-        let saved = self.ctx.clone();
-        let (plan, operand_ctx) = match self
-            .try_plan_native_fused_with_context(expr, query_engine_state)
-            .await?
-        {
-            Some((plan, Some(operand_ctx))) => (plan, operand_ctx),
-            _ => {
-                self.ctx = saved;
-                return Ok(None);
-            }
-        };
-        // The scan context is only the input layout. Calls such as histogram_quantile can
-        // remove labels while producing the fused node, so publish only columns actually in
-        // that node's output schema to the binary matcher.
-        let mut output_ctx = operand_ctx;
-        let fields = plan.schema().fields();
-        output_ctx.tag_columns = fields
-            .iter()
-            .filter(|field| field.data_type() == &ArrowDataType::Utf8)
-            .map(|field| field.name().clone())
-            .collect();
-        output_ctx
-            .field_columns
-            .retain(|field| fields.iter().any(|column| column.name() == field));
-        output_ctx.use_tsid = false;
-        self.ctx = output_ctx.clone();
-        let table_ref = self.table_ref();
-        self.ctx = saved;
-        let table_ref = table_ref?;
-        let plan = LogicalPlanBuilder::from(plan)
-            .alias(table_ref)
-            .context(DataFusionPlanningSnafu)?
-            .build()
-            .context(DataFusionPlanningSnafu)?;
-        Ok(Some((plan, output_ctx)))
-    }
-
     /// Builds the scan of the one logical table the current context is bound to. The caller has
     /// already preprocessed this selector's matchers and set the context to its table.
     #[allow(clippy::too_many_arguments)]
     async fn prepare_one_scan(
         &mut self,
         matchers: Matchers,
-        prom_expr: &PromExpr,
+        under_rate_or_increase: bool,
         logical_scan_id: &mut Option<u32>,
         logical_ids_differ: &mut bool,
         statement_kind: &mut Option<FieldKind>,
@@ -289,16 +247,13 @@ impl PromPlanner {
         if self.ctx.field_column_matcher.is_some() || fields.is_empty() {
             return Ok(None);
         }
-        // This is a deliberate semantic safety gate, not a native-function allowlist. On a
-        // delta-temporality table, samples are increments; the existing planner sums them
-        // for `increase` and divides by the range for `rate` per series, while the native
-        // compiled tree assumes cumulative samples. Keep any statement containing either
-        // operation on the existing path for these tables. The check covers the whole
-        // statement, not just this selector occurrence.
+        // Delta samples are increments: the existing planner sums them for `increase` and
+        // divides by the range for `rate`, while the native tree assumes cumulative samples.
+        // Decline only when this selector is read by one of those calls.
         if tags
             .iter()
             .any(|tag| tag == OTLP_AGGREGATION_TEMPORALITY_LABEL)
-            && calls_rate_or_increase(prom_expr)
+            && under_rate_or_increase
         {
             return Ok(None);
         }
@@ -459,10 +414,229 @@ impl PromPlanner {
         prom_expr: &PromExpr,
         query_engine_state: &QueryEngineState,
     ) -> Result<Option<LogicalPlan>> {
-        Ok(self
-            .try_plan_native_fused_with_context(prom_expr, query_engine_state)
+        match self
+            .try_plan_native(prom_expr, query_engine_state, FusedOutputFormat::PlainRows)
             .await?
-            .map(|(plan, _)| plan))
+        {
+            // A whole statement answers a row table. A frame is what a composition reads from its
+            // operands, so the statement root is never one.
+            Some(NativePlanned::Rows(plan)) => Ok(Some(plan)),
+            _ => Ok(None),
+        }
+    }
+
+    /// The one native attempt at `prom_expr`, in the representation the caller needs from it.
+    ///
+    /// The whole expression is offered first: the compiler folds a range function and the math
+    /// functions over it into one node, which is the statement's answer whenever it can bind every
+    /// selector at once. What it cannot bind that way - two selectors carrying different field
+    /// kinds, or an operand that is itself a composition - is admitted as a composition of two
+    /// frames instead.
+    ///
+    /// Both attempts write the planner's selector state, so each one is handed the context it was
+    /// called with, and this restores it before returning whatever the attempt answered. That is
+    /// what lets a refused operand leave nothing behind for the next one, or for the caller that
+    /// keeps planning around this expression.
+    ///
+    /// `Box::pin` is here only because a composition and this attempt call each other, which an
+    /// anonymous async future cannot be sized for. It is not the termination guard: the recursion
+    /// below descends through a parsed expression's own operands. Both futures below are pinned for
+    /// that reason - a level of the descent keeps this block on the stack, so the block holds the
+    /// whole-expression attempt behind a pointer rather than by value.
+    fn try_plan_native<'a>(
+        &'a mut self,
+        prom_expr: &'a PromExpr,
+        query_engine_state: &'a QueryEngineState,
+        format: FusedOutputFormat,
+    ) -> BoxFuture<'a, Result<Option<NativePlanned>>> {
+        Box::pin(async move {
+            let saved = self.ctx.clone();
+            let whole = Box::pin(self.try_plan_native_fused_with_context(
+                prom_expr,
+                query_engine_state,
+                format,
+            ))
+            .await;
+            self.ctx = saved.clone();
+            match whole {
+                Ok(Some(planned)) => return Ok(Some(planned)),
+                Ok(None) => {}
+                Err(error) => return Err(error),
+            }
+            let composed = self
+                .try_plan_native_composed_binary(prom_expr, query_engine_state, format)
+                .await;
+            self.ctx = saved;
+            composed
+        })
+    }
+
+    /// Combines two native operands without a legacy join.
+    ///
+    /// Each operand is planned the way the whole expression is - as its own tree where that tree
+    /// binds every one of its selectors, as a composition of its own operands where it does not -
+    /// and bound as one evaluated series frame. What admits the pair is the composition itself: the
+    /// two grids must agree, and the matching, its cardinality, its fill values and the output
+    /// column's kind must all be ones the kernels answer. A shape they refuse declines to the
+    /// existing plan rather than to an error.
+    ///
+    /// Only a binary expression composes, and only its own two operands are offered below: the
+    /// recursion descends the parsed expression rather than re-offering it, so it ends at a leaf.
+    /// A scalar, a raw sample and an aggregate state are not frames, so an operand that is one is
+    /// refused by the attempt that would have had to produce it.
+    async fn try_plan_native_composed_binary(
+        &mut self,
+        expr: &PromExpr,
+        query_engine_state: &QueryEngineState,
+        format: FusedOutputFormat,
+    ) -> Result<Option<NativePlanned>> {
+        if !self.native_fused
+            || self.ctx.start != self.ctx.stmt_start
+            || self.ctx.end != self.ctx.stmt_end
+        {
+            return Ok(None);
+        }
+        // Parentheses are not a shape of their own: the operand inside them is the one that
+        // composes.
+        let mut inner = expr;
+        while let PromExpr::Paren(paren) = inner {
+            inner = &paren.expr;
+        }
+        let PromExpr::Binary(binary) = inner else {
+            return Ok(None);
+        };
+        // Each attempt restores context even when a scan or compiler fails, and the second operand
+        // starts from the same context the first one did.
+        let saved = self.ctx.clone();
+        let left = self
+            .try_plan_native(
+                &binary.lhs,
+                query_engine_state,
+                FusedOutputFormat::SeriesFrame,
+            )
+            .await;
+        self.ctx = saved.clone();
+        let Some(NativePlanned::Frame(left)) = left? else {
+            return Ok(None);
+        };
+        let right = self
+            .try_plan_native(
+                &binary.rhs,
+                query_engine_state,
+                FusedOutputFormat::SeriesFrame,
+            )
+            .await;
+        self.ctx = saved;
+        let Some(NativePlanned::Frame(right)) = right? else {
+            return Ok(None);
+        };
+        if left.grid.spec() != right.grid.spec() {
+            return Ok(None);
+        }
+        let NativeFramePlan {
+            plan: left_plan,
+            output: left_output,
+            tags: left_tags,
+            kind: left_kind,
+            time: left_time,
+            grid: left_grid,
+        } = left;
+        let NativeFramePlan {
+            plan: right_plan,
+            output: right_output,
+            tags: right_tags,
+            kind: right_kind,
+            ..
+        } = right;
+        let source_tags = [left_tags, right_tags];
+        let evaluated = |source_index, output: &NativeType| NativeNode {
+            expr: NativeExpr::Input(BoundInput {
+                source_index,
+                output: output.clone(),
+                ordering: SeriesOrdering::Contiguous,
+            }),
+            output: output.clone(),
+        };
+        let tree = match bind_evaluated_binary(
+            binary,
+            evaluated(0, &left_output),
+            evaluated(1, &right_output),
+        ) {
+            Ok(tree) => tree,
+            Err(DataFusionError::NotImplemented(_)) => return Ok(None),
+            Err(error) => return Err(error).context(DataFusionPlanningSnafu),
+        };
+        let NativeExpr::Binary { matching, .. } = &tree.root().expr else {
+            return Ok(None);
+        };
+        let Some(root_kind) = binary_output_field_kind(
+            left_kind,
+            right_kind,
+            matching.op,
+            matching.return_bool,
+            matching.fill,
+        ) else {
+            return Ok(None);
+        };
+        if NativeExecutionState::try_new(&tree, Arc::new(UnboundedMemoryPool::default()), None)
+            .is_err()
+        {
+            return Ok(None);
+        }
+        // What a consumer of this composition reads, and the layout the node publishes. The row
+        // layout names one column per value; the frame layout is the evaluated frame this tree's
+        // own root declares, which is what a frame consumer decodes.
+        let metadata = match format {
+            FusedOutputFormat::PlainRows => None,
+            FusedOutputFormat::SeriesFrame => {
+                let Some(tags) = native_output_tags(tree.root(), &source_tags) else {
+                    return Ok(None);
+                };
+                Some((tree.root().output.clone(), tags))
+            }
+        };
+        let output_schema = match format {
+            FusedOutputFormat::PlainRows => {
+                let Some(schema) =
+                    Self::fused_root_schema(&tree, &source_tags, &left_time, root_kind)
+                else {
+                    return Ok(None);
+                };
+                schema
+            }
+            FusedOutputFormat::SeriesFrame => {
+                let frame = match FusedSeries::series_frame_schema(&tree) {
+                    Ok(frame) => frame,
+                    // A frame this composition cannot declare is a shape it does not answer.
+                    Err(DataFusionError::Plan(_)) => return Ok(None),
+                    Err(error) => return Err(error).context(DataFusionPlanningSnafu),
+                };
+                Arc::new(
+                    DFSchema::try_from(frame.as_ref().clone()).context(DataFusionPlanningSnafu)?,
+                )
+            }
+        };
+        let Ok(node) = FusedSeries::try_new_with_format(
+            Arc::from(expr.to_string()),
+            tree,
+            FusedSeriesBinding {
+                grid: Arc::clone(&left_grid),
+                time_index: left_time.clone(),
+                tags: Vec::new(),
+                metric_name: None,
+            },
+            vec![left_plan, right_plan],
+            output_schema,
+            format,
+        ) else {
+            return Ok(None);
+        };
+        let plan = LogicalPlan::Extension(Extension {
+            node: Arc::new(node),
+        });
+        Ok(Some(native_planned(
+            plan, metadata, root_kind, left_time, left_grid,
+        )))
     }
 
     /// Plans `prom_expr` as one native node, or returns `None` to keep the existing plan.
@@ -485,7 +659,8 @@ impl PromPlanner {
         &mut self,
         prom_expr: &PromExpr,
         query_engine_state: &QueryEngineState,
-    ) -> Result<Option<(LogicalPlan, Option<super::PromPlannerContext>)>> {
+        format: FusedOutputFormat,
+    ) -> Result<Option<NativePlanned>> {
         if !self.native_fused {
             return Ok(None);
         }
@@ -493,6 +668,10 @@ impl PromPlanner {
         // A range selector returns raw samples, which have no evaluation grid to bind. A subquery
         // root instead returns its inner expression on the subquery's child grid, and a range
         // query has no grid to bind a matrix root to at all.
+        //
+        // A composition reads this admission as its own: a subquery root is compiled on its child
+        // grid, which is the grid its rows carry, so an operand whose grid is not the one a
+        // composition binds declines rather than being evaluated on the statement's grid.
         let subquery_root = root_subquery(prom_expr);
         if prom_expr.value_type() == ValueType::Matrix
             && (subquery_root.is_none() || self.ctx.start != self.ctx.end)
@@ -526,10 +705,14 @@ impl PromPlanner {
             None => &stmt.expr,
         };
         let mut selectors = Vec::new();
+        // The walk starts outside any `rate` or `increase`, and records that per selector as it
+        // descends: a selector is delta-temporality-sensitive only where one of those calls reads
+        // it, which is what keeps `rate(a) / b` admissible when only `b` carries the marker.
         let mut set_operations = Vec::new();
         if !collect_selectors_with_set_operations(
             &stmt,
             effective_expr,
+            false,
             &mut selectors,
             &mut set_operations,
         ) {
@@ -554,6 +737,16 @@ impl PromPlanner {
                 Err(DataFusionError::NotImplemented(_)) => return Ok(None),
                 Err(error) => return Err(error).context(DataFusionPlanningSnafu),
             };
+            // A frame operand is an evaluated sample root: a composition matches series, and a
+            // scalar root - `2`, `time()` - carries one value and no labels, so those keep the
+            // existing plan rather than becoming a frame the matcher cannot pair.
+            let evaluated = matches!(
+                &tree.root().output,
+                NativeType::Samples(schema) if schema.eval_grid.is_some()
+            );
+            if format == FusedOutputFormat::SeriesFrame && !evaluated {
+                return Ok(None);
+            }
             // Bind only input tags: this data-free tree has no input, and its tags belong to its
             // output schema.
             let Some(output_tags) = native_output_tags(tree.root(), &[]) else {
@@ -579,33 +772,56 @@ impl PromPlanner {
             } else {
                 DEFAULT_TIME_INDEX_COLUMN.to_string()
             };
+            // The metadata a consumer of a frame operand reads: the evaluated layout this tree's
+            // root declares on the statement grid, and the labels a `vector(s)` reports.
+            let metadata = match format {
+                FusedOutputFormat::PlainRows => None,
+                FusedOutputFormat::SeriesFrame => {
+                    Some((tree.root().output.clone(), output_tags.clone()))
+                }
+            };
             // A data-free tree reads no input, so every field it answers is a float.
-            let output_schema =
-                fused_output_schema(&values, &output_tags, &time_index, FieldKind::Float)?;
-            let node = FusedSeries::try_new(
+            let output_schema = match format {
+                FusedOutputFormat::PlainRows => {
+                    fused_output_schema(&values, &output_tags, &time_index, FieldKind::Float)?
+                }
+                FusedOutputFormat::SeriesFrame => {
+                    let frame =
+                        FusedSeries::series_frame_schema(&tree).context(DataFusionPlanningSnafu)?;
+                    Arc::new(
+                        DFSchema::try_from(frame.as_ref().clone())
+                            .context(DataFusionPlanningSnafu)?,
+                    )
+                }
+            };
+            let node = FusedSeries::try_new_with_format(
                 Arc::from(prom_expr.to_string()),
                 tree,
                 FusedSeriesBinding {
                     grid: Arc::clone(&grid),
-                    time_index,
+                    time_index: time_index.clone(),
                     tags: Vec::new(),
                     metric_name: None,
                 },
                 Vec::new(),
                 output_schema,
+                format,
             )
             .context(DataFusionPlanningSnafu)?;
-            return Ok(Some((
-                LogicalPlan::Extension(Extension {
-                    node: Arc::new(node),
-                }),
-                None,
+            let plan = LogicalPlan::Extension(Extension {
+                node: Arc::new(node),
+            });
+            return Ok(Some(native_planned(
+                plan,
+                metadata,
+                FieldKind::Float,
+                time_index,
+                grid,
             )));
         }
         let original_context = self.ctx.clone();
         let preparation = async {
             let mut prepared: Vec<PreparedInput> = Vec::new();
-            let mut single_input_context = None;
             // The first metric logical-table id a selector's rewrite carried, and whether a later one
             // carried a different id. See the `cross_table` use below.
             let mut logical_scan_id: Option<u32> = None;
@@ -613,7 +829,7 @@ impl PromPlanner {
             // The kind every bound field carries. A statement declares one column per field, so
             // selectors that disagree have no column to declare and keep the existing plan.
             let mut statement_kind: Option<FieldKind> = None;
-            for selector in &selectors {
+            for (selector, under_rate_or_increase) in &selectors {
                 self.ctx = original_context.clone();
                 // These matchers are alternatives the one scan below the node cannot represent, so the
                 // query keeps the plan the existing path builds for it.
@@ -744,7 +960,7 @@ impl PromPlanner {
                         let Some((scan, schema, metric, time, mut tags, partitioned, split_series)) = self
                             .prepare_one_scan(
                                 matchers.clone(),
-                                prom_expr,
+                                *under_rate_or_increase,
                                 &mut logical_scan_id,
                                 &mut logical_ids_differ,
                                 &mut statement_kind,
@@ -835,13 +1051,10 @@ impl PromPlanner {
                 if self.setup_context().await?.is_some() {
                     return Ok(None);
                 }
-                if selectors.len() == 1 {
-                    single_input_context = Some(self.ctx.clone());
-                }
                 let Some(one) = self
                     .prepare_one_scan(
                         matchers,
-                        prom_expr,
+                        *under_rate_or_increase,
                         &mut logical_scan_id,
                         &mut logical_ids_differ,
                         &mut statement_kind,
@@ -852,18 +1065,11 @@ impl PromPlanner {
                 };
                 prepared.push(one);
             }
-            Ok(Some((
-                prepared,
-                single_input_context,
-                logical_ids_differ,
-                statement_kind,
-            )))
+            Ok(Some((prepared, logical_ids_differ, statement_kind)))
         }
         .await;
         self.ctx = original_context;
-        let Some((mut prepared, single_input_context, logical_ids_differ, statement_kind)) =
-            preparation?
-        else {
+        let Some((mut prepared, logical_ids_differ, statement_kind)) = preparation? else {
             return Ok(None);
         };
         // Selectors over one table share one region, so the node runs there over every scan. When
@@ -931,7 +1137,7 @@ impl PromPlanner {
         // two walks agree: a mismatch is a compiler defect, not a query this route can plan.
         let identities: Vec<(Option<String>, Matchers, i64, Option<i64>)> = selectors
             .iter()
-            .map(|selector| {
+            .map(|(selector, _)| {
                 let offset_ms = selector
                     .offset
                     .as_ref()
@@ -1255,6 +1461,20 @@ impl PromPlanner {
             }
             Some(FieldKind::Float) | None => FieldKind::Float,
         };
+        let frame_metadata = if format == FusedOutputFormat::SeriesFrame {
+            let NativeType::Samples(schema) = &root.output else {
+                return Ok(None);
+            };
+            if schema.eval_grid.is_none() {
+                return Ok(None);
+            }
+            let Some(output_tags) = native_output_tags(root, &source_tags) else {
+                return Ok(None);
+            };
+            Some((root.output.clone(), output_tags))
+        } else {
+            None
+        };
         // A tree over more than one input needs no split: each input already answers from its own
         // source, and the one node above them folds every partition in one execution. The split is
         // an optimization for the one-input shapes it can carry, and so is the segmentation below;
@@ -1306,7 +1526,7 @@ impl PromPlanner {
         // partition.
         if selectors.len() == 1
             && matches!(&tree.root().expr, NativeExpr::Merge { input } if pointwise_operand(input) && canonical_local_prefix(input) && !contains_global_consumer(input))
-            && let Some(plan) = canonical_boundary_plan(
+            && let Some((plan, _)) = canonical_boundary_stages(
                 prom_expr,
                 &tree,
                 &children,
@@ -1315,10 +1535,17 @@ impl PromPlanner {
                 &time,
                 &tags,
                 &metric,
+                format,
                 root_kind,
             )
         {
-            return Ok(Some((plan, single_input_context)));
+            return Ok(Some(native_planned(
+                plan,
+                frame_metadata,
+                root_kind,
+                time,
+                grid,
+            )));
         }
         if required_placement {
             // A tree whose fold can be split keeps that plan: it exports aggregate state rather
@@ -1343,11 +1570,20 @@ impl PromPlanner {
                 if root_kind != FieldKind::Float {
                     return Ok(None);
                 }
-                let Some(output_schema) =
+                // The row-value layout is what the split is validated against whichever format the
+                // caller asked for: it names one column per value the partial state accumulates,
+                // while the encoded frame carries those values inside its own layout.
+                let Some(value_schema) =
                     Self::fused_root_schema(&tree, &source_tags, &time, root_kind)
                 else {
                     return Ok(None);
                 };
+                // A frame operand also needs the evaluated layout its consumers decode, which is
+                // the metadata derived above: a request that could not name one keeps the existing
+                // plan rather than publishing rows to a frame consumer.
+                if format == FusedOutputFormat::SeriesFrame && frame_metadata.is_none() {
+                    return Ok(None);
+                }
                 let Some(rawinput) = children.into_iter().next() else {
                     return Ok(None);
                 };
@@ -1363,12 +1599,19 @@ impl PromPlanner {
                         metric_name: metric,
                     },
                     rawinput,
-                    output_schema,
+                    value_schema,
+                    format,
                 )?;
                 let plan = LogicalPlan::Extension(Extension {
                     node: Arc::new(node),
                 });
-                return Ok(Some((plan, single_input_context)));
+                return Ok(Some(native_planned(
+                    plan,
+                    frame_metadata,
+                    root_kind,
+                    time,
+                    grid,
+                )));
             }
         }
         // A segment over the wire keeps the raw source as its input rather than a bare scan: the
@@ -1387,7 +1630,7 @@ impl PromPlanner {
                 &time,
                 &tags,
                 &segment_metric,
-                FusedOutputFormat::PlainRows,
+                format,
                 contains_canonical_merge(root),
                 root_kind,
                 // A cut must keep the source whenever the table behind it can split a series
@@ -1399,7 +1642,13 @@ impl PromPlanner {
                 self_contained || any_split_series || (per_source_inputs && any_partitioned),
             )?;
             if let Some(plan) = plan {
-                return Ok(Some((plan, single_input_context)));
+                return Ok(Some(native_planned(
+                    plan,
+                    frame_metadata,
+                    root_kind,
+                    time,
+                    grid,
+                )));
             }
             // One input with no split or segment above it leaves a raw scan doing the work of a
             // cross-series consumer, and a single scan does not prove its region holds every
@@ -1436,7 +1685,18 @@ impl PromPlanner {
         {
             return Ok(None);
         }
-        let output_schema = fused_output_schema(&root_fields, &output_tags, &time, root_kind)?;
+        let output_schema = match format {
+            FusedOutputFormat::PlainRows => {
+                fused_output_schema(&root_fields, &output_tags, &time, root_kind)?
+            }
+            FusedOutputFormat::SeriesFrame => {
+                let frame =
+                    FusedSeries::series_frame_schema(&tree).context(DataFusionPlanningSnafu)?;
+                Arc::new(
+                    DFSchema::try_from(frame.as_ref().clone()).context(DataFusionPlanningSnafu)?,
+                )
+            }
+        };
         // The children a node reads bind it: a `RawSeriesSource` child carries the frames and names
         // the metric it reads, so a node over them binds neither tags nor one metric name of its
         // own. A node whose children stay direct scans of one table reads that table through the
@@ -1450,24 +1710,30 @@ impl PromPlanner {
         // Every lowering path above publishes on the same grid the tree was compiled on, so the
         // binding is that grid rather than a per-shape choice.
         let publish_grid = Arc::clone(&grid);
-        let node = FusedSeries::try_new(
+        let node = FusedSeries::try_new_with_format(
             Arc::from(prom_expr.to_string()),
             tree,
             FusedSeriesBinding {
                 grid: publish_grid,
-                time_index: time,
+                // The node below names the same output column, so the binding takes a copy.
+                time_index: time.clone(),
                 tags,
                 metric_name: metric,
             },
             children,
             output_schema,
+            format,
         )
         .context(DataFusionPlanningSnafu)?;
-        Ok(Some((
-            LogicalPlan::Extension(Extension {
-                node: Arc::new(node),
-            }),
-            single_input_context,
+        let plan = LogicalPlan::Extension(Extension {
+            node: Arc::new(node),
+        });
+        Ok(Some(native_planned(
+            plan,
+            frame_metadata,
+            root_kind,
+            time,
+            grid,
         )))
     }
 
@@ -1508,10 +1774,8 @@ impl PromPlanner {
     /// The statement being planned, rebuilt from the evaluation numbers the planner holds.
     ///
     /// The compiler reads the statement's grid, lookback and `@` anchors rather than the planner's
-    /// mutable state. The route is only offered at the statement root, where `ctx.start` and
-    /// `ctx.end` are the statement's own bounds: they are rewritten while an anchored window or a
-    /// subquery is folded, so a nested expression would need the bounds it was actually entered
-    /// with, which is why no nested expression is offered here.
+    /// mutable state. A nested binary is offered only while `ctx.start` and `ctx.end` are still
+    /// the statement's bounds; anchored windows and subqueries can rewrite those bounds.
     ///
     /// `None` means the bounds are not representable as a [`SystemTime`], which is not a grid a
     /// tree can be evaluated on either.
@@ -2040,33 +2304,6 @@ fn fused_publish_grid(root: &NativeNode, statement_grid: &Arc<EvalGrid>) -> Arc<
 ///   per set, complementary points joined.
 ///
 /// `None` when the boundary cannot be built, so the caller keeps the plan it would have chosen.
-#[allow(clippy::too_many_arguments)]
-fn canonical_boundary_plan(
-    prom_expr: &PromExpr,
-    tree: &NativeTree,
-    children: &[LogicalPlan],
-    source_tags: &[Vec<String>],
-    grid: &Arc<EvalGrid>,
-    time_index: &str,
-    tags: &[String],
-    metric: &Option<Arc<str>>,
-    root_kind: FieldKind,
-) -> Option<LogicalPlan> {
-    let (plan, _) = canonical_boundary_stages(
-        prom_expr,
-        tree,
-        children,
-        source_tags,
-        grid,
-        time_index,
-        tags,
-        metric,
-        FusedOutputFormat::PlainRows,
-        root_kind,
-    )?;
-    Some(plan)
-}
-
 /// The stages of a canonical boundary over `tree`, and the columns its frames carry.
 ///
 /// `format` says what the caller above reads: a statement root reads the boundary's rows, and
@@ -2771,15 +3008,22 @@ fn fused_output_schema(
 /// them the physical planner puts a `SeriesRepartitionExec`, which is what makes every row of a
 /// group reach one final partition.
 ///
-/// The statement's output value columns must match the partial state's accumulator count; a
-/// mismatch means the declared output shape does not match the state schema of the split tree.
+/// `format` is the representation the caller needs from the second node: the statement's row table,
+/// or the evaluated series frame another native node reads as an operand. The producer is
+/// unaffected, because partial state is a frame either way.
+///
+/// `value_schema` is the statement's row-value layout, and the output value columns it declares
+/// must match the partial state's accumulator count; a mismatch means the declared output shape
+/// does not match the state schema of the split tree. Only the row layout is counted: a frame
+/// declares the values inside its own encoding, so it names no float column to count.
 fn plan_split_aggregate(
     promql: Arc<str>,
     partial: NativeTree,
     final_tree: NativeTree,
     binding: FusedSeriesBinding,
     rawinput: LogicalPlan,
-    output_schema: DFSchemaRef,
+    value_schema: DFSchemaRef,
+    format: FusedOutputFormat,
 ) -> Result<FusedSeries> {
     let state_accumulators = match &partial.root().output {
         NativeType::AggregateState(state) => state.accumulators.len(),
@@ -2790,7 +3034,7 @@ fn plan_split_aggregate(
             .context(DataFusionPlanningSnafu);
         }
     };
-    let values = output_schema
+    let values = value_schema
         .fields()
         .iter()
         .filter(|field| field.data_type() == &ArrowDataType::Float64)
@@ -2819,7 +3063,17 @@ fn plan_split_aggregate(
         vec![rawinput],
     )
     .context(DataFusionPlanningSnafu)?;
-    FusedSeries::try_new(
+    let output_schema = match format {
+        FusedOutputFormat::PlainRows => value_schema,
+        // The final node's output is the frame its own evaluated root declares, so it is derived
+        // from the tree it runs rather than from the row layout.
+        FusedOutputFormat::SeriesFrame => {
+            let frame =
+                FusedSeries::series_frame_schema(&final_tree).context(DataFusionPlanningSnafu)?;
+            Arc::new(DFSchema::try_from(frame.as_ref().clone()).context(DataFusionPlanningSnafu)?)
+        }
+    };
+    FusedSeries::try_new_with_format(
         promql,
         final_tree,
         binding,
@@ -2827,6 +3081,7 @@ fn plan_split_aggregate(
             node: Arc::new(partial),
         })],
         output_schema,
+        format,
     )
     .context(DataFusionPlanningSnafu)
 }
@@ -3003,10 +3258,13 @@ fn without_metric_name(tags: Vec<String>) -> Vec<String> {
 /// They follow Prometheus' result labels: a one-to-one match keeps the left side's labels, narrowed
 /// by `on` or `ignoring`; `and` and `unless` keep the left side's series and `or` adds the right
 /// side's; `info` adds the data labels of the info table; an operation with a scalar or a function
-/// of each value keeps its operand's; a scalar and `vector(s)` have none. `None` for a node whose
-/// labels this walk does not derive - a whole-vector operation or a label rewrite, which renames the
-/// labels below it - so a tree holding one reports no label set here. Such a tree is declined rather
-/// than borrowing output names from the legacy planner.
+/// of each value keeps its operand's; a scalar and `vector(s)` have none; a fill that answers a
+/// missing many-side sample files the one side's matching labels, so they join the set, while a
+/// grouped `include` label joins them only when the one side carries it or the matching keeps it in
+/// the key a fill reads. `None` for a node whose labels this walk does not derive - a whole-vector
+/// operation or a label rewrite, which renames the labels below it - so a tree holding one reports
+/// no label set here. Such a tree is declined rather than borrowing output names from the legacy
+/// planner.
 fn native_output_tags(node: &NativeNode, source_tags: &[Vec<String>]) -> Option<Vec<String>> {
     match &node.expr {
         NativeExpr::Aggregate { input, op } => {
@@ -3208,10 +3466,61 @@ fn native_output_tags(node: &NativeNode, source_tags: &[Vec<String>]) -> Option<
                             tags.push(tag.clone());
                         }
                     }
-                    // A filled left side takes an unmatched right series' matching labels, so
-                    // those results carry the right side's tags.
-                    if matching.fill.lhs.is_some() {
-                        for tag in kept(native_output_tags(right, source_tags)?) {
+                    // A grouped result carries an include label only when a row can give it one.
+                    // `result_metric` removes the label from the many side's labels unless the one
+                    // side has it, so a paired row and a row filed from a one-side series take it
+                    // from the one series, which is what the loop above declares. A row filed from
+                    // a many-side series takes it from that series' match key instead, so it carries
+                    // the label only when the matching keeps the label in the key. Everything else
+                    // the many side carries is the base above, so a label neither of those can
+                    // provide has to leave the set: nothing would ever fill its column.
+                    if !includes.is_empty() {
+                        let many_rows_filled = match &matching.cardinality {
+                            // `group_right` puts the one side on the left, so the fills trade
+                            // places: `fill_left` is the one that answers a missing one-side sample
+                            // there.
+                            Cardinality::OneToMany(_) => matching.fill.lhs,
+                            Cardinality::ManyToOne(_) | Cardinality::OneToOne => matching.fill.rhs,
+                        }
+                        .is_some();
+                        let in_match_key = |label: &str| match &matching.labels {
+                            MatchingLabels::On(names) => {
+                                names.iter().any(|name| name.as_ref() == label)
+                            }
+                            // A match key is built from a series' tags, which never hold the metric
+                            // name.
+                            MatchingLabels::Ignoring(names) => {
+                                label != METRIC_NAME
+                                    && !names.iter().any(|name| name.as_ref() == label)
+                            }
+                        };
+                        tags.retain(|tag| {
+                            // The name is not an ordinary label here: `keeps_name` above decides
+                            // whether the walk reports it.
+                            tag == METRIC_NAME
+                                || !includes.iter().any(|label| label.as_ref() == tag.as_str())
+                                || include_tags.contains(tag)
+                                || (many_rows_filled && in_match_key(tag))
+                        });
+                    }
+                    // A fill answers a missing sample from the series of the other side, and the
+                    // kernel files that row at the label set the series it has gives it
+                    // (`vector_match::binary_field`): a many-side series keeps all of its labels,
+                    // which `tags` already holds, while a one-side series keeps only its matching
+                    // labels plus the group labels the modifier names, which the loop above adds.
+                    // So what a fill can add here is the one side's matching labels, and only a
+                    // fill that can file a one-side row has any to add: one where the many side is
+                    // the missing side. Which fill that is follows the kernel, which trades the two
+                    // for `group_right`, whose one side is the left - there it is `fill_right` that
+                    // leaves the many side missing.
+                    let (one_tags, fills_many_side) = match &matching.cardinality {
+                        Cardinality::OneToMany(_) => (left_tags.as_slice(), matching.fill.rhs),
+                        Cardinality::ManyToOne(_) | Cardinality::OneToOne => {
+                            (right_tags.as_slice(), matching.fill.lhs)
+                        }
+                    };
+                    if fills_many_side.is_some() {
+                        for tag in kept(one_tags.to_vec()) {
                             if !tags.contains(&tag) {
                                 tags.push(tag);
                             }
@@ -3430,58 +3739,6 @@ pub(crate) fn pointwise_operand(node: &NativeNode) -> bool {
     }
 }
 
-/// Whether a hybrid operand contains an aggregate, which needs the split route rather than a join.
-fn contains_aggregate_expression(expr: &PromExpr) -> bool {
-    match expr {
-        PromExpr::Aggregate(_) => true,
-        PromExpr::Paren(paren) => contains_aggregate_expression(&paren.expr),
-        PromExpr::Unary(unary) => contains_aggregate_expression(&unary.expr),
-        PromExpr::Binary(binary) => {
-            contains_aggregate_expression(&binary.lhs) || contains_aggregate_expression(&binary.rhs)
-        }
-        PromExpr::Call(call) => call
-            .args
-            .args
-            .iter()
-            .any(|arg| contains_aggregate_expression(arg)),
-        // A subquery evaluates its expression on its own grid, but a fold inside it still folds a
-        // group no single region owns, so an operand holding one needs the split route just as a
-        // direct aggregate does. [`single_selector_operand`] counts a subquery's selector as the
-        // operand's one selector, so this is what keeps a subquery around an aggregate out of the
-        // join.
-        PromExpr::Subquery(subquery) => contains_aggregate_expression(&subquery.expr),
-        _ => false,
-    }
-}
-
-/// Whether this hybrid operand is a single-selector expression the native route can place.
-fn single_selector_operand(expr: &PromExpr) -> bool {
-    let stmt = EvalStmt {
-        expr: expr.clone(),
-        start: UNIX_EPOCH,
-        end: UNIX_EPOCH,
-        interval: Duration::from_millis(1),
-        lookback_delta: Duration::from_millis(1),
-    };
-    let mut selectors = Vec::new();
-    collect_selectors(&stmt, expr, &mut selectors) && selectors.len() == 1
-}
-
-/// The selectors `expr` reads, in the order the compiler binds them.
-///
-/// This is a structural walk, not a function capability list: calls are traversed and the compiler
-/// decides whether their shapes have native kernels. `info` additionally reads a selector it does
-/// not write; [`info_input`] derives that same selector here and the compiler binds it after the base.
-fn collect_selectors<'a>(
-    stmt: &EvalStmt,
-    expr: &'a PromExpr,
-    out: &mut Vec<Cow<'a, VectorSelector>>,
-) -> bool {
-    // A caller that does not read the set operations still records them: the walk is the same one,
-    // and the list stays empty.
-    collect_selectors_with_set_operations(stmt, expr, out, &mut Vec::new())
-}
-
 /// One side of a set operation, as the slice of the pre-order selector list it reads.
 ///
 /// The slice is the side's whole subtree, so it is also what says whether the side reads a table at
@@ -3507,32 +3764,60 @@ struct SetOperation {
 fn collect_selectors_with_set_operations<'a>(
     stmt: &EvalStmt,
     expr: &'a PromExpr,
-    out: &mut Vec<Cow<'a, VectorSelector>>,
+    under_rate_or_increase: bool,
+    out: &mut Vec<(Cow<'a, VectorSelector>, bool)>,
     set_operations: &mut Vec<SetOperation>,
 ) -> bool {
     match expr {
-        PromExpr::VectorSelector(selector) => out.push(Cow::Borrowed(selector)),
-        PromExpr::MatrixSelector(MatrixSelector { vs, .. }) => out.push(Cow::Borrowed(vs)),
+        PromExpr::VectorSelector(selector) => {
+            out.push((Cow::Borrowed(selector), under_rate_or_increase))
+        }
+        PromExpr::MatrixSelector(MatrixSelector { vs, .. }) => {
+            out.push((Cow::Borrowed(vs), under_rate_or_increase))
+        }
         PromExpr::Paren(ParenExpr { expr }) => {
-            return collect_selectors_with_set_operations(stmt, expr, out, set_operations);
+            return collect_selectors_with_set_operations(
+                stmt,
+                expr,
+                under_rate_or_increase,
+                out,
+                set_operations,
+            );
         }
         PromExpr::Call(call) if call.func.name == "info" => {
             let Ok(InfoInput { selector, .. }) = info_input(stmt, &call.args.args) else {
                 return false;
             };
-            if !collect_selectors_with_set_operations(stmt, &call.args.args[0], out, set_operations)
-            {
+            if !collect_selectors_with_set_operations(
+                stmt,
+                &call.args.args[0],
+                under_rate_or_increase,
+                out,
+                set_operations,
+            ) {
                 return false;
             }
-            out.push(Cow::Owned(selector));
+            out.push((Cow::Owned(selector), under_rate_or_increase));
         }
         PromExpr::Binary(binary) => {
             let lhs_start = out.len();
-            if !collect_selectors_with_set_operations(stmt, &binary.lhs, out, set_operations) {
+            if !collect_selectors_with_set_operations(
+                stmt,
+                &binary.lhs,
+                under_rate_or_increase,
+                out,
+                set_operations,
+            ) {
                 return false;
             }
             let lhs_end = out.len();
-            if !collect_selectors_with_set_operations(stmt, &binary.rhs, out, set_operations) {
+            if !collect_selectors_with_set_operations(
+                stmt,
+                &binary.rhs,
+                under_rate_or_increase,
+                out,
+                set_operations,
+            ) {
                 return false;
             }
             if binary.op.is_set_operator() {
@@ -3552,7 +3837,13 @@ fn collect_selectors_with_set_operations<'a>(
         // Literals contribute no selector; the compiler decides which scalar forms can be bound.
         PromExpr::NumberLiteral(_) => return true,
         PromExpr::Unary(unary) => {
-            return collect_selectors_with_set_operations(stmt, &unary.expr, out, set_operations);
+            return collect_selectors_with_set_operations(
+                stmt,
+                &unary.expr,
+                under_rate_or_increase,
+                out,
+                set_operations,
+            );
         }
         // `histogram_quantile` and `histogram_fraction` take their vector last, and the compiler
         // compiles that vector before the arguments in front of it, so the walk reads it first: the
@@ -3563,10 +3854,21 @@ fn collect_selectors_with_set_operations<'a>(
             let Some((vector, parameters)) = call.args.args.split_last() else {
                 return false;
             };
-            return collect_selectors_with_set_operations(stmt, vector, out, set_operations)
-                && parameters.iter().all(|parameter| {
-                    collect_selectors_with_set_operations(stmt, parameter, out, set_operations)
-                });
+            return collect_selectors_with_set_operations(
+                stmt,
+                vector,
+                under_rate_or_increase,
+                out,
+                set_operations,
+            ) && parameters.iter().all(|parameter| {
+                collect_selectors_with_set_operations(
+                    stmt,
+                    parameter,
+                    under_rate_or_increase,
+                    out,
+                    set_operations,
+                )
+            });
         }
         PromExpr::Call(call) => {
             if matches!(call.func.name, "label_replace" | "label_join") {
@@ -3580,12 +3882,19 @@ fn collect_selectors_with_set_operations<'a>(
                     && collect_selectors_with_set_operations(
                         stmt,
                         &call.args.args[0],
+                        under_rate_or_increase,
                         out,
                         set_operations,
                     );
             }
             for arg in &call.args.args {
-                if !collect_selectors_with_set_operations(stmt, arg, out, set_operations) {
+                if !collect_selectors_with_set_operations(
+                    stmt,
+                    arg,
+                    under_rate_or_increase || matches!(call.func.name, "rate" | "increase"),
+                    out,
+                    set_operations,
+                ) {
                     return false;
                 }
             }
@@ -3599,12 +3908,17 @@ fn collect_selectors_with_set_operations<'a>(
             return collect_selectors_with_set_operations(
                 stmt,
                 &aggregate.expr,
+                under_rate_or_increase,
                 out,
                 set_operations,
             ) && match &aggregate.param {
-                Some(param) => {
-                    collect_selectors_with_set_operations(stmt, param, out, set_operations)
-                }
+                Some(param) => collect_selectors_with_set_operations(
+                    stmt,
+                    param,
+                    under_rate_or_increase,
+                    out,
+                    set_operations,
+                ),
                 None => true,
             };
         }
@@ -3616,6 +3930,7 @@ fn collect_selectors_with_set_operations<'a>(
             return collect_selectors_with_set_operations(
                 stmt,
                 &subquery.expr,
+                under_rate_or_increase,
                 out,
                 set_operations,
             );
@@ -3718,34 +4033,6 @@ fn metric_scan_and_table_id(
     Some((scan.clone(), filter.predicate.clone(), *table_id))
 }
 
-/// Whether `expr` contains `rate`/`increase`, used only by the delta-temporality semantic safety
-/// gate, not as a native-function capability list.
-fn calls_rate_or_increase(expr: &PromExpr) -> bool {
-    match expr {
-        PromExpr::Call(call) => {
-            matches!(call.func.name, "rate" | "increase")
-                || call.args.args.iter().any(|arg| calls_rate_or_increase(arg))
-        }
-        PromExpr::Paren(ParenExpr { expr }) => calls_rate_or_increase(expr),
-        PromExpr::Subquery(subquery) => calls_rate_or_increase(&subquery.expr),
-        PromExpr::Binary(binary) => {
-            calls_rate_or_increase(&binary.lhs) || calls_rate_or_increase(&binary.rhs)
-        }
-        PromExpr::Unary(unary) => calls_rate_or_increase(&unary.expr),
-        // An aggregate's parameter is an expression, so `topk(scalar(sum(rate(x[5m]))), y)` reaches
-        // `rate` only through it. The gate is about the whole statement, and a delta-temporality
-        // table answers an increment there as it does anywhere else.
-        PromExpr::Aggregate(aggregate) => {
-            calls_rate_or_increase(&aggregate.expr)
-                || aggregate
-                    .param
-                    .as_ref()
-                    .is_some_and(|param| calls_rate_or_increase(param))
-        }
-        _ => false,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -3760,28 +4047,11 @@ mod tests {
 
     use super::{
         ArrowDataType, ArrowTimeUnit, FieldKind, METRIC_NAME, NATIVE_PROMQL_EXTENSION_KEY,
-        NativeType, aggregate_reads_histogram, calls_rate_or_increase, collect_selectors,
-        cut_segments, fused_output_schema, fused_output_tags, hybrid_binary_admitted,
-        independent_scan_pair, native_output_tags, native_promql_requested,
-        native_raw_plan_bounds_region_reads, node_children, plans_over_remote_regions,
-        scan_time_filter,
+        NativeType, aggregate_reads_histogram, collect_selectors_with_set_operations, cut_segments,
+        fused_output_schema, fused_output_tags, independent_scan_pair, native_output_tags,
+        native_promql_requested, native_raw_plan_bounds_region_reads, node_children,
+        plans_over_remote_regions, scan_time_filter,
     };
-
-    #[test]
-    fn delta_temporality_guard_finds_rate_and_increase_inside_subqueries() {
-        for query in [
-            "rate(x[5m])",
-            "increase(x[5m])",
-            "avg_over_time(rate(x[5m])[10m:1m])",
-            "avg_over_time(increase(x[5m])[10m:1m])",
-        ] {
-            let expr = promql_parser::parser::parse(query).unwrap();
-            assert!(calls_rate_or_increase(&expr), "{query}");
-        }
-        let query = "avg_over_time(abs(x)[10m:1m])";
-        let expr = promql_parser::parser::parse(query).unwrap();
-        assert!(!calls_rate_or_increase(&expr), "{query}");
-    }
 
     #[test]
     fn plans_over_remote_regions_matches_engine_construction() {
@@ -3910,10 +4180,16 @@ mod tests {
             lookback_delta: Duration::from_secs(5),
         };
         let mut selectors = Vec::new();
-        assert!(collect_selectors(&statement, &expr, &mut selectors));
+        assert!(collect_selectors_with_set_operations(
+            &statement,
+            &expr,
+            false,
+            &mut selectors,
+            &mut Vec::new()
+        ));
         selectors
             .iter()
-            .map(|selector| selector.name.clone().unwrap_or_default())
+            .map(|(selector, _)| selector.name.clone().unwrap_or_default())
             .collect()
     }
 
@@ -4455,75 +4731,6 @@ mod tests {
             Some(vec!["host".to_string(), "kind".to_string()]),
             native_output_tags(tree.root(), &sources)
         );
-    }
-
-    fn hybrid_admission(query: &str) -> bool {
-        let expression = promql_parser::parser::parse(query).unwrap();
-        let promql_parser::parser::Expr::Binary(binary) = expression else {
-            panic!("expected binary expression: {query}");
-        };
-        hybrid_binary_admitted(binary.op, &binary.modifier, &binary.lhs, &binary.rhs)
-    }
-
-    #[test]
-    fn hybrid_binary_admission_is_narrow() {
-        for query in ["A / B", "rate(A[1m]) / rate(B[1m])"] {
-            assert!(hybrid_admission(query), "{query}");
-        }
-        assert!(hybrid_admission("A + on(job) B"));
-        for query in [
-            "A and B",
-            "A + on() B",
-            "A + on(job) group_left B",
-            "100 / B",
-            "A / (B + C)",
-            // A fold on either side: one shared output label set cannot describe both operands, and
-            // the shapes that produced a `tag_0` planning error before the aggregate gate existed.
-            "sum(A) / B",
-            "A / sum(B)",
-            // The same fold one subquery down. The subquery's selector is the operand's one
-            // selector, so only the aggregate gate keeps this operand out of the join - without it
-            // the admitted operand fails at execution, where no planner can build the fused node
-            // over the gathered subquery.
-            "avg_over_time((sum by (job, host) (A))[5m:1m]) + on(job, host) B",
-            "A + on(job, host) avg_over_time((sum by (job, host) (B))[5m:1m])",
-        ] {
-            assert!(!hybrid_admission(query), "{query}");
-        }
-
-        for query in [
-            "ceil(A) / B",
-            "irate(A[5m]) / B",
-            "sort(A) / B",
-            "absent(A) / B",
-            "-A / B",
-        ] {
-            assert!(hybrid_admission(query), "{query}");
-        }
-    }
-
-    /// An aggregate inside a subquery is still an aggregate, so a hybrid operand that holds one is
-    /// not the per-series evaluation the join needs.
-    ///
-    /// This is the admission decision behind a statement that used to fail while executing: both
-    /// shapes below were admitted, and the operand's subquery then had to be gathered for a join
-    /// that no installed planner can build. Refusing them keeps the plan the existing route builds.
-    #[test]
-    fn subquery_aggregate_operand_is_refused() {
-        for query in [
-            "avg_over_time((sum by (job, host) (A))[5m:1m]) + on(job, host) B",
-            "A + on(job, host) avg_over_time((sum by (job, host) (B))[5m:1m])",
-        ] {
-            assert!(!hybrid_admission(query), "{query}");
-        }
-        // The subquery on its own is admitted: what the gate refuses is the fold inside it, not the
-        // subquery that carries it.
-        for query in [
-            "avg_over_time((A)[5m:1m]) + on(job, host) B",
-            "A + on(job, host) avg_over_time((B)[5m:1m])",
-        ] {
-            assert!(hybrid_admission(query), "{query}");
-        }
     }
 
     #[test]

@@ -934,6 +934,98 @@ fn run(executor: &mut NativeExecutor) -> Vec<EvaluatedChunk> {
     out
 }
 
+/// A deep native tree executes after the real FusedSeries envelope is decoded.
+#[test]
+fn deep_native_tree_executes_after_fused_series_round_trip() {
+    // A representative deep codec/runtime test owns its worker stack; this is not an
+    // arbitrary-depth guarantee or a product-level stack setting.
+    std::thread::Builder::new()
+        .name("deep-native-codec".into())
+        .stack_size(32 * 1024 * 1024)
+        .spawn(|| {
+            use crate::extension_plan::{FusedOutputFormat, FusedSeries, FusedSeriesBinding};
+            use datafusion::common::DFSchema;
+            use datafusion::logical_expr::{EmptyRelation, LogicalPlan};
+
+            let grid = grid(0, 60_000, 3);
+            let schema = evaluated_schema(Arc::clone(&grid));
+            let mut root = evaluated_input(Arc::clone(&grid));
+            for _ in 0..80 {
+                root = scalar_binary(
+                    root,
+                    scalar(1.0, Arc::clone(&grid)),
+                    binary_matching(BinaryOp::Add),
+                );
+            }
+            root = map(
+                root,
+                vec![MathOp::Clamp {
+                    min: 0.0,
+                    max: 1000.0,
+                }],
+            );
+            let tree = NativeTree::try_new(root).unwrap();
+            let output_schema = FusedSeries::series_frame_schema(&tree).unwrap();
+            let output_schema =
+                Arc::new(DFSchema::try_from(output_schema.as_ref().clone()).unwrap());
+            let node = FusedSeries::try_new_with_format(
+                Arc::from("deep"),
+                tree,
+                FusedSeriesBinding {
+                    grid: Arc::clone(&grid),
+                    time_index: "ts".to_string(),
+                    tags: Vec::new(),
+                    metric_name: None,
+                },
+                vec![LogicalPlan::EmptyRelation(EmptyRelation {
+                    produce_one_row: false,
+                    schema: Arc::new(DFSchema::empty()),
+                })],
+                output_schema,
+                FusedOutputFormat::SeriesFrame,
+            )
+            .unwrap();
+            let bytes = node.serialize().unwrap();
+            let decoded = FusedSeries::deserialize(&bytes).unwrap();
+            fn depth(node: &NativeNode) -> usize {
+                1 + match &node.expr {
+                    NativeExpr::Input(_) | NativeExpr::Scalar(_) => 0,
+                    NativeExpr::Map { input, .. } => depth(input),
+                    NativeExpr::Binary { left, right, .. } => depth(left).max(depth(right)),
+                    other => panic!("unexpected node: {other:?}"),
+                }
+            }
+            assert!(depth(decoded.tree().root()) > 64);
+            let pool = pool();
+            let mut execution = executor(decoded.tree(), Arc::clone(&pool));
+            execution
+                .push_evaluated(
+                    InputId::new(0),
+                    evaluated_chunk_of(
+                        &schema,
+                        named_metric("x", "a"),
+                        0,
+                        vec![Some(-1.0), None, Some(3.0)],
+                        true,
+                    ),
+                )
+                .unwrap();
+            let chunks = run(&mut execution);
+            assert_eq!(chunks.len(), 1);
+            assert_eq!(
+                sample_values(&chunks[0]),
+                vec![Some(79.0), None, Some(83.0)]
+            );
+            assert_eq!(chunks[0].series.time.grid().unwrap().spec(), grid.spec());
+            assert_eq!(chunks[0].series.metric.get("job"), Some("a"));
+            assert_eq!(chunks[0].series.metric.name(), None);
+            assert_eq!(pool.reserved(), 0);
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
 /// A scalar root answers its own value, once, on the grid it was bound to.
 ///
 /// It reads nothing, so what it reports is not a series it was handed: one unlabelled chunk holding
@@ -7206,6 +7298,633 @@ fn a_binary_adds_the_native_histograms_of_both_sides() {
     assert_eq!(out.len(), 1);
     // Each side holds four buckets of one count at each point, so the sum counts eight.
     assert_eq!(histogram_counts(&out[0]), vec![8.0, 8.0]);
+}
+
+/// The native vector matcher annotates only unsupported, present histogram pairs.
+#[test]
+fn binary_histogram_drop_info_respects_presence_and_duplicates() {
+    use common_query::promql_annotations::PromqlAnnotationCollector;
+
+    let infos = |collector: &PromqlAnnotationCollector| {
+        let mut warnings = Vec::new();
+        let mut infos = Vec::new();
+        collector.append_to(&mut warnings, &mut infos);
+        assert!(warnings.is_empty());
+        infos
+    };
+    for (op, histogram_left, histogram_right, symbol) in [
+        (BinaryOp::Add, true, false, "+"),
+        (BinaryOp::Add, false, true, "+"),
+        (BinaryOp::Mul, true, true, "*"),
+    ] {
+        let (tree, grid, left, right) = binary_tree(op, 2);
+        let schema = evaluated_schema(grid);
+        let collector = PromqlAnnotationCollector::default();
+        let pool = pool();
+        let mut state = NativeExecutionState::try_new(&tree, Arc::clone(&pool), None).unwrap();
+        state.set_annotations(Some(collector.clone()));
+        let mut execution = NativeExecutor::new(state);
+        let chunk = |histogram, name| {
+            if histogram {
+                evaluated_histograms(&schema, named_metric(name, "a"), 0, 4, 2, true)
+            } else {
+                evaluated_chunk_of(
+                    &schema,
+                    named_metric(name, "a"),
+                    0,
+                    vec![Some(2.0), Some(2.0)],
+                    true,
+                )
+            }
+        };
+        execution
+            .push_evaluated(left, chunk(histogram_left, "left"))
+            .unwrap();
+        execution
+            .push_evaluated(right, chunk(histogram_right, "right"))
+            .unwrap();
+        assert!(run(&mut execution).is_empty());
+        assert_eq!(
+            infos(&collector),
+            vec![format!(
+                "{symbol}: dropped native histogram samples because this binary operation is not supported for native histograms"
+            )]
+        );
+        assert_eq!(pool.reserved(), 0);
+    }
+
+    // No label match, or a missing sample at every shared point, cannot produce a drop Info.
+    for unmatched in [false, true] {
+        let (tree, grid, left, right) = binary_tree(BinaryOp::Add, 2);
+        let schema = evaluated_schema(grid);
+        let collector = PromqlAnnotationCollector::default();
+        let mut state = NativeExecutionState::try_new(&tree, pool(), None).unwrap();
+        state.set_annotations(Some(collector.clone()));
+        let mut execution = NativeExecutor::new(state);
+        execution
+            .push_evaluated(
+                left,
+                evaluated_histograms(&schema, named_metric("hist", "a"), 0, 4, 2, true),
+            )
+            .unwrap();
+        let values = if unmatched {
+            vec![Some(2.0); 2]
+        } else {
+            vec![None; 2]
+        };
+        let job = if unmatched { "b" } else { "a" };
+        execution
+            .push_evaluated(
+                right,
+                evaluated_chunk_of(&schema, named_metric("float", job), 0, values, true),
+            )
+            .unwrap();
+        assert!(run(&mut execution).is_empty());
+        assert!(infos(&collector).is_empty());
+    }
+
+    // Even when the operation would drop the pair, duplicate one-side series retain their error.
+    let grid = grid(0, 60_000, 1);
+    let mut matching = binary_matching(BinaryOp::Add);
+    matching.labels = MatchingLabels::On(vec![Arc::from("job")]);
+    let tree = NativeTree::try_new(binary_of(
+        evaluated_input_with_source_index(Arc::clone(&grid), 0),
+        evaluated_input_with_source_index(Arc::clone(&grid), 1),
+        matching,
+    ))
+    .unwrap();
+    let left = InputId::new(0);
+    let right = InputId::new(1);
+    let schema = evaluated_schema(grid);
+    let collector = PromqlAnnotationCollector::default();
+    let pool = pool();
+    let mut state = NativeExecutionState::try_new(&tree, Arc::clone(&pool), None).unwrap();
+    state.set_annotations(Some(collector));
+    let mut execution = NativeExecutor::new(state);
+    execution
+        .push_evaluated(
+            left,
+            evaluated_histograms(&schema, pod_metric("hist", "a", "h"), 0, 4, 1, true),
+        )
+        .unwrap();
+    for pod in ["one", "two"] {
+        execution
+            .push_evaluated(
+                right,
+                evaluated_chunk_of(
+                    &schema,
+                    pod_metric("float", "a", pod),
+                    0,
+                    vec![Some(2.0)],
+                    true,
+                ),
+            )
+            .unwrap();
+    }
+    let error = execution.finish().unwrap_err().to_string();
+    assert!(
+        error.contains("duplicate series for the match group"),
+        "{error}"
+    );
+    assert_eq!(pool.reserved(), 0);
+}
+
+/// A filled pair is a pair the operation is run on, so the native executor annotates the
+/// unsupported histogram pairing a fill value made.
+///
+/// `hist{job="a"}` has no `job="b"` counterpart, so `hist + on(job) fill_right(0) float` answers
+/// every point of it with `histogram + 0`, the pairing Prometheus runs `doBinOp` on after it fills
+/// a step. The Info it records is the wording the legacy planner states the same rule with, and a
+/// pair the fill never forms at all carries nothing.
+#[test]
+fn binary_histogram_fill_reports_the_dropped_info() {
+    use common_query::promql_annotations::PromqlAnnotationCollector;
+
+    let dropped = |symbol: &str| {
+        vec![format!(
+            "{symbol}: dropped native histogram samples because this binary operation is not supported for native histograms"
+        )]
+    };
+    // `fill_right` answers a missing right-hand sample, so the histogram is the left operand and
+    // every point of it is the pair `histogram + 0`; `fill_left` answers a missing left-hand one,
+    // so the histogram is the right operand and the pair is `0 + histogram`.
+    for (fill, histogram_left) in [
+        (
+            FillValues {
+                lhs: None,
+                rhs: Some(0.0),
+            },
+            true,
+        ),
+        (
+            FillValues {
+                lhs: Some(0.0),
+                rhs: None,
+            },
+            false,
+        ),
+    ] {
+        let grid = grid(0, 60_000, 2);
+        let mut matching = binary_matching(BinaryOp::Add);
+        matching.labels = MatchingLabels::On(vec![Arc::from("job")]);
+        matching.fill = fill;
+        let tree = NativeTree::try_new(binary_of(
+            evaluated_input_with_source_index(Arc::clone(&grid), 0),
+            evaluated_input_with_source_index(Arc::clone(&grid), 1),
+            matching,
+        ))
+        .unwrap();
+        let schema = evaluated_schema(grid);
+        // The two sides carry different `job` labels, so nothing matches and the fill value is what
+        // every point of the histogram series pairs with.
+        let histogram = || evaluated_histograms(&schema, named_metric("hist", "a"), 0, 4, 2, true);
+        let float = || {
+            evaluated_chunk_of(
+                &schema,
+                named_metric("float", "b"),
+                0,
+                vec![Some(2.0), Some(2.0)],
+                true,
+            )
+        };
+        let (left, right) = if histogram_left {
+            (histogram(), float())
+        } else {
+            (float(), histogram())
+        };
+        let collector = PromqlAnnotationCollector::default();
+        let pool = pool();
+        let mut state = NativeExecutionState::try_new(&tree, Arc::clone(&pool), None).unwrap();
+        state.set_annotations(Some(collector.clone()));
+        let mut execution = NativeExecutor::new(state);
+        execution.push_evaluated(InputId::new(0), left).unwrap();
+        execution.push_evaluated(InputId::new(1), right).unwrap();
+        let chunks = run(&mut execution);
+        assert!(
+            chunks.is_empty(),
+            "a dropped fill pair filed a row: {:?}",
+            chunks
+                .iter()
+                .map(|chunk| chunk.series.metric.clone())
+                .collect::<Vec<_>>()
+        );
+        let mut warnings = Vec::new();
+        let mut infos = Vec::new();
+        collector.append_to(&mut warnings, &mut infos);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(infos, dropped("+"), "{fill:?}");
+        assert_eq!(pool.reserved(), 0);
+    }
+
+    // Without a fill modifier the two sides never pair, and a pair that was never formed produces
+    // no sample to drop.
+    let grid = grid(0, 60_000, 2);
+    let mut matching = binary_matching(BinaryOp::Add);
+    matching.labels = MatchingLabels::On(vec![Arc::from("job")]);
+    let tree = NativeTree::try_new(binary_of(
+        evaluated_input_with_source_index(Arc::clone(&grid), 0),
+        evaluated_input_with_source_index(Arc::clone(&grid), 1),
+        matching,
+    ))
+    .unwrap();
+    let schema = evaluated_schema(grid);
+    let collector = PromqlAnnotationCollector::default();
+    let pool = pool();
+    let mut state = NativeExecutionState::try_new(&tree, Arc::clone(&pool), None).unwrap();
+    state.set_annotations(Some(collector.clone()));
+    let mut execution = NativeExecutor::new(state);
+    execution
+        .push_evaluated(
+            InputId::new(0),
+            evaluated_histograms(&schema, named_metric("hist", "a"), 0, 4, 2, true),
+        )
+        .unwrap();
+    execution
+        .push_evaluated(
+            InputId::new(1),
+            evaluated_chunk_of(
+                &schema,
+                named_metric("float", "b"),
+                0,
+                vec![Some(2.0), Some(2.0)],
+                true,
+            ),
+        )
+        .unwrap();
+    assert!(run(&mut execution).is_empty());
+    let mut warnings = Vec::new();
+    let mut infos = Vec::new();
+    collector.append_to(&mut warnings, &mut infos);
+    assert!(warnings.is_empty(), "{warnings:?}");
+    assert!(infos.is_empty(), "{infos:?}");
+    assert_eq!(pool.reserved(), 0);
+}
+
+/// Matched histogram arithmetic preserves the existing reset/schema diagnostics and values.
+#[test]
+fn binary_histogram_add_sub_preserves_payload_and_diagnostics() {
+    use common_query::native_histogram::CUSTOM_BUCKETS_SCHEMA;
+    use common_query::promql_annotations::PromqlAnnotationCollector;
+
+    // A single positive bucket makes its post-reconciliation count unambiguous, including when
+    // all custom bounds differ and both source buckets fold into the result's +Inf bucket.
+    let hist = |custom: bool, bounds: &[f64], hint, count, sum| {
+        let offsets = [0];
+        let lengths = [1];
+        let buckets = [count];
+        let mut builder = HistogramBatchBuilder::new();
+        let index = builder
+            .push(HistogramView {
+                schema: if custom { CUSTOM_BUCKETS_SCHEMA } else { 0 },
+                zero_threshold: 0.0,
+                sum,
+                count,
+                zero_count: 0.0,
+                reset_hint: hint,
+                start_timestamp: None,
+                custom_values: bounds,
+                positive: BucketSideView {
+                    span_offsets: &offsets,
+                    span_lengths: &lengths,
+                    buckets: &buckets,
+                },
+                negative: BucketSideView {
+                    span_offsets: &[],
+                    span_lengths: &[],
+                    buckets: &[],
+                },
+            })
+            .unwrap();
+        (builder.finish().unwrap(), index)
+    };
+    for op in [BinaryOp::Add, BinaryOp::Sub] {
+        let name = if op == BinaryOp::Add {
+            "prom_native_histogram_add"
+        } else {
+            "prom_native_histogram_sub"
+        };
+        let factor = if op == BinaryOp::Add { 1.0 } else { -1.0 };
+        for reverse in [false, true] {
+            // Same exponential buckets; both orientations of the reset contradiction are tested.
+            let hints = if reverse {
+                (
+                    CounterResetHint::NotCounterReset,
+                    CounterResetHint::CounterReset,
+                )
+            } else {
+                (
+                    CounterResetHint::CounterReset,
+                    CounterResetHint::NotCounterReset,
+                )
+            };
+            let left_hist = hist(false, &[], hints.0, 5.0, 10.0);
+            let right_hist = hist(false, &[], hints.1, 2.0, 4.0);
+            let (tree, grid, left, right) = binary_tree(op, 1);
+            let schema = evaluated_schema(grid);
+            let collector = PromqlAnnotationCollector::default();
+            let pool = pool();
+            let mut state = NativeExecutionState::try_new(&tree, Arc::clone(&pool), None).unwrap();
+            state.set_annotations(Some(collector.clone()));
+            let mut execution = NativeExecutor::new(state);
+            for (input, (table, index)) in [(left, left_hist), (right, right_hist)] {
+                execution
+                    .push_evaluated(
+                        input,
+                        evaluated_histogram_chunk_of(
+                            &schema,
+                            named_metric("hist", "a"),
+                            0,
+                            vec![Some(index)],
+                            &table,
+                            true,
+                        ),
+                    )
+                    .unwrap();
+            }
+            let chunks = run(&mut execution);
+            assert_eq!(chunks.len(), 1);
+            let mut cursor = chunks[0].series.fields.as_slice()[0].cursor();
+            let SampleRef::Histogram(h) = cursor.at(0).unwrap() else {
+                panic!("expected histogram")
+            };
+            assert_eq!(
+                (h.count, h.sum, h.zero_count),
+                (5.0 + factor * 2.0, 10.0 + factor * 4.0, 0.0)
+            );
+            assert_eq!(h.positive.buckets, &[5.0 + factor * 2.0]);
+            assert_eq!(
+                h.reset_hint,
+                if op == BinaryOp::Add {
+                    CounterResetHint::Unknown
+                } else {
+                    CounterResetHint::Gauge
+                }
+            );
+            assert_eq!(chunks[0].series.metric.get("job"), Some("a"));
+            assert_eq!(chunks[0].series.metric.name(), None);
+            let mut warnings = Vec::new();
+            let mut infos = Vec::new();
+            collector.append_to(&mut warnings, &mut infos);
+            assert_eq!(
+                warnings,
+                vec![format!(
+                    "{name}: native histogram counter reset hints contradict"
+                )]
+            );
+            assert!(infos.is_empty());
+            assert_eq!(pool.reserved(), 0);
+        }
+
+        // Differing custom bounds reconcile; exercise partially overlapping and disjoint bounds,
+        // with and without contradictory reset hints, so each existing diagnostic is independent.
+        for (left_bounds, right_bounds) in
+            [(&[1.0, 2.0][..], &[2.0, 3.0][..]), (&[1.0][..], &[2.0][..])]
+        {
+            for collision in [false, true] {
+                let hints = if collision {
+                    (
+                        CounterResetHint::CounterReset,
+                        CounterResetHint::NotCounterReset,
+                    )
+                } else {
+                    (CounterResetHint::Unknown, CounterResetHint::Unknown)
+                };
+                let left_hist = hist(true, left_bounds, hints.0, 5.0, 10.0);
+                let right_hist = hist(true, right_bounds, hints.1, 2.0, 4.0);
+                let (tree, grid, left, right) = binary_tree(op, 1);
+                let schema = evaluated_schema(grid);
+                let collector = PromqlAnnotationCollector::default();
+                let pool = pool();
+                let mut state =
+                    NativeExecutionState::try_new(&tree, Arc::clone(&pool), None).unwrap();
+                state.set_annotations(Some(collector.clone()));
+                let mut execution = NativeExecutor::new(state);
+                for (input, (table, index)) in [(left, left_hist), (right, right_hist)] {
+                    execution
+                        .push_evaluated(
+                            input,
+                            evaluated_histogram_chunk_of(
+                                &schema,
+                                named_metric("hist", "a"),
+                                0,
+                                vec![Some(index)],
+                                &table,
+                                true,
+                            ),
+                        )
+                        .unwrap();
+                }
+                let chunks = run(&mut execution);
+                assert_eq!(chunks.len(), 1);
+                let mut cursor = chunks[0].series.fields.as_slice()[0].cursor();
+                let SampleRef::Histogram(h) = cursor.at(0).unwrap() else {
+                    panic!("expected histogram")
+                };
+                assert_eq!((h.count, h.sum), (5.0 + factor * 2.0, 10.0 + factor * 4.0));
+                assert_eq!(h.positive.buckets, &[5.0 + factor * 2.0]);
+                assert_eq!(
+                    h.custom_values,
+                    if left_bounds.len() == 1 {
+                        &[][..]
+                    } else {
+                        &[2.0][..]
+                    }
+                );
+                assert_eq!(
+                    h.reset_hint,
+                    if op == BinaryOp::Add {
+                        CounterResetHint::Unknown
+                    } else {
+                        CounterResetHint::Gauge
+                    }
+                );
+                let mut warnings = Vec::new();
+                let mut infos = Vec::new();
+                collector.append_to(&mut warnings, &mut infos);
+                let expected_warnings = if collision {
+                    vec![format!(
+                        "{name}: native histogram counter reset hints contradict"
+                    )]
+                } else {
+                    vec![]
+                };
+                assert_eq!(warnings, expected_warnings);
+                assert_eq!(
+                    infos,
+                    vec![format!(
+                        "{name}: reconciled native histograms with different custom buckets"
+                    )]
+                );
+                assert_eq!(pool.reserved(), 0);
+            }
+        }
+
+        // A conflicting pair is not a sample pair at an absent point or when labels do not match.
+        for unmatched in [false, true] {
+            let left_hist = hist(true, &[1.0], CounterResetHint::CounterReset, 5.0, 10.0);
+            let right_hist = hist(false, &[], CounterResetHint::NotCounterReset, 2.0, 4.0);
+            let (tree, grid, left, right) = binary_tree(op, 1);
+            let schema = evaluated_schema(grid);
+            let collector = PromqlAnnotationCollector::default();
+            let pool = pool();
+            let mut state = NativeExecutionState::try_new(&tree, Arc::clone(&pool), None).unwrap();
+            state.set_annotations(Some(collector.clone()));
+            let mut execution = NativeExecutor::new(state);
+            execution
+                .push_evaluated(
+                    left,
+                    evaluated_histogram_chunk_of(
+                        &schema,
+                        named_metric("left", "a"),
+                        0,
+                        vec![Some(left_hist.1)],
+                        &left_hist.0,
+                        true,
+                    ),
+                )
+                .unwrap();
+            let right_index = if unmatched { Some(right_hist.1) } else { None };
+            let right_job = if unmatched { "b" } else { "a" };
+            execution
+                .push_evaluated(
+                    right,
+                    evaluated_histogram_chunk_of(
+                        &schema,
+                        named_metric("right", right_job),
+                        0,
+                        vec![right_index],
+                        &right_hist.0,
+                        true,
+                    ),
+                )
+                .unwrap();
+            assert!(run(&mut execution).is_empty());
+            let mut warnings = Vec::new();
+            let mut infos = Vec::new();
+            collector.append_to(&mut warnings, &mut infos);
+            assert!(warnings.is_empty());
+            assert!(infos.is_empty());
+            assert_eq!(pool.reserved(), 0);
+        }
+
+        // Incompatible custom/exponential pairs are dropped, in either direction. Prometheus
+        // reports the layouts before it reaches the reset hints, so a pair that fails both carries
+        // the schema warning alone.
+        for reverse in [false, true] {
+            for collision in [false, true] {
+                let hints = if collision {
+                    (
+                        CounterResetHint::CounterReset,
+                        CounterResetHint::NotCounterReset,
+                    )
+                } else {
+                    (CounterResetHint::Unknown, CounterResetHint::Unknown)
+                };
+                let left_hist = hist(
+                    reverse,
+                    if reverse { &[1.0] } else { &[] },
+                    hints.0,
+                    5.0,
+                    10.0,
+                );
+                let right_hist = hist(
+                    !reverse,
+                    if reverse { &[] } else { &[1.0] },
+                    hints.1,
+                    2.0,
+                    4.0,
+                );
+                let (tree, grid, left, right) = binary_tree(op, 1);
+                let schema = evaluated_schema(grid);
+                let collector = PromqlAnnotationCollector::default();
+                let pool = pool();
+                let mut state =
+                    NativeExecutionState::try_new(&tree, Arc::clone(&pool), None).unwrap();
+                state.set_annotations(Some(collector.clone()));
+                let mut execution = NativeExecutor::new(state);
+                for (input, (table, index)) in [(left, left_hist), (right, right_hist)] {
+                    execution
+                        .push_evaluated(
+                            input,
+                            evaluated_histogram_chunk_of(
+                                &schema,
+                                named_metric("hist", "a"),
+                                0,
+                                vec![Some(index)],
+                                &table,
+                                true,
+                            ),
+                        )
+                        .unwrap();
+                }
+                assert!(run(&mut execution).is_empty());
+                let mut warnings = Vec::new();
+                let mut infos = Vec::new();
+                collector.append_to(&mut warnings, &mut infos);
+                // The hint collision changes nothing here: the layouts already decided the pair,
+                // and that one warning is all Prometheus reports for it.
+                assert_eq!(
+                    warnings,
+                    vec![format!(
+                        "{name}: dropped native histogram sample with incompatible schemas"
+                    )],
+                    "collision {collision}"
+                );
+                assert!(infos.is_empty());
+                assert_eq!(pool.reserved(), 0);
+            }
+        }
+    }
+}
+
+/// Supported histogram scaling keeps the values, labels and grid in both operand orders.
+#[test]
+fn binary_histogram_scaling_preserves_payload_and_labels() {
+    for (op, histogram_left, expected) in [
+        (BinaryOp::Mul, true, 8.0),
+        (BinaryOp::Mul, false, 8.0),
+        (BinaryOp::Div, true, 2.0),
+    ] {
+        let (tree, grid, left, right) = binary_tree(op, 2);
+        let schema = evaluated_schema(Arc::clone(&grid));
+        let pool = pool();
+        let mut execution = executor(&tree, Arc::clone(&pool));
+        let histogram = evaluated_histograms(&schema, named_metric("hist", "a"), 0, 4, 2, true);
+        let float = evaluated_chunk_of(
+            &schema,
+            named_metric("float", "a"),
+            0,
+            vec![Some(2.0); 2],
+            true,
+        );
+        let (lhs, rhs) = if histogram_left {
+            (histogram, float)
+        } else {
+            (float, histogram)
+        };
+        execution.push_evaluated(left, lhs).unwrap();
+        execution.push_evaluated(right, rhs).unwrap();
+        let chunks = run(&mut execution);
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(histogram_counts(&chunks[0]), vec![expected; 2]);
+        let mut cursor = chunks[0].series.fields.as_slice()[0].cursor();
+        for row in 0..2 {
+            let SampleRef::Histogram(histogram) = cursor.at(row).unwrap() else {
+                panic!("scaled sample is not a histogram");
+            };
+            assert_eq!(histogram.sum, expected);
+            let bucket = if op == BinaryOp::Mul { 2.0 } else { 0.5 };
+            assert_eq!(histogram.positive.buckets, &[bucket; 4]);
+        }
+        assert_eq!(
+            chunks[0].series.time.timestamps().unwrap().as_ref(),
+            &grid.timestamps().unwrap()[..]
+        );
+        assert_eq!(chunks[0].series.metric.get("job"), Some("a"));
+        assert_eq!(chunks[0].series.metric.name(), None);
+        assert_eq!(chunks[0].series.time.grid().unwrap().spec(), grid.spec());
+        assert_eq!(pool.reserved(), 0);
+    }
 }
 
 /// Nothing is decided before the input ends; `finish` is what hands the result over.

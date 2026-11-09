@@ -653,21 +653,7 @@ fn binary_operation(context: &Context, binary: &BinaryExpr) -> Result<NativeNode
     {
         let left = compile_expr(context, &binary.lhs)?;
         let right = compile_expr(context, &binary.rhs)?;
-        let (Some(lhs), Some(rhs)) = (left.output.samples(), right.output.samples()) else {
-            return Err(DataFusionError::Internal(format!(
-                "the binary operation `{binary}` compiled a vector operand to something other than \
-                 samples: a vector-typed expression compiles to samples, so the two disagree"
-            )));
-        };
-        let output = NativeType::Samples(binary_output_schema(lhs, rhs)?);
-        return Ok(NativeNode {
-            expr: NativeExpr::Binary {
-                left: Box::new(left),
-                right: Box::new(right),
-                matching: vector_matching(binary, op)?,
-            },
-            output,
-        });
+        return bind_vector_binary(binary, left, right, op);
     }
     // What is left has a constant on one side, and a modifier is refused rather than dropped. This
     // is deliberately narrower than Prometheus, which drops an `on` or `ignoring` written on a
@@ -705,6 +691,44 @@ fn binary_operation(context: &Context, binary: &BinaryExpr) -> Result<NativeNode
         op,
         binary.return_bool(),
     ))
+}
+
+/// Binds the same vector operation over compiled or already evaluated operands.
+fn bind_vector_binary(
+    binary: &BinaryExpr,
+    left: NativeNode,
+    right: NativeNode,
+    op: BinaryOp,
+) -> Result<NativeNode> {
+    let (Some(lhs), Some(rhs)) = (left.output.samples(), right.output.samples()) else {
+        return Err(DataFusionError::Internal(format!(
+            "the binary operation `{binary}` compiled a vector operand to something other than samples"
+        )));
+    };
+    let output = NativeType::Samples(binary_output_schema(lhs, rhs)?);
+    Ok(NativeNode {
+        expr: NativeExpr::Binary {
+            left: Box::new(left),
+            right: Box::new(right),
+            matching: vector_matching(binary, op)?,
+        },
+        output,
+    })
+}
+
+/// Uses the ordinary binary binder for two evaluated frame inputs.
+pub(crate) fn bind_evaluated_binary(
+    binary: &BinaryExpr,
+    left: NativeNode,
+    right: NativeNode,
+) -> Result<NativeTree> {
+    let op = binary_op(&binary.op).ok_or_else(|| {
+        not_implemented(&format!(
+            "the binary operator `{}` in `{binary}`",
+            binary.op
+        ))
+    })?;
+    NativeTree::try_new(bind_vector_binary(binary, left, right, op)?)
 }
 
 /// Compiles `and`, `or` or `unless` between two vectors, matched by the labels the query wrote.
