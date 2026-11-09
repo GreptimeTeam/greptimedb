@@ -13,8 +13,9 @@
 // limitations under the License.
 
 use common_telemetry::{debug, error, info};
-use snafu::{OptionExt, ResultExt};
+use snafu::{OptionExt, ResultExt, ensure};
 use store_api::region_engine::MitoCopyRegionFromResponse;
+use store_api::region_request::PathType;
 use store_api::storage::{FileId, RegionId};
 
 use crate::error::{InvalidRequestSnafu, MissingManifestSnafu, Result};
@@ -176,7 +177,7 @@ impl<S> RegionWorkerLoop<S> {
         let _ = sender.send(Ok(MitoCopyRegionFromResponse { copied_file_ids }));
     }
 
-    /// Returns the region edit and the file ids that were copied from the source region to the target region.
+    /// Returns the region edit and source file IDs, including shared logical references.
     ///
     /// If no need to copy files, returns (None, source_file_ids).
     async fn copy_region_from(
@@ -198,6 +199,20 @@ impl<S> RegionWorkerLoop<S> {
             .context(MissingManifestSnafu {
                 region_id: source_region_id,
             })?;
+        // Metadata sync transforms copied rows and then removes these references.
+        // It cannot retire shared inputs through the ordinary edit API, so reject
+        // them before either physical copying or extending the target manifest.
+        ensure!(
+            path_type != PathType::Metadata
+                || source_region_manifest
+                    .files
+                    .values()
+                    .all(|file| file.level != LEVEL_SHARED),
+            InvalidRequestSnafu {
+                region_id: target_region_id,
+                reason: "Shared SST references are not supported in metadata-region copies",
+            }
+        );
         let mut new_file_metas = vec![];
         let target_region_manifest = region.manifest_ctx.manifest().await;
         let source_file_ids = source_region_manifest
