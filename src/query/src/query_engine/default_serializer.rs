@@ -382,8 +382,9 @@ mod tests {
     use futures::stream::BoxStream;
     use promql::extension_plan::{RangeManipulate, SeriesNormalize, UnionDistinctOn};
     use promql::functions::{
-        MixedRange, NativeHistogramAggAvg, NativeHistogramAggSum, NativeHistogramCount,
-        NativeHistogramDrop, PromqlFloatToString,
+        FirstOverTime, MixedRange, NativeHistogramAggAvg, NativeHistogramAggSum,
+        NativeHistogramCount, NativeHistogramDrop, NativeHistogramFirstOverTime,
+        PromqlFloatToString,
     };
     use session::context::QueryContext;
     use table::TableRef;
@@ -606,6 +607,28 @@ mod tests {
                     ],
                 })
                 .alias("mixed_histogram"),
+                FirstOverTime::scalar_udf()
+                    .call(vec![col("timestamp_range"), col("float")])
+                    .alias("first_float"),
+                NativeHistogramFirstOverTime::scalar_udf()
+                    .call(vec![col("timestamp_range"), col("histogram")])
+                    .alias("first_histogram"),
+                MixedRange::float_udf(None)
+                    .call(vec![
+                        lit("first_over_time"),
+                        col("timestamp_range"),
+                        col("float"),
+                        col("histogram"),
+                    ])
+                    .alias("mixed_first_float"),
+                MixedRange::histogram_udf(None)
+                    .call(vec![
+                        lit("first_over_time"),
+                        col("timestamp_range"),
+                        col("float"),
+                        col("histogram"),
+                    ])
+                    .alias("mixed_first_histogram"),
             ])
             .unwrap()
             .build()
@@ -625,6 +648,9 @@ mod tests {
             .to_string();
         assert!(decoded.contains("prom_mixed_range_float"));
         assert!(decoded.contains("prom_mixed_range_histogram"));
+        assert!(decoded.contains("prom_first_over_time"));
+        assert!(decoded.contains("prom_native_histogram_first_over_time"));
+        assert!(decoded.contains("Utf8(\"first_over_time\")"));
     }
 
     #[tokio::test]

@@ -28,6 +28,7 @@ use common_query::test_util::DummyDecoder;
 use common_recordbatch::RecordBatch as GreptimeRecordBatch;
 use datafusion::arrow::array::{
     Array, ArrayRef, Float64Array, Int64Array, StringArray, TimestampMillisecondArray,
+    TimestampNanosecondArray,
 };
 use datafusion::arrow::datatypes::{Field, Schema as ArrowSchema};
 use datafusion::arrow::record_batch::RecordBatch;
@@ -4748,6 +4749,10 @@ async fn native_histogram_all_function_arms_route_correctly() {
             "prom_native_histogram_count_over_time",
         ),
         (
+            "first_over_time(some_metric[5m])",
+            "prom_native_histogram_first_over_time",
+        ),
+        (
             "last_over_time(some_metric[5m])",
             "prom_native_histogram_last_over_time",
         ),
@@ -4829,6 +4834,7 @@ async fn mixed_native_histogram_ranges_use_coordinated_udfs() {
         "irate(some_metric[5m])",
         "avg_over_time(some_metric[5m])",
         "sum_over_time(some_metric[5m])",
+        "first_over_time(some_metric[5m])",
         "last_over_time(some_metric[5m])",
     ];
     let float_output = [
@@ -4912,13 +4918,23 @@ async fn mixed_native_histogram_predict_linear_forwards_the_eval_timestamp() {
 }
 
 #[tokio::test]
-async fn mixed_native_histogram_rate_executes_real_ranges() {
+async fn mixed_native_histogram_range_functions_execute_real_ranges() {
+    // All three native nanosecond samples share the same millisecond ABI timestamp.
+    for timestamps in [
+        Arc::new(TimestampMillisecondArray::from(vec![1000, 2000, 3000])) as ArrayRef,
+        Arc::new(TimestampNanosecondArray::from(vec![
+            1_000_000_000,
+            1_000_000_001,
+            1_000_000_002,
+        ])) as ArrayRef,
+    ] {
+        do_mixed_native_histogram_ranges(timestamps).await;
+    }
+}
+
+async fn do_mixed_native_histogram_ranges(timestamps: ArrayRef) {
     let schema = Arc::new(ArrowSchema::new(vec![
-        Field::new(
-            "timestamp",
-            ArrowDataType::Timestamp(ArrowTimeUnit::Millisecond, None),
-            false,
-        ),
+        Field::new("timestamp", timestamps.data_type().clone(), false),
         Field::new(greptime_value(), ArrowDataType::Float64, true),
         Field::new(
             greptime_native_histogram(),
@@ -4929,7 +4945,7 @@ async fn mixed_native_histogram_rate_executes_real_ranges() {
     let batch = RecordBatch::try_new(
         schema.clone(),
         vec![
-            Arc::new(TimestampMillisecondArray::from(vec![1000, 2000, 3000])),
+            timestamps,
             Arc::new(Float64Array::from(vec![Some(1.0), None, Some(3.0)])),
             build_histogram_array(&[None, Some(direct_or_histogram()), None]),
         ],
@@ -4940,7 +4956,6 @@ async fn mixed_native_histogram_rate_executes_real_ranges() {
         .unwrap()
         .build()
         .unwrap();
-    let collector = PromqlAnnotationCollector::default();
     let mut planner = PromPlanner {
         table_provider: build_test_table_provider_with_fields(
             &[(DEFAULT_SCHEMA_NAME.to_string(), "dummy".to_string())],
@@ -4959,7 +4974,7 @@ async fn mixed_native_histogram_rate_executes_real_ranges() {
             ],
             ..Default::default()
         },
-        promql_annotations: Some(collector.clone()),
+        promql_annotations: None,
     };
     let input = LogicalPlan::Extension(Extension {
         node: Arc::new(
@@ -4976,38 +4991,65 @@ async fn mixed_native_histogram_rate_executes_real_ranges() {
             .unwrap(),
         ),
     });
-    let PromExpr::Call(call) = parser::parse("rate(mixed[3s])").unwrap() else {
-        unreachable!()
-    };
-    let preserve_any_value = PromPlanner::field_columns_are_alternative_samples(
-        input.schema(),
-        &planner.ctx.field_columns,
-    );
-    let state = build_query_engine_state();
-    let (mut exprs, _) = planner
-        .create_function_expr(&call.func, vec![], input.schema(), &state, None)
-        .unwrap();
-    exprs.insert(0, planner.create_time_index_column_expr().unwrap());
-    let plan = LogicalPlanBuilder::from(input)
-        .project(exprs)
-        .unwrap()
-        .filter(
-            planner
-                .create_empty_values_filter_expr(preserve_any_value)
-                .unwrap(),
-        )
-        .unwrap()
-        .build()
-        .unwrap();
-    let (_, batches) = execute(plan, &state).await;
-    assert_eq!(batches.iter().map(RecordBatch::num_rows).sum::<usize>(), 0);
-    let mut warnings = Vec::new();
-    collector.append_to(&mut warnings, &mut Vec::new());
-    assert!(
-        warnings
-            .iter()
-            .any(|warning| warning.contains("mix of float and native histogram"))
-    );
+    for function in ["rate", "first_over_time", "last_over_time"] {
+        let collector = PromqlAnnotationCollector::default();
+        planner.promql_annotations = Some(collector.clone());
+        let PromExpr::Call(call) = parser::parse(&format!("{function}(mixed[3s])")).unwrap() else {
+            unreachable!()
+        };
+        let preserve_any_value = PromPlanner::field_columns_are_alternative_samples(
+            input.schema(),
+            &planner.ctx.field_columns,
+        );
+        let state = build_query_engine_state();
+        let (mut exprs, _) = planner
+            .create_function_expr(&call.func, vec![], input.schema(), &state, None)
+            .unwrap();
+        exprs.insert(0, planner.create_time_index_column_expr().unwrap());
+        let plan = LogicalPlanBuilder::from(input.clone())
+            .project(exprs)
+            .unwrap()
+            .filter(
+                planner
+                    .create_empty_values_filter_expr(preserve_any_value)
+                    .unwrap(),
+            )
+            .unwrap()
+            .build()
+            .unwrap();
+        let (_, batches) = execute(plan, &state).await;
+        let rows = batches.iter().map(RecordBatch::num_rows).sum::<usize>();
+        let mut warnings = Vec::new();
+        let mut infos = Vec::new();
+        collector.append_to(&mut warnings, &mut infos);
+        if function == "rate" {
+            assert_eq!(rows, 0);
+            assert!(
+                warnings
+                    .iter()
+                    .any(|warning| warning.contains("mix of float and native histogram"))
+            );
+        } else {
+            assert_eq!(rows, 1);
+            let batch = batches.iter().find(|batch| batch.num_rows() > 0).unwrap();
+            let values = batch
+                .column(1)
+                .as_any()
+                .downcast_ref::<Float64Array>()
+                .unwrap();
+            assert_eq!(
+                values.value(0),
+                if function == "first_over_time" {
+                    1.0
+                } else {
+                    3.0
+                }
+            );
+            assert!(batch.column(2).is_null(0));
+            assert!(warnings.is_empty());
+            assert!(infos.is_empty());
+        }
+    }
 }
 
 #[tokio::test]
