@@ -607,7 +607,6 @@ async fn register_process_rpc_peer(mock: &MockInfo, node_id: u64, addr: String) 
         memory_usage_bytes: 0,
         hostname: String::new(),
         env_vars: Default::default(),
-        schedulable: None,
     };
     mock.in_memory
         .as_ref()

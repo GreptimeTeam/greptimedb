@@ -32,7 +32,9 @@ use crate::access_layer::AccessLayerRef;
 use crate::cache::CacheManagerRef;
 use crate::compaction::compactor::{CompactionRegion, CompactionVersion, DefaultCompactor};
 use crate::compaction::picker::{CompactionTask, PickerOutput, new_picker};
-use crate::compaction::scheduler::state::{CompactingFiles, CompactionExecution, CompactionPhase, CompactionTrigger};
+use crate::compaction::scheduler::state::{
+    CompactingFiles, CompactionExecution, CompactionPhase, CompactionTrigger,
+};
 use crate::compaction::scheduler::{CompactionScheduler, CompactionTransition};
 use crate::compaction::task::CompactionTaskImpl;
 use crate::compaction::{CompactionOutput, find_dynamic_options};

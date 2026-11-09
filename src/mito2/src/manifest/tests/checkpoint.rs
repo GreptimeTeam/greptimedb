@@ -1107,7 +1107,6 @@ async fn manifest_cache_write_through_survives_reopen(#[case] compression: Compr
         0,
         options.clone(),
         FormatType::PrimaryKey,
-        false,
         &Default::default(),
     )
     .await

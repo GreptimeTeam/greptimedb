@@ -34,7 +34,7 @@ use common_telemetry::{debug, error, info, warn};
 use common_time::util::current_time_millis;
 use futures::{StreamExt, TryStreamExt};
 use itertools::Itertools;
-use snafu::{ResultExt, ensure};
+use snafu::ResultExt;
 use store_api::storage::RegionId;
 use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::mpsc::{Receiver, Sender};
@@ -654,9 +654,8 @@ impl RegionSupervisor {
             .context(error::RuntimeSwitchManagerSnafu)
     }
 
-    /// Selects a target for each of `regions`, excluding `failure_datanodes`, the unschedulable
-    /// datanodes and the region's datanodes in `exclude_peer_ids_by_region`. Regions without a
-    /// candidate are left out.
+    /// Selects a target for each region, excluding `failure_datanodes` and the region's
+    /// datanodes in `exclude_peer_ids_by_region`. Regions without a candidate are left out.
     async fn select_peers(
         &self,
         from_peer_id: DatanodeId,
@@ -1025,7 +1024,7 @@ pub(crate) mod tests {
         use common_meta::rpc::store::PutRequest;
 
         use crate::error::{self, Result};
-        use crate::metasrv::SelectTarget;
+        use crate::metasrv::{SelectTarget, SelectorContext};
         use crate::selector::{RegionStatAwareSelector, Selector, SelectorOptions};
 
         /// Records each selection, and has no candidate once datanode 3 is excluded.
@@ -1091,10 +1090,8 @@ pub(crate) mod tests {
         }
 
         let selector = Arc::new(RecordingSelector(Mutex::new(vec![])));
-        let (mut supervisor, _tx) = new_test_supervisor_with(
-            new_test_selector_context(),
-            RegionSupervisorSelector::NaiveSelector(selector.clone()),
-        );
+        let (mut supervisor, _tx) = new_test_supervisor();
+        supervisor.selector = RegionSupervisorSelector::NaiveSelector(selector.clone());
         let table_id = 1024;
         let region_route = |region_number, followers: &[u64]| RegionRoute {
             region: Region {

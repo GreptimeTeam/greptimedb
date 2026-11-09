@@ -692,7 +692,7 @@ mod tests {
             max_batch_bytes,
             ..Default::default()
         };
-        KafkaLogStore::try_new(&config).await.unwrap()
+        KafkaLogStore::try_new(&config, None).await.unwrap()
     }
 
     async fn produce_records(
@@ -920,7 +920,7 @@ mod tests {
         produce_records(&logstore, &provider, vec![last]).await;
 
         let entries = logstore
-            .read(&provider, 0)
+            .read(&provider, 0, None)
             .await
             .unwrap()
             .try_collect::<Vec<_>>()
@@ -988,7 +988,7 @@ mod tests {
         }
 
         let entries = logstore
-            .read(&provider, 0)
+            .read(&provider, 0, None)
             .await
             .unwrap()
             .try_collect::<Vec<_>>()
@@ -1030,7 +1030,7 @@ mod tests {
         let entries = tokio::time::timeout(
             Duration::from_secs(30),
             logstore
-                .read(&provider, 0)
+                .read(&provider, 0, None)
                 .await
                 .unwrap()
                 .try_collect::<Vec<_>>(),
@@ -1066,7 +1066,7 @@ mod tests {
         logstore.append_batch(expected.clone()).await.unwrap();
 
         let entries = logstore
-            .read(&provider, 0)
+            .read(&provider, 0, None)
             .await
             .unwrap()
             .try_collect::<Vec<_>>()
@@ -1101,7 +1101,7 @@ mod tests {
         let entries = tokio::time::timeout(
             Duration::from_secs(30),
             logstore
-                .read(&provider, 0)
+                .read(&provider, 0, None)
                 .await
                 .unwrap()
                 .try_collect::<Vec<_>>(),
@@ -1133,7 +1133,7 @@ mod tests {
             produce_records(&logstore, &provider, vec![foreign_record(Some(key))]).await;
 
             let err = logstore
-                .read(&provider, 0)
+                .read(&provider, 0, None)
                 .await
                 .unwrap()
                 .try_collect::<Vec<Vec<Entry>>>()
@@ -1171,7 +1171,7 @@ mod tests {
         produce_records(&logstore, &provider, vec![records[2].clone()]).await;
 
         let err = logstore
-            .read(&provider, 0)
+            .read(&provider, 0, None)
             .await
             .unwrap()
             .try_collect::<Vec<Vec<Entry>>>()
@@ -1203,7 +1203,7 @@ mod tests {
         }
 
         let entries = logstore
-            .read(&provider, 0)
+            .read(&provider, 0, None)
             .await
             .unwrap()
             .try_collect::<Vec<_>>()
