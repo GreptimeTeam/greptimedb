@@ -15,6 +15,7 @@
 mod catalog;
 mod registrations;
 mod remote_dyn_filter;
+mod sketch;
 
 use std::collections::HashMap;
 use std::fmt::Debug;
@@ -92,6 +93,8 @@ use store_api::storage::RegionId;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc};
 use tokio::time::{self, timeout};
 use tonic::{Request, Response, Result as TonicResult};
+
+pub use crate::region_server::sketch::RegionSketchReader;
 
 use crate::datanode::record_shutdown_error;
 use crate::error::{
@@ -513,6 +516,15 @@ impl RegionServer {
 
     pub fn runtime(&self) -> Runtime {
         self.inner.runtime.clone()
+    }
+
+    /// Returns a Region-bound sketch reader without reading files or taking a snapshot.
+    /// Returns `None` if the engine does not support sketch reading; Region lookup failures remain errors.
+    pub fn sketch_reader(&self, region_id: RegionId) -> Result<Option<RegionSketchReader>> {
+        let engine = self
+            .find_engine(region_id)?
+            .context(RegionNotFoundSnafu { region_id })?;
+        Ok(RegionSketchReader::new(engine, region_id))
     }
 
     pub fn region_statistic(&self, region_id: RegionId) -> Option<RegionStatistic> {
@@ -2436,6 +2448,23 @@ mod tests {
         RecordBatches::try_new(schema, vec![batch])
             .unwrap()
             .as_stream()
+    }
+
+    #[test]
+    fn test_sketch_reader_optional_capability() {
+        let server = mock_region_server();
+        let region_id = RegionId::new(1, 1);
+        assert!(matches!(
+            server.sketch_reader(region_id),
+            Err(crate::error::Error::RegionNotFound { .. })
+        ));
+
+        let (engine, _receiver) = MockRegionEngine::new("no-sketch");
+        server
+            .inner
+            .region_map
+            .insert(region_id, RegionEngineWithStatus::Ready(engine));
+        assert!(server.sketch_reader(region_id).unwrap().is_none());
     }
 
     #[tokio::test]
