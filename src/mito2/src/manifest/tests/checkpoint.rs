@@ -21,8 +21,7 @@ use common_datasource::compression::CompressionType;
 use common_error::ext::{ErrorExt, RetryHint};
 use common_error::status_code::StatusCode;
 use object_store::layers::mock::{
-    BytesRange, Error as MockError, ErrorKind, MockLayer, MockLayerBuilder, OpDelete,
-    Result as MockResult, RpRead, oio,
+    Error as MockError, ErrorKind, MockLayerBuilder, OpDelete, Result as MockResult, oio,
 };
 use store_api::storage::{FileId, RegionId};
 use strum::IntoEnumIterator;
@@ -37,10 +36,10 @@ use crate::manifest::storage::{
     checkpoint_file, delta_file, file_version, gen_path, is_delta_file,
 };
 use crate::manifest::tests::utils::{
-    basic_region_metadata, manifest_dir_usage, manifest_recovery_usage,
+    basic_region_metadata, fail_manifest_reads_layer, manifest_dir_usage, manifest_recovery_usage,
 };
 use crate::sst::file::FileMeta;
-use crate::test_util::{CheckpointTaskBlocker, TestEnv};
+use crate::test_util::{CheckpointTaskBlocker, TestEnv, nop_action};
 
 async fn build_manager(
     checkpoint_distance: u64,
@@ -77,43 +76,6 @@ async fn reopen_manager(
     env.create_manifest_manager(compress_type, checkpoint_distance, None)
         .await
         .unwrap()
-        .unwrap()
-}
-
-fn nop_action() -> RegionMetaActionList {
-    RegionMetaActionList::new(vec![RegionMetaAction::Edit(RegionEdit {
-        files_to_add: vec![],
-        files_to_remove: vec![],
-        timestamp_ms: None,
-        compaction_time_window: None,
-        flushed_entry_id: None,
-        flushed_sequence: None,
-        committed_sequence: None,
-    })])
-}
-
-struct NotFoundReader;
-
-impl oio::StreamRead for NotFoundReader {
-    async fn open(&self, _: BytesRange) -> MockResult<(RpRead, Box<dyn oio::ReadStreamDyn>)> {
-        Err(MockError::new(
-            ErrorKind::NotFound,
-            "mock listed manifest delta not found",
-        ))
-    }
-}
-
-fn fail_manifest_delta_reads_layer() -> MockLayer {
-    MockLayerBuilder::default()
-        .reader_factory(Arc::new(|path, _args, inner| {
-            let file_name = path.rsplit('/').next().unwrap_or(path);
-            if is_delta_file(file_name) {
-                Box::new(oio::StreamReader::new(NotFoundReader))
-            } else {
-                inner
-            }
-        }))
-        .build()
         .unwrap()
 }
 
@@ -651,7 +613,7 @@ async fn manifest_size_ignores_leftover_files_after_failed_delete(#[case] fail_d
 async fn open_preserves_listed_delta_not_found_retry_hint() {
     let env = TestEnv::new()
         .await
-        .with_mock_layer(fail_manifest_delta_reads_layer());
+        .with_mock_layer(fail_manifest_reads_layer(is_delta_file));
     let metadata = Arc::new(basic_region_metadata());
     let mut manager = env
         .create_manifest_manager(CompressionType::Uncompressed, 0, Some(metadata.clone()))
@@ -682,7 +644,7 @@ async fn open_preserves_listed_delta_not_found_retry_hint() {
 async fn install_preserves_listed_delta_not_found_retry_hint() {
     let env = TestEnv::new()
         .await
-        .with_mock_layer(fail_manifest_delta_reads_layer());
+        .with_mock_layer(fail_manifest_reads_layer(is_delta_file));
     let metadata = Arc::new(basic_region_metadata());
     let mut manager = env
         .create_manifest_manager(CompressionType::Uncompressed, 0, Some(metadata))
@@ -1000,6 +962,7 @@ async fn manifest_size_warm_cache_matches_recovery_bytes(
             checkpoint_distance: 3,
             remove_file_options: Default::default(),
             manifest_cache: Some(cache.clone()),
+            conditional_publication: false,
         };
         let expected = manifest_recovery_usage(env.data_home().join("manifest")).await;
         // First open fills the cache; the second reuses the cached checkpoint and deltas.
@@ -1101,6 +1064,7 @@ async fn manifest_cache_write_through_survives_reopen(#[case] compression: Compr
         checkpoint_distance: 3,
         remove_file_options: Default::default(),
         manifest_cache: Some(cache.clone()),
+        conditional_publication: false,
     };
     let mut writer = RegionManifestManager::new(
         Arc::new(basic_region_metadata()),

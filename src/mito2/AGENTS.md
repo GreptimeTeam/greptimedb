@@ -103,6 +103,9 @@ Tests live next to the code as `*_test.rs` (e.g. `src/mito2/src/engine/flush_tes
 - Sequence numbers are strictly increasing per region; dedup and snapshot reads
   depend on this. Do not change assignment lightly.
 - Manifest version is monotonic — never reset or skip it.
+- In regions whose writes require a lease and whose WAL is the object store WAL,
+  each manifest version has one fixed object name and only one writer can create
+  it (`manifest/storage.rs`).
 - Lock ordering: take the manifest lock before updating `version_control`; the
   reverse deadlocks against concurrent flush/compaction.
 - All region I/O runs on tokio workers; never `block_on` inside a worker.

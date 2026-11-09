@@ -56,10 +56,10 @@ lazy_static! {
 /// Defines partition rules for a table.
 /// TODO(discord9): add the entire partition exprs rules here later
 pub struct PartitionRules {
-    /// The physical partition columns that are not in the logical table.
-    /// only used in kvbackend manager to store the physical partition columns that are not in the logical table.
-    /// This is used to avoid the partition columns in the physical table that are not in the logical table
-    /// to prevent certain optimizations, if table is not a logical table, this should be empty
+    /// The partition columns that are not in this table's schema: physical partition columns
+    /// missing from a logical table, or the current partition columns of a table that a plan
+    /// keeps with an older schema. They prevent optimizations that rely on knowing the partition
+    /// columns.
     pub extra_phy_cols_not_in_logical_table: Vec<String>,
 }
 

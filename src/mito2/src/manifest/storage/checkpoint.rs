@@ -19,12 +19,13 @@ use common_datasource::compression::CompressionType;
 use common_telemetry::{debug, warn};
 use object_store::{ErrorKind, ObjectStore};
 use serde::{Deserialize, Serialize};
-use snafu::ResultExt;
+use snafu::{OptionExt, ResultExt};
 use store_api::ManifestVersion;
 
 use crate::cache::manifest_cache::ManifestCache;
 use crate::error::{
-    CompressObjectSnafu, DecompressObjectSnafu, OpenDalSnafu, Result, SerdeJsonSnafu, Utf8Snafu,
+    CompressObjectSnafu, DecompressObjectSnafu, ManifestCheckpointVanishedSnafu, OpenDalSnafu,
+    Result, SerdeJsonSnafu, Utf8Snafu,
 };
 use crate::manifest::storage::size_tracker::Tracker;
 use crate::manifest::storage::utils::{get_from_cache_decoded, write_and_put_cache};
@@ -198,6 +199,44 @@ impl<T: Tracker> CheckpointStorage<T> {
             return Ok(None);
         };
         self.load_checkpoint(metadata).await
+    }
+
+    /// Loads the checkpoint that LIST found at `version` with `compress_type`.
+    ///
+    /// The checkpoint pointer only provides the checksum, when it points at the same version: the
+    /// checkpoint task of a stale writer can leave it at an older one.
+    ///
+    /// Fails if cleanup removed the checkpoint after the LIST, because the deltas it covered can
+    /// be gone too.
+    pub(crate) async fn load_listed_checkpoint(
+        &self,
+        version: ManifestVersion,
+        compress_type: CompressionType,
+    ) -> Result<(ManifestVersion, Vec<u8>)> {
+        let checksum = self
+            .read_last_checkpoint_metadata()
+            .await?
+            .filter(|metadata| metadata.version == version)
+            .and_then(|metadata| metadata.checksum);
+        let mut storage = Self::new(
+            self.path.clone(),
+            self.object_store.clone(),
+            compress_type,
+            self.manifest_cache.clone(),
+            self.size_tracker.clone(),
+        );
+        storage
+            .load_checkpoint(CheckpointMetadata {
+                size: 0,
+                version,
+                checksum,
+                extend_metadata: HashMap::new(),
+            })
+            .await?
+            .context(ManifestCheckpointVanishedSnafu {
+                version,
+                manifest_dir: &self.path,
+            })
     }
 
     /// Reads the small checkpoint pointer without loading its payload.

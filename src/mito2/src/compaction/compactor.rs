@@ -292,6 +292,7 @@ impl CompactionRegionOpener {
             manifest_manager,
             RegionRoleState::Leader(RegionLeaderState::Writable),
             hook,
+            Default::default(),
         ));
 
         let file_purger = {

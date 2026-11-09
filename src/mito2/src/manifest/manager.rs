@@ -55,6 +55,9 @@ pub struct RegionManifestOptions {
     pub remove_file_options: RemoveFileOptions,
     /// Optional cache for manifest files.
     pub manifest_cache: Option<ManifestCache>,
+    /// Whether two writers can race for a version, so that deltas are published by conditional
+    /// create under a fixed name and recovery starts from the highest listed checkpoint.
+    pub(crate) conditional_publication: bool,
 }
 
 impl RegionManifestOptions {
@@ -71,7 +74,15 @@ impl RegionManifestOptions {
                 enable_gc: config.gc.enable,
             },
             manifest_cache: None,
+            conditional_publication: false,
         }
+    }
+
+    /// Sets whether deltas are published by conditional create and recovery starts from the
+    /// highest listed checkpoint.
+    pub(crate) fn with_conditional_publication(mut self, enabled: bool) -> Self {
+        self.conditional_publication = enabled;
+        self
     }
 }
 
@@ -181,7 +192,8 @@ impl RegionManifestManager {
             stats.total_manifest_size.clone(),
             stats.metric().cloned(),
             options.manifest_cache.clone(),
-        );
+        )
+        .with_conditional_publication(options.conditional_publication)?;
         let manifest_version = stats.manifest_version.clone();
 
         info!(
@@ -269,7 +281,8 @@ impl RegionManifestManager {
             stats.total_manifest_size.clone(),
             stats.metric().cloned(),
             options.manifest_cache.clone(),
-        );
+        )
+        .with_conditional_publication(options.conditional_publication)?;
         let manifest_version = stats.manifest_version.clone();
 
         // recover from storage
@@ -556,32 +569,30 @@ impl RegionManifestManager {
     }
 
     /// Updates the manifest. Returns the current manifest version number.
+    ///
+    /// The caller has no Leader deadline to show that its commit returned in time, so a normal
+    /// commit under conditional publication is always verified and starts no checkpoint.
     pub async fn update(
         &mut self,
         action_list: RegionMetaActionList,
         is_staging: bool,
     ) -> Result<ManifestVersion> {
-        self.update_inner(action_list, is_staging, !is_staging)
+        self.update_with_verification(action_list, is_staging, !is_staging, || true)
             .await
     }
 
-    /// Updates the normal manifest without starting a checkpoint.
+    /// Updates the manifest. Returns the current manifest version number.
     ///
-    /// This is only used while a leader is downgrading. The final flush still
-    /// publishes its manifest edit, but must not start cleanup after the
-    /// downgrade checkpoint barrier.
-    pub(crate) async fn update_normal_without_checkpoint(
-        &mut self,
-        action_list: RegionMetaActionList,
-    ) -> Result<ManifestVersion> {
-        self.update_inner(action_list, false, false).await
-    }
-
-    async fn update_inner(
+    /// `allow_checkpoint` tells whether a normal commit may start a checkpoint. `must_verify` is
+    /// evaluated after the save returns, for a normal commit under conditional publication. If it
+    /// returns true, the commit may have landed on a name that checkpoint cleanup freed, so it
+    /// only applies when LIST finds no checkpoint that covers it, and it starts no checkpoint.
+    pub(crate) async fn update_with_verification(
         &mut self,
         action_list: RegionMetaActionList,
         is_staging: bool,
-        allow_checkpoint: bool,
+        mut allow_checkpoint: bool,
+        must_verify: impl FnOnce() -> bool,
     ) -> Result<ManifestVersion> {
         let _t = MANIFEST_OP_ELAPSED
             .with_label_values(&["update"])
@@ -594,10 +605,22 @@ impl RegionManifestManager {
             }
         );
 
-        let version = self.increase_version();
+        let conditional = self.store.is_conditional_publication();
+        let version = if conditional {
+            self.last_version() + 1
+        } else {
+            self.increase_version()
+        };
         self.store
             .save(version, &action_list.encode()?, is_staging)
             .await?;
+        if conditional {
+            if !is_staging && must_verify() {
+                self.store.ensure_version_not_checkpointed(version).await?;
+                allow_checkpoint = false;
+            }
+            self.set_version(version);
+        }
 
         // For a staging region, the manifest is initially inherited from the previous manifest(i.e., `self.manifest`).
         // When the staging manifest becomes available, it will be used to construct the new manifest.

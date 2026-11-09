@@ -58,8 +58,11 @@ impl<S> RegionWorkerLoop<S> {
             return;
         }
 
-        let region_metadata_loader =
-            RegionMetadataLoader::new(self.config.clone(), self.object_store_manager.clone());
+        let region_metadata_loader = RegionMetadataLoader::new(
+            self.config.clone(),
+            self.object_store_manager.clone(),
+            self.node_lease.is_enabled(),
+        );
         common_runtime::spawn_global(async move {
             let result = Self::fetch_and_remap_manifests(
                 region,
@@ -92,11 +95,11 @@ impl<S> RegionWorkerLoop<S> {
         let now = Instant::now();
         for input_region in &input_regions {
             let region_dir = region_dir_from_table_dir(table_dir, *input_region, path_type);
-            let storage = region_options.storage.clone();
+            let region_options = region_options.clone();
             let moved_region_metadata_loader = region_metadata_loader.clone();
             tasks.push(async move {
                 moved_region_metadata_loader
-                    .load_manifest(&region_dir, &storage)
+                    .load_manifest(&region_dir, &region_options)
                     .await
             });
         }

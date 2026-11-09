@@ -135,6 +135,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             region_id,
             region.table_dir(),
             region.access_layer.path_type(),
+            self.node_lease.clone(),
             self.memtable_builder_provider.clone(),
             self.object_store_manager.clone(),
             self.purge_scheduler.clone(),

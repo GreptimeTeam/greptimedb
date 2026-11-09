@@ -24,22 +24,23 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 
 use common_datasource::compression::CompressionType;
+use common_error::ext::ErrorExt;
 use common_telemetry::{debug, warn};
 use crc32fast::Hasher;
+use futures::TryStreamExt;
 use lazy_static::lazy_static;
 use object_store::util::join_dir;
 use object_store::{Lister, ObjectStore, util};
 use regex::Regex;
-#[cfg(test)]
-use snafu::ResultExt;
-use snafu::ensure;
-use store_api::ManifestVersion;
+use snafu::{ResultExt, ensure};
 use store_api::storage::RegionId;
+use store_api::{MIN_VERSION, ManifestVersion};
 
 use crate::cache::manifest_cache::ManifestCache;
-#[cfg(test)]
-use crate::error::OpenDalSnafu;
-use crate::error::{ChecksumMismatchSnafu, Result};
+use crate::error::{
+    ChecksumMismatchSnafu, ManifestVersionConflictSnafu, OpenDalSnafu, Result,
+    UnsupportedOperationSnafu,
+};
 use crate::manifest::storage::checkpoint::CheckpointStorage;
 use crate::manifest::storage::delta::DeltaStorage;
 use crate::manifest::storage::size_tracker::{CheckpointTracker, DeltaTracker, SizeTracker};
@@ -167,6 +168,8 @@ pub struct ManifestObjectStore {
     delta_storage: DeltaStorage<DeltaTracker>,
     /// The staging file storage.
     staging_storage: StagingStorage,
+    /// Whether deltas are created conditionally and the last checkpoint is found by LIST.
+    conditional_publication: bool,
 }
 
 impl ManifestObjectStore {
@@ -227,7 +230,32 @@ impl ManifestObjectStore {
             checkpoint_storage,
             delta_storage,
             staging_storage,
+            conditional_publication: false,
         }
+    }
+
+    /// Sets whether this store publishes deltas by conditional create and recovers from the
+    /// highest checkpoint found by LIST.
+    ///
+    /// Returns an error if the mode is enabled on a backend without conditional create.
+    pub(crate) fn with_conditional_publication(mut self, enabled: bool) -> Result<Self> {
+        let capability = self.object_store.info().capability();
+        ensure!(
+            !enabled || capability.write_with_if_not_exists,
+            UnsupportedOperationSnafu {
+                err_msg: format!(
+                    "conditional create is required for manifest {} of a region whose writes need a lease",
+                    self.path
+                ),
+            }
+        );
+        self.conditional_publication = enabled;
+        Ok(self)
+    }
+
+    /// Returns whether this store publishes deltas by conditional create.
+    pub(crate) fn is_conditional_publication(&self) -> bool {
+        self.conditional_publication
     }
 
     /// Returns the manifest dir
@@ -391,9 +419,33 @@ impl ManifestObjectStore {
     ) -> Result<()> {
         if is_staging {
             self.staging_storage.save(version, bytes).await
+        } else if self.conditional_publication {
+            self.delta_storage.save_conditional(version, bytes).await
         } else {
             self.delta_storage.save(version, bytes).await
         }
+    }
+
+    /// Fails with a version conflict unless LIST proves that no checkpoint at or above `version`
+    /// exists.
+    ///
+    /// Cleanup deletes a delta only after a checkpoint that covers it is saved, and never deletes
+    /// the highest checkpoint. So a late create that landed on a deleted name always finds one.
+    pub(crate) async fn ensure_version_not_checkpointed(
+        &self,
+        version: ManifestVersion,
+    ) -> Result<()> {
+        let reason = match self.list_highest_checkpoint(version).await {
+            Ok(None) => return Ok(()),
+            Ok(Some((checkpoint, _))) => format!("covered by checkpoint {checkpoint}"),
+            Err(e) => format!("cannot list the checkpoints: {}", e.output_msg()),
+        };
+        ManifestVersionConflictSnafu {
+            version,
+            manifest_dir: &self.path,
+            reason,
+        }
+        .fail()
     }
 
     /// Save the checkpoint manifest file.
@@ -411,7 +463,21 @@ impl ManifestObjectStore {
     /// Return manifest version and the raw [RegionCheckpoint](crate::manifest::action::RegionCheckpoint) content if any
     /// Also applies the checkpoint retention rule to the tracked size.
     pub async fn load_last_checkpoint(&mut self) -> Result<Option<(ManifestVersion, Vec<u8>)>> {
-        let checkpoint = self.checkpoint_storage.load_last_checkpoint().await?;
+        let checkpoint = if self.conditional_publication {
+            match self.list_highest_checkpoint(MIN_VERSION).await {
+                Ok(Some((version, compress_type))) => Some(
+                    self.checkpoint_storage
+                        .load_listed_checkpoint(version, compress_type)
+                        .await?,
+                ),
+                Ok(None) => None,
+                // A region that does not exist yet can have no manifest directory.
+                Err(e) if e.is_object_not_found() => None,
+                Err(e) => return Err(e),
+            }
+        } else {
+            self.checkpoint_storage.load_last_checkpoint().await?
+        };
         if let Some((version, _)) = &checkpoint {
             self.retain_manifest_size_after(*version);
         }
@@ -468,6 +534,31 @@ impl ManifestObjectStore {
     /// Returns the staging storage.
     pub(crate) fn staging_storage(&self) -> &StagingStorage {
         &self.staging_storage
+    }
+
+    /// Returns the version and compression of the highest checkpoint at or above `min_version`
+    /// found by LIST.
+    async fn list_highest_checkpoint(
+        &self,
+        min_version: ManifestVersion,
+    ) -> Result<Option<(ManifestVersion, CompressionType)>> {
+        let mut lister = self
+            .object_store
+            .lister_with(&self.path)
+            .start_after(&list_start_after(&self.path, min_version))
+            .await
+            .context(OpenDalSnafu)?;
+        let mut highest = None;
+        while let Some(entry) = lister.try_next().await.context(OpenDalSnafu)? {
+            let file_name = entry.name();
+            if is_checkpoint_file(file_name) {
+                let version = file_version(file_name);
+                if version >= min_version && highest.is_none_or(|(v, _)| v < version) {
+                    highest = Some((version, file_compress_type(file_name)));
+                }
+            }
+        }
+        Ok(highest)
     }
 }
 
