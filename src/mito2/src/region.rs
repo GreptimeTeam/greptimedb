@@ -1533,7 +1533,7 @@ impl ManifestContext {
         let allow_checkpoint = !is_staging
             && self.state.load() != RegionRoleState::Leader(RegionLeaderState::Downgrading);
         let version = manager
-            .update(action_list, is_staging, allow_checkpoint, || {
+            .update_with_verification(action_list, is_staging, allow_checkpoint, || {
                 self.is_leader_lease_expired()
             })
             .await
@@ -2430,8 +2430,6 @@ mod tests {
                 .update(
                     RegionMetaActionList::with_action(RegionMetaAction::Edit(edit.clone())),
                     false,
-                    true,
-                    || false,
                 )
                 .await
                 .unwrap();
@@ -2716,8 +2714,6 @@ mod tests {
                     RegionMetaAction::Edit(empty_edit()),
                 ]),
                 true,
-                false,
-                || false,
             )
             .await
             .unwrap();
@@ -2757,8 +2753,6 @@ mod tests {
                     RegionMetaAction::Edit(empty_edit()),
                 ]),
                 true,
-                false,
-                || false,
             )
             .await
             .unwrap();
@@ -2798,8 +2792,6 @@ mod tests {
                     RegionMetaAction::Edit(empty_edit()),
                 ]),
                 true,
-                false,
-                || false,
             )
             .await
             .unwrap();
@@ -2833,8 +2825,6 @@ mod tests {
                     RegionMetaAction::Edit(empty_edit()),
                 ]),
                 true,
-                false,
-                || false,
             )
             .await
             .unwrap();

@@ -1117,8 +1117,6 @@ mod tests {
                         flushed_sequence: None,
                     })),
                     false,
-                    true,
-                    || false,
                 )
                 .await
                 .unwrap();

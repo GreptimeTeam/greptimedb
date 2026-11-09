@@ -213,8 +213,6 @@ impl SstReplaceCommand {
             .update(
                 RegionMetaActionList::with_action(RegionMetaAction::Edit(edit)),
                 false,
-                true,
-                || false,
             )
             .await
             .map_err(|e| {

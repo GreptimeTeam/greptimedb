@@ -864,8 +864,6 @@ async fn test_apply_staging_manifest_change_edit_different_columns_fails_with_fo
                 }),
             ]),
             true,
-            false,
-            || false,
         )
         .await
         .unwrap();

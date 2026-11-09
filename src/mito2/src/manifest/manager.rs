@@ -576,11 +576,24 @@ impl RegionManifestManager {
 
     /// Updates the manifest. Returns the current manifest version number.
     ///
+    /// The caller has no Leader deadline to show that its commit returned in time, so a normal
+    /// commit under conditional publication is always verified and starts no checkpoint.
+    pub async fn update(
+        &mut self,
+        action_list: RegionMetaActionList,
+        is_staging: bool,
+    ) -> Result<ManifestVersion> {
+        self.update_with_verification(action_list, is_staging, !is_staging, || true)
+            .await
+    }
+
+    /// Updates the manifest. Returns the current manifest version number.
+    ///
     /// `allow_checkpoint` tells whether a normal commit may start a checkpoint. `must_verify` is
     /// evaluated after the save returns, for a normal commit under conditional publication. If it
     /// returns true, the commit may have landed on a name that checkpoint cleanup freed, so it
     /// only applies when LIST finds no checkpoint that covers it, and it starts no checkpoint.
-    pub async fn update(
+    pub(crate) async fn update_with_verification(
         &mut self,
         action_list: RegionMetaActionList,
         is_staging: bool,
@@ -983,10 +996,7 @@ mod test {
                 append_mode: None,
             }));
 
-        let current_version = manager
-            .update(action_list, false, true, || false)
-            .await
-            .unwrap();
+        let current_version = manager.update(action_list, false).await.unwrap();
         assert_eq!(current_version, 1);
         manager.validate_manifest(&new_metadata, 1);
 
@@ -1030,10 +1040,7 @@ mod test {
                 append_mode: None,
             }));
 
-        let current_version = manager
-            .update(action_list, false, true, || false)
-            .await
-            .unwrap();
+        let current_version = manager.update(action_list, false).await.unwrap();
         assert_eq!(current_version, 1);
         manager.validate_manifest(&new_metadata, 1);
 
@@ -1055,8 +1062,6 @@ mod test {
                         committed_sequence: None,
                     })]),
                     false,
-                    true,
-                    || false,
                 )
                 .await
                 .unwrap();

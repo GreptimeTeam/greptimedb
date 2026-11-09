@@ -498,7 +498,7 @@ async fn test_stale_commit_on_deleted_delta_name_conflicts(
         assert_eq!(VERSION - 1, manager.last_version());
         while manager.last_version() < VERSION || store.exists(&delta).await.unwrap() {
             manager
-                .update(nop_action(), false, true, || false)
+                .update_with_verification(nop_action(), false, true, || false)
                 .await
                 .unwrap();
             manager.wait_for_pending_checkpoint().await;

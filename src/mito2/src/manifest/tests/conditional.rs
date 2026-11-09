@@ -86,7 +86,9 @@ async fn open_manager(options: RegionManifestOptions) -> RegionManifestManager {
 }
 
 async fn commit(manager: &mut RegionManifestManager) -> Result<ManifestVersion> {
-    manager.update(nop_action(), false, true, || false).await
+    manager
+        .update_with_verification(nop_action(), false, true, || false)
+        .await
 }
 
 fn delta_key(version: ManifestVersion) -> String {
@@ -166,12 +168,25 @@ async fn test_ordinary_commit_does_one_write_and_no_list(#[case] conditional: bo
     writes.store(0, Ordering::Relaxed);
 
     manager
-        .update(nop_action(), false, true, || !conditional)
+        .update_with_verification(nop_action(), false, true, || !conditional)
         .await
         .unwrap();
 
     assert_eq!(1, writes.load(Ordering::Relaxed));
     assert_eq!(0, lists.load(Ordering::Relaxed));
+}
+
+#[tokio::test]
+async fn test_commit_without_deadline_is_verified() {
+    let (_dir, store, _writes, lists) = counting_store();
+    let mut manager = create_manager(options(&store, CompressionType::Gzip, 1, true)).await;
+
+    manager.update(nop_action(), false).await.unwrap();
+    manager.wait_for_pending_checkpoint().await;
+
+    assert_eq!(1, lists.load(Ordering::Relaxed));
+    assert_eq!(1, manager.last_version());
+    assert_eq!(0, manager.checkpointer().last_checkpoint_version());
 }
 
 #[rstest]
@@ -184,7 +199,7 @@ async fn test_list_error_during_verification_conflicts(
     let mut manager = create_manager(options(&store, CompressionType::Gzip, 1, true)).await;
 
     let error = manager
-        .update(nop_action(), false, true, || true)
+        .update_with_verification(nop_action(), false, true, || true)
         .await
         .unwrap_err();
 
@@ -293,7 +308,7 @@ async fn test_stale_checkpoint_pointer_does_not_hide_newer_edits() {
         manager.wait_for_pending_checkpoint().await;
     }
     manager
-        .update(nop_action(), false, false, || false)
+        .update_with_verification(nop_action(), false, false, || false)
         .await
         .unwrap();
     store.write(&pointer, stale_pointer).await.unwrap();

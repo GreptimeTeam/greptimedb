@@ -85,10 +85,7 @@ async fn manager_without_checkpoint() {
 
     // apply 10 actions
     for _ in 0..10 {
-        manager
-            .update(nop_action(), false, true, || false)
-            .await
-            .unwrap();
+        manager.update(nop_action(), false).await.unwrap();
     }
 
     // no checkpoint
@@ -134,10 +131,7 @@ async fn manager_with_checkpoint_distance_1() {
 
     // apply 10 actions
     for _ in 0..10 {
-        manager
-            .update(nop_action(), false, true, || false)
-            .await
-            .unwrap();
+        manager.update(nop_action(), false).await.unwrap();
 
         while manager.checkpointer().is_doing_checkpoint() {
             tokio::time::sleep(Duration::from_millis(10)).await;
@@ -199,10 +193,7 @@ async fn test_corrupted_data_causing_checksum_error() {
 
     // Apply actions
     for _ in 0..10 {
-        manager
-            .update(nop_action(), false, true, || false)
-            .await
-            .unwrap();
+        manager.update(nop_action(), false).await.unwrap();
     }
 
     // Wait for the checkpoint to finish.
@@ -296,7 +287,7 @@ async fn generate_checkpoint_with_compression_types(
     let (_env, mut manager) = build_manager(1, compress_type).await;
 
     for action in actions {
-        manager.update(action, false, true, || false).await.unwrap();
+        manager.update(action, false).await.unwrap();
 
         while manager.checkpointer().is_doing_checkpoint() {
             tokio::time::sleep(Duration::from_millis(10)).await;
@@ -353,7 +344,7 @@ async fn manifest_install_manifest_to() {
     let (env, mut manager) = build_manager(0, CompressionType::Uncompressed).await;
     let (files, actions) = generate_action_lists(10);
     for action in actions {
-        manager.update(action, false, true, || false).await.unwrap();
+        manager.update(action, false).await.unwrap();
     }
 
     // Nothing to install
@@ -391,7 +382,7 @@ async fn manifest_install_manifest_to_with_checkpoint() {
     let (env, mut manager) = build_manager(3, CompressionType::Uncompressed).await;
     let (files, actions) = generate_action_lists(10);
     for action in actions {
-        manager.update(action, false, true, || false).await.unwrap();
+        manager.update(action, false).await.unwrap();
 
         while manager.checkpointer().is_doing_checkpoint() {
             tokio::time::sleep(Duration::from_millis(10)).await;
@@ -467,10 +458,7 @@ async fn test_checkpoint_bypass_in_staging_mode() {
 
     // Apply actions in staging mode - checkpoint should be bypassed
     for _ in 0..15 {
-        manager
-            .update(nop_action(), true, false, || false)
-            .await
-            .unwrap();
+        manager.update(nop_action(), true).await.unwrap();
     }
     assert!(!manager.checkpointer().is_doing_checkpoint());
 
@@ -485,10 +473,7 @@ async fn test_checkpoint_bypass_in_staging_mode() {
     );
 
     // Now switch to normal mode and apply one more action
-    manager
-        .update(nop_action(), false, true, || false)
-        .await
-        .unwrap();
+    manager.update(nop_action(), false).await.unwrap();
 
     // Wait for potential checkpoint
     while manager.checkpointer().is_doing_checkpoint() {
@@ -565,10 +550,7 @@ async fn manifest_size_ignores_leftover_files_after_failed_delete(#[case] fail_d
         .unwrap();
 
     for _ in 0..10 {
-        manager
-            .update(nop_action(), false, true, || false)
-            .await
-            .unwrap();
+        manager.update(nop_action(), false).await.unwrap();
         while manager.checkpointer().is_doing_checkpoint() {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
@@ -698,10 +680,7 @@ async fn cancelled_waiter_keeps_pending_checkpoint_handle() {
         .unwrap()
         .unwrap();
 
-    manager
-        .update(nop_action(), false, true, || false)
-        .await
-        .unwrap();
+    manager.update(nop_action(), false).await.unwrap();
     tokio::time::timeout(Duration::from_secs(5), blocker.wait_until_blocked())
         .await
         .expect("checkpoint cleanup did not start");
@@ -740,20 +719,14 @@ async fn running_checkpoint_prevents_scheduling_another_checkpoint() {
         .unwrap()
         .unwrap();
 
-    manager
-        .update(nop_action(), false, true, || false)
-        .await
-        .unwrap();
+    manager.update(nop_action(), false).await.unwrap();
     tokio::time::timeout(Duration::from_secs(5), blocker.wait_until_blocked())
         .await
         .expect("checkpoint cleanup did not start");
 
     // The second update is eligible for checkpointing, but the first task still
     // owns the pending handle and must prevent another task from being scheduled.
-    manager
-        .update(nop_action(), false, true, || false)
-        .await
-        .unwrap();
+    manager.update(nop_action(), false).await.unwrap();
     blocker.release();
     manager.wait_for_pending_checkpoint().await;
 
@@ -772,10 +745,7 @@ async fn completed_checkpoint_is_reaped_before_scheduling_the_next_one() {
         .unwrap()
         .unwrap();
 
-    manager
-        .update(nop_action(), false, true, || false)
-        .await
-        .unwrap();
+    manager.update(nop_action(), false).await.unwrap();
     tokio::time::timeout(Duration::from_secs(5), blocker.wait_until_blocked())
         .await
         .expect("first checkpoint cleanup did not start");
@@ -793,10 +763,7 @@ async fn completed_checkpoint_is_reaped_before_scheduling_the_next_one() {
     // Do not explicitly wait/reap the completed handle. The next eligible
     // update must reap it before scheduling another checkpoint.
     blocker.arm_next_close();
-    manager
-        .update(nop_action(), false, true, || false)
-        .await
-        .unwrap();
+    manager.update(nop_action(), false).await.unwrap();
     tokio::time::timeout(Duration::from_secs(5), blocker.wait_until_blocked())
         .await
         .expect("second checkpoint cleanup did not start");
@@ -828,10 +795,7 @@ async fn manifest_size_matches_recovery_bytes_after_open() {
         for checkpoint_distance in [0, 3] {
             let (env, mut manager) = build_manager(checkpoint_distance, compress_type).await;
             for _ in 0..7 {
-                manager
-                    .update(nop_action(), false, true, || false)
-                    .await
-                    .unwrap();
+                manager.update(nop_action(), false).await.unwrap();
                 wait_for_manifest_checkpoint(&manager).await;
             }
             let expected = manifest_recovery_usage(env.data_home().join("manifest")).await;
@@ -856,10 +820,7 @@ async fn manifest_size_follower_converges_after_sync(#[case] distance: u64) {
         let (env, mut leader) = build_manager(distance, compression).await;
         let mut follower = reopen_manager(&env, distance, compression).await;
         for _ in 0..12 {
-            leader
-                .update(nop_action(), false, true, || false)
-                .await
-                .unwrap();
+            leader.update(nop_action(), false).await.unwrap();
             leader.wait_for_pending_checkpoint().await;
             let expected = manifest_recovery_usage(env.data_home().join("manifest")).await;
             assert_eq!(leader.manifest_usage(), expected);
@@ -873,10 +834,7 @@ async fn manifest_size_follower_converges_after_sync(#[case] distance: u64) {
         // continue from the same logical recovery set.
         leader.stop().await;
         for _ in 0..4 {
-            follower
-                .update(nop_action(), false, true, || false)
-                .await
-                .unwrap();
+            follower.update(nop_action(), false).await.unwrap();
             follower.wait_for_pending_checkpoint().await;
             assert_eq!(
                 follower.manifest_usage(),
@@ -900,10 +858,7 @@ async fn noop_sync_accounts_for_new_checkpoint_without_listing() {
     let env = TestEnv::new().await.with_mock_layer(layer);
     let mut leader = build_manager_with_initial_metadata(&env, 0, CompressionType::Gzip).await;
     for _ in 0..3 {
-        leader
-            .update(nop_action(), false, true, || false)
-            .await
-            .unwrap();
+        leader.update(nop_action(), false).await.unwrap();
     }
     let mut follower = reopen_manager(&env, 0, CompressionType::Gzip).await;
     let version = leader.last_version();
@@ -979,10 +934,7 @@ async fn manifest_size_warm_cache_matches_recovery_bytes(
         };
         let (env, mut leader) = build_manager(3, stored_compression).await;
         for _ in 0..7 {
-            leader
-                .update(nop_action(), false, true, || false)
-                .await
-                .unwrap();
+            leader.update(nop_action(), false).await.unwrap();
             wait_for_manifest_checkpoint(&leader).await;
         }
         let object_store = ObjectStore::new(
@@ -1125,10 +1077,7 @@ async fn manifest_cache_write_through_survives_reopen(#[case] compression: Compr
     .await
     .unwrap();
     for _ in 0..7 {
-        writer
-            .update(nop_action(), false, true, || false)
-            .await
-            .unwrap();
+        writer.update(nop_action(), false).await.unwrap();
         wait_for_manifest_checkpoint(&writer).await;
     }
     let key = gen_path(
