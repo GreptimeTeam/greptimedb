@@ -6252,6 +6252,15 @@ async fn native_promql_zero_match_or_real_tql() {
 /// existing plan, which refuses the `__name__` regex in the empty branch, so the query would fail.
 /// The empty branch answers no sample, which is why the answer has to be the one the same statement
 /// with that branch removed gives.
+///
+/// A branch with no real input anywhere in it - `(Z1 or Z2)`, whose own `or` compares two zero-match
+/// selectors - has no sibling inside its own operation to take a layout from. Its layout therefore
+/// flows in from the operation above it, which compares that whole subtree as one operand: every
+/// zero-match selector in the subtree is laid out by the first real selector of the operand it is
+/// compared against. Taking the statement's layout instead gives both of them `native_local_wide`'s
+/// two fields, and the outer `or` then pairs two fields against `native_local_narrow`'s one, which
+/// the compiler refuses - and the existing plan refuses the `__name__` regex the branch is written
+/// with, so the query fails instead of answering the control's answer.
 #[tokio::test(flavor = "multi_thread")]
 async fn native_promql_zero_match_takes_the_layout_of_its_operand() {
     common_telemetry::init_default_ut_logging();
@@ -6279,10 +6288,44 @@ async fn native_promql_zero_match_takes_the_layout_of_its_operand() {
     .await;
 
     let control = "native_local_wide + on(host) native_local_narrow";
-    let empty_branch =
-        r#"native_local_wide + on(host) ({__name__=~"no_such_.+"} or native_local_narrow)"#;
+    // Each query with the number of zero-match selectors it reads. Every one of them answers the
+    // control's rows: a zero-match branch holds no sample, so it only has to be laid out, not read.
+    let queries = [
+        (control, 0usize),
+        (
+            r#"native_local_wide + on(host) ({__name__=~"no_such_.+"} or native_local_narrow)"#,
+            1,
+        ),
+        // The empty subtree is the left operand of the outer `or`: its own `or` compares two
+        // zero-match selectors, so both of them take the layout of the operand beside it.
+        (
+            r#"native_local_wide + on(host) (({__name__=~"no_such_a.+"} or {__name__=~"no_such_b.+"}) or native_local_narrow)"#,
+            2,
+        ),
+        // The same empty subtree on the right of the outer `or`.
+        (
+            r#"native_local_wide + on(host) (native_local_narrow or ({__name__=~"no_such_a.+"} or {__name__=~"no_such_b.+"}))"#,
+            2,
+        ),
+        // One zero-match selector on each side: the inner one has a real sibling of its own
+        // operation, the outer one is laid out through the subtree that sibling makes real.
+        (
+            r#"native_local_wide + on(host) ((native_local_narrow or {__name__=~"no_such_a.+"}) or {__name__=~"no_such_b.+"})"#,
+            2,
+        ),
+    ];
+    // The nodes named `name` reachable from `plan`.
+    let count_nodes = |plan: &Arc<dyn ExecutionPlan>, name: &str| {
+        let mut stack = vec![Arc::clone(plan)];
+        let mut count = 0;
+        while let Some(node) = stack.pop() {
+            count += usize::from(node.name() == name);
+            stack.extend(node.children().into_iter().cloned());
+        }
+        count
+    };
     let mut answers = Vec::new();
-    for (query, selects_empty) in [(control, false), (empty_branch, true)] {
+    for (query, empty_selectors) in queries {
         // TQL does not prepare discovery scope itself; provide the same authorized scope that the
         // Prometheus handler would provide, without comparing to the unsupported legacy path.
         let mut ctx = QueryContext::with_db_name(None);
@@ -6310,11 +6353,12 @@ async fn native_promql_zero_match_takes_the_layout_of_its_operand() {
         let fused = observer
             .fused()
             .unwrap_or_else(|| panic!("`{query}` did not take the native route"));
-        if selects_empty {
-            assert!(
-                find_plan_node(&fused, "EmptyExec").is_some(),
-                "the zero-match branch is not the node's input: {fused:?}"
-            );
+        assert_eq!(
+            empty_selectors,
+            count_nodes(&fused, "EmptyExec"),
+            "`{query}` does not read every zero-match selector as the node's input: {fused:?}"
+        );
+        if empty_selectors > 0 {
             // The empty branch reads no region, so the two real selectors are the only two reads.
             let mut region_inputs = Vec::new();
             native_region_inputs(&fused, &mut region_inputs);
@@ -6326,10 +6370,14 @@ async fn native_promql_zero_match_takes_the_layout_of_its_operand() {
         }
         answers.push(native_result_rows(output).await);
     }
-    assert_eq!(
-        answers[1], answers[0],
-        "the empty branch changed the answer of `{empty_branch}`"
-    );
+    for ((query, empty_selectors), answer) in queries.iter().zip(&answers) {
+        if *empty_selectors > 0 {
+            assert_eq!(
+                &answers[0], answer,
+                "the zero-match branches changed the answer of `{query}`"
+            );
+        }
+    }
     // `w0` of the wide table plus `n0` of the narrow one: the binary operation over two vectors
     // pairs fields by position and keeps the shorter side's.
     assert_eq!(

@@ -887,15 +887,18 @@ impl PromPlanner {
         // source and the node matches above every region's contribution - so the tree is admitted
         // on both routes and nothing is refused here.
         // An empty selector has no table layout of its own: it reads no table, so the layout it is
-        // compiled against is the one its local context compares it as. A set operator pairs the
-        // fields of its two sides by position, so a bare empty operand is laid out by the first
-        // real selector in the other operand of that same operation - which is also how the
-        // compiler's left-biased set output names the real field when empty is first. A layout
-        // taken from the first real input anywhere in the statement is not that sibling's: it can
-        // carry a different number of fields, and the set operator refuses the two sides.
-        // An empty selector with no such sibling - beside another empty selector, or under an
-        // operator that is not a set operation - takes the statement's first real layout, and the
-        // default layout of [`empty_discovered_input`] when every selector is empty.
+        // compiled against is the one the set operation it takes part in compares it as. A set
+        // operator pairs the fields of its two sides by position, so an operand that reads no real
+        // input is laid out by the first real selector in the other operand - which is also how the
+        // compiler's left-biased set output names the real field when empty is first. That layout
+        // reaches every empty selector of the operand, the ones a set operation of its own nests
+        // included: a subtree that reads no table has no sibling inside it to take a layout from,
+        // and the operation above compares the whole subtree as one side. A layout taken from the
+        // first real input anywhere in the statement is not that sibling's: it can carry a
+        // different number of fields, and the set operator refuses the two sides.
+        // An empty selector with no such operand above it - under an operator that is not a set
+        // operation - takes the statement's first real layout, and the default layout of
+        // [`empty_discovered_input`] when every selector is empty.
         let local_layouts = local_empty_layouts(&set_operations, &prepared);
         let statement_layout = prepared
             .iter()
@@ -1531,8 +1534,12 @@ impl PromPlanner {
 /// frame, the one input a [`FusedSeries`] node and every operator above it already read. It is
 /// bound to a series schema of one field and no grid because that is the layout this route compiles
 /// a selector against, and a schema with no field is refused by the compiler for the shapes that
-/// read one. No row of that field is ever read, so its name decides only what an operator that
-/// answers on its own - `absent` - calls its value column.
+/// read one. That default is only what this input is built with: the planner re-lays it out in the
+/// schema of the set operation it takes part in - the first real selector beside it, or the
+/// statement's first real layout - so the fields and the grid it ends up carrying are that layout's
+/// whenever the statement reads a table at all. No row of either is ever read, so a name that
+/// survives decides only what an operator that answers on its own - `absent` - calls its value
+/// column.
 ///
 /// The empty plan declares the frame a scan would declare, so the physical planner reads it as the
 /// frame producer it is instead of looking for a region scan below the node. Its labels are
@@ -3477,14 +3484,13 @@ fn collect_selectors<'a>(
 
 /// One side of a set operation, as the slice of the pre-order selector list it reads.
 ///
-/// `bare` says the side is written as a selector itself rather than as an expression over one. Only
-/// a bare side is laid out by its selectors: an expression's own output layout is what it computes,
-/// so it is not the layout the operation above compares an empty sibling against.
+/// The slice is the side's whole subtree, so it is also what says whether the side reads a table at
+/// all: a side that reads none is the side whose selectors have to be laid out by the comparison
+/// itself rather than by a scan they hold.
 #[derive(Clone, Copy, Debug)]
 struct SetOperand {
     start: usize,
     end: usize,
-    bare: bool,
 }
 
 /// One set operation in the statement and the two operands it compares.
@@ -3534,12 +3540,10 @@ fn collect_selectors_with_set_operations<'a>(
                     lhs: SetOperand {
                         start: lhs_start,
                         end: lhs_end,
-                        bare: is_bare_selector(&binary.lhs),
                     },
                     rhs: SetOperand {
                         start: lhs_end,
                         end: out.len(),
-                        bare: is_bare_selector(&binary.rhs),
                     },
                 });
             }
@@ -3614,22 +3618,16 @@ fn collect_selectors_with_set_operations<'a>(
     true
 }
 
-/// Whether `expr` is a selector written on its own, with no operator or call above it.
-///
-/// Parentheses decide precedence only, so a parenthesised selector is still that selector.
-fn is_bare_selector(expr: &PromExpr) -> bool {
-    match expr {
-        PromExpr::VectorSelector(_) | PromExpr::MatrixSelector(_) => true,
-        PromExpr::Paren(ParenExpr { expr }) => is_bare_selector(expr),
-        _ => false,
-    }
-}
-
 /// The index of the real input each zero-match input is laid out by, in `prepared` order.
 ///
-/// A set operation pairs its two sides' fields by position, so the bare zero-match operand of one
-/// is laid out by the first real selector in the other operand: that sibling is the layout its side
-/// of the comparison has. An empty input with no local sibling has no entry here.
+/// A set operation pairs its two sides' fields by position, so an operand that reads no real input
+/// is laid out by the first real selector in the other operand: that sibling is the layout the
+/// comparison gives the side. The layout reaches every zero-match selector in the operand, the ones
+/// written there directly and the ones a set operation of their own nests: an operand whose whole
+/// subtree reads no table has no sibling inside it to take a layout from, and the operation above
+/// it compares that subtree as one side. A zero-match selector with a real sibling of its own
+/// operation keeps that sibling's layout, which is the more local one. An empty input with no such
+/// operand above it has no entry here.
 fn local_empty_layouts(
     set_operations: &[SetOperation],
     prepared: &[PreparedInput],
@@ -3640,23 +3638,29 @@ fn local_empty_layouts(
             .get(index)
             .is_some_and(|(scan, ..)| !is_empty_discovered_input(scan))
     };
+    // The operations are recorded inside out, so an inner one decides before the operation above it
+    // reads the subtree it holds. An operand that reads no real input holds no real input inside it
+    // either, so an operation that writes a layout here is the only one that reaches those indices.
     for operation in set_operations {
         for (empty, sibling) in [
             (operation.lhs, operation.rhs),
             (operation.rhs, operation.lhs),
         ] {
-            // A bare operand reads exactly one selector; that selector is the empty input itself.
-            if !empty.bare || empty.end != empty.start + 1 {
+            // A side that reads a table lays its own selectors out: only a side that reads none
+            // needs the layout of the comparison it takes part in.
+            if (empty.start..empty.end).any(&real) {
                 continue;
             }
-            let Some(layout) = layouts.get_mut(empty.start) else {
+            let Some(source) = (sibling.start..sibling.end).find(|index| real(*index)) else {
                 continue;
             };
-            if layout.is_some() || real(empty.start) {
-                continue;
-            }
-            if let Some(source) = (sibling.start..sibling.end).find(|index| real(*index)) {
-                *layout = Some(source);
+            for index in empty.start..empty.end {
+                let Some(layout) = layouts.get_mut(index) else {
+                    continue;
+                };
+                if layout.is_none() {
+                    *layout = Some(source);
+                }
             }
         }
     }
