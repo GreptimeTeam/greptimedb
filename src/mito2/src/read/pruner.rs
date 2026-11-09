@@ -225,9 +225,13 @@ struct PrunerInner {
     /// Positive manifest-prune cache shared across all scan partitions.
     ///
     /// SAFETY: cached positives are valid because dynamic filters only tighten;
-    /// negative decisions are not cached. Reset by `add_partition_ranges()` for
+    /// dynamic negative decisions are not cached. Reset by `add_partition_ranges()` for
     /// each fresh batch of partition ranges.
     manifest_pruned_files: Vec<AtomicBool>,
+    // Static predicates and file metadata remain unchanged for this pruner.
+    static_manifest_kept_files: Vec<AtomicBool>,
+    #[cfg(test)]
+    manifest_check_count: AtomicUsize,
     /// Keeps file range builders until the query-scoped pruner is dropped.
     retain_builders: bool,
     /// Whether FileRanges should execute the reduced-column predicate prefilter.
@@ -260,7 +264,23 @@ impl PrunerInner {
             return true;
         }
         let file = &self.stream_ctx.input.files[file_index];
+        // Dynamic filters may arrive or tighten after a static keep decision.
+        let has_dynamic_filters = self
+            .stream_ctx
+            .input
+            .predicate_for_file(file)
+            .is_some_and(|predicate| !predicate.dyn_filters().is_empty());
+        if !has_dynamic_filters
+            && self.static_manifest_kept_files[file_index].load(Ordering::Relaxed)
+        {
+            return false;
+        }
+        #[cfg(test)]
+        self.manifest_check_count.fetch_add(1, Ordering::Relaxed);
         if !self.stream_ctx.input.can_manifest_prune_file(file) {
+            if !has_dynamic_filters {
+                self.static_manifest_kept_files[file_index].store(true, Ordering::Relaxed);
+            }
             return false;
         }
         if self.manifest_pruned_files[file_index]
@@ -346,6 +366,9 @@ impl Pruner {
             file_entries,
             stream_ctx,
             manifest_pruned_files,
+            static_manifest_kept_files: (0..num_files).map(|_| AtomicBool::new(false)).collect(),
+            #[cfg(test)]
+            manifest_check_count: AtomicUsize::new(0),
             retain_builders,
             enable_predicate_prefilter,
         });
@@ -1273,5 +1296,54 @@ mod tests {
             .try_mark_manifest_pruned(0, &mut reader_metrics2);
         assert!(marked2);
         assert_eq!(reader_metrics2.filter_metrics.files_time_range_pruned, 0);
+    }
+
+    #[tokio::test]
+    async fn cached_builder_checks_late_and_tightened_dynamic_filters() {
+        use datafusion::physical_plan::expressions::{
+            DynamicFilterPhysicalExpr, lit as physical_lit,
+        };
+
+        let expressions = [col("ts").gt(lit(ScalarValue::TimestampMillisecond(Some(500), None)))];
+        let (_env, pruner) = make_test_pruner_with_predicate(1, 3, &expressions).await;
+        let ranges = pruner.inner.stream_ctx.partition_ranges();
+        pruner.add_partition_ranges(&ranges);
+        let mut metrics = ReaderMetrics::default();
+        assert!(!pruner.inner.try_mark_manifest_pruned(0, &mut metrics));
+        cache_builder_if_needed(
+            &mut pruner.inner.file_entries[0].lock().unwrap(),
+            &Arc::new(FileRangeBuilder::default()),
+            &mut metrics,
+        );
+        assert!(!pruner.inner.try_mark_manifest_pruned(0, &mut metrics));
+        let dynamic = Arc::new(DynamicFilterPhysicalExpr::new(vec![], physical_lit(true)));
+        pruner
+            .inner
+            .stream_ctx
+            .input
+            .predicate
+            .add_dyn_filters(vec![dynamic.clone()]);
+        assert!(!pruner.inner.try_mark_manifest_pruned(0, &mut metrics));
+        assert_eq!(pruner.inner.manifest_check_count.load(Ordering::Relaxed), 2);
+        dynamic.update(physical_lit(false)).unwrap();
+        assert!(pruner.inner.try_mark_manifest_pruned(0, &mut metrics));
+        assert_eq!(pruner.inner.manifest_check_count.load(Ordering::Relaxed), 3);
+        assert_eq!(metrics.filter_metrics.files_time_range_pruned, 1);
+    }
+
+    #[tokio::test]
+    async fn static_manifest_keep_is_reused_without_builder() {
+        let expressions = [col("ts").gt(lit(ScalarValue::TimestampMillisecond(Some(500), None)))];
+        let (_env, pruner) = make_test_pruner_with_predicate(1, 3, &expressions).await;
+        let ranges = pruner.inner.stream_ctx.partition_ranges();
+        pruner.add_partition_ranges(&ranges);
+        let mut metrics = ReaderMetrics::default();
+        for _ in 0..3 {
+            assert!(!pruner.inner.try_mark_manifest_pruned(0, &mut metrics));
+        }
+        assert_eq!(pruner.inner.manifest_check_count.load(Ordering::Relaxed), 1);
+        pruner.add_partition_ranges(&ranges);
+        assert!(!pruner.inner.try_mark_manifest_pruned(0, &mut metrics));
+        assert_eq!(pruner.inner.manifest_check_count.load(Ordering::Relaxed), 1);
     }
 }
