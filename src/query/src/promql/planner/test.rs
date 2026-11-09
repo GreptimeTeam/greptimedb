@@ -3505,16 +3505,6 @@ async fn native_fused_subquery_window_enters_the_native_route() {
             display.contains("FusedSeries"),
             "`{query}` must enter the native route: {display}"
         );
-        // The route is only offered when it is requested, so a statement that does not ask for it
-        // keeps the existing plan, which holds no fused node.
-        let without_flag = build_native_fused_plan(query, false).await;
-        assert!(
-            !without_flag
-                .display_indent()
-                .to_string()
-                .contains("FusedSeries"),
-            "`{query}` must keep the existing plan when the route is not requested"
-        );
     }
 }
 

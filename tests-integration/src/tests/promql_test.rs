@@ -12372,9 +12372,14 @@ async fn native_promql_subqueries_match_legacy() {
             "{sql} did not execute a FusedSeriesExec: {:#?}",
             observer.root_plan()
         );
+        observer.clear();
         let mut legacy = native_result_rows(native_tql_output(&instance, sql, false).await).await;
         // The two routes emit the same rows but not in the same order: the helper sorts within a
         // batch, and a series' label is one column of that batch's own order.
+        assert!(
+            observer.fused().is_none(),
+            "{sql} must keep the existing plan when the native route is off"
+        );
         native.sort_by(|a, b| (a.0, &a.1).cmp(&(b.0, &b.1)).then(a.2.total_cmp(&b.2)));
         legacy.sort_by(|a, b| (a.0, &a.1).cmp(&(b.0, &b.1)).then(a.2.total_cmp(&b.2)));
         assert_eq!(native, legacy, "{sql}");
@@ -12496,12 +12501,11 @@ async fn native_promql_subqueries_match_legacy() {
 /// hybrid-binary join.
 ///
 /// Both statements below are two single-selector vector operands on the same matching labels, which
-/// is what the join admits - but one operand folds a group one subquery down, and the join then has
-/// to gather that subquery. No installed planner can build the fused node over a gathered subquery,
-/// so the statements failed while executing. With the fold counted as a fold, both keep the plan the
-/// existing route builds and answer the same rows through it.
+/// is what the join admits - but one operand folds a group one subquery down. With the fold counted
+/// as a fold, both run on the native route through `build_evaluated_segment` and answer the same
+/// rows the existing route does.
 #[tokio::test(flavor = "multi_thread")]
-async fn native_promql_aggregate_subquery_operands_keep_the_existing_plan() {
+async fn native_promql_aggregate_subquery_operands_run_natively() {
     common_telemetry::init_default_ut_logging();
     let config = mito2::config::MitoConfig {
         experimental_series_scan_v2: true,
@@ -12543,6 +12547,11 @@ async fn native_promql_aggregate_subquery_operands_keep_the_existing_plan() {
             "{sql} answered no rows: {:#?}",
             observer.root_plan()
         );
+        assert!(
+            observer.fused().is_some(),
+            "{sql} must run on the native route"
+        );
+        observer.clear();
         let (_, mut legacy) =
             native_labelled_rows(native_tql_output(&instance, sql, false).await).await;
         native.sort_by(|a, b| (a.0, &a.1).cmp(&(b.0, &b.1)).then(a.2.total_cmp(&b.2)));

@@ -62,9 +62,8 @@ use promql::extension_plan::{
 };
 use promql::native::execute::NativeExecutionState;
 use promql::native::plan::{
-    AggregateStage, BoundAggregate, BoundInput, BoundVectorOp, Grouping, InstantValue, MapOp,
-    NativeExpr, NativeNode, NativeTree, NativeType, fused_output_tags, reads_across_series,
-    uniform_field_kind,
+    BoundAggregate, BoundInput, BoundVectorOp, Grouping, InstantValue, MapOp, NativeExpr,
+    NativeNode, NativeTree, NativeType, fused_output_tags, reads_across_series, uniform_field_kind,
 };
 use promql::vector_match::{Cardinality, MatchingLabels, SetOp};
 use promql_parser::label::{METRIC_NAME, MatchOp, Matchers};
@@ -1651,22 +1650,6 @@ fn evaluated_input_window(node: &NativeNode) -> bool {
 /// while being planned instead of keeping the plan it had. Segmentation therefore asks that question
 /// before it cuts, and [`cut_as_segment`] declines the nodes this refuses.
 fn region_local_segment(node: &NativeNode) -> bool {
-    // A canonical cut is not judged by that predicate: the analyzer recognizes the canonical
-    // producer before it reads the tree (`canonical_boundary_region_node`), and asks whether that
-    // producer's prefix runs per partition instead. Which prefix a boundary is built over - a
-    // `Merge` under a rewrite over a `Vector` is one - is what [`canonical_boundary_stages`]
-    // decides when it builds one, so those cuts keep the admission they had.
-    if matches!(node.expr, NativeExpr::Merge { .. }) {
-        return true;
-    }
-    // The `Partial` half of a split fold is per partition by construction: it folds the rows its own
-    // partition scanned and exports only the state it folded.
-    if let NativeExpr::Aggregate { input, op } = &node.expr
-        && op.stage == AggregateStage::Partial
-        && !reads_across_series(input)
-    {
-        return true;
-    }
     !reads_across_series(node) || pointwise_operand(node) || independent_scan_pair(node)
 }
 
