@@ -117,3 +117,110 @@ impl RegionServer for RegionServerRequestHandler {
         cancellation::with_cancellation_handler(request_future, cancellation_future).await
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Mutex;
+    use std::time::Duration;
+
+    use api::v1::region::region_client::RegionClient;
+    use api::v1::region::region_server::RegionServer as RegionService;
+    use api::v1::region::{CancelCompactionRequest, RegionRequestHeader};
+    use api::v1::{ResponseHeader, Status as ResponseStatus};
+    use common_error::status_code::StatusCode;
+    use tokio::net::TcpListener;
+    use tokio_stream::wrappers::TcpListenerStream;
+
+    use super::*;
+
+    #[derive(Default)]
+    struct RecordingHandler {
+        requests: Mutex<Vec<region_request::Body>>,
+    }
+
+    #[async_trait]
+    impl RegionServerHandler for RecordingHandler {
+        async fn handle(&self, request: region_request::Body) -> Result<RegionResponse> {
+            self.requests.lock().unwrap().push(request);
+            Ok(RegionResponse {
+                header: Some(ResponseHeader {
+                    status: Some(ResponseStatus {
+                        status_code: StatusCode::Success as u32,
+                        ..Default::default()
+                    }),
+                }),
+                affected_rows: 1,
+                ..Default::default()
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn test_cancel_compaction_forwards_through_region_handler() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handler = Arc::new(RecordingHandler::default());
+        let bridge =
+            RegionServerRequestHandler::new(handler.clone(), common_runtime::global_runtime());
+        let (shutdown, stopped) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            tonic::transport::Server::builder()
+                .add_service(RegionService::new(bridge))
+                .serve_with_incoming_shutdown(TcpListenerStream::new(listener), async {
+                    let _ = stopped.await;
+                })
+                .await
+                .unwrap();
+        });
+        tokio::time::timeout(Duration::from_secs(10), async {
+            let mut client = RegionClient::connect(format!("http://{addr}"))
+                .await
+                .unwrap();
+            let error = client
+                .handle(RegionRequest {
+                    header: None,
+                    body: Some(region_request::Body::CancelCompaction(
+                        CancelCompactionRequest {
+                            region_id: 42,
+                            task_id: "cycle-id".into(),
+                        },
+                    )),
+                })
+                .await
+                .unwrap_err();
+            assert_eq!(error.code(), tonic::Code::InvalidArgument);
+            assert!(handler.requests.lock().unwrap().is_empty());
+
+            let request = RegionRequest {
+                header: Some(RegionRequestHeader {
+                    dbname: "greptime-public".into(),
+                    tracing_context: TracingContext::from_current_span().to_w3c(),
+                    ..Default::default()
+                }),
+                body: Some(region_request::Body::CancelCompaction(
+                    CancelCompactionRequest {
+                        region_id: 42,
+                        task_id: "cycle-id".into(),
+                    },
+                )),
+            };
+            let response = client.handle(request.clone()).await.unwrap().into_inner();
+            assert_eq!(response.affected_rows, 1);
+            assert_eq!(
+                response.header.unwrap().status.unwrap().status_code,
+                StatusCode::Success as u32
+            );
+            assert_eq!(
+                *handler.requests.lock().unwrap(),
+                vec![request.body.unwrap()]
+            );
+        })
+        .await
+        .expect("cancellation RPC did not complete");
+        shutdown.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(10), server)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+}

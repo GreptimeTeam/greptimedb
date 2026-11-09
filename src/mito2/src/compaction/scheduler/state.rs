@@ -30,6 +30,7 @@ use crate::cache::CacheManagerRef;
 use crate::compaction::CompactionOutput;
 use crate::compaction::compactor::{CompactionRegion, CompactionVersion};
 use crate::compaction::picker::PickerOutput;
+use crate::compaction::scheduler::CancelCompactionResult;
 use crate::compaction::scheduler::history::PickHistory;
 use crate::compaction::scheduler::local::{LocalCompaction, LocalCompactionState};
 use crate::compaction::scheduler::planning::CompactionRequest;
@@ -115,6 +116,8 @@ pub(super) struct ActiveCompaction {
     /// picking cycle after the current cycle finishes. Recorded in every phase so an external
     /// trigger always resets the continuation scope, even during local/remote execution.
     pub(super) automatic_followup_required: bool,
+    /// Records an accepted explicit cancellation of this task.
+    task_cancel_requested: bool,
 }
 
 impl ActiveCompaction {
@@ -126,6 +129,7 @@ impl ActiveCompaction {
             trigger: CompactionTrigger::Automatic,
             waiters: Vec::new(),
             automatic_followup_required: false,
+            task_cancel_requested: false,
         }
     }
 
@@ -144,11 +148,13 @@ impl ActiveCompaction {
             trigger,
             waiters,
             automatic_followup_required: false,
+            task_cancel_requested: false,
         }
     }
 
     pub(super) fn start_picking(&mut self, plan_id: u64, trigger: CompactionTrigger) {
         self.task_state = None;
+        self.task_cancel_requested = false;
         self.phase = CompactionPhase::Picking {
             plan_id,
             cancelled: false,
@@ -385,6 +391,41 @@ pub(super) struct CompactionStatus {
 }
 
 impl CompactionStatus {
+    /// Cancels an exact identity, checking pending work before the active cycle.
+    pub(crate) fn cancel_task(&mut self, task_id: &str) -> CancelCompactionResult {
+        if self
+            .pending_task_state
+            .as_ref()
+            .is_some_and(|state| state.entry.task_id.as_ref() == task_id)
+        {
+            self.pending_task_state = None;
+            if let Some(pending) = self.pending_request.take() {
+                pending.waiter.send(CompactionCancelledSnafu.fail());
+            }
+            self.publish_state();
+            return CancelCompactionResult::CancelIssued;
+        }
+        if !self
+            .active
+            .task_state
+            .as_ref()
+            .is_some_and(|state| state.entry.task_id.as_ref() == task_id)
+        {
+            return CancelCompactionResult::NotFound;
+        }
+        if matches!(self.active.phase, CompactionPhase::Remote { .. }) {
+            return CancelCompactionResult::Unsupported;
+        }
+        if self.active.task_cancel_requested {
+            return CancelCompactionResult::AlreadyCancelling;
+        }
+        let result = self.request_cancel();
+        if result != RequestCancelResult::TooLateToCancel {
+            self.active.task_cancel_requested = true;
+        }
+        result.into()
+    }
+
     /// Publishes both slots together without holding the lock while building their metadata.
     pub(crate) fn publish_state(&self) {
         let active = self.active.current_task_state().map(Arc::new);
@@ -568,6 +609,20 @@ impl CompactionStatus {
                 }));
         }
         self.publish_state();
+    }
+
+    /// Ends task-specific cancellation only when no pending DDL takes precedence.
+    /// Returns whether the caller may promote a different pending compaction.
+    pub(crate) fn finish_task_cancellation(&mut self) -> bool {
+        if !self.active.task_cancel_requested || !self.pending_ddl_requests.is_empty() {
+            return false;
+        }
+        let mut active = std::mem::replace(&mut self.active, ActiveCompaction::idle());
+        for waiter in active.waiters.drain(..) {
+            waiter.send(CompactionCancelledSnafu.fail());
+        }
+        self.publish_state();
+        true
     }
 
     #[must_use]

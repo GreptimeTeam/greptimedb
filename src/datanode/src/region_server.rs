@@ -1931,6 +1931,7 @@ impl RegionServerInner {
             RegionRequest::Alter(_)
             | RegionRequest::Flush(_)
             | RegionRequest::Compact(_)
+            | RegionRequest::CancelCompaction(_)
             | RegionRequest::Truncate(_)
             | RegionRequest::BuildIndex(_)
             | RegionRequest::EnterStaging(_)
