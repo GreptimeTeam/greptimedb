@@ -2294,6 +2294,38 @@ pub async fn test_prometheus_native_promql_route(store_type: StorageType) {
         }
     }
 
+    // A subquery root is a matrix natively, while query_range rejects a range vector.
+    let res = client
+        .get("/v1/prometheus/api/v1/query?query=native_route[5m:1m]&time=300")
+        .header(native_hint.0, native_hint.1)
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = serde_json::from_str::<PrometheusJsonResponse>(&res.text().await).unwrap();
+    assert_eq!(
+        serde_json::to_value(&body.data).unwrap()["resultType"],
+        "matrix"
+    );
+    assert_eq!(
+        serde_json::to_value(&body.data).unwrap()["result"][0]["values"],
+        json!([
+            [60.0, "2.0"],
+            [120.0, "2.0"],
+            [180.0, "2.0"],
+            [240.0, "2.0"],
+            [300.0, "2.0"]
+        ])
+    );
+    let res = client
+        .get(
+            "/v1/prometheus/api/v1/query_range?query=native_route[5m:1m]&start=300&end=300&step=1s",
+        )
+        .header(native_hint.0, native_hint.1)
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+    assert!(res.text().await.contains("range vector"));
+
     // The same expression over a range: a matrix carries every grid point of every series, with the
     // last sample carried forward, and both routes answer it with the same one.
     let query = encode("native_route * 100");

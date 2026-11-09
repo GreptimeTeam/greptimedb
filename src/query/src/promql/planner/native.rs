@@ -35,7 +35,7 @@
 
 use std::borrow::Cow;
 use std::sync::Arc;
-use std::time::{Duration, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use common_catalog::consts::{METRIC_ENGINE, MITO_ENGINE, MITO2_ENGINE};
 use common_query::native_histogram::native_histogram_value_type;
@@ -70,7 +70,7 @@ use promql_parser::label::{METRIC_NAME, MatchOp, Matchers};
 use promql_parser::parser::value::ValueType;
 use promql_parser::parser::{
     BinModifier, EvalStmt, Expr as PromExpr, LabelModifier, MatrixSelector, ParenExpr,
-    VectorMatchCardinality, VectorSelector, token,
+    SubqueryExpr, VectorMatchCardinality, VectorSelector, token,
 };
 use session::context::{MetricDiscoveryScope, QueryContextRef};
 use snafu::ResultExt;
@@ -79,7 +79,8 @@ use store_api::region_engine::RawLabelSource;
 
 use crate::promql::error::{DataFusionPlanningSnafu, Result};
 use crate::promql::native_compile::{
-    InfoInput, compile_selectors, compile_statement, info_input, statement_grid,
+    InfoInput, compile_selectors_with_grid, compile_statement_with_grid, info_input,
+    statement_grid, subquery_child_grid,
 };
 use crate::promql::planner::{DEFAULT_FIELD_COLUMN, DEFAULT_TIME_INDEX_COLUMN, PromPlanner};
 use crate::query_engine::QueryEngineState;
@@ -487,35 +488,61 @@ impl PromPlanner {
         if !self.native_fused {
             return Ok(None);
         }
-        // Over the wire this route plans the whole statement as one fused node over raw sources:
-        // each region answers the series it holds, and the node reconciles them before evaluating.
-        // In process a region can also run a split or a segmented tree over its own scan, so those
-        // shapes stay there. This is a planning choice, not a limit of what the node can encode.
         let self_contained = plans_over_remote_regions(query_engine_state);
-        // Only the statement root is offered: the tree is compiled against the statement's grid,
-        // and a subquery's expression is evaluated on its own, smaller one. A range-vector root is
-        // the instant query's raw sample result, which the existing path reports as a matrix rather
-        // than as one point per grid position.
-        if prom_expr.value_type() == ValueType::Matrix {
+        // A range selector returns raw samples, which have no evaluation grid to bind. A subquery
+        // root instead returns its inner expression on the subquery's child grid, and a range
+        // query has no grid to bind a matrix root to at all.
+        let subquery_root = root_subquery(prom_expr);
+        if prom_expr.value_type() == ValueType::Matrix
+            && (subquery_root.is_none() || self.ctx.start != self.ctx.end)
+        {
             return Ok(None);
         }
 
         let Some(stmt) = self.native_statement(prom_expr) else {
             return Ok(None);
         };
+        // The subquery root's inner expression is compiled on the child grid, with the statement
+        // left untouched: `@ start()` and `@ end()` inside it resolve against the statement's own
+        // bounds, not against the child's. A statement whose grid cannot be built is not one this
+        // route can evaluate, so it keeps the existing plan. The child grid is the compiler's own
+        // derivation, so both halves of the route agree on the step, the range and the anchor.
+        let child_grid = if let Some(subquery) = subquery_root {
+            let Ok(outer) = statement_grid(&stmt) else {
+                return Ok(None);
+            };
+            let Some(child) =
+                subquery_child_grid(&stmt, &outer, subquery).context(DataFusionPlanningSnafu)?
+            else {
+                return Ok(None);
+            };
+            Some(child.grid)
+        } else {
+            None
+        };
+        let effective_expr = match subquery_root {
+            Some(subquery) => subquery.expr.as_ref(),
+            None => &stmt.expr,
+        };
         let mut selectors = Vec::new();
-        if !collect_selectors(&stmt, prom_expr, &mut selectors) {
+        if !collect_selectors(&stmt, effective_expr, &mut selectors) {
             return Ok(None);
         }
         // The compiler decides which calls and shapes this route answers: a name it has no kernel
         // for comes back as `NotImplemented`, which is a decline below. A second list of names here
         // refused expressions the compiler does fold - a call under an aggregate was admitted while
         // the same call on its own was not - so there is one place that decides.
-        let Ok(grid) = statement_grid(&stmt) else {
+        let Ok(statement) = statement_grid(&stmt) else {
             return Ok(None);
         };
+        // The one grid every lowering path below binds: a subquery root is compiled on its child
+        // grid, and the rows it publishes carry that grid, so the split, the boundary and the
+        // segment nodes have to publish on it too rather than on the statement's.
+        let grid = child_grid.unwrap_or(statement);
         if selectors.is_empty() {
-            let tree = match compile_statement(&stmt) {
+            let mut compile_stmt = stmt.clone();
+            compile_stmt.expr = effective_expr.clone();
+            let tree = match compile_statement_with_grid(&compile_stmt, Arc::clone(&grid)) {
                 Ok(tree) => tree,
                 Err(DataFusionError::NotImplemented(_)) => return Ok(None),
                 Err(error) => return Err(error).context(DataFusionPlanningSnafu),
@@ -552,7 +579,7 @@ impl PromPlanner {
                 Arc::from(prom_expr.to_string()),
                 tree,
                 FusedSeriesBinding {
-                    grid,
+                    grid: Arc::clone(&grid),
                     time_index,
                     tags: Vec::new(),
                     metric_name: None,
@@ -888,8 +915,10 @@ impl PromPlanner {
             })
             .collect::<Result<Vec<_>>>()?;
         let bind_index = std::cell::Cell::new(0usize);
-        let compiled = match compile_selectors(
-            &stmt,
+        let mut compile_stmt = stmt.clone();
+        compile_stmt.expr = effective_expr.clone();
+        let compiled = match compile_selectors_with_grid(
+            &compile_stmt,
             &|req| {
                 let i = bind_index.get();
                 bind_index.set(i + 1);
@@ -914,6 +943,7 @@ impl PromPlanner {
                 Ok(Arc::clone(schema))
             },
             NATIVE_ORDERING,
+            Arc::clone(&grid),
         ) {
             Ok(v) => v,
             // The compiler refusing a shape is this route declining it.
@@ -1279,7 +1309,7 @@ impl PromPlanner {
                 let Some(rawinput) = children.into_iter().next() else {
                     return Ok(None);
                 };
-                let publish_grid = fused_publish_grid(final_tree.root(), &grid);
+                let publish_grid = Arc::clone(&grid);
                 let node = plan_split_aggregate(
                     Arc::from(prom_expr.to_string()),
                     partial,
@@ -1375,7 +1405,9 @@ impl PromPlanner {
         } else {
             (tags, metric)
         };
-        let publish_grid = fused_publish_grid(tree.root(), &grid);
+        // Every lowering path above publishes on the same grid the tree was compiled on, so the
+        // binding is that grid rather than a per-shape choice.
+        let publish_grid = Arc::clone(&grid);
         let node = FusedSeries::try_new(
             Arc::from(prom_expr.to_string()),
             tree,
@@ -1442,8 +1474,8 @@ impl PromPlanner {
     /// `None` means the bounds are not representable as a [`SystemTime`], which is not a grid a
     /// tree can be evaluated on either.
     fn native_statement(&self, prom_expr: &PromExpr) -> Option<EvalStmt> {
-        let start = UNIX_EPOCH.checked_add(Duration::from_millis(self.ctx.stmt_start as u64))?;
-        let end = UNIX_EPOCH.checked_add(Duration::from_millis(self.ctx.stmt_end as u64))?;
+        let start = epoch_millis(self.ctx.stmt_start)?;
+        let end = epoch_millis(self.ctx.stmt_end)?;
         Some(EvalStmt {
             expr: prom_expr.clone(),
             start,
@@ -1918,6 +1950,8 @@ fn cut_segments(node: &NativeNode, canonical_segmentation: bool) -> Segment {
 /// expression of a subquery compiles to, produces on the subquery's grid rather than on the
 /// statement's. A statement root declares the statement's grid, so the two agree there. A root with
 /// no declared grid - raw samples - is read where it was scanned and keeps the caller's grid.
+/// Every lowering path binds the effective grid (the subquery's child grid for a matrix root, the
+/// statement's grid otherwise), so a window root answers that same grid here.
 fn fused_publish_grid(root: &NativeNode, statement_grid: &Arc<EvalGrid>) -> Arc<EvalGrid> {
     root.output
         .grid()
@@ -2550,6 +2584,11 @@ fn segment_tree(
         )
     };
     let (segment_metric, segment_time_index) = segment_binding(&current_source_ids);
+    // A segment publishes on the grid its root declares, which is the grid its consumer reads it
+    // on. Segmentation recurses into a cut subtree with the caller's grid, and that subtree can sit
+    // inside a subquery window: the canonical segmentation of a collapsing rewrite cuts the window's
+    // input while its caller still holds the statement's grid. Binding the caller's grid here
+    // rejects such a segment, and the rejection aborts the whole route.
     let publish_grid = fused_publish_grid(parent.root(), grid);
     let Ok(plan) = FusedSeries::try_new_with_format(
         Arc::from(prom_expr.to_string()),
@@ -2569,6 +2608,28 @@ fn segment_tree(
     Ok(Some(LogicalPlan::Extension(Extension {
         node: Arc::new(plan),
     })))
+}
+
+/// The moment `millis` milliseconds from the Unix epoch, on whichever side of it that lands.
+///
+/// A pre-epoch statement (`TQL EVAL ('-60', '-60', '1m')`) reaches the planner as a negative
+/// millisecond, which `PromPlannerContext::from_eval_stmt` keeps on purpose. `None` means the bound
+/// is outside what a [`SystemTime`] represents.
+fn epoch_millis(millis: i64) -> Option<SystemTime> {
+    if millis.is_negative() {
+        UNIX_EPOCH.checked_sub(Duration::from_millis(millis.unsigned_abs()))
+    } else {
+        UNIX_EPOCH.checked_add(Duration::from_millis(millis as u64))
+    }
+}
+
+/// Finds a subquery at the statement root, treating parentheses as transparent.
+fn root_subquery(expr: &PromExpr) -> Option<&SubqueryExpr> {
+    match expr {
+        PromExpr::Subquery(subquery) => Some(subquery),
+        PromExpr::Paren(paren) => root_subquery(&paren.expr),
+        _ => None,
+    }
 }
 
 /// The native root's value columns, named from the compiled tree rather than legacy expressions.
