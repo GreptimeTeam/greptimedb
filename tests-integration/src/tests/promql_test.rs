@@ -6479,6 +6479,62 @@ async fn native_promql_zero_match_takes_the_layout_of_its_operand() {
         ],
         "the fixture's answer is not the one the empty branch is compared against"
     );
+
+    // A set operation inside a subquery: the selector walk has to keep recording set operands
+    // while it descends into the subquery, otherwise the empty operand is laid out by the
+    // statement's first real input (`wide`, two fields) instead of by its own sibling (`narrow`,
+    // one field), and the inner `or` is refused. The statement's outer binary is the same one the
+    // control uses, so the empty branch must not change the answer.
+    let subquery_empty = r#"native_local_wide + on(host) avg_over_time(({__name__=~"no_such_.+"} or native_local_narrow)[2s:1s])"#;
+    let subquery_control =
+        r#"native_local_wide + on(host) avg_over_time(native_local_narrow[2s:1s])"#;
+    let mut subquery_answers = Vec::new();
+    for (query, has_empty) in [(subquery_control, false), (subquery_empty, true)] {
+        let mut ctx = QueryContext::with_db_name(None);
+        ctx.set_extension(QUERY_PARALLELISM_HINT, "4".to_string());
+        ctx.set_extension(NATIVE_PROMQL_EXTENSION_KEY, "true".to_string());
+        ctx.set_metric_discovery_scope(MetricDiscoveryScope::allowed([
+            (
+                DEFAULT_CATALOG_NAME.to_string(),
+                DEFAULT_SCHEMA_NAME.to_string(),
+                "native_local_wide".to_string(),
+            ),
+            (
+                DEFAULT_CATALOG_NAME.to_string(),
+                DEFAULT_SCHEMA_NAME.to_string(),
+                "native_local_narrow".to_string(),
+            ),
+        ]));
+        let sql = format!("TQL EVAL (1, 2, '1s', '1s') {query}");
+        observer.clear();
+        let output = instance
+            .do_query(&sql, Arc::new(ctx))
+            .await
+            .remove(0)
+            .unwrap();
+        let fused = observer
+            .fused()
+            .unwrap_or_else(|| panic!("`{query}` did not take the native route"));
+        if has_empty {
+            assert_eq!(
+                1,
+                count_nodes(&fused, "EmptyExec"),
+                "`{query}` does not read the subquery's zero-match selector: {fused:?}"
+            );
+            let mut region_inputs = Vec::new();
+            native_region_inputs(&fused, &mut region_inputs);
+            assert_eq!(
+                2,
+                region_inputs.len(),
+                "the empty branch reads a region of its own: {fused:?}"
+            );
+        }
+        subquery_answers.push(native_result_rows(output).await);
+    }
+    assert_eq!(
+        subquery_answers[0], subquery_answers[1],
+        "the zero-match branch inside the subquery changed the answer"
+    );
 }
 
 /// `promql` evaluated at one instant through the Prometheus handler, which is the path that

@@ -3611,7 +3611,14 @@ fn collect_selectors_with_set_operations<'a>(
         // A subquery evaluates its expression on its own grid; its selectors are prepared like any
         // other, each with the scan bounds `raw_scan_bounds` derives from its own range and step.
         PromExpr::Subquery(subquery) => {
-            return collect_selectors(stmt, &subquery.expr, out);
+            // Keep the set operations inside the subquery in the same accumulator: a zero-match
+            // selector there is laid out by its own set operand, not by the statement's layout.
+            return collect_selectors_with_set_operations(
+                stmt,
+                &subquery.expr,
+                out,
+                set_operations,
+            );
         }
         _ => {}
     }
