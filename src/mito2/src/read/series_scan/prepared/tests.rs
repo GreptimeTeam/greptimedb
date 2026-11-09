@@ -1453,22 +1453,38 @@ async fn preflight_rejects_unsupported_assignments_without_artifact_io() {
             .contains("invalid prepared scan range")
     );
 
-    // The public ordering API must propagate malformed scanner assignments, rather than
-    // silently describing them as an ordinary scan.
+    // Ordering is independent of reader selection, but raw preflight and execution must still
+    // reject the same malformed assignments rather than falling back to the ordinary scan.
     let mut scan = SeriesScan::new(make_context().input, false);
     scan.prepare(PrepareRequest::default()).unwrap();
     let malformed = PartitionRange {
         identifier: ranges[0].identifier + ranges.len(),
         ..ranges[0]
     };
-    // Inject after valid preparation: prepare() also checks scan limits by indexing ranges,
-    // whereas this test targets the ordering API's prepared-input validation.
+    // Inject after valid preparation: prepare() also checks scan limits by indexing ranges.
     scan.properties.partitions = vec![vec![malformed]];
+    let binding = labels(scan.metadata());
+    assert_eq!(
+        SeriesOrdering::KeyThenTime,
+        scan.raw_series_ordering().unwrap()
+    );
     assert!(
-        scan.raw_series_ordering()
+        scan.raw_series_schema(&binding)
             .unwrap_err()
             .to_string()
             .contains("invalid prepared scan range")
+    );
+    assert!(
+        scan.scan_series_partition(
+            &QueryScanContext::default(),
+            &ExecutionPlanMetricsSet::new(),
+            0,
+            &binding,
+        )
+        .err()
+        .unwrap()
+        .to_string()
+        .contains("invalid prepared scan range")
     );
 
     let scan = SeriesScan::new(context.input, false);
@@ -2145,7 +2161,13 @@ async fn identity_merge_preserves_tag_and_mixed_predicates(#[case] last_non_null
                     .unwrap();
             let scanner = SeriesScan::new(input, false);
             let binding = labels(scanner.metadata());
-            let chunks = scanner
+            let schema = scanner.raw_series_schema(&binding).unwrap().unwrap();
+            let explicit = scanner.raw_series_has_explicit_labels(&binding).unwrap();
+            assert_eq!(
+                format == SelectedFormat::Columnar && identity_only,
+                explicit
+            );
+            let stream = scanner
                 .scan_series_partition(
                     &QueryScanContext::default(),
                     &ExecutionPlanMetricsSet::new(),
@@ -2153,10 +2175,18 @@ async fn identity_merge_preserves_tag_and_mixed_predicates(#[case] last_non_null
                     &binding,
                 )
                 .unwrap()
-                .unwrap()
-                .try_collect::<Vec<_>>()
-                .await
                 .unwrap();
+            assert_eq!(schema.as_ref(), stream.schema().as_ref());
+            assert!(same_labels(stream.label_source(), &binding));
+            assert_eq!(explicit, stream.label_decode_spec().is_none());
+            assert_eq!(SeriesOrdering::KeyThenTime, stream.ordering());
+            assert_eq!(scanner.raw_series_ordering().unwrap(), stream.ordering());
+            let chunks = stream.try_collect::<Vec<_>>().await.unwrap();
+            assert!(
+                chunks
+                    .iter()
+                    .all(|chunk| chunk.metric.is_some() == explicit)
+            );
             if format == SelectedFormat::Columnar {
                 let prepared = scanner
                     .prepared
