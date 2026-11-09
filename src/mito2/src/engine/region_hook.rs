@@ -120,8 +120,8 @@
 //! immediately after SST files are written but **before** the manifest is committed.
 //!
 //! `on_manifest_updated` is funneled through [`ManifestContext::update_locked`],
-//! the sole caller of the low-level [`RegionManifestManager::update`], which
-//! packages each successful write into a [`PendingManifestHook`]. The caller
+//! which calls the low-level [`RegionManifestManager::update_with_verification`]
+//! and packages each successful write into a [`PendingManifestHook`]. The caller
 //! owns the write lock, drops it, and *then* fires the receipt — the hook must
 //! never run under the lock. [`ManifestContext::update_manifest`] is the common
 //! case: it acquires the lock, delegates to `update_locked`, and fires the
@@ -148,7 +148,7 @@
 //! [`on_region_dropped`]: RegionHook::on_region_dropped
 //! [`on_region_files_removed`]: RegionHook::on_region_files_removed
 //! [`on_region_gc`]: RegionHook::on_region_gc
-//! [`RegionManifestManager::update`]: crate::manifest::manager::RegionManifestManager::update
+//! [`RegionManifestManager::update_with_verification`]: crate::manifest::manager::RegionManifestManager::update_with_verification
 //! [`ManifestContext::update_locked`]: crate::region::ManifestContext::update_locked
 //! [`ManifestContext::update_manifest`]: crate::region::ManifestContext::update_manifest
 

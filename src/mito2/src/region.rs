@@ -1511,9 +1511,9 @@ impl ManifestContext {
 
     /// Performs a manifest write under a caller-held write lock and returns a
     /// [`PendingManifestHook`] to [`fire`](PendingManifestHook::fire) after
-    /// dropping the lock. This is the sole caller of
-    /// [`RegionManifestManager::update`], so it is the funnel through which all
-    /// logical manifest writes notify the hook.
+    /// dropping the lock. It calls
+    /// [`RegionManifestManager::update_with_verification`] and is the funnel
+    /// through which all logical manifest writes notify the hook.
     ///
     /// Does not validate state or edit applicability — the caller must do so
     /// while still holding the lock (see `update_manifest_with_state_check`
@@ -1525,8 +1525,8 @@ impl ManifestContext {
         is_staging: bool,
     ) -> Result<PendingManifestHook> {
         let region_id = manager.manifest().metadata.region_id;
-        // Clone before `action_list` is moved into `update` so the hook still
-        // sees what was written.
+        // Clone before `action_list` is moved into `update_with_verification`
+        // so the hook still sees what was written.
         let action_list_for_hook = self.hook.as_ref().map(|_| action_list.clone());
         // The final flush of a downgrading leader must not start cleanup after the downgrade
         // checkpoint barrier.
