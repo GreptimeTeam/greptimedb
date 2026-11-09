@@ -1926,13 +1926,19 @@ fn cut_segments(node: &NativeNode, canonical_segmentation: bool) -> Segment {
     }
 }
 
-/// The grid one `FusedSeries` publishes on. A root that is a window over an evaluated input - a
-/// subquery - produces on that window's own output grid; every other node is on the statement's.
+/// The grid one `FusedSeries` publishes on: the grid its root declares it produces, or the
+/// statement's grid when the root declares none.
+///
+/// A root that produces one value per grid point says which grid that is, and that declared grid is
+/// the one its consumer reads it on: a window over an evaluated input - a subquery - produces on the
+/// window's own output grid, and a non-window root inside such a window, like the `Map` an
+/// expression of a subquery compiles to, produces on the subquery's grid rather than on the
+/// statement's. A statement root declares the statement's grid, so the two agree there. A root with
+/// no declared grid - raw samples - is read where it was scanned and keeps the caller's grid.
 fn fused_publish_grid(root: &NativeNode, statement_grid: &Arc<EvalGrid>) -> Arc<EvalGrid> {
-    match &root.expr {
-        NativeExpr::Window { op, .. } => Arc::clone(&op.output_grid),
-        _ => Arc::clone(statement_grid),
-    }
+    root.output
+        .grid()
+        .map_or_else(|| Arc::clone(statement_grid), Arc::clone)
 }
 
 /// Lowers a tree whose root is a canonical merge into a producer and a canonical router.
@@ -2231,13 +2237,11 @@ fn build_inner_segment(
         .collect::<Option<Vec<_>>>()?;
     let tree = NativeTree::try_new(rewrite_inner_segment(node, &sources)).ok()?;
     let output_tags = native_output_tags(tree.root(), &source_tags)?;
-    // A segment whose root is a window over an evaluated input - a subquery - produces on that
-    // window's own output grid, not on the statement's. Every other segment is bound on the
-    // statement's grid, as before.
-    let segment_grid = match &tree.root().expr {
-        NativeExpr::Window { op, .. } => Arc::clone(&op.output_grid),
-        _ => Arc::clone(grid),
-    };
+    // A segment publishes on the grid its own root declares, which is the grid its parent reads it
+    // on: the segments of a subquery's inner expression are evaluated on the subquery's grid, not on
+    // the statement's, whatever their root computes. The statement's grid is only the fallback for a
+    // root that declares none.
+    let segment_grid = fused_publish_grid(tree.root(), grid);
     let (inputs, metric, time_index, tags) = if let [index] = sources.as_slice() {
         let (metric, time_index, tags) = per_source.get(*index)?;
         (scans, metric.clone(), time_index.clone(), tags.clone())

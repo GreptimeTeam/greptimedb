@@ -12358,6 +12358,12 @@ async fn native_promql_subqueries_match_legacy() {
         "TQL EVAL (180, 180, '1m') avg_over_time((sum by (job, host) (rate(native_subq[2m])))[2m:1m])",
         "TQL EVAL (180, 180, '1m') avg_over_time((sum by (job, host) (rate(native_subq[2m])))[2m:1m] @ 180)",
         "TQL EVAL (180, 180, '1m') max_over_time(max_over_time(native_subq[2m:1m])[2m:1m])",
+        // A subquery body that is a mapped selection rather than a fold: the segment under the
+        // window is the `Map` that clamps, and it has to publish on the subquery's own grid - the
+        // two points at 120000 and 180000 at one-minute steps - rather than on the statement's,
+        // which holds the single point at 180000. The two grids therefore differ in both their
+        // start and their length, not just in identity.
+        "TQL EVAL (180, 180, '1m') avg_over_time(clamp(native_subq, 0, 1)[2m:1m])",
     ] {
         observer.clear();
         let mut native = native_result_rows(native_tql_output(&instance, sql, true).await).await;
@@ -12436,11 +12442,14 @@ async fn native_promql_subqueries_match_legacy() {
             Some("job"),
             true,
         ),
+        // The rewrite writes a new label, so its map is per-series: the subquery's inner map is
+        // the segment, and it publishes on the subquery's grid rather than the statement's. It
+        // runs natively now; the rows below are what say it answers what the existing plan does.
         (
             "TQL EVAL (180, 180, '1m') sum by (x) \
              (avg_over_time(label_replace(native_subq, \"x\", \"$1\", \"job\", \"(.*)\")[5m:1m]))",
             Some("x"),
-            false,
+            true,
         ),
         (
             "TQL EVAL (180, 180, '1m') max_over_time(sum by (job) \
