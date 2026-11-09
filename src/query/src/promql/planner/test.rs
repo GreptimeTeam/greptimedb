@@ -9058,3 +9058,114 @@ async fn eval_times_before_epoch() {
         assert!(plan(too_early, too_early).await.is_err());
     }
 }
+
+fn max_or_height(expr: &DfExpr) -> usize {
+    match expr {
+        DfExpr::BinaryExpr(bin) if bin.op == Operator::Or => {
+            1 + max_or_height(&bin.left).max(max_or_height(&bin.right))
+        }
+        DfExpr::BinaryExpr(bin) => max_or_height(&bin.left).max(max_or_height(&bin.right)),
+        _ => 0,
+    }
+}
+
+fn filter_predicates(plan: &LogicalPlan) -> Vec<&DfExpr> {
+    let mut predicates = Vec::new();
+    fn walk<'a>(plan: &'a LogicalPlan, predicates: &mut Vec<&'a DfExpr>) {
+        if let LogicalPlan::Filter(filter) = plan {
+            predicates.push(&filter.predicate);
+        }
+        for input in plan.inputs() {
+            walk(input, predicates);
+        }
+    }
+    walk(plan, &mut predicates);
+    predicates
+}
+
+#[test]
+fn balanced_or_keeps_logarithmic_depth() {
+    assert!(super::balanced_or(vec![]).is_none());
+    assert_eq!(super::balanced_or(vec![lit(true)]).unwrap(), lit(true));
+
+    // 361 windows match a 30-day range evaluated every 2 hours (#10257).
+    let filters = (0..361).map(|i| col("ts").gt(lit(i))).collect::<Vec<_>>();
+    let expr = super::balanced_or(filters).unwrap();
+    assert_eq!(max_or_height(&expr), 9);
+}
+
+#[tokio::test]
+async fn scatter_time_filters_stay_within_expr_depth_limit() {
+    // Instant selector, 5-minute lookback, 2-hour step over 30 days: 361
+    // non-overlapping windows. A left-folded OR exceeds the depth limit of 128.
+    let eval_stmt = EvalStmt {
+        expr: parser::parse("some_metric").unwrap(),
+        start: UNIX_EPOCH,
+        end: UNIX_EPOCH
+            .checked_add(Duration::from_secs(30 * 24 * 3600))
+            .unwrap(),
+        interval: Duration::from_secs(2 * 3600),
+        lookback_delta: Duration::from_secs(5 * 60),
+    };
+    let table_provider = build_test_table_provider(
+        &[(DEFAULT_SCHEMA_NAME.to_string(), "some_metric".to_string())],
+        1,
+        1,
+    )
+    .await;
+    let plan = PromPlanner::stmt_to_plan(table_provider, &eval_stmt, &build_query_engine_state())
+        .await
+        .unwrap();
+    crate::optimizer::expr_depth::validate_plan(&plan).unwrap();
+
+    let predicates = filter_predicates(&plan);
+    assert!(
+        predicates.iter().any(|expr| max_or_height(expr) > 0),
+        "expected scattered time windows to be combined with OR, plan: {plan}"
+    );
+    for expr in &predicates {
+        let height = max_or_height(expr);
+        assert!(
+            height <= 9,
+            "OR spine height {height} should stay logarithmic, plan: {plan}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn overlapping_range_windows_use_a_single_time_filter() {
+    // `increase(metric[$__range])` over 30 days with a 2-hour step produces 361
+    // overlapping windows. Those collapse to one span (#10257).
+    let eval_stmt = EvalStmt {
+        expr: parser::parse("increase(some_metric[30d])").unwrap(),
+        start: UNIX_EPOCH,
+        end: UNIX_EPOCH
+            .checked_add(Duration::from_secs(30 * 24 * 3600))
+            .unwrap(),
+        interval: Duration::from_secs(2 * 3600),
+        lookback_delta: Duration::from_secs(5 * 60),
+    };
+    let table_provider = build_test_table_provider(
+        &[(DEFAULT_SCHEMA_NAME.to_string(), "some_metric".to_string())],
+        1,
+        1,
+    )
+    .await;
+    let plan = PromPlanner::stmt_to_plan(table_provider, &eval_stmt, &build_query_engine_state())
+        .await
+        .unwrap();
+    crate::optimizer::expr_depth::validate_plan(&plan).unwrap();
+
+    let predicates = filter_predicates(&plan);
+    assert!(
+        !predicates.is_empty(),
+        "expected a time-index filter on the scan, plan: {plan}"
+    );
+    for expr in &predicates {
+        assert_eq!(
+            max_or_height(expr),
+            0,
+            "overlapping windows should not build an OR tree, plan: {plan}"
+        );
+    }
+}

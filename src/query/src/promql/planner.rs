@@ -296,6 +296,30 @@ pub struct PromPlanner {
 
 type BinaryFieldPair<'a> = (&'a String, &'a String);
 
+/// Combines per-step time windows with `OR` as a balanced tree.
+///
+/// `Iterator::reduce(DfExpr::or)` builds a left spine whose depth equals the
+/// number of windows. A 30-day range evaluated every 2 hours produces 361
+/// windows and exceeds the analyzer depth limit of 128 (#10257). Pairing
+/// adjacent predicates keeps the depth logarithmic in the number of windows.
+fn balanced_or(mut filters: Vec<DfExpr>) -> Option<DfExpr> {
+    if filters.is_empty() {
+        return None;
+    }
+    while filters.len() > 1 {
+        let mut next = Vec::with_capacity(filters.len().div_ceil(2));
+        let mut chunks = filters.into_iter();
+        while let Some(left) = chunks.next() {
+            next.push(match chunks.next() {
+                Some(right) => left.or(right),
+                None => left,
+            });
+        }
+        filters = next;
+    }
+    filters.pop()
+}
+
 impl PromPlanner {
     pub async fn stmt_to_plan(
         table_provider: DfTableSourceProvider,
@@ -3016,7 +3040,15 @@ impl PromPlanner {
             (upper - i128::from(window), upper)
         };
         let num_points = (end as i128 - start as i128) / self.ctx.interval as i128;
-        if num_points > MAX_SCATTER_POINTS as i128 || self.ctx.interval <= INTERVAL_1H {
+        // Adjacent windows `[t - offset - window, t - offset]` and
+        // `[t + interval - offset - window, t + interval - offset]` overlap or
+        // touch when `interval <= window`. Their union is then the single span
+        // from the first lower bound to the last upper bound, so one filter
+        // avoids a deep `OR` tree (#10257).
+        if num_points > MAX_SCATTER_POINTS as i128
+            || self.ctx.interval <= INTERVAL_1H
+            || self.ctx.interval <= window
+        {
             let (lower, _) = bounds(start);
             let (_, upper) = bounds(end);
             return Ok(filter(lower, upper));
@@ -3031,7 +3063,7 @@ impl PromPlanner {
             };
             filters.push(filter);
         }
-        Ok(filters.into_iter().reduce(DfExpr::or))
+        Ok(balanced_or(filters))
     }
 
     /// Create a table scan plan and a filter plan with given filter.
