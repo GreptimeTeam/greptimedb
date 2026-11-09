@@ -104,7 +104,8 @@ pub struct LogIngesterQueryParams {
     pub pipeline_name: Option<String>,
     /// The version of the pipeline to be used for log ingestion.
     pub version: Option<String>,
-    /// Whether to ignore errors during log ingestion.
+    /// Whether to ignore payload parsing and custom timestamp errors during log ingestion.
+    /// Defaults to the server's `pipeline.ignore_errors` setting when omitted.
     pub ignore_errors: Option<bool>,
     /// The source of the log data.
     pub source: Option<String>,
@@ -123,7 +124,7 @@ pub struct LogIngesterQueryParams {
     /// Whether to skip errors during log ingestion.
     /// If set to true, the ingestion will continue even if there are errors in the data.
     /// If set to false, the ingestion will stop at the first error.
-    /// This is different from `ignore_errors`, which is used to ignore errors during the pipeline execution.
+    /// This controls pipeline execution errors, separately from `ignore_errors`.
     /// The priority of query params is lower than that headers of x-greptime-pipeline-params.
     pub skip_error: Option<bool>,
 }
@@ -592,9 +593,13 @@ fn add_step_info_for_pipeline_dryrun_error(step_msg: &str, e: Error) -> Response
 /// Parse the data with given content type
 /// If the content type is invalid, return error
 /// content type is one of application/json, text/plain, application/x-ndjson
-fn parse_dryrun_data(data_type: String, data: String) -> Result<Vec<VrlValue>> {
+fn parse_dryrun_data(
+    data_type: String,
+    data: String,
+    ignore_errors: bool,
+) -> Result<Vec<VrlValue>> {
     if let Ok(content_type) = ContentType::from_str(&data_type) {
-        extract_pipeline_value_by_content_type(content_type, Bytes::from(data), false)
+        extract_pipeline_value_by_content_type(content_type, Bytes::from(data), ignore_errors)
     } else {
         InvalidParameterSnafu {
             reason: format!(
@@ -621,11 +626,16 @@ pub async fn pipeline_dryrun(
     let query_ctx = Arc::new(query_ctx);
     handler.check_pipeline_query_permission(&query_ctx)?;
 
+    let ignore_errors = query_params
+        .ignore_errors
+        .unwrap_or(handler.pipeline_options().ignore_errors);
+
     match check_pipeline_dryrun_params_valid(&payload) {
         Some(params) => {
             let data = parse_dryrun_data(
                 params.data_type.unwrap_or("application/json".to_string()),
                 params.data,
+                ignore_errors,
             )?;
 
             check_data_valid(data.len())?;
@@ -675,8 +685,6 @@ pub async fn pipeline_dryrun(
 
             let version =
                 to_pipeline_version(query_params.version.as_deref()).context(PipelineSnafu)?;
-
-            let ignore_errors = query_params.ignore_errors.unwrap_or(false);
 
             let value =
                 extract_pipeline_value_by_content_type(content_type, payload, ignore_errors)?;
@@ -750,7 +758,9 @@ pub async fn log_ingester(
         reason: "table is required",
     })?;
 
-    let ignore_errors = query_params.ignore_errors.unwrap_or(false);
+    let ignore_errors = query_params
+        .ignore_errors
+        .unwrap_or(handler.pipeline_options().ignore_errors);
 
     // A pipeline name supplied via header takes precedence over the query parameter,
     // consistent with how other pipeline options (e.g. `x-greptime-pipeline-params`)

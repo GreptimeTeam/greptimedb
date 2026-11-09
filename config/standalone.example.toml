@@ -1156,6 +1156,12 @@ cache_ttl = "10s"
 ## network, and logs. Default is false. Enable only for trusted pipeline authors.
 ## Applies to pipeline creation, execution, and dry-runs. Requires a restart.
 allow_vrl_host_access = false
+## Default for the HTTP log ingestion and pipeline dry-run `ignore_errors` parameter.
+## Explicit request values override this setting. Malformed input may be discarded,
+## and invalid custom timestamps in identity ingestion fall back to server time.
+## Pipeline execution errors are controlled separately by `skip_error`.
+## Default is false. Requires a restart.
+ignore_errors = false
 
 ## Configuration options for the event recorder.
 [event_recorder]
