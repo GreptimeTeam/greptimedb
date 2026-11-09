@@ -906,7 +906,7 @@ async fn edit_region(
             let remote_path =
                 location::sst_file_path(layer.table_dir(), file_meta.file_id(), layer.path_type());
 
-            let is_index_exist = file_meta.exists_index();
+            let has_downloadable_index = file_meta.has_downloadable_index();
             let index_file_size = file_meta.index_file_size();
 
             let index_file_index_key = IndexKey::new(
@@ -940,12 +940,8 @@ async fn edit_region(
                             PageIndexPolicy::Optional,
                         )
                         .await;
-
-                    if matches!(parquet_cached, Ok(true)) {
-                        listener.on_file_cache_filled(index_key.file_id);
-                    }
                 }
-                if is_index_exist {
+                if has_downloadable_index {
                     // also download puffin file
                     if let Err(err) = write_cache
                         .download(
@@ -963,6 +959,9 @@ async fn edit_region(
                 }
 
                 WRITE_CACHE_INFLIGHT_DOWNLOAD.sub(1);
+                if matches!(parquet_cached, Ok(true)) {
+                    listener.on_file_cache_filled(index_key.file_id);
+                }
             });
         }
     }

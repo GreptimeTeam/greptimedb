@@ -366,7 +366,7 @@ impl Debug for FileMeta {
                 "max_row_group_uncompressed_size",
                 &ReadableSize(self.max_row_group_uncompressed_size),
             );
-        if !self.available_indexes.is_empty() {
+        if self.exists_index() {
             debug_struct
                 .field("available_indexes", &self.available_indexes)
                 .field("indexes", &self.indexes)
@@ -414,6 +414,12 @@ pub enum IndexType {
     BloomFilterIndex,
     /// Retained for manifests written with the removed experimental vector index.
     VectorIndex,
+    /// HyperLogLog distinct-value estimate.
+    HllIndex,
+    /// KLL rank estimate.
+    KllIndex,
+    /// Misra–Gries frequency estimate.
+    MgIndex,
 }
 
 /// Metadata of indexes created for a specific column in an SST file.
@@ -466,6 +472,16 @@ impl FileMeta {
 
     pub fn exists_index(&self) -> bool {
         !self.available_indexes.is_empty()
+            || self
+                .indexes
+                .iter()
+                .any(|index| !index.created_indexes.is_empty())
+    }
+
+    /// Returns whether the index has a known readable length for cache downloads.
+    /// A zero size does not remove the descriptor or its cleanup obligations.
+    pub fn has_downloadable_index(&self) -> bool {
+        self.exists_index() && self.index_file_size > 0
     }
 
     pub fn index_version(&self) -> Option<IndexVersion> {
@@ -1206,6 +1222,50 @@ mod tests {
             num_series: 0,
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn test_sketch_manifest_compatibility() {
+        let legacy = r#"{
+            "region_id": 0,
+            "file_id": "bc5896ec-e4d8-4017-a80d-f2de73188d55",
+            "time_range": [
+                {"value": 0, "unit": "Millisecond"},
+                {"value": 0, "unit": "Millisecond"}
+            ],
+            "available_indexes": [],
+            "indexes": [],
+            "level": 0
+        }"#;
+        let legacy: FileMeta = serde_json::from_str(legacy).unwrap();
+        assert!(legacy.indexes.is_empty());
+        assert!(!legacy.exists_index());
+        let old_column = r#"{"column_id":3,"created_indexes":["InvertedIndex"]}"#;
+        let column: ColumnIndexMetadata = serde_json::from_str(old_column).unwrap();
+        assert_eq!(
+            serde_json::to_value(&column).unwrap(),
+            serde_json::from_str::<serde_json::Value>(old_column).unwrap()
+        );
+        let mut metadata = legacy.clone();
+        metadata.index_version = 7;
+        metadata.indexes = vec![ColumnIndexMetadata {
+            column_id: 3,
+            created_indexes: SmallVec::from_iter([
+                IndexType::HllIndex,
+                IndexType::KllIndex,
+                IndexType::MgIndex,
+            ]),
+            ..Default::default()
+        }];
+        let encoded = serde_json::to_string(&metadata).unwrap();
+        let decoded: FileMeta = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(metadata, decoded);
+        assert!(decoded.exists_index());
+        assert_eq!(decoded.index_version(), Some(7));
+        assert_eq!(
+            serde_json::to_value(&decoded.indexes[0].created_indexes).unwrap(),
+            serde_json::json!(["HllIndex", "KllIndex", "MgIndex"])
+        );
     }
 
     #[test]

@@ -1115,7 +1115,7 @@ impl RegionLoadCacheTask {
             for level in version.ssts.levels() {
                 for file_handle in level.files.values() {
                     let file_meta = file_handle.meta_ref();
-                    if file_meta.exists_index() {
+                    if file_meta.has_downloadable_index() {
                         let puffin_key = IndexKey::new(
                             file_meta.region_id,
                             file_meta.file_id,
@@ -1745,6 +1745,95 @@ mod tests {
         writer.close().unwrap();
 
         parquet_bytes
+    }
+
+    #[rstest::rstest]
+    #[case::known_size(7, true)]
+    #[case::unknown_size(0, false)]
+    #[tokio::test]
+    async fn test_preload_column_only_index(
+        #[case] index_file_size: u64,
+        #[case] expected_cached: bool,
+    ) {
+        use store_api::region_engine::RegionEngine;
+        use store_api::region_request::RegionRequest;
+
+        use crate::manifest::action::RegionEdit;
+        use crate::sst::file::{ColumnIndexMetadata, IndexType};
+        use crate::test_util::CreateRequestBuilder;
+
+        let mut env = TestEnv::new().await;
+        let engine = env.create_engine(Default::default()).await;
+        let region_id = RegionId::new(1, 1);
+        engine
+            .handle_request(
+                region_id,
+                RegionRequest::Create(CreateRequestBuilder::new().build()),
+            )
+            .await
+            .unwrap();
+        let region = engine.get_region(region_id).unwrap();
+        let write_cache = env
+            .create_write_cache(
+                ObjectStore::new(Memory::default()).unwrap(),
+                ReadableSize::mb(1),
+            )
+            .await;
+        let meta = FileMeta {
+            region_id,
+            file_id: FileId::random(),
+            index_file_size,
+            index_version: 3,
+            indexes: vec![ColumnIndexMetadata {
+                column_id: 0,
+                created_indexes: smallvec::smallvec![IndexType::HllIndex],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        assert!(meta.available_indexes.is_empty());
+        assert!(meta.exists_index());
+        assert_eq!(meta.index_version(), Some(3));
+        let key = IndexKey::new(region_id, meta.file_id, FileType::Puffin(3));
+        let path = crate::sst::location::index_file_path(
+            region.access_layer.table_dir(),
+            meta.index_id(),
+            region.access_layer.path_type(),
+        );
+        region
+            .access_layer
+            .object_store()
+            .write(&path, b"payload".as_slice())
+            .await
+            .unwrap();
+        region.version_control.apply_edit(
+            Some(RegionEdit {
+                files_to_add: vec![meta],
+                ..Default::default()
+            }),
+            &[],
+            region.file_purger.clone(),
+        );
+
+        super::RegionLoadCacheTask::new(region)
+            .fill_cache(&write_cache.file_cache())
+            .await;
+        let file_cache = write_cache.file_cache();
+        assert_eq!(file_cache.contains_key(&key), expected_cached);
+        let cached_path = file_cache.cache_file_path(key);
+        if expected_cached {
+            assert_eq!(
+                file_cache
+                    .local_store()
+                    .read(&cached_path)
+                    .await
+                    .unwrap()
+                    .to_vec(),
+                b"payload"
+            );
+        } else {
+            assert!(!file_cache.local_store().exists(&cached_path).await.unwrap());
+        }
     }
 
     #[tokio::test]
