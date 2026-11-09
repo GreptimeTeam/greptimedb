@@ -70,6 +70,11 @@ the owning worker matches the live task ID without entering the DDL queue.
 Task-specific cancellation preserves other pending manual work when no DDL is
 pending. DDL cancellation retains its existing scheduling fence and priority.
 
+Sketch reads use the optional `SketchReader` capability (`engine/sketch.rs`).
+`stat` and `query` independently prepare a fresh SST snapshot via `build_sketch_read`;
+`sst/index/sketch_reader.rs` defines the injected `SketchReadHandler` contract.
+The Region-bound application handle does not retain a snapshot between calls.
+
 ## Public surface
 
 - Entry: `MitoEngine` in `src/mito2/src/engine.rs`, built via `MitoEngineBuilder`.

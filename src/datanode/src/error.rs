@@ -491,6 +491,9 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Sketch reader is unavailable for region {region_id}"))]
+    SketchReaderUnavailable { region_id: RegionId },
+
     #[snafu(display("Not yet implemented: {what}"))]
     NotYetImplemented { what: String },
 }
@@ -555,7 +558,9 @@ impl ErrorExt for Error {
 
             OpenLogStore { source, .. } => source.status_code(),
             MetaClientInit { source, .. } => source.status_code(),
-            UnsupportedOutput { .. } | NotYetImplemented { .. } => StatusCode::Unsupported,
+            UnsupportedOutput { .. }
+            | NotYetImplemented { .. }
+            | SketchReaderUnavailable { .. } => StatusCode::Unsupported,
             HandleRegionRequest { source, .. }
             | GetRegionMetadata { source, .. }
             | HandleBatchOpenRequest { source, .. }
