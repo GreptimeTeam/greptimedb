@@ -9533,6 +9533,10 @@ mod tests {
         fn storage(&self) -> String {
             self.inner.storage()
         }
+
+        fn prefix(&self) -> &str {
+            self.inner.prefix()
+        }
     }
 
     #[async_trait::async_trait]
@@ -9584,6 +9588,10 @@ mod tests {
 
         fn storage(&self) -> String {
             self.inner.storage()
+        }
+
+        fn prefix(&self) -> &str {
+            self.inner.prefix()
         }
     }
 
@@ -9703,6 +9711,10 @@ mod tests {
 
         fn storage(&self) -> String {
             self.inner.storage()
+        }
+
+        fn prefix(&self) -> &str {
+            self.inner.prefix()
         }
     }
 
@@ -9862,6 +9874,10 @@ mod tests {
 
         fn storage(&self) -> String {
             self.inner.storage()
+        }
+
+        fn prefix(&self) -> &str {
+            self.inner.prefix()
         }
     }
 
@@ -10072,6 +10088,10 @@ mod tests {
 
             fn storage(&self) -> String {
                 self.inner.storage()
+            }
+
+            fn prefix(&self) -> &str {
+                self.inner.prefix()
             }
         }
 

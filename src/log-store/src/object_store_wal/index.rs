@@ -60,6 +60,13 @@ pub(crate) struct FetchedObject {
     pub(crate) releases: Option<Bytes>,
 }
 
+/// Verified header and region index of an immutable object.
+#[derive(Debug)]
+pub(crate) struct FetchedFooter {
+    pub(crate) header: Header,
+    pub(crate) footer: Vec<FooterEntry>,
+}
+
 /// Returns, in sequence order, the objects on the chain that ends at the tip:
 /// the complete object with the largest epoch, then the largest sequence.
 ///
@@ -127,14 +134,10 @@ pub(crate) async fn fetch_footers(
 ) -> Result<FetchedObjects> {
     let outcomes = objects
         .map_ok(|object| async move {
-            match fetch_footer(io, &object).await {
-                Ok((header, footer, releases)) => Ok(Ok(FetchedObject {
-                    object,
-                    header,
-                    footer,
-                    releases,
-                })),
-                Err(error) if is_not_found(&error) => Ok(Err((object.object_seq, error))),
+            let object_seq = object.object_seq;
+            match fetch_footer_with_releases(io, object).await {
+                Ok(fetched) => Ok(Ok(fetched)),
+                Err(error) if is_not_found(&error) => Ok(Err((object_seq, error))),
                 Err(error) => Err(error),
             }
         })
@@ -157,20 +160,58 @@ pub(crate) fn is_not_found(error: &Error) -> bool {
     matches!(error, Error::WalObjectStore { error, .. } if error.kind() == object_store::ErrorKind::NotFound)
 }
 
-/// Reads the header, trailer and footer of `object` and verifies them: the
-/// header must carry the sequence of the key, the trailer must be well formed,
-/// the footer must match the checksum the trailer holds and its segments must
-/// tile the object body. Also returns a copy of the segment of release records
-/// when the bytes read hold it and it is at most [`MAX_KEPT_RELEASE_BYTES`],
-/// which is not decoded here.
-///
-/// A short object is read whole. Otherwise the header and a window at the end
-/// of the object are read concurrently, and the footer is read separately only
-/// when it starts before the window.
+/// Reads and verifies the header and footer without copying release records.
 pub(crate) async fn fetch_footer(
     io: &dyn WalObjectRead,
     object: &ListedObject,
-) -> Result<(Header, Vec<FooterEntry>, Option<Bytes>)> {
+) -> Result<FetchedFooter> {
+    Ok(fetch_footer_window(io, object).await?.index)
+}
+
+/// The verified index and the download window, retained only during fetching.
+struct FooterWindow {
+    index: FetchedFooter,
+    tail: Bytes,
+    tail_start: usize,
+}
+
+/// Retains a small release segment for startup recovery without another GET.
+async fn fetch_footer_with_releases(
+    io: &dyn WalObjectRead,
+    object: ListedObject,
+) -> Result<FetchedObject> {
+    let FooterWindow {
+        index,
+        tail,
+        tail_start,
+    } = fetch_footer_window(io, &object).await?;
+    // Copy only the release bytes so recovery does not retain the whole window.
+    let releases = index
+        .footer
+        .iter()
+        .find(|entry| entry.region_id == RELEASE_REGION_ID)
+        .filter(|entry| {
+            entry.segment_offset >= tail_start as u64 && entry.segment_len <= MAX_KEPT_RELEASE_BYTES
+        })
+        .map(|entry| {
+            let start = entry.segment_offset as usize - tail_start;
+            Bytes::copy_from_slice(&tail[start..start + entry.segment_len as usize])
+        });
+    Ok(FetchedObject {
+        object,
+        header: index.header,
+        footer: index.footer,
+        releases,
+    })
+}
+
+/// Verifies object sequence, header, trailer, footer checksum and segment ranges.
+/// Small objects are read whole; large ones use concurrent header and tail reads,
+/// followed by a separate footer read only when it begins before the tail window.
+async fn fetch_footer_window(
+    io: &dyn WalObjectRead,
+    object: &ListedObject,
+) -> Result<FooterWindow> {
     let ListedObject {
         object_seq, size, ..
     } = *object;
@@ -228,18 +269,11 @@ pub(crate) async fn fetch_footer(
     };
     let footer = decode_footer(&footer, trailer).map_err(invalid)?;
     verify_segment_ranges(&footer, footer_range.start).map_err(invalid)?;
-    // A copy, so the window is not kept until the releases are decoded.
-    let releases = footer
-        .iter()
-        .find(|entry| entry.region_id == RELEASE_REGION_ID)
-        .filter(|entry| {
-            entry.segment_offset >= tail_start as u64 && entry.segment_len <= MAX_KEPT_RELEASE_BYTES
-        })
-        .map(|entry| {
-            let start = entry.segment_offset as usize - tail_start;
-            Bytes::copy_from_slice(&tail[start..start + entry.segment_len as usize])
-        });
-    Ok((header, footer, releases))
+    Ok(FooterWindow {
+        index: FetchedFooter { header, footer },
+        tail,
+        tail_start,
+    })
 }
 
 /// Verifies the header and trailer of the object `object_seq` of `object_len`
