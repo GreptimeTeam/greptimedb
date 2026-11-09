@@ -123,6 +123,9 @@ Tests live next to the code as `*_test.rs` (e.g. `src/mito2/src/engine/flush_tes
 - In flat batches, equal `__primary_key` dictionary keys imply the same series, but
   not the reverse: `wrap_pk_binary_to_dict` gives every row its own key. Compare key
   bytes when grouping rows by series.
+- Staging regions never flush: a flush would move rows into the staging manifest and
+  release their WAL, losing them if staging does not end successfully. Every flush
+  trigger in `worker/handle_flush.rs` must skip them, and `handle_close` leaves staging first.
 
 ## Maintenance contract
 
