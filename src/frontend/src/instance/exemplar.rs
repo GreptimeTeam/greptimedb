@@ -68,7 +68,7 @@ impl Instance {
                 .or_default()
                 .push(selector);
         }
-        // Authorize every branch before catalog lookup, including absent exemplar destinations.
+        // Authorizes every branch before any exemplar scan, including absent destinations.
         for (schema, selectors) in &groups {
             let local = ctx.fork();
             local.set_current_schema(schema);
