@@ -2076,10 +2076,7 @@ async fn test_edit_returns_to_staging_after_staging_leader_role() {
 
     let region = engine.get_region(region_id).unwrap();
     let file = first_file(&region).await;
-    spawn_edit(&engine, region_id, file)
-        .await
-        .unwrap()
-        .unwrap();
+    spawn_edit(&engine, region_id, file).await.unwrap().unwrap();
 
     assert!(region.is_staging());
 }
