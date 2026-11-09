@@ -335,12 +335,15 @@ mod tests {
     }
 
     #[test]
-    fn test_pipeline_host_access_config() {
+    fn test_pipeline_config() {
         let defaults: FrontendOptions = toml::from_str("").unwrap();
         assert!(!defaults.pipeline.allow_vrl_host_access);
+        assert!(!defaults.pipeline.ignore_errors);
         let options: FrontendOptions =
-            toml::from_str("[pipeline]\nallow_vrl_host_access = true").unwrap();
+            toml::from_str("[pipeline]\nallow_vrl_host_access = true\nignore_errors = true")
+                .unwrap();
         assert!(options.pipeline.allow_vrl_host_access);
+        assert!(options.pipeline.ignore_errors);
         let serialized = toml::to_string(&options).unwrap();
         let restored: FrontendOptions = toml::from_str(&serialized).unwrap();
         assert_eq!(options.pipeline, restored.pipeline);
