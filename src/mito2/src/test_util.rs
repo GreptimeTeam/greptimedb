@@ -108,7 +108,7 @@ pub(crate) fn nop_action() -> RegionMetaActionList {
     })])
 }
 
-/// Controls a mock object-store layer that blocks a checkpoint task once.
+/// Controls a mock object-store layer that blocks one manifest write or checkpoint cleanup.
 #[derive(Clone)]
 pub(crate) struct CheckpointTaskBlocker {
     entered: Arc<Notify>,

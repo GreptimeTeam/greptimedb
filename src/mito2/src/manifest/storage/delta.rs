@@ -14,7 +14,7 @@
 
 use std::sync::Arc;
 
-use common_datasource::compression::{self, CompressionType};
+use common_datasource::compression::CompressionType;
 use common_telemetry::{debug, warn};
 use futures::TryStreamExt;
 use futures::future::try_join_all;
@@ -302,11 +302,12 @@ impl<T: Tracker> DeltaStorage<T> {
         bytes: &[u8],
     ) -> Result<()> {
         let path = gen_path(&self.path, &delta_file(version), CompressionType::Gzip);
-        // Without compression, gzip level 0 keeps the name that compressing writers use.
+        // Every writer has to use one object name, so `compress_manifest = false` is honoured
+        // with gzip level 0, which stores the bytes without compressing them.
         let data = if self.compress_type.is_compressed() {
             CompressionType::Gzip.encode(bytes).await
         } else {
-            compression::encode_gzip_stored(bytes).await
+            CompressionType::encode_gzip_stored(bytes).await
         }
         .context(CompressObjectSnafu {
             compress_type: CompressionType::Gzip,

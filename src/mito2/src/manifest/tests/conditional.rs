@@ -21,7 +21,6 @@ use common_datasource::compression::CompressionType;
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_test_util::temp_dir::{TempDir, create_temp_dir};
-use common_wal::options::{ObjectStoreWalOptions, WalOptions};
 use object_store::ObjectStore;
 use object_store::layers::CapabilityOverrideLayer;
 use object_store::layers::mock::{
@@ -31,7 +30,6 @@ use object_store::services::Fs;
 use rstest::rstest;
 use store_api::ManifestVersion;
 
-use crate::config::MitoConfig;
 use crate::error::{Error, Result};
 use crate::manifest::manager::{RegionManifestManager, RegionManifestOptions};
 use crate::manifest::storage::{
@@ -143,26 +141,11 @@ fn assert_conflict(error: &Error) {
     );
 }
 
-#[test]
-fn test_mode_requires_lease_and_object_store_wal() {
-    let (_dir, store) = temp_store();
-    let mode = |require_write_lease, wal_options: &WalOptions| {
-        RegionManifestOptions::new(&MitoConfig::default(), "region/", &store)
-            .with_conditional_publication(require_write_lease, wal_options)
-            .conditional_publication
-    };
-    let object_store_wal = WalOptions::ObjectStore(ObjectStoreWalOptions::new("wal".to_string()));
-
-    assert!(mode(true, &object_store_wal));
-    assert!(!mode(false, &object_store_wal));
-    assert!(!mode(true, &WalOptions::RaftEngine));
-}
-
 #[rstest]
 #[case::conditional(true)]
 #[case::legacy(false)]
 #[tokio::test]
-async fn test_ordinary_commit_does_one_write_and_no_list(#[case] conditional: bool) {
+async fn test_ordinary_commit_writes_once_without_listing(#[case] conditional: bool) {
     let (_dir, store, writes, lists) = counting_store();
     let mut manager = create_manager(options(&store, CompressionType::Gzip, 0, conditional)).await;
     writes.store(0, Ordering::Relaxed);
@@ -298,8 +281,8 @@ async fn test_failed_write_does_not_skip_version() {
 async fn test_stale_checkpoint_pointer_does_not_hide_newer_edits() {
     let (_dir, store) = temp_store();
     let pointer = format!("/{LAST_CHECKPOINT_FILE}");
-    let options = options(&store, CompressionType::Uncompressed, 1, true);
-    let mut manager = create_manager(options.clone()).await;
+    let region_options = options(&store, CompressionType::Uncompressed, 1, true);
+    let mut manager = create_manager(region_options.clone()).await;
     commit(&mut manager).await.unwrap();
     manager.wait_for_pending_checkpoint().await;
     let stale_pointer = store.read(&pointer).await.unwrap().to_vec();
@@ -313,7 +296,7 @@ async fn test_stale_checkpoint_pointer_does_not_hide_newer_edits() {
         .unwrap();
     store.write(&pointer, stale_pointer).await.unwrap();
 
-    let reopened = open_manager(options).await;
+    let reopened = open_manager(region_options).await;
 
     assert_eq!(4, reopened.last_version());
     assert_eq!(3, reopened.checkpointer().last_checkpoint_version());
@@ -333,7 +316,12 @@ async fn test_recovery_fails_when_listed_checkpoint_is_gone() {
         .await
         .unwrap_err();
 
-    assert_conflict(&error);
+    assert!(
+        matches!(error, Error::ManifestCheckpointVanished { .. }),
+        "{error:?}"
+    );
+    assert_eq!(StatusCode::StorageUnavailable, error.status_code());
+    assert!(error.retry_hint().is_retryable());
 }
 
 #[tokio::test]
@@ -358,11 +346,11 @@ async fn test_backend_without_conditional_create_is_refused_at_open() {
 #[tokio::test]
 async fn test_open_writes_nothing() {
     let (_dir, store, writes, _lists) = counting_store();
-    let options = options(&store, CompressionType::Gzip, 0, true);
-    create_manager(options.clone()).await;
+    let region_options = options(&store, CompressionType::Gzip, 0, true);
+    create_manager(region_options.clone()).await;
     writes.store(0, Ordering::Relaxed);
 
-    open_manager(options).await;
+    open_manager(region_options).await;
 
     assert_eq!(0, writes.load(Ordering::Relaxed));
 }

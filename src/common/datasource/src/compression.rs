@@ -89,15 +89,15 @@ impl CompressionType {
             Self::Uncompressed => "",
         }
     }
-}
 
-/// Encodes `content` as a gzip stream at level 0, which stores it without compression.
-pub async fn encode_gzip_stored(content: &[u8]) -> io::Result<Vec<u8>> {
-    let mut buffer = Vec::with_capacity(content.len());
-    let mut encoder = write::GzipEncoder::with_quality(&mut buffer, Level::Precise(0));
-    encoder.write_all(content).await?;
-    encoder.shutdown().await?;
-    Ok(buffer)
+    /// Encodes `content` as a gzip stream at level 0, which stores it without compression.
+    pub async fn encode_gzip_stored(content: &[u8]) -> io::Result<Vec<u8>> {
+        let mut buffer = Vec::with_capacity(content.len());
+        let mut encoder = write::GzipEncoder::with_quality(&mut buffer, Level::Precise(0));
+        encoder.write_all(content).await?;
+        encoder.shutdown().await?;
+        Ok(buffer)
+    }
 }
 
 macro_rules! impl_compression_type {

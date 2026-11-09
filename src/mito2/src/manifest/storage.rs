@@ -168,7 +168,7 @@ pub struct ManifestObjectStore {
     delta_storage: DeltaStorage<DeltaTracker>,
     /// The staging file storage.
     staging_storage: StagingStorage,
-    /// Whether deltas are created conditionally and recovery ignores the checkpoint pointer.
+    /// Whether deltas are created conditionally and the last checkpoint is found by LIST.
     conditional_publication: bool,
 }
 

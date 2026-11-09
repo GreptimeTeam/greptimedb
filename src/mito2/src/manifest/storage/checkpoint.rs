@@ -24,8 +24,8 @@ use store_api::ManifestVersion;
 
 use crate::cache::manifest_cache::ManifestCache;
 use crate::error::{
-    CompressObjectSnafu, DecompressObjectSnafu, ManifestVersionConflictSnafu, OpenDalSnafu, Result,
-    SerdeJsonSnafu, Utf8Snafu,
+    CompressObjectSnafu, DecompressObjectSnafu, ManifestCheckpointVanishedSnafu, OpenDalSnafu,
+    Result, SerdeJsonSnafu, Utf8Snafu,
 };
 use crate::manifest::storage::size_tracker::Tracker;
 use crate::manifest::storage::utils::{get_from_cache_decoded, write_and_put_cache};
@@ -206,8 +206,8 @@ impl<T: Tracker> CheckpointStorage<T> {
     /// The checkpoint pointer only provides the checksum, when it points at the same version: the
     /// checkpoint task of a stale writer can leave it at an older one.
     ///
-    /// Fails with a version conflict if cleanup removed the checkpoint after the LIST, because
-    /// the deltas it covered can be gone too.
+    /// Fails if cleanup removed the checkpoint after the LIST, because the deltas it covered can
+    /// be gone too.
     pub(crate) async fn load_listed_checkpoint(
         &self,
         version: ManifestVersion,
@@ -233,10 +233,9 @@ impl<T: Tracker> CheckpointStorage<T> {
                 extend_metadata: HashMap::new(),
             })
             .await?
-            .context(ManifestVersionConflictSnafu {
+            .context(ManifestCheckpointVanishedSnafu {
                 version,
                 manifest_dir: &self.path,
-                reason: "the listed checkpoint was removed before it was read",
             })
     }
 

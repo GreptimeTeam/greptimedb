@@ -39,7 +39,7 @@ use crate::sst::location;
 pub struct RegionMetadataLoader {
     config: Arc<MitoConfig>,
     object_store_manager: ObjectStoreManagerRef,
-    require_write_lease: bool,
+    lease_enabled: bool,
 }
 
 impl RegionMetadataLoader {
@@ -47,12 +47,12 @@ impl RegionMetadataLoader {
     pub fn new(
         config: Arc<MitoConfig>,
         object_store_manager: ObjectStoreManagerRef,
-        require_write_lease: bool,
+        lease_enabled: bool,
     ) -> Self {
         Self {
             config,
             object_store_manager,
-            require_write_lease,
+            lease_enabled,
         }
     }
 
@@ -76,8 +76,7 @@ impl RegionMetadataLoader {
         let region_manifest_options =
             RegionManifestOptions::new(&self.config, region_dir, &object_store)
                 .with_conditional_publication(
-                    self.require_write_lease,
-                    &region_options.wal_options,
+                    region_options.requires_conditional_manifest_publication(self.lease_enabled),
                 );
         let Some(manifest_manager) =
             RegionManifestManager::open(region_manifest_options, &Default::default()).await?

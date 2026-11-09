@@ -156,6 +156,16 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display(
+        "Manifest checkpoint {version} in {manifest_dir} was removed after it was listed"
+    ))]
+    ManifestCheckpointVanished {
+        version: ManifestVersion,
+        manifest_dir: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Failed to serialize manifest, region_id: {}", region_id))]
     SerializeManifest {
         region_id: RegionId,
@@ -1573,6 +1583,7 @@ impl ErrorExt for Error {
             OpenDal { .. }
             | ManifestDeltaNotFound { .. }
             | ManifestVersionConflict { .. }
+            | ManifestCheckpointVanished { .. }
             | ReadParquet { .. } => StatusCode::StorageUnavailable,
             WriteWal { source, .. }
             | ReadWal { source, .. }
@@ -1795,7 +1806,8 @@ impl ErrorExt for Error {
             | ManualCompactionAlreadyRunning { .. }
             | FlushableRegionState { .. }
             | ManifestDeltaNotFound { .. }
-            | ManifestVersionConflict { .. } => RetryHint::Retryable,
+            | ManifestVersionConflict { .. }
+            | ManifestCheckpointVanished { .. } => RetryHint::Retryable,
 
             OpenDal { error, .. }
             | DeleteSsts { error, .. }

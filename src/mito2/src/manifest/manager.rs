@@ -18,7 +18,6 @@ use std::time::Instant;
 
 use common_datasource::compression::CompressionType;
 use common_telemetry::{debug, info, warn};
-use common_wal::options::WalOptions;
 use futures::TryStreamExt;
 use object_store::ObjectStore;
 use snafu::{OptionExt, ResultExt, ensure};
@@ -79,15 +78,10 @@ impl RegionManifestOptions {
         }
     }
 
-    /// Enables conditional publication for a region whose writes require a lease and whose WAL is
-    /// the object store WAL. Other regions keep the default.
-    pub(crate) fn with_conditional_publication(
-        mut self,
-        require_write_lease: bool,
-        wal_options: &WalOptions,
-    ) -> Self {
-        self.conditional_publication =
-            require_write_lease && matches!(wal_options, WalOptions::ObjectStore(_));
+    /// Sets whether deltas are published by conditional create and recovery starts from the
+    /// highest listed checkpoint.
+    pub(crate) fn with_conditional_publication(mut self, enabled: bool) -> Self {
+        self.conditional_publication = enabled;
         self
     }
 }

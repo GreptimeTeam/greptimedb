@@ -387,7 +387,7 @@ async fn test_object_store_wal_options_reject_raft_engine_log_store() {
 }
 
 /// Returns a config that starts a checkpoint on every commit.
-fn checkpoint_every_commit() -> MitoConfig {
+fn checkpoint_every_commit_config() -> MitoConfig {
     MitoConfig {
         manifest_checkpoint_distance: 1,
         ..Default::default()
@@ -407,7 +407,7 @@ async fn create_leased_region(
     Instant,
 ) {
     let (engine, log_store) = env
-        .create_engine_with_object_store_wal(checkpoint_every_commit(), &wal_config())
+        .create_engine_with_object_store_wal(checkpoint_every_commit_config(), &wal_config())
         .await;
     engine.require_write_lease();
     engine.freeze_lease_clock(Instant::now());
@@ -482,7 +482,7 @@ async fn test_stale_commit_on_deleted_delta_name_conflicts(
     let entry_ids = stored_entry_ids(&log_store, region_id).await;
 
     let new_holder = env
-        .create_engine_with_log_store(checkpoint_every_commit(), log_store.clone())
+        .create_engine_with_log_store(checkpoint_every_commit_config(), log_store.clone())
         .await;
     new_holder.require_write_lease();
     let open = RegionRequest::Open(open_request(table_dir.clone()));
