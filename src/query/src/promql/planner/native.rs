@@ -526,7 +526,13 @@ impl PromPlanner {
             None => &stmt.expr,
         };
         let mut selectors = Vec::new();
-        if !collect_selectors(&stmt, effective_expr, &mut selectors) {
+        let mut set_operations = Vec::new();
+        if !collect_selectors_with_set_operations(
+            &stmt,
+            effective_expr,
+            &mut selectors,
+            &mut set_operations,
+        ) {
             return Ok(None);
         }
         // The compiler decides which calls and shapes this route answers: a name it has no kernel
@@ -880,20 +886,33 @@ impl PromPlanner {
         // It does have a frontend placement - each occurrence reads the table through its own raw
         // source and the node matches above every region's contribution - so the tree is admitted
         // on both routes and nothing is refused here.
-        // An empty selector has no table layout of its own. Use a real input's field layout so
-        // the compiler's left-biased set output names the real field even when empty is first.
-        // Keep the default layout when every selector is empty, as for a single empty selector.
-        if let Some(schema) = prepared
+        // An empty selector has no table layout of its own: it reads no table, so the layout it is
+        // compiled against is the one its local context compares it as. A set operator pairs the
+        // fields of its two sides by position, so a bare empty operand is laid out by the first
+        // real selector in the other operand of that same operation - which is also how the
+        // compiler's left-biased set output names the real field when empty is first. A layout
+        // taken from the first real input anywhere in the statement is not that sibling's: it can
+        // carry a different number of fields, and the set operator refuses the two sides.
+        // An empty selector with no such sibling - beside another empty selector, or under an
+        // operator that is not a set operation - takes the statement's first real layout, and the
+        // default layout of [`empty_discovered_input`] when every selector is empty.
+        let local_layouts = local_empty_layouts(&set_operations, &prepared);
+        let statement_layout = prepared
             .iter()
             .find(|(scan, ..)| !is_empty_discovered_input(scan))
-            .map(|(_, schema, ..)| Arc::clone(schema))
-        {
-            for input in &mut prepared {
-                if is_empty_discovered_input(&input.0) {
-                    input.0 = empty_discovered_frame(&schema)?;
-                    input.1 = Arc::clone(&schema);
-                }
+            .map(|(_, schema, ..)| Arc::clone(schema));
+        for index in 0..prepared.len() {
+            if !is_empty_discovered_input(&prepared[index].0) {
+                continue;
             }
+            let Some(schema) = local_layouts[index]
+                .map(|sibling| Arc::clone(&prepared[sibling].1))
+                .or_else(|| statement_layout.as_ref().map(Arc::clone))
+            else {
+                continue;
+            };
+            prepared[index].0 = empty_discovered_frame(&schema)?;
+            prepared[index].1 = Arc::clone(&schema);
         }
         // A real input names the output's time index and, on one table, binds every scan.
         let Some((_, _, metric, time, tags, _, _)) = prepared
@@ -3451,26 +3470,86 @@ fn collect_selectors<'a>(
     expr: &'a PromExpr,
     out: &mut Vec<Cow<'a, VectorSelector>>,
 ) -> bool {
+    // A caller that does not read the set operations still records them: the walk is the same one,
+    // and the list stays empty.
+    collect_selectors_with_set_operations(stmt, expr, out, &mut Vec::new())
+}
+
+/// One side of a set operation, as the slice of the pre-order selector list it reads.
+///
+/// `bare` says the side is written as a selector itself rather than as an expression over one. Only
+/// a bare side is laid out by its selectors: an expression's own output layout is what it computes,
+/// so it is not the layout the operation above compares an empty sibling against.
+#[derive(Clone, Copy, Debug)]
+struct SetOperand {
+    start: usize,
+    end: usize,
+    bare: bool,
+}
+
+/// One set operation in the statement and the two operands it compares.
+#[derive(Clone, Copy, Debug)]
+struct SetOperation {
+    lhs: SetOperand,
+    rhs: SetOperand,
+}
+
+/// [`collect_selectors`], also recording the set operations it passes.
+///
+/// The operands are recorded as index ranges of `out`, which is the same pre-order the compiler
+/// binds its inputs in, so a recorded index is an index of the prepared input list.
+fn collect_selectors_with_set_operations<'a>(
+    stmt: &EvalStmt,
+    expr: &'a PromExpr,
+    out: &mut Vec<Cow<'a, VectorSelector>>,
+    set_operations: &mut Vec<SetOperation>,
+) -> bool {
     match expr {
         PromExpr::VectorSelector(selector) => out.push(Cow::Borrowed(selector)),
         PromExpr::MatrixSelector(MatrixSelector { vs, .. }) => out.push(Cow::Borrowed(vs)),
-        PromExpr::Paren(ParenExpr { expr }) => return collect_selectors(stmt, expr, out),
+        PromExpr::Paren(ParenExpr { expr }) => {
+            return collect_selectors_with_set_operations(stmt, expr, out, set_operations);
+        }
         PromExpr::Call(call) if call.func.name == "info" => {
             let Ok(InfoInput { selector, .. }) = info_input(stmt, &call.args.args) else {
                 return false;
             };
-            if !collect_selectors(stmt, &call.args.args[0], out) {
+            if !collect_selectors_with_set_operations(stmt, &call.args.args[0], out, set_operations)
+            {
                 return false;
             }
             out.push(Cow::Owned(selector));
         }
         PromExpr::Binary(binary) => {
-            return collect_selectors(stmt, &binary.lhs, out)
-                && collect_selectors(stmt, &binary.rhs, out);
+            let lhs_start = out.len();
+            if !collect_selectors_with_set_operations(stmt, &binary.lhs, out, set_operations) {
+                return false;
+            }
+            let lhs_end = out.len();
+            if !collect_selectors_with_set_operations(stmt, &binary.rhs, out, set_operations) {
+                return false;
+            }
+            if binary.op.is_set_operator() {
+                set_operations.push(SetOperation {
+                    lhs: SetOperand {
+                        start: lhs_start,
+                        end: lhs_end,
+                        bare: is_bare_selector(&binary.lhs),
+                    },
+                    rhs: SetOperand {
+                        start: lhs_end,
+                        end: out.len(),
+                        bare: is_bare_selector(&binary.rhs),
+                    },
+                });
+            }
+            return true;
         }
         // Literals contribute no selector; the compiler decides which scalar forms can be bound.
         PromExpr::NumberLiteral(_) => return true,
-        PromExpr::Unary(unary) => return collect_selectors(stmt, &unary.expr, out),
+        PromExpr::Unary(unary) => {
+            return collect_selectors_with_set_operations(stmt, &unary.expr, out, set_operations);
+        }
         // `histogram_quantile` and `histogram_fraction` take their vector last, and the compiler
         // compiles that vector before the arguments in front of it, so the walk reads it first: the
         // scan prepared at a position has to be the one the compiler binds there.
@@ -3480,10 +3559,10 @@ fn collect_selectors<'a>(
             let Some((vector, parameters)) = call.args.args.split_last() else {
                 return false;
             };
-            return collect_selectors(stmt, vector, out)
-                && parameters
-                    .iter()
-                    .all(|parameter| collect_selectors(stmt, parameter, out));
+            return collect_selectors_with_set_operations(stmt, vector, out, set_operations)
+                && parameters.iter().all(|parameter| {
+                    collect_selectors_with_set_operations(stmt, parameter, out, set_operations)
+                });
         }
         PromExpr::Call(call) => {
             if matches!(call.func.name, "label_replace" | "label_join") {
@@ -3494,10 +3573,15 @@ fn collect_selectors<'a>(
                 };
                 return arity_valid
                     && matches!(call.args.args.first(), Some(arg) if matches!(arg.value_type(), ValueType::Vector | ValueType::Matrix))
-                    && collect_selectors(stmt, &call.args.args[0], out);
+                    && collect_selectors_with_set_operations(
+                        stmt,
+                        &call.args.args[0],
+                        out,
+                        set_operations,
+                    );
             }
             for arg in &call.args.args {
-                if !collect_selectors(stmt, arg, out) {
+                if !collect_selectors_with_set_operations(stmt, arg, out, set_operations) {
                     return false;
                 }
             }
@@ -3508,11 +3592,17 @@ fn collect_selectors<'a>(
         // prepared scan and the bound input at the same position; a literal or a grouping-only
         // parameter contributes no selector, so the walk is a no-op for it.
         PromExpr::Aggregate(aggregate) => {
-            return collect_selectors(stmt, &aggregate.expr, out)
-                && match &aggregate.param {
-                    Some(param) => collect_selectors(stmt, param, out),
-                    None => true,
-                };
+            return collect_selectors_with_set_operations(
+                stmt,
+                &aggregate.expr,
+                out,
+                set_operations,
+            ) && match &aggregate.param {
+                Some(param) => {
+                    collect_selectors_with_set_operations(stmt, param, out, set_operations)
+                }
+                None => true,
+            };
         }
         // A subquery evaluates its expression on its own grid; its selectors are prepared like any
         // other, each with the scan bounds `raw_scan_bounds` derives from its own range and step.
@@ -3522,6 +3612,55 @@ fn collect_selectors<'a>(
         _ => {}
     }
     true
+}
+
+/// Whether `expr` is a selector written on its own, with no operator or call above it.
+///
+/// Parentheses decide precedence only, so a parenthesised selector is still that selector.
+fn is_bare_selector(expr: &PromExpr) -> bool {
+    match expr {
+        PromExpr::VectorSelector(_) | PromExpr::MatrixSelector(_) => true,
+        PromExpr::Paren(ParenExpr { expr }) => is_bare_selector(expr),
+        _ => false,
+    }
+}
+
+/// The index of the real input each zero-match input is laid out by, in `prepared` order.
+///
+/// A set operation pairs its two sides' fields by position, so the bare zero-match operand of one
+/// is laid out by the first real selector in the other operand: that sibling is the layout its side
+/// of the comparison has. An empty input with no local sibling has no entry here.
+fn local_empty_layouts(
+    set_operations: &[SetOperation],
+    prepared: &[PreparedInput],
+) -> Vec<Option<usize>> {
+    let mut layouts = vec![None; prepared.len()];
+    let real = |index: usize| {
+        prepared
+            .get(index)
+            .is_some_and(|(scan, ..)| !is_empty_discovered_input(scan))
+    };
+    for operation in set_operations {
+        for (empty, sibling) in [
+            (operation.lhs, operation.rhs),
+            (operation.rhs, operation.lhs),
+        ] {
+            // A bare operand reads exactly one selector; that selector is the empty input itself.
+            if !empty.bare || empty.end != empty.start + 1 {
+                continue;
+            }
+            let Some(layout) = layouts.get_mut(empty.start) else {
+                continue;
+            };
+            if layout.is_some() || real(empty.start) {
+                continue;
+            }
+            if let Some(source) = (sibling.start..sibling.end).find(|index| real(*index)) {
+                *layout = Some(source);
+            }
+        }
+    }
+    layouts
 }
 
 /// Whether `engine` can serve raw series frames to the fused-series node.

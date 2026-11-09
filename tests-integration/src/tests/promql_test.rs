@@ -6242,6 +6242,106 @@ async fn native_promql_zero_match_or_real_tql() {
     }
 }
 
+/// A zero-match selector is laid out by the operand it is compared against, not by the statement.
+///
+/// `native_local_wide` carries two fields and `native_local_narrow` one, and the empty branch is the
+/// left operand of the inner `or`, the right operand of which is `native_local_narrow`. One field is
+/// therefore the layout that operation compares: a layout taken from the statement's first real
+/// input - `native_local_wide`, two fields - would make the two sides of `or` disagree about how
+/// many fields they pair, which the compiler refuses. A refusal here leaves the statement to the
+/// existing plan, which refuses the `__name__` regex in the empty branch, so the query would fail.
+/// The empty branch answers no sample, which is why the answer has to be the one the same statement
+/// with that branch removed gives.
+#[tokio::test(flavor = "multi_thread")]
+async fn native_promql_zero_match_takes_the_layout_of_its_operand() {
+    common_telemetry::init_default_ut_logging();
+    let (standalone, observer) = native_test_instance(GreptimeDbStandaloneBuilder::new(
+        "native_promql_zero_match_local_layout",
+    ))
+    .await;
+    let instance = standalone.fe_instance().clone();
+    execute_all(
+        &instance,
+        r#"
+        CREATE TABLE native_local_wide (
+            host STRING, ts TIMESTAMP TIME INDEX, w0 DOUBLE, w1 DOUBLE, PRIMARY KEY (host)
+        );
+        CREATE TABLE native_local_narrow (
+            host STRING, ts TIMESTAMP TIME INDEX, n0 DOUBLE, PRIMARY KEY (host)
+        );
+        INSERT INTO native_local_wide VALUES ('h0', 1000, 1, 2), ('h0', 2000, 3, 4);
+        INSERT INTO native_local_narrow VALUES ('h0', 1000, 10), ('h0', 2000, 20);
+        ADMIN FLUSH_TABLE('native_local_wide');
+        ADMIN FLUSH_TABLE('native_local_narrow');
+        "#,
+        QueryContext::arc(),
+    )
+    .await;
+
+    let control = "native_local_wide + on(host) native_local_narrow";
+    let empty_branch =
+        r#"native_local_wide + on(host) ({__name__=~"no_such_.+"} or native_local_narrow)"#;
+    let mut answers = Vec::new();
+    for (query, selects_empty) in [(control, false), (empty_branch, true)] {
+        // TQL does not prepare discovery scope itself; provide the same authorized scope that the
+        // Prometheus handler would provide, without comparing to the unsupported legacy path.
+        let mut ctx = QueryContext::with_db_name(None);
+        ctx.set_extension(QUERY_PARALLELISM_HINT, "4".to_string());
+        ctx.set_extension(NATIVE_PROMQL_EXTENSION_KEY, "true".to_string());
+        ctx.set_metric_discovery_scope(MetricDiscoveryScope::allowed([
+            (
+                DEFAULT_CATALOG_NAME.to_string(),
+                DEFAULT_SCHEMA_NAME.to_string(),
+                "native_local_wide".to_string(),
+            ),
+            (
+                DEFAULT_CATALOG_NAME.to_string(),
+                DEFAULT_SCHEMA_NAME.to_string(),
+                "native_local_narrow".to_string(),
+            ),
+        ]));
+        let sql = format!("TQL EVAL (1, 2, '1s', '1s') {query}");
+        observer.clear();
+        let output = instance
+            .do_query(&sql, Arc::new(ctx))
+            .await
+            .remove(0)
+            .unwrap();
+        let fused = observer
+            .fused()
+            .unwrap_or_else(|| panic!("`{query}` did not take the native route"));
+        if selects_empty {
+            assert!(
+                find_plan_node(&fused, "EmptyExec").is_some(),
+                "the zero-match branch is not the node's input: {fused:?}"
+            );
+            // The empty branch reads no region, so the two real selectors are the only two reads.
+            let mut region_inputs = Vec::new();
+            native_region_inputs(&fused, &mut region_inputs);
+            assert_eq!(
+                2,
+                region_inputs.len(),
+                "the empty branch reads a region of its own: {fused:?}"
+            );
+        }
+        answers.push(native_result_rows(output).await);
+    }
+    assert_eq!(
+        answers[1], answers[0],
+        "the empty branch changed the answer of `{empty_branch}`"
+    );
+    // `w0` of the wide table plus `n0` of the narrow one: the binary operation over two vectors
+    // pairs fields by position and keeps the shorter side's.
+    assert_eq!(
+        answers[0],
+        vec![
+            (1000, "h0".to_string(), 11.0),
+            (2000, "h0".to_string(), 23.0)
+        ],
+        "the fixture's answer is not the one the empty branch is compared against"
+    );
+}
+
 /// `promql` evaluated at one instant through the Prometheus handler, which is the path that
 /// authorizes and plans a discovered selector.
 ///

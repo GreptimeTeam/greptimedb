@@ -2340,6 +2340,77 @@ async fn native_zero_match_discovery_with_real_selector_binds_both_inputs() {
     }
 }
 
+/// A zero-match selector is laid out by the operand of the set operation it is compared against.
+///
+/// `wide_total` carries two fields and `narrow_total` one, and the empty branch is the left operand
+/// of an `or` whose right operand is `narrow_total`. A layout taken from the statement's first real
+/// input - `wide_total` - gives the empty side two fields, and the compiler refuses a set operator
+/// whose sides pair a different number of fields, which declines the whole statement.
+#[tokio::test]
+async fn native_zero_match_takes_the_layout_of_its_set_operand() {
+    let table_provider = build_test_table_provider_with_tsid_tag_names(
+        &[
+            (
+                (DEFAULT_SCHEMA_NAME.to_string(), "wide_total".to_string()),
+                1,
+                2,
+            ),
+            (
+                (DEFAULT_SCHEMA_NAME.to_string(), "narrow_total".to_string()),
+                1,
+                1,
+            ),
+        ],
+        &[vec!["tag_0".to_string()], vec!["tag_0".to_string()]],
+        None,
+    )
+    .await;
+    let query = r#"wide_total + on(tag_0) ({__name__=~"no_such_metric_.+"} or narrow_total)"#;
+    let plan = build_native_fused_plan_with_provider(query, true, table_provider).await;
+    let fused = find_fused_series(&plan)
+        .unwrap_or_else(|| panic!("`{query}` did not take the native route: {plan:?}"));
+    // A settled plan may wrap each input in its own segment, so the empty branch is found by what
+    // it is rather than by where it sits.
+    fn find_empty(plan: &LogicalPlan) -> Option<&LogicalPlan> {
+        if super::native::is_empty_discovered_input(plan) {
+            return Some(plan);
+        }
+        plan.inputs().into_iter().find_map(find_empty)
+    }
+    let empty = fused
+        .children()
+        .iter()
+        .find_map(find_empty)
+        .unwrap_or_else(|| panic!("the empty branch is not one of the node's inputs: {plan:?}"));
+    // The empty input is a raw series frame, so its series fields are what its layout is.
+    let declaration =
+        datatypes::series::frame::SeriesFrameDeclaration::parse(empty.schema().as_arrow())
+            .unwrap_or_else(|error| panic!("the empty branch is not a raw series frame: {error}"));
+    let empty_fields = declaration
+        .series()
+        .fields
+        .iter()
+        .map(|field| field.name.as_ref())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        empty_fields,
+        vec!["field_0"],
+        "the empty branch is not laid out by `narrow_total`"
+    );
+    // The operation above pairs fields by position and keeps the shorter side's, which is the one
+    // field of `narrow_total`.
+    let output = plan
+        .schema()
+        .fields()
+        .iter()
+        .map(|field| field.name().as_str())
+        .collect::<Vec<_>>();
+    assert!(
+        output.contains(&"field_0") && !output.contains(&"field_1"),
+        "{output:?}"
+    );
+}
+
 /// Plans `query` with the native fused-series route on or off.
 ///
 /// The table is the one [`build_test_table_provider`] builds — one tag `tag_0`, the millisecond
