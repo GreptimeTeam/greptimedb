@@ -70,7 +70,7 @@ use crate::dist_plan::dyn_filter_bridge::{
     register_dyn_filter_subscribers_for_region, register_remote_dyn_filters,
     resolve_scalar_subquery_dyn_filters,
 };
-use crate::dist_plan::grouped_read::{DatanodeReadGroup, build_group_read_plan_with_budget};
+use crate::dist_plan::grouped_read::{DatanodeReadGroup, build_group_read_plan};
 use crate::dist_plan::{
     FilterId, RemoteDynFilterProducerId, RemoteDynFilterRegistryLease, Subscriber,
 };
@@ -1044,16 +1044,11 @@ impl MergeScanExec {
                         }
                         SubscriberRollbackGuard::new(lease.registry(), added)
                     });
-                let grouped_plan = build_group_read_plan_with_budget(
-                    group.regions(),
-                    anchor.table_id(),
-                    &plan,
-                    group.region_budget(),
-                )
-                .map_err(|error| {
-                    MERGE_SCAN_ERRORS_TOTAL.inc();
-                    error
-                })?;
+                let grouped_plan = build_group_read_plan(group.regions(), anchor.table_id(), &plan)
+                    .map_err(|error| {
+                        MERGE_SCAN_ERRORS_TOTAL.inc();
+                        error
+                    })?;
                 let region_query_ctx = query_context_with_refreshed_initial_dyn_filter_regs(
                     &query_ctx,
                     anchor,
@@ -2216,8 +2211,7 @@ mod tests {
             .unwrap();
         let regions = vec![RegionId::new(1024, 1), RegionId::new(1024, 2)];
         let target = test_target(7);
-        let group =
-            DatanodeReadGroup::try_new(target.clone(), regions.clone(), regions.len()).unwrap();
+        let group = DatanodeReadGroup::try_new(target.clone(), regions.clone()).unwrap();
         let exec = MergeScanExec::new(
             &SessionStateBuilder::new().build(),
             TableName::new("catalog", "schema", "table"),
@@ -2341,8 +2335,7 @@ mod tests {
             .build()
             .unwrap();
         let regions = vec![RegionId::new(1024, 1), RegionId::new(1024, 2)];
-        let group =
-            DatanodeReadGroup::try_new(test_target(7), regions.clone(), regions.len()).unwrap();
+        let group = DatanodeReadGroup::try_new(test_target(7), regions.clone()).unwrap();
         let exec = MergeScanExec::new(
             &SessionStateBuilder::new().build(),
             TableName::new("catalog", "schema", "table"),

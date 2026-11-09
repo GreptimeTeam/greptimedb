@@ -89,7 +89,7 @@ fn estimated_region_plan_json_bytes(nested_plan_len: usize) -> usize {
 }
 
 /// Maximum RegionPlan leaves that fit the request budget for one shared regional template.
-pub fn max_regions_for_group_read_budget(nested_plan_len: usize, table_name_len: usize) -> usize {
+pub fn max_regions_for_group_read_payload(nested_plan_len: usize, table_name_len: usize) -> usize {
     let per_region = estimated_region_plan_json_bytes(nested_plan_len).saturating_add(16);
     if per_region == 0 {
         return MAX_GROUP_READ_REGIONS;
@@ -128,15 +128,8 @@ fn check_region_list(region_ids: &[u64]) -> std::result::Result<(), String> {
 pub struct GroupReadPayload {
     version: u32,
     region_ids: Vec<u64>,
-    /// Per-request budget for RegionPlan leaves.
-    #[serde(default = "default_region_budget")]
-    region_budget: usize,
     table_id: u32,
     table_name: String,
-}
-
-fn default_region_budget() -> usize {
-    MAX_GROUP_READ_REGIONS
 }
 
 impl GroupReadPayload {
@@ -145,20 +138,9 @@ impl GroupReadPayload {
         table_id: u32,
         table_name: String,
     ) -> std::result::Result<Self, String> {
-        let region_budget = region_ids.len().max(1);
-        Self::try_new_with_budget(region_ids, table_id, table_name, region_budget)
-    }
-
-    pub fn try_new_with_budget(
-        region_ids: Vec<u64>,
-        table_id: u32,
-        table_name: String,
-        region_budget: usize,
-    ) -> std::result::Result<Self, String> {
         let payload = Self {
             version: GROUP_READ_VERSION,
             region_ids,
-            region_budget,
             table_id,
             table_name,
         };
@@ -166,16 +148,10 @@ impl GroupReadPayload {
         Ok(payload)
     }
 
-    fn from_validated_parts(
-        region_ids: Vec<u64>,
-        table_id: u32,
-        table_name: String,
-        region_budget: usize,
-    ) -> Self {
+    fn from_validated_parts(region_ids: Vec<u64>, table_id: u32, table_name: String) -> Self {
         Self {
             version: GROUP_READ_VERSION,
             region_ids,
-            region_budget,
             table_id,
             table_name,
         }
@@ -187,10 +163,6 @@ impl GroupReadPayload {
 
     pub fn region_ids(&self) -> &[u64] {
         &self.region_ids
-    }
-
-    pub fn region_budget(&self) -> usize {
-        self.region_budget
     }
 
     pub fn table_id(&self) -> u32 {
@@ -249,19 +221,6 @@ impl GroupReadPayload {
             ));
         }
         check_region_list(&self.region_ids)?;
-        if self.region_budget == 0 || self.region_budget > MAX_GROUP_READ_REGIONS {
-            return Err(format!(
-                "a GroupRead region budget must be in 1..={MAX_GROUP_READ_REGIONS}, found {}",
-                self.region_budget
-            ));
-        }
-        if self.region_ids.len() > self.region_budget {
-            return Err(format!(
-                "a GroupRead names {} regions, above its per-request budget {}",
-                self.region_ids.len(),
-                self.region_budget
-            ));
-        }
         if self.table_name.is_empty() {
             return Err("a grouped read names no table".to_string());
         }
@@ -547,13 +506,12 @@ impl UserDefinedLogicalNodeCore for GroupReadPlan {
         };
         write!(
             f,
-            "{}: version={}, table_id={}, table={}, regions={:?}, region_budget={}",
+            "{}: version={}, table_id={}, table={}, regions={:?}",
             Self::name(),
             payload.version,
             payload.table_id,
             payload.table_name,
-            payload.region_ids,
-            payload.region_budget
+            payload.region_ids
         )
     }
 
@@ -757,7 +715,6 @@ pub fn build_group_read_plan_with_combine(
     regions: &[RegionId],
     table_id: u32,
     nested_plan: &LogicalPlan,
-    region_budget: usize,
     combine: impl FnOnce(LogicalPlan) -> DataFusionResult<LogicalPlan>,
 ) -> DataFusionResult<LogicalPlan> {
     let Some(table) = nested_plan_table(nested_plan) else {
@@ -773,7 +730,6 @@ pub fn build_group_read_plan_with_combine(
         table.table_name,
         &nested,
         nested_plan.schema().clone(),
-        region_budget,
         combine,
     )
 }
@@ -785,7 +741,6 @@ pub fn build_group_read_plan_from_nested(
     table_name: String,
     nested: &[u8],
     schema: DFSchemaRef,
-    region_budget: usize,
     combine: impl FnOnce(LogicalPlan) -> DataFusionResult<LogicalPlan>,
 ) -> DataFusionResult<LogicalPlan> {
     if regions.is_empty() {
@@ -793,16 +748,9 @@ pub fn build_group_read_plan_from_nested(
             "a grouped read needs at least one region".to_string(),
         ));
     }
-    if region_budget == 0 || region_budget > MAX_GROUP_READ_REGIONS {
+    if regions.len() > MAX_GROUP_READ_REGIONS {
         return Err(DataFusionError::Plan(format!(
-            "grouped read region budget must be in 1..={MAX_GROUP_READ_REGIONS}, found \
-             {region_budget}"
-        )));
-    }
-    let max_members = region_budget.min(MAX_GROUP_READ_REGIONS);
-    if regions.len() > max_members {
-        return Err(DataFusionError::Plan(format!(
-            "a grouped read names {} regions, above its effective per-request budget {max_members}",
+            "a grouped read names {} regions, above the {MAX_GROUP_READ_REGIONS} bound",
             regions.len()
         )));
     }
@@ -836,7 +784,6 @@ pub fn build_group_read_plan_from_nested(
         regions.iter().map(RegionId::as_u64).collect(),
         table_id,
         table_name,
-        region_budget,
     );
     let node = GroupReadPlan::try_new(payload, combine).map_err(DataFusionError::Plan)?;
     Ok(node.into_logical_plan())
@@ -848,17 +795,7 @@ pub fn build_group_read_plan(
     table_id: u32,
     nested_plan: &LogicalPlan,
 ) -> DataFusionResult<LogicalPlan> {
-    build_group_read_plan_with_budget(regions, table_id, nested_plan, regions.len().max(1))
-}
-
-/// Builds the default grouped read with an explicit per-request RegionPlan budget.
-pub fn build_group_read_plan_with_budget(
-    regions: &[RegionId],
-    table_id: u32,
-    nested_plan: &LogicalPlan,
-    region_budget: usize,
-) -> DataFusionResult<LogicalPlan> {
-    build_group_read_plan_with_combine(regions, table_id, nested_plan, region_budget, Ok)
+    build_group_read_plan_with_combine(regions, table_id, nested_plan, Ok)
 }
 
 /// Whether `plan` is a shape a grouped read may carry: one ordinary table scan under projections,
@@ -1228,14 +1165,12 @@ impl SubstraitConsumer for GroupReadRequestConsumer<'_> {
 pub struct DatanodeReadGroup {
     target: RegionQueryTarget,
     regions: Vec<RegionId>,
-    region_budget: usize,
 }
 
 impl DatanodeReadGroup {
     pub fn try_new(
         target: RegionQueryTarget,
         regions: Vec<RegionId>,
-        region_budget: usize,
     ) -> std::result::Result<Self, String> {
         if regions.is_empty() {
             return Err("a grouped read group names no region".to_string());
@@ -1246,28 +1181,13 @@ impl DatanodeReadGroup {
                 regions.len()
             ));
         }
-        if region_budget == 0 || region_budget > MAX_GROUP_READ_REGIONS {
-            return Err(format!(
-                "group {target:?} has an invalid region budget {region_budget}"
-            ));
-        }
-        if regions.len() > region_budget {
-            return Err(format!(
-                "group {target:?} names {} regions, above its region budget {region_budget}",
-                regions.len()
-            ));
-        }
         let mut seen = std::collections::BTreeSet::new();
         for region_id in &regions {
             if !seen.insert(*region_id) {
                 return Err(format!("group {target:?} names region {region_id} twice"));
             }
         }
-        Ok(Self {
-            target,
-            regions,
-            region_budget,
-        })
+        Ok(Self { target, regions })
     }
 
     pub fn target(&self) -> &RegionQueryTarget {
@@ -1276,10 +1196,6 @@ impl DatanodeReadGroup {
 
     pub fn regions(&self) -> &[RegionId] {
         &self.regions
-    }
-
-    pub fn region_budget(&self) -> usize {
-        self.region_budget
     }
 }
 
@@ -1386,7 +1302,6 @@ mod tests {
 
         let mut payload = peek_group_read_envelope(&encoded).unwrap().unwrap();
         payload.region_ids.push(RegionId::new(1024, 9).as_u64());
-        payload.region_budget = 3;
         let payload_bytes = payload.encode().unwrap();
         let mut raw =
             substrait::substrait_proto_df::proto::Plan::decode(encoded.as_slice()).unwrap();
@@ -1417,7 +1332,7 @@ mod tests {
         let plan = project_scan();
         let state = SessionStateBuilder::new().build();
 
-        let join = build_group_read_plan_with_combine(&regions(2), 1024, &plan, 2, |_union| {
+        let join = build_group_read_plan_with_combine(&regions(2), 1024, &plan, |_union| {
             let right = LogicalPlanBuilder::from(project_scan())
                 .alias("right")?
                 .build()?;
@@ -1444,7 +1359,7 @@ mod tests {
         .unwrap_err();
         assert!(error.contains("GroupRead combine tree"), "{error}");
 
-        let sorted = build_group_read_plan_with_combine(&regions(2), 1024, &plan, 2, |union| {
+        let sorted = build_group_read_plan_with_combine(&regions(2), 1024, &plan, |union| {
             LogicalPlanBuilder::from(union)
                 .sort(vec![col("ts").sort(true, false)])?
                 .build()
@@ -1465,7 +1380,7 @@ mod tests {
 
         let inner = build_group_read_plan(&regions(1), 1024, &plan).unwrap();
         let nested =
-            build_group_read_plan_with_combine(&regions(1), 1024, &plan, 1, |_| Ok(inner)).unwrap();
+            build_group_read_plan_with_combine(&regions(1), 1024, &plan, |_| Ok(inner)).unwrap();
         let nested_bytes = DFLogicalSubstraitConvertor
             .encode(&nested, DefaultSerializer)
             .unwrap();
@@ -1485,34 +1400,23 @@ mod tests {
         use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 
         let called = AtomicBool::new(false);
-        // Oversized caller budget is rejected before materializing any leaf.
+        // More than the hard 1024-region cap is rejected before leaves/combine.
         let error =
-            build_group_read_plan_with_combine(&regions(1025), 1024, &project_scan(), 2000, |_| {
+            build_group_read_plan_with_combine(&regions(1025), 1024, &project_scan(), |_| {
                 called.store(true, AtomicOrdering::SeqCst);
                 Ok(project_scan())
             })
             .unwrap_err();
-        assert!(error.to_string().contains("region budget must be in"));
-        assert!(!called.load(AtomicOrdering::SeqCst));
-
-        // Even with the maximum legal budget of 1024, 1025 members are rejected before leaves.
-        let error =
-            build_group_read_plan_with_combine(&regions(1025), 1024, &project_scan(), 1025, |_| {
-                called.store(true, AtomicOrdering::SeqCst);
-                Ok(project_scan())
-            })
-            .unwrap_err();
-        assert!(error.to_string().contains("region budget must be in"));
+        assert!(error.to_string().contains("above the 1024 bound"));
         assert!(!called.load(AtomicOrdering::SeqCst));
 
         // Duplicate members are rejected before leaves/combine.
         let duplicate = vec![RegionId::new(1024, 1), RegionId::new(1024, 1)];
-        let error =
-            build_group_read_plan_with_combine(&duplicate, 1024, &project_scan(), 2, |_| {
-                called.store(true, AtomicOrdering::SeqCst);
-                Ok(project_scan())
-            })
-            .unwrap_err();
+        let error = build_group_read_plan_with_combine(&duplicate, 1024, &project_scan(), |_| {
+            called.store(true, AtomicOrdering::SeqCst);
+            Ok(project_scan())
+        })
+        .unwrap_err();
         assert!(error.to_string().contains("named more than once"));
         assert!(!called.load(AtomicOrdering::SeqCst));
     }
@@ -1531,7 +1435,7 @@ mod tests {
             .build()
             .unwrap();
         let called = AtomicBool::new(false);
-        let error = build_group_read_plan_with_combine(&regions(100), 1024, &bulky, 100, |_| {
+        let error = build_group_read_plan_with_combine(&regions(100), 1024, &bulky, |_| {
             called.store(true, AtomicOrdering::SeqCst);
             Ok(project_scan())
         })

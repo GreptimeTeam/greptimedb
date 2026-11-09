@@ -85,11 +85,7 @@ impl RegionServer {
             .fail();
         }
 
-        // One RegionScanExec partition per RegionPlan: the membership budget already bounds the
-        // number of region plans in this request, so forcing one partition per scan bounds the
-        // request's active scans without claiming a datanode-global scheduler.
         let mut grouped_ctx = (*query_ctx).clone();
-        grouped_ctx.set_extension("query.parallelism", "1");
         grouped_ctx.set_extension(GROUP_READ_CONTEXT_EXTENSION, "true");
         let query_ctx = Arc::new(grouped_ctx);
         let engine_ctx = self

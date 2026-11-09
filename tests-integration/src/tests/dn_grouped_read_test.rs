@@ -227,6 +227,20 @@ async fn grouped_read_batches_one_request_per_datanode_and_keeps_rows() {
         "each datanode must receive exactly one grouped request, got {grouped_requests:?}"
     );
 
+    // A low query parallelism must not disable batching or change the rows.
+    let mut low_parallelism = QueryContext::with("greptime", "public");
+    low_parallelism.set_extension("query.parallelism", "1");
+    let before = do_gets(&cluster);
+    let mut low_rows = run_rows_with_context(&fe, &grouped_sql, Arc::new(low_parallelism)).await;
+    low_rows.sort();
+    assert_eq!(grouped, low_rows);
+    let low_requests = delta(&before, &do_gets(&cluster));
+    assert_eq!(
+        2,
+        total(&low_requests),
+        "query.parallelism=1 must still batch to one request per datanode: {low_requests:?}"
+    );
+
     // Both Flow source and sink contexts must keep one request per selected region.
     let table = fe
         .catalog_manager()
@@ -655,20 +669,6 @@ async fn grouped_read_rdf_and_rejections() {
             .handle_remote_read(request_for(own_regions[0], duplicate), QueryContext::arc())
             .await,
     );
-    let over_budget = mutate_payload(&bytes, |payload| {
-        payload["region_budget"] = serde_json::json!(1);
-    });
-    let error = assert_rejected(
-        "more RegionPlans than the per-request budget",
-        server
-            .handle_remote_read(
-                request_for(own_regions[0], over_budget),
-                QueryContext::arc(),
-            )
-            .await,
-    );
-    assert!(error.to_string().contains("per-request budget"), "{error}");
-
     let wrong_table = mutate_payload(&bytes, |payload| {
         payload["table_id"] = serde_json::json!(info.table_id() + 1);
     });
@@ -785,18 +785,13 @@ async fn dn_level_poc_group_read_sum_over_union_all_returns_partial_rows() {
     for datanode_id in cluster.datanode_instances.keys().copied() {
         let mut own_regions = region_ids_of_datanode(&fe, TABLE, datanode_id).await;
         own_regions.sort();
-        let envelope = build_group_read_plan_with_combine(
-            &own_regions,
-            info.table_id(),
-            &nested,
-            own_regions.len(),
-            |union| {
+        let envelope =
+            build_group_read_plan_with_combine(&own_regions, info.table_id(), &nested, |union| {
                 LogicalPlanBuilder::from(union)
                     .aggregate(Vec::<datafusion_expr::Expr>::new(), vec![sum(col("v"))])?
                     .build()
-            },
-        )
-        .unwrap();
+            })
+            .unwrap();
         let stream = cluster
             .datanode_instances
             .get(&datanode_id)
