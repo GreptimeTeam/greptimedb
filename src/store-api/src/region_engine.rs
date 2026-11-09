@@ -49,7 +49,7 @@ pub enum SettableRegionRoleState {
     DowngradingLeader,
     /// Exit staging mode and return to normal leader state. Only allowed from staging state.
     Leader,
-    /// Enter staging mode. Region remains writable but disables checkpoint and compaction. Only allowed from normal leader state.
+    /// Enter staging mode. Region remains writable but disables checkpoint, compaction and flush. Only allowed from normal leader state.
     StagingLeader,
 }
 

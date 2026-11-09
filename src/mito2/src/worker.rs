@@ -93,6 +93,7 @@ use crate::sst::index::puffin_manager::PuffinManagerFactory;
 use crate::temp_file_sweeper;
 use crate::time_provider::{StdTimeProvider, TimeProviderRef};
 use crate::wal::Wal;
+use crate::worker::handle_flush::StagingRegionsRef;
 use crate::worker::handle_manifest::RegionEditQueues;
 
 /// Identifier for a worker.
@@ -256,6 +257,7 @@ impl WorkerGroup {
         let sweep_limiter = (config.gc.max_concurrent_gc_job > 0)
             .then(|| Arc::new(Semaphore::new(config.gc.max_concurrent_gc_job)));
         let node_lease = Arc::new(NodeLease::default());
+        let staging_regions = StagingRegionsRef::default();
 
         let workers = (0..config.num_workers)
             .map(|id| {
@@ -288,6 +290,7 @@ impl WorkerGroup {
                     #[cfg(feature = "hdfs-object-store")]
                     sweep_limiter: sweep_limiter.clone(),
                     node_lease: node_lease.clone(),
+                    staging_regions: staging_regions.clone(),
                 }
                 .start()
             })
@@ -491,6 +494,7 @@ impl WorkerGroup {
         let sweep_limiter = (config.gc.max_concurrent_gc_job > 0)
             .then(|| Arc::new(Semaphore::new(config.gc.max_concurrent_gc_job)));
         let node_lease = Arc::new(NodeLease::default());
+        let staging_regions = StagingRegionsRef::default();
         let workers = (0..config.num_workers)
             .map(|id| {
                 WorkerStarter {
@@ -522,6 +526,7 @@ impl WorkerGroup {
                     #[cfg(feature = "hdfs-object-store")]
                     sweep_limiter: sweep_limiter.clone(),
                     node_lease: node_lease.clone(),
+                    staging_regions: staging_regions.clone(),
                 }
                 .start()
             })
@@ -639,6 +644,7 @@ struct WorkerStarter<S> {
     /// no concurrent GC job.
     sweep_limiter: Option<Arc<Semaphore>>,
     node_lease: Arc<NodeLease>,
+    staging_regions: StagingRegionsRef,
 }
 
 impl<S: LogStore> WorkerStarter<S> {
@@ -744,6 +750,7 @@ impl<S: LogStore> WorkerStarter<S> {
             #[cfg(feature = "hdfs-object-store")]
             sweep_limiter: self.sweep_limiter,
             node_lease: self.node_lease,
+            staging_regions: self.staging_regions,
         };
         let handle = common_runtime::spawn_global(async move {
             worker_thread.run().await;
@@ -1070,6 +1077,8 @@ struct RegionWorkerLoop<S> {
     /// no concurrent GC job.
     sweep_limiter: Option<Arc<Semaphore>>,
     node_lease: Arc<NodeLease>,
+    /// Staging regions of this node that have received writes.
+    staging_regions: StagingRegionsRef,
 }
 
 impl<S: LogStore> RegionWorkerLoop<S> {
