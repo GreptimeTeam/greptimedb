@@ -27,7 +27,10 @@ use datatypes::series::samples::{
 };
 use datatypes::series::time::{EvalGrid, GridSpec};
 
-use super::{info_sample_times, select_instants, timestamp_of_evaluated, timestamp_of_selection};
+use super::{
+    InstantCandidateSpan, info_sample_times, instant_candidate_span, select_instants,
+    timestamp_of_evaluated, timestamp_of_selection,
+};
 use crate::grid_series::GridSeriesBuilder;
 use crate::grid_series::reference::{Labels, labels_of, metric_of};
 
@@ -228,6 +231,32 @@ fn offset_extreme_timestamps_are_checked_without_large_fixture() {
     let (rows, times) = select(&[0, 1_000_000], &fields, 0..=1_000_000, 1, 0, 0).unwrap();
     assert_eq!(rows, [1]);
     assert_eq!(times, [1_000_000]);
+}
+
+#[test]
+fn instant_candidate_span_preserves_unaligned_and_wide_ranges() {
+    // The query end is not on the start's lattice. The scan bound is 125, but stepping from 100
+    // visits only 100, 110 and 120, as it did before clipping was shared.
+    let span = instant_candidate_span(Some((100, 120)), 100..=125, 10, 1, 0);
+    assert_eq!(
+        span,
+        InstantCandidateSpan {
+            start: 100,
+            end: 125,
+            count: 3,
+        }
+    );
+    let fields = SeriesFields::one(Samples::from_float(Float64Array::from(vec![1.0, 2.0, 3.0])));
+    let (rows, timestamps) = select(&[100, 110, 120], &fields, 100..=125, 10, 1, 0).unwrap();
+    assert_eq!(rows, [0, 1, 2]);
+    assert_eq!(timestamps, [100, 110, 120]);
+
+    // This count exceeds usize on 64-bit platforms. Computing the bound must neither allocate nor
+    // truncate it; each caller retains its own existing conversion when consuming the result.
+    let wide = instant_candidate_span(Some((i64::MIN, i64::MAX)), i64::MIN..=i64::MAX, 1, 0, 0);
+    assert_eq!(wide.start, i64::MIN as i128);
+    assert_eq!(wide.end, i64::MAX as i128);
+    assert_eq!(wide.count, u64::MAX as i128 + 1);
 }
 
 #[test]
