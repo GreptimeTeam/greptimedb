@@ -242,6 +242,17 @@ async fn resolve_host_ips(connection: &str, host: &str) -> Result<Vec<IpAddr>> {
     Ok(ips)
 }
 
+/// A raw `INFORMATION_SCHEMA.COLUMNS` row decoded by the driver:
+/// (`name`, `data_type`, `column_type`, `precision`, `scale`, `fsp`).
+type RawColumnRow = (
+    String,
+    String,
+    String,
+    Option<i64>,
+    Option<i64>,
+    Option<i64>,
+);
+
 /// Connects to the remote MySQL instance and reads the column list of
 /// `remote_table` from `INFORMATION_SCHEMA.COLUMNS`, mapping each column to a
 /// GreptimeDB [`ConcreteDataType`] via [`map_mysql_column_type`].
@@ -302,25 +313,19 @@ pub async fn fetch_mysql_columns(
                FROM INFORMATION_SCHEMA.COLUMNS \
                WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? ORDER BY ORDINAL_POSITION";
 
-    let rows: Vec<(
-        String,
-        String,
-        String,
-        Option<i64>,
-        Option<i64>,
-        Option<i64>,
-    )> = tokio::time::timeout(QUERY_TIMEOUT, conn.exec(sql, (schema, table)))
-        .await
-        .map_err(|_| {
-            box_timeout_error(
-                "fetching column metadata from the remote database",
-                QUERY_TIMEOUT,
-            )
-        })
-        .and_then(|res| res.map_err(|e| box_foreign_error(e, connection)))
-        .context(FetchMetadataSnafu {
-            remote_table: remote_table.to_string(),
-        })?;
+    let rows: Vec<RawColumnRow> =
+        tokio::time::timeout(QUERY_TIMEOUT, conn.exec(sql, (schema, table)))
+            .await
+            .map_err(|_| {
+                box_timeout_error(
+                    "fetching column metadata from the remote database",
+                    QUERY_TIMEOUT,
+                )
+            })
+            .and_then(|res| res.map_err(|e| box_foreign_error(e, connection)))
+            .context(FetchMetadataSnafu {
+                remote_table: remote_table.to_string(),
+            })?;
     let _ = conn.disconnect().await;
 
     ensure!(
