@@ -1084,9 +1084,9 @@ EXPLAIN SELECT COUNT(DISTINCT val_col_1) FROM step_aggr_extended;
 | logical_plan_| Projection: count(alias1) AS count(DISTINCT step_aggr_extended.val_col_1)_|
 |_|_Aggregate: groupBy=[[]], aggr=[[count(alias1)]]_|
 |_|_Aggregate: groupBy=[[step_aggr_extended.val_col_1 AS alias1]], aggr=[[]]_|
-|_|_Projection: step_aggr_extended.val_col_1_|
 |_|_MergeScan [is_placeholder=false, remote_input=[_|
-|_| TableScan: step_aggr_extended_|
+|_| Projection: step_aggr_extended.val_col_1_|
+|_|_TableScan: step_aggr_extended_|
 |_| ]]_|
 | physical_plan | ProjectionExec: expr=[count(alias1)@0 as count(DISTINCT step_aggr_extended.val_col_1)]_|
 |_|_AggregateExec: mode=Final, gby=[], aggr=[count(alias1)]_|
@@ -1096,7 +1096,6 @@ EXPLAIN SELECT COUNT(DISTINCT val_col_1) FROM step_aggr_extended;
 |_|_RepartitionExec: partitioning=REDACTED
 |_|_AggregateExec: mode=Partial, gby=[val_col_1@0 as alias1], aggr=[]_|
 |_|_RepartitionExec: partitioning=REDACTED
-|_|_ProjectionExec: expr=[val_col_1@2 as val_col_1]_|
 |_|_MergeScanExec: REDACTED
 |_|_|
 +-+-+
