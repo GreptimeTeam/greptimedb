@@ -26,6 +26,7 @@ use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_error::ext::BoxedError;
 use common_error::mock::MockError;
 use common_error::status_code::StatusCode;
+#[cfg(feature = "enterprise")]
 use common_meta::ddl::create_flow::FLOW_MAX_MEMORY_OPTION_KEY;
 use common_query::Output;
 use common_recordbatch::RecordBatch;
@@ -55,6 +56,7 @@ use crate::batching_mode::checkpoint::{
     CHECKPOINT_DECISION_ADVANCE, CHECKPOINT_DECISION_FALLBACK, CHECKPOINT_REASON_NONE,
     FlowCheckpointDecision, FlowQueryFallbackReason,
 };
+#[cfg(feature = "enterprise")]
 use crate::batching_mode::engine::BatchingEngine;
 use crate::batching_mode::eval_schedule::{FlowMissedTickPolicy, FlowScheduleConfig};
 use crate::batching_mode::state::CheckpointMode;
@@ -1803,12 +1805,18 @@ async fn test_frontend_extensions_carry_max_memory_bytes() {
         "flow.flow_id must not be forwarded without the max_memory option"
     );
 
-    // `max_memory = '512MB'` as resolved by the batching engine.
+    // `max_memory = '512MB'` as resolved by the batching engine, which is an
+    // enterprise-only step: a default build refuses the option itself (see
+    // `max_memory_bytes_for_flow_options`), so the resolved budget is set
+    // directly there. Forwarding it stays part of the mechanism in both builds.
+    #[cfg(feature = "enterprise")]
     let max_memory_bytes = BatchingEngine::max_memory_bytes_for_flow_options(&HashMap::from([(
         FLOW_MAX_MEMORY_OPTION_KEY.to_string(),
         "512MB".to_string(),
     )]))
     .unwrap();
+    #[cfg(not(feature = "enterprise"))]
+    let max_memory_bytes = Some(536_870_912_u64);
     assert_eq!(max_memory_bytes, Some(536_870_912));
     Arc::get_mut(&mut task.config).unwrap().max_memory_bytes = max_memory_bytes;
 

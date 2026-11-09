@@ -16,6 +16,7 @@ mod metadata;
 
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
+#[cfg(feature = "enterprise")]
 use std::str::FromStr;
 
 use api::v1::ExpireAfter;
@@ -23,6 +24,7 @@ use api::v1::flow::flow_request::Body as PbFlowRequest;
 use api::v1::flow::{CreateRequest, FlowRequest, FlowRequestHeader};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+#[cfg(feature = "enterprise")]
 use common_base::readable_size::ReadableSize;
 use common_catalog::format_full_flow_name;
 use common_procedure::error::{FromJsonSnafu, ToJsonSnafu};
@@ -470,11 +472,31 @@ pub const DEFER_ON_MISSING_SOURCE_KEY: &str = "defer_on_missing_source";
 
 /// The flow option key for the maximum memory one Flow's query execution may use.
 ///
-/// The value is a [`ReadableSize`] string such as `"512MB"` (binary units, so
+/// The value is a `ReadableSize` string such as `"512MB"` (binary units, so
 /// `512MB` == 536870912 bytes), interpreted as the memory budget of this Flow's
 /// query execution. The parsed byte budget is persisted with the flow options
 /// and carried with every query the flow executes.
 pub const FLOW_MAX_MEMORY_OPTION_KEY: &str = "max_memory";
+
+/// The error message reported when [`FLOW_MAX_MEMORY_OPTION_KEY`] is used in a
+/// build that does not support it.
+///
+/// `max_memory` is an enterprise flow option, so a build compiled without the
+/// `enterprise` feature must reject it rather than silently run the flow without
+/// its budget. Shared with the query engine and the flownode so the wording
+/// cannot drift between the layers that have to refuse it.
+pub const FLOW_MAX_MEMORY_UNSUPPORTED_MSG: &str =
+    "flow option `max_memory` requires the enterprise edition";
+
+/// Flow options that only the `enterprise` feature supports, listed after the
+/// always supported ones in the unknown-option error.
+#[cfg(feature = "enterprise")]
+const ENTERPRISE_FLOW_OPTIONS: [&str; 1] = [FLOW_MAX_MEMORY_OPTION_KEY];
+
+/// The default build supports no enterprise-only flow option, so `max_memory` is
+/// never advertised as supported here.
+#[cfg(not(feature = "enterprise"))]
+const ENTERPRISE_FLOW_OPTIONS: [&str; 0] = [];
 
 /// Internal transient key used to pass the typed `EVAL OFFSET` (whole seconds)
 /// from the operator to meta through `CreateFlowExpr.flow_options`. Inserted by
@@ -523,6 +545,22 @@ pub fn defer_on_missing_source(flow_task: &CreateFlowTask) -> Result<bool> {
         .map(|value| value.unwrap_or(false))
 }
 
+/// The flow options this build supports, in the order the unknown-option error
+/// lists them.
+///
+/// [`FLOW_MAX_MEMORY_OPTION_KEY`] is an enterprise flow option, so it only shows
+/// up here when the `enterprise` feature is enabled - a default build rejects it
+/// as an unknown option and must not advertise it.
+fn supported_flow_options() -> String {
+    [
+        DEFER_ON_MISSING_SOURCE_KEY,
+        FLOW_EXPERIMENTAL_ENABLE_INCREMENTAL_READ_KEY,
+    ]
+    .into_iter()
+    .chain(ENTERPRISE_FLOW_OPTIONS)
+    .join(", ")
+}
+
 pub fn validate_flow_options(flow_task: &CreateFlowTask) -> Result<()> {
     // Reject non-positive eval_interval_secs (zero or negative).
     if let Some(secs) = flow_task.eval_interval_secs
@@ -566,12 +604,16 @@ pub fn validate_flow_options(flow_task: &CreateFlowTask) -> Result<()> {
         match key.as_str() {
             DEFER_ON_MISSING_SOURCE_KEY
             | FLOW_EXPERIMENTAL_ENABLE_INCREMENTAL_READ_KEY
-            | FLOW_MAX_MEMORY_OPTION_KEY
             | FlowType::FLOW_TYPE_KEY => {}
+            // Enterprise-only flow option: the default build rejects it through
+            // the unknown-option branch below.
+            #[cfg(feature = "enterprise")]
+            FLOW_MAX_MEMORY_OPTION_KEY => {}
             unknown => {
                 return InvalidFlowOptionSnafu {
                     err_msg: format!(
-                        "unknown flow option '{unknown}', supported options: {DEFER_ON_MISSING_SOURCE_KEY}, {FLOW_EXPERIMENTAL_ENABLE_INCREMENTAL_READ_KEY}, {FLOW_MAX_MEMORY_OPTION_KEY}"
+                        "unknown flow option '{unknown}', supported options: {}",
+                        supported_flow_options()
                     ),
                 }
                 .fail();
@@ -594,6 +636,9 @@ pub fn validate_flow_options(flow_task: &CreateFlowTask) -> Result<()> {
         })?;
     }
 
+    // `max_memory` is an enterprise flow option: parse and validate its value
+    // only where it is supported.
+    #[cfg(feature = "enterprise")]
     if let Some(value) = flow_task.flow_options.get(FLOW_MAX_MEMORY_OPTION_KEY) {
         let bytes = ReadableSize::from_str(value).map_err(|_| {
             InvalidFlowOptionSnafu {
@@ -614,21 +659,27 @@ pub fn validate_flow_options(flow_task: &CreateFlowTask) -> Result<()> {
     }
 
     defer_on_missing_source(flow_task)?;
-    let flow_type = get_flow_type_from_options(flow_task)?;
     // The memory budget is only enforced on the batching execution path, and
     // streaming flows ignore `flow_options` entirely (see
     // `src/flow/src/adapter.rs`), so accepting it there would be a silent no-op.
-    if flow_type == FlowType::Streaming
-        && flow_task
-            .flow_options
-            .contains_key(FLOW_MAX_MEMORY_OPTION_KEY)
+    // Only reachable with the enterprise feature, the only build that accepts
+    // `max_memory` at all. `get_flow_type_from_options` is also applied by the
+    // procedure itself, so skipping it here loses no validation.
+    #[cfg(feature = "enterprise")]
     {
-        return InvalidFlowOptionSnafu {
-            err_msg: format!(
-                "flow option '{FLOW_MAX_MEMORY_OPTION_KEY}' is only supported for batching flows"
-            ),
+        let flow_type = get_flow_type_from_options(flow_task)?;
+        if flow_type == FlowType::Streaming
+            && flow_task
+                .flow_options
+                .contains_key(FLOW_MAX_MEMORY_OPTION_KEY)
+        {
+            return InvalidFlowOptionSnafu {
+                err_msg: format!(
+                    "flow option '{FLOW_MAX_MEMORY_OPTION_KEY}' is only supported for batching flows"
+                ),
+            }
+            .fail();
         }
-        .fail();
     }
     Ok(())
 }

@@ -40,9 +40,11 @@ use common_error::ext::BoxedError;
 #[cfg(feature = "enterprise")]
 use common_meta::cache_invalidator::CacheInvalidatorRef;
 use common_meta::cache_invalidator::Context;
+#[cfg(feature = "enterprise")]
+use common_meta::ddl::create_flow::FLOW_MAX_MEMORY_OPTION_KEY;
 use common_meta::ddl::create_flow::{
-    DEFER_ON_MISSING_SOURCE_KEY, FLOW_EXPERIMENTAL_ENABLE_INCREMENTAL_READ_KEY,
-    FLOW_MAX_MEMORY_OPTION_KEY, FlowType, INTERNAL_EVAL_OFFSET_KEY, INTERNAL_EVAL_SCHEDULE_KEY,
+    DEFER_ON_MISSING_SOURCE_KEY, FLOW_EXPERIMENTAL_ENABLE_INCREMENTAL_READ_KEY, FlowType,
+    INTERNAL_EVAL_OFFSET_KEY, INTERNAL_EVAL_SCHEDULE_KEY,
 };
 use common_meta::instruction::CacheIdent;
 #[cfg(feature = "enterprise")]
@@ -143,11 +145,17 @@ impl Default for DdlSubmitOptions {
     }
 }
 
+/// Flow option keys the operator accepts, in the order the unknown-option error
+/// lists them.
+///
+/// Only the default build needs this list: it is what the unknown-option error
+/// advertises, while the enterprise build passes every unknown option through to
+/// meta. `max_memory` is an enterprise flow option, so it is deliberately absent
+/// here - the default build rejects it as unknown and must not advertise it.
 #[cfg(not(feature = "enterprise"))]
-const ALLOWED_FLOW_OPTIONS: [&str; 3] = [
+const ALLOWED_FLOW_OPTIONS: [&str; 2] = [
     DEFER_ON_MISSING_SOURCE_KEY,
     FLOW_EXPERIMENTAL_ENABLE_INCREMENTAL_READ_KEY,
-    FLOW_MAX_MEMORY_OPTION_KEY,
 ];
 
 fn build_procedure_id_output(procedure_id: &str) -> Result<Output> {
@@ -241,6 +249,8 @@ fn validate_and_normalize_flow_options(
                     normalize_flow_bool_option(&key, &value)?
                 }
                 // A `ReadableSize` string such as `512MB`; validated by meta.
+                // Enterprise-only: the default build rejects it as unknown below.
+                #[cfg(feature = "enterprise")]
                 FLOW_MAX_MEMORY_OPTION_KEY => value,
                 #[cfg(feature = "enterprise")]
                 _ => value,
@@ -3517,6 +3527,7 @@ mod test {
         );
     }
 
+    #[cfg(feature = "enterprise")]
     #[test]
     fn test_validate_and_normalize_flow_options_accepts_max_memory() {
         let options =
@@ -3526,6 +3537,25 @@ mod test {
         assert_eq!(
             validate_and_normalize_flow_options(options.clone(), None).unwrap(),
             options
+        );
+    }
+
+    /// `max_memory` is an enterprise flow option: a default build rejects it as
+    /// unknown, and the error must not list it among the supported options.
+    #[cfg(not(feature = "enterprise"))]
+    #[test]
+    fn test_validate_and_normalize_flow_options_rejects_max_memory() {
+        let err = validate_and_normalize_flow_options(
+            // Spelled out on purpose: the default build does not expose the key.
+            HashMap::from([("max_memory".to_string(), "512MB".to_string())]),
+            None,
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            "Invalid SQL, error: unknown flow option 'max_memory', supported options: \
+             defer_on_missing_source, experimental_enable_incremental_read",
+            err.to_string()
         );
     }
 

@@ -166,6 +166,12 @@ pub struct TaskConfig {
     /// Resolved per-flow memory budget in bytes, parsed from the flow's
     /// `max_memory` option at creation time. Carried to the frontend as the
     /// `flow.max_memory_bytes` extension with every query this task issues.
+    ///
+    /// Never set on a build without the `enterprise` feature:
+    /// `BatchingEngine::max_memory_bytes_for_flow_options` refuses the option
+    /// there, so the field - and therefore the extension below - stays `None` /
+    /// empty. It is kept ungated because it is the mechanism the enterprise build
+    /// activates, and gating it would fork the task's runtime behaviour.
     pub max_memory_bytes: Option<u64>,
 }
 
@@ -519,6 +525,11 @@ impl BatchingTask {
     /// flow-owned statements issued through `FrontendClient::sql`); a path that
     /// drops them while a budget is configured escapes the budget and can run
     /// unbounded.
+    ///
+    /// Unreachable on a build without the `enterprise` feature: a flow whose
+    /// options contain `max_memory` fails to be created or restored there, so
+    /// [`TaskConfig::max_memory_bytes`] is always `None`. Kept ungated because it
+    /// is the mechanism the enterprise build drives.
     pub fn memory_budget_extensions(&self) -> Vec<(String, String)> {
         let Some(max_memory_bytes) = self.config.max_memory_bytes else {
             return Vec::new();

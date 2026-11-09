@@ -3507,6 +3507,7 @@ mod tests {
     /// A Flow's declared memory budget must be resolved at the request entry: the
     /// context is captured during table lookup - before `engine_context` runs -
     /// and re-entered later, so a scope attached only there would never reach it.
+    #[cfg(feature = "enterprise")]
     #[tokio::test]
     async fn test_grpc_do_query_attaches_flow_memory_scope_before_execution() -> TestResult<()> {
         let interceptor = Arc::new(CapturingQueryContextInterceptor::new());
@@ -3568,6 +3569,51 @@ mod tests {
             .register(&first_pool);
         reservation.try_grow(4096).unwrap();
         assert_eq!(4096, nested_pool.reserved());
+
+        Ok(())
+    }
+
+    /// `max_memory` is an enterprise flow option: a default build must fail a
+    /// request that declares a budget instead of running it on the node pool,
+    /// where the missing limit would be invisible.
+    #[cfg(not(feature = "enterprise"))]
+    #[tokio::test]
+    async fn test_grpc_do_query_rejects_flow_memory_budget_on_default_build() -> TestResult<()> {
+        let interceptor = Arc::new(CapturingQueryContextInterceptor::new());
+        let instance = test_instance_with_insert_select_interceptor(interceptor.clone()).await?;
+
+        let query_ctx = Arc::new(
+            QueryContextBuilder::default()
+                .set_extension(
+                    query::options::FLOW_MAX_MEMORY_BYTES.to_string(),
+                    "4096".to_string(),
+                )
+                .set_extension(query::options::FLOW_ID.to_string(), "42".to_string())
+                .build(),
+        );
+        let request = Request::Query(api::v1::QueryRequest {
+            query: Some(Query::Sql("SELECT 1".to_string())),
+        });
+        let err = servers::query_handler::grpc::GrpcQueryHandler::do_query(
+            &instance,
+            request,
+            query_ctx.clone(),
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(StatusCode::Unsupported, err.status_code());
+        assert!(
+            err.output_msg()
+                .contains("flow option `max_memory` requires the enterprise edition"),
+            "unexpected error: {}",
+            err.output_msg()
+        );
+        // The request entry still never mutates the caller's context...
+        assert!(query_ctx.memory_scope().is_none());
+        // ...and the context planning saw carries no scope either: the refusal
+        // happens when the engine resolves the budget, not at the entry.
+        assert!(interceptor.take().memory_scope().is_none());
 
         Ok(())
     }

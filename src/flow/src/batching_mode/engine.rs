@@ -15,12 +15,14 @@
 //! Batching mode engine
 
 use std::collections::{BTreeMap, HashMap, HashSet};
+#[cfg(feature = "enterprise")]
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 
 use api::v1::flow::DirtyWindowRequests;
 use catalog::CatalogManagerRef;
+#[cfg(feature = "enterprise")]
 use common_base::readable_size::ReadableSize;
 use common_error::ext::BoxedError;
 use common_meta::ddl::create_flow::{
@@ -521,31 +523,53 @@ impl BatchingEngine {
     /// Meta already validates the option, so this is defense in depth: an
     /// unparsable or non-positive value fails flow creation instead of being
     /// silently dropped.
+    ///
+    /// # Enterprise gating
+    ///
+    /// `max_memory` is an enterprise flow option. A build without the
+    /// `enterprise` feature must not start the flow unbudgeted either: a flownode
+    /// can be handed persisted flow options directly when it recreates flows
+    /// after a restart (`FlowDualEngine::recover`), which bypasses the meta
+    /// validator, so the option is refused with [`Error::Unsupported`] here. The
+    /// refusal surfaces as that flow's recovery error instead of as a running
+    /// flow whose declared limit is silently ignored.
     pub(crate) fn max_memory_bytes_for_flow_options(
         flow_options: &HashMap<String, String>,
     ) -> Result<Option<u64>, Error> {
-        flow_options
-            .get(FLOW_MAX_MEMORY_OPTION_KEY)
-            .map(|value| {
-                let bytes = ReadableSize::from_str(value).map_err(|_| {
-                    InvalidQuerySnafu {
-                        reason: format!(
-                            "Invalid flow option {FLOW_MAX_MEMORY_OPTION_KEY}: {value}, expect a size like '512MB'"
-                        ),
-                    }
-                    .build()
-                })?;
-                ensure!(
-                    bytes.as_bytes() > 0,
-                    InvalidQuerySnafu {
-                        reason: format!(
-                            "Invalid flow option {FLOW_MAX_MEMORY_OPTION_KEY}: {value}, the memory budget must be positive"
-                        ),
-                    }
-                );
-                Ok(bytes.as_bytes())
-            })
-            .transpose()
+        #[cfg(not(feature = "enterprise"))]
+        {
+            if flow_options.contains_key(FLOW_MAX_MEMORY_OPTION_KEY) {
+                return UnsupportedSnafu {
+                    reason: common_meta::ddl::create_flow::FLOW_MAX_MEMORY_UNSUPPORTED_MSG
+                        .to_string(),
+                }
+                .fail();
+            }
+            Ok(None)
+        }
+        #[cfg(feature = "enterprise")]
+        {
+            let Some(value) = flow_options.get(FLOW_MAX_MEMORY_OPTION_KEY) else {
+                return Ok(None);
+            };
+            let bytes = ReadableSize::from_str(value).map_err(|_| {
+                InvalidQuerySnafu {
+                    reason: format!(
+                        "Invalid flow option {FLOW_MAX_MEMORY_OPTION_KEY}: {value}, expect a size like '512MB'"
+                    ),
+                }
+                .build()
+            })?;
+            ensure!(
+                bytes.as_bytes() > 0,
+                InvalidQuerySnafu {
+                    reason: format!(
+                        "Invalid flow option {FLOW_MAX_MEMORY_OPTION_KEY}: {value}, the memory budget must be positive"
+                    ),
+                }
+            );
+            Ok(Some(bytes.as_bytes()))
+        }
     }
 
     fn table_options_enable_append_mode(extra_options: &HashMap<String, String>) -> bool {
@@ -1169,6 +1193,7 @@ mod tests {
     /// `max_memory` is resolved from the flow options at creation time; an
     /// absent option yields no budget, an unparsable or non-positive value
     /// fails creation instead of silently dropping the limit.
+    #[cfg(feature = "enterprise")]
     #[test]
     fn test_max_memory_bytes_for_flow_options() {
         assert_eq!(
@@ -1204,6 +1229,57 @@ mod tests {
                 "unexpected error for {value}: {err:?}"
             );
         }
+    }
+
+    /// A default build does not support the enterprise-only `max_memory` option:
+    /// an absent option still yields no budget, a declared one is refused instead
+    /// of dropping the limit.
+    #[cfg(not(feature = "enterprise"))]
+    #[test]
+    fn test_max_memory_bytes_for_flow_options_requires_enterprise() {
+        assert_eq!(
+            BatchingEngine::max_memory_bytes_for_flow_options(&HashMap::new()).unwrap(),
+            None
+        );
+
+        for value in ["512MB", "not-a-size", "0"] {
+            let err = BatchingEngine::max_memory_bytes_for_flow_options(&HashMap::from([(
+                FLOW_MAX_MEMORY_OPTION_KEY.to_string(),
+                value.to_string(),
+            )]))
+            .unwrap_err();
+            assert!(
+                matches!(err, Error::Unsupported { .. }),
+                "unexpected error for {value}: {err:?}"
+            );
+            assert_eq!(
+                "Unsupported: flow option `max_memory` requires the enterprise edition",
+                err.to_string()
+            );
+        }
+    }
+
+    /// The flownode can be handed persisted flow options directly - flow recovery
+    /// recreates each flow from its `FlowInfoValue.options` - so the create path
+    /// itself must refuse the unsupported option rather than start the flow
+    /// without its budget.
+    #[cfg(not(feature = "enterprise"))]
+    #[tokio::test]
+    async fn test_create_flow_rejects_max_memory_on_default_build() {
+        let engine = new_test_engine().await;
+        let mut args = flow_create_args(11, "max_memory_rejected");
+        args.flow_options
+            .insert(FLOW_MAX_MEMORY_OPTION_KEY.to_string(), "512MB".to_string());
+
+        let err = engine.create_flow_inner(args).await.unwrap_err();
+        assert!(
+            matches!(err, Error::Unsupported { .. }),
+            "unexpected error: {err:?}"
+        );
+        assert_eq!(
+            "Unsupported: flow option `max_memory` requires the enterprise edition",
+            err.to_string()
+        );
     }
 
     async fn new_test_engine() -> BatchingEngine {
