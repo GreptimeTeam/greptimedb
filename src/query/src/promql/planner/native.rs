@@ -110,10 +110,6 @@ pub(crate) fn native_promql_requested(query_ctx: &QueryContextRef) -> bool {
         .is_some_and(|value| value.eq_ignore_ascii_case("true"))
 }
 
-/// The analyzer rule an engine that plans distributed statements installs on its session; see
-/// [`DistPlannerAnalyzer`](crate::dist_plan::analyzer::DistPlannerAnalyzer).
-const DIST_PLANNER_RULE: &str = "DistPlannerAnalyzer";
-
 /// Whether a plan built here is split into a frontend plan over regions reached over the wire.
 ///
 /// This is the one condition under which every scan this route prepares has to be a
@@ -123,16 +119,9 @@ const DIST_PLANNER_RULE: &str = "DistPlannerAnalyzer";
 /// keep running region-locally, so those stay and this returns `false`.
 ///
 /// An engine that plans no distributed statement plans no region at all, and its plans are the
-/// standalone ones: it installs the distributed planner as an analyzer rule exactly when it was
-/// built to split statements, so the rule says whether this engine has a region to satisfy.
+/// standalone ones. The engine records whether it was built to split statements.
 fn plans_over_remote_regions(query_engine_state: &QueryEngineState) -> bool {
-    !query_engine_state.in_process_region_transport()
-        && query_engine_state
-            .session_state()
-            .analyzer()
-            .rules
-            .iter()
-            .any(|rule| rule.name() == DIST_PLANNER_RULE)
+    !query_engine_state.in_process_region_transport() && query_engine_state.with_dist_planner()
 }
 
 /// Whether this executable plan is the native raw PromQL topology, the one plan shape whose
@@ -1314,7 +1303,7 @@ impl PromPlanner {
         // what each of them reads.
         if required_placement || matches!(locality, InputLocality::SinglePartition) {
             let segment_metric = if cross_table { None } else { metric.clone() };
-            let plan = Box::pin(segment_tree(
+            let plan = segment_tree(
                 prom_expr,
                 &tree,
                 &children,
@@ -1335,8 +1324,7 @@ impl PromPlanner {
                 // a column that is not a tag. An unpartitioned table's scans are whole in one
                 // region, so its cuts keep the bare-scan form.
                 self_contained || any_split_series || (per_source_inputs && any_partitioned),
-            ))
-            .await?;
+            )?;
             if let Some(plan) = plan {
                 return Ok(Some((plan, single_input_context)));
             }
@@ -2247,7 +2235,7 @@ fn build_inner_segment(
 /// order, and recursive segments publish frames for their parents to consume. Only the statement
 /// root publishes rows.
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
-async fn segment_tree(
+fn segment_tree(
     prom_expr: &PromExpr,
     tree: &NativeTree,
     children: &[LogicalPlan],
@@ -2318,7 +2306,7 @@ async fn segment_tree(
                 let Some(cut_tree) = NativeTree::try_new(cut.clone()).ok() else {
                     return Ok(None);
                 };
-                let plan = Box::pin(segment_tree(
+                let plan = segment_tree(
                     prom_expr,
                     &cut_tree,
                     &current_children,
@@ -2333,8 +2321,7 @@ async fn segment_tree(
                     canonical_segmentation,
                     root_kind,
                     remote_raw_boundary,
-                ))
-                .await?;
+                )?;
                 match plan {
                     Some(plan) => {
                         let Some(cut_tags) = fused_output_tags(cut, &current_tags) else {
@@ -3434,7 +3421,8 @@ mod tests {
         NativeType, aggregate_reads_histogram, calls_rate_or_increase, collect_selectors,
         cut_segments, fused_output_schema, fused_output_tags, hybrid_binary_admitted,
         independent_scan_pair, native_output_tags, native_promql_requested,
-        native_raw_plan_bounds_region_reads, node_children, scan_time_filter,
+        native_raw_plan_bounds_region_reads, node_children, plans_over_remote_regions,
+        scan_time_filter,
     };
 
     #[test]
@@ -3451,6 +3439,43 @@ mod tests {
         let query = "avg_over_time(abs(x)[10m:1m])";
         let expr = promql_parser::parser::parse(query).unwrap();
         assert!(!calls_rate_or_increase(&expr), "{query}");
+    }
+
+    #[test]
+    fn plans_over_remote_regions_matches_engine_construction() {
+        use catalog::memory::new_memory_catalog_manager;
+        use common_base::Plugins;
+
+        use crate::options::QueryOptions;
+        use crate::query_engine::QueryEngineState;
+
+        for (with_dist_planner, in_process_region_transport, expected) in [
+            (false, false, false),
+            (false, true, false),
+            (true, false, true),
+            (true, true, false),
+        ] {
+            let state = QueryEngineState::try_new_with_region_transport(
+                new_memory_catalog_manager().unwrap(),
+                None,
+                None,
+                None,
+                None,
+                None,
+                with_dist_planner,
+                in_process_region_transport,
+                Plugins::default(),
+                QueryOptions::default(),
+            )
+            .unwrap();
+            assert_eq!(state.with_dist_planner(), with_dist_planner);
+            assert_eq!(
+                plans_over_remote_regions(&state),
+                expected,
+                "with_dist_planner={with_dist_planner}, in_process_region_transport={in_process_region_transport}"
+            );
+            assert_eq!(plans_over_remote_regions(&state.clone()), expected);
+        }
     }
 
     #[test]
