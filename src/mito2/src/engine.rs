@@ -81,6 +81,7 @@ mod sequence_test;
 mod set_role_state_test;
 #[cfg(test)]
 mod shared_file_test;
+mod sketch;
 #[cfg(test)]
 mod skip_wal_test;
 #[cfg(test)]
@@ -146,6 +147,7 @@ use store_api::region_info::RegionInfoEntry;
 use store_api::region_request::{
     AffectedRows, RegionCatchupRequest, RegionOpenRequest, RegionPutRequest, RegionRequest,
 };
+use store_api::sketch::SketchReader;
 use store_api::sst_entry::{self, ManifestSstEntry, PuffinIndexMetaEntry, StorageSstEntry};
 use store_api::storage::{FileId, FileRefsManifest, RegionId, ScanRequest, SequenceNumber};
 use tokio::sync::{Semaphore, oneshot};
@@ -179,6 +181,7 @@ use crate::sst::file::{FileMeta, RegionFileId, RegionIndexId};
 use crate::sst::file_ref::FileReferenceManagerRef;
 use crate::sst::index::intermediate::IntermediateManager;
 use crate::sst::index::puffin_manager::PuffinManagerFactory;
+use crate::sst::index::sketch_reader::SketchReadHandlerRef;
 use crate::wal::entry_distributor::{
     DEFAULT_ENTRY_RECEIVER_BUFFER_SIZE, build_wal_entry_distributor_and_receivers,
 };
@@ -245,6 +248,7 @@ impl<'a, S: LogStore> MitoEngineBuilder<'a, S> {
         // Extract the region hook before `plugins` is moved into the WorkerGroup,
         // so the engine (and thus the GC worker) can fire `on_region_gc`.
         let region_hook = self.plugins.get::<RegionHookRef>();
+        let sketch_read_handler = self.plugins.get::<SketchReadHandlerRef>();
         let workers = WorkerGroup::start(
             self.data_home,
             config.clone(),
@@ -277,6 +281,7 @@ impl<'a, S: LogStore> MitoEngineBuilder<'a, S> {
             wal_raw_entry_reader: RwLock::new(Some(wal_raw_entry_reader)),
             scan_memory_tracker,
             region_hook,
+            sketch_read_handler,
             #[cfg(feature = "enterprise")]
             extension_range_provider_factory: None,
         };
@@ -860,6 +865,8 @@ struct EngineInner {
     wal_raw_entry_reader: RwLock<Option<Arc<dyn RawEntryReader>>>,
     /// Memory tracker for table scans.
     scan_memory_tracker: QueryMemoryTracker,
+    /// Optional node-scoped statistics reader.
+    sketch_read_handler: Option<SketchReadHandlerRef>,
     /// The region hook (if any) registered via plugins; exposed for the GC worker
     /// to fire [`RegionHook::on_region_gc`].
     region_hook: Option<RegionHookRef>,
@@ -1505,6 +1512,13 @@ fn map_batch_responses(responses: Vec<(RegionId, Result<AffectedRows>)>) -> Batc
 
 #[async_trait]
 impl RegionEngine for MitoEngine {
+    fn sketch_reader(&self) -> Option<&dyn SketchReader> {
+        self.inner
+            .sketch_read_handler
+            .as_ref()
+            .map(|_| self as &dyn SketchReader)
+    }
+
     fn name(&self) -> &str {
         MITO_ENGINE_NAME
     }
@@ -1837,6 +1851,7 @@ impl MitoEngine {
                 wal_raw_entry_reader: RwLock::new(Some(wal_raw_entry_reader)),
                 scan_memory_tracker,
                 region_hook: None,
+                sketch_read_handler: None,
                 #[cfg(feature = "enterprise")]
                 extension_range_provider_factory: None,
             }),
