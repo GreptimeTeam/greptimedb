@@ -32,6 +32,7 @@ use datatypes::arrow::array::{
 };
 use datatypes::arrow::compute::cast;
 use datatypes::arrow::datatypes::{DataType, TimeUnit};
+use datatypes::prelude::ConcreteDataType;
 use frontend::instance::Instance;
 use query::datafusion::{QUERY_FALLBACK_HINT, QUERY_PARALLELISM_HINT};
 use query::dist_plan::MergeScanExec;
@@ -9385,26 +9386,14 @@ const CTE_NATIVE_STATEMENT: &str =
 const CTE_NATIVE_ORDERED_STATEMENT: &str =
     "WITH tql AS (TQL EVAL (0, 3, '1s') cte_native + cte_native) SELECT * FROM tql ORDER BY ts";
 
-/// The CTE column aliases the aliased statement uses on each route.
+/// [`CTE_NATIVE_STATEMENT`] with an explicit CTE column list plus an outer projection and filter
+/// over the names it declares: the aliasing projection the CTE adds, and SQL above it that names
+/// what it published.
 ///
-/// A CTE alias list is positional, and the two routes publish the CTE's columns in different
-/// orders: the existing planner puts the label set first (`host, ts, value`), the fused plan puts
-/// the time index first (`ts, val, host`). Both lists below name the same three columns - the time
-/// index `t`, the value `v` and the label `site` - so the outer SQL of
-/// [`cte_native_aliased_statement`] is one statement on both routes and the rows it answers are
-/// comparable.
-const CTE_NATIVE_LEGACY_ALIASES: &str = "(site, t, v)";
-const CTE_NATIVE_NATIVE_ALIASES: &str = "(t, v, site)";
-
-/// [`CTE_NATIVE_STATEMENT`] with explicit CTE column aliases plus an outer projection and filter
-/// over the aliased columns: the aliasing projection the CTE adds, and SQL above it that names what
-/// it published.
-fn cte_native_aliased_statement(aliases: &str) -> String {
-    format!(
-        "WITH tql {aliases} AS (TQL EVAL (0, 3, '1s') cte_native + cte_native) \
-         SELECT t, v, site FROM tql WHERE v > 5 ORDER BY t"
-    )
-}
+/// The list is positional, so it is one statement only because the columns the CTE publishes are
+/// the same on both routes: the label `site`, the time index `t` and the value `v`, in that order.
+const CTE_NATIVE_ALIASED_STATEMENT: &str = "WITH tql (site, t, v) AS (TQL EVAL (0, 3, '1s') cte_native + cte_native) \
+     SELECT t, v, site FROM tql WHERE v > 5 ORDER BY t";
 
 /// The rows [`CTE_NATIVE_STATEMENT`] answers: `cte_native + cte_native` doubles every sample, so
 /// `1, 3, 6, 10` becomes `2, 6, 12, 20`.
@@ -9426,6 +9415,53 @@ fn cte_native_filtered_rows() -> Vec<(i64, std::collections::BTreeMap<String, St
         (1_000, site(), 6.0),
         (2_000, site(), 12.0),
         (3_000, site(), 20.0),
+    ]
+}
+
+/// The columns a statement publishes, in order: the names and types its SQL sees.
+///
+/// A CTE's columns are SQL-visible, and a column list the CTE declares is applied to them by
+/// position, so this is what a route may not change.
+fn cte_native_published_columns(output: &Output) -> Vec<(String, ConcreteDataType)> {
+    let schema = match &output.data {
+        OutputData::Stream(stream) => stream.schema(),
+        OutputData::RecordBatches(batches) => batches.schema(),
+        _ => unreachable!("TQL EVAL returns record batches"),
+    };
+    schema
+        .column_schemas()
+        .iter()
+        .map(|column| (column.name.clone(), column.data_type.clone()))
+        .collect()
+}
+
+/// The columns [`CTE_NATIVE_STATEMENT`] publishes on both routes: the existing planner's names,
+/// order and types. The fused plan publishes the time index first and names the value after the
+/// tree's own field, so the CTE publishes this over it instead.
+fn cte_native_published_columns_expected() -> Vec<(String, ConcreteDataType)> {
+    vec![
+        ("host".to_string(), ConcreteDataType::string_datatype()),
+        (
+            "ts".to_string(),
+            ConcreteDataType::timestamp_millisecond_datatype(),
+        ),
+        (
+            "lhs.val + rhs.val".to_string(),
+            ConcreteDataType::float64_datatype(),
+        ),
+    ]
+}
+
+/// The columns [`CTE_NATIVE_ALIASED_STATEMENT`] publishes: the names its CTE declares, in the order
+/// it declares them, with the types the columns they name carry.
+fn cte_native_aliased_columns_expected() -> Vec<(String, ConcreteDataType)> {
+    vec![
+        (
+            "t".to_string(),
+            ConcreteDataType::timestamp_millisecond_datatype(),
+        ),
+        ("v".to_string(), ConcreteDataType::float64_datatype()),
+        ("site".to_string(), ConcreteDataType::string_datatype()),
     ]
 }
 
@@ -9529,22 +9565,27 @@ async fn cte_native_statement_runs_the_fused_plan() {
 
     // The existing plan answers the statement first, so the native answer has an oracle.
     observer.clear();
-    let legacy_rows =
-        cte_native_rows(native_tql_output(&instance, CTE_NATIVE_ORDERED_STATEMENT, false).await)
-            .await;
+    let legacy_output = native_tql_output(&instance, CTE_NATIVE_ORDERED_STATEMENT, false).await;
+    let legacy_columns = cte_native_published_columns(&legacy_output);
+    let legacy_rows = cte_native_rows(legacy_output).await;
     assert!(
         observer.fused().is_none(),
         "the route is off, so no native node may run:\n{}",
         cte_native_observed_plan_trees(&observer)
+    );
+    assert_eq!(
+        legacy_columns,
+        cte_native_published_columns_expected(),
+        "legacy columns"
     );
     assert_eq!(legacy_rows, cte_native_expected_rows(), "legacy");
 
     // The native plan: one fused node answers both occurrences, and every row comes back in the
     // order the statement asked for.
     observer.clear();
-    let native_rows =
-        cte_native_rows(native_tql_output(&instance, CTE_NATIVE_ORDERED_STATEMENT, true).await)
-            .await;
+    let native_output = native_tql_output(&instance, CTE_NATIVE_ORDERED_STATEMENT, true).await;
+    let native_columns = cte_native_published_columns(&native_output);
+    let native_rows = cte_native_rows(native_output).await;
     let fused = cte_native_observed_fused(&observer);
     assert_eq!(
         1,
@@ -9574,6 +9615,15 @@ async fn cte_native_statement_runs_the_fused_plan() {
         observer.take_raw_sources().is_empty(),
         "one logical table keeps both scans region-local instead of one raw source per input"
     );
+    assert_eq!(
+        native_columns,
+        cte_native_published_columns_expected(),
+        "the CTE publishes the existing planner's columns over the fused plan"
+    );
+    assert_eq!(
+        native_columns, legacy_columns,
+        "names, order and types do not depend on the route"
+    );
     assert_eq!(native_rows, cte_native_expected_rows(), "native");
     assert_eq!(native_rows, legacy_rows);
 
@@ -9592,12 +9642,14 @@ async fn cte_native_statement_runs_the_fused_plan() {
     );
 }
 
-/// The CTE's own column aliases and an outer projection and filter over them place nothing: the
-/// fused node still answers the statement, and the rows are the aliased statement's rows.
+/// The CTE's own column list and an outer projection and filter over it place nothing: the fused
+/// node still answers the statement, and the columns and rows are the ones the existing plan
+/// answers with.
 ///
-/// Each route aliases its own column order to the same three names, so the answer is one set of
-/// rows: the aliasing projection the CTE adds, the outer projection that reads the aliases and the
-/// outer filter that keeps three of the four rows are all above the node, and none of them moves it.
+/// The declared list is positional, so it is one statement only because both routes publish the CTE
+/// the same way: the same columns, in the same order, with the same types. What the list declares,
+/// what the outer projection reads and what the outer filter keeps are all above the node, and none
+/// of them moves it.
 #[tokio::test(flavor = "multi_thread")]
 async fn cte_native_column_aliases_and_outer_filter_keep_the_fused_plan() {
     common_telemetry::init_default_ut_logging();
@@ -9606,21 +9658,26 @@ async fn cte_native_column_aliases_and_outer_filter_keep_the_fused_plan() {
     let instance = standalone.fe_instance().clone();
     execute_all(&instance, CTE_NATIVE_FIXTURE, QueryContext::arc()).await;
 
-    let legacy_statement = cte_native_aliased_statement(CTE_NATIVE_LEGACY_ALIASES);
     observer.clear();
-    let legacy_rows =
-        cte_native_rows(native_tql_output(&instance, &legacy_statement, false).await).await;
+    let legacy_output = native_tql_output(&instance, CTE_NATIVE_ALIASED_STATEMENT, false).await;
+    let legacy_columns = cte_native_published_columns(&legacy_output);
+    let legacy_rows = cte_native_rows(legacy_output).await;
     assert!(
         observer.fused().is_none(),
         "the route is off, so no native node may run:\n{}",
         cte_native_observed_plan_trees(&observer)
     );
+    assert_eq!(
+        legacy_columns,
+        cte_native_aliased_columns_expected(),
+        "legacy columns"
+    );
     assert_eq!(legacy_rows, cte_native_filtered_rows(), "legacy");
 
-    let native_statement = cte_native_aliased_statement(CTE_NATIVE_NATIVE_ALIASES);
     observer.clear();
-    let native_rows =
-        cte_native_rows(native_tql_output(&instance, &native_statement, true).await).await;
+    let native_output = native_tql_output(&instance, CTE_NATIVE_ALIASED_STATEMENT, true).await;
+    let native_columns = cte_native_published_columns(&native_output);
+    let native_rows = cte_native_rows(native_output).await;
     assert_eq!(
         1,
         cte_native_observed_fused(&observer).len(),
@@ -9635,6 +9692,15 @@ async fn cte_native_column_aliases_and_outer_filter_keep_the_fused_plan() {
         joins.is_empty(),
         "a fused plan joins nothing, but these nodes ran: {joins:?}\n{}",
         cte_native_observed_plan_trees(&observer)
+    );
+    assert_eq!(
+        native_columns,
+        cte_native_aliased_columns_expected(),
+        "the declared names apply to the same columns on both routes"
+    );
+    assert_eq!(
+        native_columns, legacy_columns,
+        "names, order and types do not depend on the route"
     );
     assert_eq!(native_rows, cte_native_filtered_rows(), "native");
     assert_eq!(native_rows, legacy_rows);
@@ -9652,14 +9718,15 @@ async fn cte_native_without_the_hint_keeps_the_legacy_plan() {
     execute_all(&instance, CTE_NATIVE_FIXTURE, QueryContext::arc()).await;
 
     observer.clear();
-    let rows =
-        cte_native_rows(native_tql_output(&instance, CTE_NATIVE_ORDERED_STATEMENT, false).await)
-            .await;
+    let output = native_tql_output(&instance, CTE_NATIVE_ORDERED_STATEMENT, false).await;
+    let columns = cte_native_published_columns(&output);
+    let rows = cte_native_rows(output).await;
     assert!(
         cte_native_observed_fused(&observer).is_empty(),
         "the hint is off, so no fused node may run:\n{}",
         cte_native_observed_plan_trees(&observer)
     );
+    assert_eq!(columns, cte_native_published_columns_expected());
     assert_eq!(rows, cte_native_expected_rows());
 }
 
@@ -9692,10 +9759,18 @@ async fn distributed_cte_native_runs_the_fused_plan_over_raw_sources() {
         )
     };
 
-    let legacy_rows = cte_native_rows(query(false).await.remove(0).unwrap()).await;
+    let legacy_output = query(false).await.remove(0).unwrap();
+    let legacy_columns = cte_native_published_columns(&legacy_output);
+    let legacy_rows = cte_native_rows(legacy_output).await;
+    assert_eq!(
+        legacy_columns,
+        cte_native_published_columns_expected(),
+        "legacy columns"
+    );
     assert_eq!(legacy_rows, cte_native_expected_rows(), "legacy");
 
     let output = query(true).await.remove(0).unwrap();
+    let native_columns = cte_native_published_columns(&output);
     let plan = output.meta.plan.clone().expect("frontend physical plan");
     let names = {
         let mut names = Vec::new();
@@ -9738,6 +9813,15 @@ async fn distributed_cte_native_runs_the_fused_plan_over_raw_sources() {
         );
     }
     let rows = cte_native_rows(output).await;
+    assert_eq!(
+        native_columns,
+        cte_native_published_columns_expected(),
+        "the CTE publishes the existing planner's columns over the distributed fused plan"
+    );
+    assert_eq!(
+        native_columns, legacy_columns,
+        "names, order and types do not depend on the route or the deployment"
+    );
     assert_eq!(rows, cte_native_expected_rows(), "native");
     assert_eq!(rows, legacy_rows);
 }
