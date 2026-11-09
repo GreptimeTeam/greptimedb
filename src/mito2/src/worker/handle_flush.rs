@@ -14,9 +14,9 @@
 
 //! Handling flush related requests.
 
-use std::collections::HashSet;
-use std::sync::Arc;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::Ordering;
+use std::sync::{Arc, Mutex, Weak};
 
 use common_base::readable_size::ReadableSize;
 use common_telemetry::{debug, error, info};
@@ -25,10 +25,10 @@ use store_api::region_request::{RegionFlushReason, RegionFlushRequest};
 use store_api::storage::RegionId;
 
 use crate::config::{IndexBuildMode, MitoConfig};
-use crate::error::{RegionNotFoundSnafu, Result};
+use crate::error::{RegionBusySnafu, RegionNotFoundSnafu, Result};
 use crate::flush::{FlushReason, RegionFlushTask};
-use crate::region::MitoRegionRef;
 use crate::region::version::VersionRef;
+use crate::region::{MitoRegion, MitoRegionRef};
 use crate::request::{BuildIndexRequest, FlushFailed, FlushFinished, OnFailure, OptionOutputTx};
 use crate::sst::index::IndexBuildType;
 use crate::worker::RegionWorkerLoop;
@@ -37,6 +37,33 @@ use crate::worker::RegionWorkerLoop;
 pub(crate) struct RegionWriteBufferPressure {
     pub(crate) stalled_region_ids: HashSet<RegionId>,
     pub(crate) rejected_region_ids: HashSet<RegionId>,
+}
+
+/// Staging regions of a node that have received writes.
+///
+/// Workers share it to bound the memtables that stay unflushed until staging ends.
+#[derive(Debug, Default)]
+pub(crate) struct StagingRegions {
+    regions: Mutex<HashMap<RegionId, Weak<MitoRegion>>>,
+}
+
+pub(crate) type StagingRegionsRef = Arc<StagingRegions>;
+
+impl StagingRegions {
+    /// Records `region` and returns the memtable usage of the regions still in staging.
+    fn record_and_memtable_usage(&self, region: &MitoRegionRef) -> usize {
+        let mut regions = self.regions.lock().unwrap();
+        regions.insert(region.region_id, Arc::downgrade(region));
+        let mut usage = 0;
+        regions.retain(|_, region| match region.upgrade() {
+            Some(region) if region.is_staging_or_staged_edit() => {
+                usage += region_memtable_usage(&region.version());
+                true
+            }
+            _ => false,
+        });
+        usage
+    }
 }
 
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -100,8 +127,11 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         let mut pending_regions = vec![];
 
         for region in &regions {
-            if self.flush_scheduler.is_flush_requested(region.region_id) || !region.is_writable() {
-                // Already flushing or not writable.
+            if self.flush_scheduler.is_flush_requested(region.region_id)
+                || !region.is_writable()
+                || region.is_staging()
+            {
+                // Already flushing, not writable, or in staging, whose rows must stay in the WAL.
                 continue;
             }
 
@@ -193,6 +223,19 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 self.stalled_requests.estimated_size(&region_id),
             );
 
+            if region.is_staging() {
+                // Staging regions don't flush, so waiting would not release their memory. Writes
+                // are rejected at twice the region limit or at half of the engine's flush limit,
+                // which reserves memory headroom for other regions.
+                let staging_usage = self.staging_regions.record_and_memtable_usage(&region);
+                if status.should_reject
+                    || staging_usage >= self.write_buffer_manager.flush_limit() / 2
+                {
+                    pressure.rejected_region_ids.insert(region_id);
+                }
+                continue;
+            }
+
             if status.should_flush && !self.flush_scheduler.is_flush_requested(region.region_id) {
                 let task = self.new_flush_task(
                     &region,
@@ -242,8 +285,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             manifest_ctx: region.manifest_ctx.clone(),
             index_options: region.version().options.index_options.clone(),
             flush_semaphore: self.flush_semaphore.clone(),
-            is_staging: region.is_staging(),
-            partition_expr: region.maybe_staging_partition_expr_str(),
+            partition_expr: region.metadata().partition_expr.clone(),
             durability_barrier: self
                 .wal
                 .durability_barrier(region.region_id, &region.provider),
@@ -327,6 +369,18 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         // when handling flush request instead of in `schedule_flush` or `flush_finished`.
         self.update_topic_latest_entry_id(&region);
 
+        // A staging region must keep its WAL until staging ends, so it flushes nothing.
+        if region.is_staging() && !region.version().memtables.is_empty() {
+            sender.send(match request.reason {
+                // These only ask to advance the flushed position, which can wait.
+                Some(RegionFlushReason::RegionMigration | RegionFlushReason::RemoteWalPrune) => {
+                    Ok(0)
+                }
+                _ => RegionBusySnafu { region_id }.fail(),
+            });
+            return;
+        }
+
         let reason = resolve_flush_reason(request.reason, region.is_downgrading());
         let mut task =
             self.new_flush_task(&region, reason, request.row_group_size, self.config.clone());
@@ -350,6 +404,12 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 continue;
             }
             self.update_topic_latest_entry_id(region);
+            // The rows of a staging region must stay in the WAL until staging ends, so a staging
+            // region with rows pins its topic's prune point: the update above only keeps the id
+            // fresh while the memtable is empty.
+            if region.is_staging() {
+                continue;
+            }
 
             let auto_flush_interval = region
                 .version()
@@ -399,27 +459,14 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             }
         };
 
-        if request.is_staging {
-            // Skip the region metadata update.
-            info!(
-                "Skipping region metadata update for region {} in staging mode",
-                region_id
-            );
-            region.version_control.apply_edit(
-                None,
-                &request.memtables_to_remove,
-                region.file_purger.clone(),
-            );
-        } else {
-            region.version_control.apply_edit(
-                Some(request.edit.clone()),
-                &request.memtables_to_remove,
-                region.file_purger.clone(),
-            );
-        }
+        region.version_control.apply_edit(
+            Some(request.edit.clone()),
+            &request.memtables_to_remove,
+            region.file_purger.clone(),
+        );
 
-        // The flush has committed its manifest, including in staging mode. Count only
-        // its Parquet output, before WAL cleanup (which can fail after the commit).
+        // The flush has committed its manifest. Count only its Parquet output, before
+        // WAL cleanup (which can fail after the commit).
         let ingested_parquet_bytes = request
             .edit
             .files_to_add

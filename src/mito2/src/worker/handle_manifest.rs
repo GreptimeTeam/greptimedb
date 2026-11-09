@@ -30,7 +30,9 @@ use store_api::storage::{RegionId, SequenceNumber};
 use crate::cache::CacheManagerRef;
 use crate::cache::file_cache::{FileType, IndexKey};
 use crate::config::IndexBuildMode;
-use crate::error::{EditRegionSnafu, RegionBusySnafu, RegionNotFoundSnafu, Result};
+use crate::error::{
+    EditRegionSnafu, RegionBusySnafu, RegionNotFoundSnafu, RegionStateSnafu, Result,
+};
 use crate::manifest::action::{
     RegionChange, RegionEdit, RegionMetaAction, RegionMetaActionList, RegionTruncate, TruncateKind,
 };
@@ -310,6 +312,36 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             return RegionEditDispatch::Rejected;
         };
 
+        // A close-time flush ends with the region removed. A close that left staging keeps the
+        // region writable until then, so an edit meant for staging would run as a normal edit.
+        if self.flush_scheduler.has_close_time_flush(region_id) {
+            request
+                .waiters
+                .reply_with(|| RegionBusySnafu { region_id }.fail());
+            return RegionEditDispatch::Rejected;
+        }
+
+        // A close may have abandoned the staging this edit belongs to, even if its flush failed.
+        if let Some(expected) = &request.staging_partition_expr
+            && region
+                .manifest_ctx
+                .staging_partition_info()
+                .as_ref()
+                .and_then(|info| info.partition_expr())
+                != Some(expected.as_str())
+        {
+            let state = region.state();
+            request.waiters.reply_with(|| {
+                RegionStateSnafu {
+                    region_id,
+                    state,
+                    expect: RegionRoleState::Leader(RegionLeaderState::Staging),
+                }
+                .fail()
+            });
+            return RegionEditDispatch::Rejected;
+        }
+
         if !region.is_writable() || self.flush_scheduler.has_pending_alter(region_id) {
             if matches!(
                 region.state(),
@@ -334,6 +366,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             mut edit,
             waiters,
             preload_sst_cache,
+            staging_partition_expr: _,
         } = request;
         let file_sequence = region.version_control.current().last_sequence + 1;
         edit.committed_sequence = Some(file_sequence);
@@ -427,7 +460,10 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         };
 
         let need_compaction = if edit_result.is_staging {
-            if edit_result.update_region_state {
+            // A close may have abandoned this edit and left staging already.
+            if edit_result.update_region_state
+                && region.state() == RegionRoleState::Leader(RegionLeaderState::Editing)
+            {
                 // For staging regions, edits are not applied immediately,
                 // as they remain invisible until the region exits the staging state.
                 region.switch_state_to_staging(RegionLeaderState::Editing);

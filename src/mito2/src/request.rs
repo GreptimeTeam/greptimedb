@@ -1152,8 +1152,6 @@ pub(crate) struct FlushFinished {
     pub(crate) edit: RegionEdit,
     /// Memtables to remove.
     pub(crate) memtables_to_remove: SmallVec<[MemtableId; 2]>,
-    /// Whether the region is in staging mode.
-    pub(crate) is_staging: bool,
 }
 
 impl FlushFinished {
@@ -1372,6 +1370,9 @@ pub(crate) struct RegionEditRequest {
     pub(crate) preload_sst_cache: bool,
     /// The waiters that are waiting for this region edit's result.
     pub(crate) waiters: Waiters,
+    /// The partition expression of the staging this edit belongs to, if any.
+    /// The edit must not run unless the region is staging for that expression.
+    pub(crate) staging_partition_expr: Option<String>,
 }
 
 impl RegionEditRequest {
@@ -1386,7 +1387,14 @@ impl RegionEditRequest {
             edit,
             preload_sst_cache,
             waiters: Waiters::one(waiter),
+            staging_partition_expr: None,
         }
+    }
+
+    /// Binds the edit to the staging for `partition_expr`.
+    pub(crate) fn for_staging(mut self, partition_expr: String) -> Self {
+        self.staging_partition_expr = Some(partition_expr);
+        self
     }
 }
 
