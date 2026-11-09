@@ -104,6 +104,10 @@ Tests live next to the code as `*_test.rs` (e.g. `src/mito2/src/engine/flush_tes
 - Loaded regions have resident compaction state, including `Idle` and handed-off
   DDLs. Publish create/open/catchup results through the worker's `register_region`;
   only close/drop unregisters them. See `compaction/scheduler/state.rs`.
+- Explicit truncate retires shared references too (`worker/handle_truncate.rs`):
+  `All` removes all data; `ByTimeRanges` removes fully contained files. Other
+  regions/readers still protect the shared objects. Stale compaction results must
+  not reinstate truncated inputs.
 - Local compaction units use the snapshot-free `CompactionContext`. Retaining a
   full `CompactionRegion` in a unit pins other units' inputs and delays SST purge.
 - Candidate waiting history is owned by the region scheduler (`scheduler/history.rs`).

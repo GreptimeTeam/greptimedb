@@ -253,3 +253,150 @@ async fn test_shared_reclassification_requires_add_only() {
     );
     assert_eq!(expected_rows, scan().await);
 }
+
+#[cfg(feature = "enterprise")]
+#[rstest::rstest]
+#[case::all(true)]
+#[case::time_range(false)]
+#[tokio::test]
+async fn test_truncate_shared_references_preserves_other_readers(#[case] truncate_all: bool) {
+    use api::v1::Rows;
+    use common_recordbatch::RecordBatches;
+    use common_time::Timestamp;
+    use store_api::region_request::RegionTruncateRequest;
+
+    use crate::test_util::{build_rows, flush_region, put_rows, reopen_region, rows_schema};
+
+    let mut env = TestEnv::new().await;
+    let engine = env
+        .create_engine(MitoConfig {
+            schedule_compaction_after_edit: false,
+            ..Default::default()
+        })
+        .await;
+    let owner_id = RegionId::new(1, 0);
+    let target_id = RegionId::new(1, 1);
+    let other_id = RegionId::new(1, 2);
+    let create = CreateRequestBuilder::new().build();
+    for id in [owner_id, target_id, other_id] {
+        engine
+            .handle_request(id, RegionRequest::Create(create.clone()))
+            .await
+            .unwrap();
+    }
+    for start in [0, 10] {
+        put_rows(
+            &engine,
+            owner_id,
+            Rows {
+                schema: rows_schema(&create),
+                rows: build_rows(start, start + 3),
+            },
+        )
+        .await;
+        flush_region(&engine, owner_id, None).await;
+    }
+    let owner = engine.get_region(owner_id).unwrap();
+    let shared_files = owner.version().ssts.levels()[0]
+        .files()
+        .map(|file| FileMeta {
+            level: LEVEL_SHARED,
+            ..file.meta_ref().clone()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(2, shared_files.len());
+    for id in [owner_id, target_id, other_id] {
+        engine
+            .edit_region(
+                id,
+                RegionEdit {
+                    files_to_add: shared_files.clone(),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+    }
+    let target = engine.get_region(target_id).unwrap();
+    let before = target.manifest_ctx.manifest().await;
+    let expected = before
+        .files
+        .iter()
+        .filter(|(_, file)| !truncate_all && file.time_range.0 > Timestamp::new_millisecond(5_000))
+        .map(|(id, file)| (*id, file.clone()))
+        .collect::<std::collections::HashMap<_, _>>();
+    // Pin an actual query before the DDL, not just a copy of its file metadata.
+    let old_reader = engine
+        .scan_to_stream(target_id, Default::default())
+        .await
+        .unwrap();
+    let request = if truncate_all {
+        RegionTruncateRequest::All
+    } else {
+        RegionTruncateRequest::ByTimeRanges {
+            time_ranges: vec![(
+                Timestamp::new_millisecond(0),
+                Timestamp::new_millisecond(5_000),
+            )],
+        }
+    };
+    engine
+        .handle_request(target_id, RegionRequest::Truncate(request))
+        .await
+        .unwrap();
+    assert_eq!(expected, target.manifest_ctx.manifest().await.files);
+    let visible = target.version().ssts.levels()[LEVEL_SHARED as usize]
+        .files()
+        .map(|file| (file.file_id().file_id(), file.meta_ref().clone()))
+        .collect::<std::collections::HashMap<_, _>>();
+    assert_eq!(expected, visible);
+    let old_rows = RecordBatches::try_collect(old_reader).await.unwrap();
+    assert_eq!(
+        6,
+        old_rows.iter().map(|batch| batch.num_rows()).sum::<usize>()
+    );
+    reopen_region(
+        &engine,
+        target_id,
+        create.table_dir,
+        true,
+        Default::default(),
+    )
+    .await;
+    assert_eq!(
+        expected,
+        engine
+            .get_region(target_id)
+            .unwrap()
+            .manifest_ctx
+            .manifest()
+            .await
+            .files
+    );
+    for (id, expected_rows) in [(target_id, if truncate_all { 0 } else { 3 }), (other_id, 6)] {
+        let rows = RecordBatches::try_collect(
+            engine.scan_to_stream(id, Default::default()).await.unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            expected_rows,
+            rows.iter().map(|batch| batch.num_rows()).sum::<usize>()
+        );
+    }
+    for file in shared_files {
+        let path = crate::sst::location::sst_file_path(
+            owner.access_layer.table_dir(),
+            file.file_id(),
+            owner.access_layer.path_type(),
+        );
+        assert!(
+            owner
+                .access_layer
+                .object_store()
+                .exists(&path)
+                .await
+                .unwrap()
+        );
+    }
+}
