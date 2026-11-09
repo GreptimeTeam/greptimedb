@@ -47,12 +47,10 @@
 //! satisfy. No other counter query reads that tag: an aggregate drops the labels it does not group
 //! by, so their answers are the ones the untagged fixture gives.
 //!
-//! A query the native route declines is checked the other way round. [`check_fallback_case`] runs
-//! shapes the compiler has no node for - `scalar(v)` and a subquery - with the native request on and
-//! with it off, and requires that no native node ran in either plan and that both runs report rows
-//! derived from the fixture by hand. A hint that quietly
-//! took the route for one of them would show a fused producer or a frontend merge in the plans that
-//! executed, which is what is observed.
+//! Two shapes that used to be declined are checked on the plans that really ran. `scalar(v)` reads
+//! the whole vector in one fused node and needs no merge; a subquery over a fold splits into one
+//! producer and one frontend merge. A hint that quietly kept the existing route would show no native
+//! node, which is what the plan observer checks, and both routes must answer the hand-derived rows.
 //!
 //! A binary operation whose sibling is a literal scalar is carried by the split on either side of
 //! the fold: below the aggregate it is computed in the per-series prefix (`sum(8 * rate(...))`,
@@ -739,9 +737,16 @@ async fn native_hybrid_binary_05_06_08() {
     );
     let (legacy, legacy_capture) = run_query(&instance, &subquery, false, &observer).await;
     let (native, native_capture) = run_query(&instance, &subquery, true, &observer).await;
+    // A subquery now runs on the native route, so the existing plan must hold no native node while
+    // the native run must exercise one. The rows below are what says the route answers what the
+    // existing plan does.
     assert!(
-        legacy_capture.fused.is_empty() && native_capture.fused.is_empty(),
-        "hybrid must be disabled inside subquery: {subquery}"
+        legacy_capture.fused.is_empty(),
+        "the existing route must not plan native nodes: {subquery}"
+    );
+    assert!(
+        !native_capture.fused.is_empty(),
+        "the subquery must run on the native route: {subquery}"
     );
     assert_eq!(
         legacy.rows.len(),
@@ -1606,15 +1611,14 @@ fn assert_finalize_reads_region_state(
     }
 }
 
-/// Checks one query the native route declines: it must stay declined on both routes, and both must
-/// answer what the fixture derives by hand.
+/// Checks one query the native route answers by splitting the aggregate below a subquery.
 ///
-/// The native request is on for one run and off for the other, so the hint being asked for and the
-/// hint being absent are both exercised: neither plan may hold a fused producer or a frontend merge,
-/// and the rows - labels, evaluation time, values and their multiplicity - are the same hand-derived
-/// ones for both. The observer is asked to have seen a plan at all, because a run that handed nothing
-/// over would otherwise satisfy "no native node" without observing anything.
-async fn check_fallback_case(
+/// The per-series prefix runs in a `Partial` producer on every partition and the window above it
+/// finishes the answer in the `Final` half over the merged values, so the native run must show
+/// exactly one producer and one frontend merge - the opposite of a fallback case - while the existing
+/// plan shows neither. Both routes must answer what the fixture derives by hand, which is what says
+/// the split's answer is the statement's answer and not an approximation of it.
+async fn check_split_case(
     instance: &Arc<Instance>,
     observer: &NativePlanObserver,
     case: &AggregateCase,
@@ -1630,13 +1634,32 @@ async fn check_fallback_case(
             "`{query}`: the {route} run handed no plan to the observer, so nothing about the plan \
              that ran was observed"
         );
-        assert!(
-            capture.fused.is_empty() && capture.finalize.is_empty(),
-            "`{query}`: the {route} run must keep the existing plan, but the plans that ran held {} \
-             fused producers and {} frontend merges",
-            capture.fused.len(),
-            capture.finalize.len()
-        );
+        if native {
+            assert_eq!(
+                1,
+                capture.fused.len(),
+                "`{query}`: the {route} run must split the aggregate into one producer, but the \
+                 plans that ran held {} producers and {} frontend merges",
+                capture.fused.len(),
+                capture.finalize.len()
+            );
+            assert_eq!(
+                1,
+                capture.finalize.len(),
+                "`{query}`: the {route} run must finish the fold in one frontend merge, but the \
+                 plans that ran held {} producers and {} frontend merges",
+                capture.fused.len(),
+                capture.finalize.len()
+            );
+        } else {
+            assert!(
+                capture.fused.is_empty() && capture.finalize.is_empty(),
+                "`{query}`: the {route} run must keep the existing plan, but the plans that ran \
+                 held {} fused producers and {} frontend merges",
+                capture.fused.len(),
+                capture.finalize.len()
+            );
+        }
         assert_rows(&result.rows, &case.expected, &format!("{route} `{query}`"));
     }
 }
@@ -2481,20 +2504,6 @@ async fn native_aggregate_complete_over_four_nonempty_mito_partitions() {
     )
     .await;
 
-    // A shape the native compiler declines, checked on the plans that really ran: it may hold
-    // neither a fused producer nor a frontend merge, and both routes must answer what the fixture
-    // derives by hand. A subquery evaluates its own body on a grid of its own: it reads across
-    // series and cannot be answered by a producer per partition, so it keeps the existing plan. The
-    // subquery's window spans the two inner points `EVAL_SECS - 1` and `EVAL_SECS`, at each of
-    // which the same extrapolated rate answers 15 - both samples stay further from the window's
-    // ends than the 66s threshold - so the maximum is 15 as well.
-    let fallback_case = case(
-        format!("max_over_time((sum(rate({COUNTER_TABLE}[5m])))[2s:1s])"),
-        &[(&[], 15.0)],
-        false,
-    );
-    check_fallback_case(&instance, &observer, &fallback_case).await;
-
     // `scalar` reads the whole vector and the native route answers it, so it is no longer one of
     // the declined shapes. `scalar` reports the one value present at a point only when exactly one
     // series is present at it, so the five counter series make it NaN; a route that folded one
@@ -2540,6 +2549,20 @@ async fn native_aggregate_complete_over_four_nonempty_mito_partitions() {
         &legacy.rows,
         "native `scalar` against the existing plan",
     );
+    // A subquery over a fold is not declined: the compiler binds a window over an evaluated input to
+    // that input's own grid, so the split carries it - the per-series prefix runs in a `Partial`
+    // producer on every partition and the window above it finishes the answer in the `Final` half
+    // over the merged values. The subquery's window spans the two inner points `EVAL_SECS - 1` and
+    // `EVAL_SECS`, at each of which the same extrapolated rate answers 15 - both samples stay further
+    // from the window's ends than the 66s threshold - so the maximum is 15 as well.
+    let split_cases = [case(
+        format!("max_over_time((sum(rate({COUNTER_TABLE}[5m])))[2s:1s])"),
+        &[(&[], 15.0)],
+        false,
+    )];
+    for case in &split_cases {
+        check_split_case(&instance, &observer, case).await;
+    }
 }
 
 /// Histogram functions above the cut merge Partial state before evaluating the complete buckets.

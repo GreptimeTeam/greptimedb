@@ -1779,7 +1779,13 @@ fn tree_inputs(tree: &NativeTree) -> Vec<&crate::native::plan::BoundInput> {
 fn partitioned_window_sources(node: &NativeNode) -> DataFusionResult<Vec<usize>> {
     fn visit(node: &NativeNode, sources: &mut Vec<usize>) -> DataFusionResult<()> {
         match &node.expr {
-            NativeExpr::Window { input, .. } => {
+            NativeExpr::Window { input, op } => {
+                // A subquery window reads an evaluated input, whose fragments belong to one series
+                // wherever they were produced, so it needs no owner of its own. A raw window
+                // anywhere below it still does, so the walk continues into the input.
+                if op.input_grid.is_some() {
+                    return visit(input, sources);
+                }
                 let NativeExpr::Input(bound) = &input.expr else {
                     return Err(DataFusionError::Plan(
                         "partitioned FusedSeries windows require a direct Input under Window"
