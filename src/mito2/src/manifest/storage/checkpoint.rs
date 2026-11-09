@@ -19,12 +19,13 @@ use common_datasource::compression::CompressionType;
 use common_telemetry::{debug, warn};
 use object_store::{ErrorKind, ObjectStore};
 use serde::{Deserialize, Serialize};
-use snafu::ResultExt;
+use snafu::{OptionExt, ResultExt};
 use store_api::ManifestVersion;
 
 use crate::cache::manifest_cache::ManifestCache;
 use crate::error::{
-    CompressObjectSnafu, DecompressObjectSnafu, OpenDalSnafu, Result, SerdeJsonSnafu, Utf8Snafu,
+    CompressObjectSnafu, DecompressObjectSnafu, ManifestVersionConflictSnafu, OpenDalSnafu, Result,
+    SerdeJsonSnafu, Utf8Snafu,
 };
 use crate::manifest::storage::size_tracker::Tracker;
 use crate::manifest::storage::utils::{get_from_cache_decoded, write_and_put_cache};
@@ -204,11 +205,14 @@ impl<T: Tracker> CheckpointStorage<T> {
     ///
     /// The checkpoint pointer only provides the checksum, when it points at the same version: the
     /// checkpoint task of a stale writer can leave it at an older one.
+    ///
+    /// Fails with a version conflict if cleanup removed the checkpoint after the LIST, because
+    /// the deltas it covered can be gone too.
     pub(crate) async fn load_listed_checkpoint(
         &self,
         version: ManifestVersion,
         compress_type: CompressionType,
-    ) -> Result<Option<(ManifestVersion, Vec<u8>)>> {
+    ) -> Result<(ManifestVersion, Vec<u8>)> {
         let checksum = self
             .read_last_checkpoint_metadata()
             .await?
@@ -228,7 +232,12 @@ impl<T: Tracker> CheckpointStorage<T> {
                 checksum,
                 extend_metadata: HashMap::new(),
             })
-            .await
+            .await?
+            .context(ManifestVersionConflictSnafu {
+                version,
+                manifest_dir: &self.path,
+                reason: "the listed checkpoint was removed before it was read",
+            })
     }
 
     /// Reads the small checkpoint pointer without loading its payload.

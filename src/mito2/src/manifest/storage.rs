@@ -465,11 +465,11 @@ impl ManifestObjectStore {
     pub async fn load_last_checkpoint(&mut self) -> Result<Option<(ManifestVersion, Vec<u8>)>> {
         let checkpoint = if self.conditional_publication {
             match self.list_highest_checkpoint(MIN_VERSION).await {
-                Ok(Some((version, compress_type))) => {
+                Ok(Some((version, compress_type))) => Some(
                     self.checkpoint_storage
                         .load_listed_checkpoint(version, compress_type)
-                        .await?
-                }
+                        .await?,
+                ),
                 Ok(None) => None,
                 // A region that does not exist yet can have no manifest directory.
                 Err(e) if e.is_object_not_found() => None,

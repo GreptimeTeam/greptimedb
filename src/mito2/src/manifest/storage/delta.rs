@@ -314,25 +314,25 @@ impl<T: Tracker> DeltaStorage<T> {
         })?;
         let data = Buffer::from(data);
 
-        match self
+        let stored_size = match self
             .object_store
             .write_with(&path, data.clone())
             .if_not_exists(true)
             .await
         {
-            Ok(_) => {}
+            Ok(_) => data.len(),
             Err(error)
                 if matches!(
                     error.kind(),
                     ErrorKind::AlreadyExists | ErrorKind::ConditionNotMatch
                 ) =>
             {
-                self.ensure_same_delta(version, &path, bytes).await?;
+                self.ensure_same_delta(version, &path, bytes).await?
             }
             Err(error) => return Err(error).context(OpenDalSnafu),
-        }
+        };
 
-        self.delta_tracker.record(version, data.len() as u64);
+        self.delta_tracker.record(version, stored_size as u64);
         if let Some(cache) = &self.manifest_cache {
             cache.put_file(path, data.to_vec()).await;
         }
@@ -341,12 +341,13 @@ impl<T: Tracker> DeltaStorage<T> {
     }
 
     /// Checks that the object at `path` decodes to `bytes`, reading it directly from storage.
+    /// Returns the size of the stored object.
     async fn ensure_same_delta(
         &self,
         version: ManifestVersion,
         path: &str,
         bytes: &[u8],
-    ) -> Result<()> {
+    ) -> Result<usize> {
         let conflict = |reason: String| {
             ManifestVersionConflictSnafu {
                 version,
@@ -360,6 +361,7 @@ impl<T: Tracker> DeltaStorage<T> {
             .read(path)
             .await
             .map_err(|e| conflict(format!("cannot read the existing delta: {e}")))?;
+        let stored_size = existing.len();
         let existing = CompressionType::Gzip
             .decode(existing)
             .await
@@ -369,7 +371,7 @@ impl<T: Tracker> DeltaStorage<T> {
                 "the existing delta has different content".to_string(),
             ));
         }
-        Ok(())
+        Ok(stored_size)
     }
 }
 

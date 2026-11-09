@@ -56,13 +56,13 @@ pub fn basic_region_metadata() -> RegionMetadata {
     builder.build().unwrap()
 }
 
-/// Returns a layer that fails reads of manifest deltas with `NotFound` and leaves other reads
-/// untouched.
-pub(crate) fn fail_manifest_delta_reads_layer() -> MockLayer {
+/// Returns a layer that fails reads of the files `is_target` selects with `NotFound` and leaves
+/// other reads untouched.
+pub(crate) fn fail_manifest_reads_layer(is_target: fn(&str) -> bool) -> MockLayer {
     MockLayerBuilder::default()
-        .reader_factory(Arc::new(|path, _args, inner| {
+        .reader_factory(Arc::new(move |path, _args, inner| {
             let file_name = path.rsplit('/').next().unwrap_or(path);
-            if crate::manifest::storage::is_delta_file(file_name) {
+            if is_target(file_name) {
                 Box::new(oio::StreamReader::new(NotFoundReader))
             } else {
                 inner
@@ -131,7 +131,7 @@ impl oio::StreamRead for NotFoundReader {
     async fn open(&self, _: BytesRange) -> MockResult<(RpRead, Box<dyn oio::ReadStreamDyn>)> {
         Err(MockError::new(
             ErrorKind::NotFound,
-            "mock listed manifest delta not found",
+            "mock listed manifest file not found",
         ))
     }
 }

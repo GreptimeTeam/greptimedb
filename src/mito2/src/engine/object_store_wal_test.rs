@@ -537,7 +537,7 @@ async fn test_commit_crossing_deadline_applies_without_checkpoint() {
         .await
         .with_mock_layer(layer);
     let region_id = RegionId::new(1, 1);
-    let (engine, log_store, _table_dir, schema, deadline) =
+    let (engine, log_store, table_dir, schema, deadline) =
         create_leased_region(&mut env, region_id).await;
     let rows = Rows {
         schema,
@@ -564,4 +564,8 @@ async fn test_commit_crossing_deadline_applies_without_checkpoint() {
     assert_eq!(0, manager.checkpointer().last_checkpoint_version());
     assert!(!manager.checkpointer().is_doing_checkpoint());
     assert!(stored_entry_ids(&log_store, region_id).await.is_empty());
+    drop(manager);
+
+    reopen_region(&engine, region_id, table_dir, false, wal_options()).await;
+    assert_eq!(3, count_rows(&engine, region_id).await);
 }

@@ -36,8 +36,7 @@ use crate::manifest::storage::{
     checkpoint_file, delta_file, file_version, gen_path, is_delta_file,
 };
 use crate::manifest::tests::utils::{
-    basic_region_metadata, fail_manifest_delta_reads_layer, manifest_dir_usage,
-    manifest_recovery_usage,
+    basic_region_metadata, fail_manifest_reads_layer, manifest_dir_usage, manifest_recovery_usage,
 };
 use crate::sst::file::FileMeta;
 use crate::test_util::{CheckpointTaskBlocker, TestEnv, nop_action};
@@ -632,7 +631,7 @@ async fn manifest_size_ignores_leftover_files_after_failed_delete(#[case] fail_d
 async fn open_preserves_listed_delta_not_found_retry_hint() {
     let env = TestEnv::new()
         .await
-        .with_mock_layer(fail_manifest_delta_reads_layer());
+        .with_mock_layer(fail_manifest_reads_layer(is_delta_file));
     let metadata = Arc::new(basic_region_metadata());
     let mut manager = env
         .create_manifest_manager(CompressionType::Uncompressed, 0, Some(metadata.clone()))
@@ -663,7 +662,7 @@ async fn open_preserves_listed_delta_not_found_retry_hint() {
 async fn install_preserves_listed_delta_not_found_retry_hint() {
     let env = TestEnv::new()
         .await
-        .with_mock_layer(fail_manifest_delta_reads_layer());
+        .with_mock_layer(fail_manifest_reads_layer(is_delta_file));
     let metadata = Arc::new(basic_region_metadata());
     let mut manager = env
         .create_manifest_manager(CompressionType::Uncompressed, 0, Some(metadata))

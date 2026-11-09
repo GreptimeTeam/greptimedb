@@ -34,8 +34,11 @@ use store_api::ManifestVersion;
 use crate::config::MitoConfig;
 use crate::error::{Error, Result};
 use crate::manifest::manager::{RegionManifestManager, RegionManifestOptions};
-use crate::manifest::storage::{LAST_CHECKPOINT_FILE, ManifestObjectStore, delta_file, gen_path};
-use crate::manifest::tests::utils::{basic_region_metadata, fail_manifest_delta_reads_layer};
+use crate::manifest::storage::{
+    LAST_CHECKPOINT_FILE, ManifestObjectStore, delta_file, gen_path, is_checkpoint_file,
+    is_delta_file,
+};
+use crate::manifest::tests::utils::{basic_region_metadata, fail_manifest_reads_layer};
 use crate::sst::FormatType;
 use crate::test_util::nop_action;
 
@@ -219,6 +222,7 @@ async fn test_compression_settings_share_one_name() {
     compressed.save(1, &data, false).await.unwrap();
     let retried_object = store.read(&delta_key(1)).await.unwrap().to_vec();
     assert_eq!(stored_object, retried_object);
+    assert_eq!(stored_object.len() as u64, compressed.total_manifest_size());
 
     compressed.save(2, &data, false).await.unwrap();
     assert!(store.read(&delta_key(2)).await.unwrap().len() < data.len());
@@ -243,7 +247,9 @@ async fn test_existing_delta_conflicts(#[case] undecodable: bool, #[case] unread
     };
     store.write(&delta_key(1), existing.clone()).await.unwrap();
     let writer_store = if unreadable {
-        store.clone().layer(fail_manifest_delta_reads_layer())
+        store
+            .clone()
+            .layer(fail_manifest_reads_layer(is_delta_file))
     } else {
         store.clone()
     };
@@ -296,6 +302,23 @@ async fn test_stale_checkpoint_pointer_does_not_hide_newer_edits() {
 
     assert_eq!(4, reopened.last_version());
     assert_eq!(3, reopened.checkpointer().last_checkpoint_version());
+}
+
+#[tokio::test]
+async fn test_recovery_fails_when_listed_checkpoint_is_gone() {
+    let (_dir, store) = temp_store();
+    let compress_type = CompressionType::Gzip;
+    let mut manager = create_manager(options(&store, compress_type, 1, true)).await;
+    commit(&mut manager).await.unwrap();
+    manager.wait_for_pending_checkpoint().await;
+    let unreadable = store.layer(fail_manifest_reads_layer(is_checkpoint_file));
+
+    let conditional = options(&unreadable, compress_type, 1, true);
+    let error = RegionManifestManager::open(conditional, &Default::default())
+        .await
+        .unwrap_err();
+
+    assert_conflict(&error);
 }
 
 #[tokio::test]
