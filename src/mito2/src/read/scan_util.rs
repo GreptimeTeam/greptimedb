@@ -1604,7 +1604,6 @@ pub fn build_flat_file_range_scan_stream(
 
         // Reports metrics.
         reader_metrics.observe_rows(read_type);
-        reader_metrics.filter_metrics.observe();
         part_metrics.merge_reader_metrics(reader_metrics, per_file_metrics.as_ref());
     }
 }
