@@ -183,6 +183,16 @@ macro_rules! handle_index_error {
     };
 }
 
+/// Representation returned by a query reader, independent of compaction policy.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum QueryOutputMode {
+    /// Expands primary keys into the ordinary flat query schema.
+    #[default]
+    Flat,
+    /// Retains sparse encoded primary keys for prepared metric sample reads.
+    EncodedKey,
+}
+
 /// Parquet SST reader builder.
 pub struct ParquetReaderBuilder {
     /// Index snapshot and store used to determine range-index availability.
@@ -214,6 +224,7 @@ pub struct ParquetReaderBuilder {
     expected_metadata: Option<RegionMetadataRef>,
     /// Whether this reader is for compaction.
     compaction: bool,
+    query_output_mode: QueryOutputMode,
     /// Mode to pre-filter columns.
     pre_filter_mode: PreFilterMode,
     /// Whether to run the reduced-column predicate prefilter pass.
@@ -251,6 +262,7 @@ impl ParquetReaderBuilder {
             fulltext_index_appliers: [None, None],
             expected_metadata: None,
             compaction: false,
+            query_output_mode: QueryOutputMode::Flat,
             pre_filter_mode: PreFilterMode::All,
             enable_predicate_prefilter: true,
             postpone_time_index_filter: false,
@@ -339,6 +351,15 @@ impl ParquetReaderBuilder {
     #[must_use]
     pub fn expected_metadata(mut self, expected_metadata: Option<RegionMetadataRef>) -> Self {
         self.expected_metadata = expected_metadata;
+        self
+    }
+
+    /// Selects the query output representation without enabling compaction.
+    ///
+    /// Encoded output requires sparse keys and matching partition expressions.
+    /// Callers must use the ordinary reader for partition/schema transformations.
+    pub fn query_output_mode(mut self, mode: QueryOutputMode) -> Self {
+        self.query_output_mode = mode;
         self
     }
 
@@ -466,10 +487,18 @@ impl ParquetReaderBuilder {
             region_partition_expr_str,
             self.file_handle.meta_ref().partition_expr.as_ref(),
         )?;
-        // Skip auto convert when:
-        // - compaction is enabled
-        // - region partition expr is same with file partition expr (no need to auto convert)
-        let skip_auto_convert = self.compaction && is_same_region_partition;
+        let encoded_query = self.query_output_mode == QueryOutputMode::EncodedKey;
+        if encoded_query
+            && (region_meta.primary_key_encoding != PrimaryKeyEncoding::Sparse
+                || !is_same_region_partition)
+        {
+            return UnexpectedSnafu {
+                reason: "encoded query output requires sparse keys and matching partitions",
+            }
+            .fail();
+        }
+        // Representation does not change query filtering, pruning, or visibility.
+        let skip_auto_convert = (self.compaction || encoded_query) && is_same_region_partition;
 
         // Build a compaction projection helper when:
         // - compaction is enabled
@@ -2470,6 +2499,7 @@ mod tests {
         object_store: ObjectStore,
         predicate: Predicate,
         cache_strategy: CacheStrategy,
+        encoded_key: bool,
     ) -> (RowGroupReaderBuilder, Arc<RegionMetadata>) {
         let metadata = Arc::new(
             crate::test_util::sst_util::sst_region_metadata_with_encoding(
@@ -2542,7 +2572,7 @@ mod tests {
             ),
             None,
             &file_path,
-            false,
+            encoded_key,
         )
         .unwrap();
         let codec = build_primary_key_codec(metadata.as_ref());
@@ -2598,7 +2628,7 @@ mod tests {
         let object_store = ObjectStore::new(Memory::default()).unwrap();
         let predicate = Predicate::new(vec![col("field_0").gt_eq(lit(0_u64))]);
         let (reader_builder, _) =
-            prefilter_test_builder(object_store, predicate, CacheStrategy::Disabled).await;
+            prefilter_test_builder(object_store, predicate, CacheStrategy::Disabled, false).await;
         let prefilter_builder = reader_builder.prefilter_builder.as_ref().unwrap();
 
         for original_selection in [
@@ -2638,8 +2668,13 @@ mod tests {
         }
     }
 
+    #[rstest::rstest]
+    #[case::flat(false)]
+    #[case::encoded_key(true)]
     #[tokio::test(flavor = "current_thread")]
-    async fn test_execute_prefilter_mixed_filters_use_nonzero_row_group_and_cache() {
+    async fn test_execute_prefilter_mixed_filters_use_nonzero_row_group_and_cache(
+        #[case] encoded_key: bool,
+    ) {
         let object_store = ObjectStore::new(Memory::default()).unwrap();
         let predicate = Predicate::new(vec![
             col("field_0").gt_eq(lit(3_u64)),
@@ -2653,7 +2688,7 @@ mod tests {
                 .build(),
         ));
         let (reader_builder, _) =
-            prefilter_test_builder(object_store, predicate, cache.clone()).await;
+            prefilter_test_builder(object_store, predicate, cache.clone(), encoded_key).await;
         let prefilter_builder = reader_builder.prefilter_builder.as_ref().unwrap();
 
         for pass in 0..2 {
@@ -2693,6 +2728,7 @@ mod tests {
                 col("tag_0").eq(lit("a")),
             ]),
             CacheStrategy::Disabled,
+            encoded_key,
         )
         .await;
         let mut prefilter_ctx = disabled.0.prefilter_builder.as_ref().unwrap().build(1);

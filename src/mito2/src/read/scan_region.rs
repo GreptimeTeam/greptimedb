@@ -525,11 +525,11 @@ impl ScanRegion {
 
         // Only time-pruned sources from this pinned version may accompany an assigned SST
         // in a grouped sample artifact. Explicit selections and sequence pruning stay strict.
-        let time_pruned_files = if self.exact_selection.is_none()
+        let allow_sample_replacements = self.exact_selection.is_none()
             && !self.request.skip_sst_files
             && self.request.sst_min_sequence.is_none()
-            && !self.request.exact_sequence_range
-        {
+            && !self.request.exact_sequence_range;
+        let time_pruned_files = if allow_sample_replacements {
             self.version
                 .ssts
                 .levels()
@@ -625,6 +625,7 @@ impl ScanRegion {
             .with_memtables(mem_range_builders)
             .with_files(files)
             .with_time_pruned_files(time_pruned_files)
+            .with_sample_replacements(allow_sample_replacements)
             .with_primary_key_mapper(self.version.ssts.primary_key_mapper())
             .with_cache(self.cache_strategy)
             .with_inverted_index_appliers(inverted_index_appliers)
@@ -986,6 +987,8 @@ pub struct ScanInput {
     pub(crate) files: Vec<FileHandle>,
     /// Visible sources excluded solely by the query time range.
     pub(crate) time_pruned_files: HashSet<store_api::storage::FileId>,
+    /// Whether source selection permits whole-interval artifact substitution.
+    pub(crate) allow_sample_replacements: bool,
     /// Shares the pinned schema's encoded defaults across parallel range readers.
     primary_key_mapper: OnceLock<Arc<PrimaryKeyRangeMapper>>,
     /// Scan-wide hint for rows in an execution batch.
@@ -1052,6 +1055,14 @@ pub(crate) struct ScanInputBuilder {
 }
 
 impl ScanInput {
+    /// Creates an SST reader against this scan's pinned access layer.
+    pub(crate) fn sst_reader(
+        &self,
+        file: FileHandle,
+    ) -> crate::sst::parquet::reader::ParquetReaderBuilder {
+        self.access_layer.read_sst(file)
+    }
+
     /// Creates a new [ScanInputBuilder].
     #[must_use]
     pub(crate) fn builder(
@@ -1072,6 +1083,7 @@ impl ScanInput {
                 memtables: Vec::new(),
                 files: Vec::new(),
                 time_pruned_files: HashSet::new(),
+                allow_sample_replacements: false,
                 primary_key_mapper: OnceLock::new(),
                 batch_size: crate::sst::parquet::DEFAULT_READ_BATCH_SIZE,
                 cache_strategy: CacheStrategy::Disabled,
@@ -1285,6 +1297,13 @@ impl ScanInputBuilder {
     #[must_use]
     pub(crate) fn with_memtables(mut self, memtables: Vec<MemRangeBuilder>) -> Self {
         self.input.memtables = memtables;
+        self
+    }
+
+    /// Allows whole-interval sample substitution for unrestricted source selection.
+    #[must_use]
+    pub(crate) fn with_sample_replacements(mut self, allow: bool) -> Self {
+        self.input.allow_sample_replacements = allow;
         self
     }
 

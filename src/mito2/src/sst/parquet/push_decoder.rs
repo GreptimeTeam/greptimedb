@@ -169,6 +169,11 @@ impl SstParquetRangeFetcher {
                         .await
                         .context(OpenDalSnafu)?;
 
+                #[cfg(test)]
+                crate::metrics::COLUMNAR_READ_BYTES
+                    .with_label_values(&["parquet_store_fetched"])
+                    .inc_by(unaligned_size);
+
                 if let Some(metrics) = &self.fetch_metrics {
                     let elapsed = start.map(|start| start.elapsed()).unwrap_or_default();
                     let range_size_needed: u64 =

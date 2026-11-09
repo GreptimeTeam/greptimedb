@@ -47,3 +47,8 @@ listed source set and become ineligible if any source disappears.
 `sparse-daily-catalog-entry.json` freezes explicit populated-day coverage per source.
 Older daily catalogs decode with empty coverage and are rebuilt before reuse.
 The source Parquet files and sample payload encoding are unchanged.
+
+`covered-daily-catalog-entry.json` freezes the optional complete-interval coverage
+proof for compaction reuse. `frozen_sample_catalog_coverage` checks decoding and
+round-tripping this extension and defaulting old entries to no proof. Payloads
+remain version 1; old readers may ignore the proof and conservatively rebuild.

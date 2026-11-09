@@ -68,6 +68,7 @@ use crate::sst::parquet::row_group::ParquetFetchMetrics;
 pub(crate) struct SeriesCandidateScanner {
     stream_ctx: Arc<StreamContext>,
     partitions: Vec<Vec<PartitionRange>>,
+    pruner: Arc<Pruner>,
     partition_pruner: Arc<PartitionPruner>,
     candidate_pruner: Arc<PartitionPruner>,
     coverage: Arc<SeriesIndexCoverage>,
@@ -121,12 +122,14 @@ impl SeriesCandidateScanner {
             partition_pruner.clone()
         } else {
             Arc::new(
-                PartitionPruner::new(pruner, &all_ranges).excluding_files(&coverage.covered_files),
+                PartitionPruner::new(pruner.clone(), &all_ranges)
+                    .excluding_files(&coverage.covered_files),
             )
         };
         Ok(Self {
             stream_ctx,
             partitions,
+            pruner,
             partition_pruner,
             candidate_pruner,
             coverage,
@@ -137,8 +140,39 @@ impl SeriesCandidateScanner {
         })
     }
 
+    /// Restricts discovery to authoritative sources not replaced by a prepared
+    /// native-series artifact. Memtables are always retained. Legacy index
+    /// substitution is disabled so the prepared planner owns all replacements.
+    pub(crate) fn with_discovery_files(mut self, files: &HashSet<usize>) -> Self {
+        let covered_files = (0..self.stream_ctx.input.num_files())
+            .filter(|index| !files.contains(index))
+            .collect();
+        self.coverage = Arc::new(SeriesIndexCoverage {
+            indexes: Vec::new(),
+            covered_files,
+        });
+        let ranges = self
+            .partitions
+            .iter()
+            .flatten()
+            .copied()
+            .collect::<Vec<_>>();
+        self.candidate_pruner = Arc::new(
+            PartitionPruner::new(self.pruner.clone(), &ranges)
+                .excluding_files(&self.coverage.covered_files),
+        );
+        self
+    }
+
     /// Builds a globally sorted stream of candidate metric-series IDs.
     pub(crate) async fn build_stream(&self) -> Result<MetricSeriesIdStream> {
+        let keys = self.build_key_stream().await?;
+        decode_metric_series(keys, self.stream_ctx.input.region_metadata().clone())
+    }
+
+    /// Builds globally sorted, distinct encoded keys without discarding labels.
+    /// Prepared reads retain these keys for predicate evaluation and output labels.
+    pub(crate) async fn build_key_stream(&self) -> Result<BoxedRecordBatchStream> {
         let all_ranges = self
             .partitions
             .iter()
@@ -206,7 +240,7 @@ impl SeriesCandidateScanner {
             self.partitions.len(),
             "SeriesCandidateScanner::final_merge",
         )?;
-        decode_metric_series(merged, self.stream_ctx.input.region_metadata().clone())
+        Ok(merged)
     }
 
     /// Returns the partition pruner shared with the data phase.

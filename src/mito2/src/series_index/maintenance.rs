@@ -231,6 +231,12 @@ async fn build_index_version(
         .map(|file| file.file_id().file_id())
         .collect::<HashSet<_>>();
     let current = region.series_index_version();
+    let sample_assignments = crate::series_index::artifact::SamplesSourceAssignments::new(
+        &current.samples,
+        &files,
+        &visible,
+        true,
+    );
     // Empty build inputs still let the planner expire established bucket coverage.
     let buckets = match (allow_builds, version.compaction_time_window) {
         (true, Some(window)) => rounded_bucket_width(requested_bucket_width, window)
@@ -303,7 +309,7 @@ async fn build_index_version(
     let mut reusable_samples = HashSet::new();
     if let Some(backend) = &formats.samples {
         for (id, handle) in &current.samples {
-            if !handle.entry().sources_visible(&visible)
+            if !sample_assignments.sources.contains_key(id)
                 || handle.entry().artifact.format != backend.format()
             {
                 continue;
@@ -338,7 +344,13 @@ async fn build_index_version(
         plan_series_indexes_with_mode(buckets, index_buckets, version.options.ttl, now_ms, manual);
     stats.computed_buckets = plan.computed_buckets;
     stats.skipped_buckets = plan.skipped_buckets;
-    let mut next = prune_index_version(&current, &visible, &plan.expired_index_ids, &mut stats);
+    let mut next = prune_index_version(
+        &current,
+        &visible,
+        &sample_assignments,
+        &plan.expired_index_ids,
+        &mut stats,
+    );
     if !allow_builds {
         let reusable_coverage = current
             .samples
@@ -355,7 +367,7 @@ async fn build_index_version(
                             .entry()
                             .covers_file(file.meta_ref(), region.region_id)
                 }) || (formats.samples.is_some()
-                    && !crate::series_index::artifact::samples_cover_file(&reusable_coverage, file))
+                    && !sample_assignments.covers_file(&reusable_coverage, file))
             })
         {
             return crate::error::InvalidRequestSnafu {
@@ -404,16 +416,22 @@ async fn build_index_version(
             // Retain complete existing groups. Adding a source must not shift their boundaries.
             let covered: HashSet<_> = files
                 .iter()
-                .filter(|file| crate::series_index::artifact::samples_cover_file(&reusable, file))
+                .filter(|file| sample_assignments.covers_file(&reusable, file))
                 .map(|file| file.file_id().file_id())
                 .collect();
             let mut daily: std::collections::HashMap<_, _> = reusable
                 .into_iter()
-                .filter(|(_, h)| h.entry().window.is_some() && h.entry().sources_visible(&covered))
+                .filter(|(id, h)| {
+                    h.entry().window.is_some()
+                        && sample_assignments
+                            .sources
+                            .get(id)
+                            .is_some_and(|sources| sources.is_subset(&covered))
+                })
                 .collect();
             let covered: HashSet<_> = daily
-                .values()
-                .flat_map(|handle| handle.entry().source_file_ids.iter().copied())
+                .keys()
+                .flat_map(|id| sample_assignments.sources[id].iter().copied())
                 .collect();
             let mut uncovered: Vec<_> = files
                 .iter()
@@ -510,6 +528,9 @@ async fn build_index_version(
             }
         }
     }
+    let sample_assignments = crate::series_index::artifact::SamplesSourceAssignments::new(
+        &samples, &files, &visible, true,
+    );
     if manual
         && files.iter().any(|file| {
             !series_indexes.values().any(|handle| {
@@ -517,8 +538,7 @@ async fn build_index_version(
                     && handle
                         .entry()
                         .covers_file(file.meta_ref(), region.region_id)
-            }) || (formats.samples.is_some()
-                && !crate::series_index::artifact::samples_cover_file(&samples, file))
+            }) || (formats.samples.is_some() && !sample_assignments.covers_file(&samples, file))
         })
     {
         return crate::error::InvalidRequestSnafu {
@@ -553,13 +573,14 @@ async fn build_index_version(
 fn prune_index_version(
     current: &SeriesIndexVersion,
     visible: &HashSet<FileId>,
+    sample_assignments: &crate::series_index::artifact::SamplesSourceAssignments,
     expired_index_ids: &[FileId],
     stats: &mut ReconcileStats,
 ) -> Option<SeriesIndexVersion> {
     if current
         .samples
-        .values()
-        .all(|h| h.entry().sources_visible(visible))
+        .keys()
+        .all(|id| sample_assignments.sources.contains_key(id))
         && current.range_indexes.keys().all(|id| visible.contains(id))
         && expired_index_ids
             .iter()
@@ -574,7 +595,7 @@ fn prune_index_version(
         index_buckets: current.index_buckets.clone(),
     };
     next.samples
-        .retain(|_, h| h.entry().sources_visible(visible));
+        .retain(|id, _| sample_assignments.sources.contains_key(id));
     stats.removed_samples = current.samples.len() - next.samples.len();
     next.range_indexes
         .retain(|file_id, _| visible.contains(file_id));
@@ -734,7 +755,13 @@ mod tests {
             expired.extend([series_id, series_id]);
         }
         let mut stats = ReconcileStats::default();
-        let next = prune_index_version(&current, &visible, &expired, &mut stats);
+        let assignments = crate::series_index::artifact::SamplesSourceAssignments::new(
+            &current.samples,
+            &[],
+            &visible,
+            false,
+        );
+        let next = prune_index_version(&current, &visible, &assignments, &expired, &mut stats);
         assert_eq!(remove_range || remove_series, next.is_some());
         assert_eq!(usize::from(remove_range), stats.removed_range);
         assert_eq!(usize::from(remove_series), stats.removed_series);

@@ -323,6 +323,7 @@ pub(crate) async fn build_samples(
             source_file_ids: Vec::new(),
             window: None,
             source_windows: Default::default(),
+            coverage: None,
             file_id: file_id.file_id(),
             artifact,
         },
@@ -509,6 +510,18 @@ pub(crate) async fn build_sample_windows(
         .iter()
         .map(|(id, days)| (*id, days.iter().copied().collect()))
         .collect();
+    let snapshot = version
+        .ssts
+        .levels()
+        .iter()
+        .flat_map(|level| level.files())
+        .cloned()
+        .collect::<Vec<_>>();
+    let replacement_coverage = crate::series_index::artifact::SamplesCoverage::new(
+        files,
+        &snapshot,
+        writers.keys().copied().collect(),
+    );
     let mut handles = UnpublishedSamples::default();
     for (day, (generation, writer)) in writers {
         // Finished generations remain unpublished until the complete source group succeeds.
@@ -521,6 +534,7 @@ pub(crate) async fn build_sample_windows(
                 source_file_ids: files.iter().map(|f| f.file_id().file_id()).collect(),
                 window: Some(day),
                 source_windows: std::mem::take(&mut source_windows),
+                coverage: replacement_coverage.clone(),
             },
             purger.clone(),
         ));
