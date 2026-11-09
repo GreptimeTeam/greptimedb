@@ -877,3 +877,101 @@ async fn edit_region(
     }
     result.map(|_| ())
 }
+
+#[cfg(test)]
+mod tests {
+    use store_api::region_engine::RegionEngine;
+    use store_api::region_request::RegionRequest;
+    use store_api::storage::FileId;
+
+    use super::*;
+    use crate::sst::file::{FileMeta, LEVEL_SHARED, MAX_LEVEL};
+    use crate::test_util::{CreateRequestBuilder, TestEnv};
+
+    #[rstest::rstest]
+    #[case::shared_removal(false)]
+    #[case::unsupported_level(true)]
+    #[tokio::test]
+    async fn test_rejected_edit_does_not_stop_manifest(#[case] unsupported_level: bool) {
+        let mut env = TestEnv::new().await;
+        let engine = env.create_engine(Default::default()).await;
+        let region_id = RegionId::new(1, 1);
+        engine
+            .handle_request(
+                region_id,
+                RegionRequest::Create(CreateRequestBuilder::new().build()),
+            )
+            .await
+            .unwrap();
+        let region = engine.get_region(region_id).unwrap();
+        let manifest_version = region.manifest_ctx.manifest_version().await;
+        let file = FileMeta {
+            region_id,
+            file_id: FileId::random(),
+            level: if unsupported_level {
+                MAX_LEVEL
+            } else {
+                LEVEL_SHARED
+            },
+            ..Default::default()
+        };
+        let edit = if unsupported_level {
+            RegionEdit {
+                files_to_add: vec![file],
+                ..Default::default()
+            }
+        } else {
+            RegionEdit {
+                files_to_remove: vec![file],
+                ..Default::default()
+            }
+        };
+        region.set_editing(RegionLeaderState::Writable).unwrap();
+        // Exercise persistence-side rejection, not the earlier worker admission guard.
+        let error = edit_region(
+            &region,
+            edit,
+            engine.cache_manager(),
+            WorkerListener::default(),
+            false,
+            false,
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(error, crate::error::Error::InvalidRequest { .. }));
+        assert_eq!(
+            manifest_version,
+            region.manifest_ctx.manifest_version().await
+        );
+        assert!(
+            !region
+                .manifest_ctx
+                .manifest_manager
+                .read()
+                .await
+                .is_stopped()
+        );
+        assert!(
+            region
+                .version()
+                .ssts
+                .levels()
+                .iter()
+                .all(|level| level.files.is_empty())
+        );
+        // A rejected edit must not poison the manager for a subsequent valid update.
+        region
+            .manifest_ctx
+            .update_manifest(
+                RegionLeaderState::Editing,
+                RegionMetaActionList::with_action(RegionMetaAction::Edit(RegionEdit::default())),
+                false,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            manifest_version + 1,
+            region.manifest_ctx.manifest_version().await
+        );
+    }
+}
