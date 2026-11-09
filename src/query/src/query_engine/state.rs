@@ -565,10 +565,12 @@ impl QueryEngineState {
     /// Returns the engine's runtime environment with `flow_pool` nested on top
     /// of the engine-configured memory pool.
     ///
-    /// The scope never replaces the node-wide pool: every byte a scoped query
-    /// reserves is charged to both `flow_pool` and the pool built from
-    /// `query.memory_pool_size`, so scoped queries can only use memory that
-    /// ordinary queries could not have taken anyway. See [`NestedMemoryPool`].
+    /// The scope never replaces the node-wide pool: every tracked reservation a
+    /// scoped query makes is charged to both `flow_pool` and the pool built from
+    /// `query.memory_pool_size`. Under the default `Greedy` policy that keeps the
+    /// node's total within its limit; the experimental `Fair` policy keeps its own
+    /// pre-existing fair-share semantics, so it does not bound the node's absolute
+    /// total. See [`NestedMemoryPool`].
     ///
     /// All other runtime components (disk manager, cache manager, object store
     /// registry) are shared with the engine-configured environment instead of
@@ -708,6 +710,13 @@ const SCOPED_POOL_TOP_CONSUMERS: usize = 5;
 /// `limit` is a hard byte budget: `0` yields a zero-byte pool, not an unbounded
 /// one. Callers that want the engine-wide pool should leave the query context's
 /// memory scope unset instead of building a pool with `0`.
+///
+/// The bound is only as strict as the policy's `try_grow`: `Greedy` rejects any
+/// growth that would push the tracked total past `limit`, `Fair` rejects a
+/// spillable growth past the consumer's fair share (so the total can exceed
+/// `limit`), and the infallible `grow` is never rejected by either. The budget
+/// therefore bounds tracked, spill-checkable reservations rather than RSS. See
+/// [`NestedMemoryPool`].
 pub fn new_flow_memory_pool(limit: usize, policy: QueryMemoryPoolPolicy) -> Arc<dyn MemoryPool> {
     // `SCOPED_POOL_TOP_CONSUMERS` is non-zero; `MIN` keeps this panic-free.
     let top_n = NonZeroUsize::new(SCOPED_POOL_TOP_CONSUMERS).unwrap_or(NonZeroUsize::MIN);
@@ -731,21 +740,33 @@ pub fn new_flow_memory_pool(limit: usize, policy: QueryMemoryPoolPolicy) -> Arc<
 /// keeps these bounds:
 ///
 /// ```text
-/// sum of all flow reservations + ordinary query reservations <= node limit
-/// each scoped query                                          <= its flow budget
+/// each scoped query <= its flow budget
+/// Greedy (default): sum of flow reserves + ordinary reserves <= node limit
 /// ```
+///
+/// The node-wide bound is a property of the *Greedy* policy (the default), where
+/// `try_grow` is checked against the pool total: every tracked reservation is
+/// charged to both pools, so their sum stays within the node limit. The
+/// experimental *Fair* policy (DataFusion's `FairSpillPool`) keeps its own
+/// pre-existing semantics - a spillable consumer's growth is checked against its
+/// current fair share, `(pool_size - unspillable) / num_spill`, not against the
+/// pool total - so a spillable consumer can exceed the node's total when that
+/// share grows or shrinks. This wrapper only forwards to that policy; it neither
+/// introduces nor tightens the behaviour, so the node's absolute total is not
+/// guaranteed under `Fair`.
+///
+/// In both policies only [`MemoryPool::try_grow`] is enforced, because that is
+/// the only place DataFusion consults the pool before allocating. The infallible
+/// [`MemoryPool::grow`] is forwarded to both pools without any check or rollback
+/// (`GreedyMemoryPool::grow` and `FairSpillPool::grow` both add unconditionally),
+/// so it is charged but never rejected: the budget bounds tracked,
+/// spill-checkable reservations, not process RSS.
 ///
 /// The flow pool is the reporting side: [`MemoryPool::name`],
 /// [`MemoryPool::memory_limit`] and [`MemoryPool::reserved`] report the flow
 /// scope, because that is the tighter bound a single scoped query runs under.
 /// Note that [`MemoryPool::reserved`] is the flow's reservation, which is
 /// *also* counted in the node pool's `reserved()`.
-///
-/// Only [`MemoryPool::try_grow`] is enforced, because that is the only place
-/// DataFusion consults the pool before allocating; the infallible
-/// [`MemoryPool::grow`] merely book-keeps bytes a consumer has already
-/// allocated (the pinned fork's `GreedyMemoryPool::grow` adds unconditionally),
-/// so it is forwarded to both pools without any rollback.
 #[derive(Debug)]
 pub(super) struct NestedMemoryPool {
     /// Node-wide pool of the engine (`query.memory_pool_size`), shared by every

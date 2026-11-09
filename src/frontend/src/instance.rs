@@ -746,6 +746,13 @@ impl Instance {
             return vec![error::SuspendedSnafu {}.fail()];
         }
 
+        // Record the Flow memory scope before parsing, planning and table lookup
+        // capture the context, so every nested execution of this request shares
+        // one budget (see `QueryEngine::with_flow_memory_scope`). This is the
+        // same attachment as the gRPC entry and is a no-op for a request that
+        // declares no budget or whose context already carries a scope.
+        let query_ctx = self.query_engine().with_flow_memory_scope(query_ctx);
+
         let query_interceptor_opt = self.plugins.get::<SqlQueryInterceptorRef<Error>>();
         let query_interceptor = query_interceptor_opt.as_ref();
         let query = match query_interceptor.pre_parsing(query, query_ctx.clone()) {
@@ -3458,6 +3465,109 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(axum::http::StatusCode::FORBIDDEN, response.status());
+
+        Ok(())
+    }
+
+    /// Captures the context SQL execution receives, i.e. the context planning,
+    /// table lookup and every nested engine execution run under.
+    struct CapturingQueryContextInterceptor {
+        captured: std::sync::Mutex<Option<QueryContextRef>>,
+    }
+
+    impl CapturingQueryContextInterceptor {
+        fn new() -> Self {
+            Self {
+                captured: std::sync::Mutex::new(None),
+            }
+        }
+
+        fn take(&self) -> QueryContextRef {
+            self.captured
+                .lock()
+                .unwrap()
+                .take()
+                .expect("the query reached execution")
+        }
+    }
+
+    impl SqlQueryInterceptor for CapturingQueryContextInterceptor {
+        type Error = Error;
+
+        fn pre_parsing<'a>(
+            &self,
+            query: &'a str,
+            query_ctx: QueryContextRef,
+        ) -> Result<std::borrow::Cow<'a, str>> {
+            *self.captured.lock().unwrap() = Some(query_ctx);
+            Ok(std::borrow::Cow::Borrowed(query))
+        }
+    }
+
+    /// A Flow's declared memory budget must be resolved at the request entry: the
+    /// context is captured during table lookup - before `engine_context` runs -
+    /// and re-entered later, so a scope attached only there would never reach it.
+    #[tokio::test]
+    async fn test_grpc_do_query_attaches_flow_memory_scope_before_execution() -> TestResult<()> {
+        let interceptor = Arc::new(CapturingQueryContextInterceptor::new());
+        let instance = test_instance_with_insert_select_interceptor(interceptor.clone()).await?;
+
+        let query_ctx = Arc::new(
+            QueryContextBuilder::default()
+                .set_extension(
+                    query::options::FLOW_MAX_MEMORY_BYTES.to_string(),
+                    "4096".to_string(),
+                )
+                .set_extension(query::options::FLOW_ID.to_string(), "42".to_string())
+                .build(),
+        );
+        let request = Request::Query(api::v1::QueryRequest {
+            query: Some(Query::Sql("SELECT 1".to_string())),
+        });
+        servers::query_handler::grpc::GrpcQueryHandler::do_query(
+            &instance,
+            request,
+            query_ctx.clone(),
+        )
+        .await
+        .unwrap();
+
+        // The captured context - the one planning and table lookup see - carries
+        // the scope the entry resolved, on a fork of the incoming context.
+        let captured = interceptor.take();
+        assert!(!Arc::ptr_eq(&captured, &query_ctx));
+        let scope = captured
+            .memory_scope()
+            .expect("scope is recorded before planning");
+        assert_eq!("flow:42", scope.label());
+        assert!(matches!(
+            scope.pool().memory_limit(),
+            datafusion::execution::memory_pool::MemoryLimit::Finite(4096)
+        ));
+        // The caller's context is not mutated: a live pool never leaks out of the
+        // request.
+        assert!(query_ctx.memory_scope().is_none());
+
+        // Entering the engine again with that captured context - what a nested
+        // execution does - reuses one and the same pool.
+        let first = instance
+            .query_engine()
+            .engine_context(captured.clone())
+            .unwrap();
+        let nested = instance
+            .query_engine()
+            .engine_context(first.query_ctx().clone())
+            .unwrap();
+        let first_pool = first.query_ctx().memory_scope().expect("scope").pool();
+        let nested_pool = nested.query_ctx().memory_scope().expect("scope").pool();
+        assert!(Arc::ptr_eq(&first_pool, &nested_pool));
+        assert!(Arc::ptr_eq(&first_pool, &scope.pool()));
+
+        // Shared budget: what the first entry reserved is gone from the second.
+        let reservation = datafusion::execution::memory_pool::MemoryConsumer::new("flow_42")
+            .register(&first_pool);
+        reservation.try_grow(4096).unwrap();
+        assert_eq!(4096, nested_pool.reserved());
 
         Ok(())
     }
