@@ -434,9 +434,54 @@ impl Export {
         for result in futures::future::join_all(tasks).await {
             result?;
         }
+        self.export_create_flow().await?;
         let elapsed = timer.elapsed();
         info!("Success {db_count}/{db_count} jobs, cost: {elapsed:?}");
 
+        Ok(())
+    }
+
+    /// Exports all flow definitions of the catalog to `<catalog>/create_flows.sql`.
+    ///
+    /// Flows are catalog-scoped, so they are written once per catalog rather than per schema.
+    async fn export_create_flow(&self) -> Result<()> {
+        let flows = self
+            .database_client
+            .sql_in_public("SHOW FLOWS")
+            .await?
+            .unwrap_or_default();
+        let mut names = Vec::with_capacity(flows.len());
+        for row in &flows {
+            let Some(Value::String(name)) = row.first() else {
+                continue;
+            };
+            names.push(name.as_str());
+        }
+        names.sort();
+
+        // `SHOW CREATE FLOW "<catalog>"."<flow>"` has the same shape as the schema-qualified
+        // statements, so the flow name is passed in the "schema" position.
+        let mut content = String::new();
+        for name in &names {
+            append_schema_ddl(
+                &self.database_client,
+                &self.catalog,
+                name,
+                std::iter::once(("FLOW", None)),
+                &mut content,
+            )
+            .await?;
+        }
+
+        let operator = self.build_prefer_fs_operator().await?;
+        let file_path = format!("{}/create_flows.sql", self.catalog);
+        self.write_to_storage(&operator, &file_path, content.into_bytes())
+            .await?;
+        info!(
+            "Exported {} flow definitions to {}",
+            names.len(),
+            self.storage_type.format_output_path(&file_path)
+        );
         Ok(())
     }
 
