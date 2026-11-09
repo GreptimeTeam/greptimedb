@@ -518,8 +518,10 @@ async fn test_footer_limit_is_shared_and_cancelled_refresh_releases_permits() {
 
 fn assert_missing_history(error: Error, storage: &str) {
     assert_eq!(error.status_code(), StatusCode::InvalidArguments);
+    assert!(!error.to_string().contains("accept_missing_history"));
+    assert!(error.to_string().contains("Check the source node prefix"));
     match error {
-        Error::MissingWalHistory {
+        Error::MissingSourceWalHistory {
             region_id,
             prefix,
             storage: actual,
@@ -674,7 +676,7 @@ async fn test_last_entry_evicts_indexes_as_watermark_advances() {
     io.delete(6).await.unwrap();
     assert!(matches!(
         reader.prepare(region(), entry_id(6, 1), upper).await,
-        Err(Error::MissingWalHistory { .. })
+        Err(Error::MissingSourceWalHistory { .. })
     ));
     reader.indexes.run_pending_tasks().await;
     assert_eq!(reader.indexes.entry_count(), 0);

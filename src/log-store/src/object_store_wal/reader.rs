@@ -30,7 +30,7 @@ use tokio::sync::Semaphore;
 
 use crate::error::{
     CorruptedWalObjectSnafu, Error, InvalidWalEntryRangeSnafu, InvalidWalObjectSnafu,
-    InvalidWalObjectStoreSnafu, MissingWalHistorySnafu, ObjectStoreWalSnafu, Result,
+    InvalidWalObjectStoreSnafu, MissingSourceWalHistorySnafu, ObjectStoreWalSnafu, Result,
 };
 use crate::object_store_wal::batch::{
     OBJECT_SEQ_LIMIT, POSITION_BITS, POSITION_LIMIT, entry_id, sequence_floor,
@@ -204,7 +204,7 @@ impl ObjectStoreWalReader {
             .iter()
             .map(|object| object.object_seq)
             .max()
-            .with_context(|| MissingWalHistorySnafu {
+            .with_context(|| MissingSourceWalHistorySnafu {
                 region_id,
                 prefix: self.prefix().to_string(),
                 storage: self.io.storage(),
@@ -299,7 +299,7 @@ impl ObjectStoreWalReader {
             .invalidate_if(move |object, _| !present.contains(object));
         ensure!(
             !listed.is_empty(),
-            MissingWalHistorySnafu {
+            MissingSourceWalHistorySnafu {
                 region_id,
                 prefix: self.prefix().to_string(),
                 storage: self.io.storage(),
@@ -425,7 +425,7 @@ impl ObjectStoreWalReader {
             && let Some(reason) =
                 history::missing_history(&catalog, region_id, after, false, history_end)
         {
-            return MissingWalHistorySnafu {
+            return MissingSourceWalHistorySnafu {
                 region_id,
                 prefix: self.prefix().to_string(),
                 storage: self.io.storage(),

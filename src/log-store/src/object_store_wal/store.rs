@@ -4324,7 +4324,7 @@ mod tests {
                 // A memory store names itself by its address as its bucket.
                 "storage provider \"wal-store\" (memory, bucket ",
                 "root \"/\")",
-                "the prefix held no object when the WAL opened",
+                "the prefix held no object when the prefix was listed",
                 "copy every object under the prefix",
                 "`[wal].accept_missing_history = true`",
             ] {
@@ -4561,7 +4561,7 @@ mod tests {
                 for entry_id in [id(3, 1), id(9, 1)] {
                     let message = missing_history(&store, region_id, entry_id).await.unwrap();
                     let reason = format!(
-                        "its watermark, entry {entry_id}, names object {}, but the prefix held entries only in objects below 3 when the WAL opened",
+                        "its watermark, entry {entry_id}, names object {}, but the prefix held entries only in objects below 3 when the prefix was listed",
                         entry_id >> 20
                     );
                     assert!(message.contains(&reason), "{message}");
@@ -4594,7 +4594,9 @@ mod tests {
         assert_eq!(None, missing_history(&store, region(1), 0).await);
         let message = missing_history(&store, region(1), id(0, 1)).await.unwrap();
         assert!(
-            message.contains("names object 0, but the prefix held no entry when the WAL opened"),
+            message.contains(
+                "names object 0, but the prefix held no entry when the prefix was listed"
+            ),
             "{message}"
         );
         store.stop().await.unwrap();

@@ -36,7 +36,7 @@ pub(crate) fn missing_history(
         return None;
     }
     if found_empty {
-        return Some("the prefix held no object when the WAL opened".to_string());
+        return Some("the prefix held no object when the prefix was listed".to_string());
     }
     let sequence_floor = sequence_floor(entry_id);
     (sequence_floor > history_end).then(|| {
@@ -45,7 +45,7 @@ pub(crate) fn missing_history(
                 history_end => format!("entries only in objects below {history_end}"),
             };
             format!(
-                "its watermark, entry {entry_id}, names object {}, but the prefix held {held} when the WAL opened",
+                "its watermark, entry {entry_id}, names object {}, but the prefix held {held} when the prefix was listed",
                 sequence_floor - 1
             )
         })
