@@ -1133,16 +1133,15 @@ mod tests {
             b"[{\"message\":\"before\"},{\"message\":\"bad\xc1\x89\xc8\x7f\x7f\"},{\"message\":\"after\"}]".as_slice(),
             b"{\"message\":\"before\"}\n{\"message\":\"bad\xc1\x89\xc8\x7f\x7f\"}\n{\"message\":\"after\"}".as_slice(),
         ] {
-            for content_type in [ContentType::json()] {
-                for ignore_errors in [false, true] {
-                    let actual = extract_pipeline_value_by_content_type(
-                        content_type.clone(),
-                        Bytes::from_static(payload),
-                        ignore_errors,
-                    )
-                    .unwrap();
-                    assert_eq!(actual, expected);
-                }
+            let content_type = ContentType::json();
+            for ignore_errors in [false, true] {
+                let actual = extract_pipeline_value_by_content_type(
+                    content_type.clone(),
+                    Bytes::from_static(payload),
+                    ignore_errors,
+                )
+                .unwrap();
+                assert_eq!(actual, expected);
             }
         }
     }
@@ -1164,18 +1163,17 @@ mod tests {
         ];
 
         for (payload, expected) in cases {
-            for content_type in [ContentType::json()] {
-                for ignore_errors in [false, true] {
-                    let result = extract_pipeline_value_by_content_type(
-                        content_type.clone(),
-                        Bytes::from_static(payload),
-                        ignore_errors,
-                    );
-                    if ignore_errors {
-                        assert_eq!(result.unwrap(), expected);
-                    } else {
-                        assert!(matches!(result, Err(Error::ParseJson { .. })));
-                    }
+            let content_type = ContentType::json();
+            for ignore_errors in [false, true] {
+                let result = extract_pipeline_value_by_content_type(
+                    content_type.clone(),
+                    Bytes::from_static(payload),
+                    ignore_errors,
+                );
+                if ignore_errors {
+                    assert_eq!(result.unwrap(), expected);
+                } else {
+                    assert!(matches!(result, Err(Error::ParseJson { .. })));
                 }
             }
         }
@@ -1184,25 +1182,20 @@ mod tests {
     #[test]
     fn test_json_invalid_utf8_retry_preserves_ignored_items() {
         let payload = Bytes::from_static(b"0{\"message\":\"bad\xff\"}false{\"message\":\"after\"}");
-        for content_type in [ContentType::json()] {
-            let result = extract_pipeline_value_by_content_type(
-                content_type.clone(),
-                payload.clone(),
-                false,
-            );
-            assert!(matches!(result, Err(Error::InvalidParameter { .. })));
+        let content_type = ContentType::json();
+        let result =
+            extract_pipeline_value_by_content_type(content_type.clone(), payload.clone(), false);
+        assert!(matches!(result, Err(Error::InvalidParameter { .. })));
 
-            let actual =
-                extract_pipeline_value_by_content_type(content_type, payload.clone(), true)
-                    .unwrap();
-            assert_eq!(
-                actual,
-                vec![
-                    json!({"message": "bad\u{fffd}"}).into(),
-                    json!({"message": "after"}).into(),
-                ],
-            );
-        }
+        let actual =
+            extract_pipeline_value_by_content_type(content_type, payload.clone(), true).unwrap();
+        assert_eq!(
+            actual,
+            vec![
+                json!({"message": "bad\u{fffd}"}).into(),
+                json!({"message": "after"}).into(),
+            ],
+        );
     }
 
     #[test]
