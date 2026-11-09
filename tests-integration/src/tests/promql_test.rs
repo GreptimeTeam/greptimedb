@@ -42,7 +42,7 @@ use query::promql::planner::NATIVE_PROMQL_EXTENSION_KEY;
 use rstest::rstest;
 use rstest_reuse::apply;
 use servers::query_handler::sql::SqlQueryHandler;
-use session::context::QueryContext;
+use session::context::{MetricDiscoveryScope, QueryContext};
 use sql::ast::{Ident, ObjectName, ObjectNamePart};
 use sql::statements::create::CreateView;
 use sql::statements::statement::Statement as SqlStatement;
@@ -3725,6 +3725,112 @@ async fn distributed_native_promql_disjoint_regions_do_not_repartition() {
     assert_eq!(control_rows, rows, "{expression}");
 }
 
+/// A zero-match selector and a partitioned metric meet at one frontend set consumer.
+#[tokio::test(flavor = "multi_thread")]
+async fn distributed_native_promql_zero_match_or_real() {
+    common_telemetry::init_default_ut_logging();
+    let cluster = GreptimeDbClusterBuilder::new("distributed_native_promql_zero_match")
+        .await
+        .with_datanodes(2)
+        .with_real_datanode_grpc_addr(true)
+        .with_frontend_real_datanode_grpc(true)
+        .with_query_options(QueryOptions {
+            experimental_native_promql: true,
+            ..Default::default()
+        })
+        .build(false)
+        .await;
+    let instance = cluster.fe_instance().clone();
+    execute_all(
+        &instance,
+        r#"
+        CREATE TABLE zero_match_phy (host STRING, val DOUBLE, ts TIMESTAMP TIME INDEX, PRIMARY KEY(host))
+            PARTITION ON COLUMNS (host) (host < 'm', host >= 'm')
+            ENGINE=metric WITH ('physical_metric_table'='true');
+        CREATE TABLE alpha_total (host STRING, val DOUBLE, ts TIMESTAMP TIME INDEX, PRIMARY KEY(host))
+            ENGINE=metric WITH ('on_physical_table'='zero_match_phy');
+        INSERT INTO alpha_total (host, ts, val) VALUES
+            ('a', 0, 1), ('a', 1000, 2), ('a', 2000, 3),
+            ('z', 0, 10), ('z', 1000, 20), ('z', 2000, 30);
+        "#,
+        QueryContext::arc(),
+    )
+    .await;
+
+    let expected = [
+        (0, "a", 1.0),
+        (1000, "a", 2.0),
+        (2000, "a", 3.0),
+        (0, "z", 10.0),
+        (1000, "z", 20.0),
+        (2000, "z", 30.0),
+    ];
+    for (expression, empty_index) in [
+        (r#"{__name__=~"no_such_metric_.+"} or alpha_total"#, 0),
+        (r#"alpha_total or {__name__=~"no_such_metric_.+"}"#, 1),
+    ] {
+        let output = instance
+            .do_promql_query(
+                &PromQuery {
+                    query: expression.to_string(),
+                    start: "0".to_string(),
+                    end: "2".to_string(),
+                    step: "1s".to_string(),
+                    ..PromQuery::default()
+                },
+                native_query_context(true, 2),
+            )
+            .await
+            .remove(0)
+            .unwrap();
+        let plan = output.meta.plan.as_ref().expect("frontend physical plan");
+        let fused = find_plan_node(plan, "FusedSeriesExec").expect("frontend set consumer");
+        let display = format!(
+            "{}",
+            datafusion::physical_plan::displayable(fused.as_ref()).one_line()
+        );
+        assert!(display.contains("root Set or"), "{expression}: {display}");
+        let children = fused.children();
+        assert_eq!(children.len(), 2, "{expression}: {display}");
+        assert!(
+            find_plan_node(children[empty_index], "EmptyExec").is_some(),
+            "{expression}: {display}"
+        );
+        let shape = native_plan_shape(children[1 - empty_index]);
+        assert_eq!(shape.regions_per_scan, vec![2], "{expression}: {display}");
+        assert_eq!(
+            fused.output_partitioning().partition_count(),
+            1,
+            "{expression}: {display}"
+        );
+        assert!(
+            children
+                .iter()
+                .all(|child| child.output_partitioning().partition_count() == 1),
+            "{expression}: {display}"
+        );
+
+        let (columns, rows) = native_labelled_rows(output).await;
+        assert_eq!(
+            columns,
+            vec!["__name__", "host", "ts", "val"],
+            "{expression}"
+        );
+        let actual = rows
+            .iter()
+            .map(|(time, labels, value)| {
+                assert_eq!(labels.len(), 2, "{expression}: {labels:?}");
+                assert_eq!(
+                    labels.get("__name__").map(String::as_str),
+                    Some("alpha_total")
+                );
+                (*time, labels.get("host").unwrap().as_str(), *value)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(actual, expected, "{expression}");
+    }
+}
+
 /// A nameless selector discovers every metric table it matches and reads them as one `Union`.
 /// `UnionExec` reports the frame metadata of its last child, so a time-partitioned metric named
 /// before a host-partitioned one must still be reconciled: otherwise the union claims contiguous
@@ -6047,6 +6153,387 @@ async fn native_promql_discovery_names_each_metric_it_reads() {
             ("native_dn_beta".to_string(), 2.0),
         ],
         "each row reports its own metric's name and samples: {rows:?}"
+    );
+}
+
+/// Both sides of `or` are planned natively when discovery finds no authorized metric, and so is an
+/// empty input beside a real one under an operator that is not a set operation.
+///
+/// The `or` rows already read the empty input through a tree that required placement sources. The
+/// arithmetic rows are the ones that pin the input binding: physical planning accepts either all
+/// raw frames or all bare scans and refuses a node over a mixture, so a plan holding one empty input
+/// has to bind every real input to a source of its own. Leave that out and `alpha_total` stays a
+/// bare scan beside the empty frame, which physical planning cannot convert
+/// (`No installed planner was able to convert the custom node`): the query errors instead of
+/// answering the empty vector that every one of these arithmetic expressions evaluates to.
+#[tokio::test(flavor = "multi_thread")]
+async fn native_promql_zero_match_or_real_tql() {
+    common_telemetry::init_default_ut_logging();
+    let (standalone, observer) = native_test_instance(GreptimeDbStandaloneBuilder::new(
+        "native_promql_zero_match_or_real_tql",
+    ))
+    .await;
+    let instance = standalone.fe_instance().clone();
+    execute_all(
+        &instance,
+        r#"
+        CREATE TABLE zero_match_phy (host STRING, ts TIMESTAMP TIME INDEX, val DOUBLE, PRIMARY KEY (host))
+            ENGINE=metric WITH ("physical_metric_table" = "true");
+        CREATE TABLE alpha_total (host STRING, ts TIMESTAMP TIME INDEX, val DOUBLE, PRIMARY KEY (host))
+            ENGINE=metric WITH ("on_physical_table" = "zero_match_phy");
+        INSERT INTO alpha_total (host, ts, val) VALUES
+            ('a', 0, 1), ('a', 1000, 2), ('a', 2000, 3),
+            ('b', 0, 10), ('b', 1000, 20), ('b', 2000, 30);
+        ADMIN FLUSH_TABLE('zero_match_phy');
+        "#,
+        QueryContext::arc(),
+    )
+    .await;
+
+    let expected = [
+        (0, "a", 1.0),
+        (1000, "a", 2.0),
+        (2000, "a", 3.0),
+        (0, "b", 10.0),
+        (1000, "b", 20.0),
+        (2000, "b", 30.0),
+    ];
+    for (query, empty_index) in [
+        (r#"{__name__=~"no_such_metric_.+"} or alpha_total"#, 0),
+        (r#"alpha_total or {__name__=~"no_such_metric_.+"}"#, 1),
+    ] {
+        // TQL does not prepare discovery scope itself; provide the same authorized scope that
+        // the Prometheus handler would provide, without comparing to the unsupported legacy path.
+        let mut ctx = QueryContext::with_db_name(None);
+        ctx.set_extension(QUERY_PARALLELISM_HINT, "4".to_string());
+        ctx.set_extension(NATIVE_PROMQL_EXTENSION_KEY, "true".to_string());
+        ctx.set_metric_discovery_scope(MetricDiscoveryScope::allowed([(
+            DEFAULT_CATALOG_NAME.to_string(),
+            DEFAULT_SCHEMA_NAME.to_string(),
+            "alpha_total".to_string(),
+        )]));
+        let sql = format!("TQL EVAL (0, 2, '1s', '1s') {query}");
+        observer.clear();
+        let output = instance
+            .do_query(&sql, Arc::new(ctx))
+            .await
+            .remove(0)
+            .unwrap();
+        let (columns, rows) = native_labelled_rows(output).await;
+        assert_eq!(columns, vec!["__name__", "host", "ts", "val"], "{query}");
+        let actual = rows
+            .iter()
+            .map(|(time, labels, value)| {
+                assert_eq!(labels.len(), 2, "{query}: {labels:?}");
+                assert_eq!(
+                    labels.get("__name__").map(String::as_str),
+                    Some("alpha_total")
+                );
+                (*time, labels.get("host").unwrap().as_str(), *value)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(actual, expected, "{query}");
+
+        let fused = observer.two_input_fused();
+        let children = fused.children();
+        assert!(
+            find_plan_node(children[empty_index], "EmptyExec").is_some(),
+            "{query}: {fused:?}"
+        );
+        assert_eq!(fused.output_partitioning().partition_count(), 1, "{query}");
+        assert!(
+            children
+                .iter()
+                .all(|child| child.output_partitioning().partition_count() == 1),
+            "{query}: {fused:?}"
+        );
+        assert_eq!(observed_series_scans(&observer).len(), 1, "{query}");
+    }
+
+    // An empty input beside a real one under an arithmetic operator. Nothing above an empty
+    // selector here pairs it with a sibling operand, so its layout is the statement's; what these
+    // rows assert is the input binding and the answer.
+    for query in [
+        r#"alpha_total + {__name__=~"no_such_metric_.+"}"#,
+        r#"alpha_total + on(host) {__name__=~"no_such_metric_.+"}"#,
+        r#"{__name__=~"no_such_metric_.+"} + on(host) alpha_total"#,
+        r#"alpha_total * on(host) group_left {__name__=~"no_such_metric_.+"}"#,
+    ] {
+        // TQL does not prepare discovery scope itself; provide the same authorized scope that
+        // the Prometheus handler would provide, without comparing to the unsupported legacy path.
+        let mut ctx = QueryContext::with_db_name(None);
+        ctx.set_extension(QUERY_PARALLELISM_HINT, "4".to_string());
+        ctx.set_extension(NATIVE_PROMQL_EXTENSION_KEY, "true".to_string());
+        ctx.set_metric_discovery_scope(MetricDiscoveryScope::allowed([(
+            DEFAULT_CATALOG_NAME.to_string(),
+            DEFAULT_SCHEMA_NAME.to_string(),
+            "alpha_total".to_string(),
+        )]));
+        let sql = format!("TQL EVAL (0, 2, '1s', '1s') {query}");
+        observer.clear();
+        let output = instance
+            .do_query(&sql, Arc::new(ctx))
+            .await
+            .remove(0)
+            .unwrap();
+        // The statement's own tree is the one to read the shape from: the observer records the
+        // region-side plans too, and which of them was wrapped last says nothing about the shape
+        // that answers the statement.
+        let plan = observer.root_plan();
+        let fused = find_plan_node(&plan, "FusedSeriesExec")
+            .unwrap_or_else(|| panic!("`{query}` did not take the native route: {plan:?}"));
+        // One node over the real input's scan and the empty frame: the empty input is the node's
+        // sibling, and the one real selector is the only read.
+        let children = fused.children();
+        assert_eq!(children.len(), 2, "{query}: {fused:?}");
+        assert!(
+            children
+                .iter()
+                .any(|child| find_plan_node(child, "EmptyExec").is_some()),
+            "`{query}` does not read the zero-match selector as the node's input: {fused:?}"
+        );
+        assert!(
+            children
+                .iter()
+                .any(|child| find_plan_node(child, "MergeScanExec").is_some()),
+            "`{query}` does not read the real input's region: {fused:?}"
+        );
+        // No sample on the empty side means no pair to operate on: the vector answer is empty, and
+        // the node above is what answered it, not a fallback to the existing plan.
+        assert!(
+            native_result_rows(output).await.is_empty(),
+            "{query}: an empty input answered a sample"
+        );
+    }
+}
+
+/// A zero-match selector is laid out by the operand it is compared against, not by the statement.
+///
+/// `native_local_wide` carries two fields and `native_local_narrow` one, and the empty branch is the
+/// left operand of the inner `or`, the right operand of which is `native_local_narrow`. One field is
+/// therefore the layout that operation compares: a layout taken from the statement's first real
+/// input - `native_local_wide`, two fields - would make the two sides of `or` disagree about how
+/// many fields they pair, which the compiler refuses. A refusal here leaves the statement to the
+/// existing plan, which refuses the `__name__` regex in the empty branch, so the query would fail.
+/// The empty branch answers no sample, which is why the answer has to be the one the same statement
+/// with that branch removed gives.
+///
+/// A branch with no real input anywhere in it - `(Z1 or Z2)`, whose own `or` compares two zero-match
+/// selectors - has no sibling inside its own operation to take a layout from. Its layout therefore
+/// flows in from the operation above it, which compares that whole subtree as one operand: every
+/// zero-match selector in the subtree is laid out by the first real selector of the operand it is
+/// compared against. Taking the statement's layout instead gives both of them `native_local_wide`'s
+/// two fields, and the outer `or` then pairs two fields against `native_local_narrow`'s one, which
+/// the compiler refuses - and the existing plan refuses the `__name__` regex the branch is written
+/// with, so the query fails instead of answering the control's answer.
+///
+/// The sibling's first selector is not its answer's layout either: `native_local_wide + on(host)
+/// native_local_narrow` pairs two fields against one and keeps the shorter side's, so that operand
+/// answers one field while the first selector it reads carries two. An empty subtree compared
+/// against it therefore still takes a layout of two fields and the compiler refuses the operation,
+/// which is why `(Z or (native_local_wide + on(host) native_local_narrow))` - and its mirror image
+/// with the empty subtree on the right - is deliberately not asserted here: it falls back to the
+/// existing plan and fails on the regex. Laying the empty subtree out by the sibling operand's
+/// compiled answer instead of by its first selector is a separate change.
+#[tokio::test(flavor = "multi_thread")]
+async fn native_promql_zero_match_takes_the_layout_of_its_operand() {
+    common_telemetry::init_default_ut_logging();
+    let (standalone, observer) = native_test_instance(GreptimeDbStandaloneBuilder::new(
+        "native_promql_zero_match_local_layout",
+    ))
+    .await;
+    let instance = standalone.fe_instance().clone();
+    execute_all(
+        &instance,
+        r#"
+        CREATE TABLE native_local_wide (
+            host STRING, ts TIMESTAMP TIME INDEX, w0 DOUBLE, w1 DOUBLE, PRIMARY KEY (host)
+        );
+        CREATE TABLE native_local_narrow (
+            host STRING, ts TIMESTAMP TIME INDEX, n0 DOUBLE, PRIMARY KEY (host)
+        );
+        INSERT INTO native_local_wide VALUES ('h0', 1000, 1, 2), ('h0', 2000, 3, 4);
+        INSERT INTO native_local_narrow VALUES ('h0', 1000, 10), ('h0', 2000, 20);
+        ADMIN FLUSH_TABLE('native_local_wide');
+        ADMIN FLUSH_TABLE('native_local_narrow');
+        "#,
+        QueryContext::arc(),
+    )
+    .await;
+
+    let control = "native_local_wide + on(host) native_local_narrow";
+    // Each query with the number of zero-match selectors it reads. Every one of them answers the
+    // control's rows: a zero-match branch holds no sample, so it only has to be laid out, not read.
+    let queries = [
+        (control, 0usize),
+        (
+            r#"native_local_wide + on(host) ({__name__=~"no_such_.+"} or native_local_narrow)"#,
+            1,
+        ),
+        // The empty subtree is the left operand of the outer `or`: its own `or` compares two
+        // zero-match selectors, so both of them take the layout of the operand beside it.
+        (
+            r#"native_local_wide + on(host) (({__name__=~"no_such_a.+"} or {__name__=~"no_such_b.+"}) or native_local_narrow)"#,
+            2,
+        ),
+        // The same empty subtree on the right of the outer `or`.
+        (
+            r#"native_local_wide + on(host) (native_local_narrow or ({__name__=~"no_such_a.+"} or {__name__=~"no_such_b.+"}))"#,
+            2,
+        ),
+        // One zero-match selector on each side: the inner one has a real sibling of its own
+        // operation, the outer one is laid out through the subtree that sibling makes real.
+        (
+            r#"native_local_wide + on(host) ((native_local_narrow or {__name__=~"no_such_a.+"}) or {__name__=~"no_such_b.+"})"#,
+            2,
+        ),
+        // A non-bare empty operand: an aggregate, a unary negation or a label rewrite reads no real
+        // input either, so the whole subtree takes the layout of the operand it is compared against.
+        // An aggregate is also the operand that changes the shape it answers - `sum by (host)`
+        // answers a field of its own - which is why the layout has to reach the selector under it
+        // instead of being compared against the aggregate's answer.
+        (
+            r#"native_local_wide + on(host) (sum by (host) ({__name__=~"no_such_.+"}) or native_local_narrow)"#,
+            1,
+        ),
+        (
+            r#"native_local_wide + on(host) (-{__name__=~"no_such_.+"} or native_local_narrow)"#,
+            1,
+        ),
+        (
+            r#"native_local_wide + on(host) (label_replace({__name__=~"no_such_.+"}, "x", "y", "", "") or native_local_narrow)"#,
+            1,
+        ),
+    ];
+    // The nodes named `name` reachable from `plan`.
+    let count_nodes = |plan: &Arc<dyn ExecutionPlan>, name: &str| {
+        let mut stack = vec![Arc::clone(plan)];
+        let mut count = 0;
+        while let Some(node) = stack.pop() {
+            count += usize::from(node.name() == name);
+            stack.extend(node.children().into_iter().cloned());
+        }
+        count
+    };
+    let mut answers = Vec::new();
+    for (query, empty_selectors) in queries {
+        // TQL does not prepare discovery scope itself; provide the same authorized scope that the
+        // Prometheus handler would provide, without comparing to the unsupported legacy path.
+        let mut ctx = QueryContext::with_db_name(None);
+        ctx.set_extension(QUERY_PARALLELISM_HINT, "4".to_string());
+        ctx.set_extension(NATIVE_PROMQL_EXTENSION_KEY, "true".to_string());
+        ctx.set_metric_discovery_scope(MetricDiscoveryScope::allowed([
+            (
+                DEFAULT_CATALOG_NAME.to_string(),
+                DEFAULT_SCHEMA_NAME.to_string(),
+                "native_local_wide".to_string(),
+            ),
+            (
+                DEFAULT_CATALOG_NAME.to_string(),
+                DEFAULT_SCHEMA_NAME.to_string(),
+                "native_local_narrow".to_string(),
+            ),
+        ]));
+        let sql = format!("TQL EVAL (1, 2, '1s', '1s') {query}");
+        observer.clear();
+        let output = instance
+            .do_query(&sql, Arc::new(ctx))
+            .await
+            .remove(0)
+            .unwrap();
+        let fused = observer
+            .fused()
+            .unwrap_or_else(|| panic!("`{query}` did not take the native route"));
+        assert_eq!(
+            empty_selectors,
+            count_nodes(&fused, "EmptyExec"),
+            "`{query}` does not read every zero-match selector as the node's input: {fused:?}"
+        );
+        if empty_selectors > 0 {
+            // The empty branch reads no region, so the two real selectors are the only two reads.
+            let mut region_inputs = Vec::new();
+            native_region_inputs(&fused, &mut region_inputs);
+            assert_eq!(
+                2,
+                region_inputs.len(),
+                "the empty branch reads a region of its own: {fused:?}"
+            );
+        }
+        answers.push(native_result_rows(output).await);
+    }
+    for ((query, empty_selectors), answer) in queries.iter().zip(&answers) {
+        if *empty_selectors > 0 {
+            assert_eq!(
+                &answers[0], answer,
+                "the zero-match branches changed the answer of `{query}`"
+            );
+        }
+    }
+    // `w0` of the wide table plus `n0` of the narrow one: the binary operation over two vectors
+    // pairs fields by position and keeps the shorter side's.
+    assert_eq!(
+        answers[0],
+        vec![
+            (1000, "h0".to_string(), 11.0),
+            (2000, "h0".to_string(), 23.0)
+        ],
+        "the fixture's answer is not the one the empty branch is compared against"
+    );
+
+    // A set operation inside a subquery: the selector walk has to keep recording set operands
+    // while it descends into the subquery, otherwise the empty operand is laid out by the
+    // statement's first real input (`wide`, two fields) instead of by its own sibling (`narrow`,
+    // one field), and the inner `or` is refused. The statement's outer binary is the same one the
+    // control uses, so the empty branch must not change the answer.
+    let subquery_empty = r#"native_local_wide + on(host) avg_over_time(({__name__=~"no_such_.+"} or native_local_narrow)[2s:1s])"#;
+    let subquery_control =
+        r#"native_local_wide + on(host) avg_over_time(native_local_narrow[2s:1s])"#;
+    let mut subquery_answers = Vec::new();
+    for (query, has_empty) in [(subquery_control, false), (subquery_empty, true)] {
+        let mut ctx = QueryContext::with_db_name(None);
+        ctx.set_extension(QUERY_PARALLELISM_HINT, "4".to_string());
+        ctx.set_extension(NATIVE_PROMQL_EXTENSION_KEY, "true".to_string());
+        ctx.set_metric_discovery_scope(MetricDiscoveryScope::allowed([
+            (
+                DEFAULT_CATALOG_NAME.to_string(),
+                DEFAULT_SCHEMA_NAME.to_string(),
+                "native_local_wide".to_string(),
+            ),
+            (
+                DEFAULT_CATALOG_NAME.to_string(),
+                DEFAULT_SCHEMA_NAME.to_string(),
+                "native_local_narrow".to_string(),
+            ),
+        ]));
+        let sql = format!("TQL EVAL (1, 2, '1s', '1s') {query}");
+        observer.clear();
+        let output = instance
+            .do_query(&sql, Arc::new(ctx))
+            .await
+            .remove(0)
+            .unwrap();
+        let fused = observer
+            .fused()
+            .unwrap_or_else(|| panic!("`{query}` did not take the native route"));
+        if has_empty {
+            assert_eq!(
+                1,
+                count_nodes(&fused, "EmptyExec"),
+                "`{query}` does not read the subquery's zero-match selector: {fused:?}"
+            );
+            let mut region_inputs = Vec::new();
+            native_region_inputs(&fused, &mut region_inputs);
+            assert_eq!(
+                2,
+                region_inputs.len(),
+                "the empty branch reads a region of its own: {fused:?}"
+            );
+        }
+        subquery_answers.push(native_result_rows(output).await);
+    }
+    assert_eq!(
+        subquery_answers[0], subquery_answers[1],
+        "the zero-match branch inside the subquery changed the answer"
     );
 }
 

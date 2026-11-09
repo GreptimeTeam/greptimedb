@@ -54,6 +54,7 @@ use datafusion::prelude::Expr as DfExpr;
 use datafusion_expr::Expr;
 use datatypes::data_type::DataType as _;
 use datatypes::series::SeriesOrdering;
+use datatypes::series::frame::{FrameContent, FrameLabelMode, SeriesFrameDeclaration};
 use datatypes::series::samples::{FieldSpec, SeriesSchema};
 use datatypes::series::time::EvalGrid;
 use promql::extension_plan::{
@@ -525,7 +526,13 @@ impl PromPlanner {
             None => &stmt.expr,
         };
         let mut selectors = Vec::new();
-        if !collect_selectors(&stmt, effective_expr, &mut selectors) {
+        let mut set_operations = Vec::new();
+        if !collect_selectors_with_set_operations(
+            &stmt,
+            effective_expr,
+            &mut selectors,
+            &mut set_operations,
+        ) {
             return Ok(None);
         }
         // The compiler decides which calls and shapes this route answers: a name it has no kernel
@@ -704,14 +711,8 @@ impl PromPlanner {
                         // planner, which has no table to bind and raises `TableNameNotFound`: no
                         // table matching is a result, not a failure to plan.
                         //
-                        // The answer is an empty raw series frame, which is the one input the node
-                        // and every operator above it already accept. A statement with another
-                        // data input beside this selector keeps its existing plan: two inputs
-                        // reach one node under one partition-count contract, and a real scan's
-                        // partitions and an empty frame's single one cannot share it here.
-                        if selectors.len() != 1 {
-                            return Ok(None);
-                        }
+                        // An empty raw series frame is an ordinary input to the node. Multi-input
+                        // placement and partition normalization are decided after compilation.
                         // A `__field__` matcher narrows the field set in a projection the existing
                         // planner builds, and this route declines it for a scan it can read; the
                         // same refusal keeps the empty input from claiming a field layout the
@@ -885,8 +886,43 @@ impl PromPlanner {
         // It does have a frontend placement - each occurrence reads the table through its own raw
         // source and the node matches above every region's contribution - so the tree is admitted
         // on both routes and nothing is refused here.
-        // The first input names the output's time index and, on one table, binds every scan.
-        let Some((_, _, metric, time, tags, _, _)) = prepared.first() else {
+        // An empty selector has no table layout of its own: it reads no table, so the layout it is
+        // compiled against is the one the set operation it takes part in compares it as. A set
+        // operator pairs the fields of its two sides by position, so an operand that reads no real
+        // input is laid out by the first real selector in the other operand - which is also how the
+        // compiler's left-biased set output names the real field when empty is first. That layout
+        // reaches every empty selector of the operand, the ones a set operation of its own nests
+        // included: a subtree that reads no table has no sibling inside it to take a layout from,
+        // and the operation above compares the whole subtree as one side. A layout taken from the
+        // first real input anywhere in the statement is not that sibling's: it can carry a
+        // different number of fields, and the set operator refuses the two sides.
+        // An empty selector with no such operand above it - under an operator that is not a set
+        // operation - takes the statement's first real layout, and the default layout of
+        // [`empty_discovered_input`] when every selector is empty.
+        let local_layouts = local_empty_layouts(&set_operations, &prepared);
+        let statement_layout = prepared
+            .iter()
+            .find(|(scan, ..)| !is_empty_discovered_input(scan))
+            .map(|(_, schema, ..)| Arc::clone(schema));
+        for index in 0..prepared.len() {
+            if !is_empty_discovered_input(&prepared[index].0) {
+                continue;
+            }
+            let Some(schema) = local_layouts[index]
+                .map(|sibling| Arc::clone(&prepared[sibling].1))
+                .or_else(|| statement_layout.as_ref().map(Arc::clone))
+            else {
+                continue;
+            };
+            prepared[index].0 = empty_discovered_frame(&schema)?;
+            prepared[index].1 = Arc::clone(&schema);
+        }
+        // A real input names the output's time index and, on one table, binds every scan.
+        let Some((_, _, metric, time, tags, _, _)) = prepared
+            .iter()
+            .find(|(scan, ..)| !is_empty_discovered_input(scan))
+            .or_else(|| prepared.first())
+        else {
             return Ok(None);
         };
         let (metric, time, tags) = (metric.clone(), time.clone(), tags.clone());
@@ -1100,10 +1136,16 @@ impl PromPlanner {
         // regions and the tree's root is per-partition work: a partitioned table's region reads
         // neither the other scans nor the fragments another region holds, and a whole-vector
         // consumer has no region-local placement. Such a tree runs above the regions, and then each
-        // occurrence reads through its own raw source.
+        // occurrence reads through its own raw source. An empty frame likewise requires sourced
+        // scans: physical planning accepts either all frames or all bare scans, not a mixture.
         let per_source_inputs = cross_table
             || self_contained
-            || (multi_input && (any_partitioned || required_placement));
+            || (multi_input
+                && (any_partitioned
+                    || required_placement
+                    || prepared
+                        .iter()
+                        .any(|(scan, ..)| is_empty_discovered_input(scan))));
         // A segment carries one source's identity. Keeping each occurrence's scan and metadata
         // aligned here lets the cutting step name that source independently of selector count.
         // Read the split-series fact before `prepared` is consumed by the child mapping below.
@@ -1492,25 +1534,33 @@ impl PromPlanner {
 /// frame, the one input a [`FusedSeries`] node and every operator above it already read. It is
 /// bound to a series schema of one field and no grid because that is the layout this route compiles
 /// a selector against, and a schema with no field is refused by the compiler for the shapes that
-/// read one. No row of that field is ever read, so its name decides only what an operator that
-/// answers on its own - `absent` - calls its value column.
+/// read one. That default is only what this input is built with: the planner re-lays it out in the
+/// schema of the set operation it takes part in - the first real selector beside it, or the
+/// statement's first real layout - so the fields and the grid it ends up carrying are that layout's
+/// whenever the statement reads a table at all. No row of either is ever read, so a name that
+/// survives decides only what an operator that answers on its own - `absent` - calls its value
+/// column.
 ///
 /// The empty plan declares the frame a scan would declare, so the physical planner reads it as the
 /// frame producer it is instead of looking for a region scan below the node. Its labels are
 /// explicit, which is the mode a producer names each series in rather than a scan's storage key.
 fn empty_discovered_input(time_index: String) -> Result<PreparedInput> {
     let schema = empty_discovered_series_schema();
+    let input = empty_discovered_frame(&schema)?;
+    // No table stands behind this input, so no region splits it along a partition column.
+    Ok((input, schema, None, time_index, Vec::new(), false, false))
+}
+
+fn empty_discovered_frame(schema: &SeriesSchema) -> Result<LogicalPlan> {
     let frame =
-        raw_series_frame_schema_with_ordering(&schema, &RawLabelSource::Explicit, NATIVE_ORDERING)
+        raw_series_frame_schema_with_ordering(schema, &RawLabelSource::Explicit, NATIVE_ORDERING)
             .context(DataFusionPlanningSnafu)?;
-    let input = LogicalPlan::EmptyRelation(EmptyRelation {
+    Ok(LogicalPlan::EmptyRelation(EmptyRelation {
         produce_one_row: false,
         schema: Arc::new(
             DFSchema::try_from(frame.as_ref().clone()).context(DataFusionPlanningSnafu)?,
         ),
-    });
-    // No table stands behind this input, so no region splits it along a partition column.
-    Ok((input, schema, None, time_index, Vec::new(), false, false))
+    }))
 }
 
 /// The raw series schema of the typed empty input [`empty_discovered_input`] builds.
@@ -1537,8 +1587,16 @@ pub(crate) fn is_empty_discovered_input(plan: &LogicalPlan) -> bool {
     if relation.produce_one_row {
         return false;
     }
+    let Ok(declaration) = SeriesFrameDeclaration::parse(relation.schema.as_arrow()) else {
+        return false;
+    };
+    if declaration.content() != FrameContent::Raw
+        || declaration.labels() != FrameLabelMode::Explicit
+    {
+        return false;
+    }
     let Ok(frame) = raw_series_frame_schema_with_ordering(
-        &empty_discovered_series_schema(),
+        declaration.series(),
         &RawLabelSource::Explicit,
         NATIVE_ORDERING,
     ) else {
@@ -3419,26 +3477,83 @@ fn collect_selectors<'a>(
     expr: &'a PromExpr,
     out: &mut Vec<Cow<'a, VectorSelector>>,
 ) -> bool {
+    // A caller that does not read the set operations still records them: the walk is the same one,
+    // and the list stays empty.
+    collect_selectors_with_set_operations(stmt, expr, out, &mut Vec::new())
+}
+
+/// One side of a set operation, as the slice of the pre-order selector list it reads.
+///
+/// The slice is the side's whole subtree, so it is also what says whether the side reads a table at
+/// all: a side that reads none is the side whose selectors have to be laid out by the comparison
+/// itself rather than by a scan they hold.
+#[derive(Clone, Copy, Debug)]
+struct SetOperand {
+    start: usize,
+    end: usize,
+}
+
+/// One set operation in the statement and the two operands it compares.
+#[derive(Clone, Copy, Debug)]
+struct SetOperation {
+    lhs: SetOperand,
+    rhs: SetOperand,
+}
+
+/// [`collect_selectors`], also recording the set operations it passes.
+///
+/// The operands are recorded as index ranges of `out`, which is the same pre-order the compiler
+/// binds its inputs in, so a recorded index is an index of the prepared input list.
+fn collect_selectors_with_set_operations<'a>(
+    stmt: &EvalStmt,
+    expr: &'a PromExpr,
+    out: &mut Vec<Cow<'a, VectorSelector>>,
+    set_operations: &mut Vec<SetOperation>,
+) -> bool {
     match expr {
         PromExpr::VectorSelector(selector) => out.push(Cow::Borrowed(selector)),
         PromExpr::MatrixSelector(MatrixSelector { vs, .. }) => out.push(Cow::Borrowed(vs)),
-        PromExpr::Paren(ParenExpr { expr }) => return collect_selectors(stmt, expr, out),
+        PromExpr::Paren(ParenExpr { expr }) => {
+            return collect_selectors_with_set_operations(stmt, expr, out, set_operations);
+        }
         PromExpr::Call(call) if call.func.name == "info" => {
             let Ok(InfoInput { selector, .. }) = info_input(stmt, &call.args.args) else {
                 return false;
             };
-            if !collect_selectors(stmt, &call.args.args[0], out) {
+            if !collect_selectors_with_set_operations(stmt, &call.args.args[0], out, set_operations)
+            {
                 return false;
             }
             out.push(Cow::Owned(selector));
         }
         PromExpr::Binary(binary) => {
-            return collect_selectors(stmt, &binary.lhs, out)
-                && collect_selectors(stmt, &binary.rhs, out);
+            let lhs_start = out.len();
+            if !collect_selectors_with_set_operations(stmt, &binary.lhs, out, set_operations) {
+                return false;
+            }
+            let lhs_end = out.len();
+            if !collect_selectors_with_set_operations(stmt, &binary.rhs, out, set_operations) {
+                return false;
+            }
+            if binary.op.is_set_operator() {
+                set_operations.push(SetOperation {
+                    lhs: SetOperand {
+                        start: lhs_start,
+                        end: lhs_end,
+                    },
+                    rhs: SetOperand {
+                        start: lhs_end,
+                        end: out.len(),
+                    },
+                });
+            }
+            return true;
         }
         // Literals contribute no selector; the compiler decides which scalar forms can be bound.
         PromExpr::NumberLiteral(_) => return true,
-        PromExpr::Unary(unary) => return collect_selectors(stmt, &unary.expr, out),
+        PromExpr::Unary(unary) => {
+            return collect_selectors_with_set_operations(stmt, &unary.expr, out, set_operations);
+        }
         // `histogram_quantile` and `histogram_fraction` take their vector last, and the compiler
         // compiles that vector before the arguments in front of it, so the walk reads it first: the
         // scan prepared at a position has to be the one the compiler binds there.
@@ -3448,10 +3563,10 @@ fn collect_selectors<'a>(
             let Some((vector, parameters)) = call.args.args.split_last() else {
                 return false;
             };
-            return collect_selectors(stmt, vector, out)
-                && parameters
-                    .iter()
-                    .all(|parameter| collect_selectors(stmt, parameter, out));
+            return collect_selectors_with_set_operations(stmt, vector, out, set_operations)
+                && parameters.iter().all(|parameter| {
+                    collect_selectors_with_set_operations(stmt, parameter, out, set_operations)
+                });
         }
         PromExpr::Call(call) => {
             if matches!(call.func.name, "label_replace" | "label_join") {
@@ -3462,10 +3577,15 @@ fn collect_selectors<'a>(
                 };
                 return arity_valid
                     && matches!(call.args.args.first(), Some(arg) if matches!(arg.value_type(), ValueType::Vector | ValueType::Matrix))
-                    && collect_selectors(stmt, &call.args.args[0], out);
+                    && collect_selectors_with_set_operations(
+                        stmt,
+                        &call.args.args[0],
+                        out,
+                        set_operations,
+                    );
             }
             for arg in &call.args.args {
-                if !collect_selectors(stmt, arg, out) {
+                if !collect_selectors_with_set_operations(stmt, arg, out, set_operations) {
                     return false;
                 }
             }
@@ -3476,20 +3596,82 @@ fn collect_selectors<'a>(
         // prepared scan and the bound input at the same position; a literal or a grouping-only
         // parameter contributes no selector, so the walk is a no-op for it.
         PromExpr::Aggregate(aggregate) => {
-            return collect_selectors(stmt, &aggregate.expr, out)
-                && match &aggregate.param {
-                    Some(param) => collect_selectors(stmt, param, out),
-                    None => true,
-                };
+            return collect_selectors_with_set_operations(
+                stmt,
+                &aggregate.expr,
+                out,
+                set_operations,
+            ) && match &aggregate.param {
+                Some(param) => {
+                    collect_selectors_with_set_operations(stmt, param, out, set_operations)
+                }
+                None => true,
+            };
         }
         // A subquery evaluates its expression on its own grid; its selectors are prepared like any
         // other, each with the scan bounds `raw_scan_bounds` derives from its own range and step.
         PromExpr::Subquery(subquery) => {
-            return collect_selectors(stmt, &subquery.expr, out);
+            // Keep the set operations inside the subquery in the same accumulator: a zero-match
+            // selector there is laid out by its own set operand, not by the statement's layout.
+            return collect_selectors_with_set_operations(
+                stmt,
+                &subquery.expr,
+                out,
+                set_operations,
+            );
         }
         _ => {}
     }
     true
+}
+
+/// The index of the real input each zero-match input is laid out by, in `prepared` order.
+///
+/// A set operation pairs its two sides' fields by position, so an operand that reads no real input
+/// is laid out by the first real selector in the other operand: that sibling is the layout the
+/// comparison gives the side. The layout reaches every zero-match selector in the operand, the ones
+/// written there directly and the ones a set operation of their own nests: an operand whose whole
+/// subtree reads no table has no sibling inside it to take a layout from, and the operation above
+/// it compares that subtree as one side. A zero-match selector with a real sibling of its own
+/// operation keeps that sibling's layout, which is the more local one. An empty input with no such
+/// operand above it has no entry here.
+fn local_empty_layouts(
+    set_operations: &[SetOperation],
+    prepared: &[PreparedInput],
+) -> Vec<Option<usize>> {
+    let mut layouts = vec![None; prepared.len()];
+    let real = |index: usize| {
+        prepared
+            .get(index)
+            .is_some_and(|(scan, ..)| !is_empty_discovered_input(scan))
+    };
+    // The operations are recorded inside out, so an inner one decides before the operation above it
+    // reads the subtree it holds. An operand that reads no real input holds no real input inside it
+    // either, so an operation that writes a layout here is the only one that reaches those indices.
+    for operation in set_operations {
+        for (empty, sibling) in [
+            (operation.lhs, operation.rhs),
+            (operation.rhs, operation.lhs),
+        ] {
+            // A side that reads a table lays its own selectors out: only a side that reads none
+            // needs the layout of the comparison it takes part in.
+            if (empty.start..empty.end).any(&real) {
+                continue;
+            }
+            let Some(source) = (sibling.start..sibling.end).find(|index| real(*index)) else {
+                continue;
+            };
+            for index in empty.start..empty.end {
+                let Some(layout) = layouts.get_mut(index) else {
+                    continue;
+                };
+                if layout.is_none() {
+                    *layout = Some(source);
+                }
+            }
+        }
+    }
+    layouts
 }
 
 /// Whether `engine` can serve raw series frames to the fused-series node.
