@@ -282,6 +282,7 @@ fn scan_input(
     let version = region.version();
     let mapper = FlatProjectionMapper::new(&version.metadata, projection).unwrap();
     ScanInput::builder(region.access_layer.clone(), mapper)
+        .with_sample_replacements(true)
         .with_files(
             version
                 .ssts
@@ -1346,6 +1347,7 @@ async fn visibility_uses_named_columns_and_region_time_unit(
         .data_type = ConcreteDataType::timestamp_datatype(unit);
     let mapper = FlatProjectionMapper::new(&Arc::new(metadata), vec![]).unwrap();
     let input = ScanInput::builder(region.access_layer.clone(), mapper)
+        .with_sample_replacements(true)
         .with_snapshot_sequence(Some(4))
         .with_sequence_range(SequenceRange::new(Some(1), Some(5)))
         .with_time_range(TimestampRange::new(
@@ -2139,17 +2141,23 @@ async fn daily_samples_preserve_sparse_coverage_and_existing_groups() {
     let (purger, _receiver) = crate::series_index::series_index_channel(store.clone());
     let reopened =
         crate::series_index::load_version_control(&store, region.region_id, &purger).await;
-    for file in region
+    let files = region
         .version()
         .ssts
         .levels()
         .iter()
         .flat_map(|level| level.files())
-    {
-        assert!(crate::series_index::artifact::samples_cover_file(
-            &reopened.current().samples,
-            file
-        ));
+        .cloned()
+        .collect::<Vec<_>>();
+    let samples = &reopened.current().samples;
+    let assignments = SamplesSourceAssignments::new(
+        samples,
+        &files,
+        &files.iter().map(|file| file.file_id().file_id()).collect(),
+        true,
+    );
+    for file in &files {
+        assert!(assignments.covers_file(samples, file));
     }
     // Complete source coverage spans both days, but preparation must open only
     // intersecting artifacts. Compare rows with the ordinary scanner as well.
@@ -2485,6 +2493,254 @@ async fn projected_groups_reuse_across_series_and_stream_under_pressure(#[case] 
     drop(cancelled);
     cache.entries.lock().await.clear();
     assert_eq!(pool.reserved(), baseline);
+    engine.stop().await.unwrap();
+}
+
+#[derive(Default)]
+struct ReadGate {
+    armed: std::sync::atomic::AtomicBool,
+    entered: tokio::sync::Notify,
+    released: tokio::sync::Notify,
+}
+
+impl ReadGate {
+    async fn wait(&self) {
+        if self.armed.swap(false, std::sync::atomic::Ordering::SeqCst) {
+            self.entered.notify_one();
+            self.released.notified().await;
+        }
+    }
+}
+
+struct GatedReader {
+    inner: oio::Reader,
+    gate: Arc<ReadGate>,
+}
+
+impl mock::Read for GatedReader {
+    async fn read(
+        &self,
+        range: mock::BytesRange,
+    ) -> object_store::Result<(mock::RpRead, object_store::Buffer)> {
+        self.gate.wait().await;
+        self.inner.read(range).await
+    }
+
+    async fn open(
+        &self,
+        range: mock::BytesRange,
+    ) -> object_store::Result<(mock::RpRead, Box<dyn oio::ReadStreamDyn>)> {
+        self.gate.wait().await;
+        self.inner.open(range).await
+    }
+}
+
+#[rstest::rstest]
+#[case::reader_setup(false)]
+#[case::row_group_load(true)]
+#[tokio::test]
+async fn parked_reader_does_not_block_sibling(#[case] warm_reader: bool) {
+    let (_env, engine, region) = fixture().await;
+    build(&engine, &region).await;
+    let gate = Arc::new(ReadGate::default());
+    let observed = gate.clone();
+    let access = &region.access_layer;
+    let store = access.object_store().clone().layer(
+        MockLayerBuilder::default()
+            .reader_factory(Arc::new(move |_, _, inner| {
+                Box::new(GatedReader {
+                    inner,
+                    gate: observed.clone(),
+                })
+            }))
+            .build()
+            .unwrap(),
+    );
+    let access = Arc::new(crate::access_layer::AccessLayer::new(
+        access.table_dir(),
+        access.path_type(),
+        store,
+        access.puffin_manager_factory().clone(),
+        access.intermediate_manager().clone(),
+    ));
+    let version = region.version();
+    let mapper = FlatProjectionMapper::new(
+        &version.metadata,
+        0..version.metadata.column_metadatas.len(),
+    )
+    .unwrap();
+    let original = scan_input(
+        &region,
+        region.series_index_store.clone().unwrap(),
+        SelectedFormat::Columnar,
+        (0..version.metadata.column_metadatas.len()).collect(),
+    );
+    let mut index = original.series_index.unwrap();
+    index.version = Arc::new(crate::series_index::SeriesIndexVersion {
+        series_indexes: index.version.series_indexes.clone(),
+        ..Default::default()
+    });
+    let scan = SeriesScan::new(
+        ScanInput::builder(access, mapper)
+            .with_files(original.files)
+            .with_series_index(Some(index))
+            .with_predicate(original.predicate)
+            .build(),
+        false,
+    );
+    let source = scan
+        .prepare_series(
+            &QueryScanContext::default(),
+            &ExecutionPlanMetricsSet::new(),
+            &labels(scan.metadata()),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    let expected = rows(
+        &source
+            .read_series(0..source.num_series())
+            .unwrap()
+            .try_collect::<Vec<_>>()
+            .await
+            .unwrap(),
+    );
+    let prepared = scan.prepared.source.get().unwrap().as_ref().unwrap();
+    prepared.projected_groups.entries.lock().await.clear();
+    if !warm_reader {
+        prepared.projected_groups.readers.lock().await.clear();
+    }
+    gate.armed.store(true, std::sync::atomic::Ordering::SeqCst);
+    let mut parked = source.read_series(0..source.num_series()).unwrap();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        tokio::select! {
+            _ = gate.entered.notified() => {},
+            result = parked.try_next() => panic!("reader completed before gated I/O: {result:?}"),
+        }
+    })
+    .await
+    .unwrap();
+    // Wake A, but keep its generator alive without polling it again. B must not
+    // depend on A publishing a cache entry or finishing reader initialization.
+    gate.released.notify_one();
+    let actual = tokio::time::timeout(
+        Duration::from_secs(10),
+        source
+            .read_series(0..source.num_series())
+            .unwrap()
+            .try_collect::<Vec<_>>(),
+    )
+    .await
+    .expect("parked reader blocked its sibling")
+    .unwrap();
+    assert_eq!(rows(&actual), expected);
+    assert_eq!(
+        rows(&parked.try_collect::<Vec<_>>().await.unwrap()),
+        expected
+    );
+    engine.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn daily_samples_survive_compaction_with_unchanged_coverage() {
+    let (_env, engine, region) = fixture().await;
+    build(&engine, &region).await;
+    let store = region.series_index_store.clone().unwrap();
+    let before = region.series_index_version();
+    assert!(
+        before
+            .samples
+            .values()
+            .all(|h| h.entry().coverage.is_some())
+    );
+    let scan = scanner(&region, store.clone());
+    let source = scan
+        .prepare_series(
+            &QueryScanContext::default(),
+            &ExecutionPlanMetricsSet::new(),
+            &labels(scan.metadata()),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    let expected = rows(
+        &source
+            .read_series(0..source.num_series())
+            .unwrap()
+            .try_collect::<Vec<_>>()
+            .await
+            .unwrap(),
+    );
+    let old_files = region
+        .version()
+        .ssts
+        .levels()
+        .iter()
+        .flat_map(|level| level.files())
+        .map(|file| file.file_id())
+        .collect::<HashSet<_>>();
+    engine
+        .handle_request(
+            region.region_id,
+            RegionRequest::Compact(store_api::region_request::RegionCompactRequest {
+                options: api::v1::region::compact_request::Options::StrictWindow(
+                    api::v1::region::StrictWindow {
+                        window_seconds: 3600,
+                    },
+                ),
+                ..Default::default()
+            }),
+        )
+        .await
+        .unwrap();
+    assert!(
+        region
+            .version()
+            .ssts
+            .levels()
+            .iter()
+            .flat_map(|level| level.files())
+            .all(|file| !old_files.contains(&file.file_id()))
+    );
+    // Query reuse must work even before maintenance repairs the catalog snapshot.
+    for reconcile in [false, true] {
+        if reconcile {
+            build(&engine, &region).await;
+        }
+        let scan = scanner(&region, store.clone());
+        let source = scan
+            .prepare_series(
+                &QueryScanContext::default(),
+                &ExecutionPlanMetricsSet::new(),
+                &labels(scan.metadata()),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        let prepared = scan.prepared.source.get().unwrap().as_ref().unwrap();
+        assert!(prepared.plan.sample_files.is_empty());
+        assert!(!prepared.samples.is_empty());
+        assert_eq!(
+            rows(
+                &source
+                    .read_series(0..source.num_series())
+                    .unwrap()
+                    .try_collect::<Vec<_>>()
+                    .await
+                    .unwrap()
+            ),
+            expected
+        );
+        assert_eq!(
+            region
+                .series_index_version()
+                .samples
+                .keys()
+                .copied()
+                .collect::<HashSet<_>>(),
+            before.samples.keys().copied().collect()
+        );
+    }
     engine.stop().await.unwrap();
 }
 

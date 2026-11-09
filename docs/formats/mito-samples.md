@@ -34,8 +34,9 @@ size bounds. An SST crossing midnight contributes to multiple artifacts.
 
 Publication uses the existing atomic samples catalog, which also commits series
 and range indexes. Readers pin each generation once. A grouped artifact is
-ineligible if any source SST is absent from the query's data snapshot; exact
-sequence-range or SST-sequence-pruned scans fall back to the existing path.
+eligible by exact source membership, or by the optional `coverage` proof described
+below when compaction replaces source SSTs. Exact sequence-range and
+SST-sequence-pruned scans cannot use that replacement proof.
 Maintenance retains complete visible groups and groups only uncovered sources,
 with at most 64 sources per merge. One anchor entry per group records `source_windows`, the
 actual populated days for every source in its group. Other daily entries share
@@ -43,6 +44,18 @@ the same ordered source set without repeating the coverage map. Coverage checks 
 record rather than enumerating the timestamp span. Earlier daily entries without
 this record require rebuilding. Publication commits all days together; retired
 objects remain pinned until readers release them. Source Parquet SSTs are unchanged.
+
+Daily entries may also carry an optional `coverage` object, repeated on each day
+of the group. It contains `time_range` (inclusive start/end using the existing
+`Timestamp` serialization), `max_sequence` (u64), and `windows` (all populated UTC
+days of the group). This proof is emitted only when source sequences are known
+and the build includes every snapshot SST intersecting the recorded interval.
+Replacement reuse requires the complete current intersecting source set to have
+the same outer time bounds and maximum sequence, with no file crossing the
+interval boundary. All recorded daily artifacts must be present. New admissions
+must advance the watermark; unknown sequences cannot prove replacement coverage.
+Missing `coverage` retains exact-source behavior. This catalog extension does not
+change sample payloads or their version.
 
 The source file ID and generation use existing `FileId` serialization. The
 generation is unique for each build. A manifest contains:

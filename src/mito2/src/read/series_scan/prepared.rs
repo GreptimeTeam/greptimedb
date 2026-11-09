@@ -65,7 +65,7 @@ use crate::read::seq_scan::SeqScan;
 use crate::read::series_candidate::SeriesCandidateScanner;
 use crate::read::series_scan::{RawScanPreparation, raw};
 use crate::read::stream::ScanBatch;
-use crate::series_index::artifact::ArtifactFormat;
+use crate::series_index::artifact::{ArtifactFormat, SamplesSourceAssignments};
 use crate::series_index::format::{
     self, FormatReader, SamplesFormatReader, SamplesReadRequest, SeriesReadRequest,
 };
@@ -187,6 +187,7 @@ struct SourcePlan {
     sample_files: HashSet<usize>,
     samples: HashSet<FileId>,
     has_memtables: bool,
+    sample_sources: HashMap<FileId, HashSet<FileId>>,
 }
 
 /// Validates every assignment before deciding whether all sample sources are supported.
@@ -257,14 +258,31 @@ fn collect_inputs(context: &StreamContext, ranges: &[PartitionRange]) -> Result<
         .chain(&input.time_pruned_files)
         .copied()
         .collect();
+    let mut visible = input
+        .files
+        .iter()
+        .map(|file| file.file_id().file_id())
+        .collect::<HashSet<_>>();
+    visible.extend(&input.time_pruned_files);
+    let assignments = SamplesSourceAssignments::new(
+        &index.version.samples,
+        &input.files,
+        &visible,
+        input.allow_sample_replacements && input.sequence_range.is_none(),
+    );
     let mut eligible_samples: HashMap<_, _> = index
         .version
         .samples
         .iter()
-        .filter(|(_, handle)| {
+        .filter(|(id, handle)| {
             handle.entry().artifact.format == ArtifactFormat::ColumnarSamples
-                && handle.entry().sources_visible(&allowed)
-                && assigned.iter().any(|id| handle.entry().covers(*id))
+                && assignments
+                    .sources
+                    .get(id)
+                    .is_some_and(|sources| sources.is_subset(&allowed))
+                && assigned
+                    .iter()
+                    .any(|source| assignments.covers(**id, *source))
         })
         .map(|(id, handle)| (*id, handle.clone()))
         .collect();
@@ -311,9 +329,9 @@ fn collect_inputs(context: &StreamContext, ranges: &[PartitionRange]) -> Result<
         .copied()
         .filter(|source| {
             let mut windows = HashSet::new();
-            for handle in eligible_samples
-                .values()
-                .filter(|handle| handle.entry().covers(*source))
+            for (_, handle) in eligible_samples
+                .iter()
+                .filter(|(id, _)| assignments.covers(**id, *source))
             {
                 let window = handle.entry().window;
                 if (!windows.is_empty() && window.is_none())
@@ -326,31 +344,31 @@ fn collect_inputs(context: &StreamContext, ranges: &[PartitionRange]) -> Result<
             false
         })
         .collect();
-    eligible_samples.retain(|_, handle| !overlapping.iter().any(|id| handle.entry().covers(*id)));
+    eligible_samples.retain(|artifact, _| {
+        !overlapping
+            .iter()
+            .any(|id| assignments.covers(*artifact, *id))
+    });
     // Removing one incomplete source can invalidate another source in the same
     // grouped generation. Iterate to a fixed point before replacing any SST.
     loop {
         let uncovered: HashSet<_> = files
             .keys()
-            .filter(|i| {
-                !crate::series_index::artifact::samples_cover_file(
-                    &eligible_samples,
-                    &input.files[**i],
-                )
-            })
+            .filter(|i| !assignments.covers_file(&eligible_samples, &input.files[**i]))
             .map(|i| input.files[*i].file_id().file_id())
             .collect();
         let before = eligible_samples.len();
-        eligible_samples.retain(|_, handle| !uncovered.iter().any(|id| handle.entry().covers(*id)));
+        eligible_samples.retain(|artifact, _| {
+            !uncovered
+                .iter()
+                .any(|id| assignments.covers(*artifact, *id))
+        });
         if eligible_samples.len() == before {
             break;
         }
     }
     for file_idx in files.keys() {
-        if !crate::series_index::artifact::samples_cover_file(
-            &eligible_samples,
-            &input.files[*file_idx],
-        ) {
+        if !assignments.covers_file(&eligible_samples, &input.files[*file_idx]) {
             plan.sample_files.insert(*file_idx);
         }
     }
@@ -372,6 +390,7 @@ fn collect_inputs(context: &StreamContext, ranges: &[PartitionRange]) -> Result<
     }
     plan.file_groups = files;
     plan.samples = eligible_samples.into_keys().collect();
+    plan.sample_sources = assignments.sources;
     Ok(plan)
 }
 
@@ -483,7 +502,7 @@ fn compact_candidate_batch(
 
 type ProjectedGroupEntries = VecDeque<((FileId, usize), Arc<ProjectedRowGroup>)>;
 type ProjectedReaders =
-    HashMap<usize, Arc<OnceCell<Vec<crate::sst::parquet::file_range::FileRange>>>>;
+    HashMap<usize, Arc<OnceLock<Vec<crate::sst::parquet::file_range::FileRange>>>>;
 
 /// Query-local projected row groups, before selection of individual series.
 struct ProjectedRowGroups {
@@ -536,15 +555,19 @@ impl ProjectedRowGroups {
         Box::pin(async_stream::try_stream! {
             let mut metrics = crate::metrics::ColumnarReadMetrics::default();
             let key = (range.file_handle().file_id().file_id(), range.row_group_index());
-            // Loading under this lock coalesces concurrent misses. It is always
-            // released before yielding, including the oversized streaming path.
             let fetch = ProjectedFetchMetrics(Default::default());
-            let mut entries = self.entries.lock().await;
-            if let Some(position) = entries.iter().position(|(cached, _)| *cached == key) {
+            // Only completed loads are shared. A pending reader can be retained
+            // without being polled, so it must never own sibling readers' progress.
+            let cached = {
+                let mut entries = self.entries.lock().await;
+                if let Some(position) = entries.iter().position(|(cached, _)| *cached == key) {
+                    let (_, group) = entries.remove(position).ok_or_else(|| invalid("missing cached group"))?;
+                    entries.push_back((key, group.clone()));
+                    Some(group)
+                } else { None }
+            };
+            if let Some(group) = cached {
                 metrics.counts.insert("projected_group_cache_hits", 1);
-                let (_, group) = entries.remove(position).ok_or_else(|| invalid("missing cached group"))?;
-                entries.push_back((key, group.clone()));
-                drop(entries);
                 for batch in &group.batches { yield batch.clone(); }
             } else if let Some(mut reader) = range.flat_reader(None, Some(&fetch.0)).await? {
                 metrics.counts.insert("projected_group_cache_misses", 1);
@@ -562,8 +585,11 @@ impl ProjectedRowGroups {
                         overflow = Some(batch);
                         break;
                     }
-                    while entries.iter().map(|(_, group)| group.bytes).sum::<usize>() + bytes + size > self.limit {
-                        entries.pop_front();
+                    {
+                        let mut entries = self.entries.lock().await;
+                        while entries.iter().map(|(_, group)| group.bytes).sum::<usize>() + bytes + size > self.limit {
+                            entries.pop_front();
+                        }
                     }
                     if reservation.try_grow(size).is_err() {
                         // Active readers can still own evicted buffers. Do not
@@ -578,9 +604,15 @@ impl ProjectedRowGroups {
                 metrics.bytes.insert("projected_group_retained", bytes as u64);
                 if overflow.is_some() { metrics.counts.insert("projected_group_streaming", 1); }
                 if overflow.is_none() {
-                    entries.push_back((key, group.clone()));
+                    let mut entries = self.entries.lock().await;
+                    // Concurrent misses may duplicate I/O, but retain only one result.
+                    if !entries.iter().any(|(cached, _)| *cached == key) {
+                        while entries.iter().map(|(_, group)| group.bytes).sum::<usize>() + bytes > self.limit {
+                            entries.pop_front();
+                        }
+                        entries.push_back((key, group.clone()));
+                    }
                 }
-                drop(entries);
                 for batch in &group.batches { yield batch.clone(); }
                 drop(group);
                 if let Some(batch) = overflow {
@@ -684,7 +716,7 @@ impl ColumnarPreparedSource {
             } else {
                 for file in &input.files {
                     let id = file.file_id().file_id();
-                    if handle.entry().covers(id) {
+                    if plan.sample_sources[&handle.file_id().file_id()].contains(&id) {
                         incompatible_sources.insert(id);
                     }
                 }
@@ -695,14 +727,14 @@ impl ColumnarPreparedSource {
         loop {
             let before = incompatible_sources.len();
             for id in &plan.samples {
-                let entry = index.version.samples[id].entry();
+                let sources = &plan.sample_sources[id];
                 if incompatible_sources
                     .iter()
-                    .any(|source| entry.covers(*source))
+                    .any(|source| sources.contains(source))
                 {
                     for file in &input.files {
                         let source = file.file_id().file_id();
-                        if entry.covers(source) {
+                        if sources.contains(&source) {
                             incompatible_sources.insert(source);
                         }
                     }
@@ -733,7 +765,7 @@ impl ColumnarPreparedSource {
             .filter(|(id, _)| {
                 !incompatible_sources
                     .iter()
-                    .any(|source| index.version.samples[id].entry().covers(*source))
+                    .any(|source| plan.sample_sources[id].contains(source))
             })
             .map(|(_, reader)| reader)
             .collect();
@@ -1208,7 +1240,8 @@ impl PreparedSeriesSource for ColumnarPreparedSource {
                     let input = &context.input;
                     let reader = projected_groups.readers.lock().await
                         .entry(file_index).or_default().clone();
-                    let file_ranges = reader.get_or_try_init(|| async {
+                    if reader.get().is_none() {
+                    let file_ranges = async {
                     let required = input.mapper.input_arrow_schema(false);
                     let columns = required.fields().iter().filter_map(|field| {
                         input.region_metadata().column_by_name(field.name()).and_then(|column| {
@@ -1263,7 +1296,11 @@ impl PreparedSeriesSource for ColumnarPreparedSource {
                         }
                     }
                     Ok::<_, Error>(file_ranges.into_vec())
-                    }).await?;
+                    }.await?;
+                    // Publish only completed setup; a parked initializer cannot block siblings.
+                    let _ = reader.set(file_ranges);
+                    }
+                    let file_ranges = reader.get().ok_or_else(|| invalid("missing projected reader"))?;
                         for file_range in file_ranges {
                             let mut batches = projected_groups.clone().read(file_range.clone(), context.clone());
                             while let Some(batch) = batches.try_next().await? {
