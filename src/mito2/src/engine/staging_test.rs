@@ -47,7 +47,7 @@ use store_api::region_request::{
     RegionCloseRequest, RegionFlushReason, RegionFlushRequest, RegionPutRequest, RegionRequest,
     RegionTruncateRequest, StagingPartitionDirective,
 };
-use store_api::storage::{RegionId, ScanRequest};
+use store_api::storage::{FileId, RegionId, ScanRequest};
 
 use crate::config::MitoConfig;
 use crate::engine::MitoEngine;
@@ -1596,14 +1596,13 @@ async fn first_file(region: &MitoRegionRef) -> FileMeta {
 
 /// Starts an edit importing `file` and waits until the region is `Editing`.
 /// The caller holds the manifest write lock so that the edit cannot finish.
-async fn start_staged_edit(
+fn spawn_edit(
     engine: &MitoEngine,
-    region: &MitoRegionRef,
+    region_id: RegionId,
     file: FileMeta,
 ) -> tokio::task::JoinHandle<crate::error::Result<()>> {
     let edit_engine = engine.clone();
-    let region_id = region.region_id;
-    let edit = tokio::spawn(async move {
+    tokio::spawn(async move {
         edit_engine
             .edit_region(
                 region_id,
@@ -1618,7 +1617,15 @@ async fn start_staged_edit(
                 },
             )
             .await
-    });
+    })
+}
+
+async fn start_staged_edit(
+    engine: &MitoEngine,
+    region: &MitoRegionRef,
+    file: FileMeta,
+) -> tokio::task::JoinHandle<crate::error::Result<()>> {
+    let edit = spawn_edit(engine, region.region_id, file);
     tokio::time::timeout(Duration::from_secs(5), async {
         while region.state() != RegionRoleState::Leader(RegionLeaderState::Editing) {
             tokio::time::sleep(Duration::from_millis(1)).await;
@@ -2021,6 +2028,8 @@ async fn test_close_flushes_skip_wal_rows_of_staging_region() {
 #[derive(Default)]
 struct RequestCountListener {
     count: AtomicUsize,
+    /// A flush waits here before it starts while a test holds the write side.
+    flush_gate: tokio::sync::RwLock<()>,
 }
 
 impl RequestCountListener {
@@ -2041,6 +2050,118 @@ impl EventListener for RequestCountListener {
     fn on_recv_requests(&self, request_num: usize) {
         self.count.fetch_add(request_num, Ordering::Relaxed);
     }
+
+    async fn on_flush_begin(&self, _region_id: RegionId) {
+        let _open = self.flush_gate.read().await;
+    }
+}
+
+#[tokio::test]
+async fn test_edit_returns_to_staging_after_staging_leader_role() {
+    let mut env = TestEnv::new().await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+    let region_id = RegionId::new(1024, 0);
+    let request = CreateRequestBuilder::new().build();
+    let schema = rows_schema(&request);
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+    put_range(&engine, region_id, &schema, (0, 3)).await;
+    flush_region(&engine, region_id, None).await;
+    engine
+        .set_region_role_state_gracefully(region_id, SettableRegionRoleState::StagingLeader)
+        .await
+        .unwrap();
+
+    let region = engine.get_region(region_id).unwrap();
+    let file = first_file(&region).await;
+    spawn_edit(&engine, region_id, file)
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert!(region.is_staging());
+}
+
+#[tokio::test]
+async fn test_close_time_flush_rejects_queued_and_late_edits() {
+    let mut env = TestEnv::new().await;
+    let listener = Arc::new(RequestCountListener::default());
+    let engine = env
+        .create_engine_with(
+            MitoConfig {
+                num_workers: 1,
+                ..Default::default()
+            },
+            None,
+            Some(listener.clone()),
+            None,
+        )
+        .await;
+    let region_id = RegionId::new(1024, 0);
+    let request = CreateRequestBuilder::new().build();
+    let schema = rows_schema(&request);
+    let table_dir = request.table_dir.clone();
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+    put_range(&engine, region_id, &schema, (0, 3)).await;
+    flush_region(&engine, region_id, None).await;
+    enter_staging(&engine, region_id).await;
+    put_range_skip_wal(&engine, region_id, &schema, (3, 5)).await;
+
+    let region = engine.get_region(region_id).unwrap();
+    let file = first_file(&region).await;
+    let queued_file = FileMeta {
+        file_id: FileId::random(),
+        ..file.clone()
+    };
+    let late_file = FileMeta {
+        file_id: FileId::random(),
+        ..file.clone()
+    };
+    let flush_gate = listener.flush_gate.write().await;
+    let manager = region.manifest_ctx.manifest_manager.write().await;
+    let edit = start_staged_edit(&engine, &region, file).await;
+
+    let received = listener.count.load(Ordering::Relaxed);
+    let queued = spawn_edit(&engine, region_id, queued_file.clone());
+    listener.wait_received_after(received).await;
+
+    let received = listener.count.load(Ordering::Relaxed);
+    let close_engine = engine.clone();
+    let close = tokio::spawn(async move {
+        close_engine
+            .handle_request(
+                region_id,
+                RegionRequest::Close(RegionCloseRequest::default()),
+            )
+            .await
+    });
+    listener.wait_received_after(received).await;
+    drop(manager);
+
+    // The close-time flush is held back, so both edits arrive while the region waits for it.
+    let _ = edit.await;
+    let err = queued.await.unwrap().unwrap_err();
+    assert_eq!(StatusCode::RegionBusy, err.status_code());
+    let err = spawn_edit(&engine, region_id, late_file.clone())
+        .await
+        .unwrap()
+        .unwrap_err();
+    assert_eq!(StatusCode::RegionBusy, err.status_code());
+
+    drop(flush_gate);
+    close.await.unwrap().unwrap();
+
+    reopen_region(&engine, region_id, table_dir, true, HashMap::new()).await;
+    let region = engine.get_region(region_id).unwrap();
+    let manifest = region.manifest_ctx.manifest_manager.read().await.manifest();
+    assert!(!manifest.files.contains_key(&queued_file.file_id));
+    assert!(!manifest.files.contains_key(&late_file.file_id));
+    assert_eq!(5, count_rows(&engine, region_id).await);
 }
 
 #[tokio::test]

@@ -1494,6 +1494,13 @@ impl FlushScheduler {
         })
     }
 
+    /// Returns true if the region has a close-time flush.
+    pub(crate) fn has_close_time_flush(&self, region_id: RegionId) -> bool {
+        self.region_status
+            .get(&region_id)
+            .is_some_and(|status| status.closing)
+    }
+
     /// Returns true if the region has pending DDLs or a close-time flush.
     pub(crate) fn has_pending_ddls(&self, region_id: RegionId) -> bool {
         self.region_status

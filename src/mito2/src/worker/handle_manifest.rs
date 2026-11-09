@@ -310,6 +310,15 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             return RegionEditDispatch::Rejected;
         };
 
+        // A close-time flush ends with the region removed. A close that left staging keeps the
+        // region writable until then, so an edit meant for staging would run as a normal edit.
+        if self.flush_scheduler.has_close_time_flush(region_id) {
+            request
+                .waiters
+                .reply_with(|| RegionBusySnafu { region_id }.fail());
+            return RegionEditDispatch::Rejected;
+        }
+
         if !region.is_writable() || self.flush_scheduler.has_pending_alter(region_id) {
             if matches!(
                 region.state(),
@@ -428,7 +437,9 @@ impl<S: LogStore> RegionWorkerLoop<S> {
 
         let need_compaction = if edit_result.is_staging {
             // A close may have abandoned this edit and left staging already.
-            if edit_result.update_region_state && region.is_staging_or_staged_edit() {
+            if edit_result.update_region_state
+                && region.state() == RegionRoleState::Leader(RegionLeaderState::Editing)
+            {
                 // For staging regions, edits are not applied immediately,
                 // as they remain invisible until the region exits the staging state.
                 region.switch_state_to_staging(RegionLeaderState::Editing);
