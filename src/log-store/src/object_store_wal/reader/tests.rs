@@ -665,12 +665,11 @@ async fn test_last_entry_evicts_indexes_as_watermark_advances() {
             .prepare(region(), entry_id(start, 1), upper)
             .await
             .unwrap();
-        reader.indexes.run_pending_tasks().await;
         assert_eq!(
             cached_sequences(&reader, &listed).await,
             (start..=6).collect::<Vec<_>>()
         );
-        assert!(old.upgrade().is_none(), "obsolete index remains allocated");
+        wait_for_index_release(&reader, &old).await;
     }
     let last = Arc::downgrade(&reader.indexes.get(&listed[5]).await.unwrap());
     io.delete(6).await.unwrap();
@@ -678,9 +677,9 @@ async fn test_last_entry_evicts_indexes_as_watermark_advances() {
         reader.prepare(region(), entry_id(6, 1), upper).await,
         Err(Error::MissingSourceWalHistory { .. })
     ));
-    reader.indexes.run_pending_tasks().await;
+    assert!(reader.indexes.get(&listed[5]).await.is_none());
+    wait_for_index_release(&reader, &last).await;
     assert_eq!(reader.indexes.entry_count(), 0);
-    assert!(last.upgrade().is_none());
 }
 
 #[tokio::test]
@@ -749,6 +748,19 @@ fn test_node_prefix_validates_layout_and_exposes_provider_identity() {
             "{invalid}"
         );
     }
+}
+
+/// Invalidation hides an index immediately, but physical release may require
+/// multiple cache maintenance passes. Wait for release rather than a pass count.
+async fn wait_for_index_release(reader: &ObjectStoreWalReader, index: &Weak<CachedObject>) {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while index.upgrade().is_some() {
+            reader.indexes.run_pending_tasks().await;
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("obsolete index remains allocated after cache maintenance");
 }
 
 async fn cached_sequences(reader: &ObjectStoreWalReader, listed: &[ListedObject]) -> Vec<u64> {
