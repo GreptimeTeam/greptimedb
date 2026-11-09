@@ -75,7 +75,10 @@
 mod batch;
 mod catalog;
 mod format;
+mod history;
+mod index;
 mod io;
+mod prefetch;
 mod store;
 
 pub use batch::entry_id;

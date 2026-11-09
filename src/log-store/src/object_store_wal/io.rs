@@ -372,6 +372,70 @@ fn normalize_prefix(prefix: &str) -> Result<String> {
     Ok(prefix.to_string())
 }
 
+/// Object access of the store, so tests can inject failures.
+#[async_trait::async_trait]
+pub(crate) trait WalObjectIo: Send + Sync {
+    async fn put_if_absent(&self, object_seq: u64, content: Bytes) -> Result<PutResult>;
+
+    async fn get(&self, object_seq: u64) -> Result<Bytes>;
+
+    async fn get_range(&self, object_seq: u64, offset: u64, len: u64) -> Result<Bytes>;
+
+    async fn delete(&self, object_seq: u64) -> Result<()>;
+
+    async fn list(&self) -> Result<Vec<ListedObject>>;
+
+    /// See [`ObjectStoreIo::list_ahead`]; by default the objects
+    /// [`list`](Self::list) returns.
+    fn list_ahead(&self) -> BoxStream<'_, Result<ListedObject>> {
+        Box::pin(try_stream! {
+            for object in self.list().await? {
+                yield object;
+            }
+        })
+    }
+
+    fn object_path(&self, object_seq: u64) -> String;
+
+    /// Describes the object store the objects live in, for messages.
+    fn storage(&self) -> String;
+}
+
+#[async_trait::async_trait]
+impl WalObjectIo for ObjectStoreIo {
+    async fn put_if_absent(&self, object_seq: u64, content: Bytes) -> Result<PutResult> {
+        ObjectStoreIo::put_if_absent(self, object_seq, content).await
+    }
+
+    async fn get(&self, object_seq: u64) -> Result<Bytes> {
+        ObjectStoreIo::get(self, object_seq).await
+    }
+
+    async fn get_range(&self, object_seq: u64, offset: u64, len: u64) -> Result<Bytes> {
+        ObjectStoreIo::get_range(self, object_seq, offset, len).await
+    }
+
+    async fn delete(&self, object_seq: u64) -> Result<()> {
+        ObjectStoreIo::delete(self, object_seq).await
+    }
+
+    async fn list(&self) -> Result<Vec<ListedObject>> {
+        ObjectStoreIo::list(self).await
+    }
+
+    fn list_ahead(&self) -> BoxStream<'_, Result<ListedObject>> {
+        ObjectStoreIo::list_ahead(self)
+    }
+
+    fn object_path(&self, object_seq: u64) -> String {
+        ObjectStoreIo::object_path(self, object_seq)
+    }
+
+    fn storage(&self) -> String {
+        ObjectStoreIo::storage(self)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::pin::pin;
