@@ -172,8 +172,7 @@ pub fn query_to_plan(
     q: &Query,
     timestamp_column_name: &str,
 ) -> Result<LogicalPlan> {
-    let start_timestamp_ms = q.start_timestamp_ms;
-    let end_timestamp_ms = q.end_timestamp_ms;
+    let (start_timestamp_ms, end_timestamp_ms) = remote_read_time_range(q);
 
     let label_matches = &q.matchers;
 
@@ -264,6 +263,22 @@ pub fn query_to_plan(
         .context(error::DataFrameSnafu)?;
 
     Ok(dataframe.into_parts().1)
+}
+
+/// Uses selector time hints without expanding the client's remote-storage range.
+/// Nonpositive or reversed hints retain the outer range: proto3 scalar defaults
+/// cannot distinguish missing endpoints from explicit zero timestamps. Valid
+/// disjoint ranges produce contradictory time predicates and therefore no rows.
+fn remote_read_time_range(query: &Query) -> (i64, i64) {
+    let outer = (query.start_timestamp_ms, query.end_timestamp_ms);
+    let Some(hints) = &query.hints else {
+        return outer;
+    };
+    if hints.start_ms <= 0 || hints.end_ms <= 0 || hints.start_ms > hints.end_ms {
+        return outer;
+    }
+
+    (outer.0.max(hints.start_ms), outer.1.min(hints.end_ms))
 }
 
 /// Prometheus's NewFastRegexMatcher also wraps patterns in ^(?s:...)$:
@@ -1231,6 +1246,81 @@ mod tests {
             ts_col, ts_col
         );
         assert_eq!(expected, display_string);
+    }
+
+    #[tokio::test]
+    async fn test_remote_read_time_hints() {
+        use api::prom_store::remote::ReadHints;
+
+        let ctx = SessionContext::new();
+        let timestamps = vec![-1, 0, 999, 1000, 1500, 2000, 2001, 3000];
+        let batch = DfRecordBatch::try_from_iter(vec![(
+            greptime_timestamp(),
+            Arc::new(TimestampMillisecondArray::from(timestamps)) as ArrayRef,
+        )])
+        .unwrap();
+        ctx.register_batch("metrics", batch).unwrap();
+
+        for (outer, hinted, expected) in [
+            ((1000, 2000), None, vec![1000, 1500, 2000]),
+            ((1000, 2000), Some((0, 0)), vec![1000, 1500, 2000]),
+            ((1000, 2000), Some((0, 1500)), vec![1000, 1500, 2000]),
+            ((1000, 2000), Some((1500, 0)), vec![1000, 1500, 2000]),
+            ((1000, 2000), Some((-1, 1500)), vec![1000, 1500, 2000]),
+            ((1000, 2000), Some((1500, -1)), vec![1000, 1500, 2000]),
+            ((1000, 2000), Some((2000, 1000)), vec![1000, 1500, 2000]),
+            ((1000, 2000), Some((1000, 2000)), vec![1000, 1500, 2000]),
+            ((1000, 2000), Some((1, 3000)), vec![1000, 1500, 2000]),
+            ((1000, 2000), Some((1001, 1999)), vec![1500]),
+            ((1000, 2000), Some((1500, 3000)), vec![1500, 2000]),
+            ((1000, 2000), Some((1, 1500)), vec![1000, 1500]),
+            ((1000, 2000), Some((1500, 1500)), vec![1500]),
+            ((1000, 2000), Some((2000, 3000)), vec![2000]),
+            ((1000, 2000), Some((2001, 3000)), vec![]),
+            ((1000, 2000), Some((1, 999)), vec![]),
+            ((2000, 1000), Some((1, 3000)), vec![]),
+            ((-1, 1000), Some((0, 1000)), vec![-1, 0, 999, 1000]),
+        ] {
+            let query = Query {
+                start_timestamp_ms: outer.0,
+                end_timestamp_ms: outer.1,
+                hints: hinted.map(|(start_ms, end_ms)| ReadHints {
+                    start_ms,
+                    end_ms,
+                    // These describe evaluation, not sampling or aggregation instructions.
+                    step_ms: 10000,
+                    range_ms: 300000,
+                    func: "rate".into(),
+                    grouping: vec!["job".into()],
+                    by: true,
+                }),
+                ..Default::default()
+            };
+            let plan = query_to_plan(
+                ctx.table("metrics").await.unwrap(),
+                &query,
+                greptime_timestamp(),
+            )
+            .unwrap();
+            let batches = ctx
+                .execute_logical_plan(plan)
+                .await
+                .unwrap()
+                .collect()
+                .await
+                .unwrap();
+            let actual: Vec<i64> = batches
+                .iter()
+                .flat_map(|batch| {
+                    batch
+                        .column(0)
+                        .as_primitive::<TimestampMillisecondType>()
+                        .values()
+                        .to_vec()
+                })
+                .collect();
+            assert_eq!(expected, actual, "outer={outer:?}, hints={hinted:?}");
+        }
     }
 
     #[tokio::test]
