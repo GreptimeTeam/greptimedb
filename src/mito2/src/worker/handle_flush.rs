@@ -404,7 +404,9 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 continue;
             }
             self.update_topic_latest_entry_id(region);
-            // The rows of a staging region must stay in the WAL until staging ends.
+            // The rows of a staging region must stay in the WAL until staging ends, so a staging
+            // region with rows pins its topic's prune point: the update above only keeps the id
+            // fresh while the memtable is empty.
             if region.is_staging() {
                 continue;
             }
