@@ -97,6 +97,31 @@ pub struct RegionEdit {
     pub committed_sequence: Option<SequenceNumber>,
 }
 
+impl RegionEdit {
+    /// Shared reclassification must be add-only for a file ID: the manifest removes
+    /// by ID, while the in-memory Version removes from the specified level.
+    pub(crate) fn validate_shared_reclassification(&self, region_id: RegionId) -> Result<()> {
+        let shared_ids: HashSet<_> = self
+            .files_to_add
+            .iter()
+            .filter(|file| file.level == crate::sst::file::LEVEL_SHARED)
+            .map(|file| file.file_id)
+            .collect();
+        snafu::ensure!(
+            shared_ids.is_empty()
+                || self
+                    .files_to_remove
+                    .iter()
+                    .all(|file| !shared_ids.contains(&file.file_id)),
+            crate::error::InvalidRequestSnafu {
+                region_id,
+                reason: "Cannot add and remove the same shared SST in one edit",
+            }
+        );
+        Ok(())
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct RegionRemove {
     pub region_id: RegionId,

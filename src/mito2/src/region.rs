@@ -1564,6 +1564,7 @@ impl ManifestContext {
                 continue;
             };
 
+            edit.validate_shared_reclassification(manifest.metadata.region_id)?;
             // Imports may add shared references, but ordinary edits must not retire
             // or overwrite them. Table publication performs its own locked input check.
             ensure!(

@@ -706,6 +706,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
 fn prepare_region_edit(region: &MitoRegionRef, edit: &mut RegionEdit) -> Result<()> {
     use crate::sst::file::{LEVEL_SHARED, is_supported_level};
     let region_id = region.region_id;
+    edit.validate_shared_reclassification(region_id)?;
     let current = region.version_control.current();
     let shared = &current.version.ssts.levels()[LEVEL_SHARED as usize].files;
     snafu::ensure!(
