@@ -32,6 +32,7 @@ frontend.workspace = true
 hostname.workspace = true
 log-store.workspace = true
 mito2.workspace = true
+pipeline.workspace = true
 query.workspace = true
 serde.workspace = true
 servers.workspace = true
@@ -40,3 +41,6 @@ store-api.workspace = true
 table.workspace = true
 tokio.workspace = true
 url.workspace = true
+
+[dev-dependencies]
+toml.workspace = true

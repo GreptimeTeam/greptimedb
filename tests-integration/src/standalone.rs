@@ -50,6 +50,7 @@ use frontend::instance::builder::FrontendBuilder;
 use frontend::instance::{Instance, StandaloneDatanodeManager};
 use frontend::server::Services;
 use meta_srv::metasrv::{FLOW_ID_SEQ, TABLE_ID_SEQ};
+use pipeline::PipelineOptions;
 use servers::grpc::GrpcOptions;
 use snafu::ResultExt;
 use standalone::StandaloneRepartitionProcedureFactory;
@@ -81,6 +82,7 @@ pub struct GreptimeDbStandaloneBuilder {
     plugin: Option<Plugins>,
     slow_query_options: SlowQueryOptions,
     auto_create_table: bool,
+    pipeline_options: PipelineOptions,
 }
 
 impl GreptimeDbStandaloneBuilder {
@@ -99,12 +101,19 @@ impl GreptimeDbStandaloneBuilder {
                 ..Default::default()
             },
             auto_create_table: true,
+            pipeline_options: PipelineOptions::default(),
         }
     }
 
     #[must_use]
     pub fn with_auto_create_table(mut self, auto_create_table: bool) -> Self {
         self.auto_create_table = auto_create_table;
+        self
+    }
+
+    #[must_use]
+    pub fn with_pipeline_options(mut self, pipeline_options: PipelineOptions) -> Self {
+        self.pipeline_options = pipeline_options;
         self
     }
 
@@ -356,6 +365,7 @@ impl GreptimeDbStandaloneBuilder {
             grpc: GrpcOptions::default().with_server_addr("127.0.0.1:4001"),
             slow_query: self.slow_query_options.clone(),
             auto_create_table: self.auto_create_table,
+            pipeline: self.pipeline_options.clone(),
             ..StandaloneOptions::default()
         };
 

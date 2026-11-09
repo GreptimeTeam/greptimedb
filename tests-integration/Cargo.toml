@@ -66,6 +66,7 @@ meta-srv = { workspace = true, features = ["mock"] }
 mito2 = { workspace = true, features = ["test-shared-fs-region-migration"] }
 object-store.workspace = true
 operator = { workspace = true, features = ["testing"] }
+pipeline.workspace = true
 plugins.workspace = true
 prost.workspace = true
 query.workspace = true
@@ -111,7 +112,6 @@ opentelemetry-proto.workspace = true
 otel-arrow-rust.workspace = true
 partition.workspace = true
 paste.workspace = true
-pipeline.workspace = true
 prost.workspace = true
 rand.workspace = true
 rstest.workspace = true

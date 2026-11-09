@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::fmt::Display;
 use std::io::BufRead;
@@ -97,7 +98,8 @@ pub struct LogIngesterQueryParams {
     pub pipeline_name: Option<String>,
     /// The version of the pipeline to be used for log ingestion.
     pub version: Option<String>,
-    /// Whether to ignore errors during log ingestion.
+    /// Whether to ignore payload parsing and custom timestamp errors during log ingestion.
+    /// Defaults to the server's `pipeline.ignore_errors` setting when omitted.
     pub ignore_errors: Option<bool>,
     /// The source of the log data.
     pub source: Option<String>,
@@ -116,7 +118,7 @@ pub struct LogIngesterQueryParams {
     /// Whether to skip errors during log ingestion.
     /// If set to true, the ingestion will continue even if there are errors in the data.
     /// If set to false, the ingestion will stop at the first error.
-    /// This is different from `ignore_errors`, which is used to ignore errors during the pipeline execution.
+    /// This controls pipeline execution errors, separately from `ignore_errors`.
     /// The priority of query params is lower than that headers of x-greptime-pipeline-params.
     pub skip_error: Option<bool>,
 }
@@ -584,9 +586,13 @@ fn add_step_info_for_pipeline_dryrun_error(step_msg: &str, e: Error) -> Response
 /// Parse the data with given content type
 /// If the content type is invalid, return error
 /// content type is one of application/json, text/plain, application/x-ndjson
-fn parse_dryrun_data(data_type: String, data: String) -> Result<Vec<VrlValue>> {
+fn parse_dryrun_data(
+    data_type: String,
+    data: String,
+    ignore_errors: bool,
+) -> Result<Vec<VrlValue>> {
     if let Ok(content_type) = ContentType::from_str(&data_type) {
-        extract_pipeline_value_by_content_type(content_type, Bytes::from(data), false)
+        extract_pipeline_value_by_content_type(content_type, Bytes::from(data), ignore_errors)
     } else {
         InvalidParameterSnafu {
             reason: format!(
@@ -612,11 +618,16 @@ pub async fn pipeline_dryrun(
     query_ctx.set_channel(Channel::Log);
     let query_ctx = Arc::new(query_ctx);
 
+    let ignore_errors = query_params
+        .ignore_errors
+        .unwrap_or(handler.pipeline_options().ignore_errors);
+
     match check_pipeline_dryrun_params_valid(&payload) {
         Some(params) => {
             let data = parse_dryrun_data(
                 params.data_type.unwrap_or("application/json".to_string()),
                 params.data,
+                ignore_errors,
             )?;
 
             check_data_valid(data.len())?;
@@ -667,8 +678,6 @@ pub async fn pipeline_dryrun(
             let version =
                 to_pipeline_version(query_params.version.as_deref()).context(PipelineSnafu)?;
 
-            let ignore_errors = query_params.ignore_errors.unwrap_or(false);
-
             let value =
                 extract_pipeline_value_by_content_type(content_type, payload, ignore_errors)?;
 
@@ -718,7 +727,9 @@ pub async fn log_ingester(
         reason: "table is required",
     })?;
 
-    let ignore_errors = query_params.ignore_errors.unwrap_or(false);
+    let ignore_errors = query_params
+        .ignore_errors
+        .unwrap_or(handler.pipeline_options().ignore_errors);
 
     let pipeline_name = query_params.pipeline_name.context(InvalidParameterSnafu {
         reason: "pipeline_name is required",
@@ -833,36 +844,69 @@ impl<'a> TryFrom<&'a ContentType> for EventPayloadResolver<'a> {
 impl EventPayloadResolver<'_> {
     fn parse_payload(&self, payload: Bytes, ignore_errors: bool) -> Result<Vec<VrlValue>> {
         match self.inner {
-            EventPayloadResolverInner::Json => transform_ndjson_array_factory(
-                Deserializer::from_slice(&payload).into_iter(),
-                ignore_errors,
-            ),
+            EventPayloadResolverInner::Json => {
+                // Detect parse failures even when ignore_errors would discard them.
+                let mut saw_parse_error = false;
+                let result = transform_ndjson_array_factory(
+                    Deserializer::from_slice(&payload)
+                        .into_iter()
+                        .inspect(|item| saw_parse_error |= item.is_err()),
+                    ignore_errors,
+                );
+                if saw_parse_error && let Cow::Owned(text) = String::from_utf8_lossy(&payload) {
+                    // Release partially parsed records before retrying the entire payload.
+                    drop(result);
+                    return transform_ndjson_array_factory(
+                        Deserializer::from_str(&text).into_iter(),
+                        ignore_errors,
+                    );
+                }
+                result
+            }
             EventPayloadResolverInner::Ndjson => {
                 let mut result = Vec::with_capacity(1000);
                 let mut buffer = Buffers::new(1000);
-                for (index, line) in payload.lines().enumerate() {
-                    let mut line = match line {
-                        Ok(line) if !line.is_empty() => line,
-                        Ok(_) => continue, // Skip empty lines
-                        Err(_) if ignore_errors => continue,
-                        Err(e) => {
-                            warn!(e; "invalid string at index: {}", index);
-                            return InvalidParameterSnafu {
-                                reason: format!("invalid line at index: {}", index),
-                            }
-                            .fail();
-                        }
-                    };
+                let mut remaining = payload.as_ref();
+                let mut line_bytes = Vec::new();
+                // read_until keeps the optimized newline search without validating UTF-8.
+                for index in 0usize.. {
+                    let original = remaining;
+                    line_bytes.clear();
+                    let read = remaining.read_until(b'\n', &mut line_bytes)?;
+                    if read == 0 {
+                        break;
+                    }
 
-                    // simd_json, according to description, only de-escapes string at character level,
-                    // like any other json parser. So it should be safe here.
-                    if let Ok(v) = simd_json::serde::from_slice_with_buffers(
-                        unsafe { line.as_bytes_mut() },
-                        &mut buffer,
-                    ) {
+                    let line = &original[..read];
+                    let line = if let Some(line) = line.strip_suffix(b"\n") {
+                        line.strip_suffix(b"\r").unwrap_or(line)
+                    } else {
+                        line
+                    };
+                    if line.is_empty() {
+                        continue;
+                    }
+
+                    line_bytes.truncate(line.len());
+                    let mut parsed =
+                        simd_json::serde::from_slice_with_buffers(&mut line_bytes, &mut buffer);
+                    // Retry from the original line because SIMD parsing can rewrite its input.
+                    if parsed.is_err()
+                        && let Cow::Owned(text) = String::from_utf8_lossy(line)
+                    {
+                        line_bytes = text.into_bytes();
+                        parsed =
+                            simd_json::serde::from_slice_with_buffers(&mut line_bytes, &mut buffer);
+                    }
+
+                    if let Ok(v) = parsed {
                         result.push(v);
                     } else if !ignore_errors {
-                        warn!("invalid JSON at index: {}, content: {:?}", index, line);
+                        warn!(
+                            "invalid JSON at index: {}, content: {:?}",
+                            index,
+                            String::from_utf8_lossy(line)
+                        );
                         return InvalidParameterSnafu {
                             reason: format!("invalid JSON at index: {}", index),
                         }
@@ -1044,6 +1088,195 @@ mod tests {
         )
         .unwrap();
         assert_eq!(a, "[{\"a\":1},{\"b\":2}]");
+    }
+
+    #[test]
+    fn test_json_invalid_utf8_retry() {
+        let expected = vec![
+            json!({"message": "before"}).into(),
+            json!({"message": "bad\u{fffd}\u{fffd}\u{fffd}\u{7f}\u{7f}"}).into(),
+            json!({"message": "after"}).into(),
+        ];
+
+        for payload in [
+            b"[{\"message\":\"before\"},{\"message\":\"bad\xc1\x89\xc8\x7f\x7f\"},{\"message\":\"after\"}]".as_slice(),
+            b"{\"message\":\"before\"}\n{\"message\":\"bad\xc1\x89\xc8\x7f\x7f\"}\n{\"message\":\"after\"}".as_slice(),
+        ] {
+            for ignore_errors in [false, true] {
+                let actual = extract_pipeline_value_by_content_type(
+                    ContentType::json(),
+                    Bytes::from_static(payload),
+                    ignore_errors,
+                )
+                .unwrap();
+                assert_eq!(actual, expected);
+            }
+        }
+    }
+
+    #[test]
+    fn test_json_invalid_utf8_retry_preserves_parse_errors() {
+        let cases = [
+            (
+                br#"{"message":"before"}{"message":"\uD800"}{"message":"after"}"#.as_slice(),
+                vec![json!({"message": "before"}).into()],
+            ),
+            (
+                b"{\"message\":\"before\"}{\"message\":\"bad\xff\"}{\"broken\":}".as_slice(),
+                vec![
+                    json!({"message": "before"}).into(),
+                    json!({"message": "bad\u{fffd}"}).into(),
+                ],
+            ),
+        ];
+
+        for (payload, expected) in cases {
+            for ignore_errors in [false, true] {
+                let result = extract_pipeline_value_by_content_type(
+                    ContentType::json(),
+                    Bytes::from_static(payload),
+                    ignore_errors,
+                );
+                if ignore_errors {
+                    assert_eq!(result.unwrap(), expected);
+                } else {
+                    assert!(matches!(result, Err(Error::ParseJson { .. })));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_json_invalid_utf8_retry_preserves_ignored_items() {
+        let payload = Bytes::from_static(b"0{\"message\":\"bad\xff\"}false{\"message\":\"after\"}");
+        let result =
+            extract_pipeline_value_by_content_type(ContentType::json(), payload.clone(), false);
+        assert!(matches!(result, Err(Error::InvalidParameter { .. })));
+
+        let actual =
+            extract_pipeline_value_by_content_type(ContentType::json(), payload.clone(), true)
+                .unwrap();
+        assert_eq!(
+            actual,
+            vec![
+                json!({"message": "bad\u{fffd}"}).into(),
+                json!({"message": "after"}).into(),
+            ],
+        );
+    }
+
+    #[test]
+    fn test_ndjson_invalid_utf8_retry() {
+        for invalid_bytes in [1, 8192] {
+            let mut payload = b"\n{\"message\":\"before\"}\r\n\r\n{\"escaped\":\"line\\nquote\\\"slash\\\\\",\"message\":\"bad".to_vec();
+            payload.extend(std::iter::repeat_n(0xff, invalid_bytes));
+            payload.extend_from_slice(b"\"}\r\n{\"message\":\"after\"}");
+            let payload = Bytes::from(payload);
+            let expected = vec![
+                json!({"message": "before"}).into(),
+                json!({
+                    "escaped": "line\nquote\"slash\\",
+                    "message": format!("bad{}", "\u{fffd}".repeat(invalid_bytes)),
+                })
+                .into(),
+                json!({"message": "after"}).into(),
+            ];
+
+            for ignore_errors in [false, true] {
+                let actual = extract_pipeline_value_by_content_type(
+                    NDJSON_CONTENT_TYPE.clone(),
+                    payload.clone(),
+                    ignore_errors,
+                )
+                .unwrap();
+                assert_eq!(actual, expected);
+            }
+        }
+    }
+
+    #[test]
+    fn test_ndjson_invalid_utf8_retry_preserves_parse_errors() {
+        let too_deep = format!("{}0{}", "[".repeat(1025), "]".repeat(1025));
+        for bad_line in [
+            br#"{"escaped":"line\n","broken":}"#.as_slice(),
+            b"{\"escaped\":\"line\\n\",\"message\":\"bad\xff\",\"broken\":}".as_slice(),
+            br#"{"escaped":"line\n","message":"\uDC00"}"#.as_slice(),
+            br#"{"message":"\uD800"}"#.as_slice(),
+            br#"{"value":1e4294967296}"#.as_slice(),
+            b"{\"value\":123\0}".as_slice(),
+            b"{\"message\":\"bad\xe2\x82".as_slice(),
+            too_deep.as_bytes(),
+        ] {
+            let mut payload = b"{\"message\":\"before\"}\n".to_vec();
+            payload.extend_from_slice(bad_line);
+            payload.extend_from_slice(b"\n{\"message\":\"after\"}\n");
+            let payload = Bytes::from(payload);
+
+            for ignore_errors in [false, true] {
+                let result = extract_pipeline_value_by_content_type(
+                    NDJSON_CONTENT_TYPE.clone(),
+                    payload.clone(),
+                    ignore_errors,
+                );
+                if ignore_errors {
+                    assert_eq!(
+                        result.unwrap(),
+                        vec![
+                            json!({"message": "before"}).into(),
+                            json!({"message": "after"}).into(),
+                        ],
+                    );
+                } else {
+                    assert!(matches!(
+                        result,
+                        Err(Error::InvalidParameter { reason, .. })
+                            if reason.ends_with("at index: 1")
+                    ));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_ndjson_large_exponents() {
+        let payload = Bytes::from_static(br#"{"zero":0e99999999999,"underflow":1e-4294967295}"#);
+        for ignore_errors in [false, true] {
+            let actual = extract_pipeline_value_by_content_type(
+                NDJSON_CONTENT_TYPE.clone(),
+                payload.clone(),
+                ignore_errors,
+            )
+            .unwrap();
+            assert_eq!(actual, vec![json!({"zero": 0.0, "underflow": 0.0}).into()]);
+        }
+    }
+
+    #[test]
+    fn test_ndjson_empty_and_whitespace_lines() {
+        for ignore_errors in [false, true] {
+            for payload in [b"".as_slice(), b"\n\r\n".as_slice()] {
+                let actual = extract_pipeline_value_by_content_type(
+                    NDJSON_CONTENT_TYPE.clone(),
+                    Bytes::from_static(payload),
+                    ignore_errors,
+                )
+                .unwrap();
+                assert!(actual.is_empty());
+            }
+
+            for payload in [b"\r".as_slice(), b" \n".as_slice(), b"\r\r\n".as_slice()] {
+                let result = extract_pipeline_value_by_content_type(
+                    NDJSON_CONTENT_TYPE.clone(),
+                    Bytes::from_static(payload),
+                    ignore_errors,
+                );
+                if ignore_errors {
+                    assert!(result.unwrap().is_empty());
+                } else {
+                    assert!(matches!(result, Err(Error::InvalidParameter { .. })));
+                }
+            }
+        }
     }
 
     #[test]

@@ -27,6 +27,7 @@ use frontend::service_config::{
     PromStoreOptions,
 };
 use mito2::config::MitoConfig;
+use pipeline::PipelineOptions;
 use query::options::QueryOptions;
 use serde::{Deserialize, Serialize};
 use servers::grpc::GrpcOptions;
@@ -71,6 +72,7 @@ pub struct StandaloneOptions {
     pub slow_query: SlowQueryOptions,
     pub query: QueryOptions,
     pub memory: MemoryOptions,
+    pub pipeline: PipelineOptions,
     /// Environment variable keys to read and report in heartbeat messages.
     pub heartbeat_env_vars: Vec<String>,
 }
@@ -109,6 +111,7 @@ impl Default for StandaloneOptions {
             slow_query: SlowQueryOptions::default(),
             query: QueryOptions::default(),
             memory: MemoryOptions::default(),
+            pipeline: PipelineOptions::default(),
             heartbeat_env_vars: vec![],
         }
     }
@@ -150,6 +153,7 @@ impl StandaloneOptions {
             logging: cloned_opts.logging,
             user_provider: cloned_opts.user_provider,
             slow_query: cloned_opts.slow_query,
+            pipeline: cloned_opts.pipeline,
             heartbeat_env_vars: cloned_opts.heartbeat_env_vars.clone(),
             ..Default::default()
         }
@@ -181,5 +185,23 @@ impl StandaloneOptions {
                 .unwrap()
                 .sanitize(&self.storage.data_home);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::options::StandaloneOptions;
+
+    #[test]
+    fn test_pipeline_config_forwarding() {
+        let defaults: StandaloneOptions = toml::from_str("").unwrap();
+        assert!(!defaults.pipeline.ignore_errors);
+        assert!(!defaults.frontend_options().pipeline.ignore_errors);
+        let options: StandaloneOptions =
+            toml::from_str("[pipeline]\nignore_errors = true").unwrap();
+        assert!(options.frontend_options().pipeline.ignore_errors);
+        let serialized = toml::to_string(&options).unwrap();
+        let restored: StandaloneOptions = toml::from_str(&serialized).unwrap();
+        assert_eq!(options.pipeline, restored.pipeline);
     }
 }

@@ -223,6 +223,8 @@
 | `slow_query.sample_ratio` | Float | Unset | The sampling ratio of slow query log. The value should be in the range of (0, 1]. |
 | `tracing` | -- | -- | The tracing options. Only effect when compiled with `tokio-console` feature. |
 | `tracing.tokio_console_addr` | String | Unset | The tokio console address. |
+| `pipeline` | -- | -- | The pipeline options. |
+| `pipeline.ignore_errors` | Bool | `false` | Default for the HTTP log ingestion and pipeline dry-run `ignore_errors` parameter.<br/>Explicit request values override this setting. Malformed input may be discarded,<br/>and invalid custom timestamps in identity ingestion fall back to server time.<br/>Pipeline execution errors are controlled separately by `skip_error`.<br/>Default is false. Requires a restart. |
 | `memory` | -- | -- | The memory options. |
 | `memory.enable_heap_profiling` | Bool | `true` | Whether to enable heap profiling activation during startup.<br/>When enabled, heap profiling will be activated if the `MALLOC_CONF` environment variable<br/>is set to "prof:true,prof_active:false". The official image adds this env variable.<br/>Default is true. |
 
@@ -348,6 +350,8 @@
 | `tracing.tokio_console_addr` | String | Unset | The tokio console address. |
 | `memory` | -- | -- | The memory options. |
 | `memory.enable_heap_profiling` | Bool | `true` | Whether to enable heap profiling activation during startup.<br/>When enabled, heap profiling will be activated if the `MALLOC_CONF` environment variable<br/>is set to "prof:true,prof_active:false". The official image adds this env variable.<br/>Default is true. |
+| `pipeline` | -- | -- | The pipeline options. |
+| `pipeline.ignore_errors` | Bool | `false` | Default for the HTTP log ingestion and pipeline dry-run `ignore_errors` parameter.<br/>Explicit request values override this setting. Malformed input may be discarded,<br/>and invalid custom timestamps in identity ingestion fall back to server time.<br/>Pipeline execution errors are controlled separately by `skip_error`.<br/>Default is false. Requires a restart. |
 | `event_recorder` | -- | -- | Configuration options for the event recorder. |
 | `event_recorder.ttl` | String | `90d` | TTL for the events table that will be used to store the events. Default is `90d`. |
 

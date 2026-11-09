@@ -22,6 +22,7 @@ use common_options::datanode::DatanodeClientOptions;
 use common_options::memory::MemoryOptions;
 use common_telemetry::logging::{LoggingOptions, SlowQueryOptions, TracingOptions};
 use meta_client::MetaClientOptions;
+use pipeline::PipelineOptions;
 use query::options::QueryOptions;
 use serde::{Deserialize, Serialize};
 use servers::grpc::GrpcOptions;
@@ -75,6 +76,7 @@ pub struct FrontendOptions {
     pub query: QueryOptions,
     pub slow_query: SlowQueryOptions,
     pub memory: MemoryOptions,
+    pub pipeline: PipelineOptions,
     /// The event recorder options.
     pub event_recorder: EventRecorderOptions,
     /// Environment variable keys to read and report in heartbeat messages.
@@ -108,6 +110,7 @@ impl Default for FrontendOptions {
             query: QueryOptions::default(),
             slow_query: SlowQueryOptions::default(),
             memory: MemoryOptions::default(),
+            pipeline: PipelineOptions::default(),
             event_recorder: EventRecorderOptions::default(),
             heartbeat_env_vars: vec![],
         }
@@ -190,6 +193,17 @@ mod tests {
     use super::*;
     use crate::instance::builder::FrontendBuilder;
     use crate::server::Services;
+
+    #[test]
+    fn test_pipeline_config() {
+        let defaults: FrontendOptions = toml::from_str("").unwrap();
+        assert!(!defaults.pipeline.ignore_errors);
+        let options: FrontendOptions = toml::from_str("[pipeline]\nignore_errors = true").unwrap();
+        assert!(options.pipeline.ignore_errors);
+        let serialized = toml::to_string(&options).unwrap();
+        let restored: FrontendOptions = toml::from_str(&serialized).unwrap();
+        assert_eq!(options.pipeline, restored.pipeline);
+    }
 
     #[test]
     fn test_toml() {

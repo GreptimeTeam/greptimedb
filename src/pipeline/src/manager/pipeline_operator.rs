@@ -31,7 +31,6 @@ use snafu::{OptionExt, ResultExt};
 use table::TableRef;
 use table::requests::TTL_KEY;
 
-use crate::Pipeline;
 use crate::error::{CatalogSnafu, CreateTableSnafu, PipelineTableNotFoundSnafu, Result};
 use crate::manager::{PipelineInfo, PipelineTableRef, PipelineVersion};
 use crate::metrics::{
@@ -39,6 +38,7 @@ use crate::metrics::{
     METRIC_PIPELINE_RETRIEVE_HISTOGRAM,
 };
 use crate::table::{PIPELINE_TABLE_NAME, PipelineTable};
+use crate::{Pipeline, PipelineOptions};
 
 /// PipelineOperator is responsible for managing pipelines.
 /// It provides the ability to:
@@ -54,6 +54,7 @@ pub struct PipelineOperator {
     catalog_manager: CatalogManagerRef,
     query_engine: QueryEngineRef,
     tables: RwLock<HashMap<String, PipelineTableRef>>,
+    options: PipelineOptions,
 }
 
 impl PipelineOperator {
@@ -171,6 +172,7 @@ impl PipelineOperator {
         statement_executor: StatementExecutorRef,
         catalog_manager: CatalogManagerRef,
         query_engine: QueryEngineRef,
+        options: PipelineOptions,
     ) -> Self {
         Self {
             inserter,
@@ -178,6 +180,7 @@ impl PipelineOperator {
             catalog_manager,
             tables: RwLock::new(HashMap::new()),
             query_engine,
+            options,
         }
     }
 
@@ -272,6 +275,11 @@ impl PipelineOperator {
                     .observe(timer.elapsed().as_secs_f64())
             })
             .await
+    }
+
+    /// Returns the server's pipeline options.
+    pub fn options(&self) -> &PipelineOptions {
+        &self.options
     }
 
     /// Compile a pipeline.

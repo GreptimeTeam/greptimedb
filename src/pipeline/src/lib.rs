@@ -19,6 +19,7 @@ pub mod error;
 mod etl;
 mod manager;
 mod metrics;
+mod options;
 mod tablesuffix;
 
 pub use etl::ctx_req::{ContextOpt, ContextReq};
@@ -34,6 +35,7 @@ pub use manager::{
     IdentityTimeIndex, PipelineContext, PipelineDefinition, PipelineInfo, PipelineRef,
     PipelineTableRef, PipelineVersion, PipelineWay, SelectInfo, pipeline_operator, table, util,
 };
+pub use options::PipelineOptions;
 
 #[macro_export]
 macro_rules! unwrap_or_continue_if_err {

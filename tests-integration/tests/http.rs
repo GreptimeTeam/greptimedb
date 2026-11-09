@@ -51,7 +51,6 @@ use opentelemetry_proto::tonic::collector::trace::v1::{
 use pipeline::GREPTIME_INTERNAL_TRACE_PIPELINE_V1_NAME;
 use prost::Message;
 use serde_json::{Value, json};
-use servers::http::GreptimeQueryOutput;
 use servers::http::handler::HealthResponse;
 use servers::http::header::constants::{
     GREPTIME_LOG_EXTRACT_KEYS_HEADER_NAME, GREPTIME_LOG_TABLE_NAME_HEADER_NAME,
@@ -64,6 +63,7 @@ use servers::http::result::error_result::ErrorResponse;
 use servers::http::result::greptime_result_v1::GreptimedbV1Response;
 use servers::http::result::influxdb_result_v1::{InfluxdbOutput, InfluxdbV1Response};
 use servers::http::test_helpers::{TestClient, TestResponse};
+use servers::http::{GreptimeQueryOutput, HttpOptions, HttpServerBuilder};
 use servers::prom_store::{self, mock_timeseries_new_label};
 use servers::request_memory_limiter::ServerMemoryLimiter;
 use standalone::options::StandaloneOptions;
@@ -138,6 +138,7 @@ macro_rules! http_tests {
                 test_pipeline_suffix_template,
                 test_pipeline_context,
                 test_pipeline_with_vrl,
+                test_pipeline_ignore_errors_config,
                 test_pipeline_with_hint_vrl,
                 test_pipeline_one_to_many_vrl,
                 test_pipeline_2,
@@ -1692,6 +1693,9 @@ allow_query_fallback = false
 
 [memory]
 enable_heap_profiling = true
+
+[pipeline]
+ignore_errors = false
 "#,
     )
     .trim()
@@ -3714,6 +3718,129 @@ table_suffix: _${type}
     .await;
 
     guard.remove_all().await;
+}
+
+pub async fn test_pipeline_ignore_errors_config(storage_type: StorageType) {
+    let pipeline = "transform:\n  - field: value\n    type: int32\n";
+    let data = "{\"value\":1}\ninvalid JSON\n{\"value\":2}\n";
+
+    for ignore_errors in [false, true] {
+        let mut instance = tests_integration::standalone::GreptimeDbStandaloneBuilder::new(
+            "test_pipeline_ignore_errors_config",
+        )
+        .with_default_store_type(storage_type)
+        .with_pipeline_options(pipeline::PipelineOptions { ignore_errors })
+        .build()
+        .await;
+        let server = HttpServerBuilder::new(HttpOptions::default())
+            .with_log_ingest_handler(instance.fe_instance().clone(), None, None)
+            .build();
+        let client = TestClient::new(server.build(server.make_app()).unwrap()).await;
+        let response = client
+            .post("/v1/pipelines/ignore_errors")
+            .header("Content-Type", "application/x-yaml")
+            .body(pipeline)
+            .send()
+            .await;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        for request_override in [None, Some(false), Some(true)] {
+            let effective = request_override.unwrap_or(ignore_errors);
+            let query = request_override
+                .map(|value| format!("&ignore_errors={value}"))
+                .unwrap_or_default();
+            let expected_status = if effective {
+                StatusCode::OK
+            } else {
+                StatusCode::BAD_REQUEST
+            };
+
+            for path in ["/v1/ingest", "/v1/events/logs"] {
+                let response = client
+                    .post(&format!(
+                        "{path}?table=logs&pipeline_name=ignore_errors{query}"
+                    ))
+                    .header("Content-Type", "application/x-ndjson")
+                    .body(data)
+                    .send()
+                    .await;
+                assert_eq!(response.status(), expected_status);
+                if effective {
+                    let body: Value = response.json().await;
+                    assert_eq!(body["output"][0]["affectedrows"], 2);
+                }
+            }
+
+            for (content_type, body) in [
+                ("application/x-ndjson", data.to_string()),
+                (
+                    "application/json",
+                    json!({
+                        "pipeline_name": "ignore_errors",
+                        "data_type": "application/x-ndjson",
+                        "data": data,
+                    })
+                    .to_string(),
+                ),
+                (
+                    "application/json",
+                    json!({
+                        "pipeline": pipeline,
+                        "data_type": "application/x-ndjson",
+                        "data": data,
+                    })
+                    .to_string(),
+                ),
+            ] {
+                let response = client
+                    .post(&format!(
+                        "/v1/pipelines/_dryrun?pipeline_name=ignore_errors{query}"
+                    ))
+                    .header("Content-Type", content_type)
+                    .body(body)
+                    .send()
+                    .await;
+                assert_eq!(response.status(), expected_status);
+                if effective {
+                    let body: Value = response.json().await;
+                    assert_eq!(body[0]["rows"].as_array().unwrap().len(), 2);
+                }
+            }
+
+            let response = client
+                .post(&format!(
+                    "/v1/ingest?table=timestamps&pipeline_name=greptime_identity\
+                     &custom_time_index=ts;epoch;s{query}"
+                ))
+                .header("Content-Type", "application/json")
+                .body(r#"{"ts":"invalid","value":1}"#)
+                .send()
+                .await;
+            assert_eq!(
+                response.status(),
+                if effective {
+                    StatusCode::OK
+                } else {
+                    StatusCode::INTERNAL_SERVER_ERROR
+                }
+            );
+            if effective {
+                let body: Value = response.json().await;
+                assert_eq!(body["output"][0]["affectedrows"], 1);
+            }
+        }
+
+        // Parsing tolerance does not enable skipping pipeline execution errors.
+        let response = client
+            .post("/v1/ingest?table=logs&pipeline_name=ignore_errors&ignore_errors=true")
+            .header("Content-Type", "application/json")
+            .body(r#"{"value":"not an integer"}"#)
+            .send()
+            .await;
+        assert!(!response.status().is_success());
+
+        instance.guard.remove_all().await;
+    }
 }
 
 pub async fn test_pipeline_with_vrl(storage_type: StorageType) {
