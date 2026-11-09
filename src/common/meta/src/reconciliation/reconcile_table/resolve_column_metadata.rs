@@ -92,11 +92,9 @@ impl State for ResolveColumnMetadata {
         ctx.persistent_ctx.table_info_value = Some(table_info_value);
 
         if let Some(column_metadatas) = check_column_metadatas_consistent(&self.region_metadata) {
-            // Keep the region's column order. `reorder_tag_columns` is only for
-            // SyncColumns (UseLatest / UseMetasrv). Applying it here would
-            // rewrite TableInfo without updating regions, so positional INSERTs
-            // land in the wrong columns when the primary key is not in column
-            // order (see #10249).
+            // TableInfo is rebuilt from the region metadata; the column order comes
+            // from `column_metadatas`, the primary key order must come from
+            // `primary_key` — never from tag positions.
             // Safety: fetched in the above.
             let table_info_value = ctx.persistent_ctx.table_info_value.clone().unwrap();
             info!(
@@ -113,8 +111,15 @@ impl State for ResolveColumnMetadata {
             // Update metrics.
             ctx.mut_metrics().resolve_column_metadata_result =
                 Some(ResolveColumnMetadataResult::Consistent);
+            // Safety: `check_column_metadatas_consistent` only returns `Some`
+            // for a non-empty region list, and every region shares this key.
+            let primary_key = self.region_metadata[0].primary_key.clone();
             return Ok((
-                Box::new(UpdateTableInfo::new(table_info_value, column_metadatas)),
+                Box::new(UpdateTableInfo::with_primary_key(
+                    table_info_value,
+                    column_metadatas,
+                    primary_key,
+                )),
                 Status::executing(false),
             ));
         };

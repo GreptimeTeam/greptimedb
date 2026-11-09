@@ -16,6 +16,7 @@ use common_procedure::{Context as ProcedureContext, Status};
 use common_telemetry::info;
 use serde::{Deserialize, Serialize};
 use store_api::metadata::ColumnMetadata;
+use store_api::storage::ColumnId;
 use tonic::async_trait;
 
 use crate::cache_invalidator::Context as CacheContext;
@@ -32,6 +33,12 @@ use crate::rpc::router::region_distribution;
 pub struct UpdateTableInfo {
     table_info_value: DeserializedValueWithBytes<TableInfoValue>,
     column_metadatas: Vec<ColumnMetadata>,
+    /// Region primary-key column ids, in key order.
+    ///
+    /// `None` keeps the positional tag order. Absent on procedure states
+    /// persisted before this field existed.
+    #[serde(default)]
+    primary_key: Option<Vec<ColumnId>>,
 }
 
 impl UpdateTableInfo {
@@ -42,6 +49,23 @@ impl UpdateTableInfo {
         Self {
             table_info_value,
             column_metadatas,
+            primary_key: None,
+        }
+    }
+
+    /// Creates an update that preserves `primary_key` column order.
+    ///
+    /// [`UpdateTableInfo::new`] leaves the key order positional. The consistent
+    /// path uses this because region tag positions are not the key order.
+    pub fn with_primary_key(
+        table_info_value: DeserializedValueWithBytes<TableInfoValue>,
+        column_metadatas: Vec<ColumnMetadata>,
+        primary_key: Vec<ColumnId>,
+    ) -> Self {
+        Self {
+            table_info_value,
+            column_metadatas,
+            primary_key: Some(primary_key),
         }
     }
 }
@@ -56,7 +80,7 @@ impl State for UpdateTableInfo {
     ) -> Result<(Box<dyn State>, Status)> {
         let new_table_meta = match &ctx.volatile_ctx.table_meta {
             Some(table_meta) => table_meta.clone(),
-            None => ctx.build_table_meta(&self.column_metadatas)?,
+            None => ctx.build_table_meta(&self.column_metadatas, self.primary_key.as_deref())?,
         };
 
         let region_routes = &ctx

@@ -147,6 +147,7 @@ impl UpdateTableInfos {
             &table_info.meta,
             None,
             column_metadatas,
+            None,
         )?;
 
         let mut new_table_info = table_info.clone();

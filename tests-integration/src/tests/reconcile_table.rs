@@ -569,6 +569,26 @@ async fn test_reconcile_preserves_column_order_when_pk_differs() {
     // Try best effort to wait for the cache to be invalidated.
     tokio::time::sleep(Duration::from_secs(1)).await;
 
+    let output = execute_sql(&frontend, "SHOW CREATE TABLE q8").await;
+    let create_table = output.data.pretty_print().await;
+    let ts = create_table
+        .find("\"ts\"")
+        .expect("SHOW CREATE TABLE should list ts");
+    let a = create_table
+        .find("\"a\"")
+        .expect("SHOW CREATE TABLE should list a");
+    let b = create_table
+        .find("\"b\"")
+        .expect("SHOW CREATE TABLE should list b");
+    assert!(
+        ts < a && a < b,
+        "column order should stay ts, a, b:\n{create_table}"
+    );
+    assert!(
+        create_table.contains("PRIMARY KEY (\"b\", \"a\")"),
+        "primary key order should stay (b, a):\n{create_table}"
+    );
+
     let output = execute_sql(&frontend, "INSERT INTO q8 VALUES (2000, 'a2', 'b2')").await;
     assert_affected_rows(output.data).await;
 

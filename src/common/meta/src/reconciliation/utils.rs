@@ -26,7 +26,7 @@ use futures::future::{join_all, try_join_all};
 use snafu::{OptionExt, ResultExt, ensure};
 use store_api::metadata::{ColumnMetadata, RegionMetadata};
 use store_api::storage::consts::ReservedColumnId;
-use store_api::storage::{RegionId, TableId};
+use store_api::storage::{ColumnId, RegionId, TableId};
 use table::metadata::{TableInfo, TableMeta};
 use table::table_name::TableName;
 use table::table_reference::TableReference;
@@ -85,12 +85,13 @@ pub(crate) fn check_column_metadatas_consistent(
     Some(region_metadatas[0].column_metadatas.clone())
 }
 
-/// Returns columns with tag values in primary-key order while preserving the
-/// positions of non-tag columns.
-pub(crate) fn reorder_tag_columns(
+/// Maps each primary-key column id to its index in `column_metadatas`.
+///
+/// `primary_key` must list every tag column exactly once.
+fn resolve_primary_key_indices(
     column_metadatas: &[ColumnMetadata],
-    primary_key: &[u32],
-) -> Result<Vec<ColumnMetadata>> {
+    primary_key: &[ColumnId],
+) -> Result<Vec<usize>> {
     let tag_count = column_metadatas
         .iter()
         .filter(|column| column.semantic_type == SemanticType::Tag)
@@ -107,11 +108,12 @@ pub(crate) fn reorder_tag_columns(
     );
 
     let mut primary_key_ids = HashSet::with_capacity(primary_key.len());
-    let mut tags = Vec::with_capacity(primary_key.len());
+    let mut indices = Vec::with_capacity(primary_key.len());
     for column_id in primary_key {
-        let column = column_metadatas
+        let (index, column) = column_metadatas
             .iter()
-            .find(|column| column.column_id == *column_id)
+            .enumerate()
+            .find(|(_, column)| column.column_id == *column_id)
             .with_context(|| UnexpectedSnafu {
                 err_msg: format!(
                     "Primary key column {} not found in column metadata",
@@ -130,16 +132,26 @@ pub(crate) fn reorder_tag_columns(
                 err_msg: format!("Primary key column {} is duplicated", column_id),
             }
         );
-        tags.push(column);
+        indices.push(index);
     }
+    Ok(indices)
+}
 
-    let mut tags = tags.into_iter();
+/// Returns columns with tag values in primary-key order while preserving the
+/// positions of non-tag columns.
+pub(crate) fn reorder_tag_columns(
+    column_metadatas: &[ColumnMetadata],
+    primary_key: &[ColumnId],
+) -> Result<Vec<ColumnMetadata>> {
+    let mut tags = resolve_primary_key_indices(column_metadatas, primary_key)?
+        .into_iter()
+        .map(|index| column_metadatas[index].clone());
 
     column_metadatas
         .iter()
         .map(|column| {
             if column.semantic_type == SemanticType::Tag {
-                tags.next().cloned().with_context(|| UnexpectedSnafu {
+                tags.next().with_context(|| UnexpectedSnafu {
                     err_msg: "Primary key has fewer columns than tags".to_string(),
                 })
             } else {
@@ -360,11 +372,16 @@ pub(crate) fn check_column_metadata_invariants(
 
 /// Builds a [`TableMeta`] from the provided [`ColumnMetadata`]s.
 ///
+/// When `primary_key` is `Some`, `primary_key_indices` follow that column-id
+/// order. When it is `None`, each tag is recorded at its position in
+/// `column_metadata`.
+///
 /// Returns an error if:
 /// - Any column is missing in the `name_to_ids`(if `name_to_ids` is provided).
 /// - The column id in table metadata is not the same as the column id in the column metadata.(if `name_to_ids` is provided)
 /// - The table index is missing in the column metadata.
 /// - The primary key or partition key columns are missing in the column metadata.
+/// - `primary_key` is `Some` and does not list every tag column exactly once.
 ///
 /// TODO(weny): add tests
 pub(crate) fn build_table_meta_from_column_metadatas(
@@ -373,6 +390,7 @@ pub(crate) fn build_table_meta_from_column_metadatas(
     table_meta: &TableMeta,
     name_to_ids: Option<HashMap<String, u32>>,
     column_metadata: &[ColumnMetadata],
+    primary_key: Option<&[ColumnId]>,
 ) -> Result<TableMeta> {
     let column_in_column_metadata = column_metadata
         .iter()
@@ -465,6 +483,10 @@ pub(crate) fn build_table_meta_from_column_metadatas(
 
         columns.push(col.column_schema.clone());
         column_ids.push(col.column_id);
+    }
+
+    if let Some(primary_key) = primary_key {
+        *primary_key_indices = resolve_primary_key_indices(column_metadata, primary_key)?;
     }
 
     *next_column_id = column_ids
@@ -1124,6 +1146,7 @@ mod tests {
             &table_meta,
             Some(name_to_ids),
             &column_metadatas,
+            None,
         )
         .unwrap();
         assert_eq!(new_table_meta, table_meta);
@@ -1157,6 +1180,7 @@ mod tests {
             &table_meta,
             Some(name_to_ids),
             &column_metadatas,
+            None,
         )
         .unwrap();
 
@@ -1190,6 +1214,7 @@ mod tests {
             &table_meta,
             Some(name_to_ids),
             &column_metadatas,
+            None,
         )
         .unwrap_err();
 
@@ -1215,6 +1240,7 @@ mod tests {
             &table_meta,
             Some(name_to_ids),
             &column_metadatas,
+            None,
         )
         .unwrap_err();
 
@@ -1246,6 +1272,7 @@ mod tests {
             &table_meta,
             Some(name_to_ids.clone()),
             &column_metadatas,
+            None,
         )
         .unwrap_err();
         assert_matches!(err, Error::MissingColumnInColumnMetadata { .. });
@@ -1260,9 +1287,147 @@ mod tests {
             &table_meta,
             Some(name_to_ids),
             &column_metadatas,
+            None,
         )
         .unwrap_err();
         assert_matches!(err, Error::MissingColumnInColumnMetadata { .. });
+    }
+
+    /// Columns `ts, a, b` whose primary key is `(b, a)`, so key order and
+    /// column order differ.
+    fn new_reordered_primary_key_columns() -> Vec<ColumnMetadata> {
+        vec![
+            ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "ts",
+                    ConcreteDataType::timestamp_millisecond_datatype(),
+                    false,
+                )
+                .with_time_index(true),
+                semantic_type: SemanticType::Timestamp,
+                column_id: 10,
+            },
+            ColumnMetadata {
+                column_schema: ColumnSchema::new("a", ConcreteDataType::string_datatype(), true),
+                semantic_type: SemanticType::Tag,
+                column_id: 20,
+            },
+            ColumnMetadata {
+                column_schema: ColumnSchema::new("b", ConcreteDataType::string_datatype(), true),
+                semantic_type: SemanticType::Tag,
+                column_id: 30,
+            },
+        ]
+    }
+
+    fn new_reordered_primary_key_table_meta(column_metadatas: &[ColumnMetadata]) -> TableMeta {
+        let column_schemas = column_metadatas
+            .iter()
+            .map(|column| column.column_schema.clone())
+            .collect::<Vec<_>>();
+        TableMetaBuilder::empty()
+            .schema(Arc::new(
+                SchemaBuilder::try_from(column_schemas)
+                    .unwrap()
+                    .build()
+                    .unwrap(),
+            ))
+            .primary_key_indices(vec![2, 1])
+            .next_column_id(31)
+            .build()
+            .unwrap()
+    }
+
+    #[test]
+    fn test_build_table_meta_preserves_explicit_primary_key_order() {
+        let column_metadatas = new_reordered_primary_key_columns();
+        let table_meta = new_reordered_primary_key_table_meta(&column_metadatas);
+        let table_ref = TableReference::full("test_catalog", "test_schema", "q8");
+        let b_id = 30;
+        let a_id = 20;
+
+        let with_primary_key = build_table_meta_from_column_metadatas(
+            1,
+            table_ref,
+            &table_meta,
+            None,
+            &column_metadatas,
+            Some(&[b_id, a_id]),
+        )
+        .unwrap();
+        assert_eq!(with_primary_key.primary_key_indices, vec![2, 1]);
+        assert_eq!(
+            with_primary_key
+                .schema
+                .column_schemas()
+                .iter()
+                .map(|column| column.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["ts", "a", "b"]
+        );
+
+        let positional = build_table_meta_from_column_metadatas(
+            1,
+            table_ref,
+            &table_meta,
+            None,
+            &column_metadatas,
+            None,
+        )
+        .unwrap();
+        assert_eq!(positional.primary_key_indices, vec![1, 2]);
+        assert_eq!(
+            positional
+                .schema
+                .column_schemas()
+                .iter()
+                .map(|column| column.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["ts", "a", "b"]
+        );
+    }
+
+    #[test]
+    fn test_build_table_meta_rejects_invalid_primary_key() {
+        let column_metadatas = new_reordered_primary_key_columns();
+        let table_meta = new_reordered_primary_key_table_meta(&column_metadatas);
+        let table_ref = TableReference::full("test_catalog", "test_schema", "q8");
+
+        let err = build_table_meta_from_column_metadatas(
+            1,
+            table_ref,
+            &table_meta,
+            None,
+            &column_metadatas,
+            Some(&[10, 20]),
+        )
+        .unwrap_err();
+        assert_matches!(err, Error::Unexpected { .. });
+        assert!(err.to_string().contains("is not a tag"));
+
+        let err = build_table_meta_from_column_metadatas(
+            1,
+            table_ref,
+            &table_meta,
+            None,
+            &column_metadatas,
+            Some(&[999, 20]),
+        )
+        .unwrap_err();
+        assert_matches!(err, Error::Unexpected { .. });
+        assert!(err.to_string().contains("not found in column metadata"));
+
+        let err = build_table_meta_from_column_metadatas(
+            1,
+            table_ref,
+            &table_meta,
+            None,
+            &column_metadatas,
+            Some(&[20, 20]),
+        )
+        .unwrap_err();
+        assert_matches!(err, Error::Unexpected { .. });
+        assert!(err.to_string().contains("is duplicated"));
     }
 
     #[test]

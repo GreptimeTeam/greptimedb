@@ -61,7 +61,9 @@ impl State for ReconcileRegions {
         ctx: &mut ReconcileTableContext,
         _procedure_ctx: &ProcedureContext,
     ) -> Result<(Box<dyn State>, Status)> {
-        let table_meta = ctx.build_table_meta(&self.column_metadatas)?;
+        // The SyncColumns list already encodes the primary-key order in tag
+        // positions, so the rebuild keeps positional key indices.
+        let table_meta = ctx.build_table_meta(&self.column_metadatas, None)?;
         ctx.volatile_ctx.table_meta = Some(table_meta);
         let table_id = ctx.table_id();
 

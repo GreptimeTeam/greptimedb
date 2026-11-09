@@ -29,7 +29,7 @@ use common_procedure::{
 use serde::{Deserialize, Serialize};
 use snafu::ResultExt;
 use store_api::metadata::ColumnMetadata;
-use store_api::storage::TableId;
+use store_api::storage::{ColumnId, TableId};
 use table::metadata::TableMeta;
 use table::table_name::TableName;
 use tonic::async_trait;
@@ -181,9 +181,13 @@ impl ReconcileTableContext {
     }
 
     /// Builds a [`TableMeta`] from the provided [`ColumnMetadata`]s.
+    ///
+    /// `primary_key` supplies the primary-key column order. `None` keeps the
+    /// positional tag order already encoded in `column_metadatas`.
     pub(crate) fn build_table_meta(
         &self,
         column_metadatas: &[ColumnMetadata],
+        primary_key: Option<&[ColumnId]>,
     ) -> Result<TableMeta> {
         // Safety: The table info value is set in `ReconciliationStart` state.
         let table_info_value = self.persistent_ctx.table_info_value.as_ref().unwrap();
@@ -196,6 +200,7 @@ impl ReconcileTableContext {
             &table_info_value.table_info.meta,
             name_to_ids,
             column_metadatas,
+            primary_key,
         )?;
 
         Ok(table_meta)
