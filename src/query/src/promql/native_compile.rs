@@ -374,9 +374,6 @@ fn data_free_value_field(stmt: &EvalStmt) -> Arc<str> {
 /// A statement that reads a selector is refused: its scan is the caller's to bind, through
 /// [`compile_selectors`].
 pub fn compile_statement(stmt: &EvalStmt) -> Result<NativeTree> {
-    // The grid is derived inside the compiler, after it has decided the statement is a shape it
-    // compiles at all: a statement with no grid still reports the reason it has no tree, which is
-    // what the callers' decline paths were written against.
     let output_field = data_free_value_field(stmt);
     let compiled = compile_selectors_with_value_field(
         stmt,

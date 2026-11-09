@@ -12820,6 +12820,27 @@ async fn native_promql_matrix_root_matches_legacy() {
     let legacy = run_timestamps(&instance, &observer, pre_epoch_anchored, false).await;
     assert_eq!(native, legacy, "anchored pre-epoch subquery root");
 
+    // The bounds route the statement, not the root shape: this one has no subquery and no matrix
+    // root at all, a plain aggregate over a selector, and its pre-epoch start still takes the
+    // native route. It is kept apart from the matrix-root cases because the bound alone is what
+    // puts it there. The fixture starts at the epoch, so of the five 30s steps over the statement's
+    // own range only the three from the epoch on have anything inside the 5m lookback: the four
+    // hosts carry `host * 1000 + minute`, so the epoch step and the one 30s later both read minute
+    // 0 (0 + 1000 + 2000 + 3000) and the step at 60s reads minute 1 (6004).
+    let pre_epoch_aggregate = "TQL EVAL ('-60', '60', '30s') sum(native_matrix_root)";
+    let native = run_timestamps(&instance, &observer, pre_epoch_aggregate, true).await;
+    assert!(
+        observer.fused().is_some(),
+        "pre-epoch statement without a matrix root did not run natively: {pre_epoch_aggregate}"
+    );
+    let legacy = run_timestamps(&instance, &observer, pre_epoch_aggregate, false).await;
+    assert_eq!(native, legacy, "pre-epoch aggregate over a selector");
+    assert_eq!(
+        native,
+        [(0, 6000.0), (30_000, 6000.0), (60_000, 6004.0)],
+        "the pre-epoch aggregate did not answer on its own 30s grid"
+    );
+
     // A matrix root whose inner expression is folded rather than merely selected reaches the
     // split-aggregate lowering, which builds its own final node: that node has to publish on the
     // grid the tree was compiled on, which is the subquery's child grid. `sum(...)` answers without
