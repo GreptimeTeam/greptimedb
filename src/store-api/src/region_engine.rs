@@ -47,6 +47,7 @@ use crate::metadata::RegionMetadataRef;
 use crate::region_request::{
     BatchRegionDdlRequest, RegionCatchupRequest, RegionOpenRequest, RegionPutRequest, RegionRequest,
 };
+use crate::sketch::SketchReader;
 use crate::storage::{ColumnId, FileId, RegionId, ScanRequest, SequenceNumber};
 
 /// The settable region role state.
@@ -1383,6 +1384,11 @@ pub struct MitoCopyRegionFromResponse {
 
 #[async_trait]
 pub trait RegionEngine: Send + Sync {
+    /// Returns the optional sketch-reading capability without taking a snapshot or performing I/O.
+    fn sketch_reader(&self) -> Option<&dyn SketchReader> {
+        None
+    }
+
     /// Name of this engine
     fn name(&self) -> &str;
 
