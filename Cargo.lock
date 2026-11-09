@@ -8195,6 +8195,7 @@ dependencies = [
  "bytes",
  "chrono",
  "common-base",
+ "common-cache",
  "common-config",
  "common-error",
  "common-macro",
