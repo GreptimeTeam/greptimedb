@@ -427,7 +427,8 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         };
 
         let need_compaction = if edit_result.is_staging {
-            if edit_result.update_region_state {
+            // A close may have abandoned this edit and left staging already.
+            if edit_result.update_region_state && region.is_staging_or_staged_edit() {
                 // For staging regions, edits are not applied immediately,
                 // as they remain invisible until the region exits the staging state.
                 region.switch_state_to_staging(RegionLeaderState::Editing);
