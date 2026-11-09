@@ -11,6 +11,12 @@ Shared agent skills live in `.agents/skills`.
 - Add or update shared skills under `.agents/skills/<skill-name>/SKILL.md`.
 - If a new skill does not appear, restart the agent or start a new thread.
 
+`greptimedb-create-pr` and `greptimedb-review-pr` share
+[`review-context/review_context.py`](review-context/review_context.py), which
+publishes the author's rationale and sessions to the private review repository
+and gates when a reviewer may read them. The blind reviewer they use is
+defined in [`../.claude/agents/greptimedb-blind-reviewer.md`](../.claude/agents/greptimedb-blind-reviewer.md).
+
 ## Per-directory guides
 
 Read every `AGENTS.md` from the repository root down to the path being changed.
