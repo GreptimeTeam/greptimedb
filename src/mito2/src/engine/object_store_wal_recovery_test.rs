@@ -1866,7 +1866,7 @@ async fn test_flush_does_not_publish_a_frontier_for_a_lost_enqueued_backlog() {
         engine
             .get_region_statistic(REGION_A)
             .unwrap()
-            .flushed_parquet_bytes,
+            .ingested_parquet_bytes,
         0
     );
     assert!(store.stop().await.is_err());
