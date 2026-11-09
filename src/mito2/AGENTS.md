@@ -63,7 +63,8 @@ without sending a worker request. The scheduler publishes active and pending tas
 state together; readers clone task Arcs under a short read lock, then filter and
 build rows outside the lock. Execution handles provide live background phases.
 There is no second task registry or completed-task history. See
-`compaction/scheduler/state.rs`.
+`compaction/scheduler/state.rs`. The datanode provider reuses the lazy inspection scan
+path and retains residual SQL filters.
 
 ## Public surface
 

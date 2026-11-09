@@ -851,8 +851,8 @@ async fn test_staging_exit_success_with_manifests_with_format(flat_format: bool)
     assert_eq!(sst_entries.iter().filter(|e| e.visible).count(), 1);
     assert_eq!(sst_entries.iter().filter(|e| !e.visible).count(), 2);
 
-    let flushed_parquet_bytes = region.region_statistic().flushed_parquet_bytes;
-    assert!(flushed_parquet_bytes > 0);
+    let ingested_parquet_bytes = region.region_statistic().ingested_parquet_bytes;
+    assert!(ingested_parquet_bytes > 0);
 
     // Streaming inspection must retain staging entries and their visibility.
     {
@@ -972,8 +972,8 @@ async fn test_staging_exit_success_with_manifests_with_format(flat_format: bool)
     );
 
     assert_eq!(
-        region.region_statistic().flushed_parquet_bytes,
-        flushed_parquet_bytes
+        region.region_statistic().ingested_parquet_bytes,
+        ingested_parquet_bytes
     );
 
     // Verify staging manifests have been cleared

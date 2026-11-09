@@ -705,7 +705,8 @@ impl PromStoreProtocolHandler for Instance {
             prom_store::validate_matchers(&query.matchers)?;
         }
 
-        // TODO(dennis): use read_hints to speedup query if possible
+        // query_to_plan intersects valid time hints with each query's outer range.
+        // Other hints do not change raw samples or labels.
         let results = self
             .handle_remote_queries(ctx, &request.queries, &query_targets)
             .await?;
