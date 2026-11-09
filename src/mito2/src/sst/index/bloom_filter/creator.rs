@@ -84,6 +84,7 @@ pub struct BloomFilterIndexer {
 impl BloomFilterIndexer {
     /// Creates a new bloom filter indexer.
     /// JSON paths are included only for flush and compaction builds.
+    #[cfg(any(test, feature = "testing"))]
     pub fn new(
         sst_file_id: FileId,
         metadata: &RegionMetadataRef,

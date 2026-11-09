@@ -38,6 +38,7 @@ use crate::region::opener::RegionLoadCacheTask;
 use crate::sst::file::RegionFileId;
 use crate::sst::index::intermediate::IntermediateManager;
 use crate::sst::index::puffin_manager::{PuffinManagerFactory, SstPuffinManager};
+use crate::sst::index::registry::IndexRegistry;
 use crate::sst::index::{IndexerBuilderImpl, build_index_from_parquet_bytes};
 use crate::sst::parquet::writer::ParquetWriter;
 use crate::sst::parquet::{SstInfo, WriteOptions};
@@ -308,9 +309,11 @@ impl WriteCache {
             write_cache_enabled: true,
             intermediate_manager: self.intermediate_manager.clone(),
             index_options: write_request.index_options,
-            inverted_index_config: write_request.inverted_index_config,
-            fulltext_index_config: write_request.fulltext_index_config,
-            bloom_filter_index_config: write_request.bloom_filter_index_config,
+            registry: Arc::new(IndexRegistry::new(
+                write_request.inverted_index_config,
+                write_request.fulltext_index_config,
+                write_request.bloom_filter_index_config,
+            )),
         };
 
         let cleaner = TempFileCleaner::new(region_id, store.clone());

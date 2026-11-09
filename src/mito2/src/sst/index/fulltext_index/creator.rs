@@ -71,6 +71,7 @@ pub struct FulltextIndexer {
 
 impl FulltextIndexer {
     /// Creates a new `FulltextIndexer`.
+    #[cfg(test)]
     pub async fn new(
         region_id: &RegionId,
         sst_file_id: &FileId,
