@@ -615,15 +615,17 @@ impl DfLogicalPlanner {
                 };
                 let stmt = QueryLanguageParser::parse_promql(&prom_query, &query_ctx)?;
                 // A hybrid CTE registers this plan as a table the outer SQL query reads, so the
-                // `FusedSeries` node would sit under a SQL root. The in-process encodability
-                // exception is scoped to a plan whose root is the node, so here the node would be
-                // cut off and left in the frontend, where the physical planner cannot build it -
-                // a query that used to answer would fail instead. The route is therefore not
-                // offered for an embedded statement.
+                // `FusedSeries` node sits under a SQL alias and projection instead of at the plan
+                // root. Neither decides where a fused subtree runs: placement asks whether the
+                // node's own contract allows a region to run it, and the column requirements a
+                // node above makes are enforced by their lineage rather than by the shape of the
+                // subtree they travel through, so an alias or projection over the CTE does not
+                // block a multi-input fused subtree. The route is therefore offered here like it
+                // is for a top-level statement.
                 let QueryStatement::Promql(eval, _alias) = &stmt else {
                     unreachable!("a TQL eval parses to a PromQL statement");
                 };
-                self.plan_pql(eval, query_ctx, false).await
+                self.plan_pql(eval, query_ctx, true).await
             }
             Tql::Explain(_) => UnimplementedSnafu {
                 operation: "TQL EXPLAIN in CTEs",
