@@ -630,9 +630,10 @@ impl RegionOpener {
             let node_id = self.file_ref_manager.node_id();
             let replay_start = replay_from_entry_id.max(manifest.wal_replay_start(node_id));
             info!(
-                "Start replaying memtable at replay_from_entry_id: {} for region {}, manifest version: {}, flushed entry id: {}, elapsed: {:?}",
+                "Start replaying memtable at replay_start: {} for region {}, replay_from_entry_id: {}, manifest version: {}, flushed entry id: {}, elapsed: {:?}",
                 replay_start,
                 region_id,
+                replay_from_entry_id,
                 manifest.manifest_version,
                 flushed_entry_id,
                 now.elapsed()

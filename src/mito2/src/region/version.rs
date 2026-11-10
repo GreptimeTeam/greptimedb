@@ -405,9 +405,13 @@ pub(crate) struct Version {
 }
 
 impl Version {
+    pub(crate) fn has_pending_tails(&self) -> bool {
+        !self.pending_tails.is_empty()
+    }
+
     pub(crate) fn ensure_no_pending_tails(&self) -> Result<()> {
         ensure!(
-            self.pending_tails.is_empty(),
+            !self.has_pending_tails(),
             RegionPendingTailsSnafu {
                 region_id: self.metadata.region_id,
             }

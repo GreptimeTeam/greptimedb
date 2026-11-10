@@ -121,9 +121,12 @@ Tests live next to the code as `*_test.rs` (e.g. `src/mito2/src/engine/flush_tes
   a flush stay below this node's tails (`cap_wal_release`); truncate, drop, offline
   cleanup and catchup release without that cap. Handoff floors are dropped once the
   flushed entry id reaches them, in `RegionManifestBuilder::try_build`. While a
-  region has pending tails, scans and the operations that call
-  `Version::ensure_no_pending_tails` are rejected, and compaction and
-  full-listing GC skip it. Check before changing any region state.
+  region has pending tails, scans and memtable/SST stats fail with
+  `RegionPendingTails`, and so do truncate, entering staging, a repartition flush,
+  a close with `flush_on_close`, and every ALTER other than adding nullable columns
+  without a default or changing options; compaction pauses. These checks run
+  before any region state changes. Full-listing GC skips a region that has pending
+  tails or whose manifest `has_update()` reports newer, or fails to check.
 - Lock ordering: take the manifest lock before updating `version_control`; the
   reverse deadlocks against concurrent flush/compaction.
 - All region I/O runs on tokio workers; never `block_on` inside a worker.
