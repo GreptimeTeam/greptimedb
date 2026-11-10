@@ -1072,6 +1072,23 @@ impl PromPlanner {
         let Some((mut prepared, logical_ids_differ, statement_kind)) = preparation? else {
             return Ok(None);
         };
+        // `absent_over_time` reads its window through a fold that keeps the metric name, so the
+        // segment that runs it reports names across a boundary. A nameless selector that discovery
+        // expands into more than one metric binds no single name for that boundary, and the fused
+        // node refuses a tree declaring `__name__` without one at physical planning. A fold that
+        // dropped the name would plan, but it would read two metrics sharing their ordinary labels
+        // as one series, so the route declines instead of planning either tree.
+        //
+        // A selector that matched no table at all is not that shape: its typed empty input holds no
+        // series, so a presence read over it answers at every point and needs no name to hand one
+        // over.
+        if reads_presence(prom_expr)
+            && prepared
+                .iter()
+                .any(|(scan, _, metric, ..)| !is_empty_discovered_input(scan) && metric.is_none())
+        {
+            return Ok(None);
+        }
         // Selectors over one table share one region, so the node runs there over every scan. When
         // they read more than one table, each scan answers from its own region and the node runs
         // above them; see `RawSeriesSource`. A metric logical table's id is part of the identity it
@@ -1867,6 +1884,28 @@ pub(crate) fn is_empty_discovered_input(plan: &LogicalPlan) -> bool {
         return false;
     };
     relation.schema.as_arrow() == frame.as_ref()
+}
+
+/// Whether `expr` asks for `absent_over_time`, whose window is read through a fold that keeps the
+/// metric name.
+fn reads_presence(expr: &PromExpr) -> bool {
+    #[derive(Default)]
+    struct Presence(bool);
+
+    impl promql_parser::util::ExprVisitor for Presence {
+        type Error = std::convert::Infallible;
+
+        fn pre_visit(&mut self, expr: &PromExpr) -> std::result::Result<bool, Self::Error> {
+            if matches!(expr, PromExpr::Call(call) if call.func.name == "absent_over_time") {
+                self.0 = true;
+            }
+            Ok(true)
+        }
+    }
+
+    let mut presence = Presence::default();
+    let _ = promql_parser::util::walk_expr(&mut presence, expr);
+    presence.0
 }
 
 /// The subtrees a [`NativeNode`] reads, in the order the node evaluates them.

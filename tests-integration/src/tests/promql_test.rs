@@ -5650,6 +5650,183 @@ async fn native_promql_executes_fused_node_and_matches_legacy() {
     }
 }
 
+/// `promql` over `start..=end` at `step`, through the Prometheus handler.
+///
+/// The handler is the path that authorizes and plans a selector naming no metric: a `TQL EVAL`
+/// statement reaches the planner through the statement executor instead, and that path prepares no
+/// discovery scope, so it keeps declining such a selector. Its times are Prometheus timestamps, so
+/// a bare number is a count of seconds.
+async fn promql_output(
+    instance: &Arc<Instance>,
+    promql: &str,
+    start: &str,
+    end: &str,
+    step: &str,
+) -> Output {
+    let query = PromQuery {
+        query: promql.to_string(),
+        start: start.to_string(),
+        end: end.to_string(),
+        step: step.to_string(),
+        ..PromQuery::default()
+    };
+    servers::prometheus_handler::PrometheusHandler::do_query(
+        instance.as_ref(),
+        &query,
+        native_query_context(true, 4),
+    )
+    .await
+    .unwrap_or_else(|error| panic!("{promql} over {start}..={end} at {step}: {error}"))
+}
+
+/// The Prometheus v0.315 answers `absent_over_time` gives, and that the native route reports.
+///
+/// `absent_over_time` answers with the labels its selector's matchers fix at every point no series
+/// of the selector has a sample at, and with nothing at the points one does. Three metric tables
+/// make the shapes reachable: `absent_probe` carries `probe_label`, which no row's value matches, so
+/// a nameless selector narrows to it; `absent_a` and `absent_b` carry the same ordinary labels, so a
+/// nameless selector over them is one discovery expands into several metrics; and no table carries
+/// `no_such_label`, which is the reported query - the one whose selector matches no metric table and
+/// whose labels therefore have to come from the matchers alone.
+///
+/// The existing plan answers the call per series with a UDF, which needs a metric name to read a
+/// table from: such a selector writes none, and the labels still have to reach the answer at every
+/// step.
+///
+/// The statements are evaluated through the Prometheus handler, which is the path that authorizes a
+/// selector naming no metric; a bare timestamp there is a count of seconds, so the samples below sit
+/// at 0s and 60s and the evaluation times are written as the seconds they are.
+#[tokio::test(flavor = "multi_thread")]
+async fn native_promql_absent_over_time_answers_like_prometheus() {
+    common_telemetry::init_default_ut_logging();
+    let (standalone, observer) = native_test_instance(GreptimeDbStandaloneBuilder::new(
+        "native_promql_absent_over_time_e2e",
+    ))
+    .await;
+    let instance = standalone.fe_instance().clone();
+    execute_all(
+        &instance,
+        "CREATE TABLE absent_phy (ts TIMESTAMP TIME INDEX, val DOUBLE) ENGINE=metric WITH ('physical_metric_table'='true')\
+         ; CREATE TABLE absent_a (job STRING, ts TIMESTAMP TIME INDEX, val DOUBLE, PRIMARY KEY(job)) ENGINE=metric WITH ('on_physical_table'='absent_phy')\
+         ; CREATE TABLE absent_b (job STRING, ts TIMESTAMP TIME INDEX, val DOUBLE, PRIMARY KEY(job)) ENGINE=metric WITH ('on_physical_table'='absent_phy')\
+         ; CREATE TABLE absent_probe (job STRING, probe_label STRING, ts TIMESTAMP TIME INDEX, val DOUBLE, PRIMARY KEY(job, probe_label)) ENGINE=metric WITH ('on_physical_table'='absent_phy')\
+         ; INSERT INTO absent_a (job, ts, val) VALUES ('api', 0, 1), ('api', 60000, 2)\
+         ; INSERT INTO absent_b (job, ts, val) VALUES ('api', 0, 3), ('api', 60000, 4)\
+         ; INSERT INTO absent_probe (job, probe_label, ts, val) VALUES ('api', 'y', 0, 5)",
+        QueryContext::arc(),
+    )
+    .await;
+
+    let labels = |pairs: &[(&str, &str)]| {
+        pairs
+            .iter()
+            .map(|(name, value)| ((*name).to_string(), (*value).to_string()))
+            .collect::<std::collections::BTreeMap<_, _>>()
+    };
+    // Every case is the native route's answer: a shape that fell back to the existing plan would
+    // error, because that plan needs a metric name to read a table from.
+    for (promql, start, end, step, expected) in [
+        // Samples inside the window: nothing to report.
+        (
+            "absent_over_time(absent_a[5m])",
+            "120",
+            "120",
+            "1s",
+            Vec::new(),
+        ),
+        // The metric exists and holds no sample in the window: one series, and no `__name__`.
+        (
+            "absent_over_time(absent_a[5m])",
+            "400",
+            "400",
+            "1s",
+            vec![(400000, labels(&[]), 1.0)],
+        ),
+        // A named metric's other equality matcher is a label of the answer.
+        (
+            r#"absent_over_time(absent_a{job="api"}[5m])"#,
+            "400",
+            "400",
+            "1s",
+            vec![(400000, labels(&[("job", "api")]), 1.0)],
+        ),
+        // The reported query: no metric table carries `no_such_label`, so the selector matches
+        // none, and both equality matchers are the answer's labels.
+        (
+            r#"absent_over_time({no_such_label="x", job="api"}[5m])"#,
+            "120",
+            "120",
+            "1s",
+            vec![(
+                120000,
+                labels(&[("job", "api"), ("no_such_label", "x")]),
+                1.0,
+            )],
+        ),
+        // The same answer at every step of a range.
+        (
+            r#"absent_over_time({no_such_label="x", job="api"}[5m])"#,
+            "120",
+            "400",
+            "70s",
+            [120000i64, 190000, 260000, 330000, 400000]
+                .into_iter()
+                .map(|time| (time, labels(&[("job", "api"), ("no_such_label", "x")]), 1.0))
+                .collect::<Vec<_>>(),
+        ),
+        // One metric table carries `probe_label`, and no row's value matches, so the discovery
+        // narrows to that table and the presence read still finds nothing.
+        (
+            r#"absent_over_time({probe_label="x", job="api"}[5m])"#,
+            "120",
+            "120",
+            "1s",
+            vec![(120000, labels(&[("job", "api"), ("probe_label", "x")]), 1.0)],
+        ),
+    ] {
+        observer.clear();
+        let (columns, native) =
+            native_labelled_rows(promql_output(&instance, promql, start, end, step).await).await;
+        assert!(
+            observer.fused().is_some(),
+            "{promql} did not run on the native route: {columns:?} {native:?}"
+        );
+        assert_eq!(
+            native, expected,
+            "{promql} over {start}..={end} at {step}: {columns:?}"
+        );
+    }
+
+    // A nameless selector that discovery expands into more than one metric declines. The presence
+    // read keeps the metric name, and no single name is bound for the segment that hands it over; a
+    // fold that dropped the name would plan, and would read two metrics sharing their ordinary
+    // labels as one series. Neither tree is planned, so the query keeps the existing plan's answer
+    // for a selector that names no metric - an error - rather than answering wrongly.
+    observer.clear();
+    let declined = servers::prometheus_handler::PrometheusHandler::do_query(
+        instance.as_ref(),
+        &PromQuery {
+            query: r#"absent_over_time({job="api"}[5m])"#.to_string(),
+            start: "120".to_string(),
+            end: "120".to_string(),
+            step: "1s".to_string(),
+            ..PromQuery::default()
+        },
+        native_query_context(true, 4),
+    )
+    .await;
+    assert!(
+        declined.is_err(),
+        "a nameless selector over several metrics must not be answered natively yet"
+    );
+    assert!(
+        !observed_physical_nodes(&observer)
+            .iter()
+            .any(|node| node.name() == "FusedSeriesExec"),
+        "the declining shape must not run a fused node"
+    );
+}
+
 /// Compare value and response ordering for native routes added for common PromQL shapes.
 #[tokio::test(flavor = "multi_thread")]
 async fn native_promql_sort_absent_and_histogram_quantile_match_legacy() {
