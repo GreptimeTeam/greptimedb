@@ -35,6 +35,17 @@ use crate::storage::RegionId;
 pub trait LogStore: Send + Sync + 'static + std::fmt::Debug {
     type Error: ErrorExt + Send + Sync + 'static;
 
+    /// Returns regions whose retained WAL is under storage pressure and may be
+    /// released by flushing. This is an advisory snapshot, not permission to
+    /// flush or delete entries. The caller checks the current region state and
+    /// uses [`Self::obsolete`] only after persisting its data.
+    ///
+    /// Implementations inspect local metadata without I/O. Backends without
+    /// pressure-driven flushing return no candidates.
+    fn flush_candidates(&self) -> Vec<RegionId> {
+        Vec::new()
+    }
+
     /// Stops components of the logstore.
     async fn stop(&self) -> Result<(), Self::Error>;
 

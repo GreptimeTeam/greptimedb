@@ -14,7 +14,7 @@
 
 //! In-memory index over the footers of the objects of one WAL prefix.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ops::Bound::{Excluded, Included, Unbounded};
 
 use snafu::{OptionExt, ensure};
@@ -294,6 +294,24 @@ impl ObjectCatalog {
         Ok(next_object_seq)
     }
 
+    /// Returns live regions blocking reclamation of objects older than the
+    /// newest `limit` objects. Already reclaimable objects awaiting deletion
+    /// do not cause more flushes. Sequence gaps do not count as objects.
+    /// Regions are deduplicated in order of the oldest object they pin.
+    pub(crate) fn flush_candidates(&self, limit: usize) -> Vec<RegionId> {
+        let Some((&last, _)) = self.objects.iter().rev().nth(limit) else {
+            return Vec::new();
+        };
+        let mut seen = HashSet::new();
+        self.live_segments
+            .range(..=last)
+            .flat_map(|(seq, _)| self.objects[seq].iter())
+            .filter(|entry| self.is_live(entry))
+            .map(|entry| entry.region_id)
+            .filter(|region_id| seen.insert(*region_id))
+            .collect()
+    }
+
     /// Iterates over the indexed objects ordered by object sequence.
     pub(crate) fn objects_in_order(&self) -> impl Iterator<Item = (u64, &[FooterEntry])> + '_ {
         self.objects
@@ -323,6 +341,69 @@ mod tests {
     use super::*;
     use crate::error::Error;
     use crate::object_store_wal::batch::entry_id;
+
+    #[test]
+    fn test_flush_candidates_follow_retention_not_sequence_or_delete_backlog() {
+        let a = RegionId::new(1, 1);
+        let b = RegionId::new(1, 2);
+        let mut catalog = ObjectCatalog::default();
+        assert!(catalog.flush_candidates(2).is_empty());
+        catalog
+            .insert_object(100, vec![footer_entry(a, 1, 2), footer_entry(b, 1, 1)])
+            .unwrap();
+        catalog
+            .insert_object(1_000, vec![footer_entry(b, 3, 3)])
+            .unwrap();
+        // Sequence gaps are not objects, and equality does not trigger flush.
+        assert!(catalog.flush_candidates(2).is_empty());
+        catalog
+            .insert_object(10_000, vec![footer_entry(b, 4, 4)])
+            .unwrap();
+        assert_eq!(vec![a, b], catalog.flush_candidates(2));
+        catalog.obsolete(b, 1);
+        assert_eq!(vec![a], catalog.flush_candidates(2));
+        // A partially obsolete segment still pins the oldest object.
+        catalog.obsolete(a, 1);
+        assert_eq!(vec![a], catalog.flush_candidates(2));
+        catalog.obsolete(a, 2);
+        // Three physical objects remain, but only two need retention.
+        assert!(catalog.flush_candidates(2).is_empty());
+        catalog.obsolete(b, 4);
+        assert!(catalog.flush_candidates(0).is_empty());
+        catalog
+            .insert_object(20_000, vec![footer_entry(RELEASE_REGION_ID, 5, 5)])
+            .unwrap();
+        assert!(catalog.flush_candidates(0).is_empty());
+    }
+
+    #[test]
+    fn test_flush_candidates_include_all_blockers_before_retention_target() {
+        // Region IDs run opposite to the oldest objects they pin.
+        let a = RegionId::new(1, 3);
+        let b = RegionId::new(1, 2);
+        let c = RegionId::new(1, 1);
+        let mut catalog = ObjectCatalog::default();
+        for (seq, region, id) in [(10, a, 1), (20, b, 1), (30, a, 2), (40, c, 1), (50, c, 2)] {
+            catalog
+                .insert_object(seq, vec![footer_entry(region, id, id)])
+                .unwrap();
+        }
+        // Only the newest two objects may remain. A and B pin different old
+        // objects, while A appears twice and C only pins the retained suffix.
+        assert_eq!(vec![a, b], catalog.flush_candidates(2));
+        assert_eq!(vec![a, b, c], catalog.flush_candidates(0));
+        // Once A releases its oldest segment, B must precede A.
+        catalog.obsolete(a, 1);
+        assert_eq!(vec![b, a], catalog.flush_candidates(2));
+        assert_eq!(vec![b, a, c], catalog.flush_candidates(0));
+        catalog.obsolete(a, 2);
+        assert_eq!(vec![b], catalog.flush_candidates(2));
+        catalog.obsolete(b, 1);
+        // The old objects still exist until deletion completes.
+        assert!(catalog.flush_candidates(2).is_empty());
+        assert_eq!(vec![c], catalog.flush_candidates(1));
+        assert!(catalog.flush_candidates(usize::MAX).is_empty());
+    }
 
     #[test]
     fn test_catalog_indexes_objects_and_queries_ranges() {
