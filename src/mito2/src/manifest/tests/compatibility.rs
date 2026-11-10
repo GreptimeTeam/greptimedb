@@ -64,7 +64,7 @@ fn test_file_only_manifest_compatibility() {
         let mut file = serde_json::to_value(&edit.files_to_add[0]).unwrap();
         file["level"] = level.into();
         assert_eq!(
-            level < 2 || (cfg!(feature = "enterprise") && level == 2),
+            crate::sst::file::is_supported_level(level),
             serde_json::from_value::<FileMeta>(file).is_ok(),
             "level {level}"
         );

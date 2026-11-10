@@ -707,7 +707,7 @@ fn prepare_region_edit(region: &MitoRegionRef, edit: &mut RegionEdit) -> Result<
     let region_id = region.region_id;
     edit.validate_shared_reclassification(region_id)?;
     let current = region.version_control.current();
-    let shared = &current.version.ssts.levels()[file::LEVEL_SHARED as usize].files;
+    let shared = &current.version.ssts.levels()[file::SHARED_LEVEL_SLOT].files;
     snafu::ensure!(
         edit.files_to_remove
             .iter()
@@ -885,7 +885,7 @@ mod tests {
     use store_api::storage::FileId;
 
     use super::*;
-    use crate::sst::file::{FileMeta, LEVEL_SHARED, MAX_LEVEL};
+    use crate::sst::file::{FileMeta, LEVEL_SHARED};
     use crate::test_util::{CreateRequestBuilder, TestEnv};
 
     #[rstest::rstest]
@@ -909,7 +909,8 @@ mod tests {
             region_id,
             file_id: FileId::random(),
             level: if unsupported_level {
-                MAX_LEVEL
+                // An ordinary-looking but unallocated level; rejected in every build.
+                2
             } else {
                 LEVEL_SHARED
             },

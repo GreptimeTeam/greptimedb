@@ -493,7 +493,9 @@ mod tests {
                 crate::test_util::memtable_util::metadata_for_test(),
             );
             version.add_files(file_purger, [meta].into_iter());
-            let reader = version.levels()[level as usize].files[&sst_file_id.file_id()].clone();
+            let reader = version.levels()[crate::sst::file::level_slot(level).unwrap()].files
+                [&sst_file_id.file_id()]
+                .clone();
             if update_index {
                 for index_version in 1..=2 {
                     let mut meta = reader.meta_ref().clone();

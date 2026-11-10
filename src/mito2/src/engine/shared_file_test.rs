@@ -18,7 +18,7 @@ use store_api::storage::{FileId, RegionId};
 
 use crate::config::MitoConfig;
 use crate::manifest::action::{RegionEdit, RegionMetaAction, RegionMetaActionList};
-use crate::sst::file::{FileMeta, LEVEL_SHARED};
+use crate::sst::file::{FileMeta, LEVEL_SHARED, SHARED_LEVEL_SLOT};
 use crate::test_util::{CreateRequestBuilder, TestEnv};
 
 #[tokio::test]
@@ -53,14 +53,14 @@ async fn test_shared_import_preserves_visible_sequence_and_rejects_overwrite() {
     if !cfg!(feature = "enterprise") {
         assert!(first.is_err());
         assert!(
-            region.version().ssts.levels()[LEVEL_SHARED as usize]
+            region.version().ssts.levels()[SHARED_LEVEL_SLOT]
                 .files
                 .is_empty()
         );
         return;
     }
     first.unwrap();
-    let admitted = region.version().ssts.levels()[LEVEL_SHARED as usize].files[&source.file_id]
+    let admitted = region.version().ssts.levels()[SHARED_LEVEL_SLOT].files[&source.file_id]
         .meta_ref()
         .clone();
     assert_eq!(source.file_id(), admitted.file_id());
@@ -69,7 +69,7 @@ async fn test_shared_import_preserves_visible_sequence_and_rejects_overwrite() {
     assert_eq!(1, region.version_control.current().last_sequence);
     assert_eq!(
         &admitted,
-        region.version().ssts.levels()[LEVEL_SHARED as usize].files[&source.file_id].meta_ref()
+        region.version().ssts.levels()[SHARED_LEVEL_SLOT].files[&source.file_id].meta_ref()
     );
 
     let manifest_version = region.manifest_ctx.manifest_version().await;
@@ -231,7 +231,7 @@ async fn test_shared_reclassification_requires_add_only() {
     assert!(region.version().ssts.levels()[0].files.is_empty());
     assert_eq!(
         &installed.files[&source.file_id],
-        region.version().ssts.levels()[LEVEL_SHARED as usize].files[&source.file_id].meta_ref()
+        region.version().ssts.levels()[SHARED_LEVEL_SLOT].files[&source.file_id].meta_ref()
     );
     reopen_region(
         &engine,
@@ -249,7 +249,7 @@ async fn test_shared_reclassification_requires_add_only() {
     assert!(reopened.version().ssts.levels()[0].files.is_empty());
     assert_eq!(
         &installed.files[&source.file_id],
-        reopened.version().ssts.levels()[LEVEL_SHARED as usize].files[&source.file_id].meta_ref()
+        reopened.version().ssts.levels()[SHARED_LEVEL_SLOT].files[&source.file_id].meta_ref()
     );
     assert_eq!(expected_rows, scan().await);
 }
@@ -345,7 +345,7 @@ async fn test_truncate_shared_references_preserves_other_readers(#[case] truncat
         .await
         .unwrap();
     assert_eq!(expected, target.manifest_ctx.manifest().await.files);
-    let visible = target.version().ssts.levels()[LEVEL_SHARED as usize]
+    let visible = target.version().ssts.levels()[SHARED_LEVEL_SLOT]
         .files()
         .map(|file| (file.file_id().file_id(), file.meta_ref().clone()))
         .collect::<std::collections::HashMap<_, _>>();

@@ -15,7 +15,8 @@ cargo nextest run -p mito2 --features enterprise -E 'test(manifest::tests::compa
 
 The tests exercise legacy delta/checkpoint reads and verify that serialization
 still contains no task-state fields. Optional future core fields remain readable.
-Unknown SST levels are rejected; shared level 2 requires Enterprise capability.
+Unknown SST levels are rejected; the shared sentinel level (the u8 maximum)
+requires Enterprise capability.
 This does not establish downgrade safety after shared files are introduced.
 
 The earlier, unpublished prototype persisted `table_compaction` / `extensions`
