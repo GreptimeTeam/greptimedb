@@ -48,6 +48,58 @@ use crate::test_util::sst_util::{new_sparse_primary_key, sst_region_metadata_wit
 use crate::test_util::{CreateRequestBuilder, TestEnv, flush_region, rows_schema};
 use crate::time_provider::StdTimeProvider;
 
+/// Builds the sparse-metric rows of one write request against `metadata`.
+fn sparse_put_rows(metadata: &store_api::metadata::RegionMetadataRef, ts: i64) -> Rows {
+    let mut request = CreateRequestBuilder::new().build();
+    request.column_metadatas = metadata.column_metadatas.clone();
+    request.primary_key = metadata.primary_key.clone();
+    let full_schema = rows_schema(&request);
+    let mut pk_column = full_schema[0].clone();
+    pk_column.column_name = PRIMARY_KEY_COLUMN_NAME.to_string();
+    pk_column.datatype = ColumnDataType::Binary.into();
+    pk_column.semantic_type = SemanticType::Tag.into();
+    let schema = vec![pk_column, full_schema[5].clone(), full_schema[4].clone()];
+    Rows {
+        schema,
+        rows: vec![row(vec![
+            ValueData::BinaryValue(new_sparse_primary_key(&["a", "x"], metadata, 10, 0)),
+            ValueData::TimestampMillisecondValue(ts),
+            if metadata
+                .field_columns()
+                .next()
+                .unwrap()
+                .column_schema
+                .data_type
+                == datatypes::prelude::ConcreteDataType::float64_datatype()
+            {
+                ValueData::F64Value(1.0)
+            } else {
+                ValueData::U64Value(1)
+            },
+        ])],
+    }
+}
+
+/// Writes one sparse row without flushing, so the region keeps a mutable memtable.
+async fn put_sparse_row(engine: &MitoEngine, region: &MitoRegionRef, ts: i64) {
+    let metadata = region.version().metadata.clone();
+    let result = engine
+        .handle_request(
+            region.region_id,
+            RegionRequest::Put(RegionPutRequest {
+                skip_wal: false,
+                rows: sparse_put_rows(&metadata, ts),
+                hint: Some(WriteHint {
+                    primary_key_encoding: api::v1::PrimaryKeyEncoding::Sparse.into(),
+                }),
+                partition_expr_version: None,
+            }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(1, result.affected_rows);
+}
+
 /// Builds real sparse SSTs; background maintenance is disabled so tests control publication.
 pub(super) async fn prepare_region(env: &mut TestEnv) -> (MitoEngine, MitoRegionRef) {
     prepare_region_with_timestamps(env, &[1000, 2000, 3000, 4000]).await
@@ -128,12 +180,6 @@ pub(crate) async fn prepare_region_with_metadata_and_flush(
             "100".to_string(),
         );
     }
-    let full_schema = rows_schema(&request);
-    let mut pk_column = full_schema[0].clone();
-    pk_column.column_name = PRIMARY_KEY_COLUMN_NAME.to_string();
-    pk_column.datatype = ColumnDataType::Binary.into();
-    pk_column.semantic_type = SemanticType::Tag.into();
-    let schema = vec![pk_column, full_schema[5].clone(), full_schema[4].clone()];
     engine
         .handle_request(region_id, RegionRequest::Create(request))
         .await
@@ -143,43 +189,7 @@ pub(crate) async fn prepare_region_with_metadata_and_flush(
     let region = engine.get_region(region_id).unwrap();
     region.update_schedule_compaction_millis();
     for &ts in timestamps {
-        engine
-            .handle_request(
-                region_id,
-                RegionRequest::Put(RegionPutRequest {
-                    skip_wal: false,
-                    rows: Rows {
-                        schema: schema.clone(),
-                        rows: vec![row(vec![
-                            ValueData::BinaryValue(new_sparse_primary_key(
-                                &["a", "x"],
-                                &metadata,
-                                10,
-                                0,
-                            )),
-                            ValueData::TimestampMillisecondValue(ts),
-                            if metadata
-                                .field_columns()
-                                .next()
-                                .unwrap()
-                                .column_schema
-                                .data_type
-                                == datatypes::prelude::ConcreteDataType::float64_datatype()
-                            {
-                                ValueData::F64Value(1.0)
-                            } else {
-                                ValueData::U64Value(1)
-                            },
-                        ])],
-                    },
-                    hint: Some(WriteHint {
-                        primary_key_encoding: api::v1::PrimaryKeyEncoding::Sparse.into(),
-                    }),
-                    partition_expr_version: None,
-                }),
-            )
-            .await
-            .unwrap();
+        put_sparse_row(&engine, &region, ts).await;
         if flush_each {
             flush_region(&engine, region_id, None).await;
         }
@@ -674,6 +684,162 @@ async fn test_reconcile_publishes_after_region_version_changes() {
     }
 }
 
+/// Parks the first artifact write of a build so a test can observe it while in flight.
+///
+/// Only the object-store mock layer is involved: production code has no pause hook, so a
+/// build can only be observed at a real artifact write, which always happens after the build
+/// captured its inputs. The pause therefore cannot hide a retained region version.
+#[derive(Default)]
+struct BuildPause {
+    paused: std::sync::atomic::AtomicBool,
+    started: tokio::sync::Notify,
+    resume: tokio::sync::Notify,
+}
+
+impl BuildPause {
+    /// Blocks the caller once, until the test releases the build.
+    async fn pause_once(&self) {
+        if self.paused.swap(true, std::sync::atomic::Ordering::AcqRel) {
+            return;
+        }
+        self.started.notify_one();
+        self.resume.notified().await;
+    }
+}
+
+/// Forwards to the inner writer after parking the first artifact write.
+struct PausingWriter {
+    inner: oio::Writer,
+    pause: Arc<BuildPause>,
+}
+
+impl mock::Write for PausingWriter {
+    async fn write(&mut self, buffer: mock::Buffer) -> mock::Result<()> {
+        self.pause.pause_once().await;
+        self.inner.write(buffer).await
+    }
+
+    async fn close(&mut self) -> mock::Result<mock::Metadata> {
+        self.pause.pause_once().await;
+        self.inner.close().await
+    }
+
+    async fn abort(&mut self) -> mock::Result<()> {
+        self.inner.abort().await
+    }
+}
+
+/// Asserts every observed memtable is freed, retrying so async drops can settle.
+async fn assert_memtables_released(memtables: &[std::sync::Weak<dyn crate::memtable::Memtable>]) {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while memtables
+            .iter()
+            .any(|memtable| memtable.upgrade().is_some())
+        {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the in-flight build still retains a flushed memtable");
+}
+
+#[tokio::test]
+async fn test_build_snapshot_releases_flushed_memtable() {
+    use std::collections::HashSet;
+
+    let mut env = TestEnv::with_prefix("series-snapshot-inputs").await;
+    let (engine, region) = prepare_region(&mut env).await;
+    let (test, _receiver) = IndexTest::new(region.clone());
+    let source_files = region
+        .version()
+        .ssts
+        .levels()
+        .iter()
+        .flat_map(|level| level.files())
+        .map(|file| file.file_id().file_id())
+        .collect::<HashSet<_>>();
+    assert_eq!(4, source_files.len());
+
+    // An unflushed row keeps write-buffer memory alive in the version a build captures.
+    put_sparse_row(&engine, &region, 5000).await;
+    let memtables = region
+        .version()
+        .memtables
+        .list_memtables()
+        .iter()
+        .map(Arc::downgrade)
+        .collect::<Vec<_>>();
+    assert!(!memtables.is_empty());
+
+    let pause = Arc::new(BuildPause::default());
+    let layer = MockLayerBuilder::default()
+        .writer_factory(Arc::new({
+            let pause = pause.clone();
+            move |_, _, inner| {
+                Box::new(PausingWriter {
+                    inner,
+                    pause: pause.clone(),
+                })
+            }
+        }))
+        .build()
+        .unwrap();
+    let build = test.reconcile(test.store.clone().layer(layer));
+    let observe = async {
+        // The build is parked at its first artifact write, after capturing its inputs.
+        pause.started.notified().await;
+        // Freezing and flushing must release the write buffer while the build still runs.
+        flush_region(&engine, region.region_id, None).await;
+        assert_memtables_released(&memtables).await;
+        pause.resume.notify_one();
+    };
+    let (stats, ()) = tokio::join!(build, observe);
+    let stats = stats.unwrap();
+    assert_eq!((4, 1), (stats.built_range, stats.built_series));
+
+    // The flush added a newer SST that the captured inputs must not include.
+    let live_files = region
+        .version()
+        .ssts
+        .levels()
+        .iter()
+        .flat_map(|level| level.files())
+        .map(|file| file.file_id().file_id())
+        .collect::<HashSet<_>>();
+    assert_eq!(5, live_files.len());
+    let published = region.series_index_version();
+    assert_eq!(4, published.range_indexes.len());
+    let handle = published.series_indexes.values().next().unwrap();
+    assert_eq!(
+        source_files,
+        handle
+            .entry()
+            .source_file_ids
+            .iter()
+            .copied()
+            .collect::<HashSet<_>>()
+    );
+
+    // A later pass converts the SST that arrived during the paused build.
+    let stats = test.reconcile(test.store.clone()).await.unwrap();
+    assert_eq!(1, stats.built_series);
+    let published = region.series_index_version();
+    assert_eq!(
+        live_files,
+        published
+            .series_indexes
+            .values()
+            .next()
+            .unwrap()
+            .entry()
+            .source_file_ids
+            .iter()
+            .copied()
+            .collect::<HashSet<_>>()
+    );
+    engine.stop().await.unwrap();
+}
+
 #[tokio::test]
 async fn test_reconcile_cleans_up_after_region_drop() {
     let mut env = TestEnv::with_prefix("series-reconcile-drop").await;
@@ -765,15 +931,30 @@ async fn test_failed_reconcile_retires_only_unpublished_series() {
         let (bucket, entry) = &plan.builds[0];
         let mut ranges = HashMap::new();
         for file in &bucket.files {
-            let entry = build_range_index(store, &region, &version, file.clone())
-                .await
-                .unwrap()
-                .unwrap();
+            let entry = build_range_index(
+                store,
+                &region.access_layer,
+                region.region_id,
+                &version.metadata,
+                file.clone(),
+            )
+            .await
+            .unwrap()
+            .unwrap();
             ranges.insert(entry.file_id, entry);
         }
-        let handle = build_series_index(store, &region, &version, bucket, entry, None, purger)
-            .await
-            .unwrap();
+        let handle = build_series_index(
+            store,
+            &region.access_layer,
+            region.region_id,
+            &version.metadata,
+            bucket,
+            entry,
+            None,
+            purger,
+        )
+        .await
+        .unwrap();
         let reused_path = series_index_path(region.region_id, entry.index_uuid);
         region
             .series_index_version_control
