@@ -424,11 +424,7 @@ impl NestedBroadcastJoinRewriter<'_> {
         )
         .ok()?;
         let restored_plan = restore_join_schema(swapped_join, join.schema.clone())?;
-        let mut merge_scan = MergeScanLogicalPlan::new(
-            restored_plan,
-            false,
-            large_merge_scan.partition_cols().clone(),
-        );
+        let mut merge_scan = MergeScanLogicalPlan::new(restored_plan, false);
         // The outer boundary keeps the large boundary's remote dynamic filter identity
         // when it has one. A missing id only disables remote dynamic filter pushdown for
         // that boundary (`MergeScanExec` fails open), and serialization drops the ids of
@@ -872,7 +868,7 @@ mod tests {
             null_equality: NullEquality::NullEqualsNull,
             ..original_join.clone()
         });
-        let large_scan = merge_scans(&plan).first().cloned().unwrap();
+        let _large_scan = merge_scans(&plan).first().cloned().unwrap();
 
         let result = rewrite(plan.clone());
 
@@ -905,15 +901,12 @@ mod tests {
             join.right
         );
 
-        // The outer scan must be routed by the large table's regions and keep the
-        // large boundary's partition columns.
+        // The outer scan must be routed by the large table's regions.
         assert_eq!(
             "t1",
             table_name_of(&join.right).unwrap().table_name,
             "the large local probe input controls outer region routing"
         );
-        let outer_scan = merge_scans(&result).first().cloned().unwrap();
-        assert_eq!(large_scan.partition_cols(), outer_scan.partition_cols());
         assert_eq!(plan.schema(), result.schema());
     }
 
@@ -981,12 +974,10 @@ mod tests {
         let LogicalPlan::Join(join) = &plan else {
             panic!("expected a join on top, got: {plan}");
         };
-        let (probe_plan, probe_scan) = strip_merge_scan(&join.left).unwrap();
-        let (build_plan, build_scan) = strip_merge_scan(&join.right).unwrap();
-        let probe =
-            MergeScanLogicalPlan::new(probe_plan, false, probe_scan.partition_cols().clone());
-        let build =
-            MergeScanLogicalPlan::new(build_plan, false, build_scan.partition_cols().clone());
+        let (probe_plan, _probe_scan) = strip_merge_scan(&join.left).unwrap();
+        let (build_plan, _build_scan) = strip_merge_scan(&join.right).unwrap();
+        let probe = MergeScanLogicalPlan::new(probe_plan, false);
+        let build = MergeScanLogicalPlan::new(build_plan, false);
 
         inner_join(
             probe.into_logical_plan(),
@@ -1229,12 +1220,12 @@ mod tests {
         let (probe_plan, probe_scan) = strip_merge_scan(&join.left).unwrap();
         let (build_plan, build_scan) = strip_merge_scan(&join.right).unwrap();
         let plan = inner_join(
-            MergeScanLogicalPlan::new(probe_plan, false, probe_scan.partition_cols().clone())
+            MergeScanLogicalPlan::new(probe_plan, false)
                 .with_remote_dyn_filter_producer_id(
                     probe_scan.remote_dyn_filter_producer_id().unwrap(),
                 )
                 .into_logical_plan(),
-            MergeScanLogicalPlan::new(build_plan, false, build_scan.partition_cols().clone())
+            MergeScanLogicalPlan::new(build_plan, false)
                 .with_output_schema(json2_boundary_schema())
                 .with_remote_dyn_filter_producer_id(
                     build_scan.remote_dyn_filter_producer_id().unwrap(),
@@ -1270,6 +1261,7 @@ mod tests {
                 file_removed_cnt: 0,
             },
             written_bytes: 0,
+            ingested_parquet_bytes: 0,
             query_cpu_time: 0,
             query_scanned_bytes: 0,
             data_topic_latest_entry_id: 0,
