@@ -653,6 +653,8 @@ impl CompactionScheduler {
             return false;
         };
         if status.has_pending_tails() {
+            status.pending_task_state = None;
+            status.publish_state();
             pending_request.waiter.send(Ok(0));
             return false;
         }

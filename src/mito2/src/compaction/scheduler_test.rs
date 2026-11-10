@@ -3690,6 +3690,9 @@ async fn test_finishing_compaction_with_pending_tails_starts_nothing() {
         time_range: None,
     });
     scheduler.region_status.insert(region_id, status);
+    let pending_id = scheduler.inspect_tasks(&MetadataFilter::default(), None)[0]
+        .task_id
+        .clone();
     version_control.apply_edit(
         Some(pending_tails_edit(vec![tail(1, 0, 1)])),
         &[],
@@ -3702,6 +3705,15 @@ async fn test_finishing_compaction_with_pending_tails_starts_nothing() {
 
     assert_eq!(0, waiter_rx.try_recv().unwrap().unwrap());
     assert!(!scheduler.is_compacting(region_id));
+    assert!(
+        scheduler
+            .inspect_tasks(&MetadataFilter::default(), None)
+            .is_empty()
+    );
+    assert_eq!(
+        scheduler.cancel_task(region_id, &pending_id),
+        CancelCompactionResult::NotFound
+    );
 }
 
 #[tokio::test]
@@ -3729,6 +3741,9 @@ async fn test_cancelled_compaction_with_pending_tails_starts_nothing() {
             None,
         )
         .unwrap();
+    let pending_id = scheduler.inspect_tasks(&MetadataFilter::default(), None)[1]
+        .task_id
+        .clone();
     assert_eq!(
         scheduler.cancel_task(region_id, &active_id),
         CancelCompactionResult::CancelIssued
@@ -3745,6 +3760,15 @@ async fn test_cancelled_compaction_with_pending_tails_starts_nothing() {
 
     assert_eq!(0, receiver.try_recv().unwrap().unwrap());
     assert!(!scheduler.is_compacting(region_id));
+    assert!(
+        scheduler
+            .inspect_tasks(&MetadataFilter::default(), None)
+            .is_empty()
+    );
+    assert_eq!(
+        scheduler.cancel_task(region_id, &pending_id),
+        CancelCompactionResult::NotFound
+    );
 }
 
 /// Pending task identity survives promotion, but replacement invalidates the old identity.
