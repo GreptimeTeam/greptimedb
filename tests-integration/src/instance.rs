@@ -692,7 +692,7 @@ mod tests {
                 table: TableReference<'_>,
                 ctx: QueryContextRef,
             ) -> servers::error::Result<()> {
-                assert_eq!(query.bounds, (0, 1_000_000_000));
+                assert_eq!(query.bounds, (0, 1_000_999_999));
                 assert!(query.expression.starts_with("metric"));
                 assert_eq!(table.catalog, ctx.current_catalog());
                 assert_eq!(table.schema, ctx.current_schema());

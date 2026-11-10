@@ -6,6 +6,12 @@ append mode and sparse primary keys. Inherited series labels become nullable
 string tag columns; exemplar-owned labels are stored in `exemplar_labels`
 as JSON2.
 
+Each exemplar keeps its own observation timestamp. Remote Write v1/v2 supply
+milliseconds, which are converted to nanoseconds; OTLP supplies nanoseconds
+directly. These timestamps are independent of the associated metric sample's
+timestamp. The query API exposes millisecond precision while SQL exposes the
+stored precision.
+
 Each row also stores `__table_id` (`UINT32 NOT NULL`) and `__tsid`
 (`UINT64 NOT NULL`) as the first two primary-key columns. They identify the
 source logical metric table and its series. Their column IDs use the metric
@@ -40,22 +46,33 @@ Unicode characters for all three protocols. OTLP's dedicated `trace_id` and
 `span_id` contribute 63 characters when both are present, leaving 65 for
 other labels. Source-series validation, malformed request encoding, invalid
 Remote Write v2 symbol references, permissions, admission, and storage errors
-still fail the request. Remote Write v2 written-count headers report confirmed
-writes and exclude dropped exemplars.
+still fail the request. The Remote Write v2 exemplar written-count header
+reports confirmed writes and excludes dropped exemplars.
 
 `/v1/prometheus/api/v1/query_exemplars` filters by series and time before
-collecting observations. If SQL or another writer stored NULL required values
-or non-string exemplar label values, the endpoint skips those rows and returns
-a `warnings` entry with the skipped count. Valid observations retain their
-timestamps, values, labels, and deduplication behavior. Schema, decoding,
-storage, memory-limit, and cancellation errors still fail the query.
+collecting observations. It extracts selectors from the PromQL expression;
+operators and functions are not evaluated. For example, `rate(requests[5m])`
+selects `requests` exemplars within the explicit `start` and `end` bounds.
 
-Query `start` and `end` accept numeric Unix seconds or RFC3339 timestamps. Both
-are floored to nanoseconds, ignoring finer precision, before validating that
-`start` does not exceed `end`. Bounds are inclusive: values within the same
-nanosecond select that instant, even if their discarded fractions were reversed.
-Negative numeric timestamps also floor toward the past; `-0.0000000001` becomes
-`-0.000000001`.
+If SQL or another writer stored NULL required values or non-string exemplar
+label values, the endpoint skips those rows and returns a `warnings` entry with
+the skipped count. Valid observations retain their values, labels, and
+deduplication behavior. Schema, decoding, storage, memory-limit, and cancellation
+errors still fail the query.
+
+Query `start` and `end` accept numeric Unix seconds or RFC3339 timestamps using
+the existing PromQL timestamp handling. Numeric bounds round to milliseconds;
+RFC3339 bounds floor to milliseconds, including before the Unix epoch. The
+normalized `start` must not exceed `end`, and bounds outside the signed
+nanosecond storage range are rejected. Both bounds are inclusive: `start=end`
+selects the entire named millisecond, including stored OTLP observations within
+that millisecond.
+
+Response timestamps are numeric Unix seconds floored to millisecond precision.
+Storage, ordering, and exact deduplication retain the stored timestamp precision,
+so distinct observations may have the same response timestamp. Use SQL to read
+the stored precision. Automatically created exemplar tables use nanoseconds;
+compatible pre-created tables retain their configured timestamp unit.
 
 Selectors use `__name__` for the metric name and inherited series labels such
 as `job`. Storage columns such as `__table_id`, `__tsid`, `greptime_metric`,

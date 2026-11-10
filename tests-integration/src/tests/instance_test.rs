@@ -5625,14 +5625,30 @@ async fn exemplar_protocol_storage_lifecycle(distributed: bool, batching: bool, 
             3,
             "{phase}: {value}"
         );
-        assert!(
-            String::from_utf8_lossy(&bytes).contains(if precreated {
-                "1720000000.123456"
-            } else {
-                "1720000000.123456789"
-            }),
+        let otlp = value["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|series| series["seriesLabels"]["__name__"] == "otlp_exemplar")
+            .unwrap();
+        assert_eq!(
+            otlp["exemplars"][0]["timestamp"], 1720000000.123,
             "{phase}: {value}"
         );
+        let stored_timestamp = if precreated {
+            1720000000123456i64
+        } else {
+            1720000000123456789i64
+        };
+        let output = execute_sql(
+            &context.frontend(),
+            &format!("SELECT COUNT(*) FROM {METRICS_EXEMPLARS_TABLE} WHERE greptime_metric = 'otlp_exemplar' AND CAST(greptime_timestamp AS BIGINT) = {stored_timestamp}"),
+        ).await;
+        check_output_stream(
+            output.data,
+            "+----------+\n| count(*) |\n+----------+\n| 1        |\n+----------+",
+        )
+        .await;
         assert_eq!(
             value["data"][0]["exemplars"].as_array().unwrap().len(),
             1,
@@ -5734,12 +5750,16 @@ async fn test_exemplar_query_bounds_and_malformed_rows(
         frontend,
         &format!(
             r#"INSERT INTO {METRICS_EXEMPLARS_TABLE} VALUES
-        (42, 7, 1, 'metric', 'api', 1, '{{"trace_id":"good"}}'),
-        (42, 7, 2, 'metric', 'api', 2, '{{"trace_id":42}}'),
-        (42, 7, 3, 'metric', 'api', NULL, '{{}}'),
-        (42, 7, 4, 'metric', 'api', 4, NULL),
-        (42, 7, 5, NULL, 'api', 5, '{{}}'),
-        (42, 7, 6, 'bad_only', 'api', NULL, '{{}}')"#
+        (42, 7, 1000000, 'metric', 'api', 1, '{{"trace_id":"good"}}'),
+        (42, 7, 1000000, 'metric', 'api', 1, '{{"trace_id":"good"}}'),
+        (42, 7, 1999999, 'metric', 'api', 1, '{{"trace_id":"good"}}'),
+        (42, 7, -1000000, 'metric', 'api', 1, '{{"trace_id":"good"}}'),
+        (42, 7, -1, 'metric', 'api', 1, '{{"trace_id":"good"}}'),
+        (42, 7, 2000000, 'metric', 'api', 2, '{{"trace_id":42}}'),
+        (42, 7, 3000000, 'metric', 'api', NULL, '{{}}'),
+        (42, 7, 4000000, 'metric', 'api', 4, NULL),
+        (42, 7, 5000000, NULL, 'api', 5, '{{}}'),
+        (42, 7, 6000000, 'bad_only', 'api', NULL, '{{}}')"#
         ),
     )
     .await;
@@ -5750,13 +5770,16 @@ async fn test_exemplar_query_bounds_and_malformed_rows(
     for (query, start, end, skipped, series) in [
         ("metric", "0", "1", 3, 1),
         ("%7Bjob%3D%22api%22%7D", "0", "1", 5, 1),
-        ("metric", "0", "0.000000001", 0, 1),
-        ("metric", "0.0000000011", "0.0000000012", 0, 1),
-        ("metric", "0.0000000012", "0.0000000011", 0, 1),
+        ("metric", "0", "0.001", 0, 1),
+        ("metric", "0", "0", 0, 0),
+        ("metric", "0.002", "0.002", 1, 0),
+        ("metric", "-0.001", "-0.001", 0, 1),
+        ("metric", "0.0011", "0.0012", 0, 1),
+        ("metric", "0.0012", "0.0011", 0, 1),
         (
             "metric",
-            "1970-01-01T00:00:00.0000000011Z",
-            "1970-01-01T00:00:00.0000000012Z",
+            "1970-01-01T00:00:00.0011Z",
+            "1970-01-01T00:00:00.0012Z",
             0,
             1,
         ),
@@ -5794,8 +5817,13 @@ async fn test_exemplar_query_bounds_and_malformed_rows(
         if series > 0 {
             assert_eq!(
                 response["data"][0]["exemplars"].as_array().unwrap().len(),
-                1
+                2,
+                "deduplicate stored timestamps before rounding: {response}"
             );
+            let timestamp = if start == "-0.001" { -0.001 } else { 0.001 };
+            for exemplar in response["data"][0]["exemplars"].as_array().unwrap() {
+                assert_eq!(exemplar["timestamp"], timestamp, "{response}");
+            }
             assert_eq!(
                 response["data"][0]["exemplars"][0]["labels"]["trace_id"],
                 "good"
@@ -6028,14 +6056,14 @@ async fn test_exemplar_precreated_precision_and_label_defaults(
             );
             let series = frontend
                 .query_exemplars(
-                    Query::parse("metric{site=\"\"}".into(), "-0.000001", "0", "public").unwrap(),
+                    Query::parse("metric{site=\"\"}".into(), "-0.001", "0", "public").unwrap(),
                     QueryContext::arc(),
                 )
                 .await
                 .unwrap();
             assert_eq!(series.len(), 1);
             assert!(!series[0].series_labels.contains_key("site"));
-            assert_eq!(series[0].exemplars[0].timestamp.0, -1000);
+            assert_eq!(series[0].exemplars[0].timestamp, -0.001);
         }
         execute_sql(frontend, &format!("DROP TABLE {METRICS_EXEMPLARS_TABLE}")).await;
     }
@@ -6093,7 +6121,7 @@ async fn test_exemplar_cross_schema_exact_identity() {
             .into_result()
             .unwrap();
     }
-    let query = Query::parse("identity{__schema__=\"public\" or __database__=\"exemplar_other\" or __schema__=\"missing\"}".into(), "-1e-9", "-1e-9", "public").unwrap();
+    let query = Query::parse("identity{__schema__=\"public\" or __database__=\"exemplar_other\" or __schema__=\"missing\"}".into(), "-0.001", "-0.001", "public").unwrap();
     let response = frontend
         .query_exemplars(query, QueryContext::arc())
         .await
@@ -6107,5 +6135,5 @@ async fn test_exemplar_cross_schema_exact_identity() {
             "{encoded}"
         );
     }
-    assert!(encoded.contains("\"timestamp\":-0.000000001"), "{encoded}");
+    assert!(encoded.contains("\"timestamp\":-0.001"), "{encoded}");
 }

@@ -37,7 +37,7 @@ use datatypes::vectors::{Helper, VectorRef};
 use futures::StreamExt;
 use promql_parser::label::{METRIC_NAME, MatchOp, Matcher};
 use servers::error::{self, Result};
-use servers::exemplar::query::{ExactTimestamp, Observation, Query, Selector, Series};
+use servers::exemplar::query::{Observation, Query, Selector, Series};
 use servers::interceptor::{PromQueryInterceptor, PromQueryInterceptorRef};
 use servers::prometheus_handler::PrometheusHandler;
 use session::context::QueryContextRef;
@@ -438,7 +438,7 @@ fn collect(
             Observation {
                 labels,
                 value: format_prometheus_float(value.0),
-                timestamp: ExactTimestamp(timestamp),
+                timestamp: timestamp.div_euclid(1_000_000) as f64 / 1000.0,
             },
         );
     }

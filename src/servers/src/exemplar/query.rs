@@ -12,15 +12,17 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Prometheus exemplar selectors and exact nanosecond timestamps.
+//! Prometheus exemplar selectors and millisecond API timestamps.
 
-use std::cmp::Ordering;
 use std::collections::BTreeMap;
 
 use promql_parser::label::{METRIC_NAME, MatchOp, Matcher};
 use promql_parser::parser::{Expr, VectorSelector};
 use promql_parser::util::{ExprVisitor, walk_expr};
+use query::parser::QueryLanguageParser;
+use query::promql::label_values::signed_millis_since_epoch;
 use serde::{Deserialize, Serialize};
+use snafu::OptionExt;
 
 use crate::error::{InvalidQuerySnafu, Result};
 use crate::prom_store::{FIELD_NAME_LABEL, is_database_selection_label};
@@ -36,14 +38,31 @@ pub struct Selector {
 pub struct Query {
     pub expression: String,
     pub selectors: Vec<Selector>,
-    /// Inclusive bounds, floored to nanoseconds before checking their order.
+    /// Inclusive nanosecond scan bounds covering the requested milliseconds.
     pub bounds: (i64, i64),
 }
 
 impl Query {
     pub fn parse(expression: String, start: &str, end: &str, schema: &str) -> Result<Self> {
-        let start = Decimal::timestamp(start)?.round_ns(false)?;
-        let end = Decimal::timestamp(end)?.round_ns(false)?;
+        let parse = |input| {
+            let time = QueryLanguageParser::parse_promql_timestamp(input).map_err(|error| {
+                InvalidQuerySnafu {
+                    reason: error.to_string(),
+                }
+                .build()
+            })?;
+            let millis = signed_millis_since_epoch(time).map_err(|error| {
+                InvalidQuerySnafu {
+                    reason: error.to_string(),
+                }
+                .build()
+            })?;
+            millis.checked_mul(1_000_000).context(InvalidQuerySnafu {
+                reason: "timestamp exceeds signed nanosecond range",
+            })
+        };
+        let start = parse(start)?;
+        let end = parse(end)?;
         if start > end {
             return invalid("start must not exceed end");
         }
@@ -80,7 +99,8 @@ impl Query {
         Ok(Self {
             expression,
             selectors: collector.selectors,
-            bounds: (start, end),
+            // Include the whole final millisecond without casting the scanned column.
+            bounds: (start, end.saturating_add(999_999)),
         })
     }
 }
@@ -126,213 +146,8 @@ pub struct Series {
 pub struct Observation {
     pub labels: BTreeMap<String, String>,
     pub value: String,
-    pub timestamp: ExactTimestamp,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ExactTimestamp(pub i64);
-
-impl Serialize for ExactTimestamp {
-    fn serialize<S: serde::Serializer>(
-        &self,
-        serializer: S,
-    ) -> std::result::Result<S::Ok, S::Error> {
-        let raw = serde_json::value::RawValue::from_string(format_ns(self.0))
-            .map_err(serde::ser::Error::custom)?;
-        raw.serialize(serializer)
-    }
-}
-
-impl<'de> Deserialize<'de> for ExactTimestamp {
-    fn deserialize<D: serde::Deserializer<'de>>(
-        deserializer: D,
-    ) -> std::result::Result<Self, D::Error> {
-        let raw = Box::<serde_json::value::RawValue>::deserialize(deserializer)?;
-        let value = Decimal::timestamp(raw.get()).map_err(serde::de::Error::custom)?;
-        let low = value.round_ns(true).map_err(serde::de::Error::custom)?;
-        let high = value.round_ns(false).map_err(serde::de::Error::custom)?;
-        if low != high {
-            return Err(serde::de::Error::custom(
-                "timestamp is finer than one nanosecond",
-            ));
-        }
-        Ok(Self(low))
-    }
-}
-
-fn format_ns(value: i64) -> String {
-    let magnitude = value.unsigned_abs();
-    let seconds = magnitude / 1_000_000_000;
-    let fraction = magnitude % 1_000_000_000;
-    let sign = if value < 0 { "-" } else { "" };
-    if fraction == 0 {
-        format!("{sign}{seconds}")
-    } else {
-        format!("{sign}{seconds}.{fraction:09}")
-            .trim_end_matches('0')
-            .to_string()
-    }
-}
-
-/// Normalized decimal seconds. Comparison never rounds or allocates exponent-sized strings.
-struct Decimal {
-    negative: bool,
-    digits: String,
-    exponent: i64,
-}
-
-impl Decimal {
-    fn timestamp(input: &str) -> Result<Self> {
-        if let Ok(time) = chrono::DateTime::parse_from_rfc3339(input) {
-            let nanos = time.timestamp_nanos_opt().ok_or_else(|| {
-                InvalidQuerySnafu {
-                    reason: "timestamp exceeds signed nanosecond range",
-                }
-                .build()
-            })?;
-            return Self::parse(&format_ns(nanos));
-        }
-        let value = Self::parse(input)?;
-        // Flooring can discard a fraction above i64::MAX, matching RFC3339 parsing.
-        if value.cmp(&Self::parse("-9223372036.854775808")?).is_lt()
-            || value.cmp(&Self::parse("9223372036.854775808")?).is_ge()
-        {
-            return invalid("timestamp exceeds signed nanosecond range");
-        }
-        Ok(value)
-    }
-
-    fn parse(input: &str) -> Result<Self> {
-        let (negative, input) = match input.as_bytes().first() {
-            Some(b'-') => (true, &input[1..]),
-            Some(b'+') => (false, &input[1..]),
-            _ => (false, input),
-        };
-        let (mantissa, exponent) = match input.split_once(['e', 'E']) {
-            Some((mantissa, exponent)) => (
-                mantissa,
-                exponent.parse::<i64>().map_err(|_| {
-                    InvalidQuerySnafu {
-                        reason: "invalid timestamp exponent",
-                    }
-                    .build()
-                })?,
-            ),
-            None => (input, 0),
-        };
-        let mut digits = String::new();
-        let mut fraction = None;
-        for character in mantissa.bytes() {
-            match character {
-                b'0'..=b'9' => {
-                    digits.push(character as char);
-                    if let Some(count) = &mut fraction {
-                        *count += 1;
-                    }
-                }
-                b'.' if fraction.is_none() => fraction = Some(0i64),
-                _ => return invalid("invalid numeric timestamp"),
-            }
-        }
-        if digits.is_empty() {
-            return invalid("timestamp is required");
-        }
-        let mut exponent = exponent.checked_sub(fraction.unwrap_or(0)).ok_or_else(|| {
-            InvalidQuerySnafu {
-                reason: "timestamp exponent overflow",
-            }
-            .build()
-        })?;
-        let mut digits = digits.trim_start_matches('0').to_string();
-        if digits.is_empty() {
-            return Ok(Self {
-                negative: false,
-                digits: "0".to_string(),
-                exponent: 0,
-            });
-        }
-        let trailing = digits.len() - digits.trim_end_matches('0').len();
-        exponent = exponent.checked_add(trailing as i64).ok_or_else(|| {
-            InvalidQuerySnafu {
-                reason: "timestamp exponent overflow",
-            }
-            .build()
-        })?;
-        digits.truncate(digits.len() - trailing);
-        Ok(Self {
-            negative,
-            digits,
-            exponent,
-        })
-    }
-
-    fn cmp(&self, other: &Self) -> Ordering {
-        if self.negative != other.negative {
-            return other.negative.cmp(&self.negative);
-        }
-        let order = match (self.digits == "0", other.digits == "0") {
-            (true, true) => Ordering::Equal,
-            (true, false) => Ordering::Less,
-            (false, true) => Ordering::Greater,
-            _ => {
-                let positions = (self.digits.len() as i128 + self.exponent as i128)
-                    .cmp(&(other.digits.len() as i128 + other.exponent as i128));
-                positions.then_with(|| {
-                    self.digits
-                        .bytes()
-                        .chain(std::iter::repeat(b'0'))
-                        .take(self.digits.len().max(other.digits.len()))
-                        .cmp(
-                            other
-                                .digits
-                                .bytes()
-                                .chain(std::iter::repeat(b'0'))
-                                .take(self.digits.len().max(other.digits.len())),
-                        )
-                })
-            }
-        };
-        if self.negative {
-            order.reverse()
-        } else {
-            order
-        }
-    }
-
-    fn round_ns(&self, ceil: bool) -> Result<i64> {
-        if self.digits == "0" {
-            return Ok(0);
-        }
-        let position = self.digits.len() as i128 + self.exponent as i128 + 9;
-        let integer_len = position.max(0).min(self.digits.len() as i128) as usize;
-        let integer = if integer_len == 0 {
-            0
-        } else {
-            self.digits[..integer_len].parse::<i128>().map_err(|_| {
-                InvalidQuerySnafu {
-                    reason: "timestamp overflow",
-                }
-                .build()
-            })?
-        };
-        let zeros = (position - integer_len as i128).max(0);
-        if zeros > 19 {
-            return invalid("timestamp overflow");
-        }
-        let magnitude = integer * 10i128.pow(zeros as u32);
-        let fractional = integer_len < self.digits.len();
-        let value = if self.negative {
-            -magnitude - i128::from(fractional && !ceil)
-        } else {
-            magnitude + i128::from(fractional && ceil)
-        };
-        i64::try_from(value).map_err(|_| {
-            InvalidQuerySnafu {
-                reason: "timestamp overflow",
-            }
-            .build()
-        })
-    }
+    /// Unix seconds at millisecond precision.
+    pub timestamp: f64,
 }
 
 fn invalid<T>(reason: &str) -> Result<T> {
@@ -344,47 +159,56 @@ mod tests {
     use super::*;
 
     #[test]
-    fn exact_bounds_and_serialization() {
-        for (input, lower, upper) in [
-            ("1.234567891", 1234567891, 1234567891),
-            ("-1e-10", 0, -1),
-            ("1e-10", 1, 0),
-            (
-                "1720000000.123456789",
-                1720000000123456789,
-                1720000000123456789,
-            ),
-            ("1969-12-31T23:59:59.999999999Z", -1, -1),
+    fn query_bounds_use_prometheus_milliseconds() {
+        for (input, millis) in [
+            ("1.234567891", 1235),
+            ("1.234e0", 1234),
+            ("1720000000.123456789", 1720000000123),
+            ("-0.0006", -1),
+            ("-0.0004", 0),
+            ("-1.0005", -1000),
+            ("1970-01-01T00:00:00.0019Z", 1),
+            ("1969-12-31T23:59:59.999999999Z", -1),
+            ("1970-01-01T01:00:00.0019+01:00", 1),
         ] {
-            let value = Decimal::timestamp(input).unwrap();
-            assert_eq!(value.round_ns(true).unwrap(), lower);
-            assert_eq!(value.round_ns(false).unwrap(), upper);
-        }
-        for value in [i64::MIN, -1, 0, 1, 1720000000123456789, i64::MAX] {
-            let json = serde_json::to_string(&ExactTimestamp(value)).unwrap();
             assert_eq!(
-                serde_json::from_str::<ExactTimestamp>(&json).unwrap().0,
-                value
-            );
-            assert!(!json.contains('"'));
-        }
-        for input in ["1e-10", "-1e-10", "9223372036.8547758079"] {
-            assert!(
-                serde_json::from_str::<ExactTimestamp>(input).is_err(),
-                "{input}"
+                Query::parse("up".into(), input, input, "public")
+                    .unwrap()
+                    .bounds,
+                (millis * 1_000_000, millis * 1_000_000 + 999_999),
+                "{input}",
             );
         }
-        for invalid in [
+        assert_eq!(
+            Query::parse("up".into(), "0.0012", "0.0011", "public")
+                .unwrap()
+                .bounds,
+            (1_000_000, 1_999_999),
+        );
+        assert_eq!(
+            Query::parse(
+                "up".into(),
+                "2262-04-11T23:47:16.854Z",
+                "2262-04-11T23:47:16.854Z",
+                "public"
+            )
+            .unwrap()
+            .bounds,
+            (9_223_372_036_854_000_000, i64::MAX),
+        );
+        assert!(Query::parse("up".into(), "0.002", "0.001", "public").is_err());
+        for input in [
             "NaN",
             "inf",
             "",
-            "1e99999999999999999999999",
             "1e100",
-            "9223372036.854775808",
-            "-9223372036.854775809",
-            "-9223372036.8547758081",
+            "9223372036.855",
+            "-9223372036.855",
         ] {
-            assert!(Decimal::timestamp(invalid).is_err(), "{invalid}");
+            assert!(
+                Query::parse("up".into(), input, input, "public").is_err(),
+                "{input}"
+            );
         }
         assert!(
             Query::parse("1".into(), "0", "1", "public")
@@ -392,51 +216,6 @@ mod tests {
                 .selectors
                 .is_empty()
         );
-    }
-
-    #[test]
-    fn query_bounds_drop_subnanosecond_precision() {
-        for (numeric, rfc3339, expected) in [
-            ("1e-10", "1970-01-01T00:00:00.0000000001Z", 0),
-            ("-1e-10", "1969-12-31T23:59:59.9999999999Z", -1),
-            ("0.0000000019", "1970-01-01T00:00:00.0000000019Z", 1),
-            ("-0.0000000019", "1969-12-31T23:59:59.9999999981Z", -2),
-            ("1e-10", "1970-01-01T01:00:00.0000000001+01:00", 0),
-            (
-                "-9223372036.854775808",
-                "1677-09-21T00:12:43.145224192Z",
-                i64::MIN,
-            ),
-            (
-                "9223372036.8547758079",
-                "2262-04-11T23:47:16.8547758079Z",
-                i64::MAX,
-            ),
-        ] {
-            for input in [numeric, rfc3339] {
-                assert_eq!(
-                    Query::parse("up".into(), input, input, "public")
-                        .unwrap()
-                        .bounds,
-                    (expected, expected),
-                    "{input}",
-                );
-            }
-        }
-        for (start, end, expected) in [
-            ("0.0000000001", "0.0000000002", (0, 0)),
-            ("0.0000000002", "0.0000000001", (0, 0)),
-            ("-0.0000000001", "-0.0000000002", (-1, -1)),
-            ("-0.0000000001", "0.0000000001", (-1, 0)),
-        ] {
-            assert_eq!(
-                Query::parse("up".into(), start, end, "public")
-                    .unwrap()
-                    .bounds,
-                expected,
-            );
-        }
-        assert!(Query::parse("up".into(), "0.000000001", "0.0000000009", "public").is_err());
     }
 
     #[test]
