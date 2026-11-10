@@ -34,6 +34,7 @@ use partition::cache::PhysicalPartitionInfo;
 use partition::manager::PartitionRuleManagerRef;
 use session::context::QueryContextRef;
 use snafu::prelude::*;
+use store_api::metric_engine_consts;
 use store_api::storage::RegionId;
 use table::requests::{BuildIndexTableRequest, CompactTableRequest, FlushTableRequest};
 use table::table_name::TableName;
@@ -243,6 +244,13 @@ impl Requester {
         task_id: String,
         ctx: QueryContextRef,
     ) -> Result<AffectedRows> {
+        ensure!(
+            region_id.region_group() != metric_engine_consts::METRIC_METADATA_REGION_GROUP,
+            NotSupportedSnafu {
+                feat: "cancelling compaction for an internal metric metadata region",
+            }
+        );
+
         let request = RegionRequestBody::CancelCompaction(CancelCompactionRequest {
             region_id: region_id.into(),
             task_id,
@@ -468,6 +476,8 @@ fn ensure_discard_unflushed_supported(engine: &str, is_physical_table: bool) -> 
 mod tests {
     use api::region::RegionResponse;
     use api::v1::TimeUnit;
+    use common_error::ext::ErrorExt;
+    use common_error::status_code::StatusCode;
     use common_meta::ddl::test_util::datanode_handler::DatanodeWatcher;
     use common_meta::test_util::MockDatanodeManager;
     use common_time::Timestamp;
@@ -518,6 +528,25 @@ mod tests {
                         task_id: task_id.into(),
                     }
                 ))
+            );
+        }
+        // Metadata regions are rejected before routing, even without a table route.
+        for table_id in [1, u32::MAX] {
+            let region_id = RegionId::with_group_and_seq(
+                table_id,
+                metric_engine_consts::METRIC_METADATA_REGION_GROUP,
+                1,
+            );
+            let error = requester
+                .handle_cancel_region_compaction(region_id, "live-cycle".into(), ctx.clone())
+                .await
+                .unwrap_err();
+            assert_eq!(error.status_code(), StatusCode::Unsupported);
+            assert!(matches!(error, crate::error::Error::NotSupported { .. }));
+            assert!(
+                error
+                    .to_string()
+                    .contains("internal metric metadata region")
             );
         }
         assert!(requests.try_recv().is_err());
