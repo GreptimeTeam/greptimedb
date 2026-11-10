@@ -59,7 +59,7 @@ use crate::read::BoxedRecordBatchStream;
 use crate::read::scan_region::StreamContext;
 use crate::read::scan_util::PartitionMetrics;
 use crate::read::seq_scan::SeqScan;
-use crate::read::series_scan::{RawScanPreparation, raw};
+use crate::read::series_scan::{RawScanPreparation, SeriesInputMode, raw};
 use crate::read::stream::ScanBatch;
 use crate::series_index::artifact::ArtifactFormat;
 use crate::series_index::format::{
@@ -82,13 +82,20 @@ pub(crate) struct Preparation {
 }
 
 impl Preparation {
+    /// Prepares the scanner-wide source for the caller's captured [`SelectedInputs`].
+    ///
+    /// The cache holds at most one source per scanner, so the first preparation wins. A later
+    /// caller may only reuse it when its label binding and its selection are identical: a raw
+    /// all-ready capture and a native ready-subset capture describe the same inputs exactly when
+    /// `all_ready` holds, and a different capture means a different assignment.
     pub(crate) async fn prepare(
         &self,
         context: Arc<StreamContext>,
-        ranges: Vec<PartitionRange>,
+        selection: SelectedInputs,
         labels: RawLabelSource,
         raw: RawScanPreparation,
         metrics: PartitionMetrics,
+        mode: SeriesInputMode,
     ) -> std::result::Result<Arc<dyn PreparedSeriesSource>, BoxedError> {
         // Per caller, including time awaiting another partition's shared preparation.
         // This overlaps prepare_wall and must not be added to its component timings.
@@ -96,10 +103,11 @@ impl Preparation {
             .with_label_values(&["columnar_prepare_acquire_wall"])
             .start_timer();
         let expected = labels.clone();
+        let expected_selection = selection.clone();
         let result = self
             .source
             .get_or_init(|| async {
-                ColumnarPreparedSource::prepare(context, ranges, labels, raw, metrics)
+                ColumnarPreparedSource::prepare(context, selection, labels, raw, metrics)
                     .await
                     .map(Arc::new)
                     .map_err(Arc::new)
@@ -113,6 +121,16 @@ impl Preparation {
             return Err(BoxedError::new(invalid(
                 "label binding changed after series preparation",
             )));
+        }
+        if source.selection != expected_selection {
+            return Err(BoxedError::new(invalid(match mode {
+                // The raw path's preflight promised every assigned source, so a source prepared
+                // from another selection cannot answer it.
+                SeriesInputMode::Raw => "columnar series coverage changed after series preparation",
+                // Native preparation is served its own capture, so unready inputs are never an
+                // error here; a different capture can only come from another assignment.
+                SeriesInputMode::Native => "series preparation selection changed",
+            })));
         }
         Ok(source.clone())
     }
@@ -144,31 +162,50 @@ fn same_labels(left: &RawLabelSource, right: &RawLabelSource) -> bool {
     }
 }
 
+/// Inputs one scanner-wide preparation may read, selected from the pinned context and ranges.
+///
+/// Selection only decides which assigned sources and which artifacts participate. It never filters
+/// rows: every live row of a selected series is returned, including rows of an eligible grouped
+/// sample artifact whose own source SST has no covering series index. Readiness governs source
+/// selection and series discovery, never row-level filtering.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct SelectedInputs {
+    /// Indices into the scanner's assigned SST list whose columnar artifacts are complete.
+    pub(crate) ready_files: Vec<usize>,
+    /// Covering columnar series index ids, restricted to ready SSTs.
+    pub(crate) series_indexes: HashSet<FileId>,
+    /// Eligible sample artifacts covering at least one ready SST.
+    pub(crate) sample_artifacts: HashSet<FileId>,
+    /// Whether every assigned source is columnar-ready, which is the raw path's all-or-nothing
+    /// answer. Vacuously `true` for an empty assignment.
+    pub(crate) all_ready: bool,
+}
+
 /// Validates the pinned assignments and coverage without opening artifacts.
 ///
 /// Returns whether every assigned source can be read from columnar artifacts. `false` is not an
 /// error: the caller scans those sources with the ordinary reader instead.
 pub(crate) fn validate_inputs(context: &StreamContext, ranges: &[PartitionRange]) -> Result<bool> {
-    collect_inputs(context, ranges).map(|inputs| inputs.is_some())
+    select_inputs(context, ranges).map(|inputs| inputs.all_ready)
 }
 
-/// Collects the assigned SSTs and their covering columnar series indexes.
+/// Selects the assigned SSTs a columnar read may serve and the artifacts that cover them.
 ///
-/// `None` means the assignments are structurally valid but not ready for columnar reads: an
-/// assigned memtable, an SST without columnar series coverage, or an SST without columnar
-/// samples. Structural corruption is still an error, and every assignment is validated before
-/// either answer is returned, so a later invalid assignment is never masked by missing artifacts.
-fn collect_inputs(
+/// Every assignment is validated before any readiness answer, so a malformed assignment is never
+/// masked by an earlier unready one. `allowed` joins every assigned SST with the sources the query
+/// pruned by time only, and is computed once: a grouped artifact may carry rows of a pruned source
+/// that are still live rows of a discovered series, so a ready subset must never narrow it.
+pub(crate) fn select_inputs(
     context: &StreamContext,
     ranges: &[PartitionRange],
-) -> Result<Option<(Vec<usize>, HashSet<FileId>)>> {
+) -> Result<SelectedInputs> {
     let input = &context.input;
     let metadata = input.region_metadata();
     let index = input
         .series_index
         .as_ref()
         .ok_or_else(|| invalid("missing columnar index context"))?;
-    let mut ready = true;
+    let mut assigned_memtable = false;
     let mut files = BTreeMap::<usize, HashSet<i64>>::new();
     for range in ranges {
         let range = context
@@ -177,8 +214,8 @@ fn collect_inputs(
             .ok_or_else(|| invalid("invalid prepared scan range"))?;
         for row_group in &range.row_group_indices {
             if context.is_mem_range_index(*row_group) {
-                // Artifacts exist for flushed SSTs only.
-                ready = false;
+                // Artifacts exist for flushed SSTs only, and a memtable is never converted here.
+                assigned_memtable = true;
                 continue;
             }
             if !context.is_file_range_index(*row_group) {
@@ -192,31 +229,9 @@ fn collect_inputs(
                 .insert(row_group.row_group_index);
         }
     }
-    // Grouped artifacts may also contain sources excluded solely by time pruning.
-    // Sequence-pruned, unassigned, and retired sources remain ineligible.
-    let assigned: HashSet<_> = files
-        .keys()
-        .map(|i| input.files[*i].file_id().file_id())
-        .collect();
-    let allowed = assigned
-        .iter()
-        .chain(&input.time_pruned_files)
-        .copied()
-        .collect();
-    let eligible_samples = index
-        .version
-        .samples
-        .iter()
-        .filter(|(_, handle)| {
-            handle.entry().sources_visible(&allowed)
-                && assigned.iter().any(|id| handle.entry().covers(*id))
-        })
-        .map(|(id, handle)| (*id, handle.clone()))
-        .collect();
-    let mut indexes = HashSet::new();
-    let file_indices = files.keys().copied().collect();
-    for (file_idx, groups) in files {
-        let file = &input.files[file_idx];
+    // Structural validation of every assigned SST, before any readiness answer.
+    for (file_idx, groups) in &files {
+        let file = &input.files[*file_idx];
         if !groups.contains(&-1)
             && (groups.len() as u64 != file.meta_ref().num_row_groups
                 || groups
@@ -232,30 +247,63 @@ fn collect_inputs(
                 "columnar prepared reads do not support foreign SSTs",
             ));
         }
-        let mut covered = false;
+    }
+    // Grouped artifacts may also contain sources excluded solely by time pruning.
+    // Sequence-pruned, unassigned, and retired sources remain ineligible.
+    let assigned: HashSet<_> = files
+        .keys()
+        .map(|i| input.files[*i].file_id().file_id())
+        .collect();
+    let allowed: HashSet<_> = assigned
+        .iter()
+        .chain(&input.time_pruned_files)
+        .copied()
+        .collect();
+    let eligible: HashMap<FileId, crate::series_index::artifact::SamplesFileHandle> = index
+        .version
+        .samples
+        .iter()
+        .filter(|(_, handle)| {
+            handle.entry().sources_visible(&allowed)
+                && assigned.iter().any(|id| handle.entry().covers(*id))
+        })
+        .map(|(id, handle)| (*id, handle.clone()))
+        .collect();
+    let mut selected = SelectedInputs {
+        all_ready: !assigned_memtable,
+        ..Default::default()
+    };
+    for file_idx in files.keys() {
+        let file = &input.files[*file_idx];
+        let id = file.file_id().file_id();
+        let mut covering = HashSet::new();
         for handle in index.version.series_indexes.values() {
             if handle.entry().format() == ArtifactFormat::ColumnarSeries
                 && handle
                     .entry()
                     .covers_file(file.meta_ref(), metadata.region_id)
             {
-                indexes.insert(handle.entry().index_uuid);
-                covered = true;
+                covering.insert(handle.entry().index_uuid);
             }
         }
-        if !covered {
-            ready = false;
+        let ready = !covering.is_empty()
+            && crate::series_index::artifact::samples_cover_file(&eligible, file)
+            && !index.version.samples.values().any(|h| {
+                h.entry().covers(id) && h.entry().artifact.format != ArtifactFormat::ColumnarSamples
+            });
+        if !ready {
+            selected.all_ready = false;
+            continue;
         }
-        if !crate::series_index::artifact::samples_cover_file(&eligible_samples, file)
-            || index.version.samples.values().any(|h| {
-                h.entry().covers(file.file_id().file_id())
-                    && h.entry().artifact.format != ArtifactFormat::ColumnarSamples
-            })
-        {
-            ready = false;
+        selected.ready_files.push(*file_idx);
+        selected.series_indexes.extend(covering);
+        for (sample_id, handle) in &eligible {
+            if handle.entry().covers(id) {
+                selected.sample_artifacts.insert(*sample_id);
+            }
         }
     }
-    Ok(ready.then_some((file_indices, indexes)))
+    Ok(selected)
 }
 
 /// Pushes the supported conjuncts into the request.
@@ -328,6 +376,8 @@ struct Candidate {
 
 struct ColumnarPreparedSource {
     context: Arc<StreamContext>,
+    /// Inputs this source was built from; a shared cache is only reusable for an equal selection.
+    selection: SelectedInputs,
     labels: RawLabelSource,
     raw: Arc<RawScanPreparation>,
     sample_schema: Option<SchemaRef>,
@@ -339,9 +389,14 @@ struct ColumnarPreparedSource {
 }
 
 impl ColumnarPreparedSource {
+    /// Builds the prepared source from an already selected input set.
+    ///
+    /// Readiness is never recomputed here: the caller's capture is the single answer, so an
+    /// artifact that merely covers a ready SST stays readable even when another of its sources
+    /// has no covering series index.
     async fn prepare(
         context: Arc<StreamContext>,
-        ranges: Vec<PartitionRange>,
+        selection: SelectedInputs,
         labels: RawLabelSource,
         raw: RawScanPreparation,
         metrics: PartitionMetrics,
@@ -358,31 +413,14 @@ impl ColumnarPreparedSource {
             .series_index
             .as_ref()
             .ok_or_else(|| invalid("missing columnar index context"))?;
-        let Some((files, indexes)) = collect_inputs(&context, &ranges)? else {
-            // Readiness was checked before preparation, so this is a real capability change.
-            return Err(invalid(
-                "columnar series coverage changed after series preparation",
-            ));
-        };
         preparation_metrics.add_elapsed("columnar_prepare_coverage", started.elapsed());
         let timer = preparation_metrics.timer("columnar_prepare_samples_open_wall");
         let cache = input
             .cache_strategy
             .columnar_metadata(index.cache_namespace);
         let mut samples = Vec::<Arc<dyn SamplesFormatReader>>::new();
-        let assigned: HashSet<_> = files
-            .iter()
-            .map(|i| input.files[*i].file_id().file_id())
-            .collect();
-        let allowed = assigned
-            .iter()
-            .chain(&input.time_pruned_files)
-            .copied()
-            .collect();
         for handle in index.version.samples.values().filter(|h| {
-            if !h.entry().sources_visible(&allowed)
-                || !assigned.iter().any(|id| h.entry().covers(*id))
-            {
+            if !selection.sample_artifacts.contains(&h.file_id().file_id()) {
                 return false;
             }
             // Coverage validation above still needs every day of each source. Only
@@ -414,9 +452,10 @@ impl ColumnarPreparedSource {
         preparation_metrics
             .counts
             .insert("prepare_sample_readers", samples.len() as u64);
-        preparation_metrics
-            .counts
-            .insert("prepare_series_indexes", indexes.len() as u64);
+        preparation_metrics.counts.insert(
+            "prepare_series_indexes",
+            selection.series_indexes.len() as u64,
+        );
         let reservation =
             MemoryConsumer::new("ColumnarPreparedSource").register(&input.scan_memory_pool);
         let started = Instant::now();
@@ -429,11 +468,11 @@ impl ColumnarPreparedSource {
         let conjuncts = predicate_conjuncts(input.predicate_group().predicate());
         let mut retained_rows = 0_usize;
         let mut candidates = BTreeMap::<ExactSeriesKey, Candidate>::new();
-        for id in indexes {
+        for id in &selection.series_indexes {
             let timer = preparation_metrics.timer("columnar_prepare_series_open_wall");
             let reader = crate::series_index::columnar::reader::ColumnarReader::open_cached(
                 index.store.clone(),
-                index.version.series_indexes[&id].clone(),
+                index.version.series_indexes[id].clone(),
                 cache.clone(),
             )
             .await?;
@@ -718,6 +757,7 @@ impl ColumnarPreparedSource {
         preparation_metrics.add_elapsed("columnar_prepare_sort", started.elapsed());
         Ok(Self {
             context,
+            selection,
             labels,
             raw: Arc::new(raw),
             sample_schema,
