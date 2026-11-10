@@ -19,79 +19,26 @@ use crate::sst::file::{RegionFileId, RegionIndexId};
 use crate::sst::index::Indexer;
 
 impl Indexer {
+    pub(crate) async fn abort_creator(&mut self, position: usize) {
+        let mut active = self.creators.remove(position);
+        if let Err(err) = active.creator.abort().await {
+            if cfg!(any(test, feature = "test")) {
+                panic!("Failed to abort index: {err:?}");
+            }
+            warn!(err; "Failed to abort index, region_id: {}, file_id: {}, kind: {:?}", self.region_id, self.file_id, active.kind);
+        }
+    }
+
     pub(crate) async fn do_abort(&mut self) {
         self.dense_pk_decoder = None;
-        self.do_abort_inverted_index().await;
-        self.do_abort_fulltext_index().await;
-        self.do_abort_bloom_filter().await;
+        while !self.creators.is_empty() {
+            self.abort_creator(0).await;
+        }
         self.do_prune_intm_sst_dir().await;
         if self.write_cache_enabled {
             self.do_abort_clean_fs_temp_dir().await;
         }
         self.puffin_manager = None;
-    }
-
-    async fn do_abort_inverted_index(&mut self) {
-        let Some(mut indexer) = self.inverted_indexer.take() else {
-            return;
-        };
-        let Err(err) = indexer.abort().await else {
-            return;
-        };
-
-        if cfg!(any(test, feature = "test")) {
-            panic!(
-                "Failed to abort inverted index, region_id: {}, file_id: {}, err: {:?}",
-                self.region_id, self.file_id, err
-            );
-        } else {
-            warn!(
-                err; "Failed to abort inverted index, region_id: {}, file_id: {}",
-                self.region_id, self.file_id,
-            );
-        }
-    }
-
-    async fn do_abort_fulltext_index(&mut self) {
-        let Some(mut indexer) = self.fulltext_indexer.take() else {
-            return;
-        };
-        let Err(err) = indexer.abort().await else {
-            return;
-        };
-
-        if cfg!(any(test, feature = "test")) {
-            panic!(
-                "Failed to abort full-text index, region_id: {}, file_id: {}, err: {:?}",
-                self.region_id, self.file_id, err
-            );
-        } else {
-            warn!(
-                err; "Failed to abort full-text index, region_id: {}, file_id: {}",
-                self.region_id, self.file_id,
-            );
-        }
-    }
-
-    async fn do_abort_bloom_filter(&mut self) {
-        let Some(mut indexer) = self.bloom_filter_indexer.take() else {
-            return;
-        };
-        let Err(err) = indexer.abort().await else {
-            return;
-        };
-
-        if cfg!(any(test, feature = "test")) {
-            panic!(
-                "Failed to abort bloom filter, region_id: {}, file_id: {}, err: {:?}",
-                self.region_id, self.file_id, err
-            );
-        } else {
-            warn!(
-                err; "Failed to abort bloom filter, region_id: {}, file_id: {}",
-                self.region_id, self.file_id,
-            );
-        }
     }
 
     async fn do_abort_clean_fs_temp_dir(&mut self) {

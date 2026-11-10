@@ -668,7 +668,7 @@ impl RegionFlushTask {
                         partition_expr.clone(),
                         pk_range,
                         version.options.preserve_row_sequence,
-                    ));
+                    )?);
                 }
                 if hook.is_some() {
                     all_sst_infos.extend(ssts_written);
@@ -811,12 +811,12 @@ impl RegionFlushTask {
         partition_expr: Option<PartitionExpr>,
         primary_key_range: Option<(Bytes, Bytes)>,
         preserve_row_sequence: bool,
-    ) -> FileMeta {
+    ) -> Result<FileMeta> {
         let (primary_key_min, primary_key_max) = match primary_key_range {
             Some((min, max)) => (Some(min), Some(max)),
             None => (None, None),
         };
-        FileMeta {
+        Ok(FileMeta {
             region_id,
             file_id: sst_info.file_id,
             time_range: sst_info.time_range,
@@ -824,7 +824,7 @@ impl RegionFlushTask {
             file_size: sst_info.file_size,
             max_row_group_uncompressed_size: sst_info.max_row_group_uncompressed_size,
             available_indexes: sst_info.index_metadata.build_available_indexes(),
-            indexes: sst_info.index_metadata.build_indexes(),
+            indexes: sst_info.index_metadata.build_indexes()?,
             index_file_size: sst_info.index_metadata.file_size,
             index_version: 0,
             num_rows: sst_info.num_rows as u64,
@@ -835,7 +835,7 @@ impl RegionFlushTask {
             primary_key_min,
             primary_key_max,
             preserve_row_sequence,
-        }
+        })
     }
 
     fn new_write_request(

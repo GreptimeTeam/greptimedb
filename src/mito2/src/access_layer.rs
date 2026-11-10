@@ -46,6 +46,7 @@ use crate::region::options::IndexOptions;
 use crate::sst::file::{FileHandle, RegionFileId, RegionIndexId};
 use crate::sst::index::intermediate::IntermediateManager;
 use crate::sst::index::puffin_manager::{PuffinManagerFactory, SstPuffinManager};
+use crate::sst::index::registry::IndexRegistry;
 use crate::sst::index::{IndexerBuilderImpl, build_index_from_parquet_bytes};
 use crate::sst::location::{self, region_dir_from_table_dir};
 use crate::sst::parquet::reader::ParquetReaderBuilder;
@@ -446,9 +447,11 @@ impl AccessLayer {
                 write_cache_enabled: false,
                 intermediate_manager: self.intermediate_manager.clone(),
                 index_options: request.index_options,
-                inverted_index_config: request.inverted_index_config,
-                fulltext_index_config: request.fulltext_index_config,
-                bloom_filter_index_config: request.bloom_filter_index_config,
+                registry: Arc::new(IndexRegistry::new(
+                    request.inverted_index_config,
+                    request.fulltext_index_config,
+                    request.bloom_filter_index_config,
+                )),
             };
             // We disable write cache on file system but we still use atomic write.
             // TODO(yingwen): If we support other non-fs stores without the write cache, then
@@ -710,9 +713,11 @@ impl EncodedSstIndexBuildParams {
             write_cache_enabled,
             intermediate_manager,
             index_options: self.index_options,
-            inverted_index_config: self.inverted_index_config,
-            fulltext_index_config: self.fulltext_index_config,
-            bloom_filter_index_config: self.bloom_filter_index_config,
+            registry: Arc::new(IndexRegistry::new(
+                self.inverted_index_config,
+                self.fulltext_index_config,
+                self.bloom_filter_index_config,
+            )),
         }
     }
 }

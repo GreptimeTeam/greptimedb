@@ -88,7 +88,7 @@ impl<'a> TargetWriter<'a> {
             .iter()
             .map(|info| {
                 self.validate_sequence(info)?;
-                Ok(self.file_metadata(info, expression.clone()))
+                self.file_metadata(info, expression.clone())
             })
             .collect::<Result<Vec<_>>>()?;
         Ok((files, infos.into_iter().collect()))
@@ -169,12 +169,16 @@ impl<'a> TargetWriter<'a> {
         Ok(())
     }
 
-    fn file_metadata(&self, info: &SstInfo, partition_expr: Option<PartitionExpr>) -> FileMeta {
+    fn file_metadata(
+        &self,
+        info: &SstInfo,
+        partition_expr: Option<PartitionExpr>,
+    ) -> Result<FileMeta> {
         let range = info
             .file_metadata
             .as_ref()
             .and_then(|footer| extract_primary_key_range(footer, &self.target.metadata));
-        FileMeta {
+        Ok(FileMeta {
             region_id: self.target.metadata.region_id,
             file_id: info.file_id,
             time_range: info.time_range,
@@ -182,7 +186,7 @@ impl<'a> TargetWriter<'a> {
             file_size: info.file_size,
             max_row_group_uncompressed_size: info.max_row_group_uncompressed_size,
             available_indexes: info.index_metadata.build_available_indexes(),
-            indexes: info.index_metadata.build_indexes(),
+            indexes: info.index_metadata.build_indexes()?,
             index_file_size: info.index_metadata.file_size,
             index_version: 0,
             num_rows: info.num_rows as u64,
@@ -193,7 +197,7 @@ impl<'a> TargetWriter<'a> {
             primary_key_min: range.as_ref().map(|(min, _)| min.clone()),
             primary_key_max: range.map(|(_, max)| max),
             preserve_row_sequence: self.preserve_row_sequence,
-        }
+        })
     }
 }
 

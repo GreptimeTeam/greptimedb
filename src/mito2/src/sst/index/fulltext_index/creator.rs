@@ -51,6 +51,14 @@ use crate::sst::index::puffin_manager::SstPuffinWriter;
 use crate::sst::index::statistics::{ByteCount, RowCount, Statistics};
 use crate::sst::index::{IndexBuildType, TYPE_FULLTEXT_INDEX};
 
+/// Resolved column identity, name, target and options retained by a build plan.
+pub(crate) type FulltextTarget = (
+    store_api::storage::ColumnId,
+    String,
+    IndexTarget,
+    datatypes::schema::FulltextOptions,
+);
+
 /// `FulltextIndexer` is responsible for creating fulltext indexes for SST files.
 pub struct FulltextIndexer {
     /// Creators for each column.
@@ -63,6 +71,7 @@ pub struct FulltextIndexer {
 
 impl FulltextIndexer {
     /// Creates a new `FulltextIndexer`.
+    #[cfg(test)]
     pub async fn new(
         region_id: &RegionId,
         sst_file_id: &FileId,
@@ -72,116 +81,153 @@ impl FulltextIndexer {
         mem_limit: usize,
         build_type: IndexBuildType,
     ) -> Result<Option<Self>> {
+        let mut targets = Vec::new();
+        for column in &metadata.column_metadatas {
+            for (target, options) in Self::targets(column, &build_type)? {
+                targets.push((
+                    column.column_id,
+                    column.column_schema.name.clone(),
+                    target,
+                    options,
+                ));
+            }
+        }
+        Self::new_with_targets(
+            region_id,
+            sst_file_id,
+            intermediate_manager,
+            metadata,
+            compress,
+            mem_limit,
+            targets,
+        )
+        .await
+    }
+
+    /// Creates one file-level creator from already resolved targets.
+    pub(crate) async fn new_with_targets(
+        region_id: &RegionId,
+        sst_file_id: &FileId,
+        intermediate_manager: &IntermediateManager,
+        metadata: &RegionMetadataRef,
+        compress: bool,
+        mem_limit: usize,
+        targets: Vec<FulltextTarget>,
+    ) -> Result<Option<Self>> {
         let mut creators = HashMap::new();
         let global_memory_usage = Arc::new(AtomicUsize::new(0));
 
-        for column in &metadata.column_metadatas {
-            // Tag columns don't support fulltext index now.
-            // If we need to support fulltext index for tag columns, we also need to parse
-            // the codec and handle sparse encoding for flat format specially.
-            if column.semantic_type == SemanticType::Tag {
-                common_telemetry::debug!(
-                    "Skip creating fulltext index for tag column {}",
-                    column.column_schema.name
-                );
-                continue;
-            }
+        for (column_id, column_name, target, options) in targets {
+            // fulltext_path generates a fresh UUID for each target, so JSON paths
+            // in the same column use separate intermediate directories.
+            let intm_path = intermediate_manager.fulltext_path(region_id, sst_file_id, column_id);
 
-            let options = column
-                .column_schema
-                .fulltext_options()
-                .context(IndexOptionsSnafu {
-                    column_name: &column.column_schema.name,
-                })?;
+            let config = Config {
+                analyzer: match options.analyzer {
+                    FulltextAnalyzer::English => Analyzer::English,
+                    FulltextAnalyzer::Chinese => Analyzer::Chinese,
+                },
+                case_sensitive: options.case_sensitive,
+            };
 
-            let mut targets = Vec::new();
-            if let Some(options) = options.filter(|options| options.enable) {
-                targets.push((IndexTarget::ColumnId(column.column_id), options));
-            }
-            // Only flush and compaction builds collect JSON targets; manual and schema-change
-            // rebuilds skip them because existing SSTs may not materialize the current hints.
-            // FIXME: Rebuilds replace the whole Puffin file and can drop existing JSON path indexes.
-            if matches!(build_type, IndexBuildType::Flush | IndexBuildType::Compact)
-                && column.column_schema.data_type.is_json2()
-                && let Some(extension) = column
-                    .column_schema
-                    .extension_type::<Json2ExtensionType>()
-                    .context(IndexOptionsSnafu {
-                        column_name: &column.column_schema.name,
-                    })?
-            {
-                for hint in extension.metadata().json_settings().type_hints() {
-                    let Some(options) = hint.fulltext_index.as_ref().filter(|o| o.enable) else {
-                        continue;
-                    };
-                    match IndexTarget::new_json_path(column.column_id, hint.path.clone()) {
-                        Ok(target) => targets.push((target, options.clone())),
-                        Err(err) => {
-                            warn!(
-                                err;
-                                "Skip invalid JSON fulltext index target, column_id: {}, path: {:?}",
-                                column.column_id,
-                                hint.path
-                            );
-                        }
-                    }
+            let inner = match options.backend {
+                FulltextBackend::Tantivy => {
+                    let creator = TantivyFulltextIndexCreator::new(&intm_path, config, mem_limit)
+                        .await
+                        .context(CreateFulltextCreatorSnafu)?;
+                    AltFulltextCreator::Tantivy(creator)
                 }
-            }
-            for (target, options) in targets {
-                // fulltext_path generates a fresh UUID for each target, so JSON paths
-                // in the same column use separate intermediate directories.
-                let intm_path =
-                    intermediate_manager.fulltext_path(region_id, sst_file_id, column.column_id);
+                FulltextBackend::Bloom => {
+                    let temp_file_provider = Arc::new(TempFileProvider::new(
+                        IntermediateLocation::new(&metadata.region_id, sst_file_id),
+                        intermediate_manager.clone(),
+                    ));
+                    let creator = BloomFilterFulltextIndexCreator::new(
+                        config,
+                        options.granularity as _,
+                        options.false_positive_rate(),
+                        temp_file_provider,
+                        global_memory_usage.clone(),
+                        Some(mem_limit),
+                    );
+                    AltFulltextCreator::Bloom(creator)
+                }
+            };
 
-                let config = Config {
-                    analyzer: match options.analyzer {
-                        FulltextAnalyzer::English => Analyzer::English,
-                        FulltextAnalyzer::Chinese => Analyzer::Chinese,
-                    },
-                    case_sensitive: options.case_sensitive,
-                };
-
-                let inner = match options.backend {
-                    FulltextBackend::Tantivy => {
-                        let creator =
-                            TantivyFulltextIndexCreator::new(&intm_path, config, mem_limit)
-                                .await
-                                .context(CreateFulltextCreatorSnafu)?;
-                        AltFulltextCreator::Tantivy(creator)
-                    }
-                    FulltextBackend::Bloom => {
-                        let temp_file_provider = Arc::new(TempFileProvider::new(
-                            IntermediateLocation::new(&metadata.region_id, sst_file_id),
-                            intermediate_manager.clone(),
-                        ));
-                        let creator = BloomFilterFulltextIndexCreator::new(
-                            config,
-                            options.granularity as _,
-                            options.false_positive_rate(),
-                            temp_file_provider,
-                            global_memory_usage.clone(),
-                            Some(mem_limit),
-                        );
-                        AltFulltextCreator::Bloom(creator)
-                    }
-                };
-
-                creators.insert(
-                    target.clone(),
-                    SingleCreator {
-                        target,
-                        column_name: column.column_schema.name.clone(),
-                        inner,
-                        compress,
-                    },
-                );
-            }
+            creators.insert(
+                target.clone(),
+                SingleCreator {
+                    target,
+                    column_name,
+                    inner,
+                    compress,
+                },
+            );
         }
         Ok((!creators.is_empty()).then(move || Self {
             creators,
             aborted: false,
             stats: Statistics::new(TYPE_FULLTEXT_INDEX),
         }))
+    }
+
+    /// Resolves all targets of one column without creating index state.
+    pub(crate) fn targets(
+        column: &store_api::metadata::ColumnMetadata,
+        build_type: &IndexBuildType,
+    ) -> Result<Vec<(IndexTarget, datatypes::schema::FulltextOptions)>> {
+        // Tag columns don't support fulltext index now.
+        // If we need to support fulltext index for tag columns, we also need to parse
+        // the codec and handle sparse encoding for flat format specially.
+        if column.semantic_type == SemanticType::Tag {
+            common_telemetry::debug!(
+                "Skip creating fulltext index for tag column {}",
+                column.column_schema.name
+            );
+            return Ok(Vec::new());
+        }
+
+        let options = column
+            .column_schema
+            .fulltext_options()
+            .context(IndexOptionsSnafu {
+                column_name: &column.column_schema.name,
+            })?;
+
+        let mut targets = Vec::new();
+        if let Some(options) = options.filter(|options| options.enable) {
+            targets.push((IndexTarget::ColumnId(column.column_id), options));
+        }
+        // Only flush and compaction builds collect JSON targets; manual and schema-change
+        // rebuilds skip them because existing SSTs may not materialize the current hints.
+        // FIXME: Rebuilds replace the whole Puffin file and can drop existing JSON path indexes.
+        if matches!(build_type, IndexBuildType::Flush | IndexBuildType::Compact)
+            && column.column_schema.data_type.is_json2()
+            && let Some(extension) = column
+                .column_schema
+                .extension_type::<Json2ExtensionType>()
+                .context(IndexOptionsSnafu {
+                    column_name: &column.column_schema.name,
+                })?
+        {
+            for hint in extension.metadata().json_settings().type_hints() {
+                let Some(options) = hint.fulltext_index.as_ref().filter(|o| o.enable) else {
+                    continue;
+                };
+                match IndexTarget::new_json_path(column.column_id, hint.path.clone()) {
+                    Ok(target) => targets.push((target, options.clone())),
+                    Err(err) => {
+                        warn!(
+                            err;
+                            "Skip invalid JSON fulltext index target, column_id: {}, path: {:?}",
+                            column.column_id,
+                            hint.path
+                        );
+                    }
+                }
+            }
+        }
+        Ok(targets)
     }
 
     /// Updates the index with the given batch.

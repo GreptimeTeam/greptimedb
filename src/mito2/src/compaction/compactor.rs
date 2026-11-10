@@ -699,7 +699,7 @@ impl SstMerger for DefaultSstMerger {
                     None => (None, None),
                 };
 
-                FileMeta {
+                Ok(FileMeta {
                     region_id,
                     file_id: sst_info.file_id,
                     time_range: sst_info.time_range,
@@ -707,7 +707,7 @@ impl SstMerger for DefaultSstMerger {
                     file_size: sst_info.file_size,
                     max_row_group_uncompressed_size: sst_info.max_row_group_uncompressed_size,
                     available_indexes: sst_info.index_metadata.build_available_indexes(),
-                    indexes: sst_info.index_metadata.build_indexes(),
+                    indexes: sst_info.index_metadata.build_indexes()?,
                     index_file_size: sst_info.index_metadata.file_size,
                     index_version: 0,
                     num_rows: sst_info.num_rows as u64,
@@ -718,9 +718,9 @@ impl SstMerger for DefaultSstMerger {
                     primary_key_min,
                     primary_key_max,
                     preserve_row_sequence: sequence_metadata.exact_sequence_trusted,
-                }
+                })
             })
-            .collect::<Vec<_>>();
+            .collect::<Result<Vec<_>>>()?;
         let output_file_names = output_files.iter().map(|f| f.file_id.to_string()).join(",");
         info!(
             "Region {} compaction inputs: [{}], outputs: [{}], flat_format: {}, metrics: {:?}",
