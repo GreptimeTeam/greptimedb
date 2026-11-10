@@ -26,7 +26,7 @@ use object_store::services::{Fs, S3};
 use servers::query_handler::sql::SqlQueryHandler;
 use session::context::QueryContext;
 use tests_integration::standalone::{GreptimeDbStandalone, GreptimeDbStandaloneBuilder};
-use tests_integration::test_util::StorageType;
+use tests_integration::test_util::{StorageType, disabled_event_recorder_options};
 
 /// The root the store derives its node prefix from.
 const WAL_ROOT: &str = "cluster-a/wal";
@@ -126,7 +126,8 @@ async fn run_restarts_on_object_store_wal(store_type: StorageType) {
     };
     let builder = GreptimeDbStandaloneBuilder::new("object_store_wal")
         .with_default_store_type(store_type)
-        .with_datanode_wal_config(DatanodeWalConfig::ObjectStore(wal_config));
+        .with_datanode_wal_config(DatanodeWalConfig::ObjectStore(wal_config))
+        .with_event_recorder_options(disabled_event_recorder_options());
     let standalone = builder.build().await;
 
     execute_sql(
