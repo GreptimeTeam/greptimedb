@@ -574,7 +574,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         }
 
         if flush_on_close {
-            self.remove_region(region_id).await;
+            self.close_region(region_id).await;
             info!("Region {} closed after flush", region_id);
             request.on_success();
             self.listener.on_flush_success(region_id);
