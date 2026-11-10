@@ -45,6 +45,8 @@ use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use puffin_manager::SstPuffinManager;
 use smallvec::SmallVec;
 use snafu::ResultExt;
+#[cfg(feature = "enterprise")]
+pub use statistics::{Statistics, TimerGuard};
 use store_api::codec::PrimaryKeyEncoding;
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::{ColumnId, FileId, RegionId};

@@ -664,6 +664,51 @@ mod tests {
     // DO NOT modify the serialized string when they fail, check if your
     // modification to manifest-related structs is compatible with older manifests.
     #[test]
+    fn test_sketch_index_manifest_fixture() {
+        use crate::sst::file::IndexType;
+
+        // Frozen persisted names. Keep this fixture unchanged when extending the format.
+        let fixture = r#"{"actions":[{"Edit":{"files_to_add":[{
+                "region_id":0,"file_id":"bc5896ec-e4d8-4017-a80d-f2de73188d55",
+                "time_range":[{"value":0,"unit":"Millisecond"},{"value":1,"unit":"Millisecond"}],
+                "level":0,"index_version":7,"index_file_size":128,
+                "available_indexes":["InvertedIndex","HllIndex","KllIndex","MgIndex"],
+                "indexes":[{"column_id":3,"created_indexes":["InvertedIndex","HllIndex","KllIndex","MgIndex"]}]
+            }],"files_to_remove":[],"compaction_time_window":null}}]}"#;
+        let actions = RegionMetaActionList::decode(fixture.as_bytes()).unwrap();
+        let RegionMetaAction::Edit(edit) = &actions.actions[0] else {
+            panic!("expected a file edit");
+        };
+        assert_eq!(actions.actions.len(), 1);
+        assert_eq!(edit.files_to_add.len(), 1);
+        let file = &edit.files_to_add[0];
+        let expected = [
+            IndexType::InvertedIndex,
+            IndexType::HllIndex,
+            IndexType::KllIndex,
+            IndexType::MgIndex,
+        ];
+        assert_eq!(file.available_indexes.as_slice(), expected);
+        assert_eq!(file.indexes.len(), 1);
+        assert_eq!(file.indexes[0].column_id, 3);
+        assert_eq!(file.indexes[0].created_indexes.as_slice(), expected);
+        assert_eq!(file.index_version(), Some(7));
+        assert_eq!(file.index_file_size, 128);
+        let encoded = actions.encode().unwrap();
+        assert_eq!(RegionMetaActionList::decode(&encoded).unwrap(), actions);
+        let encoded: serde_json::Value = serde_json::from_slice(&encoded).unwrap();
+        let names = serde_json::json!(["InvertedIndex", "HllIndex", "KllIndex", "MgIndex"]);
+        assert_eq!(
+            encoded["actions"][0]["Edit"]["files_to_add"][0]["available_indexes"],
+            names
+        );
+        assert_eq!(
+            encoded["actions"][0]["Edit"]["files_to_add"][0]["indexes"][0]["created_indexes"],
+            names
+        );
+    }
+
+    #[test]
     fn test_region_action_compatibility() {
         let region_edit = r#"{
             "flushed_entry_id":null,

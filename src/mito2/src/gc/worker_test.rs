@@ -39,7 +39,7 @@ use crate::gc::{GcConfig, LocalGcWorker, should_delete_file};
 use crate::manifest::action::{RegionEdit, RegionMetaAction, RegionMetaActionList, RemovedFile};
 use crate::metrics::GC_SKIPPED_UNPARSABLE_FILES;
 use crate::region::{MitoRegionRef, RegionLeaderState};
-use crate::sst::file::{FileHandle, FileMeta, IndexType, RegionIndexId};
+use crate::sst::file::{ColumnIndexMetadata, FileHandle, FileMeta, IndexType, RegionIndexId};
 use crate::sst::location;
 use crate::test_util::{
     CreateRequestBuilder, TestEnv, build_rows, flush_region, put_rows, rows_schema,
@@ -280,8 +280,17 @@ async fn test_gc_reference_protects_parquet_and_only_its_index(
 async fn test_gc_reclaims_obsolete_index_after_readers_and_linger_release(
     #[values(false, true)] full_file_listing: bool,
     #[values(false, true)] linger_expired: bool,
+    #[values(false, true)] column_only: bool,
 ) {
-    let env = IndexGcTestEnv::new(full_file_listing).await;
+    let mut env = IndexGcTestEnv::new(full_file_listing).await;
+    if column_only {
+        env.meta.available_indexes.clear();
+        env.meta.indexes = vec![ColumnIndexMetadata {
+            column_id: 0,
+            created_indexes: smallvec::smallvec![IndexType::HllIndex],
+            ..Default::default()
+        }];
+    }
     let region_id = env.meta.region_id;
     env.engine
         .set_region_role(region_id, RegionRole::Leader)

@@ -9,7 +9,7 @@ default = []
 test = ["common-test-util", "rstest", "rstest_reuse", "rskafka"]
 testing = ["test"]
 test-shared-fs-region-migration = []
-enterprise = ["tokio-util/rt"]
+enterprise = ["datatypes/enterprise", "tokio-util/rt"]
 hdfs-object-store = ["object-store/hdfs-object-store"]
 
 [lints]

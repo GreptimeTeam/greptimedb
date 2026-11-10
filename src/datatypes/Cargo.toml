@@ -6,6 +6,7 @@ license.workspace = true
 
 [features]
 default = []
+enterprise = []
 test = []
 
 [lints]

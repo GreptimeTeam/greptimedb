@@ -31,6 +31,7 @@ excludes = [
     # Keep this list in sync with that file's `includes`; enforced by
     # `make check-enterprise-license`.
     # enterprise:start
+    "src/datatypes/src/schema/sketch.rs",
     "src/common/meta/src/rpc/ddl/trigger.rs",
     "src/operator/src/expr_helper/trigger.rs",
     "src/sql/src/statements/alter/trigger.rs",
