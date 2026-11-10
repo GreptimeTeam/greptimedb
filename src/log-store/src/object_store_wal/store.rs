@@ -851,6 +851,19 @@ impl ObjectStoreLogStore {
 impl LogStore for ObjectStoreLogStore {
     type Error = Error;
 
+    fn flush_candidates(&self) -> Vec<RegionId> {
+        // A soft threshold: closed regions and recovery retention can still
+        // pin objects. The engine decides which candidates it can flush.
+        const FLUSH_OBJECT_THRESHOLD: usize = 1_200;
+        if self.stopped.load(Ordering::Acquire) {
+            return Vec::new();
+        }
+        self.catalog
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .flush_candidates(FLUSH_OBJECT_THRESHOLD)
+    }
+
     /// Stops the store. Creates in flight run to completion and acknowledge
     /// their entries if they succeed; in the `enqueued` mode the remaining
     /// backlog is uploaded first, and a failure of that upload is returned.
