@@ -93,6 +93,29 @@ fn should_delete_file(
         .unwrap_or(false)
 }
 
+/// Whether an unknown (untracked) entry is withheld only by the young-object
+/// rule. Such objects must be revisited later; a dropped region depends on its
+/// meta tombstone to be discovered by a later GC pass at all.
+fn is_deferred_unknown_file(
+    is_in_manifest: bool,
+    is_in_tmp_ref: bool,
+    is_linger: bool,
+    is_eligible_for_delete: bool,
+    entry: &Entry,
+    unknown_file_may_linger_until: chrono::DateTime<chrono::Utc>,
+) -> bool {
+    let unknown = !is_in_manifest && !is_in_tmp_ref && !is_linger && !is_eligible_for_delete;
+    unknown
+        && !should_delete_file(
+            is_in_manifest,
+            is_in_tmp_ref,
+            is_linger,
+            is_eligible_for_delete,
+            entry,
+            unknown_file_may_linger_until,
+        )
+}
+
 /// Limit the amount of concurrent GC jobs on the datanode
 pub struct GcLimiter {
     pub gc_job_limit: Arc<tokio::sync::Semaphore>,
@@ -520,7 +543,7 @@ impl LocalGcWorker {
             .map(|file_ref| (file_ref.file_id, file_ref.index_version))
             .collect::<HashSet<_>>();
 
-        let mut deletable_files = self
+        let (mut deletable_files, deferred_unknown_files) = self
             .list_to_be_deleted_files(
                 region_id,
                 &in_manifest,
@@ -530,6 +553,7 @@ impl LocalGcWorker {
             )
             .await?;
 
+        let mut hook_deferred_files = false;
         if let Some(hook) = &self.hook {
             let candidates = deletable_files
                 .iter()
@@ -538,8 +562,10 @@ impl LocalGcWorker {
             let protected = hook
                 .protected_sst_files(&self.access_layer, &candidates)
                 .await?;
+            let before_filtering = deletable_files.len();
             deletable_files
                 .retain(|file| !protected.contains(&RegionFileId::new(region_id, file.file_id())));
+            hook_deferred_files = deletable_files.len() < before_filtering;
         }
         info!(
             "gc: for region{}{region_id}: In manifest file cnt: {}, Tmp ref file cnt: {}, recently removed files: {}, Unused files to delete count: {}",
@@ -640,9 +666,16 @@ impl LocalGcWorker {
                 .await?;
         }
 
+        // A dropped region is rediscovered only through its meta-srv tombstone.
+        // Young unknown objects and hook-protected candidates must keep that
+        // tombstone (needs_retry) until they are actually reclaimed; reporting
+        // success here would let the procedure drop the tombstone and leak them.
+        let dropped_files_deferred =
+            region.is_none() && (deferred_unknown_files || hook_deferred_files);
+
         Ok(RegionGcOutcome {
             removed_files: deletable_files,
-            needs_retry: extension_cleanup_failed || publication_changed,
+            needs_retry: extension_cleanup_failed || publication_changed || dropped_files_deferred,
         })
     }
 
@@ -946,8 +979,9 @@ impl LocalGcWorker {
         may_linger_files: &HashSet<&RemovedFile>,
         eligible_for_delete: &HashSet<&RemovedFile>,
         unknown_file_may_linger_until: chrono::DateTime<chrono::Utc>,
-    ) -> Vec<RemovedFile> {
+    ) -> (Vec<RemovedFile>, bool) {
         let mut ready_for_delete = vec![];
+        let mut deferred_unknown = false;
         // Every index-version reader needs the same Parquet file.
         let referenced_ssts: HashSet<_> = in_tmp_ref.iter().map(|(file_id, _)| *file_id).collect();
 
@@ -990,6 +1024,14 @@ impl LocalGcWorker {
                     let is_linger = may_linger_files.contains_key(&file_id);
                     let is_eligible_for_delete = eligible_for_delete.contains_key(&file_id);
 
+                    deferred_unknown |= is_deferred_unknown_file(
+                        is_in_manifest,
+                        is_in_tmp_ref,
+                        is_linger,
+                        is_eligible_for_delete,
+                        &entry,
+                        unknown_file_may_linger_until,
+                    );
                     should_delete_file(
                         is_in_manifest,
                         is_in_tmp_ref,
@@ -1011,6 +1053,14 @@ impl LocalGcWorker {
                         .map(|files| files.contains(&&RemovedFile::Index(file_id, version)))
                         .unwrap_or(false);
 
+                    deferred_unknown |= is_deferred_unknown_file(
+                        is_in_manifest,
+                        is_in_tmp_ref,
+                        is_linger,
+                        is_eligible_for_delete,
+                        &entry,
+                        unknown_file_may_linger_until,
+                    );
                     should_delete_file(
                         is_in_manifest,
                         is_in_tmp_ref,
@@ -1037,11 +1087,12 @@ impl LocalGcWorker {
                 ready_for_delete.push(removed_file);
             }
         }
-        ready_for_delete
+        (ready_for_delete, deferred_unknown)
     }
 
     /// List files to be deleted based on their presence in the manifest, temporary references, and recently removed files.
-    /// Returns a vector of `RemovedFile` that are eligible for deletion.
+    /// Returns the `RemovedFile`s that are eligible for deletion and whether any
+    /// unknown object was withheld by the young-object rule and needs a later pass.
     ///
     /// When `full_file_listing` is false, this method will only delete (subset of) files tracked in
     /// `recently_removed_files`, which significantly
@@ -1055,7 +1106,7 @@ impl LocalGcWorker {
         in_tmp_ref: &HashSet<(FileId, Option<IndexVersion>)>,
         recently_removed_files: BTreeMap<Timestamp, HashSet<RemovedFile>>,
         all_entries: Vec<Entry>,
-    ) -> Result<Vec<RemovedFile>> {
+    ) -> Result<(Vec<RemovedFile>, bool)> {
         let now = chrono::Utc::now();
         let may_linger_until = self
             .opt
@@ -1129,7 +1180,7 @@ impl LocalGcWorker {
                 files_to_delete.len()
             );
 
-            return Ok(files_to_delete);
+            return Ok((files_to_delete, false));
         }
 
         // Full file listing mode: get the full list of files from object store

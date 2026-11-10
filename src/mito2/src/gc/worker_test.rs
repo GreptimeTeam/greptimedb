@@ -213,7 +213,7 @@ async fn test_gc_keeps_sst_across_index_versions(
             .into_iter()
             .map(|f| (f.file_id, f.index_version))
             .collect();
-        let deleted: HashSet<_> = env
+        let (deleted, _deferred_unknown) = env
             .worker
             .list_to_be_deleted_files(
                 region_id,
@@ -223,9 +223,8 @@ async fn test_gc_keeps_sst_across_index_versions(
                 env.entries.clone(),
             )
             .await
-            .unwrap()
-            .into_iter()
-            .collect();
+            .unwrap();
+        let deleted: HashSet<_> = deleted.into_iter().collect();
         let expected = match released {
             0 => HashSet::new(),
             1 => HashSet::from([RemovedFile::Index(meta.file_id, released_version)]),
@@ -257,7 +256,7 @@ async fn test_gc_reference_protects_parquet_and_only_its_index(
     } else {
         (HashMap::new(), HashSet::from([(file_id, index_version)]))
     };
-    let deleted = env
+    let (deleted, _deferred_unknown) = env
         .worker
         .list_to_be_deleted_files(
             env.meta.region_id,
@@ -1419,6 +1418,189 @@ async fn test_on_region_gc_fires_for_dropped_region() {
         hook.last_is_region_dropped.load(Ordering::Relaxed),
         "a dropped region's GC pass must report is_region_dropped=true"
     );
+}
+
+/// Protects every candidate it is asked about; used to exercise deferrals on
+/// the dropped-region reclamation path.
+#[derive(Debug)]
+struct ProtectAllHook;
+
+#[async_trait]
+impl RegionHook for ProtectAllHook {
+    async fn protected_sst_files(
+        &self,
+        _access: &crate::access_layer::AccessLayer,
+        files: &[crate::sst::file::RegionFileId],
+    ) -> crate::error::Result<HashSet<crate::sst::file::RegionFileId>> {
+        Ok(files.iter().copied().collect())
+    }
+}
+
+/// Shared setup: create a region with one flushed SST, then hand its access
+/// layer to a dropped-region GC worker (region absent) built from `config` and
+/// `hook`. Returns the worker and the region's SST/index object paths.
+async fn dropped_region_gc_env(
+    config: GcConfig,
+    hook: Option<RegionHookRef>,
+) -> (TestEnv, MitoEngine, LocalGcWorker, RegionId, Vec<String>) {
+    let mut env = TestEnv::new().await;
+    let engine = env
+        .create_engine(MitoConfig {
+            schedule_compaction_after_edit: false,
+            gc: config,
+            ..Default::default()
+        })
+        .await;
+    let region_id = RegionId::new(3, 1);
+    env.get_schema_metadata_manager()
+        .register_region_table_info(
+            region_id.table_id(),
+            "test_table",
+            "test_catalog",
+            "test_schema",
+            None,
+            env.get_kv_backend(),
+        )
+        .await;
+    let request = CreateRequestBuilder::new().build();
+    engine
+        .handle_request(region_id, RegionRequest::Create(request.clone()))
+        .await
+        .unwrap();
+    put_rows(
+        &engine,
+        region_id,
+        Rows {
+            schema: rows_schema(&request),
+            rows: build_rows(0, 3),
+        },
+    )
+    .await;
+    flush_region(&engine, region_id, None).await;
+
+    let region = engine.get_region(region_id).unwrap();
+    let access_layer = region.access_layer.clone();
+    let manifest = region.manifest_ctx.manifest().await;
+    let version = manifest.manifest_version;
+    let store = access_layer.object_store();
+    let mut paths = Vec::new();
+    for meta in manifest.files.values() {
+        for path in [
+            location::sst_file_path(
+                access_layer.table_dir(),
+                crate::sst::file::RegionFileId::new(meta.region_id, meta.file_id),
+                access_layer.path_type(),
+            ),
+            location::index_file_path(
+                access_layer.table_dir(),
+                meta.index_id(),
+                access_layer.path_type(),
+            ),
+        ] {
+            if store.exists(&path).await.unwrap() {
+                paths.push(path);
+            }
+        }
+    }
+    assert!(!paths.is_empty(), "the flushed SST objects must be listed");
+    let file_ref_manifest = FileRefsManifest {
+        file_refs: Default::default(),
+        manifest_version: [(region_id, version)].into(),
+        cross_region_refs: HashMap::new(),
+    };
+    let worker = LocalGcWorker::try_new(
+        access_layer,
+        Some(engine.cache_manager()),
+        BTreeMap::from([(region_id, None)]),
+        engine.mito_config().gc.clone(),
+        file_ref_manifest,
+        &engine.gc_limiter(),
+        true,
+        hook,
+    )
+    .await
+    .unwrap();
+    // Keep the env (and its data-home TempDir) alive for the caller: dropping
+    // it removes the on-disk objects that the dropped-region pass must list.
+    (env, engine, worker, region_id, paths)
+}
+
+/// A dropped region's young unknown objects are deferred by
+/// `unknown_file_lingering_time`; the pass must report `needs_retry` so the
+/// meta tombstone survives and a later pass can reclaim them.
+#[tokio::test]
+async fn test_dropped_region_young_unknown_files_need_retry() {
+    init_default_ut_logging();
+    let (_env, _engine, worker, region_id, paths) = dropped_region_gc_env(
+        GcConfig {
+            enable: true,
+            ..Default::default()
+        },
+        None,
+    )
+    .await;
+
+    let outcome = worker
+        .do_region_gc(region_id, None, &HashSet::new())
+        .await
+        .unwrap();
+
+    assert!(outcome.removed_files.is_empty());
+    assert!(
+        outcome.needs_retry,
+        "deferred young unknown objects must keep the dropped-region tombstone"
+    );
+    let store = worker.access_layer.object_store();
+    for path in &paths {
+        assert!(store.exists(path).await.unwrap(), "{path} must survive");
+    }
+}
+
+/// Hook-protected candidates on a dropped region must also keep the tombstone;
+/// once nothing defers the pass any longer the report clears so the procedure
+/// can drop the tombstone.
+#[tokio::test]
+async fn test_dropped_region_hook_deferral_needs_retry_until_reclaimed() {
+    init_default_ut_logging();
+    let config = GcConfig {
+        enable: true,
+        lingering_time: None,
+        unknown_file_lingering_time: std::time::Duration::ZERO,
+        ..Default::default()
+    };
+    let (_env, _engine, worker, region_id, paths) =
+        dropped_region_gc_env(config.clone(), Some(Arc::new(ProtectAllHook))).await;
+
+    let store = worker.access_layer.object_store();
+    let protected = worker
+        .do_region_gc(region_id, None, &HashSet::new())
+        .await
+        .unwrap();
+    assert!(protected.removed_files.is_empty());
+    assert!(
+        protected.needs_retry,
+        "hook-deferred candidates must keep the dropped-region tombstone"
+    );
+    for path in &paths {
+        assert!(store.exists(path).await.unwrap(), "{path} must survive");
+    }
+
+    // Nothing defers any more: objects are old enough and no hook retains them,
+    // so this pass reclaims them and clears the retry flag.
+    let (_env, _engine, worker, region_id, paths) = dropped_region_gc_env(config, None).await;
+    let store = worker.access_layer.object_store();
+    let reclaimed = worker
+        .do_region_gc(region_id, None, &HashSet::new())
+        .await
+        .unwrap();
+    assert!(
+        !reclaimed.needs_retry,
+        "nothing defers any more, so the tombstone can be dropped"
+    );
+    assert!(!reclaimed.removed_files.is_empty());
+    for path in &paths {
+        assert!(!store.exists(path).await.unwrap(), "{path} must be gone");
+    }
 }
 
 /// `on_region_gc` **fires** on a full-listing pass even when mito itself deleted
