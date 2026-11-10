@@ -119,7 +119,10 @@ Tests live next to the code as `*_test.rs` (e.g. `src/mito2/src/engine/flush_tes
   to recover; the flushed entry id never prunes them. Opening a region replays its
   WAL after `RegionManifest::wal_replay_start`, and WAL releases stay below this
   node's tails (`cap_wal_release`). Handoff floors are dropped once the flushed
-  entry id reaches them, in `RegionManifestBuilder::try_build`.
+  entry id reaches them, in `RegionManifestBuilder::try_build`. While a region has
+  pending tails, scans and the operations that call
+  `Version::ensure_no_pending_tails` are rejected, and compaction and
+  full-listing GC skip it. Check before changing any region state.
 - Lock ordering: take the manifest lock before updating `version_control`; the
   reverse deadlocks against concurrent flush/compaction.
 - All region I/O runs on tokio workers; never `block_on` inside a worker.

@@ -365,6 +365,13 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             }
         };
 
+        if request.reason == Some(RegionFlushReason::Repartition)
+            && let Err(e) = region.version().ensure_no_pending_tails()
+        {
+            sender.send(Err(e));
+            return;
+        }
+
         // `update_topic_latest_entry_id` updates `topic_latest_entry_id` when memtables are empty.
         // But the flush is skipped if memtables are empty. Thus should update the `topic_latest_entry_id`
         // when handling flush request instead of in `schedule_flush` or `flush_finished`.

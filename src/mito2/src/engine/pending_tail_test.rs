@@ -12,15 +12,29 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use api::v1::Rows;
+use api::v1::region::StrictWindow;
+use api::v1::region::compact_request::Options;
+use api::v1::{Rows, SemanticType};
+use common_error::ext::{BoxedError, ErrorExt, RetryHint};
+use common_error::status_code::StatusCode;
+use common_time::Timestamp;
+use datatypes::prelude::ConcreteDataType;
+use datatypes::schema::{ColumnDefaultConstraint, ColumnSchema};
 use rstest::rstest;
 use store_api::logstore::provider::RaftEngineProvider;
+use store_api::metadata::ColumnMetadata;
 use store_api::region_engine::RegionEngine;
-use store_api::region_request::{RegionCreateRequest, RegionDropRequest, RegionRequest};
-use store_api::storage::RegionId;
+use store_api::region_request::{
+    AddColumn, AlterKind, EnterStagingRequest, RegionAlterRequest, RegionCloseRequest,
+    RegionCompactRequest, RegionCreateRequest, RegionDropRequest, RegionFlushReason,
+    RegionFlushRequest, RegionRequest, RegionTruncateRequest, SetRegionOption,
+    StagingPartitionDirective,
+};
+use store_api::storage::{RegionId, ScanRequest};
 
 use crate::config::MitoConfig;
 use crate::engine::MitoEngine;
+use crate::error::Error;
 use crate::manifest::action::{
     HandoffFloor, PendingTail, RegionEdit, RegionMetaAction, RegionMetaActionList, UptoKind,
     WalRecoveryEdit,
@@ -34,7 +48,7 @@ use crate::wal::EntryId;
 
 const NODE_ID: u64 = 1;
 
-fn tail(node_id: u64, after: EntryId, upto: EntryId) -> PendingTail {
+pub(crate) fn tail(node_id: u64, after: EntryId, upto: EntryId) -> PendingTail {
     PendingTail {
         node_id,
         after,
@@ -65,10 +79,9 @@ async fn create_region_with_entries(
     request
 }
 
-/// Commits `wal_recovery` to the manifest of the region and applies it to its version.
-async fn set_wal_recovery(engine: &MitoEngine, region_id: RegionId, wal_recovery: WalRecoveryEdit) {
-    let region = engine.get_region(region_id).unwrap();
-    let edit = RegionEdit {
+/// Returns an edit that only replaces the pending tails.
+pub(crate) fn pending_tails_edit(pending_tails: Vec<PendingTail>) -> RegionEdit {
+    RegionEdit {
         files_to_add: vec![],
         files_to_remove: vec![],
         timestamp_ms: None,
@@ -76,8 +89,16 @@ async fn set_wal_recovery(engine: &MitoEngine, region_id: RegionId, wal_recovery
         flushed_entry_id: None,
         flushed_sequence: None,
         committed_sequence: None,
-        wal_recovery,
-    };
+        wal_recovery: WalRecoveryEdit {
+            pending_tails: Some(pending_tails),
+            handoff_floor: None,
+        },
+    }
+}
+
+/// Commits `edit` to the manifest of the region and applies it to its version.
+async fn commit_edit(engine: &MitoEngine, region_id: RegionId, edit: RegionEdit) {
+    let region = engine.get_region(region_id).unwrap();
     region
         .manifest_ctx
         .update_manifest(
@@ -92,12 +113,12 @@ async fn set_wal_recovery(engine: &MitoEngine, region_id: RegionId, wal_recovery
         .apply_edit(Some(edit), &[], region.file_purger.clone());
 }
 
-async fn set_pending_tails(engine: &MitoEngine, region_id: RegionId, tails: Vec<PendingTail>) {
-    let wal_recovery = WalRecoveryEdit {
-        pending_tails: Some(tails),
-        handoff_floor: None,
-    };
-    set_wal_recovery(engine, region_id, wal_recovery).await;
+pub(crate) async fn set_pending_tails(
+    engine: &MitoEngine,
+    region_id: RegionId,
+    pending_tails: Vec<PendingTail>,
+) {
+    commit_edit(engine, region_id, pending_tails_edit(pending_tails)).await;
 }
 
 async fn reopen(engine: &MitoEngine, region_id: RegionId, request: RegionCreateRequest) {
@@ -126,14 +147,12 @@ async fn test_open_replays_wal_after_own_tails_and_floor(
     let engine = env.create_engine(MitoConfig::default()).await;
     let region_id = RegionId::new(1, 1);
     let request = create_region_with_entries(&engine, region_id, 3).await;
-    let wal_recovery = WalRecoveryEdit {
-        pending_tails: Some(pending_tails),
-        handoff_floor: floor_node_id.map(|node_id| HandoffFloor {
-            node_id,
-            entry_id: 2,
-        }),
-    };
-    set_wal_recovery(&engine, region_id, wal_recovery).await;
+    let mut edit = pending_tails_edit(pending_tails);
+    edit.wal_recovery.handoff_floor = floor_node_id.map(|node_id| HandoffFloor {
+        node_id,
+        entry_id: 2,
+    });
+    commit_edit(&engine, region_id, edit).await;
 
     reopen(&engine, region_id, request).await;
 
@@ -209,4 +228,180 @@ async fn test_drop_releases_wal_with_pending_tails() {
         .unwrap();
 
     assert_eq!((None, None), wal_span(&env, region_id));
+}
+
+/// Creates a region with rows in WAL entries `1..=num_entries` and one pending tail.
+async fn region_with_pending_tails(num_entries: usize) -> (TestEnv, MitoEngine, RegionId) {
+    let mut env = TestEnv::new().await.with_node_id(NODE_ID);
+    let engine = env.create_engine(MitoConfig::default()).await;
+    let region_id = RegionId::new(1, 1);
+    create_region_with_entries(&engine, region_id, num_entries).await;
+    set_pending_tails(&engine, region_id, vec![tail(NODE_ID, 0, 1)]).await;
+    (env, engine, region_id)
+}
+
+fn assert_pending_tails_error(err: &BoxedError) {
+    let err = err.as_any().downcast_ref::<Error>();
+    assert!(
+        matches!(err, Some(Error::RegionPendingTails { .. })),
+        "{err:?}"
+    );
+}
+
+fn add_field(default_constraint: Option<ColumnDefaultConstraint>) -> AlterKind {
+    let column_schema = ColumnSchema::new("field_1", ConcreteDataType::float64_datatype(), true)
+        .with_default_constraint(default_constraint)
+        .unwrap();
+    AlterKind::AddColumns {
+        columns: vec![AddColumn {
+            column_metadata: ColumnMetadata {
+                column_schema,
+                semantic_type: SemanticType::Field,
+                column_id: 10,
+            },
+            location: None,
+        }],
+    }
+}
+
+#[tokio::test]
+async fn test_scan_rejects_region_with_pending_tails() {
+    let (_env, engine, region_id) = region_with_pending_tails(1).await;
+
+    let Err(err) = engine.scanner(region_id, ScanRequest::default()).await else {
+        panic!("scan succeeded with pending tails");
+    };
+
+    assert!(matches!(err, Error::RegionPendingTails { .. }), "{err:?}");
+    assert_eq!(StatusCode::RegionNotReady, err.status_code());
+    assert_eq!(RetryHint::Retryable, err.retry_hint());
+}
+
+#[tokio::test]
+async fn test_memtable_and_sst_stats_reject_region_with_pending_tails() {
+    let (_env, engine, region_id) = region_with_pending_tails(1).await;
+
+    let result = engine.find_memtable_and_sst_stats(region_id);
+
+    assert!(matches!(result, Err(Error::RegionPendingTails { .. })));
+}
+
+#[tokio::test]
+async fn test_manual_compaction_skips_region_with_pending_tails() {
+    let (_env, engine, region_id) = region_with_pending_tails(1).await;
+    flush_region(&engine, region_id, None).await;
+    let rows = Rows {
+        schema: rows_schema(&CreateRequestBuilder::new().build()),
+        rows: build_rows(1, 2),
+    };
+    put_rows(&engine, region_id, rows).await;
+    flush_region(&engine, region_id, None).await;
+
+    let request = RegionCompactRequest {
+        options: Options::StrictWindow(StrictWindow {
+            window_seconds: 3600,
+        }),
+        ..Default::default()
+    };
+    engine
+        .handle_request(region_id, RegionRequest::Compact(request))
+        .await
+        .unwrap();
+
+    let region = engine.get_region(region_id).unwrap();
+    assert_eq!(2, region.version().ssts.owned_num_files(region_id));
+}
+
+#[rstest]
+#[case::all(RegionTruncateRequest::All)]
+#[case::unflushed(RegionTruncateRequest::Unflushed)]
+#[case::by_time_ranges(RegionTruncateRequest::ByTimeRanges {
+    time_ranges: vec![(Timestamp::new_millisecond(0), Timestamp::new_millisecond(1000))],
+})]
+#[tokio::test]
+async fn test_truncate_rejects_region_with_pending_tails(#[case] request: RegionTruncateRequest) {
+    let (_env, engine, region_id) = region_with_pending_tails(1).await;
+
+    let err = engine
+        .handle_request(region_id, RegionRequest::Truncate(request))
+        .await
+        .unwrap_err();
+
+    assert_pending_tails_error(&err);
+    let region = engine.get_region(region_id).unwrap();
+    assert_eq!(1, region.version().memtables.num_rows());
+}
+
+#[rstest]
+#[case::nullable_column(add_field(None), true)]
+#[case::region_options(AlterKind::SetRegionOptions {
+    options: vec![SetRegionOption::AppendMode(true)],
+}, true)]
+#[case::default_null_column(add_field(Some(ColumnDefaultConstraint::null_value())), false)]
+#[case::drop_column(AlterKind::DropColumns {
+    names: vec!["field_0".to_string()],
+}, false)]
+#[tokio::test]
+async fn test_alter_with_pending_tails(#[case] kind: AlterKind, #[case] allowed: bool) {
+    let (_env, engine, region_id) = region_with_pending_tails(1).await;
+    let metadata = engine.get_region(region_id).unwrap().metadata();
+
+    let result = engine
+        .handle_request(region_id, RegionRequest::Alter(RegionAlterRequest { kind }))
+        .await;
+
+    if allowed {
+        result.unwrap();
+    } else {
+        assert_pending_tails_error(&result.unwrap_err());
+        assert_eq!(metadata, engine.get_region(region_id).unwrap().metadata());
+    }
+}
+
+#[tokio::test]
+async fn test_enter_staging_rejects_region_with_pending_tails() {
+    let (_env, engine, region_id) = region_with_pending_tails(1).await;
+
+    let request = EnterStagingRequest {
+        partition_directive: StagingPartitionDirective::RejectAllWrites,
+    };
+    let err = engine
+        .handle_request(region_id, RegionRequest::EnterStaging(request))
+        .await
+        .unwrap_err();
+
+    assert_pending_tails_error(&err);
+    assert!(!engine.get_region(region_id).unwrap().is_staging());
+}
+
+#[tokio::test]
+async fn test_repartition_flush_rejects_region_with_pending_tails() {
+    let (_env, engine, region_id) = region_with_pending_tails(0).await;
+
+    let request = RegionFlushRequest {
+        reason: Some(RegionFlushReason::Repartition),
+        ..Default::default()
+    };
+    let err = engine
+        .handle_request(region_id, RegionRequest::Flush(request))
+        .await
+        .unwrap_err();
+
+    assert_pending_tails_error(&err);
+}
+
+#[tokio::test]
+async fn test_close_with_flush_rejects_region_with_pending_tails() {
+    let (_env, engine, region_id) = region_with_pending_tails(1).await;
+
+    let request = RegionCloseRequest {
+        flush_on_close: true,
+    };
+    let err = engine
+        .handle_request(region_id, RegionRequest::Close(request))
+        .await
+        .unwrap_err();
+
+    assert_pending_tails_error(&err);
+    assert!(engine.get_region(region_id).is_some());
 }

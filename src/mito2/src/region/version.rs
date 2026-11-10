@@ -27,10 +27,11 @@ use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use common_telemetry::info;
+use snafu::ensure;
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::{RegionId, SequenceNumber};
 
-use crate::error::Result;
+use crate::error::{RegionPendingTailsSnafu, Result};
 use crate::manifest::action::{PendingTail, RegionEdit, TruncateKind};
 use crate::memtable::time_partition::TimePartitions;
 use crate::memtable::version::{MemtableVersion, MemtableVersionRef};
@@ -401,6 +402,19 @@ pub(crate) struct Version {
     pub(crate) options: RegionOptions,
     /// WAL ranges the region still has to recover.
     pub(crate) pending_tails: Vec<PendingTail>,
+}
+
+impl Version {
+    /// Returns an error if the region still has WAL tails to recover.
+    pub(crate) fn ensure_no_pending_tails(&self) -> Result<()> {
+        ensure!(
+            self.pending_tails.is_empty(),
+            RegionPendingTailsSnafu {
+                region_id: self.metadata.region_id,
+            }
+        );
+        Ok(())
+    }
 }
 
 pub(crate) type VersionRef = Arc<Version>;

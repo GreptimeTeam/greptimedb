@@ -176,6 +176,12 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             sender.send(Ok(0));
             return;
         }
+        if !is_allowed_with_pending_tails(&request.kind)
+            && let Err(e) = version.ensure_no_pending_tails()
+        {
+            sender.send(Err(e));
+            return;
+        }
 
         // Checks whether we can alter the region directly.
         if !version.memtables.is_empty() {
@@ -422,6 +428,19 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             // sst_format, or max_row_group_row_count).
             Ok(Some(candidate))
         }
+    }
+}
+
+/// Returns true if `kind` only changes region options or only adds nullable columns
+/// without a default value, which rows replayed from a pending tail can lack.
+fn is_allowed_with_pending_tails(kind: &AlterKind) -> bool {
+    match kind {
+        AlterKind::AddColumns { columns } => columns.iter().all(|column| {
+            let schema = &column.column_metadata.column_schema;
+            schema.is_nullable() && schema.default_constraint().is_none()
+        }),
+        AlterKind::SetRegionOptions { .. } | AlterKind::UnsetRegionOptions { .. } => true,
+        _ => false,
     }
 }
 

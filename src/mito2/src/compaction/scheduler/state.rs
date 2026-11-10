@@ -483,6 +483,16 @@ impl CompactionStatus {
         !self.pending_ddl_requests.is_empty() || self.executing_ddl.is_some()
     }
 
+    /// Compaction pauses while the region has WAL tails to recover.
+    pub(crate) fn has_pending_tails(&self) -> bool {
+        !self
+            .version_control
+            .current()
+            .version
+            .pending_tails
+            .is_empty()
+    }
+
     /// Ends the current cycle without losing region or DDL execution state.
     pub(crate) fn become_idle(&mut self) {
         self.active = ActiveCompaction::idle();

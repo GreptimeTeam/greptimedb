@@ -41,6 +41,7 @@ use crate::compaction::test_util::new_file_handle;
 use crate::compaction::twcs::PickClass;
 use crate::compaction::{CompactionOutput, find_dynamic_options};
 use crate::config::MitoConfig;
+use crate::engine::pending_tail_test::{pending_tails_edit, tail};
 use crate::error::InvalidSchedulerStateSnafu;
 use crate::manifest::manager::{RegionManifestManager, RegionManifestOptions};
 use crate::metrics::COMPACTION_MEMORY_REJECTED;
@@ -3663,6 +3664,43 @@ async fn test_compaction_tasks_linear_local_publication(#[case] reject_after_fir
         .expect("local compaction waiter did not finish")
         .unwrap();
     assert_eq!(result.is_err(), reject_after_first);
+    assert!(!scheduler.is_compacting(region_id));
+}
+
+#[tokio::test]
+async fn test_finishing_compaction_with_pending_tails_starts_nothing() {
+    let env = SchedulerEnv::new().await;
+    let (tx, _rx) = mpsc::channel(4);
+    let mut scheduler = env.mock_compaction_scheduler(tx);
+    let builder = VersionControlBuilder::new();
+    let version_control = Arc::new(builder.build());
+    let region_id = builder.region_id();
+    let manifest_ctx = env
+        .mock_manifest_context(version_control.current().version.metadata.clone())
+        .await;
+    let (schema_metadata_manager, _kv_backend) = mock_schema_metadata_manager();
+    let (waiter_tx, mut waiter_rx) = oneshot::channel();
+    let mut status =
+        CompactionStatus::for_test(region_id, version_control.clone(), env.access_layer.clone());
+    status.start_local_task();
+    status.set_pending_request(PendingCompaction {
+        options: Options::Regular(Default::default()),
+        waiter: OptionOutputTx::from(waiter_tx),
+        max_parallelism: 1,
+        time_range: None,
+    });
+    scheduler.region_status.insert(region_id, status);
+    version_control.apply_edit(
+        Some(pending_tails_edit(vec![tail(1, 0, 1)])),
+        &[],
+        builder.file_purger(),
+    );
+
+    scheduler
+        .on_compaction_finished(region_id, &manifest_ctx, schema_metadata_manager, true)
+        .await;
+
+    assert_eq!(0, waiter_rx.try_recv().unwrap().unwrap());
     assert!(!scheduler.is_compacting(region_id));
 }
 
