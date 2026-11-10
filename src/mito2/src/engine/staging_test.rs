@@ -769,6 +769,7 @@ async fn test_staging_exit_success_with_manifests_with_format(flat_format: bool)
                     flushed_entry_id: None,
                     flushed_sequence: None,
                     committed_sequence: None,
+                    wal_recovery: Default::default(),
                 },
             )
             .await
@@ -907,6 +908,7 @@ async fn test_staging_exit_success_with_manifests_with_format(flat_format: bool)
                         flushed_entry_id: None,
                         flushed_sequence: None,
                         committed_sequence: None,
+                        wal_recovery: Default::default(),
                     })]),
                     true,
                 )
@@ -1147,6 +1149,7 @@ async fn test_staging_exit_conflict_partition_expr_change_and_change_with_format
                     flushed_entry_id: None,
                     flushed_sequence: None,
                     committed_sequence: None,
+                    wal_recovery: Default::default(),
                 }),
             ]),
             true,
@@ -1627,6 +1630,7 @@ fn edit_adding(file: FileMeta) -> RegionEdit {
         flushed_entry_id: None,
         flushed_sequence: None,
         committed_sequence: None,
+        wal_recovery: Default::default(),
     }
 }
 
@@ -1986,6 +1990,7 @@ async fn test_successful_staging_end_keeps_rows_of_rejected_flush() {
                 flushed_entry_id: None,
                 flushed_sequence: None,
                 committed_sequence: None,
+                wal_recovery: Default::default(),
             },
         )
         .await
@@ -2410,6 +2415,7 @@ async fn test_close_after_end_of_staging_is_queued_keeps_committed_result() {
                 flushed_entry_id: None,
                 flushed_sequence: None,
                 committed_sequence: None,
+                wal_recovery: Default::default(),
             },
         )
         .await

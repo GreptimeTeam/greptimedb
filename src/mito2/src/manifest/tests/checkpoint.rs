@@ -28,7 +28,8 @@ use strum::IntoEnumIterator;
 
 use crate::error::Error::{ChecksumMismatch, ManifestDeltaNotFound};
 use crate::manifest::action::{
-    RegionCheckpoint, RegionEdit, RegionMetaAction, RegionMetaActionList,
+    HandoffFloor, PendingTail, RegionCheckpoint, RegionEdit, RegionMetaAction,
+    RegionMetaActionList, UptoKind, WalRecoveryEdit,
 };
 use crate::manifest::manager::RegionManifestManager;
 use crate::manifest::storage::checkpoint::CheckpointMetadata;
@@ -185,6 +186,55 @@ async fn manager_with_checkpoint_distance_1() {
     assert_eq!(10, manager.manifest().manifest_version);
 }
 
+#[rstest::rstest]
+#[case::delta(0)]
+#[case::checkpoint(1)]
+#[tokio::test]
+async fn wal_recovery_records_survive_reopen(#[case] checkpoint_distance: u64) {
+    let (env, mut manager) =
+        build_manager(checkpoint_distance, CompressionType::Uncompressed).await;
+    let pending_tails = vec![PendingTail {
+        node_id: 1,
+        after: 10,
+        upto: 20,
+        upto_kind: UptoKind::Listed,
+    }];
+    let edit = RegionEdit {
+        files_to_add: vec![],
+        files_to_remove: vec![],
+        timestamp_ms: None,
+        compaction_time_window: None,
+        flushed_entry_id: None,
+        flushed_sequence: None,
+        committed_sequence: Some(1 << 40),
+        wal_recovery: WalRecoveryEdit {
+            pending_tails: Some(pending_tails.clone()),
+            handoff_floor: Some(HandoffFloor {
+                node_id: 1,
+                entry_id: 30,
+            }),
+        },
+    };
+    manager
+        .update(
+            RegionMetaActionList::with_action(RegionMetaAction::Edit(edit)),
+            false,
+        )
+        .await
+        .unwrap();
+    wait_for_manifest_checkpoint(&manager).await;
+    let checkpoint = manager.store().load_last_checkpoint().await.unwrap();
+    assert_eq!(checkpoint.is_some(), checkpoint_distance > 0);
+    manager.stop().await;
+
+    let manifest = reopen_manager(&env, checkpoint_distance, CompressionType::Uncompressed)
+        .await
+        .manifest();
+    assert_eq!(manifest.pending_tails, pending_tails);
+    assert_eq!(manifest.handoff_floors, [(1, 30)].into());
+    assert_eq!(manifest.committed_sequence, Some(1 << 40));
+}
+
 #[tokio::test]
 async fn test_corrupted_data_causing_checksum_error() {
     // Initialize manager
@@ -266,6 +316,7 @@ async fn checkpoint_with_different_compression_types() {
             flushed_entry_id: None,
             flushed_sequence: None,
             committed_sequence: None,
+            wal_recovery: Default::default(),
         })]);
         actions.push(action);
     }
@@ -332,6 +383,7 @@ fn generate_action_lists(num: usize) -> (Vec<FileId>, Vec<RegionMetaActionList>)
             flushed_entry_id: None,
             flushed_sequence: None,
             committed_sequence: None,
+            wal_recovery: Default::default(),
         })]);
         actions.push(action);
     }

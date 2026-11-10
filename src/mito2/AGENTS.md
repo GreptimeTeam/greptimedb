@@ -82,7 +82,8 @@ pending. DDL cancellation retains its existing scheduling fence and priority.
   follower replay. Keep it backward compatible. Compaction task state does not
   belong in the manifest; publication uses ordinary file edits after locked input
   checks. Shared SSTs require Enterprise capability. Compatibility fixtures:
-  `tests/compatibility/manifest/table_compaction/`.
+  `tests/compatibility/manifest/table_compaction/` and
+  `tests/compatibility/manifest/pending_tails/`.
 - **SST/Parquet layout** (`sst/`): readers must stay compatible with existing files.
 - **Series-index disk limit**: tasks estimate usage from entry sizes in open-region snapshots
   and defer new builds when the shared estimate is full. Cleanup still prunes obsolete
@@ -111,8 +112,14 @@ Tests live next to the code as `*_test.rs` (e.g. `src/mito2/src/engine/flush_tes
   depend on this. Do not change assignment lightly.
 - Manifest version is monotonic — never reset or skip it.
 - In regions whose writes require a lease and whose WAL is the object store WAL,
-  each manifest version has one fixed object name and only one writer can create
-  it (`manifest/storage.rs`).
+  each manifest version has one fixed object name, created conditionally. A late
+  create can succeed again once checkpoint cleanup frees the name, so a commit
+  checks its result (`ensure_version_not_checkpointed` in `manifest/storage.rs`).
+- Pending tails (`RegionManifest::pending_tails`) are WAL ranges a region still has
+  to recover; the flushed entry id never prunes them. Opening a region replays its
+  WAL after `RegionManifest::wal_replay_start`, and WAL releases stay below this
+  node's tails (`cap_wal_release`). Handoff floors are dropped once the flushed
+  entry id reaches them, in `RegionManifestBuilder::try_build`.
 - Lock ordering: take the manifest lock before updating `version_control`; the
   reverse deadlocks against concurrent flush/compaction.
 - All region I/O runs on tokio workers; never `block_on` inside a worker.

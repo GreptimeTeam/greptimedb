@@ -399,6 +399,7 @@ impl<S> RegionWorkerLoop<S> {
                     flushed_entry_id: None,
                     committed_sequence: None,
                     compaction_time_window: None,
+                    wal_recovery: Default::default(),
                 }),
                 &[],
                 region.file_purger.clone(),

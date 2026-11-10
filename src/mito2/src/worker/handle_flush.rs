@@ -27,6 +27,7 @@ use store_api::storage::RegionId;
 use crate::config::{IndexBuildMode, MitoConfig};
 use crate::error::{RegionBusySnafu, RegionNotFoundSnafu, Result};
 use crate::flush::{FlushReason, RegionFlushTask};
+use crate::manifest::action::cap_wal_release;
 use crate::region::version::VersionRef;
 use crate::region::{MitoRegion, MitoRegionRef};
 use crate::request::{BuildIndexRequest, FlushFailed, FlushFinished, OnFailure, OptionOutputTx};
@@ -484,13 +485,18 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         self.update_topic_latest_entry_id(&region);
 
         // Delete wal.
+        let obsolete_entry_id = cap_wal_release(
+            &region.version().pending_tails,
+            self.file_ref_manager.node_id(),
+            request.flushed_entry_id,
+        );
         info!(
             "Region {} flush finished, tries to bump wal to {}",
-            region_id, request.flushed_entry_id
+            region_id, obsolete_entry_id
         );
         if let Err(e) = self
             .wal
-            .obsolete(region_id, request.flushed_entry_id, &region.provider)
+            .obsolete(region_id, obsolete_entry_id, &region.provider)
             .await
         {
             error!(e; "Failed to write wal, region: {}", region_id);

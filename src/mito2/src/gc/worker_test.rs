@@ -319,6 +319,7 @@ async fn test_gc_reclaims_obsolete_index_after_readers_and_linger_release(
                     flushed_entry_id: None,
                     flushed_sequence: None,
                     committed_sequence: None,
+                    wal_recovery: Default::default(),
                 })),
                 false,
             )

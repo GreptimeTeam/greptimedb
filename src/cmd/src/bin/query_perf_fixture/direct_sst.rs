@@ -512,6 +512,8 @@ pub(super) async fn run_direct_sst(args: DirectArgs) {
         compaction_time_window: None,
         sst_format: format,
         append_mode: table.append_mode,
+        pending_tails: Default::default(),
+        handoff_floors: Default::default(),
     };
     let checkpoint = RegionCheckpoint {
         last_version: args.checkpoint_version,

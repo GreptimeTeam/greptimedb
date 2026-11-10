@@ -107,6 +107,7 @@ impl<S: LogStore> RegionCatchupTask<S> {
             wal_entry_reader,
             region_id,
             replay_from_entry_id,
+            replay_from_entry_id,
             &self.region.version_control,
             self.allow_stale_entries,
             on_region_opened,

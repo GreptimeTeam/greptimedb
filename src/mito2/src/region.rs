@@ -1509,6 +1509,7 @@ impl ManifestContext {
             flushed_entry_id: None,
             committed_sequence: None,
             compaction_time_window: None,
+            wal_recovery: Default::default(),
         };
         let action_list = RegionMetaActionList::with_action(RegionMetaAction::Edit(edit));
         let manifest_version = self.update_and_fire(manager, action_list, false).await?;
@@ -2526,6 +2527,7 @@ mod tests {
             flushed_entry_id: None,
             flushed_sequence: None,
             committed_sequence: None,
+            wal_recovery: Default::default(),
         }
     }
 
@@ -2567,6 +2569,7 @@ mod tests {
             flushed_entry_id: None,
             flushed_sequence: None,
             committed_sequence: None,
+            wal_recovery: Default::default(),
         }));
 
         region

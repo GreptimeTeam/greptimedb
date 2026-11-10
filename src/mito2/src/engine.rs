@@ -63,6 +63,8 @@ mod open_test;
 #[cfg(test)]
 mod parallel_test;
 #[cfg(test)]
+mod pending_tail_test;
+#[cfg(test)]
 mod projection_test;
 #[cfg(test)]
 mod prune_test;
@@ -159,7 +161,7 @@ use crate::error::{
 #[cfg(feature = "enterprise")]
 use crate::extension::BoxedExtensionRangeProviderFactory;
 use crate::gc::GcLimiterRef;
-use crate::manifest::action::RegionEdit;
+use crate::manifest::action::{RegionEdit, WalRecoveryEdit};
 use crate::memtable::MemtableStats;
 use crate::metrics::{
     HANDLE_REQUEST_ELAPSED, SCAN_MEMORY_EXHAUSTED_TOTAL, SCAN_MEMORY_USAGE_BYTES,
@@ -841,6 +843,7 @@ fn is_valid_region_edit(edit: &RegionEdit) -> bool {
                 ..
             }
         )
+        && edit.wal_recovery == WalRecoveryEdit::default()
 }
 
 /// Inner struct of [MitoEngine].
@@ -1889,6 +1892,7 @@ mod tests {
             flushed_entry_id: None,
             flushed_sequence: None,
             committed_sequence: None,
+            wal_recovery: Default::default(),
         };
         assert!(is_valid_region_edit(&edit));
 
@@ -1901,6 +1905,7 @@ mod tests {
             flushed_entry_id: None,
             flushed_sequence: None,
             committed_sequence: None,
+            wal_recovery: Default::default(),
         };
         assert!(!is_valid_region_edit(&edit));
 
@@ -1913,6 +1918,7 @@ mod tests {
             flushed_entry_id: None,
             flushed_sequence: None,
             committed_sequence: None,
+            wal_recovery: Default::default(),
         };
         assert!(is_valid_region_edit(&edit));
 
@@ -1925,6 +1931,7 @@ mod tests {
             flushed_entry_id: None,
             flushed_sequence: None,
             committed_sequence: None,
+            wal_recovery: Default::default(),
         };
         assert!(is_valid_region_edit(&edit));
 
@@ -1937,6 +1944,7 @@ mod tests {
             flushed_entry_id: None,
             flushed_sequence: None,
             committed_sequence: None,
+            wal_recovery: Default::default(),
         };
         assert!(!is_valid_region_edit(&edit));
         let edit = RegionEdit {
@@ -1947,6 +1955,7 @@ mod tests {
             flushed_entry_id: Some(1),
             flushed_sequence: None,
             committed_sequence: None,
+            wal_recovery: Default::default(),
         };
         assert!(!is_valid_region_edit(&edit));
         let edit = RegionEdit {
@@ -1957,6 +1966,7 @@ mod tests {
             flushed_entry_id: None,
             flushed_sequence: Some(1),
             committed_sequence: None,
+            wal_recovery: Default::default(),
         };
         assert!(!is_valid_region_edit(&edit));
     }
