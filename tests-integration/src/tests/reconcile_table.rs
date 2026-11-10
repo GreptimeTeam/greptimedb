@@ -590,11 +590,7 @@ async fn test_reconcile_table_preserves_column_order_and_pk_order() {
 
     // 6. SHOW CREATE TABLE q8 asserts columns ts, a, b and PRIMARY KEY (b, a)
     let output = execute_sql(&frontend, "SHOW CREATE TABLE q8").await;
-    let batches = match output.data {
-        OutputData::Stream(stream) => collect_batches(stream).await.unwrap(),
-        _ => unreachable!(),
-    };
-    let formatted = common_recordbatch::util::print_batches(&batches).unwrap();
+    let formatted = output.data.pretty_print().await;
     assert!(formatted.contains("`ts` TIMESTAMP(3) NOT NULL"));
     assert!(formatted.contains("`a` STRING NULL"));
     assert!(formatted.contains("`b` STRING NULL"));
