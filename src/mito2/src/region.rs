@@ -632,11 +632,21 @@ impl MitoRegion {
                 match current_state {
                     RegionRoleState::Leader(RegionLeaderState::Writable) => {
                         info!("Entering staging mode for region {}", self.region_id);
-                        self.set_staging(&mut manager).await?;
+                        // A new staging starts with no end of staging left unknown.
+                        let settled = self.manifest_ctx.settle_locked(&mut manager).await?;
+                        if let Err(e) = self.set_staging(&mut manager).await {
+                            drop(manager);
+                            if let Some(settled) = settled {
+                                settled.fire().await;
+                            }
+                            return Err(e);
+                        }
+                        settled
                     }
                     RegionRoleState::Leader(RegionLeaderState::Staging) => {
                         // Already in desired state - no-op
                         info!("Region {} already in staging mode", self.region_id);
+                        None
                     }
                     _ => {
                         return Err(RegionStateSnafu {
@@ -647,7 +657,6 @@ impl MitoRegion {
                         .build());
                     }
                 }
-                None
             }
 
             SettableRegionRoleState::Follower => {
@@ -1436,8 +1445,9 @@ impl ManifestContext {
 
     /// Leaves [RegionLeaderState::EndingStaging], entered at `ending_started_at`, after the end
     /// commit returned `result`. Returns the state the region leaves it for, which is in order:
-    /// - Follower if the commit conflicted with another writer or the Leader lease expired;
+    /// - Follower if the commit conflicted with another writer or failed on an expired lease;
     /// - Downgrading if a downgrade began meanwhile;
+    /// - Follower if the Leader lease has expired;
     /// - Writable if the commit succeeded;
     /// - Staging otherwise, keeping the staging partition info for a retry.
     pub(crate) fn finish_ending_staging<T>(
@@ -1739,14 +1749,16 @@ impl ManifestContext {
     /// Takes the manifest write lock. With `settle`, an end of staging whose result was unknown
     /// is settled first (a commit is refused while it is not), and the hook of one that landed
     /// fires with the lock released, so the caller checks its write against the settled manifest.
-    /// A staging region settles only when staging ends, which also leaves staging.
+    /// A region in staging, a staged edit included, settles only when staging ends, which also
+    /// leaves staging.
     pub(crate) async fn write_manager(
         &self,
         settle: bool,
     ) -> Result<RwLockWriteGuard<'_, RegionManifestManager>> {
         let mut manager = self.manifest_manager.write().await;
-        let settle =
-            settle && self.state.load() != RegionRoleState::Leader(RegionLeaderState::Staging);
+        let settle = settle
+            && self.state.load() != RegionRoleState::Leader(RegionLeaderState::Staging)
+            && self.staging_partition_info().is_none();
         if settle && let Some(settled) = self.settle_locked(&mut manager).await? {
             drop(manager);
             settled.fire().await;
