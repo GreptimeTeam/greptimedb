@@ -210,13 +210,16 @@ fn log_to_pipeline_value(
 
 /// Built-in columns of a direct OTLP log row, in row order.
 ///
-/// The v1 schema puts `service_name` before `scope_name` because auto-create
-/// orders the primary key by column order.
+/// The v1 schema makes `trace_id` a tag and puts `service_name` before
+/// `scope_name` because auto-create orders the primary key by column order.
 fn build_otlp_logs_identity_schema(v1_schema: bool) -> Result<Vec<ColumnSchema>> {
-    let trace_id_options = if v1_schema {
-        options_from_skipping(&SkippingIndexOptions::default())?
+    let (trace_id_semantic_type, trace_id_options) = if v1_schema {
+        (
+            SemanticType::Tag,
+            options_from_skipping(&SkippingIndexOptions::default())?,
+        )
     } else {
-        None
+        (SemanticType::Field, None)
     };
     let mut columns = vec![
         (
@@ -229,7 +232,7 @@ fn build_otlp_logs_identity_schema(v1_schema: bool) -> Result<Vec<ColumnSchema>>
         (
             "trace_id",
             ColumnDataType::String,
-            SemanticType::Field,
+            trace_id_semantic_type,
             None,
             trace_id_options,
         ),
@@ -1404,6 +1407,15 @@ mod tests {
             .unwrap()
     }
 
+    /// Tag columns in schema order; auto-create uses them as the primary key.
+    fn tag_columns(rows: &Rows) -> Vec<&str> {
+        rows.schema
+            .iter()
+            .filter(|schema| schema.semantic_type == SemanticType::Tag as i32)
+            .map(|schema| schema.column_name.as_str())
+            .collect()
+    }
+
     #[test]
     fn test_no_existing_table_preserves_direct_schema() {
         let rows = parse_with_select(request_with_log_attrs(vec![]), "", None).unwrap();
@@ -1472,20 +1484,20 @@ mod tests {
         );
         let rows = parse_with_select(request, "", None).unwrap();
 
-        // Auto-create orders the primary key by column order.
-        let tags: Vec<_> = rows
-            .schema
-            .iter()
-            .filter(|schema| schema.semantic_type == SemanticType::Tag as i32)
-            .map(|schema| schema.column_name.as_str())
-            .collect();
-        assert_eq!(tags, [SERVICE_NAME_COLUMN, "scope_name"]);
+        // Auto-create orders the primary key by column order, and `trace_id` is a
+        // tag in the v1 schema, so a fresh table keys on all three.
+        assert_eq!(
+            tag_columns(&rows),
+            ["trace_id", SERVICE_NAME_COLUMN, "scope_name"]
+        );
         let trace_id = &rows.schema[column_index(&rows, "trace_id")];
+        assert_eq!(trace_id.semantic_type, SemanticType::Tag as i32);
         assert!(
             trace_id
                 .options
                 .as_ref()
-                .is_some_and(|options| options.options.contains_key("skipping_index"))
+                .is_some_and(|options| options.options.contains_key("skipping_index")),
+            "trace_id keeps its skipping (Bloom) index option as a tag"
         );
 
         assert_eq!(
@@ -1503,6 +1515,36 @@ mod tests {
         // Empty event name and zero observed time mean "absent" in OTLP.
         assert_eq!(value_at(&rows, 1, EVENT_NAME_COLUMN), None);
         assert_eq!(value_at(&rows, 1, OBSERVED_TIMESTAMP_COLUMN), None);
+    }
+
+    #[test]
+    fn test_legacy_schema_keeps_trace_id_as_field() {
+        let request = request_with_resource_and_logs(
+            vec![kv(
+                KEY_SERVICE_NAME,
+                OtlpValue::StringValue("checkout".to_string()),
+            )],
+            vec![LogRecord {
+                time_unix_nano: 1_000,
+                ..Default::default()
+            }],
+        );
+        let rows = parse_export_logs_service_request_to_rows(
+            request,
+            Box::new(SelectInfo::from("".to_string())),
+            false,
+            None,
+            "test_logs",
+        )
+        .unwrap();
+
+        // Tables on the legacy schema keep `trace_id` as a field: only
+        // `scope_name` is a tag, so their primary key stays as it was.
+        assert_eq!(
+            rows.schema[column_index(&rows, "trace_id")].semantic_type,
+            SemanticType::Field as i32
+        );
+        assert_eq!(tag_columns(&rows), ["scope_name"]);
     }
 
     #[test]

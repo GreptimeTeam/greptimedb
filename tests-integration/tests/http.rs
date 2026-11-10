@@ -11317,7 +11317,7 @@ pub async fn test_otlp_logs(store_type: StorageType) {
             &client,
             "select column_name, constraint_name, ordinal_position from information_schema.key_column_usage \
              where table_name = 'opentelemetry_logs' order by constraint_name, ordinal_position, column_name;",
-            r#"[["service_name","PRIMARY",1],["scope_name","PRIMARY",2],["timestamp","TIME INDEX",1]]"#,
+            r#"[["trace_id","PRIMARY",1],["service_name","PRIMARY",2],["scope_name","PRIMARY",3],["timestamp","TIME INDEX",1]]"#,
         )
         .await;
         validate_data(
