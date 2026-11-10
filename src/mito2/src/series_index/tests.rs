@@ -1516,6 +1516,116 @@ async fn wait_for_series_index(
     }
 }
 
+/// Waits until the series-index worker finishes the builds triggered by earlier flushes and edits.
+///
+/// The trigger submits its builds to the series-index worker, so a manual build submitted
+/// afterwards is queued behind them and reports completion: awaiting it drains the automatic
+/// builds. `expected_buckets` documents the settled coverage a caller relies on, which then must
+/// cover every visible SST.
+///
+/// Both waits are bounded, so a stalled build fails the test instead of hanging it.
+pub(crate) async fn wait_for_series_index_builds(
+    engine: &MitoEngine,
+    region: &MitoRegionRef,
+    expected_buckets: Option<usize>,
+) {
+    use api::v1::region::build_index_request;
+    use store_api::region_request::RegionBuildIndexRequest;
+
+    let request = RegionRequest::BuildIndex(RegionBuildIndexRequest {
+        options: Some(build_index_request::Options::SeriesIndex(Default::default())),
+    });
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        engine.handle_request(region.region_id, request),
+    )
+    .await
+    .expect("the series-index worker should finish the automatic builds")
+    .unwrap();
+
+    let files = region
+        .version()
+        .ssts
+        .levels()
+        .iter()
+        .flat_map(|level| level.files())
+        .map(|file| file.meta_ref().clone())
+        .collect::<Vec<_>>();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let version = region.series_index_version();
+            let settled = expected_buckets
+                .is_none_or(|buckets| version.series_indexes.len() == buckets)
+                && files.iter().all(|file| {
+                    version
+                        .series_indexes
+                        .values()
+                        .any(|handle| handle.entry().covers_file(file, region.region_id))
+                });
+            if settled {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the settled series-index coverage should cover every visible SST");
+}
+
+/// Waits until the series-index worker has no queued or running build left for `region`.
+///
+/// The flush trigger submits its builds to the series-index worker, so a manual build submitted
+/// afterwards is served after them and only replies once they finished. A short settle poll then
+/// covers a build triggered by an edit that committed while the manual request was in flight.
+///
+/// Test-only: it exists so a test that needs the *uncovered* region it had before the flush
+/// trigger can first stop the automatic builds, and only then reset the published snapshot.
+pub(crate) async fn drain_series_index_builds(engine: &MitoEngine, region: &MitoRegionRef) {
+    use api::v1::region::build_index_request;
+    use store_api::region_request::RegionBuildIndexRequest;
+
+    let request = RegionRequest::BuildIndex(RegionBuildIndexRequest {
+        options: Some(build_index_request::Options::SeriesIndex(Default::default())),
+    });
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        engine.handle_request(region.region_id, request),
+    )
+    .await
+    .expect("the series-index worker should finish the triggered builds")
+    .unwrap();
+
+    // Two consecutive identical observations prove that no later build landed in between.
+    tokio::time::timeout(Duration::from_secs(5), async {
+        let mut previous: Option<(usize, usize)> = None;
+        loop {
+            let version = region.series_index_version();
+            let observed = (
+                Arc::as_ptr(&version) as usize,
+                version.series_indexes.len() + version.samples.len() + version.range_indexes.len(),
+            );
+            if previous == Some(observed) {
+                return;
+            }
+            previous = Some(observed);
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("no further series-index build should land after the drain");
+}
+
+/// Replaces the published series-index snapshot with an empty one.
+///
+/// Test-only: it discards the coverage the automatic flush trigger published, so a test keeps
+/// starting from the uncovered region it had before that trigger existed. The index files stay in
+/// the store (no handle is retired here), so a later build reuses or replaces them as usual.
+pub(crate) fn reset_published_series_index(region: &MitoRegionRef) {
+    region
+        .series_index_version_control
+        .publish(Arc::new(super::SeriesIndexVersion::default()));
+}
+
 /// Asserts the region's series-index catalog has been persisted to the local index store.
 async fn assert_series_catalog_published(env: &TestEnv, region_id: RegionId) {
     let path = env

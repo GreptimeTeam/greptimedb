@@ -1537,6 +1537,10 @@ async fn check_two_phase_series_scan(
         .await
         .unwrap();
     test_util::flush_region(&engine, region_id, None).await;
+    let region = engine.find_region(region_id).unwrap();
+    // The handcrafted snapshot below is published only after the last flush: the flush trigger
+    // would otherwise overwrite it with full coverage.
+    let mut handcrafted = None;
     if use_index || use_range_index {
         use datatypes::arrow::array::{BinaryArray, UInt8Array, UInt64Array};
 
@@ -1545,7 +1549,6 @@ async fn check_two_phase_series_scan(
             SeriesIndexWriterOptions, series_index_channel, series_index_path,
         };
 
-        let region = engine.find_region(region_id).unwrap();
         let store = region.series_index_store.clone().unwrap();
         let sequence = region.flushed_sequence();
         let entry = SeriesIndexEntry {
@@ -1631,9 +1634,7 @@ async fn check_two_phase_series_scan(
                 },
             );
         }
-        region
-            .series_index_version_control
-            .publish(Arc::new(index_version));
+        handcrafted = Some(Arc::new(index_version));
     }
     // A newer SST remains uncovered; the remaining writes stay in memory.
     engine
@@ -1641,6 +1642,16 @@ async fn check_two_phase_series_scan(
         .await
         .unwrap();
     test_util::flush_region(&engine, region_id, None).await;
+    // The flush above also triggers an automatic build, which covers the newer SST that this test
+    // requires to stay uncovered. Drain those builds, drop the published snapshot, and re-publish
+    // the handcrafted one. This is the last series-index write: the remaining rows stay in the
+    // memtable and the test flushes, edits, and compacts nothing afterwards, while periodic
+    // maintenance is far off, so no later build can replace it.
+    crate::series_index::tests::drain_series_index_builds(&engine, &region).await;
+    crate::series_index::tests::reset_published_series_index(&region);
+    if let Some(handcrafted) = handcrafted {
+        region.series_index_version_control.publish(handcrafted);
+    }
     engine
         .handle_request(
             region_id,

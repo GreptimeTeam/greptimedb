@@ -83,6 +83,12 @@ async fn fixture_with(experimental_series_scan_v2: bool) -> (TestEnv, MitoEngine
         Arc::new(metadata),
     )
     .await;
+    // Each fixture flush also triggers its own background series-index build, so the region would
+    // already publish coverage here. Drain those triggered builds and drop the published snapshot:
+    // every test below starts from the uncovered region it had before the flush trigger existed and
+    // decides for itself when (and over which SSTs) coverage exists.
+    crate::series_index::tests::drain_series_index_builds(&engine, &region).await;
+    crate::series_index::tests::reset_published_series_index(&region);
     (env, engine, region)
 }
 
@@ -559,6 +565,10 @@ async fn two_phase_raw_fallback_preserves_key_then_time_order() {
         write(&engine, &region, 0, 50_000 + offset, Some(1.0)).await;
     }
     flush_region(&engine, region.region_id, None).await;
+    // The flush triggers an automatic build. Drain it and drop the published coverage so the
+    // scan below still sees a region the native path cannot prepare.
+    crate::series_index::tests::drain_series_index_builds(&engine, &region).await;
+    crate::series_index::tests::reset_published_series_index(&region);
 
     let mut scanner = SeriesScan::new(
         scan_input(
@@ -2825,10 +2835,18 @@ fn file_id_at(region: &MitoRegionRef, start: i64) -> FileId {
 async fn native_preparation_serves_the_ready_subset() {
     let (_env, engine, region) = fixture().await;
     build(&engine, &region).await;
+    // The three older sources are covered by this snapshot; it is restored at the end.
+    let covered = region.series_index_version();
     // This SST is flushed after the build, so it carries no columnar artifact: the three older
     // sources are ready while this one is not.
     write(&engine, &region, 0, 3000, Some(4.0)).await;
     flush_region(&engine, region.region_id, None).await;
+    // The flush triggers an automatic build that would cover the new SST as well. Drain it, then
+    // re-publish the pre-flush snapshot as the last series-index write: no later flush, edit, or
+    // periodic maintenance pass runs in this test, so the older three sources stay ready while
+    // this one stays uncovered.
+    crate::series_index::tests::drain_series_index_builds(&engine, &region).await;
+    region.series_index_version_control.publish(covered);
     let (store, _reads) = recording_store(&region);
     let mut scan = scanner(&region, store);
     scan.prepare(
@@ -3086,6 +3104,10 @@ async fn grouped_samples_serve_rows_of_a_source_without_a_series_index() {
     // sources.
     write(&engine, &region, 0, 200_000, Some(2.0)).await;
     flush_region(&engine, region.region_id, None).await;
+    // This flush also triggers a build of its own partial day group in the background. Drain it,
+    // then rebuild from a clean snapshot so day zero keeps one grouped artifact.
+    build(&engine, &region).await;
+    region.series_index_version_control.publish(Arc::default());
     build(&engine, &region).await;
     let unindexed = file_id_at(&region, 200_000);
     let original = region.series_index_version();

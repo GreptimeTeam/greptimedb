@@ -35,7 +35,7 @@ use crate::series_index::catalog::{SeriesIndexEntry, load_version_control};
 use crate::series_index::format::{FormatWriter, SamplesFormat, SeriesFormats, SeriesIndexFormat};
 use crate::series_index::maintenance::reconcile_series_indexes;
 use crate::series_index::purger::series_index_channel;
-use crate::series_index::tests::prepare_region_with_config;
+use crate::series_index::tests::{prepare_region_with_config, wait_for_series_index_builds};
 use crate::test_util::TestEnv;
 
 #[derive(Debug, Default)]
@@ -121,6 +121,9 @@ async fn format_skeleton_build_reopen_and_retire() {
         },
     )
     .await;
+    // The flushes above trigger background builds. Let them settle before injecting a format, so
+    // a pending automatic pass cannot build the samples this test expects to build itself.
+    wait_for_series_index_builds(&engine, &region, None).await;
     let fake = Arc::new(FakeSamples::default());
     *region.series_index_version_control.formats.write().unwrap() = Arc::new(SeriesFormats {
         samples: Some(fake.clone()),
@@ -275,6 +278,9 @@ async fn format_index_rebuild_is_scoped_and_scans_fall_back_to_ssts() {
         &timestamps,
         MitoConfig {
             experimental_enable_series_index: true,
+            // The flush trigger builds indexes with the configured bucket width. Use the width
+            // this test reconciles with so the settled region starts from the same two buckets.
+            experimental_series_index_bucket_width: Duration::from_secs(100),
             experimental_series_scan_v2: true,
             experimental_series_index_maintenance_interval: Duration::from_secs(3600),
             min_compaction_interval: Duration::from_secs(3600),
@@ -282,6 +288,9 @@ async fn format_index_rebuild_is_scoped_and_scans_fall_back_to_ssts() {
         },
     )
     .await;
+    // The flushes above trigger background builds. Let them settle before injecting a format, so
+    // no automatic pass can consume the injected format and shrink this test's manual rebuild.
+    wait_for_series_index_builds(&engine, &region, Some(2)).await;
     *region.series_index_version_control.formats.write().unwrap() = Arc::new(SeriesFormats {
         index: Some(Arc::new(FakeIndex)),
         ..Default::default()
