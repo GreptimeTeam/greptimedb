@@ -47,13 +47,20 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         }
 
         // Memtables containing skip-WAL writes must be flushed before closing.
-        // Followers cannot flush; explicit flush-on-close and region WAL options
-        // retain their existing behavior.
+        // An explicit flush-on-close must report a non-flushable region instead of
+        // unloading its unpersisted data. Implicit skip-WAL flushing remains
+        // limited to flushable regions.
         let version = region.version();
         if (request.flush_on_close || region.skip_wal() || version.memtables.has_skip_wal_writes())
             && !version.memtables.is_empty()
-            && region.is_flushable()
+            && (request.flush_on_close || region.is_flushable())
         {
+            // A previous flush may still be running after the region lost its
+            // writable role. Reject this close before queuing behind that flush.
+            if let Err(error) = self.regions.flushable_region(region_id) {
+                sender.send(Err(error));
+                return;
+            }
             info!("Region {} has pending data, waiting for flush", region_id);
             if self.flush_scheduler.is_flush_requested(region_id) {
                 self.flush_scheduler
@@ -75,7 +82,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             return;
         }
 
-        // No close-time flush is required, or the region cannot flush.
+        // No close-time flush is required.
         self.remove_region(region_id).await;
         info!("Region {} closed, worker: {}", region_id, self.id);
         sender.send(Ok(0))

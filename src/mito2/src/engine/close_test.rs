@@ -14,12 +14,15 @@
 
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::time::Duration;
 
 use api::v1::Rows;
 use common_base::Plugins;
+use common_error::ext::{ErrorExt, RetryHint};
+use common_error::status_code::StatusCode;
 use common_recordbatch::RecordBatches;
-use store_api::region_engine::RegionEngine;
-use store_api::region_request::{RegionCloseRequest, RegionRequest};
+use store_api::region_engine::{RegionEngine, RegionRole};
+use store_api::region_request::{RegionCloseRequest, RegionFlushRequest, RegionRequest};
 use store_api::storage::{RegionId, ScanRequest};
 
 use crate::config::MitoConfig;
@@ -276,4 +279,110 @@ async fn test_engine_close_region_flush_on_close_while_flushing() {
         .unwrap();
     let batches = RecordBatches::try_collect(stream).await.unwrap();
     assert_eq!(6, batches.iter().map(|b| b.num_rows()).sum::<usize>());
+}
+
+#[tokio::test]
+async fn test_flush_on_close_rejects_unpersisted_follower() {
+    for (has_rows, flush_on_close, flushing) in [
+        (true, true, false),
+        (true, true, true),
+        (true, false, false),
+        (false, true, false),
+    ] {
+        let mut env = TestEnv::with_prefix("close-follower").await;
+        let listener = Arc::new(AlterFlushListener::default());
+        let engine = env
+            .create_engine_with(
+                MitoConfig::default(),
+                None,
+                if flushing {
+                    Some(listener.clone())
+                } else {
+                    None
+                },
+                None,
+            )
+            .await;
+        let region_id = RegionId::new(1, 1);
+        let request = CreateRequestBuilder::new().build();
+        engine
+            .handle_request(region_id, RegionRequest::Create(request.clone()))
+            .await
+            .unwrap();
+        if has_rows {
+            put_rows(
+                &engine,
+                region_id,
+                Rows {
+                    schema: rows_schema(&request),
+                    rows: build_rows(0, 3),
+                },
+            )
+            .await;
+        }
+        let flush_task = if flushing {
+            let engine = engine.clone();
+            let task = tokio::spawn(async move {
+                engine
+                    .handle_request(
+                        region_id,
+                        RegionRequest::Flush(RegionFlushRequest::default()),
+                    )
+                    .await
+            });
+            listener.wait_flush_begin().await;
+            Some(task)
+        } else {
+            None
+        };
+        engine
+            .set_region_role(region_id, RegionRole::Follower)
+            .unwrap();
+        // A non-flushable region rejects the close without waiting for a
+        // previously started flush, which remains parked until after this check.
+        let result = tokio::time::timeout(
+            Duration::from_secs(3),
+            engine.handle_request(
+                region_id,
+                RegionRequest::Close(RegionCloseRequest { flush_on_close }),
+            ),
+        )
+        .await
+        .expect("close must not wait for the parked flush");
+        if has_rows && flush_on_close {
+            let error = result.unwrap_err();
+            assert_eq!(error.status_code(), StatusCode::RegionNotReady);
+            assert_eq!(error.retry_hint(), RetryHint::Retryable);
+            assert!(engine.is_region_exists(region_id));
+            let batches = RecordBatches::try_collect(
+                engine
+                    .scan_to_stream(region_id, ScanRequest::default())
+                    .await
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+            assert_eq!(3, batches.iter().map(|b| b.num_rows()).sum::<usize>());
+            // A retry succeeds once the region can persist its memtables.
+            engine
+                .set_region_role(region_id, RegionRole::Leader)
+                .unwrap();
+            if let Some(task) = flush_task {
+                listener.wake_flush();
+                task.await.unwrap().unwrap();
+            }
+            engine
+                .handle_request(
+                    region_id,
+                    RegionRequest::Close(RegionCloseRequest {
+                        flush_on_close: true,
+                    }),
+                )
+                .await
+                .unwrap();
+        } else {
+            result.unwrap();
+        }
+        assert!(!engine.is_region_exists(region_id));
+    }
 }
