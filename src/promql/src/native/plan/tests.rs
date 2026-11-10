@@ -23,7 +23,8 @@ use datatypes::series::time::{EvalGrid, GridSpec};
 use super::{
     AggregateKind, AggregateStage, BoundAggregate, BoundInput, BoundInstant, BoundMap, BoundScalar,
     BoundVectorOp, BoundWindow, Grouping, InstantValue, MapOp, NativeExpr, NativeNode, NativeTree,
-    NativeType, duplicates_canonical_labels, fused_output_tags, reads_across_series,
+    NativeType, ParameterizedOp, duplicates_canonical_labels, fused_output_tags,
+    reads_across_series,
 };
 use crate::extension_plan::{FusedSeries, FusedSeriesBinding};
 use crate::info::InfoSelector;
@@ -811,6 +812,166 @@ fn a_binary_operation_broadcasts_a_scalar() {
         output: evaluated(Arc::new([]), Arc::clone(&shared)),
     };
     assert!(node.validate().is_ok());
+}
+
+/// A broadcast side carries no labels, so the labels a binary operation reports are the vector
+/// side's - whichever side the vector is written on.
+///
+/// Three kinds of constant can sit beside a vector and only one of them is typed as a scalar:
+/// `time()` answers a scalar ([`NativeExpr::EvalTime`]), `vector(1)` is a materialized one-field
+/// vector with no label set ([`NativeExpr::VectorOf`]), and `clamp_max(x, 1)` is a
+/// [`NativeExpr::ParameterizedMap`] whose parameter is a scalar. None of them names a label
+/// column, so a tree that reported one would declare a column no row fills; and a tree that
+/// dropped the vector side's labels instead would lose the identity every series of the answer is
+/// routed by.
+///
+/// `vector(1)` is the one of the three that a vector-vector match reads, because its value is a
+/// vector rather than a scalar: written on the left it is the one-to-one match's label source, so
+/// the answer carries the (empty) label set the match key names - and no label of the vector on
+/// the right. Either way nothing of `vector(1)` reaches the output as a label.
+///
+/// The same constants also decide nothing about a series' *identity*, which is the other half of
+/// what a node reports: a broadcast reaches each series of its vector side as it is, so whether two
+/// series can end under one label set is that side's answer. That half is read against a vector
+/// whose answer is `true` - a rewrite of a label its input already carries can fold two series into
+/// one - because a comparison against a vector that never aliases would pass for an implementation
+/// that always answered `false`.
+#[test]
+fn a_broadcast_side_contributes_no_labels() {
+    let shared = grid(0, 60_000, 4);
+    let source_tags = vec![vec!["host".to_string(), "zone".to_string()]];
+    let vector = || window_on(input(), None, Arc::clone(&shared));
+    let eval_time = || NativeNode {
+        expr: NativeExpr::EvalTime { date: None },
+        output: NativeType::Scalar(Arc::clone(&shared)),
+    };
+    let vector_of_one = || NativeNode {
+        expr: NativeExpr::VectorOf {
+            input: Box::new(scalar_on(1.0, Arc::clone(&shared))),
+        },
+        output: evaluated(fields(1), Arc::clone(&shared)),
+    };
+    // A vector whose answer can alias: the rewrite writes a label its input already carries, which
+    // is what lets two series end under one label set.
+    let aliasing = || {
+        map_over(rewritten(
+            window_on(input(), None, Arc::clone(&shared)),
+            "host",
+            "host",
+        ))
+    };
+    let clamp_max = |inner: NativeNode| {
+        let output = inner.output.clone();
+        NativeNode {
+            expr: NativeExpr::ParameterizedMap {
+                input: Box::new(inner),
+                op: ParameterizedOp::ClampMax,
+                parameters: vec![scalar_on(1.0, Arc::clone(&shared))],
+            },
+            output,
+        }
+    };
+    let binary = |left: NativeNode, right: NativeNode| NativeNode {
+        expr: NativeExpr::Binary {
+            left: Box::new(left),
+            right: Box::new(right),
+            matching: add(),
+        },
+        output: vector().output,
+    };
+    let tags = |node: &NativeNode| fused_output_tags(node, &source_tags);
+    let scan = vec!["host".to_string(), "zone".to_string()];
+
+    // `rate(x[5m]) + time()` and `time() + rate(x[5m])`: the evaluation time is a scalar, so the
+    // operation is a broadcast over the vector and reports exactly the vector's labels.
+    assert_eq!(
+        Some(scan.clone()),
+        tags(&vector()),
+        "the vector side reports the labels its scan carries"
+    );
+    assert_eq!(
+        Some(scan.clone()),
+        tags(&binary(vector(), eval_time())),
+        "`time()` contributes no label"
+    );
+    assert_eq!(
+        Some(scan.clone()),
+        tags(&binary(eval_time(), vector())),
+        "`time()` contributes no label with the vector on the right either"
+    );
+
+    // `vector(1)` answers one series without labels, so it adds none whichever side it is on.
+    assert_eq!(
+        Some(Vec::new()),
+        tags(&vector_of_one()),
+        "`vector(1)` reports no label set of its own"
+    );
+    assert_eq!(
+        Some(scan.clone()),
+        tags(&binary(vector(), vector_of_one())),
+        "`vector(1)` contributes no label with the vector on the left"
+    );
+    assert_eq!(
+        Some(Vec::new()),
+        tags(&binary(vector_of_one(), vector())),
+        "`vector(1)` on the left is the match key, and it names no label"
+    );
+
+    // `clamp_max(rate(x[5m]), 1)` reads a scalar parameter, which carries no labels: the node
+    // reports its input's labels, and so does a broadcast over it.
+    assert_eq!(
+        Some(scan.clone()),
+        tags(&clamp_max(vector())),
+        "a scalar parameter contributes no label"
+    );
+    assert_eq!(
+        Some(scan.clone()),
+        tags(&binary(clamp_max(vector()), eval_time())),
+        "a broadcast over a parameterized map keeps the map's input labels"
+    );
+    assert_eq!(
+        Some(scan.clone()),
+        tags(&binary(eval_time(), clamp_max(vector()))),
+        "the same with the constant written first"
+    );
+
+    // Ownership follows the vector side as well, and it is read against the aliasing vector: a
+    // broadcast reaches each series of its vector side as it is, so whether two series can end
+    // under one label set is that side's answer, not the constant's.
+    assert!(
+        duplicates_canonical_labels(&aliasing(), &source_tags),
+        "the fixture aliases: a rewrite of a label its input carries can fold two series into one"
+    );
+    assert_eq!(
+        duplicates_canonical_labels(&aliasing(), &source_tags),
+        duplicates_canonical_labels(&clamp_max(aliasing()), &source_tags),
+        "a scalar parameter carries no labels, so the map answers its input's identity"
+    );
+    for node in [
+        binary(aliasing(), eval_time()),
+        binary(eval_time(), aliasing()),
+        binary(clamp_max(aliasing()), eval_time()),
+        binary(eval_time(), clamp_max(aliasing())),
+    ] {
+        assert_eq!(
+            duplicates_canonical_labels(&aliasing(), &source_tags),
+            duplicates_canonical_labels(&node, &source_tags),
+            "a broadcast keeps the series identity of its vector side"
+        );
+    }
+    // `vector(1)` is the exception of the three: it is a vector, so a binary with it is a match,
+    // and the kernel files its rows by the label set a sample ends under and refuses two values of
+    // one field at one point. An alias below it therefore cannot reach the answer, whichever side
+    // the match reads it from.
+    for node in [
+        binary(aliasing(), vector_of_one()),
+        binary(vector_of_one(), aliasing()),
+    ] {
+        assert!(
+            !duplicates_canonical_labels(&node, &source_tags),
+            "a vector-vector match answers one series per label set, whatever aliases below it"
+        );
+    }
 }
 
 /// A scalar has no fields of its own, so a broadcast that declares a different count than the
