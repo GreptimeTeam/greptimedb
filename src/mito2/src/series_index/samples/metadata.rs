@@ -15,6 +15,7 @@
 //! Explicit sample framing and bounded two-level metadata pages.
 
 use crate::error::Result;
+use crate::series_index::identity::ExactSeriesKey;
 use crate::series_index::samples::codec::{self, Cursor, put_u32, put_u64};
 use crate::series_index::samples::{
     Manifest, MetricSeriesId, VERSION, invalid, require, unsupported, valid_rows,
@@ -203,7 +204,12 @@ pub(super) struct Column {
 }
 #[derive(Debug, Clone)]
 pub(super) struct Block {
-    pub id: MetricSeriesId,
+    /// Exact canonical sparse key of the series that owns every row in this block.
+    ///
+    /// `(table_id, tsid)` alone is a hash and cannot name the owner: a block that
+    /// recorded only it would hand its rows to whichever colliding series a reader
+    /// looked up first.
+    pub key: ExactSeriesKey,
     pub min: i64,
     pub max: i64,
     pub ordinal: u64,
@@ -211,9 +217,9 @@ pub(super) struct Block {
     pub columns: Vec<Column>,
 }
 /// The ordering boundary retained between pages, without their column descriptors.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub(crate) struct BlockOrder {
-    id: MetricSeriesId,
+    key: ExactSeriesKey,
     max: i64,
     ordinal: u64,
 }
@@ -221,26 +227,32 @@ pub(crate) struct BlockOrder {
 impl Block {
     pub(crate) fn order(&self) -> BlockOrder {
         BlockOrder {
-            id: self.id,
+            key: self.key.clone(),
             max: self.max,
             ordinal: self.ordinal,
         }
     }
 
+    /// The coarse bounds used for pruning. Exact ownership lives in `key`.
     pub fn bounds(&self) -> Bounds {
+        let id = self.key.id();
         Bounds {
-            first: self.id,
-            last: self.id,
+            first: id,
+            last: id,
             min: self.min,
             max: self.max,
         }
     }
     pub fn size(&self) -> usize {
-        44 + 44 * self.columns.len()
+        48 + 44 * self.columns.len() + self.key.bytes().len()
     }
     pub fn encode(&self, out: &mut Vec<u8>) {
-        put_u32(out, self.id.table_id);
-        put_u64(out, self.id.tsid);
+        let id = self.key.id();
+        let key = self.key.bytes();
+        put_u32(out, id.table_id);
+        put_u64(out, id.tsid);
+        put_u32(out, key.len() as u32);
+        out.extend_from_slice(key);
         put_u64(out, self.min as u64);
         put_u64(out, self.max as u64);
         put_u64(out, self.ordinal);
@@ -263,6 +275,15 @@ impl Block {
             table_id: c.u32()?,
             tsid: c.u64()?,
         };
+        let key_len = c.u32()? as usize;
+        let mut offsets = mito_codec::row_converter::SparseOffsetsCache::new();
+        let key = ExactSeriesKey::from_sparse_key(c.take(key_len)?, &mut offsets)?;
+        // A key that parses but claims another identifier is a malformed reference:
+        // ownership would silently point at the wrong series.
+        require(
+            key.id() == id,
+            "sample block series key disagrees with its identifier",
+        )?;
         let min = c.u64()? as i64;
         let max = c.u64()? as i64;
         let ordinal = c.u64()?;
@@ -327,7 +348,7 @@ impl Block {
             });
         }
         Ok(Self {
-            id,
+            key,
             min,
             max,
             ordinal,
@@ -335,9 +356,14 @@ impl Block {
             columns,
         })
     }
+    /// Checks this block against the previous one.
+    ///
+    /// Ordering and ownership are decided on the exact key. Two blocks that share one
+    /// `(table_id, tsid)` but differ in labels are different series: their timestamps
+    /// and ordinals may restart. Only the same exact series keeps the monotonic rules.
     pub fn follows(&self, previous: &BlockOrder, adjacent: bool) -> Result<()> {
-        require(previous.id <= self.id, "unordered sample identifiers")?;
-        if self.id == previous.id {
+        require(previous.key <= self.key, "unordered sample series keys")?;
+        if self.key == previous.key {
             require(
                 previous.max <= self.min && previous.ordinal < self.ordinal,
                 "unordered sample blocks",

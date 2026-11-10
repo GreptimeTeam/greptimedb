@@ -34,6 +34,7 @@ use crate::error::{InvalidMetaSnafu, Result};
 use crate::series_index::artifact::ArtifactFormat;
 use crate::series_index::catalog::SeriesIndexEntry;
 use crate::series_index::format::{FormatReader, FormatWriter, SeriesIndexFormat};
+use crate::series_index::identity::IdentityEncoding;
 use crate::series_index::{
     MetricSeriesId, ROW_COUNT_COLUMN, SeriesIndexFileHandle, TABLE_ID_COLUMN, TSID_COLUMN,
 };
@@ -115,6 +116,8 @@ pub(crate) struct Part {
 pub(crate) struct Manifest {
     pub(crate) format: ArtifactFormat,
     pub(crate) version: u32,
+    /// Mandatory discriminator; see [`IdentityEncoding`]. Never defaulted on read.
+    pub(crate) identity_encoding: IdentityEncoding,
     pub(crate) region_id: u64,
     pub(crate) generation: FileId,
     pub(crate) tags: Vec<Tag>,

@@ -35,6 +35,7 @@ use super::metadata::{Bounds, Page, Trailer};
 use super::*;
 use crate::series_index::artifact::{SamplesEntry, SamplesFileHandle};
 use crate::series_index::format::{SamplesFormat, SamplesReadRequest};
+use crate::series_index::identity::ExactSeriesKey;
 use crate::series_index::purger::series_index_channel;
 use crate::sst::file::RegionFileId;
 use crate::test_util::sst_util::{new_sparse_primary_key, sst_region_metadata_with_encoding};
@@ -58,9 +59,48 @@ fn batch(meta: &RegionMetadataRef, rows: &[Sample], dictionary: bool) -> RecordB
         .iter()
         .map(|r| new_sparse_primary_key(&["a", "b"], meta, r.0, r.1))
         .collect();
+    sample_batch(
+        meta,
+        &keys,
+        rows.iter().map(|r| r.2).collect(),
+        rows.iter().map(|r| r.3).collect(),
+        rows.iter().map(|r| r.4).collect(),
+        rows.iter().map(|r| r.5.map(f64::from_bits)).collect(),
+        dictionary,
+    )
+}
+
+/// Builds one sample batch from explicit sparse keys, so a test can give two
+/// distinct series the same `tsid` and different labels.
+fn keyed_batch(
+    meta: &RegionMetadataRef,
+    keys: &[Vec<u8>],
+    times: &[i64],
+    dictionary: bool,
+) -> RecordBatch {
+    sample_batch(
+        meta,
+        keys,
+        times.to_vec(),
+        vec![1; keys.len()],
+        vec![0; keys.len()],
+        vec![Some(0.0); keys.len()],
+        dictionary,
+    )
+}
+
+fn sample_batch(
+    meta: &RegionMetadataRef,
+    keys: &[Vec<u8>],
+    times: Vec<i64>,
+    sequences: Vec<u64>,
+    operations: Vec<u8>,
+    values: Vec<Option<f64>>,
+    dictionary: bool,
+) -> RecordBatch {
     let keys: ArrayRef = if dictionary {
         let mut builder = BinaryDictionaryBuilder::<UInt32Type>::new();
-        for key in &keys {
+        for key in keys {
             builder.append(key).unwrap();
         }
         Arc::new(builder.finish())
@@ -77,26 +117,18 @@ fn batch(meta: &RegionMetadataRef, rows: &[Sample], dictionary: bool) -> RecordB
         .unwrap()
         .unit();
     let ts: ArrayRef = match unit {
-        common_time::timestamp::TimeUnit::Second => Arc::new(
-            datatypes::arrow::array::TimestampSecondArray::from_iter_values(
-                rows.iter().map(|r| r.2),
-            ),
-        ),
-        common_time::timestamp::TimeUnit::Millisecond => Arc::new(
-            datatypes::arrow::array::TimestampMillisecondArray::from_iter_values(
-                rows.iter().map(|r| r.2),
-            ),
-        ),
-        common_time::timestamp::TimeUnit::Microsecond => Arc::new(
-            datatypes::arrow::array::TimestampMicrosecondArray::from_iter_values(
-                rows.iter().map(|r| r.2),
-            ),
-        ),
-        common_time::timestamp::TimeUnit::Nanosecond => Arc::new(
-            datatypes::arrow::array::TimestampNanosecondArray::from_iter_values(
-                rows.iter().map(|r| r.2),
-            ),
-        ),
+        common_time::timestamp::TimeUnit::Second => {
+            Arc::new(datatypes::arrow::array::TimestampSecondArray::from_iter_values(times))
+        }
+        common_time::timestamp::TimeUnit::Millisecond => {
+            Arc::new(datatypes::arrow::array::TimestampMillisecondArray::from_iter_values(times))
+        }
+        common_time::timestamp::TimeUnit::Microsecond => {
+            Arc::new(datatypes::arrow::array::TimestampMicrosecondArray::from_iter_values(times))
+        }
+        common_time::timestamp::TimeUnit::Nanosecond => {
+            Arc::new(datatypes::arrow::array::TimestampNanosecondArray::from_iter_values(times))
+        }
     };
     RecordBatch::try_new(
         Arc::new(Schema::new(vec![
@@ -107,13 +139,11 @@ fn batch(meta: &RegionMetadataRef, rows: &[Sample], dictionary: bool) -> RecordB
             Field::new(OPERATION, DataType::UInt8, false),
         ])),
         vec![
-            Arc::new(Float64Array::from_iter(
-                rows.iter().map(|r| r.5.map(f64::from_bits)),
-            )),
+            Arc::new(Float64Array::from_iter(values)),
             ts,
             keys,
-            Arc::new(UInt64Array::from_iter_values(rows.iter().map(|r| r.3))),
-            Arc::new(UInt8Array::from_iter_values(rows.iter().map(|r| r.4))),
+            Arc::new(UInt64Array::from_iter_values(sequences)),
+            Arc::new(UInt8Array::from_iter_values(operations)),
         ],
     )
     .unwrap()
@@ -336,7 +366,8 @@ async fn equal_timestamps_cross_leaves_and_parts() {
     let m = metadata();
     let format = ColumnarSamplesFormat {
         block_rows: 1,
-        page_bytes: 232,
+        // One block descriptor plus header; a block now also stores its exact series key.
+        page_bytes: 288,
         root_capacity: 2,
         ..Default::default()
     };
@@ -388,6 +419,246 @@ async fn equal_timestamps_cross_leaves_and_parts() {
     assert_eq!(out.len(), 1);
     assert_eq!(out[0].column(0).null_count(), 1);
 }
+/// Wraps one encoded primary key in the canonical exact identity.
+fn exact(meta: &RegionMetadataRef, tags: &[&str; 2], table_id: u32, tsid: u64) -> ExactSeriesKey {
+    let mut offsets = mito_codec::row_converter::SparseOffsetsCache::new();
+    ExactSeriesKey::from_sparse_key(
+        &new_sparse_primary_key(tags, meta, table_id, tsid),
+        &mut offsets,
+    )
+    .unwrap()
+}
+
+/// Reads the samples selected by one exact series key.
+async fn read_key(reader: &dyn SamplesFormatReader, key: ExactSeriesKey) -> Vec<Sample> {
+    let mut req = full_request();
+    req.keys = Some(BTreeSet::from([key]));
+    let out = reader
+        .read(req)
+        .unwrap()
+        .try_collect::<Vec<_>>()
+        .await
+        .unwrap();
+    collect_rows(&out)
+}
+
+/// The captured pair in the samples artifact: two distinct series with one
+/// `table_id`/`tsid` whose timestamps restart. Every block records which exact key
+/// owns it, so each series keeps its own samples and never sees the partner's.
+#[tokio::test]
+async fn colliding_tsids_are_retained_and_owned_exactly() {
+    let store = store();
+    let meta = metadata();
+    let format = ColumnarSamplesFormat::default();
+    let first = new_sparse_primary_key(&["host-020078", "z"], &meta, 1, 7);
+    let partner = new_sparse_primary_key(&["host-029838", "z"], &meta, 1, 7);
+    for dictionary in [false, true] {
+        let handle = build(
+            &format,
+            &store,
+            meta.clone(),
+            &[
+                keyed_batch(
+                    &meta,
+                    &[first.clone(), first.clone()],
+                    &[100, 200],
+                    dictionary,
+                ),
+                keyed_batch(
+                    &meta,
+                    &[partner.clone(), partner.clone()],
+                    &[100, 200],
+                    dictionary,
+                ),
+            ],
+        )
+        .await;
+        let reader = format.reader(store.clone(), handle).await.unwrap();
+        let first_key = exact(&meta, &["host-020078", "z"], 1, 7);
+        let partner_key = exact(&meta, &["host-029838", "z"], 1, 7);
+        assert_eq!(
+            read_key(reader.as_ref(), first_key.clone()).await,
+            vec![(1, 7, 100, 1, 0, Some(0)), (1, 7, 200, 1, 0, Some(0)),]
+        );
+        assert_eq!(
+            read_key(reader.as_ref(), partner_key.clone()).await,
+            vec![(1, 7, 100, 1, 0, Some(0)), (1, 7, 200, 1, 0, Some(0)),]
+        );
+        // A coarse selection of the shared identifier still reads both owners.
+        let mut req = full_request();
+        req.ids = Some(BTreeSet::from([MetricSeriesId {
+            table_id: 1,
+            tsid: 7,
+        }]));
+        let out = reader
+            .read(req)
+            .unwrap()
+            .try_collect::<Vec<_>>()
+            .await
+            .unwrap();
+        assert_eq!(collect_rows(&out).len(), 4);
+        // Selecting one owner never reads the partner's block.
+        let mut req = full_request();
+        req.keys = Some(BTreeSet::from([partner_key]));
+        let out = reader
+            .read(req)
+            .unwrap()
+            .try_collect::<Vec<_>>()
+            .await
+            .unwrap();
+        assert_eq!(collect_rows(&out).len(), 2);
+    }
+}
+
+/// The silent-loss variant: timestamps keep increasing across the collision, so the
+/// old writer accepted it and both series' samples landed under one identity.
+#[tokio::test]
+async fn colliding_tsids_with_increasing_timestamps_are_retained() {
+    let store = store();
+    let meta = metadata();
+    let format = ColumnarSamplesFormat::default();
+    let first = new_sparse_primary_key(&["host-020078", "z"], &meta, 1, 7);
+    let partner = new_sparse_primary_key(&["host-029838", "z"], &meta, 1, 7);
+    for dictionary in [false, true] {
+        let handle = build(
+            &format,
+            &store,
+            meta.clone(),
+            &[
+                keyed_batch(
+                    &meta,
+                    &[first.clone(), first.clone()],
+                    &[100, 200],
+                    dictionary,
+                ),
+                keyed_batch(
+                    &meta,
+                    &[partner.clone(), partner.clone()],
+                    &[300, 400],
+                    dictionary,
+                ),
+            ],
+        )
+        .await;
+        let reader = format.reader(store.clone(), handle).await.unwrap();
+        let first_key = exact(&meta, &["host-020078", "z"], 1, 7);
+        let partner_key = exact(&meta, &["host-029838", "z"], 1, 7);
+        assert_eq!(
+            read_key(reader.as_ref(), first_key).await,
+            vec![(1, 7, 100, 1, 0, Some(0)), (1, 7, 200, 1, 0, Some(0)),]
+        );
+        assert_eq!(
+            read_key(reader.as_ref(), partner_key).await,
+            vec![(1, 7, 300, 1, 0, Some(0)), (1, 7, 400, 1, 0, Some(0)),]
+        );
+    }
+}
+
+/// Many distinct keys under one forced tsid, through both primary-key inputs.
+#[tokio::test]
+async fn many_distinct_keys_under_one_tsid_are_retained() {
+    let store = store();
+    let meta = metadata();
+    let format = ColumnarSamplesFormat::default();
+    let keys: Vec<_> = (0..8)
+        .map(|index| {
+            let label = format!("host-{index:06}");
+            new_sparse_primary_key(&[label.as_str(), "z"], &meta, 1, 5)
+        })
+        .collect();
+    let times: Vec<_> = (0..8).map(|index| 100 + index as i64).collect();
+    for dictionary in [false, true] {
+        let handle = build(
+            &format,
+            &store,
+            meta.clone(),
+            &[keyed_batch(&meta, &keys, &times, dictionary)],
+        )
+        .await;
+        let reader = format.reader(store.clone(), handle).await.unwrap();
+        let all = reader
+            .read(full_request())
+            .unwrap()
+            .try_collect::<Vec<_>>()
+            .await
+            .unwrap();
+        assert_eq!(collect_rows(&all).len(), keys.len());
+        // Each owner sees exactly one row, at its own timestamp.
+        for index in 0..8 {
+            let label = format!("host-{index:06}");
+            let key = exact(&meta, &[label.as_str(), "z"], 1, 5);
+            let rows = read_key(reader.as_ref(), key).await;
+            assert_eq!(rows, vec![(1, 5, 100 + index as i64, 1, 0, Some(0))]);
+        }
+        // An absent owner selects nothing, even though its identifier is present.
+        let absent = exact(&meta, &["host-999999", "z"], 1, 5);
+        assert!(read_key(reader.as_ref(), absent).await.is_empty());
+    }
+}
+
+/// A regression in sparse-key order is refused; the same rules that guard one series
+/// still apply to a stream of distinct series.
+#[tokio::test]
+async fn out_of_order_series_are_refused() {
+    let store = store();
+    let meta = metadata();
+    let format = ColumnarSamplesFormat::default();
+    let first = new_sparse_primary_key(&["a", "b"], &meta, 1, 1);
+    let second = new_sparse_primary_key(&["a", "b"], &meta, 1, 2);
+    let file_id = FileId::random();
+    let generation = FileId::random();
+    let prefix = format!("{}/samples/{generation}/", meta.region_id.as_u64());
+    let mut writer = format
+        .writer(meta.clone(), store.clone(), &prefix, file_id, generation)
+        .await
+        .unwrap();
+    writer
+        .write(&keyed_batch(
+            &meta,
+            &[first.clone(), second.clone()],
+            &[100, 200],
+            false,
+        ))
+        .await
+        .unwrap();
+    let error = writer
+        .write(&keyed_batch(&meta, &[first], &[300], false))
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("not sorted by primary key"), "{error}");
+    writer.abort().await.unwrap();
+    // Timestamps are still monotonic inside one exact series.
+    let generation = FileId::random();
+    let prefix = format!("{}/samples/{generation}/", meta.region_id.as_u64());
+    let mut writer = format
+        .writer(
+            meta.clone(),
+            store.clone(),
+            &prefix,
+            FileId::random(),
+            generation,
+        )
+        .await
+        .unwrap();
+    writer
+        .write(&keyed_batch(
+            &meta,
+            std::slice::from_ref(&second),
+            &[200],
+            false,
+        ))
+        .await
+        .unwrap();
+    let error = writer
+        .write(&keyed_batch(&meta, &[second], &[100], false))
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("sample input is not sorted"), "{error}");
+    writer.abort().await.unwrap();
+}
+
 #[tokio::test]
 async fn empty_selection_and_validation() {
     let store = store();
@@ -845,7 +1116,16 @@ async fn real_samples_reconcile_reopen_and_retire(
     engine.stop().await.unwrap();
 }
 
-async fn fixture(store: &ObjectStore) -> SamplesFileHandle {
+/// Fields the frozen v1 manifest still has; unknown-to-the-current-format ones are
+/// deliberately not parsed, so the artifact reaches the reader's rejection path.
+#[derive(serde::Deserialize)]
+struct FrozenV1Manifest {
+    region_id: u64,
+    source_file_id: FileId,
+    generation: FileId,
+}
+
+async fn frozen_v1_handle(store: &ObjectStore) -> SamplesFileHandle {
     let bytes =
         include_str!("../../../../../tests/compatibility/wire/mito_columnar_samples/v1-part.hex")
             .split_whitespace()
@@ -857,87 +1137,60 @@ async fn fixture(store: &ObjectStore) -> SamplesFileHandle {
     let json = include_str!(
         "../../../../../tests/compatibility/wire/mito_columnar_samples/v1-manifest.json"
     );
-    let manifest: Manifest = serde_json::from_str(json).unwrap();
-    store
-        .write(&manifest.part_path(0), bytes.clone())
-        .await
-        .unwrap();
-    store.write(&manifest.path(), json).await.unwrap();
+    let frozen: FrozenV1Manifest = serde_json::from_str(json).unwrap();
+    let prefix = crate::series_index::samples::samples_prefix(frozen.region_id, frozen.generation);
+    let manifest_path = format!("{prefix}manifest.json");
+    let part_path = format!("{prefix}part-0.samples");
+    store.write(&part_path, bytes.clone()).await.unwrap();
+    store.write(&manifest_path, json).await.unwrap();
     let objects = vec![
         crate::series_index::artifact::ArtifactObject {
-            path: manifest.path(),
+            path: manifest_path,
             file_size: json.len() as u64,
         },
         crate::series_index::artifact::ArtifactObject {
-            path: manifest.part_path(0),
+            path: part_path,
             file_size: bytes.len() as u64,
         },
     ];
     let artifact = crate::series_index::artifact::ArtifactMetadata {
         format: ArtifactFormat::ColumnarSamples,
-        generation: manifest.generation,
+        generation: frozen.generation,
         file_size: (json.len() + bytes.len()) as u64,
         objects,
     };
     let (purger, _) = series_index_channel(store.clone());
     SamplesFileHandle::new(
         RegionFileId::new(
-            store_api::storage::RegionId::from_u64(manifest.region_id),
-            manifest.source_file_id,
+            store_api::storage::RegionId::from_u64(frozen.region_id),
+            frozen.source_file_id,
         ),
         SamplesEntry {
             source_file_ids: Vec::new(),
             window: None,
             source_windows: Default::default(),
-            file_id: manifest.source_file_id,
+            file_id: frozen.source_file_id,
             artifact,
         },
         purger,
     )
 }
+
+/// A frozen artifact written under hash-only identity must be rejected, never read:
+/// it is structurally valid and ordered, so nothing else distinguishes it, and the
+/// labels a collapsed block lost cannot be recovered from it.
 #[tokio::test]
-async fn frozen_v1_samples_fixture_and_unknown_codec() {
+async fn frozen_v1_samples_fixture_is_rejected() {
     let store = store();
-    let handle = fixture(&store).await;
+    let handle = frozen_v1_handle(&store).await;
     let format = ColumnarSamplesFormat::default();
-    let reader = format.reader(store.clone(), handle.clone()).await.unwrap();
-    let batches = reader
-        .read(full_request())
-        .unwrap()
-        .try_collect::<Vec<_>>()
+    let error = format
+        .reader(store.clone(), handle)
         .await
-        .unwrap();
-    assert_eq!(
-        collect_rows(&batches),
-        vec![(7, 42, 100, 9, 1, Some(1 << 63)), (7, 42, 100, 8, 0, None)]
-    );
-    let manifest = manifest(&store, &handle).await;
-    let path = manifest.part_path(0);
-    let mut bytes = store.read(&path).await.unwrap().to_vec();
-    let end = bytes.len() - 112;
-    let mut trailer = Trailer::decode(&bytes[end..], bytes.len() as u64).unwrap();
-    let leaf_start = trailer.root.payload.offset as usize;
-    let encoding = leaf_start + 12 + 44 + 3 * 44 + 8 + 24;
-    bytes[encoding..encoding + 2].copy_from_slice(&99u16.to_le_bytes());
-    trailer.root.payload.checksum = codec::checksum(&bytes[leaf_start..end]);
-    bytes[end..].copy_from_slice(&trailer.encode());
-    store.write(&path, bytes).await.unwrap();
-    assert!(
-        reader
-            .read(request(&["ts"]))
-            .unwrap()
-            .try_collect::<Vec<_>>()
-            .await
-            .is_ok()
-    );
-    assert!(
-        reader
-            .read(request(&["field_0"]))
-            .unwrap()
-            .try_collect::<Vec<_>>()
-            .await
-            .is_err()
-    );
+        .err()
+        .expect("a v1 samples artifact must be rejected");
+    let message = error.to_string();
+    assert!(message.contains("identity_encoding"), "{message}");
 }
 
 #[tokio::test]
@@ -1290,7 +1543,7 @@ async fn boundary_blocks_fetch_remaining_columns_only_for_selected_rows() {
     assert_eq!(1, creations.load(Ordering::Relaxed));
     let timestamp_read = {
         let reads = reads.lock().unwrap();
-        // Header, trailer, root, then timestamps only. The second part is pruned.
+        // Header, trailer, root, then timestamps only. The other part is pruned.
         assert_eq!(4, reads.len());
         reads[3].clone()
     };
@@ -1352,11 +1605,12 @@ async fn series_read_windows_are_bounded_and_gap_rows_are_not_returned() {
     assert_eq!(input, collect_rows(&all));
     let (full_bytes, first_window_bytes) = {
         let reads = reads.lock().unwrap();
-        // Header, trailer, one leaf, then three windows of at most 128 blocks.
-        assert_eq!(6, reads.len());
+        // Header, trailer, root, two leaves (each block descriptor also stores its
+        // exact series key), then three windows of at most 128 blocks.
+        assert_eq!(8, reads.len());
         (
             reads.iter().map(|(_, r)| r.size().unwrap()).sum::<u64>(),
-            reads[3].1.size().unwrap() as usize,
+            reads[5].1.size().unwrap() as usize,
         )
     };
     reads.lock().unwrap().clear();
@@ -1415,8 +1669,9 @@ async fn series_read_windows_are_bounded_and_gap_rows_are_not_returned() {
         .await
         .unwrap();
     assert_eq!(vec![input[0], input[2]], collect_rows(&selected));
-    // The intervening series is read as a gap, but never decoded or returned.
-    assert_eq!(4, reads.lock().unwrap().len());
+    // The intervening series is read as a gap, but never decoded or returned: only the
+    // leaf that owns both selected blocks and one payload window are fetched.
+    assert_eq!(5, reads.lock().unwrap().len());
 
     use datafusion::execution::memory_pool::{GreedyMemoryPool, MemoryPool};
     // The first pool rejects read-ahead outright. The second admits the first
@@ -1437,9 +1692,12 @@ async fn series_read_windows_are_bounded_and_gap_rows_are_not_returned() {
         {
             let reads = reads.lock().unwrap();
             assert!(reads.len() > 6);
+            // Read order depends on the pool, so look for the window instead of an index.
             assert_eq!(
                 capacity != 64 * 1024,
-                reads[3].1.size().unwrap() as usize == first_window_bytes,
+                reads
+                    .iter()
+                    .any(|(_, r)| r.size().unwrap() as usize == first_window_bytes),
                 "only the larger pool should admit the initial prefetch"
             );
         }

@@ -27,7 +27,6 @@ use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::timestamp::timestamp_array_to_primitive;
 use mito_codec::row_converter::SparseOffsetsCache;
-use mito_codec::row_converter::sparse::SparsePrimaryKeyView;
 use object_store::ObjectStore;
 use parquet::file::metadata::KeyValue;
 use snafu::{OptionExt, ResultExt, ensure};
@@ -36,9 +35,7 @@ use store_api::metadata::RegionMetadataRef;
 use store_api::storage::ColumnId;
 use store_api::storage::consts::ReservedColumnId;
 
-use crate::error::{
-    DecodeSnafu, InvalidMetaSnafu, InvalidRecordBatchSnafu, NewRecordBatchSnafu, Result,
-};
+use crate::error::{InvalidMetaSnafu, InvalidRecordBatchSnafu, NewRecordBatchSnafu, Result};
 use crate::series_index::{
     MAX_TS_COLUMN, MIN_TS_COLUMN, ROW_COUNT_COLUMN, TABLE_ID_COLUMN, TSID_COLUMN,
 };
@@ -595,9 +592,9 @@ fn decode_primary_key(
     offsets: &mut SparseOffsetsCache,
     buf: &mut Vec<u8>,
 ) -> Result<SeriesIndexRow> {
-    let (id, tags) = decode_series_identity(primary_key, tag_columns, offsets, buf)?;
-    let table_id = id.table_id;
-    let tsid = id.tsid;
+    let (key, tags) = decode_series_identity(primary_key, tag_columns, offsets, buf)?;
+    let table_id = key.id().table_id;
+    let tsid = key.id().tsid;
 
     Ok(SeriesIndexRow {
         min_ts,
@@ -610,27 +607,10 @@ fn decode_primary_key(
 }
 
 /// Shared sparse-key extraction, independent of timestamp aggregation.
-pub(crate) fn decode_series_identity(
-    primary_key: &[u8],
-    tag_columns: &[(ColumnId, String)],
-    offsets: &mut SparseOffsetsCache,
-    buf: &mut Vec<u8>,
-) -> Result<(crate::series_index::MetricSeriesId, Vec<Option<String>>)> {
-    let mut view = SparsePrimaryKeyView::new(primary_key, offsets).context(DecodeSnafu)?;
-    let id = crate::series_index::MetricSeriesId {
-        table_id: view.table_id(),
-        tsid: view.tsid(),
-    };
-    let mut tags = Vec::with_capacity(tag_columns.len());
-    for (column_id, _) in tag_columns {
-        tags.push(
-            view.label(*column_id, buf)
-                .context(DecodeSnafu)?
-                .map(str::to_owned),
-        );
-    }
-    Ok((id, tags))
-}
+///
+/// The exact key it returns is what decides series identity; `MetricSeriesId` is
+/// only its coarse, hash-based prefix.
+pub(crate) use crate::series_index::identity::decode_series_identity;
 
 /// Builds a timestamp array in `unit` from raw i64 values.
 fn ts_array(timestamps: impl Iterator<Item = i64>, unit: TimeUnit) -> ArrayRef {

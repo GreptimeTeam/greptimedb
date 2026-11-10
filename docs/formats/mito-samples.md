@@ -1,7 +1,17 @@
 # Mito columnar samples format
 
 This document specifies the version 1 on-disk layout, encodings, ordering rules,
-and validation limits for samples artifacts. It shares artifact conventions with
+and validation limits for samples artifacts. The version number stays 1: the
+exact-identity change is enforced by the mandatory `identity_encoding` manifest
+discriminator, not by a version bump.
+
+Every block stores the exact series identity (the canonical sparse primary key).
+An artifact written before exact identity has the same version number and recorded
+only `(table_id, tsid)`, a hash; it can be structurally valid and perfectly ordered
+while two distinct series were merged. Nothing in such an artifact proves
+otherwise, so a manifest without the `identity_encoding` discriminator is
+rejected, and its artifact rebuilt from SSTs; there is no dual reader. It shares
+artifact conventions with
 [Mito columnar series format](mito-series.md).
 
 Samples store nullable Float64 fields, timestamps, sequences, and operation types
@@ -51,6 +61,7 @@ generation is unique for each build. A manifest contains:
 | --- | --- |
 | `format` | String `columnar-samples` |
 | `version` | Integer 1 |
+| `identity_encoding` | String `exact-sparse-key`; required, never defaulted. Absent or different means the artifact is not readable |
 | `region_id` | Physical region ID, u64 |
 | `source_file_id` | Artifact owner ID matching `SamplesEntry.file_id`; the SST ID for legacy artifacts, or the generation ID for daily artifacts |
 | `generation` | `FileId` matching the catalog artifact generation |
@@ -72,8 +83,10 @@ including the internal names below. Tags are not sample fields and are not store
 
 The stored logical Arrow schema is `__table_id: UInt32`, `__tsid: UInt64`, the
 timestamp column with its recorded unit, `__sequence: UInt64`, `__op_type: UInt8`,
-then nullable Float64 fields in manifest order. The first five columns are
-non-null. No `__primary_key` or tag columns are stored.
+then nullable Float64 fields in manifest order, and finally
+`__primary_key: Binary` holding the exact key of the block that produced each row.
+Every column is non-null. `__table_id`/`__tsid` are the coarse, hash-based prefix
+of that key. Tag columns are not stored; the exact key is the identity.
 
 Each `files` entry contains `part_id: u32`, `file_size: u64`, `num_rows: u64`,
 `num_blocks: u64`, `first`, `last`, `min_timestamp: i64`, and `max_timestamp: i64`.
@@ -130,8 +143,11 @@ Reserved fields must be zero, and decoded structures must have no trailing bytes
 
 ### Column payloads and row semantics
 
-Each block contains exactly one `(table_id, tsid)`. Identity is stored once in
-its descriptor. Timestamp, sequence, operation type, and each present value field
+Each block contains exactly one series and stores that series' exact canonical
+sparse primary key once in its descriptor. The key is the SST's own encoding of
+`(table_id, tsid, label column-id/value pairs sorted by name, non-null only)`, and
+`(table_id, tsid)` is only its order-preserving prefix. Two distinct series may
+share a prefix. Timestamp, sequence, operation type, and each present value field
 are independent chunks; their references are in the metadata, not inline headers.
 Emit chunks in that order, with value fields following manifest order.
 
@@ -139,13 +155,11 @@ Rows preserve delete markers, duplicate timestamps, and equal-key ties, includin
 conflicting values at the same sequence. The format does not encode a deduplicated
 or snapshot-filtered view.
 
-Identifiers are nondecreasing, timestamps are nondecreasing within an identifier,
-and sequences are nonincreasing within equal timestamps, including across parts.
-Equal ordering keys retain input order; operation type is not a sorting key.
-
-`(table_id, tsid)` is the complete identity under the uniqueness assumption.
-Equal TSIDs in different tables are distinct. Exact sparse primary keys, tags,
-and collision discriminators are not stored.
+Block keys are nondecreasing in byte-lexicographic order, timestamps are
+nondecreasing within one exact key, and sequences are nonincreasing within equal
+timestamps, including across parts. A change of exact key restarts timestamps and
+ordinals, even when the coarse `(table_id, tsid)` prefix is unchanged. Equal
+ordering keys retain input order; operation type is not a sorting key.
 
 Blocks split on an identity change or before the next row would exceed a packing
 limit. There is no hourly split and no padding of short blocks. The default row
@@ -208,16 +222,18 @@ Leaf (kind 0):                     Internal root (kind 1):
 ```
 
 Pages are nonempty and limited to 65,536 decoded bytes, including the 12-byte
-prefix. Descriptors never straddle pages. Unlike series label descriptors,
-sample descriptors have no variable-size strings, and even the widest supported
-descriptor fits in one page. No oversized-leaf exception is needed.
+prefix. Descriptors never straddle pages. A descriptor carries one variable-size series
+key (at most 8 KiB) and then fixed-width columns, and even the widest supported
+descriptor fits in one 65,536-byte page. No oversized-leaf exception is needed.
 
 #### Block descriptor
 
 | Field | Bytes | Meaning |
 | --- | ---: | --- |
-| Table ID | 4 | Constant for this block |
-| TSID | 8 | Constant for this block |
+| Table ID | 4 | Coarse prefix of the constant key in this block |
+| TSID | 8 | Coarse prefix of the constant key in this block |
+| Key length | 4 | 1..=8,192 |
+| Series key | variable | Exact canonical sparse primary key; its `(table_id, tsid)` prefix must equal the two fields above |
 | Minimum timestamp | 8 | Signed i64, first row's timestamp |
 | Maximum timestamp | 8 | Signed i64, last row's timestamp |
 | Block ordinal | 8 | Per-identifier ordinal across the artifact |
@@ -225,10 +241,11 @@ descriptor fits in one page. No oversized-leaf exception is needed.
 | Column count | 4 | Number of following column descriptors |
 | Column descriptors | 44 each | Defined below |
 
-The fixed prefix is 44 bytes. Ordinals start at zero for each identity and
-increase by one across block and part boundaries. Blocks sort lexicographically
-by `(table_id, tsid, min_timestamp, ordinal)`. Adjacent blocks of the same series
-satisfy `previous.max_timestamp <= next.min_timestamp`; equality is permitted.
+The fixed prefix is 48 bytes plus the series key. Ordinals start at zero for each
+exact key and increase by one across block and part boundaries while that key
+continues. Blocks sort by exact key. Adjacent blocks of the same exact key satisfy
+`previous.max_timestamp <= next.min_timestamp`; equality is permitted. Blocks of
+different keys have no timestamp relation at all.
 
 Each column descriptor is:
 
@@ -247,7 +264,7 @@ all rows null is omitted and synthesized as null by the reader; present value
 chunks have `null_count < row_count`. No value statistics are stored.
 
 A block with `P` present fields has `C = 3 + P` chunks and a descriptor of
-`44 + 44 * C` bytes. This is 220 bytes for one present field and 45,232 bytes for
+`48 + 44 * C + key_length` bytes. This is 220 bytes for one present field and 45,232 bytes for
 1,024 present fields. The leaf prefix makes the latter 45,244 bytes. All chunks
 are physically ordered and disjoint in the column area, across blocks as well
 as within a block. There is no inline block header or block-wide compression.

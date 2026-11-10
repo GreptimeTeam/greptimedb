@@ -532,6 +532,10 @@ async fn series_index_store_from_config(
 }
 
 /// Bump when the rebuildable local index layout becomes incompatible.
+///
+/// Exact series identity needs no bump: every manifest carries the mandatory
+/// `identity_encoding` discriminator, so artifacts written under the hash-only identity
+/// are rejected when they are opened and maintenance rebuilds them.
 const SERIES_INDEX_CACHE_VERSION: &str = "2";
 
 /// Resets incompatible caches before any worker or reader can use their catalogs.

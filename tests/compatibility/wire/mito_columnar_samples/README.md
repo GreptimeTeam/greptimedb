@@ -5,7 +5,7 @@ This fixture freezes the version-1 sample wire contract in
 the owning Mito Rust test, not SQLness discovery:
 
 ```shell
-cargo nextest run -p mito2 frozen_v1_samples_fixture_and_unknown_codec
+cargo nextest run -p mito2 frozen_v1_samples_fixture_is_rejected
 ```
 
 `v1-manifest.json` and `v1-part.hex` describe a 397-byte part with raw compression,
@@ -26,11 +26,15 @@ little-endian fields and XXH64 with seed zero. Its layout is:
 | 53..285 | Leaf/root: one block, four column references |
 | 285..397 | Trailer with root reference and checksum |
 
-The test installs these exact bytes and recorded object sizes, opens them through
-`SamplesFormat`, and verifies the values and order. It also changes a column
-codec to an unknown ID while updating checksums to test that unrequested columns
-can be skipped and requested unknown codecs fail explicitly. Legacy catalog
-identifier coverage remains in `series_index::catalog` tests.
+The current reader writes the same wire version as this fixture, so the version
+number alone does not reject it. The manifest carries no `identity_encoding`
+discriminator, and the part records only `(table_id, tsid)`, which is a hash: a
+part whose two series were merged is structurally valid and ordered exactly like a
+correct one. The test installs these exact bytes and recorded object sizes and
+asserts that opening them through `SamplesFormat` fails on the missing
+`identity_encoding` discriminator, which is what makes maintenance rebuild the
+artifact from its SSTs instead of reusing it. Legacy catalog identifier coverage
+remains in `series_index::catalog` tests.
 
 Do not regenerate this fixture just to make a reader change pass. Preserve its
 bytes for future reader compatibility; introduce a separate versioned fixture

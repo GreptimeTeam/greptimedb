@@ -32,6 +32,7 @@ use crate::error::{Result, SerdeJsonSnafu};
 use crate::series_index::artifact::{ArtifactFormat, ArtifactMetadata, ArtifactObject};
 use crate::series_index::artifact_writer::Outputs;
 use crate::series_index::format::FormatWriter;
+use crate::series_index::identity::{ExactSeriesKey, IdentityEncoding, decode_series_id};
 use crate::series_index::samples::codec;
 use crate::series_index::samples::metadata::{
     self, Block, Column, Page, PageReference, Trailer, pack,
@@ -40,7 +41,7 @@ use crate::series_index::samples::{
     ColumnarSamplesFormat, MANIFEST_LIMIT, Manifest, MetricSeriesId, Part, TimestampColumn,
     TimestampUnit, VERSION, ValueColumn, invalid, require, valid_rows,
 };
-use crate::series_index::writer::{decode_series_identity, validate_metadata};
+use crate::series_index::writer::validate_metadata;
 
 use crate::sst::DEFAULT_WRITE_BUFFER_SIZE;
 
@@ -88,7 +89,8 @@ pub(super) struct SamplesWriter {
     outputs: Outputs,
     output_buffer: SampleBuffer,
     offsets: SparseOffsetsCache,
-    key_buffer: Vec<u8>,
+    /// Canonical sparse key of the series that owns `rows` and `last`.
+    series_key: Option<ExactSeriesKey>,
     rows: Vec<Row>,
     last: Option<(MetricSeriesId, i64, u64)>,
     ordinal: u64,
@@ -142,6 +144,7 @@ impl SamplesWriter {
         let manifest = Manifest {
             format: ArtifactFormat::ColumnarSamples,
             version: VERSION,
+            identity_encoding: IdentityEncoding::CURRENT,
             region_id: metadata.region_id.as_u64(),
             source_file_id,
             generation,
@@ -174,7 +177,7 @@ impl SamplesWriter {
             },
             output_buffer: SampleBuffer::default(),
             offsets: SparseOffsetsCache::new(),
-            key_buffer: Vec::new(),
+            series_key: None,
             rows: Vec::new(),
             last: None,
             ordinal: 0,
@@ -248,27 +251,49 @@ impl SamplesWriter {
                 )?;
                 values.value(index)
             };
-            // TODO: coordinate exact keys and future job/instance identity components
-            // with the series format. This port assumes (table_id, tsid) is unique.
-            let (id, _) =
-                decode_series_identity(key, &[], &mut self.offsets, &mut self.key_buffer)?;
             let time = times.value(i);
             let seq = sequence.value(i);
             let op = operations.value(i);
             require(op <= 1, "unknown sample operation")?;
-            if let Some((last_id, last_time, last_seq)) = self.last {
-                require(
-                    id >= last_id
-                        && (id != last_id
-                            || time > last_time
-                            || (time == last_time && seq <= last_seq)),
-                    "sample input is not sorted",
-                )?;
-                if id != last_id {
+            // Identity is the exact sparse key, not `(table_id, tsid)`: two distinct
+            // series may share a `tsid`, and every block records which exact key owns it.
+            let new_series = self
+                .series_key
+                .as_ref()
+                .is_none_or(|current| current.bytes() != key);
+            if new_series {
+                // Validate the whole key once per series: identity is the exact key, and a
+                // malformed one must not reach a block descriptor.
+                let exact = ExactSeriesKey::from_sparse_key(key, &mut self.offsets)?;
+                if self.last.is_some() {
+                    // Rows arrive in canonical sparse-key order.
+                    let previous = self
+                        .series_key
+                        .as_ref()
+                        .ok_or_else(|| invalid("missing sample series key"))?;
+                    require(
+                        exact > *previous,
+                        "sample input is not sorted by primary key",
+                    )?;
+                    // A different key that shares `(table_id, tsid)` is a different
+                    // series: it opens its own block, which records its exact key, so
+                    // timestamps and ordinals may restart.
                     self.flush_block().await?;
                     self.ordinal = 0;
                 }
+                self.series_key = Some(exact);
             }
+            let id = match self.last {
+                Some((id, last_time, last_seq)) if !new_series => {
+                    // The same exact series continues: the existing monotonic rules hold.
+                    require(
+                        time > last_time || (time == last_time && seq <= last_seq),
+                        "sample input is not sorted",
+                    )?;
+                    id
+                }
+                _ => decode_series_id(key, &mut self.offsets)?,
+            };
             if self.rows.len() == self.options.block_rows
                 || !valid_rows(self.rows.len() + 1, fields.len())
             {
@@ -299,7 +324,11 @@ impl SamplesWriter {
             return Ok(());
         }
         let rows = std::mem::take(&mut self.rows);
-        let (mut block, chunks) = encode_block(&rows, &self.manifest, self.ordinal)?;
+        let key = self
+            .series_key
+            .as_ref()
+            .ok_or_else(|| invalid("sample block has no series key"))?;
+        let (mut block, chunks) = encode_block(&rows, key, &self.manifest, self.ordinal)?;
         self.ordinal = self
             .ordinal
             .checked_add(1)
@@ -476,11 +505,20 @@ impl FormatWriter for SamplesWriter {
         self.outputs.cleanup().await
     }
 }
-fn encode_block(rows: &[Row], manifest: &Manifest, ordinal: u64) -> Result<(Block, Vec<Vec<u8>>)> {
+fn encode_block(
+    rows: &[Row],
+    key: &ExactSeriesKey,
+    manifest: &Manifest,
+    ordinal: u64,
+) -> Result<(Block, Vec<Vec<u8>>)> {
     let first = rows.first().ok_or_else(|| invalid("empty sample block"))?;
     let last = rows.last().ok_or_else(|| invalid("empty sample block"))?;
+    require(
+        rows.iter().all(|row| row.id == key.id()),
+        "sample block mixes series",
+    )?;
     let mut block = Block {
-        id: first.id,
+        key: key.clone(),
         min: first.time,
         max: last.time,
         ordinal,

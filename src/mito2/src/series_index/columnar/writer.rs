@@ -35,6 +35,7 @@ use crate::series_index::columnar::{
     ColumnarSeriesFormat, MANIFEST_LIMIT, Manifest, Part, Tag, VERSION, invalid, require,
 };
 use crate::series_index::format::FormatWriter;
+use crate::series_index::identity::{ExactSeriesKey, IdentityEncoding};
 use crate::series_index::writer::{decode_series_identity, tag_columns, validate_metadata};
 use crate::series_index::{MetricSeriesId, ROW_COUNT_COLUMN, TSID_COLUMN};
 
@@ -43,7 +44,8 @@ const BLOCK_BYTE_BUDGET: usize = 8 * 1024 * 1024;
 
 #[derive(Debug)]
 struct Row {
-    id: MetricSeriesId,
+    /// The exact series identity; `id` is only its prefix.
+    key: ExactSeriesKey,
     count: u64,
     tags: Vec<Option<String>>,
 }
@@ -89,6 +91,7 @@ impl ColumnarWriter {
         let manifest = Manifest {
             format: ArtifactFormat::ColumnarSeries,
             version: VERSION,
+            identity_encoding: IdentityEncoding::CURRENT,
             region_id: metadata.region_id.as_u64(),
             generation: entry.index_uuid,
             tags: tags
@@ -140,7 +143,7 @@ impl ColumnarWriter {
                 || self
                     .rows
                     .first()
-                    .is_some_and(|first| first.id.table_id != row.id.table_id)
+                    .is_some_and(|first| first.key.id().table_id != row.key.id().table_id)
             {
                 self.flush_block().await?;
             }
@@ -153,8 +156,14 @@ impl ColumnarWriter {
         Ok(())
     }
 
+    /// Aggregates one row of input.
+    ///
+    /// Identity is the exact sparse primary key, never `(table_id, tsid)`: distinct
+    /// series may share a `tsid`, and both keep their own row and labels. Rows carry
+    /// their tags and are ordered by exact key, so the format can represent the pair
+    /// without inventing a second identity.
     async fn append_key(&mut self, key: &[u8]) -> Result<()> {
-        if key == self.last_key && self.current.is_some() {
+        if self.current.is_some() && key == self.last_key.as_slice() {
             if let Some(row) = self.current.as_mut() {
                 row.count = row
                     .count
@@ -163,24 +172,26 @@ impl ColumnarWriter {
             }
             return Ok(());
         }
-        let (id, tags) =
+        let (exact, tags) =
             decode_series_identity(key, &self.tags, &mut self.offsets, &mut self.buffer)?;
-        if let Some(row) = self.current.as_mut() {
-            require(id >= row.id, "series identifiers are not sorted")?;
-            if id == row.id {
-                row.count = row
-                    .count
-                    .checked_add(1)
-                    .ok_or_else(|| invalid("series row count overflow"))?;
-                self.last_key.clear();
-                self.last_key.extend(key);
-                return Ok(());
-            }
+        if self.current.is_some() {
+            // Input arrives in sparse-key order. A regression is a contract violation,
+            // and the previous key cannot be the current one: equal keys return above.
+            // A different key that shares `(table_id, tsid)` is a different series and
+            // becomes its own row.
+            require(
+                key > self.last_key.as_slice(),
+                "series input is not sorted by primary key",
+            )?;
         }
         self.push_current().await?;
-        self.current = Some(Row { id, count: 1, tags });
+        self.current = Some(Row {
+            key: exact,
+            count: 1,
+            tags,
+        });
         self.last_key.clear();
-        self.last_key.extend(key);
+        self.last_key.extend_from_slice(key);
         Ok(())
     }
 
@@ -421,8 +432,13 @@ fn encode_block(
     let first = rows
         .first()
         .ok_or_else(|| invalid("empty series block"))?
-        .id;
-    let last = rows.last().ok_or_else(|| invalid("empty series block"))?.id;
+        .key
+        .id();
+    let last = rows
+        .last()
+        .ok_or_else(|| invalid("empty series block"))?
+        .key
+        .id();
     let mut block = Block {
         table_id: first.table_id,
         first: first.tsid,
@@ -434,7 +450,7 @@ fn encode_block(
     for (name, values) in [
         (
             TSID_COLUMN,
-            rows.iter().map(|r| r.id.tsid).collect::<Vec<_>>(),
+            rows.iter().map(|r| r.key.id().tsid).collect::<Vec<_>>(),
         ),
         (ROW_COUNT_COLUMN, rows.iter().map(|r| r.count).collect()),
     ] {

@@ -20,7 +20,7 @@ use std::time::Instant;
 
 use datafusion::execution::memory_pool::{MemoryConsumer, MemoryReservation};
 use datatypes::arrow::array::{
-    ArrayRef, Float64Array, TimestampMicrosecondArray, TimestampMillisecondArray,
+    ArrayRef, BinaryArray, Float64Array, TimestampMicrosecondArray, TimestampMillisecondArray,
     TimestampNanosecondArray, TimestampSecondArray, UInt8Array, UInt32Array, UInt64Array,
 };
 use datatypes::arrow::datatypes::SchemaRef;
@@ -33,10 +33,11 @@ use tokio::sync::OnceCell;
 use crate::cache::columnar::{
     self as metadata_cache, MetadataCache, PayloadCache, PayloadPartCache,
 };
-use crate::error::{NewRecordBatchSnafu, OpenDalSnafu, Result, SerdeJsonSnafu};
+use crate::error::{NewRecordBatchSnafu, OpenDalSnafu, Result};
 use crate::metrics::ColumnarReadMetrics;
 use crate::series_index::artifact::{ArtifactFormat, SamplesFileHandle};
 use crate::series_index::format::{SamplesFormatReader, SamplesReadRequest};
+use crate::series_index::identity::IdentityEncoding;
 use crate::series_index::samples::codec;
 use crate::series_index::samples::metadata::{
     self, Block, BlockOrder, Bounds, Column, Page, PageReference, Trailer,
@@ -134,9 +135,22 @@ impl SamplesReader {
             "samples manifest exceeds limit",
         )?;
         let bytes = read_range(&store, &path, 0, length).await?;
-        let manifest: Manifest = serde_json::from_slice(&bytes).context(SerdeJsonSnafu)?;
+        // A manifest that the current format cannot read predates exact identity or is
+        // corrupt; either way it must never be reused.
+        let manifest: Manifest = serde_json::from_slice(&bytes).map_err(|error| {
+            invalid(format!(
+                "samples manifest is not readable; rebuild the artifact: {error}"
+            ))
+        })?;
         if manifest.version != VERSION {
             return Err(unsupported("samples manifest version"));
+        }
+        // Old artifacts can be structurally valid and perfectly ordered, so identity
+        // encoding is the only thing that keeps their lost labels out of reads.
+        if manifest.identity_encoding != IdentityEncoding::CURRENT {
+            return Err(unsupported(
+                "samples manifest identity encoding; rebuild the samples artifact",
+            ));
         }
         require(
             manifest.format == artifact.format
@@ -215,8 +229,10 @@ impl SamplesFormatReader for SamplesReader {
             "reversed sample time range",
         )?;
         let empty = request.ids.as_ref().is_some_and(|ids| ids.is_empty())
+            || request.keys.as_ref().is_some_and(|keys| keys.is_empty())
             || request.start.zip(request.end).is_some_and(|(a, b)| a == b);
         let complete = request.ids.is_none()
+            && request.keys.is_none()
             && request.table_id.is_none()
             && request.start.is_none()
             && request.end.is_none();
@@ -228,7 +244,10 @@ impl SamplesFormatReader for SamplesReader {
         let field_ids: HashSet<_> = projection
             .iter()
             .filter(|&&index| index >= 5)
-            .map(|&index| self.manifest.fields[index - 5].column_id)
+            // The exact series key column is appended after the data fields and has no
+            // column id of its own.
+            .filter_map(|&index| self.manifest.fields.get(index - 5))
+            .map(|field| field.column_id)
             .collect();
         let cache = self.cache.clone();
         let manifest = self.manifest.clone();
@@ -290,7 +309,7 @@ impl SamplesFormatReader for SamplesReader {
                             column.payload.validate(payload_position, trailer.payload_end, false)?;
                             payload_position = column.payload.end()?;
                         }
-                        let batch = if matches(block.bounds(), &request) {
+                        let batch = if matches(block.bounds(), &request) && owns(block, &request) {
                             if block_index >= prefetched.end {
                                 // Release the previous window before reserving the next one.
                                 drop(std::mem::take(&mut prefetched));
@@ -313,6 +332,15 @@ impl SamplesFormatReader for SamplesReader {
         }))
     }
 }
+/// Every block records the exact series key that owns its rows. A coarse identifier
+/// match is not ownership: a colliding partner shares the identifier.
+fn owns(block: &Block, request: &SamplesReadRequest) -> bool {
+    request
+        .keys
+        .as_ref()
+        .is_none_or(|keys| keys.contains(&block.key))
+}
+
 fn matches(bounds: Bounds, request: &SamplesReadRequest) -> bool {
     if request.start.is_some_and(|start| bounds.max < start)
         || request.end.is_some_and(|end| bounds.min >= end)
@@ -540,61 +568,80 @@ async fn read_block(
     // Visit columns in physical order, regardless of requested output order.
     let mut sorted = projection.to_vec();
     sorted.sort_unstable();
+    let key_index = manifest.primary_key_index();
     for index in sorted {
-        let array: ArrayRef = match index {
-            0 => Arc::new(UInt32Array::from(vec![block.id.table_id; selected.len()])),
-            1 => Arc::new(UInt64Array::from(vec![block.id.tsid; selected.len()])),
-            2 => {
-                let values = times
-                    .as_ref()
-                    .ok_or_else(|| invalid("missing decoded sample time"))?;
-                timestamp_array(
-                    selected.iter().map(|&i| values[i] as i64),
-                    manifest.timestamp.unit,
-                )
-            }
-            3 => {
-                let column = &block.columns[1];
-                let values = codec::decode_numbers(
-                    load_column_chunk(&buffers, column, &mut decoder)?,
-                    column.payload.encoding,
-                    block.rows as usize,
-                )?;
-                if let Some(times) = &times {
-                    require(
-                        (1..values.len())
-                            .all(|i| times[i - 1] != times[i] || values[i - 1] >= values[i]),
-                        "unordered sample sequences",
-                    )?;
+        let array: ArrayRef = if index == key_index {
+            // One block belongs to exactly one exact series; the value is repeated as a
+            // plain binary column so consumers can attribute every row.
+            Arc::new(BinaryArray::from_iter_values(std::iter::repeat_n(
+                block.key.bytes(),
+                selected.len(),
+            )))
+        } else if index == 0 {
+            Arc::new(UInt32Array::from(vec![
+                block.key.id().table_id;
+                selected.len()
+            ]))
+        } else if index == 1 {
+            Arc::new(UInt64Array::from(vec![block.key.id().tsid; selected.len()]))
+        } else {
+            match index {
+                2 => {
+                    let values = times
+                        .as_ref()
+                        .ok_or_else(|| invalid("missing decoded sample time"))?;
+                    timestamp_array(
+                        selected.iter().map(|&i| values[i] as i64),
+                        manifest.timestamp.unit,
+                    )
                 }
-                Arc::new(UInt64Array::from_iter_values(
-                    selected.iter().map(|&i| values[i]),
-                ))
-            }
-            4 => {
-                let column = &block.columns[2];
-                let values = codec::decode_operations(
-                    load_column_chunk(&buffers, column, &mut decoder)?,
-                    column.payload.encoding,
-                    block.rows as usize,
-                )?;
-                Arc::new(UInt8Array::from_iter_values(
-                    selected.iter().map(|&i| values[i]),
-                ))
-            }
-            field => {
-                let id = manifest.fields[field - 5].column_id;
-                if let Some(column) = block.columns.iter().find(|c| c.role == 4 && c.id == id) {
-                    let values = codec::decode_float(
+                3 => {
+                    let column = &block.columns[1];
+                    let values = codec::decode_numbers(
                         load_column_chunk(&buffers, column, &mut decoder)?,
+                        column.payload.encoding,
                         block.rows as usize,
-                        column.nulls,
                     )?;
-                    Arc::new(Float64Array::from_iter(
-                        selected.iter().map(|&i| values[i].map(f64::from_bits)),
+                    if let Some(times) = &times {
+                        require(
+                            (1..values.len())
+                                .all(|i| times[i - 1] != times[i] || values[i - 1] >= values[i]),
+                            "unordered sample sequences",
+                        )?;
+                    }
+                    Arc::new(UInt64Array::from_iter_values(
+                        selected.iter().map(|&i| values[i]),
                     ))
-                } else {
-                    Arc::new(Float64Array::from(vec![None::<f64>; selected.len()]))
+                }
+                4 => {
+                    let column = &block.columns[2];
+                    let values = codec::decode_operations(
+                        load_column_chunk(&buffers, column, &mut decoder)?,
+                        column.payload.encoding,
+                        block.rows as usize,
+                    )?;
+                    Arc::new(UInt8Array::from_iter_values(
+                        selected.iter().map(|&i| values[i]),
+                    ))
+                }
+                field => {
+                    let field = manifest
+                        .fields
+                        .get(field - 5)
+                        .ok_or_else(|| invalid("unknown sample field"))?;
+                    let id = field.column_id;
+                    if let Some(column) = block.columns.iter().find(|c| c.role == 4 && c.id == id) {
+                        let values = codec::decode_float(
+                            load_column_chunk(&buffers, column, &mut decoder)?,
+                            block.rows as usize,
+                            column.nulls,
+                        )?;
+                        Arc::new(Float64Array::from_iter(
+                            selected.iter().map(|&i| values[i].map(f64::from_bits)),
+                        ))
+                    } else {
+                        Arc::new(Float64Array::from(vec![None::<f64>; selected.len()]))
+                    }
                 }
             }
         };

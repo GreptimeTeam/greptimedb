@@ -134,6 +134,25 @@ async fn write_with_tags(
     tags: &[&str],
 ) {
     let metadata = region.version().metadata.clone();
+    write_primary_key(
+        engine,
+        region,
+        new_sparse_primary_key(tags, &metadata, 10, tsid),
+        timestamp,
+        value,
+    )
+    .await;
+}
+
+/// Writes one row with an explicit sparse key, so a test can force two distinct
+/// series to share one tsid.
+async fn write_primary_key(
+    engine: &MitoEngine,
+    region: &MitoRegionRef,
+    primary_key: Vec<u8>,
+    timestamp: i64,
+    value: Option<f64>,
+) {
     let mut schema = vec![
         ColumnSchema {
             column_name: "__primary_key".into(),
@@ -149,7 +168,7 @@ async fn write_with_tags(
         },
     ];
     let mut values = vec![
-        ValueData::BinaryValue(new_sparse_primary_key(tags, &metadata, 10, tsid)),
+        ValueData::BinaryValue(primary_key),
         ValueData::TimestampMillisecondValue(timestamp),
     ];
     let request = if let Some(value) = value {
@@ -1131,6 +1150,7 @@ async fn ordinal_range_batches_sample_requests_and_pushes_time_bounds() {
         raw: source.raw.clone(),
         sample_schema: source.sample_schema.clone(),
         candidates: source.candidates.clone(),
+        retained_rows: source.retained_rows,
         metrics: source.metrics.clone(),
         reservation: source.reservation.clone(),
         samples: Arc::new(
@@ -2330,10 +2350,9 @@ async fn overlapping_buckets_retain_only_new_label_rows() {
     .unwrap();
     let prepared = scan.prepared.source.get().unwrap().as_ref().unwrap();
     assert_eq!(34, prepared.candidates.len());
-    let mut retained = HashMap::new();
+    // Duplicate rows from the overlapping bucket are dropped before labels are retained.
+    assert_eq!(34, prepared.retained_rows);
     for candidate in prepared.candidates.iter() {
-        let (batch, _) = candidate.metadata_row.as_ref().unwrap();
-        retained.insert(Arc::as_ptr(batch), batch.num_rows());
         let expected = if candidate.id.tsid == 0 {
             "x".to_string()
         } else {
@@ -2344,7 +2363,6 @@ async fn overlapping_buckets_retain_only_new_label_rows() {
             Some(expected.as_str())
         );
     }
-    assert_eq!(34, retained.values().sum::<usize>());
     engine.stop().await.unwrap();
 }
 
@@ -2352,7 +2370,7 @@ async fn overlapping_buckets_retain_only_new_label_rows() {
 #[case::direct(false)]
 #[case::mixed_fallback(true)]
 #[tokio::test]
-async fn overlapping_buckets_reject_conflicting_physical_tags(#[case] mixed: bool) {
+async fn overlapping_buckets_keep_colliding_physical_tags(#[case] mixed: bool) {
     let (_env, engine, region) = fixture().await;
     write_with_tags(
         &engine,
@@ -2385,16 +2403,173 @@ async fn overlapping_buckets_reject_conflicting_physical_tags(#[case] mixed: boo
         // The conflict is in an unbound physical tag, which must still be checked.
         *logical_tags = logical_tags[..1].to_vec().into();
     }
-    let error = scan
-        .prepare_series(
-            &QueryScanContext::default(),
-            &ExecutionPlanMetricsSet::new(),
-            &binding,
-        )
+    scan.prepare_series(
+        &QueryScanContext::default(),
+        &ExecutionPlanMetricsSet::new(),
+        &binding,
+    )
+    .await
+    .expect("one tsid with two label sets prepares as two series");
+    let source = scan.prepared.source.get().unwrap().as_ref().unwrap();
+    // Same `(table_id, tsid)`, different physical tags: two series, never one merged row.
+    assert_eq!(2, source.num_series());
+    let keys: HashSet<Vec<u8>> = (0..source.num_series())
+        .map(|ordinal| source.series_info(ordinal).unwrap().primary_key.to_vec())
+        .collect();
+    assert_eq!(2, keys.len());
+    let chunks = source
+        .read_series(0..source.num_series())
+        .unwrap()
+        .try_collect::<Vec<_>>()
         .await
-        .err()
-        .expect("conflicting physical tags must fail preparation");
-    assert!(error.output_msg().contains("conflicting labels"), "{error}");
+        .unwrap();
+    // The differing physical tag is unbound here, so only the exact key separates the
+    // two candidates; the previous code compared labels and failed preparation.
+    let identities: HashSet<Vec<u8>> = source
+        .candidates
+        .iter()
+        .map(|candidate| candidate.exact.bytes().to_vec())
+        .collect();
+    assert_eq!(2, identities.len(), "colliding series keep distinct keys");
+    if !mixed {
+        // Every returned chunk names one of the candidates' label sets; a chunk whose
+        // labels match neither would mean the pair had been merged again.
+        let labels = |metric: &SeriesLabels| {
+            metric
+                .tags()
+                .iter()
+                .map(|label| (label.name.to_string(), label.value.to_string()))
+                .collect::<Vec<_>>()
+        };
+        let expected: HashSet<Vec<(String, String)>> = (0..source.num_series())
+            .map(|ordinal| {
+                labels(
+                    source
+                        .series_info(ordinal)
+                        .unwrap()
+                        .metric
+                        .as_ref()
+                        .unwrap(),
+                )
+            })
+            .collect();
+        for chunk in &chunks {
+            let actual = labels(chunk.metric.as_ref().expect("explicit labels"));
+            assert!(
+                expected.contains(&actual),
+                "chunk labels {actual:?} match no candidate: {expected:?}"
+            );
+        }
+    }
+    engine.stop().await.unwrap();
+}
+
+/// Two series forced to share one `tsid` must never receive each other's samples:
+/// candidate discovery, sample attribution, and the merged primary key are all exact.
+#[tokio::test]
+async fn colliding_tsids_isolate_samples_and_labels_per_candidate() {
+    use common_time::Timestamp;
+    use common_time::range::TimestampRange;
+
+    let (_env, engine, region) = fixture().await;
+    let metadata = region.version().metadata.clone();
+    let first = new_sparse_primary_key(&["host-020078", "z"], &metadata, 10, 0);
+    let partner = new_sparse_primary_key(&["host-029838", "z"], &metadata, 10, 0);
+    // Same `(table_id, tsid)`; only the labels differ.
+    for (key, base) in [(first, 0.0), (partner, 100.0)] {
+        for (index, timestamp) in [1000, 2000, 3000].into_iter().enumerate() {
+            write_primary_key(
+                &engine,
+                &region,
+                key.clone(),
+                timestamp,
+                Some(base + index as f64),
+            )
+            .await;
+        }
+    }
+    flush_region(&engine, region.region_id, None).await;
+    build(&engine, &region).await;
+    let make_scan = |predicates: Vec<datafusion_expr::Expr>, range: Option<TimestampRange>| {
+        let mut input = scan_input(
+            &region,
+            region.series_index_store.clone().unwrap(),
+            SelectedFormat::Columnar,
+            (0..metadata.column_metadatas.len()).collect(),
+        );
+        // Replace the fixture's default predicate, which would hide both hosts.
+        input.predicate = PredicateGroup::new(&metadata, &predicates).unwrap();
+        if let Some(range) = range {
+            input.time_range = Some(range);
+        }
+        SeriesScan::new(input, false)
+    };
+    // One colliding tsid keeps both series, and each ordinal owns only its own rows.
+    let scan = make_scan(Vec::new(), None);
+    let ctx = QueryScanContext::default();
+    let metrics = ExecutionPlanMetricsSet::new();
+    let binding = labels(scan.metadata());
+    scan.prepare_series(&ctx, &metrics, &binding)
+        .await
+        .unwrap()
+        .unwrap();
+    let source = scan.prepared.source.get().unwrap().as_ref().unwrap();
+    assert_eq!(3, source.num_series(), "both colliding series must survive");
+    let mut value_sets = Vec::new();
+    for ordinal in 0..source.num_series() {
+        let chunks = source
+            .read_series(ordinal..ordinal + 1)
+            .unwrap()
+            .try_collect::<Vec<_>>()
+            .await
+            .unwrap();
+        value_sets.push(
+            rows(&chunks)
+                .into_iter()
+                .map(|(_, _, value)| value)
+                .collect::<Vec<_>>(),
+        );
+    }
+    assert!(value_sets.contains(&vec![0.0, 1.0, 2.0]), "{value_sets:?}");
+    assert!(
+        value_sets.contains(&vec![100.0, 101.0, 102.0]),
+        "{value_sets:?}"
+    );
+    assert!(
+        !value_sets
+            .iter()
+            .any(|values| values.contains(&100.0) && values.contains(&0.0)),
+        "a candidate must not mix both colliding series: {value_sets:?}"
+    );
+    // Filtering one host, inside a time range, returns only that host's samples.
+    let scan = make_scan(
+        vec![col("tag_0").eq(lit("host-020078"))],
+        TimestampRange::new(
+            Timestamp::new_millisecond(1500),
+            Timestamp::new_millisecond(2500),
+        ),
+    );
+    let binding = labels(scan.metadata());
+    scan.prepare_series(&ctx, &metrics, &binding)
+        .await
+        .unwrap()
+        .unwrap();
+    let source = scan.prepared.source.get().unwrap().as_ref().unwrap();
+    assert_eq!(1, source.num_series());
+    let chunks = source
+        .read_series(0..source.num_series())
+        .unwrap()
+        .try_collect::<Vec<_>>()
+        .await
+        .unwrap();
+    assert_eq!(
+        rows(&chunks)
+            .into_iter()
+            .map(|(_, timestamp, value)| (timestamp, value))
+            .collect::<Vec<_>>(),
+        vec![(2000, 1.0)],
+        "the partner's samples must never be attached to the filtered host"
+    );
     engine.stop().await.unwrap();
 }
 

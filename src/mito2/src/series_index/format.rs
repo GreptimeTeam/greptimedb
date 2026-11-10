@@ -33,6 +33,7 @@ use store_api::storage::consts::ReservedColumnId;
 use crate::error::{InvalidRecordBatchSnafu, Result};
 use crate::series_index::artifact::{ArtifactFormat, ArtifactMetadata, SamplesFileHandle};
 use crate::series_index::catalog::SeriesIndexEntry;
+use crate::series_index::identity::ExactSeriesKey;
 use crate::series_index::{MetricSeriesId, SeriesIndexFileHandle};
 use crate::sst::PARQUET_FIELD_ID_KEY;
 
@@ -89,7 +90,11 @@ pub(crate) struct SamplesReadRequest {
     pub(crate) memory_pool: Option<Arc<dyn datafusion::execution::memory_pool::MemoryPool>>,
     pub(crate) projection: Vec<String>,
     pub(crate) table_id: Option<u32>,
+    /// Coarse selection. Prunes parts and pages only; it cannot name a series owner.
     pub(crate) ids: Option<BTreeSet<MetricSeriesId>>,
+    /// Exact selection. A block whose key is absent here is never read, even when its
+    /// coarse `(table_id, tsid)` is selected.
+    pub(crate) keys: Option<BTreeSet<ExactSeriesKey>>,
     pub(crate) start: Option<i64>,
     pub(crate) end: Option<i64>,
 }
@@ -159,13 +164,23 @@ pub(crate) fn field_id(field: &Field) -> Result<u32> {
 
 /// Checks whether samples can be read with the current region schema.
 pub(crate) fn validate_sample_schema(schema: &SchemaRef, metadata: &RegionMetadata) -> Result<()> {
+    // Exact identity: readers attribute every sample row by this column, so an
+    // artifact that cannot expose it is unusable.
+    let key = schema
+        .field_with_name("__primary_key")
+        .map_err(|_| invalid("samples lack the exact series key column; rebuild series indexes"))?;
+    if *key.data_type() != datatypes::arrow::datatypes::DataType::Binary {
+        return Err(invalid(
+            "samples series key column is not binary; rebuild series indexes",
+        ));
+    }
     let mut ids = HashSet::new();
-    for field in schema
-        .fields()
-        .iter()
-        .skip(2)
-        .filter(|f| f.name() != "__sequence" && f.name() != "__op_type")
-    {
+    for field in schema.fields().iter().skip(2).filter(|f| {
+        !matches!(
+            f.name().as_str(),
+            "__sequence" | "__op_type" | "__primary_key"
+        )
+    }) {
         let id = field_id(field)?;
         let column = metadata
             .column_by_id(id)
@@ -260,6 +275,10 @@ mod tests {
                         )
                     }),
             );
+            if !tags {
+                // Current artifacts expose the exact series key of each row.
+                fields.push(Field::new("__primary_key", DataType::Binary, false));
+            }
             let validate = |fields: Vec<Field>| {
                 let schema = Arc::new(Schema::new(fields));
                 if tags {
