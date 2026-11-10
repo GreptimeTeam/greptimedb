@@ -7130,16 +7130,8 @@ async fn native_promql_cross_table_pairs_run_above_both_regions() {
 /// one of them does not carry. Each row's name is asserted together with its value, so a row cannot
 /// pass by carrying the right name and another metric's samples.
 ///
-/// Only the bare selector is asserted. The aggregate form of the same selector cannot be planned in
-/// a frontend yet: the in-process bypass in `query::dist_plan::analyzer` is granted only to a fused
-/// root, or to a split aggregate whose partial producer reads a bare `TableScan`, and a discovered
-/// source is a `RawSeriesSource`. The bypass is therefore not granted, `should_expand` expands one
-/// level lower than the source, and
-/// `plan_raw_series_source` refuses the `MergeScanExec` it is then handed
-/// (`RawSeriesSource for metric ... must be planned over a region scan, got MergeScanExec`). That
-/// is a separate, pre-existing gap - see
-/// `.e-agent/notes/KNOWN-ISSUE-discovery-under-aggregate-cannot-plan.md` - so `sum({job="api"})` is
-/// deliberately not asserted here.
+/// The aggregate form of the same selector folds the names away, so it is asserted separately in
+/// [`native_promql_discovery_under_an_aggregate_sums_the_discovered_metric`].
 #[tokio::test(flavor = "multi_thread")]
 async fn native_promql_discovery_names_each_metric_it_reads() {
     common_telemetry::init_default_ut_logging();
@@ -7656,6 +7648,150 @@ async fn native_labelled_rows(
     }
     rows.sort_by(|left, right| (&left.1, left.0).cmp(&(&right.1, right.0)));
     (columns, rows)
+}
+
+/// `sum({job="api"})` over one discovered metric is planned and executed natively, and folds the
+/// one series the matcher keeps.
+///
+/// The selector names no metric, so the frontend answers it by enumerating the schema's logical
+/// metric tables: one here, on its own physical metric table. The aggregate folds that metric's
+/// `api` series (2) and drops the row the matcher rejects. The observer proves the fused route is
+/// what ran - a fused node was planned, and none of the observed nodes is a join, since discovery
+/// enumerates the metric tables instead of joining them.
+#[tokio::test(flavor = "multi_thread")]
+async fn native_promql_discovery_under_an_aggregate_sums_the_discovered_metric() {
+    common_telemetry::init_default_ut_logging();
+    let (standalone, observer) = native_test_instance(GreptimeDbStandaloneBuilder::new(
+        "native_promql_discovery_under_aggregate",
+    ))
+    .await;
+    let instance = standalone.fe_instance().clone();
+    execute_all(
+        &instance,
+        r#"
+        CREATE TABLE discovery_phy (ts TIMESTAMP TIME INDEX, val DOUBLE)
+            ENGINE=metric WITH ("physical_metric_table" = "true");
+        CREATE TABLE discovery_api (job STRING, ts TIMESTAMP TIME INDEX, val DOUBLE, PRIMARY KEY (job))
+            ENGINE=metric WITH ("on_physical_table" = "discovery_phy");
+        INSERT INTO discovery_api (job, ts, val) VALUES ('api', 0, 2), ('other', 0, 100);
+        "#,
+        QueryContext::arc(),
+    )
+    .await;
+
+    observer.clear();
+    let (columns, rows) =
+        native_labelled_rows(discovery_query(&instance, r#"sum({job="api"})"#).await).await;
+    let observed = observed_physical_nodes(&observer);
+    assert!(
+        observed.iter().any(|node| node.name() == "FusedSeriesExec"),
+        "the aggregated discovery did not reach the fused node: {columns:?} {rows:?}"
+    );
+    assert!(
+        observed.iter().all(|node| node.name() != "JoinExec"),
+        "discovery joined metric tables instead of enumerating them: {columns:?} {rows:?}"
+    );
+    let values = rows
+        .iter()
+        .map(|(_, labels, value)| (labels.len(), *value))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        values,
+        vec![(0, 2.0)],
+        "sum over the discovered metric's `api` series drops the `other` row and every label: \
+         {rows:?}"
+    );
+}
+
+/// `sum({job="api"})` over two discovered metrics is planned and executed natively, and keeps the
+/// two metrics apart when the aggregate groups by their name.
+///
+/// The selector names no metric, so the frontend answers it by enumerating the schema's logical
+/// metric tables: two here, each on its own physical metric table. The aggregate folds both `api`
+/// series (2 and 3) and drops the rows the matcher rejects; grouping by `__name__` instead reports
+/// one group per metric, even though the ordinary labels of their series are identical. The
+/// observer proves the fused route is what ran for both statements - a fused node was planned, and
+/// none of the observed nodes is a join, since discovery enumerates the metric tables instead of
+/// joining them.
+#[tokio::test(flavor = "multi_thread")]
+async fn native_promql_discovery_over_two_metrics_under_an_aggregate_sums_both() {
+    common_telemetry::init_default_ut_logging();
+    let (standalone, observer) = native_test_instance(GreptimeDbStandaloneBuilder::new(
+        "native_promql_discovery_over_two_metrics_under_aggregate",
+    ))
+    .await;
+    let instance = standalone.fe_instance().clone();
+    execute_all(
+        &instance,
+        r#"
+        CREATE TABLE discovery_two_api_phy (ts TIMESTAMP TIME INDEX, val DOUBLE)
+            ENGINE=metric WITH ("physical_metric_table" = "true");
+        CREATE TABLE discovery_two_api (job STRING, ts TIMESTAMP TIME INDEX, val DOUBLE, PRIMARY KEY (job))
+            ENGINE=metric WITH ("on_physical_table" = "discovery_two_api_phy");
+        CREATE TABLE discovery_two_web_phy (ts TIMESTAMP TIME INDEX, val DOUBLE)
+            ENGINE=metric WITH ("physical_metric_table" = "true");
+        CREATE TABLE discovery_two_web (job STRING, ts TIMESTAMP TIME INDEX, val DOUBLE, PRIMARY KEY (job))
+            ENGINE=metric WITH ("on_physical_table" = "discovery_two_web_phy");
+        INSERT INTO discovery_two_api (job, ts, val) VALUES ('api', 0, 2), ('other', 0, 100);
+        INSERT INTO discovery_two_web (job, ts, val) VALUES ('api', 0, 3), ('other', 0, 200);
+        "#,
+        QueryContext::arc(),
+    )
+    .await;
+
+    observer.clear();
+    let (columns, rows) =
+        native_labelled_rows(discovery_query(&instance, r#"sum({job="api"})"#).await).await;
+    let observed = observed_physical_nodes(&observer);
+    assert!(
+        observed.iter().any(|node| node.name() == "FusedSeriesExec"),
+        "the aggregated discovery did not reach the fused node: {columns:?} {rows:?}"
+    );
+    assert!(
+        observed.iter().all(|node| node.name() != "JoinExec"),
+        "discovery joined metric tables instead of enumerating them: {columns:?} {rows:?}"
+    );
+    let values = rows
+        .iter()
+        .map(|(_, labels, value)| (labels.len(), *value))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        values,
+        vec![(0, 5.0)],
+        "sum over both discovered metrics' `api` series drops the `other` rows and every label: \
+         {rows:?}"
+    );
+
+    // Grouping by the metric name must keep the two metrics apart even though their ordinary
+    // labels are identical: two groups, each named after its own metric.
+    observer.clear();
+    let (columns, groups) = native_labelled_rows(
+        discovery_query(&instance, r#"sum by (__name__) ({job="api"})"#).await,
+    )
+    .await;
+    let observed = observed_physical_nodes(&observer);
+    assert!(
+        observed.iter().any(|node| node.name() == "FusedSeriesExec"),
+        "the grouped discovery did not reach the fused node: {columns:?} {groups:?}"
+    );
+    assert!(
+        observed.iter().all(|node| node.name() != "JoinExec"),
+        "discovery joined metric tables instead of enumerating them: {columns:?} {groups:?}"
+    );
+    // The answer's row order is a plan choice, so the groups are compared by name.
+    let mut named = groups
+        .iter()
+        .map(|(_, labels, value)| (labels.get("__name__").cloned().unwrap_or_default(), *value))
+        .collect::<Vec<_>>();
+    named.sort_by(|left, right| left.0.cmp(&right.0));
+    assert_eq!(
+        named,
+        vec![
+            ("discovery_two_api".to_string(), 2.0),
+            ("discovery_two_web".to_string(), 3.0),
+        ],
+        "each discovered metric stays its own group: {groups:?}"
+    );
 }
 
 /// Two tables whose tags, field and time index are named differently, partly flushed and partly
