@@ -47,6 +47,9 @@ pub trait EventListener: Send + Sync {
         let _ = region_id;
     }
 
+    /// Observes scheduler admission after a worker handles a WAL pressure snapshot.
+    fn on_wal_pressure_checked(&self, _region_id: RegionId, _flush_requested: bool) {}
+
     /// Notifies the listener after a flush becomes non-cancellable and before commit.
     async fn on_flush_commit_begin(&self, _region_id: RegionId) {}
 

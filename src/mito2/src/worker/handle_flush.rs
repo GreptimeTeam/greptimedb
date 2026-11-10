@@ -393,6 +393,27 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         }
     }
 
+    /// Flushes locally writable candidates selected by the WAL.
+    pub(crate) fn flush_for_wal_pressure(&mut self, candidates: &[RegionId]) -> Result<()> {
+        for &region_id in candidates.iter() {
+            let Some(region) = self.regions.get_region(region_id) else {
+                continue;
+            };
+            if !region.is_writable()
+                || region.is_staging()
+                || self.flush_scheduler.is_flush_requested(region_id)
+                || region_memtable_usage(&region.version()) == 0
+            {
+                continue;
+            }
+            let task =
+                self.new_flush_task(&region, FlushReason::WalPressure, None, self.config.clone());
+            self.flush_scheduler
+                .schedule_flush(region_id, &region.version_control, task)?;
+        }
+        Ok(())
+    }
+
     /// Flushes regions periodically.
     pub(crate) fn flush_periodically(&mut self) -> Result<()> {
         let regions = self.regions.list_regions();

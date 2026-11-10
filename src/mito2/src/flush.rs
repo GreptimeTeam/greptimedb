@@ -220,6 +220,8 @@ pub enum FlushReason {
     EngineFull,
     /// Region reaches its write buffer threshold.
     RegionFull,
+    /// Flush to relieve retained WAL pressure.
+    WalPressure,
     /// Manual flush.
     Manual,
     /// Flush to alter table.
