@@ -64,7 +64,7 @@ use crate::http::result::greptime_result_v1::GreptimedbV1Response;
 use crate::interceptor::{LogIngestInterceptor, LogIngestInterceptorRef};
 use crate::metrics::{
     METRIC_FAILURE_VALUE, METRIC_HTTP_LOGS_INGESTION_COUNTER, METRIC_HTTP_LOGS_INGESTION_ELAPSED,
-    METRIC_SUCCESS_VALUE,
+    METRIC_HTTP_LOGS_UTF8_RETRIES_TOTAL, METRIC_SUCCESS_VALUE,
 };
 use crate::pipeline::run_pipeline;
 use crate::query_handler::PipelineHandlerRef;
@@ -842,20 +842,34 @@ impl<'a> TryFrom<&'a ContentType> for EventPayloadResolver<'a> {
 }
 
 impl EventPayloadResolver<'_> {
-    fn parse_payload(&self, payload: Bytes, ignore_errors: bool) -> Result<Vec<VrlValue>> {
+    fn parse_payload(
+        &self,
+        payload: Bytes,
+        ignore_errors: bool,
+        utf8_retries: &IntCounterVec,
+    ) -> Result<Vec<VrlValue>> {
         match self.inner {
             EventPayloadResolverInner::Json => {
-                // Detect parse failures even when ignore_errors would discard them.
-                let mut saw_parse_error = false;
+                // Detect UTF-8 failures even when ignore_errors would discard them.
+                let mut saw_invalid_utf8 = false;
                 let result = transform_ndjson_array_factory(
                     Deserializer::from_slice(&payload)
                         .into_iter()
-                        .inspect(|item| saw_parse_error |= item.is_err()),
+                        .inspect(|item| {
+                            // serde_json keeps its error codes private.
+                            saw_invalid_utf8 |= item.as_ref().is_err_and(|error| {
+                                error.is_syntax()
+                                    && error
+                                        .to_string()
+                                        .starts_with("invalid unicode code point at line ")
+                            });
+                        }),
                     ignore_errors,
                 );
-                if saw_parse_error && let Cow::Owned(text) = String::from_utf8_lossy(&payload) {
+                if saw_invalid_utf8 && let Cow::Owned(text) = String::from_utf8_lossy(&payload) {
                     // Release partially parsed records before retrying the entire payload.
                     drop(result);
+                    utf8_retries.with_label_values(&["json"]).inc();
                     return transform_ndjson_array_factory(
                         Deserializer::from_str(&text).into_iter(),
                         ignore_errors,
@@ -891,10 +905,12 @@ impl EventPayloadResolver<'_> {
                     let mut parsed =
                         simd_json::serde::from_slice_with_buffers(&mut line_bytes, &mut buffer);
                     // Retry from the original line because SIMD parsing can rewrite its input.
-                    if parsed.is_err()
-                        && let Cow::Owned(text) = String::from_utf8_lossy(line)
+                    if parsed.as_ref().is_err_and(|error| {
+                        matches!(error.error(), simd_json::ErrorType::InvalidUtf8)
+                    }) && let Cow::Owned(text) = String::from_utf8_lossy(line)
                     {
                         line_bytes = text.into_bytes();
+                        utf8_retries.with_label_values(&["ndjson"]).inc();
                         parsed =
                             simd_json::serde::from_slice_with_buffers(&mut line_bytes, &mut buffer);
                     }
@@ -941,7 +957,7 @@ fn extract_pipeline_value_by_content_type(
 ) -> Result<Vec<VrlValue>> {
     EventPayloadResolver::try_from(&content_type).and_then(|resolver| {
         resolver
-            .parse_payload(payload, ignore_errors)
+            .parse_payload(payload, ignore_errors, &METRIC_HTTP_LOGS_UTF8_RETRIES_TOTAL)
             .map_err(|e| match &e {
                 Error::InvalidParameter { reason, .. } if content_type == *JSON_CONTENT_TYPE => {
                     if reason.contains("invalid item:") {
@@ -1057,6 +1073,8 @@ pub struct LogState {
 #[cfg(test)]
 mod tests {
 
+    use prometheus::Opts;
+
     use super::*;
 
     #[test]
@@ -1088,6 +1106,121 @@ mod tests {
         )
         .unwrap();
         assert_eq!(a, "[{\"a\":1},{\"b\":2}]");
+    }
+
+    #[test]
+    fn test_json_parser_invalid_utf8_errors() {
+        for payload in [
+            b"{\"message\":\"bad\xff\"}".as_slice(),
+            b"{\"message\":\"bad\xc1\x89\xc8\"}".as_slice(),
+            b"{\"message\":\"bad\xe2\x82\"}".as_slice(),
+            b"{\"message\":\"line\\nbad\xff\"}".as_slice(),
+            b"{\"bad\xff\":1}".as_slice(),
+        ] {
+            let error = Deserializer::from_slice(payload)
+                .into_iter::<VrlValue>()
+                .next()
+                .unwrap()
+                .unwrap_err();
+            assert!(error.is_syntax(), "{error:?}");
+            assert!(
+                error
+                    .to_string()
+                    .starts_with("invalid unicode code point at line "),
+                "{error:?}"
+            );
+
+            let mut line = payload.to_vec();
+            let error = simd_json::serde::from_slice_with_buffers::<VrlValue>(
+                &mut line,
+                &mut Buffers::new(payload.len()),
+            )
+            .unwrap_err();
+            assert_eq!(error.error(), &simd_json::ErrorType::InvalidUtf8);
+        }
+    }
+
+    #[test]
+    fn test_json_does_not_retry_other_errors() {
+        for payload in [
+            b"{\"message\":\"bad\xff\\q\"}".as_slice(),
+            b"{\"message\":\"bad\xff".as_slice(),
+        ] {
+            let original_error = Deserializer::from_slice(payload)
+                .into_iter::<VrlValue>()
+                .next()
+                .unwrap()
+                .unwrap_err();
+            assert!(
+                !original_error
+                    .to_string()
+                    .starts_with("invalid unicode code point at line ")
+            );
+
+            let error = extract_pipeline_value_by_content_type(
+                ContentType::json(),
+                Bytes::from_static(payload),
+                false,
+            )
+            .unwrap_err();
+            let Error::ParseJson { error: source, .. } = error else {
+                panic!("expected a JSON parse error, got {error}");
+            };
+            assert_eq!(source.to_string(), original_error.to_string());
+        }
+    }
+
+    #[test]
+    fn test_utf8_retry_counter() {
+        // Keep exact retry counts independent of other parser tests.
+        let utf8_retries = IntCounterVec::new(
+            Opts::new("test_utf8_retries", "UTF-8 retry attempts"),
+            &["format"],
+        )
+        .unwrap();
+        for (content_type, format, multi_record_retries) in [
+            (ContentType::json(), "json", 1),
+            (NDJSON_CONTENT_TYPE.clone(), "ndjson", 2),
+        ] {
+            let resolver = EventPayloadResolver::try_from(&content_type).unwrap();
+            let counter = utf8_retries.with_label_values(&[format]);
+            for ignore_errors in [false, true] {
+                for (payload, retries, valid_after_retry) in [
+                    (br#"{"message":"ok"}"#.as_slice(), 0, true),
+                    (
+                        b"{\"message\":\"bad\xff\"}\n{\"message\":\"bad\xfe\"}".as_slice(),
+                        multi_record_retries,
+                        true,
+                    ),
+                    (br#"{"broken":}"#.as_slice(), 0, false),
+                    (br#"{"message":"\uDC00"}"#.as_slice(), 0, false),
+                    (
+                        b"{\"message\":\"bad\xff\",\"broken\":}".as_slice(),
+                        1,
+                        false,
+                    ),
+                    // SIMD validates UTF-8 before decoding the invalid escape.
+                    (
+                        b"{\"message\":\"bad\xff\\q\"}".as_slice(),
+                        u64::from(format == "ndjson"),
+                        false,
+                    ),
+                ] {
+                    let before = counter.get();
+                    let result = resolver.parse_payload(
+                        Bytes::from_static(payload),
+                        ignore_errors,
+                        &utf8_retries,
+                    );
+                    assert_eq!(result.is_ok(), valid_after_retry || ignore_errors);
+                    assert_eq!(
+                        counter.get() - before,
+                        retries,
+                        "format={format}, ignore_errors={ignore_errors}, payload={payload:?}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]
