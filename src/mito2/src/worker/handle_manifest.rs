@@ -808,6 +808,20 @@ fn prepare_region_edit(region: &MitoRegionRef, edit: &mut RegionEdit) -> Result<
     edit.validate_shared_reclassification(region_id)?;
     let current = region.version_control.current();
     let shared = &current.version.ssts.levels()[file::SHARED_LEVEL_SLOT].files;
+    // Shared adoption is L0-only. The manifest is keyed by FileId and would
+    // replace an existing reference, but installing a shared handle detaches
+    // only the L0 handle, so an existing L1 reference would leave two live
+    // handles for one file and duplicate its rows until reopen.
+    let l1_files = &current.version.ssts.levels()[1].files;
+    snafu::ensure!(
+        edit.files_to_add
+            .iter()
+            .all(|file| file.level != file::LEVEL_SHARED || !l1_files.contains_key(&file.file_id)),
+        crate::error::InvalidRequestSnafu {
+            region_id,
+            reason: "Cannot adopt an existing L1 SST as shared; adoption is L0-only",
+        }
+    );
     snafu::ensure!(
         edit.files_to_remove
             .iter()

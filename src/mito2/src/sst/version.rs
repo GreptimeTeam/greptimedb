@@ -85,6 +85,7 @@ impl SstVersion {
             let new_index_version = file.index_version;
             // A trusted L0 adoption changes classification, not the physical object.
             // Detach the old handle without marking it deleted (old readers may hold it).
+            // Admission rejects an existing L1 reference; see `prepare_region_edit`.
             if level == file::LEVEL_SHARED {
                 levels[0].files.remove(&file.file_id);
             }

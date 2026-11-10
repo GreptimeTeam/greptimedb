@@ -255,6 +255,103 @@ async fn test_shared_reclassification_requires_add_only() {
 }
 
 #[cfg(feature = "enterprise")]
+#[tokio::test]
+async fn test_shared_adoption_rejects_existing_l1_reference() {
+    use api::v1::Rows;
+
+    use crate::test_util::{build_rows, flush_region, put_rows, rows_schema};
+
+    let mut env = TestEnv::new().await;
+    let engine = env
+        .create_engine(MitoConfig {
+            schedule_compaction_after_edit: false,
+            ..Default::default()
+        })
+        .await;
+    let region_id = RegionId::new(1, 1);
+    let create = CreateRequestBuilder::new().build();
+    engine
+        .handle_request(region_id, RegionRequest::Create(create.clone()))
+        .await
+        .unwrap();
+    put_rows(
+        &engine,
+        region_id,
+        Rows {
+            schema: rows_schema(&create),
+            rows: build_rows(0, 3),
+        },
+    )
+    .await;
+    flush_region(&engine, region_id, None).await;
+    let region = engine.get_region(region_id).unwrap();
+    let source = region.version().ssts.levels()[0]
+        .files()
+        .next()
+        .unwrap()
+        .meta_ref()
+        .clone();
+    // Install the same FileId as an ordinary L1 reference. The manifest is
+    // keyed by FileId, so this leaves the file classified as L1.
+    engine
+        .edit_region(
+            region_id,
+            RegionEdit {
+                files_to_add: vec![FileMeta {
+                    level: 1,
+                    ..source.clone()
+                }],
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        1,
+        engine
+            .get_region(region_id)
+            .unwrap()
+            .manifest_ctx
+            .manifest()
+            .await
+            .files[&source.file_id]
+            .level
+    );
+
+    let region = engine.get_region(region_id).unwrap();
+    let before = region.manifest_ctx.manifest().await;
+    let sequence = region.version_control.current().last_sequence;
+    let shared = FileMeta {
+        level: LEVEL_SHARED,
+        ..source.clone()
+    };
+    let error = engine
+        .edit_region(
+            region_id,
+            RegionEdit {
+                files_to_add: vec![shared],
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        crate::error::Error::EditRegion { source, .. }
+            if matches!(*source, crate::error::Error::InvalidRequest { .. })
+    ));
+    let unchanged = region.manifest_ctx.manifest().await;
+    assert_eq!(before.manifest_version, unchanged.manifest_version);
+    assert_eq!(before.files, unchanged.files);
+    assert_eq!(1, unchanged.files[&source.file_id].level);
+    assert_eq!(sequence, region.version_control.current().last_sequence);
+    assert!(std::sync::Arc::ptr_eq(
+        &region,
+        &engine.get_region(region_id).unwrap()
+    ));
+}
+
+#[cfg(feature = "enterprise")]
 #[rstest::rstest]
 #[case::all(true)]
 #[case::time_range(false)]
