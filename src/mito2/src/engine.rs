@@ -1971,5 +1971,19 @@ mod tests {
             wal_recovery: Default::default(),
         };
         assert!(!is_valid_region_edit(&edit));
+        let edit = RegionEdit {
+            files_to_add: vec![FileMeta::default()],
+            files_to_remove: vec![],
+            timestamp_ms: None,
+            compaction_time_window: None,
+            flushed_entry_id: None,
+            flushed_sequence: None,
+            committed_sequence: None,
+            wal_recovery: WalRecoveryEdit {
+                pending_tails: Some(vec![]),
+                handoff_floor: None,
+            },
+        };
+        assert!(!is_valid_region_edit(&edit));
     }
 }

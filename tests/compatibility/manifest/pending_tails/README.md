@@ -7,9 +7,11 @@ in `src/mito2/src/manifest/action.rs`, which never rewrite them:
 cargo nextest run -p mito2 -E 'test(test_pending_tails_fixtures) | test(test_pending_tails_old_shape_compat)'
 ```
 
-The first test decodes both files and requires the encoder to reproduce them byte for byte. The
-second decodes them with the shapes from before pending tails existed, which must ignore the new
-fields, and requires a manifest without pending tails to encode exactly as those shapes do.
+The first test decodes both files. It requires the encoder to reproduce `delta.json` byte for byte,
+and the `pending_tails` and `handoff_floors` of `checkpoint.json` exactly; the rest of the checkpoint
+embeds region metadata, whose encoding may gain compatible fields. The second test decodes both
+files with the shapes from before pending tails existed, which must ignore the new fields, and
+requires a manifest without pending tails to encode exactly as those shapes do.
 
 ## `delta.json`
 

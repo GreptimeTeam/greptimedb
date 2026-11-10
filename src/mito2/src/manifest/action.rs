@@ -1701,7 +1701,12 @@ mod tests {
         let manifest = decoded.checkpoint.as_ref().unwrap();
         assert_eq!(manifest.pending_tails, fixture_pending_tails());
         assert_eq!(manifest.handoff_floors, BTreeMap::from([(3, 4 << 32)]));
-        assert_eq!(decoded.encode().unwrap(), checkpoint.as_bytes());
+        let encoded: serde_json::Value =
+            serde_json::from_slice(&decoded.encode().unwrap()).unwrap();
+        let frozen: serde_json::Value = serde_json::from_str(checkpoint).unwrap();
+        for key in ["pending_tails", "handoff_floors"] {
+            assert_eq!(encoded["checkpoint"][key], frozen["checkpoint"][key]);
+        }
     }
 
     /// Checks the fixtures against the shapes before pending tails were added.

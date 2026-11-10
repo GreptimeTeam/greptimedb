@@ -358,7 +358,9 @@ async fn test_alter_with_pending_tails(#[case] kind: AlterKind, #[case] allowed:
         result.unwrap();
     } else {
         assert_pending_tails_error(&result.unwrap_err());
-        assert_eq!(metadata, engine.get_region(region_id).unwrap().metadata());
+        let region = engine.get_region(region_id).unwrap();
+        assert_eq!(metadata, region.metadata());
+        assert_eq!(1, region.version().memtables.num_rows());
     }
 }
 
@@ -394,7 +396,9 @@ async fn test_enter_staging_rejects_region_with_pending_tails() {
         .unwrap_err();
 
     assert_pending_tails_error(&err);
-    assert!(!engine.get_region(region_id).unwrap().is_staging());
+    let region = engine.get_region(region_id).unwrap();
+    assert!(!region.is_staging());
+    assert_eq!(1, region.version().memtables.num_rows());
 }
 
 #[tokio::test]
