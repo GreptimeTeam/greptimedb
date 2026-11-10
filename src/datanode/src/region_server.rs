@@ -1369,6 +1369,7 @@ impl Deref for RegionEngineWithStatus {
 }
 
 /// Clears unfinished initialization requests when startup completes, fails, or is cancelled.
+#[must_use = "the guard clears tracked initialization on drop"]
 pub(crate) struct RegionInitializationGuard(Arc<DashSet<RegionId>>);
 
 impl Drop for RegionInitializationGuard {
@@ -2699,6 +2700,32 @@ mod tests {
             RegionChange::Register(RegionAttribute::Mito),
         );
         assert_eq!(server.opening_regions(), vec![queued]);
+
+        // An engine may report a role before the whole open batch returns.
+        let (serving_engine, _receiver) = MockRegionEngine::new(MITO_ENGINE_NAME);
+        for status in [
+            RegionEngineWithStatus::Registering(serving_engine.clone()),
+            RegionEngineWithStatus::Ready(serving_engine.clone()),
+        ] {
+            server.inner.region_map.insert(queued, status);
+            assert!(server.opening_regions().is_empty());
+            assert!(server.inner.initializing_regions.contains(&queued));
+        }
+        server
+            .inner
+            .set_region_status_ready(
+                queued,
+                serving_engine,
+                RegionChange::Register(RegionAttribute::Mito),
+            )
+            .await
+            .unwrap();
+        assert!(!server.inner.initializing_regions.contains(&queued));
+        assert!(server.opening_regions().is_empty());
+
+        // Keep one unfinished request to verify guard cleanup.
+        server.inner.initializing_regions.insert(opening);
+        assert_eq!(server.opening_regions(), vec![opening]);
         drop(guard);
         assert!(server.opening_regions().is_empty());
     }

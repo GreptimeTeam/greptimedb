@@ -983,19 +983,18 @@ impl RegionSupervisor {
 
     /// Updates the state of corresponding failure detectors.
     fn on_heartbeat_arrived(&self, heartbeat: DatanodeHeartbeat) {
+        let mut regions = heartbeat.regions;
         if !heartbeat.opening_regions.is_empty() {
-            let serving_regions: HashSet<_> = heartbeat.regions.iter().copied().collect();
-            for region_id in heartbeat.opening_regions {
-                // Serving stats take precedence and retain their detector history.
-                if !serving_regions.contains(&region_id) {
-                    self.failure_detector.reset_region_failure_detector(
-                        (heartbeat.datanode_id, region_id),
-                        heartbeat.timestamp,
-                    );
-                }
-            }
+            let mut reported_regions: HashSet<_> = regions.iter().copied().collect();
+            // Update each detector once, even if both snapshots contain the region.
+            regions.extend(
+                heartbeat
+                    .opening_regions
+                    .into_iter()
+                    .filter(|region_id| reported_regions.insert(*region_id)),
+            );
         }
-        for region_id in heartbeat.regions {
+        for region_id in regions {
             let detecting_region = (heartbeat.datanode_id, region_id);
             let mut detector = self
                 .failure_detector
@@ -1534,7 +1533,7 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn test_opening_regions_reset_detectors_until_serving() {
+    async fn test_opening_regions_refresh_detectors_until_serving() {
         let (supervisor, _sender) = new_test_supervisor();
         let region_id = RegionId::new(1, 1);
         let other_region = RegionId::new(1, 2);
@@ -1545,7 +1544,12 @@ pub(crate) mod tests {
             detector.heartbeat(2_000);
         }
 
+        let mut expected = supervisor
+            .failure_detector
+            .region_failure_detector((1, region_id))
+            .clone();
         for timestamp in [60_000, 120_000] {
+            expected.heartbeat(timestamp);
             assert!(
                 !supervisor
                     .failure_detector
@@ -1558,6 +1562,12 @@ pub(crate) mod tests {
                 opening_regions: vec![region_id, new_region],
                 timestamp,
             });
+            assert_eq!(
+                expected,
+                *supervisor
+                    .failure_detector
+                    .region_failure_detector((1, region_id))
+            );
             for region in [region_id, new_region] {
                 let detector = supervisor
                     .failure_detector
@@ -1574,10 +1584,6 @@ pub(crate) mod tests {
         }
 
         // Serving heartbeats retain history, even with a stale opening entry.
-        let mut expected = supervisor
-            .failure_detector
-            .region_failure_detector((1, region_id))
-            .clone();
         for (timestamp, opening_regions) in [(121_000, vec![]), (122_000, vec![region_id])] {
             expected.heartbeat(timestamp);
             supervisor.on_heartbeat_arrived(DatanodeHeartbeat {
