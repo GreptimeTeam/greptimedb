@@ -31,7 +31,7 @@ use std::sync::atomic::AtomicU64;
 use common_base::cancellation::{CancellableFuture, CancellationHandle};
 use common_time::Timestamp;
 use partition::PartitionRuleRef;
-use snafu::{OptionExt, ensure};
+use snafu::{OptionExt, ResultExt, ensure};
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::RegionId;
 
@@ -41,6 +41,7 @@ use crate::config::MitoConfig;
 use crate::error::{InvalidMultiRegionCompactionSnafu, Result};
 use crate::region::options::RegionOptions;
 use crate::sst::file::{FileMeta, RegionFileId};
+use crate::sst::index::handler::IndexKindProviderRef;
 use crate::sst::parquet::SstInfo;
 use crate::sst::parquet::writer::SstWriteGuard;
 
@@ -78,6 +79,8 @@ pub struct MultiRegionCompactionPlan {
 
 /// Shared storage services and attempt-owned output resources.
 pub struct MultiRegionCompactionContext {
+    /// Optional enterprise index implementation. Each routed output builds its own state.
+    pub index_kind_provider: Option<IndexKindProviderRef>,
     pub access_layer: AccessLayerRef,
     pub cache: CacheManagerRef,
     pub config: Arc<MitoConfig>,
@@ -127,6 +130,27 @@ pub async fn compact_regions(
     context: MultiRegionCompactionContext,
 ) -> Result<MultiRegionCompactionOutput> {
     let metadata = validate_plan(&plan)?;
+    // Validate before source footer reads or any output creation. The source and
+    // target snapshots may each carry file-level or column-level index metadata.
+    let registry = crate::sst::index::registry::IndexRegistry::new(
+        context.config.inverted_index.clone(),
+        context.config.fulltext_index.clone(),
+        context.config.bloom_filter_index.clone(),
+    )
+    .with_provider(context.index_kind_provider.clone())
+    .with_context(|_| crate::error::ExternalSnafu {
+        context: "compaction index registration".to_string(),
+    })?;
+    for target in plan.targets.values() {
+        registry
+            .validate_required_kinds(
+                &target.metadata,
+                plan.sources.iter().chain(target.inputs.values()),
+            )
+            .with_context(|_| crate::error::ExternalSnafu {
+                context: "compaction index planning".to_string(),
+            })?;
+    }
     if context.cancellation.is_cancelled() {
         return crate::error::CompactionCancelledSnafu.fail();
     }

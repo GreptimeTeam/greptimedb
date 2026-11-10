@@ -50,6 +50,94 @@ use crate::test_util::{
 };
 
 #[tokio::test]
+async fn test_engine_create_validates_extension_options_before_manifest() {
+    use crate::sst::index::handler::{
+        IndexKindHandler, IndexKindProvider, IndexKindProviderRef, PlanContext, PlannedIndex,
+    };
+    use crate::sst::index::kind::{ExtensionIndexKind, IndexKind};
+    use common_base::Plugins;
+    use common_error::ext::BoxedError;
+
+    #[derive(Debug)]
+    struct ValidatingHandler;
+    impl IndexKindHandler for ValidatingHandler {
+        fn kinds(&self) -> &[IndexKind] {
+            &[IndexKind::Extension(ExtensionIndexKind::Hll)]
+        }
+        fn validate(&self, context: &PlanContext<'_>) -> Result<(), BoxedError> {
+            for column in &context.metadata.column_metadatas {
+                if column
+                    .column_schema
+                    .metadata()
+                    .get(datatypes::schema::HLL_KEY)
+                    .map(String::as_str)
+                    == Some(r#"{"precision":0}"#)
+                {
+                    return Err(BoxedError::new(common_error::ext::PlainError::new(
+                        "injected invalid extension option".into(),
+                        StatusCode::InvalidArguments,
+                    )));
+                }
+            }
+            Ok(())
+        }
+        fn plan(&self, _: &PlanContext<'_>) -> Result<Option<Arc<dyn PlannedIndex>>, BoxedError> {
+            Ok(None)
+        }
+    }
+    #[derive(Debug)]
+    struct Provider;
+    impl IndexKindProvider for Provider {
+        fn handlers(&self) -> Vec<Arc<dyn IndexKindHandler>> {
+            vec![Arc::new(ValidatingHandler)]
+        }
+    }
+    let mut env = TestEnv::new().await;
+    let plugins = Plugins::new();
+    plugins.insert::<IndexKindProviderRef>(Arc::new(Provider));
+    let engine = env
+        .create_engine_with_plugins(MitoConfig::default(), plugins)
+        .await;
+    let region_id = RegionId::new(1, 1);
+    let mut request = CreateRequestBuilder::new().build();
+    request.column_metadatas[0]
+        .column_schema
+        .mut_metadata()
+        .insert(
+            datatypes::schema::HLL_KEY.into(),
+            r#"{"precision":0}"#.into(),
+        );
+    let dir = manifest_dir(&region_dir_from_table_dir(
+        &request.table_dir,
+        region_id,
+        request.path_type,
+    ));
+    let error = engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap_err();
+    assert_eq!(error.status_code(), StatusCode::InvalidArguments);
+    assert!(engine.get_region(region_id).is_none());
+    assert!(
+        env.get_object_store()
+            .unwrap()
+            .list(&dir)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    // A failed plugin validation must leave a clean path for a subsequent create.
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::Create(CreateRequestBuilder::new().build()),
+        )
+        .await
+        .unwrap();
+    assert!(engine.get_region(region_id).is_some());
+}
+
+#[tokio::test]
 async fn test_engine_column_compression_validation() {
     use datatypes::schema::COMPRESSION_KEY;
     use store_api::region_request::{AlterKind, RegionAlterRequest, SetRegionOption};

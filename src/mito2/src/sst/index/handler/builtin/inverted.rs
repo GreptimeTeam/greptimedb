@@ -27,9 +27,12 @@ use index::target::IndexTarget;
 
 use crate::config::InvertedIndexConfig;
 use crate::read::Batch;
-use crate::sst::index::handler::builtin::{column_target_id, normalize_entries, target_column_id};
+use crate::sst::file::FileMeta;
+use crate::sst::index::handler::builtin::{
+    column_target_id, is_current, normalize_entries, target_column_id,
+};
 use crate::sst::index::handler::{
-    BuildContext, IndexCreator, PlanContext, PlanEntry, PlannedIndex,
+    BuildContext, CurrencyContext, IndexCreator, PlanContext, PlanEntry, PlannedIndex,
 };
 use crate::sst::index::inverted_index::creator::InvertedIndexer;
 use crate::sst::index::kind::IndexKind;
@@ -130,6 +133,10 @@ impl PlannedIndex for InvertedPlan {
             segment,
             self.targets.clone(),
         ))))
+    }
+
+    fn is_current(&self, file: &FileMeta, context: &CurrencyContext<'_>) -> bool {
+        is_current(file, context)
     }
 }
 

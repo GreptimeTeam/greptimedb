@@ -422,6 +422,21 @@ pub enum IndexType {
     MgIndex,
 }
 
+impl IndexType {
+    /// Stable label used by index diagnostics and metrics.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::InvertedIndex => "inverted_index",
+            Self::FulltextIndex => "fulltext_index",
+            Self::BloomFilterIndex => "bloom_filter_index",
+            Self::VectorIndex => "vector_index",
+            Self::HllIndex => "hll_index",
+            Self::KllIndex => "kll_index",
+            Self::MgIndex => "mg_index",
+        }
+    }
+}
+
 /// Metadata of indexes created for a specific column in an SST file.
 ///
 /// This structure tracks which index types have been successfully created for a column.
