@@ -14,22 +14,29 @@
 
 //! Tests for partition expression filtering in SST readers.
 
-use api::v1::Rows;
+use api::v1::{Rows, SemanticType};
 use common_recordbatch::RecordBatches;
+use common_time::Timestamp;
+use datafusion_expr::Expr;
 use datatypes::arrow::array::AsArray;
+use datatypes::prelude::ConcreteDataType;
+use datatypes::schema::{ColumnDefaultConstraint, ColumnSchema};
 use datatypes::value::Value;
 use partition::expr::{Operand, col};
 use partition::function::IcebergHash;
+use store_api::metadata::ColumnMetadata;
 use store_api::region_engine::{RegionEngine, RemapManifestsRequest};
 use store_api::region_request::{
-    ApplyStagingManifestRequest, EnterStagingRequest, RegionFlushRequest, RegionRequest,
-    StagingPartitionDirective,
+    AddColumn, AlterKind, ApplyStagingManifestRequest, EnterStagingRequest, RegionAlterRequest,
+    RegionCompactRequest, RegionFlushRequest, RegionRequest, StagingPartitionDirective,
 };
 use store_api::storage::{RegionId, ScanRequest};
 
 use crate::config::MitoConfig;
 use crate::engine::MitoEngine;
-use crate::test_util::{CreateRequestBuilder, TestEnv, build_rows, put_rows, rows_schema};
+use crate::test_util::{
+    CreateRequestBuilder, TestEnv, build_rows, flush_region, put_rows, rows_schema,
+};
 
 /// Helper to create a partition expression for testing.
 /// Creates `col_name >= start AND col_name < end`.
@@ -292,4 +299,345 @@ async fn test_partition_filter_iceberg_hash_with_format(flat_format: bool) {
     // Rows flushed before staging fall on both sides of the hash bound.
     assert!((0..20).any(|i| in_partition(&i)) && !(0..20).all(|i| in_partition(&i)));
     assert_eq!(actual, expected, "flat_format: {flat_format}");
+}
+
+#[tokio::test]
+async fn test_partition_filter_keeps_rows_of_sst_without_partition_column() {
+    test_partition_filter_keeps_rows_of_sst_without_partition_column_with_format(false).await;
+    test_partition_filter_keeps_rows_of_sst_without_partition_column_with_format(true).await;
+}
+
+/// Regression test for #10246.
+///
+/// Flushes an SST before the partition column `zn` exists, then adds `zn` and partitions the
+/// region on `zn < 'm'`. The old SST has no `zn`, so its rows hold NULL: a *known* value, and
+/// `zn < 'm'` is one of the expressions that own NULL (`PartitionExpr::try_as_logical_expr`
+/// adds `IS NULL`). The scan must therefore keep the rows instead of failing, while genuine
+/// `WHERE` predicates keep their own semantics.
+async fn test_partition_filter_keeps_rows_of_sst_without_partition_column_with_format(
+    flat_format: bool,
+) {
+    common_telemetry::init_default_ut_logging();
+
+    let (_env, engine, region_id) = setup_old_sst_partitioned_on_zn(
+        flat_format,
+        zn_metadata(),
+        col("zn").lt(Value::String("m".into())),
+        1,
+    )
+    .await;
+
+    // The region owns the NULL rows of the old SST, which holds no `zn`.
+    let rows = scan_row_count(&engine, region_id, vec![]).await;
+    assert_eq!(
+        rows, 5,
+        "rows of an SST without the partition column must be kept by the region that owns \
+         NULL, flat_format: {flat_format}"
+    );
+
+    // A genuine predicate on the partition column still filters: the old rows hold NULL `zn`.
+    let rows = scan_row_count(
+        &engine,
+        region_id,
+        vec![datafusion_expr::col("zn").eq(datafusion_expr::lit("a"))],
+    )
+    .await;
+    assert_eq!(
+        rows, 0,
+        "user predicate on the missing column must still filter, flat_format: {flat_format}"
+    );
+
+    // A genuine predicate on a column the old SST contains still filters.
+    let rows = scan_row_count(
+        &engine,
+        region_id,
+        vec![datafusion_expr::col("field_0").lt(datafusion_expr::lit(3.0_f64))],
+    )
+    .await;
+    assert_eq!(
+        rows, 3,
+        "user predicate on a stored column must still filter, flat_format: {flat_format}"
+    );
+}
+
+#[tokio::test]
+async fn test_partition_filter_prunes_sst_without_partition_column_in_peer_region() {
+    test_partition_filter_prunes_sst_without_partition_column_in_peer_region_with_format(false)
+        .await;
+    test_partition_filter_prunes_sst_without_partition_column_in_peer_region_with_format(true)
+        .await;
+}
+
+/// The peer of [`test_partition_filter_keeps_rows_of_sst_without_partition_column`]: the same
+/// old SST, whose `zn` is a known NULL, evaluated against the disjoint destination region
+/// `zn >= 'm'`. Partition routing orders NULL below non-NULL values, so this region doesn't own
+/// those rows and must prune the file instead of retaining them.
+async fn test_partition_filter_prunes_sst_without_partition_column_in_peer_region_with_format(
+    flat_format: bool,
+) {
+    common_telemetry::init_default_ut_logging();
+
+    let (_env, engine, region_id) = setup_old_sst_partitioned_on_zn(
+        flat_format,
+        zn_metadata(),
+        col("zn").gt_eq(Value::String("m".into())),
+        1,
+    )
+    .await;
+
+    let rows = scan_row_count(&engine, region_id, vec![]).await;
+    assert_eq!(
+        rows, 0,
+        "a region that doesn't own NULL must prune an SST without the partition column, \
+         flat_format: {flat_format}"
+    );
+}
+
+#[tokio::test]
+async fn test_compaction_keeps_rows_of_sst_without_partition_column() {
+    test_compaction_keeps_rows_of_sst_without_partition_column_with_format(false).await;
+    test_compaction_keeps_rows_of_sst_without_partition_column_with_format(true).await;
+}
+
+/// Regression test for #10246 on the compaction path.
+///
+/// Compaction reads through the same `ScanInput`/`PredicateGroup` machinery as a query, so the
+/// region partition expression is pushed down as a filter there too. Compacting a region
+/// partitioned on `zn < 'm'` (which owns NULL) must keep every row of the SSTs that were
+/// written before `zn` existed, and the rewrite must not drop the file.
+async fn test_compaction_keeps_rows_of_sst_without_partition_column_with_format(flat_format: bool) {
+    common_telemetry::init_default_ut_logging();
+
+    // A single input file makes the compaction read use `PreFilterMode::All`, so field
+    // predicates (including the partition expression on `zn`) are applied there.
+    let (_env, engine, region_id) = setup_old_sst_partitioned_on_zn(
+        flat_format,
+        zn_metadata(),
+        col("zn").lt(Value::String("m".into())),
+        1,
+    )
+    .await;
+
+    assert_eq!(5, scan_row_count(&engine, region_id, vec![]).await);
+    let level0_files = engine
+        .get_region(region_id)
+        .unwrap()
+        .version()
+        .ssts
+        .levels()[0]
+        .files
+        .len();
+    assert_eq!(
+        1, level0_files,
+        "expected the flushed SST, flat_format: {flat_format}"
+    );
+
+    // A strict-window compaction rewrites the whole window, so these SSTs are really read and
+    // rewritten instead of being left untouched.
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::Compact(RegionCompactRequest {
+                options: api::v1::region::compact_request::Options::StrictWindow(
+                    api::v1::region::StrictWindow {
+                        window_seconds: 3600,
+                    },
+                ),
+                ..Default::default()
+            }),
+        )
+        .await
+        .unwrap();
+
+    let version = engine.get_region(region_id).unwrap().version();
+    assert!(
+        version.ssts.levels()[0].files.is_empty(),
+        "compaction must rewrite the SSTs written before the column existed, flat_format: \
+         {flat_format}"
+    );
+    let rows_in_files: u64 = version
+        .ssts
+        .levels()
+        .iter()
+        .flat_map(|level| level.files())
+        .map(|file| file.meta_ref().num_rows)
+        .sum();
+    assert_eq!(
+        5, rows_in_files,
+        "compaction must keep every row of the SSTs without the partition column, \
+         flat_format: {flat_format}"
+    );
+    assert_eq!(
+        5,
+        scan_row_count(&engine, region_id, vec![]).await,
+        "rows must stay readable after compaction, flat_format: {flat_format}"
+    );
+}
+
+#[tokio::test]
+async fn test_partition_filter_keeps_rows_of_sst_without_impure_default_column() {
+    test_partition_filter_keeps_rows_of_sst_without_impure_default_column_with_format(false).await;
+    test_partition_filter_keeps_rows_of_sst_without_impure_default_column_with_format(true).await;
+}
+
+/// Regression test for #10246 with an impure column default.
+///
+/// The partition column `zn` is added with a `now()` default, so the value the old SST's rows
+/// hold can't be reproduced at read time. Neither the partition predicate pushed down as a
+/// simple filter nor the range-level partition filter may prune the file on an evaluated
+/// default.
+async fn test_partition_filter_keeps_rows_of_sst_without_impure_default_column_with_format(
+    flat_format: bool,
+) {
+    common_telemetry::init_default_ut_logging();
+
+    let zn_column = ColumnSchema::new(
+        "zn",
+        ConcreteDataType::timestamp_millisecond_datatype(),
+        true,
+    )
+    .with_default_constraint(Some(ColumnDefaultConstraint::Function("now()".to_string())))
+    .unwrap();
+    let (_env, engine, region_id) = setup_old_sst_partitioned_on_zn(
+        flat_format,
+        ColumnMetadata {
+            column_schema: zn_column,
+            semantic_type: SemanticType::Field,
+            column_id: 3,
+        },
+        // `zn < 2000-01-01` owns NULL, but the default is impure, so nothing may be assumed.
+        col("zn").lt(Value::Timestamp(Timestamp::new_millisecond(
+            946_684_800_000,
+        ))),
+        1,
+    )
+    .await;
+
+    let rows = scan_row_count(&engine, region_id, vec![]).await;
+    assert_eq!(
+        rows, 5,
+        "rows of an SST without an impure-default partition column must be kept, \
+         flat_format: {flat_format}"
+    );
+
+    // A genuine predicate on a stored column still filters.
+    let rows = scan_row_count(
+        &engine,
+        region_id,
+        vec![datafusion_expr::col("field_0").lt(datafusion_expr::lit(2.0_f64))],
+    )
+    .await;
+    assert_eq!(
+        rows, 2,
+        "user predicate on a stored column must still filter, flat_format: {flat_format}"
+    );
+}
+
+/// The `zn` column added by the regression tests: nullable, no default.
+fn zn_metadata() -> ColumnMetadata {
+    ColumnMetadata {
+        column_schema: ColumnSchema::new("zn", ConcreteDataType::string_datatype(), true),
+        semantic_type: SemanticType::Field,
+        column_id: 3,
+    }
+}
+
+/// Creates a region with `sst_count` SSTs written before the `zn` column existed (so they don't
+/// contain `zn`), adds `zn` and then partitions the region on `partition_expr`.
+async fn setup_old_sst_partitioned_on_zn(
+    flat_format: bool,
+    zn_column: ColumnMetadata,
+    partition_expr: partition::expr::PartitionExpr,
+    sst_count: usize,
+) -> (TestEnv, MitoEngine, RegionId) {
+    let mut env = TestEnv::new().await;
+    let engine = env
+        .create_engine(MitoConfig {
+            default_flat_format: flat_format,
+            ..Default::default()
+        })
+        .await;
+    let region_id = RegionId::new(1024, 0);
+    let request = CreateRequestBuilder::new().build();
+    let column_schemas = rows_schema(&request);
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+
+    // Flush rows while the region has neither the `zn` column nor a partition expression, so
+    // none of the SSTs contains `zn`.
+    for index in 0..sst_count {
+        let start = index * 5 / sst_count;
+        let end = (index + 1) * 5 / sst_count;
+        put_rows(
+            &engine,
+            region_id,
+            Rows {
+                schema: column_schemas.clone(),
+                rows: build_rows(start, end),
+            },
+        )
+        .await;
+        flush_region(&engine, region_id, None).await;
+    }
+
+    // `ALTER TABLE ... ADD COLUMN zn`, then partition the region.
+    alter_add_column(&engine, region_id, zn_column).await;
+    let partition_expr = partition_expr.as_json_str().unwrap();
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::EnterStaging(EnterStagingRequest {
+                partition_directive: StagingPartitionDirective::UpdatePartitionExpr(
+                    partition_expr.clone(),
+                ),
+            }),
+        )
+        .await
+        .unwrap();
+
+    // Exit staging and apply the new partition expression to the region.
+    apply_staging(&engine, region_id, partition_expr).await;
+    assert!(
+        engine
+            .get_region(region_id)
+            .unwrap()
+            .metadata()
+            .partition_expr
+            .is_some(),
+        "the region must be partitioned on `zn`"
+    );
+
+    (env, engine, region_id)
+}
+
+/// Adds a column to `region_id`.
+async fn alter_add_column(engine: &MitoEngine, region_id: RegionId, column: ColumnMetadata) {
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::Alter(RegionAlterRequest {
+                kind: AlterKind::AddColumns {
+                    columns: vec![AddColumn {
+                        column_metadata: column,
+                        location: None,
+                    }],
+                },
+            }),
+        )
+        .await
+        .unwrap();
+}
+
+async fn scan_row_count(engine: &MitoEngine, region_id: RegionId, filters: Vec<Expr>) -> usize {
+    let request = ScanRequest {
+        filters,
+        ..Default::default()
+    };
+    let scanner = engine.scanner(region_id, request).await.unwrap();
+    let batches = RecordBatches::try_collect(scanner.scan().await.unwrap())
+        .await
+        .unwrap();
+    batches.iter().map(|batch| batch.num_rows()).sum()
 }
