@@ -2,7 +2,7 @@
   {
     "name": "missing_ordering_rejected",
     "metadata": {
-      "greptime.series.layout": "v2",
+      "greptime.series.layout": "v1",
       "greptime.series.content": "raw",
       "greptime.series.labels": "explicit",
       "greptime.series.time": "timestamps"
@@ -13,7 +13,7 @@
   {
     "name": "known_contiguous",
     "metadata": {
-      "greptime.series.layout": "v2",
+      "greptime.series.layout": "v1",
       "greptime.series.content": "raw",
       "greptime.series.labels": "explicit",
       "greptime.series.time": "timestamps",
@@ -25,7 +25,7 @@
   {
     "name": "known_read_key_then_time",
     "metadata": {
-      "greptime.series.layout": "v2",
+      "greptime.series.layout": "v1",
       "greptime.series.content": "raw",
       "greptime.series.labels": "explicit",
       "greptime.series.time": "timestamps",
@@ -37,7 +37,7 @@
   {
     "name": "unknown_ordering_rejected",
     "metadata": {
-      "greptime.series.layout": "v2",
+      "greptime.series.layout": "v1",
       "greptime.series.content": "raw",
       "greptime.series.labels": "explicit",
       "greptime.series.time": "timestamps",
@@ -49,7 +49,7 @@
   {
     "name": "evaluated_contiguous",
     "metadata": {
-      "greptime.series.layout": "v2",
+      "greptime.series.layout": "v1",
       "greptime.series.content": "evaluated",
       "greptime.series.labels": "explicit",
       "greptime.series.time": "grid_spans",
@@ -62,7 +62,7 @@
   {
     "name": "evaluated_read_key_then_time_rejected",
     "metadata": {
-      "greptime.series.layout": "v2",
+      "greptime.series.layout": "v1",
       "greptime.series.content": "evaluated",
       "greptime.series.labels": "explicit",
       "greptime.series.time": "grid_spans",
@@ -75,7 +75,7 @@
   {
     "name": "wrong_layout_rejected",
     "metadata": {
-      "greptime.series.layout": "v3",
+      "greptime.series.layout": "v2",
       "greptime.series.content": "raw",
       "greptime.series.labels": "explicit",
       "greptime.series.time": "timestamps",
@@ -87,7 +87,7 @@
   {
     "name": "unregistered_reserved_metadata_rejected",
     "metadata": {
-      "greptime.series.layout": "v2",
+      "greptime.series.layout": "v1",
       "greptime.series.content": "raw",
       "greptime.series.labels": "explicit",
       "greptime.series.time": "timestamps",
