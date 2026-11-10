@@ -47,7 +47,7 @@ use common_runtime::{JoinHandle, Runtime};
 use common_telemetry::tracing::{self, info_span};
 use common_telemetry::tracing_context::{FutureExt, TracingContext};
 use common_telemetry::{debug, error, info, warn};
-use dashmap::DashMap;
+use dashmap::{DashMap, DashSet};
 use datafusion::datasource::TableProvider;
 use datafusion_common::tree_node::TreeNode;
 use datatypes::schema::SchemaRef;
@@ -400,6 +400,34 @@ impl RegionServer {
             stream
         };
         Ok(maybe_guard_stream(stream, permit))
+    }
+
+    /// Tracks all background initialization requests before the opening task starts.
+    pub(crate) fn track_region_initialization(
+        &self,
+        regions: impl IntoIterator<Item = RegionId>,
+    ) -> RegionInitializationGuard {
+        for region_id in regions {
+            self.inner.initializing_regions.insert(region_id);
+        }
+        RegionInitializationGuard(self.inner.initializing_regions.clone())
+    }
+
+    /// Returns initialization requests that are queued or not yet reportable.
+    pub(crate) fn opening_regions(&self) -> Vec<RegionId> {
+        self.inner
+            .initializing_regions
+            .iter()
+            .filter_map(|entry| {
+                let region_id = *entry.key();
+                let reportable = self
+                    .inner
+                    .region_map
+                    .get(&region_id)
+                    .is_some_and(|region| region.role(region_id).is_some());
+                (!reportable).then_some(region_id)
+            })
+            .collect()
     }
 
     /// Returns all opened and reportable regions.
@@ -1340,9 +1368,20 @@ impl Deref for RegionEngineWithStatus {
     }
 }
 
+/// Clears unfinished initialization requests when startup completes, fails, or is cancelled.
+pub(crate) struct RegionInitializationGuard(Arc<DashSet<RegionId>>);
+
+impl Drop for RegionInitializationGuard {
+    fn drop(&mut self) {
+        self.0.clear();
+    }
+}
+
 struct RegionServerInner {
     engines: RwLock<HashMap<String, RegionEngineRef>>,
     region_map: DashMap<RegionId, RegionEngineWithStatus>,
+    /// Regions queued or opening during background initialization only.
+    initializing_regions: Arc<DashSet<RegionId>>,
     query_engine: QueryEngineRef,
     runtime: Runtime,
     event_listener: RegionServerEventListenerRef,
@@ -1468,6 +1507,7 @@ impl RegionServerInner {
         Self {
             engines: RwLock::new(HashMap::new()),
             region_map: DashMap::new(),
+            initializing_regions: Arc::new(DashSet::new()),
             query_engine,
             runtime,
             event_listener,
@@ -2039,6 +2079,7 @@ impl RegionServerInner {
             RegionChange::None | RegionChange::Ingest | RegionChange::OfflineCleanup(_) => {}
             RegionChange::Register(_) => {
                 self.region_map.remove(&region_id);
+                self.initializing_regions.remove(&region_id);
             }
             RegionChange::Deregisters => {
                 self.region_map
@@ -2064,6 +2105,7 @@ impl RegionServerInner {
                 );
                 self.region_map
                     .insert(region_id, RegionEngineWithStatus::Ready(engine.clone()));
+                self.initializing_regions.remove(&region_id);
 
                 match attribute {
                     RegionAttribute::Metric { physical } => {
@@ -2632,6 +2674,33 @@ mod tests {
                 .clone(),
             RegionEngineWithStatus::Ready(_)
         ));
+    }
+
+    #[tokio::test]
+    async fn test_background_region_initialization() {
+        let server = mock_region_server();
+        let queued = RegionId::new(1, 1);
+        let opening = RegionId::new(1, 2);
+        let guard = server.track_region_initialization([queued, opening]);
+        let (mut engine, _receiver) = MockRegionEngine::new(MITO_ENGINE_NAME);
+        Arc::get_mut(&mut engine).unwrap().mock_role = Some(None);
+        let engine: RegionEngineRef = engine;
+        server
+            .inner
+            .region_map
+            .insert(opening, RegionEngineWithStatus::Registering(engine.clone()));
+        let mut regions = server.opening_regions();
+        regions.sort_unstable();
+        assert_eq!(regions, vec![queued, opening]);
+
+        server.inner.unset_region_status(
+            opening,
+            &engine,
+            RegionChange::Register(RegionAttribute::Mito),
+        );
+        assert_eq!(server.opening_regions(), vec![queued]);
+        drop(guard);
+        assert!(server.opening_regions().is_empty());
     }
 
     #[tokio::test]

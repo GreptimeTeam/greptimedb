@@ -390,6 +390,20 @@ impl DatanodeBuilder {
         let open_with_writable = self
             .open_regions_writable_override
             .unwrap_or(!controlled_by_metasrv);
+        let initialization_guard = self.opts.init_regions_in_background.then(|| {
+            let regions = region_open_requests
+                .leader_regions
+                .iter()
+                .map(|(id, _)| *id);
+            #[cfg(feature = "enterprise")]
+            let regions = regions.chain(
+                region_open_requests
+                    .follower_regions
+                    .iter()
+                    .map(|(id, _)| *id),
+            );
+            region_server.track_region_initialization(regions)
+        });
         let open_all_regions = open_all_regions(
             region_server.clone(),
             region_open_requests,
@@ -402,6 +416,7 @@ impl DatanodeBuilder {
         if self.opts.init_regions_in_background {
             // Opens regions in background.
             common_runtime::spawn_global(async move {
+                let _initialization_guard = initialization_guard;
                 if let Err(err) = open_all_regions.await {
                     error!(err; "Failed to open regions during the startup.");
                 }
