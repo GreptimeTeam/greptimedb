@@ -1842,9 +1842,8 @@ mod tests {
         );
     }
 
-    /// A statement that reads no table plans natively, and there is no region to place anything in:
-    /// the frontend evaluates the fused node under the native column names rather than the ones the
-    /// existing planner derives from an expression.
+    /// A statement that reads no table plans natively over the wire, where there is no region to
+    /// place anything in: the frontend evaluates the fused node with expression-named values.
     #[tokio::test]
     async fn test_remote_native_promql_plans_a_data_free_statement_natively() {
         let engine = create_promql_test_engine_with(
@@ -1855,35 +1854,26 @@ mod tests {
             false,
         );
         let query_ctx = native_discovery_query_ctx();
-        for (query, expected_columns, expected_values, expected_labels) in [
-            // `time()` answers the evaluation grid in seconds.
-            (
-                "time()",
-                &["time", "value"][..],
-                &[0.0, 5.0, 10.0][..],
-                &[][..],
-            ),
+        for (query, expected_values, expected_labels, name_column) in [
+            // `time()` answers the evaluation grid in seconds. It is a scalar root: it publishes
+            // one value and no series, so its rows layout declares no name column.
+            ("time()", &[0.0, 5.0, 10.0][..], &[][..], false),
             // `vector(1)` is a samples root: its rows layout declares the per-row name column,
             // which names no row because the vector carries no series identity.
-            (
-                "vector(1)",
-                &["time", "value", "__name__"][..],
-                &[1.0, 1.0, 1.0][..],
-                &[][..],
-            ),
+            ("vector(1)", &[1.0, 1.0, 1.0][..], &[][..], true),
             (
                 r#"label_replace(vector(1), "host", "host1", "", "")"#,
-                &["time", "value", "host", "__name__"][..],
                 &[1.0, 1.0, 1.0][..],
                 &[("host", "host1")][..],
+                true,
             ),
             // A synthesized `__tsid` is published under the statement's own columns: the stripping
             // projection above the node is read through rather than mistaken for a remote plan.
             (
                 r#"label_replace(vector(1), "__tsid", "x", "", "")"#,
-                &["time", "value", "__name__"][..],
                 &[1.0, 1.0, 1.0][..],
                 &[][..],
+                true,
             ),
         ] {
             let plan = plan_remote_native_promql(&engine, &query_ctx, query).await;
@@ -1893,7 +1883,15 @@ mod tests {
                 !display.contains("greptime_value"),
                 "{query} keeps the native value column: {display}"
             );
-            // A data-free statement has no input at all, so nothing is scanned or left empty.
+            // A data-free statement has no input at all, so nothing is scanned or left empty. The
+            // value is named after the expression, and a samples root's rows keep the name column
+            // last.
+            let expression = promql_parser::parser::parse(query).unwrap().to_string();
+            let mut expected_columns = vec!["time", expression.as_str()];
+            expected_columns.extend(expected_labels.iter().map(|(name, _)| *name));
+            if name_column {
+                expected_columns.push("__name__");
+            }
             assert_eq!(
                 expected_columns,
                 plan.schema()
@@ -1907,7 +1905,7 @@ mod tests {
             assert_regionless_physical_plan(&physical, query);
             assert_eq!(
                 expected_values,
-                numeric_values(&batches, "value").as_slice(),
+                numeric_values(&batches, &expression).as_slice(),
                 "{query}: {batches:?}"
             );
             for (label, value) in expected_labels {

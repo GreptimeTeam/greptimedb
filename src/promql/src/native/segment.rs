@@ -21,8 +21,8 @@
 //! nodes, recursing into a cut that wraps a whole-vector consumer.
 //!
 //! Everything here reads the bound tree alone. The columns a node publishes are the planner's
-//! answer, so the builders ask for them through [`OutputTags`] and [`RootSchema`] instead of
-//! deriving them a second time.
+//! answer, so the builders ask for them through [`OutputTags`], [`FieldNames`] and [`RootSchema`]
+//! instead of deriving them a second time.
 
 use std::sync::Arc;
 
@@ -56,11 +56,20 @@ use crate::vector_match::Cardinality;
 /// rather than deriving the columns a second time.
 pub type OutputTags = fn(&NativeNode, &[Vec<String>]) -> Option<Vec<String>>;
 
-/// The row schema a statement root publishes, or `None` when its columns cannot be named once.
+/// Derives the value column names a statement's expression gives the compiled `fields`.
+///
+/// Like [`OutputTags`], this is the planner's answer: a segment publishes the values its tree
+/// computes under the names the statement gave them, so the builders ask through this leaf instead
+/// of publishing the compiler's own field names. The tree alone does not carry the statement's
+/// expression, which is why the expression text is an input rather than something derived here.
+pub type FieldNames = fn(&str, &[String]) -> Vec<String>;
+
+/// The row schema a statement root publishes for `promql`, or `None` when its columns cannot be
+/// named once.
 ///
 /// Like [`OutputTags`], this is the caller's answer: a segment that publishes rows publishes
-/// exactly the columns the planner would have published for the same tree.
-pub type RootSchema = fn(&NativeTree, &[Vec<String>], &str, FieldKind) -> Option<DFSchemaRef>;
+/// exactly the columns the planner would have published for the same statement.
+pub type RootSchema = fn(&str, &NativeTree, &[Vec<String>], &str, FieldKind) -> Option<DFSchemaRef>;
 
 /// Whether `node` reads samples point-wise, so that one partitioned execution is one answer.
 ///
@@ -496,8 +505,8 @@ pub const NATIVE_ORDERING: SeriesOrdering = SeriesOrdering::Contiguous;
 
 /// The columns a [`FusedSeries`] node produces.
 ///
-/// With `experimental_native_promql` enabled, a value column is named after its compiled root
-/// field (for example, `field_0`), not legacy planner expression text. Legacy headers in
+/// With `experimental_native_promql` enabled, a value column is named by the caller's [`FieldNames`]
+/// answer for the statement's expression, not legacy planner expression text. Legacy headers in
 /// `tests/cases/**` are unaffected because the native route is opt-in and off by default.
 ///
 /// The shape is the one the existing unary pipeline consumes — the time index, then the series
@@ -623,6 +632,7 @@ pub fn canonical_boundary_stages(
     format: FusedOutputFormat,
     root_kind: FieldKind,
     output_tags_of: OutputTags,
+    field_names: FieldNames,
 ) -> Option<(LogicalPlan, Vec<String>)> {
     let NativeExpr::Merge { input } = &tree.root().expr else {
         return None;
@@ -644,7 +654,12 @@ pub fn canonical_boundary_stages(
     // declares it exactly as the other rows layouts do. The tags stay the walk's own: they name the
     // labels the frames carry, and the binding below is built from them.
     let row_tags = with_row_name_column(tree.root(), output_tags.clone());
-    let output_schema = fused_output_schema(&fields, &row_tags, time_index, root_kind).ok()?;
+    // The values are named after the expression, as in every other rows layout of this statement.
+    // A schema this boundary cannot declare declines here: the caller's error type is not one this
+    // crate can build, so a name collision is reported by declining rather than as an internal
+    // error, and the caller keeps the plan it would have chosen.
+    let value_names = field_names(&promql, &fields);
+    let output_schema = fused_output_schema(&value_names, &row_tags, time_index, root_kind).ok()?;
 
     // The producer: the statement's own tree, run per partition, exporting a frame. It runs above
     // the regions, where its router collects each label set from every region's contribution.
@@ -766,6 +781,7 @@ fn build_evaluated_segment(
     time_index: &str,
     root_kind: FieldKind,
     output_tags_of: OutputTags,
+    field_names: FieldNames,
 ) -> Option<(LogicalPlan, Vec<String>)> {
     let mut sources = Vec::new();
     collect_segment_inputs(node, &mut sources);
@@ -829,6 +845,7 @@ fn build_evaluated_segment(
             FusedOutputFormat::SeriesFrame,
             root_kind,
             output_tags_of,
+            field_names,
         )?;
         return Some((plan, tags));
     }
@@ -959,7 +976,8 @@ fn build_inner_segment(
 /// per-series prefixes do not need that gather, so each becomes a segment of its own and keeps the
 /// partitions it was scanned with. Global consumers and canonical merges are cut in their original
 /// order, and recursive segments publish frames for their parents to consume. Only the statement
-/// root publishes rows.
+/// root publishes rows, and it does so under the statement's own value names: [`FieldNames`]
+/// answers those, and the rows schema asks [`RootSchema`] for the rest of the layout.
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 pub fn segment_tree(
     promql: Arc<str>,
@@ -977,6 +995,7 @@ pub fn segment_tree(
     root_kind: FieldKind,
     remote_raw_boundary: bool,
     output_tags_of: OutputTags,
+    field_names: FieldNames,
     root_schema: RootSchema,
 ) -> Option<LogicalPlan> {
     // Only a tree the analyzer gathers is worth splitting: its per-series prefixes then run where
@@ -1061,6 +1080,7 @@ pub fn segment_tree(
                     root_kind,
                     remote_raw_boundary,
                     output_tags_of,
+                    field_names,
                     root_schema,
                 );
                 match plan {
@@ -1096,6 +1116,7 @@ pub fn segment_tree(
                     time_index,
                     root_kind,
                     output_tags_of,
+                    field_names,
                 )
             });
             let (plan, cut_tags) = built?;
@@ -1164,6 +1185,7 @@ pub fn segment_tree(
             format,
             root_kind,
             output_tags_of,
+            field_names,
         )
         .map(|(plan, _)| plan);
     }
@@ -1176,7 +1198,9 @@ pub fn segment_tree(
         return None;
     }
     let output_schema = match format {
-        FusedOutputFormat::PlainRows => root_schema(&parent, &child_tags, time_index, root_kind)?,
+        FusedOutputFormat::PlainRows => {
+            root_schema(&promql, &parent, &child_tags, time_index, root_kind)?
+        }
         FusedOutputFormat::SeriesFrame => {
             let Ok(frame) = FusedSeries::series_frame_schema(&parent) else {
                 return None;

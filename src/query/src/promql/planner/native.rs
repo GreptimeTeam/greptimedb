@@ -77,11 +77,11 @@ use promql_parser::parser::{
     EvalStmt, Expr as PromExpr, MatrixSelector, ParenExpr, SubqueryExpr, VectorSelector,
 };
 use session::context::{MetricDiscoveryScope, QueryContextRef};
-use snafu::ResultExt;
+use snafu::{ResultExt, ensure};
 use store_api::metric_engine_consts::{DATA_SCHEMA_TABLE_ID_COLUMN_NAME, METRIC_ENGINE_NAME};
 use store_api::region_engine::RawLabelSource;
 
-use crate::promql::error::{DataFusionPlanningSnafu, Result};
+use crate::promql::error::{DataFusionPlanningSnafu, DuplicateOutputColumnsSnafu, Result};
 use crate::promql::native_compile::{
     InfoInput, bind_evaluated_binary, compile_selectors_with_grid, compile_statement_with_grid,
     info_input, statement_grid, subquery_child_grid,
@@ -528,6 +528,8 @@ impl PromPlanner {
         {
             return Ok(None);
         }
+        // The expression names the value columns, and it is the label the node reports.
+        let expression = expr.to_string();
         // What a consumer of this composition reads, and the layout the node publishes. The row
         // layout names one column per value; the frame layout is the evaluated frame this tree's
         // own root declares, which is what a frame consumer decodes.
@@ -542,8 +544,13 @@ impl PromPlanner {
         };
         let output_schema = match format {
             FusedOutputFormat::PlainRows => {
-                let Some(schema) =
-                    Self::fused_root_schema(&tree, &source_tags, &left_time, root_kind)
+                let Some(schema) = Self::fused_root_schema(
+                    &expression,
+                    &tree,
+                    &source_tags,
+                    &left_time,
+                    root_kind,
+                )?
                 else {
                     return Ok(None);
                 };
@@ -562,7 +569,7 @@ impl PromPlanner {
             }
         };
         let Ok(node) = FusedSeries::try_new_with_format(
-            Arc::from(expr.to_string()),
+            Arc::from(expression.as_str()),
             tree,
             FusedSeriesBinding {
                 grid: Arc::clone(&left_grid),
@@ -586,8 +593,8 @@ impl PromPlanner {
 
     /// Plans `prom_expr` as one native node, or returns `None` to keep the existing plan.
     ///
-    /// The compiler's bound tree and selector schemas determine the native output names; the existing
-    /// planner is not consulted for capability or schema approval.
+    /// The expression names the value columns; the compiler's bound tree and selector schemas
+    /// determine their values. The existing planner is not consulted for capability or schema approval.
     ///
     /// The route is offered a whole expression because the compiler folds a range function and the math
     /// functions over it into one tree: offering a sub-expression would compile a tree that computes
@@ -606,6 +613,10 @@ impl PromPlanner {
         if !self.native_fused {
             return Ok(None);
         }
+        // The expression names the value columns of every rows layout this attempt publishes, and the
+        // node's own label follows the same text. It is the whole statement's expression even when a
+        // subquery root compiles its inner one, because that is the statement the reader wrote.
+        let expression = prom_expr.to_string();
         // A range selector returns raw samples, which have no evaluation grid to bind. A subquery root
         // instead returns its inner expression on the subquery's child grid, and a range query has no grid
         // to bind a matrix root to.
@@ -689,7 +700,13 @@ impl PromPlanner {
             let Some(values) = native_root_fields(tree.root()) else {
                 return Ok(None);
             };
-            let time_index = if values
+            // A label named `time` is the one collision the default time column can have: the
+            // value columns are named after the expression, so they never take that name. The
+            // time column is this route's own synthetic name - no label or value is renamed - so
+            // a statement whose output already holds a `time` column publishes its grid under the
+            // first free `native_time_N` instead of dropping or renaming the label.
+            let value_names = expression_field_names(&expression, &values);
+            let time_index = if value_names
                 .iter()
                 .chain(&output_tags)
                 .any(|name| name == DEFAULT_TIME_INDEX_COLUMN)
@@ -697,7 +714,7 @@ impl PromPlanner {
                 (0usize..)
                     .map(|index| format!("native_time_{index}"))
                     .find(|candidate| {
-                        !values
+                        !value_names
                             .iter()
                             .chain(&output_tags)
                             .any(|name| name == candidate)
@@ -717,6 +734,7 @@ impl PromPlanner {
             // A data-free tree reads no input, so every field it answers is a float.
             let output_schema = match format {
                 FusedOutputFormat::PlainRows => fused_output_schema(
+                    &expression,
                     &values,
                     &with_row_name_column(tree.root(), output_tags.clone()),
                     &time_index,
@@ -732,7 +750,7 @@ impl PromPlanner {
                 }
             };
             let node = FusedSeries::try_new_with_format(
-                Arc::from(prom_expr.to_string()),
+                Arc::from(expression.as_str()),
                 tree,
                 FusedSeriesBinding {
                     grid: Arc::clone(&grid),
@@ -1466,7 +1484,7 @@ impl PromPlanner {
         if selectors.len() == 1
             && matches!(&tree.root().expr, NativeExpr::Merge { input } if pointwise_operand(input) && canonical_local_prefix(input) && !contains_global_consumer(input))
             && let Some((plan, _)) = canonical_boundary_stages(
-                Arc::from(prom_expr.to_string()),
+                Arc::from(expression.as_str()),
                 &tree,
                 &children,
                 &source_tags,
@@ -1477,6 +1495,7 @@ impl PromPlanner {
                 format,
                 root_kind,
                 fused_output_tags,
+                expression_field_names,
             )
         {
             return Ok(Some(native_planned(
@@ -1510,7 +1529,7 @@ impl PromPlanner {
                 // caller asked for: it names one column per value the partial state accumulates,
                 // while the encoded frame carries those values inside its own layout.
                 let Some(value_schema) =
-                    Self::fused_root_schema(&tree, &source_tags, &time, root_kind)
+                    Self::fused_root_schema(&expression, &tree, &source_tags, &time, root_kind)?
                 else {
                     return Ok(None);
                 };
@@ -1525,7 +1544,7 @@ impl PromPlanner {
                 };
                 let publish_grid = Arc::clone(&grid);
                 let node = plan_split_aggregate(
-                    Arc::from(prom_expr.to_string()),
+                    Arc::from(expression.as_str()),
                     partial,
                     final_tree,
                     FusedSeriesBinding {
@@ -1556,7 +1575,7 @@ impl PromPlanner {
         if required_placement || matches!(locality, InputLocality::SinglePartition) {
             let segment_metric = if cross_table { None } else { metric.clone() };
             let plan = segment_tree(
-                Arc::from(prom_expr.to_string()),
+                Arc::from(expression.as_str()),
                 &tree,
                 &children,
                 &source_tags,
@@ -1575,7 +1594,8 @@ impl PromPlanner {
                 // that is not a tag, and a partitioned table whose occurrences are source-backed.
                 any_split_series || (per_source_inputs && any_partitioned),
                 fused_output_tags,
-                PromPlanner::fused_root_schema,
+                expression_field_names,
+                PromPlanner::segmented_root_schema,
             );
             if let Some(plan) = plan {
                 return Ok(Some(native_planned(
@@ -1609,20 +1629,9 @@ impl PromPlanner {
         let Some(root_fields) = native_root_fields(tree.root()) else {
             return Ok(None);
         };
-        // A root field can share a name with a tag or the time index, and under `or` the right
-        // table's tags join the left table's columns. The output names each column once, so such a
-        // statement keeps the existing plan.
-        let mut column_names = std::collections::HashSet::new();
-        if !std::iter::once(&time)
-            .chain(&root_fields)
-            .chain(&output_tags)
-            .all(|name| column_names.insert(name.as_str()))
-        {
-            return Ok(None);
-        }
         let output_schema = match format {
             FusedOutputFormat::PlainRows => {
-                fused_output_schema(&root_fields, &output_tags, &time, root_kind)?
+                fused_output_schema(&expression, &root_fields, &output_tags, &time, root_kind)?
             }
             FusedOutputFormat::SeriesFrame => {
                 let frame =
@@ -1645,7 +1654,7 @@ impl PromPlanner {
         // binding is that grid rather than a per-shape choice.
         let publish_grid = Arc::clone(&grid);
         let node = FusedSeries::try_new_with_format(
-            Arc::from(prom_expr.to_string()),
+            Arc::from(expression.as_str()),
             tree,
             FusedSeriesBinding {
                 grid: publish_grid,
@@ -1673,36 +1682,56 @@ impl PromPlanner {
 
     /// The columns a [`FusedSeries`] node over `tree` produces.
     ///
-    /// Field and tag names are derived from the native tree; a walk that cannot derive a tag set declines
-    /// rather than consulting the legacy planner.
+    /// Fields and tags are derived from the native tree; the expression names the output fields.
+    /// If this walk cannot derive a tag set, the native route declines rather than consulting the
+    /// legacy planner.
     ///
-    /// `None` when the root is not a value the node can publish, or when a field would share a name with a
-    /// tag or the time index.
+    /// `Ok(None)` when the root is not a value the node can publish. A schema the output cannot
+    /// declare is an error rather than a decline: duplicate names violate the expression-named
+    /// native output contract, so construction reports the collision instead of publishing a
+    /// layout the reader cannot address.
     fn fused_root_schema(
+        expression: &str,
+        tree: &NativeTree,
+        source_tags: &[Vec<String>],
+        time: &str,
+        root_kind: FieldKind,
+    ) -> Result<Option<DFSchemaRef>> {
+        let output_tags = match &tree.root().output {
+            NativeType::Scalar(_) => Vec::new(),
+            NativeType::Samples(_) => {
+                let Some(tags) = fused_output_tags(tree.root(), source_tags) else {
+                    return Ok(None);
+                };
+                with_row_name_column(tree.root(), tags)
+            }
+            NativeType::AggregateState(_) => return Ok(None),
+        };
+        let Some(root_fields) = native_root_fields(tree.root()) else {
+            return Ok(None);
+        };
+        // The kind is the one the statement's own root answers, derived before segmentation cut
+        // anything. It cannot be recomputed here: a cut prefix is replaced by an input leaf whose
+        // samples are already evaluated, so walking this tree would read every such leaf as the
+        // kind its scan carried. `count_over_time(h[5m]) + on (__name__) ...` answers floats, and
+        // its replaced leaf carries floats, while the scan below was a histogram.
+        fused_output_schema(expression, &root_fields, &output_tags, time, root_kind).map(Some)
+    }
+
+    /// The rows layout a segmented statement root publishes, under the segment builders' callback.
+    ///
+    /// A segment cannot carry this crate's error type, so a layout it cannot declare is a decline
+    /// here: the route keeps the plan the existing planner would have built for the same statement.
+    fn segmented_root_schema(
+        expression: &str,
         tree: &NativeTree,
         source_tags: &[Vec<String>],
         time: &str,
         root_kind: FieldKind,
     ) -> Option<DFSchemaRef> {
-        let output_tags = match &tree.root().output {
-            NativeType::Scalar(_) => Vec::new(),
-            NativeType::Samples(_) => {
-                with_row_name_column(tree.root(), fused_output_tags(tree.root(), source_tags)?)
-            }
-            NativeType::AggregateState(_) => return None,
-        };
-        let root_fields = native_root_fields(tree.root())?;
-        let mut column_names = std::collections::HashSet::new();
-        let columns = std::iter::once(time)
-            .chain(root_fields.iter().map(String::as_str))
-            .chain(output_tags.iter().map(String::as_str));
-        if !columns.clone().all(|name| column_names.insert(name)) {
-            return None;
-        }
-        // The kind is the one the statement's own root answers, derived before segmentation cut anything.
-        // It cannot be recomputed here: a cut prefix is replaced by an input leaf whose samples are
-        // already evaluated.
-        fused_output_schema(&root_fields, &output_tags, time, root_kind).ok()
+        Self::fused_root_schema(expression, tree, source_tags, time, root_kind)
+            .ok()
+            .flatten()
     }
 
     /// The statement being planned, rebuilt from the evaluation numbers the planner holds.
@@ -1821,18 +1850,67 @@ fn native_root_fields(node: &NativeNode) -> Option<Vec<String>> {
     }
 }
 
-/// The output schema of a fused node: its time index, one column per field, then its tags.
+/// The names an expression gives the value columns of `fields`.
 ///
-/// The columns themselves are named by [`segment::fused_output_schema`], which is where a segment
-/// asks for the same layout; this is that answer under this crate's error type, which is what the
-/// planner's own call sites report.
+/// One value is named after the whole expression; several append their compiled field names to it,
+/// because one name cannot stand for more than one column. Only the published layout is named this
+/// way: the fields inside the native tree keep the names the compiler gave them.
+fn expression_field_names(expression: &str, fields: &[String]) -> Vec<String> {
+    fields
+        .iter()
+        .map(|field| {
+            if fields.len() == 1 {
+                expression.to_string()
+            } else {
+                format!("{expression}.{field}")
+            }
+        })
+        .collect()
+}
+
+/// The columns a [`FusedSeries`] node produces: its time index, one column per value, then its tags.
+///
+/// A single value is named after the expression, and multiple values append their compiled field
+/// names to it, so a value is never published under a name the reader cannot address. The names
+/// inside the native tree are unchanged.
+///
+/// The layout itself is [`segment::fused_output_schema`]'s, which is where a segment asks for the
+/// same columns; this is that answer under this crate's error type, which is what the planner's own
+/// call sites report.
 fn fused_output_schema(
+    expression: &str,
     fields: &[String],
     tags: &[String],
     time_index: &str,
     field_kind: FieldKind,
 ) -> Result<DFSchemaRef> {
-    segment::fused_output_schema(fields, tags, time_index, field_kind)
+    let value_names = expression_field_names(expression, fields);
+    // A name appears twice when a value named after its expression - a bare selector is named after
+    // its metric - lands on the table's own time index or on one of its tags, or when two values
+    // take one name. `DFSchema` rejects that, but reports only that building the plan failed, which
+    // names no column; the collision is detected here so the error names the columns that collide.
+    let mut names = Vec::with_capacity(value_names.len() + tags.len() + 1);
+    names.push(time_index.to_string());
+    names.extend(value_names.iter().cloned());
+    names.extend(tags.iter().cloned());
+    let mut occurrences: std::collections::HashMap<&str, usize> =
+        std::collections::HashMap::with_capacity(names.len());
+    for name in &names {
+        *occurrences.entry(name.as_str()).or_default() += 1;
+    }
+    let mut reported = std::collections::HashSet::new();
+    let duplicates = names
+        .iter()
+        .filter(|name| occurrences[name.as_str()] > 1 && reported.insert(name.as_str()))
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    ensure!(
+        duplicates.is_empty(),
+        DuplicateOutputColumnsSnafu {
+            names: duplicates.join(", ")
+        }
+    );
+    segment::fused_output_schema(&value_names, tags, time_index, field_kind)
         .context(DataFusionPlanningSnafu)
 }
 
@@ -2911,8 +2989,10 @@ mod tests {
             ("x or y", two()),
         ] {
             let tree = compiled_test_tree(query);
-            let schema = PromPlanner::fused_root_schema(&tree, &sources, "ts", FieldKind::Float)
-                .unwrap_or_else(|| panic!("{query}: a samples root declares a rows layout"));
+            let schema =
+                PromPlanner::fused_root_schema(query, &tree, &sources, "ts", FieldKind::Float)
+                    .unwrap()
+                    .unwrap_or_else(|| panic!("{query}: a samples root declares a rows layout"));
             let names = schema
                 .fields()
                 .iter()
@@ -2932,9 +3012,13 @@ mod tests {
             assert_eq!(ArrowDataType::Utf8, *name.data_type(), "{query}");
         }
         let scalar = compiled_test_tree("1 + 2");
-        let schema = PromPlanner::fused_root_schema(&scalar, &[], "ts", FieldKind::Float).unwrap();
+        let schema = PromPlanner::fused_root_schema("1 + 2", &scalar, &[], "ts", FieldKind::Float)
+            .unwrap()
+            .unwrap();
         assert_eq!(
-            vec!["ts", "value"],
+            // A scalar root declares no name column, and its one value is named after the
+            // expression, as every other rows layout names its values.
+            vec!["ts", "1 + 2"],
             schema
                 .fields()
                 .iter()
@@ -2948,10 +3032,11 @@ mod tests {
     fn a_present_name_tag_is_not_declared_twice() {
         let sources = [vec!["host".to_string(), METRIC_NAME.to_string()]];
         let tree = compiled_test_tree("x");
-        let schema =
-            PromPlanner::fused_root_schema(&tree, &sources, "ts", FieldKind::Float).unwrap();
+        let schema = PromPlanner::fused_root_schema("x", &tree, &sources, "ts", FieldKind::Float)
+            .unwrap()
+            .unwrap();
         assert_eq!(
-            vec!["ts", "v0", "host", METRIC_NAME],
+            vec!["ts", "x", "host", METRIC_NAME],
             schema
                 .fields()
                 .iter()
@@ -2960,19 +3045,34 @@ mod tests {
         );
     }
 
-    /// A value column that is itself named `__name__` is a column of the result, not the name of a
-    /// row: the layout names each column once, so such a statement keeps the existing plan.
+    /// The value columns are named after the expression, so a tree whose own field is named
+    /// `__name__` still publishes that value under the expression's name - the name column is the
+    /// layout's own. A time index of that name collides with it, and the collision is reported
+    /// rather than published as a layout the reader cannot address.
     #[test]
-    fn a_column_named_after_the_metric_name_declines_the_rows_layout() {
+    fn a_time_index_named_after_the_metric_name_is_reported() {
         let sources = [vec!["host".to_string()]];
+        // The field is renamed by the expression, so it no longer stands where the name column is.
         let tree = compiled_test_tree_with_fields("x", &[METRIC_NAME]);
-        assert!(PromPlanner::fused_root_schema(&tree, &sources, "ts", FieldKind::Float).is_none());
-        // A time index of that name collides the same way.
-        let tree = compiled_test_tree("x");
-        assert!(
-            PromPlanner::fused_root_schema(&tree, &sources, METRIC_NAME, FieldKind::Float)
-                .is_none()
+        let schema = PromPlanner::fused_root_schema("x", &tree, &sources, "ts", FieldKind::Float)
+            .unwrap()
+            .unwrap_or_else(|| panic!("the value is named after the expression"));
+        assert_eq!(
+            vec!["ts", "x", "host", METRIC_NAME],
+            schema
+                .fields()
+                .iter()
+                .map(|field| field.name().as_str())
+                .collect::<Vec<_>>()
         );
+        // A time index of that name collides with the row-name column, and the error names it.
+        let tree = compiled_test_tree("x");
+        let error =
+            PromPlanner::fused_root_schema("x", &tree, &sources, METRIC_NAME, FieldKind::Float)
+                .expect_err("a time index named after the metric collides with the name column");
+        let message = error.to_string().to_lowercase();
+        assert!(message.contains("duplicate"), "{message}");
+        assert!(message.contains(METRIC_NAME), "{message}");
     }
 
     /// A `__name__` rewrite publishes a name column, canonicalizes the complete runtime label set,
@@ -3145,7 +3245,9 @@ mod tests {
                 .map(|field| field.name.as_ref())
                 .collect::<Vec<_>>()
         );
+        let expression = "sum by (zone, host) ((x))";
         let output = fused_output_schema(
+            expression,
             &["v0".to_string(), "v1".to_string()],
             &["zone".to_string(), "host".to_string()],
             "ts",
@@ -3153,7 +3255,13 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            vec!["ts", "v0", "v1", "zone", "host"],
+            vec![
+                "ts".to_string(),
+                format!("{expression}.v0"),
+                format!("{expression}.v1"),
+                "zone".to_string(),
+                "host".to_string(),
+            ],
             output
                 .fields()
                 .iter()
