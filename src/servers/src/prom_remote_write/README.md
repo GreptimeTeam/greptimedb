@@ -15,32 +15,33 @@ flowchart TD
     C --> D["borrow symbols and time-series bytes"]
     D --> E["decode leaf messages and build rows"]
 
-    E --> F["samples ContextReq"]
-    E --> G["histograms ContextReq"]
-
-    F --> H["write_prometheus_rows_with_progress"]
-    H --> I["metric engine / pending batcher when enabled"]
-
-    G --> J["histogram ContextOpt"]
-    J --> K["write_prometheus_rows_with_progress"]
-    K --> L["same metric-engine flag as samples, no batcher"]
-    L --> M["table: <metric>"]
-
-    M --> N["field: configured native-histogram Struct"]
-    N --> O["struct children: counts, spans, buckets, sum, schema"]
-    I --> P["written headers and counters"]
-    L --> P
+    E --> F{"Retained exemplars?"}
+    F -->|No| G["write_prometheus_v2_rows_with_progress"]
+    F -->|Yes| H["exemplar::write"]
+    G --> I["sample / native histogram writes"]
+    H --> I
+    H --> J["exemplar writes: greptime_metrics_exemplars"]
+    I --> K["written headers and counters"]
+    J --> K
 ```
-
-The conversion step splits one v2 request into two `ContextReq`s:
 
 The `decode` codec metric covers decompression and the borrowed request
 envelope. The `convert` metric covers per-series scans, leaf prost decoding,
 validation, and row construction.
 
+The conversion step produces sample and histogram `ContextReq`s plus validated
+`ExemplarRequests`:
+
 - samples keep the existing sample table name and can use the metric-engine
   physical table path and pending rows batcher;
-- native histograms keep the existing metric table name.
+- native histograms keep the existing metric table name;
+- exemplars are grouped by database and written through `exemplar::write`, which
+  prepares their source metric tables and tracks progress for each kind of write.
+
+Exemplar persistence requires metric-engine ingestion and logical metric-engine
+source tables. Exemplars are stored in the target database's
+`greptime_metrics_exemplars` table using ordinary Mito storage with sparse primary
+keys and append mode. Remote Write v1 uses the same exemplar write path.
 
 Native histogram rows follow the same metric-engine switch as samples. They do
 not use the pending rows batcher yet because the batcher assumes the classic
@@ -56,6 +57,7 @@ Each histogram row stores one Struct field named
 - list children for custom values, spans, and positive/negative buckets;
 - original Prometheus labels as Greptime tags.
 
-The v2 response always reports written sample, histogram, and exemplar counts in
-Prometheus remote-write headers. Exemplars are currently ignored and reported as
-zero.
+The v2 response reports sample, histogram, and exemplar counts in Prometheus
+remote-write headers. Exemplar counts reflect confirmed storage writes, including
+partial writes on error. Invalid exemplar observations are dropped during
+conversion and excluded from the exemplar count.
