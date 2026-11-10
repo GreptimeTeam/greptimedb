@@ -14,7 +14,7 @@
 
 //! In-memory index over the footers of the objects of one WAL prefix.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ops::Bound::{Excluded, Included, Unbounded};
 
 use snafu::{OptionExt, ensure};
@@ -297,17 +297,18 @@ impl ObjectCatalog {
     /// Returns live regions blocking reclamation of objects older than the
     /// newest `limit` objects. Already reclaimable objects awaiting deletion
     /// do not cause more flushes. Sequence gaps do not count as objects.
+    /// Regions are deduplicated in order of the oldest object they pin.
     pub(crate) fn flush_candidates(&self, limit: usize) -> Vec<RegionId> {
         let Some((&last, _)) = self.objects.iter().rev().nth(limit) else {
             return Vec::new();
         };
+        let mut seen = HashSet::new();
         self.live_segments
             .range(..=last)
             .flat_map(|(seq, _)| self.objects[seq].iter())
             .filter(|entry| self.is_live(entry))
             .map(|entry| entry.region_id)
-            .collect::<BTreeSet<_>>()
-            .into_iter()
+            .filter(|region_id| seen.insert(*region_id))
             .collect()
     }
 
@@ -377,9 +378,10 @@ mod tests {
 
     #[test]
     fn test_flush_candidates_include_all_blockers_before_retention_target() {
-        let a = RegionId::new(1, 1);
+        // Region IDs run opposite to the oldest objects they pin.
+        let a = RegionId::new(1, 3);
         let b = RegionId::new(1, 2);
-        let c = RegionId::new(1, 3);
+        let c = RegionId::new(1, 1);
         let mut catalog = ObjectCatalog::default();
         for (seq, region, id) in [(10, a, 1), (20, b, 1), (30, a, 2), (40, c, 1), (50, c, 2)] {
             catalog
@@ -390,6 +392,10 @@ mod tests {
         // objects, while A appears twice and C only pins the retained suffix.
         assert_eq!(vec![a, b], catalog.flush_candidates(2));
         assert_eq!(vec![a, b, c], catalog.flush_candidates(0));
+        // Once A releases its oldest segment, B must precede A.
+        catalog.obsolete(a, 1);
+        assert_eq!(vec![b, a], catalog.flush_candidates(2));
+        assert_eq!(vec![b, a, c], catalog.flush_candidates(0));
         catalog.obsolete(a, 2);
         assert_eq!(vec![b], catalog.flush_candidates(2));
         catalog.obsolete(b, 1);
