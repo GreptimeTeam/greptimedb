@@ -2576,3 +2576,720 @@ async fn test_truncate_while_indexing_encoded_bulk_part_removes_uploaded_sst() {
         .collect::<Vec<_>>();
     assert!(leftovers.is_empty(), "{leftovers:?}");
 }
+
+#[derive(Debug, Default, Clone)]
+struct RebuildSketchProvider {
+    fail_manual_plan: bool,
+    manual_plans: Arc<AtomicUsize>,
+    creates: Arc<AtomicUsize>,
+    readable_inputs: Arc<std::sync::Mutex<Vec<(crate::sst::file::RegionIndexId, bool)>>>,
+}
+
+impl crate::sst::index::handler::IndexKindProvider for RebuildSketchProvider {
+    fn handlers(&self) -> Vec<Arc<dyn crate::sst::index::handler::IndexKindHandler>> {
+        vec![Arc::new(self.clone())]
+    }
+}
+
+impl crate::sst::index::handler::IndexKindHandler for RebuildSketchProvider {
+    fn kinds(&self) -> &[crate::sst::index::kind::IndexKind] {
+        &[crate::sst::index::kind::IndexKind::Extension(
+            crate::sst::index::kind::ExtensionIndexKind::Hll,
+        )]
+    }
+    fn plan(
+        &self,
+        context: &crate::sst::index::handler::PlanContext<'_>,
+    ) -> std::result::Result<
+        Option<Arc<dyn crate::sst::index::handler::PlannedIndex>>,
+        common_error::ext::BoxedError,
+    > {
+        use crate::sst::index::IndexBuildType;
+        if context.build_type == IndexBuildType::Manual {
+            self.manual_plans.fetch_add(1, Ordering::Relaxed);
+            if self.fail_manual_plan {
+                return Err(common_error::ext::BoxedError::new(
+                    common_error::ext::PlainError::new(
+                        "injected manual plan failure".into(),
+                        StatusCode::Internal,
+                    ),
+                ));
+            }
+        }
+        if context.build_type == IndexBuildType::Flush {
+            return Ok(None);
+        }
+        if matches!(
+            context.build_type,
+            IndexBuildType::Manual | IndexBuildType::SchemaChange
+        ) && !context.existing_indexes.iter().any(|column| {
+            column
+                .created_indexes
+                .contains(&crate::sst::file::IndexType::HllIndex)
+        }) {
+            return Ok(None);
+        }
+        assert!(
+            context
+                .metadata
+                .column_by_id(0)
+                .unwrap()
+                .column_schema
+                .metadata()
+                .contains_key(datatypes::schema::HLL_KEY)
+        );
+        Ok(Some(Arc::new(self.clone())))
+    }
+}
+
+#[async_trait]
+impl crate::sst::index::handler::PlannedIndex for RebuildSketchProvider {
+    fn kinds(&self) -> &[crate::sst::index::kind::IndexKind] {
+        crate::sst::index::handler::IndexKindHandler::kinds(self)
+    }
+    fn entries(&self) -> &[crate::sst::index::handler::PlanEntry] {
+        &[crate::sst::index::handler::PlanEntry {
+            column_id: 0,
+            kind: crate::sst::index::kind::IndexKind::Extension(
+                crate::sst::index::kind::ExtensionIndexKind::Hll,
+            ),
+            format_version: 1,
+        }]
+    }
+    fn is_current(
+        &self,
+        _: &crate::sst::file::FileMeta,
+        _: &crate::sst::index::handler::CurrencyContext<'_>,
+    ) -> bool {
+        // This test requests explicit maintenance on each manual rebuild.
+        false
+    }
+
+    async fn build(
+        &self,
+        context: &crate::sst::index::handler::BuildContext<'_>,
+    ) -> std::result::Result<
+        Option<Box<dyn crate::sst::index::handler::IndexCreator>>,
+        common_error::ext::BoxedError,
+    > {
+        use puffin::puffin_manager::{PuffinManager, PuffinReader};
+
+        for input in context.inputs.iter() {
+            // Initial compaction may read flush files that have no sketches yet.
+            if !input.meta_ref().indexes.iter().any(|column| {
+                column.created_indexes.iter().any(|kind| {
+                    matches!(
+                        kind,
+                        crate::sst::file::IndexType::HllIndex
+                            | crate::sst::file::IndexType::KllIndex
+                            | crate::sst::file::IndexType::MgIndex
+                    )
+                })
+            }) {
+                continue;
+            }
+            let reader = context
+                .input_puffin_manager
+                .reader(&input.index_id())
+                .await
+                .unwrap();
+            let metadata = reader.metadata().await.unwrap();
+            assert!(
+                metadata
+                    .blobs
+                    .iter()
+                    .any(|blob| blob.blob_type == "test.sketch")
+            );
+            self.readable_inputs
+                .lock()
+                .unwrap()
+                .push((input.index_id(), context.can_merge_inputs));
+        }
+        self.creates.fetch_add(1, Ordering::Relaxed);
+        Ok(Some(Box::new(RebuildSketchCreator { rows: 0 })))
+    }
+}
+
+#[derive(Debug)]
+struct RebuildSketchCreator {
+    rows: usize,
+}
+
+#[async_trait]
+impl crate::sst::index::handler::IndexCreator for RebuildSketchCreator {
+    async fn update(
+        &mut self,
+        batch: &mut crate::read::Batch,
+    ) -> std::result::Result<(), common_error::ext::BoxedError> {
+        self.rows += batch.num_rows();
+        Ok(())
+    }
+
+    async fn update_flat(
+        &mut self,
+        batch: &datatypes::arrow::record_batch::RecordBatch,
+    ) -> std::result::Result<(), common_error::ext::BoxedError> {
+        self.rows += batch.num_rows();
+        Ok(())
+    }
+
+    async fn finish(
+        &mut self,
+        writer: &mut crate::sst::index::puffin_manager::SstPuffinWriter,
+    ) -> std::result::Result<Vec<crate::sst::index::CompletedEntry>, common_error::ext::BoxedError>
+    {
+        use crate::sst::index::CompletedEntry;
+        use crate::sst::index::kind::{ExtensionIndexKind, IndexKind};
+        use puffin::puffin_manager::PuffinWriter;
+        writer
+            .put_blob(
+                "test.sketch",
+                futures::io::Cursor::new(self.rows.to_le_bytes().to_vec()),
+                Default::default(),
+                HashMap::new(),
+            )
+            .await
+            .map_err(common_error::ext::BoxedError::new)?;
+        Ok(vec![CompletedEntry {
+            column_id: Some(0),
+            kind: IndexKind::Extension(ExtensionIndexKind::Hll),
+            format_version: 1,
+        }])
+    }
+
+    async fn abort(&mut self) -> std::result::Result<(), common_error::ext::BoxedError> {
+        Ok(())
+    }
+
+    fn memory_usage(&self) -> usize {
+        0
+    }
+}
+
+/// Reads the rebuilt inverted blob rather than trusting its manifest descriptor.
+async fn assert_json_path_index(layer: &crate::access_layer::AccessLayer, index_id: RegionIndexId) {
+    use index::inverted_index::format::reader::{InvertedIndexBlobReader, InvertedIndexReader};
+    use puffin::puffin_manager::{PuffinManager, PuffinReader};
+
+    let manager = layer.build_puffin_manager();
+    let reader = manager.reader(&index_id).await.unwrap();
+    let blob = reader
+        .blob(crate::sst::index::inverted_index::INDEX_BLOB_TYPE)
+        .await
+        .unwrap()
+        .reader()
+        .await
+        .unwrap();
+    let reader = InvertedIndexBlobReader::new(blob);
+    let metadata = reader.metadata(None).await.unwrap();
+    let target = index::target::IndexTarget::new_json_path(1, vec!["value".into()]).unwrap();
+    let meta = &metadata.metas[&target.encode()];
+    assert_eq!(metadata.total_row_count, 4);
+    let fst = reader
+        .fst(
+            meta.base_offset + u64::from(meta.relative_fst_offset),
+            meta.fst_size,
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(fst.len(), 1);
+    let mut encoded = Vec::new();
+    mito_codec::index::IndexValueCodec::encode_nonnull_value(
+        datatypes::value::ValueRef::Int64(7),
+        &mito_codec::row_converter::SortField::new(ConcreteDataType::int64_datatype()),
+        &mut encoded,
+    )
+    .unwrap();
+    assert!(fst.get(&encoded).is_some());
+}
+
+#[tokio::test]
+async fn test_async_compaction_builds_and_manual_rebuild_maintains_sketch() {
+    use crate::sst::index::handler::IndexKindProviderRef;
+    use common_base::Plugins;
+    let mut env = TestEnv::new().await;
+    let plugins = Plugins::new();
+    let provider = Arc::new(RebuildSketchProvider::default());
+    plugins.insert::<IndexKindProviderRef>(provider.clone());
+    let engine = env
+        .create_engine_with_plugins(async_build_mode_config(false), plugins)
+        .await;
+    let region_id = RegionId::new(1, 1);
+    let mut request = CreateRequestBuilder::new()
+        .field_datatype(ConcreteDataType::json2(
+            datatypes::types::json_type::JsonNativeType::object(),
+        ))
+        .insert_option("sst_format", "flat")
+        .build();
+    request.column_metadatas[1]
+        .column_schema
+        .with_extension_type(&datatypes::extension::json::Json2ExtensionType::new(
+            Arc::new(datatypes::extension::json::JsonMetadata::new(
+                datatypes::json::JsonSettings::try_new(
+                    vec![datatypes::json::JsonTypeHint {
+                        path: vec!["value".into()],
+                        data_type: ConcreteDataType::int64_datatype(),
+                        inverted_index: true,
+                        skipping_index: None,
+                        fulltext_index: None,
+                    }],
+                    Some(0),
+                )
+                .unwrap(),
+            )),
+        ));
+    request
+        .column_metadatas
+        .iter_mut()
+        .find(|column| column.column_id == 0)
+        .unwrap()
+        .column_schema
+        .mut_metadata()
+        .insert(
+            datatypes::schema::HLL_KEY.into(),
+            r#"{"precision":10}"#.into(),
+        );
+    let schema = rows_schema(&request);
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+    for start in [0, 2] {
+        let mut rows = build_rows(start, start + 2);
+        for row in &mut rows {
+            row.values[1].value_data = Some(api::v1::value::ValueData::JsonValue(
+                api::helper::encode_json_value(datatypes::json::value::JsonValue::from(
+                    serde_json::json!({"value": 7}),
+                )),
+            ));
+        }
+        put_rows(
+            &engine,
+            region_id,
+            Rows {
+                schema: schema.clone(),
+                rows,
+            },
+        )
+        .await;
+        flush_region(&engine, region_id, None).await;
+    }
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::BuildIndex(RegionBuildIndexRequest::default()),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        0,
+        provider.creates.load(Ordering::Relaxed),
+        "manual rebuild must not introduce sketches on flush files"
+    );
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::Compact(RegionCompactRequest::default()),
+        )
+        .await
+        .unwrap();
+    let region = engine.get_region(region_id).unwrap();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let files = region.all_manifest_files().await.0;
+            if files.len() == 1
+                && files[0].index_version > 0
+                && files[0].indexes.iter().any(|column| {
+                    column.created_indexes.iter().any(|kind| {
+                        matches!(
+                            kind,
+                            crate::sst::file::IndexType::HllIndex
+                                | crate::sst::file::IndexType::KllIndex
+                                | crate::sst::file::IndexType::MgIndex
+                        )
+                    })
+                })
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let before = region.all_manifest_files().await.0[0].clone();
+    assert_json_path_index(&region.access_layer, before.index_id()).await;
+    let before_inputs = provider.readable_inputs.lock().unwrap().len();
+    let before_creates = provider.creates.load(Ordering::Relaxed);
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::BuildIndex(RegionBuildIndexRequest::default()),
+        )
+        .await
+        .unwrap();
+    let files = region.all_manifest_files().await.0;
+    assert_eq!(before_creates + 1, provider.creates.load(Ordering::Relaxed));
+    assert!(files[0].index_version > before.index_version);
+    assert_eq!(
+        &provider.readable_inputs.lock().unwrap()[before_inputs..],
+        &[(before.index_id(), true)],
+        "manual rebuild must read the current manifest's committed Puffin version"
+    );
+    assert!(files[0].indexes.iter().any(|column| {
+        column
+            .created_indexes
+            .contains(&crate::sst::file::IndexType::HllIndex)
+    }));
+    assert_json_path_index(&region.access_layer, files[0].index_id()).await;
+    engine.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn test_rebuild_column_only_index_advances_zero_generation() {
+    use crate::sst::file::{ColumnIndexMetadata, IndexType};
+    use crate::sst::index::handler::IndexKindProviderRef;
+    use common_base::Plugins;
+
+    let mut env = TestEnv::new().await;
+    let plugins = Plugins::new();
+    let provider = Arc::new(RebuildSketchProvider::default());
+    plugins.insert::<IndexKindProviderRef>(provider.clone());
+    let engine = env
+        .create_engine_with_plugins(MitoConfig::default(), plugins)
+        .await;
+    let region_id = RegionId::new(1, 1);
+    let mut request = CreateRequestBuilder::new().build();
+    request.column_metadatas[0]
+        .column_schema
+        .mut_metadata()
+        .insert(
+            datatypes::schema::HLL_KEY.into(),
+            r#"{"precision":10}"#.into(),
+        );
+    let table_dir = request.table_dir.clone();
+    let schema = rows_schema(&request);
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+    for start in [0, 2] {
+        put_and_flush(&engine, region_id, &schema, start..start + 2).await;
+    }
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::Compact(RegionCompactRequest::default()),
+        )
+        .await
+        .unwrap();
+    let region = engine.get_region(region_id).unwrap();
+    let mut files = region.all_manifest_files().await.0;
+    assert_eq!(files.len(), 1);
+    let mut before = files.pop().unwrap();
+    assert_eq!(before.index_version, 0);
+    assert!(before.index_file_size > 0);
+    before.available_indexes.clear();
+    before.indexes = vec![ColumnIndexMetadata {
+        column_id: 0,
+        created_indexes: [IndexType::HllIndex].into_iter().collect(),
+        ..Default::default()
+    }];
+    let old_path = location::index_file_path(
+        region.access_layer.table_dir(),
+        before.index_id(),
+        region.access_layer.path_type(),
+    );
+    let store = region.access_layer.object_store().clone();
+    let old_bytes = store.read(&old_path).await.unwrap().to_vec();
+    engine
+        .edit_region(
+            region_id,
+            RegionEdit {
+                files_to_add: vec![before.clone()],
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    reopen_region(&engine, region_id, table_dir, true, HashMap::new()).await;
+    let inputs_before = provider.readable_inputs.lock().unwrap().len();
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::BuildIndex(RegionBuildIndexRequest::default()),
+        )
+        .await
+        .unwrap();
+    let region = engine.get_region(region_id).unwrap();
+    let files = region.all_manifest_files().await.0;
+    assert_eq!(files.len(), 1);
+    assert_eq!(files[0].file_id, before.file_id);
+    assert_eq!(files[0].index_version, 1);
+    assert!(
+        files[0]
+            .indexes
+            .iter()
+            .any(|column| column.created_indexes.contains(&IndexType::HllIndex))
+    );
+    assert_eq!(
+        &provider.readable_inputs.lock().unwrap()[inputs_before..],
+        &[(before.index_id(), true)]
+    );
+    let new_path = location::index_file_path(
+        region.access_layer.table_dir(),
+        files[0].index_id(),
+        region.access_layer.path_type(),
+    );
+    assert_ne!(old_path, new_path);
+    assert!(store.exists(&new_path).await.unwrap());
+    assert_eq!(store.read(&old_path).await.unwrap().to_vec(), old_bytes);
+    engine.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn test_compaction_omits_unconfigured_indexes_without_provider() {
+    use crate::sst::file::{ColumnIndexMetadata, IndexType};
+
+    let mut env = TestEnv::new().await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new().build_with_index();
+    let schema = rows_schema(&request);
+    let table_dir = request.table_dir.clone();
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+    for start in [0, 2] {
+        put_rows(
+            &engine,
+            region_id,
+            Rows {
+                schema: schema.clone(),
+                rows: build_rows(start, start + 2),
+            },
+        )
+        .await;
+        flush_region(&engine, region_id, None).await;
+    }
+    let region = engine.get_region(region_id).unwrap();
+    let mut inputs = region.all_manifest_files().await.0;
+    for file in &mut inputs {
+        file.available_indexes.push(IndexType::HllIndex);
+        file.indexes.push(ColumnIndexMetadata {
+            column_id: 0,
+            created_indexes: [IndexType::HllIndex].into_iter().collect(),
+            ..Default::default()
+        });
+    }
+    engine
+        .edit_region(
+            region_id,
+            RegionEdit {
+                files_to_add: inputs,
+                files_to_remove: vec![],
+                timestamp_ms: None,
+                compaction_time_window: None,
+                flushed_entry_id: None,
+                flushed_sequence: None,
+                committed_sequence: None,
+            },
+        )
+        .await
+        .unwrap();
+    // Reload handles so compaction sees the persisted descriptors as well as the manifest.
+    reopen_region(&engine, region_id, table_dir, true, HashMap::new()).await;
+    let region = engine.get_region(region_id).unwrap();
+    let version = region.version();
+    let files: Vec<_> = version
+        .ssts
+        .levels()
+        .iter()
+        .flat_map(|level| level.files())
+        .collect();
+    assert_eq!(files.len(), 2);
+    assert!(files.iter().all(|file| {
+        file.meta_ref()
+            .available_indexes
+            .contains(&IndexType::HllIndex)
+    }));
+    drop(version);
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::Compact(RegionCompactRequest::default()),
+        )
+        .await
+        .unwrap();
+    let files = region.all_manifest_files().await.0;
+    assert_eq!(files.len(), 1);
+    assert_eq!(files[0].num_rows, 4);
+    assert!(
+        files[0]
+            .available_indexes
+            .contains(&IndexType::InvertedIndex)
+    );
+    assert!(!files[0].available_indexes.contains(&IndexType::HllIndex));
+    assert!(
+        files[0]
+            .indexes
+            .iter()
+            .all(|column| !column.created_indexes.contains(&IndexType::HllIndex))
+    );
+    engine.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn test_manual_rebuild_without_required_provider_preserves_sketch_metadata() {
+    use crate::sst::file::ColumnIndexMetadata;
+    let mut env = TestEnv::new().await;
+    let engine = env.create_engine(async_build_mode_config(false)).await;
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new().build();
+    let schema = rows_schema(&request);
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+    put_rows(
+        &engine,
+        region_id,
+        Rows {
+            schema,
+            rows: build_rows(0, 2),
+        },
+    )
+    .await;
+    flush_region(&engine, region_id, None).await;
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::BuildIndex(RegionBuildIndexRequest::default()),
+        )
+        .await
+        .unwrap();
+    let region = engine.get_region(region_id).unwrap();
+    let mut file = region.all_manifest_files().await.0.pop().unwrap();
+    if !file.indexes.iter().any(|column| column.column_id == 0) {
+        file.indexes.push(ColumnIndexMetadata {
+            column_id: 0,
+            ..Default::default()
+        });
+    }
+    file.indexes
+        .iter_mut()
+        .find(|column| column.column_id == 0)
+        .unwrap()
+        .created_indexes
+        .push(crate::sst::file::IndexType::HllIndex);
+    // Persisted extension metadata requires its implementation even when
+    // ordinary indexes already satisfy the current schema.
+    engine
+        .edit_region(
+            region_id,
+            RegionEdit {
+                files_to_add: vec![file.clone()],
+                files_to_remove: vec![],
+                timestamp_ms: None,
+                compaction_time_window: None,
+                flushed_entry_id: None,
+                flushed_sequence: None,
+                committed_sequence: None,
+            },
+        )
+        .await
+        .unwrap();
+    // Region edits may assign a new sequence; compare against the committed metadata.
+    let file = region.all_manifest_files().await.0.pop().unwrap();
+    for _ in 0..2 {
+        let error = engine
+            .handle_request(
+                region_id,
+                RegionRequest::BuildIndex(RegionBuildIndexRequest::default()),
+            )
+            .await
+            .unwrap_err();
+        assert!(format!("{error:?}").contains("no registered handler"));
+        let current = region.all_manifest_files().await.0;
+        assert_eq!(file.index_version, current[0].index_version);
+        assert_eq!(file.indexes, current[0].indexes);
+    }
+    // Explicit internal requests must reject unavailable implementations as well.
+    let (result_tx, mut result_rx) = tokio::sync::mpsc::channel(1);
+    engine
+        .inner
+        .workers
+        .submit_to_worker(
+            region_id,
+            crate::request::WorkerRequest::Background {
+                region_id,
+                notify: crate::request::BackgroundNotify::IndexBuildRetry(
+                    crate::request::BuildIndexRequest {
+                        region_id,
+                        build_type: crate::sst::index::IndexBuildType::Manual,
+                        file_metas: vec![file.clone()],
+                        result_senders: vec![result_tx],
+                    },
+                ),
+            },
+        )
+        .await
+        .unwrap();
+    let outcome = tokio::time::timeout(Duration::from_secs(10), result_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(outcome.is_err());
+    let current = region.all_manifest_files().await.0;
+    assert_eq!(current, vec![file]);
+    engine.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn test_manual_rebuild_plan_failure_returns_before_scheduling() {
+    let mut env = TestEnv::new().await;
+    let plugins = common_base::Plugins::new();
+    let provider = Arc::new(RebuildSketchProvider {
+        fail_manual_plan: true,
+        ..Default::default()
+    });
+    plugins.insert::<crate::sst::index::handler::IndexKindProviderRef>(provider.clone());
+    let engine = env
+        .create_engine_with_plugins(async_build_mode_config(false), plugins)
+        .await;
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new().build();
+    let schema = rows_schema(&request);
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+    put_rows(
+        &engine,
+        region_id,
+        Rows {
+            schema,
+            rows: build_rows(0, 2),
+        },
+    )
+    .await;
+    flush_region(&engine, region_id, None).await;
+    let region = engine.get_region(region_id).unwrap();
+    let before = region.all_manifest_files().await.0;
+    assert_eq!(before.len(), 1);
+    let error = engine
+        .handle_request(
+            region_id,
+            RegionRequest::BuildIndex(RegionBuildIndexRequest::default()),
+        )
+        .await
+        .unwrap_err();
+    assert!(format!("{error:?}").contains("injected manual plan failure"));
+    // Selection and task preparation would each plan again; only entry preflight ran.
+    assert_eq!(provider.manual_plans.load(Ordering::Relaxed), 1);
+    assert_eq!(provider.creates.load(Ordering::Relaxed), 0);
+    assert_eq!(region.all_manifest_files().await.0, before);
+    engine.stop().await.unwrap();
+}

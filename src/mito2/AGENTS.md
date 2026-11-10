@@ -84,6 +84,13 @@ pending. DDL cancellation retains its existing scheduling fence and priority.
   checks. Shared SSTs require Enterprise capability. Compatibility fixtures:
   `tests/compatibility/manifest/table_compaction/`.
 - **SST/Parquet layout** (`sst/`): readers must stay compatible with existing files.
+- **Compaction index extensions** (`sst/index/handler.rs`, `sst/index/registry.rs`): enterprise providers use
+  the existing borrowed-batch and Puffin writer lifecycle. Publish column-level sketch descriptors
+  only after successful file finish; index rebuilds maintain existing sketches
+  through the provider before replacing the Puffin version. Rebuild retains the old version on
+  provider failure; missing required providers fail planning before file I/O. Fully reused indexes
+  with known output counts can skip the rebuild row scan. Multi-output or filtered compaction builds from
+  output rows rather than reusing whole-input summaries.
 - **Series-index disk limit**: tasks estimate usage from entry sizes in open-region snapshots
   and defer new builds when the shared estimate is full. Cleanup still prunes obsolete
   range entries and expires series indexes to reclaim published usage. Concurrent builds may

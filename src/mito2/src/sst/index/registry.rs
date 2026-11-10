@@ -29,7 +29,7 @@ use crate::metrics::INDEX_CREATE_DISCARDED_TOTAL;
 use crate::sst::file::{FileMeta, IndexType};
 use crate::sst::index::handler::builtin::BuiltinIndexHandler;
 use crate::sst::index::handler::{
-    IndexKindHandler, IndexKindProviderRef, PlanContext, PlanEntry, PlannedIndex,
+    CurrencyContext, IndexKindHandler, IndexKindProviderRef, PlanContext, PlanEntry, PlannedIndex,
 };
 use crate::sst::index::kind::IndexKind;
 
@@ -71,6 +71,14 @@ impl IndexRegistry {
         Ok(self)
     }
 
+    /// Strictly validates configured options before a region is opened.
+    pub fn validate(&self, context: &PlanContext<'_>) -> Result<(), BoxedError> {
+        for handler in &self.handlers {
+            handler.validate(context)?;
+        }
+        Ok(())
+    }
+
     /// Installs a handler, rejecting empty or overlapping kind ownership.
     pub fn register(&mut self, handler: Arc<dyn IndexKindHandler>) -> Result<(), BoxedError> {
         self.validate_registration(handler.kinds())?;
@@ -98,6 +106,46 @@ impl IndexRegistry {
             }
         }
         Ok(())
+    }
+
+    /// Rejects kinds the current schema requires but no handler implements.
+    pub fn validate_configured_kinds(
+        &self,
+        metadata: &RegionMetadataRef,
+    ) -> Result<(), BoxedError> {
+        self.validate_schema_kinds(metadata)
+    }
+
+    /// Reports persisted kinds without handlers once per kind in this call.
+    /// Compaction calls this after validating the configuration and publishes
+    /// only the indexes its registered handlers produce.
+    pub fn report_unavailable_persisted_kinds<'a>(
+        &self,
+        region_id: RegionId,
+        files: impl IntoIterator<Item = &'a FileMeta>,
+    ) {
+        let unavailable: HashSet<_> = files
+            .into_iter()
+            .flat_map(|file| {
+                file.available_indexes.iter().chain(
+                    file.indexes
+                        .iter()
+                        .flat_map(|column| &column.created_indexes),
+                )
+            })
+            .copied()
+            .filter(|kind| !self.has_handler(*kind))
+            .collect();
+        for kind in unavailable {
+            warn!(
+                "Omitting persisted index without a provider, region_id: {}, kind: {}, reason: missing_provider",
+                region_id,
+                kind.as_str()
+            );
+            INDEX_CREATE_DISCARDED_TOTAL
+                .with_label_values(&[kind.as_str(), "missing_provider"])
+                .inc();
+        }
     }
 
     /// Prepares each handler once. Construction failures retain the existing
@@ -243,12 +291,14 @@ impl IndexBuildPlan {
     pub fn planned(&self) -> &[Arc<dyn PlannedIndex>] {
         &self.planned
     }
-
+    /// Whether no handler requested work, including metadata-only maintenance.
+    pub fn is_empty(&self) -> bool {
+        self.planned.is_empty()
+    }
     /// All requested column formats.
     pub fn entries(&self) -> impl Iterator<Item = &PlanEntry> {
         self.planned.iter().flat_map(|plan| plan.entries())
     }
-
     /// Whether any planned implementation can reuse persisted input indexes.
     pub fn needs_input_reuse(&self) -> bool {
         self.planned.iter().any(|plan| plan.needs_input_reuse())
@@ -274,6 +324,15 @@ impl IndexBuildPlan {
         }
         self.planned
             .retain(|plan| plan.kinds().iter().all(|kind| kind.is_builtin()));
+    }
+
+    /// Whether every handler considers the published file current.
+    pub fn is_current(&self, file: &FileMeta, context: &CurrencyContext<'_>) -> bool {
+        self.failure.is_none()
+            && self
+                .planned
+                .iter()
+                .all(|plan| plan.is_current(file, context))
     }
 }
 
@@ -314,6 +373,40 @@ mod tests {
         ) -> Result<Option<Box<dyn crate::sst::index::handler::IndexCreator>>, BoxedError> {
             unreachable!("admission must not construct creators")
         }
+        fn is_current(&self, _: &FileMeta, _: &CurrencyContext<'_>) -> bool {
+            false
+        }
+    }
+
+    #[test]
+    fn test_unavailable_persisted_kinds_reported_once_per_call() {
+        let mut registry =
+            IndexRegistry::new(Default::default(), Default::default(), Default::default());
+        let kind = IndexType::KllIndex;
+        let file = FileMeta {
+            available_indexes: smallvec::smallvec![kind],
+            indexes: vec![crate::sst::file::ColumnIndexMetadata {
+                column_id: 0,
+                created_indexes: smallvec::smallvec![kind],
+                fulltext_bloom_version: 0,
+            }],
+            ..Default::default()
+        };
+        let counter =
+            INDEX_CREATE_DISCARDED_TOTAL.with_label_values(&[kind.as_str(), "missing_provider"]);
+        let before = counter.get();
+        registry.report_unavailable_persisted_kinds(file.region_id, [&file, &file]);
+        assert_eq!(counter.get(), before + 1);
+        registry.report_unavailable_persisted_kinds(file.region_id, [&file]);
+        assert_eq!(counter.get(), before + 2);
+
+        registry
+            .register(Arc::new(TestHandler(vec![IndexKind::Extension(
+                ExtensionIndexKind::Kll,
+            )])))
+            .unwrap();
+        registry.report_unavailable_persisted_kinds(file.region_id, [&file]);
+        assert_eq!(counter.get(), before + 2);
     }
 
     #[test]

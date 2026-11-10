@@ -28,7 +28,7 @@ use store_api::storage::ColumnId;
 
 use crate::read::Batch;
 use crate::region::options::IndexOptions;
-use crate::sst::file::{ColumnIndexMetadata, FileHandle, RegionIndexId};
+use crate::sst::file::{ColumnIndexMetadata, FileHandle, FileMeta, RegionIndexId};
 use crate::sst::index::intermediate::IntermediateManager;
 use crate::sst::index::kind::IndexKind;
 use crate::sst::index::puffin_manager::{SstPuffinManager, SstPuffinWriter};
@@ -84,6 +84,16 @@ pub struct BuildContext<'a> {
     pub output_rows: Option<u64>,
 }
 
+/// Current schema and options against which published entries are checked.
+pub struct CurrencyContext<'a> {
+    /// Shared region schema.
+    pub metadata: &'a RegionMetadataRef,
+    /// Region index options.
+    pub index_options: &'a IndexOptions,
+    /// Lifecycle event requesting the check.
+    pub build_type: IndexBuildType,
+}
+
 /// Shared plugin installed by the embedding application.
 pub type IndexKindProviderRef = Arc<dyn IndexKindProvider>;
 
@@ -97,6 +107,12 @@ pub trait IndexKindProvider: Send + Sync + Debug {
 pub trait IndexKindHandler: Send + Sync + Debug {
     /// Kinds exclusively owned by this handler.
     fn kinds(&self) -> &[IndexKind];
+
+    /// Validates options at region creation, even when this lifecycle event does
+    /// not build indexes. Implementations can override operation-specific planning.
+    fn validate(&self, context: &PlanContext<'_>) -> Result<(), BoxedError> {
+        self.plan(context).map(|_| ())
+    }
 
     /// Prepares typed parameters. `None` means no work; an empty entry list may
     /// still request removal of obsolete descriptors during maintenance.
@@ -117,6 +133,9 @@ pub trait PlannedIndex: Send + Sync + Debug {
         &self,
         context: &BuildContext<'_>,
     ) -> Result<Option<Box<dyn IndexCreator>>, BoxedError>;
+
+    /// Whether persisted entries satisfy this plan.
+    fn is_current(&self, file: &FileMeta, context: &CurrencyContext<'_>) -> bool;
 
     /// Whether building this plan can reuse persisted input summaries.
     /// Row-only plans do not require checking input object existence.

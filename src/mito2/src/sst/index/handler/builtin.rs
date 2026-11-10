@@ -24,10 +24,13 @@ use common_error::ext::BoxedError;
 use index::target::IndexTarget;
 
 use crate::config::{BloomFilterConfig, FulltextIndexConfig, InvertedIndexConfig};
+use crate::sst::file::FileMeta;
 use crate::sst::index::handler::builtin::bloom::BloomPlan;
 use crate::sst::index::handler::builtin::fulltext::FulltextPlan;
 use crate::sst::index::handler::builtin::inverted::InvertedPlan;
-use crate::sst::index::handler::{IndexKindHandler, PlanContext, PlanEntry, PlannedIndex};
+use crate::sst::index::handler::{
+    CurrencyContext, IndexKindHandler, PlanContext, PlanEntry, PlannedIndex,
+};
 use crate::sst::index::kind::IndexKind;
 
 /// Configuration for one of the existing file-level built-in creators.
@@ -45,6 +48,12 @@ impl IndexKindHandler for BuiltinIndexHandler {
             Self::Fulltext(_) => &[IndexKind::Fulltext],
             Self::Bloom(_) => &[IndexKind::Bloom],
         }
+    }
+
+    fn validate(&self, _context: &PlanContext<'_>) -> Result<(), BoxedError> {
+        // Built-in options retain their existing schema/build-time validation.
+        // Planning here would make region creation reject inputs it previously accepted.
+        Ok(())
     }
 
     fn plan(&self, context: &PlanContext<'_>) -> Result<Option<Arc<dyn PlannedIndex>>, BoxedError> {
@@ -83,12 +92,56 @@ fn normalize_entries(entries: &mut Vec<PlanEntry>) {
     });
 }
 
+fn is_current(file: &FileMeta, context: &CurrencyContext<'_>) -> bool {
+    // Preserve the established schema/version policy, including its JSON rebuild scope.
+    file.is_index_consistent_with_region(&context.metadata.column_metadatas, context.index_options)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::region::options::IndexOptions;
     use crate::sst::index::IndexBuildType;
     use crate::test_util::sst_util;
+
+    #[test]
+    fn test_builtin_validation_preserves_build_time_option_errors() {
+        for (handler, key) in [
+            (
+                BuiltinIndexHandler::Fulltext(FulltextIndexConfig::default()),
+                datatypes::schema::FULLTEXT_KEY,
+            ),
+            (
+                BuiltinIndexHandler::Bloom(BloomFilterConfig::default()),
+                datatypes::schema::SKIPPING_INDEX_KEY,
+            ),
+        ] {
+            let mut metadata = sst_util::sst_region_metadata();
+            let column = metadata
+                .column_metadatas
+                .iter_mut()
+                .find(|column| column.semantic_type == api::v1::SemanticType::Field)
+                .unwrap();
+            column.column_schema =
+                column
+                    .column_schema
+                    .clone()
+                    .with_metadata(std::collections::HashMap::from([(
+                        key.to_string(),
+                        "invalid json".to_string(),
+                    )]));
+            let metadata = Arc::new(metadata);
+            let options = IndexOptions::default();
+            let context = PlanContext {
+                metadata: &metadata,
+                index_options: &options,
+                build_type: IndexBuildType::Flush,
+                existing_indexes: &[],
+            };
+            assert!(handler.validate(&context).is_ok());
+            assert!(handler.plan(&context).is_err());
+        }
+    }
 
     #[test]
     fn test_builtin_planning_reports_invalid_options() {
