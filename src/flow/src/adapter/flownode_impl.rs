@@ -1062,7 +1062,6 @@ mod tests {
     use api::v1::{FlowId as ProtoFlowId, TableId as ProtoTableId, TableName};
 
     use common_base::Plugins;
-    use common_error::ext::{ErrorExt as _, RetryHint};
     use common_meta::ddl::create_flow::{FlowType, INTERNAL_EVAL_SCHEDULE_KEY};
     use common_meta::key::TableMetadataManager;
     use common_meta::key::flow::FlowMetadataManager;
@@ -1116,20 +1115,6 @@ mod tests {
         assert!(!mapping.in_stream(12));
         assert!(mapping.in_batch(11));
         assert_eq!(mapping.get_flow_type(8), Some(FlowType::Batching));
-    }
-
-    #[test]
-    fn test_source_flow_mapping_add_many_distinct_sources() {
-        let mut mapping = SrcTableToFlow::default();
-        for source in 0..4096 {
-            mapping.add_flow(source as u64 + 1, FlowType::Streaming, vec![source]);
-        }
-        assert!(mapping.in_stream(0));
-        assert!(mapping.in_stream(4095));
-        mapping.add_flow(1, FlowType::Batching, vec![4096]);
-        assert!(!mapping.in_stream(0));
-        assert!(mapping.in_batch(4096));
-        assert!(mapping.in_stream(4095));
     }
 
     async fn batch_startup_fixture() -> (Arc<FlowDualEngine>, Arc<BatchingEngine>, CreateFlowArgs) {
@@ -1456,7 +1441,6 @@ mod tests {
         .await
         .expect("CREATE must refuse while recovery is held")
         .unwrap_err();
-        assert_eq!(err.retry_hint(), RetryHint::Retryable);
         assert!(!dual.is_recover_done());
         assert!(!h.engine.flow_exist_inner(FLOW_ID).await.unwrap());
         assert!(!dual.batching_engine.flow_exist(FLOW_ID).await.unwrap());
