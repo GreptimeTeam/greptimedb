@@ -22,10 +22,10 @@ impl Indexer {
     pub(crate) async fn abort_creator(&mut self, position: usize) {
         let mut active = self.creators.remove(position);
         if let Err(err) = active.creator.abort().await {
-            if cfg!(any(test, feature = "test")) {
+            if active.is_builtin() && cfg!(any(test, feature = "test")) {
                 panic!("Failed to abort index: {err:?}");
             }
-            warn!(err; "Failed to abort index, region_id: {}, file_id: {}, kind: {:?}", self.region_id, self.file_id, active.kind);
+            warn!(err; "Failed to abort index, region_id: {}, file_id: {}, kinds: {:?}", self.region_id, self.file_id, active.kinds);
         }
     }
 

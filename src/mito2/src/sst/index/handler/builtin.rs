@@ -27,7 +27,7 @@ use crate::config::{BloomFilterConfig, FulltextIndexConfig, InvertedIndexConfig}
 use crate::sst::index::handler::builtin::bloom::BloomPlan;
 use crate::sst::index::handler::builtin::fulltext::FulltextPlan;
 use crate::sst::index::handler::builtin::inverted::InvertedPlan;
-use crate::sst::index::handler::{IndexKindHandler, PlanContext, PlannedIndex};
+use crate::sst::index::handler::{IndexKindHandler, PlanContext, PlanEntry, PlannedIndex};
 use crate::sst::index::kind::IndexKind;
 
 /// Configuration for one of the existing file-level built-in creators.
@@ -39,11 +39,11 @@ pub(crate) enum BuiltinIndexHandler {
 }
 
 impl IndexKindHandler for BuiltinIndexHandler {
-    fn kind(&self) -> IndexKind {
+    fn kinds(&self) -> &[IndexKind] {
         match self {
-            Self::Inverted(_) => IndexKind::Inverted,
-            Self::Fulltext(_) => IndexKind::Fulltext,
-            Self::Bloom(_) => IndexKind::Bloom,
+            Self::Inverted(_) => &[IndexKind::Inverted],
+            Self::Fulltext(_) => &[IndexKind::Fulltext],
+            Self::Bloom(_) => &[IndexKind::Bloom],
         }
     }
 
@@ -57,11 +57,30 @@ impl IndexKindHandler for BuiltinIndexHandler {
     }
 }
 
+fn target_column_id(target: &IndexTarget) -> store_api::storage::ColumnId {
+    match target {
+        IndexTarget::ColumnId(id) => *id,
+        IndexTarget::JsonPath(path) => path.column_id(),
+    }
+}
+
 fn column_target_id(target: &IndexTarget) -> Option<store_api::storage::ColumnId> {
     match target {
         IndexTarget::ColumnId(id) => Some(*id),
         IndexTarget::JsonPath(_) => None,
     }
+}
+
+fn normalize_entries(entries: &mut Vec<PlanEntry>) {
+    entries.sort_by_key(|entry| (entry.column_id, entry.format_version));
+    entries.dedup_by(|a, b| {
+        if a.column_id == b.column_id {
+            b.format_version = b.format_version.max(a.format_version);
+            true
+        } else {
+            false
+        }
+    });
 }
 
 #[cfg(test)]
@@ -103,6 +122,7 @@ mod tests {
                 metadata: &metadata,
                 index_options: &options,
                 build_type: IndexBuildType::Flush,
+                existing_indexes: &[],
             };
             assert!(handler.plan(&context).is_err());
         }

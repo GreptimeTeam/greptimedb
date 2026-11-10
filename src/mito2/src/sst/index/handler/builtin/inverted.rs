@@ -27,8 +27,10 @@ use index::target::IndexTarget;
 
 use crate::config::InvertedIndexConfig;
 use crate::read::Batch;
-use crate::sst::index::handler::builtin::column_target_id;
-use crate::sst::index::handler::{BuildContext, IndexCreator, PlanContext, PlannedIndex};
+use crate::sst::index::handler::builtin::{column_target_id, normalize_entries, target_column_id};
+use crate::sst::index::handler::{
+    BuildContext, IndexCreator, PlanContext, PlanEntry, PlannedIndex,
+};
 use crate::sst::index::inverted_index::creator::InvertedIndexer;
 use crate::sst::index::kind::IndexKind;
 use crate::sst::index::puffin_manager::SstPuffinWriter;
@@ -38,6 +40,7 @@ use crate::sst::index::{CompletedEntry, IndexBuildType};
 #[derive(Debug)]
 pub(crate) struct InvertedPlan {
     config: InvertedIndexConfig,
+    entries: Vec<PlanEntry>,
     targets: Vec<IndexTarget>,
     segment_row_count: NonZeroUsize,
 }
@@ -78,11 +81,21 @@ impl InvertedPlan {
             );
             return Ok(None);
         };
-        if targets.is_empty() {
+        let mut entries: Vec<_> = targets
+            .iter()
+            .map(|target| PlanEntry {
+                column_id: target_column_id(target),
+                kind: IndexKind::Inverted,
+                format_version: 0,
+            })
+            .collect();
+        normalize_entries(&mut entries);
+        if entries.is_empty() {
             return Ok(None);
         }
         Ok(Some(Arc::new(Self {
             config: config.clone(),
+            entries,
             targets,
             segment_row_count,
         })))
@@ -91,8 +104,12 @@ impl InvertedPlan {
 
 #[async_trait]
 impl PlannedIndex for InvertedPlan {
-    fn kind(&self) -> IndexKind {
-        IndexKind::Inverted
+    fn kinds(&self) -> &[IndexKind] {
+        &[IndexKind::Inverted]
+    }
+
+    fn entries(&self) -> &[PlanEntry] {
+        &self.entries
     }
 
     async fn build(
@@ -250,6 +267,7 @@ mod tests {
                 metadata: &metadata,
                 index_options: &options,
                 build_type: build_type.clone(),
+                existing_indexes: &[],
             };
             let plan = InvertedPlan::plan(&config, &context).unwrap().unwrap();
             let columns: Vec<_> = plan

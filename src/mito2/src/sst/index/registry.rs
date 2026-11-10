@@ -12,29 +12,36 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Ordered planning of built-in index implementations.
+//! Ordered registration and planning of index implementations.
 
 use std::sync::Arc;
 
 use common_error::ext::BoxedError;
 use common_telemetry::warn;
+use snafu::IntoError;
+use store_api::metadata::RegionMetadataRef;
 
 use crate::config::{BloomFilterConfig, FulltextIndexConfig, InvertedIndexConfig};
+use crate::error::{Error, ExternalSnafu, InvalidConfigSnafu};
+use crate::sst::file::{FileMeta, IndexType};
 use crate::sst::index::handler::builtin::BuiltinIndexHandler;
-use crate::sst::index::handler::{IndexKindHandler, PlanContext, PlannedIndex};
+use crate::sst::index::handler::{
+    IndexKindHandler, IndexKindProviderRef, PlanContext, PlanEntry, PlannedIndex,
+};
+use crate::sst::index::kind::IndexKind;
 
-/// Shared registry installed by the engine.
-pub(crate) type IndexRegistryRef = Arc<IndexRegistry>;
+/// Shared registry installed by the engine and its embedding application.
+pub type IndexRegistryRef = Arc<IndexRegistry>;
 
-/// Built-in handlers in index creation order.
+/// One handler per owner; related algorithms may share one creator and row traversal.
 #[derive(Debug, Clone)]
-pub(crate) struct IndexRegistry {
+pub struct IndexRegistry {
     handlers: Vec<Arc<dyn IndexKindHandler>>,
 }
 
 impl IndexRegistry {
     /// Registers the existing built-in creators in their established order.
-    pub(crate) fn new(
+    pub fn new(
         inverted: InvertedIndexConfig,
         fulltext: FulltextIndexConfig,
         bloom: BloomFilterConfig,
@@ -48,46 +55,245 @@ impl IndexRegistry {
         }
     }
 
-    /// Prepares each handler once, retaining the existing test panic and
-    /// production log-and-skip policy for construction failures.
-    pub(crate) fn plan(&self, context: &PlanContext<'_>) -> IndexBuildPlan {
+    /// Adds the embedding application's handlers after the built-in configuration.
+    pub fn with_provider(
+        mut self,
+        provider: Option<IndexKindProviderRef>,
+    ) -> Result<Self, BoxedError> {
+        if let Some(provider) = provider {
+            for handler in provider.handlers() {
+                self.register(handler)?;
+            }
+        }
+        Ok(self)
+    }
+
+    /// Installs a handler, rejecting empty or overlapping kind ownership.
+    pub fn register(&mut self, handler: Arc<dyn IndexKindHandler>) -> Result<(), BoxedError> {
+        self.validate_registration(handler.kinds())?;
+        self.handlers.push(handler);
+        self.handlers
+            .sort_by_key(|handler| handler.kinds().iter().map(|kind| kind.sort_key()).min());
+        Ok(())
+    }
+
+    /// Rejects required extension indexes whose implementation is unavailable.
+    /// Checks current schema options and both file-level and column-level metadata.
+    pub fn validate_required_kinds<'a>(
+        &self,
+        metadata: &RegionMetadataRef,
+        files: impl IntoIterator<Item = &'a FileMeta>,
+    ) -> Result<(), BoxedError> {
+        self.validate_schema_kinds(metadata)?;
+        for file in files {
+            for kind in file.available_indexes.iter().chain(
+                file.indexes
+                    .iter()
+                    .flat_map(|column| &column.created_indexes),
+            ) {
+                self.validate_required_kind(*kind)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Prepares each handler once. Construction failures retain the existing
+    /// built-in test panic and production skip policy. Other failures are retained
+    /// for the caller to check before publishing rebuilt indexes.
+    pub fn plan(&self, context: &PlanContext<'_>) -> Result<IndexBuildPlan, BoxedError> {
+        self.validate_plan_requirements(context)?;
         let mut planned = Vec::new();
+        let mut failure = None;
         for handler in &self.handlers {
             match handler.plan(context) {
                 Ok(Some(plan)) => planned.push(plan),
                 Ok(None) => {}
                 Err(err) => {
-                    Self::record_planning_error(handler.as_ref(), context, err);
+                    Self::record_planning_error(handler.as_ref(), context, err, &mut failure);
                 }
             }
         }
-        IndexBuildPlan { planned }
+        Ok(IndexBuildPlan { planned, failure })
+    }
+
+    fn validate_registration(&self, kinds: &[IndexKind]) -> Result<(), BoxedError> {
+        if kinds.is_empty()
+            || kinds
+                .iter()
+                .enumerate()
+                .any(|(i, kind)| kinds[..i].contains(kind))
+        {
+            return Err(BoxedError::new(
+                InvalidConfigSnafu {
+                    reason: "index handler kinds must be nonempty and unique",
+                }
+                .build(),
+            ));
+        }
+        if kinds.iter().any(|kind| self.has_handler(kind.index_type())) {
+            return Err(BoxedError::new(
+                InvalidConfigSnafu {
+                    reason: "index handler kind is already registered",
+                }
+                .build(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn has_handler(&self, kind: IndexType) -> bool {
+        self.handlers.iter().any(|handler| {
+            handler
+                .kinds()
+                .iter()
+                .any(|owned| owned.index_type() == kind)
+        })
+    }
+
+    fn validate_plan_requirements(&self, context: &PlanContext<'_>) -> Result<(), BoxedError> {
+        // Flush has no extension producer; required handlers are checked when
+        // compaction or maintenance plans actually build these indexes.
+        if context.build_type != crate::sst::index::IndexBuildType::Flush {
+            self.validate_schema_kinds(context.metadata)?;
+            for kind in context
+                .existing_indexes
+                .iter()
+                .flat_map(|column| &column.created_indexes)
+            {
+                self.validate_required_kind(*kind)?;
+            }
+        }
+        Ok(())
     }
 
     fn record_planning_error(
         handler: &dyn IndexKindHandler,
         context: &PlanContext<'_>,
         err: BoxedError,
+        failure: &mut Option<Arc<Error>>,
     ) {
-        if cfg!(any(test, feature = "test")) {
+        if handler.kinds().iter().all(|kind| kind.is_builtin()) && cfg!(any(test, feature = "test"))
+        {
             panic!(
                 "Failed to prepare built-in index, region_id: {}, err: {err}",
                 context.metadata.region_id
             );
         }
-        warn!(err; "Failed to prepare index, region_id: {}, kind: {:?}", context.metadata.region_id, handler.kind());
+        warn!(err; "Failed to prepare index, region_id: {}, kinds: {:?}", context.metadata.region_id, handler.kinds());
+        failure.get_or_insert_with(|| {
+            Arc::new(
+                ExternalSnafu {
+                    context: "index planning".to_string(),
+                }
+                .into_error(err),
+            )
+        });
+    }
+
+    fn validate_schema_kinds(&self, metadata: &RegionMetadataRef) -> Result<(), BoxedError> {
+        for column in &metadata.column_metadatas {
+            let schema = &column.column_schema;
+            for (key, kind) in [
+                (datatypes::schema::HLL_KEY, IndexType::HllIndex),
+                (datatypes::schema::KLL_KEY, IndexType::KllIndex),
+                (datatypes::schema::MG_KEY, IndexType::MgIndex),
+            ] {
+                if schema.metadata().contains_key(key) {
+                    self.validate_required_kind(kind)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_required_kind(&self, kind: IndexType) -> Result<(), BoxedError> {
+        if matches!(
+            kind,
+            IndexType::HllIndex | IndexType::KllIndex | IndexType::MgIndex
+        ) && !self.has_handler(kind)
+        {
+            return Err(BoxedError::new(
+                InvalidConfigSnafu {
+                    reason: format!("required index {kind:?} has no registered handler"),
+                }
+                .build(),
+            ));
+        }
+        Ok(())
     }
 }
 
 /// Typed plans retained across output files of one operation.
 #[derive(Debug, Clone, Default)]
-pub(crate) struct IndexBuildPlan {
+pub struct IndexBuildPlan {
     planned: Vec<Arc<dyn PlannedIndex>>,
+    failure: Option<Arc<Error>>,
 }
 
 impl IndexBuildPlan {
-    /// Plans in index creation order.
-    pub(crate) fn planned(&self) -> &[Arc<dyn PlannedIndex>] {
+    /// Reports preparation failure separately from a successful empty plan.
+    pub fn check_success(&self) -> Result<(), Arc<Error>> {
+        self.failure.clone().map_or(Ok(()), Err)
+    }
+
+    /// Plans in execution order, grouped by owner rather than by column.
+    pub fn planned(&self) -> &[Arc<dyn PlannedIndex>] {
         &self.planned
+    }
+
+    /// All requested column formats.
+    pub fn entries(&self) -> impl Iterator<Item = &PlanEntry> {
+        self.planned.iter().flat_map(|plan| plan.entries())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::sst::index::kind::ExtensionIndexKind;
+
+    #[derive(Debug)]
+    struct TestHandler(Vec<IndexKind>);
+
+    impl IndexKindHandler for TestHandler {
+        fn kinds(&self) -> &[IndexKind] {
+            &self.0
+        }
+        fn plan(&self, _: &PlanContext<'_>) -> Result<Option<Arc<dyn PlannedIndex>>, BoxedError> {
+            Ok(None)
+        }
+    }
+
+    #[test]
+    fn test_registration_preserves_grouped_owner_and_rejects_overlap() {
+        let mut registry =
+            IndexRegistry::new(Default::default(), Default::default(), Default::default());
+        let kinds = vec![
+            IndexKind::Extension(ExtensionIndexKind::Hll),
+            IndexKind::Extension(ExtensionIndexKind::Kll),
+            IndexKind::Extension(ExtensionIndexKind::Mg),
+        ];
+        registry
+            .register(Arc::new(TestHandler(kinds.clone())))
+            .unwrap();
+        assert_eq!(registry.handlers.len(), 4);
+        assert_eq!(registry.handlers[3].kinds(), kinds);
+        for invalid in [vec![], vec![kinds[0]], vec![IndexKind::Fulltext]] {
+            assert!(registry.register(Arc::new(TestHandler(invalid))).is_err());
+            assert_eq!(registry.handlers.len(), 4);
+        }
+    }
+
+    #[test]
+    fn test_registration_rejects_duplicates_within_one_owner() {
+        let mut registry =
+            IndexRegistry::new(Default::default(), Default::default(), Default::default());
+        let kind = IndexKind::Extension(ExtensionIndexKind::Hll);
+        assert!(
+            registry
+                .register(Arc::new(TestHandler(vec![kind, kind])))
+                .is_err()
+        );
+        assert_eq!(registry.handlers.len(), 3);
     }
 }

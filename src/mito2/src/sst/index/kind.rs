@@ -16,30 +16,78 @@
 
 use crate::sst::file::IndexType;
 
-/// Index implementations supplied by the storage engine.
+/// An index implementation known to the storage engine or supplied by a plugin.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub(crate) enum IndexKind {
+pub enum IndexKind {
+    /// Inverted index.
     Inverted,
+    /// Full-text index.
     Fulltext,
+    /// Bloom filter index.
     Bloom,
+    /// An index whose implementation is supplied by the embedding application.
+    Extension(ExtensionIndexKind),
+}
+
+/// Extension algorithm identities; implementations remain outside mito2.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ExtensionIndexKind {
+    /// HyperLogLog distinct-value estimate.
+    Hll,
+    /// KLL rank estimate.
+    Kll,
+    /// Misra–Gries frequency estimate.
+    Mg,
+}
+
+impl ExtensionIndexKind {
+    /// Stable label used by index diagnostics and metrics.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Hll => "hll_index",
+            Self::Kll => "kll_index",
+            Self::Mg => "mg_index",
+        }
+    }
 }
 
 impl IndexKind {
     /// Stable label used by the existing index metrics.
-    pub(crate) const fn as_str(self) -> &'static str {
+    pub const fn as_str(self) -> &'static str {
         match self {
             Self::Inverted => "inverted_index",
             Self::Fulltext => "fulltext_index",
             Self::Bloom => "bloom_filter_index",
+            Self::Extension(kind) => kind.as_str(),
         }
     }
 
     /// Returns the identity recorded in file and column index metadata.
-    pub(crate) fn index_type(self) -> IndexType {
+    pub fn index_type(self) -> IndexType {
         match self {
             Self::Inverted => IndexType::InvertedIndex,
             Self::Fulltext => IndexType::FulltextIndex,
             Self::Bloom => IndexType::BloomFilterIndex,
+            Self::Extension(ExtensionIndexKind::Hll) => IndexType::HllIndex,
+            Self::Extension(ExtensionIndexKind::Kll) => IndexType::KllIndex,
+            Self::Extension(ExtensionIndexKind::Mg) => IndexType::MgIndex,
+        }
+    }
+
+    /// Whether this kind is implemented by the storage engine.
+    pub fn is_builtin(self) -> bool {
+        !matches!(self, Self::Extension(_))
+    }
+
+    /// Orders built-ins as before, followed by extension algorithms.
+    pub fn sort_key(self) -> u8 {
+        match self {
+            Self::Inverted => 0,
+            Self::Fulltext => 1,
+            Self::Bloom => 2,
+            Self::Extension(ExtensionIndexKind::Hll) => 4,
+            Self::Extension(ExtensionIndexKind::Kll) => 5,
+            Self::Extension(ExtensionIndexKind::Mg) => 6,
         }
     }
 }
