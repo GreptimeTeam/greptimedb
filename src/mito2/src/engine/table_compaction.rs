@@ -27,6 +27,7 @@ use crate::error::{
     SerdeJsonSnafu,
 };
 use crate::manifest::action::RegionEdit;
+use crate::region::options::RegionOptions;
 use crate::region::{RegionLeaderState, RegionRoleState};
 use crate::request::{RegionEditKind, RegionEditRequest, WorkerRequest};
 use crate::sst::file::{FileMeta, SHARED_LEVEL_SLOT};
@@ -43,7 +44,7 @@ pub struct TableCompactionSnapshot {
 #[derive(Debug)]
 pub(crate) struct PublicationContext {
     pub metadata: RegionMetadataRef,
-    pub options: serde_json::Value,
+    pub options: RegionOptions,
 }
 
 /// A result for this publication attempt, not a durable task receipt.
@@ -98,6 +99,9 @@ impl MitoEngine {
                 reason: "Publication requires this region's nonempty input snapshot"
             }
         );
+        // The public snapshot keeps JSON options; parse them once here so the
+        // worker compares typed options and reads typed flags without reparsing.
+        let options = serde_json::from_value(snapshot.options).context(SerdeJsonSnafu)?;
         let edit = RegionEdit {
             files_to_remove: snapshot.inputs,
             files_to_add: outputs,
@@ -108,7 +112,7 @@ impl MitoEngine {
         let mut request = RegionEditRequest::new(region_id, edit, false, tx);
         request.kind = RegionEditKind::Compaction(Box::new(PublicationContext {
             metadata: snapshot.metadata,
-            options: snapshot.options,
+            options,
         }));
         self.inner
             .workers

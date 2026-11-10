@@ -13,12 +13,10 @@
 
 use std::collections::HashSet;
 
-use snafu::{ResultExt, ensure};
+use snafu::ensure;
 
 use crate::engine::table_compaction::{PublicationContext, output};
-use crate::error::{
-    InvalidRequestSnafu, RegionBusySnafu, Result, SerdeJsonSnafu, StaleCompactionExecutionSnafu,
-};
+use crate::error::{InvalidRequestSnafu, RegionBusySnafu, Result, StaleCompactionExecutionSnafu};
 use crate::manifest::action::{RegionEdit, RegionManifest, RegionMetaAction, RegionMetaActionList};
 use crate::region::{MitoRegionRef, RegionLeaderState, RegionRoleState};
 use crate::sst::file::LEVEL_SHARED;
@@ -32,7 +30,7 @@ pub(crate) async fn publish(
     // An old result can name outputs already compacted away. Reject stale inputs
     // before inspecting those objects; absence of an output is not a task receipt.
     ensure!(
-        is_current(region, context, &edit, &snapshot)?,
+        is_current(region, context, &edit, &snapshot),
         StaleCompactionExecutionSnafu {
             region_id: region.region_id
         }
@@ -52,7 +50,7 @@ pub(crate) async fn publish(
     );
     let manifest = manager.manifest();
     ensure!(
-        is_current(region, context, &edit, &manifest)?,
+        is_current(region, context, &edit, &manifest),
         StaleCompactionExecutionSnafu {
             region_id: region.region_id
         }
@@ -87,16 +85,15 @@ fn is_current(
     context: &PublicationContext,
     edit: &RegionEdit,
     manifest: &RegionManifest,
-) -> Result<bool> {
+) -> bool {
     let current = region.version_control.current();
-    let options = serde_json::to_value(&current.version.options).context(SerdeJsonSnafu)?;
-    Ok(context.metadata == manifest.metadata
-        && context.options == options
+    context.metadata == manifest.metadata
+        && context.options == current.version.options
         && !edit.files_to_remove.is_empty()
         && edit
             .files_to_remove
             .iter()
-            .all(|file| manifest.files.get(&file.file_id) == Some(file)))
+            .all(|file| manifest.files.get(&file.file_id) == Some(file))
 }
 
 fn validate_files(
@@ -118,9 +115,7 @@ fn validate_files(
             reason: "Expected distinct, already-admitted shared inputs"
         }
     );
-    let options: crate::region::options::RegionOptions =
-        serde_json::from_value(context.options.clone()).context(SerdeJsonSnafu)?;
-    let trusted = options.preserve_row_sequence
+    let trusted = context.options.preserve_row_sequence
         && edit.files_to_remove.iter().all(|file| {
             if file.region_id == region_id {
                 file.preserve_row_sequence

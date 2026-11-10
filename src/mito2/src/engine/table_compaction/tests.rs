@@ -315,6 +315,18 @@ async fn test_invalid_results_preserve_inputs_and_reopen_can_replan() {
             .await
             .is_err()
     );
+    let mut malformed = snapshot.clone();
+    malformed.options = serde_json::json!({ "append_mode": "not-a-bool" });
+    let error = engine
+        .publish_table_compaction(region_id, malformed, vec![output.clone()])
+        .await
+        .unwrap_err();
+    assert!(matches!(error, crate::error::Error::SerdeJson { .. }));
+    assert_eq!(version, region.manifest_ctx.manifest_version().await);
+    assert_eq!(
+        snapshot.inputs,
+        engine.table_compaction_snapshot(region_id).unwrap().inputs
+    );
     let mut stale = snapshot;
     stale.options["append_mode"] = serde_json::json!(true);
     assert_eq!(
@@ -327,7 +339,10 @@ async fn test_invalid_results_preserve_inputs_and_reopen_can_replan() {
     assert_eq!(version, region.manifest_ctx.manifest_version().await);
     reopen_region(&engine, region_id, "test".into(), true, Default::default()).await;
     // V1 refreshes the snapshot after restart instead of resuming a Prepared task.
+    // The public snapshot contract is JSON, so a serde round trip must still publish.
     let fresh = engine.table_compaction_snapshot(region_id).unwrap();
+    let fresh: TableCompactionSnapshot =
+        serde_json::from_value(serde_json::to_value(&fresh).unwrap()).unwrap();
     assert_eq!(
         PublicationOutcome::Applied,
         engine
@@ -335,6 +350,96 @@ async fn test_invalid_results_preserve_inputs_and_reopen_can_replan() {
             .await
             .unwrap()
     );
+    assert_eq!(3, row_count(&engine, region_id).await);
+}
+
+/// A preserve-row-sequence region trusts output markers only when the typed
+/// snapshot options and the admitted inputs both carry the marker.
+#[tokio::test]
+async fn test_preserve_row_sequence_option_drives_output_admission() {
+    let mut env = TestEnv::new().await;
+    let engine = env.create_engine(config()).await;
+    let region_id = RegionId::new(1, 1);
+    let create = CreateRequestBuilder::new()
+        .insert_option("append_mode", "true")
+        .insert_option("preserve_row_sequence", "true")
+        .build();
+    engine
+        .handle_request(region_id, RegionRequest::Create(create.clone()))
+        .await
+        .unwrap();
+    put_rows(
+        &engine,
+        region_id,
+        Rows {
+            schema: rows_schema(&create),
+            rows: build_rows(0, 3),
+        },
+    )
+    .await;
+    flush_region(&engine, region_id, None).await;
+    let region = engine.get_region(region_id).unwrap();
+    let original = region.version().ssts.levels()[0]
+        .files()
+        .next()
+        .unwrap()
+        .meta_ref()
+        .clone();
+    assert!(original.preserve_row_sequence);
+    // A generic import clears the trust marker, so install the admitted shared
+    // input directly: this is the shape table compaction receives after admission.
+    let shared = copy_sst(&region, &original, LEVEL_SHARED).await;
+    let edit = RegionEdit {
+        files_to_add: vec![shared],
+        files_to_remove: vec![original],
+        ..Default::default()
+    };
+    region
+        .manifest_ctx
+        .update_manifest_for_compaction(RegionMetaActionList::with_action(RegionMetaAction::Edit(
+            edit.clone(),
+        )))
+        .await
+        .unwrap();
+    region
+        .version_control
+        .apply_edit(Some(edit), &[], region.file_purger.clone());
+    let snapshot = engine.table_compaction_snapshot(region_id).unwrap();
+    assert_eq!(
+        Some(true),
+        snapshot.options["preserve_row_sequence"].as_bool()
+    );
+    let output = copy_sst(&region, &snapshot.inputs[0], 0).await;
+    assert!(output.preserve_row_sequence);
+    let untrusted = FileMeta {
+        preserve_row_sequence: false,
+        ..output.clone()
+    };
+    let version = region.manifest_ctx.manifest_version().await;
+    let error = engine
+        .publish_table_compaction(region_id, snapshot.clone(), vec![untrusted])
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        crate::error::Error::EditRegion { source, .. }
+            if matches!(source.as_ref(), crate::error::Error::InvalidRequest { reason, .. }
+                if reason == "Invalid region-local compaction output")
+    ));
+    assert_eq!(version, region.manifest_ctx.manifest_version().await);
+    assert_eq!(
+        snapshot.inputs,
+        engine.table_compaction_snapshot(region_id).unwrap().inputs
+    );
+    assert_eq!(
+        PublicationOutcome::Applied,
+        engine
+            .publish_table_compaction(region_id, snapshot, vec![output.clone()])
+            .await
+            .unwrap()
+    );
+    let manifest = region.manifest_ctx.manifest().await;
+    assert_eq!(Some(&output), manifest.files.get(&output.file_id));
     assert_eq!(3, row_count(&engine, region_id).await);
 }
 
