@@ -347,7 +347,6 @@ fn window_and_limitk_collect_only_unified_contributions() {
             None,
         )
         .unwrap()
-        .0
     };
 
     let raw_window = build(window_with(
@@ -10071,8 +10070,7 @@ fn emitted_tables(node: NativeNode) -> (bool, bool) {
         "root".to_string(),
         None,
     )
-    .unwrap()
-    .0;
+    .unwrap();
     let RuntimeOp::Broadcast {
         left, right, state, ..
     } = root.op
