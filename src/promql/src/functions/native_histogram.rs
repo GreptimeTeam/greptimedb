@@ -405,18 +405,27 @@ fn histogram_pair_udf_with_collector(
                 result.push(
                     match (read_histogram(lhs, row)?, read_histogram(rhs, row)?) {
                         (Some(lhs), Some(rhs)) => {
-                            record_custom_reconciliation(&collector, name, &lhs, &rhs);
-                            record_counter_reset_contradiction(&collector, name, &lhs, &rhs);
-                            let result = op(&lhs, &rhs);
-                            if result.is_none() {
-                                record_warning(
-                                    &collector,
-                                    format!(
-                                    "{name}: dropped native histogram sample with incompatible schemas"
-                                    ),
-                                );
+                            // The layouts decide whether there is a pair at all: Prometheus reports
+                            // a pair whose bucket layouts cannot be combined as that one error,
+                            // before it looks at the reset hints, so a pair that fails both carries
+                            // only the schema warning. This is the order the native matcher in
+                            // `vector_match` reports it in too.
+                            match op(&lhs, &rhs) {
+                                Some(result) => {
+                                    record_custom_reconciliation(&collector, name, &lhs, &rhs);
+                                    record_counter_reset_contradiction(&collector, name, &lhs, &rhs);
+                                    Some(result)
+                                }
+                                None => {
+                                    record_warning(
+                                        &collector,
+                                        format!(
+                                        "{name}: dropped native histogram sample with incompatible schemas"
+                                        ),
+                                    );
+                                    None
+                                }
                             }
-                            result
                         }
                         _ => None,
                     },
@@ -3612,7 +3621,9 @@ mod tests {
     }
 
     #[test]
-    fn subtraction_records_reset_hint_contradictions_for_incompatible_histograms() {
+    fn subtraction_reports_a_reset_hint_contradiction_only_between_compatible_histograms() {
+        // Prometheus reports a pair whose bucket layouts cannot be combined before it looks at the
+        // reset hints, so the collision warning belongs to the pairs the operation can answer.
         for incompatible in [false, true] {
             let mut left = sample_histogram(2.0, 2.0, vec![2.0]);
             left.reset_hint = COUNTER_RESET_HINT;
@@ -3633,10 +3644,23 @@ mod tests {
                 native_histogram_arrow_type(),
             );
 
-            assert!(collected_warnings(&collector).contains(&format!(
-                "{}: native histogram counter reset hints contradict",
-                NativeHistogramSub::name()
-            )));
+            let warnings = collected_warnings(&collector);
+            let name = NativeHistogramSub::name();
+            assert_eq!(
+                warnings.contains(&format!(
+                    "{name}: native histogram counter reset hints contradict"
+                )),
+                !incompatible,
+                "{incompatible}: {warnings:?}"
+            );
+            if incompatible {
+                assert!(
+                    warnings.contains(&format!(
+                        "{name}: dropped native histogram sample with incompatible schemas"
+                    )),
+                    "{warnings:?}"
+                );
+            }
         }
     }
 

@@ -1458,6 +1458,8 @@ struct BinaryRuntime {
     node_index: usize,
     /// Evidence shared with the other output partitions of this fused-series execution.
     evidence: Option<Arc<DuplicateEvidence>>,
+    /// The query's collector for dropped histogram sample pairs, when requested.
+    annotations: Option<PromqlAnnotationCollector>,
     /// The kernel and the modifiers the compiler bound it with.
     kernel: PairKernel,
     /// The layout each operand is bound to, what a chunk of it is checked against: `0` is the left
@@ -1539,6 +1541,7 @@ impl BinaryRuntime {
         Self {
             node_index,
             evidence,
+            annotations: None,
             kernel,
             schemas,
             operands: [RetainedInput::default(), RetainedInput::default()],
@@ -1699,6 +1702,7 @@ impl BinaryRuntime {
                             node: self.slot(0).0,
                             evidence,
                         }),
+                        self.annotations.as_ref(),
                         &mut reserve,
                     )
                 }
@@ -2983,8 +2987,46 @@ impl NodeState {
     }
 }
 
+/// Stack one [`RuntimeNode::build`] or [`RuntimeNode::pull`] level needs below it before the
+/// recursion grows its stack.
+///
+/// Both walks recurse once per tree level, and a debug build's frame for one level of either is
+/// large: measured on a 100-term chain, a `build` level used about 140 KiB and a `pull` level about
+/// 80 KiB, which is what aborted the shared 8 MiB runtime worker on a tree the compiler admits.
+/// There is no depth limit to keep that from happening, so the recursion grows its stack instead;
+/// the reserve is several levels' worth rather than a bare guard page, because it has to hold the
+/// level that is about to be entered, not only the one that asked.
+const NATIVE_STACK_RED_ZONE: usize = 512 * 1024;
+
+/// Stack a growth adds when the reserve above is spent. It holds several levels of the same walk.
+const NATIVE_STACK_GROWTH: usize = 4 * 1024 * 1024;
+
 impl RuntimeNode {
+    /// Builds the runtime node for `node` and, recursively, for its inputs.
+    ///
+    /// A deep tree is executed rather than refused: there is no depth limit, so what has to fit is
+    /// the recursion, and it grows its stack on demand instead of relying on the caller's.
     fn build(
+        node: &NativeNode,
+        pool: &Arc<dyn MemoryPool>,
+        inputs: &mut Vec<InputSlot>,
+        binary_before: &mut usize,
+        location: String,
+        duplicate_evidence: Option<Arc<DuplicateEvidence>>,
+    ) -> Result<(Self, bool)> {
+        stacker::maybe_grow(NATIVE_STACK_RED_ZONE, NATIVE_STACK_GROWTH, || {
+            Self::build_within_stack(
+                node,
+                pool,
+                inputs,
+                binary_before,
+                location,
+                duplicate_evidence,
+            )
+        })
+    }
+
+    fn build_within_stack(
         node: &NativeNode,
         pool: &Arc<dyn MemoryPool>,
         inputs: &mut Vec<InputSlot>,
@@ -3867,7 +3909,13 @@ impl RuntimeNode {
             RuntimeOp::VectorOf { input, .. }
             | RuntimeOp::Instant { input, .. }
             | RuntimeOp::Merge { input, .. } => input.set_annotations(collector),
-            RuntimeOp::Binary { left, right, .. } => {
+            RuntimeOp::Binary {
+                left,
+                right,
+                binary,
+                ..
+            } => {
+                binary.annotations = Some(collector.clone());
                 left.set_annotations(collector.clone());
                 right.set_annotations(collector);
             }
@@ -3926,7 +3974,21 @@ impl RuntimeNode {
     /// `inputs_finished` is the caller's word that no more source chunks will arrive. A node that
     /// decides nothing until its whole input is there reads it to tell the last pull that found
     /// nothing -- "nothing more" -- from the ones before it, which meant "nothing yet".
+    ///
+    /// The pull recurses once per tree level, so a deep tree grows the stack it runs on rather than
+    /// being refused ([`NATIVE_STACK_RED_ZONE`]). The stack is the driver's, whichever thread polls
+    /// the result stream: a shared runtime worker has 8 MiB of it in a debug build.
     fn pull(
+        &mut self,
+        inputs: &mut [InputSlot],
+        inputs_finished: bool,
+    ) -> Result<Option<NativeChunk>> {
+        stacker::maybe_grow(NATIVE_STACK_RED_ZONE, NATIVE_STACK_GROWTH, || {
+            self.pull_within_stack(inputs, inputs_finished)
+        })
+    }
+
+    fn pull_within_stack(
         &mut self,
         inputs: &mut [InputSlot],
         inputs_finished: bool,

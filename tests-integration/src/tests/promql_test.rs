@@ -2534,6 +2534,102 @@ fn assert_four_native_partitions(plan: &Arc<dyn datafusion::physical_plan::Execu
     );
 }
 
+/// Inspect the actual logical FusedSeries tree before executing a representative deep query.
+async fn assert_deep_native_plan(instance: &Arc<Instance>, query: &PromQuery) {
+    use promql::extension_plan::FusedSeries;
+    use promql::native::plan::{NativeExpr, NativeNode};
+
+    fn depth(node: &NativeNode) -> usize {
+        1 + match &node.expr {
+            NativeExpr::Input(_) | NativeExpr::Scalar(_) => 0,
+            NativeExpr::Instant { input, .. } | NativeExpr::Map { input, .. } => depth(input),
+            NativeExpr::ParameterizedMap {
+                input, parameters, ..
+            } => parameters.iter().map(depth).fold(depth(input), usize::max),
+            NativeExpr::Binary { left, right, .. } => depth(left).max(depth(right)),
+            other => panic!("unexpected node in deep expression: {other:?}"),
+        }
+    }
+    fn fused(plan: &datafusion::logical_expr::LogicalPlan) -> Option<&FusedSeries> {
+        if let datafusion::logical_expr::LogicalPlan::Extension(extension) = plan
+            && let Some(node) = extension.node.as_any().downcast_ref::<FusedSeries>()
+        {
+            return Some(node);
+        }
+        plan.inputs().into_iter().find_map(fused)
+    }
+    let ctx = native_query_context(true, 2);
+    let statement = QueryLanguageParser::parse_promql(query, &ctx).unwrap();
+    let plan = instance
+        .query_engine()
+        .planner()
+        .plan(&statement, ctx)
+        .await
+        .unwrap();
+    let display = plan.display_indent().to_string();
+    let tree = fused(&plan)
+        .unwrap_or_else(|| panic!("native deep tree: {display}"))
+        .tree();
+    assert!(depth(tree.root()) > 64, "{display}");
+    assert!(!display.contains("Join:"), "{display}");
+}
+
+/// The representative deep expression executes on a standalone instance, on the test's own stack.
+///
+/// The expression is deep enough that the walks over it used to abort the runtime worker rather
+/// than answer: planning it walks the tree once, and so do building its runtime and pulling it.
+/// Those walks grow their own stacks now, so nothing here owns a stack large enough to hide the
+/// recursion - a build that reintroduces the overflow aborts this test instead of being masked by
+/// one. The plan, the runtime and the answer are all the deep expression's own.
+#[tokio::test(flavor = "multi_thread")]
+async fn native_promql_deep_binary_standalone() {
+    common_telemetry::init_default_ut_logging();
+    let (standalone, observer) = native_test_instance(GreptimeDbStandaloneBuilder::new(
+        "native_promql_deep_binary_standalone",
+    ))
+    .await;
+    let instance = standalone.fe_instance().clone();
+    execute_all(
+        &instance,
+        "CREATE TABLE deep_standalone (host STRING, ts TIMESTAMP TIME INDEX, val DOUBLE, PRIMARY KEY(host)); INSERT INTO deep_standalone VALUES ('x', 180000, 3), ('x', 240000, 4), ('y', 180000, 4), ('y', 240000, 5)",
+        QueryContext::arc(),
+    )
+    .await;
+    let query = PromQuery {
+        query: format!("clamp(deep_standalone{}, 0, 1000)", " + 1".repeat(80)),
+        start: "180".to_string(),
+        end: "240".to_string(),
+        step: "60s".to_string(),
+        ..PromQuery::default()
+    };
+    assert_deep_native_plan(&instance, &query).await;
+    observer.clear();
+    let output = instance
+        .do_promql_query(&query, native_query_context(true, 2))
+        .await
+        .remove(0)
+        .unwrap();
+    assert_eq!(
+        native_result_rows(output).await,
+        vec![
+            (180_000, "x".to_string(), 83.0),
+            (180_000, "y".to_string(), 84.0),
+            (240_000, "x".to_string(), 84.0),
+            (240_000, "y".to_string(), 85.0)
+        ]
+    );
+    let observed = observed_physical_nodes(&observer);
+    let names: Vec<_> = observed.iter().map(|node| node.name()).collect();
+    assert!(
+        names.contains(&"FusedSeriesExec"),
+        "no native fused node: {names:?}"
+    );
+    assert!(
+        names.iter().all(|name| !name.contains("JoinExec")),
+        "legacy join: {names:?}"
+    );
+}
+
 /// A standalone instance with the native route opted in, and an observer of the plans it runs.
 async fn native_test_instance(
     builder: GreptimeDbStandaloneBuilder,
@@ -2976,6 +3072,741 @@ async fn distributed_native_promql_cross_region_targets_match_expected_values() 
         "fragmented region streams stay within the target-partition bound: {expression}: {peak}"
     );
     assert_eq!(control_rows, rows, "{expression}");
+}
+
+/// A deep native tree executes on the frontend while a true two-DN gRPC query reads fragments.
+#[test]
+fn distributed_native_promql_deep_binary_over_real_grpc() {
+    std::thread::Builder::new()
+        .name("deep-native-grpc".into())
+        .stack_size(32 * 1024 * 1024)
+        .spawn(|| {
+            tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(4)
+                .thread_stack_size(32 * 1024 * 1024)
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(async {
+                    common_telemetry::init_default_ut_logging();
+                    let cluster = GreptimeDbClusterBuilder::new("distributed_native_promql_deep_binary")
+                        .await
+                        .with_datanodes(2)
+                        .with_real_datanode_grpc_addr(true)
+                        .with_frontend_real_datanode_grpc(true)
+                        .with_query_options(QueryOptions { experimental_native_promql: true, ..Default::default() })
+                        .build(false)
+                        .await;
+                    let instance = cluster.fe_instance().clone();
+                    execute_all(&instance, "CREATE TABLE deep_dist_phy (host STRING, val DOUBLE, ts TIMESTAMP TIME INDEX, PRIMARY KEY(host)) PARTITION ON COLUMNS (ts) (ts < '1970-01-01 00:02:00', ts >= '1970-01-01 00:02:00' AND ts < '1970-01-01 00:04:00', ts >= '1970-01-01 00:04:00') ENGINE=metric WITH ('physical_metric_table'='true'); CREATE TABLE deep_dist_b (host STRING, val DOUBLE, ts TIMESTAMP TIME INDEX, PRIMARY KEY(host)) ENGINE=metric WITH ('on_physical_table'='deep_dist_phy'); INSERT INTO deep_dist_b (host,val,ts) VALUES ('x',1,60000),('x',2,120000),('x',3,180000),('x',4,240000),('y',2,60000),('y',3,120000),('y',4,180000),('y',5,240000)", QueryContext::arc()).await;
+                    let query = PromQuery {
+                        query: format!("clamp(deep_dist_b{}, 0, 1000)", " + 1".repeat(80)),
+                        start: "180".to_string(),
+                        end: "240".to_string(),
+                        step: "60s".to_string(),
+                        ..PromQuery::default()
+                    };
+                    assert_deep_native_plan(&instance, &query).await;
+                    cluster.reset_network_do_get_peak();
+                    let output = instance.do_promql_query(&query, native_query_context(true, 2)).await.remove(0).unwrap();
+                    let plan = output.meta.plan.as_ref().expect("frontend physical plan");
+                    assert_native_merge_scans(plan, 1, 3);
+                    let display = datafusion::physical_plan::displayable(plan.as_ref()).indent(true).to_string();
+                    assert!(display.contains("FusedSeriesExec") && !display.contains("JoinExec"), "{display}");
+                    assert_eq!(native_result_rows(output).await, vec![(180_000, "x".to_string(), 83.0), (180_000, "y".to_string(), 84.0), (240_000, "x".to_string(), 84.0), (240_000, "y".to_string(), 85.0)]);
+                    assert!(cluster.network_do_get_peak_active() > 0, "remote gRPC reads occurred");
+                    assert_eq!(cluster.network_do_get_active(), 0, "all response bodies closed");
+                });
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+/// A composed binary consumes a real float canonical boundary before scaling histograms.
+#[tokio::test(flavor = "multi_thread")]
+async fn native_promql_composed_binary_canonical_operand() {
+    use api::greptime_proto::io::prometheus::write::v2::Histogram;
+    use api::greptime_proto::io::prometheus::write::v2::histogram::{Count, ZeroCount};
+    use axum::body::{Body, to_bytes};
+    use common_query::native_histogram::read_histogram;
+    use datatypes::arrow::array::StructArray;
+    use http::Request;
+    use prost::Message;
+    use servers::prom_remote_write::v2::test_util as remote_write_v2;
+    use servers::prom_store::snappy_compress;
+    use tower::ServiceExt;
+
+    common_telemetry::init_default_ut_logging();
+    let (standalone, observer) = native_test_instance(GreptimeDbStandaloneBuilder::new(
+        "native_promql_composed_binary_canonical_operand",
+    ))
+    .await;
+    let instance = standalone.fe_instance().clone();
+    execute_all(&instance, "CREATE TABLE canonical_float (job STRING, host STRING, ts TIMESTAMP TIME INDEX, val DOUBLE, PRIMARY KEY(job,host)); INSERT INTO canonical_float VALUES ('api','a',0,2),('api','b',600000,3)", QueryContext::arc()).await;
+    let server = crate::test_util::build_test_prom_server(instance.clone(), false, None).build();
+    let router = server.build(server.make_app()).unwrap();
+    let request = remote_write_v2::request_with_labels_and_histograms(
+        vec![("__name__", "canonical_hist"), ("job", "api")],
+        [0, 600_000]
+            .into_iter()
+            .map(|timestamp| Histogram {
+                timestamp,
+                count: Some(Count::CountInt(4)),
+                zero_count: Some(ZeroCount::ZeroCountInt(4)),
+                sum: 8.0,
+                ..Default::default()
+            })
+            .collect(),
+    );
+    let response = router
+        .oneshot(
+            Request::post("/v1/prometheus/write")
+                .header("Content-Encoding", "snappy")
+                .header(
+                    "Content-Type",
+                    "application/x-protobuf;proto=io.prometheus.write.v2.Request",
+                )
+                .body(Body::from(
+                    snappy_compress(&request.encode_to_vec()).unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        response.status(),
+        204,
+        "{:?}",
+        to_bytes(response.into_body(), usize::MAX).await.unwrap()
+    );
+
+    let expression =
+        r#"label_replace(canonical_float, "host", "same", "host", ".*") * on(job) canonical_hist"#;
+    let query = PromQuery {
+        query: expression.to_string(),
+        start: "0".to_string(),
+        end: "600".to_string(),
+        step: "600s".to_string(),
+        ..PromQuery::default()
+    };
+    let ctx = native_query_context(true, 4);
+    let stmt = QueryLanguageParser::parse_promql(&query, &ctx).unwrap();
+    let logical = instance
+        .query_engine()
+        .planner()
+        .plan(&stmt, ctx)
+        .await
+        .unwrap();
+    let logical_display = logical.display_indent().to_string();
+    let datafusion::logical_expr::LogicalPlan::Extension(extension) = &logical else {
+        panic!("{logical_display}")
+    };
+    let binary = extension
+        .node
+        .as_any()
+        .downcast_ref::<promql::extension_plan::FusedSeries>()
+        .unwrap_or_else(|| panic!("{logical_display}"));
+    assert!(
+        matches!(
+            binary.tree().root().expr,
+            promql::native::plan::NativeExpr::Binary { .. }
+        ),
+        "{logical_display}"
+    );
+    assert_eq!(binary.children().len(), 2, "{logical_display}");
+    assert!(
+        logical_display.contains("output: series_frame") && !logical_display.contains("Join:"),
+        "{logical_display}"
+    );
+
+    observer.clear();
+    let output = instance
+        .do_promql_query(&query, native_query_context(true, 4))
+        .await
+        .remove(0)
+        .unwrap();
+    let batches = match output.data {
+        OutputData::Stream(stream) => collect_batches(stream).await.unwrap(),
+        OutputData::RecordBatches(batches) => batches,
+        _ => unreachable!(),
+    };
+    let mut rows = Vec::new();
+    for batch in batches.iter() {
+        let batch = batch.df_record_batch();
+        let time = batch
+            .columns()
+            .iter()
+            .find(|column| matches!(column.data_type(), DataType::Timestamp(..)))
+            .unwrap();
+        let time = cast(time.as_ref(), &DataType::Int64).unwrap();
+        let time = time.as_any().downcast_ref::<Int64Array>().unwrap();
+        let job = batch.column_by_name("job").unwrap();
+        let job = cast(job.as_ref(), &DataType::Utf8).unwrap();
+        let job = job.as_any().downcast_ref::<StringArray>().unwrap();
+        let histogram = batch
+            .columns()
+            .iter()
+            .find_map(|column| column.as_any().downcast_ref::<StructArray>())
+            .unwrap();
+        for row in 0..batch.num_rows() {
+            let h = read_histogram(histogram, row).unwrap().unwrap();
+            rows.push((
+                time.value(row),
+                job.value(row).to_string(),
+                h.count,
+                h.zero_count,
+                h.sum,
+            ));
+        }
+    }
+    rows.sort_by_key(|row| row.0);
+    assert_eq!(
+        rows,
+        vec![
+            (0, "api".to_string(), 8.0, 8.0, 16.0),
+            (600_000, "api".to_string(), 12.0, 12.0, 24.0)
+        ]
+    );
+    assert!(
+        canonical_router(&observer).is_some(),
+        "canonical producer must route its complete float label set"
+    );
+
+    // Overlapping inputs must fail at the canonical boundary before the binary can conceal them.
+    execute_all(
+        &instance,
+        "INSERT INTO canonical_float VALUES ('api','b',0,3)",
+        QueryContext::arc(),
+    )
+    .await;
+    observer.clear();
+    let result = instance
+        .do_promql_query(&query, native_query_context(true, 4))
+        .await
+        .remove(0);
+    let error = match result {
+        Ok(output) => collect_error(output).await,
+        Err(error) => error.to_string(),
+    };
+    assert!(
+        error.contains("cannot contain metrics with the same labelset"),
+        "{error}"
+    );
+    assert!(
+        canonical_router(&observer).is_some(),
+        "the canonical producer must check the overlapping series"
+    );
+}
+
+/// Two independently planned histogram frames retain reset-collision values and diagnostics.
+#[tokio::test(flavor = "multi_thread")]
+async fn native_promql_composed_histogram_reset_warning() {
+    use api::greptime_proto::io::prometheus::write::v2::histogram::Count;
+    use api::greptime_proto::io::prometheus::write::v2::{BucketSpan, Histogram};
+    use axum::body::{Body, to_bytes};
+    use common_query::native_histogram::{CounterResetHint, read_histogram};
+    use common_query::promql_annotations::promql_annotation_collector;
+    use datatypes::arrow::array::StructArray;
+    use http::Request;
+    use prost::Message;
+    use servers::prom_remote_write::v2::test_util as remote_write_v2;
+    use servers::prom_store::snappy_compress;
+    use tower::ServiceExt;
+
+    common_telemetry::init_default_ut_logging();
+    let (standalone, _) = native_test_instance(GreptimeDbStandaloneBuilder::new(
+        "native_promql_composed_histogram_reset_warning",
+    ))
+    .await;
+    let instance = standalone.fe_instance().clone();
+    let server = crate::test_util::build_test_prom_server(instance.clone(), false, None).build();
+    let router = server.build(server.make_app()).unwrap();
+    for (metric, count, sum, reset_hint) in [
+        ("reset_hist_a", 4_u64, 8.0, 1),
+        ("reset_hist_b", 2_u64, 4.0, 2),
+    ] {
+        let request = remote_write_v2::request_with_labels_and_histograms(
+            vec![("__name__", metric), ("job", "api")],
+            vec![Histogram {
+                timestamp: 60_000,
+                count: Some(Count::CountInt(count)),
+                sum,
+                schema: 1,
+                positive_spans: vec![BucketSpan {
+                    offset: 0,
+                    length: 2,
+                }],
+                positive_deltas: vec![(count / 2) as i64, 0],
+                reset_hint,
+                ..Default::default()
+            }],
+        );
+        let response = router
+            .clone()
+            .oneshot(
+                Request::post("/v1/prometheus/write")
+                    .header("Content-Encoding", "snappy")
+                    .header(
+                        "Content-Type",
+                        "application/x-protobuf;proto=io.prometheus.write.v2.Request",
+                    )
+                    .body(Body::from(
+                        snappy_compress(&request.encode_to_vec()).unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        assert_eq!(
+            status,
+            204,
+            "{:?}",
+            to_bytes(response.into_body(), usize::MAX).await.unwrap()
+        );
+    }
+    let query = PromQuery {
+        query: "reset_hist_a + on(job) reset_hist_b".to_string(),
+        start: "60".to_string(),
+        end: "60".to_string(),
+        step: "60s".to_string(),
+        ..PromQuery::default()
+    };
+    let ctx = native_query_context(true, 2);
+    let statement = QueryLanguageParser::parse_promql(&query, &ctx).unwrap();
+    let logical = instance
+        .query_engine()
+        .planner()
+        .plan(&statement, Arc::clone(&ctx))
+        .await
+        .unwrap();
+    let display = logical.display_indent().to_string();
+    let datafusion::logical_expr::LogicalPlan::Extension(extension) = &logical else {
+        panic!("{display}")
+    };
+    let binary = extension
+        .node
+        .as_any()
+        .downcast_ref::<promql::extension_plan::FusedSeries>()
+        .unwrap_or_else(|| panic!("{display}"));
+    let promql::native::plan::NativeExpr::Binary { left, right, .. } = &binary.tree().root().expr
+    else {
+        panic!("{display}")
+    };
+    assert!(
+        matches!(left.expr, promql::native::plan::NativeExpr::Input(_))
+            && matches!(right.expr, promql::native::plan::NativeExpr::Input(_)),
+        "{display}"
+    );
+    assert_eq!(binary.children().len(), 2, "{display}");
+    assert!(!display.contains("Join:"), "{display}");
+
+    // Hold a strong reference to the query-scoped collector until the output stream has finished.
+    let collector = promql_annotation_collector(ctx.remote_query_id().unwrap());
+    let output = instance
+        .do_promql_query(&query, ctx)
+        .await
+        .remove(0)
+        .unwrap();
+    let batches = match output.data {
+        OutputData::Stream(stream) => collect_batches(stream).await.unwrap(),
+        OutputData::RecordBatches(batches) => batches,
+        _ => unreachable!(),
+    };
+    let mut rows = Vec::new();
+    for batch in batches.iter() {
+        let batch = batch.df_record_batch();
+        let time = batch
+            .columns()
+            .iter()
+            .find(|column| matches!(column.data_type(), DataType::Timestamp(..)))
+            .unwrap();
+        let time = cast(time.as_ref(), &DataType::Int64).unwrap();
+        let time = time.as_any().downcast_ref::<Int64Array>().unwrap();
+        let job = cast(
+            batch.column_by_name("job").unwrap().as_ref(),
+            &DataType::Utf8,
+        )
+        .unwrap();
+        let job = job.as_any().downcast_ref::<StringArray>().unwrap();
+        let histogram = batch
+            .columns()
+            .iter()
+            .find_map(|column| column.as_any().downcast_ref::<StructArray>())
+            .unwrap();
+        for row in 0..batch.num_rows() {
+            let h = read_histogram(histogram, row).unwrap().unwrap();
+            rows.push((time.value(row), job.value(row).to_string(), h));
+        }
+    }
+    assert_eq!(rows.len(), 1);
+    let (timestamp, job, h) = &rows[0];
+    assert_eq!((*timestamp, job.as_str()), (60_000, "api"));
+    assert_eq!((h.count, h.sum, h.zero_count), (6.0, 12.0, 0.0));
+    assert_eq!((h.schema, h.zero_threshold), (1, 0.0));
+    assert_eq!(h.positive_spans.len(), 1);
+    assert_eq!(
+        (h.positive_spans[0].offset, h.positive_spans[0].length),
+        (0, 2)
+    );
+    assert_eq!(h.positive_buckets, vec![3.0, 3.0]);
+    assert!(h.negative_spans.is_empty() && h.negative_buckets.is_empty());
+    assert!(h.custom_values.is_empty());
+    assert_eq!(h.reset_hint, CounterResetHint::Unknown);
+    assert_eq!(h.start_timestamp, None);
+    let mut warnings = Vec::new();
+    let mut infos = Vec::new();
+    collector.append_to(&mut warnings, &mut infos);
+    assert_eq!(
+        warnings,
+        vec!["prom_native_histogram_add: native histogram counter reset hints contradict"]
+    );
+    assert!(infos.is_empty());
+}
+
+/// A composed native binary answers grouped matches and multi-selector operands as one fused node
+/// over two evaluated frames, and fills a missing side the way its modifier says.
+///
+/// The rows are written out rather than taken from the existing route: these pairs mix a native
+/// histogram with a float, which is the shape the composed route exists for. What they pin is that
+/// a grouped match reports the many side's labels with the declared ones copied in from the one
+/// side (`group_left` keeps the left side's labels, `group_right` the right side's and drops the
+/// label the one side does not carry), and that the arithmetic is the modifier's: `histogram * k`
+/// scales count and sum, and a missing right side filled with zero scales them to zero. A filled
+/// step is filed at the match group of the series that has the sample, so a `group_right` fill
+/// answers at the one side's labels - `job` below, which the many side never carries - and the
+/// answer has to declare them for the rows to keep them. A grouped `include` label is the other
+/// way round: it is copied from the one side, which removes it from the many side's labels when it
+/// does not have it, so a label only the many side carries is on no row and the answer must not
+/// declare it either.
+#[tokio::test(flavor = "multi_thread")]
+async fn native_promql_composed_grouped_and_multi_selector_operands() {
+    use api::greptime_proto::io::prometheus::write::v2::Histogram;
+    use api::greptime_proto::io::prometheus::write::v2::histogram::{Count, ZeroCount};
+    use axum::body::{Body, to_bytes};
+    use http::Request;
+    use prost::Message;
+    use servers::prom_remote_write::v2::test_util as remote_write_v2;
+    use servers::prom_store::snappy_compress;
+    use tower::ServiceExt;
+
+    common_telemetry::init_default_ut_logging();
+    let (standalone, _) = native_test_instance(GreptimeDbStandaloneBuilder::new(
+        "native_promql_composed_grouped_operands",
+    ))
+    .await;
+    let instance = standalone.fe_instance().clone();
+    execute_all(
+        &instance,
+        "CREATE TABLE grouped_float (job STRING, host STRING, unit STRING, ts TIMESTAMP TIME INDEX, val DOUBLE, PRIMARY KEY(job, host, unit));
+         INSERT INTO grouped_float VALUES ('api','a','x',0,2),('api','a','x',600000,3);
+         CREATE TABLE grouped_gap (job STRING, host STRING, ts TIMESTAMP TIME INDEX, val DOUBLE, PRIMARY KEY(job, host));
+         INSERT INTO grouped_gap VALUES ('api','a',600000,4);
+         CREATE TABLE grouped_host (host STRING, ts TIMESTAMP TIME INDEX, val DOUBLE, PRIMARY KEY(host));
+         INSERT INTO grouped_host VALUES ('a',600000,4)",
+        QueryContext::arc(),
+    )
+    .await;
+    // The histogram side is one series, labeled `job="api"`, sampled at the two steps: four counts
+    // and a sum of eight.
+    let server = crate::test_util::build_test_prom_server(instance.clone(), false, None).build();
+    let router = server.build(server.make_app()).unwrap();
+    let request = remote_write_v2::request_with_labels_and_histograms(
+        vec![("__name__", "grouped_hist"), ("job", "api")],
+        [0, 600_000]
+            .into_iter()
+            .map(|timestamp| Histogram {
+                timestamp,
+                count: Some(Count::CountInt(4)),
+                zero_count: Some(ZeroCount::ZeroCountInt(4)),
+                sum: 8.0,
+                ..Default::default()
+            })
+            .collect(),
+    );
+    let response = router
+        .oneshot(
+            Request::post("/v1/prometheus/write")
+                .header("Content-Encoding", "snappy")
+                .header(
+                    "Content-Type",
+                    "application/x-protobuf;proto=io.prometheus.write.v2.Request",
+                )
+                .body(Body::from(
+                    snappy_compress(&request.encode_to_vec()).unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        response.status(),
+        204,
+        "{:?}",
+        to_bytes(response.into_body(), usize::MAX).await.unwrap()
+    );
+
+    for (expression, expected, undeclared) in [
+        // `group_left(host)` reports the left (many) side's labels and copies `host` in from the one
+        // side, which carries it.
+        (
+            "grouped_hist * on(job) group_left(host) grouped_float",
+            vec![
+                (
+                    0,
+                    vec!["host=a".to_string(), "job=api".to_string()],
+                    8.0,
+                    16.0,
+                ),
+                (
+                    600_000,
+                    vec!["host=a".to_string(), "job=api".to_string()],
+                    12.0,
+                    24.0,
+                ),
+            ],
+            &[][..],
+        ),
+        // `group_right(host)` reports the right (many) side's labels: `host` is dropped because the
+        // one side does not carry it, and `unit` survives because a grouping does not narrow.
+        (
+            "grouped_hist * on(job) group_right(host) grouped_float",
+            vec![
+                (
+                    0,
+                    vec!["job=api".to_string(), "unit=x".to_string()],
+                    8.0,
+                    16.0,
+                ),
+                (
+                    600_000,
+                    vec!["job=api".to_string(), "unit=x".to_string()],
+                    12.0,
+                    24.0,
+                ),
+            ],
+            // The one side never carries `host`, and `on(job)` keeps it out of the key a fill reads.
+            &["host"][..],
+        ),
+        // A one-to-one match narrows the labels to what it matches on.
+        (
+            "grouped_hist * on(job) grouped_float",
+            vec![
+                (0, vec!["job=api".to_string()], 8.0, 16.0),
+                (600_000, vec!["job=api".to_string()], 12.0, 24.0),
+            ],
+            &[][..],
+        ),
+        // `group_right` fills a missing many side from the one side's series, at that series' match
+        // group label set. `grouped_host` carries no `job`, so no step pairs and every step is
+        // filled with zero at the one side's `job` - a label the many side never carries, and one
+        // the answer therefore has to declare.
+        (
+            "grouped_hist * on(job) group_right fill_right(0) grouped_host",
+            vec![
+                (0, vec!["job=api".to_string()], 0.0, 0.0),
+                (600_000, vec!["job=api".to_string()], 0.0, 0.0),
+            ],
+            &[][..],
+        ),
+        // `group_left(host)` copies `host` from the one side, and the one side here is the histogram
+        // series, which carries no `host`: the many side's own `host` never reaches a row, so the
+        // answer declares neither it nor a column nothing fills. `unit` is not an include label and
+        // survives, as a grouping does not narrow.
+        (
+            "grouped_float * on(job) group_left(host) grouped_hist",
+            vec![
+                (
+                    0,
+                    vec!["job=api".to_string(), "unit=x".to_string()],
+                    8.0,
+                    16.0,
+                ),
+                (
+                    600_000,
+                    vec!["job=api".to_string(), "unit=x".to_string()],
+                    12.0,
+                    24.0,
+                ),
+            ],
+            // The one side never carries `host`, and `on(job)` keeps it out of the key a fill reads.
+            &["host"][..],
+        ),
+        // An operand that reads more than one selector still evaluates on its own: the right side
+        // is `2 + 2` at the first step and `3 + 3` at the second, so the histogram is scaled by 4
+        // and then by 6.
+        (
+            "grouped_hist * on(job) (grouped_float + on(job, host) grouped_float)",
+            vec![
+                (0, vec!["job=api".to_string()], 16.0, 32.0),
+                (600_000, vec!["job=api".to_string()], 24.0, 48.0),
+            ],
+            &[][..],
+        ),
+    ] {
+        let query = PromQuery {
+            query: expression.to_string(),
+            start: "0".to_string(),
+            end: "600".to_string(),
+            step: "600s".to_string(),
+            ..PromQuery::default()
+        };
+        // The composed plan itself: one fused binary over two evaluated operands, with no join
+        // between them.
+        let ctx = native_query_context(true, 4);
+        let statement = QueryLanguageParser::parse_promql(&query, &ctx).unwrap();
+        let logical = instance
+            .query_engine()
+            .planner()
+            .plan(&statement, ctx)
+            .await
+            .unwrap();
+        let display = logical.display_indent().to_string();
+        let datafusion::logical_expr::LogicalPlan::Extension(extension) = &logical else {
+            panic!("{expression}: {display}")
+        };
+        let binary = extension
+            .node
+            .as_any()
+            .downcast_ref::<promql::extension_plan::FusedSeries>()
+            .unwrap_or_else(|| panic!("{expression}: {display}"));
+        assert!(
+            matches!(
+                binary.tree().root().expr,
+                promql::native::plan::NativeExpr::Binary { .. }
+            ),
+            "{expression}: {display}"
+        );
+        assert_eq!(binary.children().len(), 2, "{expression}: {display}");
+        assert!(
+            display.contains("output: series_frame") && !display.contains("Join:"),
+            "{expression}: {display}"
+        );
+
+        let rows = histogram_label_rows(
+            instance
+                .do_promql_query(&query, native_query_context(true, 4))
+                .await
+                .remove(0)
+                .unwrap(),
+        )
+        .await;
+        // Every label an answer carries is one the plan declares: a filled step answers at the one
+        // side's match group, which is a label set the many side never carries.
+        for (_, labels, _, _) in &rows {
+            for label in labels {
+                let name = label.split('=').next().unwrap();
+                assert!(
+                    logical
+                        .schema()
+                        .fields()
+                        .iter()
+                        .any(|field| field.name().as_str() == name),
+                    "{expression}: `{name}` is carried but not declared: {display}"
+                );
+            }
+        }
+        // And no column is declared that no row can fill: a grouped `include` label is on a row only
+        // when the one side carries it or the matching keeps it in the key a fill reads.
+        for name in undeclared {
+            assert!(
+                !logical
+                    .schema()
+                    .fields()
+                    .iter()
+                    .any(|field| field.name().as_str() == *name),
+                "{expression}: `{name}` is declared but no row can carry it: {display}"
+            );
+        }
+        assert_eq!(expected, rows, "{expression}");
+    }
+
+    // `fill_right` answers the step whose right side is missing: a histogram scaled by zero keeps
+    // the label set of the many side and answers zero count and sum.
+    let query = PromQuery {
+        query: "grouped_hist * on(job) fill_right(0) grouped_gap".to_string(),
+        start: "0".to_string(),
+        end: "600".to_string(),
+        step: "600s".to_string(),
+        ..PromQuery::default()
+    };
+    let filled = histogram_label_rows(
+        instance
+            .do_promql_query(&query, native_query_context(true, 4))
+            .await
+            .remove(0)
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(
+        vec![
+            (0, vec!["job=api".to_string()], 0.0, 0.0),
+            (600_000, vec!["job=api".to_string()], 16.0, 32.0),
+        ],
+        filled,
+        "the missing right side is filled with zero"
+    );
+}
+
+/// The rows of a histogram-answering PromQL result, read by column kind rather than by name.
+///
+/// The two routes name their value column differently - the compiled field of a native plan against
+/// the legacy expression text - and order their columns differently, so each row is flattened to
+/// its timestamp, its labels as `name=value`, and the histogram's count and sum.
+async fn histogram_label_rows(output: Output) -> Vec<(i64, Vec<String>, f64, f64)> {
+    use common_query::native_histogram::read_histogram;
+    use datatypes::arrow::array::StructArray;
+
+    let batches = match output.data {
+        OutputData::Stream(stream) => collect_batches(stream).await.unwrap(),
+        OutputData::RecordBatches(batches) => batches,
+        _ => unreachable!("PromQL answers record batches"),
+    };
+    let mut rows = Vec::new();
+    for batch in batches.iter() {
+        let batch = batch.df_record_batch();
+        let (time_index, _) = batch
+            .columns()
+            .iter()
+            .enumerate()
+            .find(|(_, column)| matches!(column.data_type(), DataType::Timestamp(..)))
+            .expect("a PromQL result carries its time index");
+        let time = cast(batch.column(time_index).as_ref(), &DataType::Int64).unwrap();
+        let time = time.as_any().downcast_ref::<Int64Array>().unwrap();
+        let names = batch
+            .schema()
+            .fields()
+            .iter()
+            .map(|field| field.name().clone())
+            .collect::<Vec<_>>();
+        let histogram = batch
+            .columns()
+            .iter()
+            .find_map(|column| column.as_any().downcast_ref::<StructArray>())
+            .expect("a histogram result carries a histogram column");
+        for row in 0..batch.num_rows() {
+            let mut labels = Vec::new();
+            for (index, column) in batch.columns().iter().enumerate() {
+                if !matches!(
+                    column.data_type(),
+                    DataType::Utf8 | DataType::Dictionary(_, _)
+                ) {
+                    continue;
+                }
+                let text = cast(column.as_ref(), &DataType::Utf8).unwrap();
+                let text = text.as_any().downcast_ref::<StringArray>().unwrap();
+                if !text.is_null(row) && !text.value(row).is_empty() {
+                    labels.push(format!("{}={}", names[index], text.value(row)));
+                }
+            }
+            labels.sort();
+            let histogram = read_histogram(histogram, row).unwrap().unwrap();
+            rows.push((time.value(row), labels, histogram.count, histogram.sum));
+        }
+    }
+    rows.sort_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)));
+    rows
 }
 
 /// The rows of the repeated-selector fixture, inserted into the one logical table
@@ -4033,11 +4864,17 @@ async fn distributed_native_promql_metric_discovery_reconciles_mixed_ordering() 
     }
 }
 
-/// Remote admission refusals that used to be made by `segment_tree` must survive its bypass:
-/// several sources cannot report groups that differ only by metric name, and an order-dependent
-/// operation over discovered metrics cannot be answered by a union that reads in arrival order.
+/// A union composed under a grouping by the metric name reports one group per metric, over the
+/// wire.
+///
+/// `sum by (__name__) (metric or mito)` reads a metric table beside an ordinary Mito one. The
+/// union is one fused producer whose segments read the two sources, and the name each side reports
+/// is the label the outer grouping folds by, so the answer is two groups whose label sets differ
+/// only in their metric name. That grouping is what this asserts, together with the route: a plan
+/// that dropped the name would fold the two series into one group whose single value still looks
+/// plausible, and a plan answered by the legacy join would have no name column to fold at all.
 #[tokio::test(flavor = "multi_thread")]
-async fn distributed_native_promql_remote_refuses_unsupported_discovery_and_name_grouping() {
+async fn distributed_native_promql_remote_answers_a_name_grouping_over_a_native_union() {
     common_telemetry::init_default_ut_logging();
     let cluster = GreptimeDbClusterBuilder::new("distributed_native_promql_refusal")
         .await
@@ -4103,17 +4940,37 @@ async fn distributed_native_promql_remote_refuses_unsupported_discovery_and_name
                 native_query_context(true, 2),
             )
             .await
-            .remove(0);
-        let Ok(output) = output else {
-            // Legacy planning is allowed to decline this shape too; what must not happen is a
-            // native plan that reports two metric groups it cannot name.
-            continue;
+            .remove(0)
+            .expect("the composed plan answers a grouping by the metric name");
+        let plan = Arc::clone(output.meta.plan.as_ref().expect("frontend physical plan"));
+        // The route has to stay honest: the union is a native producer rather than the legacy join
+        // the existing plan builds for it, so the name column the grouping reads exists at all.
+        assert!(
+            native_plan_shape(&plan).fused >= 1,
+            "the union stays native: {plan:?}"
+        );
+        let display = datafusion::physical_plan::displayable(plan.as_ref())
+            .indent(true)
+            .to_string();
+        assert!(
+            !display.contains("JoinExec"),
+            "the union is not a legacy join: {display}"
+        );
+        let (_, rows) = native_labelled_rows(output).await;
+        let named = |name: &str| {
+            std::collections::BTreeMap::from([("__name__".to_string(), name.to_string())])
         };
-        let plan = output.meta.plan.as_ref().expect("frontend physical plan");
+        // Grouping by the name keeps no other label, and the 180s sample is still inside the 5m
+        // lookback at 240s, so both steps report the same value under each name.
         assert_eq!(
-            native_plan_shape(plan).fused,
-            0,
-            "two sources cannot report groups that differ only by metric name: {plan:?}"
+            vec![
+                (180_000, named("dist_native_refuse_a"), 6.0),
+                (240_000, named("dist_native_refuse_a"), 6.0),
+                (180_000, named("dist_native_refuse_mito"), 6.0),
+                (240_000, named("dist_native_refuse_mito"), 6.0),
+            ],
+            rows,
+            "{expression}: one group per metric name, each named after its own metric"
         );
     }
 }
@@ -8500,16 +9357,15 @@ async fn native_promql_metric_two_aggregate_pair_matches_legacy() {
     }
 }
 
-/// A grouping by the metric name keeps series the schema would have no column for.
+/// A grouping by the metric name reports one group per metric.
 ///
-/// `sum by (__name__) (a or b)` folds two metrics into two groups that differ only in their metric
-/// name. The native aggregate keeps that name and folds by it, but the label set the node declares is
-/// taken from the existing planner's columns, and `__name__` is no column of any scan - so the two
-/// groups would be reported under one label set, as two rows a reader cannot tell apart. The number
-/// of rows and their full label sets are what this asserts: the values alone would still look
-/// plausible, and only the labels say the identity was lost.
+/// `sum by (__name__) (a or b)` reads two metrics whose only distinguishing label is their metric
+/// name. The union reports the name of the side each series came from, and the outer grouping folds
+/// by that name, so the answer is two groups, each named after its own metric. The number of rows
+/// and their full label sets are what this asserts: a plan that dropped the name would report the
+/// two contributions as one group, and the value alone would still look plausible.
 #[tokio::test(flavor = "multi_thread")]
-async fn native_promql_declines_a_grouping_by_the_metric_name() {
+async fn native_promql_answers_a_grouping_by_the_metric_name() {
     common_telemetry::init_default_ut_logging();
     let (standalone, observer) = native_test_instance(GreptimeDbStandaloneBuilder::new(
         "native_promql_group_by_name",
@@ -8544,30 +9400,37 @@ async fn native_promql_declines_a_grouping_by_the_metric_name() {
     // whose only distinguishing label is the metric name.
     let query = r#"sum by (__name__) (native_name_demo{host="a"} or native_name_other{host="b"})"#;
     let sql = format!("TQL EVAL (0, 0, '1s') {query}");
-    let (_, legacy_rows) =
-        native_labelled_rows(native_tql_output(&instance, &sql, false).await).await;
-    assert!(
-        !legacy_rows.is_empty(),
-        "{query}: the existing plan must answer this, otherwise there is nothing to keep"
-    );
-
     observer.clear();
     let (_, native_rows) =
         native_labelled_rows(native_tql_output(&instance, &sql, true).await).await;
+    let root = datafusion::physical_plan::displayable(observer.root_plan().as_ref())
+        .indent(true)
+        .to_string();
+    // The union has to stay native: the legacy plan joins the two tables and reports no name column
+    // the outer grouping could fold by.
     assert!(
-        observer.fused().is_none(),
-        "{query}: the route must decline a grouping by the metric name, whose groups its declared \
-         schema cannot name"
+        observer.fused().is_some(),
+        "{query}: the union runs as one fused node: {root}"
     );
+    assert!(
+        !root.contains("JoinExec"),
+        "{query}: the union is not a legacy join: {root}"
+    );
+    let named =
+        |name: &str| std::collections::BTreeMap::from([("__name__".to_string(), name.to_string())]);
     assert_eq!(
-        native_rows, legacy_rows,
-        "{query}: the full label sets of every row, not only the values"
+        vec![
+            (0, named("native_name_demo"), 2.0),
+            (0, named("native_name_other"), 8.0),
+        ],
+        native_rows,
+        "{query}: one group per metric name, each named after its own metric"
     );
 }
 
-/// Ordinary Mito sources also decline a multi-source grouping by metric name.
+/// Ordinary Mito sources also report one group per metric under a grouping by the metric name.
 #[tokio::test(flavor = "multi_thread")]
-async fn native_promql_declines_mito_cross_table_grouping_by_metric_name() {
+async fn native_promql_answers_mito_cross_table_grouping_by_metric_name() {
     common_telemetry::init_default_ut_logging();
     let (standalone, observer) = native_test_instance(GreptimeDbStandaloneBuilder::new(
         "native_promql_mito_group_by_name",
@@ -8586,30 +9449,37 @@ async fn native_promql_declines_mito_cross_table_grouping_by_metric_name() {
 
     let query = r#"sum by (__name__) (name_a{host="a"} or name_b{host="b"})"#;
     let sql = format!("TQL EVAL (0, 0, '1s') {query}");
-    let (_, legacy_rows) =
-        native_labelled_rows(native_tql_output(&instance, &sql, false).await).await;
-    assert!(
-        !legacy_rows.is_empty(),
-        "{query}: existing plan must answer"
-    );
-
     observer.clear();
     let (_, native_rows) =
         native_labelled_rows(native_tql_output(&instance, &sql, true).await).await;
+    let root = datafusion::physical_plan::displayable(observer.root_plan().as_ref())
+        .indent(true)
+        .to_string();
     assert!(
-        observer.fused().is_none(),
-        "{query}: native must decline multi-source grouping by __name__"
+        observer.fused().is_some(),
+        "{query}: the union runs as one fused node: {root}"
     );
+    assert!(
+        !root.contains("JoinExec"),
+        "{query}: the union is not a legacy join: {root}"
+    );
+    let named =
+        |name: &str| std::collections::BTreeMap::from([("__name__".to_string(), name.to_string())]);
     assert_eq!(
-        native_rows, legacy_rows,
-        "{query}: compare the full labelled rows from both routes"
+        vec![(0, named("name_a"), 2.0), (0, named("name_b"), 8.0)],
+        native_rows,
+        "{query}: compare the full labelled rows"
     );
 }
 
-/// Unsupported `count_values` groupings keep the legacy plan before labels are lost or execution
-/// reaches a kernel refusal. The outer `sum` prevents a final-schema check from masking the latter.
+/// `count_values` over a union reports one series per metric name, and per value it counted.
+///
+/// `by (__name__)` folds the two inputs into two groups that differ only in their metric name;
+/// `by (val)` names a label no series carries, so both inputs fall into one group and the outer
+/// `sum` folds what `count_values` wrote there. The full label sets of every row are what this
+/// asserts: a plan that dropped the name would report one series where two metrics were counted.
 #[tokio::test(flavor = "multi_thread")]
-async fn native_promql_declines_count_values_groupings_the_node_cannot_honor() {
+async fn native_promql_answers_count_values_groupings_over_a_union() {
     common_telemetry::init_default_ut_logging();
     let (standalone, observer) = native_test_instance(GreptimeDbStandaloneBuilder::new(
         "native_promql_count_values_groups",
@@ -8640,37 +9510,46 @@ async fn native_promql_declines_count_values_groupings_the_node_cannot_honor() {
     )
     .await;
 
-    // `by (__name__)` names a label absent from the declared schema; the outer sum hides the
-    // unsupported `by (val)` grouping from the final schema.
+    // `count_values` writes the value it counted into the label the first argument names, so each
+    // row carries that label beside the group's own labels. `val` is no label of either series, so
+    // the second query groups both inputs together and counts each of them once.
     let by_name = r#"count_values by (__name__) ("sample", native_cv_demo{host="a"} or native_cv_other{host="b"})"#;
     let by_field = r#"sum(count_values by (val) ("sample", native_cv_demo{host="a"} or native_cv_other{host="b"}))"#;
-    for query in [by_name, by_field] {
+    let counted = |name: &str| {
+        std::collections::BTreeMap::from([
+            ("__name__".to_string(), name.to_string()),
+            ("sample".to_string(), "1".to_string()),
+        ])
+    };
+    for (query, expected) in [
+        (
+            by_name,
+            vec![
+                (0, counted("native_cv_demo"), 1.0),
+                (0, counted("native_cv_other"), 1.0),
+            ],
+        ),
+        (by_field, vec![(0, std::collections::BTreeMap::new(), 2.0)]),
+    ] {
         let sql = format!("TQL EVAL (0, 0, '1s') {query}");
-        let (_, legacy_rows) =
-            native_labelled_rows(native_tql_output(&instance, &sql, false).await).await;
-        assert!(
-            !legacy_rows.is_empty(),
-            "{query}: the existing plan must answer this, otherwise there is nothing to keep"
-        );
-
         observer.clear();
         let (_, native_rows) =
             native_labelled_rows(native_tql_output(&instance, &sql, true).await).await;
+        let root = datafusion::physical_plan::displayable(observer.root_plan().as_ref())
+            .indent(true)
+            .to_string();
         assert!(
-            observer.fused().is_none(),
-            "{query}: the route must decline a grouping its declared schema or kernel cannot honor"
+            observer.fused().is_some(),
+            "{query}: the union runs as one fused node: {root}"
+        );
+        assert!(
+            !root.contains("JoinExec"),
+            "{query}: the union is not a legacy join: {root}"
         );
         assert_eq!(
-            native_rows, legacy_rows,
+            expected, native_rows,
             "{query}: the full label sets of every row, not only the values"
         );
-        if query == by_field {
-            assert_eq!(
-                native_rows,
-                vec![(0, std::collections::BTreeMap::new(), 2.0)],
-                "the outer sum counts both input series"
-            );
-        }
     }
 }
 
@@ -8801,10 +9680,11 @@ async fn native_promql_rewrites_the_label_count_values_writes() {
 
 /// `topk`/`bottomk` key their groups by series labels, while the existing plan also accepts a value
 /// field there and forms one group per sample value. A `by(<value field>)` therefore keeps every
-/// group's winner on the existing plan and must not reach the native node, which would fold both
-/// series into one group and return fewer rows.
+/// group's winner, and the native route has to report the same rows: the union below it reports its
+/// series, and the window above it partitions by the same value column. The rows are what this
+/// asserts - one winner per value group - rather than that no native node answers the union.
 #[tokio::test(flavor = "multi_thread")]
-async fn native_promql_declines_ranking_grouped_by_a_value_field() {
+async fn native_promql_keeps_a_ranking_grouped_by_a_value_field() {
     common_telemetry::init_default_ut_logging();
     let (standalone, observer) = native_test_instance(GreptimeDbStandaloneBuilder::new(
         "native_promql_ranking_value_field",
@@ -8836,8 +9716,8 @@ async fn native_promql_declines_ranking_grouped_by_a_value_field() {
     .await;
 
     let pair = r#"native_rank_demo{host="x"} or native_rank_other{host="y"}"#;
-    // `by (val)` forms two groups of one sample each, so both series survive: the existing plan
-    // answers two rows where the native node would keep the single winner of one group.
+    // `by (val)` forms two groups of one sample each, so both series survive: two rows, one winner
+    // per value group, on both routes.
     for query in [
         format!("topk by (val) (1, {pair})"),
         format!("bottomk by (val) (1, {pair})"),
@@ -8846,23 +9726,25 @@ async fn native_promql_declines_ranking_grouped_by_a_value_field() {
         observer.clear();
         let legacy_rows = native_result_rows(native_tql_output(&instance, &sql, false).await).await;
         assert_eq!(
-            legacy_rows.len(),
-            2,
+            legacy_rows,
+            vec![(0, "x".to_string(), 2.0), (0, "y".to_string(), 8.0)],
             "{query}: the existing plan keeps one row per value group"
-        );
-        assert!(
-            legacy_rows
-                .iter()
-                .map(|(_, _, value)| *value)
-                .eq([2.0, 8.0]),
-            "{query}: {legacy_rows:?}"
         );
 
         observer.clear();
         let native_rows = native_result_rows(native_tql_output(&instance, &sql, true).await).await;
+        let root = datafusion::physical_plan::displayable(observer.root_plan().as_ref())
+            .indent(true)
+            .to_string();
+        // The union has to stay native rather than become the legacy join, and it must not fold the
+        // two value groups into one.
         assert!(
-            observer.fused().is_none(),
-            "{query}: the route must decline a grouping its groups cannot honor"
+            observer.fused().is_some(),
+            "{query}: the union runs as one fused node: {root}"
+        );
+        assert!(
+            !root.contains("JoinExec"),
+            "{query}: the union is not a legacy join: {root}"
         );
         assert_eq!(native_rows, legacy_rows, "{query}: full rows");
     }
@@ -8878,19 +9760,26 @@ async fn native_promql_declines_ranking_grouped_by_a_value_field() {
     assert_eq!(native_rows.len(), 2);
 }
 
-/// `limitk` keeps the series that arrive first, so a multi-input node must not answer it.
+/// A selection answers natively, and the shape it cannot answer reports Prometheus's own error.
 ///
-/// A node with more than one input hands its inputs' partitions over in the order they became ready,
-/// while `limitk` keeps the first `k` series of each group in input order: the schedule would decide
-/// which series a query keeps, where Prometheus defines the selection over a series set. The
-/// aggregate split declines it for the same reason, and that refusal is repeated for a multi-input
-/// node.
+/// `limitk` keeps the first `k` series of each group in input order, and Prometheus leaves which
+/// series those are to the engine: a query that selects some of a series set may keep any subset,
+/// so a route that hands its input over in a different order still answers correctly. What the
+/// native route must not do is keep the statement from being answered at all.
 ///
-/// The existing planner cannot plan `limitk` at all - it has no kernel for the operator - so the
-/// statement fails on both routes today. What this pins is that the native route does not change
-/// that outcome by answering it, and in particular does not answer it differently between runs.
+/// That is what the earlier version of this test pinned, and it was wrong: the existing planner has
+/// no kernel for `limitk`, so "the plan this statement already had" was an error, and holding the
+/// native route to it was a coverage loss rather than a safety property. The route answers these
+/// statements now, and the assertions below are on the answers.
+///
+/// Two shapes are checked. The wrapper case is the one that can be answered *incorrectly*: with
+/// `vector(scalar(...))` on the left, `on()` matches the right side's two series against one
+/// label set on the left, and Prometheus refuses that as many-to-many. The route must report that
+/// refusal, not pick a side silently. The plain case selects from a one-series input, so the
+/// first-k rule has one answer and the test can name it; a two-series input would leave the pick to
+/// the engine, which is exactly the freedom Prometheus grants.
 #[tokio::test(flavor = "multi_thread")]
-async fn native_promql_declines_a_selection_that_depends_on_arrival_order() {
+async fn native_promql_answers_a_selection_that_depends_on_input_order() {
     common_telemetry::init_default_ut_logging();
     let (standalone, observer) = native_test_instance(GreptimeDbStandaloneBuilder::new(
         "native_promql_limitk_order",
@@ -8915,51 +9804,58 @@ async fn native_promql_declines_a_selection_that_depends_on_arrival_order() {
             val DOUBLE,
             PRIMARY KEY (host)
         ) ENGINE=metric WITH ("on_physical_table" = 'native_order_phy');
+        CREATE TABLE native_order_only (
+            host STRING,
+            ts TIMESTAMP TIME INDEX,
+            val DOUBLE,
+            PRIMARY KEY (host)
+        ) ENGINE=metric WITH ("on_physical_table" = 'native_order_phy');
         INSERT INTO native_order_left (host, ts, val) VALUES ('a', 0, 2), ('b', 0, 4);
-        INSERT INTO native_order_right (host, ts, val) VALUES ('a', 0, 8), ('b', 0, 8);"#,
+        INSERT INTO native_order_right (host, ts, val) VALUES ('a', 0, 8), ('b', 0, 8);
+        INSERT INTO native_order_only (host, ts, val) VALUES ('a', 0, 8);"#,
         QueryContext::arc(),
     )
     .await;
 
-    for query in [
-        "native_order_left and on(host) limitk(1, native_order_right)",
-        // The same selection under a `vector(scalar(...))` wrapper. The wrapper answers one value
-        // from its input, so the order-dependent selection is still in the tree: a walk that read
-        // `vector()` as a leaf would admit this shape and answer `10` or `12` depending on which
-        // partition the gather handed over first.
-        "vector(scalar(limitk(1, native_order_left))) + on() native_order_right",
-    ] {
-        let sql = format!("TQL EVAL (0, 0, '1s') {query}");
+    // The wrapper answers one value from its input, so the selection below it decides the value
+    // and the `on()` match then pairs one left label set with two right series. Prometheus refuses
+    // that pair, and so must the route: answering `10` or `12` here would be a silent choice
+    // between the two matches.
+    let query = "vector(scalar(limitk(1, native_order_left))) + on() native_order_right";
+    let sql = format!("TQL EVAL (0, 0, '1s') {query}");
+    observer.clear();
+    let native = instance
+        .do_query(&sql, native_query_context(true, 4))
+        .await
+        .remove(0)
+        .expect("the route plans the statement");
+    assert!(
+        observer.fused().is_some(),
+        "{query}: the route answers a selection, it does not decline it"
+    );
+    // The pair is refused while the stream is read, so the error is the answer's, not a planning
+    // refusal that would have kept the statement on the existing plan.
+    let error = collect_error(native).await;
+    assert!(
+        error.contains("found duplicate series for the match group {} on the right hand-side"),
+        "{query}: {error}"
+    );
+    assert!(
+        error.contains("many-to-many matching not allowed"),
+        "{query}: {error}"
+    );
 
-        // The route declines, so the statement is planned by the one that was always its answer.
-        observer.clear();
-        let native = instance
-            .do_query(&sql, native_query_context(true, 4))
-            .await
-            .remove(0);
-        assert!(
-            observer.fused().is_none(),
-            "{query}: the route must decline a selection whose answer depends on arrival order"
-        );
-        let legacy = instance
-            .do_query(&sql, native_query_context(false, 4))
-            .await
-            .remove(0);
-        // Both routes report the same outcome: the decline leads to the plan this statement already
-        // had, not to an answer the schedule could change.
-        assert_eq!(
-            native.is_err(),
-            legacy.is_err(),
-            "{query}: the route must not change whether the statement is answerable"
-        );
-        if let (Err(native_error), Err(legacy_error)) = (native, legacy) {
-            assert_eq!(
-                native_error.to_string(),
-                legacy_error.to_string(),
-                "{query}: the decline must lead to the plan this statement already had"
-            );
-        }
-    }
+    // One candidate, so the first-`k` rule keeps it and the answer is the series itself.
+    let query = "limitk(1, native_order_only)";
+    let sql = format!("TQL EVAL (0, 0, '1s') {query}");
+    observer.clear();
+    let rows = native_result_rows(native_tql_output(&instance, &sql, true).await).await;
+    assert_eq!(
+        observer.take().name(),
+        "FusedSeriesExec",
+        "{query}: the route answers it natively"
+    );
+    assert_eq!(rows, vec![(0, "a".to_string(), 8.0)], "{query}");
 }
 
 /// A tree the native runtime cannot execute keeps the existing plan, rather than failing the
@@ -9141,6 +10037,50 @@ async fn native_promql_delta_temporality_rate_and_increase_match_legacy() {
         );
     }
 
+    // Only the denominator carries the temporality tag; the rated counter is unmarked.
+    // Its zero-point extrapolation yields a rate of 0.25. The second form also requires clamp.
+    execute_all(
+        &instance,
+        &format!(
+            "INSERT INTO {TABLE} (host, ts, val, otlp_aggregation_temporality) VALUES ('a', 60000, 2, '{GREPTIME_TEMPORALITY_DELTA}'), ('a', 120000, 2, '{GREPTIME_TEMPORALITY_DELTA}')"
+        ),
+        QueryContext::arc(),
+    )
+    .await;
+    for (query, expected) in [
+        (format!("rate({CONTROL}[2m]) / on(host) {TABLE}"), 1.0 / 8.0),
+        (
+            format!("rate({CONTROL}[2m]) / on(host) clamp({TABLE}, 0, 1)"),
+            1.0 / 4.0,
+        ),
+    ] {
+        let sql = format!("TQL EVAL (120, 120, '1m') {query}");
+        observer.clear();
+        let (columns, rows) =
+            native_labelled_rows(native_tql_output(&instance, &sql, true).await).await;
+        assert_eq!(columns, vec!["host", "ts", "val"]);
+        assert_eq!(rows.len(), 1, "{query}: {rows:?}");
+        assert_eq!(rows[0].0, 120_000, "{query}");
+        assert_eq!(
+            rows[0].1,
+            [("host".to_string(), "a".to_string())].into(),
+            "{query}"
+        );
+        assert!((rows[0].2 - expected).abs() < 1e-10, "{query}: {rows:?}");
+        let binary = observer.two_input_fused();
+        let display = datafusion::physical_plan::displayable(binary.as_ref())
+            .indent(true)
+            .to_string();
+        assert!(display.contains("Binary"), "{query}: {display}");
+        assert!(
+            !datafusion::physical_plan::displayable(observer.root_plan().as_ref())
+                .indent(true)
+                .to_string()
+                .contains("JoinExec"),
+            "{query}"
+        );
+    }
+
     // The control: a marker-free table (samples 10 and 30 here, unlike the table above) still fuses
     // and agrees with the existing plan, so the decline is about the marker, not the table shape.
     let control_sql = format!("TQL EVAL (120, 120, '1m') sum_over_time({CONTROL}[2m])");
@@ -9158,6 +10098,69 @@ async fn native_promql_delta_temporality_rate_and_increase_match_legacy() {
     assert_eq!(
         control_native, control_legacy,
         "the control agrees with the existing plan"
+    );
+}
+
+/// Legacy wrappers over a native binary retain the binary's values and evaluation grid.
+#[tokio::test(flavor = "multi_thread")]
+async fn native_promql_binary_inside_scalar_and_quantile() {
+    let (standalone, observer) = native_test_instance(GreptimeDbStandaloneBuilder::new(
+        "native_promql_binary_inside_scalar_and_quantile",
+    ))
+    .await;
+    let instance = standalone.fe_instance().clone();
+    execute_all(
+        &instance,
+        "CREATE TABLE nested_native_a (job STRING, ts TIMESTAMP(3) TIME INDEX, val DOUBLE, PRIMARY KEY (job));          CREATE TABLE nested_native_b (job STRING, ts TIMESTAMP(3) TIME INDEX, val DOUBLE, PRIMARY KEY (job));          INSERT INTO nested_native_a VALUES ('api', 60000, 6), ('api', 120000, 8);          INSERT INTO nested_native_b VALUES ('api', 60000, 2), ('api', 120000, 4);",
+        QueryContext::arc(),
+    )
+    .await;
+    for query in [
+        "scalar(nested_native_a + on(job) nested_native_b)",
+        "quantile(0.5, nested_native_a + on(job) nested_native_b)",
+    ] {
+        let sql = format!("TQL EVAL (60, 120, '1m') {query}");
+        let (_, legacy) =
+            native_labelled_rows(native_tql_output(&instance, &sql, false).await).await;
+        observer.clear();
+        let (_, rows) = native_labelled_rows(native_tql_output(&instance, &sql, true).await).await;
+        assert_eq!(rows, legacy, "{query}");
+        assert_eq!(
+            rows,
+            vec![
+                (60_000, Default::default(), 8.0),
+                (120_000, Default::default(), 12.0)
+            ],
+            "{query}"
+        );
+        let binary = observer.two_input_fused();
+        let display = datafusion::physical_plan::displayable(binary.as_ref())
+            .indent(true)
+            .to_string();
+        assert!(display.contains("Binary"), "{query}: {display}");
+        let root = datafusion::physical_plan::displayable(observer.root_plan().as_ref())
+            .indent(true)
+            .to_string();
+        assert!(!root.contains("JoinExec"), "{query}: {root}");
+    }
+    let query = "scalar(clamp(nested_native_a, 0, 1) / on(job) nested_native_b)";
+    let sql = format!("TQL EVAL (60, 120, '1m') {query}");
+    observer.clear();
+    let (_, rows) = native_labelled_rows(native_tql_output(&instance, &sql, true).await).await;
+    assert_eq!(
+        rows,
+        vec![
+            (60_000, Default::default(), 0.5),
+            (120_000, Default::default(), 0.25)
+        ]
+    );
+    let binary = observer.two_input_fused();
+    let display = datafusion::physical_plan::displayable(binary.as_ref())
+        .indent(true)
+        .to_string();
+    assert!(
+        display.contains("Binary") && display.contains("clamp"),
+        "{query}: {display}"
     );
 }
 

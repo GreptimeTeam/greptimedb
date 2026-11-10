@@ -48,7 +48,7 @@ use promql::extension_plan::{
     FusedSeries, HistogramFold, InputLocality, RawSeriesSource, input_locality,
 };
 use promql::native::plan::{AggregateStage, BoundVectorOp, NativeExpr, NativeNode, NativeType};
-use promql::vector_match::MatchingLabels;
+use promql::vector_match::{Cardinality, MatchingLabels};
 use promql_parser::label::Labels;
 use promql_parser::parser;
 use session::context::{MetricDiscoveryScope, QueryContext};
@@ -249,30 +249,46 @@ fn operator_metric_table_with_engine(
     value: DirectOrValue,
     engine: &str,
 ) -> table::TableRef {
+    let tag_name = if engine == NATIVE_ENGINE {
+        "tag_0"
+    } else {
+        "tag"
+    };
+    let mut tags = vec![(tag_name, tag)];
+    if let Some(le) = le {
+        tags.push((LE_COLUMN_NAME, le));
+    }
+    operator_metric_table_with_tags(name, table_id, &tags, value, engine)
+}
+
+/// A metric table whose tag columns are the named ones, in order, one value each.
+///
+/// A composed binary hands each operand's own tag set to the label walk, so a test of a match over
+/// two operands whose label schemas differ needs two tables that carry different labels.
+fn operator_metric_table_with_tags(
+    name: &str,
+    table_id: u32,
+    tags: &[(&str, &str)],
+    value: DirectOrValue,
+    engine: &str,
+) -> table::TableRef {
     let value_type = match &value {
         DirectOrValue::Float64(_) => ConcreteDataType::float64_datatype(),
         DirectOrValue::Int64(_) => ConcreteDataType::int64_datatype(),
         DirectOrValue::NativeHistogram(_) => native_histogram_value_type().clone(),
         DirectOrValue::Utf8(_) => ConcreteDataType::string_datatype(),
     };
-    let tag_count = 1 + usize::from(le.is_some());
-    let (tag_name, time_name, value_name) = if engine == NATIVE_ENGINE {
-        ("tag_0", "timestamp", "field_0")
+    let (time_name, value_name) = if engine == NATIVE_ENGINE {
+        ("timestamp", "field_0")
     } else {
-        ("tag", "ts", "v")
+        ("ts", "v")
     };
-    let mut columns = vec![ColumnSchema::new(
-        tag_name.to_string(),
-        ConcreteDataType::string_datatype(),
-        false,
-    )];
-    if le.is_some() {
-        columns.push(ColumnSchema::new(
-            LE_COLUMN_NAME.to_string(),
-            ConcreteDataType::string_datatype(),
-            false,
-        ));
-    }
+    let mut columns = tags
+        .iter()
+        .map(|(tag, _)| {
+            ColumnSchema::new(tag.to_string(), ConcreteDataType::string_datatype(), false)
+        })
+        .collect::<Vec<_>>();
     columns.extend([
         ColumnSchema::new(
             time_name.to_string(),
@@ -283,10 +299,10 @@ fn operator_metric_table_with_engine(
         ColumnSchema::new(value_name.to_string(), value_type, true),
     ]);
     let schema = Arc::new(Schema::new(columns));
-    let mut arrays = vec![Arc::new(StringArray::from(vec![tag])) as Arc<dyn Array>];
-    if let Some(le) = le {
-        arrays.push(Arc::new(StringArray::from(vec![le])));
-    }
+    let mut arrays = tags
+        .iter()
+        .map(|(_, value)| Arc::new(StringArray::from(vec![*value])) as Arc<dyn Array>)
+        .collect::<Vec<_>>();
     arrays.extend([
         Arc::new(TimestampMillisecondArray::from(vec![1_000])) as Arc<dyn Array>,
         value.array(),
@@ -299,11 +315,11 @@ fn operator_metric_table_with_engine(
         DEFAULT_CATALOG_NAME.to_string(),
         DEFAULT_SCHEMA_NAME.to_string(),
     );
-    let value_index = tag_count + 1;
+    let value_index = tags.len() + 1;
     let meta = TableMetaBuilder::empty()
         .engine(engine.to_string())
         .schema(schema)
-        .primary_key_indices((0..tag_count).collect())
+        .primary_key_indices((0..tags.len()).collect())
         .value_indices(vec![value_index])
         .next_column_id((value_index + 1) as u32)
         .build()
@@ -1288,6 +1304,44 @@ async fn native_engine_temporality_marker_provider() -> DfTableSourceProvider {
             })
             .is_ok()
     );
+
+    // An unmarked counter in the same catalog exercises selector-specific temporality.
+    let unmarked_schema = Arc::new(Schema::new(vec![
+        ColumnSchema::new("tag_0", ConcreteDataType::string_datatype(), false),
+        ColumnSchema::new(
+            greptime_timestamp().to_string(),
+            ConcreteDataType::timestamp_millisecond_datatype(),
+            false,
+        )
+        .with_time_index(true),
+        ColumnSchema::new(
+            greptime_value().to_string(),
+            ConcreteDataType::float64_datatype(),
+            true,
+        ),
+    ]));
+    let unmarked_meta = TableMetaBuilder::empty()
+        .schema(unmarked_schema)
+        .engine(NATIVE_ENGINE.to_string())
+        .primary_key_indices(vec![0])
+        .value_indices(vec![2])
+        .next_column_id(1024)
+        .build()
+        .unwrap();
+    let unmarked_info = TableInfoBuilder::default()
+        .name("unmarked_metric")
+        .meta(unmarked_meta)
+        .build()
+        .unwrap();
+    catalog_list
+        .register_table_sync(RegisterTableRequest {
+            catalog: DEFAULT_CATALOG_NAME.to_string(),
+            schema: DEFAULT_SCHEMA_NAME.to_string(),
+            table_name: "unmarked_metric".to_string(),
+            table_id: 1025,
+            table: EmptyTable::from_table_info(&unmarked_info),
+        })
+        .unwrap();
 
     DfTableSourceProvider::new(
         catalog_list,
@@ -2464,6 +2518,13 @@ fn find_metric_physical_scan(plan: &LogicalPlan) -> Option<datafusion::logical_e
     }
 }
 
+fn is_fused_series(plan: &LogicalPlan) -> bool {
+    matches!(
+        plan,
+        LogicalPlan::Extension(Extension { node }) if node.as_any().is::<FusedSeries>()
+    )
+}
+
 fn find_fused_series(plan: &LogicalPlan) -> Option<&FusedSeries> {
     if let LogicalPlan::Extension(Extension { node }) = plan
         && let Some(fused) = node.as_any().downcast_ref::<FusedSeries>()
@@ -3533,6 +3594,30 @@ async fn native_fused_delta_temporality_rates_fall_back() {
     }
 }
 
+/// A marker on an unrelated selector must not prevent a native binary.
+#[tokio::test]
+async fn native_fused_delta_temporality_is_selector_scoped() {
+    for query in [
+        "rate(unmarked_metric[5m]) / on(tag_0) some_metric",
+        "rate(unmarked_metric[5m]) / on(tag_0) clamp(some_metric, 0, 1)",
+    ] {
+        let plan = build_native_fused_plan_with_provider(
+            query,
+            true,
+            native_engine_temporality_marker_provider().await,
+        )
+        .await;
+        let display = plan.display_indent().to_string();
+        let fused = find_fused_series(&plan).unwrap_or_else(|| panic!("{query}: {display}"));
+        assert_eq!(2, fused.children().len(), "{query}: {display}");
+        assert!(
+            matches!(fused.tree().root().expr, NativeExpr::Binary { .. }),
+            "{query}: {display}"
+        );
+        assert!(!display.contains("Join:"), "{query}: {display}");
+    }
+}
+
 /// The marker alone does not decline a query: only `rate`/`increase` are refused.
 #[tokio::test]
 async fn native_fused_delta_temporality_non_counter_math_still_folds() {
@@ -3569,51 +3654,893 @@ async fn native_fused_whole_vector_operations_are_admitted() {
 }
 
 #[tokio::test]
-async fn native_fused_depth_limit_falls_back_to_legacy_plan() {
-    // At 63 selector terms the tree reaches depth 64; the 64th exceeds the limit.
+async fn native_fused_deeper_than_64_is_not_a_legacy_join() {
     let schema = Arc::new(datatypes::series::samples::SeriesSchema {
         fields: Arc::from([datatypes::series::samples::FieldSpec { name: "v0".into() }]),
         eval_grid: None,
     });
-    let compile = |terms| {
-        let query = std::iter::repeat_n("some_metric", terms)
-            .collect::<Vec<_>>()
-            .join(" + ");
-        crate::promql::native_compile::compile_selectors(
-            &build_eval_stmt(&query),
-            &|_| Ok(Arc::clone(&schema)),
-            SeriesOrdering::KeyThenTime,
-        )
-    };
-    compile(63).expect("63 selector terms must fit native tree depth 64");
-    let error = compile(64).expect_err("64 selector terms must exceed native tree depth 64");
-    assert!(
-        matches!(
-            &error,
-            datafusion::error::DataFusionError::NotImplemented(_)
-        ),
-        "expected a NotImplemented depth-limit rejection, got: {error}"
-    );
-    assert!(
-        error.to_string().contains("native tree nesting exceeds 64"),
-        "unexpected compiler rejection: {error}"
-    );
-    let query = std::iter::repeat_n("some_metric", 64)
-        .collect::<Vec<_>>()
-        .join(" + ");
+    // Scalar broadcasts stay distinct Binary nodes rather than folding into one math map.
+    let query = format!("clamp(some_metric{} , 0, 1000)", " + 1".repeat(80));
+    let compiled = crate::promql::native_compile::compile_selectors(
+        &build_eval_stmt(&query),
+        &|_| Ok(Arc::clone(&schema)),
+        SeriesOrdering::KeyThenTime,
+    )
+    .expect("a tree deeper than 64 compiles");
+    fn depth(node: &NativeNode) -> usize {
+        1 + match &node.expr {
+            NativeExpr::Input(_) | NativeExpr::Scalar(_) => 0,
+            NativeExpr::Map { input, .. } | NativeExpr::Instant { input, .. } => depth(input),
+            NativeExpr::Binary { left, right, .. } => depth(left).max(depth(right)),
+            other => panic!("unexpected node: {other:?}"),
+        }
+    }
+    assert!(depth(compiled.tree.root()) > 64);
+    let plan = build_native_fused_plan(&query, true).await;
+    let display = plan.display_indent().to_string();
+    let fused = find_fused_series(&plan).expect("deep tree uses the native route");
+    assert!(depth(fused.tree().root()) > 64, "{display}");
+    assert!(!display.contains("Join:"), "{display}");
+}
 
-    let native = build_native_fused_plan(&query, true).await;
-    let legacy = build_native_fused_plan(&query, false).await;
-    let display = native.display_indent().to_string();
+async fn native_mixed_kind_provider() -> DfTableSourceProvider {
+    let catalog = MemoryCatalogManager::with_default_setup();
+    for table in [
+        operator_metric_table_with_engine(
+            "hist",
+            10_101,
+            "a",
+            None,
+            DirectOrValue::NativeHistogram(direct_or_histogram()),
+            MITO_ENGINE,
+        ),
+        operator_metric_table_with_engine(
+            "other_hist",
+            10_102,
+            "a",
+            None,
+            DirectOrValue::NativeHistogram(direct_or_histogram()),
+            MITO_ENGINE,
+        ),
+        operator_metric_table_with_engine(
+            "floats",
+            10_103,
+            "a",
+            None,
+            DirectOrValue::Float64(2.0),
+            MITO_ENGINE,
+        ),
+    ] {
+        let info = table.table_info();
+        catalog
+            .register_table_sync(RegisterTableRequest {
+                catalog: DEFAULT_CATALOG_NAME.to_string(),
+                schema: DEFAULT_SCHEMA_NAME.to_string(),
+                table_name: info.name.clone(),
+                table_id: info.ident.table_id,
+                table,
+            })
+            .unwrap();
+    }
+    DfTableSourceProvider::new(
+        catalog,
+        false,
+        QueryContext::arc(),
+        DummyDecoder::arc(),
+        false,
+    )
+}
+
+/// Two operands whose many side carries a label the one side does not: `hist_extra` has `extra`,
+/// `floats_plain` only `host`.
+async fn native_include_tag_provider() -> DfTableSourceProvider {
+    let catalog = MemoryCatalogManager::with_default_setup();
+    for table in [
+        operator_metric_table_with_tags(
+            "hist_extra",
+            10_203,
+            &[("job", "a"), ("extra", "e")],
+            DirectOrValue::NativeHistogram(direct_or_histogram()),
+            MITO_ENGINE,
+        ),
+        operator_metric_table_with_tags(
+            "floats_plain",
+            10_204,
+            &[("host", "h")],
+            DirectOrValue::Float64(2.0),
+            MITO_ENGINE,
+        ),
+    ] {
+        let info = table.table_info();
+        catalog
+            .register_table_sync(RegisterTableRequest {
+                catalog: DEFAULT_CATALOG_NAME.to_string(),
+                schema: DEFAULT_SCHEMA_NAME.to_string(),
+                table_name: info.name.clone(),
+                table_id: info.ident.table_id,
+                table,
+            })
+            .unwrap();
+    }
+    DfTableSourceProvider::new(
+        catalog,
+        false,
+        QueryContext::arc(),
+        DummyDecoder::arc(),
+        false,
+    )
+}
+
+/// Two operands whose label schemas differ: `hist` carries `job`, `floats` only `host`.
+async fn native_disjoint_tag_provider() -> DfTableSourceProvider {
+    let catalog = MemoryCatalogManager::with_default_setup();
+    for table in [
+        operator_metric_table_with_tags(
+            "hist",
+            10_201,
+            &[("job", "a")],
+            DirectOrValue::NativeHistogram(direct_or_histogram()),
+            MITO_ENGINE,
+        ),
+        operator_metric_table_with_tags(
+            "floats",
+            10_202,
+            &[("host", "h")],
+            DirectOrValue::Float64(2.0),
+            MITO_ENGINE,
+        ),
+    ] {
+        let info = table.table_info();
+        catalog
+            .register_table_sync(RegisterTableRequest {
+                catalog: DEFAULT_CATALOG_NAME.to_string(),
+                schema: DEFAULT_SCHEMA_NAME.to_string(),
+                table_name: info.name.clone(),
+                table_id: info.ident.table_id,
+                table,
+            })
+            .unwrap();
+    }
+    DfTableSourceProvider::new(
+        catalog,
+        false,
+        QueryContext::arc(),
+        DummyDecoder::arc(),
+        false,
+    )
+}
+
+#[tokio::test]
+async fn native_fused_composes_independent_histogram_binary_frames() {
+    for query in [
+        "hist * on(tag_0) floats",
+        "floats * on(tag_0) hist",
+        "hist / on(tag_0) floats",
+        "hist - on(tag_0) other_hist",
+        "clamp(floats, 1, 2) * on(tag_0) hist",
+    ] {
+        let plan =
+            build_native_fused_plan_with_provider(query, true, native_mixed_kind_provider().await)
+                .await;
+        let display = plan.display_indent().to_string();
+        let fused = find_fused_series(&plan).unwrap_or_else(|| panic!("{query}: {display}"));
+        let NativeExpr::Binary { left, right, .. } = &fused.tree().root().expr else {
+            panic!("expected Binary for {query}: {display}");
+        };
+        assert!(
+            matches!(left.expr, NativeExpr::Input(_)) && matches!(right.expr, NativeExpr::Input(_)),
+            "{display}"
+        );
+        assert_eq!(2, fused.children().len(), "{display}");
+        for child in fused.children() {
+            let frame = find_fused_series(child)
+                .unwrap_or_else(|| panic!("missing operand frame: {display}"));
+            assert_eq!(
+                promql::extension_plan::FusedOutputFormat::SeriesFrame,
+                frame.format(),
+                "{display}"
+            );
+        }
+        assert!(!display.contains("Join:"), "{display}");
+        assert_eq!(
+            vec!["field_0", "tag_0", "timestamp"],
+            sorted_column_names(&plan),
+            "{display}"
+        );
+    }
+}
+
+/// Unsupported histogram arithmetic still runs the native matcher and declares an empty float.
+#[tokio::test]
+async fn native_composed_invalid_histogram_arithmetic_declares_float() {
+    for query in [
+        "clamp(floats, 1, 2) + on(tag_0) hist",
+        "hist + on(tag_0) clamp(floats, 1, 2)",
+        "hist * on(tag_0) other_hist",
+    ] {
+        let plan =
+            build_native_fused_plan_with_provider(query, true, native_mixed_kind_provider().await)
+                .await;
+        let display = plan.display_indent().to_string();
+        let fused = find_fused_series(&plan).unwrap_or_else(|| panic!("{query}: {display}"));
+        let NativeExpr::Binary { left, right, .. } = &fused.tree().root().expr else {
+            panic!("expected Binary for {query}: {display}");
+        };
+        assert!(
+            matches!(left.expr, NativeExpr::Input(_)) && matches!(right.expr, NativeExpr::Input(_)),
+            "{display}"
+        );
+        assert_eq!(2, fused.children().len(), "{display}");
+        assert!(!display.contains("Join:"), "{display}");
+        let fields = plan.schema().fields();
+        let field = fields
+            .iter()
+            .find(|field| field.name() == "field_0")
+            .unwrap();
+        assert_eq!(field.data_type(), &ArrowDataType::Float64, "{display}");
+        assert_eq!(
+            vec!["field_0", "tag_0", "timestamp"],
+            sorted_column_names(&plan),
+            "{display}"
+        );
+    }
+}
+
+/// Fill modifiers are part of the composed binary's matching, decided by the output kind they imply.
+#[tokio::test]
+async fn native_composed_binary_admits_fill() {
+    for (query, fills_left, fills_right) in [
+        // A filled right side is a float meeting a histogram here, and `histogram * float` answers a
+        // histogram: the same column carries the matched rows and the filled ones.
+        ("hist * on(tag_0) fill_right(0) floats", false, true),
+        // Both sides carry a histogram, so either fill keeps the column a histogram.
+        ("hist * on(tag_0) fill(0) other_hist", true, true),
+        ("hist * on(tag_0) fill_left(0) other_hist", true, false),
+    ] {
+        let plan =
+            build_native_fused_plan_with_provider(query, true, native_mixed_kind_provider().await)
+                .await;
+        let display = plan.display_indent().to_string();
+        let fused = find_fused_series(&plan).unwrap_or_else(|| panic!("{query}: {display}"));
+        let NativeExpr::Binary {
+            left,
+            right,
+            matching,
+        } = &fused.tree().root().expr
+        else {
+            panic!("expected composed Binary for {query}: {display}");
+        };
+        assert!(
+            matches!(left.expr, NativeExpr::Input(_)) && matches!(right.expr, NativeExpr::Input(_)),
+            "{display}"
+        );
+        assert_eq!(
+            (fills_left, fills_right),
+            (matching.fill.lhs.is_some(), matching.fill.rhs.is_some()),
+            "{query}: {display}"
+        );
+        assert_eq!(2, fused.children().len(), "{display}");
+        for child in fused.children() {
+            let frame = find_fused_series(child)
+                .unwrap_or_else(|| panic!("missing operand frame: {display}"));
+            assert_eq!(
+                promql::extension_plan::FusedOutputFormat::SeriesFrame,
+                frame.format(),
+                "{query}: {display}"
+            );
+        }
+        assert!(!display.contains("Join:"), "{display}");
+        let field = plan
+            .schema()
+            .fields()
+            .iter()
+            .find(|field| field.name() == "field_0")
+            .unwrap();
+        assert_eq!(
+            field.data_type(),
+            &native_histogram_value_type().as_arrow_type(),
+            "{query}: {display}"
+        );
+    }
+
+    // A filled left side meets the right side alone, and `float * float` is a float: with a
+    // histogram on the right, one column would have to carry a histogram row and a float row. The
+    // kind walk refuses that shape, so the statement keeps the existing plan, which answers no fill
+    // at all - the two refusals are the type's, not a whitelist's.
+    for query in [
+        "hist * on(tag_0) fill_left(0) floats",
+        "hist * on(tag_0) fill(0) floats",
+    ] {
+        let stmt = build_eval_stmt(query);
+        let error = PromPlanner::stmt_to_plan_with_annotations(
+            native_mixed_kind_provider().await,
+            &stmt,
+            &build_query_engine_state(),
+            None,
+            true,
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(
+                &error,
+                crate::promql::error::Error::UnsupportedExpr { name, .. }
+                    if name == "PromQL fill modifiers"
+            ),
+            "{query}: {error}"
+        );
+    }
+
+    // Whole-native fill is unaffected: one node over one table's two selectors.
+    let plan = build_native_fused_plan_with_provider(
+        "floats + on(tag_0) fill(0) floats",
+        true,
+        native_mixed_kind_provider().await,
+    )
+    .await;
+    let display = plan.display_indent().to_string();
+    let fused = find_fused_series(&plan).unwrap_or_else(|| panic!("{display}"));
     assert!(
-        !display.contains("FusedSeries"),
-        "64 selector terms exceed the native tree depth cap: {display}"
+        matches!(fused.tree().root().expr, NativeExpr::Binary { .. }),
+        "{display}"
+    );
+    assert!(!display.contains("Join:"), "{display}");
+}
+
+/// A composed binary reports the labels a grouped match produces, not a one-to-one narrowing.
+///
+/// The composed route hands `fused_root_schema` the two operands' own tag sets, in the order their
+/// inputs are bound, and the walk over the tree derives the result labels from them. `group_left`
+/// keeps the many side's labels as they are, `group_right` keeps the right side's, and each copies
+/// the labels its modifier names from the one side; only a one-to-one match narrows them by `on` or
+/// `ignoring`. The legacy plan is the reference for each: it projects the many side's label columns
+/// (`hist.*` for `group_left`, `floats.*` for `group_right`) and no label column at all for the
+/// one-to-one pair.
+#[tokio::test]
+async fn native_composed_binary_grouped_cardinality_keeps_many_side_labels() {
+    for (query, many_to_one, many_side) in [
+        ("hist * ignoring(tag_0) group_left floats", true, "hist"),
+        ("hist * ignoring(tag_0) group_right floats", false, "floats"),
+    ] {
+        let plan =
+            build_native_fused_plan_with_provider(query, true, native_mixed_kind_provider().await)
+                .await;
+        let display = plan.display_indent().to_string();
+        let fused = find_fused_series(&plan).unwrap_or_else(|| panic!("{query}: {display}"));
+        let NativeExpr::Binary { matching, .. } = &fused.tree().root().expr else {
+            panic!("expected composed Binary for {query}: {display}");
+        };
+        if many_to_one {
+            assert!(
+                matches!(matching.cardinality, Cardinality::ManyToOne(_)),
+                "{query}: {display}"
+            );
+        } else {
+            assert!(
+                matches!(matching.cardinality, Cardinality::OneToMany(_)),
+                "{query}: {display}"
+            );
+        }
+        assert_eq!(2, fused.children().len(), "{query}: {display}");
+        // The many side keeps `tag_0` even though the pair ignores it: a grouping result holds one
+        // series per series of that side, so the label is not narrowed away.
+        assert_eq!(
+            vec!["field_0", "tag_0", "timestamp"],
+            sorted_column_names(&plan),
+            "{query}: {display}"
+        );
+        assert!(!display.contains("Join:"), "{query}: {display}");
+
+        let legacy = PromPlanner::stmt_to_plan_with_annotations(
+            native_mixed_kind_provider().await,
+            &build_eval_stmt(query),
+            &build_query_engine_state(),
+            None,
+            false,
+        )
+        .await
+        .unwrap();
+        let legacy_display = legacy.display_indent().to_string();
+        let legacy_columns = legacy
+            .schema()
+            .fields()
+            .iter()
+            .map(|field| field.name().clone())
+            .collect::<Vec<_>>();
+        assert!(
+            legacy_columns.iter().any(|name| name == "tag_0"),
+            "{query}: the legacy plan reports the many side's label: {legacy_display}"
+        );
+        assert!(
+            legacy_display.contains(&format!("{many_side}.tag_0")),
+            "{query}: and it is the many side's: {legacy_display}"
+        );
+    }
+
+    // The same pair without a grouping modifier is one-to-one: the labels both sides match on are
+    // the only ones the result keeps, so `tag_0` is narrowed away here - and only here.
+    let plan = build_native_fused_plan_with_provider(
+        "hist * ignoring(tag_0) floats",
+        true,
+        native_mixed_kind_provider().await,
+    )
+    .await;
+    let display = plan.display_indent().to_string();
+    let fused = find_fused_series(&plan).unwrap_or_else(|| panic!("{display}"));
+    let NativeExpr::Binary { matching, .. } = &fused.tree().root().expr else {
+        panic!("expected composed Binary: {display}");
+    };
+    assert!(
+        matches!(matching.cardinality, Cardinality::OneToOne),
+        "{display}"
     );
     assert_eq!(
-        display,
-        legacy.display_indent().to_string(),
-        "a native depth-limit rejection must preserve the legacy plan"
+        vec!["field_0", "timestamp"],
+        sorted_column_names(&plan),
+        "{display}"
     );
+    let legacy = PromPlanner::stmt_to_plan_with_annotations(
+        native_mixed_kind_provider().await,
+        &build_eval_stmt("hist * ignoring(tag_0) floats"),
+        &build_query_engine_state(),
+        None,
+        false,
+    )
+    .await
+    .unwrap();
+    let legacy_display = legacy.display_indent().to_string();
+    assert!(
+        !legacy
+            .schema()
+            .fields()
+            .iter()
+            .any(|field| field.name() == "tag_0"),
+        "the legacy one-to-one plan narrows the label away too: {legacy_display}"
+    );
+}
+
+/// A filled step carries the one side's matching labels, `group_right` included.
+///
+/// The kernel files a fill row at the label set of the series it has: the many side keeps all of
+/// its labels, the one side only its matching ones plus the group labels the modifier names
+/// (`vector_match::binary_field`, which trades the two fills under `group_right`, whose one side is
+/// the left). `hist` carries `job` and `floats` only `host`, so
+/// `hist * on(job) group_right fill_right(0) floats` answers a filled step labelled `job` although
+/// the many side never carries it: the declared columns must name it. The rows themselves are
+/// pinned by `native_promql_composed_grouped_and_multi_selector_operands`, which runs the same
+/// match over a real instance - a composed frame cannot be executed over the in-memory scans here.
+#[tokio::test]
+async fn native_composed_binary_filled_one_side_carries_its_matching_labels() {
+    let plan = build_native_fused_plan_with_provider(
+        "hist * on(job) group_right fill_right(0) floats",
+        true,
+        native_disjoint_tag_provider().await,
+    )
+    .await;
+    let display = plan.display_indent().to_string();
+    let fused = find_fused_series(&plan).unwrap_or_else(|| panic!("{display}"));
+    let NativeExpr::Binary { matching, .. } = &fused.tree().root().expr else {
+        panic!("expected composed Binary: {display}");
+    };
+    // `group_right` puts the one side on the left, and the fill written on the right is the one
+    // that answers a missing many-side sample.
+    assert!(
+        matches!(matching.cardinality, Cardinality::OneToMany(_)),
+        "{display}"
+    );
+    assert!(
+        matching.fill.lhs.is_none() && matching.fill.rhs.is_some(),
+        "{display}"
+    );
+    assert!(!display.contains("Join:"), "{display}");
+    // The many side's `host` comes with the pairing and the one side's `job` with the filled step.
+    assert_eq!(
+        vec!["field_0", "host", "job", "timestamp"],
+        sorted_column_names(&plan),
+        "{display}"
+    );
+    // The parallel walk over the same tree, which the segmentation metadata is derived from, names
+    // the same columns from the two operands' own tags.
+    let operand_tags = fused
+        .children()
+        .iter()
+        .map(|child| {
+            let LogicalPlan::Extension(Extension { node }) = child else {
+                panic!("expected an operand frame: {child}")
+            };
+            node.as_any()
+                .downcast_ref::<FusedSeries>()
+                .unwrap_or_else(|| panic!("expected an operand frame: {child}"))
+                .binding()
+                .tags
+                .clone()
+        })
+        .collect::<Vec<_>>();
+    let mut walked = promql::native::plan::fused_output_tags(fused.tree().root(), &operand_tags)
+        .unwrap_or_else(|| panic!("{display}"));
+    walked.retain(|tag| tag != METRIC_NAME);
+    walked.sort();
+    assert_eq!(
+        vec!["host".to_string(), "job".to_string()],
+        walked,
+        "{display}"
+    );
+}
+
+/// A grouped `include` label is declared only when a result row can carry it.
+///
+/// `result_metric` removes an include label from the many side's labels unless the one side has it,
+/// so a paired row and a row filed from a one-side series take it from the one series. A row filed
+/// from a many-side series takes it from that series' match key, which holds it only when the
+/// matching keeps it there. `extra` is on the many side alone and `on(job)` keeps it out of the key,
+/// so no row carries it and the declared columns must not name it; `ignoring(host)` leaves it in the
+/// key, so a fill synthesizes it from there and it stays.
+#[tokio::test]
+async fn native_composed_binary_declares_only_include_labels_a_row_can_carry() {
+    use datatypes::series::samples::{FieldSpec, Samples, Series, SeriesFields};
+    use datatypes::series::time::{EvalGrid, GridRange, GridSpec, TimeAxis};
+    use datatypes::series::{Label, SeriesLabels};
+
+    // The grid the operands the kernel is asked to match are laid on.
+    let grid = Arc::new(EvalGrid::try_new(GridSpec::try_new(0, 1_000, 4).unwrap()).unwrap());
+    let schema = Arc::new(datatypes::series::samples::SeriesSchema {
+        fields: vec![FieldSpec {
+            name: "field_0".into(),
+        }]
+        .into(),
+        eval_grid: Some(Arc::clone(&grid)),
+    });
+    // A dense one-field operand of the label set `labels`.
+    let operand = |labels: &[(&str, &str)]| {
+        let metric = SeriesLabels::try_new(
+            None,
+            labels
+                .iter()
+                .map(|(name, value)| Label {
+                    name: (*name).into(),
+                    value: (*value).into(),
+                })
+                .collect(),
+        )
+        .unwrap();
+        Series::try_new(
+            &schema,
+            metric,
+            TimeAxis::Grid(GridRange::try_new(Arc::clone(&grid), 0, 4).unwrap()),
+            SeriesFields::one(Samples::from_float(Float64Array::from(vec![Some(1.0); 4]))),
+        )
+        .unwrap()
+    };
+    let mut filed = 0;
+    for (query, left, right, declared, carried) in [
+        // `group_left(extra)` makes the left side the many one, and `extra` never reaches a row: the
+        // one side does not carry it and `on(job)` keeps it out of the key a fill reads.
+        (
+            "hist_extra * on(job) group_left(extra) floats_plain",
+            &[("job", "a"), ("extra", "e")][..],
+            &[("host", "h")][..],
+            &["job"][..],
+            &[][..],
+        ),
+        (
+            "hist_extra * on(job) group_left(extra) fill_right(0) floats_plain",
+            &[("job", "a"), ("extra", "e")][..],
+            &[("host", "h")][..],
+            &["job"][..],
+            &["job"][..],
+        ),
+        // The matching keeps `extra` in the key, so the fill that files many-side rows synthesizes
+        // it from there and the label stays declared.
+        (
+            "hist_extra * ignoring(host) group_left(extra) fill_right(0) floats_plain",
+            &[("job", "a"), ("extra", "e")][..],
+            &[("host", "h")][..],
+            &["extra", "job"][..],
+            &["extra", "job"][..],
+        ),
+        // Mirrored: `group_right(extra)` makes the right side the many one.
+        (
+            "floats_plain * on(job) group_right(extra) hist_extra",
+            &[("host", "h")][..],
+            &[("job", "a"), ("extra", "e")][..],
+            &["job"][..],
+            &[][..],
+        ),
+        (
+            "floats_plain * on(job) group_right(extra) fill_left(0) hist_extra",
+            &[("host", "h")][..],
+            &[("job", "a"), ("extra", "e")][..],
+            &["job"][..],
+            &["job"][..],
+        ),
+        (
+            "floats_plain * ignoring(host) group_right(extra) fill_left(0) hist_extra",
+            &[("host", "h")][..],
+            &[("job", "a"), ("extra", "e")][..],
+            &["extra", "job"][..],
+            &["extra", "job"][..],
+        ),
+    ] {
+        let plan =
+            build_native_fused_plan_with_provider(query, true, native_include_tag_provider().await)
+                .await;
+        let display = plan.display_indent().to_string();
+        let fused = find_fused_series(&plan).unwrap_or_else(|| panic!("{query}: {display}"));
+        let NativeExpr::Binary { matching, .. } = &fused.tree().root().expr else {
+            panic!("expected composed Binary for {query}: {display}");
+        };
+        // The declared columns: the value and time columns plus the labels the walk names.
+        let mut columns = sorted_column_names(&plan);
+        columns.retain(|column| column != "field_0" && column != "timestamp");
+        assert_eq!(
+            declared
+                .iter()
+                .map(|tag| tag.to_string())
+                .collect::<Vec<_>>(),
+            columns,
+            "{query}: {display}"
+        );
+        // What the kernel files for the same matching: the labels the fused node carries.
+        let rows = promql::vector_match::binary_vectors(
+            matching,
+            &schema,
+            &[operand(left)],
+            &schema,
+            &[operand(right)],
+        )
+        .unwrap_or_else(|error| panic!("{query}: {error}"));
+        let mut collected = rows
+            .iter()
+            .flat_map(|series| series.metric.tags().iter().map(|tag| tag.name.to_string()))
+            .collect::<Vec<_>>();
+        collected.sort();
+        collected.dedup();
+        assert_eq!(
+            carried
+                .iter()
+                .map(|tag| tag.to_string())
+                .collect::<Vec<_>>(),
+            collected,
+            "{query}: {display}"
+        );
+        // The declared columns hold every label the rows carry.
+        for label in &collected {
+            assert!(
+                columns.contains(label),
+                "{query}: `{label}` is carried but not declared: {display}"
+            );
+        }
+        filed += rows.len();
+    }
+    assert!(filed > 0, "the filled cases file rows to compare");
+}
+
+/// Composition decides by what the kernels and the column can answer, not by operand shape.
+///
+/// An operand with more than one selector, and an operand that ranks one, each compile and evaluate
+/// on their own, so the pair composes.
+#[tokio::test]
+async fn native_composed_binary_admits_complex_operands() {
+    for (query, operand_inputs) in [
+        ("hist * on(tag_0) (floats + on(tag_0) floats)", 2),
+        ("hist * on(tag_0) topk(1, floats)", 1),
+    ] {
+        let plan =
+            build_native_fused_plan_with_provider(query, true, native_mixed_kind_provider().await)
+                .await;
+        let display = plan.display_indent().to_string();
+        let fused = find_fused_series(&plan).unwrap_or_else(|| panic!("{query}: {display}"));
+        let NativeExpr::Binary { left, right, .. } = &fused.tree().root().expr else {
+            panic!("expected composed Binary for {query}: {display}");
+        };
+        assert!(
+            matches!(left.expr, NativeExpr::Input(_)) && matches!(right.expr, NativeExpr::Input(_)),
+            "{query}: {display}"
+        );
+        assert_eq!(2, fused.children().len(), "{query}: {display}");
+        let operand = find_fused_series(&fused.children()[1])
+            .unwrap_or_else(|| panic!("missing operand frame: {display}"));
+        assert_eq!(
+            promql::extension_plan::FusedOutputFormat::SeriesFrame,
+            operand.format(),
+            "{query}: {display}"
+        );
+        assert_eq!(operand_inputs, operand.inputs().len(), "{query}: {display}");
+        assert!(!display.contains("Join:"), "{query}: {display}");
+    }
+
+    // A fold the split cannot carry is still refused: `quantile` folds a group's samples rather
+    // than a fixed-width accumulator, and a second fold above one is a second cut. Those statements
+    // keep the existing plan, which answers them.
+    for query in [
+        "hist * on(tag_0) quantile(0.5, floats)",
+        "hist * on(tag_0) sum by (tag_0) (quantile(0.5, floats))",
+    ] {
+        let plan =
+            build_native_fused_plan_with_provider(query, true, native_mixed_kind_provider().await)
+                .await;
+        let display = plan.display_indent().to_string();
+        assert!(
+            find_fused_series(&plan).is_none(),
+            "`{query}` has no composed answer: {display}"
+        );
+        let legacy = PromPlanner::stmt_to_plan_with_annotations(
+            native_mixed_kind_provider().await,
+            &build_eval_stmt(query),
+            &build_query_engine_state(),
+            None,
+            false,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            legacy.display_indent().to_string(),
+            display,
+            "`{query}` must keep the existing plan"
+        );
+    }
+}
+
+/// A composed binary that meets a shape its kernels refuse keeps the existing plan.
+///
+/// Admission is the composition's own: an operand the native compiler cannot bind, a value that is
+/// not a frame, or a pair whose output column cannot carry both operands' kinds declines here
+/// exactly as it would on the whole statement. None of these may turn into a planning error,
+/// because the existing route answers them.
+#[tokio::test]
+async fn native_composed_binary_declines_to_the_existing_plan() {
+    // A comparison between a histogram and a float has no kernel, so the pair is not admitted, and
+    // nothing below it composes either: the whole statement stays on the existing plan.
+    let query = "hist > on(tag_0) floats";
+    let plan =
+        build_native_fused_plan_with_provider(query, true, native_mixed_kind_provider().await)
+            .await;
+    let display = plan.display_indent().to_string();
+    let legacy = PromPlanner::stmt_to_plan_with_annotations(
+        native_mixed_kind_provider().await,
+        &build_eval_stmt(query),
+        &build_query_engine_state(),
+        None,
+        false,
+    )
+    .await
+    .unwrap_or_else(|error| panic!("`{query}`: the existing route must answer it: {error}"));
+    assert!(
+        find_fused_series(&plan).is_none(),
+        "`{query}` has no native answer: {display}"
+    );
+    assert_eq!(
+        legacy.display_indent().to_string(),
+        display,
+        "`{query}` must keep the existing plan"
+    );
+
+    // An operand that is not a frame leaves the statement's own wrapper in place: the pair is
+    // refused, so the existing plan answers the statement while the operand that does compose keeps
+    // its own answer below it.
+    for query in [
+        // A scalar root is not a frame: composing it by vector matching would broadcast it as if it
+        // were a one-series vector, which is not what the query asked for.
+        "(hist * on(tag_0) floats) * 2",
+        // Neither is a scalar function, however it is written.
+        "(hist * on(tag_0) floats) / time()",
+        // A comparison between a histogram and a float has no kernel at this pair either, so the
+        // operand's own answer stops where it was admitted.
+        "(hist * on(tag_0) floats) > on(tag_0) floats",
+    ] {
+        let plan =
+            build_native_fused_plan_with_provider(query, true, native_mixed_kind_provider().await)
+                .await;
+        let display = plan.display_indent().to_string();
+        assert!(
+            !is_fused_series(&plan),
+            "`{query}` has no composed answer: {display}"
+        );
+        assert!(
+            find_fused_series(&plan).is_some(),
+            "`{query}` keeps the operand's own answer: {display}"
+        );
+    }
+}
+
+/// Whole-native fill preserves histogram row schemas; empty-only arithmetic stays a float.
+#[tokio::test]
+async fn native_histogram_binary_fill_declares_possible_payload_kind() {
+    for (query, histogram_output) in [
+        (
+            "hist{tag_0=\"a\"} * on(tag_0) fill(1) hist{tag_0=\"b\"}",
+            true,
+        ),
+        (
+            "hist{tag_0=\"a\"} * on(tag_0) fill_left(1) hist{tag_0=\"b\"}",
+            true,
+        ),
+        (
+            "hist{tag_0=\"a\"} * on(tag_0) fill_right(1) hist{tag_0=\"b\"}",
+            true,
+        ),
+        (
+            "hist{tag_0=\"a\"} / on(tag_0) fill_right(2) hist{tag_0=\"b\"}",
+            true,
+        ),
+        (
+            "hist{tag_0=\"a\"} / on(tag_0) fill_left(2) hist{tag_0=\"b\"}",
+            false,
+        ),
+        ("hist{tag_0=\"a\"} * on(tag_0) hist{tag_0=\"b\"}", false),
+    ] {
+        let plan =
+            build_native_fused_plan_with_provider(query, true, native_mixed_kind_provider().await)
+                .await;
+        let display = plan.display_indent().to_string();
+        let fused = find_fused_series(&plan).unwrap_or_else(|| panic!("{query}: {display}"));
+        let NativeExpr::Binary { matching, .. } = &fused.tree().root().expr else {
+            panic!("expected native Binary for {query}: {display}");
+        };
+        assert!(!display.contains("Join:"), "{display}");
+        let field = plan
+            .schema()
+            .fields()
+            .iter()
+            .find(|field| field.name() == "field_0")
+            .unwrap();
+        let expected = if histogram_output {
+            native_histogram_value_type().as_arrow_type()
+        } else {
+            ArrowDataType::Float64
+        };
+        assert_eq!(field.data_type(), &expected, "{query}: {display}");
+        if query.contains("fill(") {
+            assert!(
+                matching.fill.lhs.is_some() && matching.fill.rhs.is_some(),
+                "{display}"
+            );
+        }
+    }
+}
+
+/// A legacy-only outer function reaches a composed native binary, including statement anchors.
+#[tokio::test]
+async fn native_fused_binary_inside_legacy_math_preserves_anchors() {
+    for query in [
+        "ceil(clamp(histogram_count(hist), 1, 2) + on(tag_0) floats)",
+        "ceil((clamp(histogram_count(hist @ end() offset 1m), 1, 2) + on(tag_0) floats @ start()))",
+    ] {
+        let plan =
+            build_native_fused_plan_with_provider(query, true, native_mixed_kind_provider().await)
+                .await;
+        let display = plan.display_indent().to_string();
+        let fused = find_fused_series(&plan).unwrap_or_else(|| panic!("{query}: {display}"));
+        let NativeExpr::Binary { left, right, .. } = &fused.tree().root().expr else {
+            panic!("expected composed Binary for {query}: {display}");
+        };
+        assert!(
+            matches!(left.expr, NativeExpr::Input(_)) && matches!(right.expr, NativeExpr::Input(_)),
+            "{display}"
+        );
+        assert_eq!(2, fused.children().len(), "{display}");
+        assert!(!display.contains("Join:"), "{display}");
+        assert_eq!(
+            vec!["ceil(field_0)", "tag_0", "timestamp"],
+            sorted_column_names(&plan),
+            "{display}"
+        );
+        if query.contains("@ end()") {
+            let left_tree = find_fused_series(&fused.children()[0])
+                .unwrap()
+                .tree()
+                .to_string();
+            let right_tree = find_fused_series(&fused.children()[1])
+                .unwrap()
+                .tree()
+                .to_string();
+            assert!(
+                left_tree.contains("@ 100000000ms") && left_tree.contains("offset 60000"),
+                "{left_tree}"
+            );
+            assert!(right_tree.contains("@ 0ms"), "{right_tree}");
+        }
+    }
 }
 
 /// A window over an evaluated input enters the native route, and only when it is asked for.
@@ -5298,30 +6225,111 @@ async fn native_fused_histogram_quantile_binary_drops_le_from_operand_matching()
         "output schema still contains dropped `le`: {display}"
     );
 
-    // Check the contexts returned at the contract boundary for both calls independently.
-    let mut planner = PromPlanner {
-        table_provider: native_classic_histogram_provider().await,
-        ctx: PromPlannerContext::from_eval_stmt(&build_eval_stmt(
-            "histogram_quantile(0.9, m) / histogram_quantile(0.5, m)",
-        ))
-        .unwrap(),
-        promql_annotations: None,
-        native_fused: true,
-    };
-    let PromExpr::Binary(binary) =
-        parser::parse("histogram_quantile(0.9, m) / histogram_quantile(0.5, m)").unwrap()
-    else {
-        unreachable!()
-    };
-    let query_engine_state = build_query_engine_state();
-    for operand in [&binary.lhs, &binary.rhs] {
-        let (_, context) = planner
-            .try_plan_native_operand(operand, &query_engine_state)
-            .await
-            .unwrap()
-            .expect("each histogram call is admitted as one native operand");
-        assert_eq!(vec!["host"], context.tag_columns);
-        assert!(!context.tag_columns.contains(&LE_COLUMN_NAME.to_string()));
+    assert!(
+        matches!(fused.tree().root().expr, NativeExpr::Binary { .. }),
+        "{display}"
+    );
+    assert!(
+        plan.schema()
+            .fields()
+            .iter()
+            .any(|field| field.name() == "host"),
+        "{display}"
+    );
+    assert!(!display.contains("Join:"), "{display}");
+}
+
+/// A legacy wrapper or a native one preserves a whole native binary below it, not a join of native
+/// operands.
+///
+/// `scalar()` is a native node, so it becomes the fused root itself and reads the binary's own fused
+/// node as its single bound input. `quantile` is not a native aggregate, so its legacy fold stays
+/// above a fused node that still holds the whole binary. Either way the binary matches above its two
+/// sources rather than joining two separately evaluated native operands.
+#[tokio::test]
+async fn native_fused_binary_inside_scalar_and_quantile() {
+    // `true` marks the wrapper the native compiler admits into the tree; `false` keeps the legacy
+    // fold above it.
+    for (query, native_wrapper) in [
+        ("scalar(some_metric + on(tag_0) other_metric)", true),
+        ("quantile(0.5, some_metric + on(tag_0) other_metric)", false),
+        (
+            "scalar(clamp(some_metric, 0, 1) / on(tag_0) other_metric)",
+            true,
+        ),
+    ] {
+        let provider = build_test_table_provider_with_options(
+            &[
+                (DEFAULT_SCHEMA_NAME.to_string(), "some_metric".to_string()),
+                (DEFAULT_SCHEMA_NAME.to_string(), "other_metric".to_string()),
+            ],
+            1,
+            1,
+            vec![],
+            ConcreteDataType::timestamp_millisecond_datatype(),
+            false,
+            ConcreteDataType::float64_datatype(),
+            NATIVE_ENGINE,
+        )
+        .await;
+        let plan = build_native_fused_plan_with_provider(query, true, provider).await;
+        let display = plan.display_indent().to_string();
+        let fused = find_fused_series(&plan).unwrap_or_else(|| panic!("{query}: {display}"));
+
+        // One binary over both sources, with no join of two separately evaluated native operands.
+        assert!(!display.contains("Join:"), "{query}: {display}");
+        let mut metrics = fused_input_metrics(&plan);
+        // The selectors are bound in source order, but the walk collects them wherever the plan
+        // carries them, so compare the two metrics without relying on that order.
+        metrics.sort();
+        assert_eq!(
+            vec!["other_metric".to_string(), "some_metric".to_string()],
+            metrics,
+            "{query}: {display}"
+        );
+
+        let tree = if native_wrapper {
+            // The wrapper is this node's root and binds the binary's fused node as its one input.
+            let NativeExpr::ScalarOf { input } = &fused.tree().root().expr else {
+                panic!(
+                    "`{query}`: the native wrapper is the fused root: {}\n{display}",
+                    fused.tree()
+                );
+            };
+            let NativeExpr::Input(bound) = &input.expr else {
+                panic!(
+                    "`{query}`: the wrapper reads one bound source: {}\n{display}",
+                    fused.tree()
+                );
+            };
+            // The wrapper's tree has one input, so the binding names child 0: the segment that runs
+            // the binary.
+            assert_eq!(
+                0,
+                bound.source_index,
+                "`{query}`: {}\n{display}",
+                fused.tree()
+            );
+            assert_eq!(1, fused.children().len(), "`{query}`: {display}");
+            let nested = find_fused_series(&fused.children()[0]).unwrap_or_else(|| {
+                panic!("`{query}`: the wrapper's input is a fused node: {display}")
+            });
+            // The binary's node reads both sources itself, so it has one child per operand.
+            assert_eq!(2, nested.children().len(), "`{query}`: {display}");
+            nested.tree()
+        } else {
+            // The legacy fold is still there, above the one fused node that runs the binary.
+            assert!(
+                display.contains("Aggregate: groupBy="),
+                "`{query}`: the legacy aggregate is gone: {display}"
+            );
+            assert_eq!(2, fused.children().len(), "`{query}`: {display}");
+            fused.tree()
+        };
+        assert!(
+            matches!(tree.root().expr, NativeExpr::Binary { .. }),
+            "`{query}`: the binary is one native operation: {tree}\n{display}"
+        );
     }
 }
 
@@ -8362,24 +9370,11 @@ async fn native_histogram_plan(query: &str) -> String {
     plan.display_indent_schema().to_string()
 }
 
-/// A native histogram statement runs on the native route: the producer exports the canonical
-/// histogram struct column, not a float column, and the plan names no legacy histogram fold.
-/// A segmented parent is typed by the kind the statement's own root answers.
+/// A histogram-consuming aggregate remains a legacy fold even if its child is native.
 ///
-/// Segmentation replaces every cut prefix with an input leaf that carries already-evaluated
-/// samples. Re-deriving the parent's kind by walking that rewritten tree reads each leaf as the
-/// kind its scan carried, so a float-producing histogram prefix declares a histogram column while
-/// its values are floats: `count_over_time(h[5m]) + on (__name__) count_over_time(h[5m])` announced
-/// the canonical histogram struct, and the row conversion then refused the floats it was handed.
-/// The kind therefore comes from the uncut root, which is what these two statements pin - both
-/// answer floats, and `on (__name__)` is what makes them segment.
-/// An aggregate is admitted only when the kind entering it is provably a float.
-///
-/// The canonicalization pass inserts a merge under an aggregate when a label rewrite can give two
-/// series one label set, and the kind walk does not describe that node. Reading "cannot name it" as
-/// "not a histogram" admitted `sum(label_replace(h, "tag_0", "x", "tag_0", ".*"))` to a native fold
-/// over histograms, which the runtime then refuses sample by sample. The same silence covers a set
-/// operation, so both stay on the existing plan.
+/// A label rewrite or a set expression can pass histograms to the aggregate. Admitting that fold
+/// natively would send histograms into a float-only kernel, but independently supported child
+/// expressions may still have their own native producers below the legacy histogram aggregate.
 #[tokio::test]
 async fn an_aggregate_over_an_unnamed_kind_keeps_the_existing_plan() {
     for query in [
@@ -8389,17 +9384,32 @@ async fn an_aggregate_over_an_unnamed_kind_keeps_the_existing_plan() {
     ] {
         let table_provider = build_test_native_histogram_table_provider("some_metric").await;
         let plan = build_native_fused_plan_with_provider(query, true, table_provider).await;
+        let display = plan.display_indent_schema().to_string();
         assert!(
-            find_fused_series(&plan).is_none(),
-            "{query} ran a native fold over histograms: {}",
-            plan.display_indent_schema()
+            display.contains("Aggregate: groupBy=")
+                && display.contains("prom_native_histogram_agg_sum("),
+            "{query} did not retain the legacy histogram aggregate: {display}"
         );
+        // Inspect every fused node's complete native tree, not just its root: a set child and its
+        // frame producers may be native, but none may perform this histogram fold.
+        let mut pending = vec![&plan];
+        while let Some(node) = pending.pop() {
+            if let LogicalPlan::Extension(Extension { node }) = node
+                && let Some(fused) = node.as_any().downcast_ref::<FusedSeries>()
+            {
+                let tree = fused.tree().to_string();
+                assert!(
+                    !tree
+                        .lines()
+                        .any(|line| line.split_whitespace().nth(1) == Some("Aggregate")),
+                    "{query} ran a native aggregate: {tree}\n{display}"
+                );
+            }
+            pending.extend(node.inputs());
+        }
     }
-    // The reverse case: a float the walk can name still splits. What enters this aggregate is a
-    // window's count, not a histogram, and no canonical merge sits between them. (A rewrite stays
-    // conservative: the merge the canonicalization pass inserts is not described by the walk, so
-    // `sum(label_replace(histogram_count(h), ...))` keeps the existing plan along with the shapes
-    // above.)
+    // A float-producing window still permits the aggregate itself to split natively: its count,
+    // not the input histogram, reaches the fold.
     let table_provider = build_test_native_histogram_table_provider("some_metric").await;
     let plan = build_native_fused_plan_with_provider(
         "sum(count_over_time(some_metric[5m]))",
@@ -13381,4 +14391,234 @@ async fn native_fused_metric_engine_count_values_output_labels() {
         expected.sort();
         assert_eq!(sorted_column_names(&plan), expected, "{query}");
     }
+}
+
+/// A composition is an operand of another composition.
+///
+/// `(hist * on(tag_0) floats) / on(tag_0) floats` reads three selectors of two field kinds, which no
+/// single tree binds, so each operand is planned on its own and the left one is itself a match over
+/// two frames. The statement is one fused tree, and no legacy join is left above it.
+#[tokio::test]
+async fn native_composed_binary_nests_as_one_fused_tree() {
+    let query = "(hist * on(tag_0) floats) / on(tag_0) floats";
+    let plan =
+        build_native_fused_plan_with_provider(query, true, native_mixed_kind_provider().await)
+            .await;
+    let display = plan.display_indent().to_string();
+    assert!(!display.contains("Join:"), "{query}: {display}");
+    let fused = find_fused_series(&plan).unwrap_or_else(|| panic!("{query}: {display}"));
+    let NativeExpr::Binary { left, right, .. } = &fused.tree().root().expr else {
+        panic!("{query}: the statement root matches two frames: {display}");
+    };
+    assert!(
+        matches!(left.expr, NativeExpr::Input(_)) && matches!(right.expr, NativeExpr::Input(_)),
+        "{query}: {display}"
+    );
+    let [nested_plan, right_plan] = fused.children() else {
+        panic!("{query}: the root matches two operands: {display}");
+    };
+    let nested = find_fused_series(nested_plan)
+        .unwrap_or_else(|| panic!("{query}: missing nested operand frame: {display}"));
+    assert_eq!(
+        promql::extension_plan::FusedOutputFormat::SeriesFrame,
+        nested.format(),
+        "{query}: {display}"
+    );
+    // The nested operand is `hist * on(tag_0) floats` composed on its own, not the statement's
+    // three selectors bound by one tree.
+    let NativeExpr::Binary { left, right, .. } = &nested.tree().root().expr else {
+        panic!("{query}: the nested operand composes: {display}");
+    };
+    assert!(
+        matches!(left.expr, NativeExpr::Input(_)) && matches!(right.expr, NativeExpr::Input(_)),
+        "{query}: {display}"
+    );
+    assert_eq!(2, nested.children().len(), "{query}: {display}");
+    for child in nested.children() {
+        let operand = find_fused_series(child)
+            .unwrap_or_else(|| panic!("{query}: missing nested leaf frame: {display}"));
+        assert_eq!(
+            promql::extension_plan::FusedOutputFormat::SeriesFrame,
+            operand.format(),
+            "{query}: {display}"
+        );
+        assert_eq!(1, operand.children().len(), "{query}: {display}");
+    }
+    let right = find_fused_series(right_plan)
+        .unwrap_or_else(|| panic!("{query}: missing right operand frame: {display}"));
+    assert_eq!(
+        promql::extension_plan::FusedOutputFormat::SeriesFrame,
+        right.format(),
+        "{query}: {display}"
+    );
+    assert_eq!(1, right.children().len(), "{query}: {display}");
+    assert_eq!(
+        vec!["field_0", "tag_0", "timestamp"],
+        sorted_column_names(&plan),
+        "{query}: {display}"
+    );
+}
+
+/// An aggregate operand is admitted through the split's own halves.
+///
+/// A fold reads across series, but its `Partial` and `Final` stages already answer one group's whole
+/// state, so the pair reads the final half as one evaluated frame. The operator never sees aggregate
+/// state as if it were a sample input; that is the producer's output, one node lower.
+#[tokio::test]
+async fn native_composed_binary_admits_a_split_aggregate_frame_operand() {
+    for (query, aggregate_on_the_left) in [
+        ("hist * on(tag_0) sum by (tag_0) (floats)", false),
+        ("sum by (tag_0) (floats) * on(tag_0) hist", true),
+    ] {
+        let plan =
+            build_native_fused_plan_with_provider(query, true, native_mixed_kind_provider().await)
+                .await;
+        let display = plan.display_indent().to_string();
+        assert!(!display.contains("Join:"), "{query}: {display}");
+        let fused = find_fused_series(&plan).unwrap_or_else(|| panic!("{query}: {display}"));
+        let NativeExpr::Binary { left, right, .. } = &fused.tree().root().expr else {
+            panic!("{query}: the statement root matches two frames: {display}");
+        };
+        // The operand enters the match as evaluated samples on the statement's grid.
+        let operand_input = if aggregate_on_the_left { left } else { right };
+        let NativeType::Samples(schema) = &operand_input.output else {
+            panic!("{query}: the aggregate enters the match as samples: {display}");
+        };
+        assert!(schema.eval_grid.is_some(), "{query}: {display}");
+        assert_eq!(2, fused.children().len(), "{query}: {display}");
+        let operand_plan = &fused.children()[if aggregate_on_the_left { 0 } else { 1 }];
+        let operand = find_fused_series(operand_plan)
+            .unwrap_or_else(|| panic!("{query}: missing aggregate operand frame: {display}"));
+        assert_eq!(
+            promql::extension_plan::FusedOutputFormat::SeriesFrame,
+            operand.format(),
+            "{query}: {display}"
+        );
+        // The operand is the split's final half: it answers samples and reads state.
+        assert!(
+            operand.reads_aggregate_state(),
+            "{query}: the operand must be the Final half: {display}"
+        );
+        let partial = partial_below(operand).unwrap_or_else(|| {
+            panic!("{query}: the Final half reads a Partial producer: {display}")
+        });
+        assert!(
+            matches!(&partial.tree().root().expr, NativeExpr::Aggregate { op, .. } if op.stage == AggregateStage::Partial),
+            "{query}: {display}"
+        );
+        assert_eq!(
+            1,
+            partial.children().len(),
+            "{query}: the producer reads one scan: {display}"
+        );
+    }
+}
+
+/// A source-free evaluated vector is a frame operand.
+///
+/// `vector(2)` reads no region and answers one series on the statement's grid, so the match pairs it
+/// like any other frame. A scalar root is refused by the same rule, which is what keeps `2` from
+/// being broadcast as if it were a one-series vector.
+#[tokio::test]
+async fn native_composed_binary_admits_a_source_free_frame_operand() {
+    let query = "(hist * on(tag_0) floats) * on() group_left vector(2)";
+    let plan =
+        build_native_fused_plan_with_provider(query, true, native_mixed_kind_provider().await)
+            .await;
+    let display = plan.display_indent().to_string();
+    assert!(!display.contains("Join:"), "{query}: {display}");
+    let fused = find_fused_series(&plan).unwrap_or_else(|| panic!("{query}: {display}"));
+    let [_nested_plan, right_plan] = fused.children() else {
+        panic!("{query}: the root matches two operands: {display}");
+    };
+    let source_free = find_fused_series(right_plan)
+        .unwrap_or_else(|| panic!("{query}: missing source-free operand frame: {display}"));
+    assert_eq!(
+        promql::extension_plan::FusedOutputFormat::SeriesFrame,
+        source_free.format(),
+        "{query}: {display}"
+    );
+    assert!(
+        matches!(source_free.tree().root().expr, NativeExpr::VectorOf { .. }),
+        "{query}: the operand is the source-free `vector(2)`: {display}"
+    );
+    assert!(
+        source_free.children().is_empty(),
+        "{query}: a source-free operand reads no input: {display}"
+    );
+}
+
+/// A composition descends a parsed expression, so a deep one ends.
+///
+/// Every operand offered below is a strict part of the expression it came from, which is what bounds
+/// the descent. A left-deep chain of matches over two field kinds plans as a nested tree here, and a
+/// shape that did not would decline to the existing plan; neither may re-offer the same expression.
+#[tokio::test]
+async fn native_composed_binary_recursion_terminates_on_a_deep_expression() {
+    fn count_fused(plan: &LogicalPlan) -> usize {
+        usize::from(is_fused_series(plan))
+            + plan.inputs().into_iter().map(count_fused).sum::<usize>()
+    }
+
+    let depth = 32;
+    let mut query = "hist * on(tag_0) floats".to_string();
+    for _ in 1..depth {
+        query = format!("({query}) / on(tag_0) floats");
+    }
+    let plan =
+        build_native_fused_plan_with_provider(&query, true, native_mixed_kind_provider().await)
+            .await;
+    let display = plan.display_indent().to_string();
+    assert!(
+        find_fused_series(&plan).is_some(),
+        "{depth}-deep: {display}"
+    );
+    assert!(!display.contains("Join:"), "{depth}-deep: {display}");
+    // One composition per operator, plus the leaf frames below them.
+    assert!(
+        count_fused(&plan) > depth,
+        "{depth}-deep: {} fused nodes: {display}",
+        count_fused(&plan)
+    );
+}
+
+/// A refused operand leaves the planner's selector state where it found it.
+///
+/// The composed attempt writes the context while it prepares each operand's scan, so a refusal - here
+/// the left operand plans and the scalar `2` is no frame - must restore it before the refusal is
+/// returned. The same planner then plans another expression natively, from the same context.
+#[tokio::test]
+async fn native_composed_binary_restores_the_context_after_a_refused_operand() {
+    let state = build_query_engine_state();
+    let stmt = build_eval_stmt("(hist * on(tag_0) floats) / 2");
+    let mut planner = PromPlanner {
+        table_provider: native_mixed_kind_provider().await,
+        ctx: PromPlannerContext::from_eval_stmt(&stmt).unwrap(),
+        promql_annotations: None,
+        native_fused: true,
+    };
+    let before = format!("{:?}", planner.ctx);
+    let refused = planner
+        .try_plan_native_fused(&stmt.expr, &state)
+        .await
+        .unwrap();
+    assert!(
+        refused.is_none(),
+        "a scalar operand is no frame, so the pair declines"
+    );
+    assert_eq!(
+        before,
+        format!("{:?}", planner.ctx),
+        "a refused operand must leave no selector state behind"
+    );
+    // The next expression still plans: the context is the statement's own, not an operand's.
+    let next = build_eval_stmt("hist * on(tag_0) floats");
+    assert!(
+        planner
+            .try_plan_native_fused(&next.expr, &state)
+            .await
+            .unwrap()
+            .is_some(),
+        "a refused operand must not stop the next query"
+    );
 }
