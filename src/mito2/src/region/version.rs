@@ -508,7 +508,6 @@ impl VersionBuilder {
         self
     }
 
-    /// Sets pending tails.
     pub(crate) fn pending_tails(mut self, pending_tails: Vec<PendingTail>) -> Self {
         self.pending_tails = pending_tails;
         self

@@ -167,6 +167,13 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             return;
         }
 
+        if !is_allowed_with_pending_tails(&request.kind)
+            && let Err(e) = version.ensure_no_pending_tails()
+        {
+            sender.send(Err(e));
+            return;
+        }
+
         // Checks whether we need to alter the region.
         if !request.need_alter(&version.metadata) {
             warn!(
@@ -174,12 +181,6 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 region_id, request
             );
             sender.send(Ok(0));
-            return;
-        }
-        if !is_allowed_with_pending_tails(&request.kind)
-            && let Err(e) = version.ensure_no_pending_tails()
-        {
-            sender.send(Err(e));
             return;
         }
 

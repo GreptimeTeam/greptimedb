@@ -359,6 +359,25 @@ async fn test_alter_with_pending_tails(#[case] kind: AlterKind, #[case] allowed:
 }
 
 #[tokio::test]
+async fn test_alter_rejects_no_op_with_pending_tails() {
+    let (_env, engine, region_id) = region_with_pending_tails(1).await;
+    let column_metadatas = engine
+        .get_region(region_id)
+        .unwrap()
+        .metadata()
+        .column_metadatas
+        .clone();
+
+    let kind = AlterKind::SyncColumns { column_metadatas };
+    let err = engine
+        .handle_request(region_id, RegionRequest::Alter(RegionAlterRequest { kind }))
+        .await
+        .unwrap_err();
+
+    assert_pending_tails_error(&err);
+}
+
+#[tokio::test]
 async fn test_enter_staging_rejects_region_with_pending_tails() {
     let (_env, engine, region_id) = region_with_pending_tails(1).await;
 
