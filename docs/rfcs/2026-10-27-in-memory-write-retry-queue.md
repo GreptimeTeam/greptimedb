@@ -54,27 +54,29 @@ Core v1 is an operator-layer module wired by the frontend. It has three parts:
 - **Admission.** Once per retryable per-region failure of the first dispatch round: check eligibility, reserve ledger room, encode, commit. A request that is still shared after the first RPC has no owned payload and is a first-round terminal failure, not an admission rejection.
 - **Retry worker.** One task on the global runtime. It leases ready heads, spawns bounded per-record tasks, and joins their results. A task reserves transient capacity and decodes the payload before calling the one-shot retry function; the function issues at most one target-region RPC. `TransientFull` and decode failure are pre-invocation task events, not outcomes returned by the retry function.
 
-```text
-client write
-  -> Inserter/Deleter -> plan + plan metadata
-  -> dispatcher.prepare -> per-peer RegionRequest
-  -> dispatcher.execute -> first dispatch round in the request path (send_batch, per-region results)
-       -> successes merged into the response
-       -> terminal failures: client error, logged, not queued
-       -> retryable per-region failures -> queue admission
-  -> client is told the original error (admission is not success)
-                  |
-                  v
-       QueueState: per-target-region ordered deques
-                  |
-                  v
-       retry worker -> lease -> retry function (at most one RPC)
-            table info -> route -> at most one RPC -> classify
-              applied            -> complete
-              non-retryable      -> remove
-              retryable          -> defer; the queue schedules backoff
-              route refresh      -> invalidate + rebuild -> successors -> admission
-              lookup failure     -> defer; no attempt consumed
+
+```mermaid
+flowchart TD
+    C["client write"] --> I["Inserter/Deleter: plan + plan metadata"]
+    I --> P["dispatcher.prepare: per-peer RegionRequest"]
+    P --> E["dispatcher.execute: first dispatch round, send_batch"]
+    E --> S["successes merged into the response"]
+    E --> T["terminal failures: client error, logged, no queue record"]
+    E --> R["retryable per-region failures"]
+    R --> A["queue admission"]
+    A --> CE["client receives the original error; admission is not success"]
+    A --> Q["QueueState: per-target-region ordered deques"]
+    Q --> W["retry worker: lease one ready head"]
+    W --> F["retry function: table info and route, at most one RPC, classify"]
+    F --> O1["applied: complete"]
+    F --> O2["non-retryable: remove"]
+    F --> O3["retryable: defer with backoff"]
+    F --> O4["route refresh: invalidate and rebuild"]
+    F --> O5["lookup failure: defer, no attempt consumed"]
+    O3 --> Q
+    O5 --> Q
+    O4 --> SU["rebuilt successors"]
+    SU --> A
 ```
 
 **Who performs what.** The first send is the existing `send_batch` in the request path; it already splits the partial result per region, so the failures handed to admission are single-region writes. The queue calls the retry function, never `WriteDispatcher::execute`, `WriteDispatcher::finish`, `WriteRetry::retry`, `WriteRetry::enqueue_failures`, or a second dispatcher round. The retry function is one-shot: when called, it issues at most one RPC and reports one classified outcome; it has no sleep and no loop. With the queue enabled, `finish` merges the first round, hands retryable failures to admission, returns the client error, and does not call `WriteRetry::retry`. The only duplicate risk is semantic (a record or a rebuilt successor resends rows), not a second in-process retry loop.
