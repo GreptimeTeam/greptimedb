@@ -612,7 +612,8 @@ impl MitoRegion {
                     RegionRoleState::Leader(RegionLeaderState::Writable) => {
                         // Already in desired state - no-op
                         info!("Region {} already in normal leader mode", self.region_id);
-                        None
+                        // The metadata backfill below checks the settled manifest.
+                        self.manifest_ctx.settle_locked(&mut manager).await?
                     }
                     _ => {
                         // Only staging -> leader transition is allowed
@@ -1124,18 +1125,19 @@ impl MitoRegion {
         };
         let _ = worker_sender.send(WorkerRequestWithTime::new(notify)).await;
         let _ = wait.await;
-        let Some(pending) = result? else {
-            return Ok(());
-        };
+        let pending = result?;
         self.clear_ended_staging().await;
-        pending.fire().await;
+        if let Some(pending) = pending {
+            pending.fire().await;
+        }
         Ok(())
     }
 
-    /// Clears the staging directory after staging ended, unless a new staging has begun.
+    /// Clears the staging directory after staging ended, unless the region was closed (it may be
+    /// open again by now) or a new staging has begun.
     async fn clear_ended_staging(&self) {
         let mut manager = self.manifest_ctx.manifest_manager.write().await;
-        if self.is_enter_staging() || self.is_staging_or_staged_edit() {
+        if manager.is_stopped() || self.is_enter_staging() || self.is_staging_or_staged_edit() {
             return;
         }
         if let Err(e) = manager.clear_staging_manifest_and_dir().await {
