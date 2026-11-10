@@ -939,8 +939,7 @@ mod tests {
         // The small build side can use the same table under another qualifier; only the
         // large-side predicate must decide which regions are selected.
         let build_plan =
-            MergeScanLogicalPlan::new(build_side_plan(&large_plan), false, Default::default())
-                .into_logical_plan();
+            MergeScanLogicalPlan::new(build_side_plan(&large_plan), false).into_logical_plan();
         let join_plan = LogicalPlanBuilder::from(build_plan)
             .join(
                 large_plan.clone(),
@@ -1051,6 +1050,7 @@ mod tests {
                 file_removed_cnt: 0,
             },
             written_bytes: 0,
+            ingested_parquet_bytes: 0,
             query_cpu_time: 0,
             query_scanned_bytes: 0,
             data_topic_latest_entry_id: 0,

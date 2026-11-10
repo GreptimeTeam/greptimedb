@@ -57,7 +57,7 @@ use tracing::Span;
 use crate::analyze::DistAnalyzeExec;
 pub use crate::datafusion::planner::DfContextProviderAdapter;
 use crate::dist_plan::{
-    DIST_JOIN_PLANNER_RULE_NAME, DistJoinStats, DistPlannerOptions, MergeScanLogicalPlan,
+    DIST_JOIN_PLANNER_RULE_NAME, DistJoinStats, MergeScanLogicalPlan,
     RemoteDynFilterReceiverInjectorRef, aggregate_region_stats, candidate_joins,
     expected_region_ids,
 };
@@ -1890,6 +1890,7 @@ mod tests {
                 file_removed_cnt: 0,
             },
             written_bytes: 0,
+            ingested_parquet_bytes: 0,
             query_cpu_time: 0,
             query_scanned_bytes: 0,
             data_topic_latest_entry_id: 0,
@@ -2175,7 +2176,9 @@ mod tests {
             .as_any()
             .downcast_ref::<DatafusionQueryEngine>()
             .unwrap();
-        let mut ctx = query_engine.engine_context(dist_join_query_ctx(true));
+        let mut ctx = query_engine
+            .engine_context(dist_join_query_ctx(true))
+            .unwrap();
         let plan = dist_join_test_plan();
 
         let stats = query_engine.dist_join_stats(&ctx, &plan).await.unwrap();
@@ -2210,7 +2213,9 @@ mod tests {
             .downcast_ref::<DatafusionQueryEngine>()
             .unwrap();
         let plan = dist_join_test_plan();
-        let ctx = query_engine.engine_context(dist_join_query_ctx(false));
+        let ctx = query_engine
+            .engine_context(dist_join_query_ctx(false))
+            .unwrap();
         assert!(query_engine.dist_join_stats(&ctx, &plan).await.is_none());
         assert_eq!(0, calls.load(Ordering::SeqCst));
 
@@ -2221,12 +2226,16 @@ mod tests {
             .as_any()
             .downcast_ref::<DatafusionQueryEngine>()
             .unwrap();
-        let ctx = query_engine.engine_context(dist_join_query_ctx(true));
+        let ctx = query_engine
+            .engine_context(dist_join_query_ctx(true))
+            .unwrap();
         assert!(query_engine.dist_join_stats(&ctx, &plan).await.is_none());
         assert_eq!(0, calls.load(Ordering::SeqCst));
 
         // Without a candidate join.
-        let ctx = query_engine.engine_context(dist_join_query_ctx(true));
+        let ctx = query_engine
+            .engine_context(dist_join_query_ctx(true))
+            .unwrap();
         let scan_plan = dist_join_test_scan("probe", PROBE_TABLE_ID, "probe");
         assert!(
             query_engine
@@ -2238,7 +2247,9 @@ mod tests {
 
         // The same plan runs through the EXPLAIN path without the opt-in: the join keeps its two
         // boundaries.
-        let mut ctx = query_engine.engine_context(dist_join_query_ctx(false));
+        let mut ctx = query_engine
+            .engine_context(dist_join_query_ctx(false))
+            .unwrap();
         let explained = explain_logical_plan(query_engine, &mut ctx, &plan).await;
         assert!(
             !nests_join_in_merge_scan(&explained),
@@ -2261,7 +2272,9 @@ mod tests {
             .as_any()
             .downcast_ref::<DatafusionQueryEngine>()
             .unwrap();
-        let mut ctx = query_engine.engine_context(dist_join_query_ctx(true));
+        let mut ctx = query_engine
+            .engine_context(dist_join_query_ctx(true))
+            .unwrap();
         let plan = dist_join_test_plan();
 
         let stats = query_engine.dist_join_stats(&ctx, &plan).await.unwrap();
@@ -2313,7 +2326,9 @@ mod tests {
             .as_any()
             .downcast_ref::<DatafusionQueryEngine>()
             .unwrap();
-        let ctx = query_engine.engine_context(dist_join_query_ctx(true));
+        let ctx = query_engine
+            .engine_context(dist_join_query_ctx(true))
+            .unwrap();
         let plan = dist_join_test_plan();
 
         assert!(query_engine.dist_join_stats(&ctx, &plan).await.is_none());
@@ -2370,7 +2385,9 @@ mod tests {
             .as_any()
             .downcast_ref::<DatafusionQueryEngine>()
             .unwrap();
-        let ctx = query_engine.engine_context(dist_join_query_ctx(true));
+        let ctx = query_engine
+            .engine_context(dist_join_query_ctx(true))
+            .unwrap();
         let plan = dist_join_test_plan();
 
         assert!(query_engine.dist_join_stats(&ctx, &plan).await.is_none());
@@ -2388,7 +2405,9 @@ mod tests {
             .as_any()
             .downcast_ref::<DatafusionQueryEngine>()
             .unwrap();
-        let ctx = query_engine.engine_context(dist_join_query_ctx(true));
+        let ctx = query_engine
+            .engine_context(dist_join_query_ctx(true))
+            .unwrap();
 
         assert!(query_engine.dist_join_stats(&ctx, &plan).await.is_none());
         assert_eq!(0, calls.load(Ordering::SeqCst));
@@ -2407,7 +2426,9 @@ mod tests {
             .as_any()
             .downcast_ref::<DatafusionQueryEngine>()
             .unwrap();
-        let mut ctx = query_engine.engine_context(dist_join_query_ctx(true));
+        let mut ctx = query_engine
+            .engine_context(dist_join_query_ctx(true))
+            .unwrap();
         let plan =
             dist_join_aliased_test_plan((PROBE_TABLE_ID, "probe"), (PROBE_TABLE_ID, "probe"));
 
@@ -2438,7 +2459,9 @@ mod tests {
             .as_any()
             .downcast_ref::<DatafusionQueryEngine>()
             .unwrap();
-        let mut ctx = query_engine.engine_context(dist_join_query_ctx(true));
+        let mut ctx = query_engine
+            .engine_context(dist_join_query_ctx(true))
+            .unwrap();
         let plan =
             dist_join_aliased_test_plan((PROBE_TABLE_ID, "probe"), (BUILD_TABLE_ID, "build"));
 
@@ -2476,7 +2499,9 @@ mod tests {
             .as_any()
             .downcast_ref::<DatafusionQueryEngine>()
             .unwrap();
-        let ctx = query_engine.engine_context(dist_join_query_ctx(true));
+        let ctx = query_engine
+            .engine_context(dist_join_query_ctx(true))
+            .unwrap();
         let self_join =
             dist_join_aliased_test_plan((SELF_JOIN_TABLE_ID, "logs"), (SELF_JOIN_TABLE_ID, "logs"));
         let plan = LogicalPlanBuilder::from(self_join)

@@ -220,11 +220,7 @@ impl SubstraitConsumer for MergeScanSubstraitConsumer<'_> {
 
         let input = self.decode_payload(merge_scan.input).await?;
 
-        // `PbMergeScan` lacks `partition_cols`; decoded plans lose this optimization and may repartition.
-        Ok(
-            MergeScanLogicalPlan::new(input, merge_scan.is_placeholder, Default::default())
-                .into_logical_plan(),
-        )
+        Ok(MergeScanLogicalPlan::new(input, merge_scan.is_placeholder).into_logical_plan())
     }
 
     // Keep child dispatch on this consumer; delegating the parent bypasses async MergeScan decoding.
@@ -519,6 +515,7 @@ mod tests {
 
         let plan_decoder = engine
             .engine_context(QueryContext::arc())
+            .unwrap()
             .new_plan_decoder()
             .unwrap();
         let catalog_list = Arc::new(DummyCatalogList::with_table_provider(table_provider));
@@ -611,6 +608,7 @@ mod tests {
         let table_provider = Arc::new(MemTable::try_new(schema, vec![vec![]]).unwrap());
         let plan_decoder = engine
             .engine_context(QueryContext::arc())
+            .unwrap()
             .new_plan_decoder()
             .unwrap();
 
@@ -739,8 +737,6 @@ mod tests {
             .expect("Expect a MergeScan plan node");
         assert!(merge_scan.is_placeholder());
         assert_eq!(merge_scan.input().to_string(), numbers_scan().to_string());
-        // `PbMergeScan` doesn't carry `partition_cols`, so decoded nodes have an empty mapping.
-        assert!(merge_scan.partition_cols().is_empty());
     }
 
     /// Payload table binding uses the engine catalog, not the request catalog.
@@ -919,6 +915,7 @@ mod tests {
                 .unwrap();
             let plan_decoder = engine
                 .engine_context(query_ctx.clone())
+                .unwrap()
                 .new_plan_decoder()
                 .unwrap();
             let decoded = plan_decoder
@@ -979,14 +976,14 @@ mod tests {
             .unwrap()
             .build()
             .unwrap();
-            let plan =
-                MergeScanLogicalPlan::new(input, false, Default::default()).into_logical_plan();
+            let plan = MergeScanLogicalPlan::new(input, false).into_logical_plan();
 
             let bytes = DFLogicalSubstraitConvertor
                 .encode(&plan, DefaultSerializer)
                 .unwrap();
             let plan_decoder = engine
                 .engine_context(query_ctx.clone())
+                .unwrap()
                 .new_plan_decoder()
                 .unwrap();
             let catalog_list = Arc::new(DummyCatalogList::with_table_provider(Arc::new(
@@ -1041,7 +1038,7 @@ mod tests {
     }
 
     fn merge_scan(input: LogicalPlan, is_placeholder: bool) -> LogicalPlan {
-        MergeScanLogicalPlan::new(input, is_placeholder, Default::default()).into_logical_plan()
+        MergeScanLogicalPlan::new(input, is_placeholder).into_logical_plan()
     }
 
     fn encode_plan(plan: &LogicalPlan) -> Bytes {
@@ -1053,6 +1050,7 @@ mod tests {
     fn plan_decoder(engine: &dyn crate::QueryEngine) -> SubstraitPlanDecoderRef {
         engine
             .engine_context(QueryContext::arc())
+            .unwrap()
             .new_plan_decoder()
             .unwrap()
     }
@@ -1086,7 +1084,11 @@ mod tests {
             QueryOptions::default(),
         )
         .query_engine();
-        let mut state = engine.engine_context(resolver_ctx.clone()).state().clone();
+        let mut state = engine
+            .engine_context(resolver_ctx.clone())
+            .unwrap()
+            .state()
+            .clone();
         state.config_mut().set_extension(resolver_ctx);
         let extensions = Extensions::default();
         let consumer = MergeScanSubstraitConsumer {
@@ -1573,7 +1575,11 @@ mod tests {
         )
         .query_engine();
         let mut state = SessionStateBuilder::new_from_existing(
-            engine.engine_context(QueryContext::arc()).state().clone(),
+            engine
+                .engine_context(QueryContext::arc())
+                .unwrap()
+                .state()
+                .clone(),
         )
         .with_serializer_registry(Arc::new(DefaultSerializer))
         .build();
