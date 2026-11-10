@@ -45,8 +45,43 @@ use crate::request::{DdlRequest, OptionOutputTx, SenderDdlRequest};
 use crate::sst::FormatType;
 use crate::worker::RegionWorkerLoop;
 
+pub(crate) type PendingAlters = std::collections::HashMap<
+    RegionId,
+    std::collections::VecDeque<(RegionAlterRequest, OptionOutputTx)>,
+>;
+
 impl<S: LogStore> RegionWorkerLoop<S> {
     pub(crate) async fn handle_alter_request(
+        &mut self,
+        region_id: RegionId,
+        request: RegionAlterRequest,
+        sender: OptionOutputTx,
+    ) {
+        if self.flush_scheduler.has_pending_alter(region_id)
+            || self.pending_alters.contains_key(&region_id)
+            || self.regions.get_region(region_id).is_some_and(|region| {
+                matches!(
+                    region.state(),
+                    crate::region::RegionRoleState::Leader(
+                        crate::region::RegionLeaderState::Editing
+                            | crate::region::RegionLeaderState::Altering
+                    )
+                )
+            })
+        {
+            let queue = self.pending_alters.entry(region_id).or_default();
+            if queue.len() >= 128 {
+                sender.send(crate::error::RegionBusySnafu { region_id }.fail());
+            } else {
+                queue.push_back((request, sender));
+            }
+            self.dispatch_pending_region_requests(region_id).await;
+            return;
+        }
+        self.execute_alter_request(region_id, request, sender).await;
+    }
+
+    pub(crate) async fn execute_alter_request(
         &mut self,
         region_id: RegionId,
         request: RegionAlterRequest,

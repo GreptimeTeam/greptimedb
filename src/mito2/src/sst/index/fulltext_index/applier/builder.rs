@@ -15,19 +15,21 @@
 use std::collections::BTreeMap;
 
 use common_base::term_token::extract_like_probes;
+use common_telemetry::warn;
 use datafusion_common::ScalarValue;
 use datafusion_expr::expr::{Like, ScalarFunction};
 use datafusion_expr::{BinaryExpr, Expr, Operator};
 use datatypes::schema::FulltextBackend;
+use index::target::IndexTarget;
 use object_store::ObjectStore;
 use puffin::puffin_manager::cache::PuffinMetadataCacheRef;
 use store_api::metadata::RegionMetadata;
 use store_api::region_request::PathType;
-use store_api::storage::{ColumnId, ConcreteDataType};
 
 use crate::cache::file_cache::FileCacheRef;
 use crate::cache::index::bloom_filter_index::BloomFilterIndexCacheRef;
 use crate::error::Result;
+use crate::sst::index::column::{fulltext_target_options, json_index_target};
 use crate::sst::index::fulltext_index::applier::FulltextIndexApplier;
 use crate::sst::index::puffin_manager::PuffinManagerFactory;
 
@@ -143,6 +145,7 @@ impl<'a> FulltextIndexApplierBuilder<'a> {
                 self.store,
                 requests,
                 self.puffin_manager_factory,
+                self.metadata,
             )
             .with_file_cache(self.file_cache)
             .with_puffin_metadata_cache(self.puffin_metadata_cache)
@@ -153,135 +156,132 @@ impl<'a> FulltextIndexApplierBuilder<'a> {
     fn extract_requests(
         expr: &Expr,
         metadata: &'a RegionMetadata,
-        requests: &mut BTreeMap<ColumnId, FulltextRequest>,
+        requests: &mut BTreeMap<IndexTarget, FulltextRequest>,
     ) {
+        if let Expr::BinaryExpr(BinaryExpr {
+            left,
+            op: Operator::And,
+            right,
+        }) = expr
+        {
+            Self::extract_requests(left, metadata, requests);
+            Self::extract_requests(right, metadata, requests);
+            return;
+        }
+        if let Err(err) = Self::extract_request(expr, metadata, requests) {
+            warn!(err; "Failed to extract fulltext index predicate from {expr}");
+        }
+    }
+
+    fn extract_request(
+        expr: &Expr,
+        metadata: &RegionMetadata,
+        requests: &mut BTreeMap<IndexTarget, FulltextRequest>,
+    ) -> Result<()> {
         match expr {
-            Expr::BinaryExpr(BinaryExpr {
-                left,
-                op: Operator::And,
-                right,
-            }) => {
-                Self::extract_requests(left, metadata, requests);
-                Self::extract_requests(right, metadata, requests);
-            }
             Expr::Like(like) => {
-                if let Some((column_id, like)) = Self::expr_to_like(metadata, like) {
-                    requests.entry(column_id).or_default().likes.push(like);
+                if let Some((target, like)) = Self::expr_to_like(metadata, like)? {
+                    requests.entry(target).or_default().likes.push(like);
                 }
             }
             Expr::ScalarFunction(func) => {
-                if let Some((column_id, query)) = Self::expr_to_query(metadata, func) {
-                    requests.entry(column_id).or_default().queries.push(query);
-                } else if let Some((column_id, term)) = Self::expr_to_term(metadata, func) {
-                    requests.entry(column_id).or_default().terms.push(term);
+                if let Some((target, query)) = Self::expr_to_query(metadata, func)? {
+                    requests.entry(target).or_default().queries.push(query);
+                } else if let Some((target, term)) = Self::expr_to_term(metadata, func)? {
+                    requests.entry(target).or_default().terms.push(term);
                 }
             }
             _ => {}
         }
+        Ok(())
     }
 
     fn expr_to_query(
         metadata: &RegionMetadata,
         f: &ScalarFunction,
-    ) -> Option<(ColumnId, FulltextQuery)> {
+    ) -> Result<Option<(IndexTarget, FulltextQuery)>> {
         if f.name() != "matches" {
-            return None;
+            return Ok(None);
         }
         if f.args.len() != 2 {
-            return None;
+            return Ok(None);
         }
 
-        let Expr::Column(c) = &f.args[0] else {
-            return None;
-        };
-        let column = metadata.column_by_name(&c.name)?;
-
-        if column.column_schema.data_type != ConcreteDataType::string_datatype() {
-            return None;
-        }
-
-        let Expr::Literal(ScalarValue::Utf8(Some(query)), _) = &f.args[1] else {
-            return None;
+        let Some(target) = Self::index_target_from_expr(metadata, &f.args[0])? else {
+            return Ok(None);
         };
 
-        Some((column.column_id, FulltextQuery(query.clone())))
+        let Expr::Literal(
+            ScalarValue::Utf8(Some(query))
+            | ScalarValue::LargeUtf8(Some(query))
+            | ScalarValue::Utf8View(Some(query)),
+            _,
+        ) = &f.args[1]
+        else {
+            return Ok(None);
+        };
+
+        Ok(Some((target, FulltextQuery(query.clone()))))
     }
 
     fn expr_to_term(
         metadata: &RegionMetadata,
         f: &ScalarFunction,
-    ) -> Option<(ColumnId, FulltextTerm)> {
+    ) -> Result<Option<(IndexTarget, FulltextTerm)>> {
         if f.name() != "matches_term" {
-            return None;
+            return Ok(None);
         }
         if f.args.len() != 2 {
-            return None;
+            return Ok(None);
         }
 
-        let mut lowered = false;
-        let column;
-        match &f.args[0] {
-            Expr::Column(c) => {
-                column = c;
-            }
-            Expr::ScalarFunction(f) => {
-                let lower_arg = Self::extract_lower_arg(f)?;
-                lowered = true;
-                if let Expr::Column(c) = lower_arg {
-                    column = c;
-                } else {
-                    return None;
-                }
-            }
-            _ => return None,
-        }
-
-        let column = metadata.column_by_name(&column.name)?;
-        if column.column_schema.data_type != ConcreteDataType::string_datatype() {
-            return None;
-        }
-
-        let Expr::Literal(ScalarValue::Utf8(Some(term)), _) = &f.args[1] else {
-            return None;
+        let (expr, lowered) = Self::unwrap_lower(&f.args[0]);
+        let Some(target) = Self::index_target_from_expr(metadata, expr)? else {
+            return Ok(None);
         };
 
-        Some((
-            column.column_id,
+        let Expr::Literal(
+            ScalarValue::Utf8(Some(term))
+            | ScalarValue::LargeUtf8(Some(term))
+            | ScalarValue::Utf8View(Some(term)),
+            _,
+        ) = &f.args[1]
+        else {
+            return Ok(None);
+        };
+
+        Ok(Some((
+            target,
             FulltextTerm {
                 col_lowered: lowered,
                 term: term.clone(),
             },
-        ))
+        )))
     }
 
-    fn expr_to_like(metadata: &RegionMetadata, like: &Like) -> Option<(ColumnId, FulltextLike)> {
+    fn expr_to_like(
+        metadata: &RegionMetadata,
+        like: &Like,
+    ) -> Result<Option<(IndexTarget, FulltextLike)>> {
         // `ILIKE` uses Unicode case folding, which disagrees with the index's
         // `to_lowercase` on characters like 'ſ', so its probes could miss rows.
         if like.negated || like.case_insensitive {
-            return None;
+            return Ok(None);
         }
         // Probes assume arrow's default `\` escape.
         if !matches!(like.escape_char, None | Some('\\')) {
-            return None;
+            return Ok(None);
         }
 
-        let (c, col_lowered) = match like.expr.as_ref() {
-            Expr::Column(c) => (c, false),
-            Expr::ScalarFunction(f) => match Self::extract_lower_arg(f)? {
-                Expr::Column(c) => (c, true),
-                _ => return None,
-            },
-            _ => return None,
+        let (expr, col_lowered) = Self::unwrap_lower(&like.expr);
+        let Some(target) = Self::index_target_from_expr(metadata, expr)? else {
+            return Ok(None);
         };
-        let column = metadata.column_by_name(&c.name)?;
-        if column.column_schema.data_type != ConcreteDataType::string_datatype() {
-            return None;
-        }
-        // `LIKE` is common on unindexed columns and with patterns like '%word%' that have
-        // no probe; skip them instead of opening every SST's index for nothing.
-        let options = column.column_schema.fulltext_options().ok()??;
-        if !options.enable || options.backend != FulltextBackend::Bloom {
-            return None;
+        let Some(options) = fulltext_target_options(metadata, &target)? else {
+            return Ok(None);
+        };
+        if options.backend != FulltextBackend::Bloom {
+            return Ok(None);
         }
 
         let Expr::Literal(
@@ -291,19 +291,57 @@ impl<'a> FulltextIndexApplierBuilder<'a> {
             _,
         ) = like.pattern.as_ref()
         else {
-            return None;
+            return Ok(None);
         };
         if extract_like_probes(pattern).is_empty() {
-            return None;
+            return Ok(None);
         }
 
-        Some((
-            column.column_id,
+        Ok(Some((
+            target,
             FulltextLike {
                 col_lowered,
                 pattern: pattern.clone(),
             },
-        ))
+        )))
+    }
+
+    /// Resolves a column reference or JSON path expression to a single index target.
+    /// Returns `None` for unsupported expressions without traversing their children.
+    fn index_target_from_expr(
+        metadata: &RegionMetadata,
+        expr: &Expr,
+    ) -> Result<Option<IndexTarget>> {
+        if let Expr::Column(col) = expr {
+            let Some(col) = metadata.column_by_name(&col.name) else {
+                return Ok(None);
+            };
+            if !col.column_schema.data_type.is_string() {
+                return Ok(None);
+            }
+            let target = IndexTarget::ColumnId(col.column_id);
+            return Ok(fulltext_target_options(metadata, &target)?.map(|_| target));
+        }
+        let Some((target, ty)) = json_index_target(metadata, expr, |hint| {
+            hint.fulltext_index
+                .as_ref()
+                .is_some_and(|options| options.enable)
+        })?
+        else {
+            return Ok(None);
+        };
+        Ok(ty.is_string().then_some(target))
+    }
+
+    /// Returns the inner expression and `true` for `lower(expr)`, or the original
+    /// expression and `false` otherwise.
+    fn unwrap_lower(expr: &Expr) -> (&Expr, bool) {
+        if let Expr::ScalarFunction(func) = expr
+            && let Some(inner) = Self::extract_lower_arg(func)
+        {
+            return (inner, true);
+        }
+        (expr, false)
     }
 
     fn extract_lower_arg(lower_func: &ScalarFunction) -> Option<&Expr> {
@@ -315,10 +353,6 @@ impl<'a> FulltextIndexApplierBuilder<'a> {
             return None;
         }
 
-        if lower_func.args.len() != 1 {
-            return None;
-        }
-
         Some(&lower_func.args[0])
     }
 }
@@ -327,40 +361,125 @@ impl<'a> FulltextIndexApplierBuilder<'a> {
 mod tests {
     use std::sync::Arc;
 
-    use api::v1::SemanticType;
     use common_function::function::FunctionRef;
     use common_function::function_factory::ScalarFunctionFactory;
+    use common_function::scalars::json::json_get::JsonGetWithType;
     use common_function::scalars::matches::MatchesFunction;
     use common_function::scalars::matches_term::MatchesTermFunction;
+    use common_function::scalars::udf::create_udf;
     use datafusion::functions::string::lower;
     use datafusion_common::Column;
     use datafusion_expr::expr::{Like, ScalarFunction};
     use datafusion_expr::{Literal, ScalarUDF};
-    use datatypes::schema::{ColumnSchema, FulltextAnalyzer, FulltextOptions};
-    use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder};
-    use store_api::storage::RegionId;
+    use datatypes::schema::{FULLTEXT_KEY, FulltextOptions};
+    use store_api::metadata::RegionMetadataBuilder;
 
     use super::*;
+    use crate::sst::index::fulltext_index::applier::tests::{
+        json_metadata, mock_metadata_with_fulltext, mock_metadata_without_fulltext,
+    };
+
+    #[test]
+    fn test_json_fulltext_predicate_extraction() {
+        let options = FulltextOptions {
+            enable: true,
+            ..Default::default()
+        };
+        let metadata = json_metadata(Some(options));
+        let target = IndexTarget::new_json_path(3, vec!["message".into()]).unwrap();
+        for literal in [
+            ScalarValue::Utf8(Some("error timeout".into())),
+            ScalarValue::LargeUtf8(Some("error timeout".into())),
+            ScalarValue::Utf8View(Some("error timeout".into())),
+        ] {
+            let expr = json_expr("$.message", Some(ScalarValue::Utf8View(None)));
+            let query = ScalarFunction::new_udf(
+                matches_func(),
+                vec![expr.clone(), Expr::Literal(literal.clone(), None)],
+            );
+            assert_eq!(
+                FulltextIndexApplierBuilder::expr_to_query(&metadata, &query).unwrap(),
+                Some((target.clone(), FulltextQuery("error timeout".into())))
+            );
+            for lowered in [false, true] {
+                let expr = if lowered {
+                    lower().call(vec![expr.clone()])
+                } else {
+                    expr.clone()
+                };
+                let term = ScalarFunction::new_udf(
+                    matches_term_func(),
+                    vec![expr.clone(), Expr::Literal(literal.clone(), None)],
+                );
+                let (actual, term) = FulltextIndexApplierBuilder::expr_to_term(&metadata, &term)
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(actual, target);
+                assert_eq!(
+                    term,
+                    FulltextTerm {
+                        col_lowered: lowered,
+                        term: "error timeout".into()
+                    }
+                );
+                let like = Like::new(
+                    false,
+                    Box::new(expr),
+                    Box::new(Expr::Literal(literal.clone(), None)),
+                    None,
+                    false,
+                );
+                let (actual, like) = FulltextIndexApplierBuilder::expr_to_like(&metadata, &like)
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(actual, target);
+                assert_eq!(
+                    like,
+                    FulltextLike {
+                        col_lowered: lowered,
+                        pattern: "error timeout".into()
+                    }
+                );
+            }
+        }
+        for expr in [
+            json_expr("$.missing", None),
+            json_expr("$.message", Some(ScalarValue::Int64(None))),
+        ] {
+            assert!(
+                FulltextIndexApplierBuilder::index_target_from_expr(&metadata, &expr)
+                    .unwrap()
+                    .is_none()
+            );
+        }
+        for options in [None, Some(FulltextOptions::default())] {
+            let metadata = json_metadata(options);
+            let path = json_expr("$.message", None);
+            for expr in [
+                matches_func().call(vec![path.clone(), "error".lit()]),
+                matches_term_func().call(vec![path.clone(), "error".lit()]),
+                path.like("%error timeout%".lit()),
+            ] {
+                let mut requests = BTreeMap::new();
+                FulltextIndexApplierBuilder::extract_requests(&expr, &metadata, &mut requests);
+                assert!(requests.is_empty(), "{expr}");
+            }
+        }
+    }
+
+    fn json_expr(path: &str, ty: Option<ScalarValue>) -> Expr {
+        let mut args = vec![datafusion_expr::col("attrs"), datafusion_expr::lit(path)];
+        if let Some(ty) = ty {
+            args.push(Expr::Literal(ty, None));
+        }
+        Expr::ScalarFunction(ScalarFunction::new_udf(
+            Arc::new(create_udf(Arc::new(JsonGetWithType::default()))),
+            args,
+        ))
+    }
 
     fn mock_metadata() -> RegionMetadata {
-        let mut builder = RegionMetadataBuilder::new(RegionId::new(1, 2));
-        builder
-            .push_column_metadata(ColumnMetadata {
-                column_schema: ColumnSchema::new("text", ConcreteDataType::string_datatype(), true),
-                semantic_type: SemanticType::Field,
-                column_id: 1,
-            })
-            .push_column_metadata(ColumnMetadata {
-                column_schema: ColumnSchema::new(
-                    "ts",
-                    ConcreteDataType::timestamp_millisecond_datatype(),
-                    false,
-                ),
-                semantic_type: SemanticType::Timestamp,
-                column_id: 2,
-            });
-
-        builder.build().unwrap()
+        mock_metadata_with_fulltext(FulltextBackend::Bloom)
     }
 
     fn matches_func() -> Arc<ScalarUDF> {
@@ -378,18 +497,73 @@ mod tests {
     }
 
     #[test]
+    fn test_ordinary_fulltext_requests_require_enabled_index() {
+        for options in [
+            None,
+            Some(FulltextOptions::default()),
+            Some(FulltextOptions {
+                enable: true,
+                ..Default::default()
+            }),
+            Some(FulltextOptions {
+                enable: true,
+                backend: FulltextBackend::Tantivy,
+                ..Default::default()
+            }),
+        ] {
+            let enabled = options.as_ref().is_some_and(|options| options.enable);
+            let bloom_enabled = options
+                .as_ref()
+                .is_some_and(|options| options.enable && options.backend == FulltextBackend::Bloom);
+            let mut metadata = mock_metadata_without_fulltext();
+            if let Some(options) = options {
+                metadata.column_metadatas[0]
+                    .column_schema
+                    .set_fulltext_options(&options)
+                    .unwrap();
+            }
+            let column = datafusion_expr::col("text");
+            let expressions = [
+                (
+                    matches_func().call(vec![column.clone(), "error".lit()]),
+                    enabled,
+                ),
+                (
+                    matches_term_func().call(vec![column.clone(), "error".lit()]),
+                    enabled,
+                ),
+                (
+                    matches_term_func()
+                        .call(vec![lower().call(vec![column.clone()]), "error".lit()]),
+                    enabled,
+                ),
+                (column.like("%error timeout retry%".lit()), bloom_enabled),
+            ];
+            for (expr, expected) in expressions {
+                let mut requests = BTreeMap::new();
+                FulltextIndexApplierBuilder::extract_requests(&expr, &metadata, &mut requests);
+                assert_eq!(!requests.is_empty(), expected, "{expr}");
+            }
+        }
+    }
+
+    #[test]
     fn test_expr_to_query_basic() {
         let metadata = mock_metadata();
-
-        let func = ScalarFunction {
-            args: vec![Expr::Column(Column::from_name("text")), "foo".lit()],
-            func: matches_func(),
-        };
-
-        let (column_id, query) =
-            FulltextIndexApplierBuilder::expr_to_query(&metadata, &func).unwrap();
-        assert_eq!(column_id, 1);
-        assert_eq!(query, FulltextQuery("foo".to_string()));
+        for literal in [
+            ScalarValue::Utf8(Some("foo".into())),
+            ScalarValue::LargeUtf8(Some("foo".into())),
+            ScalarValue::Utf8View(Some("foo".into())),
+        ] {
+            let func = ScalarFunction::new_udf(
+                matches_func(),
+                vec![datafusion_expr::col("text"), Expr::Literal(literal, None)],
+            );
+            assert_eq!(
+                FulltextIndexApplierBuilder::expr_to_query(&metadata, &func).unwrap(),
+                Some((IndexTarget::ColumnId(1), FulltextQuery("foo".into())))
+            );
+        }
     }
 
     #[test]
@@ -401,7 +575,11 @@ mod tests {
             func: matches_func(),
         };
 
-        assert!(FulltextIndexApplierBuilder::expr_to_query(&metadata, &func).is_none());
+        assert!(
+            FulltextIndexApplierBuilder::expr_to_query(&metadata, &func)
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
@@ -413,7 +591,11 @@ mod tests {
             func: matches_func(),
         };
 
-        assert!(FulltextIndexApplierBuilder::expr_to_query(&metadata, &func).is_none());
+        assert!(
+            FulltextIndexApplierBuilder::expr_to_query(&metadata, &func)
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
@@ -425,7 +607,11 @@ mod tests {
             func: matches_func(),
         };
 
-        assert!(FulltextIndexApplierBuilder::expr_to_query(&metadata, &func).is_none());
+        assert!(
+            FulltextIndexApplierBuilder::expr_to_query(&metadata, &func)
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
@@ -437,28 +623,36 @@ mod tests {
             func: matches_func(),
         };
 
-        assert!(FulltextIndexApplierBuilder::expr_to_query(&metadata, &func).is_none());
+        assert!(
+            FulltextIndexApplierBuilder::expr_to_query(&metadata, &func)
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
     fn test_expr_to_term_basic() {
         let metadata = mock_metadata();
-
-        let func = ScalarFunction {
-            args: vec![Expr::Column(Column::from_name("text")), "foo".lit()],
-            func: matches_term_func(),
-        };
-
-        let (column_id, term) =
-            FulltextIndexApplierBuilder::expr_to_term(&metadata, &func).unwrap();
-        assert_eq!(column_id, 1);
-        assert_eq!(
-            term,
-            FulltextTerm {
-                col_lowered: false,
-                term: "foo".to_string(),
-            }
-        );
+        for literal in [
+            ScalarValue::Utf8(Some("foo".into())),
+            ScalarValue::LargeUtf8(Some("foo".into())),
+            ScalarValue::Utf8View(Some("foo".into())),
+        ] {
+            let func = ScalarFunction::new_udf(
+                matches_term_func(),
+                vec![datafusion_expr::col("text"), Expr::Literal(literal, None)],
+            );
+            assert_eq!(
+                FulltextIndexApplierBuilder::expr_to_term(&metadata, &func).unwrap(),
+                Some((
+                    IndexTarget::ColumnId(1),
+                    FulltextTerm {
+                        col_lowered: false,
+                        term: "foo".into()
+                    }
+                ))
+            );
+        }
     }
 
     #[test]
@@ -475,9 +669,10 @@ mod tests {
             func: matches_term_func(),
         };
 
-        let (column_id, term) =
-            FulltextIndexApplierBuilder::expr_to_term(&metadata, &func).unwrap();
-        assert_eq!(column_id, 1);
+        let (target, term) = FulltextIndexApplierBuilder::expr_to_term(&metadata, &func)
+            .unwrap()
+            .unwrap();
+        assert_eq!(target, IndexTarget::ColumnId(1));
         assert_eq!(
             term,
             FulltextTerm {
@@ -496,7 +691,11 @@ mod tests {
             func: matches_term_func(),
         };
 
-        assert!(FulltextIndexApplierBuilder::expr_to_term(&metadata, &func).is_none());
+        assert!(
+            FulltextIndexApplierBuilder::expr_to_term(&metadata, &func)
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
@@ -508,7 +707,11 @@ mod tests {
             func: matches_func(), // Using 'matches' instead of 'matches_term'
         };
 
-        assert!(FulltextIndexApplierBuilder::expr_to_term(&metadata, &func).is_none());
+        assert!(
+            FulltextIndexApplierBuilder::expr_to_term(&metadata, &func)
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
@@ -551,40 +754,10 @@ mod tests {
         FulltextIndexApplierBuilder::extract_requests(&matches_expr, &metadata, &mut requests);
 
         assert_eq!(requests.len(), 1);
-        let request = requests.get(&1).unwrap();
+        let request = requests.get(&IndexTarget::ColumnId(1)).unwrap();
         assert_eq!(request.queries.len(), 1);
         assert_eq!(request.terms.len(), 0);
         assert_eq!(request.queries[0], FulltextQuery("foo".to_string()));
-    }
-
-    fn mock_metadata_with_fulltext(backend: FulltextBackend) -> RegionMetadata {
-        let mut builder = RegionMetadataBuilder::new(RegionId::new(1, 2));
-        builder
-            .push_column_metadata(ColumnMetadata {
-                column_schema: ColumnSchema::new("text", ConcreteDataType::string_datatype(), true)
-                    .with_fulltext_options(FulltextOptions::new_unchecked(
-                        true,
-                        FulltextAnalyzer::English,
-                        false,
-                        backend,
-                        10240,
-                        0.01,
-                    ))
-                    .unwrap(),
-                semantic_type: SemanticType::Field,
-                column_id: 1,
-            })
-            .push_column_metadata(ColumnMetadata {
-                column_schema: ColumnSchema::new(
-                    "ts",
-                    ConcreteDataType::timestamp_millisecond_datatype(),
-                    false,
-                ),
-                semantic_type: SemanticType::Timestamp,
-                column_id: 2,
-            });
-
-        builder.build().unwrap()
     }
 
     #[test]
@@ -603,9 +776,10 @@ mod tests {
                 FulltextIndexApplierBuilder::expr_to_like(
                     &bloom,
                     &like(false, false, escape_char, "%foo bar baz%")
-                ),
+                )
+                .unwrap(),
                 Some((
-                    1,
+                    IndexTarget::ColumnId(1),
                     FulltextLike {
                         col_lowered: false,
                         pattern: "%foo bar baz%".to_string(),
@@ -621,9 +795,9 @@ mod tests {
             ..like(false, false, None, "%foo bar baz%")
         };
         assert_eq!(
-            FulltextIndexApplierBuilder::expr_to_like(&bloom, &lowered),
+            FulltextIndexApplierBuilder::expr_to_like(&bloom, &lowered).unwrap(),
             Some((
-                1,
+                IndexTarget::ColumnId(1),
                 FulltextLike {
                     col_lowered: true,
                     pattern: "%foo bar baz%".to_string(),
@@ -639,22 +813,102 @@ mod tests {
             like(false, false, None, "%foo%"),
         ] {
             assert_eq!(
-                FulltextIndexApplierBuilder::expr_to_like(&bloom, &like),
+                FulltextIndexApplierBuilder::expr_to_like(&bloom, &like).unwrap(),
                 None
             );
         }
         // Only columns with a bloom fulltext index.
         for metadata in [
-            mock_metadata(),
+            mock_metadata_without_fulltext(),
             mock_metadata_with_fulltext(FulltextBackend::Tantivy),
         ] {
             assert_eq!(
                 FulltextIndexApplierBuilder::expr_to_like(
                     &metadata,
                     &like(false, false, None, "%foo bar baz%")
-                ),
+                )
+                .unwrap(),
                 None
             );
+        }
+    }
+
+    #[test]
+    fn test_extract_requests_boolean_boundaries() {
+        let metadata = json_metadata(Some(FulltextOptions {
+            enable: true,
+            ..Default::default()
+        }));
+        let ordinary = matches_func().call(vec![datafusion_expr::col("text"), "error".lit()]);
+        let json = matches_term_func().call(vec![json_expr("$.message", None), "error".lit()]);
+        let ordinary_target = IndexTarget::ColumnId(1);
+        let json_target = IndexTarget::new_json_path(3, vec!["message".into()]).unwrap();
+        for (expr, expected) in [
+            (
+                ordinary.clone().and(json.clone()),
+                vec![ordinary_target.clone(), json_target],
+            ),
+            (ordinary.clone().or(json.clone()), vec![]),
+            (Expr::Not(Box::new(json.clone())), vec![]),
+            (
+                ordinary.clone().and(json.or(ordinary.clone())),
+                vec![ordinary_target],
+            ),
+        ] {
+            let mut requests = BTreeMap::new();
+            FulltextIndexApplierBuilder::extract_requests(&expr, &metadata, &mut requests);
+            assert_eq!(
+                requests.keys().cloned().collect::<Vec<_>>(),
+                expected,
+                "{expr}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_extract_requests_keeps_valid_conjunct_on_error() {
+        let mut metadata = json_metadata(Some(FulltextOptions {
+            enable: true,
+            ..Default::default()
+        }));
+        let column = &mut metadata.column_metadatas[0].column_schema;
+        let mut options = column.metadata().clone();
+        options.insert(FULLTEXT_KEY.into(), "invalid json".into());
+        *column = column.clone().with_metadata(options);
+        let metadata = RegionMetadataBuilder::from_existing(metadata)
+            .build()
+            .unwrap();
+        let column = datafusion_expr::col("text");
+        let valid = matches_term_func().call(vec![json_expr("$.message", None), "error".lit()]);
+        let expected = BTreeMap::from([(
+            IndexTarget::new_json_path(3, vec!["message".into()]).unwrap(),
+            FulltextRequest {
+                terms: vec![FulltextTerm {
+                    col_lowered: false,
+                    term: "error".into(),
+                }],
+                ..Default::default()
+            },
+        )]);
+        for invalid in [
+            matches_func().call(vec![column.clone(), "error".lit()]),
+            matches_term_func().call(vec![column.clone(), "error".lit()]),
+            column.like("%error timeout%".lit()),
+        ] {
+            let mut requests = BTreeMap::new();
+            assert!(
+                FulltextIndexApplierBuilder::extract_request(&invalid, &metadata, &mut requests)
+                    .is_err()
+            );
+            assert!(requests.is_empty());
+            for expr in [
+                invalid.clone().and(valid.clone()),
+                valid.clone().and(invalid),
+            ] {
+                FulltextIndexApplierBuilder::extract_requests(&expr, &metadata, &mut requests);
+                assert_eq!(requests, expected, "{expr}");
+                requests.clear();
+            }
         }
     }
 
@@ -685,7 +939,7 @@ mod tests {
         FulltextIndexApplierBuilder::extract_requests(&binary_expr, &metadata, &mut requests);
 
         assert_eq!(requests.len(), 1);
-        let request = requests.get(&1).unwrap();
+        let request = requests.get(&IndexTarget::ColumnId(1)).unwrap();
         assert_eq!(request.queries.len(), 1);
         assert_eq!(request.terms.len(), 1);
         assert_eq!(request.queries[0], FulltextQuery("foo".to_string()));

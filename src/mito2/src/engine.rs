@@ -125,6 +125,7 @@ use region_hook::RegionHookRef;
 use snafu::{OptionExt, ResultExt, ensure};
 use store_api::ManifestVersion;
 use store_api::codec::PrimaryKeyEncoding;
+use store_api::compaction_task::{self, CompactionTaskEntry};
 use store_api::logstore::LogStore;
 use store_api::logstore::provider::{KafkaProvider, Provider};
 use store_api::metadata::{ColumnMetadata, RegionMetadataRef};
@@ -147,6 +148,7 @@ use tokio::sync::{Semaphore, oneshot};
 
 use crate::access_layer::RegionFilePathFactory;
 use crate::cache::{CacheManagerRef, CacheStrategy};
+use crate::compaction::CompactionState;
 use crate::config::{MitoConfig, ScanMemoryMode};
 use crate::engine::puffin_index::{IndexEntryContext, collect_index_entries_from_puffin};
 use crate::error::{
@@ -750,6 +752,40 @@ impl MitoEngine {
         }
 
         results
+    }
+
+    /// Reads current compaction cycles with conservative metadata predicate pruning.
+    pub async fn inspect_compaction_tasks(
+        &self,
+        filters: &[Expr],
+    ) -> Result<Vec<CompactionTaskEntry>> {
+        let filters = MetadataFilter::new(filters);
+        let node_id = self.inner.workers.file_ref_manager().node_id();
+        let mut entries = Vec::new();
+        for region in self.inner.workers.all_regions() {
+            if !filters.matches(|column| match column {
+                compaction_task::REGION_ID => {
+                    Some(ScalarValue::UInt64(Some(region.region_id.as_u64())))
+                }
+                compaction_task::TABLE_ID => {
+                    Some(ScalarValue::UInt32(Some(region.region_id.table_id())))
+                }
+                compaction_task::NODE_ID => Some(ScalarValue::UInt64(node_id)),
+                _ => None,
+            }) {
+                continue;
+            }
+            // Clone only task handles under the region's lock. Snapshot materialization
+            // and residual metadata filtering never hold that lock or queue worker work.
+            let (active, pending) = CompactionState::current(&region.compaction_state);
+            for task in active.into_iter().chain(pending) {
+                let entry = task.snapshot(node_id);
+                if entry.matches(&filters) {
+                    entries.push(entry);
+                }
+            }
+        }
+        Ok(entries)
     }
 
     /// Lists region info entries of all regions in the engine.

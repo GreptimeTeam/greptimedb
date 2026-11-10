@@ -18,7 +18,7 @@ use common_datasource::compression::CompressionType;
 use common_telemetry::{debug, warn};
 use futures::TryStreamExt;
 use futures::future::try_join_all;
-use object_store::{Entry, ErrorKind, Lister, ObjectStore};
+use object_store::{Buffer, Entry, ErrorKind, Lister, ObjectStore};
 use snafu::{ResultExt, ensure};
 use store_api::ManifestVersion;
 use store_api::storage::RegionId;
@@ -27,11 +27,11 @@ use tokio::sync::Semaphore;
 use crate::cache::manifest_cache::ManifestCache;
 use crate::error::{
     CompressObjectSnafu, DecompressObjectSnafu, InvalidScanIndexSnafu, ManifestDeltaNotFoundSnafu,
-    OpenDalSnafu, Result,
+    ManifestVersionConflictSnafu, OpenDalSnafu, Result,
 };
 use crate::manifest::storage::size_tracker::Tracker;
 use crate::manifest::storage::utils::{
-    get_from_cache, put_to_cache, sort_manifests, write_and_put_cache,
+    get_from_cache_decoded, sort_manifests, write_and_put_cache,
 };
 use crate::manifest::storage::{
     FETCH_MANIFEST_PARALLELISM, delta_file, file_compress_type, file_version, gen_path,
@@ -206,8 +206,9 @@ impl<T: Tracker> DeltaStorage<T> {
             let _permit = semaphore.acquire().await.unwrap();
 
             let cache_key = entry.path();
+            let compress_type = file_compress_type(entry.name());
             // Try to get from cache first
-            if let Some(data) = get_from_cache(self.manifest_cache.as_ref(), cache_key).await {
+            if let Some(data) = get_from_cache_decoded(self.manifest_cache.as_ref(), cache_key, compress_type).await {
                 let size = entry.metadata().content_length();
                 if size > 0 {
                     self.delta_tracker.record(*v, size);
@@ -221,7 +222,6 @@ impl<T: Tracker> DeltaStorage<T> {
             }
 
             // Fetch from remote object store
-            let compress_type = file_compress_type(entry.name());
             let bytes = match self.object_store.read(entry.path()).await {
                 Ok(bytes) => bytes,
                 Err(error) if error.kind() == ErrorKind::NotFound => {
@@ -234,7 +234,7 @@ impl<T: Tracker> DeltaStorage<T> {
             };
             self.delta_tracker.record(*v, bytes.len() as u64);
             let data = compress_type
-                .decode(bytes)
+                .decode(bytes.clone())
                 .await
                 .context(DecompressObjectSnafu {
                     compress_type,
@@ -242,7 +242,9 @@ impl<T: Tracker> DeltaStorage<T> {
                 })?;
 
             // Add to cache
-            put_to_cache(self.manifest_cache.as_ref(), cache_key.to_string(), &data).await;
+            if let Some(cache) = &self.manifest_cache {
+                cache.put_file(cache_key.to_string(), bytes.to_vec()).await;
+            }
 
             Ok((*v, data))
         });
@@ -287,6 +289,90 @@ impl<T: Tracker> DeltaStorage<T> {
         self.delta_tracker.record(version, delta_size as u64);
 
         Ok(())
+    }
+
+    /// Creates the delta of `version` under its fixed `.json.gz` name, so that only one writer can
+    /// commit the version.
+    ///
+    /// An existing object with the same decoded content is a retry of an earlier write that
+    /// landed. Any other existing object fails with a version conflict.
+    pub(crate) async fn save_conditional(
+        &mut self,
+        version: ManifestVersion,
+        bytes: &[u8],
+    ) -> Result<()> {
+        let path = gen_path(&self.path, &delta_file(version), CompressionType::Gzip);
+        // Every writer has to use one object name, so `compress_manifest = false` is honoured
+        // with gzip level 0, which stores the bytes without compressing them.
+        let data = if self.compress_type.is_compressed() {
+            CompressionType::Gzip.encode(bytes).await
+        } else {
+            CompressionType::encode_gzip_stored(bytes).await
+        }
+        .context(CompressObjectSnafu {
+            compress_type: CompressionType::Gzip,
+            path: &path,
+        })?;
+        let data = Buffer::from(data);
+
+        let stored_size = match self
+            .object_store
+            .write_with(&path, data.clone())
+            .if_not_exists(true)
+            .await
+        {
+            Ok(_) => data.len(),
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    ErrorKind::AlreadyExists | ErrorKind::ConditionNotMatch
+                ) =>
+            {
+                self.ensure_same_delta(version, &path, bytes).await?
+            }
+            Err(error) => return Err(error).context(OpenDalSnafu),
+        };
+
+        self.delta_tracker.record(version, stored_size as u64);
+        if let Some(cache) = &self.manifest_cache {
+            cache.put_file(path, data.to_vec()).await;
+        }
+
+        Ok(())
+    }
+
+    /// Checks that the object at `path` decodes to `bytes`, reading it directly from storage.
+    /// Returns the size of the stored object.
+    async fn ensure_same_delta(
+        &self,
+        version: ManifestVersion,
+        path: &str,
+        bytes: &[u8],
+    ) -> Result<usize> {
+        let conflict = |reason: String| {
+            ManifestVersionConflictSnafu {
+                version,
+                manifest_dir: &self.path,
+                reason,
+            }
+            .build()
+        };
+        let existing = self
+            .object_store
+            .read(path)
+            .await
+            .map_err(|e| conflict(format!("cannot read the existing delta: {e}")))?;
+        let stored_size = existing.len();
+        let existing = CompressionType::Gzip
+            .decode(existing)
+            .await
+            .map_err(|e| conflict(format!("cannot decode the existing delta: {e}")))?;
+        if existing != bytes {
+            return Err(conflict(
+                "the existing delta has different content".to_string(),
+            ));
+        }
+        Ok(stored_size)
     }
 }
 

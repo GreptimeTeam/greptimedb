@@ -60,7 +60,7 @@ use crate::read::flat_dedup::{FlatDedupIterator, FlatLastNonNull, FlatLastRow};
 use crate::read::flat_merge::FlatMergeIterator;
 use crate::region::options::{IndexOptions, MergeMode, RegionOptions};
 use crate::region::version::{VersionControlData, VersionControlRef, VersionRef};
-use crate::region::{ManifestContextRef, RegionLeaderState, RegionRoleState, parse_partition_expr};
+use crate::region::{ManifestContextRef, RegionLeaderState, parse_partition_expr};
 use crate::request::{
     BackgroundNotify, DdlRequest, FlushFailed, FlushFinished, OnFailure, OptionOutputTx, OutputTx,
     SenderBulkRequest, SenderDdlRequest, SenderWriteRequest, WorkerRequest, WorkerRequestWithTime,
@@ -281,8 +281,6 @@ pub(crate) struct RegionFlushTask {
     pub(crate) index_options: IndexOptions,
     /// Semaphore to control flush concurrency.
     pub(crate) flush_semaphore: Arc<Semaphore>,
-    /// Whether the region is in staging mode.
-    pub(crate) is_staging: bool,
     /// Partition expression of the region.
     ///
     /// This is used to generate the file meta.
@@ -412,7 +410,6 @@ impl RegionFlushTask {
                     _timer: timer,
                     edit,
                     memtables_to_remove,
-                    is_staging: self.is_staging,
                 };
                 WorkerRequest::Background {
                     region_id: self.region_id,
@@ -537,10 +534,7 @@ impl RegionFlushTask {
             flushed_sequence: Some(version_data.committed_sequence),
             committed_sequence: None,
         };
-        info!(
-            "Applying {edit:?} to region {}, is_staging: {}",
-            self.region_id, self.is_staging
-        );
+        info!("Applying {edit:?} to region {}", self.region_id);
 
         let action_list = RegionMetaActionList::with_action(RegionMetaAction::Edit(edit.clone()));
 
@@ -553,17 +547,11 @@ impl RegionFlushTask {
         let expected_state = if matches!(self.reason, FlushReason::Downgrading) {
             RegionLeaderState::Downgrading
         } else {
-            // Check if region is in staging mode
-            let current_state = self.manifest_ctx.current_state();
-            if current_state == RegionRoleState::Leader(RegionLeaderState::Staging) {
-                RegionLeaderState::Staging
-            } else {
-                RegionLeaderState::Writable
-            }
+            RegionLeaderState::Writable
         };
         let manifest_version = match self
             .manifest_ctx
-            .update_manifest(expected_state, action_list, self.is_staging)
+            .update_manifest(expected_state, action_list, false)
             .await
         {
             Ok(manifest_version) => {
@@ -584,9 +572,8 @@ impl RegionFlushTask {
             }
         };
         info!(
-            "Successfully update manifest version to {manifest_version}, region: {}, is_staging: {}, reason: {}",
+            "Successfully update manifest version to {manifest_version}, region: {}, reason: {}",
             self.region_id,
-            self.is_staging,
             self.reason.as_str()
         );
 
@@ -1497,6 +1484,23 @@ impl FlushScheduler {
         status.pending_bulk_writes.push(request);
     }
 
+    /// Whether an ALTER owns a turn while waiting for its memtables to flush.
+    pub(crate) fn has_pending_alter(&self, region_id: RegionId) -> bool {
+        self.region_status.get(&region_id).is_some_and(|status| {
+            status
+                .pending_ddls
+                .iter()
+                .any(|ddl| matches!(ddl.request, DdlRequest::Alter(_)))
+        })
+    }
+
+    /// Returns true if the region has a close-time flush.
+    pub(crate) fn has_close_time_flush(&self, region_id: RegionId) -> bool {
+        self.region_status
+            .get(&region_id)
+            .is_some_and(|status| status.closing)
+    }
+
     /// Returns true if the region has pending DDLs or a close-time flush.
     pub(crate) fn has_pending_ddls(&self, region_id: RegionId) -> bool {
         self.region_status
@@ -1703,7 +1707,6 @@ mod tests {
             manifest_ctx,
             index_options: IndexOptions::default(),
             flush_semaphore: Arc::new(Semaphore::new(2)),
-            is_staging: false,
             partition_expr: None,
             durability_barrier: DurabilityBarrier::noop(),
         }
@@ -1854,7 +1857,6 @@ mod tests {
                 .await,
             index_options: IndexOptions::default(),
             flush_semaphore: Arc::new(Semaphore::new(2)),
-            is_staging: false,
             partition_expr: None,
             durability_barrier: DurabilityBarrier::noop(),
         };
@@ -1940,7 +1942,6 @@ mod tests {
                     committed_sequence: None,
                 },
                 memtables_to_remove: smallvec![],
-                is_staging: false,
             }),
         };
 
@@ -2156,7 +2157,6 @@ mod tests {
                 manifest_ctx: manifest_ctx.clone(),
                 index_options: IndexOptions::default(),
                 flush_semaphore: Arc::new(Semaphore::new(2)),
-                is_staging: false,
                 partition_expr: None,
                 durability_barrier: DurabilityBarrier::noop(),
             })
@@ -2463,7 +2463,6 @@ mod tests {
                 manifest_ctx: manifest_ctx.clone(),
                 index_options: IndexOptions::default(),
                 flush_semaphore: Arc::new(Semaphore::new(2)),
-                is_staging: false,
                 partition_expr: None,
                 durability_barrier: DurabilityBarrier::noop(),
             })

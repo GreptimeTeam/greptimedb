@@ -755,7 +755,7 @@ async fn test_open_on_an_empty_prefix_requires_accepting_the_missing_history() {
         assert_missing_history(
             &err,
             REGION_A,
-            "the prefix held no object when the WAL opened",
+            "the prefix held no object when the prefix was listed",
         );
         assert!(!engine.is_region_exists(REGION_A));
         assert!(wal_object_seqs(&new_location).await.is_empty());
@@ -923,7 +923,7 @@ async fn test_moving_the_wal_keeps_the_history_only_with_its_objects() {
     // nor through a catch-up after an open that skipped the replay.
     let store = open_store(&memory_store(), AckMode::Durable).await;
     let engine = new_engine(&mut env, store.clone()).await;
-    let reason = "the prefix held no object when the WAL opened";
+    let reason = "the prefix held no object when the prefix was listed";
     let err = open_region(&engine, REGION_A, &table_dir, &[])
         .await
         .unwrap_err();
@@ -1046,7 +1046,7 @@ async fn test_open_region_fails_when_its_watermark_is_above_the_wal_objects() {
                 .await
                 .unwrap_err();
             let reason = format!(
-                "its watermark, entry {watermark}, names object {}, but the prefix held entries only in objects below 2 when the WAL opened",
+                "its watermark, entry {watermark}, names object {}, but the prefix held entries only in objects below 2 when the prefix was listed",
                 watermark >> 20
             );
             assert_missing_history(&err, region_id, &reason);
@@ -1866,7 +1866,7 @@ async fn test_flush_does_not_publish_a_frontier_for_a_lost_enqueued_backlog() {
         engine
             .get_region_statistic(REGION_A)
             .unwrap()
-            .flushed_parquet_bytes,
+            .ingested_parquet_bytes,
         0
     );
     assert!(store.stop().await.is_err());

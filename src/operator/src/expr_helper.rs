@@ -20,17 +20,17 @@ use std::collections::{HashMap, HashSet};
 use api::helper::ColumnDataTypeWrapper;
 use api::v1::alter_database_expr::Kind as AlterDatabaseKind;
 use api::v1::alter_table_expr::Kind as AlterTableKind;
-use api::v1::column_def::{options_from_column_schema, try_as_column_schema};
+use api::v1::column_def::{self, options_from_column_schema, try_as_column_schema};
 use api::v1::{
     AddColumn, AddColumns, AlterDatabaseExpr, AlterTableExpr, Analyzer, ColumnDataType,
     ColumnDataTypeExtension, CreateFlowExpr, CreateTableExpr, CreateViewExpr, DropColumn,
     DropColumns, DropDefaults, ExpireAfter, FulltextBackend as PbFulltextBackend,
-    JsonSettings as PbJsonSettings, JsonTypeHint as PbJsonTypeHint, ModifyColumnType,
-    ModifyColumnTypes, RenameTable, SemanticType, SetDatabaseOptions, SetDefaults, SetFulltext,
-    SetIndex, SetIndexes, SetInverted, SetJsonSettings, SetSkipping, SetTableOptions,
-    SkippingIndexType as PbSkippingIndexType, TableName, UnsetDatabaseOptions, UnsetFulltext,
-    UnsetIndex, UnsetIndexes, UnsetInverted, UnsetSkipping, UnsetTableOptions, set_index,
-    unset_index,
+    JsonSettings as PbJsonSettings, JsonSkippingIndexOptions, JsonTypeHint as PbJsonTypeHint,
+    ModifyColumnType, ModifyColumnTypes, RenameTable, SemanticType, SetDatabaseOptions,
+    SetDefaults, SetFulltext, SetIndex, SetIndexes, SetInverted, SetJsonSettings, SetSkipping,
+    SetTableOptions, SkippingIndexType as PbSkippingIndexType, TableName, UnsetDatabaseOptions,
+    UnsetFulltext, UnsetIndex, UnsetIndexes, UnsetInverted, UnsetSkipping, UnsetTableOptions,
+    set_index, unset_index,
 };
 use common_datasource::object_store::LocalFileAccess;
 use common_error::ext::BoxedError;
@@ -806,16 +806,15 @@ fn json_settings_to_proto(settings: JsonSettings) -> Result<PbJsonSettings> {
                 data_type: data_type as i32,
                 datatype_extension,
                 inverted_index: hint.inverted_index,
-                skipping_index: hint.skipping_index.map(|options| {
-                    api::v1::JsonSkippingIndexOptions {
-                        granularity: options.granularity,
-                        index_type: match options.index_type {
-                            SkippingIndexType::BloomFilter => {
-                                PbSkippingIndexType::BloomFilter.into()
-                            }
-                        },
-                        false_positive_rate: options.false_positive_rate(),
-                    }
+                fulltext_index: hint
+                    .fulltext_index
+                    .map(column_def::json_fulltext_options_to_proto),
+                skipping_index: hint.skipping_index.map(|options| JsonSkippingIndexOptions {
+                    granularity: options.granularity,
+                    index_type: match options.index_type {
+                        SkippingIndexType::BloomFilter => PbSkippingIndexType::BloomFilter.into(),
+                    },
+                    false_positive_rate: options.false_positive_rate(),
                 }),
             })
         })
@@ -1211,11 +1210,14 @@ mod tests {
 
     use api::v1::{SetDatabaseOptions, UnsetDatabaseOptions};
     use datatypes::extension::json::is_json2_extension_type;
+    use datatypes::json::{JsonSettings, JsonTypeHint};
+    use datatypes::schema::{FulltextOptions, SkippingIndexOptions};
     use datatypes::value::Value;
     use session::context::{QueryContext, QueryContextBuilder};
     use sql::dialect::GreptimeDbDialect;
     use sql::parser::{ParseOptions, ParserContext};
     use sql::statements::statement::Statement;
+    use store_api::region_request::{AlterKind as RegionAlterKind, RegionAlterRequest};
     use store_api::storage::ColumnDefaultConstraint;
 
     use super::*;
@@ -1859,6 +1861,71 @@ SELECT max(c1), min(c2) FROM schema_2.table_2;";
             modify_column_type.target_type
         );
         assert!(modify_column_type.target_type_extension.is_none());
+    }
+
+    #[test]
+    fn test_json_settings_roundtrip() {
+        let mut cases = vec![JsonSettings::default(), JsonSettings::new_v2()];
+        for backend in [FulltextBackend::Bloom, FulltextBackend::Tantivy] {
+            let options =
+                FulltextOptions::new(true, FulltextAnalyzer::Chinese, true, backend, 8, 0.05)
+                    .unwrap();
+            cases.push(
+                JsonSettings::try_new(
+                    vec![
+                        JsonTypeHint {
+                            path: vec!["nested".into(), "message".into()],
+                            data_type: ConcreteDataType::string_datatype(),
+                            inverted_index: true,
+                            skipping_index: Some(
+                                SkippingIndexOptions::new(8, 0.05, SkippingIndexType::BloomFilter)
+                                    .unwrap(),
+                            ),
+                            fulltext_index: Some(options),
+                        },
+                        JsonTypeHint {
+                            path: vec!["count".into()],
+                            data_type: ConcreteDataType::int64_datatype(),
+                            inverted_index: false,
+                            skipping_index: None,
+                            fulltext_index: None,
+                        },
+                    ],
+                    Some(0),
+                )
+                .unwrap(),
+            );
+        }
+        for settings in cases {
+            let wire = json_settings_to_proto(settings.clone()).unwrap();
+            let set_settings = api::v1::SetJsonSettings {
+                column_name: "payload".into(),
+                settings: Some(wire),
+            };
+            let expr = api::v1::AlterTableExpr {
+                kind: Some(AlterTableKind::SetJsonSettings(set_settings.clone())),
+                ..Default::default()
+            };
+            let request = common_grpc_expr::alter_expr_to_request(1, expr, None).unwrap();
+            let table::requests::AlterKind::SetJsonSettings { request } = request.alter_kind else {
+                panic!("expected JSON settings request");
+            };
+            assert_eq!(settings, request.settings);
+            let request = RegionAlterRequest::try_from(api::v1::region::AlterRequest {
+                kind: Some(api::v1::region::alter_request::Kind::SetJsonSettings(
+                    set_settings,
+                )),
+                ..Default::default()
+            })
+            .unwrap();
+            let RegionAlterKind::SetJsonSettings {
+                settings: decoded, ..
+            } = request.kind
+            else {
+                panic!("expected JSON settings region request");
+            };
+            assert_eq!(settings, decoded);
+        }
     }
 
     #[test]

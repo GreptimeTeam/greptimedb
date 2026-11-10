@@ -31,7 +31,6 @@ parquet-variant.workspace = true
 parquet-variant-compute.workspace = true
 parquet-variant-json.workspace = true
 paste.workspace = true
-regex.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 snafu.workspace = true

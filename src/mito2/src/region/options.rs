@@ -265,6 +265,12 @@ impl RegionOptions {
     pub fn primary_key_encoding(&self) -> PrimaryKeyEncoding {
         self.primary_key_encoding.unwrap_or_default()
     }
+
+    /// Returns whether the manifest of this region is published conditionally, which it is when
+    /// the region's writes require a lease and its WAL is the object store WAL.
+    pub(crate) fn requires_conditional_manifest_publication(&self, lease_enabled: bool) -> bool {
+        lease_enabled && matches!(self.wal_options, WalOptions::ObjectStore(_))
+    }
 }
 
 impl RegionOptions {
@@ -696,7 +702,7 @@ fn validate_enum_options(
 mod tests {
     use common_error::ext::ErrorExt;
     use common_error::status_code::StatusCode;
-    use common_wal::options::KafkaWalOptions;
+    use common_wal::options::{KafkaWalOptions, ObjectStoreWalOptions};
     use store_api::mito_engine_options::{
         EXPERIMENTAL_SST_FLOAT_FIELD_ENCODING, SKIP_WAL_KEY, WRITE_BUFFER_SIZE_KEY,
     };
@@ -715,6 +721,21 @@ mod tests {
         let map = make_map(&[]);
         let options = RegionOptions::try_from_options(RegionId::new(0, 0), &map).unwrap();
         assert_eq!(RegionOptions::default(), options);
+    }
+
+    #[test]
+    fn test_conditional_manifest_requires_lease_and_object_store_wal() {
+        let options = |wal_options| RegionOptions {
+            wal_options,
+            ..Default::default()
+        };
+        let object_store_wal = options(WalOptions::ObjectStore(ObjectStoreWalOptions::new(
+            "wal".to_string(),
+        )));
+
+        assert!(object_store_wal.requires_conditional_manifest_publication(true));
+        assert!(!object_store_wal.requires_conditional_manifest_publication(false));
+        assert!(!options(WalOptions::RaftEngine).requires_conditional_manifest_publication(true));
     }
 
     #[test]

@@ -17,14 +17,13 @@ use std::fmt::Display;
 use common_time::timestamp::Timestamp;
 use itertools::Itertools;
 use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
-use opentelemetry_proto::tonic::common::v1::{InstrumentationScope, any_value};
+use opentelemetry_proto::tonic::common::v1::InstrumentationScope;
 use opentelemetry_proto::tonic::trace::v1::span::{Event, Link};
 use opentelemetry_proto::tonic::trace::v1::{Span, Status};
 use serde::Serialize;
 
-use crate::otlp::trace::KEY_SERVICE_NAME;
 use crate::otlp::trace::attributes::{Attributes, SharedAttributes};
-use crate::otlp::utils::bytes_to_hex_string;
+use crate::otlp::utils::{bytes_to_hex_string, resource_service_name};
 
 #[derive(Debug, Clone)]
 pub struct TraceSpan {
@@ -268,21 +267,7 @@ pub fn parse(request: ExportTraceServiceRequest) -> TraceSpanGroups {
             .map(|r| r.attributes)
             .unwrap_or_default();
 
-        // "service.name" is required; SDKs MUST provide a fallback when it is unset.
-        // This is in the specification:
-        // https://opentelemetry.io/docs/specs/semconv/resource/service/
-        // Tolerate missing names from senders without using unrelated attributes as names.
-        let service_name = resource_attrs
-            .iter()
-            .find(|kv| kv.key == KEY_SERVICE_NAME)
-            .and_then(|kv| kv.value.clone())
-            .and_then(|v| match v.value {
-                Some(any_value::Value::StringValue(s)) => Some(s),
-                Some(any_value::Value::BytesValue(b)) => {
-                    Some(String::from_utf8_lossy(&b).to_string())
-                }
-                _ => None,
-            });
+        let service_name = resource_service_name(&resource_attrs);
 
         let resource_attrs = SharedAttributes::from(Attributes::from(resource_attrs));
         for scope_spans in resource_spans.scope_spans {

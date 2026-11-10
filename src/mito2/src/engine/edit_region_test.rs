@@ -884,3 +884,339 @@ async fn test_edit_region_concurrently_with_format(flat_format: bool) {
         tasks_count * EDITS_PER_TASK
     );
 }
+
+#[tokio::test]
+async fn test_alter_precedes_edit_backlog() {
+    use store_api::region_request::{AddColumn, AlterKind, RegionAlterRequest};
+    use tokio::sync::Notify;
+    struct Listener {
+        tx: mpsc::UnboundedSender<usize>,
+        altering: Notify,
+        release: Notify,
+        flushing: Notify,
+        release_flush: Notify,
+    }
+    #[async_trait::async_trait]
+    impl EventListener for Listener {
+        fn on_recv_requests(&self, count: usize) {
+            let _ = self.tx.send(count);
+        }
+        async fn on_flush_begin(&self, _: RegionId) {
+            self.flushing.notify_one();
+            self.release_flush.notified().await;
+        }
+        async fn on_notify_region_change_result_begin(&self, _: RegionId) {
+            self.altering.notify_one();
+            self.release.notified().await;
+        }
+    }
+    for (dirty, invalid) in [(false, false), (true, false), (false, true)] {
+        let mut env = TestEnv::new().await;
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let listener = Arc::new(Listener {
+            tx,
+            altering: Notify::new(),
+            release: Notify::new(),
+            flushing: Notify::new(),
+            release_flush: Notify::new(),
+        });
+        let engine = env
+            .create_engine_with(
+                MitoConfig {
+                    schedule_compaction_after_edit: false,
+                    ..Default::default()
+                },
+                None,
+                Some(listener.clone()),
+                None,
+            )
+            .await;
+        let region_id = RegionId::new(1, 1);
+        let create = CreateRequestBuilder::new().build();
+        let schema = rows_schema(&create);
+        engine
+            .handle_request(region_id, RegionRequest::Create(create))
+            .await
+            .unwrap();
+        if dirty {
+            crate::test_util::put_rows(
+                &engine,
+                region_id,
+                Rows {
+                    schema,
+                    rows: build_rows(0, 1),
+                },
+            )
+            .await;
+        }
+        let region = engine.get_region(region_id).unwrap();
+        let guard = region.manifest_ctx.manifest_manager.write().await;
+        let e = engine.clone();
+        let first = tokio::spawn(async move {
+            e.edit_region(region_id, test_region_edit(region_id, FileId::random()))
+                .await
+        });
+        wait_until_region_is_in_editing(&region).await;
+        drain_worker_recv_events(&mut rx);
+        let file_id = FileId::random();
+        let e = engine.clone();
+        let queued = tokio::spawn(async move {
+            e.edit_region(region_id, test_region_edit(region_id, file_id))
+                .await
+        });
+        wait_worker_recv_event(&mut rx).await;
+        let e = engine.clone();
+        let alter = tokio::spawn(async move {
+            e.handle_request(
+                region_id,
+                RegionRequest::Alter(RegionAlterRequest {
+                    kind: AlterKind::AddColumns {
+                        columns: vec![AddColumn {
+                            column_metadata: store_api::metadata::ColumnMetadata {
+                                column_schema: datatypes::schema::ColumnSchema::new(
+                                    if invalid { "ts" } else { "new_field" },
+                                    datatypes::data_type::ConcreteDataType::float64_datatype(),
+                                    true,
+                                ),
+                                semantic_type: api::v1::SemanticType::Field,
+                                column_id: 100,
+                            },
+                            location: None,
+                        }],
+                    },
+                }),
+            )
+            .await
+        });
+        wait_worker_recv_event(&mut rx).await;
+        drop(guard);
+        let late = if dirty {
+            tokio::time::timeout(Duration::from_secs(10), listener.flushing.notified())
+                .await
+                .unwrap();
+            drain_worker_recv_events(&mut rx);
+            let e = engine.clone();
+            let task = tokio::spawn(async move {
+                e.edit_region(region_id, test_region_edit(region_id, FileId::random()))
+                    .await
+            });
+            wait_worker_recv_event(&mut rx).await;
+            listener.release_flush.notify_one();
+            Some(task)
+        } else {
+            None
+        };
+        if invalid {
+            assert!(alter.await.unwrap().is_err());
+            first.await.unwrap().unwrap();
+            tokio::time::timeout(Duration::from_secs(10), queued)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            continue;
+        }
+        tokio::time::timeout(Duration::from_secs(10), listener.altering.notified())
+            .await
+            .unwrap();
+        assert_eq!(None, region_file_sequence(&region, file_id));
+        assert!(!queued.is_finished());
+        assert!(late.as_ref().is_none_or(|task| !task.is_finished()));
+        // Queue another ALTER while the first is waiting to notify the worker.
+        drain_worker_recv_events(&mut rx);
+        let e = engine.clone();
+        let second_alter = tokio::spawn(async move {
+            e.handle_request(
+                region_id,
+                RegionRequest::Alter(RegionAlterRequest {
+                    kind: AlterKind::AddColumns {
+                        columns: vec![AddColumn {
+                            column_metadata: store_api::metadata::ColumnMetadata {
+                                column_schema: datatypes::schema::ColumnSchema::new(
+                                    "new_field_2",
+                                    datatypes::data_type::ConcreteDataType::float64_datatype(),
+                                    true,
+                                ),
+                                semantic_type: api::v1::SemanticType::Field,
+                                column_id: 101,
+                            },
+                            location: None,
+                        }],
+                    },
+                }),
+            )
+            .await
+        });
+        wait_worker_recv_event(&mut rx).await;
+        listener.release.notify_one();
+        tokio::time::timeout(Duration::from_secs(10), alter)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(10), listener.altering.notified())
+            .await
+            .unwrap();
+        // Completing the first ALTER must hand off to the next ALTER before edits.
+        assert_eq!(None, region_file_sequence(&region, file_id));
+        assert!(!queued.is_finished());
+        assert!(late.as_ref().is_none_or(|task| !task.is_finished()));
+        listener.release.notify_one();
+        tokio::time::timeout(Duration::from_secs(10), second_alter)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let metadata = region.metadata();
+        assert_eq!(metadata.column_by_name("new_field").unwrap().column_id, 100);
+        assert_eq!(
+            metadata.column_by_name("new_field_2").unwrap().column_id,
+            101
+        );
+        first.await.unwrap().unwrap();
+        tokio::time::timeout(Duration::from_secs(10), queued)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(region_file_sequence(&region, file_id).is_some());
+        if let Some(late) = late {
+            tokio::time::timeout(Duration::from_secs(10), late)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_drop_rejects_alter_and_edit_queues_after_flush_commit() {
+    use store_api::region_request::{
+        AddColumn, AlterKind, RegionAlterRequest, RegionDropRequest, RegionFlushRequest,
+    };
+    use tokio::sync::Notify;
+
+    struct Listener {
+        tx: mpsc::UnboundedSender<usize>,
+        committing: Notify,
+        release: Notify,
+    }
+
+    #[async_trait::async_trait]
+    impl EventListener for Listener {
+        fn on_recv_requests(&self, count: usize) {
+            let _ = self.tx.send(count);
+        }
+
+        async fn on_flush_commit_begin(&self, _: RegionId) {
+            self.committing.notify_one();
+            self.release.notified().await;
+        }
+    }
+
+    let mut env = TestEnv::new().await;
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let listener = Arc::new(Listener {
+        tx,
+        committing: Notify::new(),
+        release: Notify::new(),
+    });
+    let engine = env
+        .create_engine_with(MitoConfig::default(), None, Some(listener.clone()), None)
+        .await;
+    let region_id = RegionId::new(1, 1);
+    let create = CreateRequestBuilder::new().build();
+    let schema = rows_schema(&create);
+    engine
+        .handle_request(region_id, RegionRequest::Create(create))
+        .await
+        .unwrap();
+    crate::test_util::put_rows(
+        &engine,
+        region_id,
+        Rows {
+            schema,
+            rows: build_rows(0, 1),
+        },
+    )
+    .await;
+
+    let e = engine.clone();
+    let flush = tokio::spawn(async move {
+        e.handle_request(
+            region_id,
+            RegionRequest::Flush(RegionFlushRequest::default()),
+        )
+        .await
+    });
+    tokio::time::timeout(Duration::from_secs(10), listener.committing.notified())
+        .await
+        .unwrap();
+    drain_worker_recv_events(&mut rx);
+
+    // DROP can no longer cancel the flush, so it waits for successful completion.
+    let e = engine.clone();
+    let drop = tokio::spawn(async move {
+        e.handle_request(
+            region_id,
+            RegionRequest::Drop(RegionDropRequest {
+                fast_path: false,
+                force: false,
+                partial_drop: false,
+            }),
+        )
+        .await
+    });
+    wait_worker_recv_event(&mut rx).await;
+
+    // The first ALTER waits in the flush scheduler; the second uses pending_alters.
+    let mut alters = Vec::new();
+    for _ in 0..2 {
+        let e = engine.clone();
+        alters.push(tokio::spawn(async move {
+            e.handle_request(
+                region_id,
+                RegionRequest::Alter(RegionAlterRequest {
+                    kind: AlterKind::AddColumns {
+                        columns: vec![AddColumn {
+                            column_metadata: store_api::metadata::ColumnMetadata {
+                                column_schema: datatypes::schema::ColumnSchema::new(
+                                    "new_field",
+                                    datatypes::data_type::ConcreteDataType::float64_datatype(),
+                                    true,
+                                ),
+                                semantic_type: api::v1::SemanticType::Field,
+                                column_id: 100,
+                            },
+                            location: None,
+                        }],
+                    },
+                }),
+            )
+            .await
+        }));
+        wait_worker_recv_event(&mut rx).await;
+    }
+    let e = engine.clone();
+    let edit = tokio::spawn(async move {
+        e.edit_region(region_id, test_region_edit(region_id, FileId::random()))
+            .await
+    });
+    wait_worker_recv_event(&mut rx).await;
+    listener.release.notify_one();
+
+    tokio::time::timeout(Duration::from_secs(10), async {
+        flush.await.unwrap().unwrap();
+        drop.await.unwrap().unwrap();
+        assert!(engine.get_region(region_id).is_none());
+        for alter in alters {
+            let err = alter.await.unwrap().unwrap_err();
+            assert_eq!(err.status_code(), StatusCode::RegionNotFound);
+        }
+        let err = edit.await.unwrap().unwrap_err();
+        assert_eq!(err.status_code(), StatusCode::RegionNotFound);
+    })
+    .await
+    .expect("DROP left queued ALTER or edit requests unresolved");
+}

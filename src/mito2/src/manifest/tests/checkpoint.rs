@@ -21,8 +21,7 @@ use common_datasource::compression::CompressionType;
 use common_error::ext::{ErrorExt, RetryHint};
 use common_error::status_code::StatusCode;
 use object_store::layers::mock::{
-    BytesRange, Error as MockError, ErrorKind, MockLayer, MockLayerBuilder, OpDelete,
-    Result as MockResult, RpRead, oio,
+    Error as MockError, ErrorKind, MockLayerBuilder, OpDelete, Result as MockResult, oio,
 };
 use store_api::storage::{FileId, RegionId};
 use strum::IntoEnumIterator;
@@ -37,10 +36,10 @@ use crate::manifest::storage::{
     checkpoint_file, delta_file, file_version, gen_path, is_delta_file,
 };
 use crate::manifest::tests::utils::{
-    basic_region_metadata, manifest_dir_usage, manifest_recovery_usage,
+    basic_region_metadata, fail_manifest_reads_layer, manifest_dir_usage, manifest_recovery_usage,
 };
 use crate::sst::file::FileMeta;
-use crate::test_util::{CheckpointTaskBlocker, TestEnv};
+use crate::test_util::{CheckpointTaskBlocker, TestEnv, nop_action};
 
 async fn build_manager(
     checkpoint_distance: u64,
@@ -77,43 +76,6 @@ async fn reopen_manager(
     env.create_manifest_manager(compress_type, checkpoint_distance, None)
         .await
         .unwrap()
-        .unwrap()
-}
-
-fn nop_action() -> RegionMetaActionList {
-    RegionMetaActionList::new(vec![RegionMetaAction::Edit(RegionEdit {
-        files_to_add: vec![],
-        files_to_remove: vec![],
-        timestamp_ms: None,
-        compaction_time_window: None,
-        flushed_entry_id: None,
-        flushed_sequence: None,
-        committed_sequence: None,
-    })])
-}
-
-struct NotFoundReader;
-
-impl oio::StreamRead for NotFoundReader {
-    async fn open(&self, _: BytesRange) -> MockResult<(RpRead, Box<dyn oio::ReadStreamDyn>)> {
-        Err(MockError::new(
-            ErrorKind::NotFound,
-            "mock listed manifest delta not found",
-        ))
-    }
-}
-
-fn fail_manifest_delta_reads_layer() -> MockLayer {
-    MockLayerBuilder::default()
-        .reader_factory(Arc::new(|path, _args, inner| {
-            let file_name = path.rsplit('/').next().unwrap_or(path);
-            if is_delta_file(file_name) {
-                Box::new(oio::StreamReader::new(NotFoundReader))
-            } else {
-                inner
-            }
-        }))
-        .build()
         .unwrap()
 }
 
@@ -651,7 +613,7 @@ async fn manifest_size_ignores_leftover_files_after_failed_delete(#[case] fail_d
 async fn open_preserves_listed_delta_not_found_retry_hint() {
     let env = TestEnv::new()
         .await
-        .with_mock_layer(fail_manifest_delta_reads_layer());
+        .with_mock_layer(fail_manifest_reads_layer(is_delta_file));
     let metadata = Arc::new(basic_region_metadata());
     let mut manager = env
         .create_manifest_manager(CompressionType::Uncompressed, 0, Some(metadata.clone()))
@@ -682,7 +644,7 @@ async fn open_preserves_listed_delta_not_found_retry_hint() {
 async fn install_preserves_listed_delta_not_found_retry_hint() {
     let env = TestEnv::new()
         .await
-        .with_mock_layer(fail_manifest_delta_reads_layer());
+        .with_mock_layer(fail_manifest_reads_layer(is_delta_file));
     let metadata = Arc::new(basic_region_metadata());
     let mut manager = env
         .create_manifest_manager(CompressionType::Uncompressed, 0, Some(metadata))
@@ -1000,6 +962,7 @@ async fn manifest_size_warm_cache_matches_recovery_bytes(
             checkpoint_distance: 3,
             remove_file_options: Default::default(),
             manifest_cache: Some(cache.clone()),
+            conditional_publication: false,
         };
         let expected = manifest_recovery_usage(env.data_home().join("manifest")).await;
         // First open fills the cache; the second reuses the cached checkpoint and deltas.
@@ -1071,4 +1034,74 @@ impl oio::List for ZeroSizeLister {
         builder.set_file(0);
         Ok(Some(oio::Entry::new(&path, builder.build())))
     }
+}
+
+#[rstest::rstest]
+#[case(CompressionType::Uncompressed)]
+#[case(CompressionType::Gzip)]
+#[case(CompressionType::Zstd)]
+#[tokio::test]
+async fn manifest_cache_write_through_survives_reopen(#[case] compression: CompressionType) {
+    use common_base::readable_size::ReadableSize;
+    use common_test_util::temp_dir::create_temp_dir;
+    use object_store::ObjectStore;
+    use object_store::services::Fs;
+
+    use crate::cache::manifest_cache::ManifestCache;
+    use crate::manifest::manager::RegionManifestOptions;
+    use crate::sst::FormatType;
+
+    let remote_dir = create_temp_dir("manifest-manager-remote");
+    let cache_dir = create_temp_dir("manifest-manager-cache");
+    let remote = ObjectStore::new(Fs::default().root(remote_dir.path().to_str().unwrap())).unwrap();
+    let local = ObjectStore::new(Fs::default().root(cache_dir.path().to_str().unwrap())).unwrap();
+    let cache = ManifestCache::new(local.clone(), ReadableSize::mb(32), None, true).await;
+    // Use a relative prefix, matching production keys and the recovered index.
+    let mut options = RegionManifestOptions {
+        manifest_dir: "region/".to_string(),
+        object_store: remote,
+        compress_type: compression,
+        checkpoint_distance: 3,
+        remove_file_options: Default::default(),
+        manifest_cache: Some(cache.clone()),
+        conditional_publication: false,
+    };
+    let mut writer = RegionManifestManager::new(
+        Arc::new(basic_region_metadata()),
+        0,
+        options.clone(),
+        FormatType::PrimaryKey,
+        false,
+        &Default::default(),
+    )
+    .await
+    .unwrap();
+    for _ in 0..7 {
+        writer.update(nop_action(), false).await.unwrap();
+        wait_for_manifest_checkpoint(&writer).await;
+    }
+    let key = gen_path(
+        "region/",
+        &checkpoint_file(writer.checkpointer().last_checkpoint_version()),
+        compression,
+    );
+    assert!(cache.get(&key).await.is_some());
+    let version = writer.manifest().manifest_version;
+    let usage = writer.manifest_usage();
+    drop(writer);
+    drop(cache);
+    // Release the final old cache handle before recovering a new index.
+    drop(options.manifest_cache.take());
+    let cache = ManifestCache::new(local, ReadableSize::mb(32), None, true).await;
+    assert!(
+        cache.get(&key).await.is_some(),
+        "cache recovery missed {key}"
+    );
+    options.manifest_cache = Some(cache);
+    let reopened = RegionManifestManager::open(options, &Default::default())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(version, reopened.manifest().manifest_version);
+    assert_eq!(usage, reopened.manifest_usage());
 }

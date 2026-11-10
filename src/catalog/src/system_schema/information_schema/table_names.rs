@@ -60,3 +60,6 @@ pub const USER_PRIVILEGES: &str = "user_privileges";
 /// MySQL's session list. GreptimeDB reports its own sessions through [`PROCESS_LIST`];
 /// this table only exists so MySQL tooling finds the name and column shape it expects.
 pub const PROCESSLIST: &str = "processlist";
+
+/// Live compaction tasks.
+pub const COMPACTION_TASKS: &str = "compaction_tasks";

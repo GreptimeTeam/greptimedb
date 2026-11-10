@@ -1657,7 +1657,7 @@ dependencies = [
  "maybe-owned",
  "rustix 1.0.7",
  "rustix-linux-procfs",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
  "winx",
 ]
 
@@ -2285,7 +2285,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "117725a109d387c937a1533ce01b450cbde6b88abceea8473c4d7a85853cda3c"
 dependencies = [
  "lazy_static",
- "windows-sys 0.48.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -4518,6 +4518,7 @@ version = "1.4.0-alpha.0"
 dependencies = [
  "api",
  "arrow-flight",
+ "async-stream",
  "async-trait",
  "bytes",
  "cache",
@@ -4613,7 +4614,6 @@ dependencies = [
  "parquet-variant-compute",
  "parquet-variant-json",
  "paste",
- "regex",
  "serde",
  "serde_json",
  "snafu 0.8.6",
@@ -6158,7 +6158,7 @@ dependencies = [
 [[package]]
 name = "greptime-proto"
 version = "0.1.0"
-source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=9eb24ddd94ddb9295bff9e596834832a7d8ba008#9eb24ddd94ddb9295bff9e596834832a7d8ba008"
+source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=f5ab772b697b571e2c27b7d74fab98bac27046ae#f5ab772b697b571e2c27b7d74fab98bac27046ae"
 dependencies = [
  "prost 0.14.1",
  "prost-types 0.14.1",
@@ -6251,11 +6251,11 @@ dependencies = [
 
 [[package]]
 name = "halfbrown"
-version = "0.3.0"
+version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "aa2c385c6df70fd180bbb673d93039dbd2cd34e41d782600bdf6e1ca7bce39aa"
+checksum = "0c7ed2f2edad8a14c8186b847909a41fbb9c3eafa44f88bd891114ed5019da09"
 dependencies = [
- "hashbrown 0.15.4",
+ "hashbrown 0.16.1",
  "serde",
 ]
 
@@ -6770,7 +6770,7 @@ dependencies = [
  "libc",
  "percent-encoding",
  "pin-project-lite",
- "socket2 0.5.10",
+ "socket2 0.6.4",
  "tokio",
  "tower-service",
  "tracing",
@@ -8195,6 +8195,7 @@ dependencies = [
  "bytes",
  "chrono",
  "common-base",
+ "common-cache",
  "common-config",
  "common-error",
  "common-macro",
@@ -9333,7 +9334,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -10816,9 +10817,9 @@ dependencies = [
 
 [[package]]
 name = "pgwire"
-version = "0.42.1"
+version = "0.42.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1452e6541bcc64e166ff9d350c25c09334c0c80e8f60fde5e36ff81768eeaa55"
+checksum = "69354d96ef951739b5ccc75a99a8a1b09bc164afde265be9656ddab87395b481"
 dependencies = [
  "async-trait",
  "aws-lc-rs",
@@ -11606,7 +11607,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ac6c3320f9abac597dcbc668774ef006702672474aad53c6d596b62e487b40b1"
 dependencies = [
  "heck 0.5.0",
- "itertools 0.10.5",
+ "itertools 0.14.0",
  "log",
  "multimap",
  "once_cell",
@@ -11654,7 +11655,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8a56d757972c98b346a9b766e3f02746cde6dd1cd1d1d563472929fdd74bec4d"
 dependencies = [
  "anyhow",
- "itertools 0.10.5",
+ "itertools 0.14.0",
  "proc-macro2",
  "quote",
  "syn 2.0.117",
@@ -11667,7 +11668,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9120690fafc389a67ba3803df527d0ec9cbbc9cc45e4cc20b332996dfb672425"
 dependencies = [
  "anyhow",
- "itertools 0.10.5",
+ "itertools 0.14.0",
  "proc-macro2",
  "quote",
  "syn 2.0.117",
@@ -13223,7 +13224,7 @@ dependencies = [
  "security-framework 3.7.0",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -13992,13 +13993,11 @@ checksum = "d66dc143e6b11c1eddc06d5c423cfc97062865baf299914ab64caa38182078fe"
 
 [[package]]
 name = "simd-json"
-version = "0.15.1"
+version = "0.19.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c962f626b54771990066e5435ec8331d1462576cd2d1e62f24076ae014f92112"
+checksum = "e8f2e4d523646f7da6dde3983bd18ede0babc21c258ab708b3dd93ea0259719d"
 dependencies = [
- "getrandom 0.3.4",
  "halfbrown",
- "ref-cast",
  "serde",
  "serde_json",
  "simdutf8",
@@ -14147,7 +14146,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "52d1cfed4120b4d927bf7c0f86d2087a4a7d6027c906d9f9d525a80573b9be51"
 dependencies = [
  "libc",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -14718,7 +14717,7 @@ dependencies = [
  "cfg-if",
  "libc",
  "psm",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -15343,7 +15342,7 @@ dependencies = [
  "getrandom 0.3.4",
  "once_cell",
  "rustix 1.0.7",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -16596,9 +16595,9 @@ checksum = "ba73ea9cf16a25df0c8caa16c51acb937d5712a8429db78a3ee29d5dcacd3a65"
 
 [[package]]
 name = "value-trait"
-version = "0.11.0"
+version = "0.12.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0508fce11ad19e0aab49ce20b6bec7f8f82902ded31df1c9fc61b90f0eb396b8"
+checksum = "545a3d7089f11f1741d12963c057adf9443fc24325110a6a6daf582e825fd51b"
 dependencies = [
  "float-cmp",
  "halfbrown",
@@ -17113,7 +17112,7 @@ version = "0.1.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf221c93e13a30d793f7645a0e7762c55d169dbb0a49671918a2319d289b10bb"
 dependencies = [
- "windows-sys 0.48.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]

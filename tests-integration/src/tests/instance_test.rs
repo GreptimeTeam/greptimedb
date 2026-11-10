@@ -22,6 +22,7 @@ use common_error::status_code::StatusCode;
 use common_query::Output;
 use common_recordbatch::util;
 use common_test_util::recordbatch::check_output_stream;
+use datanode::region_server::RegionServer;
 use datatypes::arrow::array::{
     ArrayRef, AsArray, StringArray, TimestampMillisecondArray, UInt64Array,
 };
@@ -4978,4 +4979,309 @@ async fn test_exemplar_source_identity_policy() {
         })
         .collect::<Vec<_>>();
     assert_eq!(ids, vec![source.table_id(), replacement.table_id()]);
+}
+
+#[tokio::test]
+async fn test_compaction_tasks_sql_lifecycle() {
+    use crate::standalone::GreptimeDbStandaloneBuilder;
+
+    let instance = GreptimeDbStandaloneBuilder::new("compaction_tasks_sql_lifecycle")
+        .build()
+        .await;
+    check_compaction_tasks_sql_lifecycle(
+        instance.fe_instance(),
+        instance.datanode.region_server(),
+        0,
+        None,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn test_compaction_tasks_distributed_sql_lifecycle() {
+    use common_meta::peer::Peer;
+    use meta_srv::error::Result as MetaResult;
+    use meta_srv::metasrv::SelectorContext;
+    use meta_srv::selector::{Selector, SelectorOptions};
+
+    use crate::cluster::GreptimeDbClusterBuilder;
+    use crate::test_util::PEER_PLACEHOLDER_ADDR;
+
+    struct CompactionNodeSelector;
+
+    #[async_trait::async_trait]
+    impl Selector for CompactionNodeSelector {
+        type Context = SelectorContext;
+        type Output = Vec<Peer>;
+
+        async fn select(
+            &self,
+            _ctx: &Self::Context,
+            _opts: SelectorOptions<'_>,
+        ) -> MetaResult<Self::Output> {
+            Ok(vec![Peer {
+                id: 1,
+                addr: PEER_PLACEHOLDER_ADDR.to_string(),
+            }])
+        }
+    }
+
+    let cluster = GreptimeDbClusterBuilder::new("compaction_tasks_distributed_sql_lifecycle")
+        .await
+        .with_datanodes(2)
+        // Only node 1 gets the gated engine; place the table there deterministically.
+        .with_meta_selector(Arc::new(CompactionNodeSelector))
+        .build(false)
+        .await;
+    assert_eq!(cluster.datanode_instances.len(), 2);
+    check_compaction_tasks_sql_lifecycle(
+        cluster.fe_instance(),
+        cluster.datanode_instances[&1].region_server(),
+        1,
+        Some(2),
+    )
+    .await;
+}
+
+/// Exercises SQL -> catalog -> datanode inspection -> live scheduler state.
+async fn check_compaction_tasks_sql_lifecycle(
+    frontend: &Arc<Instance>,
+    mut region_server: RegionServer,
+    node_id: u64,
+    other_node_id: Option<u64>,
+) {
+    use std::time::Duration;
+
+    use common_recordbatch::RecordBatches;
+    use mito2::config::MitoConfig;
+    use mito2::engine::listener::CompactionListener;
+    use mito2::test_util::TestEnv;
+
+    struct Release(Arc<CompactionListener>);
+
+    impl Drop for Release {
+        fn drop(&mut self) {
+            self.0.wake();
+        }
+    }
+
+    async fn rows(frontend: &Arc<Instance>, sql: &str) -> RecordBatches {
+        let output = execute_sql(frontend, sql).await;
+        match output.data {
+            OutputData::Stream(stream) => RecordBatches::try_collect(stream).await.unwrap(),
+            OutputData::RecordBatches(batches) => batches,
+            _ => panic!("expected query output"),
+        }
+    }
+
+    let listener = Arc::new(CompactionListener::default());
+    let release = Release(listener.clone());
+    let mut env = TestEnv::new().await.with_node_id(node_id);
+    let engine = env
+        .create_engine_with(
+            MitoConfig {
+                min_compaction_interval: Duration::from_secs(3600),
+                ..Default::default()
+            },
+            None,
+            Some(listener.clone()),
+            None,
+        )
+        .await;
+    // Install a real engine with a deterministic merge gate before creating any user table.
+    region_server.register_engine(Arc::new(engine.clone()));
+    execute_sql(frontend, "CREATE TABLE compact_inspect (host STRING PRIMARY KEY, ts TIMESTAMP TIME INDEX, val DOUBLE) WITH ('compaction.type' = 'twcs', 'compaction.twcs.trigger_file_num' = '100')").await;
+    for value in [1, 2] {
+        execute_sql(
+            frontend,
+            &format!("INSERT INTO compact_inspect VALUES ('a', 0, {value}), ('a', 1000, {value})"),
+        )
+        .await;
+        execute_sql(frontend, "ADMIN FLUSH_TABLE('compact_inspect')").await;
+    }
+    let before = rows(frontend, "SELECT * FROM compact_inspect ORDER BY ts")
+        .await
+        .pretty_print()
+        .unwrap();
+    let compact = {
+        let frontend = frontend.clone();
+        tokio::spawn(async move {
+            execute_sql(
+                &frontend,
+                "ADMIN COMPACT_TABLE('compact_inspect', 'strict_window', 'window=3600')",
+            )
+            .await
+        })
+    };
+    tokio::time::timeout(Duration::from_secs(20), listener.wait_handle_finished())
+        .await
+        .unwrap();
+    let live_tasks = engine.inspect_compaction_tasks(&[]).await.unwrap();
+    assert_eq!(live_tasks.len(), 1);
+    assert_eq!(live_tasks[0].state.as_ref(), "running");
+    assert_eq!(live_tasks[0].node_id, Some(node_id));
+    // Input SST bounds are inclusive; strict-window output bounds are [start, end).
+    let ranges = rows(frontend, &format!("SELECT input_time_start, input_time_end, output_time_start, output_time_end FROM information_schema.compaction_tasks WHERE node_id = {node_id} AND input_time_end = CAST('1970-01-01T00:00:01Z' AS TIMESTAMP(9))")).await;
+    assert_eq!(
+        ranges.iter().map(|batch| batch.num_rows()).sum::<usize>(),
+        1
+    );
+    let range_batch = ranges.iter().find(|batch| batch.num_rows() > 0).unwrap();
+    for (index, expected) in [0, 1_000_000_000, 0, 3_600_000_000_000i64]
+        .into_iter()
+        .enumerate()
+    {
+        let values = range_batch
+            .column(index)
+            .as_any()
+            .downcast_ref::<datatypes::arrow::array::TimestampNanosecondArray>()
+            .unwrap();
+        assert_eq!(values.iter().collect::<Vec<_>>(), vec![Some(expected)]);
+    }
+    let snapshot = rows(frontend, &format!("SELECT task_id, trigger_type, state, input_files, request_options, effective_options, node_id FROM information_schema.compaction_tasks WHERE trigger_type = 'manual' AND node_id = {node_id} LIMIT 1")).await;
+    assert_eq!(snapshot.iter().map(|b| b.num_rows()).sum::<usize>(), 1);
+    let snapshot = snapshot.iter().find(|batch| batch.num_rows() > 0).unwrap();
+    assert_eq!(
+        snapshot.column(0).as_string::<i32>().value(0),
+        live_tasks[0].task_id.as_ref()
+    );
+    assert_eq!(snapshot.column(1).as_string::<i32>().value(0), "manual");
+    assert_eq!(snapshot.column(2).as_string::<i32>().value(0), "running");
+    assert_eq!(
+        snapshot
+            .column(3)
+            .as_any()
+            .downcast_ref::<UInt64Array>()
+            .unwrap()
+            .value(0),
+        2
+    );
+    let request: serde_json::Value =
+        serde_json::from_str(snapshot.column(4).as_string::<i32>().value(0)).unwrap();
+    assert_eq!(request["type"], "strict_window");
+    assert_eq!(request["window_seconds"], 3600);
+    let effective: serde_json::Value =
+        serde_json::from_str(snapshot.column(5).as_string::<i32>().value(0)).unwrap();
+    assert_eq!(effective["time_window_seconds"], 3600);
+    assert_eq!(
+        snapshot
+            .column(6)
+            .as_any()
+            .downcast_ref::<UInt64Array>()
+            .unwrap()
+            .value(0),
+        node_id
+    );
+    assert_eq!(
+        rows(
+            frontend,
+            "SELECT task_id FROM information_schema.compaction_tasks WHERE node_id IS NULL"
+        )
+        .await
+        .iter()
+        .map(|batch| batch.num_rows())
+        .sum::<usize>(),
+        0
+    );
+    let nodes = rows(
+        frontend,
+        "SELECT node_id FROM information_schema.compaction_tasks",
+    )
+    .await;
+    assert_eq!(nodes.iter().map(|batch| batch.num_rows()).sum::<usize>(), 1);
+    assert_eq!(
+        nodes
+            .iter()
+            .find(|batch| batch.num_rows() > 0)
+            .unwrap()
+            .column(0)
+            .as_any()
+            .downcast_ref::<UInt64Array>()
+            .unwrap()
+            .value(0),
+        node_id
+    );
+    if let Some(other_node_id) = other_node_id {
+        let count = rows(frontend, &format!(
+            "SELECT count(*) FROM information_schema.compaction_tasks WHERE node_id = {other_node_id}"
+        )).await.pretty_print().unwrap();
+        assert_eq!(
+            count,
+            "+----------+\n| count(*) |\n+----------+\n| 0        |\n+----------+"
+        );
+    }
+    for sql in [
+        "SELECT count(*) FROM information_schema.compaction_tasks",
+        "SELECT count(*) FROM information_schema.compaction_tasks WHERE state = 'running'",
+    ] {
+        let count = rows(frontend, sql).await.pretty_print().unwrap();
+        assert_eq!(
+            count,
+            "+----------+\n| count(*) |\n+----------+\n| 1        |\n+----------+"
+        );
+    }
+    assert_eq!(rows(frontend, "SELECT task_id FROM information_schema.compaction_tasks WHERE node_id = 18446744073709551615").await.iter().map(|b| b.num_rows()).sum::<usize>(), 0);
+    drop(release);
+    tokio::time::timeout(Duration::from_secs(20), compact)
+        .await
+        .unwrap()
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if engine
+                .inspect_compaction_tasks(&[])
+                .await
+                .unwrap()
+                .is_empty()
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        rows(
+            frontend,
+            "SELECT task_id FROM information_schema.compaction_tasks"
+        )
+        .await
+        .iter()
+        .map(|b| b.num_rows())
+        .sum::<usize>(),
+        0
+    );
+    assert_eq!(
+        before,
+        rows(frontend, "SELECT * FROM compact_inspect ORDER BY ts")
+            .await
+            .pretty_print()
+            .unwrap()
+    );
+    execute_sql(frontend, "DROP TABLE compact_inspect").await;
+}
+
+#[apply(both_instances_cases)]
+async fn test_compaction_tasks_empty_and_node_pruning(instance: Arc<dyn MockInstance>) {
+    let frontend = instance.frontend();
+    for sql in [
+        "SELECT task_id FROM information_schema.compaction_tasks",
+        "SELECT task_id FROM information_schema.compaction_tasks WHERE node_id = 18446744073709551615 LIMIT 1",
+        "SELECT task_id FROM information_schema.compaction_tasks WHERE state = 'running' AND region_id = 0",
+    ] {
+        let output = execute_sql(&frontend, sql).await;
+        let batches = match output.data {
+            OutputData::Stream(stream) => common_recordbatch::RecordBatches::try_collect(stream)
+                .await
+                .unwrap(),
+            OutputData::RecordBatches(batches) => batches,
+            _ => panic!("expected query output"),
+        };
+        assert_eq!(
+            batches.iter().map(|b| b.num_rows()).sum::<usize>(),
+            0,
+            "{sql}"
+        );
+    }
 }

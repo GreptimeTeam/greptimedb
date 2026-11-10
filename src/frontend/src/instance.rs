@@ -1109,6 +1109,11 @@ impl SqlQueryHandler for Instance {
         stmt: Option<Statement>,
         query_ctx: QueryContextRef,
     ) -> server_error::Result<Output> {
+        // Prepared statements reach here with a plan built before their current execution.
+        let plan = query::plan::refresh_partition_columns(plan, &self.catalog_manager, &query_ctx)
+            .await
+            .map_err(BoxedError::new)
+            .context(server_error::ExecutePlanSnafu)?;
         self.do_exec_plan_inner(plan, stmt, query_ctx)
             .await
             .map_err(BoxedError::new)

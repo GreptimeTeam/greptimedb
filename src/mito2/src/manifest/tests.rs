@@ -14,4 +14,5 @@
 
 mod checkpoint;
 mod compatibility;
+mod conditional;
 pub mod utils;

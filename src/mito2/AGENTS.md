@@ -58,6 +58,14 @@ Internal series merges use the query runtime pool forwarded through
 `QueryScanContext`; reader and output-batch accounting uses the separate scan
 memory tracker. Direct scanner callers default to an unbounded operator pool.
 
+Live compaction queries read shared per-region state directly from `MitoRegion`,
+without sending a worker request. The scheduler publishes active and pending task
+state together; readers clone task Arcs under a short read lock, then filter and
+build rows outside the lock. Execution handles provide live background phases.
+There is no second task registry or completed-task history. See
+`compaction/scheduler/state.rs`. The datanode provider reuses the lazy inspection scan
+path and retains residual SQL filters.
+
 ## Public surface
 
 - Entry: `MitoEngine` in `src/mito2/src/engine.rs`, built via `MitoEngineBuilder`.
@@ -98,6 +106,9 @@ Tests live next to the code as `*_test.rs` (e.g. `src/mito2/src/engine/flush_tes
 - Sequence numbers are strictly increasing per region; dedup and snapshot reads
   depend on this. Do not change assignment lightly.
 - Manifest version is monotonic — never reset or skip it.
+- In regions whose writes require a lease and whose WAL is the object store WAL,
+  each manifest version has one fixed object name and only one writer can create
+  it (`manifest/storage.rs`).
 - Lock ordering: take the manifest lock before updating `version_control`; the
   reverse deadlocks against concurrent flush/compaction.
 - All region I/O runs on tokio workers; never `block_on` inside a worker.
@@ -115,9 +126,16 @@ Tests live next to the code as `*_test.rs` (e.g. `src/mito2/src/engine/flush_tes
   resident history, and an accepted plan consumes the fairness turn for each selected
   key. Execution success or failure must not rewrite waiting ages. TWCS discovery
   must not mutate scheduler state.
+- Compaction admission is engine-wide (`compaction/scheduler/coordinator.rs`),
+  but pick/DDL state remains worker-owned. Repick only after every batch unit's
+  `Released`; FIFO submission is not admission and pipeline children share the
+  parent unit's slot. Keep service accounting across batches until region unload.
 - In flat batches, equal `__primary_key` dictionary keys imply the same series, but
   not the reverse: `wrap_pk_binary_to_dict` gives every row its own key. Compare key
   bytes when grouping rows by series.
+- Staging regions never flush: a flush would move rows into the staging manifest and
+  release their WAL, losing them if staging does not end successfully. Every flush
+  trigger in `worker/handle_flush.rs` must skip them, and `handle_close` leaves staging first.
 
 ## Maintenance contract
 

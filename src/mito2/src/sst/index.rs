@@ -655,6 +655,7 @@ impl IndexerBuilderImpl {
             &self.metadata,
             self.fulltext_index_config.compress,
             mem_limit,
+            self.build_type.clone(),
         )
         .await;
 

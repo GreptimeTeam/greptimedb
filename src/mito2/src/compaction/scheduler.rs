@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+mod coordinator;
 pub(crate) mod history;
 mod local;
 mod planning;
@@ -24,21 +25,27 @@ use api::v1::region::compact_request;
 use common_base::Plugins;
 use common_memory_manager::OnExhaustedPolicy;
 use common_meta::key::SchemaMetadataManagerRef;
+#[cfg(test)]
+use common_recordbatch::filter::MetadataFilter;
 use common_telemetry::{debug, error, info, warn};
 use common_time::range::TimestampRange;
+pub(crate) use coordinator::{CompactionCoordinator, ReadyUnit};
+#[cfg(test)]
+use datafusion_common::ScalarValue;
 pub(crate) use planning::CompactionPickFinished;
 pub use planning::CompactionRequest;
 #[cfg(test)]
 pub(crate) use planning::pick_automatic_for_test;
-pub(crate) use state::CompactionExecution;
+pub(crate) use state::{CompactionExecution, CompactionState, CompactionStateRef};
 use state::{CompactionStatus, CompactionTrigger, DdlExecution, PendingCompaction};
+#[cfg(test)]
+use store_api::compaction_task::{self, CompactionTaskEntry};
 use store_api::storage::RegionId;
 use tokio::sync::mpsc::Sender;
 
 use crate::access_layer::AccessLayerRef;
 use crate::cache::CacheManagerRef;
 use crate::compaction::memory_manager::CompactionMemoryManager;
-use crate::compaction::task::MAX_PARALLEL_COMPACTION;
 use crate::config::MitoConfig;
 use crate::error::{
     CompactionCancelledSnafu, Error, ManualCompactionAlreadyRunningSnafu, RegionClosedSnafu,
@@ -49,7 +56,6 @@ use crate::region::{ManifestContextRef, RegionLeaderState, RegionRoleState};
 use crate::request::{DdlRequest, OptionOutputTx, SenderDdlRequest, WorkerRequestWithTime};
 #[cfg(test)]
 use crate::schedule::RequestCancelResult;
-use crate::schedule::scheduler::SchedulerRef;
 use crate::worker::WorkerListener;
 
 /// Internal testing switch to prevent SST compaction from changing file layouts
@@ -88,7 +94,7 @@ pub(crate) struct CompactionScheduler {
     /// Initialized from [`DISABLE_COMPACTION`] and fixed for the scheduler's lifetime
     /// in production; unit tests can override it without changing the process environment.
     disable_compaction: bool,
-    scheduler: SchedulerRef,
+    coordinator: Arc<CompactionCoordinator>,
     /// All loaded regions, including idle regions and regions executing DDLs.
     region_status: HashMap<RegionId, CompactionStatus>,
     /// Request sender of the worker that this scheduler belongs to.
@@ -154,7 +160,7 @@ impl CompactionScheduler {
     /// same worker so region state transitions remain serialized.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
-        scheduler: SchedulerRef,
+        coordinator: Arc<CompactionCoordinator>,
         request_sender: Sender<WorkerRequestWithTime>,
         cache_manager: CacheManagerRef,
         engine_config: Arc<MitoConfig>,
@@ -165,7 +171,7 @@ impl CompactionScheduler {
     ) -> Self {
         Self {
             disable_compaction: *DISABLE_COMPACTION,
-            scheduler,
+            coordinator,
             region_status: HashMap::new(),
             request_sender,
             cache_manager,
@@ -183,6 +189,7 @@ impl CompactionScheduler {
         &mut self,
         version_control: &VersionControlRef,
         access_layer: &AccessLayerRef,
+        shared_state: &CompactionStateRef,
     ) {
         let region_id = version_control.region_id();
         if let Some(status) = self.region_status.get_mut(&region_id) {
@@ -191,10 +198,10 @@ impl CompactionScheduler {
             }
             status.on_failure(Arc::new(RegionClosedSnafu { region_id }.build()));
         }
-        self.region_status.insert(
-            region_id,
-            CompactionStatus::new(region_id, version_control.clone(), access_layer.clone()),
-        );
+        let mut status =
+            CompactionStatus::new(region_id, version_control.clone(), access_layer.clone());
+        status.shared_state = shared_state.clone();
+        self.region_status.insert(region_id, status);
     }
 
     /// Reports active work rather than the existence of a resident region record.
@@ -235,7 +242,7 @@ impl CompactionScheduler {
             OptionOutputTx::none(),
             manifest_ctx,
             schema_metadata_manager,
-            1, // Default for automatic compaction
+            self.engine_config.max_background_compactions,
             None,
         )
     }
@@ -625,6 +632,7 @@ impl CompactionScheduler {
         // was fetched above.
         let plan_id = Self::next_plan_id(&mut self.next_plan_id);
         status.start_picking_with_trigger(plan_id, CompactionTrigger::Manual);
+        status.active.task_state = status.pending_task_state.take();
         self.dispatch_compaction_planning(
             plan_id,
             request,
@@ -701,7 +709,7 @@ impl CompactionScheduler {
             manifest_ctx,
             self.listener.clone(),
             schema_metadata_manager,
-            MAX_PARALLEL_COMPACTION,
+            self.engine_config.max_background_compactions,
             Some(status.pick_history.clone()),
         );
         // Bump the counter through a disjoint field borrow so the `status`
@@ -771,6 +779,7 @@ impl CompactionScheduler {
         if let Some(mut status) = self.region_status.remove(&region_id) {
             status.on_failure(err);
         }
+        self.coordinator.forget_region(region_id);
     }
 
     /// Fails a cycle without discarding the loaded region's registration.
@@ -891,7 +900,38 @@ impl Drop for CompactionScheduler {
         for (region_id, mut status) in self.region_status.drain() {
             // We are shutting down so notify all pending tasks.
             status.on_failure(Arc::new(RegionClosedSnafu { region_id }.build()));
+            self.coordinator.forget_region(region_id);
         }
+    }
+}
+
+impl CompactionScheduler {
+    /// Reads the same published task state as engine queries.
+    #[cfg(test)]
+    pub(crate) fn inspect_tasks(
+        &self,
+        filters: &MetadataFilter,
+        node_id: Option<u64>,
+    ) -> Vec<CompactionTaskEntry> {
+        let mut entries = Vec::new();
+        for (region_id, status) in &self.region_status {
+            if !filters.matches(|name| match name {
+                compaction_task::REGION_ID => Some(ScalarValue::UInt64(Some(region_id.as_u64()))),
+                compaction_task::TABLE_ID => Some(ScalarValue::UInt32(Some(region_id.table_id()))),
+                compaction_task::NODE_ID => Some(ScalarValue::UInt64(node_id)),
+                _ => None,
+            }) {
+                continue;
+            }
+            let (active, pending) = CompactionState::current(&status.shared_state);
+            for task in active.into_iter().chain(pending) {
+                let entry = task.snapshot(node_id);
+                if entry.matches(filters) {
+                    entries.push(entry);
+                }
+            }
+        }
+        entries
     }
 }
 

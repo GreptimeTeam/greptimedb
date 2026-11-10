@@ -2,6 +2,11 @@ name: Tracesbench
 on:
   workflow_dispatch:
     inputs:
+      greptimedb_storage:
+        description: 'GreptimeDB data storage (S3 requires AWS in the bucket region; WAL stays local)'
+        type: choice
+        options: [file, s3, both]
+        default: file
       run_greptimedb:
         description: Run GreptimeDB
         type: boolean
@@ -39,7 +44,7 @@ on:
         default: sanity
         required: true
       runtime_image:
-        description: 'Runtime image: auto = AWS ECR Public or Aliyun ACR by provider; explicit tag/digest overrides'
+        description: 'Runtime image: auto = pinned S3 test runtime on ACR; explicit tag/digest overrides'
         type: string
         default: auto
         required: true
@@ -107,6 +112,11 @@ on:
 permissions:
   contents: read
 env:
+  GREPTIMEDB_STORAGE: ${{ inputs.greptimedb_storage || 'file' }}
+  S3_BUCKET: ${{ vars.AWS_CI_TEST_BUCKET }}
+  S3_REGION: ${{ vars.AWS_CI_TEST_BUCKET_REGION }}
+  RUNNER_REGION: ${{ vars.EC2_RUNNER_REGION }}
+  RUN_GREPTIMEDB: ${{ inputs.run_greptimedb }}
   COMPARE_GREPTIMEDB: ${{ inputs.compare_greptimedb }}
   BASELINE_GREPTIMEDB_TAG: ${{ inputs.baseline_greptimedb_tag }}
   DATASET: ${{ inputs.dataset }}
@@ -114,7 +124,7 @@ env:
   RUNTIME_CPUS: ${{ inputs.runtime_cpus }}
   RUNTIME_MEMORY: ${{ inputs.runtime_memory }}
   BENCHMARK_ROOT: ${{ inputs.benchmark_root }}
-  RUNTIME_IMAGE: ${{ inputs.runtime_image != 'auto' && inputs.runtime_image || inputs.provider == 'AWS' && 'public.ecr.aws/i8k6a5e1/greptime/o11ybenchruntime:77a84e1c8136@sha256:c482993ec177b026235d6cd0c61d4fb6d6f1088bc78bdc0e5964a5398de6dba0' || 'greptime-registry.cn-hangzhou.cr.aliyuncs.com/tools/o11ybench-runtime:77a84e1c8136@sha256:c482993ec177b026235d6cd0c61d4fb6d6f1088bc78bdc0e5964a5398de6dba0' }}
+  RUNTIME_IMAGE: ${{ inputs.runtime_image != 'auto' && inputs.runtime_image || 'greptime-registry.cn-hangzhou.cr.aliyuncs.com/tools/o11ybench-runtime:s3-test-b0cf5204d2fc@sha256:c2bf622db6056a2029842f4dc1cc1f37b82773bd45b134a0a83ffe2a8cd62214' }}
   PROVIDER: ${{ inputs.provider }}
   REQUESTED_INSTANCE_TYPE: ${{ inputs.instance_type }}
   SYSTEM_DISK_GIB: ${{ inputs.system_disk_gib }}
@@ -162,6 +172,10 @@ jobs:
           [[ "$GREPTIMEDB_TAG" =~ ^[a-zA-Z0-9_][a-zA-Z0-9_.-]{0,127}$ ]] || { echo 'Invalid GreptimeDB image tag' >&2; exit 1; }
         fi
         printf 'targets=%s\n' "$selected" >> "$GITHUB_OUTPUT"
+    - name: Validate GreptimeDB storage
+      run: |
+        python3 greptimedb/tests/perf/test_o11ybench_storage.py
+        python3 greptimedb/.github/scripts/o11ybench-storage.py validate
     - name: Validate version comparison
       env:
         RUN_GREPTIMEDB: ${{ inputs.run_greptimedb }}
@@ -389,22 +403,44 @@ jobs:
         python3 o11ybench/scripts/run_tracesbench_docker.py --stage generate \
           --dataset "$DATASET" --runtime-cpus "$RUNTIME_CPUS" --runtime-memory "$RUNTIME_MEMORY" \
           --root "$RUN_ROOT" --owner "$OWNER" --runtime-image "$RESOLVED_RUNTIME_IMAGE"
-    - name: Baseline GreptimeDB load, correctness and benchmark
-      if: ${{ !cancelled() && steps.generate.outcome == 'success' && needs.validate.outputs.greptimedb == 'true' && inputs.compare_greptimedb }}
+    - name: Baseline GreptimeDB load, correctness and benchmark (File)
+      if: ${{ !cancelled() && steps.generate.outcome == 'success' && needs.validate.outputs.greptimedb == 'true' && inputs.greptimedb_storage != 's3' && inputs.compare_greptimedb }}
       run: |
-        python3 o11ybench/scripts/run_tracesbench_docker.py --stage target --target greptimedb --port 14000 --greptimedb-image "$BASELINE_GREPTIMEDB_IMAGE" \
+        python3 o11ybench/scripts/run_tracesbench_docker.py --stage target --greptimedb-storage file --target greptimedb --port 14000 --greptimedb-image "$BASELINE_GREPTIMEDB_IMAGE" \
           --db-cpus "$DB_CPUS" --db-memory "$DB_MEMORY" --query-timeout-seconds "$QUERY_TIMEOUT_SECONDS" --load-workers "$LOAD_WORKERS" \
           --dataset "$DATASET" --runtime-cpus "$RUNTIME_CPUS" --runtime-memory "$RUNTIME_MEMORY" \
           --root "$RUN_ROOT/baseline" --data-root "$RUN_ROOT" --owner "$OWNER-base" --runtime-image "$RESOLVED_RUNTIME_IMAGE"
         python3 o11ybench/scripts/check_tracesbench_query_plans.py "$RUN_ROOT/baseline/runs/greptimedb"
-    - name: GreptimeDB load, correctness and benchmark
-      if: ${{ !cancelled() && steps.generate.outcome == 'success' && needs.validate.outputs.greptimedb == 'true' }}
+    - name: Baseline GreptimeDB load, correctness and benchmark (S3)
+      env:
+        AWS_ACCESS_KEY_ID: ${{ inputs.greptimedb_storage != 'file' && secrets.AWS_ACCESS_KEY_ID || '' }}
+        AWS_SECRET_ACCESS_KEY: ${{ inputs.greptimedb_storage != 'file' && secrets.AWS_SECRET_ACCESS_KEY || '' }}
+      if: ${{ !cancelled() && steps.generate.outcome == 'success' && needs.validate.outputs.greptimedb == 'true' && inputs.greptimedb_storage != 'file' && inputs.compare_greptimedb }}
       run: |
-        python3 o11ybench/scripts/run_tracesbench_docker.py --stage target --target greptimedb --port 14000 --greptimedb-image "$GREPTIMEDB_IMAGE" \
+        python3 o11ybench/scripts/run_tracesbench_docker.py --stage target --greptimedb-storage s3 --target greptimedb --port 14000 --greptimedb-image "$BASELINE_GREPTIMEDB_IMAGE" \
+          --db-cpus "$DB_CPUS" --db-memory "$DB_MEMORY" --query-timeout-seconds "$QUERY_TIMEOUT_SECONDS" --load-workers "$LOAD_WORKERS" \
+          --dataset "$DATASET" --runtime-cpus "$RUNTIME_CPUS" --runtime-memory "$RUNTIME_MEMORY" \
+          --root "$RUN_ROOT/baseline/s3" --data-root "$RUN_ROOT" --owner "$OWNER-base-s3" --runtime-image "$RESOLVED_RUNTIME_IMAGE"
+        python3 o11ybench/scripts/check_tracesbench_query_plans.py "$RUN_ROOT/baseline/s3/runs/greptimedb"
+    - name: GreptimeDB load, correctness and benchmark (File)
+      if: ${{ !cancelled() && steps.generate.outcome == 'success' && needs.validate.outputs.greptimedb == 'true' && inputs.greptimedb_storage != 's3' }}
+      run: |
+        python3 o11ybench/scripts/run_tracesbench_docker.py --stage target --greptimedb-storage file --target greptimedb --port 14000 --greptimedb-image "$GREPTIMEDB_IMAGE" \
           --db-cpus "$DB_CPUS" --db-memory "$DB_MEMORY" --query-timeout-seconds "$QUERY_TIMEOUT_SECONDS" --load-workers "$LOAD_WORKERS" \
           --dataset "$DATASET" --runtime-cpus "$RUNTIME_CPUS" --runtime-memory "$RUNTIME_MEMORY" \
           --root "$RUN_ROOT" --owner "$OWNER" --runtime-image "$RESOLVED_RUNTIME_IMAGE"
         python3 o11ybench/scripts/check_tracesbench_query_plans.py "$RUN_ROOT/runs/greptimedb"
+    - name: GreptimeDB load, correctness and benchmark (S3)
+      env:
+        AWS_ACCESS_KEY_ID: ${{ inputs.greptimedb_storage != 'file' && secrets.AWS_ACCESS_KEY_ID || '' }}
+        AWS_SECRET_ACCESS_KEY: ${{ inputs.greptimedb_storage != 'file' && secrets.AWS_SECRET_ACCESS_KEY || '' }}
+      if: ${{ !cancelled() && steps.generate.outcome == 'success' && needs.validate.outputs.greptimedb == 'true' && inputs.greptimedb_storage != 'file' }}
+      run: |
+        python3 o11ybench/scripts/run_tracesbench_docker.py --stage target --greptimedb-storage s3 --target greptimedb --port 14000 --greptimedb-image "$GREPTIMEDB_IMAGE" \
+          --db-cpus "$DB_CPUS" --db-memory "$DB_MEMORY" --query-timeout-seconds "$QUERY_TIMEOUT_SECONDS" --load-workers "$LOAD_WORKERS" \
+          --dataset "$DATASET" --runtime-cpus "$RUNTIME_CPUS" --runtime-memory "$RUNTIME_MEMORY" \
+          --root "$RUN_ROOT/s3" --data-root "$RUN_ROOT" --owner "$OWNER-s3" --runtime-image "$RESOLVED_RUNTIME_IMAGE"
+        python3 o11ybench/scripts/check_tracesbench_query_plans.py "$RUN_ROOT/s3/runs/greptimedb"
     - name: VictoriaTraces load, correctness and benchmark
       if: ${{ !cancelled() && steps.generate.outcome == 'success' && needs.validate.outputs.victoriatraces == 'true' }}
       run: |
@@ -422,49 +458,80 @@ jobs:
     - name: GreptimeDB version comparison
       if: always() && inputs.compare_greptimedb
       run: |
-        python3 greptimedb/.github/scripts/benchmark-version-comparison.py report --kind traces --root "$RUN_ROOT" >> "$GITHUB_STEP_SUMMARY"
-    - name: Validate and render report
+        python3 greptimedb/.github/scripts/benchmark-version-comparison.py report --kind traces --root "$RUN_ROOT" | tee -a "$RUN_ROOT/ci-summary.md" >> "$GITHUB_STEP_SUMMARY"
+    - name: Validate and render primary report
+      if: always() && steps.generate.outcome == 'success'
       env:
+        AWS_ACCESS_KEY_ID: ${{ inputs.greptimedb_storage != 'file' && secrets.AWS_ACCESS_KEY_ID || '' }}
+        AWS_SECRET_ACCESS_KEY: ${{ inputs.greptimedb_storage != 'file' && secrets.AWS_SECRET_ACCESS_KEY || '' }}
         COMPARE_GREPTIMEDB: ${{ inputs.compare_greptimedb }}
       run: |
+        if [[ "$GREPTIMEDB_STORAGE" == s3 ]]; then
+          TARGETS=$(tr "," "\n" <<< "$TARGETS" | sed "/^greptimedb$/d" | paste -sd, -)
+          [[ -n "$TARGETS" ]] || exit 0
+        fi
         comparison_args=()
-        if [[ "$COMPARE_GREPTIMEDB" == true ]]; then
+        if [[ "$COMPARE_GREPTIMEDB" == true && "$GREPTIMEDB_STORAGE" != s3 ]]; then
           comparison_args+=(--baseline-run "$RUN_ROOT/baseline/runs/greptimedb/run.json")
         fi
-        python3 o11ybench/scripts/run_tracesbench_docker.py --stage report --targets "$TARGETS" "${comparison_args[@]}" \
+        python3 o11ybench/scripts/run_tracesbench_docker.py --stage report --targets "${TARGETS}" "${comparison_args[@]}" \
           --dataset "$DATASET" --runtime-cpus "$RUNTIME_CPUS" --runtime-memory "$RUNTIME_MEMORY" \
           --root "$RUN_ROOT" --owner "$OWNER" --runtime-image "$RESOLVED_RUNTIME_IMAGE"
+    - name: Validate and render S3 report
+      if: always() && steps.generate.outcome == 'success' && inputs.greptimedb_storage != 'file'
+      run: |
+        python3 o11ybench/scripts/run_tracesbench_docker.py --stage report --targets greptimedb \
+          --dataset "$DATASET" --runtime-cpus "$RUNTIME_CPUS" --runtime-memory "$RUNTIME_MEMORY" \
+          --root "$RUN_ROOT/s3" --data-root "$RUN_ROOT" --owner "$OWNER-s3" --runtime-image "$RESOLVED_RUNTIME_IMAGE"
     - name: Clean up owned containers
+      env:
+        AWS_ACCESS_KEY_ID: ${{ inputs.greptimedb_storage != 'file' && secrets.AWS_ACCESS_KEY_ID || '' }}
+        AWS_SECRET_ACCESS_KEY: ${{ inputs.greptimedb_storage != 'file' && secrets.AWS_SECRET_ACCESS_KEY || '' }}
       if: always() && steps.runtime.outcome == 'success'
       run: |
-        python3 o11ybench/scripts/run_tracesbench_docker.py --stage cleanup \
+        python3 greptimedb/.github/scripts/o11ybench-storage.py run -- python3 o11ybench/scripts/run_tracesbench_docker.py --stage cleanup \
           --dataset "$DATASET" --runtime-cpus "$RUNTIME_CPUS" --runtime-memory "$RUNTIME_MEMORY" \
           --root "$RUN_ROOT" --owner "$OWNER" --runtime-image "$RESOLVED_RUNTIME_IMAGE"
     - name: Clean up baseline containers
+      env:
+        AWS_ACCESS_KEY_ID: ${{ inputs.greptimedb_storage != 'file' && secrets.AWS_ACCESS_KEY_ID || '' }}
+        AWS_SECRET_ACCESS_KEY: ${{ inputs.greptimedb_storage != 'file' && secrets.AWS_SECRET_ACCESS_KEY || '' }}
       if: always() && steps.runtime.outcome == 'success' && inputs.compare_greptimedb
       run: |
-        python3 o11ybench/scripts/run_tracesbench_docker.py --stage cleanup \
+        python3 greptimedb/.github/scripts/o11ybench-storage.py run -- python3 o11ybench/scripts/run_tracesbench_docker.py --stage cleanup \
           --root "$RUN_ROOT/baseline" --owner "$OWNER-base" --runtime-image "$RESOLVED_RUNTIME_IMAGE"
     - name: Benchmark summary
       if: always()
-      run: python3 greptimedb/.github/scripts/tracesbench-summary.py --root "$RUN_ROOT" --targets "$TARGETS" --section benchmark >> "$GITHUB_STEP_SUMMARY"
+      run: python3 greptimedb/.github/scripts/o11ybench-storage.py summary --kind traces --root "$RUN_ROOT" --targets "$TARGETS" --section benchmark | tee -a "$RUN_ROOT/ci-summary.md" >> "$GITHUB_STEP_SUMMARY"
     - name: Load / lifecycle summary
       if: always()
-      run: python3 greptimedb/.github/scripts/tracesbench-summary.py --root "$RUN_ROOT" --targets "$TARGETS" --section lifecycle >> "$GITHUB_STEP_SUMMARY"
+      run: python3 greptimedb/.github/scripts/o11ybench-storage.py summary --kind traces --root "$RUN_ROOT" --targets "$TARGETS" --section lifecycle | tee -a "$RUN_ROOT/ci-summary.md" >> "$GITHUB_STEP_SUMMARY"
     - name: Baseline load / lifecycle summary
       if: always() && inputs.compare_greptimedb
       run: |
-        echo '## Baseline GreptimeDB' >> "$GITHUB_STEP_SUMMARY"
-        python3 greptimedb/.github/scripts/tracesbench-summary.py \
-          --root "$RUN_ROOT/baseline" --targets greptimedb --section lifecycle >> "$GITHUB_STEP_SUMMARY"
+        echo '## Baseline GreptimeDB' | tee -a "$RUN_ROOT/ci-summary.md" >> "$GITHUB_STEP_SUMMARY"
+        python3 greptimedb/.github/scripts/o11ybench-storage.py summary --kind traces \
+          --root "$RUN_ROOT/baseline" --targets greptimedb --section lifecycle | tee -a "$RUN_ROOT/ci-summary.md" >> "$GITHUB_STEP_SUMMARY"
+    - name: Render storage comparison overview
+      if: always() && steps.generate.outcome == 'success'
+      run: |
+        mkdir -p "$RUN_ROOT/metadata"
+        cp "$METADATA_ROOT"/*-image.json "$RUN_ROOT/metadata/"
+        python3 o11ybench/scripts/build_query_performance_report.py --traces "$RUN_ROOT" \
+          --output "$RUN_ROOT-query-report.html" --json-output "$RUN_ROOT-query-report.json"
+        python3 greptimedb/.github/scripts/o11ybench-storage.py overview "$RUN_ROOT-query-report.json" \
+          | tee -a "$RUN_ROOT/ci-summary.md" >> "$GITHUB_STEP_SUMMARY"
+        python3 greptimedb/.github/scripts/o11ybench-storage.py audit --root "$RUN_ROOT" \
+          --report "$RUN_ROOT-query-report.json" --targets "$TARGETS" --allow-trace-query-failures
     - name: Stage benchmark artifacts
       if: always()
       run: |
         mkdir -p "$RUNNER_TEMP/tracesbench-artifacts"
+        cp "$RUN_ROOT"-query-report.* "$RUNNER_TEMP/tracesbench-artifacts/" 2>/dev/null || true
         if [[ -d "$METADATA_ROOT" ]]; then
           rsync -a --no-owner --no-group "$METADATA_ROOT" "$RUNNER_TEMP/tracesbench-artifacts/"
         fi
-        for entry in runs report report.json report.md version-comparison.json version-comparison.md; do
+        for entry in artifact-audit.json metadata runs report report.json report.md ci-summary.md version-comparison.json version-comparison.md; do
           if [[ -e "$RUN_ROOT/$entry" ]]; then
             rsync -a --no-owner --no-group "$RUN_ROOT/$entry" "$RUNNER_TEMP/tracesbench-artifacts/"
           fi
@@ -473,6 +540,12 @@ jobs:
           mkdir -p "$RUNNER_TEMP/tracesbench-artifacts/baseline"
           rsync -a --no-owner --no-group "$RUN_ROOT/baseline/runs" "$RUNNER_TEMP/tracesbench-artifacts/baseline/"
         fi
+        for arm in s3 baseline/s3; do
+          if [[ -d "$RUN_ROOT/$arm" ]]; then
+            mkdir -p "$RUNNER_TEMP/tracesbench-artifacts/$arm"
+            rsync -a --no-owner --no-group --exclude scratch --exclude corpora "$RUN_ROOT/$arm/" "$RUNNER_TEMP/tracesbench-artifacts/$arm/"
+          fi
+        done
     - name: Upload HTML and results (no corpus)
       if: always()
       uses: actions/upload-artifact@v4

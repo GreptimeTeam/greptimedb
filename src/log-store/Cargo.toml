@@ -20,6 +20,7 @@ async-trait.workspace = true
 bytes.workspace = true
 chrono.workspace = true
 common-base.workspace = true
+common-cache.workspace = true
 common-config.workspace = true
 common-error.workspace = true
 common-macro.workspace = true

@@ -55,6 +55,7 @@ use crate::error::{
     DataTypeMismatchSnafu, EmptyRegionDirSnafu, InvalidMetadataSnafu, InvalidRegionOptionsSnafu,
     ObjectStoreNotFoundSnafu, RegionCorruptedSnafu, Result, StaleLogEntrySnafu,
 };
+use crate::lease::NodeLease;
 use crate::manifest::action::RegionManifest;
 use crate::manifest::manager::{RegionManifestManager, RegionManifestOptions};
 use crate::memtable::bulk::part::BulkPart;
@@ -157,6 +158,7 @@ pub(crate) struct RegionOpener {
     options: Option<RegionOptions>,
     cache_manager: Option<CacheManagerRef>,
     skip_wal_replay: bool,
+    node_lease: Arc<NodeLease>,
     puffin_manager_factory: PuffinManagerFactory,
     intermediate_manager: IntermediateManager,
     time_provider: TimeProviderRef,
@@ -178,6 +180,7 @@ impl RegionOpener {
         region_id: RegionId,
         table_dir: &str,
         path_type: PathType,
+        node_lease: Arc<NodeLease>,
         memtable_builder_provider: MemtableBuilderProvider,
         object_store_manager: ObjectStoreManagerRef,
         purge_scheduler: SchedulerRef,
@@ -198,10 +201,11 @@ impl RegionOpener {
             options: None,
             cache_manager: None,
             skip_wal_replay: false,
+            node_lease,
             puffin_manager_factory,
             intermediate_manager,
             time_provider,
-            stats: Default::default(),
+            stats: ManifestStats::with_region_metrics(region_id),
             wal_entry_reader: None,
             replay_checkpoint: None,
             file_ref_manager,
@@ -386,7 +390,10 @@ impl RegionOpener {
         wal.start_region_history(region_id, &provider)?;
         // Create a manifest manager for this region and writes regions to the manifest file.
         let mut region_manifest_options =
-            RegionManifestOptions::new(config, &region_dir, &object_store);
+            RegionManifestOptions::new(config, &region_dir, &object_store)
+                .with_conditional_publication(
+                    options.requires_conditional_manifest_publication(self.node_lease.is_enabled()),
+                );
         // Set manifest cache if available
         region_manifest_options.manifest_cache = self
             .cache_manager
@@ -438,6 +445,7 @@ impl RegionOpener {
 
         Ok(Arc::new(MitoRegion {
             region_id,
+            compaction_state: Default::default(),
             version_control,
             series_index_version_control: Default::default(),
             series_index_store: self.series_index_store.clone(),
@@ -447,6 +455,7 @@ impl RegionOpener {
                 manifest_manager,
                 RegionRoleState::Leader(RegionLeaderState::Writable),
                 self.hook.clone(),
+                self.node_lease.clone(),
             )),
             file_purger: create_file_purger(
                 config.gc.enable,
@@ -516,7 +525,11 @@ impl RegionOpener {
         let mut region_options = self.options.as_ref().unwrap().clone();
         let object_storage = get_object_store(&region_options.storage, &self.object_store_manager)?;
         let mut region_manifest_options =
-            RegionManifestOptions::new(config, &self.region_dir(), &object_storage);
+            RegionManifestOptions::new(config, &self.region_dir(), &object_storage)
+                .with_conditional_publication(
+                    region_options
+                        .requires_conditional_manifest_publication(self.node_lease.is_enabled()),
+                );
         // Set manifest cache if available
         region_manifest_options.manifest_cache = self
             .cache_manager
@@ -688,6 +701,7 @@ impl RegionOpener {
 
         let region = MitoRegion {
             region_id: self.region_id,
+            compaction_state: Default::default(),
             version_control: version_control.clone(),
             series_index_version_control,
             series_index_store: self.series_index_store.clone(),
@@ -697,6 +711,7 @@ impl RegionOpener {
                 manifest_manager,
                 RegionRoleState::Follower,
                 self.hook.clone(),
+                self.node_lease.clone(),
             )),
             file_purger,
             provider: provider.clone(),

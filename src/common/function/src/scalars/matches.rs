@@ -23,7 +23,7 @@ use datafusion::common::{DFSchema, Result as DfResult};
 use datafusion::execution::SessionStateBuilder;
 use datafusion::logical_expr::{self, ColumnarValue, Expr, Volatility};
 use datafusion::physical_planner::{DefaultPhysicalPlanner, PhysicalPlanner};
-use datafusion_common::DataFusionError;
+use datafusion_common::{DataFusionError, ScalarValue};
 use datafusion_expr::physical_planning_context::PhysicalPlanningContext;
 use datafusion_expr::{ScalarFunctionArgs, Signature};
 use datatypes::arrow::array::RecordBatch;
@@ -101,14 +101,19 @@ impl Function for MatchesFunction {
 
 impl MatchesFunction {
     fn eval(&self, data_array: ArrayRef, pattern: &str) -> DfResult<ColumnarValue> {
+        let data_type = data_array.data_type();
+        if !data_type.is_string() {
+            return Err(DataFusionError::Execution(format!(
+                "unsupported datatype {data_type}"
+            )));
+        }
         let col_name = "data";
         let parser_context = ParserContext::default();
         let raw_ast = parser_context.parse_pattern(pattern)?;
         let ast = raw_ast.transform_ast()?;
 
-        let like_expr = ast.into_like_expr(col_name);
-
-        let input_schema = Self::input_schema();
+        let like_expr = ast.into_like_expr(col_name, data_type);
+        let input_schema = Self::input_schema(data_type);
         let session_state = SessionStateBuilder::new().with_default_features().build();
         let planner = DefaultPhysicalPlanner::default();
         let physical_expr = planner.create_physical_expr(
@@ -119,7 +124,7 @@ impl MatchesFunction {
         )?;
 
         let arrow_schema = Arc::new(input_schema.as_arrow().clone());
-        let input_record_batch = RecordBatch::try_new(arrow_schema, vec![data_array]).unwrap();
+        let input_record_batch = RecordBatch::try_new(arrow_schema, vec![data_array])?;
 
         let num_rows = input_record_batch.num_rows();
         let result = physical_expr.evaluate(&input_record_batch)?;
@@ -128,9 +133,9 @@ impl MatchesFunction {
         Ok(ColumnarValue::Array(Arc::new(result_array)))
     }
 
-    fn input_schema() -> DFSchema {
+    fn input_schema(data_type: &DataType) -> DFSchema {
         DFSchema::from_unqualified_fields(
-            [Arc::new(Field::new("data", DataType::Utf8, true))].into(),
+            [Arc::new(Field::new("data", data_type.clone(), true))].into(),
             HashMap::new(),
         )
         .unwrap()
@@ -165,10 +170,10 @@ enum BinaryOp {
 }
 
 impl PatternAst {
-    fn into_like_expr(self, column: &str) -> Expr {
+    fn into_like_expr(self, column: &str, data_type: &DataType) -> Expr {
         match self {
             PatternAst::Literal { op, pattern } => {
-                let expr = Self::convert_literal(column, &pattern);
+                let expr = Self::convert_literal(column, &pattern, data_type);
                 match op {
                     UnaryOp::Must => expr,
                     UnaryOp::Optional => expr,
@@ -181,7 +186,7 @@ impl PatternAst {
                 }
                 let exprs = children
                     .into_iter()
-                    .map(|child| child.into_like_expr(column));
+                    .map(|child| child.into_like_expr(column, data_type));
                 // safety: children is not empty
                 match op {
                     BinaryOp::And => exprs.reduce(Expr::and).unwrap(),
@@ -189,7 +194,7 @@ impl PatternAst {
                 }
             }
             PatternAst::Group { op, child } => {
-                let child = child.into_like_expr(column);
+                let child = child.into_like_expr(column, data_type);
                 match op {
                     UnaryOp::Must => child,
                     UnaryOp::Optional => child,
@@ -199,11 +204,14 @@ impl PatternAst {
         }
     }
 
-    fn convert_literal(column: &str, pattern: &str) -> Expr {
-        logical_expr::col(column).like(logical_expr::lit(format!(
-            "%{}%",
-            crate::utils::escape_like_pattern(pattern)
-        )))
+    fn convert_literal(column: &str, pattern: &str, data_type: &DataType) -> Expr {
+        let pattern = Some(format!("%{}%", crate::utils::escape_like_pattern(pattern)));
+        let pattern = match data_type {
+            DataType::Utf8View => ScalarValue::Utf8View(pattern),
+            DataType::LargeUtf8 => ScalarValue::LargeUtf8(pattern),
+            _ => ScalarValue::Utf8(pattern),
+        };
+        logical_expr::col(column).like(Expr::Literal(pattern, None))
     }
 
     /// Transform this AST with preset rules to make it correct.
@@ -836,7 +844,6 @@ impl Tokenizer {
 #[cfg(test)]
 mod test {
     use datafusion::arrow::array::StringArray;
-    use datafusion_common::ScalarValue;
     use datafusion_common::config::ConfigOptions;
 
     use super::*;
@@ -1291,6 +1298,32 @@ mod test {
             let parser = ParserContext { stack: vec![] };
             let ast = parser.parse_pattern(query).unwrap();
             assert_eq!(expected, ast, "{query}");
+        }
+    }
+
+    #[test]
+    fn evaluate_matches_string_layouts() {
+        let input: ArrayRef = Arc::new(StringArray::from(vec![
+            Some("error timeout"),
+            Some("healthy"),
+            None,
+        ]));
+        let function = MatchesFunction::default();
+        for data_type in [DataType::Utf8, DataType::LargeUtf8, DataType::Utf8View] {
+            let input = datatypes::arrow::compute::cast(&input, &data_type).unwrap();
+            for (pattern, expected) in [
+                ("error", vec![Some(true), Some(false), None]),
+                ("error AND timeout", vec![Some(true), Some(false), None]),
+                ("error OR healthy", vec![Some(true), Some(true), None]),
+            ] {
+                let expected: ArrayRef = Arc::new(BooleanArray::from(expected));
+                let actual = function
+                    .eval(input.clone(), pattern)
+                    .unwrap()
+                    .to_array(3)
+                    .unwrap();
+                assert_eq!(expected.as_ref(), actual.as_ref(), "{data_type}, {pattern}");
+            }
         }
     }
 

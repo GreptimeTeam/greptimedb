@@ -36,6 +36,16 @@ impl<S: LogStore> RegionWorkerLoop<S> {
 
         info!("Try to close region {}, worker: {}", region_id, self.id);
 
+        if region.is_staging_or_staged_edit() {
+            // A staging region cannot flush, so it leaves staging before the close-time flush
+            // below. The manifest lock lets a successful end of staging in progress finish first,
+            // after which the region is already out of staging.
+            let _manager = region.manifest_ctx.manifest_manager.write().await;
+            region.abort_staging();
+            // Edits queued behind a staged edit belong to the staging that has just ended.
+            self.reject_region_edit_queue_as_not_found(region_id);
+        }
+
         // Memtables containing skip-WAL writes must be flushed before closing.
         // Followers cannot flush; explicit flush-on-close and region WAL options
         // retain their existing behavior.
@@ -76,6 +86,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         let Some(region) = self.regions.remove_region(region_id) else {
             return;
         };
+        region.deactivate_region_manifest_size_metric();
         region.stop().await;
         self.fail_region_stalled_requests_as_not_found(&region_id);
         self.reject_region_edit_queue_as_not_found(region_id);

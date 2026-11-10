@@ -133,9 +133,10 @@ def benchmark(root, targets):
     return '\n'.join(lines)
 
 
-def lifecycle(root, targets):
-    manifest = read(root / 'run-manifest.json')
-    corpus = read(root / 'corpus' / 'summary.json')
+def lifecycle(root, targets, data_root=None):
+    data_root = data_root or root
+    manifest = read(data_root / 'run-manifest.json')
+    corpus = read(data_root / 'corpus' / 'summary.json')
     lines = ['# Load / lifecycle summary', '',
              f'Dataset: **{cell(manifest.get("profile", corpus.get("data_profile", {}).get("id")))}**; rows: **{cell(corpus.get("line_count"))}**; '
              f'seed: `{cell(corpus.get("seed"))}`.',
@@ -161,12 +162,13 @@ def lifecycle(root, targets):
     physical_rows = []
     load_rows = []
     details = ['<details>', '<summary>DDL, index configuration and image provenance</summary>', '']
-    raw_bytes = read(root / 'corpus' / 'size.json').get('raw_jsonl_bytes')
+    raw_bytes = read(data_root / 'corpus' / 'size.json').get('raw_jsonl_bytes')
     for t in targets:
         directory = result_dir(root, t)
         physical = read(directory / 'physical-evidence.json')
         storage = physical.get('storage', {})
-        total = storage.get('engine_total_bytes')
+        s3 = read(root / f'{t}-1' / 'storage.json').get('type') == 's3'
+        total = None if s3 else storage.get('engine_total_bytes')
         stats = read(root / f'{t}-1' / 'post-load-docker-stats.json')
         ratio = f'{raw_bytes / total:.2f}×' if (physical.get('passed') is True and
                  isinstance(raw_bytes, (int, float)) and raw_bytes > 0 and
@@ -186,6 +188,7 @@ def lifecycle(root, targets):
     lines += ['## Load and physical evidence', '', table(['DB', 'Write transport', 'Batches', 'Load smoke rows'], load_rows), '',
               f'Raw JSONL size: **{size(raw_bytes)}**. Ratio = raw JSONL / engine bytes at collection time; '
               'not a settled-storage guarantee. CPU/memory are post-load snapshots, not peaks. '
+              'S3 total/compression is omitted: local files exclude remote objects. '
               'Missing artifacts remain blank; pre-cleanup stats are not substituted.', '',
               table(['DB', 'Engine size', 'Size ratio', 'Materialization', 'SSTs / active parts',
                      'Post-load CPU', 'Post-load memory / limit'], physical_rows), '', *details, '</details>', '']
