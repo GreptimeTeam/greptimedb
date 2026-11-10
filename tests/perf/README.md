@@ -351,17 +351,19 @@ The outer driver currently supports `direct_readable_sst`,
 A direct-SST case sizes its tables with the shared `[scenario.layout]` and can
 override `sst_count` and `rows_per_sst` per table, so a case can join a large fact
 table with a small dimension table. Setting `require_region_statistics = true`
-on any query makes the candidate direct-SST target wait for every case table's
-leader reports with non-zero disk size in `information_schema.region_statistics`.
-This untimed wait precedes all candidate measurements; timeout or request failure
-aborts that target with no timed samples. The base target and candidate cases
-without an opted-in query do not wait. A query can list
-`candidate_session_sql` statements that only the candidate target runs; the
-runner sends them in the same `/v1/sql` request as the query itself (validation,
-warmup and measurement), because every request gets its own session context and a
-`SET` statement only affects the statements of its own request. A base build that
-does not know a setting yet therefore keeps measuring the query without it, which
-is what makes `SET experimental_dist_join = true` a candidate-only opt-in.
+on any query makes the direct-SST targets wait for every case table's leader
+reports with non-zero disk size in `information_schema.region_statistics`. This
+untimed wait precedes all measurements; timeout or request failure aborts that
+target with no timed samples. Cases without an opted-in query do not wait. A query can list
+`candidate_session_sql` statements that only the candidate target runs, or
+`base_session_sql` statements that only the base target runs; the runner sends
+them in the same `/v1/sql` request as the query itself (validation, warmup and
+measurement), because every request gets its own session context and a `SET`
+statement only affects the statements of its own request. A base build that does
+not know a setting yet therefore keeps measuring the query without it. Setting it
+on both targets through `base_session_sql` and `candidate_session_sql` compares
+two implementations behind the same opt-in, e.g. the nested and the materialized
+broadcast join.
 
 A SQL query can set `candidate_remote_operator`, e.g. `HashJoinExec`, to require
 one separate untimed `EXPLAIN ANALYZE` with the same session prefix. It must show

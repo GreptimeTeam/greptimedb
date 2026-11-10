@@ -227,11 +227,19 @@ pub(super) struct Query {
     /// request it is sent with. The runner therefore sends these statements and `query` as one
     /// multi-statement SQL string for every request of this query (validation, warmup and
     /// measurement). Only the candidate target runs them, so a base build that does not know the
-    /// setting yet still measures the same query without it.
+    /// setting yet still measures the same query without it; use [`Self::base_session_sql`] to
+    /// opt the base target in as well.
     #[serde(default)]
     pub(super) candidate_session_sql: Vec<String>,
-    /// Opts the candidate direct-SST target into waiting for its tables' leader/size reports
-    /// before any measurements. Defaults to false; the base target never waits.
+    /// Statements the base target executes in the same request before `query`.
+    ///
+    /// Use this to opt the base build into the same session setting as the candidate, e.g. to
+    /// compare two rewrite implementations of the same query instead of the rewrite with the
+    /// default plan. The candidate keeps using [`Self::candidate_session_sql`].
+    #[serde(default)]
+    pub(super) base_session_sql: Vec<String>,
+    /// Opts the direct-SST targets into waiting for their tables' leader/size reports before any
+    /// measurements. Defaults to false.
     #[serde(default)]
     pub(super) require_region_statistics: bool,
     /// An operator that a separate candidate `EXPLAIN ANALYZE` must execute remotely, not in
@@ -248,23 +256,26 @@ pub(super) struct Query {
 }
 
 impl Query {
-    /// The SQL text of one request of this query for the target: the candidate session
+    /// The SQL text of one request of this query for the target: the target's session
     /// statements followed by `query`, or just `query`.
     ///
     /// Statements are joined with `;` separators, so both a prefixed and a bare statement stay
     /// valid SQL.
     pub(super) fn request_sql(&self, candidate: bool) -> String {
-        if candidate && !self.candidate_session_sql.is_empty() {
-            let prefix = self
-                .candidate_session_sql
-                .iter()
-                .map(|statement| statement.trim().trim_end_matches(';'))
-                .collect::<Vec<_>>()
-                .join(";\n");
-            format!("{prefix};\n{}", self.query)
+        let statements = if candidate {
+            &self.candidate_session_sql
         } else {
-            self.query.clone()
+            &self.base_session_sql
+        };
+        if statements.is_empty() {
+            return self.query.clone();
         }
+        let prefix = statements
+            .iter()
+            .map(|statement| statement.trim().trim_end_matches(';'))
+            .collect::<Vec<_>>()
+            .join(";\n");
+        format!("{prefix};\n{}", self.query)
     }
 }
 
@@ -309,6 +320,7 @@ mod tests {
                 .into_iter()
                 .map(ToString::to_string)
                 .collect(),
+            base_session_sql: Vec::new(),
             require_region_statistics: false,
             candidate_remote_operator: None,
             warmup: 0,
@@ -324,8 +336,19 @@ mod tests {
             query.request_sql(true),
             "SET experimental_dist_join = true;\nSELECT 1"
         );
-        // The base target keeps the plain statement.
+        // The base target keeps the plain statement unless it has its own prefix.
         assert_eq!(query.request_sql(false), "SELECT 1");
+    }
+
+    #[test]
+    fn request_sql_prefixes_the_base_session() {
+        let mut query = query(vec![]);
+        query.base_session_sql = vec!["SET experimental_dist_join = true".to_string()];
+        assert_eq!(
+            query.request_sql(false),
+            "SET experimental_dist_join = true;\nSELECT 1"
+        );
+        assert_eq!(query.request_sql(true), "SELECT 1");
     }
 
     #[test]
@@ -351,6 +374,7 @@ mod tests {
     fn query_deserializes_without_session_sql() {
         let query: Query = serde_json::from_value(json!({"query": "SELECT 1"})).unwrap();
         assert!(query.candidate_session_sql.is_empty());
+        assert!(query.base_session_sql.is_empty());
     }
 
     #[test]

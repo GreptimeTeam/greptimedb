@@ -1,11 +1,12 @@
 # SQL distributed broadcast-join case over direct SSTs.
 #
-# The case measures the nested broadcast join rewrite of the experimental
-# `experimental_dist_join` opt-in: the join of a large probe (fact) table with a
-# small build (dimension) table. The candidate target opts into the rewrite for
-# its queries with `candidate_session_sql`, the base target runs the same query
-# without the opt-in (and without a build that knows the setting yet), so the
-# report compares "join on the frontend" with "join next to the probe data".
+# The case compares the two implementations of the distributed broadcast join
+# behind the experimental `experimental_dist_join` opt-in: the join of a large
+# probe (fact) table with a small build (dimension) table. Both targets opt in
+# through `candidate_session_sql` / `base_session_sql`. The base build takes path
+# B (the small side is re-executed on every probe region through a nested
+# MergeScan); the candidate takes path C (the small side is materialized once and
+# dispatched to the probe regions).
 #
 # The heuristic compares `probe_regions * build_bytes` with `probe_bytes`, so a
 # single-region fact table with a much smaller dimension table already favors the
@@ -119,10 +120,11 @@ name = "join_dist_broadcast_aggregate_top"
 kind = "sql"
 query = "SELECT f.host, d.zone, avg(f.value * d.weight) AS score FROM sql_join_dist_fact f JOIN sql_join_dist_dim d ON f.host = d.host WHERE f.ts >= '2024-01-01 00:00:00+0000'::TIMESTAMP AND f.ts < '2024-01-05 00:00:00+0000'::TIMESTAMP AND d.ts >= '2024-01-01 00:00:00+0000'::TIMESTAMP AND d.ts < '2024-01-01 01:00:00+0000'::TIMESTAMP AND d.zone IN ('zone1', 'zone2') GROUP BY f.host, d.zone ORDER BY score DESC LIMIT 10"
 # Every request of `/v1/sql` gets its own session context, so the opt-in has to
-# travel with the query it should affect. Only the candidate target runs these
-# statements; the base target measures the same query with the default rewrite
-# behavior.
+# travel with the query it should affect. Both targets opt in: the base build
+# takes path B (nested MergeScan, re-executing the small side per probe region)
+# and the candidate takes path C (materializing the small side once).
 candidate_session_sql = ["SET experimental_dist_join = true"]
+base_session_sql = ["SET experimental_dist_join = true"]
 # Before it measures, the candidate target runs one separate EXPLAIN ANALYZE
 # request of this query and fails it without a timed sample unless the executed
 # plan keeps HashJoinExec out of the frontend stage and runs it in a later one.
@@ -140,7 +142,8 @@ max_candidate_latency_regression_pct = 50
 # rewrite (path B) rejects it. With experimental_dist_join=true the candidate
 # uses the materialized broadcast path (path C): the small side is materialized
 # once on the frontend, then dispatched to the probe regions.
-# The base runs the same query without the opt-in, so it joins on the frontend.
+# The base opts in too, but its build predates path C and path B rejects the
+# volatile shape, so it still joins on the frontend.
 #
 # candidate_remote_operator is intentionally absent: the C hook runs after the
 # analyzer but EXPLAIN ANALYZE bypasses it, so the preflight would not see the
@@ -151,6 +154,7 @@ name = "join_dist_broadcast_volatile"
 kind = "sql"
 query = "SELECT f.host, d.zone, avg(f.value * d.weight * d.rand_factor) AS score FROM sql_join_dist_fact f JOIN (SELECT host, zone, weight, random() AS rand_factor FROM sql_join_dist_dim WHERE ts >= '2024-01-01 00:00:00+0000'::TIMESTAMP AND ts < '2024-01-01 01:00:00+0000'::TIMESTAMP AND zone IN ('zone1', 'zone2')) d ON f.host = d.host WHERE f.ts >= '2024-01-01 00:00:00+0000'::TIMESTAMP AND f.ts < '2024-01-05 00:00:00+0000'::TIMESTAMP GROUP BY f.host, d.zone ORDER BY score DESC LIMIT 10"
 candidate_session_sql = ["SET experimental_dist_join = true"]
+base_session_sql = ["SET experimental_dist_join = true"]
 require_region_statistics = true
 warmup = 1
 iterations = 3
