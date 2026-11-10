@@ -46,8 +46,8 @@ use crate::sst::internal_fields;
 use crate::sst::parquet::flat_format::{FlatReadFormat, primary_key_column_index};
 use crate::sst::parquet::format::{INTERNAL_COLUMN_NUM, PrimaryKeyArray};
 
-/// Returns true if the columns in the `projection_mapper` and `read_format` have same data types
-/// and primary key encodings.
+/// Returns true if the columns in the `projection_mapper` and `read_format` have same data types,
+/// primary key order and primary key encodings.
 pub(crate) fn has_same_columns_and_pk_encoding(
     projection_mapper: &FlatProjectionMapper,
     read_format: &FlatReadFormat,
@@ -56,6 +56,15 @@ pub(crate) fn has_same_columns_and_pk_encoding(
     let left = projection_mapper.metadata();
     let right = read_format.metadata();
     if left.primary_key_encoding != right.primary_key_encoding {
+        return false;
+    }
+
+    // The primary key order is part of the primary key encoding. The compat reader
+    // cannot reorder a key: it can only append missing tags or rewrite the encoding.
+    // A reordered key is therefore rejected instead of being re-encoded, and readers
+    // must not merge keys encoded in another order, even if the projected schema hides
+    // the difference.
+    if left.primary_key != right.primary_key {
         return false;
     }
 
@@ -787,6 +796,50 @@ mod tests {
             builder.append(pk).unwrap();
         }
         Arc::new(builder.finish())
+    }
+
+    #[test]
+    fn test_has_same_columns_and_pk_encoding_compares_pk_order() {
+        let semantic_types = [
+            (
+                0,
+                SemanticType::Timestamp,
+                ConcreteDataType::timestamp_millisecond_datatype(),
+            ),
+            (1, SemanticType::Tag, ConcreteDataType::string_datatype()),
+            (2, SemanticType::Tag, ConcreteDataType::string_datatype()),
+            (3, SemanticType::Field, ConcreteDataType::int64_datatype()),
+        ];
+        // Same columns, column ids and encoding. Only the primary key order differs:
+        // the SST encodes `(tag_1, tag_2)` while the region expects `(tag_2, tag_1)`.
+        let actual_metadata =
+            Arc::new(with_sparse_encoding(new_metadata(&semantic_types, &[1, 2])));
+        let expected_metadata =
+            Arc::new(with_sparse_encoding(new_metadata(&semantic_types, &[2, 1])));
+        assert_ne!(
+            actual_metadata.primary_key, expected_metadata.primary_key,
+            "the two metadata must differ in primary key order"
+        );
+
+        let read_columns = ReadColumns::new(
+            actual_metadata
+                .column_metadatas
+                .iter()
+                .map(|column| column.column_id),
+        );
+        let mapper = FlatProjectionMapper::all(&expected_metadata).unwrap();
+        let read_format =
+            FlatReadFormat::new(actual_metadata.clone(), read_columns, None, "test", false)
+                .unwrap();
+
+        // Both readers must treat a primary key order change as incompatible, so
+        // keys encoded in another order are never merged.
+        for compaction in [false, true] {
+            assert!(
+                !has_same_columns_and_pk_encoding(&mapper, &read_format, compaction),
+                "primary key order mismatch must require compatibility, compaction: {compaction}"
+            );
+        }
     }
 
     #[test]

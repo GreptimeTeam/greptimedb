@@ -789,8 +789,6 @@ impl TableMeta {
     ) -> Result<TableMetaBuilder> {
         let table_schema = &self.schema;
         let mut meta_builder = self.new_meta_builder();
-        let original_primary_key_indices: HashSet<&usize> =
-            self.primary_key_indices.iter().collect();
 
         let mut names = HashSet::with_capacity(requests.len());
         let mut new_columns = Vec::with_capacity(requests.len());
@@ -873,27 +871,27 @@ impl TableMeta {
             columns_at_last,
             column_names,
         } = self.split_requests_by_column_location(table_name, requests)?;
-        let mut primary_key_indices = Vec::with_capacity(self.primary_key_indices.len());
+        // Maps the index of an existing column to its index in the new schema.
+        let mut original_to_new_index = vec![0; table_schema.num_columns()];
+        // New key columns by name, used to append them to the primary key in the
+        // order regions append them.
+        let mut new_key_indices = HashMap::with_capacity(requests.len());
         let mut columns = Vec::with_capacity(table_schema.num_columns() + requests.len());
         // add new columns with FIRST, and in reverse order of requests.
         columns_at_first.iter().rev().for_each(|request| {
             if request.is_key {
-                // If a key column is added, we also need to store its index in primary_key_indices.
-                primary_key_indices.push(columns.len());
+                new_key_indices.insert(request.column_schema.name.as_str(), columns.len());
             }
             columns.push(request.column_schema.clone());
         });
         // add existed columns in original order and handle new columns with AFTER.
         for (index, column_schema) in table_schema.column_schemas().iter().enumerate() {
-            if original_primary_key_indices.contains(&index) {
-                primary_key_indices.push(columns.len());
-            }
+            original_to_new_index[index] = columns.len();
             columns.push(column_schema.clone());
             if let Some(requests) = columns_at_after.get(&column_schema.name) {
                 requests.iter().rev().for_each(|request| {
                     if request.is_key {
-                        // If a key column is added, we also need to store its index in primary_key_indices.
-                        primary_key_indices.push(columns.len());
+                        new_key_indices.insert(request.column_schema.name.as_str(), columns.len());
                     }
                     columns.push(request.column_schema.clone());
                 });
@@ -902,11 +900,31 @@ impl TableMeta {
         // add new columns without location info to last.
         columns_at_last.iter().for_each(|request| {
             if request.is_key {
-                // If a key column is added, we also need to store its index in primary_key_indices.
-                primary_key_indices.push(columns.len());
+                new_key_indices.insert(request.column_schema.name.as_str(), columns.len());
             }
             columns.push(request.column_schema.clone());
         });
+
+        // The primary key order is part of the primary key encoding regions use, so
+        // it must be preserved and only remapped to the new column positions.
+        let mut primary_key_indices =
+            Vec::with_capacity(self.primary_key_indices.len() + new_key_indices.len());
+        primary_key_indices.extend(
+            self.primary_key_indices
+                .iter()
+                .map(|index| original_to_new_index[*index]),
+        );
+        // A region only appends a new tag to the end of its primary key. Appending new
+        // key columns in request order keeps the table meta and its regions consistent,
+        // instead of inserting them at their column position.
+        for request in requests.iter().filter(|request| request.is_key) {
+            // Every key request is laid out by exactly one of the location buckets
+            // above, so its new index is always recorded.
+            let new_index = *new_key_indices
+                .get(request.column_schema.name.as_str())
+                .expect("key column is laid out before the primary key is built");
+            primary_key_indices.push(new_index);
+        }
 
         let mut builder = SchemaBuilder::try_from(columns)
             .with_context(|_| error::SchemaBuildSnafu {
@@ -3219,9 +3237,120 @@ mod tests {
             ],
             &names[..]
         );
-        assert_eq!(&[0, 1, 3], &new_meta.primary_key_indices[..]);
+        // The original primary key (`col1`) keeps its position, and the two new
+        // tag columns are appended in request order, which is the order a region
+        // appends new tags to its primary key.
+        assert_eq!(&[1, 0, 3], &new_meta.primary_key_indices[..]);
         assert_eq!(&[2, 4, 5], &new_meta.value_indices[..]);
         assert_eq!(&[1, 5], &new_meta.partition_key_indices[..]);
+    }
+
+    /// Creates a table meta whose primary key is not in column order:
+    /// columns `[ts, a, b, f]` with primary key `(b, a)`.
+    fn new_out_of_order_pk_meta() -> TableMeta {
+        let column_schemas = vec![
+            ColumnSchema::new(
+                "ts",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            )
+            .with_time_index(true),
+            ColumnSchema::new("a", ConcreteDataType::string_datatype(), true),
+            ColumnSchema::new("b", ConcreteDataType::string_datatype(), true),
+            ColumnSchema::new("f", ConcreteDataType::int64_datatype(), true),
+        ];
+        let schema = SchemaBuilder::try_from(column_schemas)
+            .unwrap()
+            .version(123)
+            .build()
+            .unwrap();
+
+        TableMetaBuilder::empty()
+            .schema(Arc::new(schema))
+            // Primary key is `(b, a)`, the reverse of the column order.
+            .primary_key_indices(vec![2, 1])
+            .engine("engine")
+            .next_column_id(4)
+            .build()
+            .unwrap()
+    }
+
+    #[test]
+    fn test_add_columns_preserves_primary_key_order() {
+        let meta = new_out_of_order_pk_meta();
+        let alter_kind = AlterKind::AddColumns {
+            columns: vec![
+                AddColumnRequest {
+                    // A new tag in the middle of the table.
+                    column_schema: ColumnSchema::new(
+                        "mid_tag",
+                        ConcreteDataType::string_datatype(),
+                        true,
+                    ),
+                    is_key: true,
+                    location: Some(AddColumnLocation::After {
+                        column_name: "a".to_string(),
+                    }),
+                    add_if_not_exists: false,
+                },
+                AddColumnRequest {
+                    // A new field at the end of the table.
+                    column_schema: ColumnSchema::new(
+                        "last_field",
+                        ConcreteDataType::int64_datatype(),
+                        true,
+                    ),
+                    is_key: false,
+                    location: None,
+                    add_if_not_exists: false,
+                },
+                AddColumnRequest {
+                    // A new tag at the end of the table.
+                    column_schema: ColumnSchema::new(
+                        "last_tag",
+                        ConcreteDataType::string_datatype(),
+                        true,
+                    ),
+                    is_key: true,
+                    location: None,
+                    add_if_not_exists: false,
+                },
+            ],
+        };
+
+        let new_meta = meta
+            .builder_with_alter_kind("my_table", &alter_kind)
+            .unwrap()
+            .build()
+            .unwrap();
+
+        let names: Vec<&str> = new_meta
+            .schema
+            .column_schemas()
+            .iter()
+            .map(|column_schema| column_schema.name.as_str())
+            .collect();
+        assert_eq!(
+            &["ts", "a", "mid_tag", "b", "f", "last_field", "last_tag"],
+            &names[..]
+        );
+
+        // The existing primary key order `(b, a)` must survive adding columns even
+        // though `b` is not the first primary key column and a new tag is inserted
+        // before it. New tags are appended, which matches the region side that only
+        // appends new tags to the end of its primary key.
+        assert_eq!(&[3, 1, 2, 6], &new_meta.primary_key_indices[..]);
+        let pk_names: Vec<&str> = new_meta
+            .row_key_column_names()
+            .map(|name| name.as_str())
+            .collect();
+        assert_eq!(&["b", "a", "mid_tag", "last_tag"], &pk_names[..]);
+        // Every primary key index still points at its own column.
+        for (index, name) in new_meta.primary_key_indices.iter().zip(&pk_names) {
+            assert_eq!(name, &names[*index]);
+        }
+        // Non primary key columns are still the complement of the primary key.
+        assert_eq!(&[0, 4, 5], &new_meta.value_indices[..]);
     }
 
     #[test]
