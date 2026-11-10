@@ -90,10 +90,9 @@ pub(crate) struct SamplesReadRequest {
     pub(crate) memory_pool: Option<Arc<dyn datafusion::execution::memory_pool::MemoryPool>>,
     pub(crate) projection: Vec<String>,
     pub(crate) table_id: Option<u32>,
-    /// Coarse selection. Prunes parts and pages only; it cannot name a series owner.
-    pub(crate) ids: Option<BTreeSet<MetricSeriesId>>,
     /// Exact selection. A block whose key is absent here is never read, even when its
-    /// coarse `(table_id, tsid)` is selected.
+    /// coarse `(table_id, tsid)` is present. The reader derives its coarse pruning set
+    /// from these keys, so the selection cannot disagree with itself.
     pub(crate) keys: Option<BTreeSet<ExactSeriesKey>>,
     pub(crate) start: Option<i64>,
     pub(crate) end: Option<i64>,

@@ -31,7 +31,7 @@ use store_api::codec::PrimaryKeyEncoding;
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::FileId;
 
-use super::metadata::{Bounds, Page, Trailer};
+use super::metadata::{Bounds, Page, PayloadReference, TRAILER_SIZE, Trailer};
 use super::*;
 use crate::series_index::artifact::{SamplesEntry, SamplesFileHandle};
 use crate::series_index::format::{SamplesFormat, SamplesReadRequest};
@@ -178,6 +178,40 @@ async fn build(
         purger,
     )
 }
+/// Reads the descriptor and root page of a one-part artifact, plus the part's bytes. Tests
+/// use it to inspect what the reader decodes and to rewrite a stored page.
+async fn root_page(
+    store: &ObjectStore,
+    handle: &SamplesFileHandle,
+) -> (Manifest, Trailer, Page, Vec<u8>) {
+    let manifest = manifest(store, handle).await;
+    assert_eq!(
+        1,
+        manifest.files.len(),
+        "one part keeps the root page addressable"
+    );
+    let bytes = store
+        .read(&manifest.part_path(0))
+        .await
+        .unwrap()
+        .to_bytes()
+        .to_vec();
+    let trailer_start = bytes.len() - TRAILER_SIZE as usize;
+    let trailer = Trailer::decode(&bytes[trailer_start..], bytes.len() as u64).unwrap();
+    assert_eq!(1, trailer.depth, "one leaf keeps the root page addressable");
+    let start = trailer.root.payload.offset as usize;
+    let stored = &bytes[start..start + trailer.root.payload.stored as usize];
+    let page = Page::decode(
+        &trailer.root.payload.unpack(stored).unwrap(),
+        &trailer.root,
+        trailer.depth,
+        trailer.payload_end,
+        &manifest,
+    )
+    .unwrap();
+    (manifest, trailer, page, bytes)
+}
+
 async fn manifest(store: &ObjectStore, handle: &SamplesFileHandle) -> Manifest {
     let path = &handle
         .entry()
@@ -388,10 +422,7 @@ async fn equal_timestamps_cross_leaves_and_parts() {
     let reader = format.reader(store, handle).await.unwrap();
     for (start, end) in [(99, 100), (100, 101), (101, 102), (50, 101)] {
         let mut req = full_request();
-        req.ids = Some(BTreeSet::from([MetricSeriesId {
-            table_id: 7,
-            tsid: 42,
-        }]));
+        req.keys = Some(BTreeSet::from([exact(&m, &["a", "b"], 7, 42)]));
         req.start = Some(start);
         req.end = Some(end);
         let out = reader
@@ -442,6 +473,45 @@ async fn read_key(reader: &dyn SamplesFormatReader, key: ExactSeriesKey) -> Vec<
     collect_rows(&out)
 }
 
+/// A key whose label is long enough to push the encoded key past 8 KiB round-trips like any
+/// other: the writer and the reader agree because neither imposes a length cap.
+#[tokio::test]
+async fn long_keys_round_trip() {
+    let store = store();
+    let meta = metadata();
+    let format = ColumnarSamplesFormat::default();
+    let label = "x".repeat(8 * 1024);
+    let key = new_sparse_primary_key(&[label.as_str(), "z"], &meta, 1, 7);
+    assert!(key.len() > 8 * 1024, "{}", key.len());
+    let handle = build(
+        &format,
+        &store,
+        meta.clone(),
+        &[keyed_batch(
+            &meta,
+            &[key.clone(), key.clone()],
+            &[100, 200],
+            false,
+        )],
+    )
+    .await;
+    let reader = format.reader(store.clone(), handle.clone()).await.unwrap();
+    let selection = exact(&meta, &[label.as_str(), "z"], 1, 7);
+    assert_eq!(selection.bytes(), key.as_slice());
+    assert_eq!(
+        read_key(reader.as_ref(), selection).await,
+        vec![(1, 7, 100, 1, 0, Some(0)), (1, 7, 200, 1, 0, Some(0)),]
+    );
+    // The stored descriptor keeps the key byte for byte, so a read returns the same bytes the
+    // writer received.
+    let (_, _, page, _) = root_page(&store, &handle).await;
+    let Page::Leaf(blocks) = page else {
+        panic!("one leaf page holds the fixture")
+    };
+    assert_eq!(1, blocks.len());
+    assert_eq!(key.as_slice(), blocks[0].key.bytes());
+}
+
 /// The captured pair in the samples artifact: two distinct series with one
 /// `table_id`/`tsid` whose timestamps restart. Every block records which exact key
 /// owns it, so each series keeps its own samples and never sees the partner's.
@@ -484,12 +554,9 @@ async fn colliding_tsids_are_retained_and_owned_exactly() {
             read_key(reader.as_ref(), partner_key.clone()).await,
             vec![(1, 7, 100, 1, 0, Some(0)), (1, 7, 200, 1, 0, Some(0)),]
         );
-        // A coarse selection of the shared identifier still reads both owners.
+        // Selecting both owners reads both, even though they share one identifier.
         let mut req = full_request();
-        req.ids = Some(BTreeSet::from([MetricSeriesId {
-            table_id: 1,
-            tsid: 7,
-        }]));
+        req.keys = Some(BTreeSet::from([first_key.clone(), partner_key.clone()]));
         let out = reader
             .read(req)
             .unwrap()
@@ -684,7 +751,7 @@ async fn empty_selection_and_validation() {
     req.end = Some(1);
     assert!(reader.read(req).is_err());
     let mut req = request(&[]);
-    req.ids = Some(BTreeSet::new());
+    req.keys = Some(BTreeSet::new());
     assert!(
         reader
             .read(req)
@@ -1189,8 +1256,97 @@ async fn frozen_v1_samples_fixture_is_rejected() {
         .await
         .err()
         .expect("a v1 samples artifact must be rejected");
+    // The compatibility property, not the wording of the discriminator: the artifact is
+    // refused, and the remedy the caller is told about is a rebuild.
     let message = error.to_string();
-    assert!(message.contains("identity_encoding"), "{message}");
+    assert!(message.contains("rebuild"), "{message}");
+}
+
+/// Rewrites the stored root page so every field column carries an unknown codec, and returns a
+/// handle whose descriptor sizes match the rewritten bytes. Everything else stays valid.
+async fn unknown_field_codec(store: &ObjectStore, handle: SamplesFileHandle) -> SamplesFileHandle {
+    let (mut manifest, mut trailer, page, mut bytes) = root_page(store, &handle).await;
+    let Page::Leaf(mut blocks) = page else {
+        panic!("the root page must be a leaf")
+    };
+    let mut patched = 0;
+    for column in blocks.iter_mut().flat_map(|block| block.columns.iter_mut()) {
+        if column.role == 4 {
+            column.payload.encoding = 99;
+            patched += 1;
+        }
+    }
+    assert_eq!(1, patched, "the fixture must store one field column");
+    let start = trailer.root.payload.offset as usize;
+    let encoded = Page::Leaf(blocks).encode();
+    bytes.truncate(start);
+    bytes.extend_from_slice(&encoded);
+    trailer.root.payload = PayloadReference {
+        offset: start as u64,
+        stored: encoded.len() as u32,
+        decoded: encoded.len() as u32,
+        checksum: codec::checksum(&encoded),
+        encoding: 1,
+        compression: 0,
+    };
+    // The payload area ends where the pages begin, so only the page's own reference and the
+    // file length change.
+    trailer.file_length = (bytes.len() + TRAILER_SIZE as usize) as u64;
+    bytes.extend_from_slice(&trailer.encode());
+    let part_path = manifest.part_path(0);
+    store.write(&part_path, bytes.clone()).await.unwrap();
+    manifest.files[0].file_size = bytes.len() as u64;
+    let manifest_path = manifest.path();
+    let json = serde_json::to_vec(&manifest).unwrap();
+    store.write(&manifest_path, json.clone()).await.unwrap();
+    let mut entry = handle.entry().clone();
+    for object in &mut entry.artifact.objects {
+        if object.path == part_path {
+            object.file_size = bytes.len() as u64;
+        } else if object.path == manifest_path {
+            object.file_size = json.len() as u64;
+        } else {
+            panic!("unexpected samples object {}", object.path);
+        }
+    }
+    entry.artifact.file_size = entry.artifact.objects.iter().map(|o| o.file_size).sum();
+    let (purger, _receiver) = series_index_channel(store.clone());
+    SamplesFileHandle::new(handle.file_id(), entry, purger)
+}
+
+/// A column whose codec the format does not know can only be skipped: a query that does not
+/// project it reads normally, and projecting it is an error rather than silent garbage.
+#[tokio::test]
+async fn unknown_field_codec_can_only_be_skipped() {
+    let store = store();
+    let m = metadata();
+    let format = ColumnarSamplesFormat::default();
+    let handle = build(
+        &format,
+        &store,
+        m.clone(),
+        &[batch(&m, &[(1, 1, 100, 1, 1, Some(7))], false)],
+    )
+    .await;
+    let handle = unknown_field_codec(&store, handle).await;
+    let reader = format.reader(store, handle).await.unwrap();
+    let timestamps = reader
+        .read(request(&["ts"]))
+        .unwrap()
+        .try_collect::<Vec<_>>()
+        .await
+        .unwrap();
+    assert_eq!(1, timestamps.iter().map(|b| b.num_rows()).sum::<usize>());
+    let error = reader
+        .read(request(&["field_0"]))
+        .unwrap()
+        .try_collect::<Vec<_>>()
+        .await
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("samples column encoding"),
+        "{error}"
+    );
 }
 
 #[tokio::test]
@@ -1615,19 +1771,11 @@ async fn series_read_windows_are_bounded_and_gap_rows_are_not_returned() {
     };
     reads.lock().unwrap().clear();
     let mut request = full_request();
-    request.ids = Some(
-        [
-            MetricSeriesId {
-                table_id: 1,
-                tsid: 0,
-            },
-            MetricSeriesId {
-                table_id: 1,
-                tsid: 259,
-            },
-        ]
-        .into_iter()
-        .collect(),
+    request.keys = Some(
+        [0, 259]
+            .into_iter()
+            .map(|tsid| exact(&m, &["a", "b"], 1, tsid))
+            .collect(),
     );
     let selected = reader
         .read(request)
@@ -1648,19 +1796,11 @@ async fn series_read_windows_are_bounded_and_gap_rows_are_not_returned() {
 
     reads.lock().unwrap().clear();
     let mut request = full_request();
-    request.ids = Some(
-        [
-            MetricSeriesId {
-                table_id: 1,
-                tsid: 0,
-            },
-            MetricSeriesId {
-                table_id: 1,
-                tsid: 2,
-            },
-        ]
-        .into_iter()
-        .collect(),
+    request.keys = Some(
+        [0, 2]
+            .into_iter()
+            .map(|tsid| exact(&m, &["a", "b"], 1, tsid))
+            .collect(),
     );
     let selected = reader
         .read(request)
@@ -1757,13 +1897,7 @@ async fn aligned_payload_cache_reuses_gap_bytes_across_readers() {
         .unwrap()
         .with_payload_cache(strategy.columnar_payload(namespace));
         let mut request = full_request();
-        request.ids = Some(
-            [MetricSeriesId {
-                table_id: 1,
-                tsid: id,
-            }]
-            .into(),
-        );
+        request.keys = Some([exact(&m, &["a", "b"], 1, id)].into());
         request.start = Some(1);
         request.end = Some(3);
         let rows = reader
@@ -1858,6 +1992,82 @@ async fn aligned_payload_cache_assembles_columns_across_blocks() {
     );
 }
 
+/// Metadata pages retain each block's exact key on the heap, so the cache weight of a page
+/// must count those bytes as well.
+#[tokio::test]
+async fn retained_metadata_pages_count_the_key_heap() {
+    let store = store();
+    let meta = metadata();
+    let format = ColumnarSamplesFormat::default();
+    let label = "x".repeat(1024);
+    let keys = (0..3)
+        .map(|tsid| new_sparse_primary_key(&[label.as_str(), "z"], &meta, 1, tsid))
+        .collect::<Vec<_>>();
+    let handle = build(
+        &format,
+        &store,
+        meta.clone(),
+        &[keyed_batch(&meta, &keys, &[100, 100, 100], false)],
+    )
+    .await;
+    let (_, _, page, _) = root_page(&store, &handle).await;
+    assert!(
+        page.retained_size() >= 3 * 1024,
+        "retained size {} omits the retained keys",
+        page.retained_size()
+    );
+}
+
+/// The exact key column allocates one key per output row, so the scan reservation has to
+/// budget the key bytes rather than a fixed per-column estimate: one block of 8192 rows with
+/// a 1 KiB key retains ~8 MiB of keys.
+#[tokio::test]
+async fn exact_key_output_is_budgeted_per_row() {
+    use datafusion::execution::memory_pool::{GreedyMemoryPool, MemoryPool};
+
+    let store = store();
+    let m = metadata();
+    let format = ColumnarSamplesFormat::default();
+    let label = "x".repeat(1024);
+    let keys = vec![new_sparse_primary_key(&[label.as_str(), "z"], &m, 1, 7); 8192];
+    let times = (0..8192_i64).collect::<Vec<_>>();
+    let handle = build(
+        &format,
+        &store,
+        m.clone(),
+        &[keyed_batch(&m, &keys, &times, false)],
+    )
+    .await;
+    let reader = format.reader(store, handle).await.unwrap();
+    let mut request = request(&[TABLE_ID_COLUMN, TSID_COLUMN, "ts", PRIMARY_KEY]);
+    request.keys = Some(BTreeSet::from([exact(&m, &[label.as_str(), "z"], 1, 7)]));
+    // A pool that cannot hold the key column must refuse the read, not under-report it.
+    let small = Arc::new(GreedyMemoryPool::new(4 * 1024 * 1024));
+    let mut rejected = request.clone();
+    rejected.memory_pool = Some(small.clone());
+    assert!(
+        reader
+            .read(rejected)
+            .unwrap()
+            .try_collect::<Vec<_>>()
+            .await
+            .is_err(),
+        "a 4 MiB pool cannot hold 8192 rows of 1 KiB keys"
+    );
+    assert_eq!(0, small.reserved());
+    // A pool that does cover the keys still returns every row.
+    let large = Arc::new(GreedyMemoryPool::new(64 * 1024 * 1024));
+    request.memory_pool = Some(large.clone());
+    let rows = reader
+        .read(request)
+        .unwrap()
+        .try_collect::<Vec<_>>()
+        .await
+        .unwrap();
+    assert_eq!(8192, rows.iter().map(|b| b.num_rows()).sum::<usize>());
+    assert_eq!(0, large.reserved());
+}
+
 /// Sparse selections must bound aligned cache reads as well as selected column bytes.
 #[rstest::rstest]
 #[case(1024 * 1024)]
@@ -1906,10 +2116,10 @@ async fn sparse_cached_reads_fit_the_scan_pool(#[case] capacity: usize) {
         let pool = Arc::new(GreedyMemoryPool::new(capacity));
         let mut request = full_request();
         request.memory_pool = Some(pool.clone());
-        request.ids = Some(
+        request.keys = Some(
             (0..256)
                 .step_by(2)
-                .map(|tsid| MetricSeriesId { table_id: 1, tsid })
+                .map(|tsid| exact(&m, &["a", "b"], 1, tsid))
                 .collect(),
         );
         for warm in [false, true] {

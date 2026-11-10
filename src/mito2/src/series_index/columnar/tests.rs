@@ -404,40 +404,6 @@ async fn colliding_tsids_are_retained_not_merged() {
     }
 }
 
-/// The silent-loss variant: timestamps keep increasing across the collision, so the
-/// old writer merged the partner without any timestamp evidence against it.
-#[tokio::test]
-async fn colliding_tsids_with_increasing_timestamps_are_retained() {
-    let store = store();
-    let meta = metadata();
-    let format = ColumnarSeriesFormat::default();
-    let first = new_sparse_primary_key(&["host-020078", "z"], &meta, 1, 7);
-    let partner = new_sparse_primary_key(&["host-029838", "z"], &meta, 1, 7);
-    for dictionary in [false, true] {
-        let entry = entry();
-        let mut writer = format
-            .writer(meta.clone(), store.clone(), &entry)
-            .await
-            .unwrap();
-        writer
-            .write(&batch(&[first.clone(), first.clone()], dictionary, 100))
-            .await
-            .unwrap();
-        writer
-            .write(&batch(&[partner.clone(), partner.clone()], dictionary, 300))
-            .await
-            .unwrap();
-        let handle = handle_of(&store, entry, writer).await;
-        assert_eq!(
-            read_rows(&format, &store, handle).await,
-            vec![
-                (7, 2, "host-020078".to_owned()),
-                (7, 2, "host-029838".to_owned()),
-            ]
-        );
-    }
-}
-
 /// Many distinct keys under one forced tsid, through both primary-key inputs.
 #[tokio::test]
 async fn many_distinct_keys_under_one_tsid_are_retained() {

@@ -14,7 +14,7 @@
 
 //! Lazy, selective sample reads with independent traversal and pinned lifetimes.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -37,7 +37,7 @@ use crate::error::{NewRecordBatchSnafu, OpenDalSnafu, Result};
 use crate::metrics::ColumnarReadMetrics;
 use crate::series_index::artifact::{ArtifactFormat, SamplesFileHandle};
 use crate::series_index::format::{SamplesFormatReader, SamplesReadRequest};
-use crate::series_index::identity::IdentityEncoding;
+use crate::series_index::identity::{ExactSeriesKey, IdentityEncoding};
 use crate::series_index::samples::codec;
 use crate::series_index::samples::metadata::{
     self, Block, BlockOrder, Bounds, Column, Page, PageReference, Trailer,
@@ -228,14 +228,18 @@ impl SamplesFormatReader for SamplesReader {
                 .is_none_or(|(start, end)| start <= end),
             "reversed sample time range",
         )?;
-        let empty = request.ids.as_ref().is_some_and(|ids| ids.is_empty())
-            || request.keys.as_ref().is_some_and(|keys| keys.is_empty())
+        let empty = request.keys.as_ref().is_some_and(|keys| keys.is_empty())
             || request.start.zip(request.end).is_some_and(|(a, b)| a == b);
-        let complete = request.ids.is_none()
-            && request.keys.is_none()
+        let complete = request.keys.is_none()
             && request.table_id.is_none()
             && request.start.is_none()
             && request.end.is_none();
+        // Coarse pruning bounds come from the exact selection itself, so a reader can never
+        // prune away a part or page that owns one of the selected series.
+        let ids: Option<BTreeSet<MetricSeriesId>> = request
+            .keys
+            .as_ref()
+            .map(|keys| keys.iter().map(ExactSeriesKey::id).collect());
         let projected = Arc::new(
             schema
                 .project(&projection)
@@ -263,7 +267,7 @@ impl SamplesFormatReader for SamplesReader {
             let mut adjacent = true;
             for part in &manifest.files {
                 let bounds = Bounds { first: part.first, last: part.last, min: part.min_timestamp, max: part.max_timestamp };
-                if !matches(bounds, &request) { adjacent = false; continue; }
+                if !matches(bounds, &request, ids.as_ref()) { adjacent = false; continue; }
                 let path = manifest.part_path(part.part_id);
                 // One lazy reader per accessed part, shared across this query's streams.
                 let reader = parts[part.part_id as usize].get_or_try_init(|| async {
@@ -292,7 +296,7 @@ impl SamplesFormatReader for SamplesReader {
                 loop {
                     let page = if let Some(page) = active.take() { page } else {
                         let Some(child) = children.next() else { break; };
-                        if !matches(child.bounds, &request) { adjacent = false; continue; }
+                        if !matches(child.bounds, &request, ids.as_ref()) { adjacent = false; continue; }
                         let started = Instant::now();
                         let page = load_metadata_page(cache.as_ref(), reader, (&path, size), &child, 1, trailer.payload_end, &manifest).await?;
                         metrics.add_elapsed("columnar_metadata_wall", started.elapsed());
@@ -309,11 +313,11 @@ impl SamplesFormatReader for SamplesReader {
                             column.payload.validate(payload_position, trailer.payload_end, false)?;
                             payload_position = column.payload.end()?;
                         }
-                        let batch = if matches(block.bounds(), &request) && owns(block, &request) {
+                        let batch = if matches(block.bounds(), &request, ids.as_ref()) && owns(block, &request) {
                             if block_index >= prefetched.end {
                                 // Release the previous window before reserving the next one.
                                 drop(std::mem::take(&mut prefetched));
-                                prefetched = prefetch_blocks(&payload_reader, blocks, block_index, &field_ids, &request, &projection, trailer.payload_end, &mut metrics).await?;
+                                prefetched = prefetch_blocks(&payload_reader, blocks, block_index, &field_ids, &request, ids.as_ref(), &projection, trailer.payload_end, &mut metrics).await?;
                             }
                             *metrics.counts.entry("blocks").or_default() += 1;
                             *metrics.counts.entry("decoded_rows").or_default() += u64::from(block.rows);
@@ -341,7 +345,12 @@ fn owns(block: &Block, request: &SamplesReadRequest) -> bool {
         .is_none_or(|keys| keys.contains(&block.key))
 }
 
-fn matches(bounds: Bounds, request: &SamplesReadRequest) -> bool {
+/// Bounds-only pruning. Selection itself is exact and decided by [`owns`].
+fn matches(
+    bounds: Bounds,
+    request: &SamplesReadRequest,
+    ids: Option<&BTreeSet<MetricSeriesId>>,
+) -> bool {
     if request.start.is_some_and(|start| bounds.max < start)
         || request.end.is_some_and(|end| bounds.min >= end)
     {
@@ -356,11 +365,7 @@ fn matches(bounds: Bounds, request: &SamplesReadRequest) -> bool {
             tsid: u64::MAX,
         });
     }
-    first <= last
-        && request
-            .ids
-            .as_ref()
-            .is_none_or(|ids| ids.range(first..=last).next().is_some())
+    first <= last && ids.is_none_or(|ids| ids.range(first..=last).next().is_some())
 }
 async fn read_range(store: &ObjectStore, path: &str, start: u64, end: u64) -> Result<bytes::Bytes> {
     require(start <= end, "reversed sample byte range")?;
@@ -478,12 +483,22 @@ async fn read_block(
         .map(|r| r.end - r.start)
         .sum::<u64>()
         - ranges.iter().map(|r| r.end - r.start).sum::<u64>();
+    // The exact key column copies one key per output row, so its per-row budget is the
+    // key itself rather than a fixed estimate: an 8 KiB key over one block of 8192 rows
+    // allocates 64 MiB. Every row is budgeted because time pruning has not happened yet
+    // and can only lower the count.
+    let key_bytes = if projection.contains(&manifest.primary_key_index()) {
+        block.key.bytes().len()
+    } else {
+        0
+    };
     let base_bytes = 2 * gap_bytes as usize
         + columns
             .iter()
             .map(|column| column.payload.stored as usize + column.payload.decoded as usize)
             .sum::<usize>()
-        + block.rows as usize * (32 * (projection.len() + 1) + std::mem::size_of::<usize>())
+        + block.rows as usize
+            * (32 * (projection.len() + 1) + std::mem::size_of::<usize>() + key_bytes)
         + columns.len() * 128;
     let bytes = base_bytes + reader.reservation_bytes(&ranges);
     let mut bypass_cache = false;
@@ -925,6 +940,7 @@ async fn prefetch_blocks(
     start: usize,
     field_ids: &HashSet<u32>,
     request: &SamplesReadRequest,
+    ids: Option<&BTreeSet<MetricSeriesId>>,
     projection: &[usize],
     payload_end: u64,
     metrics: &mut ColumnarReadMetrics,
@@ -936,7 +952,7 @@ async fn prefetch_blocks(
     let mut payload_ranges = Vec::new();
     let mut end = start;
     for block in blocks.iter().skip(start).take(MAX_BLOCKS) {
-        if !matches(block.bounds(), request) {
+        if !matches(block.bounds(), request, ids) {
             end += 1;
             continue;
         }

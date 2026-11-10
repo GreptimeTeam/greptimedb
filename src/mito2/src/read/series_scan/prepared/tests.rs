@@ -1182,13 +1182,14 @@ async fn ordinal_range_batches_sample_requests_and_pushes_time_bounds() {
     {
         let requests = requests.lock().unwrap();
         assert_eq!(source.samples.len(), requests.len());
-        let ids = source
+        // Selection is exact and key-only: the reader derives its coarse bounds from it.
+        let keys = source
             .candidates
             .iter()
-            .map(|c| c.id)
+            .map(|c| c.exact.clone())
             .collect::<BTreeSet<_>>();
         for request in requests.iter() {
-            assert_eq!(Some(&ids), request.ids.as_ref());
+            assert_eq!(Some(&keys), request.keys.as_ref());
             assert_eq!(Some(1001), request.start);
             assert_eq!(Some(1601), request.end);
         }
@@ -1226,7 +1227,7 @@ async fn ordinal_range_batches_sample_requests_and_pushes_time_bounds() {
             .lock()
             .unwrap()
             .iter()
-            .all(|r| r.ids.as_ref().unwrap().len() == 2)
+            .all(|r| r.keys.as_ref().unwrap().len() == 2)
     );
     engine.stop().await.unwrap();
 }
@@ -2569,6 +2570,65 @@ async fn colliding_tsids_isolate_samples_and_labels_per_candidate() {
             .collect::<Vec<_>>(),
         vec![(2000, 1.0)],
         "the partner's samples must never be attached to the filtered host"
+    );
+    engine.stop().await.unwrap();
+}
+
+/// A key past 8 KiB must prepare and read like any other: the series-index writer, the
+/// samples writer, and preparation all accept the same key, so no artifact can be published
+/// that preparation then refuses.
+#[tokio::test]
+async fn long_keys_prepare_and_read() {
+    let (_env, engine, region) = fixture().await;
+    let metadata = region.version().metadata.clone();
+    let label = "x".repeat(8 * 1024);
+    let key = new_sparse_primary_key(&[label.as_str(), "z"], &metadata, 10, 0);
+    assert!(key.len() > 8 * 1024, "{}", key.len());
+    for (timestamp, value) in [(1000, 1.0), (2000, 2.0)] {
+        write_primary_key(&engine, &region, key.clone(), timestamp, Some(value)).await;
+    }
+    flush_region(&engine, region.region_id, None).await;
+    build(&engine, &region).await;
+
+    let mut input = scan_input(
+        &region,
+        region.series_index_store.clone().unwrap(),
+        SelectedFormat::Columnar,
+        (0..metadata.column_metadatas.len()).collect(),
+    );
+    // The fixture's default predicate would hide this series.
+    input.predicate = PredicateGroup::new(&metadata, &[]).unwrap();
+    let scan = SeriesScan::new(input, false);
+    let ctx = QueryScanContext::default();
+    let metrics = ExecutionPlanMetricsSet::new();
+    let binding = labels(scan.metadata());
+    scan.prepare_series(&ctx, &metrics, &binding)
+        .await
+        .unwrap()
+        .unwrap();
+    let source = scan.prepared.source.get().unwrap().as_ref().unwrap();
+    // The fixture's own series prepare beside this one; the long key must survive preparation
+    // byte for byte and own its samples. Served samples make `primary_key` region-qualified.
+    let mut expected = metadata.region_id.as_u64().to_be_bytes().to_vec();
+    expected.extend_from_slice(&key);
+    let ordinal = (0..source.num_series())
+        .find(|ordinal| {
+            source.series_info(*ordinal).unwrap().primary_key.as_ref() as &[u8]
+                == expected.as_slice()
+        })
+        .expect("preparation must keep the series whose key is longer than 8 KiB");
+    let chunks = source
+        .read_series(ordinal..ordinal + 1)
+        .unwrap()
+        .try_collect::<Vec<_>>()
+        .await
+        .unwrap();
+    assert_eq!(
+        rows(&chunks)
+            .into_iter()
+            .map(|(_, timestamp, value)| (timestamp, value))
+            .collect::<Vec<_>>(),
+        vec![(1000, 1.0), (2000, 2.0)]
     );
     engine.stop().await.unwrap();
 }

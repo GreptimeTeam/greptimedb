@@ -27,7 +27,7 @@ use mito_codec::row_converter::sparse::SparsePrimaryKeyView;
 use snafu::ResultExt;
 use store_api::storage::ColumnId;
 
-use crate::error::{DecodeSnafu, InvalidRecordBatchSnafu, Result};
+use crate::error::{DecodeSnafu, Result};
 use crate::series_index::MetricSeriesId;
 
 /// The identity semantics an artifact was written with.
@@ -49,10 +49,6 @@ impl IdentityEncoding {
     /// The encoding new artifacts are written with; readers require exactly this.
     pub(crate) const CURRENT: Self = Self::ExactSparseKey;
 }
-
-/// Largest key one series may have. A block stores at most one key, and a sparse key
-/// beyond this cannot describe a real series; refusing it keeps descriptors bounded.
-pub(crate) const MAX_KEY_BYTES: usize = 8 * 1024;
 
 /// The exact identity of one series: its canonical sparse primary-key bytes.
 ///
@@ -104,13 +100,16 @@ pub(crate) struct ExactSeriesKey {
 
 impl ExactSeriesKey {
     /// Wraps one encoded sparse primary key after validating its framing.
+    ///
+    /// # Length
+    ///
+    /// This entry point deliberately has no length cap, and neither does any other:
+    /// key length is bounded by the containers that store a key (one key per block,
+    /// plus the descriptor, page, and column limits), and a cap enforced on only one
+    /// entry point would let a writer publish a key another one refuses. Long labels
+    /// are real data — a single 8 KiB label already encodes to a larger sparse key —
+    /// so framing validation is the only requirement here.
     pub(crate) fn from_sparse_key(key: &[u8], offsets: &mut SparseOffsetsCache) -> Result<Self> {
-        if key.len() > MAX_KEY_BYTES {
-            return InvalidRecordBatchSnafu {
-                reason: format!("series key exceeds {MAX_KEY_BYTES} bytes"),
-            }
-            .fail();
-        }
         let mut view = SparsePrimaryKeyView::new(key, offsets).context(DecodeSnafu)?;
         // `new` validates the reserved prefix only; walk the labels so a truncated or
         // trailing-garbage key cannot become an identity that happens to share a prefix.
@@ -330,6 +329,24 @@ mod tests {
             assert_eq!(pair[0].cmp(&pair[1]), pair[0].bytes().cmp(pair[1].bytes()));
         }
         assert!(sorted.is_sorted());
+    }
+
+    #[test]
+    fn long_keys_are_identity_not_an_error() {
+        let mut offsets = SparseOffsetsCache::new();
+        // One 8 KiB label already encodes to a sparse key past 8 KiB. Both entry points
+        // must accept it: the containers that store a key bound its length, and a cap on
+        // one entry point alone would publish keys another refuses.
+        let label = "x".repeat(8 * 1024);
+        let encoded = key(&[&label, "z"], 1, 7);
+        assert!(encoded.len() > 8 * 1024, "{}", encoded.len());
+        let exact = ExactSeriesKey::from_sparse_key(&encoded, &mut offsets).unwrap();
+        assert_eq!(encoded, exact.bytes());
+        let tag_columns = [(0, "tag_0".to_string()), (1, "tag_1".to_string())];
+        let (decoded, tags) =
+            decode_series_identity(&encoded, &tag_columns, &mut offsets, &mut Vec::new()).unwrap();
+        assert_eq!(exact, decoded);
+        assert_eq!(Some(label), tags[0]);
     }
 
     #[test]

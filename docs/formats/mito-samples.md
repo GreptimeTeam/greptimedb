@@ -85,8 +85,10 @@ The stored logical Arrow schema is `__table_id: UInt32`, `__tsid: UInt64`, the
 timestamp column with its recorded unit, `__sequence: UInt64`, `__op_type: UInt8`,
 then nullable Float64 fields in manifest order, and finally
 `__primary_key: Binary` holding the exact key of the block that produced each row.
-Every column is non-null. `__table_id`/`__tsid` are the coarse, hash-based prefix
-of that key. Tag columns are not stored; the exact key is the identity.
+The five internal columns and `__primary_key` are non-null; value fields stay
+nullable, as the manifest declares them. `__table_id`/`__tsid` are the coarse,
+hash-based prefix of that key. Tag columns are not stored; the exact key is the
+identity.
 
 Each `files` entry contains `part_id: u32`, `file_size: u64`, `num_rows: u64`,
 `num_blocks: u64`, `first`, `last`, `min_timestamp: i64`, and `max_timestamp: i64`.
@@ -223,7 +225,8 @@ Leaf (kind 0):                     Internal root (kind 1):
 
 Pages are nonempty and limited to 65,536 decoded bytes, including the 12-byte
 prefix. Descriptors never straddle pages. A descriptor carries one variable-size series
-key (at most 8 KiB) and then fixed-width columns, and even the widest supported
+key and then fixed-width columns. A key has no separate length limit: it is bounded
+only by the page it shares with its block descriptor, and even the widest supported
 descriptor fits in one 65,536-byte page. No oversized-leaf exception is needed.
 
 #### Block descriptor
@@ -232,7 +235,7 @@ descriptor fits in one 65,536-byte page. No oversized-leaf exception is needed.
 | --- | ---: | --- |
 | Table ID | 4 | Coarse prefix of the constant key in this block |
 | TSID | 8 | Coarse prefix of the constant key in this block |
-| Key length | 4 | 1..=8,192 |
+| Key length | 4 | 1..=65,344, and short enough for the block's own page |
 | Series key | variable | Exact canonical sparse primary key; its `(table_id, tsid)` prefix must equal the two fields above |
 | Minimum timestamp | 8 | Signed i64, first row's timestamp |
 | Maximum timestamp | 8 | Signed i64, last row's timestamp |

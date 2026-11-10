@@ -394,6 +394,11 @@ impl Page {
                 }
                 Self::Leaf(blocks) => {
                     blocks.capacity() * std::mem::size_of::<Block>()
+                        // Each block owns its exact series key on the heap.
+                        + blocks
+                            .iter()
+                            .map(|block| block.key.bytes().len())
+                            .sum::<usize>()
                         + blocks
                             .iter()
                             .map(|block| block.columns.capacity() * std::mem::size_of::<Column>())

@@ -777,10 +777,10 @@ impl PreparedSeriesSource for ColumnarPreparedSource {
                 let sample_schema = sample_schema.clone();
                 sources.push(Box::pin(async_stream::try_stream! {
                     let reservation = MemoryConsumer::new("ColumnarSamplesRead").register(&context.input.scan_memory_pool);
-                    // Account for the ID selection retained by the samples reader, including
-                    // B-tree node overhead, before allocating it.
-                    // Both the coarse identifier selection and the exact-key selection
-                    // are retained for the lifetime of the sample stream.
+                    // Account for the selection retained by the samples reader, including
+                    // B-tree node overhead, before allocating it. The exact-key selection and
+                    // the coarse identifiers the reader derives from it both live for the
+                    // lifetime of the sample stream.
                     let selection_bytes = candidates[range.clone()]
                         .iter()
                         .map(|candidate| {
@@ -791,9 +791,9 @@ impl PreparedSeriesSource for ColumnarPreparedSource {
                         })
                         .sum::<usize>();
                     reservation.try_grow(selection_bytes).context(crate::error::ScanMemoryExhaustedSnafu)?;
-                    let ids = candidates[range.clone()].iter().map(|c| c.id).collect::<BTreeSet<_>>();
                     // Exact ownership: a block is read only when its own key is selected,
-                    // never because a colliding partner shares the identifier.
+                    // never because a colliding partner shares the identifier. Coarse
+                    // pruning bounds are derived from these keys inside the reader.
                     let keys = candidates[range.clone()]
                         .iter()
                         .map(|c| c.exact.clone())
@@ -802,7 +802,6 @@ impl PreparedSeriesSource for ColumnarPreparedSource {
                     let mut batches = reader.read(SamplesReadRequest {
                         projection: sample_projection(&reader.schema(), &context),
                         memory_pool: Some(context.input.scan_memory_pool.clone()),
-                        ids: Some(ids),
                         keys: Some(keys),
                         start,
                         end,
