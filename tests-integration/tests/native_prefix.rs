@@ -1294,6 +1294,13 @@ impl RegionScanner for GatedScanner {
         self.inner.raw_series_schema(label_source)
     }
 
+    fn raw_series_has_explicit_labels(
+        &self,
+        label_source: &RawLabelSource,
+    ) -> Result<bool, BoxedError> {
+        self.inner.raw_series_has_explicit_labels(label_source)
+    }
+
     fn scan_series_partition(
         &self,
         ctx: &QueryScanContext,
