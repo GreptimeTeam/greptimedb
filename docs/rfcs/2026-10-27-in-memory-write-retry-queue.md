@@ -1,5 +1,5 @@
 ---
-Feature Name: propose an in-memory frontend write retry queue
+Feature Name: In-Memory Frontend Write Retry Queue
 Tracking Issue: https://github.com/GreptimeTeam/greptimedb/issues/8085
 Date: 2026-10-27
 Author: @lczllx
@@ -53,7 +53,6 @@ Core v1 is an operator-layer module wired by the frontend. It has three parts:
 - **Queue state.** One `Mutex<QueueState>` holding `closed`, charged counters, transient reservation accounting, and per-target-region ordered deques. Admission commits directly under the state lock. The same lock is the send authorization gate: a replay task checks `closed`, checks the record deadline, and records `send_issued` under it, while shutdown sets `closed` under it.
 - **Admission.** Once per retryable per-region failure of the first dispatch round: check eligibility, reserve ledger room, encode, commit. A request that is still shared after the first RPC has no owned payload and is a first-round terminal failure, not an admission rejection.
 - **Retry worker.** One task on the global runtime. It leases ready heads, spawns bounded per-record tasks, and joins their results. A task reserves transient capacity and decodes the payload before calling the one-shot retry function; the function issues at most one target-region RPC. `TransientFull` and decode failure are pre-invocation task events, not outcomes returned by the retry function.
-
 
 ```mermaid
 flowchart TD
