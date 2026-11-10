@@ -375,7 +375,6 @@ impl DistExtensionPlanner {
                 table_name_for_plan.table_name.clone(),
                 &nested,
                 remote_plan.schema().clone(),
-                Ok,
             ) {
                 Ok(envelope) => envelope,
                 Err(reason) => {

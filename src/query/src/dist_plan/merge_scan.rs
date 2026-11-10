@@ -52,6 +52,7 @@ use futures_util::StreamExt;
 use greptime_proto::v1::region::RegionRequestHeader;
 use meter_core::data::ReadItem;
 use meter_macros::read_meter;
+use session::ReadPreference;
 use session::context::{
     FLIGHT_METRICS_HEARTBEAT_INTERVAL, QueryContextRef,
     SUPPORT_FLIGHT_METRICS_BEFORE_BATCH_EXTENSION_KEY,
@@ -74,7 +75,10 @@ use crate::dist_plan::grouped_read::{DatanodeReadGroup, build_group_read_plan};
 use crate::dist_plan::{
     FilterId, RemoteDynFilterProducerId, RemoteDynFilterRegistryLease, Subscriber,
 };
-use crate::metrics::{MERGE_SCAN_ERRORS_TOTAL, MERGE_SCAN_POLL_ELAPSED, MERGE_SCAN_REGIONS};
+use crate::metrics::{
+    MERGE_SCAN_ERRORS_TOTAL, MERGE_SCAN_GROUPED_FALLBACKS_TOTAL, MERGE_SCAN_POLL_ELAPSED,
+    MERGE_SCAN_REGIONS,
+};
 use crate::options::{FlowQueryExtensions, remote_dyn_filter_pushdown_enabled_from_extensions};
 use crate::query_engine::QueryEngineState;
 use crate::region_query::RegionQueryHandlerRef;
@@ -358,6 +362,195 @@ impl Drop for SubscriberRollbackGuard<'_> {
             self.registry.remove_subscriber(filter_id, subscriber);
         }
     }
+}
+
+/// Why one datanode group's grouped read was discarded in favor of one request per region.
+///
+/// Both reasons describe a datanode that cannot serve the grouped envelope (for example an older
+/// datanode that does not know it, or one that refuses the grouped plan at planning time). They
+/// are expected during a rolling upgrade and must not fail the query.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GroupedFallbackReason {
+    /// The grouped `do_get` itself failed.
+    DoGet,
+    /// The grouped stream failed on its first poll, before producing any batch.
+    FirstPoll,
+}
+
+impl GroupedFallbackReason {
+    /// Stable counter label; dashboards rely on these exact values.
+    fn label(self) -> &'static str {
+        match self {
+            Self::DoGet => "do_get",
+            Self::FirstPoll => "first_poll",
+        }
+    }
+
+    #[cfg(test)]
+    fn test_index(self) -> usize {
+        match self {
+            Self::DoGet => 0,
+            Self::FirstPoll => 1,
+        }
+    }
+}
+
+fn record_merge_scan_grouped_fallback(reason: GroupedFallbackReason) {
+    MERGE_SCAN_GROUPED_FALLBACKS_TOTAL
+        .with_label_values(&[reason.label()])
+        .inc();
+
+    #[cfg(test)]
+    TEST_MERGE_SCAN_GROUPED_FALLBACKS.with(|counts| {
+        let mut values = counts.get();
+        values[reason.test_index()] += 1;
+        counts.set(values);
+    });
+}
+
+#[cfg(test)]
+thread_local! {
+    // Prometheus counters are process-global and tests run concurrently. This
+    // companion counter is incremented at the exact production increment site
+    // and is scoped to the polling test thread, making delta assertions stable.
+    static TEST_MERGE_SCAN_GROUPED_FALLBACKS: Cell<[u64; 2]> = const { Cell::new([0, 0]) };
+}
+
+#[cfg(test)]
+fn merge_scan_grouped_fallbacks_for_test() -> (u64, u64) {
+    TEST_MERGE_SCAN_GROUPED_FALLBACKS.with(|counts| {
+        let counts = counts.get();
+        (counts[0], counts[1])
+    })
+}
+
+/// Inputs shared by every ordinary per-region request issued for one output partition.
+struct RegionReadRequest<'a> {
+    region_query_handler: &'a RegionQueryHandlerRef,
+    read_preference: ReadPreference,
+    query_ctx: &'a QueryContextRef,
+    captured_remote_dyn_filters: &'a [CapturedDynFilter],
+    remote_dyn_filter_registry_lease: Option<&'a RemoteDynFilterRegistryLease>,
+    tracing_context: &'a TracingContext,
+    dbname: &'a str,
+    plan: &'a LogicalPlan,
+    arrow_schema: &'a ArrowSchemaRef,
+}
+
+/// A ready-to-poll ordinary per-region response.
+struct RegionRead {
+    stream: common_recordbatch::SendableRecordBatchStream,
+    advertised_schema: ArrowSchemaRef,
+    /// Target selection plus `do_get` cost.
+    do_get_cost: Duration,
+}
+
+/// Opens the ordinary per-region request of `region_id`.
+///
+/// This is the fallback tail of a grouped read and mirrors the ordinary one-request-per-region
+/// path exactly: the target is selected again (so a failover between planning and execution is
+/// honored), the per-region dynamic filter subscribers are registered and rolled back on failure,
+/// the request carries the per-region query context and the original regional plan, and the
+/// advertised schema is validated before any batch is trusted.
+async fn open_region_read(
+    read: &RegionReadRequest<'_>,
+    region_id: RegionId,
+    region_span: &Span,
+) -> Result<RegionRead> {
+    register_remote_dyn_filters_for_region(
+        read.remote_dyn_filter_registry_lease,
+        read.captured_remote_dyn_filters,
+    );
+    let select_target_start = Instant::now();
+    let target = read
+        .region_query_handler
+        .select_target(read.read_preference, region_id)
+        .instrument(region_span.clone())
+        .await
+        .map_err(|e| {
+            MERGE_SCAN_ERRORS_TOTAL.inc();
+            DataFusionError::External(Box::new(e))
+        })?;
+    let select_target_cost = select_target_start.elapsed();
+    let mut subscriber_rollback = read.remote_dyn_filter_registry_lease.map(|lease| {
+        SubscriberRollbackGuard::new(
+            lease.registry(),
+            register_dyn_filter_subscribers_for_region(
+                lease.registry(),
+                region_id,
+                target.clone(),
+                read.captured_remote_dyn_filters,
+            ),
+        )
+    });
+    let region_query_ctx = query_context_with_refreshed_initial_dyn_filter_regs(
+        read.query_ctx,
+        region_id,
+        read.captured_remote_dyn_filters,
+    );
+    let request = QueryRequest {
+        header: Some(RegionRequestHeader {
+            tracing_context: read.tracing_context.to_w3c(),
+            dbname: read.dbname.to_string(),
+            query_context: Some((&region_query_ctx).into()),
+        }),
+        region_id,
+        plan: read.plan.clone(),
+    };
+
+    let do_get_start = Instant::now();
+    let do_get_result = read
+        .region_query_handler
+        .do_get(&target, request)
+        .instrument(region_span.clone())
+        .await;
+    if do_get_result.is_err() {
+        drop(subscriber_rollback.take());
+    }
+    let stream = do_get_result.map_err(|e| {
+        MERGE_SCAN_ERRORS_TOTAL.inc();
+        DataFusionError::External(Box::new(BoxedError::new(e)))
+    })?;
+
+    let advertised_schema = stream.schema().arrow_schema().clone();
+    // The guard stays armed until the response is accepted: a schema mismatch fails the request, so
+    // its subscribers must be rolled back instead of leaking into the registry.
+    validate_remote_schema(
+        read.arrow_schema.as_ref(),
+        advertised_schema.as_ref(),
+        "advertised remote stream",
+    )
+    .inspect_err(|_| record_merge_scan_schema_error())?;
+    if let Some(subscriber_rollback) = subscriber_rollback.as_mut() {
+        subscriber_rollback.disarm();
+    }
+    if let Some(remote_dyn_filter_registry_lease) = read.remote_dyn_filter_registry_lease {
+        remote_dyn_filter_registry_lease.ensure_fanout_task(read.region_query_handler.clone());
+    }
+
+    Ok(RegionRead {
+        stream,
+        advertised_schema,
+        do_get_cost: select_target_cost + do_get_start.elapsed(),
+    })
+}
+
+/// The remote stream a datanode group is currently reading from: its one grouped request, or, when
+/// that request was discarded, one member region's ordinary request.
+struct DatanodeGroupRead {
+    stream: common_recordbatch::SendableRecordBatchStream,
+    span: Span,
+    advertised_schema: ArrowSchemaRef,
+    /// Region named by the request, used as the sub-stage metrics key.
+    metrics_region: RegionId,
+    /// Whether this is the grouped request. A grouped request that produced no batch yet may still
+    /// be replaced by per-region requests; one that produced a batch is committed.
+    grouped: bool,
+    do_get_cost: Duration,
+    started: Instant,
+    produced_batch: bool,
+    poll_duration: Duration,
+    poll_timer: Instant,
 }
 
 #[derive(Debug, Hash, PartialEq, Eq, Clone)]
@@ -992,6 +1185,7 @@ impl MergeScanExec {
         let dbname = context.task_id().unwrap_or_default();
         let tracing_context = TracingContext::from_json(context.session_id().as_str());
         let current_channel = self.query_ctx.channel();
+        let read_preference = self.query_ctx.read_preference();
         let remote_dyn_filter_registry_lease = acquire_remote_dyn_filter_registry_lease(
             context.as_ref(),
             &query_ctx,
@@ -1013,6 +1207,20 @@ impl MergeScanExec {
             let mut partition_ready_time: Option<Duration> = None;
             let mut partition_first_consume_time: Option<Duration> = None;
 
+            // Everything a fallback per-region request needs; the grouped path reuses the same
+            // registration, query context, plan and schema as one ordinary request would.
+            let region_read_request = RegionReadRequest {
+                region_query_handler: &region_query_handler,
+                read_preference,
+                query_ctx: &query_ctx,
+                captured_remote_dyn_filters: &captured_remote_dyn_filters,
+                remote_dyn_filter_registry_lease: remote_dyn_filter_registry_lease.as_ref(),
+                tracing_context: &tracing_context,
+                dbname: &dbname,
+                plan: &plan,
+                arrow_schema: &arrow_schema,
+            };
+
             for group in groups.iter().skip(partition).step_by(target_partition) {
                 let anchor = group.regions()[0];
                 let group_span = tracing_context.attach(tracing::info_span!(
@@ -1031,6 +1239,9 @@ impl MergeScanExec {
                     remote_dyn_filter_registry_lease.as_ref(),
                     &captured_remote_dyn_filters,
                 );
+                // Kept armed until the grouped request is committed (its first batch arrives or
+                // its stream ends): a discarded grouped attempt must not leave its subscribers or
+                // its initial registrations behind.
                 let mut subscriber_rollback =
                     remote_dyn_filter_registry_lease.as_ref().map(|lease| {
                         let mut added = Vec::new();
@@ -1069,105 +1280,219 @@ impl MergeScanExec {
                     .do_get(group.target(), request)
                     .instrument(group_span.clone())
                     .await;
-                if do_get_result.is_err() {
-                    drop(subscriber_rollback.take());
-                }
-                let mut stream = do_get_result.map_err(|e| {
-                    MERGE_SCAN_ERRORS_TOTAL.inc();
-                    DataFusionError::External(Box::new(BoxedError::new(e)))
-                })?;
 
-                if let Some(subscriber_rollback) = subscriber_rollback.as_mut() {
-                    subscriber_rollback.disarm();
-                }
-                let mut advertised_schema = stream.schema().arrow_schema().clone();
-                validate_remote_schema(
-                    arrow_schema.as_ref(),
-                    advertised_schema.as_ref(),
-                    "advertised grouped remote stream",
-                )
-                .inspect_err(|_| record_merge_scan_schema_error())?;
-                let do_get_cost = do_get_start.elapsed();
-
-                if let Some(remote_dyn_filter_registry_lease) =
-                    remote_dyn_filter_registry_lease.as_ref()
-                {
-                    remote_dyn_filter_registry_lease
-                        .ensure_fanout_task(region_query_handler.clone());
-                }
-
-                ready_timer.stop();
-                if partition_ready_time.is_none() {
-                    partition_ready_time = Some(partition_start.elapsed());
-                }
-
-                let mut poll_duration = Duration::ZERO;
-                let mut poll_timer = Instant::now();
-                loop {
-                    let batch = stream.next().instrument(group_span.clone()).await;
-                    let Some(batch) = batch else {
-                        if let Some(metrics) = stream.metrics() {
-                            let load = region_scan_load(&metrics);
-                            let (c, s) = parse_catalog_and_schema_from_db_string(&dbname);
-                            let value = read_meter!(c, s, load, current_channel as u8);
-                            metric.record_greptime_exec_cost(value as usize);
-                            sub_stage_metrics_moved
-                                .lock()
-                                .unwrap()
-                                .insert(anchor, metrics);
-                        }
-                        break;
-                    };
-                    poll_duration += poll_timer.elapsed();
-
-                    let batch = batch
-                        .map_err(|e| DataFusionError::External(Box::new(BoxedError::new(e))))?;
-                    let df_batch = batch.into_df_record_batch();
-                    if !Arc::ptr_eq(&advertised_schema, df_batch.schema_ref()) {
+                // A datanode that cannot serve the grouped request (an older datanode, or one that
+                // refuses the grouped envelope) must slow the query down instead of failing it: the
+                // discarded attempt is replaced by one ordinary request per member region.
+                let mut grouped_read = match do_get_result {
+                    Ok(stream) => {
+                        let advertised_schema = stream.schema().arrow_schema().clone();
                         validate_remote_schema(
                             arrow_schema.as_ref(),
-                            df_batch.schema_ref().as_ref(),
-                            "grouped remote record batch",
+                            advertised_schema.as_ref(),
+                            "advertised grouped remote stream",
                         )
                         .inspect_err(|_| record_merge_scan_schema_error())?;
-                        advertised_schema = df_batch.schema_ref().clone();
+                        let do_get_cost = do_get_start.elapsed();
+
+                        if let Some(remote_dyn_filter_registry_lease) =
+                            remote_dyn_filter_registry_lease.as_ref()
+                        {
+                            remote_dyn_filter_registry_lease
+                                .ensure_fanout_task(region_query_handler.clone());
+                        }
+
+                        ready_timer.stop();
+                        if partition_ready_time.is_none() {
+                            partition_ready_time = Some(partition_start.elapsed());
+                        }
+                        Some(DatanodeGroupRead {
+                            stream,
+                            span: group_span.clone(),
+                            advertised_schema,
+                            metrics_region: anchor,
+                            grouped: true,
+                            do_get_cost,
+                            started: group_start,
+                            produced_batch: false,
+                            poll_duration: Duration::ZERO,
+                            poll_timer: Instant::now(),
+                        })
                     }
-                    let batch =
-                        patch_batch_timezone(arrow_schema.clone(), df_batch.columns().to_vec())?;
-                    metric.record_output_batch_rows(batch.num_rows());
-                    if let Some(mut first_consume_timer) = first_consume_timer.take() {
-                        first_consume_timer.stop();
-                        partition_first_consume_time = Some(partition_start.elapsed());
+                    Err(error) => {
+                        drop(subscriber_rollback.take());
+                        record_merge_scan_grouped_fallback(GroupedFallbackReason::DoGet);
+                        common_telemetry::debug!(
+                            error = %error,
+                            "Grouped read of datanode group anchored at region {}, with {} regions, failed before its first batch; falling back to per-region reads",
+                            anchor,
+                            group.regions().len()
+                        );
+                        None
                     }
-                    if let Some(metrics) = stream.metrics() {
-                        let mut sub_stage_metrics = sub_stage_metrics_moved.lock().unwrap();
-                        sub_stage_metrics.insert(anchor, metrics);
+                };
+
+                // Region index inside the group that the fallback reads next. It stays 0 while the
+                // grouped request is in use, because per-region requests only start after it was
+                // discarded.
+                let mut next_fallback_region = 0;
+                'group: loop {
+                    let mut read = match grouped_read.take() {
+                        Some(read) => read,
+                        None => {
+                            let Some(region_id) =
+                                group.regions().get(next_fallback_region).copied()
+                            else {
+                                // Every member region of the discarded group was read.
+                                break 'group;
+                            };
+                            next_fallback_region += 1;
+                            let region_start = Instant::now();
+                            let region_span = tracing_context.attach(tracing::info_span!(
+                                parent: &group_span,
+                                "merge_scan_region",
+                                region_id = %region_id,
+                                partition = partition
+                            ));
+                            // The ordinary path is re-entered from scratch, including a fresh
+                            // target selection, so a failover since planning is honored.
+                            let read =
+                                open_region_read(&region_read_request, region_id, &region_span)
+                                    .await?;
+                            ready_timer.stop();
+                            if partition_ready_time.is_none() {
+                                partition_ready_time = Some(partition_start.elapsed());
+                            }
+                            DatanodeGroupRead {
+                                stream: read.stream,
+                                span: region_span,
+                                advertised_schema: read.advertised_schema,
+                                metrics_region: region_id,
+                                grouped: false,
+                                do_get_cost: read.do_get_cost,
+                                started: region_start,
+                                produced_batch: false,
+                                poll_duration: Duration::ZERO,
+                                poll_timer: Instant::now(),
+                            }
+                        }
+                    };
+
+                    loop {
+                        let batch = read.stream.next().instrument(read.span.clone()).await;
+                        let Some(batch) = batch else {
+                            // The remote Flight stream publishes its terminal metrics
+                            // immediately after EOF. Capture them before leaving the loop so the
+                            // final verbose snapshot is not lost.
+                            if let Some(metrics) = read.stream.metrics() {
+                                let load = region_scan_load(&metrics);
+                                let (c, s) = parse_catalog_and_schema_from_db_string(&dbname);
+                                let value = read_meter!(c, s, load, current_channel as u8);
+                                metric.record_greptime_exec_cost(value as usize);
+                                sub_stage_metrics_moved
+                                    .lock()
+                                    .unwrap()
+                                    .insert(read.metrics_region, metrics);
+                            }
+                            // Group metrics are recorded under the group's anchor region, the
+                            // region the request itself names; a fallback records one entry per
+                            // region it read. The grouped path is disabled for verbose explain, so
+                            // no per-region verbose snapshot depends on the other members.
+                            {
+                                let mut partition_metrics_guard =
+                                    partition_metrics_moved.lock().unwrap();
+                                let partition_metrics = partition_metrics_guard
+                                    .entry(partition)
+                                    .or_insert_with(|| PartitionMetrics::new(partition, false));
+                                partition_metrics.add_region_metrics(RegionMetrics {
+                                    region_id: read.metrics_region,
+                                    poll_duration: read.poll_duration,
+                                    do_get_cost: read.do_get_cost,
+                                    total_cost: read.started.elapsed(),
+                                });
+                            }
+                            MERGE_SCAN_POLL_ELAPSED.observe(read.poll_duration.as_secs_f64());
+                            if read.grouped {
+                                if let Some(subscriber_rollback) = subscriber_rollback.as_mut() {
+                                    subscriber_rollback.disarm();
+                                }
+                                break 'group;
+                            }
+                            break;
+                        };
+                        read.poll_duration += read.poll_timer.elapsed();
+
+                        let batch = match batch {
+                            Ok(batch) => batch,
+                            Err(error) => {
+                                if read.grouped && !read.produced_batch {
+                                    // The datanode accepted the grouped request but failed before
+                                    // producing any batch, so no row of this group was emitted.
+                                    // Discard it and read its regions one by one instead.
+                                    drop(subscriber_rollback.take());
+                                    record_merge_scan_grouped_fallback(
+                                        GroupedFallbackReason::FirstPoll,
+                                    );
+                                    common_telemetry::debug!(
+                                        error = %error,
+                                        "Grouped read of datanode group anchored at region {}, with {} regions, failed before its first batch; falling back to per-region reads",
+                                        anchor,
+                                        group.regions().len()
+                                    );
+                                    break;
+                                }
+                                // Rows of this read may already have been emitted; reissuing it
+                                // would duplicate them, so the error propagates. A stream block
+                                // yields its errors instead of returning them.
+                                yield Err(DataFusionError::External(Box::new(BoxedError::new(
+                                    error,
+                                ))));
+                                return;
+                            }
+                        };
+                        read.produced_batch = true;
+                        let df_batch = batch.into_df_record_batch();
+                        if !Arc::ptr_eq(&read.advertised_schema, df_batch.schema_ref()) {
+                            validate_remote_schema(
+                                arrow_schema.as_ref(),
+                                df_batch.schema_ref().as_ref(),
+                                if read.grouped {
+                                    "grouped remote record batch"
+                                } else {
+                                    "remote record batch"
+                                },
+                            )
+                            .inspect_err(|_| record_merge_scan_schema_error())?;
+                            read.advertised_schema = df_batch.schema_ref().clone();
+                        }
+                        let batch = patch_batch_timezone(
+                            arrow_schema.clone(),
+                            df_batch.columns().to_vec(),
+                        )?;
+                        metric.record_output_batch_rows(batch.num_rows());
+                        if let Some(mut first_consume_timer) = first_consume_timer.take() {
+                            first_consume_timer.stop();
+                            partition_first_consume_time = Some(partition_start.elapsed());
+                        }
+                        if let Some(metrics) = read.stream.metrics() {
+                            let mut sub_stage_metrics = sub_stage_metrics_moved.lock().unwrap();
+                            sub_stage_metrics.insert(read.metrics_region, metrics);
+                        }
+                        // The grouped request produced a batch, so it is committed and can no
+                        // longer be reissued: keep its subscribers.
+                        if read.grouped {
+                            if let Some(subscriber_rollback) = subscriber_rollback.as_mut() {
+                                subscriber_rollback.disarm();
+                            }
+                        }
+                        yield Ok(batch);
+                        read.poll_timer = Instant::now();
                     }
-                    yield Ok(batch);
-                    poll_timer = Instant::now();
                 }
                 if let Some(mut first_consume_timer) = first_consume_timer.take() {
                     first_consume_timer.stop();
                     partition_first_consume_time = Some(partition_start.elapsed());
                 }
-                let total_cost = group_start.elapsed();
-
-                // Group metrics are recorded under the group's anchor region, the region the
-                // request itself names. The grouped path is disabled for verbose explain, so no
-                // per-region verbose snapshot depends on the other members.
-                {
-                    let mut partition_metrics_guard = partition_metrics_moved.lock().unwrap();
-                    let partition_metrics = partition_metrics_guard
-                        .entry(partition)
-                        .or_insert_with(|| PartitionMetrics::new(partition, false));
-                    partition_metrics.add_region_metrics(RegionMetrics {
-                        region_id: anchor,
-                        poll_duration,
-                        do_get_cost,
-                        total_cost,
-                    });
-                }
-                MERGE_SCAN_POLL_ELAPSED.observe(poll_duration.as_secs_f64());
             }
 
             ready_timer.stop();
@@ -1667,9 +1992,11 @@ mod tests {
 
     use super::*;
     use crate::dist_plan::DynFilterRegistryManager;
+    use crate::dist_plan::grouped_read::{GROUP_READ_NAME, peek_group_read_envelope};
     use crate::options::QueryOptions;
-    use crate::query_engine::{QueryEngineContext, QueryEngineState};
+    use crate::query_engine::{DefaultSerializer, QueryEngineContext, QueryEngineState};
     use crate::region_query::RegionQueryHandler;
+    use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
 
     fn test_target(id: u64) -> crate::region_query::RegionQueryTarget {
         crate::region_query::RegionQueryTarget::new(Peer {
@@ -2371,6 +2698,434 @@ mod tests {
             region_scan_output_bytes(&collected[0]),
             "the FE grouping path must receive the cumulative member scan bytes"
         );
+    }
+
+    /// Scripted outcome of one grouped request.
+    enum GroupedOutcome {
+        /// The datanode rejects the grouped request outright, like an older datanode that cannot
+        /// decode the envelope.
+        DoGetError,
+        /// The datanode accepted the request and its stream is scripted here.
+        Stream(Vec<TestStreamStep>),
+    }
+
+    /// One item of a scripted remote stream.
+    enum TestStreamStep {
+        Batch(RecordBatch),
+        Error(&'static str),
+    }
+
+    #[derive(Clone)]
+    struct RecordedRequest {
+        region_id: RegionId,
+        target_id: u64,
+        plan: LogicalPlan,
+        grouped: bool,
+    }
+
+    /// Records every request and answers grouped requests with `grouped_outcome` while serving
+    /// each region's ordinary request from `ordinary_steps`.
+    struct GroupedFallbackHandler {
+        schema: Arc<Schema>,
+        grouped_outcome: GroupedOutcome,
+        ordinary_steps: HashMap<RegionId, Vec<TestStreamStep>>,
+        calls: Mutex<Vec<RecordedRequest>>,
+    }
+
+    impl GroupedFallbackHandler {
+        fn new(
+            schema: Arc<Schema>,
+            grouped_outcome: GroupedOutcome,
+            ordinary_steps: impl IntoIterator<Item = (RegionId, Vec<TestStreamStep>)>,
+        ) -> Self {
+            Self {
+                schema,
+                grouped_outcome,
+                ordinary_steps: ordinary_steps.into_iter().collect(),
+                calls: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn calls(&self) -> Vec<RecordedRequest> {
+            self.calls.lock().unwrap().clone()
+        }
+    }
+
+    fn scripted_stream(
+        schema: Arc<Schema>,
+        steps: &[TestStreamStep],
+    ) -> common_recordbatch::SendableRecordBatchStream {
+        Box::pin(TestRecordBatchStream {
+            schema,
+            batches: steps
+                .iter()
+                .map(|step| match step {
+                    TestStreamStep::Batch(batch) => Ok(batch.clone()),
+                    TestStreamStep::Error(message) => Err(common_recordbatch::error::ExternalSnafu
+                        .into_error(BoxedError::new(PlainError::new(
+                            message.to_string(),
+                            StatusCode::Internal,
+                        )))),
+                })
+                .collect(),
+            metrics: None,
+        })
+    }
+
+    #[async_trait]
+    impl RegionQueryHandler for GroupedFallbackHandler {
+        async fn select_target(
+            &self,
+            _read_preference: ReadPreference,
+            _region_id: RegionId,
+        ) -> crate::error::Result<crate::region_query::RegionQueryTarget> {
+            Ok(test_target(1))
+        }
+
+        async fn do_get(
+            &self,
+            target: &crate::region_query::RegionQueryTarget,
+            request: common_query::request::QueryRequest,
+        ) -> crate::error::Result<common_recordbatch::SendableRecordBatchStream> {
+            let grouped = is_group_read_plan(&request.plan);
+            self.calls.lock().unwrap().push(RecordedRequest {
+                region_id: request.region_id,
+                target_id: target.peer().id,
+                plan: request.plan.clone(),
+                grouped,
+            });
+            if grouped {
+                return match &self.grouped_outcome {
+                    GroupedOutcome::DoGetError => Err(crate::error::Error::QueryExecution {
+                        source: BoxedError::new(PlainError::new(
+                            "the datanode cannot run a grouped read".to_string(),
+                            StatusCode::Unsupported,
+                        )),
+                        location: snafu::Location::default(),
+                    }),
+                    GroupedOutcome::Stream(steps) => {
+                        Ok(scripted_stream(self.schema.clone(), steps))
+                    }
+                };
+            }
+
+            let steps = self
+                .ordinary_steps
+                .get(&request.region_id)
+                .expect("every fallback region needs a scripted response");
+            Ok(scripted_stream(self.schema.clone(), steps))
+        }
+
+        async fn handle_remote_dyn_filter_update(
+            &self,
+            _target: &crate::region_query::RegionQueryTarget,
+            _query_id: String,
+            _update: api::v1::region::RemoteDynFilterUpdate,
+        ) -> crate::error::Result<()> {
+            unimplemented!("the fallback tests install no dynamic filter")
+        }
+
+        async fn handle_remote_dyn_filter_unregister(
+            &self,
+            _target: &crate::region_query::RegionQueryTarget,
+            _query_id: String,
+            _unregister: api::v1::region::RemoteDynFilterUnregister,
+        ) -> crate::error::Result<()> {
+            unimplemented!("the fallback tests install no dynamic filter")
+        }
+    }
+
+    fn is_group_read_plan(plan: &LogicalPlan) -> bool {
+        matches!(
+            plan,
+            LogicalPlan::Extension(extension) if extension.node.name() == GROUP_READ_NAME
+        )
+    }
+
+    /// Asserts both how the plan is shaped and how its encoded request is decoded by a datanode.
+    fn assert_group_read_envelope(plan: &LogicalPlan, expected: bool) {
+        assert_eq!(
+            expected,
+            is_group_read_plan(plan),
+            "unexpected plan root for a {} request",
+            if expected { "grouped" } else { "per-region" }
+        );
+        let encoded = DFLogicalSubstraitConvertor
+            .encode(plan, DefaultSerializer)
+            .expect("a MergeScan request plan must encode")
+            .to_vec();
+        assert_eq!(
+            expected,
+            peek_group_read_envelope(&encoded).unwrap().is_some(),
+            "peeking the encoded request must agree with its plan root"
+        );
+    }
+
+    /// Builds one grouped read over a single datanode group holding every `region`.
+    fn grouped_fallback_exec(
+        handler: Arc<GroupedFallbackHandler>,
+        schema: Arc<Schema>,
+        regions: Vec<RegionId>,
+    ) -> MergeScanExec {
+        use datafusion::datasource::DefaultTableSource;
+        use datafusion::datasource::empty::EmptyTable;
+
+        let source = Arc::new(DefaultTableSource::new(Arc::new(EmptyTable::new(
+            schema.arrow_schema().clone(),
+        ))));
+        let plan = LogicalPlanBuilder::scan("table", source, None)
+            .unwrap()
+            .build()
+            .unwrap();
+        let group = DatanodeReadGroup::try_new(test_target(7), regions.clone()).unwrap();
+        MergeScanExec::new(
+            &SessionStateBuilder::new().build(),
+            TableName::new("catalog", "schema", "table"),
+            regions,
+            plan,
+            schema.arrow_schema(),
+            handler,
+            QueryContext::arc(),
+            1,
+            Some(RemoteDynFilterProducerId::new(42)),
+            false,
+        )
+        .unwrap()
+        .with_datanode_groups(vec![group])
+        .unwrap()
+    }
+
+    /// Drives partition 0 of the scan to the end and returns every item it emitted.
+    async fn drive_merge_scan(
+        exec: &MergeScanExec,
+    ) -> Vec<datafusion_common::Result<DfRecordBatch>> {
+        let mut stream = exec
+            .execute(0, Arc::new(TaskContext::default()))
+            .expect("the scan must start");
+        let mut items = Vec::new();
+        while let Some(item) = stream.next().await {
+            items.push(item);
+        }
+        items
+    }
+
+    fn int64_values(batch: &DfRecordBatch) -> Vec<i64> {
+        let column = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap();
+        (0..column.len()).map(|index| column.value(index)).collect()
+    }
+
+    /// A grouped read whose request fails must read every region one by one instead.
+    #[tokio::test]
+    async fn grouped_read_falls_back_to_per_region_requests_when_do_get_fails() {
+        let schema = int64_schema(&["a"]);
+        let first_region = RegionId::new(1024, 1);
+        let second_region = RegionId::new(1024, 2);
+        let handler = Arc::new(GroupedFallbackHandler::new(
+            schema.clone(),
+            GroupedOutcome::DoGetError,
+            [
+                (
+                    first_region,
+                    vec![TestStreamStep::Batch(record_batch(
+                        schema.clone(),
+                        vec![Arc::new(Int64Vector::from_slice([11])) as _],
+                    ))],
+                ),
+                (
+                    second_region,
+                    vec![TestStreamStep::Batch(record_batch(
+                        schema.clone(),
+                        vec![Arc::new(Int64Vector::from_slice([22])) as _],
+                    ))],
+                ),
+            ],
+        ));
+        let exec =
+            grouped_fallback_exec(handler.clone(), schema, vec![first_region, second_region]);
+        let fallbacks_before = merge_scan_grouped_fallbacks_for_test();
+
+        let items = drive_merge_scan(&exec).await;
+
+        let rows: Vec<i64> = items
+            .iter()
+            .flat_map(|item| int64_values(item.as_ref().unwrap()))
+            .collect();
+        assert_eq!(
+            vec![11, 22],
+            rows,
+            "the fallback must return the rows of every region"
+        );
+        assert_eq!(
+            (fallbacks_before.0 + 1, fallbacks_before.1),
+            merge_scan_grouped_fallbacks_for_test(),
+            "one do_get fallback is recorded"
+        );
+
+        let calls = handler.calls();
+        assert_eq!(
+            3,
+            calls.len(),
+            "one grouped attempt, then one ordinary request per region"
+        );
+        assert!(calls[0].grouped, "the grouped request is attempted first");
+        assert_eq!(first_region, calls[0].region_id);
+        assert_eq!(
+            7, calls[0].target_id,
+            "the grouped attempt uses the group's frozen target"
+        );
+        assert_eq!(
+            vec![first_region, second_region],
+            calls[1..]
+                .iter()
+                .map(|call| call.region_id)
+                .collect::<Vec<_>>(),
+            "every region is requested exactly once, in group order"
+        );
+        assert!(
+            calls[1..].iter().all(|call| !call.grouped),
+            "a fallback request is an ordinary per-region request"
+        );
+        assert!(
+            calls[1..].iter().all(|call| call.target_id == 1),
+            "every fallback request selects its target again"
+        );
+        // A datanode peeks the request root before decoding it: the grouped attempt carries the
+        // envelope, the fallback requests carry the original per-region plan.
+        assert_group_read_envelope(&calls[0].plan, true);
+        for call in &calls[1..] {
+            assert_group_read_envelope(&call.plan, false);
+        }
+    }
+
+    /// A grouped read whose stream fails before its first batch must read every region one by one.
+    #[tokio::test]
+    async fn grouped_read_falls_back_to_per_region_requests_when_first_poll_fails() {
+        let schema = int64_schema(&["a"]);
+        let first_region = RegionId::new(1024, 1);
+        let second_region = RegionId::new(1024, 2);
+        let handler = Arc::new(GroupedFallbackHandler::new(
+            schema.clone(),
+            GroupedOutcome::Stream(vec![TestStreamStep::Error(
+                "the datanode failed the grouped plan before its first batch",
+            )]),
+            [
+                (
+                    first_region,
+                    vec![TestStreamStep::Batch(record_batch(
+                        schema.clone(),
+                        vec![Arc::new(Int64Vector::from_slice([11])) as _],
+                    ))],
+                ),
+                (
+                    second_region,
+                    vec![TestStreamStep::Batch(record_batch(
+                        schema.clone(),
+                        vec![Arc::new(Int64Vector::from_slice([22])) as _],
+                    ))],
+                ),
+            ],
+        ));
+        let exec =
+            grouped_fallback_exec(handler.clone(), schema, vec![first_region, second_region]);
+        let fallbacks_before = merge_scan_grouped_fallbacks_for_test();
+
+        let items = drive_merge_scan(&exec).await;
+
+        let rows: Vec<i64> = items
+            .iter()
+            .flat_map(|item| int64_values(item.as_ref().unwrap()))
+            .collect();
+        assert_eq!(
+            vec![11, 22],
+            rows,
+            "no row of the failed grouped attempt may leak, and every region must be read"
+        );
+        assert_eq!(
+            (fallbacks_before.0, fallbacks_before.1 + 1),
+            merge_scan_grouped_fallbacks_for_test(),
+            "one first_poll fallback is recorded"
+        );
+
+        let calls = handler.calls();
+        assert_eq!(3, calls.len());
+        assert!(calls[0].grouped);
+        assert_eq!(
+            vec![first_region, second_region],
+            calls[1..]
+                .iter()
+                .map(|call| call.region_id)
+                .collect::<Vec<_>>()
+        );
+        for call in &calls[1..] {
+            assert_group_read_envelope(&call.plan, false);
+        }
+    }
+
+    /// A grouped stream that already produced a batch must not be reissued.
+    #[tokio::test]
+    async fn grouped_read_keeps_the_grouped_stream_after_the_first_batch() {
+        let schema = int64_schema(&["a"]);
+        let first_region = RegionId::new(1024, 1);
+        let second_region = RegionId::new(1024, 2);
+        let handler = Arc::new(GroupedFallbackHandler::new(
+            schema.clone(),
+            GroupedOutcome::Stream(vec![
+                TestStreamStep::Batch(record_batch(
+                    schema.clone(),
+                    vec![Arc::new(Int64Vector::from_slice([33])) as _],
+                )),
+                TestStreamStep::Error("the grouped stream failed after its first batch"),
+            ]),
+            [
+                (
+                    first_region,
+                    vec![TestStreamStep::Batch(record_batch(
+                        schema.clone(),
+                        vec![Arc::new(Int64Vector::from_slice([44])) as _],
+                    ))],
+                ),
+                (
+                    second_region,
+                    vec![TestStreamStep::Batch(record_batch(
+                        schema.clone(),
+                        vec![Arc::new(Int64Vector::from_slice([55])) as _],
+                    ))],
+                ),
+            ],
+        ));
+        let exec =
+            grouped_fallback_exec(handler.clone(), schema, vec![first_region, second_region]);
+        let fallbacks_before = merge_scan_grouped_fallbacks_for_test();
+
+        let items = drive_merge_scan(&exec).await;
+
+        assert_eq!(
+            2,
+            items.len(),
+            "the committed grouped stream emits its first batch and then fails"
+        );
+        assert_eq!(vec![33], int64_values(items[0].as_ref().unwrap()));
+        let error = items[1].as_ref().unwrap_err().to_string();
+        assert!(
+            error.contains("after its first batch"),
+            "the grouped stream error must propagate, got: {error}"
+        );
+        assert_eq!(
+            fallbacks_before,
+            merge_scan_grouped_fallbacks_for_test(),
+            "a grouped stream that produced a batch must not fall back"
+        );
+        let calls = handler.calls();
+        assert_eq!(
+            1,
+            calls.len(),
+            "no region may be read again after the grouped stream produced rows"
+        );
+        assert!(calls[0].grouped);
     }
 
     #[tokio::test]

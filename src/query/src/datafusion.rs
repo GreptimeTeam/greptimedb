@@ -144,28 +144,55 @@ fn query_stat_counters(plan: &Arc<dyn ExecutionPlan>) -> Option<RegionQueryStatC
 /// Collects one independent counter/metrics owner per region scan.
 ///
 /// Composite GroupRead plans contain several RegionScanExec nodes. Each scan owns its region
-/// identity, counters and metrics source; shared Union/Aggregate execution cost is deliberately
-/// not charged to every region.
+/// identity, counters and metrics source. The metrics source of an owner is not the scan leaf but
+/// the root of the branch that exclusively serves the owning region: grouped plans interleave
+/// region-local `ProjectionExec`, `FilterExec` or `RepartitionExec` nodes between the scan and the
+/// operators that combine regions, and the CPU time of those nodes belongs to the region.
+///
+/// Walking up stops at the first operator with several children (`UnionExec`, `JoinExec`, ...).
+/// Such a node combines regions, so neither it nor its ancestors are charged to one region: shared
+/// Union/Aggregate execution cost is deliberately not charged to every region.
 fn query_stat_owners(plan: &Arc<dyn ExecutionPlan>) -> Vec<RegionQueryStatOwner> {
     let mut owners: Vec<RegionQueryStatOwner> = Vec::new();
-    let mut stack = vec![plan.clone()];
+    collect_query_stat_owners(plan, None, &mut owners);
+    owners
+}
 
-    while let Some(plan) = stack.pop() {
-        if plan.name() == REGION_SCAN_EXEC_NAME
-            && let Some(scan) = plan.downcast_ref::<RegionScanExec>()
-            && let Some(counters) = scan.query_stat_counters()
-            && !owners.iter().any(|owner| Arc::ptr_eq(&owner.plan, &plan))
-        {
+/// Recursively collects region scan owners, carrying the root of the current exclusive branch.
+///
+/// `branch_root` is the highest ancestor of `plan` that only serves the region below it, if any.
+fn collect_query_stat_owners(
+    plan: &Arc<dyn ExecutionPlan>,
+    branch_root: Option<&Arc<dyn ExecutionPlan>>,
+    owners: &mut Vec<RegionQueryStatOwner>,
+) {
+    if plan.name() == REGION_SCAN_EXEC_NAME
+        && let Some(scan) = plan.downcast_ref::<RegionScanExec>()
+        && let Some(counters) = scan.query_stat_counters()
+    {
+        let plan = branch_root.unwrap_or(plan).clone();
+        // The same scan can be referenced by several branches; count it once.
+        if !owners.iter().any(|owner| Arc::ptr_eq(&owner.plan, &plan)) {
             owners.push(RegionQueryStatOwner {
                 region_id: scan.region_id().as_u64(),
                 counters,
-                plan: plan.clone(),
+                plan,
             });
         }
-        stack.extend(plan.children().into_iter().cloned());
+        return;
     }
 
-    owners
+    let children = plan.children();
+    // A node with a single child exclusively serves the branch below it; a node with several
+    // children is shared between regions (or it is a leaf, which no region scan sits below).
+    let branch_root = if children.len() == 1 {
+        Some(branch_root.unwrap_or(plan))
+    } else {
+        None
+    };
+    for child in children {
+        collect_query_stat_owners(child, branch_root, owners);
+    }
 }
 
 fn use_region_owners(query_ctx: &QueryContextRef, owners_len: usize) -> bool {
@@ -778,6 +805,7 @@ mod tests {
     use std::fmt;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+    use std::time::Duration;
 
     use api::v1::SemanticType;
     use arrow::array::{ArrayRef, UInt64Array};
@@ -792,9 +820,12 @@ mod tests {
     use datafusion::physical_plan::display::{DisplayAs, DisplayFormatType};
     use datafusion::physical_plan::expressions::PhysicalSortExpr;
     use datafusion::physical_plan::joins::{HashJoinExec, JoinOn, PartitionMode};
-    use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
-    use datafusion::physical_plan::{ExecutionPlan, PhysicalExpr};
+    use datafusion::physical_plan::metrics::{
+        ExecutionPlanMetricsSet, MetricBuilder, MetricValue, MetricsSet,
+    };
+    use datafusion::physical_plan::{ExecutionPlan, PhysicalExpr, PlanProperties};
     use datafusion::prelude::{col, lit};
+    use datafusion_common::tree_node::TreeNodeRecursion;
     use datafusion_common::{JoinType, NullEquality, ScalarValue};
     use datafusion_physical_expr::expressions::Column;
     use datatypes::prelude::ConcreteDataType;
@@ -900,6 +931,124 @@ mod tests {
         fn fmt_as(&self, _t: DisplayFormatType, f: &mut fmt::Formatter<'_>) -> fmt::Result {
             write!(f, "RecordingScanner")
         }
+    }
+
+    /// A pass-through plan node that only carries an `elapsed_compute` metric.
+    ///
+    /// Query-load accounting walks `children()` of a region owner's plan root and sums
+    /// `ElapsedCompute`, so this node stands in for a region-local `ProjectionExec`/`FilterExec`
+    /// (or for a shared `UnionExec`/`AggregateExec`) and shows which nodes a region owner covers.
+    #[derive(Debug)]
+    struct TimedExec {
+        name: &'static str,
+        children: Vec<Arc<dyn ExecutionPlan>>,
+        properties: Arc<PlanProperties>,
+        metrics: ExecutionPlanMetricsSet,
+    }
+
+    impl TimedExec {
+        fn new(
+            name: &'static str,
+            children: Vec<Arc<dyn ExecutionPlan>>,
+            elapsed_nanos: u64,
+        ) -> Arc<dyn ExecutionPlan> {
+            assert!(!children.is_empty());
+            let metrics = ExecutionPlanMetricsSet::new();
+            let elapsed_compute = MetricBuilder::new(&metrics).elapsed_compute(0);
+            elapsed_compute.add_duration(Duration::from_nanos(elapsed_nanos));
+            let properties = children[0].properties().clone();
+            Arc::new(Self {
+                name,
+                children,
+                properties,
+                metrics,
+            })
+        }
+    }
+
+    impl DisplayAs for TimedExec {
+        fn fmt_as(&self, _t: DisplayFormatType, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            write!(f, "{}", self.name)
+        }
+    }
+
+    impl ExecutionPlan for TimedExec {
+        fn name(&self) -> &str {
+            self.name
+        }
+
+        fn properties(&self) -> &Arc<PlanProperties> {
+            &self.properties
+        }
+
+        fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
+            self.children.iter().collect()
+        }
+
+        fn apply_expressions(
+            &self,
+            _f: &mut dyn FnMut(
+                &Arc<dyn PhysicalExpr>,
+            ) -> datafusion_common::Result<TreeNodeRecursion>,
+        ) -> datafusion_common::Result<TreeNodeRecursion> {
+            Ok(TreeNodeRecursion::Continue)
+        }
+
+        fn with_new_children(
+            self: Arc<Self>,
+            children: Vec<Arc<dyn ExecutionPlan>>,
+        ) -> datafusion_common::Result<Arc<dyn ExecutionPlan>> {
+            let properties = children[0].properties().clone();
+            Ok(Arc::new(Self {
+                name: self.name,
+                children,
+                properties,
+                metrics: self.metrics.clone(),
+            }))
+        }
+
+        fn execute(
+            &self,
+            _partition: usize,
+            _context: Arc<datafusion::execution::TaskContext>,
+        ) -> datafusion_common::Result<datafusion::physical_plan::SendableRecordBatchStream>
+        {
+            unreachable!("TimedExec is only used for metrics accounting in tests")
+        }
+
+        fn metrics(&self) -> Option<MetricsSet> {
+            Some(self.metrics.clone_inner())
+        }
+    }
+
+    /// Sums `ElapsedCompute` over a plan subtree, mirroring the lightweight query-load collector
+    /// that `RecordBatchStreamAdapter` runs for every region owner.
+    fn subtree_elapsed_compute(plan: &Arc<dyn ExecutionPlan>) -> u64 {
+        let mut total = 0;
+        let mut stack = vec![plan.clone()];
+        while let Some(node) = stack.pop() {
+            if let Some(metrics) = node.metrics() {
+                for metric in metrics.iter() {
+                    if let MetricValue::ElapsedCompute(elapsed_compute) = metric.value() {
+                        total += elapsed_compute.value() as u64;
+                    }
+                }
+            }
+            stack.extend(node.children().into_iter().cloned());
+        }
+        total
+    }
+
+    /// Returns true when `target` is reachable from `plan` (including `plan` itself).
+    fn subtree_contains(plan: &Arc<dyn ExecutionPlan>, target: &Arc<dyn ExecutionPlan>) -> bool {
+        let mut stack = vec![plan.clone()];
+        while let Some(node) = stack.pop() {
+            if Arc::ptr_eq(&node, target) {
+                return true;
+            }
+            stack.extend(node.children().into_iter().cloned());
+        }
+        false
     }
 
     fn build_query_load_region_scan(
@@ -1044,6 +1193,106 @@ mod tests {
 
         let duplicate = UnionExec::try_new(vec![left.clone(), left]).unwrap();
         assert_eq!(1, super::query_stat_owners(&duplicate).len());
+    }
+
+    #[test]
+    fn query_stat_owners_charges_region_local_cpu_but_not_shared_nodes() {
+        let counters_a = query_stat_counters_for_test();
+        let counters_b = query_stat_counters_for_test();
+        let scan_a = build_query_stat_counter_region_scan(counters_a.clone());
+        let scan_b = build_query_stat_counter_region_scan(counters_b.clone());
+
+        // Region-local chain: Filter(Projection(RegionScanExec)).
+        let filter_a = TimedExec::new("FilterExec", vec![scan_a.clone()], 10);
+        let projection_a = TimedExec::new("ProjectionExec", vec![filter_a.clone()], 20);
+        // Shared nodes: UnionAll over the region branches, and an Aggregate above the union.
+        let shared_union = TimedExec::new(
+            "UnionExec",
+            vec![projection_a.clone(), scan_b.clone()],
+            1_000,
+        );
+        let shared_aggregate = TimedExec::new("AggregateExec", vec![shared_union.clone()], 5_000);
+
+        let owners = super::query_stat_owners(&shared_aggregate);
+        assert_eq!(2, owners.len());
+
+        let owner_a = owners
+            .iter()
+            .find(|owner| Arc::ptr_eq(&owner.counters.query_cpu_time, &counters_a.query_cpu_time))
+            .expect("the wrapped scan keeps its own owner");
+        // The owner reports the region-exclusive branch root instead of the scan leaf, so the
+        // region-local Projection/Filter CPU time is collected ...
+        assert_eq!(projection_a.name(), owner_a.plan.name());
+        assert!(Arc::ptr_eq(&owner_a.plan, &projection_a));
+        assert_eq!(30, subtree_elapsed_compute(&owner_a.plan));
+        // ... while the shared UnionAll/Aggregate stay outside the owner subtree.
+        assert!(!subtree_contains(&owner_a.plan, &shared_union));
+        assert!(!subtree_contains(&owner_a.plan, &shared_aggregate));
+
+        let owner_b = owners
+            .iter()
+            .find(|owner| Arc::ptr_eq(&owner.counters.query_cpu_time, &counters_b.query_cpu_time))
+            .expect("the plain scan keeps its own owner");
+        // A branch whose only node is the scan keeps the scan as its root.
+        assert!(Arc::ptr_eq(&owner_b.plan, &scan_b));
+        assert_eq!(0, subtree_elapsed_compute(&owner_b.plan));
+
+        // Owners cover 30 of the 6030 nanoseconds, so shared cost is never charged per region.
+        assert_eq!(6_030, subtree_elapsed_compute(&shared_aggregate));
+    }
+
+    #[test]
+    fn query_stat_owners_excludes_shared_union_from_region_branches() {
+        use datafusion::physical_plan::union::UnionExec;
+
+        let counters_left = query_stat_counters_for_test();
+        let counters_right = query_stat_counters_for_test();
+        let left = TimedExec::new(
+            "ProjectionExec",
+            vec![build_query_stat_counter_region_scan(counters_left.clone())],
+            7,
+        );
+        let right = TimedExec::new(
+            "ProjectionExec",
+            vec![build_query_stat_counter_region_scan(counters_right.clone())],
+            11,
+        );
+        let plan = UnionExec::try_new(vec![left.clone(), right.clone()]).unwrap();
+
+        let owners = super::query_stat_owners(&plan);
+        // Two independent branches of the same region stay two independent owners.
+        assert_eq!(2, owners.len());
+        assert_eq!(owners[0].region_id, owners[1].region_id);
+        assert!(Arc::ptr_eq(&owners[0].plan, &left));
+        assert!(Arc::ptr_eq(&owners[1].plan, &right));
+        assert_eq!(7, subtree_elapsed_compute(&owners[0].plan));
+        assert_eq!(11, subtree_elapsed_compute(&owners[1].plan));
+        // The shared UnionAll is never the metrics source of a region owner.
+        assert!(!owners.iter().any(|owner| Arc::ptr_eq(&owner.plan, &plan)));
+    }
+
+    #[test]
+    fn query_stat_owners_keep_single_owner_on_the_normal_path() {
+        let counters = query_stat_counters_for_test();
+        let scan = build_query_stat_counter_region_scan(counters.clone());
+        let plan = TimedExec::new("ProjectionExec", vec![scan.clone()], 20);
+
+        let owners = super::query_stat_owners(&plan);
+        // A single owner never enables the region owner path, so the plain single-region path
+        // keeps using `query_stat_counters`/`query_load_region_id` over the whole plan.
+        assert!(!super::use_region_owners(
+            &QueryContext::arc(),
+            owners.len()
+        ));
+        assert_eq!(1, owners.len());
+        // The metrics source of that owner is the region-exclusive branch root, not the scan leaf.
+        assert!(Arc::ptr_eq(&owners[0].plan, &plan));
+        assert_eq!(20, subtree_elapsed_compute(&owners[0].plan));
+        // The normal path measures the whole plan, which here is that same branch.
+        assert_eq!(
+            subtree_elapsed_compute(&plan),
+            subtree_elapsed_compute(&owners[0].plan)
+        );
     }
 
     #[test]

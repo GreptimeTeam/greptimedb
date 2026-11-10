@@ -51,6 +51,7 @@ use common_telemetry::{debug, error, info, warn};
 use dashmap::{DashMap, DashSet};
 use datafusion::datasource::TableProvider;
 use datafusion_common::tree_node::TreeNode;
+use datafusion_expr::LogicalPlan;
 use datatypes::schema::SchemaRef;
 use either::Either;
 use futures_util::stream::FuturesUnordered;
@@ -59,7 +60,10 @@ use metric_engine::engine::MetricEngine;
 use mito2::engine::{MITO_ENGINE_NAME, MitoEngine};
 use prost::Message;
 use query::QueryEngineRef;
-use query::dist_plan::{GROUP_READ_VERSION, GroupReadEnvelopeError, peek_group_read_envelope};
+use query::dist_plan::{
+    GROUP_READ_VERSION, GroupReadEnvelopeError, GroupReadPayload, GroupReadPlan,
+    MAX_GROUP_READ_PAYLOAD_BYTES, encode_nested_plan, peek_group_read_envelope,
+};
 pub use query::dummy_catalog::{
     DummyCatalogList, DummyTableProviderFactory, TableProviderFactoryRef,
 };
@@ -101,9 +105,9 @@ use crate::error::{
     ConcurrentQueryLimiterTimeoutSnafu, DataFusionSnafu, DecodeLogicalPlanSnafu,
     ExecuteLogicalPlanSnafu, FindLogicalRegionsSnafu, GetRegionMetadataSnafu,
     HandleBatchDdlRequestSnafu, HandleBatchOpenRequestSnafu, HandleRegionRequestSnafu,
-    NewPlanDecoderSnafu, NotYetImplementedSnafu, RegionEngineNotFoundSnafu, RegionNotFoundSnafu,
-    RegionNotReadySnafu, Result, RuntimeJoinSnafu, SerializeJsonSnafu, StopRegionEngineSnafu,
-    UnexpectedSnafu, UnsupportedOutputSnafu,
+    InvalidQueryRequestSnafu, NewPlanDecoderSnafu, NotYetImplementedSnafu,
+    RegionEngineNotFoundSnafu, RegionNotFoundSnafu, RegionNotReadySnafu, Result, RuntimeJoinSnafu,
+    SerializeJsonSnafu, StopRegionEngineSnafu, UnexpectedSnafu, UnsupportedOutputSnafu,
 };
 use crate::event_listener::RegionServerEventListenerRef;
 use crate::query_stream::QueryRuntimeStream;
@@ -306,21 +310,31 @@ impl RegionServer {
                 .fail();
             }
             Err(GroupReadEnvelopeError::Malformed(reason)) => {
-                return UnexpectedSnafu { violated: reason }.fail();
+                return InvalidQueryRequestSnafu { reason }.fail();
             }
         };
-        let permit = if let Some(p) = &self.inner.parallelism {
-            Some(p.acquire().await?)
-        } else {
-            None
-        };
+        let anchor = RegionId::from_u64(request.region_id);
+        // Reject a request this server cannot serve before it occupies limiter capacity.
+        if let Some(payload) = &grouped {
+            validate_group_read_request(anchor, request.plan.len(), payload)?;
+        }
+        let permit = self
+            .acquire_read_permit(read_stream_permits(grouped.as_ref()))
+            .await?;
         if let Some(payload) = grouped {
             return self
-                .handle_grouped_read_inner(request, query_ctx, payload, permit)
+                .handle_grouped_read_inner(
+                    request.header,
+                    anchor,
+                    Bytes::from(request.plan),
+                    query_ctx,
+                    payload,
+                    permit,
+                )
                 .await;
         }
 
-        let region_id = RegionId::from_u64(request.region_id);
+        let region_id = anchor;
         let engine_ctx = self
             .inner
             .query_engine
@@ -372,18 +386,20 @@ impl RegionServer {
         Ok(maybe_guard_stream(stream, permit))
     }
 
+    /// Acquires the limiter permits of `streams` region-read streams, when the limiter is enabled.
+    async fn acquire_read_permit(&self, streams: usize) -> Result<Option<OwnedSemaphorePermit>> {
+        match &self.inner.parallelism {
+            Some(parallelism) => Ok(Some(parallelism.acquire_many(streams).await?)),
+            None => Ok(None),
+        }
+    }
+
     #[tracing::instrument(skip_all)]
     pub async fn handle_read(&self, request: QueryRequest) -> Result<SendableRecordBatchStream> {
         self.handle_read_inner(request).await
     }
 
     async fn handle_read_inner(&self, request: QueryRequest) -> Result<SendableRecordBatchStream> {
-        let permit = if let Some(p) = &self.inner.parallelism {
-            Some(p.acquire().await?)
-        } else {
-            None
-        };
-
         let ctx = request
             .header
             .as_ref()
@@ -397,7 +413,45 @@ impl RegionServer {
             })?;
         let query_ctx = Arc::new(ctx.unwrap_or_else(|| QueryContextBuilder::default().build()));
 
+        // The in-process (standalone) path carries an already decoded logical plan, so a grouped
+        // read arrives as our `GroupRead` extension root instead of a serialized envelope. Peek it
+        // before the anchor data-source injector: an injected `GroupRead` would hand the query
+        // engine region leaves it can only bind through the grouped-read consumer.
         let region_id = request.region_id;
+        let grouped = match peek_local_group_read(&request.plan) {
+            Some(payload) => {
+                // The grouped-read consumer only reads the wire envelope, so this local request
+                // takes the same decode path a remote one takes.
+                let plan_bytes = encode_nested_plan(&request.plan).map_err(|error| {
+                    InvalidQueryRequestSnafu {
+                        reason: format!("cannot encode the local GroupRead request: {error}"),
+                    }
+                    .build()
+                })?;
+                // Reject a request this server cannot serve before it occupies limiter capacity.
+                validate_group_read_request(region_id, plan_bytes.len(), &payload)?;
+                Some((payload, plan_bytes))
+            }
+            None => None,
+        };
+        let permit = self
+            .acquire_read_permit(read_stream_permits(
+                grouped.as_ref().map(|(payload, _)| payload),
+            ))
+            .await?;
+        if let Some((payload, plan_bytes)) = grouped {
+            return self
+                .handle_grouped_read_inner(
+                    request.header,
+                    region_id,
+                    Bytes::from(plan_bytes),
+                    query_ctx,
+                    payload,
+                    permit,
+                )
+                .await;
+        }
+
         let injector_builder = NameAwareDataSourceInjectorBuilder::from_plan(&request.plan)
             .context(DataFusionSnafu)?;
         let mut injector = injector_builder
@@ -1411,7 +1465,8 @@ struct RegionServerInner {
     runtime: Runtime,
     event_listener: RegionServerEventListenerRef,
     table_provider_factory: TableProviderFactoryRef,
-    /// The number of queries allowed to be executed at the same time.
+    /// The number of concurrent region-read streams allowed to be executed at the same time.
+    /// A grouped read consumes one permit per region it names.
     /// Act as last line of defense on datanode to prevent query overloading.
     parallelism: Option<RegionServerParallelism>,
     /// The topic stats reporter.
@@ -1425,7 +1480,15 @@ struct RegionServerInner {
     initial_remote_dyn_filter_registrations: RemoteDynFilterRegistry,
 }
 
+/// Bounds how many region-read streams a datanode runs at the same time.
+///
+/// One permit is one region-read stream, so `max_concurrent_queries` counts streams rather than
+/// requests: an ordinary request consumes one, a grouped read consumes one per region it names.
 struct RegionServerParallelism {
+    /// The number of region-read streams this limiter admits at once. Stored so a request that
+    /// needs more streams than can ever be admitted is rejected instead of waiting for permits
+    /// that do not exist.
+    capacity: usize,
     semaphore: Arc<Semaphore>,
     timeout: Duration,
 }
@@ -1439,17 +1502,95 @@ impl RegionServerParallelism {
             return None;
         }
         Some(RegionServerParallelism {
+            capacity: max_concurrent_queries,
             semaphore: Arc::new(Semaphore::new(max_concurrent_queries)),
             timeout: concurrent_query_limiter_timeout,
         })
     }
 
-    pub async fn acquire(&self) -> Result<OwnedSemaphorePermit> {
-        timeout(self.timeout, self.semaphore.clone().acquire_owned())
-            .await
-            .context(ConcurrentQueryLimiterTimeoutSnafu)?
-            .context(ConcurrentQueryLimiterClosedSnafu)
+    /// Acquires the permits of `streams` region-read streams at once.
+    ///
+    /// A request that needs more streams than the limiter can ever admit is rejected immediately:
+    /// waiting would only burn the timeout on permits that can never be available together. A
+    /// grouped read names at most `query::dist_plan::MAX_GROUP_READ_REGIONS` regions, so raising
+    /// `max_concurrent_queries` to that bound admits any single grouped request.
+    pub async fn acquire_many(&self, streams: usize) -> Result<OwnedSemaphorePermit> {
+        // Zero streams would hold no permit and let a request run unmetered; charge one.
+        let streams = streams.max(1);
+        if streams > self.capacity {
+            return NotYetImplementedSnafu {
+                what: format!(
+                    "the grouped read names {streams} regions, above the concurrent region-read \
+                     stream capacity {}; raise `max_concurrent_queries` to at least the number of \
+                     regions of one grouped read",
+                    self.capacity
+                ),
+            }
+            .fail();
+        }
+        let permits = u32::try_from(streams).map_err(|_| {
+            NotYetImplementedSnafu {
+                what: format!(
+                    "the grouped read names {streams} regions, above the widest concurrent \
+                     region-read stream capacity this limiter can hold"
+                ),
+            }
+            .build()
+        })?;
+        timeout(
+            self.timeout,
+            self.semaphore.clone().acquire_many_owned(permits),
+        )
+        .await
+        .context(ConcurrentQueryLimiterTimeoutSnafu)?
+        .context(ConcurrentQueryLimiterClosedSnafu)
     }
+}
+
+/// The number of region-read streams one request consumes from the limiter.
+fn read_stream_permits(grouped: Option<&GroupReadPayload>) -> usize {
+    grouped.map_or(1, |payload| payload.region_ids().len())
+}
+
+/// Peeks the `GroupRead` marker of an already decoded in-process plan.
+///
+/// The remote path peeks a serialized envelope; the standalone path hands over the logical node
+/// tree directly, so a grouped read arrives as the `GroupRead` extension root. Anything that is
+/// not such a root is an ordinary plan.
+fn peek_local_group_read(plan: &LogicalPlan) -> Option<GroupReadPayload> {
+    let LogicalPlan::Extension(extension) = plan else {
+        return None;
+    };
+    extension
+        .node
+        .as_any()
+        .downcast_ref::<GroupReadPlan>()?
+        .payload()
+        .cloned()
+}
+
+/// Rejects a grouped read whose anchor, region set or size this server cannot serve.
+///
+/// Runs before a request takes limiter capacity so a malformed or oversized request never
+/// occupies permits.
+fn validate_group_read_request(
+    anchor: RegionId,
+    plan_len: usize,
+    payload: &GroupReadPayload,
+) -> Result<()> {
+    payload
+        .validate_for_request(anchor)
+        .map_err(|reason| InvalidQueryRequestSnafu { reason }.build())?;
+    if plan_len > MAX_GROUP_READ_PAYLOAD_BYTES {
+        return InvalidQueryRequestSnafu {
+            reason: format!(
+                "GroupRead request is {plan_len} bytes, above the {MAX_GROUP_READ_PAYLOAD_BYTES} \
+                 byte bound"
+            ),
+        }
+        .fail();
+    }
+    Ok(())
 }
 
 /// Wraps a record batch stream and holds a concurrency permit until the stream is
@@ -2433,17 +2574,30 @@ impl RegionAttribute {
 
 #[cfg(test)]
 mod tests {
+    use std::any::Any;
     use std::assert_matches;
     use std::collections::HashMap;
     use std::sync::Arc;
+    use std::sync::atomic::AtomicUsize;
 
     use api::v1::region::{InsertRequest, InsertRequests};
     use api::v1::{PartitionExprVersion, Rows, SemanticType};
+    use async_trait::async_trait;
+    use common_base::Plugins;
     use common_error::ext::{ErrorExt, RetryHint};
+    use common_function::function_factory::ScalarFunctionFactory;
+    use common_query::{Output, OutputMeta};
     use common_recordbatch::RecordBatches;
     use common_recordbatch::adapter::{RecordBatchMetrics, RegionWatermarkEntry};
+    use common_runtime::runtime::{BuilderBuild, RuntimeTrait};
     use common_wal::config::object_store::{ObjectStoreWalConfig, STANDALONE_GENERATION};
     use common_wal::options::{ObjectStoreWalOptions, WAL_OPTIONS_KEY, WalOptions};
+    use datafusion::catalog::TableFunction;
+    use datafusion::dataframe::DataFrame;
+    use datafusion::datasource::DefaultTableSource;
+    use datafusion::datasource::empty::EmptyTable;
+    use datafusion_common::TableReference;
+    use datafusion_expr::{AggregateUDF, LogicalPlanBuilder, WindowUDF};
     use datatypes::prelude::{ConcreteDataType, VectorRef};
     use datatypes::schema::{ColumnSchema, Schema};
     use datatypes::vectors::Int32Vector;
@@ -2453,7 +2607,10 @@ mod tests {
     use mito2::test_util::{CreateRequestBuilder, TestEnv, build_rows, rows_schema};
     use object_store::ObjectStore;
     use object_store::services::Memory;
-    use query::options::FLOW_RETURN_REGION_SEQ;
+    use query::options::{FLOW_RETURN_REGION_SEQ, QueryOptions};
+    use query::planner::LogicalPlanner;
+    use query::query_engine::{DescribeResult, QueryEngineState};
+    use query::{QueryEngine, QueryEngineContext};
     use store_api::metadata::{ColumnMetadata, RegionMetadata, RegionMetadataBuilder};
     use store_api::region_engine::RegionEngine;
     use store_api::region_request::{
@@ -2461,8 +2618,10 @@ mod tests {
         RegionDropRequest, RegionOpenRequest, RegionPutRequest, RegionTruncateRequest,
     };
     use store_api::storage::RegionId;
+    use table::TableRef;
 
     use super::*;
+    use crate::event_listener::NoopRegionServerEventListener;
     use crate::tests::{MockRegionEngine, mock_region_server};
 
     #[test]
@@ -2686,7 +2845,8 @@ mod tests {
                 }),
             )
             .await
-            .unwrap_err();
+            .err()
+            .expect("expected read error");
 
         assert_eq!(err.status_code(), StatusCode::RegionBusy);
         assert!(receiver.try_recv().is_err());
@@ -2896,7 +3056,8 @@ mod tests {
                 RegionRequest::Truncate(RegionTruncateRequest::All),
             )
             .await
-            .unwrap_err();
+            .err()
+            .expect("expected read error");
 
         assert_eq!(err.status_code(), StatusCode::RegionNotReady);
     }
@@ -3060,7 +3221,8 @@ mod tests {
                 body: Some(region_request::Body::Inserts(InsertRequests { requests })),
             })
             .await
-            .unwrap_err();
+            .err()
+            .expect("expected read error");
         assert_eq!(StatusCode::RegionBusy, error.status_code());
         assert_eq!(RetryHint::Retryable, error.retry_hint());
     }
@@ -3088,7 +3250,8 @@ mod tests {
         mock_region_server
             .handle_request(region_id, RegionRequest::Create(create_req))
             .await
-            .unwrap_err();
+            .err()
+            .expect("expected read error");
 
         assert!(!mock_region_server.inner.region_map.contains_key(&region_id));
 
@@ -3107,7 +3270,8 @@ mod tests {
                 }),
             )
             .await
-            .unwrap_err();
+            .err()
+            .expect("expected read error");
 
         assert!(mock_region_server.inner.region_map.contains_key(&region_id));
 
@@ -3308,7 +3472,8 @@ mod tests {
                 false,
             )
             .await
-            .unwrap_err();
+            .err()
+            .expect("expected read error");
         assert_matches!(&err, error::Error::HandleBatchOpenRequest { .. });
         assert_eq!(err.status_code(), StatusCode::RegionNotFound);
         assert_eq!(err.retry_hint(), RetryHint::RetryAfterRouteRefresh);
@@ -3510,20 +3675,431 @@ mod tests {
     #[tokio::test]
     async fn test_region_server_parallelism() {
         let p = RegionServerParallelism::from_opts(2, Duration::from_millis(1)).unwrap();
-        let first_query = p.acquire().await;
+        let first_query = p.acquire_many(1).await;
         assert!(first_query.is_ok());
-        let second_query = p.acquire().await;
+        let second_query = p.acquire_many(1).await;
         assert!(second_query.is_ok());
-        let third_query = p.acquire().await;
+        let third_query = p.acquire_many(1).await;
         assert!(third_query.is_err());
-        let err = third_query.unwrap_err();
+        let err = third_query.err().expect("expected limiter error");
         assert_eq!(
             err.output_msg(),
             "Failed to acquire permit under timeouts: deadline has elapsed".to_string()
         );
         drop(first_query);
-        let forth_query = p.acquire().await;
+        let forth_query = p.acquire_many(1).await;
         assert!(forth_query.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_region_server_parallelism_counts_region_read_streams() {
+        // A grouped read takes one permit per region it names, so a group that fits in the
+        // capacity holds all of it and leaves nothing for the next request.
+        let p = RegionServerParallelism::from_opts(3, Duration::from_millis(1)).unwrap();
+        let group = p.acquire_many(3).await;
+        assert!(group.is_ok());
+        let next = p
+            .acquire_many(1)
+            .await
+            .err()
+            .expect("expected limiter error");
+        assert_eq!(next.status_code(), StatusCode::RegionBusy);
+        drop(group);
+        assert!(p.acquire_many(3).await.is_ok());
+
+        // A request that needs more streams than the limiter can ever admit fails immediately
+        // instead of waiting for permits that can never exist together.
+        let too_wide = p
+            .acquire_many(4)
+            .await
+            .err()
+            .expect("expected limiter error");
+        assert_eq!(too_wide.status_code(), StatusCode::Unsupported);
+        assert!(
+            too_wide
+                .output_msg()
+                .contains("above the concurrent region-read"),
+            "{}",
+            too_wide.output_msg()
+        );
+    }
+
+    const GROUPED_READ_TABLE: &str = "dn_grouped_read_unit";
+    const GROUPED_READ_TABLE_ID: u32 = 2048;
+
+    /// A query engine that answers every plan with an empty stream of that plan's schema.
+    ///
+    /// A grouped read needs a real engine context: the request-scoped consumer decodes the combine
+    /// tree with the session state and the plan decoder. The rows themselves come from region
+    /// scans, so execution only has to record that a bound plan reached the engine.
+    struct EmptyStreamQueryEngine {
+        state: Arc<QueryEngineState>,
+        executed: AtomicUsize,
+    }
+
+    impl EmptyStreamQueryEngine {
+        fn build() -> Arc<Self> {
+            let state = QueryEngineState::new(
+                query::dummy_catalog::DummyCatalogManager::arc(),
+                None,
+                None,
+                None,
+                None,
+                None,
+                false,
+                Plugins::default(),
+                QueryOptions::default(),
+            );
+            Arc::new(Self {
+                state: Arc::new(state),
+                executed: AtomicUsize::new(0),
+            })
+        }
+
+        fn executed(&self) -> usize {
+            self.executed.load(Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait]
+    impl QueryEngine for EmptyStreamQueryEngine {
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+
+        fn planner(&self) -> Arc<dyn LogicalPlanner> {
+            unimplemented!("a read request never plans")
+        }
+
+        fn name(&self) -> &str {
+            "EmptyStreamQueryEngine"
+        }
+
+        async fn describe(
+            &self,
+            _plan: LogicalPlan,
+            _query_ctx: QueryContextRef,
+        ) -> query::error::Result<DescribeResult> {
+            unimplemented!("a read request never describes a plan")
+        }
+
+        async fn execute(
+            &self,
+            plan: LogicalPlan,
+            _query_ctx: QueryContextRef,
+        ) -> query::error::Result<Output> {
+            self.executed.fetch_add(1, Ordering::SeqCst);
+            let schema = SchemaRef::from(Schema::try_from(plan.schema().clone()).unwrap());
+            let batches = RecordBatches::try_new(schema, vec![]).unwrap();
+            Ok(Output {
+                data: OutputData::Stream(batches.as_stream()),
+                meta: OutputMeta::new(None, 0),
+            })
+        }
+
+        fn register_aggregate_function(&self, _func: AggregateUDF) {}
+
+        fn register_scalar_function(&self, _func: ScalarFunctionFactory) {}
+
+        fn register_table_function(&self, _func: Arc<TableFunction>) {}
+
+        fn register_window_function(&self, _func: WindowUDF) {}
+
+        fn read_table(&self, _table: TableRef) -> query::error::Result<DataFrame> {
+            unimplemented!("a read request never reads a table")
+        }
+
+        fn engine_context(
+            &self,
+            query_ctx: QueryContextRef,
+        ) -> query::error::Result<QueryEngineContext> {
+            Ok(QueryEngineContext::new(
+                self.state.session_state(),
+                query_ctx,
+            ))
+        }
+
+        fn engine_state(&self) -> &QueryEngineState {
+            &self.state
+        }
+    }
+
+    /// Two regions of one table: the shape a grouped read has.
+    fn grouped_read_regions() -> Vec<RegionId> {
+        vec![
+            RegionId::new(GROUPED_READ_TABLE_ID, 1),
+            RegionId::new(GROUPED_READ_TABLE_ID, 2),
+        ]
+    }
+
+    /// The plain per-region plan a grouped read repeats once per region.
+    fn grouped_read_nested_plan(region_id: RegionId) -> LogicalPlan {
+        let schema = mock_region_metadata(region_id)
+            .schema
+            .arrow_schema()
+            .clone();
+        let table = Arc::new(EmptyTable::new(schema));
+        LogicalPlanBuilder::scan(
+            TableReference::bare(GROUPED_READ_TABLE),
+            Arc::new(DefaultTableSource::new(table)),
+            None,
+        )
+        .unwrap()
+        .build()
+        .unwrap()
+    }
+
+    /// A region server whose regions resolve metadata, so every `RegionPlan` leaf decodes against
+    /// its own region catalog.
+    fn grouped_read_region_server(
+        max_concurrent_queries: usize,
+        limiter_timeout: Duration,
+        regions: &[RegionId],
+    ) -> (RegionServer, Arc<EmptyStreamQueryEngine>) {
+        let query_engine = EmptyStreamQueryEngine::build();
+        let mut server = RegionServer::with_table_provider(
+            query_engine.clone(),
+            Runtime::builder().build().unwrap(),
+            Box::new(NoopRegionServerEventListener),
+            Arc::new(DummyTableProviderFactory),
+            max_concurrent_queries,
+            limiter_timeout,
+            FlightCompression::default(),
+        );
+        let metadatas = regions
+            .iter()
+            .map(|region_id| (*region_id, Arc::new(mock_region_metadata(*region_id))))
+            .collect::<HashMap<RegionId, _>>();
+        // Not a Mito engine name: the region provider must keep the plain schema of the metadata
+        // so the plain regional plans and their bindings share one schema.
+        let (engine, _rx) = MockRegionEngine::with_metadata_mock_fn(
+            "grouped_read_test_engine",
+            Box::new(move |region_id| {
+                metadatas
+                    .get(&region_id)
+                    .cloned()
+                    .context(error::RegionNotFoundSnafu { region_id })
+            }),
+        );
+        server.register_engine(engine.clone());
+        for region_id in regions {
+            server
+                .inner
+                .region_map
+                .insert(*region_id, RegionEngineWithStatus::Ready(engine.clone()));
+        }
+        (server, query_engine)
+    }
+
+    /// A local grouped read: the in-process path carries the `GroupRead` logical root itself.
+    fn local_group_read_request(regions: &[RegionId]) -> QueryRequest {
+        let plan = query::dist_plan::build_group_read_plan(
+            regions,
+            GROUPED_READ_TABLE_ID,
+            &grouped_read_nested_plan(regions[0]),
+        )
+        .unwrap();
+        QueryRequest {
+            header: None,
+            region_id: regions[0],
+            plan,
+        }
+    }
+
+    fn remote_group_read_request(
+        regions: &[RegionId],
+        plan: Vec<u8>,
+    ) -> api::v1::region::QueryRequest {
+        api::v1::region::QueryRequest {
+            header: None,
+            region_id: regions[0].as_u64(),
+            plan,
+        }
+    }
+
+    #[tokio::test]
+    async fn test_handle_read_executes_group_read_locally() {
+        let regions = grouped_read_regions();
+        let (server, query_engine) =
+            grouped_read_region_server(0, Duration::from_millis(10), &regions);
+
+        let stream = server
+            .handle_read(local_group_read_request(&regions))
+            .await
+            .expect("a local GroupRead must execute, not fail as unsupported");
+        let batches = common_recordbatch::util::collect(stream).await.unwrap();
+
+        assert!(batches.is_empty());
+        assert_eq!(
+            1,
+            query_engine.executed(),
+            "the bound combine tree must reach the query engine once"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_grouped_read_holds_one_permit_per_region() {
+        let regions = grouped_read_regions();
+        // The capacity equals the group size, so the first group takes every permit.
+        let (server, _) =
+            grouped_read_region_server(regions.len(), Duration::from_millis(50), &regions);
+
+        let first = server
+            .handle_read(local_group_read_request(&regions))
+            .await
+            .unwrap();
+
+        let second = server
+            .handle_read(local_group_read_request(&regions))
+            .await
+            .err()
+            .expect("expected read error");
+        assert_eq!(second.status_code(), StatusCode::RegionBusy);
+        assert!(
+            second.output_msg().contains("deadline has elapsed"),
+            "{}",
+            second.output_msg()
+        );
+
+        drop(first);
+        assert!(
+            server
+                .handle_read(local_group_read_request(&regions))
+                .await
+                .is_ok(),
+            "dropping the group must release its permits"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_grouped_read_above_limiter_capacity_is_unsupported() {
+        let regions = grouped_read_regions();
+        let (server, query_engine) =
+            grouped_read_region_server(1, Duration::from_millis(50), &regions);
+
+        let err = server
+            .handle_read(local_group_read_request(&regions))
+            .await
+            .err()
+            .expect("expected read error");
+
+        assert_eq!(err.status_code(), StatusCode::Unsupported);
+        assert!(
+            err.output_msg()
+                .contains("above the concurrent region-read stream capacity"),
+            "{}",
+            err.output_msg()
+        );
+        assert_eq!(0, query_engine.executed());
+    }
+
+    #[tokio::test]
+    async fn test_local_group_read_is_validated_before_the_limiter() {
+        let regions = grouped_read_regions();
+        // Capacity one cannot admit the group, so an anchor outside the group must be reported as
+        // an invalid request instead of an unsupported one.
+        let (server, query_engine) =
+            grouped_read_region_server(1, Duration::from_millis(50), &regions);
+        let mut request = local_group_read_request(&regions);
+        request.region_id = RegionId::new(GROUPED_READ_TABLE_ID, 9);
+
+        let err = server
+            .handle_read(request)
+            .await
+            .err()
+            .expect("expected read error");
+
+        assert_eq!(err.status_code(), StatusCode::InvalidArguments);
+        assert!(
+            err.output_msg()
+                .contains("is not one of the grouped regions"),
+            "{}",
+            err.output_msg()
+        );
+        assert_eq!(0, query_engine.executed());
+    }
+
+    #[tokio::test]
+    async fn test_group_read_malformed_envelope_is_an_invalid_request() {
+        let regions = grouped_read_regions();
+        let nested = grouped_read_nested_plan(regions[0]);
+        // A bare `RegionPlan` root leaf is not a valid grouped read.
+        let leaf = query::dist_plan::RegionPlan::try_new(
+            regions[0],
+            query::dist_plan::encode_nested_plan(&nested).unwrap(),
+            nested.schema().clone(),
+        )
+        .unwrap()
+        .into_logical_plan();
+        let plan = query::dist_plan::encode_nested_plan(&leaf).unwrap();
+
+        let (server, _) = grouped_read_region_server(0, Duration::from_millis(10), &regions);
+        let err = server
+            .handle_remote_read(
+                remote_group_read_request(&regions, plan),
+                QueryContext::arc(),
+            )
+            .await
+            .err()
+            .expect("expected read error");
+
+        assert_eq!(err.status_code(), StatusCode::InvalidArguments);
+        assert!(
+            err.output_msg().contains("not a valid root relation"),
+            "{}",
+            err.output_msg()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_group_read_decode_failure_is_an_invalid_request() {
+        let regions = grouped_read_regions();
+        let nested = grouped_read_nested_plan(regions[0]);
+        // A well-formed envelope whose regional plan bytes no decoder accepts.
+        let mut plans = Vec::with_capacity(regions.len());
+        for region in &regions {
+            plans.push(
+                query::dist_plan::RegionPlan::try_new(
+                    *region,
+                    vec![0xff, 0xff, 0xff],
+                    nested.schema().clone(),
+                )
+                .unwrap()
+                .into_logical_plan(),
+            );
+        }
+        let union = plans
+            .into_iter()
+            .reduce(|left, right| {
+                LogicalPlanBuilder::from(left)
+                    .union(right)
+                    .unwrap()
+                    .build()
+                    .unwrap()
+            })
+            .unwrap();
+        let payload = query::dist_plan::GroupReadPayload::try_new(
+            regions.iter().map(RegionId::as_u64).collect(),
+            GROUPED_READ_TABLE_ID,
+            GROUPED_READ_TABLE.to_string(),
+        )
+        .unwrap();
+        let plan = query::dist_plan::GroupReadPlan::try_new(payload, union)
+            .unwrap()
+            .into_logical_plan();
+        let plan = query::dist_plan::encode_nested_plan(&plan).unwrap();
+
+        let (server, _) = grouped_read_region_server(0, Duration::from_millis(10), &regions);
+        let err = server
+            .handle_remote_read(
+                remote_group_read_request(&regions, plan),
+                QueryContext::arc(),
+            )
+            .await
+            .err()
+            .expect("expected read error");
+
+        assert_eq!(err.status_code(), StatusCode::InvalidArguments);
     }
 
     fn mock_region_metadata(region_id: RegionId) -> RegionMetadata {
@@ -3694,7 +4270,8 @@ mod tests {
         mock_region_server
             .handle_list_metadata_request(&list_metadata_request)
             .await
-            .unwrap_err();
+            .err()
+            .expect("expected read error");
     }
 
     /// Returns a region server with a Mito engine on a durable object store WAL, the WAL, and the

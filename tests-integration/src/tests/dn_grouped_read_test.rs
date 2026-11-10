@@ -38,8 +38,7 @@ use common_query::request::{
 use common_recordbatch::adapter::region_scan_output_bytes;
 use datafusion::common::TableReference;
 use datafusion::datasource::DefaultTableSource;
-use datafusion::functions_aggregate::sum::sum;
-use datafusion::logical_expr::{LogicalPlanBuilder, col};
+use datafusion::logical_expr::LogicalPlanBuilder;
 use datafusion::physical_plan::PhysicalExpr;
 use datafusion::physical_plan::expressions::lit as physical_lit;
 use datanode::error::{Error as DatanodeError, Result as DatanodeResult};
@@ -50,7 +49,7 @@ use meta_srv::metasrv::SelectTarget;
 use meta_srv::selector::round_robin::RoundRobinSelector;
 use query::dist_plan::{
     MAX_GROUP_READ_PAYLOAD_BYTES, MergeScanLogicalPlan, build_group_read_plan,
-    build_group_read_plan_with_combine, peek_group_read_envelope,
+    peek_group_read_envelope,
 };
 use query::query_engine::DefaultSerializer;
 use servers::grpc::region_server::RegionServerHandler;
@@ -750,91 +749,6 @@ async fn grouped_read_rdf_and_rejections() {
                 QueryContext::arc(),
             )
             .await,
-    );
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn dn_level_poc_group_read_sum_over_union_all_returns_partial_rows() {
-    // DN-level POC only: the test drives GroupRead directly and sums the per-datanode partial
-    // rows itself. FE SQL/Flight aggregate pushdown is not part of this case.
-    common_telemetry::init_default_ut_logging();
-    let cluster = build_cluster("dn_grouped_read_sum").await;
-    let fe = cluster.fe_instance().clone();
-    prepare_fixture(&fe).await;
-
-    let table = fe
-        .catalog_manager()
-        .table("greptime", "public", TABLE, None)
-        .await
-        .unwrap()
-        .unwrap();
-    let info = table.table_info();
-    let nested = LogicalPlanBuilder::scan(
-        TableReference::bare(TABLE),
-        Arc::new(DefaultTableSource::new(Arc::new(
-            DfTableProviderAdapter::new(table.clone()),
-        ))),
-        None,
-    )
-    .unwrap()
-    .build()
-    .unwrap();
-
-    let mut total = 0.0f64;
-    let mut datanodes = 0;
-    for datanode_id in cluster.datanode_instances.keys().copied() {
-        let mut own_regions = region_ids_of_datanode(&fe, TABLE, datanode_id).await;
-        own_regions.sort();
-        let envelope =
-            build_group_read_plan_with_combine(&own_regions, info.table_id(), &nested, |union| {
-                LogicalPlanBuilder::from(union)
-                    .aggregate(Vec::<datafusion_expr::Expr>::new(), vec![sum(col("v"))])?
-                    .build()
-            })
-            .unwrap();
-        let stream = cluster
-            .datanode_instances
-            .get(&datanode_id)
-            .unwrap()
-            .region_server()
-            .handle_remote_read(
-                RegionQueryRequest {
-                    header: Some(RegionRequestHeader {
-                        query_context: Some(QueryContext::arc().as_ref().into()),
-                        ..Default::default()
-                    }),
-                    region_id: own_regions[0].as_u64(),
-                    plan: encode(&envelope),
-                },
-                QueryContext::arc(),
-            )
-            .await
-            .unwrap_or_else(|error| {
-                panic!("SUM GroupRead failed on datanode {datanode_id}: {error}")
-            });
-        let batches = common_recordbatch::util::collect_batches(stream)
-            .await
-            .unwrap_or_else(|error| panic!("SUM GroupRead produced no batches: {error}"));
-        let rows = batches.iter().map(|batch| batch.num_rows()).sum::<usize>();
-        assert_eq!(
-            1, rows,
-            "Aggregate over UnionAll(RegionPlan...) must emit one partial row per datanode"
-        );
-        let batch = batches
-            .iter()
-            .next()
-            .expect("one partial SUM row")
-            .df_record_batch();
-        let values = batch
-            .column(0)
-            .as_primitive::<datatypes::arrow::datatypes::Float64Type>();
-        total += values.value(0);
-        datanodes += 1;
-    }
-    assert_eq!(2, datanodes);
-    assert_eq!(
-        13.0, total,
-        "the frontend sums the per-datanode partial SUM rows to the global SUM"
     );
 }
 

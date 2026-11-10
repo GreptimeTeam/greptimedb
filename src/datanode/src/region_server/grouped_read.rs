@@ -43,7 +43,9 @@ use snafu::{IntoError, ResultExt};
 use store_api::storage::RegionId;
 use tokio::sync::OwnedSemaphorePermit;
 
-use crate::error::{DecodeLogicalPlanSnafu, NewPlanDecoderSnafu, Result, UnexpectedSnafu};
+use crate::error::{
+    DecodeLogicalPlanSnafu, InvalidQueryRequestSnafu, NewPlanDecoderSnafu, Result, UnexpectedSnafu,
+};
 use crate::region_server::RegionServer;
 use crate::region_server::catalog::NameAwareCatalogList;
 use crate::region_server::remote_dyn_filter::RemoteDynFilterRegistrationGuard;
@@ -53,9 +55,16 @@ type GroupedReadInitFuture =
 
 impl RegionServer {
     /// Decodes and executes a `GroupRead` request.
+    ///
+    /// `plan_bytes` is the serialized `GroupRead` envelope, whether it arrived over Flight or was
+    /// encoded from the in-process plan of a standalone datanode: both paths bind the region leaves
+    /// through the same request-scoped consumer. `permit` holds one limiter permit per named
+    /// region, or nothing when the limiter is disabled.
     pub(super) async fn handle_grouped_read_inner(
         &self,
-        request: api::v1::region::QueryRequest,
+        header: Option<api::v1::region::RegionRequestHeader>,
+        anchor: RegionId,
+        plan_bytes: Bytes,
         query_ctx: QueryContextRef,
         payload: GroupReadPayload,
         permit: Option<OwnedSemaphorePermit>,
@@ -70,15 +79,14 @@ impl RegionServer {
             }
             .fail();
         }
-        let anchor = RegionId::from_u64(request.region_id);
         payload
             .validate_for_request(anchor)
-            .map_err(|reason| UnexpectedSnafu { violated: reason }.build())?;
-        if request.plan.len() > MAX_GROUP_READ_PAYLOAD_BYTES {
-            return UnexpectedSnafu {
-                violated: format!(
+            .map_err(|reason| InvalidQueryRequestSnafu { reason }.build())?;
+        if plan_bytes.len() > MAX_GROUP_READ_PAYLOAD_BYTES {
+            return InvalidQueryRequestSnafu {
+                reason: format!(
                     "GroupRead request is {} bytes, above the {} byte bound",
-                    request.plan.len(),
+                    plan_bytes.len(),
                     MAX_GROUP_READ_PAYLOAD_BYTES
                 ),
             }
@@ -101,9 +109,9 @@ impl RegionServer {
             query_ctx: query_ctx.clone(),
             decoder,
         };
-        let plan = decode_group_read_request(&request.plan, engine_ctx.state(), payload, &resolver)
+        let plan = decode_group_read_request(&plan_bytes, engine_ctx.state(), payload, &resolver)
             .await
-            .map_err(|reason| UnexpectedSnafu { violated: reason }.build())?;
+            .map_err(|reason| InvalidQueryRequestSnafu { reason }.build())?;
 
         let mut guards = Vec::with_capacity(region_ids.len());
         for region in region_ids {
@@ -115,8 +123,8 @@ impl RegionServer {
         }
 
         let schema = SchemaRef::from(Schema::try_from(plan.schema().clone()).map_err(|error| {
-            UnexpectedSnafu {
-                violated: format!("GroupRead combine tree has an invalid schema: {error}"),
+            InvalidQueryRequestSnafu {
+                reason: format!("GroupRead combine tree has an invalid schema: {error}"),
             }
             .build()
         })?);
@@ -126,7 +134,7 @@ impl RegionServer {
             inner
                 .handle_read(
                     QueryRequest {
-                        header: request.header,
+                        header,
                         region_id: anchor,
                         plan,
                     },
@@ -141,9 +149,9 @@ impl RegionServer {
             guards,
         });
         Ok(match permit {
-            Some(permit) => Box::pin(GroupedReadPermitStream {
+            Some(permits) => Box::pin(GroupedReadPermitStream {
                 inner: stream,
-                permit: Some(permit),
+                permits: Some(permits),
             }),
             None => stream,
         })
@@ -213,10 +221,13 @@ impl RecordBatchStream for GroupedReadLazyStream {
     }
 }
 
-/// Holds the outer grouped-read permit until EOF, error or drop.
+/// Holds the limiter permits of a grouped read until EOF, error or drop.
+///
+/// The permit is the multi-permit of the whole group: one limiter permit per region the request
+/// names, so `max_concurrent_queries` counts the region-read streams this request keeps open.
 struct GroupedReadPermitStream {
     inner: SendableRecordBatchStream,
-    permit: Option<OwnedSemaphorePermit>,
+    permits: Option<OwnedSemaphorePermit>,
 }
 
 impl Stream for GroupedReadPermitStream {
@@ -225,7 +236,7 @@ impl Stream for GroupedReadPermitStream {
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let result = self.inner.as_mut().poll_next(cx);
         if matches!(result, Poll::Ready(None)) || matches!(result, Poll::Ready(Some(Err(_)))) {
-            self.permit.take();
+            self.permits.take();
         }
         result
     }

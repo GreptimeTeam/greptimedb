@@ -14,17 +14,18 @@
 
 //! Multi-input grouped-read envelope.
 //!
-//! A grouped read is one `GroupRead` root marker around a combine tree. The default combine tree
-//! is `UnionAll(RegionPlan(...), ...)`, where each `RegionPlan` is a wire extension leaf carrying
-//! one region id and the complete per-region plan bytes. A datanode intercepts the root, decodes
-//! every `RegionPlan` against that region's catalog, replaces the leaf with the bound logical
-//! subtree and executes the resulting ordinary multi-input plan through the query engine. Nothing
-//! is merged here by the wire layer: a combine tree that contains an aggregate is planned and run
-//! exactly like the same logical plan in a local query.
+//! A grouped read is one `GroupRead` root marker around `UnionAll(RegionPlan(...), ...)`, where
+//! each `RegionPlan` is a wire extension leaf carrying one region id and the complete per-region
+//! plan bytes. A datanode intercepts the root, replaces every `RegionPlan` leaf with that region's
+//! bound logical subtree and executes the resulting ordinary `UnionAll` through the query engine.
+//! The wire is deliberately narrow: the marker's only child is a `UnionAll` of region leaves (a
+//! single member may degrade to a bare leaf), and every region plan is a single-table
+//! `Read`/`Project`/`Filter` chain. Neither the outer request nor a region plan may carry an
+//! aggregate, join, sort or any other extension, so a datanode never decodes an arbitrary plan.
 //!
 //! `GroupRead` is the root relation of the serialized request and is an
-//! [`ExtensionSingleRel`](substrait::substrait_proto_df::proto::ExtensionSingleRel). Its child is
-//! the combine tree. `RegionPlan` is an [`ExtensionLeafRel`](substrait::substrait_proto_df::proto::ExtensionLeafRel).
+//! [`ExtensionSingleRel`](substrait::substrait_proto_df::proto::ExtensionSingleRel). `RegionPlan`
+//! is an [`ExtensionLeafRel`](substrait::substrait_proto_df::proto::ExtensionLeafRel).
 //! Ordinary plans are left untouched: a datanode peeks only at the root before constructing a
 //! region-scoped decoder.
 
@@ -32,38 +33,34 @@ use std::cmp::Ordering;
 use std::collections::BTreeSet;
 use std::fmt;
 use std::hash::{Hash, Hasher};
-use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use async_trait::async_trait;
-use datafusion::catalog::TableProvider;
 use datafusion::common::Result as DataFusionResult;
 use datafusion::datasource::DefaultTableSource;
-use datafusion::execution::FunctionRegistry;
 use datafusion::execution::context::SessionState;
 use datafusion_common::tree_node::{TreeNode, TreeNodeRecursion};
-use datafusion_common::{DFSchema, DFSchemaRef, DataFusionError, TableReference};
+use datafusion_common::{DFSchemaRef, DataFusionError};
 use datafusion_expr::{
     Expr, Extension, LogicalPlan, LogicalPlanBuilder, UserDefinedLogicalNodeCore,
 };
-use datatypes::schema::{Schema, SchemaRef};
 use prost::Message;
 use serde::{Deserialize, Serialize};
 use store_api::storage::RegionId;
-use substrait::df_logical_plan::consumer::{SubstraitConsumer, from_substrait_rel};
-use substrait::substrait_proto_df::proto::{
-    ExtensionLeafRel, ExtensionSingleRel, ReadRel, Rel, rel, set_rel::SetOp,
-};
-use substrait::{DFLogicalSubstraitConvertor, Extensions, SubstraitPlan};
+use substrait::substrait_proto_df::proto::{Plan, Rel, plan_rel, read_rel, rel, set_rel::SetOp};
+use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
 use table::metadata::TableType;
 use table::table::adapter::DfTableProviderAdapter;
 use table::table_name::TableName;
 
+use crate::dummy_catalog::DummyTableProvider;
 use crate::query_engine::DefaultSerializer;
 use crate::region_query::RegionQueryTarget;
 
 /// The version of the grouped-read model this build produces and accepts.
-pub const GROUP_READ_VERSION: u32 = 2;
+///
+/// The envelope was never released, so there is exactly one version.
+pub const GROUP_READ_VERSION: u32 = 1;
 
 /// The wire name of the root multi-input marker.
 pub const GROUP_READ_NAME: &str = "GroupRead";
@@ -79,6 +76,18 @@ pub const MAX_GROUP_READ_REGIONS: usize = 1024;
 
 /// Upper bound on the serialized grouped-read request.
 pub const MAX_GROUP_READ_PAYLOAD_BYTES: usize = 8 * 1024 * 1024;
+
+/// Upper bound on the relations one `RegionPlan`'s raw plan may contain.
+///
+/// A production regional plan is a single table read under a few projections and filters, so this
+/// bound only has to leave room for planner-added wrappers.
+pub const MAX_REGION_PLAN_NODES: usize = 24;
+
+/// Upper bound on the depth of one `RegionPlan`'s raw plan.
+pub const MAX_REGION_PLAN_DEPTH: usize = 32;
+
+/// Upper bound on the `UnionAll` nesting depth of one grouped-read combine tree.
+pub const MAX_GROUP_READ_UNION_DEPTH: usize = 32;
 
 /// Conservative bytes one RegionPlan contributes after JSON encoding.
 ///
@@ -250,9 +259,29 @@ impl GroupReadPayload {
         }
         Ok(())
     }
-}
 
-/// The payload of one `RegionPlan` wire leaf.
+    /// Checks one `RegionPlan` member against the root metadata before it is decoded.
+    ///
+    /// A member must be named by the payload and its region must belong to the payload's table;
+    /// duplicates are checked by the caller so it can keep one set across members.
+    fn validate_region_member(&self, region_id: RegionId) -> std::result::Result<(), String> {
+        self.validate_shape()?;
+        if !self.region_ids.contains(&region_id.as_u64()) {
+            return Err(format!(
+                "region {region_id} is not one of the grouped regions {:?}",
+                self.region_ids
+            ));
+        }
+        if region_id.table_id() != self.table_id {
+            return Err(format!(
+                "region {region_id} belongs to table {}, but the grouped read names table {}",
+                region_id.table_id(),
+                self.table_id
+            ));
+        }
+        Ok(())
+    }
+}
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct RegionPlanPayload {
     region_id: u64,
@@ -330,6 +359,13 @@ impl fmt::Display for GroupReadEnvelopeError {
 
 impl std::error::Error for GroupReadEnvelopeError {}
 
+/// Whether `needle` occurs in `haystack`.
+fn contains_marker(haystack: &[u8], needle: &[u8]) -> bool {
+    haystack
+        .windows(needle.len())
+        .any(|window| window == needle)
+}
+
 /// Peeks at the root relation of a serialized region request.
 ///
 /// Only a unique `GroupRead` `ExtensionSingleRel` root is ours. An old append-only root leaf is
@@ -337,7 +373,15 @@ impl std::error::Error for GroupReadEnvelopeError {}
 pub fn peek_group_read_envelope(
     plan: &[u8],
 ) -> std::result::Result<Option<GroupReadPayload>, GroupReadEnvelopeError> {
-    use substrait::substrait_proto_df::proto::{Plan, plan_rel, rel};
+    // Cheap pre-filter: an ordinary remote plan never carries either marker name, so most requests
+    // are answered without paying for a full protobuf decode. `RegionPlan` is included so a bare
+    // region leaf at the root is still rejected as a malformed grouped read instead of being
+    // silently left to the ordinary decoder.
+    if !contains_marker(plan, GROUP_READ_NAME.as_bytes())
+        && !contains_marker(plan, REGION_PLAN_NAME.as_bytes())
+    {
+        return Ok(None);
+    }
 
     let Ok(decoded) = Plan::decode(plan) else {
         return Ok(None);
@@ -657,38 +701,6 @@ pub fn encode_nested_plan(plan: &LogicalPlan) -> DataFusionResult<Vec<u8>> {
     Ok(encoded.to_vec())
 }
 
-/// Builds the default `UnionAll(RegionPlan...)` combine tree.
-pub fn build_region_plan_union(
-    regions: &[RegionId],
-    table_id: u32,
-    nested_plan: &LogicalPlan,
-) -> DataFusionResult<LogicalPlan> {
-    let Some(table) = nested_plan_table(nested_plan) else {
-        return Err(DataFusionError::Plan(format!(
-            "the regional plan is not a single ordinary table scan: got `{}`",
-            nested_plan.display_indent()
-        )));
-    };
-    if regions.iter().any(|region| region.table_id() != table_id) {
-        return Err(DataFusionError::Plan(format!(
-            "the RegionPlan list names a region outside table {table_id}"
-        )));
-    }
-    let nested = encode_nested_plan(nested_plan)?;
-    let mut plans = Vec::with_capacity(regions.len());
-    for region in regions {
-        let leaf = RegionPlan::try_new(*region, nested.clone(), nested_plan.schema().clone())
-            .map_err(DataFusionError::Plan)?;
-        plans.push(leaf.into_logical_plan());
-    }
-    if plans.is_empty() {
-        return Err(DataFusionError::Plan(
-            "a grouped read needs at least one region".to_string(),
-        ));
-    }
-    union_balanced(plans, &table.table_name)
-}
-
 /// Builds a balanced `UnionAll` tree.
 ///
 /// A left-deep union of a thousand region leaves would overflow the stack while dropping or
@@ -710,30 +722,6 @@ fn union_balanced(mut plans: Vec<LogicalPlan>, table_name: &str) -> DataFusionRe
         .build()
 }
 
-/// Builds `GroupRead(combine(UnionAll(RegionPlan...)))` with a caller-supplied combine tree.
-pub fn build_group_read_plan_with_combine(
-    regions: &[RegionId],
-    table_id: u32,
-    nested_plan: &LogicalPlan,
-    combine: impl FnOnce(LogicalPlan) -> DataFusionResult<LogicalPlan>,
-) -> DataFusionResult<LogicalPlan> {
-    let Some(table) = nested_plan_table(nested_plan) else {
-        return Err(DataFusionError::Plan(format!(
-            "the regional plan is not a single ordinary table scan: got `{}`",
-            nested_plan.display_indent()
-        )));
-    };
-    let nested = encode_nested_plan(nested_plan)?;
-    build_group_read_plan_from_nested(
-        regions,
-        table_id,
-        table.table_name,
-        &nested,
-        nested_plan.schema().clone(),
-        combine,
-    )
-}
-
 /// Builds a GroupRead from one already encoded regional template.
 pub fn build_group_read_plan_from_nested(
     regions: &[RegionId],
@@ -741,7 +729,6 @@ pub fn build_group_read_plan_from_nested(
     table_name: String,
     nested: &[u8],
     schema: DFSchemaRef,
-    combine: impl FnOnce(LogicalPlan) -> DataFusionResult<LogicalPlan>,
 ) -> DataFusionResult<LogicalPlan> {
     if regions.is_empty() {
         return Err(DataFusionError::Plan(
@@ -762,6 +749,14 @@ pub fn build_group_read_plan_from_nested(
             )));
         }
     }
+    if regions.iter().any(|region| region.table_id() != table_id) {
+        return Err(DataFusionError::Plan(format!(
+            "the RegionPlan list names a region outside table {table_id}"
+        )));
+    }
+    // The datanode re-runs this pre-check before decoding anything; refusing to produce a wire
+    // the consumer must reject keeps the producer and consumer on the same narrow contract.
+    preflight_region_plan(nested).map_err(DataFusionError::Plan)?;
     let estimated = estimated_region_plan_json_bytes(nested.len())
         .saturating_mul(regions.len())
         .saturating_add(table_name.len())
@@ -779,68 +774,60 @@ pub fn build_group_read_plan_from_nested(
         plans.push(leaf.into_logical_plan());
     }
     let union = union_balanced(plans, &table_name)?;
-    let combine = combine(union)?;
     let payload = GroupReadPayload::from_validated_parts(
         regions.iter().map(RegionId::as_u64).collect(),
         table_id,
         table_name,
     );
-    let node = GroupReadPlan::try_new(payload, combine).map_err(DataFusionError::Plan)?;
+    let node = GroupReadPlan::try_new(payload, union).map_err(DataFusionError::Plan)?;
     Ok(node.into_logical_plan())
 }
 
-/// Builds the default append-equivalent grouped read.
+/// Builds the only production grouped read: `GroupRead(UnionAll(RegionPlan...))`.
 pub fn build_group_read_plan(
     regions: &[RegionId],
     table_id: u32,
     nested_plan: &LogicalPlan,
 ) -> DataFusionResult<LogicalPlan> {
-    build_group_read_plan_with_combine(regions, table_id, nested_plan, Ok)
+    let Some(table) = nested_plan_table(nested_plan) else {
+        return Err(DataFusionError::Plan(format!(
+            "the regional plan is not a single ordinary table scan: got `{}`",
+            nested_plan.display_indent()
+        )));
+    };
+    let nested = encode_nested_plan(nested_plan)?;
+    build_group_read_plan_from_nested(
+        regions,
+        table_id,
+        table.table_name,
+        &nested,
+        nested_plan.schema().clone(),
+    )
 }
 
 /// Whether `plan` is a shape a grouped read may carry: one ordinary table scan under projections,
 /// filters and aliases only.
 pub fn eligible_remote_plan(plan: &LogicalPlan) -> bool {
-    fn walk(plan: &LogicalPlan, scans: &mut usize) -> bool {
-        match plan {
-            LogicalPlan::TableScan(scan) => {
-                if ordinary_scan_table(scan).is_none() {
-                    return false;
-                }
-                *scans += 1;
-                *scans == 1
-            }
-            LogicalPlan::Projection(projection) => walk(&projection.input, scans),
-            LogicalPlan::Filter(filter) => walk(&filter.input, scans),
-            LogicalPlan::SubqueryAlias(alias) => walk(&alias.input, scans),
-            _ => false,
-        }
-    }
+    // The wire only carries plain expressions: a subquery or DML would be rejected by the
+    // datanode, so such a plan must keep the ordinary path instead of building an envelope.
+    !plan_has_forbidden_nodes(plan)
+        && single_table_scan(plan).is_some_and(|scan| ordinary_scan_table(scan).is_some())
+}
 
-    let mut scans = 0usize;
-    walk(plan, &mut scans) && scans == 1
+/// The one table scan `plan` reads through only projections, filters and aliases.
+fn single_table_scan(plan: &LogicalPlan) -> Option<&datafusion_expr::TableScan> {
+    match plan {
+        LogicalPlan::TableScan(scan) => Some(scan),
+        LogicalPlan::Projection(projection) => single_table_scan(&projection.input),
+        LogicalPlan::Filter(filter) => single_table_scan(&filter.input),
+        LogicalPlan::SubqueryAlias(alias) => single_table_scan(&alias.input),
+        _ => None,
+    }
 }
 
 /// The one ordinary table `plan` reads, when it is an eligible grouped read shape.
 pub fn nested_plan_table(plan: &LogicalPlan) -> Option<TableName> {
-    fn walk(plan: &LogicalPlan, table: &mut Option<TableName>) -> bool {
-        match plan {
-            LogicalPlan::TableScan(scan) => {
-                let Some(name) = ordinary_scan_table(scan) else {
-                    return false;
-                };
-                *table = Some(name);
-                true
-            }
-            LogicalPlan::Projection(projection) => walk(&projection.input, table),
-            LogicalPlan::Filter(filter) => walk(&filter.input, table),
-            LogicalPlan::SubqueryAlias(alias) => walk(&alias.input, table),
-            _ => false,
-        }
-    }
-
-    let mut table = None;
-    walk(plan, &mut table).then_some(table).flatten()
+    single_table_scan(plan).and_then(ordinary_scan_table)
 }
 
 fn ordinary_scan_table(scan: &datafusion_expr::TableScan) -> Option<TableName> {
@@ -880,30 +867,69 @@ fn ordinary_scan_table(scan: &datafusion_expr::TableScan) -> Option<TableName> {
 }
 
 /// Validates one decoded regional plan against the root metadata and its region id.
+///
+/// The decoded plan must be a single ordinary table read whose provider is the region provider
+/// bound to `region_id`. The wire table name is not an identity: the region catalog resolves any
+/// name to the region provider, so a matching name alone proves nothing.
 pub fn validate_region_plan(
     payload: &GroupReadPayload,
     region_id: RegionId,
     plan: &LogicalPlan,
 ) -> std::result::Result<(), String> {
-    payload.validate_for_request(region_id)?;
+    payload.validate_region_member(region_id)?;
     if plan_has_forbidden_nodes(plan) {
         return Err(format!(
             "region {region_id} decoded a plan with a subquery or DML node"
         ));
     }
-    let Some(table_name) = nested_plan_table(plan) else {
+    let Some(scan) = single_table_scan(plan) else {
         return Err(format!(
             "region {region_id} decoded a plan that is not a single ordinary table read: `{}`",
             plan.display_indent()
         ));
     };
-    if table_name.table_name != payload.table_name {
+    validate_region_scan(payload, region_id, scan)
+}
+
+/// Checks that one decoded scan reads exactly the region provider bound to `region_id`.
+fn validate_region_scan(
+    payload: &GroupReadPayload,
+    region_id: RegionId,
+    scan: &datafusion_expr::TableScan,
+) -> std::result::Result<(), String> {
+    let Some(source) = scan.source.downcast_ref::<DefaultTableSource>() else {
+        return Err(format!("region {region_id} does not read a table provider"));
+    };
+    let scan_table = scan.table_name.table();
+    if scan_table != payload.table_name.as_str() {
         return Err(format!(
-            "region {region_id} reads table `{}`, but the grouped read names `{}`",
-            table_name.table_name, payload.table_name
+            "region {region_id} reads table `{scan_table}`, but the grouped read names `{}`",
+            payload.table_name
         ));
     }
-    Ok(())
+    // The datanode resolves every name to the region provider, so the provider itself is the
+    // only identity that matters. Inspection, reserved and other logical sources are not it.
+    if let Some(provider) = source.table_provider.downcast_ref::<DummyTableProvider>() {
+        let metadata = provider.region_metadata();
+        if metadata.region_id != region_id {
+            return Err(format!(
+                "region {region_id} decoded the provider of region {}",
+                metadata.region_id
+            ));
+        }
+        if metadata.region_id.table_id() != payload.table_id {
+            return Err(format!(
+                "region {region_id} decoded a provider of table {}, but the grouped read names \
+                 table {}",
+                metadata.region_id.table_id(),
+                payload.table_id
+            ));
+        }
+        return Ok(());
+    }
+    Err(format!(
+        "region {region_id} decoded a provider that is not the bound region provider"
+    ))
 }
 
 fn expr_has_subquery(expr: &Expr) -> bool {
@@ -935,6 +961,107 @@ fn plan_has_forbidden_nodes(plan: &LogicalPlan) -> bool {
             .any(|input| plan_has_forbidden_nodes(input))
 }
 
+fn rel_kind_name(rel: &rel::RelType) -> &'static str {
+    match rel {
+        rel::RelType::Read(_) => "a plain read",
+        rel::RelType::Filter(_) => "Filter",
+        rel::RelType::Fetch(_) => "Fetch",
+        rel::RelType::Aggregate(_) => "Aggregate",
+        rel::RelType::Sort(_) => "Sort",
+        rel::RelType::Join(_) => "Join",
+        rel::RelType::Project(_) => "Projection",
+        rel::RelType::Set(_) => "Set",
+        rel::RelType::ExtensionSingle(_) | rel::RelType::ExtensionMulti(_) => "an extension",
+        rel::RelType::ExtensionLeaf(_) => "an extension leaf",
+        rel::RelType::Cross(_) => "CrossJoin",
+        rel::RelType::Reference(_) => "Reference",
+        rel::RelType::Write(_) => "Write",
+        rel::RelType::Ddl(_) => "Ddl",
+        rel::RelType::Update(_) => "Update",
+        rel::RelType::HashJoin(_) => "HashJoin",
+        rel::RelType::MergeJoin(_) => "MergeJoin",
+        rel::RelType::NestedLoopJoin(_) => "NestedLoopJoin",
+        rel::RelType::Window(_) => "Window",
+        rel::RelType::Exchange(_) => "Exchange",
+        rel::RelType::Expand(_) => "Expand",
+    }
+}
+
+/// Returns the single root relation of a serialized plan.
+fn plan_root_rel(plan: &Plan) -> std::result::Result<&Rel, String> {
+    if plan.relations.len() != 1 {
+        return Err(format!(
+            "a plan must have exactly one root relation, found {}",
+            plan.relations.len()
+        ));
+    }
+    match plan.relations[0].rel_type.as_ref() {
+        Some(plan_rel::RelType::Rel(root)) => Ok(root),
+        Some(plan_rel::RelType::Root(root)) => root
+            .input
+            .as_ref()
+            .ok_or_else(|| "the plan root relation is empty".to_string()),
+        None => Err("the plan has no root relation".to_string()),
+    }
+}
+
+/// Cheap pre-check of one `RegionPlan`'s raw plan, before any generic decoder sees it.
+///
+/// The production wire only carries a single-table `Read` under `Project` and `Filter` nodes.
+/// Checking the raw proto tree first bounds the work a malformed wire can make a decoder do.
+pub fn preflight_region_plan(plan_bytes: &[u8]) -> std::result::Result<(), String> {
+    let plan = Plan::decode(plan_bytes)
+        .map_err(|error| format!("cannot parse a RegionPlan plan: {error}"))?;
+    let root = plan_root_rel(&plan)?;
+    let mut nodes = 0usize;
+    check_region_rel(root, 1, &mut nodes)
+}
+
+fn check_region_rel(rel: &Rel, depth: usize, nodes: &mut usize) -> std::result::Result<(), String> {
+    if depth > MAX_REGION_PLAN_DEPTH {
+        return Err(format!(
+            "a RegionPlan plan is deeper than the {MAX_REGION_PLAN_DEPTH} node bound"
+        ));
+    }
+    *nodes += 1;
+    if *nodes > MAX_REGION_PLAN_NODES {
+        return Err(format!(
+            "a RegionPlan plan has more than the {MAX_REGION_PLAN_NODES} node bound"
+        ));
+    }
+    match rel.rel_type.as_ref() {
+        Some(rel::RelType::Read(read)) => {
+            if matches!(
+                read.read_type.as_ref(),
+                Some(read_rel::ReadType::NamedTable(_))
+            ) {
+                Ok(())
+            } else {
+                Err("a RegionPlan plan may only read one named table".to_string())
+            }
+        }
+        Some(rel::RelType::Project(project)) => {
+            let input = project
+                .input
+                .as_ref()
+                .ok_or_else(|| "a RegionPlan projection has no input".to_string())?;
+            check_region_rel(input, depth + 1, nodes)
+        }
+        Some(rel::RelType::Filter(filter)) => {
+            let input = filter
+                .input
+                .as_ref()
+                .ok_or_else(|| "a RegionPlan filter has no input".to_string())?;
+            check_region_rel(input, depth + 1, nodes)
+        }
+        Some(other) => Err(format!(
+            "a RegionPlan plan may only contain Read, Projection and Filter nodes, found {}",
+            rel_kind_name(other)
+        )),
+        None => Err("a RegionPlan plan has an empty relation".to_string()),
+    }
+}
+
 /// Resolves one `RegionPlan` leaf against its region catalog.
 #[async_trait]
 pub trait RegionPlanResolver: Send + Sync {
@@ -947,215 +1074,180 @@ pub trait RegionPlanResolver: Send + Sync {
 
 /// Decodes a serialized `GroupRead` request into an ordinary logical plan.
 ///
-/// The request-scoped consumer has the session state and the region resolver, so it can replace
-/// every wire `RegionPlan` leaf with its bound logical subtree. Plain table reads and any other
-/// extension leaf are rejected; the final region set must match the root metadata exactly.
+/// Only the narrow production wire is accepted: a `GroupRead` root around `UnionAll(RegionPlan...)`
+/// (a single member may be a bare leaf). Every leaf is checked against the root metadata, its raw
+/// plan is preflighted as a `Read`/`Project`/`Filter` chain before the resolver decodes it, and the
+/// decoded plan must be the region provider bound to that leaf. The final region set must match the
+/// root metadata exactly.
 pub async fn decode_group_read_request(
     plan_bytes: &[u8],
-    state: &SessionState,
+    _state: &SessionState,
     payload: GroupReadPayload,
     resolver: &dyn RegionPlanResolver,
 ) -> std::result::Result<LogicalPlan, String> {
-    use substrait::substrait_proto_df::proto::Plan;
-
     let plan = Plan::decode(plan_bytes)
         .map_err(|error| format!("cannot parse GroupRead request: {error}"))?;
-    let extensions = Extensions::try_from(&plan.extensions)
-        .map_err(|error| format!("cannot read GroupRead extensions: {error}"))?;
-    let consumer = GroupReadRequestConsumer {
-        resolver,
-        state,
-        payload,
-        extensions,
-        outer_schemas: Mutex::new(Vec::new()),
-        consumed: Mutex::new(BTreeSet::new()),
-        expected_schema: Mutex::new(None),
-        root_seen: AtomicBool::new(false),
-    };
-    let decoded = DFLogicalSubstraitConvertor
-        .decode_with_consumer(&plan, state, &consumer)
-        .await
-        .map_err(|error| format!("cannot decode GroupRead combine tree: {error}"))?;
-    consumer.validate_complete()?;
-    if plan_has_forbidden_nodes(&decoded) {
-        return Err("the GroupRead combine tree contains a subquery or DML node".to_string());
-    }
-    Ok(decoded)
-}
-
-struct GroupReadRequestConsumer<'a> {
-    resolver: &'a dyn RegionPlanResolver,
-    state: &'a SessionState,
-    payload: GroupReadPayload,
-    extensions: Extensions,
-    outer_schemas: Mutex<Vec<Arc<DFSchema>>>,
-    consumed: Mutex<BTreeSet<u64>>,
-    expected_schema: Mutex<Option<SchemaRef>>,
-    root_seen: AtomicBool,
-}
-
-impl GroupReadRequestConsumer<'_> {
-    fn validate_complete(&self) -> std::result::Result<(), String> {
-        let consumed = self.consumed.lock().unwrap();
-        let expected = self
-            .payload
-            .region_ids()
-            .iter()
-            .copied()
-            .collect::<BTreeSet<_>>();
-        if *consumed != expected {
+    let root = plan_root_rel(&plan)?;
+    let input = match root.rel_type.as_ref() {
+        Some(rel::RelType::ExtensionSingle(single)) => {
+            let detail = single
+                .detail
+                .as_ref()
+                .ok_or_else(|| "the GroupRead root has no detail".to_string())?;
+            if detail.type_url != GROUP_READ_NAME {
+                return Err(format!(
+                    "a GroupRead request root must be the `{GROUP_READ_NAME}` marker, found `{}`",
+                    detail.type_url
+                ));
+            }
+            let root_payload = GroupReadPayload::decode(detail.value.as_ref())
+                .map_err(|error| error.to_string())?;
+            if root_payload != payload {
+                return Err("the root marker and the intercepted metadata differ".to_string());
+            }
+            single
+                .input
+                .as_ref()
+                .ok_or_else(|| "the GroupRead root has no combine tree".to_string())?
+        }
+        Some(other) => {
             return Err(format!(
-                "the combine tree does not name the grouped regions exactly once: consumed {:?}, \
-                 expected {:?}",
-                *consumed, expected
+                "a GroupRead request root must be the `{GROUP_READ_NAME}` marker, found {}",
+                rel_kind_name(other)
             ));
         }
-        if self.expected_schema.lock().unwrap().is_none() {
-            return Err("the combine tree decoded no RegionPlan".to_string());
-        }
-        Ok(())
+        None => return Err("the request root relation is empty".to_string()),
+    };
+
+    let leaves = group_read_leaf_rels(input)?;
+    if leaves.len() > MAX_GROUP_READ_REGIONS {
+        return Err(format!(
+            "a grouped read names {} regions, above the {MAX_GROUP_READ_REGIONS} bound",
+            leaves.len()
+        ));
     }
-}
-
-fn group_read_error(reason: impl std::fmt::Display) -> DataFusionError {
-    DataFusionError::Plan(reason.to_string())
-}
-
-#[async_trait]
-impl SubstraitConsumer for GroupReadRequestConsumer<'_> {
-    async fn resolve_table_ref(
-        &self,
-        table_ref: &TableReference,
-    ) -> datafusion::common::Result<Option<Arc<dyn TableProvider>>> {
-        let table = table_ref.table().to_string();
-        let schema = self.state.schema_for_ref(table_ref.clone())?;
-        let table_provider = schema.table(&table).await?;
-        Ok(table_provider)
-    }
-
-    fn get_extensions(&self) -> &Extensions {
-        &self.extensions
-    }
-
-    fn get_function_registry(&self) -> &impl FunctionRegistry {
-        self.state
-    }
-
-    fn push_outer_schema(&self, schema: Arc<DFSchema>) {
-        self.outer_schemas.lock().unwrap().push(schema);
-    }
-
-    fn pop_outer_schema(&self) {
-        self.outer_schemas.lock().unwrap().pop();
-    }
-
-    fn get_outer_schema(&self, steps_out: usize) -> Option<Arc<DFSchema>> {
-        let schemas = self.outer_schemas.lock().unwrap();
-        schemas
-            .len()
-            .checked_sub(steps_out)
-            .and_then(|idx| schemas.get(idx).cloned())
-    }
-
-    async fn consume_rel(&self, rel: &Rel) -> datafusion::common::Result<LogicalPlan> {
-        let allowed = match rel.rel_type.as_ref() {
-            Some(rel::RelType::Set(set)) => SetOp::try_from(set.op).ok() == Some(SetOp::UnionAll),
-            Some(rel::RelType::Project(_))
-            | Some(rel::RelType::Filter(_))
-            | Some(rel::RelType::Aggregate(_))
-            | Some(rel::RelType::ExtensionLeaf(_))
-            | Some(rel::RelType::ExtensionSingle(_)) => true,
-            _ => false,
+    // First pass: check every member and bound its raw plan before any decoder runs.
+    let mut members = Vec::with_capacity(leaves.len());
+    let mut seen = BTreeSet::new();
+    for leaf in leaves {
+        let Some(rel::RelType::ExtensionLeaf(leaf_rel)) = leaf.rel_type.as_ref() else {
+            return Err(format!(
+                "a GroupRead member must be a RegionPlan leaf, found {}",
+                leaf.rel_type
+                    .as_ref()
+                    .map(rel_kind_name)
+                    .unwrap_or("an empty relation")
+            ));
         };
-        if !allowed {
-            return Err(group_read_error(
-                "only UnionAll, Projection, Filter, Aggregate and RegionPlan are allowed in a \
-                 GroupRead combine tree",
-            ));
-        }
-        from_substrait_rel(self, rel).await
-    }
-
-    async fn consume_read(&self, _rel: &ReadRel) -> datafusion::common::Result<LogicalPlan> {
-        Err(group_read_error(
-            "plain table read outside a RegionPlan is not allowed in a GroupRead combine tree",
-        ))
-    }
-
-    async fn consume_extension_leaf(
-        &self,
-        rel: &ExtensionLeafRel,
-    ) -> datafusion::common::Result<LogicalPlan> {
-        let detail = rel
+        let detail = leaf_rel
             .detail
             .as_ref()
-            .ok_or_else(|| group_read_error("a RegionPlan leaf has no detail"))?;
+            .ok_or_else(|| "a RegionPlan leaf has no detail".to_string())?;
         if detail.type_url != REGION_PLAN_NAME {
-            return Err(group_read_error(format!(
+            return Err(format!(
                 "unexpected extension leaf `{}` in a GroupRead combine tree",
                 detail.type_url
-            )));
-        }
-        let payload = RegionPlanPayload::decode(detail.value.as_ref()).map_err(group_read_error)?;
-        let region_id = payload.region_id();
-        if !self.consumed.lock().unwrap().insert(region_id.as_u64()) {
-            return Err(group_read_error(format!(
-                "region {region_id} appears more than once in the combine tree"
-            )));
-        }
-        let plan = self
-            .resolver
-            .resolve_region_plan(region_id, payload.plan())
-            .await
-            .map_err(group_read_error)?;
-        validate_region_plan(&self.payload, region_id, &plan).map_err(group_read_error)?;
-        let schema = SchemaRef::from(
-            Schema::try_from(plan.schema().clone())
-                .map_err(|error| group_read_error(format!("invalid region schema: {error}")))?,
-        );
-        {
-            let mut expected = self.expected_schema.lock().unwrap();
-            match expected.as_ref() {
-                Some(expected) if expected != &schema => {
-                    return Err(group_read_error(format!(
-                        "region {region_id} decodes to a different output schema"
-                    )));
-                }
-                Some(_) => {}
-                None => *expected = Some(schema),
-            }
-        }
-        Ok(plan)
-    }
-
-    async fn consume_extension_single(
-        &self,
-        rel: &ExtensionSingleRel,
-    ) -> datafusion::common::Result<LogicalPlan> {
-        if self.root_seen.swap(true, AtomicOrdering::SeqCst) {
-            return Err(group_read_error("nested GroupRead is not allowed"));
-        }
-        let detail = rel
-            .detail
-            .as_ref()
-            .ok_or_else(|| group_read_error("the GroupRead root has no detail"))?;
-        if detail.type_url != GROUP_READ_NAME {
-            return Err(group_read_error(format!(
-                "expected the `{GROUP_READ_NAME}` root extension, found `{}`",
-                detail.type_url
-            )));
-        }
-        let root = GroupReadPayload::decode(detail.value.as_ref()).map_err(group_read_error)?;
-        if root != self.payload {
-            return Err(group_read_error(
-                "the root marker and the intercepted metadata differ",
             ));
         }
-        let input = rel
-            .input
-            .as_ref()
-            .ok_or_else(|| group_read_error("the GroupRead root has no combine tree"))?;
-        self.consume_rel(input).await
+        let leaf_payload = RegionPlanPayload::decode(detail.value.as_ref())?;
+        let region_id = leaf_payload.region_id();
+        payload.validate_region_member(region_id)?;
+        if !seen.insert(region_id.as_u64()) {
+            return Err(format!(
+                "region {region_id} appears more than once in the combine tree"
+            ));
+        }
+        preflight_region_plan(leaf_payload.plan())?;
+        members.push((region_id, leaf_payload));
+    }
+    let expected = payload
+        .region_ids()
+        .iter()
+        .copied()
+        .collect::<BTreeSet<_>>();
+    if seen != expected {
+        return Err(format!(
+            "the combine tree does not name the grouped regions exactly once: consumed {seen:?}, \
+             expected {expected:?}"
+        ));
+    }
+    // Second pass: decode each preflighted member and accept only its bound region provider.
+    let mut plans = Vec::with_capacity(members.len());
+    let mut expected_schema: Option<DFSchemaRef> = None;
+    for (region_id, leaf_payload) in members {
+        let plan = resolver
+            .resolve_region_plan(region_id, leaf_payload.plan())
+            .await?;
+        validate_region_plan(&payload, region_id, &plan)?;
+        let schema = plan.schema().clone();
+        match expected_schema.as_ref() {
+            Some(expected) if expected != &schema => {
+                return Err(format!(
+                    "region {region_id} decodes to a different output schema"
+                ));
+            }
+            Some(_) => {}
+            None => expected_schema = Some(schema),
+        }
+        plans.push(plan);
+    }
+    union_balanced(plans, payload.table_name())
+        .map_err(|error| format!("cannot combine region plans: {error}"))
+}
+
+/// Returns the `RegionPlan` leaves directly below the `GroupRead` marker.
+///
+/// The builder balances a large union into a tree, so the combine tree is a `UnionAll` tree whose
+/// leaves are exactly the region plans; nothing else may appear in it.
+fn group_read_leaf_rels<'a>(input: &'a Rel) -> std::result::Result<Vec<&'a Rel>, String> {
+    let mut leaves = Vec::new();
+    collect_group_read_leaves(input, 1, &mut leaves)?;
+    Ok(leaves)
+}
+
+fn collect_group_read_leaves<'a>(
+    rel: &'a Rel,
+    depth: usize,
+    leaves: &mut Vec<&'a Rel>,
+) -> std::result::Result<(), String> {
+    if depth > MAX_GROUP_READ_UNION_DEPTH {
+        return Err(format!(
+            "a GroupRead combine tree is deeper than the {MAX_GROUP_READ_UNION_DEPTH} UnionAll \
+             bound"
+        ));
+    }
+    match rel.rel_type.as_ref() {
+        Some(rel::RelType::Set(set)) => {
+            let op = SetOp::try_from(set.op)
+                .map_err(|_| format!("unknown set operator {} in a GroupRead", set.op))?;
+            if op != SetOp::UnionAll {
+                return Err(format!(
+                    "a GroupRead combine tree must be UnionAll, found {op:?}"
+                ));
+            }
+            if set.inputs.is_empty() {
+                return Err("a GroupRead combine tree names no RegionPlan".to_string());
+            }
+            for input in &set.inputs {
+                collect_group_read_leaves(input, depth + 1, leaves)?;
+            }
+            Ok(())
+        }
+        // A single-region grouped read degrades to one bare `RegionPlan` leaf.
+        Some(rel::RelType::ExtensionLeaf(_)) => {
+            if leaves.len() >= MAX_GROUP_READ_REGIONS {
+                return Err(format!(
+                    "a grouped read names more than the {MAX_GROUP_READ_REGIONS} region bound"
+                ));
+            }
+            leaves.push(rel);
+            Ok(())
+        }
+        Some(other) => Err(format!(
+            "a GroupRead combine tree must be UnionAll(RegionPlan...), found {}",
+            rel_kind_name(other)
+        )),
+        None => Err("the GroupRead root input is empty".to_string()),
     }
 }
 
@@ -1203,12 +1295,17 @@ impl DatanodeReadGroup {
 mod tests {
     use async_trait::async_trait;
     use datafusion::arrow::datatypes::{DataType, Field, Schema as ArrowSchema};
+    use datafusion::catalog::MemTable;
     use datafusion::datasource::DefaultTableSource;
     use datafusion::datasource::empty::EmptyTable;
+    use datafusion::execution::SessionStateBuilder;
+    use datafusion::functions_aggregate::sum::sum;
     use datafusion::logical_expr::{LogicalPlanBuilder, col, lit};
     use datafusion_common::TableReference;
+    use prost::Message;
 
     use super::*;
+    use crate::dist_plan::MergeScanLogicalPlan;
 
     fn metrics_source() -> Arc<dyn datafusion::logical_expr::TableSource> {
         let schema = Arc::new(ArrowSchema::new(vec![
@@ -1232,19 +1329,209 @@ mod tests {
             .unwrap()
     }
 
+    fn filtered_scan(filters: usize) -> LogicalPlan {
+        let mut builder = metrics_scan();
+        for _ in 0..filters {
+            builder = builder.filter(col("v").gt(lit(1.0))).unwrap();
+        }
+        builder.build().unwrap()
+    }
+
     fn regions(count: u32) -> Vec<RegionId> {
         (1..=count).map(|n| RegionId::new(1024, n)).collect()
     }
 
+    fn encode_plan(plan: &LogicalPlan) -> Vec<u8> {
+        DFLogicalSubstraitConvertor
+            .encode(plan, DefaultSerializer)
+            .unwrap()
+            .to_vec()
+    }
+
+    fn encoded_template() -> Vec<u8> {
+        encode_nested_plan(&project_scan()).unwrap()
+    }
+
+    fn region_leaf(region: RegionId) -> LogicalPlan {
+        RegionPlan::try_new(region, encoded_template(), project_scan().schema().clone())
+            .unwrap()
+            .into_logical_plan()
+    }
+
+    fn region_union(regions: &[RegionId]) -> LogicalPlan {
+        union_balanced(
+            regions.iter().map(|region| region_leaf(*region)).collect(),
+            "metrics",
+        )
+        .unwrap()
+    }
+
+    /// A decoded regional plan whose scan is bound to the real region provider of `region_id`.
+    fn region_scan(region_id: RegionId) -> LogicalPlan {
+        let provider = crate::optimizer::test_util::mock_table_provider(region_id);
+        LogicalPlanBuilder::scan(
+            TableReference::bare("metrics"),
+            Arc::new(DefaultTableSource::new(Arc::new(provider))),
+            None,
+        )
+        .unwrap()
+        .project(vec![col("k0"), col("v0")])
+        .unwrap()
+        .build()
+        .unwrap()
+    }
+
+    /// A scan over an in-memory provider, mimicking a reserved inspection provider.
+    fn inspect_scan() -> LogicalPlan {
+        let schema = Arc::new(ArrowSchema::new(vec![Field::new(
+            "ts",
+            DataType::Int64,
+            false,
+        )]));
+        let table = MemTable::try_new(schema, vec![]).unwrap();
+        LogicalPlanBuilder::scan(
+            TableReference::bare("metrics"),
+            Arc::new(DefaultTableSource::new(Arc::new(table))),
+            None,
+        )
+        .unwrap()
+        .build()
+        .unwrap()
+    }
+
+    /// Builds a `GroupRead` request around an arbitrary combine tree.
+    fn group_read_request(
+        regions: &[RegionId],
+        table_id: u32,
+        input: LogicalPlan,
+    ) -> (Vec<u8>, GroupReadPayload) {
+        let payload = GroupReadPayload::try_new(
+            regions.iter().map(RegionId::as_u64).collect(),
+            table_id,
+            "metrics".to_string(),
+        )
+        .unwrap();
+        let node = GroupReadPlan::try_new(payload.clone(), input).unwrap();
+        (encode_plan(&node.into_logical_plan()), payload)
+    }
+
+    fn rewrite_root_payload(plan_bytes: Vec<u8>, payload: &GroupReadPayload) -> Vec<u8> {
+        let mut plan = Plan::decode(plan_bytes.as_slice()).unwrap();
+        let relation = plan.relations.first_mut().unwrap();
+        let root = match relation.rel_type.as_mut().unwrap() {
+            plan_rel::RelType::Rel(root) => root,
+            plan_rel::RelType::Root(root) => root.input.as_mut().unwrap(),
+        };
+        let rel::RelType::ExtensionSingle(single) = root.rel_type.as_mut().unwrap() else {
+            panic!("the fixture must have a GroupRead root");
+        };
+        single.detail.as_mut().unwrap().value = payload.encode().unwrap().into();
+        plan.encode_to_vec()
+    }
+
+    fn count_table_scans(plan: &LogicalPlan) -> usize {
+        let mut count = usize::from(matches!(plan, LogicalPlan::TableScan(_)));
+        for input in plan.inputs() {
+            count += count_table_scans(input);
+        }
+        count
+    }
+
+    struct BoundRegionResolver;
+
+    #[async_trait]
+    impl RegionPlanResolver for BoundRegionResolver {
+        async fn resolve_region_plan(
+            &self,
+            region_id: RegionId,
+            _plan: &[u8],
+        ) -> std::result::Result<LogicalPlan, String> {
+            Ok(region_scan(region_id))
+        }
+    }
+
+    struct ForeignRegionResolver;
+
+    #[async_trait]
+    impl RegionPlanResolver for ForeignRegionResolver {
+        async fn resolve_region_plan(
+            &self,
+            _region_id: RegionId,
+            _plan: &[u8],
+        ) -> std::result::Result<LogicalPlan, String> {
+            Ok(region_scan(RegionId::new(1024, 77)))
+        }
+    }
+
+    struct InspectProviderResolver;
+
+    #[async_trait]
+    impl RegionPlanResolver for InspectProviderResolver {
+        async fn resolve_region_plan(
+            &self,
+            _region_id: RegionId,
+            _plan: &[u8],
+        ) -> std::result::Result<LogicalPlan, String> {
+            Ok(inspect_scan())
+        }
+    }
+
+    struct MultiInputResolver;
+
+    #[async_trait]
+    impl RegionPlanResolver for MultiInputResolver {
+        async fn resolve_region_plan(
+            &self,
+            region_id: RegionId,
+            _plan: &[u8],
+        ) -> std::result::Result<LogicalPlan, String> {
+            Ok(LogicalPlanBuilder::from(region_scan(region_id))
+                .union(region_scan(region_id))
+                .unwrap()
+                .build()
+                .unwrap())
+        }
+    }
+
+    struct PanicResolver;
+
+    #[async_trait]
+    impl RegionPlanResolver for PanicResolver {
+        async fn resolve_region_plan(
+            &self,
+            _region_id: RegionId,
+            _plan: &[u8],
+        ) -> std::result::Result<LogicalPlan, String> {
+            panic!("the resolver must not see an invalid RegionPlan member")
+        }
+    }
+
+    fn session_state() -> SessionState {
+        SessionStateBuilder::new().build()
+    }
+
+    #[test]
+    fn group_read_version_is_one() {
+        assert_eq!(1, GROUP_READ_VERSION);
+        let payload = GroupReadPayload::try_new(
+            vec![RegionId::new(1024, 1).as_u64()],
+            1024,
+            "metrics".to_string(),
+        )
+        .unwrap();
+        assert_eq!(1, payload.version());
+
+        let mut value: serde_json::Value =
+            serde_json::from_slice(&payload.encode().unwrap()).unwrap();
+        value["version"] = serde_json::json!(2);
+        let error = GroupReadPayload::decode(&serde_json::to_vec(&value).unwrap()).unwrap_err();
+        assert_eq!(GroupReadEnvelopeError::UnsupportedVersion(2), error);
+    }
+
     #[test]
     fn group_read_round_trips_as_single_root_with_region_plan_leaves() {
-        use substrait::substrait_proto_df::proto::{Plan, plan_rel, rel};
-
         let envelope = build_group_read_plan(&regions(3), 1024, &project_scan()).unwrap();
-        let encoded = DFLogicalSubstraitConvertor
-            .encode(&envelope, DefaultSerializer)
-            .unwrap()
-            .to_vec();
+        let encoded = encode_plan(&envelope);
         let payload = peek_group_read_envelope(&encoded).unwrap().unwrap();
         assert_eq!(GROUP_READ_VERSION, payload.version());
         assert_eq!(
@@ -1268,190 +1555,310 @@ mod tests {
             panic!("GroupRead must be an ExtensionSingleRel");
         };
         assert_eq!(GROUP_READ_NAME, single.detail.as_ref().unwrap().type_url);
+        // The builder balances a three-region union into nested UnionAll nodes.
+        let rel::RelType::Set(set) = single.input.as_ref().unwrap().rel_type.as_ref().unwrap()
+        else {
+            panic!("three regions must be a UnionAll tree");
+        };
+        assert_eq!(SetOp::UnionAll, SetOp::try_from(set.op).unwrap());
     }
 
-    struct TestRegionPlanResolver;
+    #[tokio::test]
+    async fn balanced_union_of_three_regions_decodes_every_leaf() {
+        let listed = regions(3);
+        let (bytes, payload) = group_read_request(&listed, 1024, region_union(&listed));
+        let decoded =
+            decode_group_read_request(&bytes, &session_state(), payload, &BoundRegionResolver)
+                .await
+                .unwrap();
+        assert_eq!(3, count_table_scans(&decoded));
 
-    #[async_trait]
-    impl RegionPlanResolver for TestRegionPlanResolver {
-        async fn resolve_region_plan(
-            &self,
-            _region_id: RegionId,
-            _plan: &[u8],
-        ) -> std::result::Result<LogicalPlan, String> {
-            Ok(project_scan())
+        let listed = regions(9);
+        let (bytes, payload) = group_read_request(&listed, 1024, region_union(&listed));
+        let decoded =
+            decode_group_read_request(&bytes, &session_state(), payload, &BoundRegionResolver)
+                .await
+                .unwrap();
+        assert_eq!(9, count_table_scans(&decoded));
+    }
+
+    #[tokio::test]
+    async fn single_region_group_read_is_a_bare_leaf() {
+        let only = regions(1);
+        let envelope = build_group_read_plan(&only, 1024, &project_scan()).unwrap();
+        let bytes = encode_plan(&envelope);
+        let payload = peek_group_read_envelope(&bytes).unwrap().unwrap();
+
+        let plan = Plan::decode(bytes.as_slice()).unwrap();
+        let root = plan_root_rel(&plan).unwrap();
+        let rel::RelType::ExtensionSingle(single) = root.rel_type.as_ref().unwrap() else {
+            panic!("GroupRead must be an ExtensionSingleRel");
+        };
+        let input = single.input.as_ref().unwrap();
+        assert!(
+            matches!(
+                input.rel_type.as_ref(),
+                Some(rel::RelType::ExtensionLeaf(_))
+            ),
+            "a single-region grouped read must be a bare RegionPlan leaf"
+        );
+        assert_eq!(
+            REGION_PLAN_NAME,
+            match input.rel_type.as_ref().unwrap() {
+                rel::RelType::ExtensionLeaf(leaf) =>
+                    leaf.detail.as_ref().unwrap().type_url.as_str(),
+                _ => unreachable!(),
+            }
+        );
+
+        let decoded =
+            decode_group_read_request(&bytes, &session_state(), payload, &BoundRegionResolver)
+                .await
+                .unwrap();
+        assert_eq!(1, count_table_scans(&decoded));
+    }
+
+    #[tokio::test]
+    async fn outer_projection_filter_aggregate_and_sort_are_rejected() {
+        let state = session_state();
+        let envelope = build_group_read_plan(&regions(2), 1024, &project_scan()).unwrap();
+        let payload = peek_group_read_envelope(&encode_plan(&envelope))
+            .unwrap()
+            .unwrap();
+        let wrapped = vec![
+            (
+                "Projection",
+                LogicalPlanBuilder::from(envelope.clone())
+                    .project(vec![col("ts")])
+                    .unwrap()
+                    .build()
+                    .unwrap(),
+            ),
+            (
+                "Filter",
+                LogicalPlanBuilder::from(envelope.clone())
+                    .filter(col("v").gt(lit(1.0)))
+                    .unwrap()
+                    .build()
+                    .unwrap(),
+            ),
+            (
+                "Aggregate",
+                LogicalPlanBuilder::from(envelope.clone())
+                    .aggregate(Vec::<Expr>::new(), vec![sum(col("v"))])
+                    .unwrap()
+                    .build()
+                    .unwrap(),
+            ),
+            (
+                "Sort",
+                LogicalPlanBuilder::from(envelope)
+                    .sort(vec![col("ts").sort(true, false)])
+                    .unwrap()
+                    .build()
+                    .unwrap(),
+            ),
+        ];
+        for (kind, plan) in wrapped {
+            let bytes = encode_plan(&plan);
+            let error =
+                decode_group_read_request(&bytes, &state, payload.clone(), &BoundRegionResolver)
+                    .await
+                    .unwrap_err();
+            assert!(
+                error.contains(&format!("found {kind}")),
+                "{kind} must be rejected: {error}"
+            );
         }
     }
 
     #[tokio::test]
-    async fn group_read_consumer_replaces_every_region_plan_and_checks_completeness() {
-        use datafusion::execution::SessionStateBuilder;
-
-        let plan = project_scan();
-        let envelope = build_group_read_plan(&regions(2), 1024, &plan).unwrap();
-        let encoded = DFLogicalSubstraitConvertor
-            .encode(&envelope, DefaultSerializer)
-            .unwrap()
-            .to_vec();
-        let payload = peek_group_read_envelope(&encoded).unwrap().unwrap();
-        let state = SessionStateBuilder::new().build();
-        let decoded = decode_group_read_request(&encoded, &state, payload, &TestRegionPlanResolver)
-            .await
-            .unwrap();
-        assert_eq!(plan.schema().as_arrow(), decoded.schema().as_arrow());
-
-        let mut payload = peek_group_read_envelope(&encoded).unwrap().unwrap();
-        payload.region_ids.push(RegionId::new(1024, 9).as_u64());
-        let payload_bytes = payload.encode().unwrap();
-        let mut raw =
-            substrait::substrait_proto_df::proto::Plan::decode(encoded.as_slice()).unwrap();
-        let relation = raw.relations.first_mut().unwrap();
-        let root = match relation.rel_type.as_mut().unwrap() {
-            substrait::substrait_proto_df::proto::plan_rel::RelType::Rel(root) => root,
-            substrait::substrait_proto_df::proto::plan_rel::RelType::Root(root) => {
-                root.input.as_mut().unwrap()
-            }
-        };
-        let substrait::substrait_proto_df::proto::rel::RelType::ExtensionSingle(single) =
-            root.rel_type.as_mut().unwrap()
-        else {
-            panic!("the fixture must have a GroupRead root");
-        };
-        single.detail.as_mut().unwrap().value = payload_bytes.into();
-        let encoded = raw.encode_to_vec();
-        let error = decode_group_read_request(&encoded, &state, payload, &TestRegionPlanResolver)
-            .await
-            .unwrap_err();
-        assert!(error.contains("does not name the grouped regions exactly once"));
-    }
-
-    #[tokio::test]
-    async fn group_read_consumer_rejects_join_sort_and_nested_group_read() {
-        use datafusion::execution::SessionStateBuilder;
-
-        let plan = project_scan();
-        let state = SessionStateBuilder::new().build();
-
-        let join = build_group_read_plan_with_combine(&regions(2), 1024, &plan, |_union| {
-            let right = LogicalPlanBuilder::from(project_scan())
-                .alias("right")?
-                .build()?;
-            LogicalPlanBuilder::from(project_scan())
-                .cross_join(right)?
-                .build()
-        })
-        .unwrap();
-        let error = decode_group_read_request(
-            &DFLogicalSubstraitConvertor
-                .encode(&join, DefaultSerializer)
-                .unwrap(),
-            &state,
-            peek_group_read_envelope(
-                &DFLogicalSubstraitConvertor
-                    .encode(&join, DefaultSerializer)
+    async fn combine_tree_must_be_union_all_of_region_plans() {
+        let state = session_state();
+        let union = region_union(&regions(2));
+        let join = LogicalPlanBuilder::from(region_union(&regions(2)))
+            .cross_join(
+                LogicalPlanBuilder::from(project_scan())
+                    .alias("right")
+                    .unwrap()
+                    .build()
                     .unwrap(),
             )
             .unwrap()
-            .unwrap(),
-            &TestRegionPlanResolver,
-        )
-        .await
-        .unwrap_err();
-        assert!(error.contains("GroupRead combine tree"), "{error}");
-
-        let sorted = build_group_read_plan_with_combine(&regions(2), 1024, &plan, |union| {
-            LogicalPlanBuilder::from(union)
-                .sort(vec![col("ts").sort(true, false)])?
-                .build()
-        })
-        .unwrap();
-        let sorted_bytes = DFLogicalSubstraitConvertor
-            .encode(&sorted, DefaultSerializer)
+            .build()
             .unwrap();
-        let error = decode_group_read_request(
-            &sorted_bytes,
-            &state,
-            peek_group_read_envelope(&sorted_bytes).unwrap().unwrap(),
-            &TestRegionPlanResolver,
-        )
-        .await
-        .unwrap_err();
-        assert!(error.contains("GroupRead combine tree"), "{error}");
-
-        let inner = build_group_read_plan(&regions(1), 1024, &plan).unwrap();
-        let nested =
-            build_group_read_plan_with_combine(&regions(1), 1024, &plan, |_| Ok(inner)).unwrap();
-        let nested_bytes = DFLogicalSubstraitConvertor
-            .encode(&nested, DefaultSerializer)
-            .unwrap();
-        let error = decode_group_read_request(
-            &nested_bytes,
-            &state,
-            peek_group_read_envelope(&nested_bytes).unwrap().unwrap(),
-            &TestRegionPlanResolver,
-        )
-        .await
-        .unwrap_err();
-        assert!(error.contains("GroupRead combine tree"), "{error}");
+        let nested_group_read = build_group_read_plan(&regions(1), 1024, &project_scan()).unwrap();
+        let other_extension =
+            MergeScanLogicalPlan::new(region_union(&regions(2)), true).into_logical_plan();
+        let cases = vec![
+            (
+                "Projection",
+                LogicalPlanBuilder::from(union.clone())
+                    .project(vec![col("ts")])
+                    .unwrap()
+                    .build()
+                    .unwrap(),
+            ),
+            (
+                "Filter",
+                LogicalPlanBuilder::from(union.clone())
+                    .filter(col("v").gt(lit(1.0)))
+                    .unwrap()
+                    .build()
+                    .unwrap(),
+            ),
+            (
+                "Aggregate",
+                LogicalPlanBuilder::from(union.clone())
+                    .aggregate(Vec::<Expr>::new(), vec![sum(col("v"))])
+                    .unwrap()
+                    .build()
+                    .unwrap(),
+            ),
+            (
+                "Sort",
+                LogicalPlanBuilder::from(union)
+                    .sort(vec![col("ts").sort(true, false)])
+                    .unwrap()
+                    .build()
+                    .unwrap(),
+            ),
+            ("Join", join),
+            ("a plain read", project_scan()),
+            ("an extension", nested_group_read),
+            ("an extension", other_extension),
+        ];
+        for (kind, input) in cases {
+            let (bytes, payload) = group_read_request(&regions(2), 1024, input);
+            let error = decode_group_read_request(&bytes, &state, payload, &BoundRegionResolver)
+                .await
+                .unwrap_err();
+            assert!(
+                error.contains(&format!("found {kind}")),
+                "a {kind} combine tree must be rejected: {error}"
+            );
+        }
     }
 
-    #[test]
-    fn custom_combine_rejects_invalid_membership_before_materializing_leaves() {
-        use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
+    #[tokio::test]
+    async fn duplicate_missing_and_foreign_regions_are_rejected() {
+        let state = session_state();
 
-        let called = AtomicBool::new(false);
-        // More than the hard 1024-region cap is rejected before leaves/combine.
-        let error =
-            build_group_read_plan_with_combine(&regions(1025), 1024, &project_scan(), |_| {
-                called.store(true, AtomicOrdering::SeqCst);
-                Ok(project_scan())
-            })
-            .unwrap_err();
-        assert!(error.to_string().contains("above the 1024 bound"));
-        assert!(!called.load(AtomicOrdering::SeqCst));
-
-        // Duplicate members are rejected before leaves/combine.
-        let duplicate = vec![RegionId::new(1024, 1), RegionId::new(1024, 1)];
-        let error = build_group_read_plan_with_combine(&duplicate, 1024, &project_scan(), |_| {
-            called.store(true, AtomicOrdering::SeqCst);
-            Ok(project_scan())
-        })
-        .unwrap_err();
-        assert!(error.to_string().contains("named more than once"));
-        assert!(!called.load(AtomicOrdering::SeqCst));
-    }
-
-    #[test]
-    fn custom_combine_rejects_cumulative_budget_before_materializing_leaves() {
-        use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
-
-        let bulky = LogicalPlanBuilder::from(project_scan())
-            .project(vec![
-                col("ts"),
-                col("v"),
-                lit("x".repeat(30 * 1024)).alias("padding"),
-            ])
+        // The same region twice is rejected before any decoder runs.
+        let duplicate = regions(1)[0];
+        let input = LogicalPlanBuilder::from(region_leaf(duplicate))
+            .union(region_leaf(duplicate))
             .unwrap()
             .build()
             .unwrap();
-        let called = AtomicBool::new(false);
-        let error = build_group_read_plan_with_combine(&regions(100), 1024, &bulky, |_| {
-            called.store(true, AtomicOrdering::SeqCst);
-            Ok(project_scan())
-        })
-        .unwrap_err();
+        let (bytes, payload) = group_read_request(&[duplicate], 1024, input);
+        let error = decode_group_read_request(&bytes, &state, payload, &PanicResolver)
+            .await
+            .unwrap_err();
+        assert!(error.contains("appears more than once"), "{error}");
+
+        // A payload member without a leaf is rejected after all leaves are consumed.
+        let listed = regions(2);
+        let (bytes, mut payload) = group_read_request(&listed, 1024, region_union(&listed));
+        payload.region_ids.push(RegionId::new(1024, 9).as_u64());
+        let bytes = rewrite_root_payload(bytes, &payload);
+        let error = decode_group_read_request(&bytes, &state, payload, &PanicResolver)
+            .await
+            .unwrap_err();
         assert!(
-            error
-                .to_string()
-                .contains("estimated grouped read envelope")
-        );
-        assert!(
-            !called.load(AtomicOrdering::SeqCst),
-            "custom combine must not run after the pre-materialization budget check"
+            error.contains("does not name the grouped regions exactly once"),
+            "{error}"
         );
 
-        // One such leaf is still valid; the rejection is cumulative.
-        build_group_read_plan(&regions(1), 1024, &bulky).unwrap();
+        // A leaf the payload does not name is rejected before any decoder runs.
+        let own = RegionId::new(1024, 1);
+        let (bytes, payload) =
+            group_read_request(&[own], 1024, region_leaf(RegionId::new(1024, 2)));
+        let error = decode_group_read_request(&bytes, &state, payload, &PanicResolver)
+            .await
+            .unwrap_err();
+        assert!(
+            error.contains("is not one of the grouped regions"),
+            "{error}"
+        );
+
+        // A region of another table is rejected before any decoder runs.
+        let foreign = RegionId::new(2048, 1);
+        let (bytes, payload) = group_read_request(&[foreign], 1024, region_leaf(foreign));
+        let error = decode_group_read_request(&bytes, &state, payload, &PanicResolver)
+            .await
+            .unwrap_err();
+        assert!(error.contains("belongs to table 2048"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn decoded_region_must_be_the_bound_region_provider() {
+        let state = session_state();
+        let listed = regions(2);
+        let (bytes, payload) = group_read_request(&listed, 1024, region_union(&listed));
+
+        let error =
+            decode_group_read_request(&bytes, &state, payload.clone(), &ForeignRegionResolver)
+                .await
+                .unwrap_err();
+        assert!(
+            error.contains("decoded the provider of region 1024_77"),
+            "{error}"
+        );
+
+        let error =
+            decode_group_read_request(&bytes, &state, payload.clone(), &InspectProviderResolver)
+                .await
+                .unwrap_err();
+        assert!(error.contains("not the bound region provider"), "{error}");
+
+        let error = decode_group_read_request(&bytes, &state, payload, &MultiInputResolver)
+            .await
+            .unwrap_err();
+        assert!(
+            error.contains("not a single ordinary table read"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn region_plan_raw_tree_is_bounded_before_decode() {
+        let ok = encode_nested_plan(&project_scan()).unwrap();
+        preflight_region_plan(&ok).unwrap();
+
+        let too_many = encode_nested_plan(&filtered_scan(MAX_REGION_PLAN_NODES)).unwrap();
+        let error = preflight_region_plan(&too_many).unwrap_err();
+        assert!(error.contains("node bound"), "{error}");
+
+        let too_deep = encode_nested_plan(&filtered_scan(MAX_REGION_PLAN_DEPTH + 1)).unwrap();
+        let error = preflight_region_plan(&too_deep).unwrap_err();
+        assert!(error.contains("node bound"), "{error}");
+    }
+
+    #[test]
+    fn region_plan_raw_tree_allows_only_read_project_filter() {
+        // An aggregate nested plan is rejected by the preflight without decoding it.
+        let aggregate = LogicalPlanBuilder::from(project_scan())
+            .aggregate(Vec::<Expr>::new(), vec![sum(col("v"))])
+            .unwrap()
+            .build()
+            .unwrap();
+        let error = preflight_region_plan(&encode_nested_plan(&aggregate).unwrap()).unwrap_err();
+        assert!(error.contains("may only contain"), "{error}");
+
+        let join = LogicalPlanBuilder::from(project_scan())
+            .cross_join(
+                LogicalPlanBuilder::from(project_scan())
+                    .alias("right")
+                    .unwrap()
+                    .build()
+                    .unwrap(),
+            )
+            .unwrap()
+            .build()
+            .unwrap();
+        let error = preflight_region_plan(&encode_nested_plan(&join).unwrap()).unwrap_err();
+        assert!(error.contains("may only contain"), "{error}");
     }
 
     #[test]
@@ -1487,17 +1894,35 @@ mod tests {
     }
 
     #[test]
-    fn ordinary_plan_and_old_root_leaf_are_not_the_new_envelope() {
-        let encoded = DFLogicalSubstraitConvertor
-            .encode(&project_scan(), DefaultSerializer)
-            .unwrap()
-            .to_vec();
+    fn ordinary_plan_peek_does_not_decode() {
+        let encoded = encode_plan(&project_scan());
+        assert!(!contains_marker(&encoded, GROUP_READ_NAME.as_bytes()));
         assert!(peek_group_read_envelope(&encoded).unwrap().is_none());
         assert!(
             peek_group_read_envelope(b"not a substrait plan")
                 .unwrap()
                 .is_none()
         );
+
+        // A GroupRead marker used as a root leaf is ours but malformed.
+        let envelope = build_group_read_plan(&regions(1), 1024, &project_scan()).unwrap();
+        let mut leaf_root = Plan::decode(encode_plan(&envelope).as_slice()).unwrap();
+        let relation = leaf_root.relations.first_mut().unwrap();
+        let root = match relation.rel_type.as_mut().unwrap() {
+            plan_rel::RelType::Rel(root) => root,
+            plan_rel::RelType::Root(root) => root.input.as_mut().unwrap(),
+        };
+        let Some(rel::RelType::ExtensionSingle(single)) = root.rel_type.take() else {
+            panic!("the fixture must have a GroupRead root");
+        };
+        root.rel_type = Some(rel::RelType::ExtensionLeaf(
+            substrait::substrait_proto_df::proto::ExtensionLeafRel {
+                common: None,
+                detail: single.detail,
+            },
+        ));
+        let error = peek_group_read_envelope(&leaf_root.encode_to_vec()).unwrap_err();
+        assert!(matches!(error, GroupReadEnvelopeError::Malformed(_)));
     }
 
     #[test]
@@ -1520,8 +1945,92 @@ mod tests {
             "metrics".to_string(),
         )
         .unwrap();
-        assert!(validate_region_plan(&payload, RegionId::new(2048, 1), &project_scan()).is_err());
-        assert!(validate_region_plan(&payload, RegionId::new(1024, 1), &project_scan()).is_ok());
+        let region = RegionId::new(1024, 1);
+        assert!(
+            validate_region_plan(
+                &payload,
+                RegionId::new(2048, 1),
+                &region_scan(RegionId::new(1024, 1))
+            )
+            .is_err()
+        );
+        assert!(validate_region_plan(&payload, region, &region_scan(region)).is_ok());
+        assert!(validate_region_plan(&payload, region, &project_scan()).is_err());
+    }
+
+    #[test]
+    fn builder_rejects_invalid_membership_before_materializing_leaves() {
+        // More than the hard 1024-region cap is rejected before leaves are built.
+        let error = build_group_read_plan(&regions(1025), 1024, &project_scan()).unwrap_err();
+        assert!(error.to_string().contains("above the 1024 bound"));
+
+        // Duplicate members are rejected.
+        let duplicate = vec![RegionId::new(1024, 1), RegionId::new(1024, 1)];
+        let error = build_group_read_plan(&duplicate, 1024, &project_scan()).unwrap_err();
+        assert!(error.to_string().contains("named more than once"));
+
+        // A region of another table is rejected.
+        let foreign = vec![RegionId::new(2048, 1)];
+        let error = build_group_read_plan(&foreign, 1024, &project_scan()).unwrap_err();
+        assert!(error.to_string().contains("outside table 1024"));
+
+        // A multi-input template is not a grouped-read member.
+        let join = LogicalPlanBuilder::from(project_scan())
+            .cross_join(
+                LogicalPlanBuilder::from(project_scan())
+                    .alias("right")
+                    .unwrap()
+                    .build()
+                    .unwrap(),
+            )
+            .unwrap()
+            .build()
+            .unwrap();
+        let error = build_group_read_plan(&regions(2), 1024, &join).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("not a single ordinary table scan")
+        );
+    }
+
+    #[test]
+    fn builder_rejects_cumulative_budget() {
+        let bulky = LogicalPlanBuilder::from(project_scan())
+            .project(vec![
+                col("ts"),
+                col("v"),
+                lit("x".repeat(30 * 1024)).alias("padding"),
+            ])
+            .unwrap()
+            .build()
+            .unwrap();
+        let error = build_group_read_plan(&regions(100), 1024, &bulky).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("estimated grouped read envelope")
+        );
+
+        // One such leaf is still valid; the rejection is cumulative.
+        build_group_read_plan(&regions(1), 1024, &bulky).unwrap();
+    }
+
+    #[test]
+    fn subquery_scans_are_not_eligible() {
+        use datafusion_expr::Subquery;
+
+        let plan = LogicalPlanBuilder::from(project_scan())
+            .filter(Expr::ScalarSubquery(Subquery {
+                subquery: Arc::new(project_scan()),
+                outer_ref_columns: vec![],
+                spans: Default::default(),
+            }))
+            .unwrap()
+            .build()
+            .unwrap();
+        assert!(plan_has_forbidden_nodes(&plan));
+        assert!(!eligible_remote_plan(&plan));
     }
 
     #[test]

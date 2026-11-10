@@ -82,6 +82,16 @@ lazy_static! {
         "query merge scan errors total"
     )
     .unwrap();
+    /// Datanode groups whose grouped read was discarded in favor of one ordinary
+    /// request per region, labeled with the stable discard reason:
+    /// `do_get` (the grouped request failed) or `first_poll` (the grouped stream
+    /// failed before producing any batch).
+    pub static ref MERGE_SCAN_GROUPED_FALLBACKS_TOTAL: IntCounterVec = register_int_counter_vec!(
+        "greptime_query_merge_scan_grouped_fallbacks_total",
+        "query merge scan grouped read fallbacks to per-region requests",
+        &["reason"]
+    )
+    .unwrap();
     pub static ref PUSH_DOWN_FALLBACK_ERRORS_TOTAL: IntCounter = register_int_counter!(
         "greptime_push_down_fallback_errors_total",
         "query push down fallback errors total"

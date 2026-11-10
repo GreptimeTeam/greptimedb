@@ -327,13 +327,13 @@ impl Stream for RemoteDynFilterGuardedStream {
     }
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        match Pin::new(&mut self.stream).poll_next(cx) {
-            Poll::Ready(None) => {
-                self.cleanup.cleanup_once();
-                Poll::Ready(None)
-            }
-            other => other,
+        let ready = Pin::new(&mut self.stream).poll_next(cx);
+        // A stream that ends or fails never polls again, so release the subscriptions here for the
+        // same reason EOF does; drop still covers a stream that is abandoned early.
+        if matches!(ready, Poll::Ready(None) | Poll::Ready(Some(Err(_)))) {
+            self.cleanup.cleanup_once();
         }
+        ready
     }
 }
 
@@ -348,6 +348,8 @@ mod tests {
         RemoteDynFilterRequest, RemoteDynFilterUnregister, RemoteDynFilterUpdate,
         remote_dyn_filter_request,
     };
+    use common_error::ext::PlainError;
+    use common_error::status_code::StatusCode;
     use common_query::request::{
         DynFilterPayload, INITIAL_REMOTE_DYN_FILTER_REGISTRATIONS_EXTENSION_KEY,
         InitialDynFilterReg, InitialDynFilterRegs, InitialDynFilterSnapshot,
@@ -360,6 +362,7 @@ mod tests {
     use datafusion_common::DFSchema;
     use datafusion_expr::EmptyRelation;
     use datatypes::prelude::{ConcreteDataType, VectorRef};
+    use datatypes::schema::SchemaRef;
     use datatypes::schema::{ColumnSchema, Schema};
     use datatypes::vectors::Int32Vector;
     use futures_util::StreamExt;
@@ -367,6 +370,7 @@ mod tests {
     use session::context::QueryContext;
     use session::hints::REMOTE_QUERY_ID_EXTENSION_KEY;
     use session::query_id::QueryId;
+    use snafu::IntoError;
     use store_api::storage::RegionId;
 
     use super::*;
@@ -411,17 +415,56 @@ mod tests {
         RegionId::new(1024, 7)
     }
 
-    fn single_value_stream() -> common_recordbatch::SendableRecordBatchStream {
-        let schema = Arc::new(Schema::new(vec![ColumnSchema::new(
+    fn single_value_schema() -> SchemaRef {
+        Arc::new(Schema::new(vec![ColumnSchema::new(
             "v",
             ConcreteDataType::int32_datatype(),
             false,
-        )]));
+        )]))
+    }
+
+    fn single_value_stream() -> common_recordbatch::SendableRecordBatchStream {
+        let schema = single_value_schema();
         let values: VectorRef = Arc::new(Int32Vector::from_slice([1]));
         let batch = common_recordbatch::RecordBatch::new(schema.clone(), vec![values]).unwrap();
         RecordBatches::try_new(schema, vec![batch])
             .unwrap()
             .as_stream()
+    }
+
+    /// A stream that fails on its first poll, like a grouped read whose real stream breaks.
+    struct FailingStream {
+        schema: SchemaRef,
+    }
+
+    impl Stream for FailingStream {
+        type Item = common_recordbatch::error::Result<common_recordbatch::RecordBatch>;
+
+        fn poll_next(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+            Poll::Ready(Some(Err(common_recordbatch::error::ExternalSnafu
+                .into_error(common_error::ext::BoxedError::new(PlainError::new(
+                    "stream broke".to_string(),
+                    StatusCode::Internal,
+                ))))))
+        }
+    }
+
+    impl common_recordbatch::RecordBatchStream for FailingStream {
+        fn name(&self) -> &str {
+            "FailingStream"
+        }
+
+        fn schema(&self) -> SchemaRef {
+            self.schema.clone()
+        }
+
+        fn output_ordering(&self) -> Option<&[OrderOption]> {
+            None
+        }
+
+        fn metrics(&self) -> Option<RecordBatchMetrics> {
+            None
+        }
     }
 
     fn empty_logical_plan() -> LogicalPlan {
@@ -1105,6 +1148,41 @@ mod tests {
                 .initial_remote_dyn_filter_registrations
                 .inspect_query(&query_id, |_| ())
                 .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_remote_dyn_filter_guarded_stream_removes_on_error() {
+        let mock_region_server = mock_region_server();
+        let query_id = test_remote_query_id();
+        let region_id = test_remote_dyn_filter_region_id();
+        let registered_filter_ids = register_empty_remote_dyn_filter(
+            &mock_region_server
+                .inner
+                .initial_remote_dyn_filter_registrations,
+            &query_id,
+        );
+        let cleanup = RemoteDynFilterRegistrationGuard::new(
+            mock_region_server.clone(),
+            query_id.clone(),
+            region_id,
+            registered_filter_ids,
+        );
+        let failing: SendableRecordBatchStream = Box::pin(FailingStream {
+            schema: single_value_schema(),
+        });
+
+        let stream = wrap_remote_dyn_filter_guarded_stream(failing, cleanup);
+        let mut pinned = Box::pin(stream);
+        assert!(pinned.next().await.unwrap().is_err());
+
+        assert!(
+            mock_region_server
+                .inner
+                .initial_remote_dyn_filter_registrations
+                .inspect_query(&query_id, |_| ())
+                .is_none(),
+            "a stream that failed never polls again, so its registrations must be gone"
         );
     }
 
