@@ -2144,7 +2144,7 @@ async fn native_aggregate_topk_over_global_partitions() {
         capture
             .fused
             .iter()
-            .map(|node| plan_text(node))
+            .map(plan_text)
             .collect::<Vec<_>>()
             .join("\n=====\n")
     );
