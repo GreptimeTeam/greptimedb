@@ -2111,7 +2111,7 @@ async fn exact_key_output_reservation_covers_the_retained_array() {
         &[keyed_batch(&m, &keys, &times, false)],
     )
     .await;
-    let reader = format.reader(store, handle).await.unwrap();
+    let reader = format.reader(store.clone(), handle).await.unwrap();
     let pool = Arc::new(GreedyMemoryPool::new(128 * 1024 * 1024));
     let mut request = request(&[TABLE_ID_COLUMN, TSID_COLUMN, "ts", PRIMARY_KEY]);
     request.keys = Some(BTreeSet::from([exact(&m, &[label.as_str(), "z"], 1, 7)]));
@@ -2141,6 +2141,37 @@ async fn exact_key_output_reservation_covers_the_retained_array() {
     assert!(
         reserved < 2 * retained,
         "reservation {reserved} dwarfs the {retained} bytes retained"
+    );
+    drop(batch);
+    drop(stream);
+    assert_eq!(0, pool.reserved());
+
+    // A one-row block with a key-only projection selects no payload column, so nothing but the
+    // key itself and the per-row allowance is in the estimate. The key array's own header still
+    // has to be covered, which the per-row bytes cannot do at one row.
+    let handle = build(
+        &format,
+        &store,
+        m.clone(),
+        &[keyed_batch(&m, &keys[..1], &times[..1], false)],
+    )
+    .await;
+    let reader = format.reader(store, handle).await.unwrap();
+    let pool = Arc::new(GreedyMemoryPool::new(1024 * 1024));
+    let mut key_only = SamplesReadRequest {
+        projection: vec![PRIMARY_KEY.to_string()],
+        ..Default::default()
+    };
+    key_only.keys = Some(BTreeSet::from([exact(&m, &[label.as_str(), "z"], 1, 7)]));
+    key_only.memory_pool = Some(pool.clone());
+    let mut stream = reader.read(key_only).unwrap();
+    let batch = stream.try_next().await.unwrap().expect("one batch");
+    assert_eq!(1, batch.num_rows());
+    let retained = batch.get_array_memory_size();
+    let reserved = pool.reserved();
+    assert!(
+        reserved >= retained,
+        "a key-only one-row projection reserves {reserved} for {retained} retained bytes"
     );
     drop(batch);
     drop(stream);

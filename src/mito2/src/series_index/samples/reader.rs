@@ -434,6 +434,16 @@ fn load_column_chunk<'a>(
         .ok_or_else(|| invalid("missing prefetched sample column"))?;
     column.payload.unpack_with_decoder(bytes, decoder)
 }
+/// Fixed per-column charge `arrow` reports beyond the column's own data.
+///
+/// `Array::get_array_memory_size` is `size_of::<Self>()` plus the buffer capacities, and
+/// `RecordBatch::get_array_memory_size` sums those with no other term. The exact key column's
+/// array is the widest type this reader emits, so its struct size bounds every projected column.
+const ARRAY_HEADER_BYTES: usize = std::mem::size_of::<BinaryArray>();
+/// Granularity `arrow_buffer` rounds every buffer allocation up to, so each column can retain up
+/// to this much more than the bytes it holds.
+const BUFFER_ALIGNMENT: usize = 64;
+
 fn timestamp_array(values: impl Iterator<Item = i64>, unit: TimestampUnit) -> ArrayRef {
     match unit {
         TimestampUnit::Second => Arc::new(TimestampSecondArray::from_iter_values(values)),
@@ -485,10 +495,10 @@ async fn read_block(
         - ranges.iter().map(|r| r.end - r.start).sum::<u64>();
     // The exact key column copies one key per output row, so its per-row budget is the
     // key itself rather than a fixed estimate: an 8 KiB key over one block of 8192 rows
-    // allocates 64 MiB. The 32-byte per-column allowance covers the key's offset entry and
-    // the allocator's alignment rounding, and the column is built without growth so the
-    // budget is what is actually retained. Every row is budgeted because time pruning has
-    // not happened yet and can only lower the count.
+    // allocates 64 MiB. The 32-byte per-column allowance covers the key's offset entry now that
+    // the array header and alignment rounding are budgeted per column below, and the column is
+    // built without growth so the budget is what is actually retained. Every row is budgeted
+    // because time pruning has not happened yet and can only lower the count.
     let key_bytes = if projection.contains(&manifest.primary_key_index()) {
         block.key.bytes().len()
     } else {
@@ -501,6 +511,11 @@ async fn read_block(
             .sum::<usize>()
         + block.rows as usize
             * (32 * (projection.len() + 1) + std::mem::size_of::<usize>() + key_bytes)
+        // Each projected column also retains one array header and one allocation rounded up to
+        // the allocator's granularity, which the per-row bytes above do not cover. A block with
+        // one row and a key-only projection selects no payload column at all, so this is the
+        // only term that keeps its array accounted for.
+        + projection.len() * (ARRAY_HEADER_BYTES + BUFFER_ALIGNMENT)
         + columns.len() * 128;
     let bytes = base_bytes + reader.reservation_bytes(&ranges);
     let mut bypass_cache = false;
