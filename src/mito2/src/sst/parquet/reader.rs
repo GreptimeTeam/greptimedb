@@ -196,6 +196,12 @@ pub struct ParquetReaderBuilder {
     object_store: ObjectStore,
     /// Predicate to push down.
     predicate: Option<Predicate>,
+    /// The same predicate without its region partition expression.
+    ///
+    /// `Some` marks that [`Self::predicate`] contains the region partition expression, which
+    /// happens when the file's partition expression differs from the region's. The reader uses
+    /// it for SSTs that can't evaluate the region partition expression.
+    predicate_without_region_partition: Option<Predicate>,
     /// The columns to read.
     ///
     /// `None` reads all columns. Due to schema change, the projection
@@ -253,6 +259,7 @@ impl ParquetReaderBuilder {
             file_handle,
             object_store,
             predicate: None,
+            predicate_without_region_partition: None,
             read_cols: None,
             json2_rewrite_targets: Arc::default(),
             cache_strategy: CacheStrategy::Disabled,
@@ -285,10 +292,34 @@ impl ParquetReaderBuilder {
         self
     }
 
-    /// Attaches the predicate to the builder.
+    /// Attaches a predicate that carries no region partition expression.
     #[must_use]
     pub fn predicate(mut self, predicate: Option<Predicate>) -> ParquetReaderBuilder {
         self.predicate = predicate;
+        // A bare predicate doesn't carry the region partition expression, so it has no
+        // region-partition-free variant.
+        self.predicate_without_region_partition = None;
+        self
+    }
+
+    /// Attaches the predicate together with its region-partition-free variant.
+    ///
+    /// `predicate_without_region_partition` must be `Some` exactly when `predicate` contains the
+    /// region partition expression, which [`Self::predicate`] can't express on its own: the pair
+    /// is set here so the two can't diverge. The reader drops the partition predicate for SSTs
+    /// that can't evaluate it (a column it references is absent from the SST metadata).
+    #[must_use]
+    pub fn predicates(
+        mut self,
+        predicate: Option<Predicate>,
+        predicate_without_region_partition: Option<Predicate>,
+    ) -> ParquetReaderBuilder {
+        debug_assert!(
+            predicate.is_some() || predicate_without_region_partition.is_none(),
+            "a region-partition-free predicate requires the predicate it derives from"
+        );
+        self.predicate = predicate;
+        self.predicate_without_region_partition = predicate_without_region_partition;
         self
     }
 
@@ -583,8 +614,32 @@ impl ParquetReaderBuilder {
 
         let codec = build_primary_key_codec(read_format.metadata());
 
+        // The partition filter is built first: its schema is exactly the set of columns the
+        // region partition expression references, which decides the predicate below.
+        let partition_filter = self.build_partition_filter(&read_format, &prune_schema)?;
+
+        // `self.predicate` contains the region partition expression when the file's partition
+        // expression differs from the region's (see `ScanInput::predicate_for_file`). The simple
+        // filter path can't stand in for the range-level partition filter on such files: for a
+        // column the SST doesn't contain it evaluates the column's default, and for an impure
+        // default such as `now()` that is a second, different value (`pruned_by_default`
+        // evaluates `create_default` again), so it can prune rows whose persisted value was
+        // never known. Drop the partition predicate for those files and let
+        // `PartitionFilterContext` answer the ownership question instead.
+        let filter_predicate =
+            if Self::has_missing_partition_expr_column(partition_filter.as_ref(), &region_meta) {
+                // `Some` exactly when `self.predicate` carries the region partition expression, so
+                // this is the same predicate without it. Fall back to the predicate itself when the
+                // caller attached it without that expression.
+                self.predicate_without_region_partition
+                    .as_ref()
+                    .or(self.predicate.as_ref())
+            } else {
+                self.predicate.as_ref()
+            };
+
         let filter_plan = build_reader_filter_plan(
-            self.predicate.as_ref(),
+            filter_predicate,
             self.expected_metadata.as_deref(),
             self.pre_filter_mode,
             self.enable_predicate_prefilter,
@@ -690,8 +745,6 @@ impl ParquetReaderBuilder {
             batch_size: self.batch_size,
         };
 
-        let partition_filter = self.build_partition_filter(&read_format, &prune_schema)?;
-
         let range_index_store = self.series_index.as_ref().and_then(|context| {
             let region_id = self
                 .expected_metadata
@@ -738,6 +791,26 @@ impl ParquetReaderBuilder {
 
         let is_same = region_partition_expr.as_ref() == file_partition_expr;
         Ok((region_partition_expr, is_same))
+    }
+
+    /// Returns true if the region partition expression references a column that `sst_metadata`
+    /// doesn't contain, so it can't be evaluated against the SST.
+    ///
+    /// `partition_filter` is `None` when the file doesn't need partition filtering, and its
+    /// schema holds exactly the columns the expression references otherwise.
+    fn has_missing_partition_expr_column(
+        partition_filter: Option<&PartitionFilterContext>,
+        sst_metadata: &RegionMetadata,
+    ) -> bool {
+        let Some(partition_filter) = partition_filter else {
+            return false;
+        };
+
+        partition_filter
+            .partition_schema
+            .column_schemas()
+            .iter()
+            .any(|column| sst_metadata.column_by_name(&column.name).is_none())
     }
 
     /// Compare partition expressions from expected metadata and file metadata,
