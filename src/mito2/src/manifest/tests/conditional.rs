@@ -398,8 +398,11 @@ async fn test_staged_commit_retry_writes_same_content() {
     assert!(error.may_have_persisted_manifest_update());
     assert_eq!(0, manager.last_version());
 
-    // Until the kept commit is retried, only a retried import is staged.
+    // Until the kept commit is retried, only a retried import (empty for a target with no
+    // files) is staged.
     manager.update(import(imported), true).await.unwrap();
+    let empty = RegionMetaActionList::with_action(RegionMetaAction::Edit(Default::default()));
+    manager.update(empty, true).await.unwrap();
     let refused = manager.update(import(FileId::random()), true).await;
     assert!(
         matches!(refused, Err(Error::RegionBusy { .. })),

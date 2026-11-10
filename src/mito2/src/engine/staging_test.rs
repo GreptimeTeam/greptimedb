@@ -2421,6 +2421,7 @@ async fn test_writes_wait_while_staging_ends(#[case] downgrade: bool) {
     region
         .manifest_ctx
         .finish_ending_staging(region_id, started, &Ok::<(), Error>(()));
+    let (drained, wait) = tokio::sync::oneshot::channel();
     engine
         .inner
         .workers
@@ -2428,11 +2429,12 @@ async fn test_writes_wait_while_staging_ends(#[case] downgrade: bool) {
             region_id,
             WorkerRequest::Background {
                 region_id,
-                notify: BackgroundNotify::StagingEnded,
+                notify: BackgroundNotify::StagingEnded(drained),
             },
         )
         .await
         .unwrap();
+    wait.await.unwrap();
 
     // The drained write sees the state that the end of staging left: a downgrade refuses it.
     let result = put.await.unwrap();

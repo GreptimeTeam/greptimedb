@@ -1600,8 +1600,9 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 self.handle_manifest_region_change_result(req).await
             }
             BackgroundNotify::EnterStaging(req) => self.handle_enter_staging_result(req).await,
-            BackgroundNotify::StagingEnded => {
-                self.handle_region_stalled_requests(&region_id, true).await
+            BackgroundNotify::StagingEnded(drained) => {
+                self.handle_region_stalled_requests(&region_id, true).await;
+                let _ = drained.send(());
             }
             BackgroundNotify::RegionEdit(req) => self.handle_region_edit_result(req).await,
             BackgroundNotify::CopyRegionFromFinished(req) => {

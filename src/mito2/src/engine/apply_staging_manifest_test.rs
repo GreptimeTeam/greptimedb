@@ -1430,6 +1430,7 @@ async fn test_apply_staging_manifest_after_lost_response(
     };
     let region = engine.get_region(region_id).unwrap();
     let version = region.manifest_ctx.manifest_version().await;
+    let size = region.manifest_size();
 
     faults.lose_next_response();
     faults.fail_reads(read_error);
@@ -1490,6 +1491,8 @@ async fn test_apply_staging_manifest_after_lost_response(
         version + 1 + leave_staging as u64,
         region.manifest_ctx.manifest_version().await
     );
+    // The end commit's delta is counted however its result was learned.
+    assert!(region.manifest_size() > size);
     assert_eq!(
         Some(partition_expr.as_str()),
         region.version().metadata.partition_expr.as_deref()

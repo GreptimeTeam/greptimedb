@@ -151,7 +151,8 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                     sender.send(result.map(|_| 0));
                     return;
                 };
-                let result = region.end_staging(&worker_sender).await;
+                let manager = region.manifest_ctx.manifest_manager.write().await;
+                let result = region.end_staging(manager, &worker_sender).await;
                 if result.is_err() {
                     notify_if_fenced(&worker_sender, &region).await;
                 }

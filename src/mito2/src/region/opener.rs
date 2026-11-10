@@ -459,8 +459,8 @@ impl RegionOpener {
             compaction_state: Default::default(),
             version_control: version_control.clone(),
             series_index_version_control: Default::default(),
-            series_index_store: self.series_index_store,
-            access_layer,
+            series_index_store: self.series_index_store.clone(),
+            access_layer: access_layer.clone(),
             // Region is writable after it is created.
             manifest_ctx: Arc::new(
                 ManifestContext::new(

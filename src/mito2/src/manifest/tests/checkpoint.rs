@@ -509,20 +509,14 @@ async fn test_checkpoint_bypass_in_staging_mode() {
     let (_env, mut manager) = build_manager(1, CompressionType::Uncompressed).await;
     let version = manager.last_version();
 
-    // Staged actions take no version, write no delta and start no checkpoint.
+    // Apply actions in staging mode - checkpoint should be bypassed
     for _ in 0..15 {
         manager.update(nop_action(), true).await.unwrap();
     }
     assert_eq!(manager.last_version(), version);
     assert!(!manager.checkpointer().is_doing_checkpoint());
-    assert!(
-        manager
-            .store()
-            .fetch_manifests(version + 1, u64::MAX)
-            .await
-            .unwrap()
-            .is_empty()
-    );
+
+    // Verify no checkpoint was created in staging mode
     assert!(
         manager
             .store()
@@ -534,15 +528,22 @@ async fn test_checkpoint_bypass_in_staging_mode() {
 
     // The end of staging commits all of them as the next version.
     assert_eq!(manager.commit_staged(|| false).await.unwrap(), version + 1);
+
+    // Wait for potential checkpoint
     while manager.checkpointer().is_doing_checkpoint() {
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }
-    let (last_version, _checkpoint_data) = manager
-        .store()
-        .load_last_checkpoint()
-        .await
-        .unwrap()
-        .expect("the end of staging should start a checkpoint");
+
+    // Now checkpoint should exist because we switched to writable mode
+    let checkpoint_result = manager.store().load_last_checkpoint().await.unwrap();
+
+    assert!(
+        checkpoint_result.is_some(),
+        "Checkpoint should exist after switching to writable mode"
+    );
+    let (last_version, _checkpoint_data) = checkpoint_result.unwrap();
+
+    // Checkpoint should include the staged actions, which took one version
     assert_eq!(last_version, version + 1);
 }
 

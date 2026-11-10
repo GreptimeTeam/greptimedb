@@ -607,8 +607,7 @@ impl MitoRegion {
                 match current_state {
                     RegionRoleState::Leader(RegionLeaderState::Staging) => {
                         info!("Exiting staging mode for region {}", self.region_id);
-                        drop(manager);
-                        return self.end_staging(worker_sender).await;
+                        return self.end_staging(manager, worker_sender).await;
                     }
                     RegionRoleState::Leader(RegionLeaderState::Writable) => {
                         // Already in desired state - no-op
@@ -1096,23 +1095,26 @@ impl MitoRegion {
     }
 
     /// Commits the staged edits as one manifest version and ends staging (see
-    /// [Self::end_staging_locked]). After dropping the manifest lock it lets the worker resume
-    /// the writes stalled meanwhile, then clears the staging directory.
+    /// [Self::end_staging_locked]) under the manifest write lock `manager`. After dropping the
+    /// lock it waits for the worker to resume the writes stalled meanwhile, then clears the
+    /// staging directory.
     pub(crate) async fn end_staging(
         &self,
+        mut manager: RwLockWriteGuard<'_, RegionManifestManager>,
         worker_sender: &Sender<WorkerRequestWithTime>,
     ) -> Result<()> {
-        let mut manager = self.manifest_ctx.manifest_manager.write().await;
         let result = self.end_staging_locked(&mut manager).await;
         drop(manager);
 
         // The worker cannot be awaited under the lock, and its writes need not wait for the
         // slower clear of the staging directory.
+        let (drained, wait) = tokio::sync::oneshot::channel();
         let notify = WorkerRequest::Background {
             region_id: self.region_id,
-            notify: BackgroundNotify::StagingEnded,
+            notify: BackgroundNotify::StagingEnded(drained),
         };
         let _ = worker_sender.send(WorkerRequestWithTime::new(notify)).await;
+        let _ = wait.await;
         let Some(pending) = result? else {
             return Ok(());
         };
@@ -1593,7 +1595,7 @@ impl ManifestContext {
         source: &IndexBuildSource,
         updated: FileMeta,
     ) -> Result<IndexPublication> {
-        let manager = self.manifest_manager.write().await;
+        let manager = self.write_manager(true).await?;
         let manifest = manager.manifest();
         let current_state = self.state.load();
         if !matches!(
@@ -1668,11 +1670,6 @@ impl ManifestContext {
         // checkpoint barrier.
         let allow_checkpoint = !is_staging
             && self.state.load() != RegionRoleState::Leader(RegionLeaderState::Downgrading);
-        let settled = if is_staging {
-            None
-        } else {
-            self.settle_locked(manager).await?
-        };
         // A writer past its Leader deadline may no longer hold the region, so it sends nothing.
         let result = if manager.is_conditional_publication() && self.is_leader_lease_expired() {
             RegionLeaseExpiredSnafu { region_id }.fail()
@@ -1694,17 +1691,13 @@ impl ManifestContext {
             }
         };
 
-        let pending = PendingManifestHook::new(
+        Ok(PendingManifestHook::new(
             region_id,
             action_list_for_hook,
             version,
             self.hook.clone(),
             is_staging,
-        );
-        Ok(match settled {
-            Some(settled) => settled.merge(pending),
-            None => pending,
-        })
+        ))
     }
 
     /// Commits the staged actions of `manager` as one version under a caller-held write lock,
@@ -1741,6 +1734,25 @@ impl ManifestContext {
             Some(settled) => settled.merge(pending),
             None => pending,
         })
+    }
+
+    /// Takes the manifest write lock. With `settle`, an end of staging whose result was unknown
+    /// is settled first (a commit is refused while it is not), and the hook of one that landed
+    /// fires with the lock released, so the caller checks its write against the settled manifest.
+    /// A staging region settles only when staging ends, which also leaves staging.
+    pub(crate) async fn write_manager(
+        &self,
+        settle: bool,
+    ) -> Result<RwLockWriteGuard<'_, RegionManifestManager>> {
+        let mut manager = self.manifest_manager.write().await;
+        let settle =
+            settle && self.state.load() != RegionRoleState::Leader(RegionLeaderState::Staging);
+        if settle && let Some(settled) = self.settle_locked(&mut manager).await? {
+            drop(manager);
+            settled.fire().await;
+            manager = self.manifest_manager.write().await;
+        }
+        Ok(manager)
     }
 
     /// Settles an end of staging whose result was unknown (see [RegionManifestManager::settle]),
@@ -1854,7 +1866,7 @@ impl ManifestContext {
         check_state: impl FnOnce(RegionRoleState, RegionId) -> Result<()>,
     ) -> Result<ManifestVersion> {
         // Acquires the write lock of the manifest manager.
-        let manager = self.manifest_manager.write().await;
+        let manager = self.write_manager(!is_staging).await?;
         // Gets current manifest.
         let manifest = manager.manifest();
         // Checks state inside the lock. This is to ensure that we won't update the manifest

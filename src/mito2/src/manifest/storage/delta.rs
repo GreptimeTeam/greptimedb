@@ -362,12 +362,22 @@ impl<T: Tracker> DeltaStorage<T> {
         Ok(stored_size)
     }
 
-    /// Reads the delta of `version` that [Self::save] writes, directly from storage. Returns
-    /// `None` if it does not exist.
-    pub(crate) async fn read_delta(&self, version: ManifestVersion) -> Result<Option<Vec<u8>>> {
+    /// Reads the delta of `version` that [Self::save] writes directly from storage, and returns
+    /// whether it holds `bytes` (then recording its size), or `None` if it does not exist.
+    pub(crate) async fn holds_delta(
+        &self,
+        version: ManifestVersion,
+        bytes: &[u8],
+    ) -> Result<Option<bool>> {
         let path = self.delta_file_path(version);
         let delta = self.read_delta_at(&path, self.compress_type).await?;
-        Ok(delta.map(|(_, data)| data))
+        Ok(delta.map(|(size, data)| {
+            let same = data == bytes;
+            if same {
+                self.delta_tracker.record(version, size as u64);
+            }
+            same
+        }))
     }
 
     /// Reads and decodes the object at `path`, bypassing the cache. Returns its stored size and

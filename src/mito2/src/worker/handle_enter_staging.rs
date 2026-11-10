@@ -130,7 +130,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         let now = Instant::now();
         // First step: clear all staging manifest files.
         {
-            let mut manager = region.manifest_ctx.manifest_manager.write().await;
+            let mut manager = region.manifest_ctx.write_manager(true).await?;
             // `set_entering_staging` has already stopped new normal manifest
             // publications. Wait for an older checkpoint to finish cleanup
             // before exposing staging to repartition remap readers.

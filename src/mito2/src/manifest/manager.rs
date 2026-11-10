@@ -201,9 +201,7 @@ impl StagedActions {
         !action_list.actions.is_empty()
             && action_list.actions.iter().all(|action| {
                 matches!(action, RegionMetaAction::Edit(edit)
-                    if edit.files_to_remove.is_empty()
-                        && !edit.files_to_add.is_empty()
-                        && edit.files_to_add.iter().all(is_staged))
+                    if edit.files_to_remove.is_empty() && edit.files_to_add.iter().all(is_staged))
             })
     }
 }
@@ -717,7 +715,7 @@ impl RegionManifestManager {
             if conditional || !settle {
                 return Err(e);
             }
-            match self.read_back(version, bytes).await {
+            match self.store.holds_delta(version, bytes).await {
                 Ok(Some(true)) => {}
                 Ok(None) => return Err(e),
                 _ => {
@@ -744,7 +742,7 @@ impl RegionManifestManager {
         let Some((version, bytes)) = self.unsettled.take() else {
             return Ok(None);
         };
-        let reason = match self.read_back(version, &bytes).await {
+        let reason = match self.store.holds_delta(version, &bytes).await {
             Ok(Some(true)) => None,
             Ok(None) => return Ok(None),
             Ok(Some(false)) => Some("another delta has this version".to_string()),
@@ -763,13 +761,6 @@ impl RegionManifestManager {
         self.publish(version, action_list.actions.clone(), false)
             .await?;
         Ok(Some((version, action_list)))
-    }
-
-    /// Reads `version` back directly from storage. Returns whether it holds `bytes`, or `None` if
-    /// it does not exist.
-    async fn read_back(&self, version: ManifestVersion, bytes: &[u8]) -> Result<Option<bool>> {
-        let saved = self.store.read_delta(version).await?;
-        Ok(saved.map(|saved| saved == bytes))
     }
 
     /// Applies `actions`, written as `version`, to the manifest.
