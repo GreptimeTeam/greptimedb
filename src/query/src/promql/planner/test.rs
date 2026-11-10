@@ -6415,6 +6415,29 @@ async fn only_equals_is_supported_for_special_matcher() {
 }
 
 #[tokio::test]
+async fn scatter_time_filter_many_evaluation_points() {
+    for function in ["increase", "sum_over_time"] {
+        for window in ["1h", "2h", "3h"] {
+            let query = format!("sum({function}(some_metric[{window}]))");
+            let eval_stmt = EvalStmt {
+                expr: parser::parse(&query).unwrap(),
+                start: UNIX_EPOCH,
+                end: UNIX_EPOCH + Duration::from_secs(30 * 24 * 3600 + 1800),
+                interval: Duration::from_secs(2 * 3600),
+                lookback_delta: Duration::from_secs(300),
+            };
+            let provider = build_test_table_provider(
+                &[(DEFAULT_SCHEMA_NAME.to_string(), "some_metric".to_string())],
+                1,
+                1,
+            )
+            .await;
+            build_optimized_promql_plan(provider, &eval_stmt).await;
+        }
+    }
+}
+
+#[tokio::test]
 async fn native_scan_bounds_preserve_zero_lookback_and_overflow() {
     let table_provider = build_test_table_provider(
         &[(DEFAULT_SCHEMA_NAME.to_string(), "some_metric".to_string())],
