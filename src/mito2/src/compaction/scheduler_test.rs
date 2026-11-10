@@ -52,9 +52,9 @@ use crate::schedule::remote_job_scheduler::{RemoteJob, RemoteJobSchedulerRef};
 use crate::schedule::scheduler::{Job, Scheduler};
 use crate::sst::FormatType;
 use crate::sst::file::FileHandle;
-use crate::test_util::mock_schema_metadata_manager;
 use crate::test_util::scheduler_util::{SchedulerEnv, VecScheduler};
 use crate::test_util::version_util::{VersionControlBuilder, apply_edit};
+use crate::test_util::{mock_schema_metadata_manager, new_noop_file_purger};
 
 struct FailingScheduler;
 
@@ -3701,6 +3701,49 @@ async fn test_finishing_compaction_with_pending_tails_starts_nothing() {
         .await;
 
     assert_eq!(0, waiter_rx.try_recv().unwrap().unwrap());
+    assert!(!scheduler.is_compacting(region_id));
+}
+
+#[tokio::test]
+async fn test_cancelled_compaction_with_pending_tails_starts_nothing() {
+    let env = SchedulerEnv::new().await;
+    let (tx, mut rx) = mpsc::channel(8);
+    let mut scheduler = env.mock_compaction_scheduler(tx);
+    let version = compactable_version();
+    let region_id = version.region_id();
+    let (finished, manifest, schemas) =
+        begin_pick_result(&env, &mut scheduler, &mut rx, &version).await;
+    let active_id = scheduler.inspect_tasks(&MetadataFilter::default(), None)[0]
+        .task_id
+        .clone();
+    let (sender, mut receiver) = oneshot::channel();
+    scheduler
+        .schedule_manual_compaction(
+            Options::Regular(Default::default()),
+            &version,
+            &env.access_layer,
+            sender.into(),
+            &manifest,
+            schemas.clone(),
+            1,
+            None,
+        )
+        .unwrap();
+    assert_eq!(
+        scheduler.cancel_task(region_id, &active_id),
+        CancelCompactionResult::CancelIssued
+    );
+    version.apply_edit(
+        Some(pending_tails_edit(vec![tail(1, 0, 1)])),
+        &[],
+        new_noop_file_purger(),
+    );
+
+    scheduler
+        .handle_compaction_pick_finished(finished, &manifest, schemas)
+        .await;
+
+    assert_eq!(0, receiver.try_recv().unwrap().unwrap());
     assert!(!scheduler.is_compacting(region_id));
 }
 
