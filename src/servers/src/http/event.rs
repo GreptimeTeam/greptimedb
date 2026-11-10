@@ -886,7 +886,12 @@ impl<'a> TryFrom<&'a ContentType> for EventPayloadResolver<'a> {
 }
 
 impl EventPayloadResolver<'_> {
-    fn parse_payload(&self, payload: Bytes, ignore_errors: bool) -> Result<Vec<VrlValue>> {
+    fn parse_payload(
+        &self,
+        payload: Bytes,
+        ignore_errors: bool,
+        utf8_retries: &IntCounterVec,
+    ) -> Result<Vec<VrlValue>> {
         match self.inner {
             EventPayloadResolverInner::Json | EventPayloadResolverInner::JsonStream => {
                 // Detect UTF-8 failures even when ignore_errors would discard them.
@@ -913,9 +918,7 @@ impl EventPayloadResolver<'_> {
                     } else {
                         "json_stream"
                     };
-                    METRIC_HTTP_LOGS_UTF8_RETRIES_TOTAL
-                        .with_label_values(&[format])
-                        .inc();
+                    utf8_retries.with_label_values(&[format]).inc();
                     return transform_ndjson_array_factory(
                         Deserializer::from_str(&text).into_iter(),
                         ignore_errors,
@@ -956,9 +959,7 @@ impl EventPayloadResolver<'_> {
                     }) && let Cow::Owned(text) = String::from_utf8_lossy(line)
                     {
                         line_bytes = text.into_bytes();
-                        METRIC_HTTP_LOGS_UTF8_RETRIES_TOTAL
-                            .with_label_values(&["ndjson"])
-                            .inc();
+                        utf8_retries.with_label_values(&["ndjson"]).inc();
                         parsed =
                             simd_json::serde::from_slice_with_buffers(&mut line_bytes, &mut buffer);
                     }
@@ -1005,7 +1006,7 @@ fn extract_pipeline_value_by_content_type(
 ) -> Result<Vec<VrlValue>> {
     EventPayloadResolver::try_from(&content_type).and_then(|resolver| {
         resolver
-            .parse_payload(payload, ignore_errors)
+            .parse_payload(payload, ignore_errors, &METRIC_HTTP_LOGS_UTF8_RETRIES_TOTAL)
             .map_err(|e| match &e {
                 Error::InvalidParameter { reason, .. } if content_type == *JSON_CONTENT_TYPE => {
                     if reason.contains("invalid item:") {
@@ -1118,6 +1119,8 @@ pub struct LogState {
 
 #[cfg(test)]
 mod tests {
+
+    use prometheus::Opts;
 
     use super::*;
 
@@ -1261,12 +1264,19 @@ mod tests {
 
     #[test]
     fn test_utf8_retry_counter() {
+        // Keep exact retry counts independent of other parser tests.
+        let utf8_retries = IntCounterVec::new(
+            Opts::new("test_utf8_retries", "UTF-8 retry attempts"),
+            &["format"],
+        )
+        .unwrap();
         for (content_type, format, multi_record_retries) in [
             (ContentType::json(), "json", 1),
             (JSON_STREAM_CONTENT_TYPE.clone(), "json_stream", 1),
             (NDJSON_CONTENT_TYPE.clone(), "ndjson", 2),
         ] {
-            let counter = METRIC_HTTP_LOGS_UTF8_RETRIES_TOTAL.with_label_values(&[format]);
+            let resolver = EventPayloadResolver::try_from(&content_type).unwrap();
+            let counter = utf8_retries.with_label_values(&[format]);
             for ignore_errors in [false, true] {
                 for (payload, retries, valid_after_retry) in [
                     (br#"{"message":"ok"}"#.as_slice(), 0, true),
@@ -1290,10 +1300,10 @@ mod tests {
                     ),
                 ] {
                     let before = counter.get();
-                    let result = extract_pipeline_value_by_content_type(
-                        content_type.clone(),
+                    let result = resolver.parse_payload(
                         Bytes::from_static(payload),
                         ignore_errors,
+                        &utf8_retries,
                     );
                     assert_eq!(result.is_ok(), valid_after_retry || ignore_errors);
                     assert_eq!(
