@@ -152,11 +152,18 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                     return;
                 };
                 let manager = region.manifest_ctx.manifest_manager.write().await;
-                let result = region.end_staging(manager, &worker_sender).await;
-                if result.is_err() {
-                    notify_if_fenced(&worker_sender, &region).await;
+                let hook_payload = match region.end_staging(manager, &worker_sender).await {
+                    Ok(payload) => payload,
+                    Err(e) => {
+                        notify_if_fenced(&worker_sender, &region).await;
+                        sender.send(Err(e));
+                        return;
+                    }
+                };
+                if let Some(pending) = hook_payload {
+                    pending.fire().await;
                 }
-                sender.send(result.map(|_| 0));
+                sender.send(Ok(0));
             } else {
                 sender.send(
                     UnexpectedSnafu {

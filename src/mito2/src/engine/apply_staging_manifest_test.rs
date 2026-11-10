@@ -24,7 +24,6 @@ use common_recordbatch::RecordBatches;
 use datatypes::arrow::array::{AsArray, UInt64Array};
 use datatypes::arrow::datatypes::Float64Type;
 use datatypes::value::Value;
-use object_store::layers::mock::ErrorKind;
 use partition::expr::{PartitionExpr, col};
 use store_api::region_engine::{
     RegionEngine, RegionRole, RemapManifestsRequest, SettableRegionRoleState,
@@ -45,7 +44,7 @@ use crate::sst::FormatType;
 use crate::sst::file::FileMeta;
 use crate::test_util::{
     CreateRequestBuilder, DeltaFaults, TestEnv, build_rows, build_rows_for_key, put_rows,
-    rows_schema,
+    reopen_region, rows_schema,
 };
 
 fn range_expr(col_name: &str, start: i64, end: i64) -> PartitionExpr {
@@ -1363,36 +1362,32 @@ async fn test_merge_repartition_data_integrity() {
     );
 }
 
-/// The end commit lands but its response is lost; `read_error` makes reading it back fail.
+/// The end commit fails after its delta landed (a lost response) or before. The retry writes the
+/// same delta at the next version, and a reopen sees one commit.
 #[rstest::rstest]
-#[case::landed(None, false)]
-#[case::absent(Some(ErrorKind::NotFound), false)]
-#[case::unsettled(Some(ErrorKind::Unexpected), false)]
-#[case::unsettled_then_left_staging(Some(ErrorKind::Unexpected), true)]
+#[case::landed(true)]
+#[case::not_landed(false)]
 #[tokio::test]
-async fn test_apply_staging_manifest_after_lost_response(
-    #[case] read_error: Option<ErrorKind>,
-    #[case] leave_staging: bool,
-) {
+async fn test_apply_staging_manifest_retries_failed_commit(#[case] landed: bool) {
     let faults = DeltaFaults::default();
-    let mut env = TestEnv::with_prefix("apply-lost-response")
+    let mut env = TestEnv::with_prefix("apply-failed-commit")
         .await
         .with_mock_layer(faults.layer());
     let engine = env.create_engine(MitoConfig::default()).await;
     let region_id = RegionId::new(2, 2);
     let request = CreateRequestBuilder::new().build();
+    let table_dir = request.table_dir.clone();
     let schema = rows_schema(&request);
     engine
         .handle_request(region_id, RegionRequest::Create(request))
         .await
         .unwrap();
-    let rows = build_rows(0, 3);
     put_rows(
         &engine,
         region_id,
         Rows {
-            schema: schema.clone(),
-            rows,
+            schema,
+            rows: build_rows(0, 3),
         },
     )
     .await;
@@ -1430,71 +1425,80 @@ async fn test_apply_staging_manifest_after_lost_response(
     };
     let region = engine.get_region(region_id).unwrap();
     let version = region.manifest_ctx.manifest_version().await;
-    let size = region.manifest_size();
 
-    faults.lose_next_response();
-    faults.fail_reads(read_error);
-    let result = engine.handle_request(region_id, apply()).await;
-    if read_error.is_some() {
-        // Not known to be written: the region stays staging and keeps its edits for a retry.
-        assert_eq!(RetryHint::Retryable, result.unwrap_err().retry_hint());
-        let other = FileMeta {
+    if landed {
+        faults.lose_next_response();
+    } else {
+        faults.fail_next_write();
+    }
+    // The region stays staging and keeps its edits for a retry.
+    let err = engine.handle_request(region_id, apply()).await.unwrap_err();
+    assert_eq!(RetryHint::Retryable, err.retry_hint());
+    assert!(region.is_staging());
+    // Until the retry, another edit is refused without closing the region.
+    let edit = RegionEdit {
+        files_to_add: vec![FileMeta {
             region_id,
             file_id: FileId::random(),
             ..Default::default()
-        };
-        let edit = RegionEdit {
-            files_to_add: vec![other],
-            ..Default::default()
-        };
-        let err = engine.edit_region(region_id, edit).await.unwrap_err();
-        assert_eq!(RetryHint::Retryable, err.retry_hint());
-        assert!(region.is_staging());
-        assert!(
-            !region
-                .manifest_ctx
-                .manifest_manager
-                .read()
-                .await
-                .is_stopped()
-        );
-        if leave_staging {
-            // A Leader lease ends staging. Commits wait until the end commit can be read back.
-            region.set_role(RegionRole::Leader);
-            put_rows(
-                &engine,
-                region_id,
-                Rows {
-                    schema,
-                    rows: build_rows(3, 5),
-                },
-            )
-            .await;
-            let flush =
-                || engine.handle_request(region_id, RegionRequest::Flush(Default::default()));
-            assert_eq!(
-                RetryHint::Retryable,
-                flush().await.unwrap_err().retry_hint()
-            );
-            faults.fail_reads(None);
-            flush().await.unwrap();
-        } else {
-            faults.fail_reads(None);
-            engine.handle_request(region_id, apply()).await.unwrap();
-        }
-    } else {
-        result.unwrap();
-    }
-
-    assert!(!region.is_staging());
-    assert_eq!(
-        version + 1 + leave_staging as u64,
-        region.manifest_ctx.manifest_version().await
+        }],
+        ..Default::default()
+    };
+    let err = engine.edit_region(region_id, edit).await.unwrap_err();
+    assert_eq!(RetryHint::Retryable, err.retry_hint());
+    assert!(region.is_staging());
+    assert!(
+        !region
+            .manifest_ctx
+            .manifest_manager
+            .read()
+            .await
+            .is_stopped()
     );
-    // The end commit's delta is counted however its result was learned.
-    assert!(region.manifest_size() > size);
+
+    // The retry writes the same delta at the next version.
+    engine.handle_request(region_id, apply()).await.unwrap();
+    assert!(!region.is_staging());
+    let committed = region.manifest_ctx.manifest().await;
+    assert_eq!(version + 2, committed.manifest_version);
     assert_eq!(
         Some(partition_expr.as_str()),
-        region.version().metadata.partition_expr.as_deref()
+        committed.metadata.partition_expr.as_deref()
+    );
+    let deltas = region
+        .manifest_ctx
+        .manifest_manager
+        .read()
+        .await
+        .store()
+        .fetch_manifests(version + 1, version + 3)
+        .await
+        .unwrap();
+    if landed {
+        assert_eq!(
+            vec![version + 1, version + 2],
+            deltas.iter().map(|(v, _)| *v).collect::<Vec<_>>()
+        );
+        assert_eq!(deltas[0].1, deltas[1].1);
+    } else {
+        assert_eq!(
+            vec![version + 2],
+            deltas.iter().map(|(v, _)| *v).collect::<Vec<_>>()
+        );
+    }
+
+    // A reopen replays the deltas as one commit.
+    reopen_region(&engine, region_id, table_dir, true, Default::default()).await;
+    let reopened = engine
+        .get_region(region_id)
+        .unwrap()
+        .manifest_ctx
+        .manifest()
+        .await;
+    assert_eq!(version + 2, reopened.manifest_version);
+    assert_eq!(committed.files, reopened.files);
+    assert_eq!(
+        committed.metadata.partition_expr,
+        reopened.metadata.partition_expr
     );
 }

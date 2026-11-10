@@ -607,13 +607,14 @@ impl MitoRegion {
                 match current_state {
                     RegionRoleState::Leader(RegionLeaderState::Staging) => {
                         info!("Exiting staging mode for region {}", self.region_id);
-                        return self.end_staging(manager, worker_sender).await;
+                        let pending = self.end_staging(manager, worker_sender).await?;
+                        manager = self.manifest_ctx.manifest_manager.write().await;
+                        pending
                     }
                     RegionRoleState::Leader(RegionLeaderState::Writable) => {
                         // Already in desired state - no-op
                         info!("Region {} already in normal leader mode", self.region_id);
-                        // The metadata backfill below checks the settled manifest.
-                        self.manifest_ctx.settle_locked(&mut manager).await?
+                        None
                     }
                     _ => {
                         // Only staging -> leader transition is allowed
@@ -633,21 +634,11 @@ impl MitoRegion {
                 match current_state {
                     RegionRoleState::Leader(RegionLeaderState::Writable) => {
                         info!("Entering staging mode for region {}", self.region_id);
-                        // A new staging starts with no end of staging left unknown.
-                        let settled = self.manifest_ctx.settle_locked(&mut manager).await?;
-                        if let Err(e) = self.set_staging(&mut manager).await {
-                            drop(manager);
-                            if let Some(settled) = settled {
-                                settled.fire().await;
-                            }
-                            return Err(e);
-                        }
-                        settled
+                        self.set_staging(&mut manager).await?;
                     }
                     RegionRoleState::Leader(RegionLeaderState::Staging) => {
                         // Already in desired state - no-op
                         info!("Region {} already in staging mode", self.region_id);
-                        None
                     }
                     _ => {
                         return Err(RegionStateSnafu {
@@ -658,6 +649,7 @@ impl MitoRegion {
                         .build());
                     }
                 }
+                None
             }
 
             SettableRegionRoleState::Follower => {
@@ -1107,12 +1099,12 @@ impl MitoRegion {
     /// Commits the staged edits as one manifest version and ends staging (see
     /// [Self::end_staging_locked]) under the manifest write lock `manager`. After dropping the
     /// lock it waits for the worker to resume the writes stalled meanwhile, then clears the
-    /// staging directory.
+    /// staging directory. Returns the receipt of the commit, as [Self::end_staging_locked] does.
     pub(crate) async fn end_staging(
         &self,
         mut manager: RwLockWriteGuard<'_, RegionManifestManager>,
         worker_sender: &Sender<WorkerRequestWithTime>,
-    ) -> Result<()> {
+    ) -> Result<Option<PendingManifestHook>> {
         let result = self.end_staging_locked(&mut manager).await;
         drop(manager);
 
@@ -1127,10 +1119,7 @@ impl MitoRegion {
         let _ = wait.await;
         let pending = result?;
         self.clear_ended_staging().await;
-        if let Some(pending) = pending {
-            pending.fire().await;
-        }
-        Ok(())
+        Ok(pending)
     }
 
     /// Clears the staging directory after staging ended, unless the region was closed (it may be
@@ -1203,7 +1192,8 @@ impl MitoRegion {
             }
         );
 
-        let (_, merged_change, _) = staged_actions.split_region_change_and_edit();
+        let (merged_partition_expr_change, merged_change, merged_edit) =
+            staged_actions.clone().split_region_change_and_edit();
         if let Some(change) = &merged_change {
             // In staging exit we only allow metadata-only updates. A `Change`
             // action is accepted only when column definitions are unchanged;
@@ -1218,13 +1208,27 @@ impl MitoRegion {
         }
 
         let ending_started_at = self.manifest_ctx.begin_ending_staging(self.region_id)?;
-        let result = self.manifest_ctx.commit_staged_locked(manager).await;
+        let result = self
+            .manifest_ctx
+            .commit_staged_locked(manager, staged_actions)
+            .await;
         if let Ok(pending) = &result {
             info!(
                 "Successfully committed staged manifests for region {}, new version: {}",
                 self.region_id,
                 pending.version()
             );
+            // Apply the merged changes to in-memory version control
+            if let Some(change) = merged_partition_expr_change {
+                let mut new_metadata = self.version().metadata.as_ref().clone();
+                new_metadata.set_partition_expr(change.partition_expr);
+                self.version_control.alter_metadata(new_metadata.into());
+            }
+            if let Some(change) = merged_change {
+                self.version_control.alter_metadata(change.metadata);
+            }
+            self.version_control
+                .apply_edit(Some(merged_edit), &[], self.file_purger.clone());
         }
         let next_state =
             self.manifest_ctx
@@ -1344,9 +1348,6 @@ pub(crate) struct ManifestContext {
     staging_partition_info: Mutex<Option<StagingPartitionInfo>>,
     /// Optional region hook for observing manifest mutations.
     hook: Option<RegionHookRef>,
-    /// The region version that committed staging actions are applied to. `None` for a context
-    /// that serves no region version.
-    region_version: Option<(VersionControlRef, FilePurgerRef)>,
 }
 
 impl ManifestContext {
@@ -1367,18 +1368,7 @@ impl ManifestContext {
             node_lease,
             staging_partition_info: Mutex::new(None),
             hook,
-            region_version: None,
         }
-    }
-
-    /// Sets the region version that committed staging actions are applied to.
-    pub(crate) fn with_region_version(
-        mut self,
-        version_control: VersionControlRef,
-        file_purger: FilePurgerRef,
-    ) -> Self {
-        self.region_version = Some((version_control, file_purger));
-        self
     }
 
     /// Returns the region hook if one is registered.
@@ -1607,7 +1597,7 @@ impl ManifestContext {
         source: &IndexBuildSource,
         updated: FileMeta,
     ) -> Result<IndexPublication> {
-        let manager = self.write_manager(true).await?;
+        let manager = self.manifest_manager.write().await;
         let manifest = manager.manifest();
         let current_state = self.state.load();
         if !matches!(
@@ -1712,102 +1702,29 @@ impl ManifestContext {
         ))
     }
 
-    /// Commits the staged actions of `manager` as one version under a caller-held write lock,
-    /// applies them to the region version, and returns a [`PendingManifestHook`] to
+    /// Commits the staged actions of `manager`, `staged_actions`, as one version under a
+    /// caller-held write lock, and returns a [`PendingManifestHook`] to
     /// [`fire`](PendingManifestHook::fire) after dropping the lock.
     pub(crate) async fn commit_staged_locked(
         &self,
         manager: &mut RegionManifestManager,
+        staged_actions: RegionMetaActionList,
     ) -> Result<PendingManifestHook> {
         let region_id = manager.manifest().metadata.region_id;
-        let settled = self.settle_locked(manager).await?;
-        let Some(staged_actions) = manager.staged_actions() else {
-            // Settling found that an earlier attempt of this commit landed.
-            return settled.context(UnexpectedSnafu {
-                reason: "no staged actions to commit",
-            });
-        };
         let version = manager
             .commit_staged(|| self.is_leader_lease_expired())
             .await
             .inspect_err(
                 |e| error!(e; "Failed to commit staged manifest, region_id: {}", region_id),
             )?;
-        self.apply_committed(staged_actions.clone());
 
-        let pending = PendingManifestHook::new(
+        Ok(PendingManifestHook::new(
             region_id,
             self.hook.as_ref().map(|_| staged_actions),
             version,
             self.hook.clone(),
             false,
-        );
-        Ok(match settled {
-            Some(settled) => settled.merge(pending),
-            None => pending,
-        })
-    }
-
-    /// Takes the manifest write lock. With `settle`, an end of staging whose result was unknown
-    /// is settled first (a commit is refused while it is not), and the hook of one that landed
-    /// fires with the lock released, so the caller checks its write against the settled manifest.
-    /// A region in staging, a staged edit included, settles only when staging ends, which also
-    /// leaves staging.
-    pub(crate) async fn write_manager(
-        &self,
-        settle: bool,
-    ) -> Result<RwLockWriteGuard<'_, RegionManifestManager>> {
-        let mut manager = self.manifest_manager.write().await;
-        let settle = settle
-            && self.state.load() != RegionRoleState::Leader(RegionLeaderState::Staging)
-            && self.staging_partition_info().is_none();
-        if settle && let Some(settled) = self.settle_locked(&mut manager).await? {
-            drop(manager);
-            settled.fire().await;
-            manager = self.manifest_manager.write().await;
-        }
-        Ok(manager)
-    }
-
-    /// Settles an end of staging whose result was unknown (see [RegionManifestManager::settle]),
-    /// applying it to the region version if it landed.
-    async fn settle_locked(
-        &self,
-        manager: &mut RegionManifestManager,
-    ) -> Result<Option<PendingManifestHook>> {
-        let Some((version, action_list)) = manager.settle().await? else {
-            return Ok(None);
-        };
-        let region_id = manager.manifest().metadata.region_id;
-        info!(
-            "Region {} settled the end of staging as version {}",
-            region_id, version
-        );
-        self.apply_committed(action_list.clone());
-        Ok(Some(PendingManifestHook::new(
-            region_id,
-            self.hook.as_ref().map(|_| action_list),
-            version,
-            self.hook.clone(),
-            false,
-        )))
-    }
-
-    /// Applies committed staging actions to the region version, if this context has one.
-    fn apply_committed(&self, action_list: RegionMetaActionList) {
-        let Some((version_control, file_purger)) = &self.region_version else {
-            return;
-        };
-        let (partition_expr_change, change, edit) = action_list.split_region_change_and_edit();
-        if let Some(change) = partition_expr_change {
-            let mut metadata = version_control.current().version.metadata.as_ref().clone();
-            metadata.set_partition_expr(change.partition_expr);
-            version_control.alter_metadata(metadata.into());
-        }
-        if let Some(change) = change {
-            version_control.alter_metadata(change.metadata);
-        }
-        version_control.apply_edit(Some(edit), &[], file_purger.clone());
+        ))
     }
 
     /// Returns whether the region's Leader deadline has passed. No deadline counts as passed.
@@ -1880,7 +1797,7 @@ impl ManifestContext {
         check_state: impl FnOnce(RegionRoleState, RegionId) -> Result<()>,
     ) -> Result<ManifestVersion> {
         // Acquires the write lock of the manifest manager.
-        let manager = self.write_manager(!is_staging).await?;
+        let manager = self.manifest_manager.write().await;
         // Gets current manifest.
         let manifest = manager.manifest();
         // Checks state inside the lock. This is to ensure that we won't update the manifest
@@ -2709,16 +2626,12 @@ mod tests {
         .await
         .unwrap();
 
-        let file_purger = crate::test_util::new_noop_file_purger();
-        let manifest_ctx = Arc::new(
-            ManifestContext::new(
-                manager,
-                RegionRoleState::Leader(RegionLeaderState::Writable),
-                None,
-                Default::default(),
-            )
-            .with_region_version(version_control.clone(), file_purger.clone()),
-        );
+        let manifest_ctx = Arc::new(ManifestContext::new(
+            manager,
+            RegionRoleState::Leader(RegionLeaderState::Writable),
+            None,
+            Default::default(),
+        ));
 
         MitoRegion {
             region_id: metadata.region_id,
@@ -2728,7 +2641,7 @@ mod tests {
             series_index_store: None,
             access_layer: env.access_layer.clone(),
             manifest_ctx,
-            file_purger,
+            file_purger: crate::test_util::new_noop_file_purger(),
             provider: Provider::noop_provider(),
             last_flush_millis: Default::default(),
             last_schedule_compaction_millis: Default::default(),

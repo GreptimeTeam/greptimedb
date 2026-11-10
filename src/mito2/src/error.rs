@@ -156,14 +156,6 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Whether manifest version {version} was written is unknown: {reason}"))]
-    ManifestUnsettled {
-        version: ManifestVersion,
-        reason: String,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
     #[snafu(display(
         "Manifest checkpoint {version} in {manifest_dir} was removed after it was listed"
     ))]
@@ -1578,7 +1570,6 @@ impl Error {
             | Error::RegionStopped { .. }
             | Error::RegionLeaseExpired { .. }
             | Error::RegionBusy { .. }
-            | Error::ManifestUnsettled { .. }
             | Error::SerdeJson { .. }
             | Error::CompressObject { .. } => false,
             Error::OpenDal { error, .. } => !matches!(
@@ -1614,7 +1605,6 @@ impl ErrorExt for Error {
             OpenDal { .. }
             | ManifestDeltaNotFound { .. }
             | ManifestVersionConflict { .. }
-            | ManifestUnsettled { .. }
             | ManifestCheckpointVanished { .. }
             | ReadParquet { .. } => StatusCode::StorageUnavailable,
             WriteWal { source, .. }
@@ -1842,7 +1832,6 @@ impl ErrorExt for Error {
             | FlushableRegionState { .. }
             | ManifestDeltaNotFound { .. }
             | ManifestVersionConflict { .. }
-            | ManifestUnsettled { .. }
             | ManifestCheckpointVanished { .. } => RetryHint::Retryable,
 
             OpenDal { error, .. }
@@ -2063,18 +2052,10 @@ mod tests {
         }
         .build();
         assert!(!error.may_have_persisted_manifest_update());
-        // Raised before the commit's storage I/O.
-        for error in [
-            RegionBusySnafu { region_id }.build(),
-            ManifestUnsettledSnafu {
-                version: 1u64,
-                reason: "test",
-            }
-            .build(),
-        ] {
-            assert!(!error.may_have_persisted_manifest_update());
-            assert!(error.retry_hint().is_retryable());
-        }
+        // Raised before storage I/O, for example by staging that waits for a retried end commit.
+        let error = RegionBusySnafu { region_id }.build();
+        assert!(!error.may_have_persisted_manifest_update());
+        assert!(error.retry_hint().is_retryable());
 
         // A commit refused before its PUT because the Leader deadline has passed.
         let error = RegionLeaseExpiredSnafu { region_id }.build();

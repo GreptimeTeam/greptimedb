@@ -412,16 +412,6 @@ impl ManifestObjectStore {
         }
     }
 
-    /// Reads the delta of `version` directly from storage, under the name [Self::save] uses, and
-    /// returns whether it holds `bytes`, or `None` if it does not exist.
-    pub(crate) async fn holds_delta(
-        &self,
-        version: ManifestVersion,
-        bytes: &[u8],
-    ) -> Result<Option<bool>> {
-        self.delta_storage.holds_delta(version, bytes).await
-    }
-
     /// Fails with a version conflict unless LIST proves that no checkpoint at or above `version`
     /// exists.
     ///

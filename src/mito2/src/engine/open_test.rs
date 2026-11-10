@@ -1198,8 +1198,11 @@ fn new_dummy_fetcher(region_id: RegionId, expr_json: String) -> PartitionExprFet
     })
 }
 
+#[rstest::rstest]
+#[case::from_writable(false)]
+#[case::after_empty_staging(true)]
 #[tokio::test]
-async fn test_open_backfills_partition_expr_with_fetcher() {
+async fn test_open_backfills_partition_expr_with_fetcher(#[case] staging: bool) {
     let mut env = TestEnv::with_prefix("open-backfill-fetcher").await;
 
     // prepare plugins with dummy fetcher
@@ -1255,10 +1258,27 @@ async fn test_open_backfills_partition_expr_with_fetcher() {
     engine
         .set_region_role(region_id, RegionRole::Leader)
         .unwrap();
+    if staging {
+        // Ending a staging with nothing to commit also backfills.
+        engine
+            .set_region_role_state_gracefully(region_id, SettableRegionRoleState::StagingLeader)
+            .await
+            .unwrap();
+    }
     engine
         .set_region_role_state_gracefully(region_id, SettableRegionRoleState::Leader)
         .await
         .unwrap();
+    let manifest = engine
+        .get_region(region_id)
+        .unwrap()
+        .manifest_ctx
+        .manifest()
+        .await;
+    assert_eq!(
+        manifest.metadata.partition_expr.as_deref(),
+        Some(expr_json.as_str())
+    );
 
     // reopen again to ensure no further changes and still Some
     engine
