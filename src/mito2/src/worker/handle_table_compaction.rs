@@ -143,7 +143,7 @@ fn validate_files(
         edit.files_to_add
             .iter()
             .all(|file| file.region_id == region_id
-                && file.level == 1
+                && file.level == 0
                 && outputs.insert(file.file_id)
                 && !manifest.files.contains_key(&file.file_id)
                 && file.partition_expr == partition

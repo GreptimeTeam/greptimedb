@@ -103,7 +103,7 @@ async fn seed(engine: &MitoEngine, region_id: RegionId) -> (TableCompactionSnaps
         .unwrap();
     let snapshot = engine.table_compaction_snapshot(region_id).unwrap();
     assert_eq!(1, snapshot.inputs.len());
-    let output = copy_sst(&region, &snapshot.inputs[0], 1).await;
+    let output = copy_sst(&region, &snapshot.inputs[0], 0).await;
     (snapshot, output)
 }
 
@@ -157,7 +157,7 @@ async fn test_duplicate_publication_and_later_replacement_do_not_readmit_inputs(
 
     // Publish a later ordinary compaction, then remove the old output object.
     // A late retry must reject its obsolete inputs before trying to verify C.
-    let replacement = copy_sst(&region, &output, 1).await;
+    let replacement = copy_sst(&region, &output, 0).await;
     let edit = RegionEdit {
         files_to_remove: vec![output.clone()],
         files_to_add: vec![replacement.clone()],
