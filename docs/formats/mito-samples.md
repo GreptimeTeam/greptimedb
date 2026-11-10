@@ -226,8 +226,9 @@ Leaf (kind 0):                     Internal root (kind 1):
 Pages are nonempty and limited to 65,536 decoded bytes, including the 12-byte
 prefix. Descriptors never straddle pages. A descriptor carries one variable-size series
 key and then fixed-width columns. A key has no separate length limit: it is bounded
-only by the page it shares with its block descriptor, and even the widest supported
-descriptor fits in one 65,536-byte page. No oversized-leaf exception is needed.
+only by the page it shares with its block descriptor. The writer requires the 12-byte
+leaf prefix and the descriptor, key included, to fit in one 65,536-byte page, so no
+oversized-leaf exception is needed.
 
 #### Block descriptor
 
@@ -267,8 +268,12 @@ all rows null is omitted and synthesized as null by the reader; present value
 chunks have `null_count < row_count`. No value statistics are stored.
 
 A block with `P` present fields has `C = 3 + P` chunks and a descriptor of
-`48 + 44 * C + key_length` bytes. This is 220 bytes for one present field and 45,232 bytes for
-1,024 present fields. The leaf prefix makes the latter 45,244 bytes. All chunks
+`48 + 44 * C + key_length` bytes. For one present field the fixed part is
+`48 + 44 * 4 = 224` bytes; at the 1,024-field maximum it is `48 + 44 * 1,027 = 45,236`
+bytes, and the 12-byte leaf prefix makes that `45,248`. Every one of those figures is
+`base + key_length`, so the page-fit requirement above is what bounds the key: at the
+widest field count a key of at most `65,536 - 45,248 = 20,288` bytes still fits, and
+fewer fields leave room for correspondingly longer keys. All chunks
 are physically ordered and disjoint in the column area, across blocks as well
 as within a block. There is no inline block header or block-wide compression.
 

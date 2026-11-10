@@ -485,8 +485,10 @@ async fn read_block(
         - ranges.iter().map(|r| r.end - r.start).sum::<u64>();
     // The exact key column copies one key per output row, so its per-row budget is the
     // key itself rather than a fixed estimate: an 8 KiB key over one block of 8192 rows
-    // allocates 64 MiB. Every row is budgeted because time pruning has not happened yet
-    // and can only lower the count.
+    // allocates 64 MiB. The 32-byte per-column allowance covers the key's offset entry and
+    // the allocator's alignment rounding, and the column is built without growth so the
+    // budget is what is actually retained. Every row is budgeted because time pruning has
+    // not happened yet and can only lower the count.
     let key_bytes = if projection.contains(&manifest.primary_key_index()) {
         block.key.bytes().len()
     } else {
@@ -587,11 +589,12 @@ async fn read_block(
     for index in sorted {
         let array: ArrayRef = if index == key_index {
             // One block belongs to exactly one exact series; the value is repeated as a
-            // plain binary column so consumers can attribute every row.
-            Arc::new(BinaryArray::from_iter_values(std::iter::repeat_n(
-                block.key.bytes(),
-                selected.len(),
-            )))
+            // plain binary column so consumers can attribute every row. `new_repeated`
+            // builds the offsets in one allocation and reserves the key bytes once, so the
+            // array retains the key data plus its offsets and nothing else. A builder that
+            // grows from an empty buffer (such as `from_iter_values`) doubles its capacity
+            // instead and would retain up to twice the budget below.
+            Arc::new(BinaryArray::new_repeated(block.key.bytes(), selected.len()))
         } else if index == 0 {
             Arc::new(UInt32Array::from(vec![
                 block.key.id().table_id;

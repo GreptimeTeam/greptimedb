@@ -31,7 +31,7 @@ use store_api::codec::PrimaryKeyEncoding;
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::FileId;
 
-use super::metadata::{Bounds, Page, PayloadReference, TRAILER_SIZE, Trailer};
+use super::metadata::{Bounds, HEADER_SIZE, Page, PayloadReference, TRAILER_SIZE, Trailer};
 use super::*;
 use crate::series_index::artifact::{SamplesEntry, SamplesFileHandle};
 use crate::series_index::format::{SamplesFormat, SamplesReadRequest};
@@ -1764,9 +1764,24 @@ async fn series_read_windows_are_bounded_and_gap_rows_are_not_returned() {
         // Header, trailer, root, two leaves (each block descriptor also stores its
         // exact series key), then three windows of at most 128 blocks.
         assert_eq!(8, reads.len());
+        // The initial read-ahead window is the first read of block 0's first column: it starts
+        // at the payload header, while the header, trailer, and page reads do not. Anchor on
+        // that range rather than on an index so a reordered traversal cannot point the
+        // assertions below at some later window.
+        let (_, window) = reads
+            .iter()
+            .find(|(_, range)| range.offset() == HEADER_SIZE)
+            .expect("the initial payload window must be read");
+        let window_size = window.size().unwrap() as usize;
+        // One row per block and four payload columns: 8 + 8 + 1 + 8 bytes each. A read that
+        // spans the whole 128-block window is far larger than a single block's columns.
+        assert!(
+            window_size >= 128 * (8 + 8 + 1 + 8),
+            "the anchored read must be the initial 128-block window, not one block: {window_size}"
+        );
         (
             reads.iter().map(|(_, r)| r.size().unwrap()).sum::<u64>(),
-            reads[5].1.size().unwrap() as usize,
+            window_size,
         )
     };
     reads.lock().unwrap().clear();
@@ -1832,13 +1847,17 @@ async fn series_read_windows_are_bounded_and_gap_rows_are_not_returned() {
         {
             let reads = reads.lock().unwrap();
             assert!(reads.len() > 6);
-            // Read order depends on the pool, so look for the window instead of an index.
+            // The fallback reads that same first column one block at a time, so only the larger
+            // pool's first payload read spans the whole window. Read order depends on the pool,
+            // which is why the anchor is the range rather than an index.
+            let initial = reads
+                .iter()
+                .find(|(_, range)| range.offset() == HEADER_SIZE)
+                .map(|(_, range)| range.size().unwrap() as usize);
             assert_eq!(
                 capacity != 64 * 1024,
-                reads
-                    .iter()
-                    .any(|(_, r)| r.size().unwrap() as usize == first_window_bytes),
-                "only the larger pool should admit the initial prefetch"
+                initial == Some(first_window_bytes),
+                "only the larger pool should admit the initial 128-block prefetch: {initial:?}"
             );
         }
         let mut stream = reader.read(request).unwrap();
@@ -2066,6 +2085,66 @@ async fn exact_key_output_is_budgeted_per_row() {
         .unwrap();
     assert_eq!(8192, rows.iter().map(|b| b.num_rows()).sum::<usize>());
     assert_eq!(0, large.reserved());
+}
+
+/// The reservation must cover what the key column actually retains. A builder that grows its
+/// value buffer doubles it, so a non-power-of-two row count used to retain nearly twice the key
+/// bytes the reservation asked for.
+#[tokio::test]
+async fn exact_key_output_reservation_covers_the_retained_array() {
+    use datafusion::execution::memory_pool::{GreedyMemoryPool, MemoryPool};
+
+    let store = store();
+    let m = metadata();
+    let format = ColumnarSamplesFormat::default();
+    let label = "x".repeat(1024);
+    // Rows just past a doubling step of a value buffer that grows from zero, so a builder that
+    // starts empty ends up sized for nearly twice the key data.
+    let rows = 2135;
+    let keys = vec![new_sparse_primary_key(&[label.as_str(), "z"], &m, 1, 7); rows];
+    let key_len = keys[0].len();
+    let times = (0..rows as i64).collect::<Vec<_>>();
+    let handle = build(
+        &format,
+        &store,
+        m.clone(),
+        &[keyed_batch(&m, &keys, &times, false)],
+    )
+    .await;
+    let reader = format.reader(store, handle).await.unwrap();
+    let pool = Arc::new(GreedyMemoryPool::new(128 * 1024 * 1024));
+    let mut request = request(&[TABLE_ID_COLUMN, TSID_COLUMN, "ts", PRIMARY_KEY]);
+    request.keys = Some(BTreeSet::from([exact(&m, &[label.as_str(), "z"], 1, 7)]));
+    request.memory_pool = Some(pool.clone());
+    let mut stream = reader.read(request).unwrap();
+    let batch = stream.try_next().await.unwrap().expect("one batch");
+    assert_eq!(rows, batch.num_rows());
+    // The batch is yielded while its reservation is still held, so the two are comparable.
+    let retained = batch.get_array_memory_size();
+    let reserved = pool.reserved();
+    assert!(
+        reserved >= retained,
+        "reservation {reserved} is below the {retained} bytes the yielded batch retains"
+    );
+    // The key column itself keeps no growth slack: what it retains is the key data rounded up
+    // to the allocator's 64-byte granularity, one offset per row, and the array's own header.
+    let key_memory = batch
+        .column_by_name(PRIMARY_KEY)
+        .unwrap()
+        .get_array_memory_size();
+    let key_data = key_len * rows;
+    assert!(
+        key_memory <= key_data.div_ceil(64) * 64 + 4 * (rows + 1) + 1024,
+        "the exact key column retains {key_memory} bytes for {key_data} key bytes"
+    );
+    // Proportional as well: the estimate tracks the retained bytes in both directions.
+    assert!(
+        reserved < 2 * retained,
+        "reservation {reserved} dwarfs the {retained} bytes retained"
+    );
+    drop(batch);
+    drop(stream);
+    assert_eq!(0, pool.reserved());
 }
 
 /// Sparse selections must bound aligned cache reads as well as selected column bytes.
