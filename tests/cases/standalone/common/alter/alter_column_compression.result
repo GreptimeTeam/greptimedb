@@ -1,0 +1,490 @@
+-- Per-column SST compression overrides via ALTER TABLE.
+-- MODIFY COLUMN ... COMPRESSION WITH (...) is a merge-on-set delta over the
+-- column's current options; MODIFY COLUMN ... UNSET COMPRESSION clears them.
+CREATE TABLE alter_compression (
+    ts TIMESTAMP TIME INDEX,
+    host STRING,
+    payload STRING,
+    tokens BIGINT,
+    j JSON2
+);
+
+Affected Rows: 0
+
+INSERT INTO alter_compression (ts, host, payload, tokens) VALUES
+    (1, 'a', 'first', 100),
+    (2, 'b', 'second', 200);
+
+Affected Rows: 2
+
+ADMIN FLUSH_TABLE('alter_compression');
+
++----------------------------------------+
+| ADMIN FLUSH_TABLE('alter_compression') |
++----------------------------------------+
+| 0                                      |
++----------------------------------------+
+
+-- No override yet: the column is written with the SST defaults.
+SHOW CREATE TABLE alter_compression;
+
++-------------------+--------------------------------------------------+
+| Table             | Create Table                                     |
++-------------------+--------------------------------------------------+
+| alter_compression | CREATE TABLE IF NOT EXISTS "alter_compression" ( |
+|                   |   "ts" TIMESTAMP(3) NOT NULL,                    |
+|                   |   "host" STRING NULL,                            |
+|                   |   "payload" STRING NULL,                         |
+|                   |   "tokens" BIGINT NULL,                          |
+|                   |   "j" JSON2(                                     |
+|                   |     max_auto_expanded_paths = 100                |
+|                   |   ) NULL,                                        |
+|                   |   TIME INDEX ("ts")                              |
+|                   | )                                                |
+|                   |                                                  |
+|                   | ENGINE=mito                                      |
+|                   |                                                  |
++-------------------+--------------------------------------------------+
+
+ALTER TABLE alter_compression MODIFY COLUMN payload COMPRESSION WITH (type = 'zstd', level = '14');
+
+Affected Rows: 0
+
+SHOW CREATE TABLE alter_compression;
+
++-------------------+------------------------------------------------------------------------+
+| Table             | Create Table                                                           |
++-------------------+------------------------------------------------------------------------+
+| alter_compression | CREATE TABLE IF NOT EXISTS "alter_compression" (                       |
+|                   |   "ts" TIMESTAMP(3) NOT NULL,                                          |
+|                   |   "host" STRING NULL,                                                  |
+|                   |   "payload" STRING NULL COMPRESSION WITH(level = '14', type = 'zstd'), |
+|                   |   "tokens" BIGINT NULL,                                                |
+|                   |   "j" JSON2(                                                           |
+|                   |     max_auto_expanded_paths = 100                                      |
+|                   |   ) NULL,                                                              |
+|                   |   TIME INDEX ("ts")                                                    |
+|                   | )                                                                      |
+|                   |                                                                        |
+|                   | ENGINE=mito                                                            |
+|                   |                                                                        |
++-------------------+------------------------------------------------------------------------+
+
+-- The delta merges into the current options: level is retained, page_size is added.
+ALTER TABLE alter_compression MODIFY COLUMN payload COMPRESSION WITH (page_size = '16KiB');
+
+Affected Rows: 0
+
+SHOW CREATE TABLE alter_compression;
+
++-------------------+---------------------------------------------------------------------------------------------+
+| Table             | Create Table                                                                                |
++-------------------+---------------------------------------------------------------------------------------------+
+| alter_compression | CREATE TABLE IF NOT EXISTS "alter_compression" (                                            |
+|                   |   "ts" TIMESTAMP(3) NOT NULL,                                                               |
+|                   |   "host" STRING NULL,                                                                       |
+|                   |   "payload" STRING NULL COMPRESSION WITH(level = '14', page_size = '16KiB', type = 'zstd'), |
+|                   |   "tokens" BIGINT NULL,                                                                     |
+|                   |   "j" JSON2(                                                                                |
+|                   |     max_auto_expanded_paths = 100                                                           |
+|                   |   ) NULL,                                                                                   |
+|                   |   TIME INDEX ("ts")                                                                         |
+|                   | )                                                                                           |
+|                   |                                                                                             |
+|                   | ENGINE=mito                                                                                 |
+|                   |                                                                                             |
++-------------------+---------------------------------------------------------------------------------------------+
+
+INSERT INTO alter_compression (ts, host, payload, tokens) VALUES
+    (3, 'c', 'third', 300),
+    (4, 'd', 'fourth', 400);
+
+Affected Rows: 2
+
+ADMIN FLUSH_TABLE('alter_compression');
+
++----------------------------------------+
+| ADMIN FLUSH_TABLE('alter_compression') |
++----------------------------------------+
+| 0                                      |
++----------------------------------------+
+
+SELECT ts, host, payload, tokens FROM alter_compression ORDER BY ts;
+
++-------------------------+------+---------+--------+
+| ts                      | host | payload | tokens |
++-------------------------+------+---------+--------+
+| 1970-01-01T00:00:00.001 | a    | first   | 100    |
+| 1970-01-01T00:00:00.002 | b    | second  | 200    |
+| 1970-01-01T00:00:00.003 | c    | third   | 300    |
+| 1970-01-01T00:00:00.004 | d    | fourth  | 400    |
++-------------------------+------+---------+--------+
+
+-- Data and options written before the restart survive it.
+-- SQLNESS ARG restart=true
+SHOW CREATE TABLE alter_compression;
+
++-------------------+---------------------------------------------------------------------------------------------+
+| Table             | Create Table                                                                                |
++-------------------+---------------------------------------------------------------------------------------------+
+| alter_compression | CREATE TABLE IF NOT EXISTS "alter_compression" (                                            |
+|                   |   "ts" TIMESTAMP(3) NOT NULL,                                                               |
+|                   |   "host" STRING NULL,                                                                       |
+|                   |   "payload" STRING NULL COMPRESSION WITH(level = '14', page_size = '16KiB', type = 'zstd'), |
+|                   |   "tokens" BIGINT NULL,                                                                     |
+|                   |   "j" JSON2(                                                                                |
+|                   |     max_auto_expanded_paths = 100                                                           |
+|                   |   ) NULL,                                                                                   |
+|                   |   TIME INDEX ("ts")                                                                         |
+|                   | )                                                                                           |
+|                   |                                                                                             |
+|                   | ENGINE=mito                                                                                 |
+|                   |                                                                                             |
++-------------------+---------------------------------------------------------------------------------------------+
+
+SELECT ts, host, payload, tokens FROM alter_compression ORDER BY ts;
+
++-------------------------+------+---------+--------+
+| ts                      | host | payload | tokens |
++-------------------------+------+---------+--------+
+| 1970-01-01T00:00:00.001 | a    | first   | 100    |
+| 1970-01-01T00:00:00.002 | b    | second  | 200    |
+| 1970-01-01T00:00:00.003 | c    | third   | 300    |
+| 1970-01-01T00:00:00.004 | d    | fourth  | 400    |
++-------------------------+------+---------+--------+
+
+-- Encoding is a merge-on-set key as well.
+ALTER TABLE alter_compression MODIFY COLUMN tokens COMPRESSION WITH (encoding = 'delta_binary_packed');
+
+Affected Rows: 0
+
+SHOW CREATE TABLE alter_compression;
+
++-------------------+---------------------------------------------------------------------------------------------+
+| Table             | Create Table                                                                                |
++-------------------+---------------------------------------------------------------------------------------------+
+| alter_compression | CREATE TABLE IF NOT EXISTS "alter_compression" (                                            |
+|                   |   "ts" TIMESTAMP(3) NOT NULL,                                                               |
+|                   |   "host" STRING NULL,                                                                       |
+|                   |   "payload" STRING NULL COMPRESSION WITH(level = '14', page_size = '16KiB', type = 'zstd'), |
+|                   |   "tokens" BIGINT NULL COMPRESSION WITH(encoding = 'delta_binary_packed', type = 'zstd'),   |
+|                   |   "j" JSON2(                                                                                |
+|                   |     max_auto_expanded_paths = 100                                                           |
+|                   |   ) NULL,                                                                                   |
+|                   |   TIME INDEX ("ts")                                                                         |
+|                   | )                                                                                           |
+|                   |                                                                                             |
+|                   | ENGINE=mito                                                                                 |
+|                   |                                                                                             |
++-------------------+---------------------------------------------------------------------------------------------+
+
+-- UNSET drops the whole override, so the column falls back to the SST defaults.
+ALTER TABLE alter_compression MODIFY COLUMN payload UNSET COMPRESSION;
+
+Affected Rows: 0
+
+ALTER TABLE alter_compression MODIFY COLUMN tokens UNSET COMPRESSION;
+
+Affected Rows: 0
+
+SHOW CREATE TABLE alter_compression;
+
++-------------------+--------------------------------------------------+
+| Table             | Create Table                                     |
++-------------------+--------------------------------------------------+
+| alter_compression | CREATE TABLE IF NOT EXISTS "alter_compression" ( |
+|                   |   "ts" TIMESTAMP(3) NOT NULL,                    |
+|                   |   "host" STRING NULL,                            |
+|                   |   "payload" STRING NULL,                         |
+|                   |   "tokens" BIGINT NULL,                          |
+|                   |   "j" JSON2(                                     |
+|                   |     max_auto_expanded_paths = 100                |
+|                   |   ) NULL,                                        |
+|                   |   TIME INDEX ("ts")                              |
+|                   | )                                                |
+|                   |                                                  |
+|                   | ENGINE=mito                                      |
+|                   |                                                  |
++-------------------+--------------------------------------------------+
+
+-- After UNSET, a new delta starts from the SST defaults instead of the old options.
+ALTER TABLE alter_compression MODIFY COLUMN payload COMPRESSION WITH (page_size = '32KiB');
+
+Affected Rows: 0
+
+SHOW CREATE TABLE alter_compression;
+
++-------------------+-------------------------------------------------------------------------------+
+| Table             | Create Table                                                                  |
++-------------------+-------------------------------------------------------------------------------+
+| alter_compression | CREATE TABLE IF NOT EXISTS "alter_compression" (                              |
+|                   |   "ts" TIMESTAMP(3) NOT NULL,                                                 |
+|                   |   "host" STRING NULL,                                                         |
+|                   |   "payload" STRING NULL COMPRESSION WITH(page_size = '32KiB', type = 'zstd'), |
+|                   |   "tokens" BIGINT NULL,                                                       |
+|                   |   "j" JSON2(                                                                  |
+|                   |     max_auto_expanded_paths = 100                                             |
+|                   |   ) NULL,                                                                     |
+|                   |   TIME INDEX ("ts")                                                           |
+|                   | )                                                                             |
+|                   |                                                                               |
+|                   | ENGINE=mito                                                                   |
+|                   |                                                                               |
++-------------------+-------------------------------------------------------------------------------+
+
+-- Invalid options are rejected and leave the column options untouched.
+ALTER TABLE alter_compression MODIFY COLUMN payload COMPRESSION WITH (level = '0');
+
+Error: 1004(InvalidArguments), Invalid alter table(alter_compression) request: Invalid compression option: invalid level: 0, expected: an integer in 1..=22
+
+ALTER TABLE alter_compression MODIFY COLUMN payload COMPRESSION WITH (level = '23');
+
+Error: 1004(InvalidArguments), Invalid alter table(alter_compression) request: Invalid compression option: invalid level: 23, expected: an integer in 1..=22
+
+ALTER TABLE alter_compression MODIFY COLUMN payload COMPRESSION WITH (type = 'lz4');
+
+Error: 1004(InvalidArguments), Invalid alter table(alter_compression) request: Invalid compression option: invalid type: lz4, expected: 'zstd'
+
+ALTER TABLE alter_compression MODIFY COLUMN payload COMPRESSION WITH (page_size = 'large');
+
+Error: 1004(InvalidArguments), Invalid alter table(alter_compression) request: Invalid compression option: invalid page_size: large, expected: a positive size such as '8MiB'
+
+ALTER TABLE alter_compression MODIFY COLUMN payload COMPRESSION WITH (page_size = '0');
+
+Error: 1004(InvalidArguments), Invalid alter table(alter_compression) request: Invalid compression option: invalid page_size: 0, expected: a positive size such as '8MiB'
+
+ALTER TABLE alter_compression MODIFY COLUMN payload COMPRESSION WITH (codec = 'zstd');
+
+Error: 1004(InvalidArguments), Invalid column option, column name: payload, error: invalid COMPRESSION option: codec
+
+ALTER TABLE alter_compression MODIFY COLUMN payload COMPRESSION WITH ();
+
+Error: 1004(InvalidArguments), Invalid column option, column name: payload, error: expect WITH (...) after COMPRESSION keyword
+
+ALTER TABLE alter_compression MODIFY COLUMN missing COMPRESSION WITH (level = '3');
+
+Error: 4002(TableColumnNotFound), Column missing not exists in table alter_compression
+
+-- Nested columns are rejected: their values live in child columns.
+ALTER TABLE alter_compression MODIFY COLUMN j COMPRESSION WITH (level = '3');
+
+Error: 1004(InvalidArguments), Invalid alter table(alter_compression) request: Invalid compression option: compression options are not supported on column j of type Json2"<Null>"
+
+-- ADD COLUMN has no compression support.
+ALTER TABLE alter_compression ADD COLUMN extra STRING COMPRESSION WITH (level = '3');
+
+Error: 1004(InvalidArguments), Invalid column option, column name: extra, error: ADD COLUMN does not support COMPRESSION
+
+SHOW CREATE TABLE alter_compression;
+
++-------------------+-------------------------------------------------------------------------------+
+| Table             | Create Table                                                                  |
++-------------------+-------------------------------------------------------------------------------+
+| alter_compression | CREATE TABLE IF NOT EXISTS "alter_compression" (                              |
+|                   |   "ts" TIMESTAMP(3) NOT NULL,                                                 |
+|                   |   "host" STRING NULL,                                                         |
+|                   |   "payload" STRING NULL COMPRESSION WITH(page_size = '32KiB', type = 'zstd'), |
+|                   |   "tokens" BIGINT NULL,                                                       |
+|                   |   "j" JSON2(                                                                  |
+|                   |     max_auto_expanded_paths = 100                                             |
+|                   |   ) NULL,                                                                     |
+|                   |   TIME INDEX ("ts")                                                           |
+|                   | )                                                                             |
+|                   |                                                                               |
+|                   | ENGINE=mito                                                                   |
+|                   |                                                                               |
++-------------------+-------------------------------------------------------------------------------+
+
+-- Tag columns need flat SST format and dense primary key encoding: the
+-- primary-key SST format packs tags into __primary_key, so they cannot carry
+-- their own compression options.
+CREATE TABLE alter_compression_tags (
+    ts TIMESTAMP TIME INDEX,
+    host STRING PRIMARY KEY,
+    val DOUBLE
+) WITH ('sst_format' = 'primary_key');
+
+Affected Rows: 0
+
+INSERT INTO alter_compression_tags VALUES (1, 'host-a', 1), (2, 'host-b', 2);
+
+Affected Rows: 2
+
+ADMIN FLUSH_TABLE('alter_compression_tags');
+
++---------------------------------------------+
+| ADMIN FLUSH_TABLE('alter_compression_tags') |
++---------------------------------------------+
+| 0                                           |
++---------------------------------------------+
+
+ALTER TABLE alter_compression_tags MODIFY COLUMN host COMPRESSION WITH (level = '3');
+
+Error: 1004(InvalidArguments), Invalid region options, COMPRESSION on tag column host requires flat SST format and dense primary key encoding
+
+-- A rejected alter leaves the table untouched.
+SHOW CREATE TABLE alter_compression_tags;
+
++------------------------+-------------------------------------------------------+
+| Table                  | Create Table                                          |
++------------------------+-------------------------------------------------------+
+| alter_compression_tags | CREATE TABLE IF NOT EXISTS "alter_compression_tags" ( |
+|                        |   "ts" TIMESTAMP(3) NOT NULL,                         |
+|                        |   "host" STRING NULL,                                 |
+|                        |   "val" DOUBLE NULL,                                  |
+|                        |   TIME INDEX ("ts"),                                  |
+|                        |   PRIMARY KEY ("host")                                |
+|                        | )                                                     |
+|                        |                                                       |
+|                        | ENGINE=mito                                           |
+|                        | WITH(                                                 |
+|                        |   sst_format = 'primary_key'                          |
+|                        | )                                                     |
++------------------------+-------------------------------------------------------+
+
+CREATE TABLE alter_compression_tags_dense (
+    ts TIMESTAMP TIME INDEX,
+    host STRING PRIMARY KEY,
+    val DOUBLE
+) WITH ('sst_format' = 'flat', 'primary_key_encoding' = 'dense');
+
+Affected Rows: 0
+
+INSERT INTO alter_compression_tags_dense VALUES (1, 'host-a', 1), (2, 'host-b', 2);
+
+Affected Rows: 2
+
+ADMIN FLUSH_TABLE('alter_compression_tags_dense');
+
++---------------------------------------------------+
+| ADMIN FLUSH_TABLE('alter_compression_tags_dense') |
++---------------------------------------------------+
+| 0                                                 |
++---------------------------------------------------+
+
+ALTER TABLE alter_compression_tags_dense MODIFY COLUMN host COMPRESSION WITH (level = '3', page_size = '64KiB');
+
+Affected Rows: 0
+
+SHOW CREATE TABLE alter_compression_tags_dense;
+
++------------------------------+-----------------------------------------------------------------------------------------+
+| Table                        | Create Table                                                                            |
++------------------------------+-----------------------------------------------------------------------------------------+
+| alter_compression_tags_dense | CREATE TABLE IF NOT EXISTS "alter_compression_tags_dense" (                             |
+|                              |   "ts" TIMESTAMP(3) NOT NULL,                                                           |
+|                              |   "host" STRING NULL COMPRESSION WITH(level = '3', page_size = '64KiB', type = 'zstd'), |
+|                              |   "val" DOUBLE NULL,                                                                    |
+|                              |   TIME INDEX ("ts"),                                                                    |
+|                              |   PRIMARY KEY ("host")                                                                  |
+|                              | )                                                                                       |
+|                              |                                                                                         |
+|                              | ENGINE=mito                                                                             |
+|                              | WITH(                                                                                   |
+|                              |   primary_key_encoding = 'dense',                                                       |
+|                              |   sst_format = 'flat'                                                                   |
+|                              | )                                                                                       |
++------------------------------+-----------------------------------------------------------------------------------------+
+
+INSERT INTO alter_compression_tags_dense VALUES (3, 'host-c', 3);
+
+Affected Rows: 1
+
+ADMIN FLUSH_TABLE('alter_compression_tags_dense');
+
++---------------------------------------------------+
+| ADMIN FLUSH_TABLE('alter_compression_tags_dense') |
++---------------------------------------------------+
+| 0                                                 |
++---------------------------------------------------+
+
+SELECT * FROM alter_compression_tags_dense ORDER BY ts;
+
++-------------------------+--------+-----+
+| ts                      | host   | val |
++-------------------------+--------+-----+
+| 1970-01-01T00:00:00.001 | host-a | 1.0 |
+| 1970-01-01T00:00:00.002 | host-b | 2.0 |
+| 1970-01-01T00:00:00.003 | host-c | 3.0 |
++-------------------------+--------+-----+
+
+-- Compression is a physical-table concern for the metric engine.
+CREATE TABLE alter_compression_phy (
+    ts TIMESTAMP TIME INDEX,
+    val DOUBLE COMPRESSION WITH (level = '3')
+) ENGINE = metric WITH (physical_metric_table = '');
+
+Affected Rows: 0
+
+ALTER TABLE alter_compression_phy MODIFY COLUMN val COMPRESSION WITH (level = '9');
+
+Affected Rows: 0
+
+SHOW CREATE TABLE alter_compression_phy;
+
++-----------------------+-------------------------------------------------------------------+
+| Table                 | Create Table                                                      |
++-----------------------+-------------------------------------------------------------------+
+| alter_compression_phy | CREATE TABLE IF NOT EXISTS "alter_compression_phy" (              |
+|                       |   "ts" TIMESTAMP(3) NOT NULL,                                     |
+|                       |   "val" DOUBLE NULL COMPRESSION WITH(level = '9', type = 'zstd'), |
+|                       |   TIME INDEX ("ts")                                               |
+|                       | )                                                                 |
+|                       |                                                                   |
+|                       | ENGINE=metric                                                     |
+|                       | WITH(                                                             |
+|                       |   physical_metric_table = ''                                      |
+|                       | )                                                                 |
++-----------------------+-------------------------------------------------------------------+
+
+CREATE TABLE alter_compression_logical (
+    ts TIMESTAMP TIME INDEX,
+    val DOUBLE
+) ENGINE = metric WITH (on_physical_table = 'alter_compression_phy');
+
+Affected Rows: 0
+
+INSERT INTO alter_compression_logical VALUES (1, 42);
+
+Affected Rows: 1
+
+ADMIN FLUSH_TABLE('alter_compression_phy');
+
++--------------------------------------------+
+| ADMIN FLUSH_TABLE('alter_compression_phy') |
++--------------------------------------------+
+| 0                                          |
++--------------------------------------------+
+
+ALTER TABLE alter_compression_logical MODIFY COLUMN val COMPRESSION WITH (level = '9');
+
+Error: 1004(InvalidArguments), Alter logical tables invalid arguments: Only support add columns operation
+
+SELECT * FROM alter_compression_logical;
+
++-------------------------+------+
+| ts                      | val  |
++-------------------------+------+
+| 1970-01-01T00:00:00.001 | 42.0 |
++-------------------------+------+
+
+DROP TABLE alter_compression_logical;
+
+Affected Rows: 0
+
+DROP TABLE alter_compression_phy;
+
+Affected Rows: 0
+
+DROP TABLE alter_compression_tags_dense;
+
+Affected Rows: 0
+
+DROP TABLE alter_compression_tags;
+
+Affected Rows: 0
+
+DROP TABLE alter_compression;
+
+Affected Rows: 0
+

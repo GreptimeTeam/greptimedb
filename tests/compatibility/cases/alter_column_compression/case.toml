@@ -1,0 +1,8 @@
+name = "alter_column_compression"
+reason = "Apply ALTER TABLE ... MODIFY COLUMN ... COMPRESSION to a table created and flushed by an older version, then read the old SSTs and the new override across restart."
+introduced_by = "PR #10196"
+topologies = ["distributed", "standalone"]
+from_range = ["*"]
+to_range = [">=v1.4.0-alpha.0"]
+features = ["table", "compression", "alter", "write", "read"]
+owner = "storage"
