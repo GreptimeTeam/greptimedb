@@ -376,8 +376,8 @@ struct FusedSeriesPayload {
 
 impl FusedSeries {
     /// Serializes the native tree and the binding required to reconstruct this plan node.
-    /// The PromQL text is included for diagnostics only and never drives execution; children
-    /// remain ordinary Substrait inputs.
+    /// The PromQL text identifies expression-named output fields; children remain ordinary
+    /// Substrait inputs.
     ///
     /// This is only the node's own encoding. Whether a planner is allowed to place this node on
     /// another machine is a separate decision, made by the planner and the transport, not here.
@@ -494,6 +494,7 @@ impl FusedSeries {
                 &node.tree,
                 &node.output_tags()?,
                 &node.binding.time_index,
+                &node.promql,
             )?;
         }
         Ok(node)
@@ -1030,6 +1031,22 @@ impl FusedSeries {
     /// from the whole tree - a match narrows them, `or` joins both sides' and a wrapper around
     /// either keeps them - and the output schema is where it records that.
     fn output_tags(&self) -> DataFusionResult<Vec<String>> {
+        if matches!(self.tree.root().output, NativeType::Scalar(_)) {
+            return Ok(Vec::new());
+        }
+        if self.format == FusedOutputFormat::PlainRows {
+            // Roles are types here too: a value is a float or a native histogram, so every other
+            // non-time column of a row table is one of this output's labels, whatever its name.
+            return Ok(self
+                .output_schema
+                .fields()
+                .iter()
+                .filter(|field| {
+                    field.name() != &self.binding.time_index && field.data_type() == &DataType::Utf8
+                })
+                .map(|field| field.name().clone())
+                .collect());
+        }
         let field_names = self
             .tree
             .root()
@@ -1881,6 +1898,7 @@ fn validate_plain_output_schema(
     tree: &NativeTree,
     tags: &[String],
     time: &str,
+    promql: &str,
 ) -> DataFusionResult<()> {
     let fields = match &tree.root().output {
         NativeType::Samples(s) => s.fields.to_vec(),
@@ -1904,7 +1922,7 @@ fn validate_plain_output_schema(
             ));
         }
     };
-    classify_output(schema, &fields, tags, time)?;
+    classify_output(schema, &fields, tags, time, promql)?;
     Ok(())
 }
 
@@ -1993,13 +2011,73 @@ fn scalar_root_fields(
     }])
 }
 
+/// Whether a column of this type carries a field's samples.
+///
+/// A role is a type: a field holds floats or the canonical native histogram struct, a tag is
+/// `Utf8` and time is a timestamp. A name says nothing about which of those a column is.
+fn is_value_column(data_type: &DataType) -> bool {
+    data_type == &DataType::Float64 || data_type == &native_histogram_value_type().as_arrow_type()
+}
+
+/// Whether `names` name exactly the columns in `value_names`, one name per column.
+fn names_value_columns(value_names: &[&str], names: &[String]) -> bool {
+    if names.len() != value_names.len() {
+        return false;
+    }
+    let mut declared = names.iter().map(String::as_str).collect::<Vec<_>>();
+    declared.sort_unstable();
+    let mut carried = value_names.to_vec();
+    carried.sort_unstable();
+    declared == carried
+}
+
+/// Names the fields in a row schema, in `series_fields` order.
+///
+/// A caller names a value column either after the expression that produced it or after the tree's
+/// field, so the typed value columns are what decide which: the expression names are used only
+/// when they name exactly those columns, and the field names when those do. Deciding by type keeps
+/// a tag that shares a field's name from being read as that field. The result stays in
+/// `series_fields` order because a name is bound back to its field by that index, so a reordered
+/// output still reads every column from its own field.
+fn output_field_names(
+    output_schema: &SchemaRef,
+    series_fields: &[FieldSpec],
+    promql: &str,
+) -> Vec<String> {
+    let value_names = output_schema
+        .fields()
+        .iter()
+        .filter(|field| is_value_column(field.data_type()))
+        .map(|field| field.name().as_str())
+        .collect::<Vec<_>>();
+    let expression_names = series_fields
+        .iter()
+        .map(|field| {
+            if series_fields.len() == 1 {
+                promql.to_string()
+            } else {
+                format!("{promql}.{}", field.name)
+            }
+        })
+        .collect::<Vec<_>>();
+    if names_value_columns(&value_names, &expression_names) {
+        return expression_names;
+    }
+    series_fields
+        .iter()
+        .map(|field| field.name.to_string())
+        .collect()
+}
+
 /// Classifies every output column, rejecting anything the conversion cannot produce.
 pub(crate) fn classify_output(
     output_schema: &SchemaRef,
     series_fields: &[FieldSpec],
     tags: &[String],
     time_column: &str,
+    promql: &str,
 ) -> DataFusionResult<Vec<OutputColumn>> {
+    let field_names = output_field_names(output_schema, series_fields, promql);
     if output_schema
         .fields()
         .iter()
@@ -2020,11 +2098,6 @@ pub(crate) fn classify_output(
         if tag == time_column {
             return Err(DataFusionError::Plan(format!(
                 "tag column {tag:?} of FusedSeriesExec cannot be the time column"
-            )));
-        }
-        if series_fields.iter().any(|field| field.name.as_ref() == tag) {
-            return Err(DataFusionError::Plan(format!(
-                "tag column {tag:?} of FusedSeriesExec clashes with a series field"
             )));
         }
     }
@@ -2058,10 +2131,7 @@ pub(crate) fn classify_output(
             classification.push(OutputColumn::Time);
             continue;
         }
-        if let Some(index) = series_fields
-            .iter()
-            .position(|field| field.name.as_ref() == name)
-        {
+        if let Some(index) = field_names.iter().position(|field| field == name) {
             if std::mem::replace(&mut field_seen[index], true) {
                 return Err(DataFusionError::Plan(format!(
                     "duplicate field column {name:?} in FusedSeriesExec output schema"
@@ -2126,7 +2196,7 @@ pub(crate) fn classify_output(
         if !seen {
             return Err(DataFusionError::Plan(format!(
                 "missing field column {:?} in FusedSeriesExec output schema",
-                series_fields[index].name
+                field_names[index]
             )));
         }
     }
@@ -2425,7 +2495,7 @@ impl FusedSeriesExec {
             Vec::new()
         } else if scalar_root {
             let scalar_fields = scalar_root_fields(&output_schema, &tags, &time_column)?;
-            classify_output(&output_schema, &scalar_fields, &tags, &time_column)?
+            classify_output(&output_schema, &scalar_fields, &tags, &time_column, &promql)?
         } else {
             classify_output(
                 &output_schema,
@@ -2436,6 +2506,7 @@ impl FusedSeriesExec {
                     .fields,
                 &tags,
                 &time_column,
+                &promql,
             )?
         };
         let partition_count = inputs.first().map_or(1, |(input, _, _)| {

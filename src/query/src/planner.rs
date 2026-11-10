@@ -1685,8 +1685,7 @@ mod tests {
     }
 
     /// A statement that reads no table plans natively over the wire, where there is no region to
-    /// place anything in: the frontend evaluates the fused node under the native column names
-    /// rather than the ones the existing planner derives from an expression.
+    /// place anything in: the frontend evaluates the fused node with expression-named values.
     #[tokio::test]
     async fn test_remote_native_promql_plans_a_data_free_statement_natively() {
         let engine = create_promql_test_engine_with(
@@ -1697,31 +1696,17 @@ mod tests {
             false,
         );
         let query_ctx = native_discovery_query_ctx();
-        for (query, expected_columns, expected_values, expected_labels) in [
+        for (query, expected_values, expected_labels) in [
             // `time()` answers the evaluation grid in seconds.
-            (
-                "time()",
-                &["time", "value"][..],
-                &[0.0, 5.0, 10.0][..],
-                &[][..],
-            ),
-            (
-                "vector(1)",
-                &["time", "value"][..],
-                &[1.0, 1.0, 1.0][..],
-                &[][..],
-            ),
+            ("time()", &[0.0, 5.0, 10.0][..], &[][..]),
+            ("vector(1)", &[1.0, 1.0, 1.0][..], &[][..]),
             (
                 r#"label_replace(vector(1), "host", "host1", "", "")"#,
-                &["time", "value", "host"][..],
                 &[1.0, 1.0, 1.0][..],
                 &[("host", "host1")][..],
             ),
-            // A synthesized `__tsid` is published under the statement's own columns: the stripping
-            // projection above the node is read through rather than mistaken for a remote plan.
             (
                 r#"label_replace(vector(1), "__tsid", "x", "", "")"#,
-                &["time", "value"][..],
                 &[1.0, 1.0, 1.0][..],
                 &[][..],
             ),
@@ -1734,6 +1719,9 @@ mod tests {
                 "{query} keeps the native value column: {display}"
             );
             // A data-free statement has no input at all, so nothing is scanned or left empty.
+            let expression = promql_parser::parser::parse(query).unwrap().to_string();
+            let mut expected_columns = vec!["time", expression.as_str()];
+            expected_columns.extend(expected_labels.iter().map(|(name, _)| *name));
             assert_eq!(
                 expected_columns,
                 plan.schema()
@@ -1747,7 +1735,7 @@ mod tests {
             assert_regionless_physical_plan(&physical, query);
             assert_eq!(
                 expected_values,
-                numeric_values(&batches, "value").as_slice(),
+                numeric_values(&batches, &expression).as_slice(),
                 "{query}: {batches:?}"
             );
             for (label, value) in expected_labels {

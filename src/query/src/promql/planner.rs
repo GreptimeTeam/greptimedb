@@ -62,7 +62,7 @@ use datafusion_expr::expr_fn::when;
 use datafusion_expr::utils::{conjunction, disjunction};
 use datafusion_expr::{ExprSchemable, Literal, SortExpr, TableSource, ident, lit};
 use datafusion_functions::core::coalesce;
-use datatypes::arrow::datatypes::{DataType as ArrowDataType, TimeUnit as ArrowTimeUnit};
+use datatypes::arrow::datatypes::{DataType as ArrowDataType, Field, TimeUnit as ArrowTimeUnit};
 use datatypes::data_type::{ConcreteDataType, DataType as GreptimeDataType};
 use itertools::Itertools;
 use once_cell::sync::Lazy;
@@ -1419,13 +1419,11 @@ impl PromPlanner {
                     let right_ctx = self.ctx.clone();
                     (left, left_ctx, right, right_ctx)
                 };
-                let left_field_columns = left_context.field_columns.clone();
                 let left_time_index_column = left_context.time_index_column.clone();
                 self.ctx = left_context.clone();
                 let mut left_table_ref = self
                     .table_ref()
                     .unwrap_or_else(|_| TableReference::bare(""));
-                let right_field_columns = right_context.field_columns.clone();
                 let right_time_index_column = right_context.time_index_column.clone();
                 self.ctx = right_context.clone();
                 let mut right_table_ref = self
@@ -1434,7 +1432,8 @@ impl PromPlanner {
 
                 // Both operands are planned first because only the planned contexts tell a tag
                 // from a value field. The rewrite merely adds matchers to a selector, so the
-                // table reference, time index and field columns captured above stay valid.
+                // table reference and time index captured above stay valid. The field columns are
+                // read after this rewrite, because an operand it re-plans brings its own.
                 if let Some(rewritten) = matching_filters::propagate(
                     binary_expr,
                     &left_context.tag_columns,
@@ -1465,6 +1464,8 @@ impl PromPlanner {
                     self.ctx = right_context.clone();
                 }
 
+                let left_field_columns = left_context.field_columns.clone();
+                let right_field_columns = right_context.field_columns.clone();
                 let left_is_empty_metric = Self::is_empty_metric(&left_input);
                 let right_is_empty_metric = Self::is_empty_metric(&right_input);
 
@@ -3982,12 +3983,28 @@ impl PromPlanner {
                     query_engine_state,
                 )?;
 
-                // Reserve the current field columns except the `dst_label`.
-                for value in &self.ctx.field_columns {
-                    if *value != dst_label {
-                        let expr = DfExpr::Column(Column::from_name(value));
-                        exprs.push(expr);
+                // A destination label is a tag, and a tag is published under its own name. A
+                // value field of that name would have to be dropped or renamed to make room, and
+                // neither is what the statement says, so the collision is the statement's error
+                // rather than a value quietly going missing.
+                if self
+                    .ctx
+                    .field_columns
+                    .iter()
+                    .any(|field| field == &dst_label)
+                {
+                    return UnsupportedExprSnafu {
+                        name: format!(
+                            "label_join destination label {dst_label:?} collides with a value field"
+                        ),
                     }
+                    .fail();
+                }
+
+                // Reserve the current field columns.
+                for value in &self.ctx.field_columns {
+                    let expr = DfExpr::Column(Column::from_name(value));
+                    exprs.push(expr);
                 }
 
                 // Remove it from tag columns if exists to avoid duplicated column names
@@ -4003,12 +4020,10 @@ impl PromPlanner {
                 if let Some((replace_expr, dst_label)) =
                     self.build_regexp_replace_label_expr(&mut other_input_exprs, input_schema)?
                 {
-                    // Reserve the current field columns except the `dst_label`.
+                    // Reserve the current field columns.
                     for value in &self.ctx.field_columns {
-                        if *value != dst_label {
-                            let expr = DfExpr::Column(Column::from_name(value));
-                            exprs.push(expr);
-                        }
+                        let expr = DfExpr::Column(Column::from_name(value));
+                        exprs.push(expr);
                     }
 
                     // Remove it from tag columns if exists to avoid duplicated column names
@@ -4338,6 +4353,22 @@ impl PromPlanner {
 
         // Validate the destination label name
         Self::validate_label_name(&dst_label)?;
+        // A destination label is a tag, and a tag is published under its own name. A value field
+        // of that name would have to be dropped or renamed to make room, so report the collision
+        // before any no-op path below can silently decline the rewrite.
+        if self
+            .ctx
+            .field_columns
+            .iter()
+            .any(|field| field == &dst_label)
+        {
+            return UnsupportedExprSnafu {
+                name: format!(
+                    "label_replace destination label {dst_label:?} collides with a value field"
+                ),
+            }
+            .fail();
+        }
         let replacement = match other_input_exprs.pop_front() {
             Some(DfExpr::Literal(ScalarValue::Utf8(Some(r)), _)) => r,
             other => UnexpectedPlanExprSnafu {
@@ -6631,11 +6662,18 @@ impl PromPlanner {
 
     fn strip_tsid_column(&self, plan: LogicalPlan) -> Result<LogicalPlan> {
         let schema = plan.schema();
-        if !schema
-            .fields()
-            .iter()
-            .any(|field| field.name() == DATA_SCHEMA_TSID_COLUMN_NAME)
-        {
+        // A series identifier is the internal `UInt64` key or the `Utf8` label synthesized from
+        // it, and only those two representations are stripped. The same name on any other column
+        // is the statement's own answer - `count(m)` aliased to `__tsid` answers an `Int64`, and a
+        // value is `Float64` or the canonical native histogram struct - so a name is not a role.
+        fn is_internal_tsid(field: &Field) -> bool {
+            field.name() == DATA_SCHEMA_TSID_COLUMN_NAME
+                && matches!(
+                    field.data_type(),
+                    ArrowDataType::UInt64 | ArrowDataType::Utf8
+                )
+        }
+        if !schema.fields().iter().any(|field| is_internal_tsid(field)) {
             return Ok(plan);
         }
 
@@ -6643,7 +6681,7 @@ impl PromPlanner {
         // the columns by their original qualified names.
         let project_exprs = schema
             .iter()
-            .filter(|(_, field)| field.name() != DATA_SCHEMA_TSID_COLUMN_NAME)
+            .filter(|(_, field)| !is_internal_tsid(field))
             .map(|(qualifier, field)| {
                 DfExpr::Column(Column::new(qualifier.cloned(), field.name().clone()))
             })

@@ -1746,19 +1746,17 @@ fn result_columns(schema: &SchemaRef) -> Vec<(String, DataType, bool)> {
 ///
 /// The tags are stated by the caller rather than read off the result: a vector that matches no
 /// series reports no row to read them from, and still answers with its tag columns.
-fn assert_native_result_schema(schema: &SchemaRef, tags: &[&str], context: &str) {
-    // The time index and the one field the tree reports, then one `Utf8` column per tag.
+fn assert_native_result_schema(schema: &SchemaRef, tags: &[&str], value_name: &str, context: &str) {
+    // The time index and the one field the tree reports, then one `Utf8` column per tag. The
+    // native route names the value column after the expression, so the caller states that name;
+    // `value`/`val` are the legacy route's names.
     let mut columns = vec![
         (
             if tags.is_empty() { "time" } else { "ts" }.to_string(),
             DataType::Timestamp(TimeUnit::Millisecond, None),
             false,
         ),
-        (
-            if tags.is_empty() { "value" } else { "val" }.to_string(),
-            DataType::Float64,
-            true,
-        ),
+        (value_name.to_string(), DataType::Float64, true),
     ];
     for name in tags {
         columns.push(((*name).to_string(), DataType::Utf8, true));
@@ -2048,9 +2046,13 @@ async fn assert_raw_scan_fused_formats(observer: &NativeFusedObserver, frontend:
                         .as_any()
                         .downcast_ref::<StringArray>()
                         .unwrap();
+                    // The native route names its value column after the expression, so the
+                    // type is what identifies it; `val` is only the legacy route's name.
                     let values = batch
-                        .column_by_name("val")
-                        .unwrap()
+                        .columns()
+                        .iter()
+                        .find(|column| column.data_type() == &DataType::Float64)
+                        .expect("one Float64 value column")
                         .as_any()
                         .downcast_ref::<Float64Array>()
                         .unwrap();
@@ -2548,7 +2550,7 @@ pub async fn test_native_promql_route_plans_the_query(store_type: StorageType) {
         };
         let (plan, schema, rows) = promql_output(frontend, query, true, start, end).await;
         assert_rows_eq(&rows, &expected, query);
-        assert_native_result_schema(&schema, tags, query);
+        assert_native_result_schema(&schema, tags, query, query);
         let fused = assert_native_plan(&plan, scan_partitions, query);
         assert_eq!(
             fused["metrics"]["native.root.output_values"].as_u64(),
@@ -2573,13 +2575,33 @@ pub async fn test_native_promql_route_plans_the_query(store_type: StorageType) {
         );
         assert_rows_eq(&legacy_rows, &expected, query);
         assert_legacy_result_schema(&legacy_schema, tags, query);
-        // Both constant cases preserve the legacy time/value schema; computed vector columns are
-        // compared by role.
+        // Both routes report the time column and one Float64 value. The native route names that
+        // value after the expression, so the constant cases agree by role, not by header name.
         if scan_partitions.is_none() {
             assert_eq!(
-                result_columns(&legacy_schema),
-                result_columns(&schema),
-                "`{query}`: the two routes must report the same constant schema"
+                2,
+                schema.fields().len(),
+                "`{query}`: native constant schema"
+            );
+            assert_eq!(
+                2,
+                legacy_schema.fields().len(),
+                "`{query}`: legacy constant schema"
+            );
+            assert_eq!(
+                schema.field(0).data_type(),
+                legacy_schema.field(0).data_type(),
+                "`{query}`: time column type"
+            );
+            assert_eq!(
+                &DataType::Float64,
+                schema.field(1).data_type(),
+                "`{query}`: native value type"
+            );
+            assert_eq!(
+                &DataType::Float64,
+                legacy_schema.field(1).data_type(),
+                "`{query}`: legacy value type"
             );
         }
     }
@@ -2592,7 +2614,7 @@ pub async fn test_native_promql_route_plans_the_query(store_type: StorageType) {
     observer.clear();
     let (plan, schema, rows) = promql_output(frontend, query, true, "0", "2").await;
     assert!(rows.is_empty(), "`{query}` reported {} rows", rows.len());
-    assert_native_result_schema(&schema, &["host"], query);
+    assert_native_result_schema(&schema, &["host"], query, query);
     assert!(
         executes_fused_series(&plan),
         "`{query}` did not execute the fused route"

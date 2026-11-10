@@ -4903,11 +4903,15 @@ async fn distributed_native_promql_zero_match_or_real() {
         );
 
         let (columns, rows) = native_labelled_rows(output).await;
-        assert_eq!(
-            columns,
-            vec!["__name__", "host", "ts", "val"],
-            "{expression}"
-        );
+        // The value is named after the statement's expression, not `val`.
+        let mut expected_columns = vec![
+            "__name__".to_string(),
+            "host".to_string(),
+            "ts".to_string(),
+            expression_name(expression),
+        ];
+        expected_columns.sort();
+        assert_eq!(columns, expected_columns, "{expression}");
         let actual = rows
             .iter()
             .map(|(time, labels, value)| {
@@ -5101,7 +5105,7 @@ async fn distributed_native_promql_metric_discovery_reconciles_mixed_ordering() 
                     .clone()
             });
             let values = batch
-                .column_by_name("val")
+                .column_by_name(&expression_name(expression))
                 .expect("one value column")
                 .as_any()
                 .downcast_ref::<Float64Array>()
@@ -5273,9 +5277,7 @@ async fn data_free_rows(output: Output) -> (Vec<String>, Vec<(i64, f64)>) {
     (columns, rows)
 }
 
-/// A statement that reads no table plans natively over the wire, where there is no region to place
-/// anything in: the frontend evaluates one fused node, so the answer keeps the native column name
-/// instead of the one the existing planner derives from an expression.
+/// A statement that reads no table plans natively over the wire, with an expression-named value.
 #[tokio::test(flavor = "multi_thread")]
 async fn distributed_native_promql_data_free_statement_plans_natively() {
     common_telemetry::init_default_ut_logging();
@@ -5291,12 +5293,12 @@ async fn distributed_native_promql_data_free_statement_plans_natively() {
         .build(false)
         .await;
     let instance = cluster.fe_instance().clone();
-    for (expression, expected_columns, expected_rows) in [
+    for (expression, labels, expected_rows) in [
         // `start`/`end` are seconds, so this one-step range evaluates at 3000ms.
-        ("time()", &["time", "value"][..], &[(3000, 3.0)][..]),
+        ("time()", &[][..], &[(3000, 3.0)][..]),
         (
             r#"label_replace(vector(1), "host", "host1", "", "")"#,
-            &["time", "value", "host"][..],
+            &["host"][..],
             &[(3000, 1.0)][..],
         ),
     ] {
@@ -5323,11 +5325,17 @@ async fn distributed_native_promql_data_free_statement_plans_natively() {
             "a data-free statement reads no region: {plan:?}"
         );
         let (columns, rows) = data_free_rows(output).await;
+        let QueryStatement::Promql(stmt, _) =
+            QueryLanguageParser::parse_promql(&query, &QueryContext::arc()).unwrap()
+        else {
+            unreachable!()
+        };
+        let mut expected_columns = vec!["time".to_string(), stmt.expr.to_string()];
+        expected_columns.extend(labels.iter().map(|label| (*label).to_string()));
         assert_eq!(expected_columns, columns, "{expression}");
         assert_eq!(expected_rows, rows.as_slice(), "{expression}");
 
-        // The same statement through the existing planner answers the same rows; only the native
-        // route names the value column after the tree rather than after an expression.
+        // The same statement through the existing planner answers the same rows.
         let legacy = instance
             .do_promql_query(&query, native_query_context(false, 2))
             .await
@@ -6431,8 +6439,18 @@ async fn native_promql_sort_absent_and_histogram_quantile_match_legacy() {
             let legacy_rows = legacy.iter().map(|batch| batch.num_rows()).sum::<usize>();
             assert_eq!(native_rows, legacy_rows);
             assert!(native_rows >= 1, "histogram_quantile must produce data");
+            let query = PromQuery {
+                query: shape.to_string(),
+                ..PromQuery::default()
+            };
+            let QueryStatement::Promql(stmt, _) =
+                QueryLanguageParser::parse_promql(&query, &QueryContext::arc()).unwrap()
+            else {
+                unreachable!()
+            };
+            let expression = stmt.expr.to_string();
             assert_eq!(
-                vec!["ts", "val", "host"],
+                vec!["ts", expression.as_str(), "host"],
                 native_columns
                     .iter()
                     .map(|column| column.name.as_str())
@@ -6523,9 +6541,123 @@ async fn native_promql_sort_absent_and_histogram_quantile_match_legacy() {
                 );
             }
         } else {
-            let native = native_output_text(native).await;
-            let legacy = native_output_text(legacy).await;
-            assert_eq!(native, legacy, "{shape}; SQL: {sql}");
+            // Both routes answer the same rows; only the one value column's header differs,
+            // because the existing planner keeps the tree's field name while the native route
+            // names that column after the expression. Compare what the columns carry - the
+            // timestamp, the label set and the value, in response order - and the native naming.
+            let collect = |output: Output| async move {
+                match output.data {
+                    OutputData::Stream(stream) => collect_batches(stream).await.unwrap(),
+                    OutputData::RecordBatches(batches) => batches,
+                    _ => unreachable!("query returns record batches"),
+                }
+            };
+            let rows = |batches: &common_recordbatch::RecordBatches| {
+                batches
+                    .iter()
+                    .flat_map(|batch| {
+                        let batch = batch.df_record_batch();
+                        let schema = batch.schema();
+                        let value_index = schema
+                            .fields()
+                            .iter()
+                            .position(|field| field.data_type() == &DataType::Float64)
+                            .expect("one float value column");
+                        let timestamps = batch
+                            .column_by_name("ts")
+                            .unwrap()
+                            .as_any()
+                            .downcast_ref::<TimestampMillisecondArray>()
+                            .unwrap();
+                        let labels = schema
+                            .fields()
+                            .iter()
+                            .filter(|field| {
+                                !matches!(
+                                    field.data_type(),
+                                    DataType::Float64 | DataType::Timestamp(..)
+                                )
+                            })
+                            .map(|field| {
+                                let column = cast(
+                                    batch.column_by_name(field.name()).unwrap().as_ref(),
+                                    &DataType::Utf8,
+                                )
+                                .unwrap();
+                                (
+                                    field.name().clone(),
+                                    column
+                                        .as_any()
+                                        .downcast_ref::<StringArray>()
+                                        .unwrap()
+                                        .clone(),
+                                )
+                            })
+                            .collect::<Vec<_>>();
+                        let values =
+                            cast(batch.column(value_index).as_ref(), &DataType::Float64).unwrap();
+                        let values = values.as_any().downcast_ref::<Float64Array>().unwrap();
+                        (0..batch.num_rows())
+                            .map(|row| {
+                                (
+                                    timestamps.value(row),
+                                    labels
+                                        .iter()
+                                        .filter(|(_, column)| {
+                                            column.is_valid(row) && !column.value(row).is_empty()
+                                        })
+                                        .map(|(name, column)| {
+                                            (name.clone(), column.value(row).to_string())
+                                        })
+                                        .collect::<std::collections::BTreeMap<_, _>>(),
+                                    values.value(row),
+                                )
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                    .collect::<Vec<_>>()
+            };
+            let native = collect(native).await;
+            let legacy = collect(legacy).await;
+            let native_names = native
+                .schema()
+                .column_schemas()
+                .iter()
+                .map(|column| column.name.clone())
+                .collect::<Vec<_>>();
+            let native_rows = rows(&native);
+            let legacy_rows = rows(&legacy);
+            assert_eq!(native_rows, legacy_rows, "{shape}; SQL: {sql}");
+            if shape.starts_with("sort") {
+                assert!(!native_rows.is_empty(), "{shape} must produce data: {sql}");
+            }
+            let legacy_labels = legacy
+                .schema()
+                .column_schemas()
+                .iter()
+                .filter(|column| {
+                    !column.data_type.is_timestamp()
+                        && column.data_type
+                            != datatypes::prelude::ConcreteDataType::float64_datatype()
+                })
+                .map(|column| column.name.clone())
+                .collect::<Vec<_>>();
+            assert_eq!(
+                native_names[2..],
+                legacy_labels,
+                "{shape}: native boundary lost a label column: {native_names:?}"
+            );
+            assert_eq!(
+                native_names[0..2],
+                ["ts".to_string(), expression_name(shape)],
+                "{shape}: native boundary columns"
+            );
+            assert!(
+                native_names[2..]
+                    .iter()
+                    .all(|name| matches!(name.as_str(), "host" | "le")),
+                "{shape}: native boundary columns: {native_names:?}"
+            );
         }
     }
 }
@@ -7156,11 +7288,10 @@ async fn native_kind_rows(output: Output) -> Vec<(i64, String, String, f64)> {
         let hosts = hosts.as_any().downcast_ref::<StringArray>().unwrap();
         let kinds = kinds.as_any().downcast_ref::<StringArray>().unwrap();
         let values = batch
-            .column_by_name("val")
-            .unwrap()
-            .as_any()
-            .downcast_ref::<Float64Array>()
-            .unwrap();
+            .columns()
+            .iter()
+            .find_map(|column| column.as_any().downcast_ref::<Float64Array>())
+            .expect("one value column");
         for row in 0..batch.num_rows() {
             rows.push((
                 timestamps.value(row),
@@ -7769,7 +7900,15 @@ async fn native_promql_zero_match_or_real_tql() {
             .remove(0)
             .unwrap();
         let (columns, rows) = native_labelled_rows(output).await;
-        assert_eq!(columns, vec!["__name__", "host", "ts", "val"], "{query}");
+        // The value is named after the statement's expression, not `val`.
+        let mut expected_columns = vec![
+            "__name__".to_string(),
+            "host".to_string(),
+            "ts".to_string(),
+            expression_name(query),
+        ];
+        expected_columns.sort();
+        assert_eq!(columns, expected_columns, "{query}");
         let actual = rows
             .iter()
             .map(|(time, labels, value)| {
@@ -8107,6 +8246,19 @@ async fn discovery_query(instance: &Arc<Instance>, promql: &str) -> Output {
     )
     .await
     .unwrap()
+}
+
+fn expression_name(promql: &str) -> String {
+    let query = PromQuery {
+        query: promql.to_string(),
+        ..PromQuery::default()
+    };
+    let QueryStatement::Promql(stmt, _) =
+        QueryLanguageParser::parse_promql(&query, &QueryContext::arc()).unwrap()
+    else {
+        unreachable!()
+    };
+    stmt.expr.to_string()
 }
 
 /// `(time, labels, value)` of every row, sorted, whatever the columns are named: the time index is
@@ -8470,7 +8622,18 @@ async fn native_promql_cross_table_pairs_over_different_schemas() {
                 2,
                 "{context}: expected one distinct SeriesScanExec per selector occurrence"
             );
-            assert_eq!(native_columns, columns, "{context}");
+            let mut expected_columns = columns
+                .into_iter()
+                .map(|column| {
+                    if column == "val" {
+                        expression_name(query)
+                    } else {
+                        column.to_string()
+                    }
+                })
+                .collect::<Vec<_>>();
+            expected_columns.sort();
+            assert_eq!(native_columns, expected_columns, "{context}");
             assert_eq!(native.len(), expected.len(), "{context}: {native:?}");
             for (actual, expected) in native.iter().zip(&expected) {
                 assert_eq!(
@@ -8665,7 +8828,27 @@ async fn native_promql_three_selector_trees_bind_every_occurrence() {
             .map(|field| field.name().clone())
             .collect::<Vec<_>>();
         plan_columns.sort();
-        assert_eq!(plan_columns, columns, "{query}");
+        let expression_query = PromQuery {
+            query: query.to_string(),
+            ..PromQuery::default()
+        };
+        let QueryStatement::Promql(stmt, _) =
+            QueryLanguageParser::parse_promql(&expression_query, &QueryContext::arc()).unwrap()
+        else {
+            unreachable!()
+        };
+        let mut expected_columns = columns
+            .into_iter()
+            .map(|column| {
+                if column == "val" {
+                    stmt.expr.to_string()
+                } else {
+                    column.to_string()
+                }
+            })
+            .collect::<Vec<_>>();
+        expected_columns.sort();
+        assert_eq!(plan_columns, expected_columns, "{query}");
         assert_eq!(native, expected, "{query}");
         let legacy = native_result_rows(native_tql_output(&instance, &sql, false).await).await;
         assert_eq!(native, legacy, "legacy: {query}");
@@ -8870,7 +9053,18 @@ async fn native_promql_info_enriches_from_the_info_table() {
         assert_eq!(plan.name(), "FusedSeriesExec", "{query}");
         assert_eq!(plan.children().len(), 2, "{query}");
         assert_eq!(observer.take_raw_sources().len(), 2, "{query}");
-        assert_eq!(native_columns, columns, "{query}");
+        let mut expected_columns = columns
+            .into_iter()
+            .map(|column| {
+                if column == "val" {
+                    expression_name(query)
+                } else {
+                    column.to_string()
+                }
+            })
+            .collect::<Vec<_>>();
+        expected_columns.sort();
+        assert_eq!(native_columns, expected_columns, "{query}");
         assert_eq!(native, expected, "{query}");
 
         // The existing plan refuses `info`: "Unsupported expr type: info" for one argument, and
@@ -9596,7 +9790,15 @@ async fn native_hybrid_binary_empty_on_grouped_matching_and_errors() {
             native_labelled_rows(native_tql_output(&instance, &sql, true).await).await;
         let plan = observer.two_input_fused();
         assert_eq!(plan.name(), "FusedSeriesExec", "{query}");
-        assert_eq!(columns, vec!["host", "kind", "ts", "val", "zone_name"]);
+        let mut expected_columns = vec![
+            "host".to_string(),
+            "kind".to_string(),
+            "ts".to_string(),
+            expression_name(query),
+            "zone_name".to_string(),
+        ];
+        expected_columns.sort();
+        assert_eq!(columns, expected_columns);
         assert_eq!(rows, expected, "{query}");
         let (_, legacy) =
             native_labelled_rows(native_tql_output(&instance, &sql, false).await).await;
@@ -10085,6 +10287,26 @@ async fn native_promql_metric_two_aggregate_pair_matches_legacy() {
             .iter()
             .map(|column| column.name.as_str())
             .collect::<Vec<_>>();
+        let expression_query = PromQuery {
+            query: query.to_string(),
+            ..PromQuery::default()
+        };
+        let QueryStatement::Promql(stmt, _) =
+            QueryLanguageParser::parse_promql(&expression_query, &QueryContext::arc()).unwrap()
+        else {
+            unreachable!()
+        };
+        let expression = stmt.expr.to_string();
+        let expected_columns = expected_columns
+            .into_iter()
+            .map(|column| {
+                if column == "val" {
+                    expression.as_str()
+                } else {
+                    column
+                }
+            })
+            .collect::<Vec<_>>();
         assert_eq!(
             expected_columns, boundary_columns,
             "{query}: native boundary columns"
@@ -10158,14 +10380,8 @@ async fn native_promql_metric_two_aggregate_pair_matches_legacy() {
         assert_eq!(native_rows, legacy_rows, "{query}: rows");
         assert_eq!(native_rows, expected, "{query}");
 
-        // The columns both routes report: the time index, one value column, and one column per
-        // label. The labels themselves are compared row by row above, and the time index is `ts` on
-        // both. The value column's *name* is not equal, and that is this route's existing naming for
-        // a computed value column rather than anything this shape introduces: the node names its
-        // fields after the tree's own root schema, while the existing planner names a computed column
-        // after its expression (the same difference is pinned for a cross-table pair by
-        // `native_fused_cross_table_pair_reads_each_table_through_its_own_source`). So the
-        // shape is asserted, and the value column's name is pinned as the raw field it comes from.
+        // Compare time and label columns independently; the native boundary uses the canonical
+        // expression name for its value.
         assert_eq!(
             native_columns.len(),
             legacy_columns.len(),
@@ -11054,13 +11270,19 @@ async fn native_promql_rewrites_the_label_count_values_writes() {
     );
 }
 
-/// `topk`/`bottomk` key their groups by series labels, while the existing plan also accepts a value
-/// field there and forms one group per sample value. A `by(<value field>)` therefore keeps every
-/// group's winner, and the native route has to report the same rows: the union below it reports its
-/// series, and the window above it partitions by the same value column. The rows are what this
-/// asserts - one winner per value group - rather than that no native node answers the union.
+/// `topk`/`bottomk` key their groups by series labels, and `by (val)` names no label a series
+/// carries: `val` is the value field, not a label. Prometheus therefore puts every series of the
+/// input into one empty group and answers only that group's winner, so the statement returns one
+/// row rather than one per sample value.
+///
+/// Both routes are about that grouping, but only the native one answers Prometheus here. The value
+/// column is named after the expression, so a `by (val)` over it selects nothing and the one empty
+/// group keeps the global winner. The existing plan still partitions its window by the `val` column
+/// it publishes, one group per sample value, so its rows are recorded below rather than matched.
+/// What the native route must keep is the answer, with the union below it running as one native
+/// node rather than a legacy join.
 #[tokio::test(flavor = "multi_thread")]
-async fn native_promql_keeps_a_ranking_grouped_by_a_value_field() {
+async fn native_promql_ranks_a_value_field_grouping_as_one_group() {
     common_telemetry::init_default_ut_logging();
     let (standalone, observer) = native_test_instance(GreptimeDbStandaloneBuilder::new(
         "native_promql_ranking_value_field",
@@ -11092,28 +11314,25 @@ async fn native_promql_keeps_a_ranking_grouped_by_a_value_field() {
     .await;
 
     let pair = r#"native_rank_demo{host="x"} or native_rank_other{host="y"}"#;
-    // `by (val)` forms two groups of one sample each, so both series survive: two rows, one winner
-    // per value group, on both routes.
-    for query in [
-        format!("topk by (val) (1, {pair})"),
-        format!("bottomk by (val) (1, {pair})"),
+    // No series carries a `val` label, so the grouping is empty: every series lands in that one
+    // group and the answer is its winner, `y` at 8 for `topk` and `x` at 2 for `bottomk`.
+    for (query, expected) in [
+        (
+            format!("topk by (val) (1, {pair})"),
+            vec![(0, "y".to_string(), 8.0)],
+        ),
+        (
+            format!("bottomk by (val) (1, {pair})"),
+            vec![(0, "x".to_string(), 2.0)],
+        ),
     ] {
         let sql = format!("TQL EVAL (0, 0, '1s') {query}");
-        observer.clear();
-        let legacy_rows = native_result_rows(native_tql_output(&instance, &sql, false).await).await;
-        assert_eq!(
-            legacy_rows,
-            vec![(0, "x".to_string(), 2.0), (0, "y".to_string(), 8.0)],
-            "{query}: the existing plan keeps one row per value group"
-        );
-
         observer.clear();
         let native_rows = native_result_rows(native_tql_output(&instance, &sql, true).await).await;
         let root = datafusion::physical_plan::displayable(observer.root_plan().as_ref())
             .indent(true)
             .to_string();
-        // The union has to stay native rather than become the legacy join, and it must not fold the
-        // two value groups into one.
+        // The union has to stay native rather than become the legacy join.
         assert!(
             observer.fused().is_some(),
             "{query}: the union runs as one fused node: {root}"
@@ -11122,7 +11341,18 @@ async fn native_promql_keeps_a_ranking_grouped_by_a_value_field() {
             !root.contains("JoinExec"),
             "{query}: the union is not a legacy join: {root}"
         );
-        assert_eq!(native_rows, legacy_rows, "{query}: full rows");
+        assert_eq!(native_rows, expected, "{query}: full rows");
+
+        // The existing plan still partitions by its own `val` column, so it keeps one row per value
+        // group. Recorded here so the difference between the routes stays visible.
+        let mut legacy_rows =
+            native_result_rows(native_tql_output(&instance, &sql, false).await).await;
+        legacy_rows.sort_by(|left, right| left.1.cmp(&right.1));
+        assert_eq!(
+            legacy_rows,
+            vec![(0, "x".to_string(), 2.0), (0, "y".to_string(), 8.0)],
+            "{query}: the existing plan keeps one row per value group"
+        );
     }
 
     // A label grouping is what the native node does honor, so it still runs natively and keeps every
@@ -11434,7 +11664,14 @@ async fn native_promql_delta_temporality_rate_and_increase_match_legacy() {
         observer.clear();
         let (columns, rows) =
             native_labelled_rows(native_tql_output(&instance, &sql, true).await).await;
-        assert_eq!(columns, vec!["host", "ts", "val"]);
+        // The value is named after the statement's expression, not `val`.
+        let mut expected_columns = vec![
+            "host".to_string(),
+            "ts".to_string(),
+            expression_name(&query),
+        ];
+        expected_columns.sort();
+        assert_eq!(columns, expected_columns, "{query}");
         assert_eq!(rows.len(), 1, "{query}: {rows:?}");
         assert_eq!(rows[0].0, 120_000, "{query}");
         assert_eq!(
@@ -12139,16 +12376,15 @@ async fn native_promql_dynamic_scalars_match_prometheus_and_legacy() {
     };
     let native = pretty(native_tql_output(&instance, sql, true).await).await;
     // The native route answers `count_values` itself now, so this is its own answer: one series at
-    // t=0 whose generated label is "1" and whose count is 1. The existing planner still plans the
-    // query but names the count column after the aggregate, so the two headers differ while the
-    // numbers agree; the native answer is the one this route reports.
+    // t=0 whose generated label is "1" and whose count is 1. The value column is named after the
+    // expression, which is what this route reports.
     assert_eq!(
         native,
-        "+---------------------+-------+--------+\
-        \n| time                | value | bucket |\
-        \n+---------------------+-------+--------+\
-        \n| 1970-01-01T00:00:00 | 1.0   | 1      |\
-        \n+---------------------+-------+--------+"
+        "+---------------------+-----------------------------------+--------+\
+        \n| time                | count_values(\"bucket\", vector(1)) | bucket |\
+        \n+---------------------+-----------------------------------+--------+\
+        \n| 1970-01-01T00:00:00 | 1.0                               | 1      |\
+        \n+---------------------+-----------------------------------+--------+"
     );
 }
 
@@ -12942,10 +13178,9 @@ async fn native_promql_recursive_matching_segments_match_legacy() {
         expected, native,
         "matching on host drops job from output labels"
     );
-    assert_eq!(
-        vec!["host", "ts", "val"],
-        columns.iter().map(String::as_str).collect::<Vec<_>>()
-    );
+    let mut expected_columns = vec!["host".to_string(), "ts".to_string(), expression_name(query)];
+    expected_columns.sort();
+    assert_eq!(expected_columns, columns);
 }
 
 /// Segments are cut where the physical planner would otherwise have to gather a per-series prefix.
@@ -13523,18 +13758,17 @@ async fn native_promql_real_query_q07_throttled_periods() {
             .iter()
             .all(|debug| debug.contains("FusedSeries"))
     );
-    // Known computed-column naming gap from the ungrouped two-source case; values agree.
+    // The two routes name the computed value column differently - the existing planner after its
+    // own rewrite, the native route after the expression - and the labelled rows compared above
+    // are what both report.
     assert!(
         legacy_columns
             .iter()
             .any(|column| column.contains("prom_increase"))
     );
-    assert_eq!(
-        native_columns
-            .iter()
-            .filter(|column| *column == "val")
-            .count(),
-        1
+    assert!(
+        native_columns.contains(&expression_name(query)),
+        "Q07 native value column: {native_columns:?}"
     );
 }
 
@@ -13640,14 +13874,13 @@ async fn native_promql_real_query_q04_namespace_cpu_requests() {
             .iter()
             .all(|debug| debug.contains("FusedSeries"))
     );
-    // Known computed-column naming gap from the ungrouped two-source case; values agree.
+    // The two routes name the computed value column differently - the existing planner after its
+    // own rewrite, the native route after the expression - and the labelled rows compared above
+    // are what both report.
     assert!(legacy_columns.iter().any(|column| column.contains("max(")));
-    assert_eq!(
-        native_columns
-            .iter()
-            .filter(|column| *column == "val")
-            .count(),
-        1
+    assert!(
+        native_columns.contains(&expression_name(query)),
+        "Q04 native value column: {native_columns:?}"
     );
 }
 
@@ -13984,7 +14217,17 @@ async fn native_promql_dynamic_topk_matches_legacy() {
         Some("FusedSeriesExec"),
         "a bare topk above no aggregate runs natively: {bare_sql}"
     );
-    assert_eq!(bare_native, bare_legacy);
+    // The two routes name the one value column differently - the existing planner keeps the tree's
+    // `val`, the native route names it after the expression - so the rows are what they must agree
+    // on.
+    assert_eq!(bare_native.1, bare_legacy.1, "{bare_sql}");
+    assert!(
+        bare_native
+            .0
+            .contains(&expression_name("topk(3, native_dyn_topk)")),
+        "native topk value column: {:?}",
+        bare_native.0
+    );
 }
 
 /// A `scalar()` parameter that reads its own selector runs natively: the parameter reads a metric

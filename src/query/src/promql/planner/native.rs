@@ -73,11 +73,11 @@ use promql_parser::parser::{
     EvalStmt, Expr as PromExpr, MatrixSelector, ParenExpr, SubqueryExpr, VectorSelector,
 };
 use session::context::{MetricDiscoveryScope, QueryContextRef};
-use snafu::ResultExt;
+use snafu::{ResultExt, ensure};
 use store_api::metric_engine_consts::{DATA_SCHEMA_TABLE_ID_COLUMN_NAME, METRIC_ENGINE_NAME};
 use store_api::region_engine::RawLabelSource;
 
-use crate::promql::error::{DataFusionPlanningSnafu, Result};
+use crate::promql::error::{DataFusionPlanningSnafu, DuplicateOutputColumnsSnafu, Result};
 use crate::promql::native_compile::{
     InfoInput, bind_evaluated_binary, compile_selectors_with_grid, compile_statement_with_grid,
     info_input, statement_grid, subquery_child_grid,
@@ -598,7 +598,7 @@ impl PromPlanner {
         let output_schema = match format {
             FusedOutputFormat::PlainRows => {
                 let Some(schema) =
-                    Self::fused_root_schema(&tree, &source_tags, &left_time, root_kind)
+                    Self::fused_root_schema(expr, &tree, &source_tags, &left_time, root_kind)?
                 else {
                     return Ok(None);
                 };
@@ -641,8 +641,8 @@ impl PromPlanner {
 
     /// Plans `prom_expr` as one native node, or returns `None` to keep the existing plan.
     ///
-    /// The compiler's bound tree and selector schemas determine the native output names; the
-    /// existing planner is not consulted for capability or schema approval.
+    /// The expression names the value columns; the compiler's bound tree and selector schemas
+    /// determine their values. The existing planner is not consulted for capability or schema approval.
     ///
     /// The route is offered a whole expression because the compiler folds a range function and the
     /// math functions over it into one tree: offering a sub-expression instead would compile a tree
@@ -755,7 +755,13 @@ impl PromPlanner {
             let Some(values) = native_root_fields(tree.root()) else {
                 return Ok(None);
             };
-            let time_index = if values
+            // A label named `time` is the one collision the default time column can have: the
+            // value columns are named after the expression, so they never take that name. The
+            // time column is this route's own synthetic name - no label or value is renamed - so
+            // a statement whose output already holds a `time` column publishes its grid under the
+            // first free `native_time_N` instead of dropping or renaming the label.
+            let value_names = expression_field_names(prom_expr, &values);
+            let time_index = if value_names
                 .iter()
                 .chain(&output_tags)
                 .any(|name| name == DEFAULT_TIME_INDEX_COLUMN)
@@ -763,7 +769,7 @@ impl PromPlanner {
                 (0usize..)
                     .map(|index| format!("native_time_{index}"))
                     .find(|candidate| {
-                        !values
+                        !value_names
                             .iter()
                             .chain(&output_tags)
                             .any(|name| name == candidate)
@@ -782,9 +788,13 @@ impl PromPlanner {
             };
             // A data-free tree reads no input, so every field it answers is a float.
             let output_schema = match format {
-                FusedOutputFormat::PlainRows => {
-                    fused_output_schema(&values, &output_tags, &time_index, FieldKind::Float)?
-                }
+                FusedOutputFormat::PlainRows => fused_output_schema(
+                    prom_expr,
+                    &values,
+                    &output_tags,
+                    &time_index,
+                    FieldKind::Float,
+                )?,
                 FusedOutputFormat::SeriesFrame => {
                     let frame =
                         FusedSeries::series_frame_schema(&tree).context(DataFusionPlanningSnafu)?;
@@ -1560,7 +1570,8 @@ impl PromPlanner {
         // partition.
         if selectors.len() == 1
             && matches!(&tree.root().expr, NativeExpr::Merge { input } if pointwise_operand(input) && canonical_local_prefix(input) && !contains_global_consumer(input))
-            && let Some((plan, _)) = canonical_boundary_stages(
+        {
+            let boundary = canonical_boundary_stages(
                 prom_expr,
                 &tree,
                 &children,
@@ -1571,15 +1582,16 @@ impl PromPlanner {
                 &metric,
                 format,
                 root_kind,
-            )
-        {
-            return Ok(Some(native_planned(
-                plan,
-                frame_metadata,
-                root_kind,
-                time,
-                grid,
-            )));
+            )?;
+            if let Some((plan, _)) = boundary {
+                return Ok(Some(native_planned(
+                    plan,
+                    frame_metadata,
+                    root_kind,
+                    time,
+                    grid,
+                )));
+            }
         }
         if required_placement {
             // A tree whose fold can be split keeps that plan: it exports aggregate state rather
@@ -1608,7 +1620,7 @@ impl PromPlanner {
                 // caller asked for: it names one column per value the partial state accumulates,
                 // while the encoded frame carries those values inside its own layout.
                 let Some(value_schema) =
-                    Self::fused_root_schema(&tree, &source_tags, &time, root_kind)
+                    Self::fused_root_schema(prom_expr, &tree, &source_tags, &time, root_kind)?
                 else {
                     return Ok(None);
                 };
@@ -1708,20 +1720,9 @@ impl PromPlanner {
         let Some(root_fields) = native_root_fields(tree.root()) else {
             return Ok(None);
         };
-        // A root field can share a name with a tag or the time index, and under `or` the right
-        // table's tags join the left table's columns. The output names each column once, so such a
-        // statement keeps the existing plan.
-        let mut column_names = std::collections::HashSet::new();
-        if !std::iter::once(&time)
-            .chain(&root_fields)
-            .chain(&output_tags)
-            .all(|name| column_names.insert(name.as_str()))
-        {
-            return Ok(None);
-        }
         let output_schema = match format {
             FusedOutputFormat::PlainRows => {
-                fused_output_schema(&root_fields, &output_tags, &time, root_kind)?
+                fused_output_schema(prom_expr, &root_fields, &output_tags, &time, root_kind)?
             }
             FusedOutputFormat::SeriesFrame => {
                 let frame =
@@ -1773,36 +1774,38 @@ impl PromPlanner {
 
     /// The columns a [`FusedSeries`] node over `tree` produces.
     ///
-    /// Field and tag names are derived from the native tree. If this walk cannot derive a tag
-    /// set, the native route declines rather than consulting the legacy planner.
+    /// Fields and tags are derived from the native tree; the expression names the output fields.
+    /// If this walk cannot derive a tag set, the native route declines rather than consulting the
+    /// legacy planner.
     ///
-    /// `None` when the root is not a value the node can publish, or when a field would share a
-    /// name with a tag or the time index: the output names each column once.
+    /// `Ok(None)` when the root is not a value the node can publish. A schema the output cannot
+    /// declare is an error rather than a decline: duplicate names violate the expression-named
+    /// native output contract, so construction reports the collision instead of publishing a
+    /// layout the reader cannot address.
     fn fused_root_schema(
+        prom_expr: &PromExpr,
         tree: &NativeTree,
         source_tags: &[Vec<String>],
         time: &str,
         root_kind: FieldKind,
-    ) -> Option<DFSchemaRef> {
+    ) -> Result<Option<DFSchemaRef>> {
         let output_tags = match &tree.root().output {
             NativeType::Scalar(_) => Vec::new(),
-            NativeType::Samples(_) => native_output_tags(tree.root(), source_tags)?,
-            NativeType::AggregateState(_) => return None,
+            NativeType::Samples(_) => match native_output_tags(tree.root(), source_tags) {
+                Some(tags) => tags,
+                None => return Ok(None),
+            },
+            NativeType::AggregateState(_) => return Ok(None),
         };
-        let root_fields = native_root_fields(tree.root())?;
-        let mut column_names = std::collections::HashSet::new();
-        let columns = std::iter::once(time)
-            .chain(root_fields.iter().map(String::as_str))
-            .chain(output_tags.iter().map(String::as_str));
-        if !columns.clone().all(|name| column_names.insert(name)) {
-            return None;
-        }
+        let Some(root_fields) = native_root_fields(tree.root()) else {
+            return Ok(None);
+        };
         // The kind is the one the statement's own root answers, derived before segmentation cut
         // anything. It cannot be recomputed here: a cut prefix is replaced by an input leaf whose
         // samples are already evaluated, so walking this tree would read every such leaf as the
         // kind its scan carried. `count_over_time(h[5m]) + on (__name__) ...` answers floats, and
         // its replaced leaf carries floats, while the scan below was a histogram.
-        fused_output_schema(&root_fields, &output_tags, time, root_kind).ok()
+        fused_output_schema(prom_expr, &root_fields, &output_tags, time, root_kind).map(Some)
     }
 
     /// The statement being planned, rebuilt from the evaluation numbers the planner holds.
@@ -2376,27 +2379,38 @@ fn canonical_boundary_stages(
     metric: &Option<Arc<str>>,
     format: FusedOutputFormat,
     root_kind: FieldKind,
-) -> Option<(LogicalPlan, Vec<String>)> {
+) -> Result<Option<(LogicalPlan, Vec<String>)>> {
     let NativeExpr::Merge { input } = &tree.root().expr else {
-        return None;
+        return Ok(None);
     };
     if !canonical_local_prefix(input) {
-        return None;
+        return Ok(None);
     }
     let NativeType::Samples(schema) = &tree.root().output else {
-        return None;
+        return Ok(None);
     };
-    schema.eval_grid.as_ref()?;
+    if schema.eval_grid.is_none() {
+        return Ok(None);
+    }
     let fields = schema
         .fields
         .iter()
         .map(|field| field.name.to_string())
         .collect::<Vec<_>>();
-    let output_tags = native_output_tags(tree.root(), source_tags)?;
-    let output_schema = fused_output_schema(&fields, &output_tags, time_index, root_kind).ok()?;
+    // The tags a boundary reports are the ones its own root derives: a root whose output tags this
+    // walk cannot derive declines, as it does everywhere else.
+    let Some(output_tags) = native_output_tags(tree.root(), source_tags) else {
+        return Ok(None);
+    };
+    // The values are named after the expression, as in every other row layout of this statement. A
+    // schema this walk cannot declare is an error rather than a decline: duplicate names violate
+    // the expression-named native output contract, so construction reports the collision instead
+    // of publishing a layout the reader cannot address.
+    let output_schema =
+        fused_output_schema(prom_expr, &fields, &output_tags, time_index, root_kind)?;
 
     // The producer: the statement's own tree, run per partition, exporting a frame.
-    let producer = FusedSeries::try_new_canonical_producer(
+    let Ok(producer) = FusedSeries::try_new_canonical_producer(
         Arc::from(prom_expr.to_string()),
         tree.clone(),
         FusedSeriesBinding {
@@ -2406,8 +2420,9 @@ fn canonical_boundary_stages(
             metric_name: metric.clone(),
         },
         children.to_vec(),
-    )
-    .ok()?;
+    ) else {
+        return Ok(None);
+    };
     let producer = LogicalPlan::Extension(Extension {
         node: Arc::new(producer),
     });
@@ -2417,25 +2432,26 @@ fn canonical_boundary_stages(
     // so that consumer is an ordinary evaluated input of its own and needs no merge. The statement's
     // root instead publishes rows, which is this boundary's own frame converted as usual.
     if format == FusedOutputFormat::SeriesFrame {
-        return Some((producer, output_tags));
+        return Ok(Some((producer, output_tags)));
     }
     let evaluated = NativeType::Samples(Arc::clone(schema));
-    let consumer_tree = NativeTree::try_new(NativeNode {
+    let Ok(consumer_tree) = NativeTree::try_new(NativeNode {
         expr: NativeExpr::Input(BoundInput {
             source_index: 0,
             output: evaluated.clone(),
             ordering: SeriesOrdering::Contiguous,
         }),
         output: evaluated,
-    })
-    .ok()?;
+    }) else {
+        return Ok(None);
+    };
     // A frame names each series' own metric, so the binding names one only when a tag column does.
     let consumer_metric = if output_tags.iter().any(|tag| tag == METRIC_NAME) {
         metric.clone()
     } else {
         None
     };
-    let consumer = FusedSeries::try_new_with_format(
+    let Ok(consumer) = FusedSeries::try_new_with_format(
         Arc::from(prom_expr.to_string()),
         consumer_tree,
         FusedSeriesBinding {
@@ -2447,14 +2463,15 @@ fn canonical_boundary_stages(
         vec![producer],
         output_schema,
         FusedOutputFormat::PlainRows,
-    )
-    .ok()?;
-    Some((
+    ) else {
+        return Ok(None);
+    };
+    Ok(Some((
         LogicalPlan::Extension(Extension {
             node: Arc::new(consumer),
         }),
         output_tags,
-    ))
+    )))
 }
 
 fn is_raw_series_source(plan: &LogicalPlan) -> bool {
@@ -2484,19 +2501,27 @@ fn build_evaluated_segment(
     grid: &Arc<EvalGrid>,
     time_index: &str,
     root_kind: FieldKind,
-) -> Option<(LogicalPlan, Vec<String>)> {
+) -> Result<Option<(LogicalPlan, Vec<String>)>> {
     let mut sources = Vec::new();
     collect_segment_inputs(node, &mut sources);
     if sources.is_empty() {
-        return None;
+        return Ok(None);
     }
     let mut inputs = Vec::with_capacity(sources.len());
     let mut local_tags = Vec::with_capacity(sources.len());
-    let tree = NativeTree::try_new(rewrite_inner_segment(node, &sources)).ok()?;
-    let source_fields = tree_source_fields(&tree).ok()?;
+    let Ok(tree) = NativeTree::try_new(rewrite_inner_segment(node, &sources)) else {
+        return Ok(None);
+    };
+    let Ok(source_fields) = tree_source_fields(&tree) else {
+        return Ok(None);
+    };
     for (local_index, &index) in sources.iter().enumerate() {
-        let child = children.get(index)?.clone();
-        let input = find_input_node(node, index)?;
+        let Some(child) = children.get(index).cloned() else {
+            return Ok(None);
+        };
+        let Some(input) = find_input_node(node, index) else {
+            return Ok(None);
+        };
         if input
             .output
             .samples()
@@ -2508,25 +2533,27 @@ fn build_evaluated_segment(
             || is_empty_discovered_input(&child)
         {
             inputs.push(child);
-            local_tags.push(source_tags.get(index)?.clone());
+            let Some(source_tag_set) = source_tags.get(index) else {
+                return Ok(None);
+            };
+            local_tags.push(source_tag_set.clone());
         } else {
-            let original_index = *source_ids.get(index)?.as_ref()?;
+            let Some(original_index) = source_ids.get(index).copied().flatten() else {
+                return Ok(None);
+            };
             let (Some((Some(metric), _, tags)), Some(fields)) = (
                 per_source.get(original_index),
                 source_fields.get(local_index),
             ) else {
-                return None;
+                return Ok(None);
+            };
+            let Ok(source) =
+                RawSeriesSource::try_new(Arc::clone(metric), tags.clone(), fields.clone(), child)
+            else {
+                return Ok(None);
             };
             inputs.push(LogicalPlan::Extension(Extension {
-                node: Arc::new(
-                    RawSeriesSource::try_new(
-                        Arc::clone(metric),
-                        tags.clone(),
-                        fields.clone(),
-                        child,
-                    )
-                    .ok()?,
-                ),
+                node: Arc::new(source),
             }));
             local_tags.push(tags.clone());
         }
@@ -2535,7 +2562,7 @@ fn build_evaluated_segment(
     // router are what answer one series per label set across partitions, so it is built as that
     // boundary and read as a frame.
     if matches!(tree.root().expr, NativeExpr::Merge { .. }) {
-        let (plan, tags) = canonical_boundary_stages(
+        let Some((plan, tags)) = canonical_boundary_stages(
             prom_expr,
             &tree,
             &inputs,
@@ -2546,18 +2573,27 @@ fn build_evaluated_segment(
             &None,
             FusedOutputFormat::SeriesFrame,
             root_kind,
-        )?;
-        return Some((plan, tags));
+        )?
+        else {
+            return Ok(None);
+        };
+        return Ok(Some((plan, tags)));
     }
-    let output_tags = native_output_tags(tree.root(), &local_tags)?;
+    let Some(output_tags) = native_output_tags(tree.root(), &local_tags) else {
+        return Ok(None);
+    };
     if NativeExecutionState::try_new(&tree, Arc::new(UnboundedMemoryPool::default()), None).is_err()
     {
-        return None;
+        return Ok(None);
     }
-    let frame = FusedSeries::series_frame_schema(&tree).ok()?;
-    let frame = DFSchema::try_from(frame.as_ref().clone()).ok()?;
+    let Ok(frame) = FusedSeries::series_frame_schema(&tree) else {
+        return Ok(None);
+    };
+    let Ok(frame) = DFSchema::try_from(frame.as_ref().clone()) else {
+        return Ok(None);
+    };
     let publish_grid = fused_publish_grid(tree.root(), grid);
-    let plan = FusedSeries::try_new_with_format(
+    let Ok(plan) = FusedSeries::try_new_with_format(
         Arc::from("segment"),
         tree,
         FusedSeriesBinding {
@@ -2569,14 +2605,15 @@ fn build_evaluated_segment(
         inputs,
         Arc::new(frame),
         FusedOutputFormat::SeriesFrame,
-    )
-    .ok()?;
-    Some((
+    ) else {
+        return Ok(None);
+    };
+    Ok(Some((
         LogicalPlan::Extension(Extension {
             node: Arc::new(plan),
         }),
         output_tags,
-    ))
+    )))
 }
 
 /// Builds one segment's plan from a subtree, binding its scan inputs without cutting again.
@@ -2802,8 +2839,9 @@ fn segment_tree(
             // one series per label set across partitions. Which cuts are taken is
             // [`cut_as_segment`]'s decision, and it declines the evaluated-input window the analyzer
             // will not place region-locally, so this fallback only ever sees the cuts it admitted.
-            let built = built.or_else(|| {
-                build_evaluated_segment(
+            let built = match built {
+                Some(built) => Some(built),
+                None => build_evaluated_segment(
                     prom_expr,
                     cut,
                     &current_children,
@@ -2813,8 +2851,8 @@ fn segment_tree(
                     grid,
                     time_index,
                     root_kind,
-                )
-            });
+                )?,
+            };
             let Some((plan, cut_tags)) = built else {
                 return Ok(None);
             };
@@ -2888,7 +2926,7 @@ fn segment_tree(
             metric,
             format,
             root_kind,
-        )
+        )?
         .map(|(plan, _)| plan));
     }
     // Nothing below can fall back once physical planning starts, so every tree this route commits
@@ -2901,8 +2939,13 @@ fn segment_tree(
     }
     let output_schema = match format {
         FusedOutputFormat::PlainRows => {
-            let Some(schema) =
-                PromPlanner::fused_root_schema(&parent, &child_tags, time_index, root_kind)
+            let Some(schema) = PromPlanner::fused_root_schema(
+                prom_expr,
+                &parent,
+                &child_tags,
+                time_index,
+                root_kind,
+            )?
             else {
                 return Ok(None);
             };
@@ -2998,11 +3041,29 @@ fn native_root_fields(node: &NativeNode) -> Option<Vec<String>> {
     }
 }
 
+/// The names an expression gives the value columns of `fields`.
+///
+/// One value is named after the whole expression; several append their compiled field names to it,
+/// because one name cannot stand for more than one column. Only the published layout is named this
+/// way: the fields inside the native tree keep the names the compiler gave them.
+fn expression_field_names(prom_expr: &PromExpr, fields: &[String]) -> Vec<String> {
+    let expression = prom_expr.to_string();
+    fields
+        .iter()
+        .map(|field| {
+            if fields.len() == 1 {
+                expression.clone()
+            } else {
+                format!("{expression}.{field}")
+            }
+        })
+        .collect()
+}
+
 /// The columns a [`FusedSeries`] node produces.
 ///
-/// With `experimental_native_promql` enabled, a value column is named after its compiled root
-/// field (for example, `field_0`), not legacy planner expression text. Legacy headers in
-/// `tests/cases/**` are unaffected because the native route is opt-in and off by default.
+/// A single value is named after the expression. Multiple values append their compiled field
+/// names to the expression; the names inside the native tree remain unchanged.
 ///
 /// The shape is the one the existing unary pipeline consumes — the time index, then the series
 /// fields, then the tags — and each column is declared the way the node's own conversion reads it
@@ -3013,10 +3074,13 @@ fn native_root_fields(node: &NativeNode) -> Option<Vec<String>> {
 /// a nullable `Utf8`, because a range function drops the metric name and a series can be missing a
 /// label entirely.
 /// The output schema of a fused node: its time index, one column per field, then its tags.
+/// Two columns cannot share a name, and a name that would is reported rather than left to
+/// `DFSchema`, whose duplicate-name error names no column.
 ///
 /// `field_kind` says what a field column carries. The physical conversion reads the same kind off
 /// this schema and dispatches on it, so the schema and the batch it describes cannot disagree.
 fn fused_output_schema(
+    prom_expr: &PromExpr,
     fields: &[String],
     tags: &[String],
     time_index: &str,
@@ -3027,6 +3091,32 @@ fn fused_output_schema(
         FieldKind::Histogram => native_histogram_value_type().as_arrow_type(),
     };
     let mut columns = Vec::with_capacity(fields.len() + tags.len() + 1);
+    let value_names = expression_field_names(prom_expr, fields);
+    // A name appears twice when a value named after its expression - a bare selector is named after
+    // its metric - lands on the table's own time index or on one of its tags. `DFSchema` rejects
+    // that, but reports only that building the plan failed, which names no column; the collision is
+    // detected here so the error names the columns that collide.
+    let mut names = Vec::with_capacity(fields.len() + tags.len() + 1);
+    names.push(time_index.to_string());
+    names.extend(value_names.iter().cloned());
+    names.extend(tags.iter().cloned());
+    let mut occurrences: std::collections::HashMap<&str, usize> =
+        std::collections::HashMap::with_capacity(names.len());
+    for name in &names {
+        *occurrences.entry(name.as_str()).or_default() += 1;
+    }
+    let mut reported = std::collections::HashSet::new();
+    let duplicates = names
+        .iter()
+        .filter(|name| occurrences[name.as_str()] > 1 && reported.insert(name.as_str()))
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    ensure!(
+        duplicates.is_empty(),
+        DuplicateOutputColumnsSnafu {
+            names: duplicates.join(", ")
+        }
+    );
     // The time index is marked as one, the way the existing planner's plans mark the table's own
     // time index: what a plan publishes is a result either way, and a reader of the marker - a
     // `RANGE` query over the plan, a schema converted back to GreptimeDB's - has to see the same
@@ -3045,7 +3135,7 @@ fn fused_output_schema(
             )])),
         ),
     ));
-    for name in fields {
+    for name in value_names {
         columns.push((None, Arc::new(Field::new(name, field_type.clone(), true))));
     }
     for name in tags {
@@ -4905,7 +4995,9 @@ mod tests {
                 .map(|field| field.name.as_ref())
                 .collect::<Vec<_>>()
         );
+        let expression = promql_parser::parser::parse("sum by (zone, host) ((x))").unwrap();
         let output = fused_output_schema(
+            &expression,
             &["v0".to_string(), "v1".to_string()],
             &["zone".to_string(), "host".to_string()],
             "ts",
@@ -4913,7 +5005,13 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            vec!["ts", "v0", "v1", "zone", "host"],
+            vec![
+                "ts".to_string(),
+                format!("{expression}.v0"),
+                format!("{expression}.v1"),
+                "zone".to_string(),
+                "host".to_string(),
+            ],
             output
                 .fields()
                 .iter()

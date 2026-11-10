@@ -2068,6 +2068,149 @@ fn assert_decode_error(bytes: &[u8], expected: &str) {
 }
 
 #[test]
+fn renamed_reordered_value_columns_keep_field_identity_after_decode() {
+    let tree = rate_tree_of(two_field_schema());
+    let schema = Arc::new(Schema::new(vec![
+        Field::new(format!("{PROMQL}.{OTHER}"), DataType::Float64, true),
+        Field::new(HOST, DataType::Utf8, true),
+        Field::new(
+            TIME,
+            DataType::Timestamp(TimeUnit::Millisecond, None),
+            false,
+        ),
+        Field::new(format!("{PROMQL}.{VALUE}"), DataType::Float64, true),
+    ]));
+    let node = FusedSeries::try_new(
+        Arc::from(PROMQL),
+        tree.clone(),
+        binding_of(&tree, two_field_schema(), vec![HOST.to_string()]),
+        vec![input_plan(frame_schema_of(&two_field_schema()))],
+        Arc::new(datafusion::common::DFSchema::try_from(schema.as_ref().clone()).unwrap()),
+    )
+    .unwrap();
+    let decoded = FusedSeries::deserialize(&node.serialize().unwrap()).unwrap();
+    assert_eq!(node.schema(), decoded.schema());
+    let tags = decoded.output_tags().unwrap();
+    assert_eq!(vec![HOST], tags);
+    let classification =
+        super::classify_output(&schema, &two_field_schema().fields, &tags, TIME, PROMQL).unwrap();
+    let chunk = EvaluatedChunk::try_new(
+        Series {
+            metric: SeriesLabels::try_new(None, Vec::new()).unwrap(),
+            time: TimeAxis::from_grid_spans(grid(), vec![GridSpan::new(0, 1)]).unwrap(),
+            fields: SeriesFields::try_from_vec(vec![
+                Samples::from_float(Float64Array::from(vec![10.0])),
+                Samples::from_float(Float64Array::from(vec![20.0])),
+            ])
+            .unwrap(),
+        },
+        true,
+    )
+    .unwrap();
+    let batch = series_to_record_batch(&classification, &tags, &schema, &chunk).unwrap();
+    for (name, expected) in [(OTHER, 20.0), (VALUE, 10.0)] {
+        let values = batch
+            .column_by_name(&format!("{PROMQL}.{name}"))
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .unwrap();
+        assert_eq!(expected, values.value(0));
+    }
+}
+
+/// A tag that carries the expression's name is a tag, not the statement's value.
+///
+/// This is an old-style row schema: the statement is `host`, the schema names its one value
+/// `field_0` and also carries the `host` tag. Deciding the value by whether a name occurs
+/// anywhere in the schema would pick the tag as the value; the typed columns put the value at
+/// `field_0` and the tag at `host`.
+#[test]
+fn a_tag_named_after_the_expression_is_not_the_value() {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new(
+            TIME,
+            DataType::Timestamp(TimeUnit::Millisecond, None),
+            false,
+        ),
+        Field::new("field_0", DataType::Float64, true),
+        Field::new(HOST, DataType::Utf8, true),
+    ]));
+    let fields = [FieldSpec {
+        name: "field_0".into(),
+    }];
+    let classification =
+        super::classify_output(&schema, &fields, &[HOST.to_string()], TIME, HOST).unwrap();
+    assert!(
+        matches!(
+            classification[1],
+            OutputColumn::Field {
+                index: 0,
+                kind: FieldKind::Float
+            }
+        ),
+        "{classification:?}"
+    );
+    assert!(
+        matches!(classification[2], OutputColumn::Tag(0)),
+        "{classification:?}"
+    );
+}
+
+/// A reordered output still binds every value column to its own field.
+///
+/// The expression names are matched as a set against the typed value columns, and the result is
+/// kept in `series_fields` order - here `other` before `value` - because that order is what the
+/// classification indexes the chunk's fields by. Names taken in output order would bind the first
+/// column to `value`.
+#[test]
+fn reordered_expression_names_bind_fields_in_series_order() {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new(
+            TIME,
+            DataType::Timestamp(TimeUnit::Millisecond, None),
+            false,
+        ),
+        Field::new(format!("{PROMQL}.{OTHER}"), DataType::Float64, true),
+        Field::new(HOST, DataType::Utf8, true),
+        Field::new(format!("{PROMQL}.{VALUE}"), DataType::Float64, true),
+    ]));
+    let series_schema = two_field_schema();
+    let classification = super::classify_output(
+        &schema,
+        &series_schema.fields,
+        &[HOST.to_string()],
+        TIME,
+        PROMQL,
+    )
+    .unwrap();
+    assert!(
+        matches!(
+            classification[1],
+            OutputColumn::Field {
+                index: 1,
+                kind: FieldKind::Float
+            }
+        ),
+        "{classification:?}"
+    );
+    assert!(
+        matches!(classification[2], OutputColumn::Tag(0)),
+        "{classification:?}"
+    );
+    assert!(
+        matches!(
+            classification[3],
+            OutputColumn::Field {
+                index: 0,
+                kind: FieldKind::Float
+            }
+        ),
+        "{classification:?}"
+    );
+}
+
+#[test]
 fn plain_rows_decode_rejects_invalid_schemas() {
     let node = fused(rate_tree());
     let bytes = node.serialize().unwrap();
@@ -2117,15 +2260,61 @@ fn plain_rows_decode_rejects_invalid_schemas() {
                     false,
                 ),
                 Field::new(VALUE, DataType::Float64, true),
+                // A column's role is its type: a float here is not a tag, so this payload names a
+                // column the conversion cannot produce.
                 Field::new(HOST, DataType::Float64, true),
                 Field::new(NAME, DataType::Utf8, true),
             ]),
-            "must be Utf8",
+            "unknown column",
         ),
     ];
     for (schema, expected) in malformed_schemas {
         assert_decode_error(&mutate_schema(&bytes, schema), expected);
     }
+
+    let renamed = mutate_envelope_payload(&bytes, |payload| {
+        let mut fields = payload.output_schema.fields().to_vec();
+        let index = fields
+            .iter()
+            .position(|field| field.name() == VALUE)
+            .unwrap();
+        fields[index] = Arc::new(Field::new(PROMQL, DataType::Float64, true));
+        payload.output_schema = Schema::new(fields);
+    });
+    assert!(FusedSeries::deserialize(&renamed).is_ok());
+    // A value column is identified by type, so this payload types its one float column as neither
+    // a float nor a native histogram and names no value column the tree can read; a float value
+    // column that cannot be null is refused for its nullability, because a grid point may be
+    // missing.
+    for (data_type, nullable, expected) in [
+        (DataType::Int64, true, "unknown column"),
+        (DataType::Float64, false, "must be nullable"),
+    ] {
+        let malformed = mutate_envelope_payload(&renamed, |payload| {
+            let mut fields = payload.output_schema.fields().to_vec();
+            let index = fields
+                .iter()
+                .position(|field| field.name() == PROMQL)
+                .unwrap();
+            fields[index] = Arc::new(Field::new(PROMQL, data_type, nullable));
+            payload.output_schema = Schema::new(fields);
+        });
+        assert_decode_error(&malformed, expected);
+    }
+
+    // A scalar's value column is its one non-time column, so the wrong type is reported as a kind
+    // the conversion cannot produce.
+    let scalar_wrong_kind = mutate_envelope_payload(&scalar_bytes, |payload| {
+        let mut fields = payload.output_schema.fields().to_vec();
+        let index = fields
+            .iter()
+            .position(|field| field.name() != TIME)
+            .expect("a scalar carries one value column");
+        let name = fields[index].name().clone();
+        fields[index] = Arc::new(Field::new(name, DataType::Int64, true));
+        payload.output_schema = Schema::new(fields);
+    });
+    assert_decode_error(&scalar_wrong_kind, "must be Float64");
 
     let scalar_decoded = FusedSeries::deserialize(&scalar_bytes).unwrap();
     assert_eq!(scalar_decoded.schema(), scalar.schema());
