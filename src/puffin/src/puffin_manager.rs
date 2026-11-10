@@ -14,6 +14,7 @@
 
 pub mod cache;
 pub mod file_accessor;
+pub mod file_key;
 pub mod fs_puffin_manager;
 pub mod stager;
 
@@ -31,6 +32,7 @@ use futures::AsyncRead;
 use crate::blob_metadata::{BlobMetadata, CompressionCodec};
 use crate::error::Result;
 use crate::file_metadata::FileMetadata;
+use crate::puffin_manager::file_key::PuffinFileKey;
 
 /// Metrics returned by `PuffinReader::dir` operations.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -47,6 +49,9 @@ pub trait PuffinManager {
     type Reader: PuffinReader;
     type Writer: PuffinWriter;
     type FileHandle: ToString + Clone + Send + Sync;
+
+    /// Returns a stable storage-scoped key without opening or reading the file.
+    fn file_key(&self, handle: &Self::FileHandle) -> PuffinFileKey<Self::FileHandle>;
 
     /// Creates a `PuffinReader` for the specified `handle`.
     async fn reader(&self, handle: &Self::FileHandle) -> Result<Self::Reader>;
@@ -106,6 +111,20 @@ pub trait PuffinReader {
 
     /// Returns the metadata of the Puffin file.
     async fn metadata(&self) -> Result<Arc<FileMetadata>>;
+
+    /// Returns metadata for a unique blob key without reading its payload.
+    ///
+    /// Missing keys return `None`; duplicate keys return an error. The length is
+    /// the stored byte length, before any decompression performed by [`Self::blob`].
+    async fn blob_metadata(&self, key: &str) -> Result<Option<BlobMetadata>> {
+        let metadata = self.metadata().await?;
+        let mut matches = metadata.blobs.iter().filter(|blob| blob.blob_type == key);
+        let first = matches.next();
+        if matches.next().is_some() {
+            return crate::error::AmbiguousBlobSnafu { blob: key }.fail();
+        }
+        Ok(first.cloned())
+    }
 
     /// Reads a blob from the Puffin file.
     ///
