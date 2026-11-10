@@ -336,6 +336,7 @@ mod tests {
                 "SELECT compact_table('admin_fn_demo')",
                 "SELECT flush_region(0)",
                 "SELECT compact_region(0)",
+                "SELECT cancel_region_compaction(0, 'x')",
                 "SELECT migrate_region(1, 2, 3)",
                 "SELECT gc_regions(0)",
                 "SELECT gc_table('admin_fn_demo')",

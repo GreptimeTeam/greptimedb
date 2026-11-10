@@ -4981,8 +4981,11 @@ async fn test_exemplar_source_identity_policy() {
     assert_eq!(ids, vec![source.table_id(), replacement.table_id()]);
 }
 
+#[rstest]
+#[case::completed(false)]
+#[case::cancelled(true)]
 #[tokio::test]
-async fn test_compaction_tasks_sql_lifecycle() {
+async fn test_compaction_tasks_sql_lifecycle(#[case] cancel: bool) {
     use crate::standalone::GreptimeDbStandaloneBuilder;
 
     let instance = GreptimeDbStandaloneBuilder::new("compaction_tasks_sql_lifecycle")
@@ -4993,12 +4996,16 @@ async fn test_compaction_tasks_sql_lifecycle() {
         instance.datanode.region_server(),
         0,
         None,
+        cancel,
     )
     .await;
 }
 
+#[rstest]
+#[case::completed(false)]
+#[case::cancelled(true)]
 #[tokio::test]
-async fn test_compaction_tasks_distributed_sql_lifecycle() {
+async fn test_compaction_tasks_distributed_sql_lifecycle(#[case] cancel: bool) {
     use common_meta::peer::Peer;
     use meta_srv::error::Result as MetaResult;
     use meta_srv::metasrv::SelectorContext;
@@ -5039,6 +5046,7 @@ async fn test_compaction_tasks_distributed_sql_lifecycle() {
         cluster.datanode_instances[&1].region_server(),
         1,
         Some(2),
+        cancel,
     )
     .await;
 }
@@ -5049,6 +5057,7 @@ async fn check_compaction_tasks_sql_lifecycle(
     mut region_server: RegionServer,
     node_id: u64,
     other_node_id: Option<u64>,
+    cancel: bool,
 ) {
     use std::time::Duration;
 
@@ -5106,11 +5115,13 @@ async fn check_compaction_tasks_sql_lifecycle(
     let compact = {
         let frontend = frontend.clone();
         tokio::spawn(async move {
-            execute_sql(
-                &frontend,
-                "ADMIN COMPACT_TABLE('compact_inspect', 'strict_window', 'window=3600')",
-            )
-            .await
+            frontend
+                .do_query(
+                    "ADMIN COMPACT_TABLE('compact_inspect', 'strict_window', 'window=3600')",
+                    QueryContext::arc(),
+                )
+                .await
+                .remove(0)
         })
     };
     tokio::time::timeout(Duration::from_secs(20), listener.wait_handle_finished())
@@ -5221,11 +5232,51 @@ async fn check_compaction_tasks_sql_lifecycle(
         );
     }
     assert_eq!(rows(frontend, "SELECT task_id FROM information_schema.compaction_tasks WHERE node_id = 18446744073709551615").await.iter().map(|b| b.num_rows()).sum::<usize>(), 0);
+    let task_id = snapshot.column(0).as_string::<i32>().value(0);
+    let region_id = live_tasks[0].region_id.as_u64();
+    let cancel_sql = format!("ADMIN cancel_region_compaction({region_id}, '{task_id}')");
+    if cancel {
+        for (sql, expected) in [
+            (
+                format!("ADMIN cancel_region_compaction({region_id}, 'stale-task-id')"),
+                0,
+            ),
+            (cancel_sql.clone(), 1),
+            (cancel_sql.clone(), 1),
+        ] {
+            let result = tokio::time::timeout(Duration::from_secs(10), rows(frontend, &sql))
+                .await
+                .expect("SQL compaction cancellation did not return");
+            assert_eq!(
+                result.iter().map(|batch| batch.num_rows()).sum::<usize>(),
+                1
+            );
+            let batch = result.iter().find(|batch| batch.num_rows() > 0).unwrap();
+            assert_eq!(
+                batch
+                    .column(0)
+                    .as_primitive::<datatypes::arrow::datatypes::UInt64Type>()
+                    .value(0),
+                expected
+            );
+        }
+        assert_eq!(
+            engine.inspect_compaction_tasks(&[]).await.unwrap()[0]
+                .state
+                .as_ref(),
+            "cancelling"
+        );
+    }
     drop(release);
-    tokio::time::timeout(Duration::from_secs(20), compact)
+    let result = tokio::time::timeout(Duration::from_secs(20), compact)
         .await
         .unwrap()
         .unwrap();
+    assert_eq!(
+        result.is_err(),
+        cancel,
+        "unexpected COMPACT_TABLE outcome: {result:?}"
+    );
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {
             if engine
@@ -5252,6 +5303,23 @@ async fn check_compaction_tasks_sql_lifecycle(
         .sum::<usize>(),
         0
     );
+    if cancel {
+        let result = tokio::time::timeout(Duration::from_secs(10), rows(frontend, &cancel_sql))
+            .await
+            .expect("completed task cancellation did not return");
+        assert_eq!(
+            result.iter().map(|batch| batch.num_rows()).sum::<usize>(),
+            1
+        );
+        let batch = result.iter().find(|batch| batch.num_rows() > 0).unwrap();
+        assert_eq!(
+            batch
+                .column(0)
+                .as_primitive::<datatypes::arrow::datatypes::UInt64Type>()
+                .value(0),
+            0
+        );
+    }
     assert_eq!(
         before,
         rows(frontend, "SELECT * FROM compact_inspect ORDER BY ts")

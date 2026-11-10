@@ -23,7 +23,7 @@ use api::v1::column_def::{
 };
 use api::v1::region::bulk_insert_request::Body;
 use api::v1::region::{
-    AlterRequest, AlterRequests, BuildIndexRequest, BulkInsertRequest,
+    AlterRequest, AlterRequests, BuildIndexRequest, BulkInsertRequest, CancelCompactionRequest,
     CleanUpRequest as PbCleanUpRequest, CloseRequest, CompactRequest, CreateRequest,
     CreateRequests, DeleteRequests, DropRequest, DropRequests, FlushRequest, InsertRequests,
     OpenRequest, TruncateRequest, alter_request, build_index_request, compact_request,
@@ -161,6 +161,7 @@ pub enum RegionRequest {
     Alter(RegionAlterRequest),
     Flush(RegionFlushRequest),
     Compact(RegionCompactRequest),
+    CancelCompaction(RegionCancelCompactionRequest),
     BuildIndex(RegionBuildIndexRequest),
     Truncate(RegionTruncateRequest),
     Catchup(RegionCatchupRequest),
@@ -184,6 +185,7 @@ impl RegionRequest {
             region_request::Body::Alter(alter) => make_region_alter(alter),
             region_request::Body::Flush(flush) => make_region_flush(flush),
             region_request::Body::Compact(compact) => make_region_compact(compact),
+            region_request::Body::CancelCompaction(cancel) => make_region_cancel_compaction(cancel),
             region_request::Body::BuildIndex(index) => make_region_build_index(index),
             region_request::Body::Truncate(truncate) => make_region_truncate(truncate),
             region_request::Body::Creates(creates) => make_region_creates(creates),
@@ -444,6 +446,25 @@ fn make_region_compact(compact: CompactRequest) -> Result<Vec<(RegionId, RegionR
             options,
             parallelism,
             time_range,
+        }),
+    )])
+}
+
+fn make_region_cancel_compaction(
+    cancel: CancelCompactionRequest,
+) -> Result<Vec<(RegionId, RegionRequest)>> {
+    let region_id = cancel.region_id.into();
+    ensure!(
+        !cancel.task_id.trim().is_empty(),
+        InvalidRegionRequestSnafu {
+            region_id,
+            err: "compaction task_id must not be empty".to_string(),
+        }
+    );
+    Ok(vec![(
+        region_id,
+        RegionRequest::CancelCompaction(RegionCancelCompactionRequest {
+            task_id: cancel.task_id,
         }),
     )])
 }
@@ -1922,6 +1943,12 @@ pub struct RegionFlushRequest {
     pub reason: Option<RegionFlushReason>,
 }
 
+/// Cancels one exact live compaction identity without pausing future compactions.
+#[derive(Debug)]
+pub struct RegionCancelCompactionRequest {
+    pub task_id: String,
+}
+
 #[derive(Debug)]
 pub struct RegionCompactRequest {
     pub options: compact_request::Options,
@@ -2088,6 +2115,7 @@ impl fmt::Display for RegionRequest {
             RegionRequest::Alter(_) => write!(f, "Alter"),
             RegionRequest::Flush(_) => write!(f, "Flush"),
             RegionRequest::Compact(_) => write!(f, "Compact"),
+            RegionRequest::CancelCompaction(_) => write!(f, "CancelCompaction"),
             RegionRequest::BuildIndex(_) => write!(f, "BuildIndex"),
             RegionRequest::Truncate(_) => write!(f, "Truncate"),
             RegionRequest::Catchup(_) => write!(f, "Catchup"),
@@ -2112,6 +2140,35 @@ mod tests {
 
     use super::*;
     use crate::metadata::RegionMetadataBuilder;
+
+    #[test]
+    fn test_cancel_compaction_request_conversion() {
+        let region_id = RegionId::new(7, 3);
+        let requests = RegionRequest::try_from_request_body(
+            region_request::Body::CancelCompaction(CancelCompactionRequest {
+                region_id: region_id.as_u64(),
+                task_id: "task-1".to_string(),
+            }),
+        )
+        .unwrap();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].0, region_id);
+        let RegionRequest::CancelCompaction(request) = &requests[0].1 else {
+            panic!("expected cancellation")
+        };
+        assert_eq!(request.task_id, "task-1");
+        for task_id in ["", " ", "\t\n"] {
+            assert!(
+                RegionRequest::try_from_request_body(region_request::Body::CancelCompaction(
+                    CancelCompactionRequest {
+                        region_id: region_id.as_u64(),
+                        task_id: task_id.to_string()
+                    }
+                ))
+                .is_err()
+            );
+        }
+    }
 
     #[test]
     fn test_build_index_options_round_trip() {

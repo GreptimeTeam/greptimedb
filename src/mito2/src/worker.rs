@@ -62,7 +62,7 @@ use crate::access_layer::new_fs_cache_store;
 use crate::cache::write_cache::{WriteCache, WriteCacheRef};
 use crate::cache::{CacheManager, CacheManagerRef, WriteCacheUploadStoreWrapperRef};
 use crate::compaction::memory_manager::{CompactionMemoryManager, new_compaction_memory_manager};
-use crate::compaction::{CompactionCoordinator, CompactionScheduler};
+use crate::compaction::{CancelCompactionResult, CompactionCoordinator, CompactionScheduler};
 use crate::config::MitoConfig;
 use crate::error::{self, CreateDirSnafu, JoinSnafu, Result, WorkerStoppedSnafu};
 use crate::flush::{FlushScheduler, WriteBufferManagerImpl, WriteBufferManagerRef};
@@ -1359,6 +1359,31 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 }
                 WorkerRequest::EditRegion(request) => {
                     self.handle_region_edit(request);
+                }
+                WorkerRequest::CancelCompaction {
+                    region_id,
+                    task_id,
+                    sender,
+                } => {
+                    let result = match self.compaction_scheduler.cancel_task(region_id, &task_id) {
+                        CancelCompactionResult::CancelIssued
+                        | CancelCompactionResult::AlreadyCancelling => Ok(1),
+                        CancelCompactionResult::NotFound => Ok(0),
+                        CancelCompactionResult::TooLateToCancel => error::InvalidRequestSnafu {
+                            region_id,
+                            reason: format!(
+                                "Compaction task {task_id} has crossed its commit boundary"
+                            ),
+                        }
+                        .fail(),
+                        CancelCompactionResult::Unsupported => error::UnsupportedOperationSnafu {
+                            err_msg: format!(
+                                "Cancellation of remote compaction task {task_id} is unsupported"
+                            ),
+                        }
+                        .fail(),
+                    };
+                    sender.send(result);
                 }
                 WorkerRequest::Stop => {
                     debug_assert!(!self.running.load(Ordering::Relaxed));
