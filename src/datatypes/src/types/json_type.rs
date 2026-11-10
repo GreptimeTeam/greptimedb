@@ -400,20 +400,22 @@ pub fn jsonb_to_string(val: &[u8]) -> Result<String> {
     if val.is_empty() {
         return Ok("".to_string());
     }
-    let serialize = |bytes: &[u8]| {
-        serde_json::to_string(&jsonb::RawJsonb::new(bytes)).map_err(|e| {
-            InvalidJsonSnafu {
-                value: e.to_string(),
-            }
-            .build()
-        })
-    };
-    match serialize(val) {
+    match serde_json::to_string(&jsonb::RawJsonb::new(val)) {
         Ok(s) => Ok(s),
-        Err(e) => match jsonb::parse_value(val) {
-            Ok(value) => serialize(&value.to_vec()),
-            Err(_) => Err(e),
-        },
+        Err(jsonb_err) => {
+            let value = jsonb::parse_value(val).map_err(|text_err| {
+                InvalidJsonSnafu {
+                    value: format!("neither jsonb ({jsonb_err}) nor JSON text ({text_err})"),
+                }
+                .build()
+            })?;
+            serde_json::to_string(&jsonb::RawJsonb::new(&value.to_vec())).map_err(|e| {
+                InvalidJsonSnafu {
+                    value: e.to_string(),
+                }
+                .build()
+            })
+        }
     }
 }
 
@@ -448,6 +450,21 @@ mod tests {
         let value = jsonb::parse_value(input.as_bytes()).map_err(|e| e.to_string())?;
         assert_eq!(jsonb_to_serde_json(&value.to_vec())?, expected);
         Ok(())
+    }
+
+    #[test]
+    fn test_jsonb_to_serde_json_scalars() {
+        for input in [r#""2026-11-05""#, "1730800000000", "false", "null"] {
+            let expected: serde_json::Value = serde_json::from_str(input).unwrap();
+            let jsonb = parse_string_to_jsonb(input).unwrap();
+            assert_eq!(jsonb_to_serde_json(&jsonb).unwrap(), expected, "{input}");
+            // Stored as JSON text, the first two used to decode as `false`.
+            assert_eq!(
+                jsonb_to_serde_json(input.as_bytes()).unwrap(),
+                expected,
+                "{input}"
+            );
+        }
     }
 
     #[test]
