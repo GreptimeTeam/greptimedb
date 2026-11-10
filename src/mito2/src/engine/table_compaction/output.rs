@@ -109,7 +109,7 @@ async fn verify_file(
         );
     } else {
         ensure!(
-            !file.exists_index(),
+            file.available_indexes.is_empty() && file.indexes.is_empty(),
             InvalidRequestSnafu {
                 region_id,
                 reason: "Output advertises indexes without an index object",

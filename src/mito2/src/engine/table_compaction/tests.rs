@@ -29,7 +29,7 @@ use crate::engine::MitoEngine;
 use crate::engine::region_hook::{RegionHook, RegionHookRef, VerifiedSstFileInfo};
 use crate::manifest::action::{RegionEdit, RegionMetaAction, RegionMetaActionList};
 use crate::region::MitoRegionRef;
-use crate::sst::file::{FileMeta, LEVEL_SHARED, SHARED_LEVEL_SLOT};
+use crate::sst::file::{ColumnIndexMetadata, FileMeta, IndexType, LEVEL_SHARED, SHARED_LEVEL_SLOT};
 use crate::sst::location;
 use crate::test_util::{
     CreateRequestBuilder, TestEnv, build_rows, flush_region, put_rows, reopen_region, rows_schema,
@@ -357,6 +357,24 @@ async fn test_invalid_results_preserve_inputs_and_reopen_can_replan() {
         ),
         (
             FileMeta {
+                available_indexes: smallvec::smallvec![IndexType::InvertedIndex],
+                ..output.clone()
+            },
+            ExpectedError::InvalidRequest("Output advertises indexes without an index object"),
+        ),
+        (
+            FileMeta {
+                indexes: vec![ColumnIndexMetadata {
+                    column_id: 0,
+                    created_indexes: smallvec::smallvec![IndexType::InvertedIndex],
+                    ..Default::default()
+                }],
+                ..output.clone()
+            },
+            ExpectedError::InvalidRequest("Output advertises indexes without an index object"),
+        ),
+        (
+            FileMeta {
                 file_id: snapshot.inputs[0].file_id,
                 ..output.clone()
             },
@@ -486,6 +504,66 @@ async fn test_invalid_results_preserve_inputs_and_reopen_can_replan() {
             .await
             .unwrap()
     );
+    assert_eq!(3, row_count(&engine, region_id).await);
+}
+
+/// An output carrying a real index object written by flush is accepted.
+#[tokio::test]
+async fn test_indexed_output_with_real_index_object_publishes() {
+    let mut env = TestEnv::new().await;
+    let engine = env.create_engine(config()).await;
+    let region_id = RegionId::new(1, 1);
+    let create = CreateRequestBuilder::new().build_with_index();
+    engine
+        .handle_request(region_id, RegionRequest::Create(create.clone()))
+        .await
+        .unwrap();
+    put_rows(
+        &engine,
+        region_id,
+        Rows {
+            schema: rows_schema(&create),
+            rows: build_rows(0, 3),
+        },
+    )
+    .await;
+    flush_region(&engine, region_id, None).await;
+    let region = engine.get_region(region_id).unwrap();
+    let original = region.version().ssts.levels()[0]
+        .files()
+        .next()
+        .unwrap()
+        .meta_ref()
+        .clone();
+    assert!(original.index_file_size > 0);
+    assert!(!original.available_indexes.is_empty());
+    assert!(!original.indexes.is_empty());
+    let shared = copy_sst(&region, &original, LEVEL_SHARED).await;
+    engine
+        .edit_region(
+            region_id,
+            RegionEdit {
+                files_to_add: vec![shared],
+                files_to_remove: vec![original],
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let snapshot = engine.table_compaction_snapshot(region_id).unwrap();
+    let output = copy_sst(&region, &snapshot.inputs[0], 0).await;
+    assert!(output.index_file_size > 0);
+    assert!(!output.available_indexes.is_empty());
+    assert!(!output.indexes.is_empty());
+    assert_eq!(
+        PublicationOutcome::Applied,
+        engine
+            .publish_table_compaction(region_id, snapshot, vec![output.clone()])
+            .await
+            .unwrap()
+    );
+    let manifest = region.manifest_ctx.manifest().await;
+    assert_eq!(Some(&output), manifest.files.get(&output.file_id));
     assert_eq!(3, row_count(&engine, region_id).await);
 }
 
