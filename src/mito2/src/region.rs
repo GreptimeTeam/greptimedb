@@ -57,8 +57,8 @@ use crate::access_layer::AccessLayerRef;
 use crate::compaction::CompactionStateRef;
 use crate::engine::region_hook::{PendingManifestHook, RegionHookRef};
 use crate::error::{
-    FlushableRegionStateSnafu, InvalidPartitionExprSnafu, RegionNotFoundSnafu, RegionStateSnafu,
-    RegionTruncatedSnafu, Result, UnexpectedSnafu, UpdateManifestSnafu,
+    FlushableRegionStateSnafu, InvalidPartitionExprSnafu, InvalidRequestSnafu, RegionNotFoundSnafu,
+    RegionStateSnafu, RegionTruncatedSnafu, Result, UnexpectedSnafu, UpdateManifestSnafu,
 };
 use crate::lease::{Deadline, NodeLease};
 use crate::manifest::action::{
@@ -69,7 +69,7 @@ use crate::metrics::manifest_size::RegionManifestSizeMetric;
 use crate::region::version::{VersionControlRef, VersionRef};
 use crate::request::{OnFailure, OptionOutputTx};
 use crate::series_index::{SeriesIndexVersion, SeriesIndexVersionControl};
-use crate::sst::file::FileMeta;
+use crate::sst::file::{self, FileMeta};
 use crate::sst::file_purger::FilePurgerRef;
 use crate::sst::location::{index_file_path, sst_file_path};
 use crate::time_provider::TimeProviderRef;
@@ -1615,6 +1615,27 @@ impl ManifestContext {
             let RegionMetaAction::Edit(edit) = &action else {
                 continue;
             };
+
+            edit.validate_shared_reclassification(manifest.metadata.region_id)?;
+            // Imports may add shared references, but ordinary edits must not retire
+            // or overwrite them. Table publication performs its own locked input check.
+            ensure!(
+                edit.files_to_remove.iter().all(|file| {
+                    file.level != file::LEVEL_SHARED
+                        && manifest
+                            .files
+                            .get(&file.file_id)
+                            .is_none_or(|current| current.level != file::LEVEL_SHARED)
+                }) && edit.files_to_add.iter().all(|file| {
+                    manifest.files.get(&file.file_id).is_none_or(|current| {
+                        current.level != file::LEVEL_SHARED || current == file
+                    })
+                }),
+                InvalidRequestSnafu {
+                    region_id: manifest.metadata.region_id,
+                    reason: "Ordinary manifest edits cannot modify shared SSTs",
+                }
+            );
 
             // Checks whether the region is truncated.
             let Some(truncated_entry_id) = manifest.truncated_entry_id else {

@@ -21,7 +21,7 @@ use common_time::{TimeToLive, Timestamp};
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::{FileId, RegionId};
 
-use crate::sst::file::{FileHandle, FileMeta, FileTimeRange, Level, MAX_LEVEL};
+use crate::sst::file::{self, FileHandle, FileMeta, FileTimeRange, Level};
 use crate::sst::file_purger::FilePurgerRef;
 use crate::sst::primary_key::PrimaryKeyRangeMapper;
 
@@ -73,7 +73,7 @@ impl SstVersion {
     /// it will be overwritten with the new file.
     ///
     /// # Panics
-    /// Panics if level of [FileMeta] is greater than [MAX_LEVEL].
+    /// Panics if the level of [FileMeta] has no storage slot.
     pub(crate) fn add_files(
         &mut self,
         file_purger: FilePurgerRef,
@@ -83,8 +83,18 @@ impl SstVersion {
         for file in files_to_add {
             let level = file.level;
             let new_index_version = file.index_version;
+            // A trusted L0 adoption changes classification, not the physical object.
+            // Detach the old handle without marking it deleted (old readers may hold it).
+            // Admission rejects an existing L1 reference; see `prepare_region_edit`.
+            if level == file::LEVEL_SHARED {
+                levels[0].files.remove(&file.file_id);
+            }
+            // Shared references use a sentinel wire level and live in their own slot.
+            let Some(slot) = file::level_slot(level) else {
+                panic!("Unsupported SST level {level}");
+            };
             // If the file already exists, then we should only replace the handle when the index is outdated.
-            levels[level as usize]
+            levels[slot]
                 .files
                 .entry(file.file_id)
                 .and_modify(|f| {
@@ -112,12 +122,14 @@ impl SstVersion {
     /// Remove files from the version.
     ///
     /// # Panics
-    /// Panics if level of [FileMeta] is greater than [MAX_LEVEL].
+    /// Panics if the level of [FileMeta] has no storage slot.
     pub(crate) fn remove_files(&mut self, files_to_remove: impl Iterator<Item = FileMeta>) {
         let levels = Arc::make_mut(&mut self.levels);
         for file in files_to_remove {
-            let level = file.level;
-            if let Some(handle) = levels[level as usize].files.remove(&file.file_id) {
+            let Some(slot) = file::level_slot(file.level) else {
+                panic!("Unsupported SST level {}", file.level);
+            };
+            if let Some(handle) = levels[slot].files.remove(&file.file_id) {
                 handle.mark_deleted();
             }
         }
@@ -217,7 +229,7 @@ impl SstVersion {
 
 // We only has fixed number of level, so we use array to hold elements. This implementation
 // detail of LevelMetaArray should not be exposed to users of [LevelMetas].
-type LevelMetaArray = [LevelMeta; MAX_LEVEL as usize];
+type LevelMetaArray = [LevelMeta; file::LEVEL_SLOT_COUNT];
 
 /// Metadata of files in the same SST level.
 #[derive(Clone)]
@@ -271,11 +283,12 @@ impl fmt::Debug for LevelMeta {
 }
 
 fn new_level_meta_vec() -> LevelMetaArray {
-    (0u8..MAX_LEVEL)
-        .map(LevelMeta::new)
-        .collect::<Vec<_>>()
-        .try_into()
-        .unwrap() // safety: LevelMetaArray is a fixed length array with length MAX_LEVEL
+    // Slot 2 keeps the sentinel wire level so level-based filters still see shared files.
+    [
+        LevelMeta::new(0),
+        LevelMeta::new(1),
+        LevelMeta::new(file::LEVEL_SHARED),
+    ]
 }
 
 #[cfg(test)]

@@ -157,6 +157,7 @@ pub struct AccessLayer {
     puffin_manager_factory: PuffinManagerFactory,
     /// Intermediate manager for inverted index.
     intermediate_manager: IntermediateManager,
+    file_protection: Option<crate::engine::region_hook::RegionHookRef>,
 }
 
 impl std::fmt::Debug for AccessLayer {
@@ -182,6 +183,26 @@ impl AccessLayer {
             object_store,
             puffin_manager_factory,
             intermediate_manager,
+            file_protection: None,
+        }
+    }
+
+    /// Attaches the engine's deletion-time protection provider for local purging.
+    pub(crate) fn with_file_protection(
+        mut self,
+        hook: Option<crate::engine::region_hook::RegionHookRef>,
+    ) -> Self {
+        self.file_protection = hook;
+        self
+    }
+
+    pub(crate) async fn is_file_protected(&self, file: RegionFileId) -> crate::error::Result<bool> {
+        match &self.file_protection {
+            Some(hook) => Ok(hook
+                .protected_sst_files(self, &[file])
+                .await?
+                .contains(&file)),
+            None => Ok(false),
         }
     }
 

@@ -1403,6 +1403,8 @@ impl RegionEditRequest {
 pub(crate) struct RegionEditResult {
     /// Region id.
     pub(crate) region_id: RegionId,
+    /// Prevents a delayed completion from mutating a reopened region with the same id.
+    pub(crate) origin: MitoRegionRef,
     /// Result waiters.
     pub(crate) waiters: Waiters,
     /// Region edit to apply.

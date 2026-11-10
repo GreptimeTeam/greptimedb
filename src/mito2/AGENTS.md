@@ -75,7 +75,10 @@ path and retains residual SQL filters.
 ## When you change X, also touch Y
 
 - **Manifest format** (`manifest/action.rs`): affects crash recovery and
-  follower replay. Keep it backward compatible.
+  follower replay. Keep it backward compatible. Compaction task state does not
+  belong in the manifest; publication uses ordinary file edits after locked input
+  checks. Shared SSTs require Enterprise capability. Compatibility fixtures:
+  `tests/compatibility/manifest/table_compaction/`.
 - **SST/Parquet layout** (`sst/`): readers must stay compatible with existing files.
 - **Series-index disk limit**: tasks estimate usage from entry sizes in open-region snapshots
   and defer new builds when the shared estimate is full. Cleanup still prunes obsolete
@@ -112,6 +115,10 @@ Tests live next to the code as `*_test.rs` (e.g. `src/mito2/src/engine/flush_tes
 - Loaded regions have resident compaction state, including `Idle` and handed-off
   DDLs. Publish create/open/catchup results through the worker's `register_region`;
   only close/drop unregisters them. See `compaction/scheduler/state.rs`.
+- Explicit truncate retires shared references too (`worker/handle_truncate.rs`):
+  `All` removes all data; `ByTimeRanges` removes fully contained files. Other
+  regions/readers still protect the shared objects. Stale compaction results must
+  not reinstate truncated inputs.
 - Local compaction units use the snapshot-free `CompactionContext`. Retaining a
   full `CompactionRegion` in a unit pins other units' inputs and delays SST purge.
 - Candidate waiting history is owned by the region scheduler (`scheduler/history.rs`).

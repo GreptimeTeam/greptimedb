@@ -1950,6 +1950,9 @@ pub struct RegionBuildIndexRequest {
 #[derive(Debug)]
 pub enum RegionTruncateRequest {
     /// Truncate all data in the region.
+    ///
+    /// Mito2 also retires this region's shared SST references. Other regions and
+    /// existing readers may still retain the physical objects.
     All,
     /// Discard all unflushed data while preserving persisted SST files.
     ///
@@ -1961,6 +1964,8 @@ pub enum RegionTruncateRequest {
     /// WAL is obsoleted last. Retrying is safe: a request against a region with nothing
     /// left to discard only re-attempts the WAL obsoletion.
     Unflushed,
+    /// Retires fully contained SST references, including shared SSTs in Mito2.
+    /// Physical reclamation still waits for other references and readers.
     ByTimeRanges {
         /// Time ranges to truncate. Both bound are inclusive.
         /// only files that are fully contained in the time range will be truncated.

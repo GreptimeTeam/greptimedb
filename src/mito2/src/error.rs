@@ -1544,7 +1544,9 @@ impl Error {
     /// from a revoked key, a changed bucket policy or clock skew) never proves nothing was written.
     pub(crate) fn may_have_persisted_manifest_update(&self) -> bool {
         match self {
-            Error::UpdateManifest { .. }
+            // Applicability and capability checks reject the edit before storage I/O.
+            Error::InvalidRequest { .. }
+            | Error::UpdateManifest { .. }
             | Error::RegionState { .. }
             | Error::RegionTruncated { .. }
             | Error::RegionStopped { .. }
@@ -2020,6 +2022,12 @@ mod tests {
 
         let region_id = RegionId::new(1, 1);
         let error = RegionTruncatedSnafu { region_id }.build();
+        assert!(!error.may_have_persisted_manifest_update());
+        let error = InvalidRequestSnafu {
+            region_id,
+            reason: "manifest applicability check rejected the edit",
+        }
+        .build();
         assert!(!error.may_have_persisted_manifest_update());
 
         // This can be raised while applying an edit after its manifest file was saved.

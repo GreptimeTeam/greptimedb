@@ -114,8 +114,38 @@ where
 
 /// Type to store SST level.
 pub type Level = u8;
-/// Maximum level of SSTs.
-pub const MAX_LEVEL: Level = 2;
+/// Shared inputs owned by table compaction, not a deeper region-compaction level.
+/// This sentinel is persisted; L0=0 and L1=1 retain their original meanings, and
+/// taking the maximum value keeps every future ordinary level below it.
+pub const LEVEL_SHARED: Level = Level::MAX;
+/// Storage slot that holds shared references inside the fixed level array.
+pub(crate) const SHARED_LEVEL_SLOT: usize = 2;
+/// Number of level storage slots: L0, L1 and the shared slot.
+pub(crate) const LEVEL_SLOT_COUNT: usize = SHARED_LEVEL_SLOT + 1;
+
+/// Maps a persisted level to its storage slot, if the level is representable.
+pub(crate) const fn level_slot(level: Level) -> Option<usize> {
+    match level {
+        0 | 1 => Some(level as usize),
+        LEVEL_SHARED => Some(SHARED_LEVEL_SLOT),
+        _ => None,
+    }
+}
+
+pub(crate) const fn is_supported_level(level: Level) -> bool {
+    level <= 1 || (cfg!(feature = "enterprise") && level == LEVEL_SHARED)
+}
+
+fn deserialize_level<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Level, D::Error> {
+    let level = Level::deserialize(deserializer)?;
+    if !is_supported_level(level) {
+        return Err(serde::de::Error::custom(format!(
+            "Unsupported SST level {level}"
+        )));
+    }
+    Ok(level)
+}
+
 /// Type to store index types for a column.
 pub type IndexTypes = SmallVec<[IndexType; 4]>;
 
@@ -213,6 +243,7 @@ pub struct FileMeta {
     /// data in the SST.
     pub time_range: FileTimeRange,
     /// SST level of the file.
+    #[serde(deserialize_with = "deserialize_level")]
     pub level: Level,
     /// Size of the file.
     pub file_size: u64,

@@ -1280,7 +1280,10 @@ pub(crate) fn should_split_flat_batches_for_merge(
             let file_index = index.index - stream_ctx.input.num_memtables();
             let file = &stream_ctx.input.files[file_index];
             let file_meta = file.meta_ref();
-            if file_meta.level == 0 {
+            // Only L1 compaction outputs guarantee a published, non-overlapping layout.
+            // L0 and shared inputs may carry short series whose tiny batches
+            // would otherwise be retained by the merge.
+            if file_meta.level != 1 {
                 // Short series can leave too many tiny batches retained by the merge.
                 if file_meta.num_series > 0 {
                     if !can_split_series(file_meta.num_rows, file_meta.num_series) {

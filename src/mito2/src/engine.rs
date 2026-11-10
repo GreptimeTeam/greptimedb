@@ -78,6 +78,8 @@ mod sequence_test;
 #[cfg(test)]
 mod set_role_state_test;
 #[cfg(test)]
+mod shared_file_test;
+#[cfg(test)]
 mod skip_wal_test;
 #[cfg(test)]
 mod staging_test;

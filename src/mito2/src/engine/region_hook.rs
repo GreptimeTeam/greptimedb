@@ -152,6 +152,7 @@
 //! [`ManifestContext::update_locked`]: crate::region::ManifestContext::update_locked
 //! [`ManifestContext::update_manifest`]: crate::region::ManifestContext::update_manifest
 
+use std::collections::HashSet;
 use std::fmt::Debug;
 use std::sync::Arc;
 
@@ -160,10 +161,10 @@ use store_api::ManifestVersion;
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::RegionId;
 
-use crate::access_layer::AccessLayerRef;
+use crate::access_layer::{AccessLayer, AccessLayerRef};
 use crate::error::Result;
 use crate::manifest::action::{RegionMetaActionList, RemovedFile};
-use crate::sst::file::FileMeta;
+use crate::sst::file::{FileMeta, RegionFileId};
 use crate::sst::parquet::SstInfo;
 
 /// A deferred [`RegionHook::on_manifest_updated`] notification produced by a
@@ -297,6 +298,21 @@ pub trait RegionHook: Send + Sync + Debug {
         files: &[SstFileInfo<'_>],
     ) {
         let _ = (region_id, region_metadata, files);
+    }
+
+    /// Queries durable file protections immediately before deletion. Implementations
+    /// must include pending uploads, inputs and undecided outputs, and fail on
+    /// unavailable/uncertain state. File identities are scoped by the access layer's
+    /// storage, table directory and PathType; protection covers all index generations.
+    /// GC rechecks the manifest after this await. This is not `on_region_gc`, which
+    /// is too late to protect anything. Calls must not retain a manifest lock.
+    async fn protected_sst_files(
+        &self,
+        access: &AccessLayer,
+        files: &[RegionFileId],
+    ) -> Result<HashSet<RegionFileId>> {
+        let _ = (access, files);
+        Ok(HashSet::new())
     }
 
     /// Called after the region manifest is successfully committed to the **live**

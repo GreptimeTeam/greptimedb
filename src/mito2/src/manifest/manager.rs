@@ -40,7 +40,7 @@ use crate::manifest::storage::{
 };
 use crate::metrics::MANIFEST_OP_ELAPSED;
 use crate::region::{ManifestStats, RegionLeaderState, RegionRoleState};
-use crate::sst::FormatType;
+use crate::sst::{FormatType, file};
 
 /// Options for [RegionManifestManager].
 #[derive(Debug, Clone)]
@@ -605,6 +605,19 @@ impl RegionManifestManager {
             }
         );
 
+        for action in &action_list.actions {
+            if let RegionMetaAction::Edit(edit) = action {
+                for file in edit.files_to_add.iter().chain(&edit.files_to_remove) {
+                    ensure!(
+                        file::is_supported_level(file.level),
+                        crate::error::InvalidRequestSnafu {
+                            region_id: self.manifest.metadata.region_id,
+                            reason: format!("Unsupported SST level {}", file.level),
+                        }
+                    );
+                }
+            }
+        }
         let conditional = self.store.is_conditional_publication();
         let version = if conditional {
             self.last_version() + 1

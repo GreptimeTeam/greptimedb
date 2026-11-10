@@ -29,6 +29,12 @@ Frozen objects of the object store WAL are checked byte for byte by the format t
 `log-store`. The SQL runner cannot cover the object store WAL: it owns `wal.provider`. See the
 [fixture notes](wal/object_store/README.md).
 
+## Manifest fixtures
+
+[Table-compaction fixtures](manifest/table_compaction/README.md) are exercised by
+mito2's Rust tests. They cover ordinary file-edit compatibility, supported SST
+levels, and explicit rejection of unpublished prototype task-state records.
+
 ## Quick Start
 
 ```shell

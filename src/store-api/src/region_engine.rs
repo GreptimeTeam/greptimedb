@@ -1009,7 +1009,10 @@ pub struct MitoCopyRegionFromRequest {
 
 #[derive(Debug, Clone)]
 pub struct MitoCopyRegionFromResponse {
-    /// The file ids that were copied from the source region to the target region.
+    /// Source SST IDs installed in the target by this copy. Shared references may
+    /// be installed without copying their physical objects. If no new references
+    /// need installation, returns the source IDs already present in the target.
+    /// This is not a count or inventory of physical object transfers.
     pub copied_file_ids: Vec<FileId>,
 }
 

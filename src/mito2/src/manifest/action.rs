@@ -30,7 +30,7 @@ use crate::error::{RegionMetadataNotFoundSnafu, Result, SerdeJsonSnafu, Utf8Snaf
 use crate::manifest::manager::RemoveFileOptions;
 use crate::region::ManifestStats;
 use crate::sst::FormatType;
-use crate::sst::file::FileMeta;
+use crate::sst::file::{self, FileMeta};
 use crate::wal::EntryId;
 
 /// Actions that can be applied to region manifest.
@@ -83,7 +83,7 @@ pub struct RegionChange {
     pub append_mode: Option<bool>,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq)]
 pub struct RegionEdit {
     pub files_to_add: Vec<FileMeta>,
     pub files_to_remove: Vec<FileMeta>,
@@ -95,6 +95,31 @@ pub struct RegionEdit {
     pub flushed_entry_id: Option<EntryId>,
     pub flushed_sequence: Option<SequenceNumber>,
     pub committed_sequence: Option<SequenceNumber>,
+}
+
+impl RegionEdit {
+    /// Shared reclassification must be add-only for a file ID: the manifest removes
+    /// by ID, while the in-memory Version removes from the specified level.
+    pub(crate) fn validate_shared_reclassification(&self, region_id: RegionId) -> Result<()> {
+        let shared_ids: HashSet<_> = self
+            .files_to_add
+            .iter()
+            .filter(|file| file.level == file::LEVEL_SHARED)
+            .map(|file| file.file_id)
+            .collect();
+        snafu::ensure!(
+            shared_ids.is_empty()
+                || self
+                    .files_to_remove
+                    .iter()
+                    .all(|file| !shared_ids.contains(&file.file_id)),
+            crate::error::InvalidRequestSnafu {
+                region_id,
+                reason: "Cannot add and remove the same shared SST in one edit",
+            }
+        );
+        Ok(())
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -179,6 +204,15 @@ impl PartialEq for RegionManifest {
             && self.truncated_entry_id == other.truncated_entry_id
             && self.compaction_time_window == other.compaction_time_window
             && self.committed_sequence == other.committed_sequence
+    }
+}
+
+impl RegionManifest {
+    /// Rejects prototype task state before deserializing, so callers cannot
+    /// silently drop recovery evidence that this build cannot interpret.
+    pub(crate) fn decode(bytes: &[u8]) -> Result<Self> {
+        crate::manifest::compat::validate_manifest(bytes)?;
+        serde_json::from_slice(bytes).context(SerdeJsonSnafu)
     }
 }
 
@@ -526,7 +560,7 @@ impl RegionCheckpoint {
 
     pub fn decode(bytes: &[u8]) -> Result<Self> {
         let data = std::str::from_utf8(bytes).context(Utf8Snafu)?;
-
+        crate::manifest::compat::validate_checkpoint(data)?;
         serde_json::from_str(data).context(SerdeJsonSnafu)
     }
 }
@@ -614,7 +648,7 @@ impl RegionMetaActionList {
 
     pub fn decode(bytes: &[u8]) -> Result<Self> {
         let data = std::str::from_utf8(bytes).context(Utf8Snafu)?;
-
+        crate::manifest::compat::validate_actions(data)?;
         serde_json::from_str(data).context(SerdeJsonSnafu)
     }
 }

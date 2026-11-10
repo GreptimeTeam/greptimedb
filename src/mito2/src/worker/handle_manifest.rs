@@ -22,7 +22,7 @@ use std::sync::Arc;
 
 use common_telemetry::{debug, info, warn};
 use parquet::file::metadata::PageIndexPolicy;
-use snafu::ResultExt;
+use snafu::{OptionExt, ResultExt};
 use store_api::logstore::LogStore;
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::{RegionId, SequenceNumber};
@@ -48,7 +48,7 @@ use crate::request::{
     WorkerRequest, WorkerRequestWithTime,
 };
 use crate::sst::index::IndexBuildType;
-use crate::sst::location;
+use crate::sst::{file, location};
 use crate::wal::EntryId;
 use crate::worker::{RegionWorkerLoop, WorkerListener};
 
@@ -368,17 +368,10 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             preload_sst_cache,
             staging_partition_expr: _,
         } = request;
-        let file_sequence = region.version_control.current().last_sequence + 1;
-        edit.committed_sequence = Some(file_sequence);
-
-        // Generic region edits (direct/import/staging) assign a new destination
-        // sequence domain but cannot prove or rewrite the physical per-row sequence
-        // column. The added files are therefore atomic/untrusted: clear the
-        // `preserve_row_sequence` marker so exact sequence-range scans fail closed
-        // until the scan reaches the assigned max sequence.
-        for file in &mut edit.files_to_add {
-            file.sequence = NonZeroU64::new(file_sequence);
-            file.preserve_row_sequence = false;
+        if let Err(error) = prepare_region_edit(&region, &mut edit) {
+            let error = Arc::new(error);
+            waiters.reply_with(|| Err(error.clone()).context(EditRegionSnafu { region_id }));
+            return RegionEditDispatch::Rejected;
         }
 
         // Allow retrieving `is_staging` before spawn the edit region task.
@@ -394,7 +387,9 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             waiters.reply_with(|| Err(e.clone()).context(EditRegionSnafu { region_id }));
             return RegionEditDispatch::Rejected;
         }
-        region.version_control.update_last_sequence(file_sequence);
+        if let Some(sequence) = edit.committed_sequence {
+            region.version_control.update_last_sequence(sequence);
+        }
 
         let request_sender = self.sender.clone();
         let cache_manager = self.cache_manager.clone();
@@ -416,6 +411,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 region_id,
                 notify: BackgroundNotify::RegionEdit(RegionEditResult {
                     region_id,
+                    origin: region,
                     waiters,
                     edit,
                     result,
@@ -459,6 +455,37 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             }
         };
 
+        if !Arc::ptr_eq(&region, &edit_result.origin) {
+            // The durable edit will be recovered by open. Never replay its old
+            // completion over newer files, or change the new incarnation's queues.
+            edit_result.waiters.reply_with(|| {
+                RegionNotFoundSnafu {
+                    region_id: edit_result.region_id,
+                }
+                .fail()
+            });
+            return;
+        }
+        let requires_reopen = edit_result.result.is_err()
+            && region
+                .manifest_ctx
+                .manifest_manager
+                .read()
+                .await
+                .is_stopped();
+        if let Err(error) = &edit_result.result
+            && requires_reopen
+        {
+            // An uncertain manifest write requires replay before the old Version
+            // can become writable again.
+            self.remove_region(edit_result.region_id).await;
+            edit_result.waiters.reply_with(|| {
+                Err(error.clone()).context(EditRegionSnafu {
+                    region_id: edit_result.region_id,
+                })
+            });
+            return;
+        }
         let need_compaction = if edit_result.is_staging {
             // A close may have abandoned this edit and left staging already.
             if edit_result.update_region_state
@@ -473,7 +500,11 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         } else {
             let need_compaction = self.config.schedule_compaction_after_edit
                 && edit_result.result.is_ok()
-                && !edit_result.edit.files_to_add.is_empty();
+                && edit_result
+                    .edit
+                    .files_to_add
+                    .iter()
+                    .any(|file| file.level < file::LEVEL_SHARED);
 
             // Only apply the edit if the result is ok and region is not in staging state.
             if edit_result.result.is_ok() {
@@ -772,6 +803,87 @@ impl<S: LogStore> RegionWorkerLoop<S> {
     }
 }
 
+fn prepare_region_edit(region: &MitoRegionRef, edit: &mut RegionEdit) -> Result<()> {
+    let region_id = region.region_id;
+    edit.validate_shared_reclassification(region_id)?;
+    let current = region.version_control.current();
+    let shared = &current.version.ssts.levels()[file::SHARED_LEVEL_SLOT].files;
+    // Shared adoption is L0-only. The manifest is keyed by FileId and would
+    // replace an existing reference, but installing a shared handle detaches
+    // only the L0 handle, so an existing L1 reference would leave two live
+    // handles for one file and duplicate its rows until reopen.
+    let l1_files = &current.version.ssts.levels()[1].files;
+    snafu::ensure!(
+        edit.files_to_add
+            .iter()
+            .all(|file| file.level != file::LEVEL_SHARED || !l1_files.contains_key(&file.file_id)),
+        crate::error::InvalidRequestSnafu {
+            region_id,
+            reason: "Cannot adopt an existing L1 SST as shared; adoption is L0-only",
+        }
+    );
+    snafu::ensure!(
+        edit.files_to_remove
+            .iter()
+            .all(|file| file.level < file::LEVEL_SHARED && !shared.contains_key(&file.file_id))
+            && edit
+                .files_to_add
+                .iter()
+                .all(|file| file::is_supported_level(file.level)
+                    && (file.level != file::LEVEL_SHARED
+                        || file.region_id.table_id() == region_id.table_id())),
+        crate::error::InvalidRequestSnafu {
+            region_id,
+            reason: "Invalid shared SST import or removal"
+        }
+    );
+    for file in &edit.files_to_add {
+        if let Some(existing) = shared.get(&file.file_id) {
+            let mut imported = file.clone();
+            imported.sequence = existing.meta_ref().sequence;
+            imported.preserve_row_sequence = false;
+            snafu::ensure!(
+                &imported == existing.meta_ref(),
+                crate::error::InvalidRequestSnafu {
+                    region_id,
+                    reason: "Shared SST import conflicts with a visible reference",
+                }
+            );
+        }
+    }
+    let existing_sequence = |file: &file::FileMeta| {
+        shared
+            .get(&file.file_id)
+            .and_then(|handle| handle.meta_ref().sequence)
+    };
+    // A repeat of a still-visible shared import is not a new admission. Retired
+    // imports are not tracked: compaction retries must never re-import old inputs.
+    let same_import = !edit.files_to_add.is_empty()
+        && edit.files_to_remove.is_empty()
+        && edit
+            .files_to_add
+            .iter()
+            .all(|file| existing_sequence(file).is_some());
+    let sequence =
+        if same_import {
+            None
+        } else {
+            let sequence = current.last_sequence.checked_add(1).context(
+                crate::error::InvalidRequestSnafu {
+                    region_id,
+                    reason: "Region sequence exhausted",
+                },
+            )?;
+            edit.committed_sequence = Some(sequence);
+            NonZeroU64::new(sequence)
+        };
+    for file in &mut edit.files_to_add {
+        file.sequence = existing_sequence(file).or(sequence);
+        file.preserve_row_sequence = false;
+    }
+    Ok(())
+}
+
 /// Checks the edit, writes and applies it.
 async fn edit_region(
     region: &MitoRegionRef,
@@ -861,9 +973,120 @@ async fn edit_region(
     );
 
     let action_list = RegionMetaActionList::with_action(RegionMetaAction::Edit(edit));
-    region
+    let result = region
         .manifest_ctx
         .update_manifest(RegionLeaderState::Editing, action_list, is_staging)
+        .await;
+    if let Err(error) = &result
+        && error.may_have_persisted_manifest_update()
+    {
+        // Recover the file list before accepting another edit after an uncertain write.
+        region
+            .manifest_ctx
+            .manifest_manager
+            .write()
+            .await
+            .stop()
+            .await;
+    }
+    result.map(|_| ())
+}
+
+#[cfg(test)]
+mod tests {
+    use store_api::region_engine::RegionEngine;
+    use store_api::region_request::RegionRequest;
+    use store_api::storage::FileId;
+
+    use super::*;
+    use crate::sst::file::{FileMeta, LEVEL_SHARED};
+    use crate::test_util::{CreateRequestBuilder, TestEnv};
+
+    #[rstest::rstest]
+    #[case::shared_removal(false)]
+    #[case::unsupported_level(true)]
+    #[tokio::test]
+    async fn test_rejected_edit_does_not_stop_manifest(#[case] unsupported_level: bool) {
+        let mut env = TestEnv::new().await;
+        let engine = env.create_engine(Default::default()).await;
+        let region_id = RegionId::new(1, 1);
+        engine
+            .handle_request(
+                region_id,
+                RegionRequest::Create(CreateRequestBuilder::new().build()),
+            )
+            .await
+            .unwrap();
+        let region = engine.get_region(region_id).unwrap();
+        let manifest_version = region.manifest_ctx.manifest_version().await;
+        let file = FileMeta {
+            region_id,
+            file_id: FileId::random(),
+            level: if unsupported_level {
+                // An ordinary-looking but unallocated level; rejected in every build.
+                2
+            } else {
+                LEVEL_SHARED
+            },
+            ..Default::default()
+        };
+        let edit = if unsupported_level {
+            RegionEdit {
+                files_to_add: vec![file],
+                ..Default::default()
+            }
+        } else {
+            RegionEdit {
+                files_to_remove: vec![file],
+                ..Default::default()
+            }
+        };
+        region.set_editing(RegionLeaderState::Writable).unwrap();
+        // Exercise persistence-side rejection, not the earlier worker admission guard.
+        let error = edit_region(
+            &region,
+            edit,
+            engine.cache_manager(),
+            WorkerListener::default(),
+            false,
+            false,
+        )
         .await
-        .map(|_| ())
+        .unwrap_err();
+        assert!(matches!(error, crate::error::Error::InvalidRequest { .. }));
+        assert_eq!(
+            manifest_version,
+            region.manifest_ctx.manifest_version().await
+        );
+        assert!(
+            !region
+                .manifest_ctx
+                .manifest_manager
+                .read()
+                .await
+                .is_stopped()
+        );
+        assert!(
+            region
+                .version()
+                .ssts
+                .levels()
+                .iter()
+                .all(|level| level.files.is_empty())
+        );
+        // A rejected edit must not poison the manager for a subsequent valid update.
+        region
+            .manifest_ctx
+            .update_manifest(
+                RegionLeaderState::Editing,
+                RegionMetaActionList::with_action(RegionMetaAction::Edit(RegionEdit::default())),
+                false,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            manifest_version + 1,
+            region.manifest_ctx.manifest_version().await
+        );
+    }
 }

@@ -23,7 +23,7 @@ use crate::access_layer::AccessLayerRef;
 use crate::cache::CacheManagerRef;
 use crate::error::Result;
 use crate::schedule::scheduler::SchedulerRef;
-use crate::sst::file::{FileMeta, delete_files};
+use crate::sst::file::{self, FileMeta, delete_files};
 use crate::sst::file_ref::FileReferenceManagerRef;
 use crate::sst::range_index::RangeIndexDeleter;
 
@@ -36,8 +36,8 @@ pub trait FilePurger: Send + Sync + fmt::Debug {
     /// Retire cached scan results immediately, without waiting for physical deletion.
     fn invalidate_file(&self, _: &FileMeta) {}
 
-    /// Returns the object-store reference manager used by SST metadata views.
-    /// Local and no-op purgers do not track GC references.
+    /// Returns the reference manager used by SST metadata views.
+    /// Purgers without a manager do not track GC references.
     fn file_ref_manager(&self) -> Option<FileReferenceManagerRef> {
         None
     }
@@ -59,6 +59,7 @@ pub struct LocalFilePurger {
     sst_layer: AccessLayerRef,
     cache_manager: Option<CacheManagerRef>,
     range_index_deleter: Option<RangeIndexDeleter>,
+    file_ref_manager: Option<FileReferenceManagerRef>,
 }
 
 impl fmt::Debug for LocalFilePurger {
@@ -91,6 +92,7 @@ pub fn should_enable_gc(global_gc_enabled: bool, _object_store_scheme: &'static 
 /// If the storage is an object store, an `ObjectStoreFilePurger` is created, which
 /// only manages SST file references. Companion range indexes are deleted directly in either
 /// mode on final handle release when the SST is marked deleted and a deleter is provided.
+/// Shared SSTs and their indexes are retained for global GC.
 ///
 pub fn create_file_purger(
     gc_enabled: bool,
@@ -116,6 +118,7 @@ pub fn create_file_purger(
     } else {
         Arc::new(
             LocalFilePurger::new(scheduler, sst_layer, cache_manager)
+                .with_file_ref_manager(file_ref_manager)
                 .with_range_index_deleter(range_index_deleter),
         )
     }
@@ -126,11 +129,12 @@ pub fn create_local_file_purger(
     scheduler: SchedulerRef,
     sst_layer: AccessLayerRef,
     cache_manager: Option<CacheManagerRef>,
-    _file_ref_manager: FileReferenceManagerRef,
+    file_ref_manager: FileReferenceManagerRef,
     range_index_deleter: Option<RangeIndexDeleter>,
 ) -> FilePurgerRef {
     Arc::new(
         LocalFilePurger::new(scheduler, sst_layer, cache_manager)
+            .with_file_ref_manager(file_ref_manager)
             .with_range_index_deleter(range_index_deleter),
     )
 }
@@ -147,7 +151,13 @@ impl LocalFilePurger {
             sst_layer,
             cache_manager,
             range_index_deleter: None,
+            file_ref_manager: None,
         }
+    }
+
+    fn with_file_ref_manager(mut self, manager: FileReferenceManagerRef) -> Self {
+        self.file_ref_manager = Some(manager);
+        self
     }
 
     /// Attaches deletion of companion range indexes.
@@ -165,7 +175,16 @@ impl LocalFilePurger {
     fn delete_file(&self, file_meta: FileMeta) {
         let sst_layer = self.sst_layer.clone();
         let cache_manager = self.cache_manager.clone();
+        let range_index_deleter = self.range_index_deleter.clone();
         if let Err(e) = self.scheduler.schedule(Box::pin(async move {
+            match sst_layer.is_file_protected(file_meta.file_id()).await {
+                Ok(false) => {}
+                Ok(true) => return,
+                Err(error) => {
+                    error!(error; "File protection unavailable; retaining SST {}", file_meta.file_id());
+                    return;
+                }
+            }
             if let Err(e) = delete_files(
                 file_meta.region_id,
                 &[(file_meta.file_id, file_meta.index_id().version)],
@@ -176,6 +195,12 @@ impl LocalFilePurger {
             .await
             {
                 error!(e; "Failed to delete file {:?} from storage", file_meta);
+                return;
+            }
+            if let Some(deleter) = range_index_deleter
+                && let Err(error) = deleter.delete(file_meta.file_id).await
+            {
+                error!(error; "Failed to delete companion range index");
             }
         })) {
             error!(e; "Failed to schedule the file purge request");
@@ -191,12 +216,22 @@ impl FilePurger for LocalFilePurger {
     }
 
     fn purge_file(&self, file_meta: FileMeta) {
-        schedule_range_index_deletion(
-            &self.scheduler,
-            self.range_index_deleter.as_ref(),
-            file_meta.file_id,
-        );
+        if file_meta.level == file::LEVEL_SHARED {
+            // This lifetime covers one logical reference, not other targets sharing the SST,
+            // so the SST object itself is left to global GC. The range index is keyed by
+            // this region and all of its readers are gone, so it must not leak.
+            schedule_range_index_deletion(
+                &self.scheduler,
+                self.range_index_deleter.as_ref(),
+                file_meta.file_id,
+            );
+            return;
+        }
         self.delete_file(file_meta);
+    }
+
+    fn file_ref_manager(&self) -> Option<FileReferenceManagerRef> {
+        self.file_ref_manager.clone()
     }
 }
 
@@ -271,8 +306,8 @@ mod tests {
     use crate::access_layer::AccessLayer;
     use crate::schedule::scheduler::{LocalScheduler, Scheduler};
     use crate::sst::file::{
-        ColumnIndexMetadata, FileHandle, FileMeta, FileTimeRange, IndexType, RegionFileId,
-        RegionIndexId,
+        ColumnIndexMetadata, FileHandle, FileMeta, FileTimeRange, IndexType, LEVEL_SHARED,
+        RegionFileId, RegionIndexId,
     };
     use crate::sst::index::intermediate::IntermediateManager;
     use crate::sst::index::puffin_manager::PuffinManagerFactory;
@@ -413,6 +448,7 @@ mod tests {
         #[case] gc_enabled: bool,
         #[values(false, true)] is_delete: bool,
         #[values(false, true)] update_index: bool,
+        #[values(0, LEVEL_SHARED)] level: u8,
     ) {
         let env = PurgeTestEnv::new().await;
         let object_store = env.layer.object_store();
@@ -448,6 +484,7 @@ mod tests {
             let meta = FileMeta {
                 region_id: sst_file_id.region_id(),
                 file_id: sst_file_id.file_id(),
+                level,
                 file_size: 4096,
                 max_row_group_uncompressed_size: 4096,
                 ..Default::default()
@@ -456,7 +493,9 @@ mod tests {
                 crate::test_util::memtable_util::metadata_for_test(),
             );
             version.add_files(file_purger, [meta].into_iter());
-            let reader = version.levels()[0].files[&sst_file_id.file_id()].clone();
+            let reader = version.levels()[crate::sst::file::level_slot(level).unwrap()].files
+                [&sst_file_id.file_id()]
+                .clone();
             if update_index {
                 for index_version in 1..=2 {
                     let mut meta = reader.meta_ref().clone();
@@ -489,22 +528,27 @@ mod tests {
 
         assert_eq!(
             object_store.exists(&path).await.unwrap(),
-            gc_enabled || !is_delete
+            gc_enabled || !is_delete || level == LEVEL_SHARED
         );
-        assert_eq!(index_store.exists(&index_path).await.unwrap(), !is_delete);
+        assert_eq!(
+            index_store.exists(&index_path).await.unwrap(),
+            !is_delete,
+            "range index is region-scoped and must be deleted with the last reader"
+        );
         if update_index {
             for index_version in 1..=2 {
                 let path = env.index_path(index_version);
                 assert_eq!(
                     object_store.exists(&path).await.unwrap(),
-                    gc_enabled || !is_delete
+                    gc_enabled || !is_delete || level == LEVEL_SHARED
                 );
             }
         }
     }
 
+    #[rstest::rstest]
     #[tokio::test]
-    async fn test_file_purge_with_index() {
+    async fn test_file_purge_with_index(#[values(0, LEVEL_SHARED)] level: u8) {
         let env = PurgeTestEnv::new().await;
         let object_store = env.layer.object_store();
         let sst_file_id = env.file_id;
@@ -528,7 +572,7 @@ mod tests {
                     region_id: sst_file_id.region_id(),
                     file_id: sst_file_id.file_id(),
                     time_range: FileTimeRange::default(),
-                    level: 0,
+                    level,
                     file_size: 4096,
                     max_row_group_uncompressed_size: 4096,
                     available_indexes: SmallVec::from_iter([IndexType::InvertedIndex]),
@@ -548,13 +592,19 @@ mod tests {
                 },
                 file_purger,
             );
-            // mark file as deleted and drop the handle, we expect the sst file and the index file are deleted.
+            // Shared SSTs and their indexes require global GC even after local release.
             handle.mark_deleted();
         }
 
         scheduler.stop(true).await.unwrap();
 
-        assert!(!object_store.exists(&path).await.unwrap());
-        assert!(!object_store.exists(&index_path).await.unwrap());
+        assert_eq!(
+            level == LEVEL_SHARED,
+            object_store.exists(&path).await.unwrap()
+        );
+        assert_eq!(
+            level == LEVEL_SHARED,
+            object_store.exists(&index_path).await.unwrap()
+        );
     }
 }
