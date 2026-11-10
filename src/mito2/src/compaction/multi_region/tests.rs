@@ -447,6 +447,7 @@ fn write_request(
     format: FormatType,
 ) -> SstWriteRequest {
     SstWriteRequest {
+        index_build_inputs: None,
         op_type: OperationType::Flush,
         metadata,
         source,

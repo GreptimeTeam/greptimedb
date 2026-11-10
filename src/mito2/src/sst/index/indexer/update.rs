@@ -36,6 +36,10 @@ impl Indexer {
         }
         let mut position = 0;
         while position < self.creators.len() {
+            if !self.creators[position].creator.requires_row_scan() {
+                position += 1;
+                continue;
+            }
             match self.creators[position].creator.update(batch).await {
                 Ok(()) => position += 1,
                 Err(err) => {
@@ -61,6 +65,10 @@ impl Indexer {
         }
         let mut position = 0;
         while position < self.creators.len() {
+            if !self.creators[position].creator.requires_row_scan() {
+                position += 1;
+                continue;
+            }
             match self.creators[position].creator.update_flat(batch).await {
                 Ok(()) => position += 1,
                 Err(err) => {

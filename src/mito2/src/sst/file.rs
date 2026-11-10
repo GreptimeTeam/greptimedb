@@ -147,7 +147,7 @@ fn deserialize_level<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Resul
 }
 
 /// Type to store index types for a column.
-pub type IndexTypes = SmallVec<[IndexType; 4]>;
+pub type IndexTypes = SmallVec<[IndexType; 6]>;
 
 /// Cross-region file id.
 ///

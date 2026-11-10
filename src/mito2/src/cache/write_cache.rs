@@ -301,6 +301,7 @@ impl WriteCache {
         let store = self.file_cache.local_store();
         let path_provider = WriteCachePathProvider::new(self.file_cache.clone());
         let indexer = IndexerBuilderImpl {
+            index_build_inputs: write_request.index_build_inputs,
             build_type: write_request.op_type.into(),
             metadata: write_request.metadata.clone(),
             puffin_manager: self
@@ -746,6 +747,7 @@ mod tests {
         ]);
 
         let write_request = SstWriteRequest {
+            index_build_inputs: None,
             op_type,
             metadata,
             source,
@@ -863,6 +865,7 @@ mod tests {
 
         // Write to local cache and upload sst to mock remote store
         let write_request = SstWriteRequest {
+            index_build_inputs: None,
             op_type: OperationType::Flush,
             metadata,
             source,
@@ -955,6 +958,7 @@ mod tests {
 
         // Write to local cache and upload sst to mock remote store
         let write_request = SstWriteRequest {
+            index_build_inputs: None,
             op_type: OperationType::Flush,
             metadata,
             source,

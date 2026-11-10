@@ -14,15 +14,18 @@
 
 //! Ordered registration and planning of index implementations.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use common_error::ext::BoxedError;
 use common_telemetry::warn;
 use snafu::IntoError;
 use store_api::metadata::RegionMetadataRef;
+use store_api::storage::RegionId;
 
 use crate::config::{BloomFilterConfig, FulltextIndexConfig, InvertedIndexConfig};
 use crate::error::{Error, ExternalSnafu, InvalidConfigSnafu};
+use crate::metrics::{INDEX_CREATE_DISCARDED_TOTAL, INDEX_DISCARD_ADMISSION_REJECTED};
 use crate::sst::file::{FileMeta, IndexType};
 use crate::sst::index::IndexBuildType;
 use crate::sst::index::handler::builtin::BuiltinIndexHandler;
@@ -271,6 +274,33 @@ impl IndexBuildPlan {
     pub fn entries(&self) -> impl Iterator<Item = &PlanEntry> {
         self.planned.iter().flat_map(|plan| plan.entries())
     }
+
+    /// Whether any planned implementation can reuse persisted input indexes.
+    pub fn needs_input_reuse(&self) -> bool {
+        self.planned.iter().any(|plan| plan.needs_input_reuse())
+    }
+
+    /// Omits optional extension work when the caller cannot admit its memory budget.
+    /// Records each requested kind once per target plan, rather than once per column.
+    pub fn omit_extensions_for_budget(&mut self, region_id: RegionId) {
+        let omitted: HashSet<_> = self
+            .entries()
+            .filter(|entry| !entry.kind.is_builtin())
+            .map(|entry| entry.kind)
+            .collect();
+        for kind in omitted {
+            warn!(
+                "Omitting index before construction, region_id: {}, kind: {}, reason: admission_rejected",
+                region_id,
+                kind.as_str()
+            );
+            INDEX_CREATE_DISCARDED_TOTAL
+                .with_label_values(&[kind.as_str(), INDEX_DISCARD_ADMISSION_REJECTED])
+                .inc();
+        }
+        self.planned
+            .retain(|plan| plan.kinds().iter().all(|kind| kind.is_builtin()));
+    }
 }
 
 #[cfg(test)]
@@ -310,6 +340,47 @@ mod tests {
         ) -> Result<Option<Box<dyn crate::sst::index::handler::IndexCreator>>, BoxedError> {
             unreachable!("admission must not construct creators")
         }
+    }
+
+    #[test]
+    fn test_admission_omission_records_each_requested_kind_once() {
+        let builtin = IndexKind::Bloom;
+        let enabled = IndexKind::Extension(ExtensionIndexKind::Mg);
+        let disabled = IndexKind::Extension(ExtensionIndexKind::Kll);
+        let entry = |kind, column_id| PlanEntry {
+            kind,
+            column_id,
+            format_version: 1,
+        };
+        let mut plan = IndexBuildPlan {
+            planned: vec![
+                Arc::new(TestPlan {
+                    kinds: vec![builtin],
+                    entries: vec![entry(builtin, 0)],
+                }),
+                Arc::new(TestPlan {
+                    kinds: vec![enabled, disabled],
+                    entries: vec![entry(enabled, 0), entry(enabled, 1)],
+                }),
+            ],
+            failure: None,
+        };
+        let counter = INDEX_CREATE_DISCARDED_TOTAL
+            .with_label_values(&[enabled.as_str(), "admission_rejected"]);
+        let disabled_counter = INDEX_CREATE_DISCARDED_TOTAL
+            .with_label_values(&[disabled.as_str(), "admission_rejected"]);
+        let before = counter.get();
+        let disabled_before = disabled_counter.get();
+        plan.omit_extensions_for_budget(RegionId::new(1, 1));
+        assert_eq!(
+            plan.entries().cloned().collect::<Vec<_>>(),
+            vec![entry(builtin, 0)]
+        );
+        assert_eq!(counter.get(), before + 1);
+        assert_eq!(disabled_counter.get(), disabled_before);
+        assert!(plan.check_success().is_ok());
+        plan.omit_extensions_for_budget(RegionId::new(1, 1));
+        assert_eq!(counter.get(), before + 1);
     }
 
     #[test]
