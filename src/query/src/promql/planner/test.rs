@@ -9721,6 +9721,59 @@ async fn a_float_prefix_over_histograms_aggregates_natively() {
 /// function that answers histograms and scalar arithmetic over them all run here, while an
 /// aggregate that would fold them keeps the existing plan. `rate` is in the histogram-answering
 /// set, so `sum(rate(h[5m]))` is refused by the same rule as `sum(h)`.
+/// A histogram is counted by `count`/`group` and skipped by `min`/`max`/`stddev`/`stdvar`, so all
+/// of them fold it natively; only `sum` and `avg` fold the payload and keep the existing plan.
+///
+/// Prometheus counts every present sample whatever its type is, answers `1` for a non-empty group,
+/// and ignores a histogram where it would have to order or average the values. The second half
+/// pins the aggregates this route still cannot fold.
+#[tokio::test]
+async fn presence_and_order_aggregates_fold_histograms_natively() {
+    for query in [
+        "count(some_metric)",
+        "group(some_metric)",
+        "min(some_metric)",
+        "max(some_metric)",
+        "stddev(some_metric)",
+        "stdvar(some_metric)",
+    ] {
+        let table_provider = build_test_native_histogram_table_provider("some_metric").await;
+        let plan = build_native_fused_plan_with_provider(query, true, table_provider).await;
+        let display = plan.display_indent_schema().to_string();
+        let fused = find_fused_series(&plan)
+            .unwrap_or_else(|| panic!("{query} left the route instead of counting: {display}"));
+        let field = fused
+            .schema()
+            .field_with_unqualified_name(greptime_native_histogram())
+            .unwrap_or_else(|_| panic!("{query} published no field column: {display}"));
+        assert_eq!(
+            &ArrowDataType::Float64,
+            field.data_type(),
+            "{query} answers a count or a `1`, not a histogram: {display}"
+        );
+    }
+    for query in [
+        "sum(some_metric)",
+        "avg(some_metric)",
+        // `quantile` has no kernel in this runtime: the admission check lets it through and the
+        // runtime's own construction refuses it, which keeps the statement on the plan it had
+        // rather than making it count or skip histogram samples here.
+        "quantile(0.9, some_metric)",
+        // A skipping or counting aggregate at the root does not excuse the payload-folding one
+        // below it: `sum` still has no histogram state to fold into.
+        "count(sum(some_metric))",
+        "min(sum(some_metric))",
+    ] {
+        let table_provider = build_test_native_histogram_table_provider("some_metric").await;
+        let plan = build_native_fused_plan_with_provider(query, true, table_provider).await;
+        assert!(
+            find_fused_series(&plan).is_none(),
+            "{query} ran a native fold over histograms: {}",
+            plan.display_indent_schema()
+        );
+    }
+}
+
 #[tokio::test]
 async fn histogram_statements_run_natively_until_an_aggregate_folds_them() {
     for query in [

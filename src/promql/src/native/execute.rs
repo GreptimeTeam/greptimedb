@@ -3929,7 +3929,14 @@ impl RuntimeNode {
                 left.set_annotations(collector.clone());
                 right.set_annotations(collector);
             }
-            RuntimeOp::Aggregate { input, .. } => input.set_annotations(collector),
+            RuntimeOp::Aggregate {
+                input, aggregate, ..
+            } => {
+                // An aggregate that skips histogram samples reports that it did, so it needs the
+                // collector as well as its child.
+                aggregate.set_annotations(collector.clone());
+                input.set_annotations(collector);
+            }
             RuntimeOp::Timestamp { input, .. } => input.set_annotations(collector),
             RuntimeOp::Vector { input, vector, .. } => {
                 vector.annotations = Some(collector.clone());

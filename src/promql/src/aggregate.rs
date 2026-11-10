@@ -70,8 +70,10 @@ pub enum Grouping<'a> {
 /// Groups are returned in the order their first input appears, as in Prometheus: a nested
 /// aggregation folds them in that order.
 ///
-/// Only float evaluated inputs on the shared schema/grid are admitted. `by` on a value field
-/// needs per-point labels and an output schema adapter, and is rejected. There is no fallback.
+/// Evaluated inputs on the shared schema/grid are admitted. An operation that reads a value takes
+/// float samples only; `count` and `group` ask whether a sample is present, so they also accept a
+/// histogram. `by` on a value field needs per-point labels and an output schema adapter, and is
+/// rejected. There is no fallback.
 pub fn aggregate_float(
     schema: &Arc<SeriesSchema>,
     input: &[Series],
@@ -99,6 +101,51 @@ pub struct FloatAggregator {
     group_index: HashMap<LabelKey, usize>,
     groups: Vec<Group>,
     retained: usize,
+}
+
+/// What an aggregate does with a native histogram sample.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum HistogramSamples {
+    /// Counts it as one present sample: `count` counts every present sample, and `group` answers
+    /// `1` for a non-empty group, whatever the sample's type is.
+    Presence,
+    /// Ignores it and reports that it did: `min`, `max`, `stddev`, `stdvar` and `quantile` read a
+    /// float value, and Prometheus skips the histogram samples instead of refusing the statement.
+    Ignored,
+    /// Refuses it: `sum` and `avg` would have to fold the payload, and this route has no
+    /// histogram aggregate state yet.
+    Refused,
+}
+
+/// What `op` does with a native histogram sample.
+pub(crate) fn histogram_samples(op: AggregateOp) -> HistogramSamples {
+    match op {
+        AggregateOp::Count | AggregateOp::Group => HistogramSamples::Presence,
+        AggregateOp::Min | AggregateOp::Max | AggregateOp::Stddev | AggregateOp::Stdvar => {
+            HistogramSamples::Ignored
+        }
+        AggregateOp::Sum | AggregateOp::Avg => HistogramSamples::Refused,
+    }
+}
+
+/// Checks a series for the aggregate `op` folds, and returns its evaluated axis.
+///
+/// The payload check is per operation: an aggregate that counts presence accepts a histogram,
+/// while one that folds values still refuses it here rather than reading a float that is not
+/// there.
+pub(crate) fn validate_aggregate_series<'a>(
+    schema: &SeriesSchema,
+    series: &'a Series,
+    op: AggregateOp,
+) -> Result<&'a TimeAxis> {
+    match histogram_samples(op) {
+        // A histogram is either counted or skipped by the fold, so either way it is a series this
+        // aggregate can take; only the payload-folding operations refuse it.
+        HistogramSamples::Presence | HistogramSamples::Ignored => {
+            validate_grid_series(schema, series)
+        }
+        HistogramSamples::Refused => validate_float_series(schema, series),
+    }
 }
 
 impl FloatAggregator {
@@ -166,7 +213,7 @@ impl FloatAggregator {
         series: &Series,
         mut budget: impl FnMut(usize) -> Result<()>,
     ) -> Result<()> {
-        validate_float_series(&self.schema, series)?;
+        validate_aggregate_series(&self.schema, series, self.op)?;
         let existing_bytes = self.state_bytes();
         let grouping_workspace = grouping_workspace_bytes(&series.metric);
         let mut workspace_bytes =
@@ -707,7 +754,9 @@ enum Value {
 fn validate_input(schema: &SeriesSchema, input: &[Series], grouping: Grouping<'_>) -> Result<()> {
     validate_grouping(schema, grouping)?;
     for series in input {
-        validate_float_series(schema, series)?;
+        // `quantile` reads float values and skips a histogram sample the way Prometheus does, so
+        // the only thing it needs from a series is that it fits this schema and grid.
+        validate_grid_series(schema, series)?;
     }
     Ok(())
 }
@@ -933,8 +982,24 @@ impl Group {
                     )?;
                     block = index / BLOCK_POINTS;
                 }
-                if let SampleRef::Float(sample) = sample {
-                    pending.push((index % BLOCK_POINTS, sample));
+                match sample {
+                    SampleRef::Missing => {}
+                    SampleRef::Float(sample) => pending.push((index % BLOCK_POINTS, sample)),
+                    SampleRef::Histogram(_) => match histogram_samples(op) {
+                        // `count` and `group` ask whether a sample is present, not which payload
+                        // it carries, so a histogram is one contribution. The value is a
+                        // placeholder: `FloatState` counts the contributions for `count` and only
+                        // records that it saw one for `group`.
+                        HistogramSamples::Presence => pending.push((index % BLOCK_POINTS, 1.0)),
+                        // Prometheus skips a histogram sample where the aggregate reads a float
+                        // value; the runtime reports that it did.
+                        HistogramSamples::Ignored => {}
+                        // A payload-folding aggregate is validated as float-only before it folds,
+                        // so a histogram reaching one of them is a defect, not a query.
+                        HistogramSamples::Refused => {
+                            unreachable!("a payload-folding aggregate refuses histogram samples")
+                        }
+                    },
                 }
             }
             retained = self.update_block(
