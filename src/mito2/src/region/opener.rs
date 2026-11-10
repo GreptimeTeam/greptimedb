@@ -1474,6 +1474,7 @@ fn can_load_cache(state: RegionRoleState) -> bool {
     match state {
         RegionRoleState::Leader(RegionLeaderState::Writable)
         | RegionRoleState::Leader(RegionLeaderState::Staging)
+        | RegionRoleState::Leader(RegionLeaderState::EndingStaging)
         | RegionRoleState::Leader(RegionLeaderState::Altering)
         | RegionRoleState::Leader(RegionLeaderState::EnteringStaging)
         | RegionRoleState::Leader(RegionLeaderState::Editing)

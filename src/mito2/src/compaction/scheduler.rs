@@ -569,7 +569,10 @@ impl CompactionScheduler {
             return Ok(false);
         }
         let current_state = manifest_ctx.current_state();
-        if current_state == RegionRoleState::Leader(RegionLeaderState::Staging) {
+        if matches!(
+            current_state,
+            RegionRoleState::Leader(RegionLeaderState::Staging | RegionLeaderState::EndingStaging)
+        ) {
             info!(
                 "Skipping compaction for region {} in staging mode, options: {:?}",
                 region_id, compact_options

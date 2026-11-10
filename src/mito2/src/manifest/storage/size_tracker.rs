@@ -56,15 +56,6 @@ impl Tracker for DeltaTracker {
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct NoopTracker;
-
-impl Tracker for NoopTracker {
-    fn record(&self, _version: ManifestVersion, _size: u64) {
-        // noop
-    }
-}
-
 #[derive(Debug, Clone, Default)]
 pub(crate) struct SizeTracker {
     inventory: Arc<RwLock<Inventory>>,

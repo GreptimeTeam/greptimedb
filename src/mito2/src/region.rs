@@ -51,15 +51,16 @@ use store_api::region_request::{PathType, StagingPartitionDirective};
 use store_api::sst_entry::{self, ManifestSstEntry};
 use store_api::storage::{FileId, RegionId, SequenceNumber};
 use tokio::sync::RwLockWriteGuard;
+use tokio::sync::mpsc::Sender;
 pub use utils::*;
 
 use crate::access_layer::AccessLayerRef;
 use crate::compaction::CompactionStateRef;
 use crate::engine::region_hook::{PendingManifestHook, RegionHookRef};
 use crate::error::{
-    Error, FlushableRegionStateSnafu, InvalidPartitionExprSnafu, InvalidRequestSnafu,
-    RegionBusySnafu, RegionLeaseExpiredSnafu, RegionNotFoundSnafu, RegionStateSnafu,
-    RegionTruncatedSnafu, Result, UnexpectedSnafu, UpdateManifestSnafu,
+    EndStagingSnafu, Error, FlushableRegionStateSnafu, InvalidPartitionExprSnafu,
+    InvalidRequestSnafu, RegionBusySnafu, RegionLeaseExpiredSnafu, RegionNotFoundSnafu,
+    RegionStateSnafu, RegionTruncatedSnafu, Result, UnexpectedSnafu, UpdateManifestSnafu,
 };
 use crate::lease::{Deadline, NodeLease};
 use crate::manifest::action::{
@@ -68,7 +69,9 @@ use crate::manifest::action::{
 use crate::manifest::manager::RegionManifestManager;
 use crate::metrics::manifest_size::RegionManifestSizeMetric;
 use crate::region::version::{VersionControlRef, VersionRef};
-use crate::request::{OnFailure, OptionOutputTx};
+use crate::request::{
+    BackgroundNotify, OnFailure, OptionOutputTx, WorkerRequest, WorkerRequestWithTime,
+};
 use crate::series_index::{SeriesIndexVersion, SeriesIndexVersionControl};
 use crate::sst::file::{self, FileMeta};
 use crate::sst::file_purger::FilePurgerRef;
@@ -101,6 +104,9 @@ pub enum RegionLeaderState {
     Staging,
     /// The region is entering staging mode. - write requests will be stalled.
     EnteringStaging,
+    /// The region is committing its staged edits to end staging mode. - write requests will be
+    /// stalled, and role changes wait for the commit.
+    EndingStaging,
     /// The region is altering.
     Altering,
     /// The region is dropping.
@@ -136,6 +142,7 @@ impl RegionRoleState {
             RegionRoleState::Leader(RegionLeaderState::EnteringStaging) => {
                 "Leader(EnteringStaging)"
             }
+            RegionRoleState::Leader(RegionLeaderState::EndingStaging) => "Leader(EndingStaging)",
             RegionRoleState::Leader(RegionLeaderState::Altering) => "Leader(Altering)",
             RegionRoleState::Leader(RegionLeaderState::Dropping) => "Leader(Dropping)",
             RegionRoleState::Leader(RegionLeaderState::Truncating) => "Leader(Truncating)",
@@ -392,6 +399,7 @@ impl MitoRegion {
                 | RegionRoleState::Leader(RegionLeaderState::Truncating)
                 | RegionRoleState::Leader(RegionLeaderState::Downgrading)
                 | RegionRoleState::Leader(RegionLeaderState::Staging)
+                | RegionRoleState::Leader(RegionLeaderState::EndingStaging)
         )
     }
 
@@ -408,10 +416,13 @@ impl MitoRegion {
         self.manifest_ctx.state.load() == RegionRoleState::Leader(RegionLeaderState::Staging)
     }
 
-    /// Returns whether the region is in staging mode, counting a staged edit in progress.
+    /// Returns whether the region is in staging mode, counting a staged edit in progress and the
+    /// end of staging.
     pub(crate) fn is_staging_or_staged_edit(&self) -> bool {
         match self.manifest_ctx.state.load() {
-            RegionRoleState::Leader(RegionLeaderState::Staging) => true,
+            RegionRoleState::Leader(
+                RegionLeaderState::Staging | RegionLeaderState::EndingStaging,
+            ) => true,
             RegionRoleState::Leader(RegionLeaderState::Editing) => {
                 self.manifest_ctx.staging_partition_info().is_some()
             }
@@ -465,7 +476,9 @@ impl MitoRegion {
     pub(crate) fn region_role(&self) -> RegionRole {
         match self.state() {
             RegionRoleState::Follower => RegionRole::Follower,
-            RegionRoleState::Leader(RegionLeaderState::Staging) => RegionRole::StagingLeader,
+            RegionRoleState::Leader(
+                RegionLeaderState::Staging | RegionLeaderState::EndingStaging,
+            ) => RegionRole::StagingLeader,
             RegionRoleState::Leader(RegionLeaderState::Downgrading) => {
                 RegionRole::DowngradingLeader
             }
@@ -512,7 +525,7 @@ impl MitoRegion {
         &self,
         manager: &mut RwLockWriteGuard<'_, RegionManifestManager>,
     ) -> Result<()> {
-        manager.store().clear_staging_manifests().await?;
+        manager.clear_staging_manifest_and_dir().await?;
 
         self.compare_exchange_state(
             RegionLeaderState::Writable,
@@ -563,9 +576,12 @@ impl MitoRegion {
     }
 
     /// Sets the region role state gracefully. This acquires the manifest write lock.
+    ///
+    /// Ending staging notifies the worker through `worker_sender` (see [Self::end_staging]).
     pub(crate) async fn set_role_state_gracefully(
         &self,
         state: SettableRegionRoleState,
+        worker_sender: &Sender<WorkerRequestWithTime>,
     ) -> Result<()> {
         let mut manager: RwLockWriteGuard<'_, RegionManifestManager> =
             self.manifest_ctx.manifest_manager.write().await;
@@ -591,8 +607,8 @@ impl MitoRegion {
                 match current_state {
                     RegionRoleState::Leader(RegionLeaderState::Staging) => {
                         info!("Exiting staging mode for region {}", self.region_id);
-                        // Use the success exit path that merges all staged manifests
-                        self.exit_staging_on_success(&mut manager).await?
+                        drop(manager);
+                        return self.end_staging(worker_sender).await;
                     }
                     RegionRoleState::Leader(RegionLeaderState::Writable) => {
                         // Already in desired state - no-op
@@ -1048,8 +1064,8 @@ impl MitoRegion {
     /// the authoritative live file set lives in the staging manifest, so this
     /// method merges both — matching the semantics of [`manifest_sst_entries`].
     ///
-    /// The returned manifest version is the staging version when a staging
-    /// manifest is present, otherwise the normal manifest version.
+    /// The returned manifest version is the normal manifest version: staged
+    /// actions take no version.
     pub async fn all_manifest_files(&self) -> (Vec<FileMeta>, ManifestVersion) {
         let manifest = self.manifest_ctx.manifest().await;
         let staging = self
@@ -1079,16 +1095,67 @@ impl MitoRegion {
         (files, version)
     }
 
-    /// Exit staging mode successfully by merging all staged manifests and making them visible.
-    /// Merges staged manifest actions into the live manifest and exits staging mode.
+    /// Commits the staged edits as one manifest version and ends staging (see
+    /// [Self::end_staging_locked]). After dropping the manifest lock it lets the worker resume
+    /// the writes stalled meanwhile, then clears the staging directory.
+    pub(crate) async fn end_staging(
+        &self,
+        worker_sender: &Sender<WorkerRequestWithTime>,
+    ) -> Result<()> {
+        let mut manager = self.manifest_ctx.manifest_manager.write().await;
+        let result = self.end_staging_locked(&mut manager).await;
+        drop(manager);
+
+        // The worker cannot be awaited under the lock, and its writes need not wait for the
+        // slower clear of the staging directory.
+        let notify = WorkerRequest::Background {
+            region_id: self.region_id,
+            notify: BackgroundNotify::StagingEnded,
+        };
+        if worker_sender
+            .send(WorkerRequestWithTime::new(notify))
+            .await
+            .is_err()
+        {
+            warn!(
+                "Failed to notify the worker that region {} ended staging",
+                self.region_id
+            );
+        }
+        let Some(pending) = result? else {
+            return Ok(());
+        };
+        self.clear_ended_staging().await;
+        pending.fire().await;
+        Ok(())
+    }
+
+    /// Clears the staging directory after staging ended, unless a new staging has begun.
+    async fn clear_ended_staging(&self) {
+        let mut manager = self.manifest_ctx.manifest_manager.write().await;
+        if self.is_enter_staging() || self.is_staging_or_staged_edit() {
+            return;
+        }
+        if let Err(e) = manager.clear_staging_manifest_and_dir().await {
+            error!(e; "Failed to clear staging manifest dir for region {}", self.region_id);
+        }
+    }
+
+    /// Commits the staged edits as one manifest version and ends staging.
     ///
-    /// The caller must hold the manifest write lock and pass it via `manager`.
-    /// Returns `Ok(Some(pending))` when staging manifests were merged, or
-    /// `Ok(None)` when there were no staged manifests to merge.
+    /// The caller must hold the manifest write lock and pass it via `manager`. The commit runs in
+    /// [RegionLeaderState::EndingStaging], which stalls writes and holds role changes back; the
+    /// caller lets the worker resume those writes after dropping the lock. The region then becomes
+    /// writable, or a follower or a downgrading leader if the commit conflicted, the Leader lease
+    /// expired or a downgrade began meanwhile. If the commit may have been written and the region
+    /// stays staging, its staged edits are kept for a retry and the error is retryable.
+    ///
+    /// Returns `Ok(Some(pending))` when the staged edits were committed, or `Ok(None)` when
+    /// there was nothing to commit.
     ///
     /// **Important:** [`fire`](PendingManifestHook::fire) the receipt only after
     /// dropping the lock — the hook may read the manifest and deadlock otherwise.
-    pub(crate) async fn exit_staging_on_success(
+    pub(crate) async fn end_staging_locked(
         &self,
         manager: &mut RwLockWriteGuard<'_, RegionManifestManager>,
     ) -> Result<Option<PendingManifestHook>> {
@@ -1102,25 +1169,20 @@ impl MitoRegion {
             }
         );
 
-        // Merge all staged manifest actions
-        let merged_actions = match manager.merge_staged_actions(current_state).await? {
-            Some(actions) => actions,
-            None => {
-                info!(
-                    "No staged manifests to merge for region {}, exiting staging mode without changes",
-                    self.region_id
-                );
-                // Even if no manifests to merge, we still need to exit staging mode
-                self.exit_staging()?;
-                return Ok(None);
-            }
+        let Some(staged_actions) = manager.staged_actions() else {
+            info!(
+                "No staged manifests to merge for region {}, exiting staging mode without changes",
+                self.region_id
+            );
+            self.exit_staging()?;
+            return Ok(None);
         };
-        let expect_change = merged_actions.actions.iter().any(|a| a.is_change());
-        let expect_partition_expr_change = merged_actions
+        let expect_change = staged_actions.actions.iter().any(|a| a.is_change());
+        let expect_partition_expr_change = staged_actions
             .actions
             .iter()
             .any(|a| a.is_partition_expr_change());
-        let expect_edit = merged_actions.actions.iter().any(|a| a.is_edit());
+        let expect_edit = staged_actions.actions.iter().any(|a| a.is_edit());
         ensure!(
             !(expect_change && expect_partition_expr_change),
             UnexpectedSnafu {
@@ -1141,7 +1203,7 @@ impl MitoRegion {
         );
 
         let (merged_partition_expr_change, merged_change, merged_edit) =
-            merged_actions.clone().split_region_change_and_edit();
+            staged_actions.clone().split_region_change_and_edit();
         if let Some(change) = &merged_change {
             // In staging exit we only allow metadata-only updates. A `Change`
             // action is accepted only when column definitions are unchanged;
@@ -1155,38 +1217,42 @@ impl MitoRegion {
             );
         }
 
-        // Submit merged actions using the manifest manager's update method.
-        // Pass `false` so it saves to normal directory, not staging.
-        let pending = self
+        let ending_started_at = self.manifest_ctx.begin_ending_staging(self.region_id)?;
+        let result = self
             .manifest_ctx
-            .update_locked(manager, merged_actions, false)
-            .await?;
-        let new_version = pending.version();
-        info!(
-            "Successfully submitted merged staged manifests for region {}, new version: {}",
-            self.region_id, new_version
-        );
-
-        // Apply the merged changes to in-memory version control
-        if let Some(change) = merged_partition_expr_change {
-            let mut new_metadata = self.version().metadata.as_ref().clone();
-            new_metadata.set_partition_expr(change.partition_expr);
-            self.version_control.alter_metadata(new_metadata.into());
+            .commit_staged_locked(manager, staged_actions)
+            .await;
+        if let Ok(pending) = &result {
+            info!(
+                "Successfully committed staged manifests for region {}, new version: {}",
+                self.region_id,
+                pending.version()
+            );
+            // Apply the merged changes to in-memory version control
+            if let Some(change) = merged_partition_expr_change {
+                let mut new_metadata = self.version().metadata.as_ref().clone();
+                new_metadata.set_partition_expr(change.partition_expr);
+                self.version_control.alter_metadata(new_metadata.into());
+            }
+            if let Some(change) = merged_change {
+                self.version_control.alter_metadata(change.metadata);
+            }
+            self.version_control
+                .apply_edit(Some(merged_edit), &[], self.file_purger.clone());
         }
-        if let Some(change) = merged_change {
-            self.version_control.alter_metadata(change.metadata);
-        }
-        self.version_control
-            .apply_edit(Some(merged_edit), &[], self.file_purger.clone());
+        let next_state =
+            self.manifest_ctx
+                .finish_ending_staging(self.region_id, ending_started_at, &result);
 
-        // Clear all staging manifests and transit state
-        if let Err(e) = manager.clear_staging_manifest_and_dir().await {
-            error!(e; "Failed to clear staging manifest dir for region {}", self.region_id);
+        match result {
+            // A retry of the request commits the kept edits.
+            Err(e) if next_state == RegionRoleState::Leader(RegionLeaderState::Staging) => {
+                Err(Arc::new(e)).context(EndStagingSnafu {
+                    region_id: self.region_id,
+                })
+            }
+            result => result.map(Some),
         }
-        self.exit_staging()?;
-
-        // Return the hook payload; the caller invokes the hook after dropping the lock.
-        Ok(Some(pending))
     }
 
     pub fn expected_partition_expr_version(&self) -> u64 {
@@ -1354,6 +1420,66 @@ impl ManifestContext {
             })?;
         self.clear_staging_partition_info();
         Ok(())
+    }
+
+    /// Switches a staging region to [RegionLeaderState::EndingStaging] and returns the instant
+    /// it switched.
+    ///
+    /// It holds the lock of [Self::begin_downgrade], so a downgrade either has left staging
+    /// already, or begins after the returned instant.
+    pub(crate) fn begin_ending_staging(&self, region_id: RegionId) -> Result<Instant> {
+        let _fence = self.promotion_fence.lock().unwrap();
+        self.state
+            .compare_exchange(
+                RegionRoleState::Leader(RegionLeaderState::Staging),
+                RegionRoleState::Leader(RegionLeaderState::EndingStaging),
+            )
+            .map_err(|actual| {
+                RegionStateSnafu {
+                    region_id,
+                    state: actual,
+                    expect: RegionRoleState::Leader(RegionLeaderState::Staging),
+                }
+                .build()
+            })?;
+        Ok(Instant::now())
+    }
+
+    /// Leaves [RegionLeaderState::EndingStaging], entered at `ending_started_at`, after the end
+    /// commit returned `result`. Returns the state the region leaves it for, which is in order:
+    /// - Follower if the commit conflicted with another writer or the Leader lease expired;
+    /// - Downgrading if a downgrade began meanwhile;
+    /// - Writable if the commit succeeded;
+    /// - Staging otherwise, keeping the staging partition info for a retry.
+    pub(crate) fn finish_ending_staging<T>(
+        &self,
+        region_id: RegionId,
+        ending_started_at: Instant,
+        result: &Result<T>,
+    ) -> RegionRoleState {
+        let fence = self.promotion_fence.lock().unwrap();
+        let lease_expired = self.node_lease.is_enabled() && self.is_leader_lease_expired();
+        let next_state = match result {
+            Err(Error::ManifestVersionConflict { .. } | Error::RegionLeaseExpired { .. }) => {
+                RegionRoleState::Follower
+            }
+            _ if fence.downgrade_started_at > ending_started_at => {
+                RegionRoleState::Leader(RegionLeaderState::Downgrading)
+            }
+            _ if lease_expired => RegionRoleState::Follower,
+            Ok(_) => RegionRoleState::Leader(RegionLeaderState::Writable),
+            Err(_) => RegionRoleState::Leader(RegionLeaderState::Staging),
+        };
+        // Role changes leave a region that is ending staging alone.
+        self.state.store(next_state);
+        if next_state != RegionRoleState::Leader(RegionLeaderState::Staging) {
+            self.clear_staging_partition_info();
+        }
+        info!(
+            "Region {} ended staging, next state: {:?}",
+            region_id, next_state
+        );
+        next_state
     }
 
     pub(crate) async fn manifest_version(&self) -> ManifestVersion {
@@ -1540,7 +1666,7 @@ impl ManifestContext {
     ///
     /// Does not validate state or edit applicability — the caller must do so
     /// while still holding the lock (see `update_manifest_with_state_check`
-    /// and `MitoRegion::exit_staging_on_success`).
+    /// and `MitoRegion::end_staging_locked`).
     pub(crate) async fn update_locked(
         &self,
         manager: &mut RegionManifestManager,
@@ -1582,6 +1708,31 @@ impl ManifestContext {
             version,
             self.hook.clone(),
             is_staging,
+        ))
+    }
+
+    /// Commits the staged actions of `manager`, `staged_actions`, as one version under a
+    /// caller-held write lock, and returns a [`PendingManifestHook`] to
+    /// [`fire`](PendingManifestHook::fire) after dropping the lock.
+    pub(crate) async fn commit_staged_locked(
+        &self,
+        manager: &mut RegionManifestManager,
+        staged_actions: RegionMetaActionList,
+    ) -> Result<PendingManifestHook> {
+        let region_id = manager.manifest().metadata.region_id;
+        let version = manager
+            .commit_staged(|| self.is_leader_lease_expired())
+            .await
+            .inspect_err(
+                |e| error!(e; "Failed to commit staged manifest, region_id: {}", region_id),
+            )?;
+
+        Ok(PendingManifestHook::new(
+            region_id,
+            self.hook.as_ref().map(|_| staged_actions),
+            version,
+            self.hook.clone(),
+            false,
         ))
     }
 
@@ -1810,6 +1961,9 @@ impl ManifestContext {
     /// From `Downgrading Leader`:
     /// - `Downgrading Leader -> Leader`
     /// - `Downgrading Leader -> Follower`
+    ///
+    /// A region that is ending staging keeps its state: the end of staging reads the Leader
+    /// deadline and the downgrade start when it leaves that state.
     pub(crate) fn set_role(&self, next_role: RegionRole, region_id: RegionId) {
         match next_role {
             RegionRole::Follower => {
@@ -1825,7 +1979,11 @@ impl ManifestContext {
                     return;
                 }
                 match self.state.fetch_update(|state| {
-                    if !matches!(state, RegionRoleState::Follower) {
+                    if !matches!(
+                        state,
+                        RegionRoleState::Follower
+                            | RegionRoleState::Leader(RegionLeaderState::EndingStaging)
+                    ) {
                         Some(RegionRoleState::Follower)
                     } else {
                         None
@@ -1886,6 +2044,7 @@ impl ManifestContext {
                                     | RegionLeaderState::Truncating
                                     | RegionLeaderState::Editing
                                     | RegionLeaderState::EnteringStaging
+                                    | RegionLeaderState::EndingStaging
                             )
                         ) {
                             warn!(
@@ -2348,18 +2507,20 @@ mod tests {
     use object_store::services::Fs;
     use store_api::logstore::provider::Provider;
     use store_api::region_engine::RegionRole;
-    use store_api::region_request::PathType;
+    use store_api::region_request::{PathType, StagingPartitionDirective};
     use store_api::storage::{FileId, RegionId};
 
     use crate::access_layer::AccessLayer;
-    use crate::error::Error;
+    use crate::error::{Error, ManifestVersionConflictSnafu, Result, UnexpectedSnafu};
     use crate::manifest::action::{
         RegionChange, RegionEdit, RegionMetaAction, RegionMetaActionList, RegionPartitionExprChange,
     };
     use crate::manifest::manager::{RegionManifestManager, RegionManifestOptions};
+    use crate::manifest::storage::delta_file;
+    use crate::manifest::storage::staging::staging_manifest_path;
     use crate::region::{
         IndexBuildSource, IndexPublication, IndexPublicationStale, ManifestContext, ManifestStats,
-        MitoRegion, RegionLeaderState, RegionRoleState, RegionStats,
+        MitoRegion, RegionLeaderState, RegionRoleState, RegionStats, StagingPartitionInfo,
     };
     use crate::sst::FormatType;
     use crate::sst::index::intermediate::IntermediateManager;
@@ -2813,26 +2974,31 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_exit_staging_partition_expr_change_and_edit_success() {
+    async fn test_end_staging_partition_expr_change_and_edit_success() {
         let env = SchedulerEnv::new().await;
         let region = build_test_region(&env).await;
 
         let mut manager = region.manifest_ctx.manifest_manager.write().await;
         region.set_staging(&mut manager).await.unwrap();
-        manager
-            .update(
-                RegionMetaActionList::new(vec![
-                    RegionMetaAction::PartitionExprChange(RegionPartitionExprChange {
-                        partition_expr: Some("expr_a".to_string()),
-                    }),
-                    RegionMetaAction::Edit(empty_edit()),
-                ]),
-                true,
-            )
-            .await
-            .unwrap();
+        let version = manager.last_version();
+        for action in [
+            RegionMetaAction::PartitionExprChange(RegionPartitionExprChange {
+                partition_expr: Some("expr_a".to_string()),
+            }),
+            RegionMetaAction::Edit(empty_edit()),
+        ] {
+            manager
+                .update(RegionMetaActionList::with_action(action), true)
+                .await
+                .unwrap();
+        }
+        // Staged actions take no version.
+        assert_eq!(manager.last_version(), version);
 
-        let _hook_payload = region.exit_staging_on_success(&mut manager).await.unwrap();
+        let pending = region.end_staging_locked(&mut manager).await.unwrap();
+        assert_eq!(pending.unwrap().version(), version + 1);
+        assert_eq!(manager.last_version(), version + 1);
+        assert!(manager.staged_actions().is_none());
         drop(manager);
 
         assert_eq!(
@@ -2846,7 +3012,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_exit_staging_change_with_same_columns_success() {
+    async fn test_end_staging_change_with_same_columns_success() {
         let env = SchedulerEnv::new().await;
         let region = build_test_region(&env).await;
 
@@ -2871,7 +3037,7 @@ mod tests {
             .await
             .unwrap();
 
-        let _hook_payload = region.exit_staging_on_success(&mut manager).await.unwrap();
+        let _hook_payload = region.end_staging_locked(&mut manager).await.unwrap();
         drop(manager);
 
         assert_eq!(
@@ -2885,7 +3051,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_exit_staging_change_with_different_columns_fails() {
+    async fn test_end_staging_change_with_different_columns_fails() {
         let env = SchedulerEnv::new().await;
         let region = build_test_region(&env).await;
 
@@ -2910,12 +3076,12 @@ mod tests {
             .await
             .unwrap();
 
-        let result = region.exit_staging_on_success(&mut manager).await;
+        let result = region.end_staging_locked(&mut manager).await;
         assert!(matches!(result, Err(Error::Unexpected { .. })));
     }
 
     #[tokio::test]
-    async fn test_exit_staging_partition_expr_change_and_change_conflict_fails() {
+    async fn test_end_staging_partition_expr_change_and_change_conflict_fails() {
         let env = SchedulerEnv::new().await;
         let region = build_test_region(&env).await;
 
@@ -2943,8 +3109,140 @@ mod tests {
             .await
             .unwrap();
 
-        let result = region.exit_staging_on_success(&mut manager).await;
+        let result = region.end_staging_locked(&mut manager).await;
         assert!(matches!(result, Err(Error::Unexpected { .. })));
+    }
+
+    #[tokio::test]
+    async fn test_end_staging_ignores_files_in_staging_dir() {
+        let env = SchedulerEnv::new().await;
+        let region = build_test_region(&env).await;
+
+        let mut manager = region.manifest_ctx.manifest_manager.write().await;
+        region.set_staging(&mut manager).await.unwrap();
+        // A late writer leaves a delta in the staging directory.
+        let late_file = crate::sst::file::FileMeta {
+            region_id: region.region_id,
+            file_id: FileId::random(),
+            ..Default::default()
+        };
+        let mut late_edit = empty_edit();
+        late_edit.files_to_add.push(late_file.clone());
+        region
+            .access_layer
+            .object_store()
+            .write(
+                &format!(
+                    "{}{}",
+                    staging_manifest_path(manager.store().manifest_dir()),
+                    delta_file(1)
+                ),
+                RegionMetaActionList::with_action(RegionMetaAction::Edit(late_edit))
+                    .encode()
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        manager
+            .update(
+                RegionMetaActionList::new(vec![
+                    RegionMetaAction::PartitionExprChange(RegionPartitionExprChange {
+                        partition_expr: Some("expr_a".to_string()),
+                    }),
+                    RegionMetaAction::Edit(empty_edit()),
+                ]),
+                true,
+            )
+            .await
+            .unwrap();
+
+        let _hook_payload = region.end_staging_locked(&mut manager).await.unwrap();
+
+        assert!(!manager.manifest().files.contains_key(&late_file.file_id));
+    }
+
+    #[tokio::test]
+    async fn test_ending_staging_holds_role_changes() {
+        let env = SchedulerEnv::new().await;
+        let builder = VersionControlBuilder::new();
+        let version_control = Arc::new(builder.build());
+        let manifest_ctx = env
+            .mock_manifest_context(version_control.current().version.metadata.clone())
+            .await;
+        let region_id = RegionId::new(1024, 0);
+        let staging = RegionRoleState::Leader(RegionLeaderState::Staging);
+        let ending = RegionRoleState::Leader(RegionLeaderState::EndingStaging);
+        let begin_ending = || {
+            manifest_ctx.state.store(staging);
+            if manifest_ctx.staging_partition_info().is_none() {
+                manifest_ctx.set_staging_partition_info(
+                    StagingPartitionInfo::from_partition_directive(
+                        StagingPartitionDirective::UpdatePartitionExpr("expr".to_string()),
+                    ),
+                );
+            }
+            manifest_ctx.begin_ending_staging(region_id).unwrap()
+        };
+        let committed: Result<()> = Ok(());
+        let unknown: Result<()> = UnexpectedSnafu { reason: "mock" }.fail();
+
+        // Role changes wait, and an unknown result returns to staging for a retry.
+        let started = begin_ending();
+        for role in [
+            RegionRole::Follower,
+            RegionRole::Leader,
+            RegionRole::StagingLeader,
+            RegionRole::DowngradingLeader,
+        ] {
+            manifest_ctx.set_role(role, region_id);
+            assert_eq!(manifest_ctx.state.load(), ending);
+        }
+        assert_eq!(
+            manifest_ctx.finish_ending_staging(region_id, started, &unknown),
+            staging
+        );
+        assert!(manifest_ctx.staging_partition_info().is_some());
+
+        // A downgrade that began meanwhile takes effect when staging ends.
+        let started = begin_ending();
+        manifest_ctx.begin_downgrade(region_id);
+        assert_eq!(manifest_ctx.state.load(), ending);
+        assert_eq!(
+            manifest_ctx.finish_ending_staging(region_id, started, &committed),
+            RegionRoleState::Leader(RegionLeaderState::Downgrading)
+        );
+        assert!(manifest_ctx.staging_partition_info().is_none());
+
+        let started = begin_ending();
+        assert_eq!(
+            manifest_ctx.finish_ending_staging(region_id, started, &committed),
+            RegionRoleState::Leader(RegionLeaderState::Writable)
+        );
+        assert!(manifest_ctx.staging_partition_info().is_none());
+
+        // Another writer committed the version.
+        let started = begin_ending();
+        let conflict: Result<()> = ManifestVersionConflictSnafu {
+            version: 1u64,
+            manifest_dir: "manifest/",
+            reason: "mock",
+        }
+        .fail();
+        assert_eq!(
+            manifest_ctx.finish_ending_staging(region_id, started, &conflict),
+            RegionRoleState::Follower
+        );
+
+        // The Leader lease expired while the commit ran; no deadline counts as expired.
+        manifest_ctx.node_lease.enable();
+        for result in [&committed, &unknown] {
+            let started = begin_ending();
+            assert_eq!(
+                manifest_ctx.finish_ending_staging(region_id, started, result),
+                RegionRoleState::Follower
+            );
+            assert!(manifest_ctx.staging_partition_info().is_none());
+        }
     }
 
     #[tokio::test]
@@ -3154,42 +3452,38 @@ mod tests {
         );
         assert!(!region.is_staging());
 
-        // Test staging directory cleanup: Create dirty staging files before entering staging mode
+        // Entering staging clears the staging directory and the staged actions.
         {
-            // Create some dummy staging manifest files to simulate interrupted session
-            let manager = manifest_ctx.manifest_manager.write().await;
-            let dummy_actions = RegionMetaActionList::new(vec![]);
-            let dummy_bytes = dummy_actions.encode().unwrap();
-
-            // Create dirty staging files with versions 100 and 101
-            manager.store().save(100, &dummy_bytes, true).await.unwrap();
-            manager.store().save(101, &dummy_bytes, true).await.unwrap();
-            drop(manager);
-
-            // Verify dirty files exist before entering staging
-            let manager = manifest_ctx.manifest_manager.read().await;
-            let dirty_manifests = manager.store().fetch_staging_manifests().await.unwrap();
-            assert_eq!(
-                dirty_manifests.len(),
-                2,
-                "Should have 2 dirty staging files"
-            );
-            drop(manager);
-
-            // Enter staging mode - this should clean up the dirty files
             let mut manager = manifest_ctx.manifest_manager.write().await;
-            region.set_staging(&mut manager).await.unwrap();
-            drop(manager);
-
-            // Verify dirty files are cleaned up after entering staging
-            let manager = manifest_ctx.manifest_manager.read().await;
-            let cleaned_manifests = manager.store().fetch_staging_manifests().await.unwrap();
-            assert_eq!(
-                cleaned_manifests.len(),
-                0,
-                "Dirty staging files should be cleaned up"
+            let object_store = region.access_layer.object_store().clone();
+            // A delta that an older version staged.
+            let stale_delta = format!(
+                "{}{}",
+                staging_manifest_path(manager.store().manifest_dir()),
+                delta_file(100)
             );
-            drop(manager);
+            object_store
+                .write(
+                    &stale_delta,
+                    RegionMetaActionList::new(vec![]).encode().unwrap(),
+                )
+                .await
+                .unwrap();
+            region.set_staging(&mut manager).await.unwrap();
+            assert!(!object_store.exists(&stale_delta).await.unwrap());
+
+            manager
+                .update(
+                    RegionMetaActionList::with_action(RegionMetaAction::Edit(empty_edit())),
+                    true,
+                )
+                .await
+                .unwrap();
+            assert!(manager.staged_actions().is_some());
+            region.exit_staging().unwrap();
+            region.set_staging(&mut manager).await.unwrap();
+            assert!(manager.staged_actions().is_none());
+            assert!(manager.staging_manifest().is_none());
 
             // Exit staging to restore normal state for remaining tests
             region.exit_staging().unwrap();

@@ -366,9 +366,11 @@ impl<S> RegionWorkerLoop<S> {
                         e.insert(region_ctx);
                     }
                     RegionRoleState::Leader(RegionLeaderState::Altering)
-                    | RegionRoleState::Leader(RegionLeaderState::Editing) => {
+                    | RegionRoleState::Leader(RegionLeaderState::Editing)
+                    | RegionRoleState::Leader(RegionLeaderState::EndingStaging) => {
                         // Editing is transient: queue the write so edit completion can drain it
-                        // before starting the next queued edit.
+                        // before starting the next queued edit. The end of staging drains it
+                        // after its final state change.
                         debug!(
                             "Region {} is {:?}, add request to pending writes",
                             region.region_id,
@@ -522,9 +524,11 @@ impl<S> RegionWorkerLoop<S> {
                         e.insert(region_ctx);
                     }
                     RegionRoleState::Leader(RegionLeaderState::Altering)
-                    | RegionRoleState::Leader(RegionLeaderState::Editing) => {
+                    | RegionRoleState::Leader(RegionLeaderState::Editing)
+                    | RegionRoleState::Leader(RegionLeaderState::EndingStaging) => {
                         // Editing is transient: queue the bulk write so edit completion can drain
-                        // it before starting the next queued edit.
+                        // it before starting the next queued edit. The end of staging drains it
+                        // after its final state change.
                         debug!(
                             "Region {} is {:?}, add request to pending writes",
                             region.region_id,

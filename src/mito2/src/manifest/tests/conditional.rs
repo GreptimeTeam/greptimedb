@@ -15,7 +15,7 @@
 //! Tests for manifests published by conditional create.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use common_datasource::compression::CompressionType;
 use common_error::ext::ErrorExt;
@@ -24,13 +24,15 @@ use common_test_util::temp_dir::{TempDir, create_temp_dir};
 use object_store::ObjectStore;
 use object_store::layers::CapabilityOverrideLayer;
 use object_store::layers::mock::{
-    Error as MockError, ErrorKind, MockLayer, MockLayerBuilder, Result as MockResult, oio,
+    Error as MockError, ErrorKind, Metadata, MockLayer, MockLayerBuilder, Result as MockResult, oio,
 };
 use object_store::services::Fs;
 use rstest::rstest;
 use store_api::ManifestVersion;
+use store_api::storage::FileId;
 
 use crate::error::{Error, Result};
+use crate::manifest::action::{RegionEdit, RegionMetaAction, RegionMetaActionList};
 use crate::manifest::manager::{RegionManifestManager, RegionManifestOptions};
 use crate::manifest::storage::{
     LAST_CHECKPOINT_FILE, ManifestObjectStore, delta_file, gen_path, is_checkpoint_file,
@@ -38,6 +40,7 @@ use crate::manifest::storage::{
 };
 use crate::manifest::tests::utils::{basic_region_metadata, fail_manifest_reads_layer};
 use crate::sst::FormatType;
+use crate::sst::file::FileMeta;
 use crate::test_util::nop_action;
 
 fn temp_store() -> (TempDir, ObjectStore) {
@@ -212,17 +215,17 @@ async fn test_compression_settings_share_one_name() {
     let mut compressed = conditional_store(&store, CompressionType::Gzip);
     let data = vec![b'a'; 1024];
 
-    stored.save(1, &data, false).await.unwrap();
+    stored.save(1, &data).await.unwrap();
     let stored_object = store.read(&delta_key(1)).await.unwrap().to_vec();
     assert!(stored_object.len() > data.len());
 
     // A retry by a writer with the other setting succeeds and leaves the object alone.
-    compressed.save(1, &data, false).await.unwrap();
+    compressed.save(1, &data).await.unwrap();
     let retried_object = store.read(&delta_key(1)).await.unwrap().to_vec();
     assert_eq!(stored_object, retried_object);
     assert_eq!(stored_object.len() as u64, compressed.total_manifest_size());
 
-    compressed.save(2, &data, false).await.unwrap();
+    compressed.save(2, &data).await.unwrap();
     assert!(store.read(&delta_key(2)).await.unwrap().len() < data.len());
     assert_eq!(
         vec![(1, data.clone()), (2, data)],
@@ -253,7 +256,7 @@ async fn test_existing_delta_conflicts(#[case] undecodable: bool, #[case] unread
     };
 
     let error = conditional_store(&writer_store, CompressionType::Gzip)
-        .save(1, b"mine", false)
+        .save(1, b"mine")
         .await
         .unwrap_err();
 
@@ -369,4 +372,87 @@ async fn test_deltas_are_readable_across_modes(
 
     assert_eq!(1, reader.last_version());
     assert_eq!(2, commit(&mut reader).await.unwrap());
+}
+
+/// Reports an error after a delta write has landed while `lost` is set, like a write whose
+/// response was lost.
+struct LostResponseWriter {
+    inner: oio::Writer,
+    lost: Arc<AtomicBool>,
+}
+
+impl oio::Write for LostResponseWriter {
+    async fn write(&mut self, bs: object_store::Buffer) -> MockResult<()> {
+        self.inner.write(bs).await
+    }
+
+    async fn close(&mut self) -> MockResult<Metadata> {
+        let metadata = self.inner.close().await?;
+        if self.lost.swap(false, Ordering::Relaxed) {
+            return Err(MockError::new(ErrorKind::Unexpected, "mock lost response"));
+        }
+        Ok(metadata)
+    }
+
+    async fn abort(&mut self) -> MockResult<()> {
+        self.inner.abort().await
+    }
+}
+
+fn import(file_id: FileId) -> RegionMetaActionList {
+    RegionMetaActionList::with_action(RegionMetaAction::Edit(RegionEdit {
+        files_to_add: vec![FileMeta {
+            file_id,
+            ..Default::default()
+        }],
+        files_to_remove: vec![],
+        timestamp_ms: None,
+        compaction_time_window: None,
+        flushed_entry_id: None,
+        flushed_sequence: None,
+        committed_sequence: None,
+    }))
+}
+
+#[tokio::test]
+async fn test_staged_commit_retry_writes_same_content() {
+    let (_dir, store) = temp_store();
+    let lost = Arc::new(AtomicBool::new(false));
+    let layer_lost = lost.clone();
+    let layer = MockLayerBuilder::default()
+        .writer_factory(Arc::new(move |_, _, inner| {
+            Box::new(LostResponseWriter {
+                inner,
+                lost: layer_lost.clone(),
+            })
+        }))
+        .build()
+        .unwrap();
+    let store = store.layer(layer);
+    let mut manager = create_manager(options(&store, CompressionType::Gzip, 0, true)).await;
+    let imported = FileId::random();
+    manager.update(import(imported), true).await.unwrap();
+
+    lost.store(true, Ordering::Relaxed);
+    let error = manager.commit_staged(|| false).await.unwrap_err();
+    assert!(error.may_have_persisted_manifest_update());
+    assert_eq!(0, manager.last_version());
+
+    // Until the kept commit is retried, only a retried import is staged.
+    manager.update(import(imported), true).await.unwrap();
+    let refused = manager
+        .update(import(FileId::random()), true)
+        .await
+        .unwrap_err();
+    assert!(matches!(refused, Error::RegionBusy { .. }), "{refused:?}");
+    assert!(!refused.may_have_persisted_manifest_update());
+    assert!(refused.retry_hint().is_retryable());
+
+    // The retry writes the same content, so it recognizes its own landed write.
+    assert_eq!(1, manager.commit_staged(|| false).await.unwrap());
+    assert!(manager.staged_actions().is_none());
+    assert_eq!(
+        vec![imported],
+        manager.manifest().files.keys().copied().collect::<Vec<_>>()
+    );
 }

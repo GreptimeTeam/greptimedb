@@ -828,7 +828,7 @@ async fn test_staging_save_after_deadline_sends_nothing() {
     let region = engine.get_region(region_id).unwrap();
     let version = next_manifest_version(&region).await;
 
-    // The memtable is empty, so entering staging saves its manifest without a flush.
+    // The memtable is empty, so entering staging stages its change without a flush.
     engine.freeze_lease_clock(deadline);
     let error = engine
         .handle_request(region_id, enter_staging_request())
@@ -840,8 +840,9 @@ async fn test_staging_save_after_deadline_sends_nothing() {
         "{error:?}"
     );
     assert_eq!(version, next_manifest_version(&region).await);
-    let store = region.manifest_ctx.manifest_manager.read().await.store();
-    assert!(store.fetch_staging_manifests().await.unwrap().is_empty());
+    let manager = region.manifest_ctx.manifest_manager.read().await;
+    assert!(manager.staged_actions().is_none());
+    drop(manager);
     assert!(!region.manifest_ctx.is_reload_pending());
     assert!(region.is_writable());
 }

@@ -151,21 +151,11 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                     sender.send(result.map(|_| 0));
                     return;
                 };
-                let mut manager = region.manifest_ctx.manifest_manager.write().await;
-                let result = region.exit_staging_on_success(&mut manager).await;
-                drop(manager);
-                let hook_payload = match result {
-                    Ok(payload) => payload,
-                    Err(e) => {
-                        notify_if_fenced(&worker_sender, &region).await;
-                        sender.send(Err(e));
-                        return;
-                    }
-                };
-                if let Some(pending) = hook_payload {
-                    pending.fire().await;
+                let result = region.end_staging(&worker_sender).await;
+                if result.is_err() {
+                    notify_if_fenced(&worker_sender, &region).await;
                 }
-                sender.send(Ok(0));
+                sender.send(result.map(|_| 0));
             } else {
                 sender.send(
                     UnexpectedSnafu {

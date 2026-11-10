@@ -1600,6 +1600,9 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 self.handle_manifest_region_change_result(req).await
             }
             BackgroundNotify::EnterStaging(req) => self.handle_enter_staging_result(req).await,
+            BackgroundNotify::StagingEnded => {
+                self.handle_region_stalled_requests(&region_id, true).await
+            }
             BackgroundNotify::RegionEdit(req) => self.handle_region_edit_result(req).await,
             BackgroundNotify::CopyRegionFromFinished(req) => {
                 self.handle_copy_region_from_finished(req)
@@ -1640,7 +1643,10 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             let request_sender = self.sender.clone();
             // We need to do this in background as we need the manifest lock.
             common_runtime::spawn_global(async move {
-                match region.set_role_state_gracefully(region_role_state).await {
+                match region
+                    .set_role_state_gracefully(region_role_state, &request_sender)
+                    .await
+                {
                     Ok(()) => {
                         let last_entry_id = region.version_control.current().last_entry_id;
                         let _ = sender.send(SetRegionRoleStateResponse::success(

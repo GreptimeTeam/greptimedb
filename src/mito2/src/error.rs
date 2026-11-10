@@ -771,6 +771,17 @@ pub enum Error {
     },
 
     #[snafu(display(
+        "Failed to end staging of region {}, which is still staging",
+        region_id
+    ))]
+    EndStaging {
+        region_id: RegionId,
+        source: Arc<Error>,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display(
         "Failed to compat readers for region {}, reason: {}",
         region_id,
         reason,
@@ -1558,6 +1569,7 @@ impl Error {
             | Error::RegionTruncated { .. }
             | Error::RegionStopped { .. }
             | Error::RegionLeaseExpired { .. }
+            | Error::RegionBusy { .. }
             | Error::SerdeJson { .. }
             | Error::CompressObject { .. } => false,
             Error::OpenDal { error, .. } => !matches!(
@@ -1696,7 +1708,7 @@ impl ErrorExt for Error {
             RegionTruncated { .. } => StatusCode::Cancelled,
             RejectWrite { .. } | RejectWriteInStaging { .. } => StatusCode::StorageUnavailable,
             CompactRegion { source, .. } => source.status_code(),
-            EditRegion { source, .. } => source.status_code(),
+            EditRegion { source, .. } | EndStaging { source, .. } => source.status_code(),
             CompatReader { .. } => StatusCode::Unexpected,
             InvalidRegionRequest { source, .. } => source.status_code(),
             RegionState { .. } | UpdateManifest { .. } => StatusCode::RegionNotReady,
@@ -1815,6 +1827,7 @@ impl ErrorExt for Error {
             | RegionStopped { .. }
             | RegionBusy { .. }
             | RegionPendingTails { .. }
+            | EndStaging { .. }
             | ManualCompactionAlreadyRunning { .. }
             | FlushableRegionState { .. }
             | ManifestDeltaNotFound { .. }
@@ -2039,6 +2052,10 @@ mod tests {
         }
         .build();
         assert!(!error.may_have_persisted_manifest_update());
+        // Raised before storage I/O, for example by staging that waits for a retried end commit.
+        let error = RegionBusySnafu { region_id }.build();
+        assert!(!error.may_have_persisted_manifest_update());
+        assert!(error.retry_hint().is_retryable());
 
         // A commit refused before its PUT because the Leader deadline has passed.
         let error = RegionLeaseExpiredSnafu { region_id }.build();

@@ -507,14 +507,22 @@ async fn manifest_install_manifest_to_with_checkpoint() {
 async fn test_checkpoint_bypass_in_staging_mode() {
     common_telemetry::init_default_ut_logging();
     let (_env, mut manager) = build_manager(1, CompressionType::Uncompressed).await;
+    let version = manager.last_version();
 
-    // Apply actions in staging mode - checkpoint should be bypassed
+    // Staged actions take no version, write no delta and start no checkpoint.
     for _ in 0..15 {
         manager.update(nop_action(), true).await.unwrap();
     }
+    assert_eq!(manager.last_version(), version);
     assert!(!manager.checkpointer().is_doing_checkpoint());
-
-    // Verify no checkpoint was created in staging mode
+    assert!(
+        manager
+            .store()
+            .fetch_manifests(version + 1, u64::MAX)
+            .await
+            .unwrap()
+            .is_empty()
+    );
     assert!(
         manager
             .store()
@@ -524,25 +532,18 @@ async fn test_checkpoint_bypass_in_staging_mode() {
             .is_none()
     );
 
-    // Now switch to normal mode and apply one more action
-    manager.update(nop_action(), false).await.unwrap();
-
-    // Wait for potential checkpoint
+    // The end of staging commits all of them as the next version.
+    assert_eq!(manager.commit_staged(|| false).await.unwrap(), version + 1);
     while manager.checkpointer().is_doing_checkpoint() {
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }
-
-    // Now checkpoint should exist because we switched to writable mode
-    let checkpoint_result = manager.store().load_last_checkpoint().await.unwrap();
-
-    assert!(
-        checkpoint_result.is_some(),
-        "Checkpoint should exist after switching to writable mode"
-    );
-    let (last_version, _checkpoint_data) = checkpoint_result.unwrap();
-
-    // Checkpoint should include all 16 actions (15 from staging + 1 from writable)
-    assert_eq!(last_version, 16);
+    let (last_version, _checkpoint_data) = manager
+        .store()
+        .load_last_checkpoint()
+        .await
+        .unwrap()
+        .expect("the end of staging should start a checkpoint");
+    assert_eq!(last_version, version + 1);
 }
 
 /// Simulates both a rejected delete and a close failure after eager deletion.
@@ -705,7 +706,7 @@ async fn install_preserves_listed_delta_not_found_retry_hint() {
         .unwrap();
     let mut store = manager.store();
     store
-        .save(1, &nop_action().encode().unwrap(), false)
+        .save(1, &nop_action().encode().unwrap())
         .await
         .unwrap();
 

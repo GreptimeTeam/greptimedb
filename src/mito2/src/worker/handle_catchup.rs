@@ -79,6 +79,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         #[cfg(feature = "hdfs-object-store")]
         let sweep_limiter = self.sweep_limiter.clone();
         let node_lease = self.node_lease.clone();
+        let worker_sender = self.sender.clone();
         common_runtime::spawn_global(async move {
             let mut task = RegionCatchupTask::new(region.clone(), wal, allow_stale_entries)
                 .with_entry_receiver(entry_receiver)
@@ -94,7 +95,10 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                         if region.manifest_ctx.promote_after_catchup(region_id) {
                             // Finalize leadership: persist backfilled metadata.
                             match region
-                                .set_role_state_gracefully(SettableRegionRoleState::Leader)
+                                .set_role_state_gracefully(
+                                    SettableRegionRoleState::Leader,
+                                    &worker_sender,
+                                )
                                 .await
                             {
                                 Ok(()) => {

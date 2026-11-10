@@ -1143,6 +1143,9 @@ pub(crate) enum BackgroundNotify {
     RegionEdit(RegionEditResult),
     /// Enter staging result.
     EnterStaging(EnterStagingResult),
+    /// The region left [RegionLeaderState::EndingStaging](crate::region::RegionLeaderState::EndingStaging),
+    /// so writes stalled meanwhile can be handled.
+    StagingEnded,
     /// Copy region result.
     CopyRegionFromFinished(CopyRegionFromFinished),
     /// A commit outside the worker fenced the region until it is reloaded.

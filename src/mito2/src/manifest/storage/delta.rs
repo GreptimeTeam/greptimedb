@@ -64,14 +64,6 @@ impl<T: Tracker> DeltaStorage<T> {
         }
     }
 
-    pub(crate) fn path(&self) -> &str {
-        &self.path
-    }
-
-    pub(crate) fn object_store(&self) -> &ObjectStore {
-        &self.object_store
-    }
-
     fn delta_file_path(&self, version: ManifestVersion) -> String {
         gen_path(&self.path, &delta_file(version), self.compress_type)
     }
