@@ -47,7 +47,10 @@ use datatypes::series::SeriesOrdering;
 use promql::extension_plan::{
     FusedSeries, HistogramFold, InputLocality, RawSeriesSource, input_locality,
 };
-use promql::native::plan::{AggregateStage, BoundVectorOp, NativeExpr, NativeNode, NativeType};
+use promql::native::plan::{
+    AggregateStage, BoundVectorOp, NativeExpr, NativeNode, NativeType,
+    unifies_its_own_contributions,
+};
 use promql::vector_match::{Cardinality, MatchingLabels};
 use promql_parser::label::Labels;
 use promql_parser::parser;
@@ -6264,6 +6267,65 @@ async fn native_fused_declined_nested_aggregate_uses_native_name() {
         vec!["field_0", "tag_0", "timestamp"],
         "an explicit by grouping keeps its label in the exact native schema"
     );
+}
+
+/// `limitk` over a subquery range function over a grouped aggregate is the reachable shape behind
+/// the window's unification answer: the window keeps the metric name and its child is a complete
+/// aggregate, so the window emits one series per label set and the `limitk` above it needs no
+/// collection of its own. The native tree keeps that shape rather than adding a merge node.
+#[tokio::test]
+async fn native_fused_limitk_over_a_windowed_aggregate_keeps_its_shape() {
+    let query = "limitk(1, last_over_time((sum by (job) (some_metric))[5m:1m]))";
+    let plan = build_native_fused_plan(query, true).await;
+    let fused = find_fused_series(&plan)
+        .unwrap_or_else(|| panic!("`{query}` did not take the native route: {plan}"));
+    let root = fused.tree().root();
+    let NativeExpr::Vector {
+        input: window_node,
+        op: vector_op,
+    } = &root.expr
+    else {
+        panic!("`{query}`: the root is not a vector operation: {root:?}");
+    };
+    assert!(
+        matches!(vector_op, BoundVectorOp::LimitK { .. }),
+        "`{query}`: the vector operation is not `limitk`: {root:?}"
+    );
+    let NativeExpr::Window {
+        input: aggregate_node,
+        op: window_op,
+    } = &window_node.expr
+    else {
+        panic!("`{query}`: `limitk` is not over a window: {root:?}");
+    };
+    assert!(
+        !window_op.function.drops_metric_name(),
+        "`{query}`: `last_over_time` keeps the metric name"
+    );
+    assert_eq!(
+        Some(true),
+        unifies_its_own_contributions(window_node),
+        "`{query}`: the window emits one series per label set, so `limitk` collects nothing"
+    );
+    let NativeExpr::Aggregate {
+        input: step_node,
+        op: aggregate_op,
+    } = &aggregate_node.expr
+    else {
+        panic!("`{query}`: the window is not over an aggregate: {root:?}");
+    };
+    assert!(
+        matches!(aggregate_op.stage, AggregateStage::Complete),
+        "`{query}`: the aggregate is not complete: {root:?}"
+    );
+    // The aggregate reads the subquery's step over the one scan, and nothing in between is a
+    // canonical merge.
+    let reads_scan = match &step_node.expr {
+        NativeExpr::Instant { input, .. } => matches!(input.expr, NativeExpr::Input(_)),
+        NativeExpr::Input(_) => true,
+        _ => panic!("`{query}`: the aggregate's input is not a scan: {root:?}"),
+    };
+    assert!(reads_scan, "`{query}`: {root:?}");
 }
 
 #[tokio::test]
