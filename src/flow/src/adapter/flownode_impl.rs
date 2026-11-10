@@ -1434,7 +1434,7 @@ mod tests {
                 or_replace: true,
             })),
         };
-        let err = tokio::time::timeout(
+        tokio::time::timeout(
             TEST_TIMEOUT,
             common_meta::node_manager::Flownode::handle(dual.as_ref(), request.clone()),
         )
