@@ -25,16 +25,37 @@ use crate::sst::file::FileMeta;
 use crate::sst::location;
 use crate::sst::parquet::metadata::{MetadataLoader, extract_primary_key_range};
 
-pub(crate) async fn verify(
-    access: &AccessLayer,
+/// Verifies every output, then notifies the region hook once if one is registered.
+///
+/// Without a hook no footer is needed after its own verification, so each one is
+/// dropped before the next output is read. With a hook every footer is kept until
+/// all outputs verify, because the hook observes them in one call; footers are then
+/// released when this returns, before the caller takes the manifest lock. A failed
+/// verification notifies nothing.
+pub(crate) async fn verify_and_notify(
+    region: &MitoRegionRef,
     metadata: &RegionMetadataRef,
     outputs: &[FileMeta],
-) -> Result<Vec<Arc<ParquetMetaData>>> {
+) -> Result<()> {
+    let Some(hook) = region.manifest_ctx.hook() else {
+        for file in outputs {
+            verify_file(&region.access_layer, metadata, file).await?;
+        }
+        return Ok(());
+    };
+
     let mut footers = Vec::with_capacity(outputs.len());
     for file in outputs {
-        footers.push(verify_file(access, metadata, file).await?);
+        footers.push(verify_file(&region.access_layer, metadata, file).await?);
     }
-    Ok(footers)
+    let verified = outputs
+        .iter()
+        .zip(&footers)
+        .map(|(file_meta, footer)| VerifiedSstFileInfo { file_meta, footer })
+        .collect::<Vec<_>>();
+    hook.on_sst_files_verified(region.region_id, metadata, &verified)
+        .await;
+    Ok(())
 }
 
 async fn verify_file(
@@ -180,21 +201,4 @@ fn verify_time_range(
         }
     );
     Ok(())
-}
-
-pub(crate) async fn notify_verified(
-    region: &MitoRegionRef,
-    metadata: &RegionMetadataRef,
-    files: &[FileMeta],
-    footers: &[Arc<ParquetMetaData>],
-) {
-    if let Some(hook) = region.manifest_ctx.hook() {
-        let verified = files
-            .iter()
-            .zip(footers)
-            .map(|(file_meta, footer)| VerifiedSstFileInfo { file_meta, footer })
-            .collect::<Vec<_>>();
-        hook.on_sst_files_verified(region.region_id, metadata, &verified)
-            .await;
-    }
 }

@@ -38,9 +38,7 @@ pub(crate) async fn publish(
         }
     );
     validate_files(region, context, &edit, &snapshot)?;
-    let footers =
-        output::verify(&region.access_layer, &context.metadata, &edit.files_to_add).await?;
-    output::notify_verified(region, &context.metadata, &edit.files_to_add, &footers).await;
+    output::verify_and_notify(region, &context.metadata, &edit.files_to_add).await?;
 
     let mut manager = region.manifest_ctx.manifest_manager.write().await;
     ensure!(

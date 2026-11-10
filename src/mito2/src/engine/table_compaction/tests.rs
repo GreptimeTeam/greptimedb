@@ -9,12 +9,13 @@
 // distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND,
 // either express or implied.
 
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Weak};
 
 use api::v1::Rows;
 use common_base::Plugins;
 use common_recordbatch::RecordBatches;
+use parquet::file::metadata::ParquetMetaData;
 use store_api::region_engine::RegionEngine;
 use store_api::region_request::{RegionRequest, RegionTruncateRequest};
 use store_api::storage::{FileId, RegionId};
@@ -67,44 +68,63 @@ async fn copy_sst(region: &MitoRegionRef, source: &FileMeta, level: u8) -> FileM
 
 /// Input admission is deliberately separate from the compaction API.
 async fn seed(engine: &MitoEngine, region_id: RegionId) -> (TableCompactionSnapshot, FileMeta) {
+    let (snapshot, outputs) = seed_shared_inputs(engine, region_id, &[(0, 3)]).await;
+    let output = outputs.into_iter().next().unwrap();
+    (snapshot, output)
+}
+
+/// Writes each row range as a flushed SST, promotes the flushed files to shared
+/// level, and returns one region-local output per shared input under the snapshot.
+async fn seed_shared_inputs(
+    engine: &MitoEngine,
+    region_id: RegionId,
+    row_ranges: &[(usize, usize)],
+) -> (TableCompactionSnapshot, Vec<FileMeta>) {
     let create = CreateRequestBuilder::new().build();
     engine
         .handle_request(region_id, RegionRequest::Create(create.clone()))
         .await
         .unwrap();
-    put_rows(
-        engine,
-        region_id,
-        Rows {
-            schema: rows_schema(&create),
-            rows: build_rows(0, 3),
-        },
-    )
-    .await;
-    flush_region(engine, region_id, None).await;
+    for &(start, end) in row_ranges {
+        put_rows(
+            engine,
+            region_id,
+            Rows {
+                schema: rows_schema(&create),
+                rows: build_rows(start, end),
+            },
+        )
+        .await;
+        flush_region(engine, region_id, None).await;
+    }
     let region = engine.get_region(region_id).unwrap();
-    let original = region.version().ssts.levels()[0]
+    let originals = region.version().ssts.levels()[0]
         .files()
-        .next()
-        .unwrap()
-        .meta_ref()
-        .clone();
-    let shared = copy_sst(&region, &original, LEVEL_SHARED).await;
+        .map(|file| file.meta_ref().clone())
+        .collect::<Vec<_>>();
+    assert_eq!(row_ranges.len(), originals.len());
+    let mut shared = Vec::with_capacity(originals.len());
+    for original in &originals {
+        shared.push(copy_sst(&region, original, LEVEL_SHARED).await);
+    }
     engine
         .edit_region(
             region_id,
             RegionEdit {
-                files_to_add: vec![shared],
-                files_to_remove: vec![original],
+                files_to_add: shared,
+                files_to_remove: originals,
                 ..Default::default()
             },
         )
         .await
         .unwrap();
     let snapshot = engine.table_compaction_snapshot(region_id).unwrap();
-    assert_eq!(1, snapshot.inputs.len());
-    let output = copy_sst(&region, &snapshot.inputs[0], 0).await;
-    (snapshot, output)
+    assert_eq!(row_ranges.len(), snapshot.inputs.len());
+    let mut outputs = Vec::with_capacity(snapshot.inputs.len());
+    for input in &snapshot.inputs {
+        outputs.push(copy_sst(&region, input, 0).await);
+    }
+    (snapshot, outputs)
 }
 
 async fn row_count(engine: &MitoEngine, region_id: RegionId) -> usize {
@@ -602,4 +622,146 @@ async fn test_close_reopen_fences_old_publication(#[case] after_commit: bool) {
             .unwrap()
     );
     assert_eq!(0, row_count(&engine, region_id).await);
+}
+
+/// Records one notification per verification, keeping verified footers only as
+/// weak references, and checks those references again when the publication's
+/// manifest update is announced. `on_manifest_updated` runs after the commit, so
+/// this catches footers retained across it; it does not claim the hook fires
+/// before the commit. Nothing else in the test keeps the footers alive.
+#[derive(Debug, Default)]
+struct VerificationRecorder {
+    verified_files: AtomicUsize,
+    notifications: AtomicUsize,
+    manifest_updates: AtomicUsize,
+    released_by_commit: AtomicBool,
+    footers: std::sync::Mutex<Vec<Weak<ParquetMetaData>>>,
+}
+
+#[async_trait::async_trait]
+impl RegionHook for VerificationRecorder {
+    async fn on_sst_files_verified(
+        &self,
+        _: RegionId,
+        _: &store_api::metadata::RegionMetadataRef,
+        files: &[VerifiedSstFileInfo<'_>],
+    ) {
+        let mut footers = self.footers.lock().unwrap();
+        footers.extend(files.iter().map(|file| Arc::downgrade(file.footer)));
+        self.verified_files.fetch_add(files.len(), Ordering::SeqCst);
+        self.notifications.fetch_add(1, Ordering::SeqCst);
+    }
+
+    async fn on_manifest_updated(
+        &self,
+        _: RegionId,
+        actions: &RegionMetaActionList,
+        _: store_api::ManifestVersion,
+    ) {
+        let is_compaction = actions.actions.iter().any(|action| matches!(action,
+            RegionMetaAction::Edit(edit) if edit.files_to_remove.iter().any(|file| file.level == LEVEL_SHARED)));
+        if !is_compaction {
+            return;
+        }
+        let footers = self.footers.lock().unwrap();
+        self.released_by_commit.store(
+            !footers.is_empty() && footers.iter().all(|footer| footer.upgrade().is_none()),
+            Ordering::SeqCst,
+        );
+        self.manifest_updates.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+#[rstest::rstest]
+#[case::without_hook(false)]
+#[case::with_hook(true)]
+#[tokio::test]
+async fn test_multiple_outputs_verify_notify_once_and_release_footers(#[case] with_hook: bool) {
+    let recorder = Arc::new(VerificationRecorder::default());
+    let mut env = TestEnv::new().await;
+    let engine = if with_hook {
+        let plugins = Plugins::new();
+        plugins.insert(recorder.clone() as RegionHookRef);
+        env.create_engine_with_plugins(config(), plugins).await
+    } else {
+        env.create_engine(config()).await
+    };
+    let region_id = RegionId::new(1, 1);
+    let (snapshot, outputs) = seed_shared_inputs(&engine, region_id, &[(0, 3), (3, 6)]).await;
+    assert_eq!(
+        PublicationOutcome::Applied,
+        engine
+            .publish_table_compaction(region_id, snapshot, outputs.clone())
+            .await
+            .unwrap()
+    );
+    let expected_notifications = usize::from(with_hook);
+    assert_eq!(
+        expected_notifications * outputs.len(),
+        recorder.verified_files.load(Ordering::SeqCst)
+    );
+    assert_eq!(
+        expected_notifications,
+        recorder.notifications.load(Ordering::SeqCst)
+    );
+    if with_hook {
+        assert_eq!(1, recorder.manifest_updates.load(Ordering::SeqCst));
+        assert!(recorder.released_by_commit.load(Ordering::SeqCst));
+        assert!(
+            recorder
+                .footers
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|footer| footer.upgrade().is_none())
+        );
+    } else {
+        assert_eq!(0, recorder.manifest_updates.load(Ordering::SeqCst));
+    }
+    let region = engine.get_region(region_id).unwrap();
+    let manifest = region.manifest_ctx.manifest().await;
+    assert_eq!(outputs.len(), manifest.files.len());
+    for output in &outputs {
+        assert_eq!(Some(output), manifest.files.get(&output.file_id));
+    }
+    assert_eq!(6, row_count(&engine, region_id).await);
+}
+
+#[tokio::test]
+async fn test_failed_verification_does_not_notify_hook() {
+    let recorder = Arc::new(VerificationRecorder::default());
+    let plugins = Plugins::new();
+    plugins.insert(recorder.clone() as RegionHookRef);
+    let mut env = TestEnv::new().await;
+    let engine = env.create_engine_with_plugins(config(), plugins).await;
+    let region_id = RegionId::new(1, 1);
+    let (snapshot, outputs) = seed_shared_inputs(&engine, region_id, &[(0, 3), (3, 6)]).await;
+    let region = engine.get_region(region_id).unwrap();
+    let version = region.manifest_ctx.manifest_version().await;
+    let invalid = FileMeta {
+        file_size: outputs[1].file_size + 1,
+        ..outputs[1].clone()
+    };
+    let error = engine
+        .publish_table_compaction(
+            region_id,
+            snapshot.clone(),
+            vec![outputs[0].clone(), invalid],
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        crate::error::Error::EditRegion { source, .. }
+            if matches!(source.as_ref(), crate::error::Error::InvalidRequest { reason, .. }
+                if reason == "Output SST size mismatch")
+    ));
+    assert_eq!(0, recorder.verified_files.load(Ordering::SeqCst));
+    assert_eq!(0, recorder.notifications.load(Ordering::SeqCst));
+    assert_eq!(version, region.manifest_ctx.manifest_version().await);
+    assert_eq!(
+        snapshot.inputs,
+        engine.table_compaction_snapshot(region_id).unwrap().inputs
+    );
+    assert_eq!(6, row_count(&engine, region_id).await);
 }
