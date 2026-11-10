@@ -441,7 +441,7 @@ impl ObjectStoreLogStore {
             reclaim_boundary: writer_reclaim_boundary,
             durable_reclaim_boundary: reclaim_boundary,
             unindexed: unindexed.into_iter().chain(moved_past).collect(),
-            failed_releases: BTreeMap::new(),
+            pending_releases: BTreeMap::new(),
             creating: HashSet::new(),
             deleting: deleting.clone(),
             deletes: FuturesUnordered::new(),
@@ -1129,6 +1129,26 @@ impl LogStore for ObjectStoreLogStore {
         self.release(region_id, false).await
     }
 
+    async fn release_entries(
+        &self,
+        provider: &Provider,
+        region_id: RegionId,
+        entry_id: EntryId,
+    ) -> Result<()> {
+        self.check_region(provider, region_id)?;
+        let (response, receiver) = oneshot::channel();
+        self.command_tx
+            .send(Command::ReleaseEntries {
+                region_id,
+                entry_id,
+                response,
+            })
+            .await
+            .ok()
+            .context(ObjectStoreWalStoppedSnafu)?;
+        receiver.await.ok().context(ObjectStoreWalStoppedSnafu)?
+    }
+
     fn entry(
         &self,
         data: Vec<u8>,
@@ -1260,6 +1280,13 @@ enum Command {
     Release {
         region_id: RegionId,
         full: bool,
+        response: oneshot::Sender<Result<()>>,
+    },
+    /// Answered once the actor has accepted the bounded release for its next
+    /// batch. Unlike `Release`, this does not wait for persistence.
+    ReleaseEntries {
+        region_id: RegionId,
+        entry_id: EntryId,
         response: oneshot::Sender<Result<()>>,
     },
     /// Answered once the store keeps its start object, or once the delete
@@ -1497,11 +1524,10 @@ struct Actor {
     /// Sequences of objects that may be present but are not indexed: the
     /// objects recovery listed off the chain and the batches that failed.
     unindexed: BTreeSet<u64>,
-    /// Release records of batches that failed, which the next sealed batch
-    /// carries again, so a release whose call failed still becomes durable
-    /// while the store runs. A timer tick seals them when no entry is
-    /// admitted.
-    failed_releases: BTreeMap<RegionId, EntryId>,
+    /// Accepted release records and records from failed batches, coalesced by
+    /// region for the next sealed batch. Timer ticks also seal them when no
+    /// entries arrive, and shutdown drains them in both acknowledgement modes.
+    pending_releases: BTreeMap<RegionId, EntryId>,
     /// Sequences whose create is in flight.
     creating: HashSet<u64>,
     deleting: Arc<DeletingObjects>,
@@ -1561,6 +1587,10 @@ impl Actor {
                     }
                     Some(Command::Release { region_id, full, response }) => {
                         self.handle_release(region_id, full, response);
+                    }
+                    Some(Command::ReleaseEntries { region_id, entry_id, response }) => {
+                        let result = self.handle_release_entries(region_id, entry_id);
+                        let _ = response.send(result);
                     }
                     Some(Command::Withdraw { response }) => {
                         self.handle_withdraw(response);
@@ -1740,18 +1770,19 @@ impl Actor {
         self.seal(Vec::new())
     }
 
-    /// Seals the open batch together with `releases` and the release records
-    /// of failed batches as the object `next_object_seq`, even when the open
+    /// Seals the open batch together with `releases` and pending release
+    /// records as the object `next_object_seq`, even when the open
     /// batch holds no entry, and starts its create when a slot is free.
     /// Returns whether a batch was sealed.
     ///
-    /// A failing store keeps the records of failed batches coalesced instead
+    /// A failing store keeps pending release records coalesced instead
     /// of sealing them alone behind its backlog on every tick, until `stop`
     /// seals them for its last attempt of the backlog.
     fn seal(&mut self, releases: Vec<Release>) -> bool {
         if self.open_batch.is_empty()
             && releases.is_empty()
-            && (self.failed_releases.is_empty() || (self.failing.is_some() && self.stop.is_empty()))
+            && (self.pending_releases.is_empty()
+                || (self.failing.is_some() && self.stop.is_empty()))
         {
             return false;
         }
@@ -1784,7 +1815,7 @@ impl Actor {
             ),
             reclaim_boundary: self.reclaim_boundary,
         };
-        let mut records = std::mem::take(&mut self.failed_releases);
+        let mut records = std::mem::take(&mut self.pending_releases);
         for release in releases {
             let entry_id = records.entry(release.region_id).or_insert(release.entry_id);
             *entry_id = (*entry_id).max(release.entry_id);
@@ -2201,7 +2232,7 @@ impl Actor {
         // its caller has arrived yet or not. So it does release records once
         // stop began, which no later create carries.
         if self.ack_mode == AckMode::Enqueued
-            || (!self.stop.is_empty() && !self.failed_releases.is_empty())
+            || (!self.stop.is_empty() && !self.pending_releases.is_empty())
         {
             self.stop_error.get_or_insert(error);
         }
@@ -2218,7 +2249,7 @@ impl Actor {
 
     fn keep_release(&mut self, release: Release) {
         let entry_id = self
-            .failed_releases
+            .pending_releases
             .entry(release.region_id)
             .or_insert(release.entry_id);
         *entry_id = (*entry_id).max(release.entry_id);
@@ -2234,7 +2265,7 @@ impl Actor {
     fn poison(&mut self, error: Error) -> Arc<Error> {
         let error = set_terminal(&self.terminal_error, error);
         let stopped = self.is_stopped();
-        let releases_lost = !self.failed_releases.is_empty()
+        let releases_lost = !self.pending_releases.is_empty()
             || self.sealed.iter().any(|batch| !batch.releases.is_empty());
         let failure = || {
             if stopped {
@@ -2358,7 +2389,7 @@ impl Actor {
             || !self.creates.is_empty()
             || self.stalled.is_some()
             || !self.unindexed.is_empty()
-            || !self.failed_releases.is_empty()
+            || !self.pending_releases.is_empty()
         {
             let _ = response.send(());
             return;
@@ -2418,6 +2449,23 @@ impl Actor {
             self.collect();
         }
         let _ = response.send(result);
+    }
+
+    /// Accepts a bounded release without sealing an object or waiting for I/O.
+    /// Raising the sequence floor prevents a later reopen from assigning ids
+    /// covered by this record. Physical collection still uses the durable
+    /// reclaim boundary, so an unpersisted record only loses reclamation progress.
+    fn handle_release_entries(&mut self, region_id: RegionId, entry_id: EntryId) -> Result<()> {
+        ensure!(!self.is_stopped(), ObjectStoreWalStoppedSnafu);
+        self.raise_sequence_floor(region_id, entry_id)?;
+        record_obsolete(&self.obsolete_entry_ids, &self.catalog, region_id, entry_id);
+        self.keep_release(Release {
+            region_id,
+            entry_id,
+        });
+        self.update_reclaim_boundary();
+        self.collect();
+        Ok(())
     }
 
     /// Moves the watermark of the region up to the release and seals the
@@ -9127,6 +9175,194 @@ mod tests {
             .unwrap()
             .get(&region_id)
             .copied()
+    }
+
+    #[tokio::test]
+    async fn test_bounded_release_batches_and_preserves_later_entries() {
+        let _serialized = SERIALIZED.lock().await;
+        for config in [eager(), enqueued(eager())] {
+            let object_store = memory_store();
+            let store = open(object_store.clone(), &config).await;
+            let (one, two) = (region(1), region(2));
+            store
+                .append_batch(vec![entry(&store, one, "old")])
+                .await
+                .unwrap();
+            store.seal_open_batch().await.unwrap();
+            store
+                .append_batch(vec![entry(&store, one, "keep")])
+                .await
+                .unwrap();
+            store.seal_open_batch().await.unwrap();
+            store.wait_durable(&provider(one), id(2, 1)).await.unwrap();
+            let before = collected_object_seqs(&store).await;
+            for (region_id, entry_id) in [(one, id(1, 1)), (one, 0), (two, 0)] {
+                timeout(
+                    WAIT,
+                    store.release_entries(&provider(region_id), region_id, entry_id),
+                )
+                .await
+                .unwrap()
+                .unwrap();
+            }
+            // Admission never seals an object. Both regions share one release-only batch.
+            assert_eq!(before, object_seqs(store.io.as_ref()).await);
+            store.seal_open_batch().await.unwrap();
+            assert_eq!(
+                vec![release(one, id(1, 1)), release(two, 0)],
+                releases_of(store.io.as_ref(), 3).await
+            );
+            store.stop().await.unwrap();
+            let reopened = open(object_store, &config).await;
+            assert_eq!(Some(id(1, 1)), watermark(&reopened, one));
+            assert_eq!(
+                expected_entries(one, &[(id(2, 1), "keep")]),
+                read_entries(&reopened, one, 0).await
+            );
+            reopened.stop().await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn test_bounded_release_timer_seals_without_appends() {
+        let _serialized = SERIALIZED.lock().await;
+        let store = open(
+            memory_store(),
+            &config(Duration::from_millis(100), u64::MAX),
+        )
+        .await;
+        let region_id = region(1);
+        store
+            .release_entries(&provider(region_id), region_id, 0)
+            .await
+            .unwrap();
+        timeout(WAIT, async {
+            loop {
+                let indexed = store
+                    .catalog
+                    .read()
+                    .unwrap()
+                    .objects_in_order()
+                    .any(|(seq, _)| seq == 1);
+                if indexed {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            vec![release(region_id, 0)],
+            releases_of(store.io.as_ref(), 1).await
+        );
+        store.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_bounded_release_fences_future_appends_and_rejects_after_stop() {
+        let _serialized = SERIALIZED.lock().await;
+        let store = open(memory_store(), &eager()).await;
+        let region_id = region(1);
+        store
+            .release_entries(&provider(region_id), region_id, id(10, 1))
+            .await
+            .unwrap();
+        store
+            .append_batch(vec![entry(&store, region_id, "new")])
+            .await
+            .unwrap();
+        assert_eq!(id(11, 1), latest(&store, region_id));
+        assert_eq!(
+            vec![release(region_id, id(10, 1))],
+            releases_of(store.io.as_ref(), 11).await
+        );
+        assert_eq!(
+            expected_entries(region_id, &[(id(11, 1), "new")]),
+            read_entries(&store, region_id, 0).await
+        );
+        store.stop().await.unwrap();
+        assert!(
+            store
+                .release_entries(&provider(region_id), region_id, 0)
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_bounded_release_shutdown_persists_pending_records() {
+        let _serialized = SERIALIZED.lock().await;
+        for config in [manual(), enqueued(manual())] {
+            let object_store = memory_store();
+            let store = open(object_store.clone(), &config).await;
+            let region_id = region(1);
+            store
+                .release_entries(&provider(region_id), region_id, 0)
+                .await
+                .unwrap();
+            assert_eq!(vec![0], object_seqs(store.io.as_ref()).await);
+            store.stop().await.unwrap();
+            let reopened = open(object_store, &config).await;
+            assert_eq!(Some(0), watermark(&reopened, region_id));
+            reopened.stop().await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn test_bounded_release_crash_before_sealing_retains_history() {
+        let _serialized = SERIALIZED.lock().await;
+        let object_store = memory_store();
+        let store = open(object_store.clone(), &eager()).await;
+        let region_id = region(1);
+        store
+            .append_batch(vec![entry(&store, region_id, "keep")])
+            .await
+            .unwrap();
+        store
+            .release_entries(&provider(region_id), region_id, id(1, 1))
+            .await
+            .unwrap();
+        store.crash().await;
+        let reopened = open(object_store, &eager()).await;
+        assert_eq!(None, watermark(&reopened, region_id));
+        assert_eq!(
+            expected_entries(region_id, &[(id(1, 1), "keep")]),
+            read_entries(&reopened, region_id, 0).await
+        );
+        reopened.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_bounded_release_retries_failed_upload() {
+        let _serialized = SERIALIZED.lock().await;
+        let (store, io, mut parked) = open_parking_creates(memory_store(), &manual()).await;
+        let region_id = region(1);
+        store
+            .release_entries(&provider(region_id), region_id, 0)
+            .await
+            .unwrap();
+        let seal = {
+            let store = store.clone();
+            tokio::spawn(async move { store.seal_open_batch().await })
+        };
+        let (seq, create) = next_parked_operation(&mut parked).await;
+        assert_eq!(1, seq);
+        create.send(false).unwrap();
+        assert!(timeout(WAIT, seal).await.unwrap().unwrap().is_err());
+        let seal = {
+            let store = store.clone();
+            tokio::spawn(async move { store.seal_open_batch().await })
+        };
+        let (seq, create) = next_parked_operation(&mut parked).await;
+        assert_eq!(2, seq);
+        create.send(true).unwrap();
+        timeout(WAIT, seal).await.unwrap().unwrap().unwrap();
+        assert_eq!(
+            vec![release(region_id, 0)],
+            releases_of(io.as_ref(), seq).await
+        );
+        store.stop().await.unwrap();
     }
 
     #[tokio::test]

@@ -134,6 +134,22 @@ pub trait LogStore: Send + Sync + 'static + std::fmt::Debug {
         Ok(())
     }
 
+    /// Queues a persistent release of a region's entries through `entry_id`.
+    ///
+    /// The caller must ensure these entries are no longer needed for recovery.
+    /// Success means the store accepted the release, not that it is durable.
+    /// Implementations may batch records and retry failed writes; a crash before
+    /// persistence may retain extra history. Later entries remain readable.
+    /// The default does nothing, preserving other stores' reclamation policies.
+    async fn release_entries(
+        &self,
+        _provider: &Provider,
+        _region_id: RegionId,
+        _entry_id: EntryId,
+    ) -> Result<(), Self::Error> {
+        Ok(())
+    }
+
     /// Checks, before an existing region is replayed from its persisted
     /// state, that the log store holds the region's WAL history through
     /// `entry_id`, the largest replay watermark the region persisted, so that
