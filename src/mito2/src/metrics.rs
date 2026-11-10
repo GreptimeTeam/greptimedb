@@ -505,6 +505,12 @@ lazy_static! {
         &[TYPE_LABEL],
     )
     .unwrap();
+    /// Optional index kinds discarded by a resource policy, not a build error.
+    pub static ref INDEX_CREATE_DISCARDED_TOTAL: IntCounterVec = register_int_counter_vec!(
+        "greptime_index_create_discarded_total",
+        "index kinds omitted or discarded by resource policy",
+        &[TYPE_LABEL, "reason"],
+    ).unwrap();
     /// Gauge of index create memory usage.
     pub static ref INDEX_CREATE_MEMORY_USAGE: IntGaugeVec = register_int_gauge_vec!(
         "greptime_index_create_memory_usage",

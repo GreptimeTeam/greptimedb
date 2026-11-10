@@ -28,7 +28,7 @@ use store_api::storage::ColumnId;
 
 use crate::read::Batch;
 use crate::region::options::IndexOptions;
-use crate::sst::file::{ColumnIndexMetadata, RegionIndexId};
+use crate::sst::file::{ColumnIndexMetadata, FileHandle, RegionIndexId};
 use crate::sst::index::intermediate::IntermediateManager;
 use crate::sst::index::kind::IndexKind;
 use crate::sst::index::puffin_manager::{SstPuffinManager, SstPuffinWriter};
@@ -69,8 +69,19 @@ pub struct BuildContext<'a> {
     pub puffin_manager: &'a SstPuffinManager,
     /// Existing intermediate-file facility shared by built-in creators.
     pub intermediate_manager: &'a IntermediateManager,
+    /// Pinned physical input files.
+    pub inputs: &'a [FileHandle],
+    /// Manager for reading persisted input indexes.
+    pub input_puffin_manager: &'a SstPuffinManager,
+    /// Permits coarse input-summary reuse only for a complete single output.
+    pub can_merge_inputs: bool,
+    /// Retained-memory allowance for an injected creator, capped by the remaining
+    /// operation budget and its plan ceiling. Built-in creators use spill budgets.
+    pub memory_limit: Option<usize>,
     /// Actual output row-group size used to align inverted-index segments.
     pub row_group_size: Option<usize>,
+    /// Exact row count when rebuilding an existing SST; unknown for compaction outputs.
+    pub output_rows: Option<u64>,
 }
 
 /// Shared plugin installed by the embedding application.
@@ -101,17 +112,34 @@ pub trait PlannedIndex: Send + Sync + Debug {
     /// Requested column formats.
     fn entries(&self) -> &[PlanEntry];
 
-    /// Creates a per-file index creator before any output batch is consumed.
+    /// Prepares input reuse before any output batch is consumed.
     async fn build(
         &self,
         context: &BuildContext<'_>,
     ) -> Result<Option<Box<dyn IndexCreator>>, BoxedError>;
+
+    /// Whether building this plan can reuse persisted input summaries.
+    /// Row-only plans do not require checking input object existence.
+    fn needs_input_reuse(&self) -> bool {
+        false
+    }
+
+    /// Optional hard ceiling; built-in creators use their existing spill budgets.
+    fn memory_limit(&self) -> Option<usize> {
+        None
+    }
 }
 
 /// Accumulates rows and writes blobs into the engine-owned Puffin lifecycle.
 /// Implementations release retained state on drop, including cancellation.
 #[async_trait]
 pub trait IndexCreator: Send {
+    /// Whether rebuilding this index requires scanning SST rows after preparation.
+    /// A creator reusing persisted state must account for output rows without updates.
+    fn requires_row_scan(&self) -> bool {
+        true
+    }
+
     /// Borrows a batch and its reusable primary-key decode cache.
     async fn update(&mut self, batch: &mut Batch) -> Result<(), BoxedError>;
 

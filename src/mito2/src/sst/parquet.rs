@@ -1560,6 +1560,7 @@ mod tests {
         let intermediate_manager = env.get_intermediate_manager();
 
         let indexer_builder = IndexerBuilderImpl {
+            index_build_inputs: None,
             build_type: IndexBuildType::Flush,
             metadata: metadata.clone(),
             puffin_manager,
@@ -2106,6 +2107,7 @@ mod tests {
         let intermediate_manager = env.get_intermediate_manager();
 
         IndexerBuilderImpl {
+            index_build_inputs: None,
             build_type: IndexBuildType::Flush,
             metadata,
             puffin_manager,
@@ -2227,6 +2229,7 @@ mod tests {
         let intermediate_manager = env.get_intermediate_manager();
 
         let indexer_builder = IndexerBuilderImpl {
+            index_build_inputs: None,
             build_type: IndexBuildType::Flush,
             metadata: metadata.clone(),
             puffin_manager,
