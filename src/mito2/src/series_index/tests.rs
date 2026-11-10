@@ -1595,7 +1595,10 @@ pub(crate) async fn drain_series_index_builds(engine: &MitoEngine, region: &Mito
     .expect("the series-index worker should finish the triggered builds")
     .unwrap();
 
-    // Two consecutive identical observations prove that no later build landed in between.
+    // Wait until the snapshot stops changing. A build longer than one poll interval can still be
+    // in flight when two observations agree, so callers must establish quiescence themselves:
+    // every fixture here has already finished its last flush and the periodic maintenance is
+    // distant, so the queued manual reconciliation above is the real barrier.
     tokio::time::timeout(Duration::from_secs(5), async {
         let mut previous: Option<(usize, usize)> = None;
         loop {
@@ -1612,7 +1615,7 @@ pub(crate) async fn drain_series_index_builds(engine: &MitoEngine, region: &Mito
         }
     })
     .await
-    .expect("no further series-index build should land after the drain");
+    .expect("the series-index snapshot should settle after the drain");
 }
 
 /// Replaces the published series-index snapshot with an empty one.

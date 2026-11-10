@@ -448,21 +448,20 @@ impl SeriesScan {
                 .flatten()
                 .copied()
                 .collect::<Vec<_>>();
-            // The raw entrypoint keeps today's all-or-nothing answer, so it asks
-            // [`prepared::validate_inputs`] first and captures the subset only when it can be
-            // served. The native entrypoint always captures the subset it may serve.
-            let raw_ready = match mode {
-                SeriesInputMode::Raw => {
-                    prepared::validate_inputs(&self.stream_ctx, &ranges).map_err(BoxedError::new)?
-                }
-                SeriesInputMode::Native => true,
-            };
-            if raw_ready {
-                prepared::select_inputs(&self.stream_ctx, &ranges).map_err(BoxedError::new)?
-            } else {
-                // Structural validation already ran; `prepare_series_with_raw` declines this
-                // capture and the caller keeps the ordinary scan.
-                prepared::SelectedInputs::default()
+            // Selecting walks the assignment and the published catalogs, so time it here: the
+            // preparation no longer re-derives coverage.
+            let _coverage_timer = crate::metrics::READ_STAGE_ELAPSED
+                .with_label_values(&["columnar_select_coverage"])
+                .start_timer();
+            let selection =
+                prepared::select_inputs(&self.stream_ctx, &ranges).map_err(BoxedError::new)?;
+            match mode {
+                // The raw entrypoint keeps today's all-or-nothing answer: without complete
+                // coverage `prepare_series_with_raw` declines the capture and the caller keeps
+                // the ordinary scan.
+                SeriesInputMode::Raw if !selection.all_ready => prepared::SelectedInputs::default(),
+                // The native entrypoint serves whatever subset is ready.
+                _ => selection,
             }
         } else {
             prepared::SelectedInputs::default()

@@ -406,14 +406,12 @@ impl ColumnarPreparedSource {
             .start_timer();
         let mut preparation_metrics = crate::metrics::ColumnarReadMetrics::default();
         preparation_metrics.counts.insert("prepare_executions", 1);
-        let started = Instant::now();
         let input = &context.input;
         let metadata = input.region_metadata();
         let index = input
             .series_index
             .as_ref()
             .ok_or_else(|| invalid("missing columnar index context"))?;
-        preparation_metrics.add_elapsed("columnar_prepare_coverage", started.elapsed());
         let timer = preparation_metrics.timer("columnar_prepare_samples_open_wall");
         let cache = input
             .cache_strategy
