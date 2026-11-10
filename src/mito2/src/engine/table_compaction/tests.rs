@@ -13,8 +13,11 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Weak};
 
 use api::v1::Rows;
+use bytes::Bytes;
 use common_base::Plugins;
 use common_recordbatch::RecordBatches;
+use common_time::Timestamp;
+use common_time::timestamp::TimeUnit;
 use parquet::file::metadata::ParquetMetaData;
 use store_api::region_engine::RegionEngine;
 use store_api::region_request::{RegionRequest, RegionTruncateRequest};
@@ -264,40 +267,173 @@ async fn test_invalid_results_preserve_inputs_and_reopen_can_replan() {
     let (snapshot, output) = seed(&engine, region_id).await;
     let region = engine.get_region(region_id).unwrap();
     let version = region.manifest_ctx.manifest_version().await;
-    for invalid in [
-        FileMeta {
-            file_size: output.file_size + 1,
-            ..output.clone()
-        },
-        FileMeta {
-            num_rows: output.num_rows + 1,
-            ..output.clone()
-        },
-        FileMeta {
-            file_id: FileId::random(),
-            ..output.clone()
-        },
-        FileMeta {
-            sequence: None,
-            ..output.clone()
-        },
-        FileMeta {
-            file_id: snapshot.inputs[0].file_id,
-            ..output.clone()
-        },
-    ] {
-        assert!(
-            engine
-                .publish_table_compaction(region_id, snapshot.clone(), vec![invalid])
-                .await
-                .is_err()
-        );
+    // Snapshot-level and footer-derived mutations must all fail output admission
+    // with the specific reason, leaving the manifest, inputs and rows untouched.
+    #[derive(Clone, Copy)]
+    enum ExpectedError {
+        InvalidRequest(&'static str),
+        OpenDal,
+    }
+    let statistics_mismatch =
+        ExpectedError::InvalidRequest("Output statistics differ from its footer");
+    let invalid_output = ExpectedError::InvalidRequest("Invalid region-local compaction output");
+    let timestamp_mismatch = ExpectedError::InvalidRequest("Output timestamp range mismatch");
+    let cases = [
+        (
+            FileMeta {
+                file_size: output.file_size + 1,
+                ..output.clone()
+            },
+            ExpectedError::InvalidRequest("Output SST size mismatch"),
+        ),
+        (
+            FileMeta {
+                num_rows: output.num_rows + 1,
+                ..output.clone()
+            },
+            statistics_mismatch,
+        ),
+        (
+            FileMeta {
+                num_row_groups: output.num_row_groups + 1,
+                ..output.clone()
+            },
+            statistics_mismatch,
+        ),
+        (
+            FileMeta {
+                max_row_group_uncompressed_size: output.max_row_group_uncompressed_size + 1,
+                ..output.clone()
+            },
+            statistics_mismatch,
+        ),
+        (
+            FileMeta {
+                primary_key_min: Some(Bytes::from_static(b"not-the-footer-minimum")),
+                ..output.clone()
+            },
+            statistics_mismatch,
+        ),
+        (
+            FileMeta {
+                primary_key_max: Some(Bytes::from_static(b"not-the-footer-maximum")),
+                ..output.clone()
+            },
+            statistics_mismatch,
+        ),
+        (
+            FileMeta {
+                time_range: (
+                    Timestamp::new(output.time_range.0.value() + 1, output.time_range.0.unit()),
+                    output.time_range.1,
+                ),
+                ..output.clone()
+            },
+            timestamp_mismatch,
+        ),
+        (
+            FileMeta {
+                time_range: (
+                    output.time_range.0,
+                    Timestamp::new(output.time_range.1.value(), TimeUnit::Second),
+                ),
+                ..output.clone()
+            },
+            timestamp_mismatch,
+        ),
+        (
+            FileMeta {
+                file_id: FileId::random(),
+                ..output.clone()
+            },
+            ExpectedError::OpenDal,
+        ),
+        (
+            FileMeta {
+                sequence: None,
+                ..output.clone()
+            },
+            invalid_output,
+        ),
+        (
+            FileMeta {
+                file_id: snapshot.inputs[0].file_id,
+                ..output.clone()
+            },
+            invalid_output,
+        ),
+    ];
+    for (invalid, expected) in cases {
+        let error = engine
+            .publish_table_compaction(region_id, snapshot.clone(), vec![invalid])
+            .await
+            .unwrap_err();
+        let source = match error {
+            crate::error::Error::EditRegion { source, .. } => source,
+            other => panic!("unexpected error: {other}"),
+        };
+        match expected {
+            ExpectedError::InvalidRequest(reason) => assert!(
+                matches!(source.as_ref(), crate::error::Error::InvalidRequest { reason: actual, .. } if actual == reason),
+                "unexpected error: {source}"
+            ),
+            ExpectedError::OpenDal => assert!(
+                matches!(source.as_ref(), crate::error::Error::OpenDal { .. }),
+                "unexpected error: {source}"
+            ),
+        }
         assert_eq!(version, region.manifest_ctx.manifest_version().await);
         assert_eq!(
             snapshot.inputs,
             engine.table_compaction_snapshot(region_id).unwrap().inputs
         );
+        assert_eq!(3, row_count(&engine, region_id).await);
     }
+    // A real footer written for another region's metadata must reach the footer
+    // check; the stale-input shortcut must not mask it.
+    let foreign_region_id = RegionId::new(1, 2);
+    let (_, foreign_output) = seed(&engine, foreign_region_id).await;
+    let foreign_region = engine.get_region(foreign_region_id).unwrap();
+    let mut foreign = foreign_output;
+    assert_eq!(0, foreign.index_file_size);
+    let foreign_path = location::sst_file_path(
+        foreign_region.access_layer.table_dir(),
+        foreign.file_id(),
+        foreign_region.access_layer.path_type(),
+    );
+    foreign.file_id = FileId::random();
+    foreign.region_id = region_id;
+    foreign.sequence = output.sequence;
+    let target_path = location::sst_file_path(
+        region.access_layer.table_dir(),
+        foreign.file_id(),
+        region.access_layer.path_type(),
+    );
+    foreign_region
+        .access_layer
+        .object_store()
+        .copy(&foreign_path, &target_path)
+        .await
+        .unwrap();
+    let error = engine
+        .publish_table_compaction(region_id, snapshot.clone(), vec![foreign])
+        .await
+        .unwrap_err();
+    let source = match error {
+        crate::error::Error::EditRegion { source, .. } => source,
+        other => panic!("unexpected error: {other}"),
+    };
+    assert!(
+        matches!(source.as_ref(), crate::error::Error::InvalidRequest { reason, .. }
+            if reason == "Output footer schema or partition mismatch"),
+        "unexpected error: {source}"
+    );
+    assert_eq!(version, region.manifest_ctx.manifest_version().await);
+    assert_eq!(
+        snapshot.inputs,
+        engine.table_compaction_snapshot(region_id).unwrap().inputs
+    );
+    assert_eq!(3, row_count(&engine, region_id).await);
     let mut stale_input = snapshot.clone();
     stale_input.inputs[0].index_version += 1;
     assert_eq!(
