@@ -145,7 +145,8 @@ enum SeriesInputMode {
     /// partition adapter reads every assigned source (including memtables) with the ordinary scan.
     Raw,
     /// Regions whose columnar series gate is on serve the ready subset of the assignment, both to
-    /// the native ordinal-range entry and to the raw partition adapter.
+    /// the native ordinal-range entry and to the raw partition adapter. An empty subset is served
+    /// too, as an empty stream, so these regions never read the ordinary scan.
     Native,
 }
 
@@ -179,9 +180,11 @@ fn selection_serves(
         // all-or-nothing answer. This is only reachable outside the columnar gate, where the
         // capture is empty and the answer is therefore `false`.
         SeriesInputMode::Raw => selection.all_ready,
-        // The native entry serves the ready subset: an empty subset leaves nothing to prepare, so
-        // an assigned memtable is skipped instead of disabling the sources that are ready.
-        SeriesInputMode::Native => !selection.ready_files.is_empty(),
+        // The native entry always answers once the gate is on: it serves the ready subset, and an
+        // empty subset is an empty stream with the planned schema, not the ordinary scan. An
+        // assigned memtable or an unbuilt SST therefore narrows the answer instead of switching
+        // the reader, and the answer cannot change while a planned scan executes.
+        SeriesInputMode::Native => true,
     }
 }
 
@@ -611,8 +614,9 @@ impl SeriesScan {
                 &preflight.selection,
                 preflight.columnar_fields_supported,
             ) {
-                // Known unsupported coverage or field types: the caller keeps the ordinary scan
-                // instead.
+                // Unsupported field types, or a region outside the gate: the caller keeps the
+                // ordinary scan. Readiness never causes this, because an unready native
+                // assignment prepares an empty source.
                 return Ok(None);
             }
             state
@@ -1097,8 +1101,10 @@ impl RegionScanner for SeriesScan {
                 Box::pin(stream),
             )));
         }
-        // Sources the artifacts do not cover yet (memtables, uncovered SSTs) and regions outside
-        // the columnar gate are read by the ordinary scan, so the raw path stays available.
+        // Only two shapes reach the ordinary scan: a region outside the columnar gate, and a
+        // selection the prepared reader cannot serve because a field type is not `Float64`. A
+        // gated region with nothing ready is served above, as an empty stream declaring the
+        // planned schema and labels, so it never falls back to the Parquet rows.
         let metrics = new_partition_metrics(
             &self.stream_ctx,
             ctx.explain_verbose,
@@ -1120,6 +1126,13 @@ impl RegionScanner for SeriesScan {
         )))
     }
 
+    /// Prepares this scanner's native source, or `None` when the shape is unsupported.
+    ///
+    /// Under the columnar gate the answer is always `Some`: a scan whose assignment has no ready
+    /// source prepares an empty source instead, so a caller never has to fall back. `None` means
+    /// the gate is off, or the preflight refused this shape (explicit label source, metadata that
+    /// is not a sparse metric region, append mode, a row selector, a non-millisecond time index,
+    /// dynamic or volatile predicates, or a selected field the prepared reader cannot serve).
     fn prepare_series(
         &self,
         ctx: &QueryScanContext,
@@ -1129,7 +1142,8 @@ impl RegionScanner for SeriesScan {
         'static,
         Result<Option<Arc<dyn store_api::region_engine::PreparedSeriesSource>>, BoxedError>,
     > {
-        // Only a region under the columnar gate has a native subset to prepare.
+        // Only a region under the columnar gate has a native subset to prepare. Outside the gate
+        // there is no native answer at all, so the caller keeps the ordinary scan.
         if !self.uses_columnar() {
             return Box::pin(async { Ok(None) });
         }

@@ -252,7 +252,7 @@ impl IndexTest {
 }
 
 #[rstest::rstest]
-#[case::range_only(vec![1000], 0)]
+#[case::single_file(vec![1000], 1)]
 #[case::series_bucket(vec![1000, 2000, 3000, 4000], 1)]
 #[tokio::test]
 async fn test_reconcile_range_index_disabled(
@@ -285,7 +285,7 @@ async fn test_reconcile_range_index_disabled(
         .map(|file| file.meta_ref().clone())
         .collect::<Vec<_>>();
 
-    // Both planned series buckets and SSTs without a series build must skip range builds.
+    // Every planned series bucket - including one built from a single SST - skips range builds.
     let stats = test
         .reconcile_with_range_index(store.clone(), false)
         .await
@@ -431,14 +431,44 @@ async fn test_reconcile_restores_and_reuses_indexes() {
     engine.stop().await.unwrap();
 }
 
+/// A single flushed SST is converted by the automatic pass: no file-count threshold holds a
+/// bucket back, because a native reader can only serve published artifacts.
 #[tokio::test]
-async fn test_reconcile_range_only_build_and_removal() {
+async fn test_reconcile_single_flushed_sst_builds_both_indexes() {
     let mut env = TestEnv::with_prefix("series-range-lifecycle").await;
     let (engine, region) = prepare_region_with_timestamps(&mut env, &[1000]).await;
     let (test, _receiver) = IndexTest::new(region.clone());
     let initial = region.series_index_version();
+    let files = region
+        .version()
+        .ssts
+        .levels()
+        .iter()
+        .flat_map(|level| level.files())
+        .cloned()
+        .collect::<Vec<_>>();
+    assert_eq!(1, files.len(), "the fixture must flush exactly one SST");
     let stats = test.reconcile(test.store.clone()).await.unwrap();
-    assert_eq!((1, 0), (stats.built_range, stats.built_series));
+    assert_eq!((1, 1), (stats.built_range, stats.built_series));
+    let published = region.series_index_version();
+    let entry = published
+        .series_indexes
+        .values()
+        .next()
+        .expect("one series index covers the single SST")
+        .entry();
+    assert!(
+        entry.covers_file(files[0].meta_ref(), region.region_id),
+        "the published index must cover the flushed SST"
+    );
+    // A repeated pass reuses the published index instead of rebuilding it.
+    assert_eq!(
+        0,
+        test.reconcile(test.store.clone())
+            .await
+            .unwrap()
+            .built_series
+    );
     let built = region.series_index_version();
     assert!(!Arc::ptr_eq(&initial, &built));
     let files = region
@@ -927,7 +957,8 @@ async fn test_failed_reconcile_retires_only_unpublished_series() {
             None,
             0,
         );
-        assert_eq!(if failure == "range" { 2 } else { 3 }, plan.builds.len());
+        // Every bucket is planned, including the third one built from a single SST.
+        assert_eq!(3, plan.builds.len());
         let (bucket, entry) = &plan.builds[0];
         let mut ranges = HashMap::new();
         for file in &bucket.files {
@@ -1025,7 +1056,8 @@ async fn test_failed_reconcile_retires_only_unpublished_series() {
         assert!(store.exists(&reused_path).await.unwrap());
 
         let stats = test.reconcile(store.clone()).await.unwrap();
-        assert_eq!(if failure == "range" { 1 } else { 2 }, stats.built_series);
+        // The pre-published bucket is reused, so the remaining two buckets are built.
+        assert_eq!(2, stats.built_series);
         let published = region.series_index_version();
         for handle in published.series_indexes.values() {
             assert!(
@@ -1776,6 +1808,131 @@ async fn test_bulk_flush_triggers_series_index_build() {
     assert_series_catalog_published(&env, region_id).await;
     assert_eq!(timestamps, raw_series_timestamps(&engine, region_id).await);
 
+    engine.stop().await.unwrap();
+}
+
+/// A single ingested SST without a sequence is converted too: neither the file count nor the
+/// missing sequence defers a non-empty bucket, and the published coverage is exact membership.
+#[tokio::test]
+async fn test_automatic_build_indexes_a_single_ingested_sst() {
+    let mut env = TestEnv::with_prefix("series-single-ingested-sst").await;
+    // The series-index task stays disabled, so only the automatic pass below can publish.
+    let engine = env
+        .create_engine(MitoConfig {
+            min_compaction_interval: Duration::from_secs(3600),
+            schedule_compaction_after_edit: false,
+            ..Default::default()
+        })
+        .await;
+    let metadata = Arc::new(sst_region_metadata_with_encoding(
+        PrimaryKeyEncoding::Sparse,
+    ));
+    let source_id = RegionId::new(1, 1);
+    let target_id = RegionId::new(1, 2);
+    let schema = create_metrics_region(&engine, source_id, &metadata).await;
+    create_metrics_region(&engine, target_id, &metadata).await;
+    let source = engine.get_region(source_id).unwrap();
+    let target = engine.get_region(target_id).unwrap();
+
+    let timestamps = vec![1000, 2000, 3000, 4000];
+    put_metric_rows(&engine, source_id, &metadata, &schema, &timestamps).await;
+    flush_region(&engine, source_id, None).await;
+    let flushed = single_sst(&source);
+    let file_id = install_foreign_sst(&engine, &source, &target, &flushed).await;
+    // No memtable and no flush: the ingested SST is the region's only source.
+    assert!(target.version().memtables.is_empty());
+    assert!(target.series_index_version().series_indexes.is_empty());
+
+    let (test, _receiver) = IndexTest::new(target.clone());
+    let stats = test.reconcile(test.store.clone()).await.unwrap();
+    assert_eq!(1, stats.built_series);
+    let published = target.series_index_version();
+    let entry = published
+        .series_indexes
+        .values()
+        .next()
+        .expect("the ingested SST must be indexed")
+        .entry()
+        .clone();
+    assert!(
+        entry.covers_file(&region_file_meta(&target, file_id), target_id),
+        "the published index must cover the ingested SST"
+    );
+    // A repeated pass reuses the published index instead of rebuilding it.
+    assert_eq!(
+        0,
+        test.reconcile(test.store.clone())
+            .await
+            .unwrap()
+            .built_series
+    );
+    engine.stop().await.unwrap();
+}
+
+/// A bucket whose sources carry no sequence is built by the automatic pass: coverage of a
+/// sequence-less SST is exact file membership, so nothing has to be deferred.
+#[tokio::test]
+async fn test_automatic_build_indexes_unknown_sequence_sources() {
+    use crate::region::version::VersionBuilder;
+
+    let mut env = TestEnv::with_prefix("series-unknown-sequence").await;
+    let (engine, region) =
+        prepare_region_with_timestamps(&mut env, &[1000, 2000, 3000, 4000]).await;
+    let original = region.version();
+    let originals = original
+        .ssts
+        .levels()
+        .iter()
+        .flat_map(|level| level.files())
+        .map(|file| file.meta_ref().clone())
+        .collect::<Vec<_>>();
+    // Rewrite the same SSTs without a sequence, like files a bulk writer installed itself.
+    let mut unknown = originals.clone();
+    for file in &mut unknown {
+        file.sequence = None;
+    }
+    let version = VersionBuilder::from_version(original.clone())
+        .remove_files(originals.into_iter())
+        .add_files(region.file_purger.clone(), unknown.into_iter())
+        .build();
+    region.version_control.overwrite_current(Arc::new(version));
+    let installed = region
+        .version()
+        .ssts
+        .levels()
+        .iter()
+        .flat_map(|level| level.files())
+        .map(|file| file.meta_ref().clone())
+        .collect::<Vec<_>>();
+    assert_eq!(4, installed.len());
+    assert!(installed.iter().all(|file| file.sequence.is_none()));
+
+    let (test, _receiver) = IndexTest::new(region.clone());
+    let stats = test.reconcile(test.store.clone()).await.unwrap();
+    assert_eq!(1, stats.built_series);
+    let published = region.series_index_version();
+    let entry = published
+        .series_indexes
+        .values()
+        .next()
+        .expect("unknown-sequence sources must be indexed")
+        .entry()
+        .clone();
+    assert_eq!(0, entry.min_file_sequence);
+    for file in &installed {
+        assert!(
+            entry.covers_file(file, region.region_id),
+            "coverage of a sequence-less SST is exact file membership"
+        );
+    }
+    // The same exact source set is reused instead of being rebuilt on every pass.
+    assert_eq!(
+        0,
+        test.reconcile(test.store.clone())
+            .await
+            .unwrap()
+            .built_series
+    );
     engine.stop().await.unwrap();
 }
 

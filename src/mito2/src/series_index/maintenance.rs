@@ -288,6 +288,12 @@ async fn build_index_version(
                 .max(1);
             group_files_into_series_buckets(files, width, width)
         }
+        // Automatic maintenance builds every bucket it can form, but it cannot form one here:
+        // bucket geometry, and the per-window sequence summaries that detect new data, are
+        // defined by the declared compaction window that keeps a bucket stable across
+        // compaction. A manual build may synthesize a width instead. This is a structural
+        // precondition, not a size threshold; without a window a region gets no automatic
+        // series indexes.
         (true, None) => {
             debug!(
                 "Deferring series indexes without compaction window, worker: {worker_id}, region: {}",

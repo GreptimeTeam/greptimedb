@@ -24,15 +24,13 @@ use store_api::storage::FileId;
 use crate::series_index::catalog::{SeriesIndexEntry, WindowSequence};
 use crate::sst::file::FileHandle;
 
-const SERIES_INDEX_TRIGGER_FILES: usize = 4;
-
 /// Index files sharing a non-overlapping, half-open time bucket.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct IndexBucket {
     pub(crate) start: Timestamp,
     pub(crate) end: Timestamp,
     pub(crate) index_ids: SmallVec<[FileId; 2]>,
-    /// Exact input set when a manual build contains unknown file sequences.
+    /// Exact input set of a build whose entries carry unknown file sequences.
     pub(crate) unknown_sequence_sources: HashSet<FileId>,
     /// Zero means that merged indexes use incompatible window widths.
     pub(crate) compaction_window_secs: i64,
@@ -99,8 +97,11 @@ impl IndexBucket {
 /// SSTs grouped into a half-open time interval for an aggregate series-index build.
 ///
 /// Reconciliation may expand the interval through existing index coverage. A changed
-/// bucket is rebuilt from all its SSTs. Unknown source sequences prevent builds,
-/// since their coverage cannot be determined safely.
+/// bucket is rebuilt from all its SSTs. Every non-empty bucket is planned, whatever its
+/// file count: a single flushed or ingested SST is indexed as soon as it is planned,
+/// because the native read path serves only published artifacts. Unknown source
+/// sequences are indexed by exact file membership
+/// ([`SeriesIndexEntry::covers_file`]), never by a sequence range.
 #[derive(Debug, Clone)]
 pub(crate) struct SeriesBucket {
     pub(crate) start: Timestamp,
@@ -114,7 +115,7 @@ pub(crate) struct SeriesBucket {
     /// Each SST contributes one entry; equal starts merge by maximum end and sequence.
     /// Ranges may overlap. See [`WindowSequence`] for the sequence assumption.
     /// Missing SST sequences use zero as a placeholder and set `has_unknown_sequence`,
-    /// preventing index builds and reuse.
+    /// so reuse compares the exact source set instead of a sequence range.
     pub(crate) window_sequences: BTreeMap<i64, WindowSequence>,
 }
 
@@ -174,21 +175,22 @@ pub(crate) fn plan_series_indexes_with_mode(
         if expired(bucket.end) {
             continue;
         }
-        if bucket.has_unknown_sequence && !manual {
-            continue;
-        }
+        // Every remaining bucket is planned. There is no file-count or sequence-based
+        // deferral: the native read path serves only published artifacts, so an unbuilt
+        // bucket is data the reader cannot see.
         if index_buckets.get(&bucket.start).is_some_and(|indexed| {
+            // A bucket with unknown sequences is covered only by an index built from exactly
+            // its source files: their sequences cannot express coverage as a range.
             (!bucket.has_unknown_sequence
-                || (manual
-                    && indexed.unknown_sequence_sources
-                        == bucket.files.iter().map(|f| f.file_id().file_id()).collect()))
+                || indexed.unknown_sequence_sources
+                    == bucket.files.iter().map(|f| f.file_id().file_id()).collect())
                 && indexed.end == bucket.end
                 && indexed.compaction_window_secs == bucket.compaction_window_secs
                 && indexed.window_sequences == bucket.window_sequences
         }) {
             continue;
         }
-        if let Some(entry) = bucket.to_series_entry(manual) {
+        if let Some(entry) = bucket.to_series_entry() {
             index_buckets.retain(|_, indexed| {
                 if indexed.start < bucket.end && bucket.start < indexed.end {
                     superseded_index_ids.extend_from_slice(&indexed.index_ids);
@@ -342,12 +344,11 @@ fn merge_window_sequences(
 
 impl SeriesBucket {
     /// Creates entry metadata with a fresh UUID and sorted source file IDs.
-    /// Automatic builds defer unknown sequences and buckets with too few files.
-    fn to_series_entry(&self, manual: bool) -> Option<SeriesIndexEntry> {
-        if self.files.is_empty()
-            || (!manual
-                && (self.has_unknown_sequence || self.files.len() < SERIES_INDEX_TRIGGER_FILES))
-        {
+    ///
+    /// Never defers a non-empty bucket: automatic builds index every planned bucket, so a
+    /// single flushed or ingested SST becomes a native artifact on the first pass.
+    fn to_series_entry(&self) -> Option<SeriesIndexEntry> {
+        if self.files.is_empty() {
             return None;
         }
         let mut source_file_ids = self
@@ -464,8 +465,14 @@ mod tests {
         );
         assert_eq!(3, buckets[0].max_file_sequence);
         assert_eq!(4, buckets[1].max_file_sequence);
-        assert!(buckets[0].to_series_entry(false).is_none());
-        assert!(buckets[1].to_series_entry(false).is_none());
+        // Neither a file count nor unknown sequence metadata defers a non-empty bucket.
+        assert!(buckets[0].to_series_entry().is_some());
+        assert!(buckets[1].to_series_entry().is_some());
+        let empty = SeriesBucket {
+            files: SmallVec::new(),
+            ..buckets[1].clone()
+        };
+        assert!(empty.to_series_entry().is_none());
         let mut files = files.to_vec();
         files.push(file(
             None,
@@ -475,8 +482,8 @@ mod tests {
         ));
         assert!(
             group_files_into_series_buckets(&files, width, 10)[0]
-                .to_series_entry(false)
-                .is_none()
+                .to_series_entry()
+                .is_some()
         );
     }
 
@@ -536,11 +543,15 @@ mod tests {
         let planned = group_files_into_series_buckets(&files, 10, 10);
         assert_eq!(4, planned.len());
         let plan = plan_series_indexes(planned, indexes, None, 0);
-        assert_eq!((2, 1), (plan.computed_buckets, plan.skipped_buckets));
-        let [(bucket, entry)] = plan.builds.as_slice() else {
-            panic!("expected one replacement build");
+        // The bridge merges the first three spans into one bucket, and the adjacent span stays
+        // separate. Both are built: a bucket is never skipped for its file count.
+        assert_eq!((2, 0), (plan.computed_buckets, plan.skipped_buckets));
+        let [(bucket, entry), (adjacent, _)] = plan.builds.as_slice() else {
+            panic!("expected one replacement build and one new bucket");
         };
         assert_eq!((ts(0), ts(100)), (bucket.start, bucket.end));
+        assert_eq!((ts(100), ts(110)), (adjacent.start, adjacent.end));
+        assert_eq!(1, adjacent.files.len());
         // Include sequence 15 and both files at 32, but exclude the adjacent bucket.
         let expected = files[..5]
             .iter()
@@ -557,7 +568,7 @@ mod tests {
         assert_eq!(expected, entry.source_file_ids.iter().copied().collect());
         assert_eq!((15, 33), (entry.min_file_sequence, entry.max_file_sequence));
         assert!(plan.expired_index_ids.is_empty());
-        assert_eq!(1, plan.index_buckets.len());
+        assert_eq!(2, plan.index_buckets.len());
         let merged = &plan.index_buckets[&ts(0)];
         assert_eq!((ts(0), ts(100)), (merged.start, merged.end));
         assert_eq!(33, bucket.max_file_sequence);
@@ -769,7 +780,7 @@ mod tests {
     }
 
     #[test]
-    fn test_deferred_bridge_preserves_established_coverage() {
+    fn test_bridge_rebuilds_small_buckets_and_reuses_unknown_source_sets() {
         let ts = Timestamp::new_second;
         let mut indexes = BTreeMap::new();
         for (start, seq) in [(0, 10), (20, 30)] {
@@ -787,39 +798,53 @@ mod tests {
             file(Some(13), 0, ts(1), ts(21)),
             file(Some(30), 0, ts(21), ts(22)),
         ];
-        let deferred = plan_series_indexes(
+        // Two bridged sources still rebuild their bucket instead of deferring it.
+        let bridged = plan_series_indexes(
             group_files_into_series_buckets(&files, 10, 10),
-            indexes.clone(),
+            indexes,
             None,
             0,
         );
-        assert!(deferred.builds.is_empty());
-        assert!(deferred.superseded_index_ids.is_empty());
-        assert_eq!(indexes, deferred.index_buckets);
-        files.extend((11..=12).map(|seq| file(Some(seq), 0, ts(1), ts(2))));
+        assert_eq!(1, bridged.builds.len());
+        assert_eq!(2, bridged.builds[0].0.files.len());
+        assert_eq!(2, bridged.superseded_index_ids.len());
+        files.extend((31..=32).map(|seq| file(Some(seq), 0, ts(1), ts(2))));
         let plan = plan_series_indexes(
             group_files_into_series_buckets(&files, 10, 10),
-            deferred.index_buckets,
+            bridged.index_buckets,
             None,
             0,
         );
         assert_eq!(1, plan.builds.len());
         assert_eq!(4, plan.builds[0].0.files.len());
-        assert_eq!(2, plan.superseded_index_ids.len());
+        assert_eq!(1, plan.superseded_index_ids.len());
+        // New data raises the summary of the window it lands in, which forces the rebuild.
         assert_eq!(
-            coverage(&[(0, 30, 13), (20, 30, 30)]),
+            coverage(&[(0, 30, 32), (20, 30, 30)]),
             plan.builds[0].1.window_sequences
         );
 
+        // A source without a sequence joins the bucket: coverage becomes exact file membership,
+        // so the changed source set rebuilds, and the same set is reused next time.
         files.push(file(None, 0, ts(1), ts(2)));
         let unknown = plan_series_indexes(
             group_files_into_series_buckets(&files, 10, 10),
-            indexes.clone(),
+            plan.index_buckets,
             None,
             0,
         );
-        assert!(unknown.builds.is_empty());
-        assert_eq!(indexes, unknown.index_buckets);
+        assert_eq!(1, unknown.builds.len());
+        assert_eq!(5, unknown.builds[0].0.files.len());
+        assert_eq!(0, unknown.builds[0].1.min_file_sequence);
+        assert_eq!(1, unknown.superseded_index_ids.len());
+        let repeated = plan_series_indexes(
+            group_files_into_series_buckets(&files, 10, 10),
+            unknown.index_buckets.clone(),
+            None,
+            0,
+        );
+        assert!(repeated.builds.is_empty());
+        assert_eq!(unknown.index_buckets, repeated.index_buckets);
     }
 
     #[rstest::rstest]
