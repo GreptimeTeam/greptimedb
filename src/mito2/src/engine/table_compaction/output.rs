@@ -144,6 +144,9 @@ fn verify_statistics(
             && max_uncompressed == file.max_row_group_uncompressed_size
             && pk_range.as_ref().map(|range| &range.0) == file.primary_key_min.as_ref()
             && pk_range.as_ref().map(|range| &range.1) == file.primary_key_max.as_ref()
+            // `num_series` is the writer's caller-reported estimate derived from
+            // timestamp boundaries, not a footer statistic, so it only bounds the
+            // count against rows instead of being verified against the footer.
             && file.num_series <= file.num_rows,
         InvalidRequestSnafu {
             region_id: metadata.region_id,
