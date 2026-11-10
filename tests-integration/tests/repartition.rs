@@ -32,8 +32,7 @@ use meta_srv::metasrv::Metasrv;
 use mito2::gc::GcConfig;
 use servers::error::Result as ServerResult;
 use servers::query_handler::sql::SqlQueryHandler;
-use session::Session;
-use session::context::{Channel, QueryContext, QueryContextRef};
+use session::context::{QueryContext, QueryContextRef};
 use sqlx::Row;
 use store_api::codec::PrimaryKeyEncoding;
 use store_api::storage::{RegionId, TableId};
@@ -252,7 +251,7 @@ async fn test_repartition_physical_metric_without_logical_table() {
 /// COUNT must use visible rows rather than the full row counts of shared SSTs.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_repartition_append_count_file() {
-    let (cluster, _home_guard) = append_count_cluster("repartition_append_count").await;
+    let (cluster, _home_guard) = repartition_cluster("repartition_append_count").await;
     let instance = cluster.fe_instance();
     let table = "count_repartition";
     prepare_append_count_table(instance, table, "").await;
@@ -270,7 +269,7 @@ async fn test_repartition_append_count_file() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_split_append_count_file() {
-    let (cluster, _home_guard) = append_count_cluster("split_append_count").await;
+    let (cluster, _home_guard) = repartition_cluster("split_append_count").await;
     let instance = cluster.fe_instance();
     let table = "count_split";
     prepare_append_count_table(
@@ -293,7 +292,7 @@ async fn test_split_append_count_file() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_repartition_append_count_memtable_file() {
-    let (cluster, home_guard) = append_count_cluster("repartition_append_count_memtable").await;
+    let (cluster, home_guard) = repartition_cluster("repartition_append_count_memtable").await;
     assert!(home_guard.path().is_dir());
     let instance = cluster.fe_instance();
     let table = "count_repartition_memtable";
@@ -310,7 +309,7 @@ async fn test_repartition_append_count_memtable_file() {
     assert!(home_guard.path().is_dir());
 }
 
-async fn append_count_cluster(name: &str) -> (GreptimeDbCluster, Arc<TempDir>) {
+async fn repartition_cluster(name: &str) -> (GreptimeDbCluster, Arc<TempDir>) {
     common_telemetry::init_default_ut_logging();
     let (store_config, _guard) = get_test_store_config(&StorageType::File);
     let home_dir = Arc::new(create_temp_dir(name));

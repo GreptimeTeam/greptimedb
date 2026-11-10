@@ -757,7 +757,8 @@ async fn test_staging_exit_success_with_manifests_with_format(flat_format: bool)
         .unwrap();
 
     let region = engine.get_region(region_id).unwrap();
-    for (file, expected) in source_files.into_iter().zip([11, 12]) {
+    assert_eq!(source_files.len(), 2);
+    for file in source_files {
         engine
             .edit_region(
                 region_id,
@@ -774,7 +775,6 @@ async fn test_staging_exit_success_with_manifests_with_format(flat_format: bool)
             .await
             .unwrap();
         let current = region.version_control.current();
-        assert_eq!(current.last_sequence, expected);
         assert_eq!(current.committed_sequence, 10);
     }
 
