@@ -102,7 +102,8 @@ pub struct RegionEdit {
 /// Changes an edit makes to the WAL ranges the region still has to recover.
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq)]
 pub struct WalRecoveryEdit {
-    /// The new [RegionManifest::pending_tails]. `None` keeps them unchanged.
+    /// The new [RegionManifest::pending_tails], whose segments of each node keep the
+    /// order and bounds described there. `None` keeps them unchanged.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_tails: Option<Vec<PendingTail>>,
     /// Replaces the handoff floor of one node.
@@ -130,7 +131,8 @@ pub enum UptoKind {
     Listed,
 }
 
-/// Entries of a node at or below `entry_id` are never recovered from its WAL.
+/// Entries of a node at or below `entry_id` are never recovered from its WAL, except
+/// those in a pending tail of the node.
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 pub struct HandoffFloor {
     pub node_id: u64,
@@ -246,6 +248,13 @@ pub struct RegionManifest {
     #[serde(default)]
     pub append_mode: Option<bool>,
     /// WAL ranges the region still has to recover, in the order they were added.
+    ///
+    /// The segments of one node are increasing and do not overlap, and each has
+    /// `after < upto`: a new segment of a node takes as `after` the largest of the
+    /// flushed entry id, the `upto`s of the node's existing segments and its handoff
+    /// floor, and is added only if that is below its `upto`. So the entries of a node
+    /// between two of its segments are flushed or at or below a handoff floor of the
+    /// node, and need no replay.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pending_tails: Vec<PendingTail>,
     /// The [HandoffFloor] of each node, removed once the flushed entry id reaches it.
@@ -257,6 +266,10 @@ impl RegionManifest {
     /// Returns the entry id after which node `node_id` replays its WAL when it opens
     /// the region. Entries up to it are flushed, left to the pending tails, or below
     /// the handoff floor of the node.
+    ///
+    /// Entries of the node in `(after, upto]` of one of its tails belong to that tail.
+    /// Whoever adds a tail ensures that every entry id the node allocates afterwards is
+    /// above the tail's `upto`, so no later write of the node falls in a skipped range.
     pub(crate) fn wal_replay_start(&self, node_id: Option<u64>) -> EntryId {
         let floor = node_id.and_then(|node_id| self.handoff_floors.get(&node_id).copied());
         self.pending_tails
@@ -1632,12 +1645,27 @@ mod tests {
     #[test]
     fn test_wal_replay_start() {
         let mut builder = manifest_builder();
+        // Node 1 was handed off at 40 after its first tail, so its second tail starts
+        // there and entries in (20, 40] belong to no tail.
         builder.apply_edit(
             1,
             wal_recovery_edit(
                 Some(10),
                 WalRecoveryEdit {
-                    pending_tails: Some(vec![tail(1, 10, 30), tail(2, 30, 60), tail(1, 30, 25)]),
+                    pending_tails: Some(vec![tail(1, 10, 20), tail(2, 30, 60), tail(1, 40, 50)]),
+                    handoff_floor: Some(HandoffFloor {
+                        node_id: 1,
+                        entry_id: 40,
+                    }),
+                },
+            ),
+        );
+        builder.apply_edit(
+            2,
+            wal_recovery_edit(
+                None,
+                WalRecoveryEdit {
+                    pending_tails: None,
                     handoff_floor: Some(HandoffFloor {
                         node_id: 3,
                         entry_id: 40,
@@ -1647,7 +1675,7 @@ mod tests {
         );
         let manifest = builder.try_build().unwrap();
 
-        assert_eq!(manifest.wal_replay_start(Some(1)), 30);
+        assert_eq!(manifest.wal_replay_start(Some(1)), 50);
         assert_eq!(manifest.wal_replay_start(Some(2)), 60);
         assert_eq!(manifest.wal_replay_start(Some(3)), 40);
         assert_eq!(manifest.wal_replay_start(Some(4)), 10);
@@ -1656,7 +1684,7 @@ mod tests {
 
     #[test]
     fn test_cap_wal_release() {
-        let tails = [tail(1, 30, 40), tail(2, 5, 60), tail(1, 20, 25)];
+        let tails = [tail(1, 20, 25), tail(2, 5, 60), tail(1, 30, 40)];
 
         assert_eq!(cap_wal_release(&tails, Some(1), 50), 20);
         assert_eq!(cap_wal_release(&tails, Some(1), 10), 10);
