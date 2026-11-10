@@ -67,9 +67,8 @@ pub(super) async fn run_measure(args: MeasureArgs) -> Result<()> {
         .timeout(Duration::from_secs_f64(args.http_timeout))
         .build()?;
     let direct_fixture = matches!(scenario_kind(&plan), Some("direct_readable_sst"));
-    // Only the candidate target waits for region statistics, and only when a query of the case
-    // opts in: the base target does not need the reports, and a case without such a query keeps
-    // measuring immediately.
+    // Both targets wait for region statistics when a query of the case opts in: the opt-in may
+    // apply to either build, and a case without such a query keeps measuring immediately.
     let base = run_target(
         args.base_http_port,
         &tables,
@@ -173,10 +172,11 @@ fn scenario_kind(plan: &Value) -> Option<&str> {
 /// Whether a run of `queries` on a target waits for the region statistics of the case tables
 /// before it measures anything.
 ///
-/// Only candidate direct-SST cases with an opted-in query wait; base targets and candidate
-/// cases without an opted-in query do not wait.
-fn waits_for_region_statistics(candidate: bool, direct_fixture: bool, queries: &[Query]) -> bool {
-    candidate && direct_fixture && queries.iter().any(|query| query.require_region_statistics)
+/// Only direct-SST cases with an opted-in query wait; other cases do not wait. The flag applies
+/// to both targets so a base build that opts into the same rewrite sees the same statistics as
+/// the candidate.
+fn waits_for_region_statistics(_candidate: bool, direct_fixture: bool, queries: &[Query]) -> bool {
+    direct_fixture && queries.iter().any(|query| query.require_region_statistics)
 }
 
 /// The region statistics of `table`: `(regions, ready_regions)`, where a ready region has an
@@ -409,6 +409,7 @@ async fn run_target(
             end: None,
             step: None,
             candidate_session_sql: Vec::new(),
+            base_session_sql: Vec::new(),
             require_region_statistics: false,
             candidate_remote_operator: None,
             warmup: 0,
@@ -761,7 +762,7 @@ mod tests {
     }
 
     #[test]
-    fn region_statistics_wait_is_candidate_only_and_query_opt_in() {
+    fn region_statistics_wait_is_query_opt_in() {
         let plain: Query = serde_json::from_value(json!({"query": "SELECT 1"})).unwrap();
         let opted_in: Query = serde_json::from_value(json!({
             "query": "SELECT 1",
@@ -775,13 +776,13 @@ mod tests {
             std::slice::from_ref(&plain)
         ));
         assert!(!waits_for_region_statistics(true, true, &[]));
-        // An opted-in query waits on the candidate target only.
+        // An opted-in query waits on both targets.
         assert!(waits_for_region_statistics(
             true,
             true,
             std::slice::from_ref(&opted_in)
         ));
-        assert!(!waits_for_region_statistics(
+        assert!(waits_for_region_statistics(
             false,
             true,
             std::slice::from_ref(&opted_in)
@@ -806,6 +807,7 @@ mod tests {
             end: None,
             step: None,
             candidate_session_sql: Vec::new(),
+            base_session_sql: Vec::new(),
             require_region_statistics: false,
             candidate_remote_operator: None,
             warmup: 0,

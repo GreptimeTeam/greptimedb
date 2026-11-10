@@ -104,7 +104,8 @@ required by the Mito Parquet writer; sorting preserves every generated column an
 row, including deterministic-wave values.
 
 A query can list `candidate_session_sql` statements that the candidate target
-sends before the query itself, for example:
+sends before the query itself, and `base_session_sql` for the base target, for
+example:
 
 ```toml
 [[scenario.queries]]
@@ -112,14 +113,15 @@ name = "join_dist_broadcast"
 kind = "sql"
 query = "SELECT f.host, avg(f.value) FROM fact f JOIN dim d ON f.host = d.host GROUP BY f.host"
 candidate_session_sql = ["SET experimental_dist_join = true"]
+base_session_sql = ["SET experimental_dist_join = true"]
 ```
 
 Every `/v1/sql` request is answered in its own session context, so a session
 setting only affects the statements of the request that carries it: the runner
 sends the statements and the query as one multi-statement SQL string for the
-validation, warmup, and measurement requests of that query. Only the candidate
-target runs them, so a base build that does not know the setting measures the
-same query with the default behavior.
+validation, warmup, and measurement requests of that query. Only the configured
+target runs each prefix, so a base build that does not know the setting measures
+the same query with the default behavior.
 
 For a statistics-dependent rewrite, the query may also set:
 
@@ -129,10 +131,10 @@ candidate_remote_operator = "HashJoinExec"
 ```
 
 `require_region_statistics` defaults to `false`. If any query opts in, the
-candidate direct-SST target waits for every case table's leader reports with
-non-zero disk size in `information_schema.region_statistics` before any timed
-samples. Timeout or request failure aborts all measurements on that target.
-Base targets and candidate cases without the flag do not wait.
+direct-SST targets wait for every case table's leader reports with non-zero disk
+size in `information_schema.region_statistics` before any timed samples. Timeout
+or request failure aborts all measurements on that target. Cases without the flag
+do not wait.
 
 `candidate_remote_operator` defaults to unset and supports SQL queries only.
 Before any measurements, the candidate runs a separate `EXPLAIN ANALYZE` with
