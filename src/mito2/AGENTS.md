@@ -117,10 +117,11 @@ Tests live next to the code as `*_test.rs` (e.g. `src/mito2/src/engine/flush_tes
   checks its result (`ensure_version_not_checkpointed` in `manifest/storage.rs`).
 - Pending tails (`RegionManifest::pending_tails`) are WAL ranges a region still has
   to recover; the flushed entry id never prunes them. Opening a region replays its
-  WAL after `RegionManifest::wal_replay_start`, and WAL releases stay below this
-  node's tails (`cap_wal_release`). Handoff floors are dropped once the flushed
-  entry id reaches them, in `RegionManifestBuilder::try_build`. While a region has
-  pending tails, scans and the operations that call
+  WAL after `RegionManifest::wal_replay_start`. The WAL releases at open and after
+  a flush stay below this node's tails (`cap_wal_release`); truncate, drop, offline
+  cleanup and catchup release without that cap. Handoff floors are dropped once the
+  flushed entry id reaches them, in `RegionManifestBuilder::try_build`. While a
+  region has pending tails, scans and the operations that call
   `Version::ensure_no_pending_tails` are rejected, and compaction and
   full-listing GC skip it. Check before changing any region state.
 - Lock ordering: take the manifest lock before updating `version_control`; the
