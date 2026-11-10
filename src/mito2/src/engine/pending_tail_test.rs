@@ -79,7 +79,6 @@ async fn create_region_with_entries(
     request
 }
 
-/// Returns an edit that only replaces the pending tails.
 pub(crate) fn pending_tails_edit(pending_tails: Vec<PendingTail>) -> RegionEdit {
     RegionEdit {
         files_to_add: vec![],
@@ -96,7 +95,6 @@ pub(crate) fn pending_tails_edit(pending_tails: Vec<PendingTail>) -> RegionEdit 
     }
 }
 
-/// Commits `edit` to the manifest of the region and applies it to its version.
 async fn commit_edit(engine: &MitoEngine, region_id: RegionId, edit: RegionEdit) {
     let region = engine.get_region(region_id).unwrap();
     region
@@ -147,6 +145,7 @@ async fn test_open_replays_wal_after_own_tails_and_floor(
     let engine = env.create_engine(MitoConfig::default()).await;
     let region_id = RegionId::new(1, 1);
     let request = create_region_with_entries(&engine, region_id, 3).await;
+    let has_pending_tails = !pending_tails.is_empty();
     let mut edit = pending_tails_edit(pending_tails);
     edit.wal_recovery.handoff_floor = floor_node_id.map(|node_id| HandoffFloor {
         node_id,
@@ -158,6 +157,11 @@ async fn test_open_replays_wal_after_own_tails_and_floor(
 
     let region = engine.get_region(region_id).unwrap();
     assert_eq!(replayed_rows, region.version().memtables.num_rows());
+    let scan = engine.scanner(region_id, ScanRequest::default()).await;
+    assert_eq!(
+        has_pending_tails,
+        matches!(scan, Err(Error::RegionPendingTails { .. }))
+    );
 }
 
 #[tokio::test]

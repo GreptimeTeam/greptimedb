@@ -405,7 +405,6 @@ pub(crate) struct Version {
 }
 
 impl Version {
-    /// Returns an error if the region still has WAL tails to recover.
     pub(crate) fn ensure_no_pending_tails(&self) -> Result<()> {
         ensure!(
             self.pending_tails.is_empty(),
