@@ -885,14 +885,10 @@ fn btree_backing_bytes(entries: usize) -> usize {
     entries.div_ceil(5).saturating_mul(btree_node_bytes())
 }
 
+/// Transient bytes the fold needs for one field's row while it folds a series. The samples are
+/// written straight into their blocks, so a block's staging buffer is no longer part of this.
 fn pending_bytes(fields: usize) -> usize {
-    working_set_bytes(fields, BLOCK_POINTS)
-}
-
-fn working_set_bytes(fields: usize, pending_capacity: usize) -> usize {
-    pending_capacity
-        .saturating_mul(std::mem::size_of::<(usize, f64)>())
-        .saturating_add(fields.saturating_mul(std::mem::size_of::<Option<f64>>() + 1))
+    fields.saturating_mul(std::mem::size_of::<Option<f64>>() + 1)
 }
 
 fn labels_capacity_bytes(grouping: Grouping<'_>) -> usize {
@@ -950,6 +946,12 @@ struct FieldFold {
 }
 
 impl Group {
+    /// Folds one series' float samples into this group's blocks, one field at a time.
+    ///
+    /// Within a field the samples arrive in position order, so the first sample of a block admits
+    /// that block and allocates its states, and every following sample of the same block is written
+    /// into the states just placed. Each block needs one acquisition per field run, and a field
+    /// with no value in a block leaves that block unallocated.
     fn accumulate(
         &mut self,
         series: &Series,
@@ -958,108 +960,95 @@ impl Group {
         mut retained: usize,
         width: usize,
     ) -> Result<usize> {
-        let pending_capacity_bytes = BLOCK_POINTS.saturating_mul(size_of::<(usize, f64)>());
-        budget(retained.saturating_add(pending_capacity_bytes))?;
-        let mut pending = Vec::with_capacity(BLOCK_POINTS);
+        // The grouping workspace the caller admitted for this series is gone once the fold starts,
+        // so only the retained state stays charged while the samples are written.
+        budget(retained)?;
         for (field_index, field) in series.fields.iter().enumerate() {
             // The axis says which absolute positions the field holds and the field iterator
-            // supplies them in order, so a sparse axis never turns into its envelope here.
-            // `usize::MAX` is the "no block yet" marker; flushing it is a no-op, since it only
-            // touches a block once a sample was buffered.
-            let mut block = usize::MAX;
-            for ((index, _), sample) in series.time.positions().zip(field.iter()) {
-                if index / BLOCK_POINTS != block {
-                    retained = self.update_block(
-                        block,
-                        FieldFold {
-                            width,
-                            field_index,
-                            op,
-                        },
-                        &mut pending,
-                        budget,
-                        retained,
-                    )?;
-                    block = index / BLOCK_POINTS;
-                }
-                match sample {
-                    SampleRef::Missing => {}
-                    SampleRef::Float(sample) => pending.push((index % BLOCK_POINTS, sample)),
+            // supplies them in order, so a sparse axis never turns into its envelope here. Samples
+            // that hold nothing never reach a state, and `validate_aggregate_series` has already
+            // decided how this aggregate treats histogram samples.
+            let mut samples = series
+                .time
+                .positions()
+                .zip(field.iter())
+                .filter_map(|((index, _), sample)| match sample {
+                    SampleRef::Float(sample) => Some((index, sample)),
                     SampleRef::Histogram(_) => match histogram_samples(op) {
                         // `count` and `group` ask whether a sample is present, not which payload
                         // it carries, so a histogram is one contribution. The value is a
                         // placeholder: `FloatState` counts the contributions for `count` and only
                         // records that it saw one for `group`.
-                        HistogramSamples::Presence => pending.push((index % BLOCK_POINTS, 1.0)),
+                        HistogramSamples::Presence => Some((index, 1.0)),
                         // Prometheus skips a histogram sample where the aggregate reads a float
                         // value; the runtime reports that it did.
-                        HistogramSamples::Ignored => {}
+                        HistogramSamples::Ignored => None,
                         // A payload-folding aggregate is validated as float-only before it folds,
                         // so a histogram reaching one of them is a defect, not a query.
                         HistogramSamples::Refused => {
                             unreachable!("a payload-folding aggregate refuses histogram samples")
                         }
                     },
+                    _ => None,
+                })
+                .peekable();
+            let fold = FieldFold {
+                width,
+                field_index,
+                op,
+            };
+            while let Some((index, sample)) = samples.next() {
+                let block = index / BLOCK_POINTS;
+                let (states, admitted) = self.block_states(block, fold, budget, retained)?;
+                retained = admitted;
+                states[(index % BLOCK_POINTS) * fold.width + fold.field_index]
+                    .update(fold.op, sample);
+                while let Some(&(at, sample)) = samples.peek()
+                    && at / BLOCK_POINTS == block
+                {
+                    samples.next();
+                    states[(at % BLOCK_POINTS) * fold.width + fold.field_index]
+                        .update(fold.op, sample);
                 }
             }
-            retained = self.update_block(
-                block,
-                FieldFold {
-                    width,
-                    field_index,
-                    op,
-                },
-                &mut pending,
-                budget,
-                retained,
-            )?;
         }
         Ok(retained)
     }
 
-    /// Applies one field's samples within a block, so a block costs one lookup per field run.
-    fn update_block(
-        &mut self,
+    /// The states of `block` for this field, admitting and allocating the block if this field has
+    /// not written there yet, along with the retained bytes after that admission.
+    ///
+    /// A new block is admitted before the tree holds it, so a refused allocation leaves no block
+    /// behind and the retained figure never counts an allocation that was not made.
+    fn block_states<'a>(
+        &'a mut self,
         block: usize,
         fold: FieldFold,
-        pending: &mut Vec<(usize, f64)>,
         budget: &mut impl FnMut(usize) -> Result<()>,
         retained: usize,
-    ) -> Result<usize> {
-        if pending.is_empty() {
-            return Ok(retained);
-        }
+    ) -> Result<(&'a mut [FloatState], usize)> {
         let new_block = !self.blocks.contains_key(&block);
-        let block_bytes = if new_block {
-            BLOCK_POINTS
-                .saturating_mul(fold.width)
-                .saturating_mul(std::mem::size_of::<FloatState>())
+        let (block_bytes, backing_delta) = if new_block {
+            (
+                BLOCK_POINTS
+                    .saturating_mul(fold.width)
+                    .saturating_mul(size_of::<FloatState>()),
+                btree_backing_bytes(self.blocks.len() + 1)
+                    .saturating_sub(btree_backing_bytes(self.blocks.len())),
+            )
         } else {
-            0
+            (0, 0)
         };
-        let backing_delta = if new_block {
-            btree_backing_bytes(self.blocks.len() + 1)
-                .saturating_sub(btree_backing_bytes(self.blocks.len()))
-        } else {
-            0
-        };
+        let retained = retained
+            .saturating_add(backing_delta)
+            .saturating_add(block_bytes);
         if new_block {
-            budget(
-                retained
-                    .saturating_add(backing_delta)
-                    .saturating_add(block_bytes)
-                    .saturating_add(pending.capacity().saturating_mul(size_of::<(usize, f64)>())),
-            )?;
+            budget(retained)?;
         }
         let states = self.blocks.entry(block).or_insert_with(|| {
             vec![FloatState::default(); BLOCK_POINTS * fold.width].into_boxed_slice()
         });
-        for (offset, sample) in pending.drain(..) {
-            states[offset * fold.width + fold.field_index].update(fold.op, sample);
-        }
-        Ok(retained
-            .saturating_add(backing_delta)
-            .saturating_add(block_bytes))
+        Ok((&mut states[..], retained))
     }
 }
 
