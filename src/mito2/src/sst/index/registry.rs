@@ -30,7 +30,7 @@ use crate::sst::file::{FileMeta, IndexType};
 use crate::sst::index::IndexBuildType;
 use crate::sst::index::handler::builtin::BuiltinIndexHandler;
 use crate::sst::index::handler::{
-    IndexKindHandler, IndexKindProviderRef, PlanContext, PlanEntry, PlannedIndex,
+    CurrencyContext, IndexKindHandler, IndexKindProviderRef, PlanContext, PlanEntry, PlannedIndex,
 };
 use crate::sst::index::kind::{ExtensionIndexKind, IndexKind};
 
@@ -70,6 +70,14 @@ impl IndexRegistry {
             }
         }
         Ok(self)
+    }
+
+    /// Strictly validates configured options before a region is opened.
+    pub fn validate(&self, context: &PlanContext<'_>) -> Result<(), BoxedError> {
+        for handler in &self.handlers {
+            handler.validate(context)?;
+        }
+        Ok(())
     }
 
     /// Installs a handler, rejecting empty or overlapping kind ownership.
@@ -270,6 +278,11 @@ impl IndexBuildPlan {
         &self.planned
     }
 
+    /// Whether no handler requested work, including metadata-only maintenance.
+    pub fn is_empty(&self) -> bool {
+        self.planned.is_empty()
+    }
+
     /// All requested column formats.
     pub fn entries(&self) -> impl Iterator<Item = &PlanEntry> {
         self.planned.iter().flat_map(|plan| plan.entries())
@@ -300,6 +313,15 @@ impl IndexBuildPlan {
         }
         self.planned
             .retain(|plan| plan.kinds().iter().all(|kind| kind.is_builtin()));
+    }
+
+    /// Whether every handler considers the published file current.
+    pub fn is_current(&self, file: &FileMeta, context: &CurrencyContext<'_>) -> bool {
+        self.failure.is_none()
+            && self
+                .planned
+                .iter()
+                .all(|plan| plan.is_current(file, context))
     }
 }
 
@@ -339,6 +361,10 @@ mod tests {
             _: &crate::sst::index::handler::BuildContext<'_>,
         ) -> Result<Option<Box<dyn crate::sst::index::handler::IndexCreator>>, BoxedError> {
             unreachable!("admission must not construct creators")
+        }
+
+        fn is_current(&self, _: &FileMeta, _: &CurrencyContext<'_>) -> bool {
+            false
         }
     }
 
