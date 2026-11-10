@@ -1145,6 +1145,15 @@ pub(crate) enum BackgroundNotify {
     EnterStaging(EnterStagingResult),
     /// Copy region result.
     CopyRegionFromFinished(CopyRegionFromFinished),
+    /// A commit outside the worker fenced the region until it is reloaded.
+    RegionFenced,
+    /// The reload of a fenced region has finished.
+    RegionReloaded {
+        /// The instance the reload replaces.
+        old: MitoRegionRef,
+        /// The reloaded instance.
+        result: Result<MitoRegionRef>,
+    },
 }
 
 /// Notifies a flush job is finished.

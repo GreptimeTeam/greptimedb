@@ -1557,6 +1557,7 @@ impl Error {
             | Error::RegionState { .. }
             | Error::RegionTruncated { .. }
             | Error::RegionStopped { .. }
+            | Error::RegionLeaseExpired { .. }
             | Error::SerdeJson { .. }
             | Error::CompressObject { .. } => false,
             Error::OpenDal { error, .. } => !matches!(
@@ -2037,6 +2038,10 @@ mod tests {
             reason: "manifest applicability check rejected the edit",
         }
         .build();
+        assert!(!error.may_have_persisted_manifest_update());
+
+        // A commit refused before its PUT because the Leader deadline has passed.
+        let error = RegionLeaseExpiredSnafu { region_id }.build();
         assert!(!error.may_have_persisted_manifest_update());
 
         // This can be raised while applying an edit after its manifest file was saved.

@@ -28,6 +28,7 @@ mod handle_flush;
 mod handle_manifest;
 mod handle_open;
 mod handle_rebuild_index;
+mod handle_reload;
 mod handle_remap;
 mod handle_truncate;
 mod handle_write;
@@ -1532,10 +1533,16 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         if let Err(e) = self.flush_periodically() {
             error!(e; "Failed to flush regions periodically");
         }
+        // Retries the reloads that failed, and starts those no notification started.
+        for region in self.regions.list_regions() {
+            self.maybe_reload_region(region.region_id);
+        }
     }
 
     /// Handles region background request
     async fn handle_background_notify(&mut self, region_id: RegionId, notify: BackgroundNotify) {
+        // A reload that fails for good would otherwise restart itself forever.
+        let is_reload_result = matches!(notify, BackgroundNotify::RegionReloaded { .. });
         match notify {
             BackgroundNotify::RegionOpened { region, registered } => {
                 self.register_region(region);
@@ -1595,6 +1602,14 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             BackgroundNotify::CopyRegionFromFinished(req) => {
                 self.handle_copy_region_from_finished(req)
             }
+            BackgroundNotify::RegionFenced => {}
+            BackgroundNotify::RegionReloaded { old, result } => {
+                self.handle_region_reloaded(region_id, old, result).await
+            }
+        }
+        // A commit that found a newer manifest fenced the region before its job reported here.
+        if !is_reload_result {
+            self.maybe_reload_region(region_id);
         }
     }
 
@@ -1620,6 +1635,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             let sweep_older_than = self.config.gc.unknown_file_lingering_time;
             #[cfg(feature = "hdfs-object-store")]
             let sweep_limiter = self.sweep_limiter.clone();
+            let request_sender = self.sender.clone();
             // We need to do this in background as we need the manifest lock.
             common_runtime::spawn_global(async move {
                 match region.set_role_state_gracefully(region_role_state).await {
@@ -1647,6 +1663,8 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                         ));
                     }
                 }
+                // The call commits outside the worker when it ends staging or backfills metadata.
+                handle_reload::notify_if_fenced(&request_sender, &region).await;
             });
         } else {
             let _ = sender.send(SetRegionRoleStateResponse::NotFound);
@@ -1697,6 +1715,14 @@ impl WorkerListener {
         #[cfg(any(test, feature = "test"))]
         if let Some(listener) = &self.listener {
             listener.on_region_open_registered(_region_id).await;
+        }
+    }
+
+    /// The worker is about to replace a fenced region with its reload.
+    pub(crate) async fn on_region_reload_swap(&self, _region_id: RegionId) {
+        #[cfg(any(test, feature = "test"))]
+        if let Some(listener) = &self.listener {
+            listener.on_region_reload_swap(_region_id).await;
         }
     }
 

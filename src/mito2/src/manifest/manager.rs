@@ -403,6 +403,11 @@ impl RegionManifestManager {
         self.stopped
     }
 
+    /// Returns whether deltas are published by conditional create.
+    pub(crate) fn is_conditional_publication(&self) -> bool {
+        self.store.is_conditional_publication()
+    }
+
     /// Installs the manifest changes from the current version to the target version (inclusive).
     ///
     /// Returns installed version.
