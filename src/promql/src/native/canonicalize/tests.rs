@@ -301,6 +301,9 @@ fn merges(tree: &NativeTree) -> usize {
             | NativeExpr::Window { input, .. }
             | NativeExpr::Map { input, .. }
             | NativeExpr::ParameterizedMap { input, .. }
+            | NativeExpr::ParameterizedTopK { input, .. }
+            | NativeExpr::ParameterizedHistogram { input, .. }
+            | NativeExpr::ScalarOf { input }
             | NativeExpr::Timestamp { input }
             | NativeExpr::Merge { input }
             | NativeExpr::Aggregate { input, .. }

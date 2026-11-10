@@ -49,6 +49,7 @@ use sql::statements::query::Query;
 use sql::statements::statement::Statement;
 use sql::statements::tql::Tql;
 use sqlparser::ast::{AccessExpr, Value, visit_expressions_mut};
+use store_api::metric_engine_consts::DATA_SCHEMA_TSID_COLUMN_NAME;
 
 use crate::datafusion::QUERY_FALLBACK_HINT;
 use crate::dist_plan::DistPlannerOptions;
@@ -82,6 +83,9 @@ pub trait LogicalPlanner: Send + Sync {
 /// A remote native plan may place fused evaluation only above independent raw sources.
 /// In particular, a bare scan under FusedSeries would require shipping the process-local
 /// fused plan to a region, which this gate must not admit.
+///
+/// A fused node that reads no region is the one exception: it has nothing to place in a region, so
+/// the frontend evaluates it and the transport this gate protects is never used.
 fn remote_native_raw_plan_supported(plan: &LogicalPlan) -> bool {
     fn walk(plan: &LogicalPlan, found_raw: &mut bool) -> bool {
         if matches!(plan, LogicalPlan::TableScan(_)) {
@@ -102,7 +106,260 @@ fn remote_native_raw_plan_supported(plan: &LogicalPlan) -> bool {
         plan.inputs().iter().all(|child| walk(child, found_raw))
     }
     let mut found_raw = false;
-    walk(plan, &mut found_raw) && found_raw
+    walk(plan, &mut found_raw) && (found_raw || is_regionless_fused_plan(plan))
+}
+
+/// Whether `plan` is a native fused plan with no region below it.
+///
+/// Two shapes qualify, and both are already the finished plan: a statement that reads no data -
+/// `time()`, `vector(1)`, a label rewrite over one of them - is one node with no input at all,
+/// and a discovered selector that matched no metric table is planned over the typed empty frame
+/// [`is_empty_discovered_input`](crate::promql::planner::native::is_empty_discovered_input)
+/// builds. Neither has a scan to ship, so neither needs the remote transport.
+///
+/// The route stacks its own nodes above such an input: a split aggregate runs a `Final` half over
+/// the `Partial` half that reads it, and a segmented statement runs its parent over the segment's
+/// own node. So the inputs a node reads are followed through fused nodes only - never through
+/// another extension, and never through a scan - and every leaf that is not one of them rejects
+/// the shape.
+fn is_regionless_fused_plan(plan: &LogicalPlan) -> bool {
+    // `strip_tsid_column` publishes a statement's own columns over a node that reported the
+    // internal series id, which a data-free statement can synthesize with `label_replace`. That
+    // wrapper is this route's own, so it is read through when it drops exactly that one column.
+    if let LogicalPlan::Projection(projection) = plan {
+        return strips_only_tsid(plan, projection.input.as_ref())
+            && is_regionless_fused_chain(projection.input.as_ref());
+    }
+    is_regionless_fused_chain(plan)
+}
+
+/// Whether `plan` is a fused node whose inputs are fused nodes or the typed empty frame.
+fn is_regionless_fused_chain(plan: &LogicalPlan) -> bool {
+    let LogicalPlan::Extension(extension) = plan else {
+        return false;
+    };
+    let Some(fused) = extension
+        .node
+        .as_any()
+        .downcast_ref::<promql::extension_plan::FusedSeries>()
+    else {
+        return false;
+    };
+    fused.children().iter().all(|child| {
+        crate::promql::planner::native::is_empty_discovered_input(child)
+            || is_regionless_fused_chain(child)
+    })
+}
+
+/// Whether `plan` is the projection that drops exactly the internal series-id column of `inner`.
+///
+/// That is the projection `strip_tsid_column` builds: one plain column per field of its input,
+/// in order, except `__tsid__`. A computed expression, a reordering or a second dropped column is
+/// some other plan and is not read through.
+fn strips_only_tsid(plan: &LogicalPlan, inner: &LogicalPlan) -> bool {
+    let LogicalPlan::Projection(projection) = plan else {
+        return false;
+    };
+    if projection
+        .expr
+        .iter()
+        .any(|expr| !matches!(expr, DfExpr::Column(_)))
+    {
+        return false;
+    }
+    let stripped = inner
+        .schema()
+        .fields()
+        .iter()
+        .filter(|field| field.name() != DATA_SCHEMA_TSID_COLUMN_NAME)
+        .map(|field| field.name())
+        .collect::<Vec<_>>();
+    let projected = plan
+        .schema()
+        .fields()
+        .iter()
+        .map(|field| field.name())
+        .collect::<Vec<_>>();
+    projected == stripped && projected.len() + 1 == inner.schema().fields().len()
+}
+
+/// Whether `plan` runs on the native fused-series route.
+fn contains_native_fused(plan: &LogicalPlan) -> bool {
+    if let LogicalPlan::Extension(extension) = plan
+        && extension
+            .node
+            .as_any()
+            .is::<promql::extension_plan::FusedSeries>()
+    {
+        return true;
+    }
+    plan.inputs()
+        .iter()
+        .any(|input| contains_native_fused(input))
+}
+
+/// Whether `schema` is a series frame's declaration, which describes the columns below it.
+fn publishes_series_frame(schema: &DFSchema) -> bool {
+    schema
+        .metadata()
+        .keys()
+        .any(|key| key.starts_with("greptime.series."))
+}
+
+/// Whether `published` publishes `wanted`'s columns: the same names, in the same order, with the
+/// same types, nullability, per-column metadata and schema metadata.
+///
+/// Qualifiers are not compared: a CTE's plan is read through the alias the CTE registers, which
+/// names every column after the CTE on both routes.
+fn publishes_columns(published: &DFSchema, wanted: &DFSchema) -> bool {
+    published.fields().len() == wanted.fields().len()
+        && published.metadata() == wanted.metadata()
+        && published
+            .iter()
+            .zip(wanted.iter())
+            .all(|((_, published), (_, wanted))| {
+                published.name() == wanted.name()
+                    && published.data_type() == wanted.data_type()
+                    && published.is_nullable() == wanted.is_nullable()
+                    && published.metadata() == wanted.metadata()
+            })
+}
+
+/// The type a column names once its dictionary encoding is taken off.
+///
+/// A label column is dictionary-encoded in the existing planner's plan and plain text in the fused
+/// plan's. That is the one difference between the two answers for the same column that an
+/// expression can carry: a cast reproduces the encoding, and the values stay the same strings.
+fn unwrap_dictionary(data_type: &DataType) -> &DataType {
+    let mut data_type = data_type;
+    while let DataType::Dictionary(_, inner) = data_type {
+        data_type = inner.as_ref();
+    }
+    data_type
+}
+
+/// The native plan, wrapped in the projection that publishes `legacy`'s columns over it.
+///
+/// A hybrid CTE registers the plan as a table the outer SQL query reads, so the columns this plan
+/// publishes *are* the CTE's columns: their names, their order, their types, their nullability and
+/// the metadata they carry are what the statement's SQL sees, and a column list the CTE declares is
+/// applied to them by position. The two routes do not agree on that schema - the fused node takes
+/// its names from the compiled tree and publishes the time index first, while the existing planner
+/// names each value column after the expression it planned and publishes the labels first - so a CTE
+/// answered natively would make one statement mean different things depending on which route planned
+/// it. This wraps the native plan in the projection that publishes the existing planner's answer for
+/// the same statement instead, so what a CTE exposes does not depend on the route.
+///
+/// The projection is made of expressions - an alias per column, and a cast where the two routes carry
+/// the same values in different Arrow types - because that is what survives analysis: the analyzer
+/// rebuilds a projection's schema from its expressions, so anything the projection declared but its
+/// expressions did not carry would be gone by the time the CTE's columns are read.
+///
+/// The mapping is the identity on every column both plans publish alike - the time index and the
+/// label columns, which carry the same metadata on both routes now - and is a cast for a column
+/// whose identity is unambiguous: one native column of the same type once both are unencoded, no
+/// per-column metadata to lose and the same nullability. `None` says the two plans admit no such
+/// mapping - a differently named time index, an ambiguous set of columns left over, or a column a
+/// cast cannot reproduce faithfully - and the caller then keeps the existing plan rather than publish
+/// a column it cannot fill faithfully.
+fn publish_legacy_schema(native: LogicalPlan, legacy: &LogicalPlan) -> Option<LogicalPlan> {
+    let native_schema = native.schema().clone();
+    let legacy_schema = legacy.schema();
+
+    // A frame's declaration is schema metadata describing the columns under it, and a projection
+    // that renames and reorders them cannot keep it. A statement that publishes one keeps the
+    // existing plan.
+    if publishes_series_frame(native_schema.as_ref()) {
+        return None;
+    }
+    if publishes_columns(native_schema.as_ref(), legacy_schema.as_ref()) {
+        return Some(native);
+    }
+
+    let native_fields = native_schema
+        .iter()
+        .map(|(qualifier, field)| (qualifier.cloned(), field))
+        .collect::<Vec<_>>();
+    let mut taken = vec![false; native_fields.len()];
+    let mut source: Vec<Option<usize>> = vec![None; legacy_schema.fields().len()];
+    // First the columns both plans publish alike: the same name and the same column, metadata
+    // included. These are read as they are, so nothing about them is re-declared here.
+    for (legacy_index, (_, legacy_field)) in legacy_schema.iter().enumerate() {
+        let found =
+            native_fields
+                .iter()
+                .enumerate()
+                .find_map(|(native_index, (_, native_field))| {
+                    (!taken[native_index]
+                        && native_field.name() == legacy_field.name()
+                        && native_field.data_type() == legacy_field.data_type()
+                        && native_field.is_nullable() == legacy_field.is_nullable()
+                        && native_field.metadata() == legacy_field.metadata())
+                    .then_some(native_index)
+                });
+        if let Some(native_index) = found {
+            taken[native_index] = true;
+            source[legacy_index] = Some(native_index);
+        }
+    }
+    // Then the columns whose only difference is that the routes carry them in different Arrow
+    // types. A cast reproduces the existing planner's type, so it is only paired when exactly one
+    // native column can be that column: the same type once both are unencoded, the same
+    // nullability, and no metadata a cast would drop.
+    for (legacy_index, source) in source.iter_mut().enumerate() {
+        if source.is_some() {
+            continue;
+        }
+        let legacy_field = legacy_schema.field(legacy_index);
+        if !legacy_field.metadata().is_empty() {
+            continue;
+        }
+        let candidates = native_fields
+            .iter()
+            .enumerate()
+            .filter(|(native_index, (_, native_field))| {
+                !taken[*native_index]
+                    && unwrap_dictionary(native_field.data_type())
+                        == unwrap_dictionary(legacy_field.data_type())
+                    && native_field.is_nullable() == legacy_field.is_nullable()
+            })
+            .map(|(native_index, _)| native_index)
+            .collect::<Vec<_>>();
+        if let [native_index] = candidates.as_slice() {
+            taken[*native_index] = true;
+            *source = Some(*native_index);
+        }
+    }
+    let source = source.into_iter().collect::<Option<Vec<usize>>>()?;
+
+    let mut exprs = Vec::with_capacity(source.len());
+    for ((_, legacy_field), native_index) in legacy_schema.iter().zip(source) {
+        let (native_qualifier, native_field) = &native_fields[native_index];
+        let column = DfExpr::Column(datafusion_common::Column::new(
+            native_qualifier.clone(),
+            native_field.name().clone(),
+        ));
+        // A column the two plans publish alike is read as it is; one they carry in different Arrow
+        // types is cast to the existing planner's type, which keeps the same values under the same
+        // name - and keeps them when the analyzer rebuilds this projection.
+        let value = if native_field.data_type() == legacy_field.data_type() {
+            column
+        } else {
+            DfExpr::Cast(datafusion_expr::Cast::new(
+                Box::new(column),
+                legacy_field.data_type().clone(),
+            ))
+        };
+        exprs.push(value.alias(legacy_field.name().clone()));
+    }
+    let plan = LogicalPlanBuilder::from(native)
+        .project(exprs)
+        .ok()?
+        .build()
+        .ok()?;
+    // The published columns are the ones this set out to publish, or the native plan is not used at
+    // all: what a CTE exposes may not change for a reason this did not predict.
+    publishes_columns(plan.schema().as_ref(), legacy_schema.as_ref()).then_some(plan)
 }
 
 pub struct DfLogicalPlanner {
@@ -405,8 +662,9 @@ impl DfLogicalPlanner {
         .map_err(BoxedError::new)
         .context(QueryPlanSnafu)?;
 
-        // Only per-selector raw sources have a supported remote transport. Decide while the
-        // original statement is still available: physical planning cannot fall back safely.
+        // Only per-selector raw sources have a supported remote transport, and a statement that
+        // reads no table needs none. Decide while the original statement is still available:
+        // physical planning cannot fall back safely.
         let plan = if native_requested
             && !self.engine_state.in_process_region_transport()
             && !remote_native_raw_plan_supported(&plan)
@@ -536,15 +794,30 @@ impl DfLogicalPlanner {
                 };
                 let stmt = QueryLanguageParser::parse_promql(&prom_query, &query_ctx)?;
                 // A hybrid CTE registers this plan as a table the outer SQL query reads, so the
-                // `FusedSeries` node would sit under a SQL root. The in-process encodability
-                // exception is scoped to a plan whose root is the node, so here the node would be
-                // cut off and left in the frontend, where the physical planner cannot build it -
-                // a query that used to answer would fail instead. The route is therefore not
-                // offered for an embedded statement.
+                // `FusedSeries` node sits under a SQL alias and projection instead of at the plan
+                // root. Neither decides where a fused subtree runs: placement asks whether the
+                // node's own contract allows a region to run it, and the column requirements a
+                // node above makes are enforced by their lineage rather than by the shape of the
+                // subtree they travel through, so an alias or projection over the CTE does not
+                // block a multi-input fused subtree. The route is therefore offered here like it
+                // is for a top-level statement.
                 let QueryStatement::Promql(eval, _alias) = &stmt else {
                     unreachable!("a TQL eval parses to a PromQL statement");
                 };
-                self.plan_pql(eval, query_ctx, false).await
+                let plan = self.plan_pql(eval, query_ctx.clone(), true).await?;
+                if !contains_native_fused(&plan) {
+                    // The route was not taken - it is off for this query, or it declined this
+                    // shape - so this is the existing plan, which already publishes what a CTE has
+                    // always published.
+                    return Ok(plan);
+                }
+                // What the CTE publishes is SQL-visible, and this route names and orders its output
+                // its own way, so its own schema cannot stand in for the existing planner's: plan
+                // the statement for that schema and publish it over the native answer. A statement
+                // whose columns that projection cannot fill faithfully keeps the existing plan
+                // instead of changing the schema the CTE exposes.
+                let existing = self.plan_pql(eval, query_ctx, false).await?;
+                Ok(publish_legacy_schema(plan, &existing).unwrap_or(existing))
             }
             Tql::Explain(_) => UnimplementedSnafu {
                 operation: "TQL EXPLAIN in CTEs",
@@ -831,10 +1104,16 @@ mod tests {
     use catalog::RegisterTableRequest;
     use catalog::memory::MemoryCatalogManager;
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+    use common_query::OutputData;
+    use common_recordbatch::RecordBatch;
+    use common_recordbatch::util::collect_batches;
     use common_time::Timezone;
+    use datatypes::arrow::array::{Array, Float64Array, StringArray};
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::{ColumnSchema, Schema};
-    use session::context::{QueryContext, QueryContextBuilder};
+    use session::context::{
+        MetricDiscoveryScope, QueryContext, QueryContextBuilder, QueryContextRef,
+    };
     use store_api::metric_engine_consts::{
         DATA_SCHEMA_TABLE_ID_COLUMN_NAME, DATA_SCHEMA_TSID_COLUMN_NAME, LOGICAL_TABLE_METADATA_KEY,
         METRIC_ENGINE_NAME,
@@ -1185,6 +1464,372 @@ mod tests {
                 assert!(display.contains("RawSeriesSource"), "{display}");
             }
         }
+    }
+
+    /// Plans `query` on the fixture engine with the native route requested. The engine reaches its
+    /// regions over the wire, which is the route the admission gate guards.
+    async fn plan_remote_native_promql(
+        engine: &QueryEngineRef,
+        query_ctx: &QueryContextRef,
+        query: &str,
+    ) -> LogicalPlan {
+        let stmt = QueryLanguageParser::parse_promql(
+            &PromQuery {
+                query: query.to_string(),
+                start: "0".to_string(),
+                end: "10".to_string(),
+                step: "5s".to_string(),
+                lookback: "300s".to_string(),
+                alias: None,
+            },
+            query_ctx,
+        )
+        .unwrap();
+        engine
+            .planner()
+            .plan(&stmt, query_ctx.clone())
+            .await
+            .unwrap()
+    }
+
+    /// A query context that asks for the native route and states what a nameless selector may
+    /// discover; the default context declines discovery altogether.
+    fn native_query_ctx(scope: MetricDiscoveryScope) -> QueryContextRef {
+        let mut ctx = (*QueryContext::arc()).clone();
+        ctx.set_metric_discovery_scope(scope);
+        ctx.set_extension(NATIVE_PROMQL_EXTENSION_KEY.to_string(), "true".to_string());
+        Arc::new(ctx)
+    }
+
+    fn native_discovery_query_ctx() -> QueryContextRef {
+        native_query_ctx(MetricDiscoveryScope::Unrestricted)
+    }
+
+    /// The engine's physical plan for `plan` and the batches it answers.
+    async fn execute_plan(
+        engine: &QueryEngineRef,
+        plan: LogicalPlan,
+        query_ctx: &QueryContextRef,
+    ) -> (
+        Arc<dyn datafusion::physical_plan::ExecutionPlan>,
+        Vec<RecordBatch>,
+    ) {
+        let output = engine.execute(plan, query_ctx.clone()).await.unwrap();
+        let physical = output
+            .meta
+            .plan
+            .expect("the engine reports its physical plan");
+        let batches = match output.data {
+            OutputData::Stream(stream) => collect_batches(stream).await.unwrap(),
+            OutputData::RecordBatches(batches) => batches,
+            other => panic!("a PromQL query answers rows, not {other:?}"),
+        }
+        .take();
+        (physical, batches)
+    }
+
+    /// Every node name in the tree rooted at `root`, the root included.
+    fn physical_plan_names(
+        root: &Arc<dyn datafusion::physical_plan::ExecutionPlan>,
+    ) -> Vec<String> {
+        let mut names = Vec::new();
+        let mut stack = vec![Arc::clone(root)];
+        while let Some(node) = stack.pop() {
+            names.push(node.name().to_string());
+            stack.extend(node.children().into_iter().cloned());
+        }
+        names
+    }
+
+    /// Every logical plan node below `root`, the root included.
+    fn logical_plan_nodes(root: &LogicalPlan) -> Vec<&LogicalPlan> {
+        let mut nodes = Vec::new();
+        let mut stack = vec![root];
+        while let Some(node) = stack.pop() {
+            nodes.push(node);
+            stack.extend(node.inputs());
+        }
+        nodes
+    }
+
+    fn fused_series_nodes(plan: &LogicalPlan) -> Vec<&promql::extension_plan::FusedSeries> {
+        logical_plan_nodes(plan)
+            .into_iter()
+            .filter_map(|node| match node {
+                LogicalPlan::Extension(extension) => extension
+                    .node
+                    .as_any()
+                    .downcast_ref::<promql::extension_plan::FusedSeries>(
+                ),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn numeric_values(batches: &[RecordBatch], column: &str) -> Vec<f64> {
+        batches
+            .iter()
+            .flat_map(|batch| {
+                batch
+                    .column_by_name(column)
+                    .unwrap_or_else(|| panic!("no `{column}` column"))
+                    .as_any()
+                    .downcast_ref::<Float64Array>()
+                    .unwrap()
+                    .values()
+                    .to_vec()
+            })
+            .collect()
+    }
+
+    fn label_values(batches: &[RecordBatch], column: &str) -> Vec<String> {
+        batches
+            .iter()
+            .flat_map(|batch| {
+                let array = batch
+                    .column_by_name(column)
+                    .unwrap_or_else(|| panic!("no `{column}` column"))
+                    .as_any()
+                    .downcast_ref::<StringArray>()
+                    .expect("a label column is Utf8");
+                (0..array.len())
+                    .map(|row| array.value(row).to_string())
+                    .collect::<Vec<_>>()
+            })
+            .collect()
+    }
+
+    /// Asserts `plan` is a native plan that reads no region, and that every fused node in it binds
+    /// no metric: a data-free or zero-match statement has no table to name.
+    fn assert_regionless_native_plan(plan: &LogicalPlan, query: &str) {
+        let display = plan.display_indent().to_string();
+        assert!(display.contains("FusedSeries"), "{query}: {display}");
+        for absent in ["TableScan", "MergeScan", "RawSeriesSource"] {
+            assert!(
+                !display.contains(absent),
+                "{query} contains {absent}: {display}"
+            );
+        }
+        let fused = fused_series_nodes(plan);
+        assert!(!fused.is_empty(), "{query}: {display}");
+        for node in fused {
+            assert_eq!(
+                None,
+                node.binding().metric_name,
+                "{query} bound a metric to an input that reads no table: {display}"
+            );
+        }
+    }
+
+    /// Asserts every empty input under `plan` declares the typed empty raw series frame: the
+    /// planner's own definition of that input, and the frame a scan would have declared, so the
+    /// physical planner reads it as a frame producer instead of looking for a scan below it.
+    fn assert_typed_empty_inputs(plan: &LogicalPlan, query: &str) {
+        let empty = logical_plan_nodes(plan)
+            .into_iter()
+            .filter(|node| matches!(node, LogicalPlan::EmptyRelation(_)))
+            .collect::<Vec<_>>();
+        assert!(!empty.is_empty(), "{query} has no empty input");
+        for node in empty {
+            assert!(
+                crate::promql::planner::native::is_empty_discovered_input(node),
+                "{query}: {node:?}"
+            );
+            let LogicalPlan::EmptyRelation(relation) = node else {
+                unreachable!();
+            };
+            assert!(!relation.produce_one_row, "{query}: {relation:?}");
+            let schema = relation.schema.as_arrow();
+            for (key, expected) in [
+                ("greptime.series.content", "raw"),
+                ("greptime.series.labels", "explicit"),
+                ("greptime.series.ordering", "contiguous"),
+            ] {
+                assert_eq!(
+                    Some(expected),
+                    schema.metadata().get(key).map(String::as_str),
+                    "{query}: {key}"
+                );
+            }
+            // The one value field the empty input is bound to, named as the route names a value.
+            let fields = schema.field_with_name("fields").expect("a series frame");
+            let arrow_schema::DataType::Struct(payloads) = fields.data_type() else {
+                panic!("{query}: {fields:?}");
+            };
+            assert_eq!(
+                vec!["value"],
+                payloads
+                    .iter()
+                    .map(|field| field.name().as_str())
+                    .collect::<Vec<_>>(),
+                "{query}"
+            );
+        }
+    }
+
+    /// Asserts the physical plan of a regionless native statement: the fused node runs on the
+    /// frontend and no region read is planned.
+    fn assert_regionless_physical_plan(
+        physical: &Arc<dyn datafusion::physical_plan::ExecutionPlan>,
+        query: &str,
+    ) {
+        let names = physical_plan_names(physical);
+        assert!(
+            names.iter().any(|name| name == "FusedSeriesExec"),
+            "{query} is evaluated on the frontend by the fused node: {physical:?}"
+        );
+        assert!(
+            !names.iter().any(|name| name == "MergeScanExec"),
+            "{query} reads no region: {physical:?}"
+        );
+    }
+
+    /// A statement that reads no table plans natively over the wire, where there is no region to
+    /// place anything in: the frontend evaluates the fused node under the native column names
+    /// rather than the ones the existing planner derives from an expression.
+    #[tokio::test]
+    async fn test_remote_native_promql_plans_a_data_free_statement_natively() {
+        let engine = create_promql_test_engine_with(
+            crate::options::QueryOptions {
+                experimental_native_promql: true,
+                ..Default::default()
+            },
+            false,
+        );
+        let query_ctx = native_discovery_query_ctx();
+        for (query, expected_columns, expected_values, expected_labels) in [
+            // `time()` answers the evaluation grid in seconds.
+            (
+                "time()",
+                &["time", "value"][..],
+                &[0.0, 5.0, 10.0][..],
+                &[][..],
+            ),
+            (
+                "vector(1)",
+                &["time", "value"][..],
+                &[1.0, 1.0, 1.0][..],
+                &[][..],
+            ),
+            (
+                r#"label_replace(vector(1), "host", "host1", "", "")"#,
+                &["time", "value", "host"][..],
+                &[1.0, 1.0, 1.0][..],
+                &[("host", "host1")][..],
+            ),
+            // A synthesized `__tsid` is published under the statement's own columns: the stripping
+            // projection above the node is read through rather than mistaken for a remote plan.
+            (
+                r#"label_replace(vector(1), "__tsid", "x", "", "")"#,
+                &["time", "value"][..],
+                &[1.0, 1.0, 1.0][..],
+                &[][..],
+            ),
+        ] {
+            let plan = plan_remote_native_promql(&engine, &query_ctx, query).await;
+            let display = plan.display_indent().to_string();
+            assert_regionless_native_plan(&plan, query);
+            assert!(
+                !display.contains("greptime_value"),
+                "{query} keeps the native value column: {display}"
+            );
+            // A data-free statement has no input at all, so nothing is scanned or left empty.
+            assert_eq!(
+                expected_columns,
+                plan.schema()
+                    .fields()
+                    .iter()
+                    .map(|field| field.name().as_str())
+                    .collect::<Vec<_>>(),
+                "{query}: {display}"
+            );
+            let (physical, batches) = execute_plan(&engine, plan, &query_ctx).await;
+            assert_regionless_physical_plan(&physical, query);
+            assert_eq!(
+                expected_values,
+                numeric_values(&batches, "value").as_slice(),
+                "{query}: {batches:?}"
+            );
+            for (label, value) in expected_labels {
+                assert_eq!(
+                    vec![value.to_string(); batches_row_count(&batches)],
+                    label_values(&batches, label),
+                    "{query}: label `{label}`: {batches:?}"
+                );
+            }
+        }
+    }
+
+    /// The rows every batch of `batches` holds.
+    fn batches_row_count(batches: &[RecordBatch]) -> usize {
+        batches.iter().map(|batch| batch.num_rows()).sum()
+    }
+
+    /// A nameless selector that matches no metric table has no region to read either, so the typed
+    /// empty input it is planned as stays that input on both routes and the node above it is
+    /// evaluated on the frontend. Binding a metric to it is what used to turn this statement into
+    /// an internal error over the wire.
+    #[tokio::test]
+    async fn test_remote_native_promql_plans_a_zero_match_selector_natively() {
+        let engine = create_promql_test_engine_with(
+            crate::options::QueryOptions {
+                experimental_native_promql: true,
+                ..Default::default()
+            },
+            false,
+        );
+        let query_ctx = native_discovery_query_ctx();
+        for (query, expected_rows, expected_labels) in [
+            // The selection itself, over the typed empty frame.
+            (r#"{job="api"}"#, 0, &[][..]),
+            // A whole-vector operation over it, which the route plans as a segment: its parent node
+            // reads the segment's own fused node.
+            (r#"sort({job="api"})"#, 0, &[][..]),
+            // A fold splits into a `Final` half over the `Partial` half that reads the input.
+            (r#"sum({job="api"})"#, 0, &[][..]),
+            // `absent` answers one series per evaluation point over zero input, labelled by the
+            // selector's matchers. The grid holds three points.
+            (r#"absent({job="api"})"#, 3, &[("job", "api")][..]),
+        ] {
+            let plan = plan_remote_native_promql(&engine, &query_ctx, query).await;
+            let display = plan.display_indent().to_string();
+            assert_regionless_native_plan(&plan, query);
+            assert!(
+                display.contains("EmptyRelation"),
+                "{query} keeps the typed empty input: {display}"
+            );
+            assert_typed_empty_inputs(&plan, query);
+            let (physical, batches) = execute_plan(&engine, plan, &query_ctx).await;
+            assert_regionless_physical_plan(&physical, query);
+            // No table matched, so the answer is the empty vector, not an error.
+            assert_eq!(
+                expected_rows,
+                batches_row_count(&batches),
+                "{query} answered rows over a selector that matches no metric: {physical:?}"
+            );
+            for (label, value) in expected_labels {
+                assert_eq!(
+                    vec![value.to_string(); expected_rows],
+                    label_values(&batches, label),
+                    "{query}: label `{label}`: {batches:?}"
+                );
+            }
+        }
+
+        // An allowlist that admits no metric at all reaches the same empty input: the answer comes
+        // from the statement, not from whatever the catalog holds.
+        let query_ctx = native_query_ctx(MetricDiscoveryScope::allowed(std::iter::empty()));
+        let query = r#"{job="api"}"#;
+        let plan = plan_remote_native_promql(&engine, &query_ctx, query).await;
+        assert_regionless_native_plan(&plan, "denied discovery");
+        assert_typed_empty_inputs(&plan, "denied discovery");
+        let (physical, batches) = execute_plan(&engine, plan, &query_ctx).await;
+        assert_regionless_physical_plan(&physical, "denied discovery");
+        assert_eq!(
+            0,
+            batches_row_count(&batches),
+            "denied discovery: {physical:?}"
+        );
     }
 
     /// Plans `sql` and runs the DataFusion analyzer, which is where
@@ -1548,6 +2193,228 @@ mod tests {
         assert_eq!(types.get("$2"), Some(&Some(DataType::Utf8)));
         assert_eq!(types.get("$3"), Some(&Some(DataType::Int32)));
         assert_eq!(types.get("$4"), Some(&Some(DataType::Utf8)));
+    }
+
+    /// A plan that publishes `columns` as its output, one literal per column, named and typed as
+    /// the column is.
+    fn plan_publishing(columns: &[(&str, ScalarValue)]) -> LogicalPlan {
+        let exprs = columns
+            .iter()
+            .map(|(name, value)| DfExpr::Literal(value.clone(), None).alias(*name))
+            .collect::<Vec<_>>();
+        LogicalPlanBuilder::empty(false)
+            .project(exprs)
+            .unwrap()
+            .build()
+            .unwrap()
+    }
+
+    /// [`plan_publishing`], declaring what a plan of either route declares: the time index marked as
+    /// one, and the schema version GreptimeDB's schemas carry.
+    fn plan_publishing_marked(columns: &[(&str, ScalarValue)], time_index: &str) -> LogicalPlan {
+        let plan = plan_publishing(columns);
+        let LogicalPlan::Projection(projection) = plan else {
+            unreachable!("plan_publishing builds a projection")
+        };
+        let fields = projection
+            .schema
+            .iter()
+            .map(|(_, field)| {
+                let field =
+                    if field.name() == time_index {
+                        Arc::new(field.as_ref().clone().with_metadata(
+                            std::collections::HashMap::from([(
+                                datatypes::schema::TIME_INDEX_KEY.to_string(),
+                                "true".to_string(),
+                            )]),
+                        ))
+                    } else {
+                        Arc::clone(field)
+                    };
+                (None, field)
+            })
+            .collect::<Vec<_>>();
+        let schema = Arc::new(
+            DFSchema::new_with_metadata(
+                fields,
+                std::collections::HashMap::from([(
+                    datatypes::schema::VERSION_KEY.to_string(),
+                    datatypes::schema::Schema::INITIAL_VERSION.to_string(),
+                )]),
+            )
+            .unwrap(),
+        );
+        LogicalPlan::Projection(
+            datafusion_expr::Projection::try_new_with_schema(
+                projection.expr.clone(),
+                projection.input.clone(),
+                schema,
+            )
+            .unwrap(),
+        )
+    }
+
+    /// The label column the existing planner publishes: dictionary-encoded text.
+    fn dictionary_label(value: &str) -> ScalarValue {
+        ScalarValue::Dictionary(
+            Box::new(DataType::UInt32),
+            Box::new(ScalarValue::Utf8(Some(value.to_string()))),
+        )
+    }
+
+    /// The names of a plan's output columns, in order.
+    fn column_names(plan: &LogicalPlan) -> Vec<String> {
+        plan.schema()
+            .fields()
+            .iter()
+            .map(|field| field.name().clone())
+            .collect()
+    }
+
+    fn time_value() -> ScalarValue {
+        ScalarValue::TimestampMillisecond(Some(0), None)
+    }
+
+    /// The native answer for the statement these tests use: time index first, the value under the
+    /// tree's own field name, the labels last.
+    fn native_answer() -> LogicalPlan {
+        plan_publishing_marked(
+            &[
+                ("ts", time_value()),
+                ("val", ScalarValue::Float64(Some(2.0))),
+                ("host", ScalarValue::Utf8(Some("a".to_string()))),
+            ],
+            "ts",
+        )
+    }
+
+    /// The existing planner's answer for the same statement: labels first, then the time index, then
+    /// the value named after the expression it planned, with the label dictionary-encoded.
+    fn existing_answer() -> LogicalPlan {
+        plan_publishing_marked(
+            &[
+                ("host", dictionary_label("a")),
+                ("ts", time_value()),
+                ("lhs.val + rhs.val", ScalarValue::Float64(Some(2.0))),
+            ],
+            "ts",
+        )
+    }
+
+    /// A CTE publishes the existing planner's columns over a native plan as well.
+    ///
+    /// The fused plan publishes the time index first, the value under the tree's field name and the
+    /// labels last, in plain text; the existing planner publishes the labels first, then the time
+    /// index, then the value under the name of the expression it planned, in dictionary-encoded text.
+    /// What a CTE exposes is the second one, whichever route answered the statement, because a CTE's
+    /// columns are SQL-visible - and a column list the CTE declares is applied to them by position.
+    #[test]
+    fn a_cte_publishes_the_existing_planners_columns_over_a_native_plan() {
+        let native = native_answer();
+        let existing = existing_answer();
+
+        let published = publish_legacy_schema(native, &existing)
+            .expect("every column has one answer in the other plan");
+
+        assert_eq!(
+            column_names(&published),
+            vec!["host", "ts", "lhs.val + rhs.val"],
+            "the CTE publishes the existing planner's column order and names"
+        );
+        assert!(
+            publishes_columns(published.schema().as_ref(), existing.schema().as_ref()),
+            "and every column it publishes: name, order, type, nullability and metadata: {}",
+            published.schema()
+        );
+        assert_eq!(
+            published
+                .schema()
+                .field_with_name(None, "host")
+                .unwrap()
+                .data_type(),
+            &DataType::Dictionary(Box::new(DataType::UInt32), Box::new(DataType::Utf8)),
+            "a label is published as the encoding the existing planner publishes"
+        );
+        let LogicalPlan::Projection(projection) = &published else {
+            panic!("the native plan is wrapped in a projection: {published}");
+        };
+        assert_eq!(
+            column_names(projection.input.as_ref()),
+            vec!["ts", "val", "host"],
+            "the native plan is kept as the projection's input"
+        );
+    }
+
+    /// What the CTE publishes survives the analyzer, which rebuilds every projection from its
+    /// expressions.
+    ///
+    /// The declared schema of a projection is not what analysis keeps: the analyzer calls
+    /// `with_new_exprs`, which rebuilds the projection and derives its schema from the expressions
+    /// and their input. So the columns have to be carried by the expressions themselves - an alias
+    /// per column and a cast for the encoding - or they are gone by the time the CTE is read.
+    #[test]
+    fn what_a_cte_publishes_survives_the_analyzer_rebuilding_the_projection() {
+        let existing = existing_answer();
+        let published = publish_legacy_schema(native_answer(), &existing).unwrap();
+
+        // The rebuild `DistPlannerAnalyzer` performs on every projection it visits.
+        let rebuilt = published
+            .with_new_exprs(
+                published.expressions(),
+                published.inputs().into_iter().cloned().collect(),
+            )
+            .unwrap();
+
+        assert!(
+            publishes_columns(rebuilt.schema().as_ref(), existing.schema().as_ref()),
+            "the rebuilt projection publishes the same columns: {}",
+            rebuilt.schema()
+        );
+        assert_eq!(
+            rebuilt.to_string(),
+            published.to_string(),
+            "and the same expressions"
+        );
+    }
+
+    /// A statement whose columns do not pair keeps the existing plan.
+    ///
+    /// Publishing a column this cannot fill would change what the CTE means, so a shape it cannot
+    /// map faithfully is refused instead: the caller keeps the existing plan and the CTE keeps the
+    /// columns it has always published.
+    #[test]
+    fn a_shape_with_no_faithful_column_mapping_keeps_the_existing_plan() {
+        // One native value column cannot fill two of the existing plan's value columns.
+        let two_values = plan_publishing_marked(
+            &[
+                ("host", dictionary_label("a")),
+                ("ts", time_value()),
+                ("lhs.val + rhs.val", ScalarValue::Float64(Some(2.0))),
+                ("lhs.val - rhs.val", ScalarValue::Float64(Some(0.0))),
+            ],
+            "ts",
+        );
+        assert!(publish_legacy_schema(native_answer(), &two_values).is_none());
+
+        // A time index the other route had to rename is marked as the time index on both sides, and
+        // a column that carries metadata is never reproduced by a cast.
+        let renamed_time = plan_publishing_marked(
+            &[
+                ("native_time_0", time_value()),
+                ("val", ScalarValue::Float64(Some(2.0))),
+                ("host", ScalarValue::Utf8(Some("a".to_string()))),
+            ],
+            "native_time_0",
+        );
+        let existing = plan_publishing_marked(
+            &[
+                ("host", dictionary_label("a")),
+                ("ts", time_value()),
+                ("val", ScalarValue::Float64(Some(2.0))),
+            ],
+            "ts",
+        );
+        assert!(publish_legacy_schema(renamed_time, &existing).is_none());
     }
 
     #[tokio::test]

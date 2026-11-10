@@ -13,7 +13,9 @@ The catalog identifier is `columnar-samples`. Its file and manifest version is 1
 independent of the series format's version and both formats' codec identifiers.
 Existing `parquet` and `columnar-series` identifiers keep their meaning.
 
-One artifact is derived from one immutable source SST. It owns these objects:
+An artifact is derived either from one immutable source SST (legacy) or from
+a bounded group of snapshot SSTs contributing to one UTC day. It owns
+these objects:
 
 ```text
 <region_id>/samples/<generation>/manifest.json
@@ -21,6 +23,26 @@ One artifact is derived from one immutable source SST. It owns these objects:
 <region_id>/samples/<generation>/part-1.samples
 ...
 ```
+
+Daily catalog entries add `source_file_ids` (the complete, sorted source SST
+set) and `window` (signed UTC day number since the Unix epoch). Missing fields
+retain legacy whole-SST semantics. The catalog key and manifest owner ID for a
+daily artifact are its unique generation ID, not an individual source SST.
+Each source group is merged once and rows are routed to nonempty days; sequence numbers, deletion markers,
+and duplicate versions are preserved. Blocks and parts retain their existing
+size bounds. An SST crossing midnight contributes to multiple artifacts.
+
+Publication uses the existing atomic samples catalog, which also commits series
+and range indexes. Readers pin each generation once. A grouped artifact is
+ineligible if any source SST is absent from the query's data snapshot; exact
+sequence-range or SST-sequence-pruned scans fall back to the existing path.
+Maintenance retains complete visible groups and groups only uncovered sources,
+with at most 64 sources per merge. One anchor entry per group records `source_windows`, the
+actual populated days for every source in its group. Other daily entries share
+the same ordered source set without repeating the coverage map. Coverage checks use this
+record rather than enumerating the timestamp span. Earlier daily entries without
+this record require rebuilding. Publication commits all days together; retired
+objects remain pinned until readers release them. Source Parquet SSTs are unchanged.
 
 The source file ID and generation use existing `FileId` serialization. The
 generation is unique for each build. A manifest contains:
@@ -30,7 +52,7 @@ generation is unique for each build. A manifest contains:
 | `format` | String `columnar-samples` |
 | `version` | Integer 1 |
 | `region_id` | Physical region ID, u64 |
-| `source_file_id` | SST `FileId` matching `SamplesEntry.file_id` |
+| `source_file_id` | Artifact owner ID matching `SamplesEntry.file_id`; the SST ID for legacy artifacts, or the generation ID for daily artifacts |
 | `generation` | `FileId` matching the catalog artifact generation |
 | `timestamp` | Object with `column_id`, `name`, and `unit` |
 | `fields` | Ordered objects with `column_id`, `name`, `type`, and `nullable` |
@@ -433,3 +455,23 @@ unchanged layout alone does not make them readable by version-1 implementations.
 The local cache root contains a layout-version marker. Startup clears the entire
 series-index cache when this marker is absent or incompatible, then rebuilds
 artifacts through existing maintenance. Source SST identity remains in metadata.
+
+### Local cache rollout
+
+Daily consolidation is the default for the opt-in columnar samples backend,
+including manual reconciliation. Legacy-format defaults are unchanged. A day may
+contain several generations with disjoint source sets (at most 64 SSTs per merge),
+and each generation may contain multiple bounded part files. Source Parquet files
+are never rewritten.
+
+The local series-index cache layout version is 2. On upgrade from layout 1,
+startup resets the rebuildable index cache before opening regions; ordinary SST
+reads remain available while artifacts rebuild. Rolling back to a layout-1 binary
+likewise resets the incompatible cache. Allow for rebuild time and I/O in either
+direction; do not reuse daily catalogs with an older reader outside this startup
+check. Existing per-SST catalog entries remain readable by the new reader.
+
+A prepared scan uses a grouped artifact only when all of its sources belong to
+that scan's assignment or were excluded solely by its time filter. Partial coverage
+or a stale source set selects the
+ordinary SST path until reconciliation supplies complete valid coverage.

@@ -138,7 +138,13 @@ async fn build(
     let (purger, _) = series_index_channel(store.clone());
     SamplesFileHandle::new(
         RegionFileId::new(meta.region_id, file_id),
-        SamplesEntry { file_id, artifact },
+        SamplesEntry {
+            file_id,
+            artifact,
+            source_file_ids: Vec::new(),
+            window: None,
+            source_windows: Default::default(),
+        },
         purger,
     )
 }
@@ -678,16 +684,25 @@ async fn malformed_framing_and_payload_corruption() {
     assert!(format.reader(store, bad).await.is_err());
 }
 
+#[rstest::rstest]
+#[case(vec![1000, 2000], 1, true)]
+#[case(vec![-1, 0, 86_399_999, 86_400_000], 3, true)]
+#[case(vec![86_399_999, 86_400_000], 2, false)]
+#[case((1000..1065).collect(), 2, true)]
 #[tokio::test]
-async fn real_samples_reconcile_reopen_and_retire() {
+async fn real_samples_reconcile_reopen_and_retire(
+    #[case] expected_times: Vec<i64>,
+    #[case] windows: usize,
+    #[case] flush_each: bool,
+) {
     use crate::config::MitoConfig;
     use crate::series_index::format::SeriesFormats;
     use crate::series_index::maintenance::reconcile_series_indexes;
     use crate::test_util::TestEnv;
     let mut env = TestEnv::with_prefix("columnar-samples-reconcile").await;
-    let (engine, region) = crate::series_index::tests::prepare_region_with_metadata(
+    let (engine, region) = crate::series_index::tests::prepare_region_with_metadata_and_flush(
         &mut env,
-        &[1000, 2000],
+        &expected_times,
         MitoConfig {
             experimental_enable_series_index: true,
             experimental_series_index_maintenance_interval: Duration::from_secs(3600),
@@ -695,8 +710,24 @@ async fn real_samples_reconcile_reopen_and_retire() {
             ..Default::default()
         },
         metadata(),
+        flush_each,
     )
     .await;
+    if !flush_each {
+        assert!(
+            region
+                .version()
+                .ssts
+                .levels()
+                .iter()
+                .flat_map(|l| l.files())
+                .any(|f| {
+                    let (a, b) = f.time_range();
+                    crate::series_index::builder::sample_day(a)
+                        != crate::series_index::builder::sample_day(b)
+                })
+        );
+    }
     let format = Arc::new(ColumnarSamplesFormat::default());
     *region.series_index_version_control.formats.write().unwrap() = Arc::new(SeriesFormats {
         samples: Some(format.clone()),
@@ -716,13 +747,32 @@ async fn real_samples_reconcile_reopen_and_retire() {
             true,
         )
     };
-    assert_eq!(reconcile().await.unwrap().built_samples, 2);
+    assert_eq!(reconcile().await.unwrap().built_samples, windows);
     assert_eq!(reconcile().await.unwrap().built_samples, 0);
     let reopened =
         crate::series_index::catalog::load_version_control(&store, region.region_id, &purger).await;
-    assert_eq!(reopened.current().samples.len(), 2);
+    assert_eq!(reopened.current().samples.len(), windows);
     let mut timestamps = Vec::new();
     for handle in reopened.current().samples.values() {
+        let day = handle.entry().window.unwrap();
+        let manifest_path = format!(
+            "{}manifest.json",
+            samples_prefix(
+                region.region_id.as_u64(),
+                handle.entry().artifact.generation
+            )
+        );
+        let manifest: Manifest =
+            serde_json::from_slice(&store.read(&manifest_path).await.unwrap().to_bytes()).unwrap();
+        // All source chunks for this series/day are repacked into one block.
+        assert_eq!(manifest.files.iter().map(|p| p.num_blocks).sum::<u64>(), 1);
+        assert!(
+            manifest
+                .files
+                .iter()
+                .all(|p| p.min_timestamp.div_euclid(86_400_000) == day
+                    && p.max_timestamp.div_euclid(86_400_000) == day)
+        );
         let reader = format.reader(store.clone(), handle.clone()).await.unwrap();
         let batches = reader
             .read(full_request())
@@ -733,7 +783,7 @@ async fn real_samples_reconcile_reopen_and_retire() {
         timestamps.extend(collect_rows(&batches).into_iter().map(|row| row.2));
     }
     timestamps.sort_unstable();
-    assert_eq!(timestamps, vec![1000, 2000]);
+    assert_eq!(timestamps, expected_times);
     // A missing artifact triggers rebuilding; failure to publish its replacement
     // must retain the prior snapshot/catalog and retire only the new generation.
     let before = region.series_index_version();
@@ -774,15 +824,22 @@ async fn real_samples_reconcile_reopen_and_retire() {
     );
     assert!(Arc::ptr_eq(&before, &region.series_index_version()));
     assert_eq!(catalog, store.read(&catalog_path).await.unwrap().to_bytes());
-    let cleanup = purges.try_recv().unwrap().objects.unwrap();
-    assert_eq!(cleanup.len(), 2);
-    assert!(cleanup.iter().all(|path| {
-        !old.entry()
-            .artifact
-            .objects
-            .iter()
-            .any(|object| object.path == *path)
-    }));
+    let rebuilt_days = before
+        .samples
+        .values()
+        .filter(|h| h.entry().source_file_ids == old.entry().source_file_ids)
+        .count();
+    for _ in 0..rebuilt_days {
+        let cleanup = purges.try_recv().unwrap().objects.unwrap();
+        assert_eq!(cleanup.len(), 2);
+        assert!(cleanup.iter().all(|path| before.samples.values().all(|h| {
+            h.entry()
+                .artifact
+                .objects
+                .iter()
+                .all(|object| object.path != *path)
+        })));
+    }
     assert!(purges.try_recv().is_err());
     use store_api::region_engine::RegionEngine;
     engine.stop().await.unwrap();
@@ -829,6 +886,9 @@ async fn fixture(store: &ObjectStore) -> SamplesFileHandle {
             manifest.source_file_id,
         ),
         SamplesEntry {
+            source_file_ids: Vec::new(),
+            window: None,
+            source_windows: Default::default(),
             file_id: manifest.source_file_id,
             artifact,
         },
@@ -1122,8 +1182,8 @@ async fn batches_column_io_reuses_readers_and_releases_reservations() {
     assert_eq!(1, creations.load(Ordering::Relaxed));
     {
         let reads = reads.lock().unwrap();
-        // Each stream reads framing/root plus one coalesced request per four-column block.
-        assert_eq!(10, reads.len());
+        // Each stream reads framing/root plus one payload read across both blocks.
+        assert_eq!(8, reads.len());
         assert_eq!(
             2 * part_size,
             reads
@@ -1251,4 +1311,375 @@ async fn boundary_blocks_fetch_remaining_columns_only_for_selected_rows() {
     // Both boundary blocks read timestamps before fetching remaining columns.
     assert_eq!(10, reads.len());
     assert_eq!(timestamp_read, reads[3]);
+}
+
+#[tokio::test]
+async fn series_read_windows_are_bounded_and_gap_rows_are_not_returned() {
+    let store = store();
+    let m = metadata();
+    let format = ColumnarSamplesFormat::default();
+    let input = (0..260)
+        .map(|id| (1, id, 0, 1, 1, Some(id)))
+        .collect::<Vec<_>>();
+    let handle = build(&format, &store, m.clone(), &[batch(&m, &input, false)]).await;
+    let reads = Arc::new(Mutex::new(Vec::new()));
+    let observed = reads.clone();
+    let reader = format
+        .reader(
+            store.layer(
+                MockLayerBuilder::default()
+                    .reader_factory(Arc::new(move |path, _, inner| {
+                        Box::new(RecordingRead {
+                            inner,
+                            path: path.into(),
+                            reads: observed.clone(),
+                        })
+                    }))
+                    .build()
+                    .unwrap(),
+            ),
+            handle,
+        )
+        .await
+        .unwrap();
+    reads.lock().unwrap().clear();
+    let all = reader
+        .read(full_request())
+        .unwrap()
+        .try_collect::<Vec<_>>()
+        .await
+        .unwrap();
+    assert_eq!(input, collect_rows(&all));
+    let (full_bytes, first_window_bytes) = {
+        let reads = reads.lock().unwrap();
+        // Header, trailer, one leaf, then three windows of at most 128 blocks.
+        assert_eq!(6, reads.len());
+        (
+            reads.iter().map(|(_, r)| r.size().unwrap()).sum::<u64>(),
+            reads[3].1.size().unwrap() as usize,
+        )
+    };
+    reads.lock().unwrap().clear();
+    let mut request = full_request();
+    request.ids = Some(
+        [
+            MetricSeriesId {
+                table_id: 1,
+                tsid: 0,
+            },
+            MetricSeriesId {
+                table_id: 1,
+                tsid: 259,
+            },
+        ]
+        .into_iter()
+        .collect(),
+    );
+    let selected = reader
+        .read(request)
+        .unwrap()
+        .try_collect::<Vec<_>>()
+        .await
+        .unwrap();
+    assert_eq!(vec![input[0], input[259]], collect_rows(&selected));
+    assert!(
+        reads
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(_, r)| r.size().unwrap())
+            .sum::<u64>()
+            < full_bytes
+    );
+
+    reads.lock().unwrap().clear();
+    let mut request = full_request();
+    request.ids = Some(
+        [
+            MetricSeriesId {
+                table_id: 1,
+                tsid: 0,
+            },
+            MetricSeriesId {
+                table_id: 1,
+                tsid: 2,
+            },
+        ]
+        .into_iter()
+        .collect(),
+    );
+    let selected = reader
+        .read(request)
+        .unwrap()
+        .try_collect::<Vec<_>>()
+        .await
+        .unwrap();
+    assert_eq!(vec![input[0], input[2]], collect_rows(&selected));
+    // The intervening series is read as a gap, but never decoded or returned.
+    assert_eq!(4, reads.lock().unwrap().len());
+
+    use datafusion::execution::memory_pool::{GreedyMemoryPool, MemoryPool};
+    // The first pool rejects read-ahead outright. The second admits the first
+    // 128-block, four-column window but leaves no room for block decoding.
+    for capacity in [64 * 1024, 2 * first_window_bytes + 128 * 4 * 256] {
+        reads.lock().unwrap().clear();
+        let pool = Arc::new(GreedyMemoryPool::new(capacity));
+        let mut request = full_request();
+        request.memory_pool = Some(pool.clone());
+        let all = reader
+            .read(request.clone())
+            .unwrap()
+            .try_collect::<Vec<_>>()
+            .await
+            .unwrap();
+        assert_eq!(input, collect_rows(&all));
+        assert_eq!(0, pool.reserved());
+        {
+            let reads = reads.lock().unwrap();
+            assert!(reads.len() > 6);
+            assert_eq!(
+                capacity != 64 * 1024,
+                reads[3].1.size().unwrap() as usize == first_window_bytes,
+                "only the larger pool should admit the initial prefetch"
+            );
+        }
+        let mut stream = reader.read(request).unwrap();
+        assert!(stream.try_next().await.unwrap().is_some());
+        drop(stream);
+        assert_eq!(0, pool.reserved());
+    }
+}
+
+#[tokio::test]
+async fn aligned_payload_cache_reuses_gap_bytes_across_readers() {
+    use crate::cache::{CacheManager, CacheStrategy};
+    use datafusion::execution::memory_pool::{GreedyMemoryPool, MemoryPool};
+
+    let store = store();
+    let m = metadata();
+    let input = (1..=2)
+        .flat_map(|id| (0..3).map(move |t| (1, id, t, 1, 1, Some(t as u64))))
+        .collect::<Vec<_>>();
+    let handle = build(
+        &ColumnarSamplesFormat::default(),
+        &store,
+        m.clone(),
+        &[batch(&m, &input, false)],
+    )
+    .await;
+    let reads = Arc::new(Mutex::new(Vec::new()));
+    let observed = reads.clone();
+    let store = store.layer(
+        MockLayerBuilder::default()
+            .reader_factory(Arc::new(move |path, _, inner| {
+                Box::new(RecordingRead {
+                    inner,
+                    path: path.into(),
+                    reads: observed.clone(),
+                })
+            }))
+            .build()
+            .unwrap(),
+    );
+    let strategy = CacheStrategy::EnableAll(Arc::new(
+        CacheManager::builder()
+            .page_cache_size(1024 * 1024)
+            .sst_meta_cache_size(1024 * 1024)
+            .build(),
+    ));
+    let namespace = FileId::random();
+    for id in [1, 2, 1] {
+        reads.lock().unwrap().clear();
+        let reader = reader::SamplesReader::open_cached(
+            store.clone(),
+            handle.clone(),
+            strategy.columnar_metadata(namespace),
+        )
+        .await
+        .unwrap()
+        .with_payload_cache(strategy.columnar_payload(namespace));
+        let mut request = full_request();
+        request.ids = Some(
+            [MetricSeriesId {
+                table_id: 1,
+                tsid: id,
+            }]
+            .into(),
+        );
+        request.start = Some(1);
+        request.end = Some(3);
+        let rows = reader
+            .read(request)
+            .unwrap()
+            .try_collect::<Vec<_>>()
+            .await
+            .unwrap();
+        assert_eq!(
+            input
+                .iter()
+                .copied()
+                .filter(|r| r.1 == id && r.2 >= 1)
+                .collect::<Vec<_>>(),
+            collect_rows(&rows)
+        );
+        if id == 2 {
+            assert!(
+                reads.lock().unwrap().is_empty(),
+                "a different series must reuse the aligned over-read, including boundary values"
+            );
+        }
+    }
+    let reader =
+        reader::SamplesReader::open_cached(store, handle, strategy.columnar_metadata(namespace))
+            .await
+            .unwrap()
+            .with_payload_cache(strategy.columnar_payload(namespace));
+    let pool = Arc::new(GreedyMemoryPool::new(1024 * 1024));
+    let mut request = full_request();
+    request.memory_pool = Some(pool.clone());
+    let mut stream = reader.read(request).unwrap();
+    assert!(stream.try_next().await.unwrap().is_some());
+    assert!(pool.reserved() > 0);
+    drop(stream);
+    assert_eq!(0, pool.reserved());
+    let pool = Arc::new(GreedyMemoryPool::new(1));
+    let mut request = full_request();
+    request.memory_pool = Some(pool.clone());
+    assert!(reader.read(request).unwrap().try_next().await.is_err());
+    assert_eq!(0, pool.reserved());
+}
+
+#[tokio::test]
+async fn aligned_payload_cache_assembles_columns_across_blocks() {
+    use crate::cache::{CacheManager, CacheStrategy};
+    let store = store();
+    let m = metadata();
+    // Non-repeating payload bits force a value column across cache boundaries.
+    let input = (0..8192)
+        .map(|t| {
+            (
+                1,
+                1,
+                t,
+                1,
+                1,
+                Some((t as u64).wrapping_mul(0x9e3779b97f4a7c15)),
+            )
+        })
+        .collect::<Vec<_>>();
+    let handle = build(
+        &ColumnarSamplesFormat::default(),
+        &store,
+        m.clone(),
+        &[batch(&m, &input, false)],
+    )
+    .await;
+    let strategy = CacheStrategy::EnableAll(Arc::new(
+        CacheManager::builder().page_cache_size(1024 * 1024).build(),
+    ));
+    let reader = reader::SamplesReader::open(store, handle)
+        .await
+        .unwrap()
+        .with_payload_cache(strategy.columnar_payload(FileId::random()));
+    let (a, b) = tokio::join!(
+        reader.read(full_request()).unwrap().try_collect::<Vec<_>>(),
+        reader.read(full_request()).unwrap().try_collect::<Vec<_>>()
+    );
+    assert_eq!(input, collect_rows(&a.unwrap()));
+    assert_eq!(input, collect_rows(&b.unwrap()));
+    assert_eq!(
+        input,
+        collect_rows(
+            &reader
+                .read(full_request())
+                .unwrap()
+                .try_collect::<Vec<_>>()
+                .await
+                .unwrap()
+        )
+    );
+}
+
+/// Sparse selections must bound aligned cache reads as well as selected column bytes.
+#[rstest::rstest]
+#[case(1024 * 1024)]
+#[case(128 * 1024)]
+#[case(16 * 1024)]
+#[tokio::test]
+async fn sparse_cached_reads_fit_the_scan_pool(#[case] capacity: usize) {
+    use crate::cache::{CacheManager, CacheStrategy};
+    use datafusion::execution::memory_pool::{GreedyMemoryPool, MemoryPool};
+    let store = store();
+    let m = metadata();
+    let input = (0..256_u64)
+        .flat_map(|id| {
+            let count = if id % 2 == 0 { 1 } else { 2000 };
+            (0..count).map(move |t| {
+                (
+                    1,
+                    id,
+                    t,
+                    1,
+                    1,
+                    Some((t as u64).wrapping_mul(0x9e3779b97f4a7c15)),
+                )
+            })
+        })
+        .collect::<Vec<_>>();
+    let handle = build(
+        &ColumnarSamplesFormat::default(),
+        &store,
+        m.clone(),
+        &[batch(&m, &input, false)],
+    )
+    .await;
+    let strategy = CacheStrategy::EnableAll(Arc::new(
+        CacheManager::builder()
+            .page_cache_size(16 * 1024 * 1024)
+            .build(),
+    ));
+    for cached in [false, true] {
+        let mut reader = reader::SamplesReader::open(store.clone(), handle.clone())
+            .await
+            .unwrap();
+        if cached {
+            reader = reader.with_payload_cache(strategy.columnar_payload(FileId::random()));
+        }
+        let pool = Arc::new(GreedyMemoryPool::new(capacity));
+        let mut request = full_request();
+        request.memory_pool = Some(pool.clone());
+        request.ids = Some(
+            (0..256)
+                .step_by(2)
+                .map(|tsid| MetricSeriesId { table_id: 1, tsid })
+                .collect(),
+        );
+        for warm in [false, true] {
+            if warm && cached {
+                let mut prime = request.clone();
+                prime.memory_pool = None;
+                reader
+                    .read(prime)
+                    .unwrap()
+                    .try_collect::<Vec<_>>()
+                    .await
+                    .unwrap();
+            }
+            let rows = reader
+                .read(request.clone())
+                .unwrap()
+                .try_collect::<Vec<_>>()
+                .await
+                .unwrap();
+            assert_eq!(
+                collect_rows(&rows),
+                input
+                    .iter()
+                    .copied()
+                    .filter(|r| r.1 % 2 == 0)
+                    .collect::<Vec<_>>()
+            );
+            assert_eq!(pool.reserved(), 0);
+        }
+    }
 }

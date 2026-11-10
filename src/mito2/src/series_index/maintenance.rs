@@ -303,7 +303,9 @@ async fn build_index_version(
     let mut reusable_samples = HashSet::new();
     if let Some(backend) = &formats.samples {
         for (id, handle) in &current.samples {
-            if !visible.contains(id) || handle.entry().artifact.format != backend.format() {
+            if !handle.entry().sources_visible(&visible)
+                || handle.entry().artifact.format != backend.format()
+            {
                 continue;
             }
             let mut reusable = true;
@@ -338,6 +340,12 @@ async fn build_index_version(
     stats.skipped_buckets = plan.skipped_buckets;
     let mut next = prune_index_version(&current, &visible, &plan.expired_index_ids, &mut stats);
     if !allow_builds {
+        let reusable_coverage = current
+            .samples
+            .iter()
+            .filter(|(id, _)| reusable_samples.contains(id))
+            .map(|(id, h)| (*id, h.clone()))
+            .collect();
         if manual
             && files.iter().any(|file| {
                 !current.series_indexes.values().any(|handle| {
@@ -347,7 +355,7 @@ async fn build_index_version(
                             .entry()
                             .covers_file(file.meta_ref(), region.region_id)
                 }) || (formats.samples.is_some()
-                    && !reusable_samples.contains(&file.file_id().file_id()))
+                    && !crate::series_index::artifact::samples_cover_file(&reusable_coverage, file))
             })
         {
             return crate::error::InvalidRequestSnafu {
@@ -387,31 +395,77 @@ async fn build_index_version(
         samples.clear();
     }
     if let Some(backend) = &formats.samples {
-        for file in &files {
-            let id = file.file_id().file_id();
-            let reusable = reusable_samples.contains(&id);
-            if reusable {
-                continue;
-            }
-            if let Some(handle) = crate::series_index::builder::build_samples(
-                store,
-                region,
-                version,
-                file.clone(),
-                backend.as_ref(),
-                purger,
-            )
-            .await?
-            {
-                unpublished.1.push(handle.clone());
-                samples.insert(id, handle);
-                stats.built_samples += 1;
-            } else if manual {
-                return crate::error::InvalidRequestSnafu {
-                    region_id: region.region_id,
-                    reason: format!("SST {id} has no readable input for samples"),
+        if backend.format() == ArtifactFormat::ColumnarSamples {
+            let reusable: std::collections::HashMap<_, _> = samples
+                .iter()
+                .filter(|(id, _)| reusable_samples.contains(id))
+                .map(|(id, handle)| (*id, handle.clone()))
+                .collect();
+            // Retain complete existing groups. Adding a source must not shift their boundaries.
+            let covered: HashSet<_> = files
+                .iter()
+                .filter(|file| crate::series_index::artifact::samples_cover_file(&reusable, file))
+                .map(|file| file.file_id().file_id())
+                .collect();
+            let mut daily: std::collections::HashMap<_, _> = reusable
+                .into_iter()
+                .filter(|(_, h)| h.entry().window.is_some() && h.entry().sources_visible(&covered))
+                .collect();
+            let covered: HashSet<_> = daily
+                .values()
+                .flat_map(|handle| handle.entry().source_file_ids.iter().copied())
+                .collect();
+            let mut uncovered: Vec<_> = files
+                .iter()
+                .filter(|file| !covered.contains(&file.file_id().file_id()))
+                .cloned()
+                .collect();
+            uncovered.sort_unstable_by_key(|file| file.file_id().file_id().to_string());
+            for sources in uncovered.chunks(64) {
+                let handles = crate::series_index::builder::build_sample_windows(
+                    store,
+                    region,
+                    version,
+                    sources,
+                    backend.as_ref(),
+                    purger,
+                )
+                .await?;
+                for handle in handles {
+                    unpublished.1.push(handle.clone());
+                    stats.built_samples += 1;
+                    daily.insert(handle.entry().file_id, handle);
                 }
-                .fail();
+            }
+            stats.removed_samples += samples.keys().filter(|id| !daily.contains_key(id)).count();
+            samples = daily;
+        } else {
+            for file in &files {
+                let id = file.file_id().file_id();
+                let reusable = reusable_samples.contains(&id);
+                if reusable {
+                    continue;
+                }
+                if let Some(handle) = crate::series_index::builder::build_samples(
+                    store,
+                    region,
+                    version,
+                    file.clone(),
+                    backend.as_ref(),
+                    purger,
+                )
+                .await?
+                {
+                    unpublished.1.push(handle.clone());
+                    samples.insert(id, handle);
+                    stats.built_samples += 1;
+                } else if manual {
+                    return crate::error::InvalidRequestSnafu {
+                        region_id: region.region_id,
+                        reason: format!("SST {id} has no readable input for samples"),
+                    }
+                    .fail();
+                }
             }
         }
     }
@@ -463,7 +517,8 @@ async fn build_index_version(
                     && handle
                         .entry()
                         .covers_file(file.meta_ref(), region.region_id)
-            }) || (formats.samples.is_some() && !samples.contains_key(&file.file_id().file_id()))
+            }) || (formats.samples.is_some()
+                && !crate::series_index::artifact::samples_cover_file(&samples, file))
         })
     {
         return crate::error::InvalidRequestSnafu {
@@ -501,7 +556,10 @@ fn prune_index_version(
     expired_index_ids: &[FileId],
     stats: &mut ReconcileStats,
 ) -> Option<SeriesIndexVersion> {
-    if current.samples.keys().all(|id| visible.contains(id))
+    if current
+        .samples
+        .values()
+        .all(|h| h.entry().sources_visible(visible))
         && current.range_indexes.keys().all(|id| visible.contains(id))
         && expired_index_ids
             .iter()
@@ -515,7 +573,8 @@ fn prune_index_version(
         series_indexes: current.series_indexes.clone(),
         index_buckets: current.index_buckets.clone(),
     };
-    next.samples.retain(|id, _| visible.contains(id));
+    next.samples
+        .retain(|_, h| h.entry().sources_visible(visible));
     stats.removed_samples = current.samples.len() - next.samples.len();
     next.range_indexes
         .retain(|file_id, _| visible.contains(file_id));

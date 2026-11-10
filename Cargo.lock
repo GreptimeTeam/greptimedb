@@ -11413,6 +11413,7 @@ dependencies = [
  "regex",
  "serde",
  "snafu 0.8.6",
+ "stacker",
  "store-api",
  "table",
  "tokio",

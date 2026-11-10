@@ -485,7 +485,8 @@ pub struct BoundTag {
 /// Bound source for materializing labels from raw series chunks.
 #[derive(Clone, Debug)]
 pub enum RawLabelSource {
-    /// Labels are encoded in the complete primary key and use this scan-bound metadata.
+    /// Scan-bound metadata for labels. A producer may expose encoded keys or
+    /// complete explicit labels; its stream decode specification distinguishes them.
     PrimaryKey {
         /// Metric name associated with the bound logical source.
         metric_name: Arc<str>,
@@ -526,10 +527,9 @@ pub const NO_BOUND_LABEL_SOURCE: RawLabelSource = RawLabelSource::Explicit;
 pub trait RawSeriesStream: Stream<Item = Result<RawSeriesChunk, BoxedError>> + Send {
     /// Returns the schema shared by all chunks; raw schemas have no evaluation grid.
     fn schema(&self) -> &Arc<SeriesSchema>;
-    /// Returns scan-bound label metadata. `PrimaryKey` chunks leave `metric` as `None`, meaning
-    /// labels are undecoded, not that the metric name is missing; `Explicit` chunks supply
-    /// `Some` with the complete name/label set, not a partial projection. The metric name itself
-    /// may be absent.
+    /// Returns scan-bound label metadata. The binding does not dictate representation:
+    /// chunks with a decode specification leave `metric` as `None`; otherwise they
+    /// supply the complete explicit label set. The metric name itself may be absent.
     ///
     /// A stream that was decoded from a raw frame has no scan-bound identity and reports
     /// [`NO_BOUND_LABEL_SOURCE`], which reads as `Explicit` while its chunks may still carry no
@@ -560,7 +560,8 @@ pub type SendableRawSeriesStream = Pin<Box<dyn RawSeriesStream>>;
 /// Stable identity metadata for one ordinal in a prepared series source.
 #[derive(Clone, Debug)]
 pub struct SeriesInfo {
-    /// Complete encoded primary key, not a TSID or hash alone.
+    /// Complete source identity, not a TSID or hash alone. Explicit-label sources
+    /// may use an opaque domain-qualified identity instead of a label-bearing key.
     pub primary_key: datatypes::arrow::buffer::Buffer,
     /// Complete explicit metric name and labels, not a partial label projection; or `None` for
     /// primary-key label binding (undecoded, not nameless). The metric name itself may be absent.
@@ -574,8 +575,9 @@ pub struct SeriesInfo {
 /// [`PreparedSeriesSource::series_info`], and that identity matches chunks for that ordinal.
 /// Every reader exposes the same fixed schema, label binding, and ordering before polling,
 /// including for an empty range, and describes labels independently of this source's lifetime.
-/// `PrimaryKey` output has `metric: None` (undecoded); `Explicit` output has a complete
-/// `Some(metric)` matching each chunk. Ordering describes the stream, not ordinal enumeration.
+/// Key-encoded output has `metric: None`; explicit-label output has a complete
+/// `Some(metric)` matching each chunk, independently of its scan binding.
+/// Ordering describes the stream, not ordinal enumeration.
 ///
 /// Preparation, identity lookup, and reader creation do not load sample payloads or perform
 /// hidden blocking I/O. The selected set is bound to the scanner's immutable MVCC view,
@@ -649,6 +651,13 @@ pub trait RegionScanner: Debug + DisplayAs + Send {
         _label_source: &RawLabelSource,
     ) -> Result<Option<Arc<SeriesSchema>>, BoxedError> {
         Ok(None)
+    }
+
+    /// Whether raw chunks carry complete explicit labels under this scan binding.
+    /// This non-consuming declaration must agree with the stream before its first poll.
+    /// Returning true does not replace the immutable source binding or authorization checks.
+    fn raw_series_has_explicit_labels(&self, _labels: &RawLabelSource) -> Result<bool, BoxedError> {
+        Ok(false)
     }
 
     /// Returns the guarantee for subsequent raw scans without consuming scanner state.

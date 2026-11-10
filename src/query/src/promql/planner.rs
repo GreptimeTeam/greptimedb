@@ -22,8 +22,6 @@ pub use native::{NATIVE_PROMQL_EXTENSION_KEY, discovers_metric_name};
 mod set_operator;
 
 use std::collections::{BTreeSet, HashSet, VecDeque};
-use std::future::Future;
-use std::pin::Pin;
 use std::sync::Arc;
 
 use arrow::datatypes::IntervalDayTime;
@@ -309,11 +307,6 @@ pub struct PromPlanner {
 }
 
 type BinaryFieldPair<'a> = (&'a String, &'a String);
-
-/// [`PromPlanner::try_plan_native_operand`]'s future, boxed; see
-/// [`PromPlanner::native_operand_future`] for why it is not kept inline.
-type NativeOperandFuture<'a> =
-    Pin<Box<dyn Future<Output = Result<Option<(LogicalPlan, PromPlannerContext)>>> + Send + 'a>>;
 
 impl PromPlanner {
     pub async fn stmt_to_plan(
@@ -1177,63 +1170,6 @@ impl PromPlanner {
         })
     }
 
-    /// Boxes [`Self::try_plan_native_operand`]'s future.
-    ///
-    /// The planner re-enters [`Self::prom_expr_to_plan_inner`] and
-    /// [`Self::prom_binary_expr_to_plan`] once per nesting level of the statement, and both frames
-    /// are large in a debug build. The native route's future is large as well, so a caller that
-    /// also plans the same expression with the existing path would carry a copy of it on the stack
-    /// at every level. Built here, the future moves into the box before that recursion starts, and
-    /// only the attempt itself pays for it.
-    fn native_operand_future<'a>(
-        &'a mut self,
-        expr: &'a PromExpr,
-        query_engine_state: &'a QueryEngineState,
-    ) -> NativeOperandFuture<'a> {
-        Box::pin(self.try_plan_native_operand(expr, query_engine_state))
-    }
-
-    /// Re-plans one operand that [`matching_filters::propagate`] rewrote, publishing the plan and
-    /// its context through `context`.
-    ///
-    /// A copied matcher belongs to the scan, not to the operand's identity: `absent()` turns
-    /// `selector_matcher` into the labels it reports, so the re-planned context keeps the matchers
-    /// the operand was written with.
-    ///
-    /// A natively planned operand is re-planned natively: the matcher has to reach the fused node's
-    /// own scan, or the join keeps the non-joining rows that node reported. The route decides per
-    /// expression, so a decline falls back to the existing plan exactly as it would have on its own.
-    async fn replan_rewritten_operand(
-        &mut self,
-        rewritten: &PromExpr,
-        used_native: bool,
-        query_engine_state: &QueryEngineState,
-        context: &mut PromPlannerContext,
-    ) -> Result<LogicalPlan> {
-        let selectors = std::mem::take(&mut context.selector_matcher);
-        let native = if used_native {
-            self.native_operand_future(rewritten, query_engine_state)
-                .await?
-        } else {
-            None
-        };
-        let plan = match native {
-            Some((plan, replanned)) => {
-                *context = replanned;
-                plan
-            }
-            None => {
-                let plan = self
-                    .prom_expr_to_plan(rewritten, query_engine_state)
-                    .await?;
-                *context = self.ctx.clone();
-                plan
-            }
-        };
-        context.selector_matcher = selectors;
-        Ok(plan)
-    }
-
     async fn prom_binary_expr_to_plan(
         &mut self,
         query_engine_state: &QueryEngineState,
@@ -1249,6 +1185,40 @@ impl PromPlanner {
                     name: "PromQL fill modifiers"
                 }
             );
+        }
+
+        // The same whole native binary the statement root was offered can sit below a
+        // legacy-only wrapper. A nested retry is valid only on the statement's own grid.
+        if self.native_fused
+            && self.ctx.start == self.ctx.stmt_start
+            && self.ctx.end == self.ctx.stmt_end
+        {
+            let saved = self.ctx.clone();
+            let native = self
+                .try_plan_native_fused(&PromExpr::Binary(binary_expr.clone()), query_engine_state)
+                .await;
+            self.ctx = saved;
+            if let Some(plan) = native? {
+                let mut fields = plan.schema().fields().iter();
+                if let Some(time) = fields.next().map(|field| field.name().clone()) {
+                    let values = fields
+                        .clone()
+                        .filter(|field| field.data_type() != &ArrowDataType::Utf8)
+                        .map(|field| field.name().clone())
+                        .collect();
+                    let tags = fields
+                        .filter(|field| field.data_type() == &ArrowDataType::Utf8)
+                        .map(|field| field.name().clone())
+                        .collect();
+                    self.ctx.reset();
+                    self.ctx.reset_table_name_and_schema();
+                    self.ctx.aggregation_field_labels.clear();
+                    self.ctx.time_index_column = Some(time);
+                    self.ctx.field_columns = values;
+                    self.ctx.tag_columns = tags;
+                    return Ok(plan);
+                }
+            }
         }
 
         if let Some(plan) = self.try_plan_binary_island(binary_expr).await? {
@@ -1441,32 +1411,14 @@ impl PromPlanner {
             }
             // both are columns. join them on time index
             (None, None) => {
-                let native_pair =
-                    self.native_fused && native::hybrid_binary_admitted(*op, modifier, lhs, rhs);
-                let native = if native_pair {
-                    match (
-                        self.try_plan_native_operand(lhs, query_engine_state)
-                            .await?,
-                        self.try_plan_native_operand(rhs, query_engine_state)
-                            .await?,
-                    ) {
-                        (Some(left), Some(right)) => Some((left, right)),
-                        _ => None,
-                    }
-                } else {
-                    None
+                // A declined binary uses the existing planner for its operands.
+                let (mut left_input, mut left_context, mut right_input, mut right_context) = {
+                    let left = self.prom_expr_to_plan(lhs, query_engine_state).await?;
+                    let left_ctx = self.ctx.clone();
+                    let right = self.prom_expr_to_plan(rhs, query_engine_state).await?;
+                    let right_ctx = self.ctx.clone();
+                    (left, left_ctx, right, right_ctx)
                 };
-                let used_native = native.is_some();
-                let (mut left_input, mut left_context, mut right_input, mut right_context) =
-                    if let Some(((left, left_ctx), (right, right_ctx))) = native {
-                        (left, left_ctx, right, right_ctx)
-                    } else {
-                        let left = self.prom_expr_to_plan(lhs, query_engine_state).await?;
-                        let left_ctx = self.ctx.clone();
-                        let right = self.prom_expr_to_plan(rhs, query_engine_state).await?;
-                        let right_ctx = self.ctx.clone();
-                        (left, left_ctx, right, right_ctx)
-                    };
                 let left_field_columns = left_context.field_columns.clone();
                 let left_time_index_column = left_context.time_index_column.clone();
                 self.ctx = left_context.clone();
@@ -1490,25 +1442,24 @@ impl PromPlanner {
                     &left_context.aggregation_field_labels,
                     &right_context.aggregation_field_labels,
                 ) {
+                    // A copied matcher belongs to the scan, not to the operand's identity:
+                    // `absent()` turns `selector_matcher` into the labels it reports, so the
+                    // re-planned context keeps the matchers the operand was written with.
                     if rewritten.lhs.as_ref() != lhs.as_ref() {
+                        let selectors = std::mem::take(&mut left_context.selector_matcher);
                         left_input = self
-                            .replan_rewritten_operand(
-                                &rewritten.lhs,
-                                used_native,
-                                query_engine_state,
-                                &mut left_context,
-                            )
+                            .prom_expr_to_plan(&rewritten.lhs, query_engine_state)
                             .await?;
+                        left_context = self.ctx.clone();
+                        left_context.selector_matcher = selectors;
                     }
                     if rewritten.rhs.as_ref() != rhs.as_ref() {
+                        let selectors = std::mem::take(&mut right_context.selector_matcher);
                         right_input = self
-                            .replan_rewritten_operand(
-                                &rewritten.rhs,
-                                used_native,
-                                query_engine_state,
-                                &mut right_context,
-                            )
+                            .prom_expr_to_plan(&rewritten.rhs, query_engine_state)
                             .await?;
+                        right_context = self.ctx.clone();
+                        right_context.selector_matcher = selectors;
                     }
                     // The code below reads `self.ctx` as the right operand's context.
                     self.ctx = right_context.clone();

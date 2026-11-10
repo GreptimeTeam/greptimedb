@@ -622,7 +622,15 @@ impl RegionScanExec {
                 "a scan cannot plan interleaved raw series ordering".into(),
             ));
         }
-        let arrow_schema = raw_series_frame_schema_with_ordering(&schema, &label_source, ordering)?;
+        let frame_labels = if scanner
+            .raw_series_has_explicit_labels(&label_source)
+            .map_err(|e| DataFusionError::External(Box::new(e)))?
+        {
+            RawLabelSource::Explicit
+        } else {
+            label_source.clone()
+        };
+        let arrow_schema = raw_series_frame_schema_with_ordering(&schema, &frame_labels, ordering)?;
         let partition_count = scanner.properties().num_partitions().max(1);
         let properties = Arc::new(PlanProperties::new(
             EquivalenceProperties::new(arrow_schema.clone()),
@@ -633,7 +641,8 @@ impl RegionScanExec {
         drop(scanner);
         Ok(Some(Arc::new(SeriesScanExec {
             scan: self,
-            label_source,
+            label_source: frame_labels,
+            scan_binding: label_source,
             series_schema: schema,
             arrow_schema,
             ordering,
@@ -645,8 +654,9 @@ impl RegionScanExec {
 /// Native physical leaf that packs a prepared region scanner's raw series chunks.
 /// Do not prepare, reset, or execute concurrently through scanner aliases.
 pub struct SeriesScanExec {
-    scan: Arc<RegionScanExec>,
     label_source: RawLabelSource,
+    scan: Arc<RegionScanExec>,
+    scan_binding: RawLabelSource,
     series_schema: Arc<SeriesSchema>,
     arrow_schema: ArrowSchemaRef,
     ordering: SeriesOrdering,
@@ -655,7 +665,7 @@ pub struct SeriesScanExec {
 
 impl std::fmt::Debug for SeriesScanExec {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let source = match &self.label_source {
+        let source = match &self.scan_binding {
             RawLabelSource::Explicit => "explicit",
             RawLabelSource::PrimaryKey { .. } => "primary_key",
         };
@@ -671,6 +681,12 @@ impl std::fmt::Debug for SeriesScanExec {
 }
 
 impl SeriesScanExec {
+    /// Returns the immutable label binding supplied to the storage scan.
+    pub fn scan_binding(&self) -> &RawLabelSource {
+        &self.scan_binding
+    }
+
+    /// Returns the label representation carried by output frames.
     pub fn label_source(&self) -> &RawLabelSource {
         &self.label_source
     }
@@ -721,7 +737,7 @@ fn same_label_source(left: &RawLabelSource, right: &RawLabelSource) -> bool {
 
 impl DisplayAs for SeriesScanExec {
     fn fmt_as(&self, _t: DisplayFormatType, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        let source = match &self.label_source {
+        let source = match &self.scan_binding {
             RawLabelSource::Explicit => "explicit",
             RawLabelSource::PrimaryKey { .. } => "primary_key",
         };
@@ -797,7 +813,7 @@ impl ExecutionPlan for SeriesScanExec {
         };
         let scanner = self.scan.scanner.lock().unwrap();
         let current = scanner
-            .raw_series_schema(&self.label_source)
+            .raw_series_schema(&self.scan_binding)
             .map_err(|e| DataFusionError::External(Box::new(e)))?
             .ok_or_else(|| {
                 DataFusionError::Execution("raw series capability changed after planning".into())
@@ -805,8 +821,16 @@ impl ExecutionPlan for SeriesScanExec {
         let current_ordering = scanner
             .raw_series_ordering()
             .map_err(|e| DataFusionError::External(Box::new(e)))?;
+        let frame_labels = if scanner
+            .raw_series_has_explicit_labels(&self.scan_binding)
+            .map_err(|e| DataFusionError::External(Box::new(e)))?
+        {
+            RawLabelSource::Explicit
+        } else {
+            self.scan_binding.clone()
+        };
         let current_frame =
-            raw_series_frame_schema_with_ordering(&current, &self.label_source, current_ordering)?;
+            raw_series_frame_schema_with_ordering(&current, &frame_labels, current_ordering)?;
         if current_frame != self.arrow_schema
             || scanner.properties().num_partitions().max(1) != partitions
         {
@@ -815,7 +839,7 @@ impl ExecutionPlan for SeriesScanExec {
             ));
         }
         let raw = scanner
-            .scan_series_partition(&ctx, &self.scan.metric, partition, &self.label_source)
+            .scan_series_partition(&ctx, &self.scan.metric, partition, &self.scan_binding)
             .map_err(|e| DataFusionError::External(Box::new(e)))?
             .ok_or_else(|| {
                 DataFusionError::Execution(
@@ -835,13 +859,18 @@ impl ExecutionPlan for SeriesScanExec {
                 .zip(self.series_schema.fields.iter())
                 .any(|(a, b)| a.name != b.name)
             || raw.schema().eval_grid.is_some()
-            || !same_label_source(raw.label_source(), &self.label_source)
+            || !same_label_source(raw.label_source(), &self.scan_binding)
         {
             return Err(DataFusionError::Execution(
                 "raw series stream does not match its planned binding".into(),
             ));
         }
         let packed = pack_raw_series(raw)?;
+        if packed.schema() != self.arrow_schema {
+            return Err(DataFusionError::Execution(
+                "raw series label representation changed after planning".into(),
+            ));
+        }
         let stream = RecordBatchStreamAdapter::try_new(packed)
             .map_err(|e| DataFusionError::External(Box::new(BoxedError::new(e))))?;
         let stream: SendableRecordBatchStream = Box::pin(stream);

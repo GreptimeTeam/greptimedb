@@ -104,13 +104,25 @@ pub fn evaluate_histograms(
     schema: &Arc<SeriesSchema>,
     series: &[Series],
 ) -> Result<Vec<Series>> {
-    evaluate_histograms_with_annotations(function, schema, series, None)
+    evaluate_histograms_with_annotations(function, schema, series, None, None)
 }
 
+/// Per-grid-point arguments to a classic or native histogram function.
+#[derive(Debug, Clone, Copy)]
+pub struct HistogramParameters<'a> {
+    pub quantile: Option<&'a [Option<f64>]>,
+    pub lower: Option<&'a [Option<f64>]>,
+    pub upper: Option<&'a [Option<f64>]>,
+}
+
+/// Evaluates `function` with optional per-point scalar arguments, reporting what it drops to
+/// `collector`. A missing parameter value suppresses the output at that point, matching aggregate
+/// quantile's missing-q behavior.
 pub(crate) fn evaluate_histograms_with_annotations(
     function: HistogramFunction,
     schema: &Arc<SeriesSchema>,
     series: &[Series],
+    parameters: Option<HistogramParameters<'_>>,
     collector: Option<&PromqlAnnotationCollector>,
 ) -> Result<Vec<Series>> {
     // The groups in the order their first member arrived, so the result is in one order on every
@@ -215,6 +227,31 @@ pub(crate) fn evaluate_histograms_with_annotations(
                         _ => None,
                     }
                 });
+                let argument = |values: Option<&[Option<f64>]>, bound: f64| -> Option<f64> {
+                    match values {
+                        Some(values) => values.get(point).copied().flatten(),
+                        None => Some(bound),
+                    }
+                };
+                let function = match function {
+                    HistogramFunction::Quantile(q) => {
+                        let Some(q) = argument(parameters.and_then(|p| p.quantile), q) else {
+                            *value = None;
+                            continue;
+                        };
+                        HistogramFunction::Quantile(q)
+                    }
+                    HistogramFunction::Fraction { lower, upper } => {
+                        let (Some(lower), Some(upper)) = (
+                            argument(parameters.and_then(|p| p.lower), lower),
+                            argument(parameters.and_then(|p| p.upper), upper),
+                        ) else {
+                            *value = None;
+                            continue;
+                        };
+                        HistogramFunction::Fraction { lower, upper }
+                    }
+                };
                 // A native histogram and classic buckets of one label set conflict.
                 *value = match (native, classic_buckets.is_empty()) {
                     (Some(_), false) => {

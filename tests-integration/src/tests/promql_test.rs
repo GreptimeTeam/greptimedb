@@ -31,7 +31,7 @@ use datatypes::arrow::array::{
     Array, Float64Array, Int64Array, StringArray, TimestampMillisecondArray,
 };
 use datatypes::arrow::compute::cast;
-use datatypes::arrow::datatypes::DataType;
+use datatypes::arrow::datatypes::{DataType, Field, Schema as ArrowSchema, TimeUnit};
 use frontend::instance::Instance;
 use query::datafusion::{QUERY_FALLBACK_HINT, QUERY_PARALLELISM_HINT};
 use query::dist_plan::MergeScanExec;
@@ -42,7 +42,7 @@ use query::promql::planner::NATIVE_PROMQL_EXTENSION_KEY;
 use rstest::rstest;
 use rstest_reuse::apply;
 use servers::query_handler::sql::SqlQueryHandler;
-use session::context::QueryContext;
+use session::context::{MetricDiscoveryScope, QueryContext};
 use sql::ast::{Ident, ObjectName, ObjectNamePart};
 use sql::statements::create::CreateView;
 use sql::statements::statement::Statement as SqlStatement;
@@ -1849,6 +1849,23 @@ impl NativePlanObserver {
     fn fused(&self) -> Option<Arc<dyn datafusion::physical_plan::ExecutionPlan>> {
         self.0.lock().unwrap().clone()
     }
+
+    /// The name of the node that answers the statement, when it is one of the native nodes.
+    ///
+    /// [`Self::fused`] answers whether *some* fused node exists, and a split plan holds two: the
+    /// partition-local producer below the state router and the merge above it. A test that means
+    /// "the whole statement runs natively" therefore has to say which node answers it, not that one
+    /// was captured. The search is breadth first, so the shallowest native node is the one reported.
+    fn answering_node(&self) -> Option<String> {
+        let mut queue = std::collections::VecDeque::from([self.root_plan()]);
+        while let Some(node) = queue.pop_front() {
+            if node.name() == "FusedSeriesExec" {
+                return Some(node.name().to_string());
+            }
+            queue.extend(node.children().into_iter().cloned());
+        }
+        None
+    }
 }
 
 /// Unique physical nodes reachable from the frontend and separately wrapped region trees.
@@ -1866,6 +1883,21 @@ fn observed_physical_nodes(
         nodes.push(node);
     }
     nodes
+}
+
+/// The region reads a native node answers from, descending through cooperative wrappers and the
+/// segments a statement cut out of itself.
+fn native_region_inputs(
+    plan: &Arc<dyn datafusion::physical_plan::ExecutionPlan>,
+    out: &mut Vec<Arc<dyn datafusion::physical_plan::ExecutionPlan>>,
+) {
+    for child in plan.children() {
+        if child.is::<MergeScanExec>() {
+            out.push(Arc::clone(child));
+        } else {
+            native_region_inputs(child, out);
+        }
+    }
 }
 
 fn observed_series_scans(observer: &NativePlanObserver) -> Vec<Arc<dyn ExecutionPlan>> {
@@ -1996,7 +2028,11 @@ async fn native_site_rows(output: Output) -> Vec<(i64, String, String, f64)> {
     rows
 }
 
-async fn native_result_rows(output: Output) -> Vec<(i64, String, f64)> {
+/// The rows of a TQL answer, labelled by `label`.
+///
+/// `None` labels each row with every label column it carries, by name, so an answer whose label set
+/// is not the `host` one can be compared with the existing route's the same way.
+async fn native_rows(output: Output, label: Option<&str>) -> Vec<(i64, String, f64)> {
     let batches = match output.data {
         OutputData::Stream(stream) => collect_batches(stream).await.unwrap(),
         OutputData::RecordBatches(batches) => batches,
@@ -2011,30 +2047,60 @@ async fn native_result_rows(output: Output) -> Vec<(i64, String, f64)> {
                 .as_any()
                 .downcast_ref::<TimestampMillisecondArray>()
                 .unwrap();
-            let hosts = cast(
-                batch.column_by_name("host").unwrap().as_ref(),
-                &DataType::Utf8,
-            )
-            .unwrap();
-            let hosts = hosts.as_any().downcast_ref::<StringArray>().unwrap();
             let value_columns = batch
                 .columns()
                 .iter()
-                .filter(|column| column.data_type() == &DataType::Float64)
+                .enumerate()
+                .filter(|(_, column)| column.data_type() == &DataType::Float64)
                 .collect::<Vec<_>>();
             assert_eq!(value_columns.len(), 1, "expected one Float64 value column");
-            let values = value_columns[0]
+            let (value_index, value_column) = value_columns[0];
+            let labels = match label {
+                Some(label) => {
+                    let labels = cast(
+                        batch.column_by_name(label).unwrap().as_ref(),
+                        &DataType::Utf8,
+                    )
+                    .unwrap();
+                    let labels = labels.as_any().downcast_ref::<StringArray>().unwrap();
+                    assert_eq!(labels.null_count(), 0);
+                    (0..batch.num_rows())
+                        .map(|row| labels.value(row).to_string())
+                        .collect::<Vec<_>>()
+                }
+                // Every label column, by name: the value column and the time index are the two that
+                // are not one, and a route names its value differently from the other.
+                None => (0..batch.num_rows())
+                    .map(|row| {
+                        batch
+                            .schema
+                            .column_schemas()
+                            .iter()
+                            .enumerate()
+                            .filter(|(index, column)| *index != value_index && column.name != "ts")
+                            .filter_map(|(_, column)| {
+                                let values = batch.column_by_name(&column.name)?.as_ref();
+                                let values = cast(values, &DataType::Utf8).ok()?;
+                                let values = values.as_any().downcast_ref::<StringArray>()?;
+                                (!values.is_null(row))
+                                    .then(|| format!("{}={}", column.name, values.value(row)))
+                            })
+                            .collect::<Vec<_>>()
+                            .join(",")
+                    })
+                    .collect::<Vec<_>>(),
+            };
+            let values = value_column
                 .as_any()
                 .downcast_ref::<Float64Array>()
                 .unwrap();
             assert_eq!(timestamps.null_count(), 0);
-            assert_eq!(hosts.null_count(), 0);
             assert_eq!(values.null_count(), 0);
             (0..batch.num_rows())
                 .map(|row| {
                     (
                         timestamps.value(row),
-                        hosts.value(row).to_string(),
+                        labels[row].clone(),
                         values.value(row),
                     )
                 })
@@ -2043,6 +2109,10 @@ async fn native_result_rows(output: Output) -> Vec<(i64, String, f64)> {
         .collect::<Vec<_>>();
     rows.sort_by(|left, right| (left.0, &left.1).cmp(&(right.0, &right.1)));
     rows
+}
+
+async fn native_result_rows(output: Output) -> Vec<(i64, String, f64)> {
+    native_rows(output, Some("host")).await
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -2126,6 +2196,55 @@ async fn native_promql_clamp_aggregates_execute_on_native_segments() {
             );
         }
     }
+}
+
+/// [`native_result_rows`] for a statement whose output carries no series labels, such as the
+/// data-free `vector(time())`: the evaluation timestamp and the one value, sorted by time.
+///
+/// The timestamp is found by type rather than by name: the native route names the time index of a
+/// statement that reads nothing `time`, while the existing planner names it `ts`.
+async fn native_timestamp_rows(output: Output) -> Vec<(i64, f64)> {
+    let batches = match output.data {
+        OutputData::Stream(stream) => collect_batches(stream).await.unwrap(),
+        OutputData::RecordBatches(batches) => batches,
+        _ => unreachable!("TQL EVAL returns record batches"),
+    };
+    let mut rows = batches
+        .iter()
+        .flat_map(|batch| {
+            let timestamps = batch
+                .columns()
+                .iter()
+                .find(|column| {
+                    matches!(
+                        column.data_type(),
+                        DataType::Timestamp(TimeUnit::Millisecond, _)
+                    )
+                })
+                .expect("a timestamp column");
+            let timestamps = timestamps
+                .as_any()
+                .downcast_ref::<TimestampMillisecondArray>()
+                .unwrap();
+            let value_columns = batch
+                .columns()
+                .iter()
+                .filter(|column| column.data_type() == &DataType::Float64)
+                .collect::<Vec<_>>();
+            assert_eq!(value_columns.len(), 1, "expected one Float64 value column");
+            let values = value_columns[0]
+                .as_any()
+                .downcast_ref::<Float64Array>()
+                .unwrap();
+            assert_eq!(timestamps.null_count(), 0);
+            assert_eq!(values.null_count(), 0);
+            (0..batch.num_rows())
+                .map(|row| (timestamps.value(row), values.value(row)))
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    rows.sort_by_key(|row| row.0);
+    rows
 }
 
 /// [`native_result_rows`] plus each row's OTLP temporality marker, sorted by label then time.
@@ -2412,6 +2531,102 @@ fn assert_four_native_partitions(plan: &Arc<dyn datafusion::physical_plan::Execu
     assert!(
         values_by_partition.iter().all(|value| *value > 0),
         "every native execution partition must produce values: {values_by_partition:?}"
+    );
+}
+
+/// Inspect the actual logical FusedSeries tree before executing a representative deep query.
+async fn assert_deep_native_plan(instance: &Arc<Instance>, query: &PromQuery) {
+    use promql::extension_plan::FusedSeries;
+    use promql::native::plan::{NativeExpr, NativeNode};
+
+    fn depth(node: &NativeNode) -> usize {
+        1 + match &node.expr {
+            NativeExpr::Input(_) | NativeExpr::Scalar(_) => 0,
+            NativeExpr::Instant { input, .. } | NativeExpr::Map { input, .. } => depth(input),
+            NativeExpr::ParameterizedMap {
+                input, parameters, ..
+            } => parameters.iter().map(depth).fold(depth(input), usize::max),
+            NativeExpr::Binary { left, right, .. } => depth(left).max(depth(right)),
+            other => panic!("unexpected node in deep expression: {other:?}"),
+        }
+    }
+    fn fused(plan: &datafusion::logical_expr::LogicalPlan) -> Option<&FusedSeries> {
+        if let datafusion::logical_expr::LogicalPlan::Extension(extension) = plan
+            && let Some(node) = extension.node.as_any().downcast_ref::<FusedSeries>()
+        {
+            return Some(node);
+        }
+        plan.inputs().into_iter().find_map(fused)
+    }
+    let ctx = native_query_context(true, 2);
+    let statement = QueryLanguageParser::parse_promql(query, &ctx).unwrap();
+    let plan = instance
+        .query_engine()
+        .planner()
+        .plan(&statement, ctx)
+        .await
+        .unwrap();
+    let display = plan.display_indent().to_string();
+    let tree = fused(&plan)
+        .unwrap_or_else(|| panic!("native deep tree: {display}"))
+        .tree();
+    assert!(depth(tree.root()) > 64, "{display}");
+    assert!(!display.contains("Join:"), "{display}");
+}
+
+/// The representative deep expression executes on a standalone instance, on the test's own stack.
+///
+/// The expression is deep enough that the walks over it used to abort the runtime worker rather
+/// than answer: planning it walks the tree once, and so do building its runtime and pulling it.
+/// Those walks grow their own stacks now, so nothing here owns a stack large enough to hide the
+/// recursion - a build that reintroduces the overflow aborts this test instead of being masked by
+/// one. The plan, the runtime and the answer are all the deep expression's own.
+#[tokio::test(flavor = "multi_thread")]
+async fn native_promql_deep_binary_standalone() {
+    common_telemetry::init_default_ut_logging();
+    let (standalone, observer) = native_test_instance(GreptimeDbStandaloneBuilder::new(
+        "native_promql_deep_binary_standalone",
+    ))
+    .await;
+    let instance = standalone.fe_instance().clone();
+    execute_all(
+        &instance,
+        "CREATE TABLE deep_standalone (host STRING, ts TIMESTAMP TIME INDEX, val DOUBLE, PRIMARY KEY(host)); INSERT INTO deep_standalone VALUES ('x', 180000, 3), ('x', 240000, 4), ('y', 180000, 4), ('y', 240000, 5)",
+        QueryContext::arc(),
+    )
+    .await;
+    let query = PromQuery {
+        query: format!("clamp(deep_standalone{}, 0, 1000)", " + 1".repeat(80)),
+        start: "180".to_string(),
+        end: "240".to_string(),
+        step: "60s".to_string(),
+        ..PromQuery::default()
+    };
+    assert_deep_native_plan(&instance, &query).await;
+    observer.clear();
+    let output = instance
+        .do_promql_query(&query, native_query_context(true, 2))
+        .await
+        .remove(0)
+        .unwrap();
+    assert_eq!(
+        native_result_rows(output).await,
+        vec![
+            (180_000, "x".to_string(), 83.0),
+            (180_000, "y".to_string(), 84.0),
+            (240_000, "x".to_string(), 84.0),
+            (240_000, "y".to_string(), 85.0)
+        ]
+    );
+    let observed = observed_physical_nodes(&observer);
+    let names: Vec<_> = observed.iter().map(|node| node.name()).collect();
+    assert!(
+        names.contains(&"FusedSeriesExec"),
+        "no native fused node: {names:?}"
+    );
+    assert!(
+        names.iter().all(|name| !name.contains("JoinExec")),
+        "legacy join: {names:?}"
     );
 }
 
@@ -2859,6 +3074,741 @@ async fn distributed_native_promql_cross_region_targets_match_expected_values() 
     assert_eq!(control_rows, rows, "{expression}");
 }
 
+/// A deep native tree executes on the frontend while a true two-DN gRPC query reads fragments.
+#[test]
+fn distributed_native_promql_deep_binary_over_real_grpc() {
+    std::thread::Builder::new()
+        .name("deep-native-grpc".into())
+        .stack_size(32 * 1024 * 1024)
+        .spawn(|| {
+            tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(4)
+                .thread_stack_size(32 * 1024 * 1024)
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(async {
+                    common_telemetry::init_default_ut_logging();
+                    let cluster = GreptimeDbClusterBuilder::new("distributed_native_promql_deep_binary")
+                        .await
+                        .with_datanodes(2)
+                        .with_real_datanode_grpc_addr(true)
+                        .with_frontend_real_datanode_grpc(true)
+                        .with_query_options(QueryOptions { experimental_native_promql: true, ..Default::default() })
+                        .build(false)
+                        .await;
+                    let instance = cluster.fe_instance().clone();
+                    execute_all(&instance, "CREATE TABLE deep_dist_phy (host STRING, val DOUBLE, ts TIMESTAMP TIME INDEX, PRIMARY KEY(host)) PARTITION ON COLUMNS (ts) (ts < '1970-01-01 00:02:00', ts >= '1970-01-01 00:02:00' AND ts < '1970-01-01 00:04:00', ts >= '1970-01-01 00:04:00') ENGINE=metric WITH ('physical_metric_table'='true'); CREATE TABLE deep_dist_b (host STRING, val DOUBLE, ts TIMESTAMP TIME INDEX, PRIMARY KEY(host)) ENGINE=metric WITH ('on_physical_table'='deep_dist_phy'); INSERT INTO deep_dist_b (host,val,ts) VALUES ('x',1,60000),('x',2,120000),('x',3,180000),('x',4,240000),('y',2,60000),('y',3,120000),('y',4,180000),('y',5,240000)", QueryContext::arc()).await;
+                    let query = PromQuery {
+                        query: format!("clamp(deep_dist_b{}, 0, 1000)", " + 1".repeat(80)),
+                        start: "180".to_string(),
+                        end: "240".to_string(),
+                        step: "60s".to_string(),
+                        ..PromQuery::default()
+                    };
+                    assert_deep_native_plan(&instance, &query).await;
+                    cluster.reset_network_do_get_peak();
+                    let output = instance.do_promql_query(&query, native_query_context(true, 2)).await.remove(0).unwrap();
+                    let plan = output.meta.plan.as_ref().expect("frontend physical plan");
+                    assert_native_merge_scans(plan, 1, 3);
+                    let display = datafusion::physical_plan::displayable(plan.as_ref()).indent(true).to_string();
+                    assert!(display.contains("FusedSeriesExec") && !display.contains("JoinExec"), "{display}");
+                    assert_eq!(native_result_rows(output).await, vec![(180_000, "x".to_string(), 83.0), (180_000, "y".to_string(), 84.0), (240_000, "x".to_string(), 84.0), (240_000, "y".to_string(), 85.0)]);
+                    assert!(cluster.network_do_get_peak_active() > 0, "remote gRPC reads occurred");
+                    assert_eq!(cluster.network_do_get_active(), 0, "all response bodies closed");
+                });
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+/// A composed binary consumes a real float canonical boundary before scaling histograms.
+#[tokio::test(flavor = "multi_thread")]
+async fn native_promql_composed_binary_canonical_operand() {
+    use api::greptime_proto::io::prometheus::write::v2::Histogram;
+    use api::greptime_proto::io::prometheus::write::v2::histogram::{Count, ZeroCount};
+    use axum::body::{Body, to_bytes};
+    use common_query::native_histogram::read_histogram;
+    use datatypes::arrow::array::StructArray;
+    use http::Request;
+    use prost::Message;
+    use servers::prom_remote_write::v2::test_util as remote_write_v2;
+    use servers::prom_store::snappy_compress;
+    use tower::ServiceExt;
+
+    common_telemetry::init_default_ut_logging();
+    let (standalone, observer) = native_test_instance(GreptimeDbStandaloneBuilder::new(
+        "native_promql_composed_binary_canonical_operand",
+    ))
+    .await;
+    let instance = standalone.fe_instance().clone();
+    execute_all(&instance, "CREATE TABLE canonical_float (job STRING, host STRING, ts TIMESTAMP TIME INDEX, val DOUBLE, PRIMARY KEY(job,host)); INSERT INTO canonical_float VALUES ('api','a',0,2),('api','b',600000,3)", QueryContext::arc()).await;
+    let server = crate::test_util::build_test_prom_server(instance.clone(), false, None).build();
+    let router = server.build(server.make_app()).unwrap();
+    let request = remote_write_v2::request_with_labels_and_histograms(
+        vec![("__name__", "canonical_hist"), ("job", "api")],
+        [0, 600_000]
+            .into_iter()
+            .map(|timestamp| Histogram {
+                timestamp,
+                count: Some(Count::CountInt(4)),
+                zero_count: Some(ZeroCount::ZeroCountInt(4)),
+                sum: 8.0,
+                ..Default::default()
+            })
+            .collect(),
+    );
+    let response = router
+        .oneshot(
+            Request::post("/v1/prometheus/write")
+                .header("Content-Encoding", "snappy")
+                .header(
+                    "Content-Type",
+                    "application/x-protobuf;proto=io.prometheus.write.v2.Request",
+                )
+                .body(Body::from(
+                    snappy_compress(&request.encode_to_vec()).unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        response.status(),
+        204,
+        "{:?}",
+        to_bytes(response.into_body(), usize::MAX).await.unwrap()
+    );
+
+    let expression =
+        r#"label_replace(canonical_float, "host", "same", "host", ".*") * on(job) canonical_hist"#;
+    let query = PromQuery {
+        query: expression.to_string(),
+        start: "0".to_string(),
+        end: "600".to_string(),
+        step: "600s".to_string(),
+        ..PromQuery::default()
+    };
+    let ctx = native_query_context(true, 4);
+    let stmt = QueryLanguageParser::parse_promql(&query, &ctx).unwrap();
+    let logical = instance
+        .query_engine()
+        .planner()
+        .plan(&stmt, ctx)
+        .await
+        .unwrap();
+    let logical_display = logical.display_indent().to_string();
+    let datafusion::logical_expr::LogicalPlan::Extension(extension) = &logical else {
+        panic!("{logical_display}")
+    };
+    let binary = extension
+        .node
+        .as_any()
+        .downcast_ref::<promql::extension_plan::FusedSeries>()
+        .unwrap_or_else(|| panic!("{logical_display}"));
+    assert!(
+        matches!(
+            binary.tree().root().expr,
+            promql::native::plan::NativeExpr::Binary { .. }
+        ),
+        "{logical_display}"
+    );
+    assert_eq!(binary.children().len(), 2, "{logical_display}");
+    assert!(
+        logical_display.contains("output: series_frame") && !logical_display.contains("Join:"),
+        "{logical_display}"
+    );
+
+    observer.clear();
+    let output = instance
+        .do_promql_query(&query, native_query_context(true, 4))
+        .await
+        .remove(0)
+        .unwrap();
+    let batches = match output.data {
+        OutputData::Stream(stream) => collect_batches(stream).await.unwrap(),
+        OutputData::RecordBatches(batches) => batches,
+        _ => unreachable!(),
+    };
+    let mut rows = Vec::new();
+    for batch in batches.iter() {
+        let batch = batch.df_record_batch();
+        let time = batch
+            .columns()
+            .iter()
+            .find(|column| matches!(column.data_type(), DataType::Timestamp(..)))
+            .unwrap();
+        let time = cast(time.as_ref(), &DataType::Int64).unwrap();
+        let time = time.as_any().downcast_ref::<Int64Array>().unwrap();
+        let job = batch.column_by_name("job").unwrap();
+        let job = cast(job.as_ref(), &DataType::Utf8).unwrap();
+        let job = job.as_any().downcast_ref::<StringArray>().unwrap();
+        let histogram = batch
+            .columns()
+            .iter()
+            .find_map(|column| column.as_any().downcast_ref::<StructArray>())
+            .unwrap();
+        for row in 0..batch.num_rows() {
+            let h = read_histogram(histogram, row).unwrap().unwrap();
+            rows.push((
+                time.value(row),
+                job.value(row).to_string(),
+                h.count,
+                h.zero_count,
+                h.sum,
+            ));
+        }
+    }
+    rows.sort_by_key(|row| row.0);
+    assert_eq!(
+        rows,
+        vec![
+            (0, "api".to_string(), 8.0, 8.0, 16.0),
+            (600_000, "api".to_string(), 12.0, 12.0, 24.0)
+        ]
+    );
+    assert!(
+        canonical_router(&observer).is_some(),
+        "canonical producer must route its complete float label set"
+    );
+
+    // Overlapping inputs must fail at the canonical boundary before the binary can conceal them.
+    execute_all(
+        &instance,
+        "INSERT INTO canonical_float VALUES ('api','b',0,3)",
+        QueryContext::arc(),
+    )
+    .await;
+    observer.clear();
+    let result = instance
+        .do_promql_query(&query, native_query_context(true, 4))
+        .await
+        .remove(0);
+    let error = match result {
+        Ok(output) => collect_error(output).await,
+        Err(error) => error.to_string(),
+    };
+    assert!(
+        error.contains("cannot contain metrics with the same labelset"),
+        "{error}"
+    );
+    assert!(
+        canonical_router(&observer).is_some(),
+        "the canonical producer must check the overlapping series"
+    );
+}
+
+/// Two independently planned histogram frames retain reset-collision values and diagnostics.
+#[tokio::test(flavor = "multi_thread")]
+async fn native_promql_composed_histogram_reset_warning() {
+    use api::greptime_proto::io::prometheus::write::v2::histogram::Count;
+    use api::greptime_proto::io::prometheus::write::v2::{BucketSpan, Histogram};
+    use axum::body::{Body, to_bytes};
+    use common_query::native_histogram::{CounterResetHint, read_histogram};
+    use common_query::promql_annotations::promql_annotation_collector;
+    use datatypes::arrow::array::StructArray;
+    use http::Request;
+    use prost::Message;
+    use servers::prom_remote_write::v2::test_util as remote_write_v2;
+    use servers::prom_store::snappy_compress;
+    use tower::ServiceExt;
+
+    common_telemetry::init_default_ut_logging();
+    let (standalone, _) = native_test_instance(GreptimeDbStandaloneBuilder::new(
+        "native_promql_composed_histogram_reset_warning",
+    ))
+    .await;
+    let instance = standalone.fe_instance().clone();
+    let server = crate::test_util::build_test_prom_server(instance.clone(), false, None).build();
+    let router = server.build(server.make_app()).unwrap();
+    for (metric, count, sum, reset_hint) in [
+        ("reset_hist_a", 4_u64, 8.0, 1),
+        ("reset_hist_b", 2_u64, 4.0, 2),
+    ] {
+        let request = remote_write_v2::request_with_labels_and_histograms(
+            vec![("__name__", metric), ("job", "api")],
+            vec![Histogram {
+                timestamp: 60_000,
+                count: Some(Count::CountInt(count)),
+                sum,
+                schema: 1,
+                positive_spans: vec![BucketSpan {
+                    offset: 0,
+                    length: 2,
+                }],
+                positive_deltas: vec![(count / 2) as i64, 0],
+                reset_hint,
+                ..Default::default()
+            }],
+        );
+        let response = router
+            .clone()
+            .oneshot(
+                Request::post("/v1/prometheus/write")
+                    .header("Content-Encoding", "snappy")
+                    .header(
+                        "Content-Type",
+                        "application/x-protobuf;proto=io.prometheus.write.v2.Request",
+                    )
+                    .body(Body::from(
+                        snappy_compress(&request.encode_to_vec()).unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        assert_eq!(
+            status,
+            204,
+            "{:?}",
+            to_bytes(response.into_body(), usize::MAX).await.unwrap()
+        );
+    }
+    let query = PromQuery {
+        query: "reset_hist_a + on(job) reset_hist_b".to_string(),
+        start: "60".to_string(),
+        end: "60".to_string(),
+        step: "60s".to_string(),
+        ..PromQuery::default()
+    };
+    let ctx = native_query_context(true, 2);
+    let statement = QueryLanguageParser::parse_promql(&query, &ctx).unwrap();
+    let logical = instance
+        .query_engine()
+        .planner()
+        .plan(&statement, Arc::clone(&ctx))
+        .await
+        .unwrap();
+    let display = logical.display_indent().to_string();
+    let datafusion::logical_expr::LogicalPlan::Extension(extension) = &logical else {
+        panic!("{display}")
+    };
+    let binary = extension
+        .node
+        .as_any()
+        .downcast_ref::<promql::extension_plan::FusedSeries>()
+        .unwrap_or_else(|| panic!("{display}"));
+    let promql::native::plan::NativeExpr::Binary { left, right, .. } = &binary.tree().root().expr
+    else {
+        panic!("{display}")
+    };
+    assert!(
+        matches!(left.expr, promql::native::plan::NativeExpr::Input(_))
+            && matches!(right.expr, promql::native::plan::NativeExpr::Input(_)),
+        "{display}"
+    );
+    assert_eq!(binary.children().len(), 2, "{display}");
+    assert!(!display.contains("Join:"), "{display}");
+
+    // Hold a strong reference to the query-scoped collector until the output stream has finished.
+    let collector = promql_annotation_collector(ctx.remote_query_id().unwrap());
+    let output = instance
+        .do_promql_query(&query, ctx)
+        .await
+        .remove(0)
+        .unwrap();
+    let batches = match output.data {
+        OutputData::Stream(stream) => collect_batches(stream).await.unwrap(),
+        OutputData::RecordBatches(batches) => batches,
+        _ => unreachable!(),
+    };
+    let mut rows = Vec::new();
+    for batch in batches.iter() {
+        let batch = batch.df_record_batch();
+        let time = batch
+            .columns()
+            .iter()
+            .find(|column| matches!(column.data_type(), DataType::Timestamp(..)))
+            .unwrap();
+        let time = cast(time.as_ref(), &DataType::Int64).unwrap();
+        let time = time.as_any().downcast_ref::<Int64Array>().unwrap();
+        let job = cast(
+            batch.column_by_name("job").unwrap().as_ref(),
+            &DataType::Utf8,
+        )
+        .unwrap();
+        let job = job.as_any().downcast_ref::<StringArray>().unwrap();
+        let histogram = batch
+            .columns()
+            .iter()
+            .find_map(|column| column.as_any().downcast_ref::<StructArray>())
+            .unwrap();
+        for row in 0..batch.num_rows() {
+            let h = read_histogram(histogram, row).unwrap().unwrap();
+            rows.push((time.value(row), job.value(row).to_string(), h));
+        }
+    }
+    assert_eq!(rows.len(), 1);
+    let (timestamp, job, h) = &rows[0];
+    assert_eq!((*timestamp, job.as_str()), (60_000, "api"));
+    assert_eq!((h.count, h.sum, h.zero_count), (6.0, 12.0, 0.0));
+    assert_eq!((h.schema, h.zero_threshold), (1, 0.0));
+    assert_eq!(h.positive_spans.len(), 1);
+    assert_eq!(
+        (h.positive_spans[0].offset, h.positive_spans[0].length),
+        (0, 2)
+    );
+    assert_eq!(h.positive_buckets, vec![3.0, 3.0]);
+    assert!(h.negative_spans.is_empty() && h.negative_buckets.is_empty());
+    assert!(h.custom_values.is_empty());
+    assert_eq!(h.reset_hint, CounterResetHint::Unknown);
+    assert_eq!(h.start_timestamp, None);
+    let mut warnings = Vec::new();
+    let mut infos = Vec::new();
+    collector.append_to(&mut warnings, &mut infos);
+    assert_eq!(
+        warnings,
+        vec!["prom_native_histogram_add: native histogram counter reset hints contradict"]
+    );
+    assert!(infos.is_empty());
+}
+
+/// A composed native binary answers grouped matches and multi-selector operands as one fused node
+/// over two evaluated frames, and fills a missing side the way its modifier says.
+///
+/// The rows are written out rather than taken from the existing route: these pairs mix a native
+/// histogram with a float, which is the shape the composed route exists for. What they pin is that
+/// a grouped match reports the many side's labels with the declared ones copied in from the one
+/// side (`group_left` keeps the left side's labels, `group_right` the right side's and drops the
+/// label the one side does not carry), and that the arithmetic is the modifier's: `histogram * k`
+/// scales count and sum, and a missing right side filled with zero scales them to zero. A filled
+/// step is filed at the match group of the series that has the sample, so a `group_right` fill
+/// answers at the one side's labels - `job` below, which the many side never carries - and the
+/// answer has to declare them for the rows to keep them. A grouped `include` label is the other
+/// way round: it is copied from the one side, which removes it from the many side's labels when it
+/// does not have it, so a label only the many side carries is on no row and the answer must not
+/// declare it either.
+#[tokio::test(flavor = "multi_thread")]
+async fn native_promql_composed_grouped_and_multi_selector_operands() {
+    use api::greptime_proto::io::prometheus::write::v2::Histogram;
+    use api::greptime_proto::io::prometheus::write::v2::histogram::{Count, ZeroCount};
+    use axum::body::{Body, to_bytes};
+    use http::Request;
+    use prost::Message;
+    use servers::prom_remote_write::v2::test_util as remote_write_v2;
+    use servers::prom_store::snappy_compress;
+    use tower::ServiceExt;
+
+    common_telemetry::init_default_ut_logging();
+    let (standalone, _) = native_test_instance(GreptimeDbStandaloneBuilder::new(
+        "native_promql_composed_grouped_operands",
+    ))
+    .await;
+    let instance = standalone.fe_instance().clone();
+    execute_all(
+        &instance,
+        "CREATE TABLE grouped_float (job STRING, host STRING, unit STRING, ts TIMESTAMP TIME INDEX, val DOUBLE, PRIMARY KEY(job, host, unit));
+         INSERT INTO grouped_float VALUES ('api','a','x',0,2),('api','a','x',600000,3);
+         CREATE TABLE grouped_gap (job STRING, host STRING, ts TIMESTAMP TIME INDEX, val DOUBLE, PRIMARY KEY(job, host));
+         INSERT INTO grouped_gap VALUES ('api','a',600000,4);
+         CREATE TABLE grouped_host (host STRING, ts TIMESTAMP TIME INDEX, val DOUBLE, PRIMARY KEY(host));
+         INSERT INTO grouped_host VALUES ('a',600000,4)",
+        QueryContext::arc(),
+    )
+    .await;
+    // The histogram side is one series, labeled `job="api"`, sampled at the two steps: four counts
+    // and a sum of eight.
+    let server = crate::test_util::build_test_prom_server(instance.clone(), false, None).build();
+    let router = server.build(server.make_app()).unwrap();
+    let request = remote_write_v2::request_with_labels_and_histograms(
+        vec![("__name__", "grouped_hist"), ("job", "api")],
+        [0, 600_000]
+            .into_iter()
+            .map(|timestamp| Histogram {
+                timestamp,
+                count: Some(Count::CountInt(4)),
+                zero_count: Some(ZeroCount::ZeroCountInt(4)),
+                sum: 8.0,
+                ..Default::default()
+            })
+            .collect(),
+    );
+    let response = router
+        .oneshot(
+            Request::post("/v1/prometheus/write")
+                .header("Content-Encoding", "snappy")
+                .header(
+                    "Content-Type",
+                    "application/x-protobuf;proto=io.prometheus.write.v2.Request",
+                )
+                .body(Body::from(
+                    snappy_compress(&request.encode_to_vec()).unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        response.status(),
+        204,
+        "{:?}",
+        to_bytes(response.into_body(), usize::MAX).await.unwrap()
+    );
+
+    for (expression, expected, undeclared) in [
+        // `group_left(host)` reports the left (many) side's labels and copies `host` in from the one
+        // side, which carries it.
+        (
+            "grouped_hist * on(job) group_left(host) grouped_float",
+            vec![
+                (
+                    0,
+                    vec!["host=a".to_string(), "job=api".to_string()],
+                    8.0,
+                    16.0,
+                ),
+                (
+                    600_000,
+                    vec!["host=a".to_string(), "job=api".to_string()],
+                    12.0,
+                    24.0,
+                ),
+            ],
+            &[][..],
+        ),
+        // `group_right(host)` reports the right (many) side's labels: `host` is dropped because the
+        // one side does not carry it, and `unit` survives because a grouping does not narrow.
+        (
+            "grouped_hist * on(job) group_right(host) grouped_float",
+            vec![
+                (
+                    0,
+                    vec!["job=api".to_string(), "unit=x".to_string()],
+                    8.0,
+                    16.0,
+                ),
+                (
+                    600_000,
+                    vec!["job=api".to_string(), "unit=x".to_string()],
+                    12.0,
+                    24.0,
+                ),
+            ],
+            // The one side never carries `host`, and `on(job)` keeps it out of the key a fill reads.
+            &["host"][..],
+        ),
+        // A one-to-one match narrows the labels to what it matches on.
+        (
+            "grouped_hist * on(job) grouped_float",
+            vec![
+                (0, vec!["job=api".to_string()], 8.0, 16.0),
+                (600_000, vec!["job=api".to_string()], 12.0, 24.0),
+            ],
+            &[][..],
+        ),
+        // `group_right` fills a missing many side from the one side's series, at that series' match
+        // group label set. `grouped_host` carries no `job`, so no step pairs and every step is
+        // filled with zero at the one side's `job` - a label the many side never carries, and one
+        // the answer therefore has to declare.
+        (
+            "grouped_hist * on(job) group_right fill_right(0) grouped_host",
+            vec![
+                (0, vec!["job=api".to_string()], 0.0, 0.0),
+                (600_000, vec!["job=api".to_string()], 0.0, 0.0),
+            ],
+            &[][..],
+        ),
+        // `group_left(host)` copies `host` from the one side, and the one side here is the histogram
+        // series, which carries no `host`: the many side's own `host` never reaches a row, so the
+        // answer declares neither it nor a column nothing fills. `unit` is not an include label and
+        // survives, as a grouping does not narrow.
+        (
+            "grouped_float * on(job) group_left(host) grouped_hist",
+            vec![
+                (
+                    0,
+                    vec!["job=api".to_string(), "unit=x".to_string()],
+                    8.0,
+                    16.0,
+                ),
+                (
+                    600_000,
+                    vec!["job=api".to_string(), "unit=x".to_string()],
+                    12.0,
+                    24.0,
+                ),
+            ],
+            // The one side never carries `host`, and `on(job)` keeps it out of the key a fill reads.
+            &["host"][..],
+        ),
+        // An operand that reads more than one selector still evaluates on its own: the right side
+        // is `2 + 2` at the first step and `3 + 3` at the second, so the histogram is scaled by 4
+        // and then by 6.
+        (
+            "grouped_hist * on(job) (grouped_float + on(job, host) grouped_float)",
+            vec![
+                (0, vec!["job=api".to_string()], 16.0, 32.0),
+                (600_000, vec!["job=api".to_string()], 24.0, 48.0),
+            ],
+            &[][..],
+        ),
+    ] {
+        let query = PromQuery {
+            query: expression.to_string(),
+            start: "0".to_string(),
+            end: "600".to_string(),
+            step: "600s".to_string(),
+            ..PromQuery::default()
+        };
+        // The composed plan itself: one fused binary over two evaluated operands, with no join
+        // between them.
+        let ctx = native_query_context(true, 4);
+        let statement = QueryLanguageParser::parse_promql(&query, &ctx).unwrap();
+        let logical = instance
+            .query_engine()
+            .planner()
+            .plan(&statement, ctx)
+            .await
+            .unwrap();
+        let display = logical.display_indent().to_string();
+        let datafusion::logical_expr::LogicalPlan::Extension(extension) = &logical else {
+            panic!("{expression}: {display}")
+        };
+        let binary = extension
+            .node
+            .as_any()
+            .downcast_ref::<promql::extension_plan::FusedSeries>()
+            .unwrap_or_else(|| panic!("{expression}: {display}"));
+        assert!(
+            matches!(
+                binary.tree().root().expr,
+                promql::native::plan::NativeExpr::Binary { .. }
+            ),
+            "{expression}: {display}"
+        );
+        assert_eq!(binary.children().len(), 2, "{expression}: {display}");
+        assert!(
+            display.contains("output: series_frame") && !display.contains("Join:"),
+            "{expression}: {display}"
+        );
+
+        let rows = histogram_label_rows(
+            instance
+                .do_promql_query(&query, native_query_context(true, 4))
+                .await
+                .remove(0)
+                .unwrap(),
+        )
+        .await;
+        // Every label an answer carries is one the plan declares: a filled step answers at the one
+        // side's match group, which is a label set the many side never carries.
+        for (_, labels, _, _) in &rows {
+            for label in labels {
+                let name = label.split('=').next().unwrap();
+                assert!(
+                    logical
+                        .schema()
+                        .fields()
+                        .iter()
+                        .any(|field| field.name().as_str() == name),
+                    "{expression}: `{name}` is carried but not declared: {display}"
+                );
+            }
+        }
+        // And no column is declared that no row can fill: a grouped `include` label is on a row only
+        // when the one side carries it or the matching keeps it in the key a fill reads.
+        for name in undeclared {
+            assert!(
+                !logical
+                    .schema()
+                    .fields()
+                    .iter()
+                    .any(|field| field.name().as_str() == *name),
+                "{expression}: `{name}` is declared but no row can carry it: {display}"
+            );
+        }
+        assert_eq!(expected, rows, "{expression}");
+    }
+
+    // `fill_right` answers the step whose right side is missing: a histogram scaled by zero keeps
+    // the label set of the many side and answers zero count and sum.
+    let query = PromQuery {
+        query: "grouped_hist * on(job) fill_right(0) grouped_gap".to_string(),
+        start: "0".to_string(),
+        end: "600".to_string(),
+        step: "600s".to_string(),
+        ..PromQuery::default()
+    };
+    let filled = histogram_label_rows(
+        instance
+            .do_promql_query(&query, native_query_context(true, 4))
+            .await
+            .remove(0)
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(
+        vec![
+            (0, vec!["job=api".to_string()], 0.0, 0.0),
+            (600_000, vec!["job=api".to_string()], 16.0, 32.0),
+        ],
+        filled,
+        "the missing right side is filled with zero"
+    );
+}
+
+/// The rows of a histogram-answering PromQL result, read by column kind rather than by name.
+///
+/// The two routes name their value column differently - the compiled field of a native plan against
+/// the legacy expression text - and order their columns differently, so each row is flattened to
+/// its timestamp, its labels as `name=value`, and the histogram's count and sum.
+async fn histogram_label_rows(output: Output) -> Vec<(i64, Vec<String>, f64, f64)> {
+    use common_query::native_histogram::read_histogram;
+    use datatypes::arrow::array::StructArray;
+
+    let batches = match output.data {
+        OutputData::Stream(stream) => collect_batches(stream).await.unwrap(),
+        OutputData::RecordBatches(batches) => batches,
+        _ => unreachable!("PromQL answers record batches"),
+    };
+    let mut rows = Vec::new();
+    for batch in batches.iter() {
+        let batch = batch.df_record_batch();
+        let (time_index, _) = batch
+            .columns()
+            .iter()
+            .enumerate()
+            .find(|(_, column)| matches!(column.data_type(), DataType::Timestamp(..)))
+            .expect("a PromQL result carries its time index");
+        let time = cast(batch.column(time_index).as_ref(), &DataType::Int64).unwrap();
+        let time = time.as_any().downcast_ref::<Int64Array>().unwrap();
+        let names = batch
+            .schema()
+            .fields()
+            .iter()
+            .map(|field| field.name().clone())
+            .collect::<Vec<_>>();
+        let histogram = batch
+            .columns()
+            .iter()
+            .find_map(|column| column.as_any().downcast_ref::<StructArray>())
+            .expect("a histogram result carries a histogram column");
+        for row in 0..batch.num_rows() {
+            let mut labels = Vec::new();
+            for (index, column) in batch.columns().iter().enumerate() {
+                if !matches!(
+                    column.data_type(),
+                    DataType::Utf8 | DataType::Dictionary(_, _)
+                ) {
+                    continue;
+                }
+                let text = cast(column.as_ref(), &DataType::Utf8).unwrap();
+                let text = text.as_any().downcast_ref::<StringArray>().unwrap();
+                if !text.is_null(row) && !text.value(row).is_empty() {
+                    labels.push(format!("{}={}", names[index], text.value(row)));
+                }
+            }
+            labels.sort();
+            let histogram = read_histogram(histogram, row).unwrap().unwrap();
+            rows.push((time.value(row), labels, histogram.count, histogram.sum));
+        }
+    }
+    rows.sort_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)));
+    rows
+}
+
 /// The rows of the repeated-selector fixture, inserted into the one logical table
 /// `{prefix}_b`. Both hosts are counters sampled every minute for ten minutes, longer than the
 /// widest window the test reads, so a 5m window and a 10m window over the same series cover
@@ -2880,11 +3830,11 @@ fn repeated_selector_fixture_inserts(prefix: &str) -> String {
 }
 
 /// Real two-datanode TCP acceptance for a repeated selector over ONE partitioned metric table.
-/// Over the wire every prepared scan becomes its own raw source with its own time bounds, so two
-/// occurrences of the same fragmented table - a ratio of two windows, or a binary expression over
-/// two identical ones - stay independent instead of falling back. In process the same expression
-/// would place one node region-locally over both scans of the one table, which no region can serve,
-/// so this admission is remote-only.
+/// Every prepared scan becomes its own raw source with its own time bounds, so two occurrences of
+/// the same fragmented table - a ratio of two windows, or a binary expression over two identical
+/// ones - stay independent instead of falling back. Over the wire the transport carries those
+/// sources; in process they keep the node out of the region, which cannot serve one node over both
+/// scans of the one table.
 #[tokio::test(flavor = "multi_thread")]
 async fn distributed_native_promql_repeated_selector_over_partitioned_table() {
     common_telemetry::init_default_ut_logging();
@@ -3028,6 +3978,289 @@ async fn distributed_native_promql_repeated_selector_over_partitioned_table() {
         }
         assert_eq!(control_rows, rows, "{expression}");
     }
+}
+
+/// The rows a collapsing rewrite joins into one series without a collision: the two stored series
+/// are ten minutes apart, twice the five-minute lookback, so exactly one of them holds a value at
+/// each evaluation point and the label set they share carries both points.
+fn canonical_merge_fixture_inserts(prefix: &str) -> String {
+    format!(
+        "INSERT INTO {prefix}_b (host, val, ts) VALUES ('first', 10, 0), ('second', 20, 600000)"
+    )
+}
+
+/// The rows a collapsing rewrite can only reject: the second series is two minutes after the first,
+/// inside the lookback, so both hold a value at the same evaluation point while the declared partition
+/// column stores the two hosts under values that place them in different regions.
+fn canonical_collision_fixture_inserts(prefix: &str) -> String {
+    format!("INSERT INTO {prefix}_c (host, val, ts) VALUES ('early', 10, 0), ('late', 20, 120000)")
+}
+
+/// Real two-datanode TCP acceptance for a canonical merge over a tag-partitioned metric table.
+///
+/// A rewrite that writes a label its input carries can give two stored series one label set. The two
+/// series are stored under different values of the declared partition column, so that partition puts
+/// the pieces of the one label set in different regions: no region holds the set whole. A
+/// region-local producer merges only the pieces its own region holds, so the boundary has to be
+/// placed above the regions: the frontend runs the producer over the reconciled raw sources, and the
+/// canonical router it inserts above itself collects each label set from every region.
+///
+/// The test states that in the three ways it can be observed: the values (against the same rows in
+/// one unpartitioned table), the plan (the producer is a frontend node reading a merge scan, with its
+/// canonical router above it), and the error (a collision two different regions hold is reported,
+/// which no single region could see).
+#[tokio::test(flavor = "multi_thread")]
+async fn distributed_native_promql_canonical_merge_over_partitioned_table() {
+    common_telemetry::init_default_ut_logging();
+    let cluster = GreptimeDbClusterBuilder::new("distributed_native_promql_canonical")
+        .await
+        .with_datanodes(2)
+        .with_real_datanode_grpc_addr(true)
+        .with_frontend_real_datanode_grpc(true)
+        .with_query_options(QueryOptions {
+            experimental_native_promql: true,
+            ..Default::default()
+        })
+        .build(false)
+        .await;
+    let instance = cluster.fe_instance().clone();
+    execute_all(
+        &instance,
+        "CREATE TABLE dist_native_canon_phy (host STRING, val DOUBLE, ts TIMESTAMP TIME INDEX, PRIMARY KEY(host)) PARTITION ON COLUMNS (host) (host < 'first', host >= 'first' AND host < 'second', host >= 'second') ENGINE=metric WITH ('physical_metric_table'='true')",
+        QueryContext::arc(),
+    )
+    .await;
+    for table in ["dist_native_canon_b", "dist_native_canon_c"] {
+        execute_all(
+            &instance,
+            &format!(
+                "CREATE TABLE {table} (host STRING, val DOUBLE, ts TIMESTAMP TIME INDEX, PRIMARY KEY(host)) ENGINE=metric WITH ('on_physical_table'='dist_native_canon_phy')"
+            ),
+            QueryContext::arc(),
+        )
+        .await;
+    }
+    execute_all(
+        &instance,
+        &canonical_merge_fixture_inserts("dist_native_canon"),
+        QueryContext::arc(),
+    )
+    .await;
+    execute_all(
+        &instance,
+        &canonical_collision_fixture_inserts("dist_native_canon"),
+        QueryContext::arc(),
+    )
+    .await;
+
+    // The semantic reference: the same rows in one unpartitioned physical table, where one region
+    // holds every piece of a label set. Its evaluation is what the partitioned plan has to reproduce.
+    execute_all(
+        &instance,
+        "CREATE TABLE dist_native_canon_ctl_phy (host STRING, val DOUBLE, ts TIMESTAMP TIME INDEX, PRIMARY KEY(host)) ENGINE=metric WITH ('physical_metric_table'='true')",
+        QueryContext::arc(),
+    )
+    .await;
+    for table in ["dist_native_canon_ctl_b", "dist_native_canon_ctl_c"] {
+        execute_all(
+            &instance,
+            &format!(
+                "CREATE TABLE {table} (host STRING, val DOUBLE, ts TIMESTAMP TIME INDEX, PRIMARY KEY(host)) ENGINE=metric WITH ('on_physical_table'='dist_native_canon_ctl_phy')"
+            ),
+            QueryContext::arc(),
+        )
+        .await;
+    }
+    execute_all(
+        &instance,
+        &canonical_merge_fixture_inserts("dist_native_canon_ctl"),
+        QueryContext::arc(),
+    )
+    .await;
+    execute_all(
+        &instance,
+        &canonical_collision_fixture_inserts("dist_native_canon_ctl"),
+        QueryContext::arc(),
+    )
+    .await;
+
+    // Two stored series rewritten to one label set, holding their values at different evaluation
+    // points, are one series carrying both points - and the hosts they are stored under land in
+    // different host ranges, so the two pieces are in different regions.
+    let expression = r#"label_replace(dist_native_canon_b, "host", "same", "host", ".*")"#;
+    let query = PromQuery {
+        query: expression.to_string(),
+        start: "0".to_string(),
+        end: "600".to_string(),
+        step: "600s".to_string(),
+        ..PromQuery::default()
+    };
+    let expected = vec![
+        (0, "same".to_string(), 10.0),
+        (600_000, "same".to_string(), 20.0),
+    ];
+    let control = expression.replace("dist_native_canon_", "dist_native_canon_ctl_");
+    for (route, native) in [("native", true), ("existing", false)] {
+        let control_rows = native_result_rows(
+            instance
+                .do_promql_query(
+                    &PromQuery {
+                        query: control.clone(),
+                        ..query.clone()
+                    },
+                    native_query_context(native, 2),
+                )
+                .await
+                .remove(0)
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(
+            control_rows, expected,
+            "the control over one region defines every row: {route}: {control}"
+        );
+    }
+
+    let output = instance
+        .do_promql_query(&query, native_query_context(true, 2))
+        .await
+        .remove(0)
+        .unwrap();
+    let plan = output.meta.plan.as_ref().expect("frontend physical plan");
+    let shape = native_plan_shape(plan);
+    assert_eq!(
+        shape.regions_per_scan,
+        vec![3],
+        "the selector reads all three host ranges: {expression}: {plan:?}"
+    );
+    // Declaring a partition on a primary-key column that is not the time index proves the regions
+    // hold disjoint series, so the merge scan publishes them whole and the boundary above the
+    // regions only ever sees complete stored series.
+    assert!(
+        shape
+            .scan_orderings
+            .iter()
+            .all(|ordering| ordering.as_deref() == Some("contiguous")),
+        "a declared partition on a primary-key column that excludes the time index proves the \
+         regions hold disjoint series (physical_regions_disjoint), so the merge scan publishes \
+         whole series, not fragments: {expression}: {:?}: {plan:?}",
+        shape.scan_orderings
+    );
+    // The boundary's two halves are both frontend nodes: the producer merges what each execution
+    // partition holds and the consumer above it publishes the routed frames. A producer planned
+    // inside a region would leave this tree with one fused node and no canonical producer in it.
+    assert_eq!(
+        shape.fused, 2,
+        "the canonical producer and the consumer above it run on the frontend: {expression}: \
+         {plan:?}"
+    );
+    let producer = native_plan_nodes(plan)
+        .into_iter()
+        .find(|node| promql::extension_plan::is_canonical_producer_exec(node.as_ref()))
+        .unwrap_or_else(|| {
+            panic!(
+                "the canonical producer must be a frontend node above the regions, not a region's \
+                 own producer: {expression}: {plan:?}"
+            )
+        });
+    // What the producer reads is every region's own stored series, each already whole: one merge
+    // scan over all three regions, with no raw-key repartition below it.
+    let below_producer = native_plan_nodes(&producer);
+    assert!(
+        below_producer
+            .iter()
+            .any(|node| node.downcast_ref::<MergeScanExec>().is_some()),
+        "the producer reads the regions through a merge scan: {expression}: {plan:?}"
+    );
+    assert!(
+        below_producer
+            .iter()
+            .all(|node| node.name() != "SeriesRepartitionExec"),
+        "no raw-key repartition sits below the producer: each input partition already holds whole \
+         stored series, since the partition covers the primary key and only the label set crosses \
+         regions: {expression}: {plan:?}"
+    );
+    // The router is the boundary's middle stage: it sits above the producer and collects each label
+    // set from every partition the producer ran on, which is what a region-local boundary cannot do.
+    let router = native_plan_nodes(plan)
+        .into_iter()
+        .find(|node| {
+            node.name() == "SeriesRepartitionExec"
+                && node
+                    .children()
+                    .iter()
+                    .any(|child| promql::extension_plan::is_canonical_producer_exec(child.as_ref()))
+        })
+        .unwrap_or_else(|| {
+            panic!(
+                "the canonical router must read the producer above the regions: {expression}: \
+                 {plan:?}"
+            )
+        });
+    assert_eq!(
+        router.children()[0].name(),
+        "FusedSeriesExec",
+        "the router reads the canonical producer: {expression}: {plan:?}"
+    );
+    assert_eq!(
+        router.properties().output_partitioning().partition_count(),
+        producer
+            .properties()
+            .output_partitioning()
+            .partition_count(),
+        "the router keeps the producer's width instead of gathering every piece: {expression}: \
+         {plan:?}"
+    );
+    let rows = native_result_rows(output).await;
+    assert_eq!(
+        rows, expected,
+        "the partitioned plan answers the control's rows: {expression}"
+    );
+
+    // A collision two regions hold is the error Prometheus reports for two metrics with one label
+    // set. A region-local producer cannot see it: each region would hold one piece and publish it,
+    // and the answer would be two series under one label set. The control over one region reports it
+    // as well, which is the answer the partitioned plan owes.
+    let collision = r#"label_replace(dist_native_canon_c, "host", "same", "host", ".*")"#;
+    let collision_query = PromQuery {
+        query: collision.to_string(),
+        start: "120".to_string(),
+        end: "120".to_string(),
+        step: "60s".to_string(),
+        ..PromQuery::default()
+    };
+    let collision_control = collision.replace("dist_native_canon_", "dist_native_canon_ctl_");
+    let control_error = instance
+        .do_promql_query(
+            &PromQuery {
+                query: collision_control.clone(),
+                ..collision_query.clone()
+            },
+            native_query_context(true, 2),
+        )
+        .await
+        .remove(0);
+    let control_error = match control_error {
+        Ok(output) => collect_error(output).await,
+        Err(error) => error.to_string(),
+    };
+    assert!(
+        control_error.contains("cannot contain metrics with the same labelset"),
+        "the control over one region reports the overlap: {collision_control}: {control_error}"
+    );
+    let partitioned = instance
+        .do_promql_query(&collision_query, native_query_context(true, 2))
+        .await
+        .remove(0);
+    let partitioned_error = match partitioned {
+        Ok(output) => collect_error(output).await,
+        Err(error) => error.to_string(),
+    };
+    assert!(
+        partitioned_error.contains("cannot contain metrics with the same labelset"),
+        "a label set whose pieces two regions hold is collected by the router and rejected, not \
+         published twice: {collision}: {partitioned_error}"
+    );
 }
 
 /// The rows of the disjoint fixture, inserted into the logical tables `{prefix}_a` and
@@ -3323,6 +4556,112 @@ async fn distributed_native_promql_disjoint_regions_do_not_repartition() {
     assert_eq!(control_rows, rows, "{expression}");
 }
 
+/// A zero-match selector and a partitioned metric meet at one frontend set consumer.
+#[tokio::test(flavor = "multi_thread")]
+async fn distributed_native_promql_zero_match_or_real() {
+    common_telemetry::init_default_ut_logging();
+    let cluster = GreptimeDbClusterBuilder::new("distributed_native_promql_zero_match")
+        .await
+        .with_datanodes(2)
+        .with_real_datanode_grpc_addr(true)
+        .with_frontend_real_datanode_grpc(true)
+        .with_query_options(QueryOptions {
+            experimental_native_promql: true,
+            ..Default::default()
+        })
+        .build(false)
+        .await;
+    let instance = cluster.fe_instance().clone();
+    execute_all(
+        &instance,
+        r#"
+        CREATE TABLE zero_match_phy (host STRING, val DOUBLE, ts TIMESTAMP TIME INDEX, PRIMARY KEY(host))
+            PARTITION ON COLUMNS (host) (host < 'm', host >= 'm')
+            ENGINE=metric WITH ('physical_metric_table'='true');
+        CREATE TABLE alpha_total (host STRING, val DOUBLE, ts TIMESTAMP TIME INDEX, PRIMARY KEY(host))
+            ENGINE=metric WITH ('on_physical_table'='zero_match_phy');
+        INSERT INTO alpha_total (host, ts, val) VALUES
+            ('a', 0, 1), ('a', 1000, 2), ('a', 2000, 3),
+            ('z', 0, 10), ('z', 1000, 20), ('z', 2000, 30);
+        "#,
+        QueryContext::arc(),
+    )
+    .await;
+
+    let expected = [
+        (0, "a", 1.0),
+        (1000, "a", 2.0),
+        (2000, "a", 3.0),
+        (0, "z", 10.0),
+        (1000, "z", 20.0),
+        (2000, "z", 30.0),
+    ];
+    for (expression, empty_index) in [
+        (r#"{__name__=~"no_such_metric_.+"} or alpha_total"#, 0),
+        (r#"alpha_total or {__name__=~"no_such_metric_.+"}"#, 1),
+    ] {
+        let output = instance
+            .do_promql_query(
+                &PromQuery {
+                    query: expression.to_string(),
+                    start: "0".to_string(),
+                    end: "2".to_string(),
+                    step: "1s".to_string(),
+                    ..PromQuery::default()
+                },
+                native_query_context(true, 2),
+            )
+            .await
+            .remove(0)
+            .unwrap();
+        let plan = output.meta.plan.as_ref().expect("frontend physical plan");
+        let fused = find_plan_node(plan, "FusedSeriesExec").expect("frontend set consumer");
+        let display = format!(
+            "{}",
+            datafusion::physical_plan::displayable(fused.as_ref()).one_line()
+        );
+        assert!(display.contains("root Set or"), "{expression}: {display}");
+        let children = fused.children();
+        assert_eq!(children.len(), 2, "{expression}: {display}");
+        assert!(
+            find_plan_node(children[empty_index], "EmptyExec").is_some(),
+            "{expression}: {display}"
+        );
+        let shape = native_plan_shape(children[1 - empty_index]);
+        assert_eq!(shape.regions_per_scan, vec![2], "{expression}: {display}");
+        assert_eq!(
+            fused.output_partitioning().partition_count(),
+            1,
+            "{expression}: {display}"
+        );
+        assert!(
+            children
+                .iter()
+                .all(|child| child.output_partitioning().partition_count() == 1),
+            "{expression}: {display}"
+        );
+
+        let (columns, rows) = native_labelled_rows(output).await;
+        assert_eq!(
+            columns,
+            vec!["__name__", "host", "ts", "val"],
+            "{expression}"
+        );
+        let actual = rows
+            .iter()
+            .map(|(time, labels, value)| {
+                assert_eq!(labels.len(), 2, "{expression}: {labels:?}");
+                assert_eq!(
+                    labels.get("__name__").map(String::as_str),
+                    Some("alpha_total")
+                );
+                (*time, labels.get("host").unwrap().as_str(), *value)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(actual, expected, "{expression}");
+    }
+}
+
 /// A nameless selector discovers every metric table it matches and reads them as one `Union`.
 /// `UnionExec` reports the frame metadata of its last child, so a time-partitioned metric named
 /// before a host-partitioned one must still be reconciled: otherwise the union claims contiguous
@@ -3525,11 +4864,17 @@ async fn distributed_native_promql_metric_discovery_reconciles_mixed_ordering() 
     }
 }
 
-/// Remote admission refusals that used to be made by `segment_tree` must survive its bypass:
-/// several sources cannot report groups that differ only by metric name, and an order-dependent
-/// operation over discovered metrics cannot be answered by a union that reads in arrival order.
+/// A union composed under a grouping by the metric name reports one group per metric, over the
+/// wire.
+///
+/// `sum by (__name__) (metric or mito)` reads a metric table beside an ordinary Mito one. The
+/// union is one fused producer whose segments read the two sources, and the name each side reports
+/// is the label the outer grouping folds by, so the answer is two groups whose label sets differ
+/// only in their metric name. That grouping is what this asserts, together with the route: a plan
+/// that dropped the name would fold the two series into one group whose single value still looks
+/// plausible, and a plan answered by the legacy join would have no name column to fold at all.
 #[tokio::test(flavor = "multi_thread")]
-async fn distributed_native_promql_remote_refuses_unsupported_discovery_and_name_grouping() {
+async fn distributed_native_promql_remote_answers_a_name_grouping_over_a_native_union() {
     common_telemetry::init_default_ut_logging();
     let cluster = GreptimeDbClusterBuilder::new("distributed_native_promql_refusal")
         .await
@@ -3595,18 +4940,140 @@ async fn distributed_native_promql_remote_refuses_unsupported_discovery_and_name
                 native_query_context(true, 2),
             )
             .await
-            .remove(0);
-        let Ok(output) = output else {
-            // Legacy planning is allowed to decline this shape too; what must not happen is a
-            // native plan that reports two metric groups it cannot name.
-            continue;
-        };
-        let plan = output.meta.plan.as_ref().expect("frontend physical plan");
-        assert_eq!(
-            native_plan_shape(plan).fused,
-            0,
-            "two sources cannot report groups that differ only by metric name: {plan:?}"
+            .remove(0)
+            .expect("the composed plan answers a grouping by the metric name");
+        let plan = Arc::clone(output.meta.plan.as_ref().expect("frontend physical plan"));
+        // The route has to stay honest: the union is a native producer rather than the legacy join
+        // the existing plan builds for it, so the name column the grouping reads exists at all.
+        assert!(
+            native_plan_shape(&plan).fused >= 1,
+            "the union stays native: {plan:?}"
         );
+        let display = datafusion::physical_plan::displayable(plan.as_ref())
+            .indent(true)
+            .to_string();
+        assert!(
+            !display.contains("JoinExec"),
+            "the union is not a legacy join: {display}"
+        );
+        let (_, rows) = native_labelled_rows(output).await;
+        let named = |name: &str| {
+            std::collections::BTreeMap::from([("__name__".to_string(), name.to_string())])
+        };
+        // Grouping by the name keeps no other label, and the 180s sample is still inside the 5m
+        // lookback at 240s, so both steps report the same value under each name.
+        assert_eq!(
+            vec![
+                (180_000, named("dist_native_refuse_a"), 6.0),
+                (240_000, named("dist_native_refuse_a"), 6.0),
+                (180_000, named("dist_native_refuse_mito"), 6.0),
+                (240_000, named("dist_native_refuse_mito"), 6.0),
+            ],
+            rows,
+            "{expression}: one group per metric name, each named after its own metric"
+        );
+    }
+}
+
+/// The columns and `(timestamp, value)` rows of a statement that reads no table, whose time column
+/// is the statement's own rather than a table's.
+async fn data_free_rows(output: Output) -> (Vec<String>, Vec<(i64, f64)>) {
+    let batches = match output.data {
+        OutputData::Stream(stream) => collect_batches(stream).await.unwrap(),
+        OutputData::RecordBatches(batches) => batches,
+        _ => unreachable!("PromQL query returns record batches"),
+    };
+    let mut columns = Vec::new();
+    let mut rows = Vec::new();
+    for batch in batches {
+        columns = batch
+            .schema
+            .column_schemas()
+            .iter()
+            .map(|column| column.name.clone())
+            .collect();
+        let timestamps = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<TimestampMillisecondArray>()
+            .unwrap();
+        let values = batch
+            .columns()
+            .iter()
+            .filter(|column| column.data_type() == &DataType::Float64)
+            .collect::<Vec<_>>();
+        assert_eq!(values.len(), 1, "one result value column");
+        let values = values[0].as_any().downcast_ref::<Float64Array>().unwrap();
+        for row in 0..batch.num_rows() {
+            rows.push((timestamps.value(row), values.value(row)));
+        }
+    }
+    rows.sort_by_key(|row| row.0);
+    (columns, rows)
+}
+
+/// A statement that reads no table plans natively over the wire, where there is no region to place
+/// anything in: the frontend evaluates one fused node, so the answer keeps the native column name
+/// instead of the one the existing planner derives from an expression.
+#[tokio::test(flavor = "multi_thread")]
+async fn distributed_native_promql_data_free_statement_plans_natively() {
+    common_telemetry::init_default_ut_logging();
+    let cluster = GreptimeDbClusterBuilder::new("distributed_native_promql_data_free")
+        .await
+        .with_datanodes(2)
+        .with_real_datanode_grpc_addr(true)
+        .with_frontend_real_datanode_grpc(true)
+        .with_query_options(QueryOptions {
+            experimental_native_promql: true,
+            ..Default::default()
+        })
+        .build(false)
+        .await;
+    let instance = cluster.fe_instance().clone();
+    for (expression, expected_columns, expected_rows) in [
+        // `start`/`end` are seconds, so this one-step range evaluates at 3000ms.
+        ("time()", &["time", "value"][..], &[(3000, 3.0)][..]),
+        (
+            r#"label_replace(vector(1), "host", "host1", "", "")"#,
+            &["time", "value", "host"][..],
+            &[(3000, 1.0)][..],
+        ),
+    ] {
+        let query = PromQuery {
+            query: expression.to_string(),
+            start: "3".to_string(),
+            end: "3".to_string(),
+            step: "1s".to_string(),
+            ..PromQuery::default()
+        };
+        let output = instance
+            .do_promql_query(&query, native_query_context(true, 2))
+            .await
+            .remove(0)
+            .unwrap();
+        let plan = output.meta.plan.clone().expect("frontend physical plan");
+        let shape = native_plan_shape(&plan);
+        assert_eq!(
+            1, shape.fused,
+            "a data-free statement is one fused node: {plan:?}"
+        );
+        assert!(
+            shape.regions_per_scan.is_empty(),
+            "a data-free statement reads no region: {plan:?}"
+        );
+        let (columns, rows) = data_free_rows(output).await;
+        assert_eq!(expected_columns, columns, "{expression}");
+        assert_eq!(expected_rows, rows.as_slice(), "{expression}");
+
+        // The same statement through the existing planner answers the same rows; only the native
+        // route names the value column after the tree rather than after an expression.
+        let legacy = instance
+            .do_promql_query(&query, native_query_context(false, 2))
+            .await
+            .remove(0)
+            .unwrap();
+        let (_, legacy_rows) = data_free_rows(legacy).await;
+        assert_eq!(rows, legacy_rows, "{expression} must answer the same rows");
     }
 }
 
@@ -4181,6 +5648,183 @@ async fn native_promql_executes_fused_node_and_matches_legacy() {
             );
         }
     }
+}
+
+/// `promql` over `start..=end` at `step`, through the Prometheus handler.
+///
+/// The handler is the path that authorizes and plans a selector naming no metric: a `TQL EVAL`
+/// statement reaches the planner through the statement executor instead, and that path prepares no
+/// discovery scope, so it keeps declining such a selector. Its times are Prometheus timestamps, so
+/// a bare number is a count of seconds.
+async fn promql_output(
+    instance: &Arc<Instance>,
+    promql: &str,
+    start: &str,
+    end: &str,
+    step: &str,
+) -> Output {
+    let query = PromQuery {
+        query: promql.to_string(),
+        start: start.to_string(),
+        end: end.to_string(),
+        step: step.to_string(),
+        ..PromQuery::default()
+    };
+    servers::prometheus_handler::PrometheusHandler::do_query(
+        instance.as_ref(),
+        &query,
+        native_query_context(true, 4),
+    )
+    .await
+    .unwrap_or_else(|error| panic!("{promql} over {start}..={end} at {step}: {error}"))
+}
+
+/// The Prometheus v0.315 answers `absent_over_time` gives, and that the native route reports.
+///
+/// `absent_over_time` answers with the labels its selector's matchers fix at every point no series
+/// of the selector has a sample at, and with nothing at the points one does. Three metric tables
+/// make the shapes reachable: `absent_probe` carries `probe_label`, which no row's value matches, so
+/// a nameless selector narrows to it; `absent_a` and `absent_b` carry the same ordinary labels, so a
+/// nameless selector over them is one discovery expands into several metrics; and no table carries
+/// `no_such_label`, which is the reported query - the one whose selector matches no metric table and
+/// whose labels therefore have to come from the matchers alone.
+///
+/// The existing plan answers the call per series with a UDF, which needs a metric name to read a
+/// table from: such a selector writes none, and the labels still have to reach the answer at every
+/// step.
+///
+/// The statements are evaluated through the Prometheus handler, which is the path that authorizes a
+/// selector naming no metric; a bare timestamp there is a count of seconds, so the samples below sit
+/// at 0s and 60s and the evaluation times are written as the seconds they are.
+#[tokio::test(flavor = "multi_thread")]
+async fn native_promql_absent_over_time_answers_like_prometheus() {
+    common_telemetry::init_default_ut_logging();
+    let (standalone, observer) = native_test_instance(GreptimeDbStandaloneBuilder::new(
+        "native_promql_absent_over_time_e2e",
+    ))
+    .await;
+    let instance = standalone.fe_instance().clone();
+    execute_all(
+        &instance,
+        "CREATE TABLE absent_phy (ts TIMESTAMP TIME INDEX, val DOUBLE) ENGINE=metric WITH ('physical_metric_table'='true')\
+         ; CREATE TABLE absent_a (job STRING, ts TIMESTAMP TIME INDEX, val DOUBLE, PRIMARY KEY(job)) ENGINE=metric WITH ('on_physical_table'='absent_phy')\
+         ; CREATE TABLE absent_b (job STRING, ts TIMESTAMP TIME INDEX, val DOUBLE, PRIMARY KEY(job)) ENGINE=metric WITH ('on_physical_table'='absent_phy')\
+         ; CREATE TABLE absent_probe (job STRING, probe_label STRING, ts TIMESTAMP TIME INDEX, val DOUBLE, PRIMARY KEY(job, probe_label)) ENGINE=metric WITH ('on_physical_table'='absent_phy')\
+         ; INSERT INTO absent_a (job, ts, val) VALUES ('api', 0, 1), ('api', 60000, 2)\
+         ; INSERT INTO absent_b (job, ts, val) VALUES ('api', 0, 3), ('api', 60000, 4)\
+         ; INSERT INTO absent_probe (job, probe_label, ts, val) VALUES ('api', 'y', 0, 5)",
+        QueryContext::arc(),
+    )
+    .await;
+
+    let labels = |pairs: &[(&str, &str)]| {
+        pairs
+            .iter()
+            .map(|(name, value)| ((*name).to_string(), (*value).to_string()))
+            .collect::<std::collections::BTreeMap<_, _>>()
+    };
+    // Every case is the native route's answer: a shape that fell back to the existing plan would
+    // error, because that plan needs a metric name to read a table from.
+    for (promql, start, end, step, expected) in [
+        // Samples inside the window: nothing to report.
+        (
+            "absent_over_time(absent_a[5m])",
+            "120",
+            "120",
+            "1s",
+            Vec::new(),
+        ),
+        // The metric exists and holds no sample in the window: one series, and no `__name__`.
+        (
+            "absent_over_time(absent_a[5m])",
+            "400",
+            "400",
+            "1s",
+            vec![(400000, labels(&[]), 1.0)],
+        ),
+        // A named metric's other equality matcher is a label of the answer.
+        (
+            r#"absent_over_time(absent_a{job="api"}[5m])"#,
+            "400",
+            "400",
+            "1s",
+            vec![(400000, labels(&[("job", "api")]), 1.0)],
+        ),
+        // The reported query: no metric table carries `no_such_label`, so the selector matches
+        // none, and both equality matchers are the answer's labels.
+        (
+            r#"absent_over_time({no_such_label="x", job="api"}[5m])"#,
+            "120",
+            "120",
+            "1s",
+            vec![(
+                120000,
+                labels(&[("job", "api"), ("no_such_label", "x")]),
+                1.0,
+            )],
+        ),
+        // The same answer at every step of a range.
+        (
+            r#"absent_over_time({no_such_label="x", job="api"}[5m])"#,
+            "120",
+            "400",
+            "70s",
+            [120000i64, 190000, 260000, 330000, 400000]
+                .into_iter()
+                .map(|time| (time, labels(&[("job", "api"), ("no_such_label", "x")]), 1.0))
+                .collect::<Vec<_>>(),
+        ),
+        // One metric table carries `probe_label`, and no row's value matches, so the discovery
+        // narrows to that table and the presence read still finds nothing.
+        (
+            r#"absent_over_time({probe_label="x", job="api"}[5m])"#,
+            "120",
+            "120",
+            "1s",
+            vec![(120000, labels(&[("job", "api"), ("probe_label", "x")]), 1.0)],
+        ),
+    ] {
+        observer.clear();
+        let (columns, native) =
+            native_labelled_rows(promql_output(&instance, promql, start, end, step).await).await;
+        assert!(
+            observer.fused().is_some(),
+            "{promql} did not run on the native route: {columns:?} {native:?}"
+        );
+        assert_eq!(
+            native, expected,
+            "{promql} over {start}..={end} at {step}: {columns:?}"
+        );
+    }
+
+    // A nameless selector that discovery expands into more than one metric declines. The presence
+    // read keeps the metric name, and no single name is bound for the segment that hands it over; a
+    // fold that dropped the name would plan, and would read two metrics sharing their ordinary
+    // labels as one series. Neither tree is planned, so the query keeps the existing plan's answer
+    // for a selector that names no metric - an error - rather than answering wrongly.
+    observer.clear();
+    let declined = servers::prometheus_handler::PrometheusHandler::do_query(
+        instance.as_ref(),
+        &PromQuery {
+            query: r#"absent_over_time({job="api"}[5m])"#.to_string(),
+            start: "120".to_string(),
+            end: "120".to_string(),
+            step: "1s".to_string(),
+            ..PromQuery::default()
+        },
+        native_query_context(true, 4),
+    )
+    .await;
+    assert!(
+        declined.is_err(),
+        "a nameless selector over several metrics must not be answered natively yet"
+    );
+    assert!(
+        !observed_physical_nodes(&observer)
+            .iter()
+            .any(|node| node.name() == "FusedSeriesExec"),
+        "the declining shape must not run a fused node"
+    );
 }
 
 /// Compare value and response ordering for native routes added for common PromQL shapes.
@@ -5486,16 +7130,8 @@ async fn native_promql_cross_table_pairs_run_above_both_regions() {
 /// one of them does not carry. Each row's name is asserted together with its value, so a row cannot
 /// pass by carrying the right name and another metric's samples.
 ///
-/// Only the bare selector is asserted. The aggregate form of the same selector cannot be planned in
-/// a frontend yet: the in-process bypass in `query::dist_plan::analyzer` is granted only to a fused
-/// root, or to a split aggregate whose partial producer reads a bare `TableScan`, and a discovered
-/// source is a `RawSeriesSource`. The bypass is therefore not granted, `should_expand` expands one
-/// level lower than the source, and
-/// `plan_raw_series_source` refuses the `MergeScanExec` it is then handed
-/// (`RawSeriesSource for metric ... must be planned over a region scan, got MergeScanExec`). That
-/// is a separate, pre-existing gap - see
-/// `.e-agent/notes/KNOWN-ISSUE-discovery-under-aggregate-cannot-plan.md` - so `sum({job="api"})` is
-/// deliberately not asserted here.
+/// The aggregate form of the same selector folds the names away, so it is asserted separately in
+/// [`native_promql_discovery_under_an_aggregate_sums_the_discovered_metric`].
 #[tokio::test(flavor = "multi_thread")]
 async fn native_promql_discovery_names_each_metric_it_reads() {
     common_telemetry::init_default_ut_logging();
@@ -5543,6 +7179,387 @@ async fn native_promql_discovery_names_each_metric_it_reads() {
             ("native_dn_beta".to_string(), 2.0),
         ],
         "each row reports its own metric's name and samples: {rows:?}"
+    );
+}
+
+/// Both sides of `or` are planned natively when discovery finds no authorized metric, and so is an
+/// empty input beside a real one under an operator that is not a set operation.
+///
+/// The `or` rows already read the empty input through a tree that required placement sources. The
+/// arithmetic rows are the ones that pin the input binding: physical planning accepts either all
+/// raw frames or all bare scans and refuses a node over a mixture, so a plan holding one empty input
+/// has to bind every real input to a source of its own. Leave that out and `alpha_total` stays a
+/// bare scan beside the empty frame, which physical planning cannot convert
+/// (`No installed planner was able to convert the custom node`): the query errors instead of
+/// answering the empty vector that every one of these arithmetic expressions evaluates to.
+#[tokio::test(flavor = "multi_thread")]
+async fn native_promql_zero_match_or_real_tql() {
+    common_telemetry::init_default_ut_logging();
+    let (standalone, observer) = native_test_instance(GreptimeDbStandaloneBuilder::new(
+        "native_promql_zero_match_or_real_tql",
+    ))
+    .await;
+    let instance = standalone.fe_instance().clone();
+    execute_all(
+        &instance,
+        r#"
+        CREATE TABLE zero_match_phy (host STRING, ts TIMESTAMP TIME INDEX, val DOUBLE, PRIMARY KEY (host))
+            ENGINE=metric WITH ("physical_metric_table" = "true");
+        CREATE TABLE alpha_total (host STRING, ts TIMESTAMP TIME INDEX, val DOUBLE, PRIMARY KEY (host))
+            ENGINE=metric WITH ("on_physical_table" = "zero_match_phy");
+        INSERT INTO alpha_total (host, ts, val) VALUES
+            ('a', 0, 1), ('a', 1000, 2), ('a', 2000, 3),
+            ('b', 0, 10), ('b', 1000, 20), ('b', 2000, 30);
+        ADMIN FLUSH_TABLE('zero_match_phy');
+        "#,
+        QueryContext::arc(),
+    )
+    .await;
+
+    let expected = [
+        (0, "a", 1.0),
+        (1000, "a", 2.0),
+        (2000, "a", 3.0),
+        (0, "b", 10.0),
+        (1000, "b", 20.0),
+        (2000, "b", 30.0),
+    ];
+    for (query, empty_index) in [
+        (r#"{__name__=~"no_such_metric_.+"} or alpha_total"#, 0),
+        (r#"alpha_total or {__name__=~"no_such_metric_.+"}"#, 1),
+    ] {
+        // TQL does not prepare discovery scope itself; provide the same authorized scope that
+        // the Prometheus handler would provide, without comparing to the unsupported legacy path.
+        let mut ctx = QueryContext::with_db_name(None);
+        ctx.set_extension(QUERY_PARALLELISM_HINT, "4".to_string());
+        ctx.set_extension(NATIVE_PROMQL_EXTENSION_KEY, "true".to_string());
+        ctx.set_metric_discovery_scope(MetricDiscoveryScope::allowed([(
+            DEFAULT_CATALOG_NAME.to_string(),
+            DEFAULT_SCHEMA_NAME.to_string(),
+            "alpha_total".to_string(),
+        )]));
+        let sql = format!("TQL EVAL (0, 2, '1s', '1s') {query}");
+        observer.clear();
+        let output = instance
+            .do_query(&sql, Arc::new(ctx))
+            .await
+            .remove(0)
+            .unwrap();
+        let (columns, rows) = native_labelled_rows(output).await;
+        assert_eq!(columns, vec!["__name__", "host", "ts", "val"], "{query}");
+        let actual = rows
+            .iter()
+            .map(|(time, labels, value)| {
+                assert_eq!(labels.len(), 2, "{query}: {labels:?}");
+                assert_eq!(
+                    labels.get("__name__").map(String::as_str),
+                    Some("alpha_total")
+                );
+                (*time, labels.get("host").unwrap().as_str(), *value)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(actual, expected, "{query}");
+
+        let fused = observer.two_input_fused();
+        let children = fused.children();
+        assert!(
+            find_plan_node(children[empty_index], "EmptyExec").is_some(),
+            "{query}: {fused:?}"
+        );
+        assert_eq!(fused.output_partitioning().partition_count(), 1, "{query}");
+        assert!(
+            children
+                .iter()
+                .all(|child| child.output_partitioning().partition_count() == 1),
+            "{query}: {fused:?}"
+        );
+        assert_eq!(observed_series_scans(&observer).len(), 1, "{query}");
+    }
+
+    // An empty input beside a real one under an arithmetic operator. Nothing above an empty
+    // selector here pairs it with a sibling operand, so its layout is the statement's; what these
+    // rows assert is the input binding and the answer.
+    for query in [
+        r#"alpha_total + {__name__=~"no_such_metric_.+"}"#,
+        r#"alpha_total + on(host) {__name__=~"no_such_metric_.+"}"#,
+        r#"{__name__=~"no_such_metric_.+"} + on(host) alpha_total"#,
+        r#"alpha_total * on(host) group_left {__name__=~"no_such_metric_.+"}"#,
+    ] {
+        // TQL does not prepare discovery scope itself; provide the same authorized scope that
+        // the Prometheus handler would provide, without comparing to the unsupported legacy path.
+        let mut ctx = QueryContext::with_db_name(None);
+        ctx.set_extension(QUERY_PARALLELISM_HINT, "4".to_string());
+        ctx.set_extension(NATIVE_PROMQL_EXTENSION_KEY, "true".to_string());
+        ctx.set_metric_discovery_scope(MetricDiscoveryScope::allowed([(
+            DEFAULT_CATALOG_NAME.to_string(),
+            DEFAULT_SCHEMA_NAME.to_string(),
+            "alpha_total".to_string(),
+        )]));
+        let sql = format!("TQL EVAL (0, 2, '1s', '1s') {query}");
+        observer.clear();
+        let output = instance
+            .do_query(&sql, Arc::new(ctx))
+            .await
+            .remove(0)
+            .unwrap();
+        // The statement's own tree is the one to read the shape from: the observer records the
+        // region-side plans too, and which of them was wrapped last says nothing about the shape
+        // that answers the statement.
+        let plan = observer.root_plan();
+        let fused = find_plan_node(&plan, "FusedSeriesExec")
+            .unwrap_or_else(|| panic!("`{query}` did not take the native route: {plan:?}"));
+        // One node over the real input's scan and the empty frame: the empty input is the node's
+        // sibling, and the one real selector is the only read.
+        let children = fused.children();
+        assert_eq!(children.len(), 2, "{query}: {fused:?}");
+        assert!(
+            children
+                .iter()
+                .any(|child| find_plan_node(child, "EmptyExec").is_some()),
+            "`{query}` does not read the zero-match selector as the node's input: {fused:?}"
+        );
+        assert!(
+            children
+                .iter()
+                .any(|child| find_plan_node(child, "MergeScanExec").is_some()),
+            "`{query}` does not read the real input's region: {fused:?}"
+        );
+        // No sample on the empty side means no pair to operate on: the vector answer is empty, and
+        // the node above is what answered it, not a fallback to the existing plan.
+        assert!(
+            native_result_rows(output).await.is_empty(),
+            "{query}: an empty input answered a sample"
+        );
+    }
+}
+
+/// A zero-match selector is laid out by the operand it is compared against, not by the statement.
+///
+/// `native_local_wide` carries two fields and `native_local_narrow` one, and the empty branch is the
+/// left operand of the inner `or`, the right operand of which is `native_local_narrow`. One field is
+/// therefore the layout that operation compares: a layout taken from the statement's first real
+/// input - `native_local_wide`, two fields - would make the two sides of `or` disagree about how
+/// many fields they pair, which the compiler refuses. A refusal here leaves the statement to the
+/// existing plan, which refuses the `__name__` regex in the empty branch, so the query would fail.
+/// The empty branch answers no sample, which is why the answer has to be the one the same statement
+/// with that branch removed gives.
+///
+/// A branch with no real input anywhere in it - `(Z1 or Z2)`, whose own `or` compares two zero-match
+/// selectors - has no sibling inside its own operation to take a layout from. Its layout therefore
+/// flows in from the operation above it, which compares that whole subtree as one operand: every
+/// zero-match selector in the subtree is laid out by the first real selector of the operand it is
+/// compared against. Taking the statement's layout instead gives both of them `native_local_wide`'s
+/// two fields, and the outer `or` then pairs two fields against `native_local_narrow`'s one, which
+/// the compiler refuses - and the existing plan refuses the `__name__` regex the branch is written
+/// with, so the query fails instead of answering the control's answer.
+///
+/// The sibling's first selector is not its answer's layout either: `native_local_wide + on(host)
+/// native_local_narrow` pairs two fields against one and keeps the shorter side's, so that operand
+/// answers one field while the first selector it reads carries two. An empty subtree compared
+/// against it therefore still takes a layout of two fields and the compiler refuses the operation,
+/// which is why `(Z or (native_local_wide + on(host) native_local_narrow))` - and its mirror image
+/// with the empty subtree on the right - is deliberately not asserted here: it falls back to the
+/// existing plan and fails on the regex. Laying the empty subtree out by the sibling operand's
+/// compiled answer instead of by its first selector is a separate change.
+#[tokio::test(flavor = "multi_thread")]
+async fn native_promql_zero_match_takes_the_layout_of_its_operand() {
+    common_telemetry::init_default_ut_logging();
+    let (standalone, observer) = native_test_instance(GreptimeDbStandaloneBuilder::new(
+        "native_promql_zero_match_local_layout",
+    ))
+    .await;
+    let instance = standalone.fe_instance().clone();
+    execute_all(
+        &instance,
+        r#"
+        CREATE TABLE native_local_wide (
+            host STRING, ts TIMESTAMP TIME INDEX, w0 DOUBLE, w1 DOUBLE, PRIMARY KEY (host)
+        );
+        CREATE TABLE native_local_narrow (
+            host STRING, ts TIMESTAMP TIME INDEX, n0 DOUBLE, PRIMARY KEY (host)
+        );
+        INSERT INTO native_local_wide VALUES ('h0', 1000, 1, 2), ('h0', 2000, 3, 4);
+        INSERT INTO native_local_narrow VALUES ('h0', 1000, 10), ('h0', 2000, 20);
+        ADMIN FLUSH_TABLE('native_local_wide');
+        ADMIN FLUSH_TABLE('native_local_narrow');
+        "#,
+        QueryContext::arc(),
+    )
+    .await;
+
+    let control = "native_local_wide + on(host) native_local_narrow";
+    // Each query with the number of zero-match selectors it reads. Every one of them answers the
+    // control's rows: a zero-match branch holds no sample, so it only has to be laid out, not read.
+    let queries = [
+        (control, 0usize),
+        (
+            r#"native_local_wide + on(host) ({__name__=~"no_such_.+"} or native_local_narrow)"#,
+            1,
+        ),
+        // The empty subtree is the left operand of the outer `or`: its own `or` compares two
+        // zero-match selectors, so both of them take the layout of the operand beside it.
+        (
+            r#"native_local_wide + on(host) (({__name__=~"no_such_a.+"} or {__name__=~"no_such_b.+"}) or native_local_narrow)"#,
+            2,
+        ),
+        // The same empty subtree on the right of the outer `or`.
+        (
+            r#"native_local_wide + on(host) (native_local_narrow or ({__name__=~"no_such_a.+"} or {__name__=~"no_such_b.+"}))"#,
+            2,
+        ),
+        // One zero-match selector on each side: the inner one has a real sibling of its own
+        // operation, the outer one is laid out through the subtree that sibling makes real.
+        (
+            r#"native_local_wide + on(host) ((native_local_narrow or {__name__=~"no_such_a.+"}) or {__name__=~"no_such_b.+"})"#,
+            2,
+        ),
+        // A non-bare empty operand: an aggregate, a unary negation or a label rewrite reads no real
+        // input either, so the whole subtree takes the layout of the operand it is compared against.
+        // An aggregate is also the operand that changes the shape it answers - `sum by (host)`
+        // answers a field of its own - which is why the layout has to reach the selector under it
+        // instead of being compared against the aggregate's answer.
+        (
+            r#"native_local_wide + on(host) (sum by (host) ({__name__=~"no_such_.+"}) or native_local_narrow)"#,
+            1,
+        ),
+        (
+            r#"native_local_wide + on(host) (-{__name__=~"no_such_.+"} or native_local_narrow)"#,
+            1,
+        ),
+        (
+            r#"native_local_wide + on(host) (label_replace({__name__=~"no_such_.+"}, "x", "y", "", "") or native_local_narrow)"#,
+            1,
+        ),
+    ];
+    // The nodes named `name` reachable from `plan`.
+    let count_nodes = |plan: &Arc<dyn ExecutionPlan>, name: &str| {
+        let mut stack = vec![Arc::clone(plan)];
+        let mut count = 0;
+        while let Some(node) = stack.pop() {
+            count += usize::from(node.name() == name);
+            stack.extend(node.children().into_iter().cloned());
+        }
+        count
+    };
+    let mut answers = Vec::new();
+    for (query, empty_selectors) in queries {
+        // TQL does not prepare discovery scope itself; provide the same authorized scope that the
+        // Prometheus handler would provide, without comparing to the unsupported legacy path.
+        let mut ctx = QueryContext::with_db_name(None);
+        ctx.set_extension(QUERY_PARALLELISM_HINT, "4".to_string());
+        ctx.set_extension(NATIVE_PROMQL_EXTENSION_KEY, "true".to_string());
+        ctx.set_metric_discovery_scope(MetricDiscoveryScope::allowed([
+            (
+                DEFAULT_CATALOG_NAME.to_string(),
+                DEFAULT_SCHEMA_NAME.to_string(),
+                "native_local_wide".to_string(),
+            ),
+            (
+                DEFAULT_CATALOG_NAME.to_string(),
+                DEFAULT_SCHEMA_NAME.to_string(),
+                "native_local_narrow".to_string(),
+            ),
+        ]));
+        let sql = format!("TQL EVAL (1, 2, '1s', '1s') {query}");
+        observer.clear();
+        let output = instance
+            .do_query(&sql, Arc::new(ctx))
+            .await
+            .remove(0)
+            .unwrap();
+        let fused = observer
+            .fused()
+            .unwrap_or_else(|| panic!("`{query}` did not take the native route"));
+        assert_eq!(
+            empty_selectors,
+            count_nodes(&fused, "EmptyExec"),
+            "`{query}` does not read every zero-match selector as the node's input: {fused:?}"
+        );
+        if empty_selectors > 0 {
+            // The empty branch reads no region, so the two real selectors are the only two reads.
+            let mut region_inputs = Vec::new();
+            native_region_inputs(&fused, &mut region_inputs);
+            assert_eq!(
+                2,
+                region_inputs.len(),
+                "the empty branch reads a region of its own: {fused:?}"
+            );
+        }
+        answers.push(native_result_rows(output).await);
+    }
+    for ((query, empty_selectors), answer) in queries.iter().zip(&answers) {
+        if *empty_selectors > 0 {
+            assert_eq!(
+                &answers[0], answer,
+                "the zero-match branches changed the answer of `{query}`"
+            );
+        }
+    }
+    // `w0` of the wide table plus `n0` of the narrow one: the binary operation over two vectors
+    // pairs fields by position and keeps the shorter side's.
+    assert_eq!(
+        answers[0],
+        vec![
+            (1000, "h0".to_string(), 11.0),
+            (2000, "h0".to_string(), 23.0)
+        ],
+        "the fixture's answer is not the one the empty branch is compared against"
+    );
+
+    // A set operation inside a subquery: the selector walk has to keep recording set operands
+    // while it descends into the subquery, otherwise the empty operand is laid out by the
+    // statement's first real input (`wide`, two fields) instead of by its own sibling (`narrow`,
+    // one field), and the inner `or` is refused. The statement's outer binary is the same one the
+    // control uses, so the empty branch must not change the answer.
+    let subquery_empty = r#"native_local_wide + on(host) avg_over_time(({__name__=~"no_such_.+"} or native_local_narrow)[2s:1s])"#;
+    let subquery_control =
+        r#"native_local_wide + on(host) avg_over_time(native_local_narrow[2s:1s])"#;
+    let mut subquery_answers = Vec::new();
+    for (query, has_empty) in [(subquery_control, false), (subquery_empty, true)] {
+        let mut ctx = QueryContext::with_db_name(None);
+        ctx.set_extension(QUERY_PARALLELISM_HINT, "4".to_string());
+        ctx.set_extension(NATIVE_PROMQL_EXTENSION_KEY, "true".to_string());
+        ctx.set_metric_discovery_scope(MetricDiscoveryScope::allowed([
+            (
+                DEFAULT_CATALOG_NAME.to_string(),
+                DEFAULT_SCHEMA_NAME.to_string(),
+                "native_local_wide".to_string(),
+            ),
+            (
+                DEFAULT_CATALOG_NAME.to_string(),
+                DEFAULT_SCHEMA_NAME.to_string(),
+                "native_local_narrow".to_string(),
+            ),
+        ]));
+        let sql = format!("TQL EVAL (1, 2, '1s', '1s') {query}");
+        observer.clear();
+        let output = instance
+            .do_query(&sql, Arc::new(ctx))
+            .await
+            .remove(0)
+            .unwrap();
+        let fused = observer
+            .fused()
+            .unwrap_or_else(|| panic!("`{query}` did not take the native route"));
+        if has_empty {
+            assert_eq!(
+                1,
+                count_nodes(&fused, "EmptyExec"),
+                "`{query}` does not read the subquery's zero-match selector: {fused:?}"
+            );
+            let mut region_inputs = Vec::new();
+            native_region_inputs(&fused, &mut region_inputs);
+            assert_eq!(
+                2,
+                region_inputs.len(),
+                "the empty branch reads a region of its own: {fused:?}"
+            );
+        }
+        subquery_answers.push(native_result_rows(output).await);
+    }
+    assert_eq!(
+        subquery_answers[0], subquery_answers[1],
+        "the zero-match branch inside the subquery changed the answer"
     );
 }
 
@@ -5631,6 +7648,150 @@ async fn native_labelled_rows(
     }
     rows.sort_by(|left, right| (&left.1, left.0).cmp(&(&right.1, right.0)));
     (columns, rows)
+}
+
+/// `sum({job="api"})` over one discovered metric is planned and executed natively, and folds the
+/// one series the matcher keeps.
+///
+/// The selector names no metric, so the frontend answers it by enumerating the schema's logical
+/// metric tables: one here, on its own physical metric table. The aggregate folds that metric's
+/// `api` series (2) and drops the row the matcher rejects. The observer proves the fused route is
+/// what ran - a fused node was planned, and none of the observed nodes is a join, since discovery
+/// enumerates the metric tables instead of joining them.
+#[tokio::test(flavor = "multi_thread")]
+async fn native_promql_discovery_under_an_aggregate_sums_the_discovered_metric() {
+    common_telemetry::init_default_ut_logging();
+    let (standalone, observer) = native_test_instance(GreptimeDbStandaloneBuilder::new(
+        "native_promql_discovery_under_aggregate",
+    ))
+    .await;
+    let instance = standalone.fe_instance().clone();
+    execute_all(
+        &instance,
+        r#"
+        CREATE TABLE discovery_phy (ts TIMESTAMP TIME INDEX, val DOUBLE)
+            ENGINE=metric WITH ("physical_metric_table" = "true");
+        CREATE TABLE discovery_api (job STRING, ts TIMESTAMP TIME INDEX, val DOUBLE, PRIMARY KEY (job))
+            ENGINE=metric WITH ("on_physical_table" = "discovery_phy");
+        INSERT INTO discovery_api (job, ts, val) VALUES ('api', 0, 2), ('other', 0, 100);
+        "#,
+        QueryContext::arc(),
+    )
+    .await;
+
+    observer.clear();
+    let (columns, rows) =
+        native_labelled_rows(discovery_query(&instance, r#"sum({job="api"})"#).await).await;
+    let observed = observed_physical_nodes(&observer);
+    assert!(
+        observed.iter().any(|node| node.name() == "FusedSeriesExec"),
+        "the aggregated discovery did not reach the fused node: {columns:?} {rows:?}"
+    );
+    assert!(
+        observed.iter().all(|node| node.name() != "JoinExec"),
+        "discovery joined metric tables instead of enumerating them: {columns:?} {rows:?}"
+    );
+    let values = rows
+        .iter()
+        .map(|(_, labels, value)| (labels.len(), *value))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        values,
+        vec![(0, 2.0)],
+        "sum over the discovered metric's `api` series drops the `other` row and every label: \
+         {rows:?}"
+    );
+}
+
+/// `sum({job="api"})` over two discovered metrics is planned and executed natively, and keeps the
+/// two metrics apart when the aggregate groups by their name.
+///
+/// The selector names no metric, so the frontend answers it by enumerating the schema's logical
+/// metric tables: two here, each on its own physical metric table. The aggregate folds both `api`
+/// series (2 and 3) and drops the rows the matcher rejects; grouping by `__name__` instead reports
+/// one group per metric, even though the ordinary labels of their series are identical. The
+/// observer proves the fused route is what ran for both statements - a fused node was planned, and
+/// none of the observed nodes is a join, since discovery enumerates the metric tables instead of
+/// joining them.
+#[tokio::test(flavor = "multi_thread")]
+async fn native_promql_discovery_over_two_metrics_under_an_aggregate_sums_both() {
+    common_telemetry::init_default_ut_logging();
+    let (standalone, observer) = native_test_instance(GreptimeDbStandaloneBuilder::new(
+        "native_promql_discovery_over_two_metrics_under_aggregate",
+    ))
+    .await;
+    let instance = standalone.fe_instance().clone();
+    execute_all(
+        &instance,
+        r#"
+        CREATE TABLE discovery_two_api_phy (ts TIMESTAMP TIME INDEX, val DOUBLE)
+            ENGINE=metric WITH ("physical_metric_table" = "true");
+        CREATE TABLE discovery_two_api (job STRING, ts TIMESTAMP TIME INDEX, val DOUBLE, PRIMARY KEY (job))
+            ENGINE=metric WITH ("on_physical_table" = "discovery_two_api_phy");
+        CREATE TABLE discovery_two_web_phy (ts TIMESTAMP TIME INDEX, val DOUBLE)
+            ENGINE=metric WITH ("physical_metric_table" = "true");
+        CREATE TABLE discovery_two_web (job STRING, ts TIMESTAMP TIME INDEX, val DOUBLE, PRIMARY KEY (job))
+            ENGINE=metric WITH ("on_physical_table" = "discovery_two_web_phy");
+        INSERT INTO discovery_two_api (job, ts, val) VALUES ('api', 0, 2), ('other', 0, 100);
+        INSERT INTO discovery_two_web (job, ts, val) VALUES ('api', 0, 3), ('other', 0, 200);
+        "#,
+        QueryContext::arc(),
+    )
+    .await;
+
+    observer.clear();
+    let (columns, rows) =
+        native_labelled_rows(discovery_query(&instance, r#"sum({job="api"})"#).await).await;
+    let observed = observed_physical_nodes(&observer);
+    assert!(
+        observed.iter().any(|node| node.name() == "FusedSeriesExec"),
+        "the aggregated discovery did not reach the fused node: {columns:?} {rows:?}"
+    );
+    assert!(
+        observed.iter().all(|node| node.name() != "JoinExec"),
+        "discovery joined metric tables instead of enumerating them: {columns:?} {rows:?}"
+    );
+    let values = rows
+        .iter()
+        .map(|(_, labels, value)| (labels.len(), *value))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        values,
+        vec![(0, 5.0)],
+        "sum over both discovered metrics' `api` series drops the `other` rows and every label: \
+         {rows:?}"
+    );
+
+    // Grouping by the metric name must keep the two metrics apart even though their ordinary
+    // labels are identical: two groups, each named after its own metric.
+    observer.clear();
+    let (columns, groups) = native_labelled_rows(
+        discovery_query(&instance, r#"sum by (__name__) ({job="api"})"#).await,
+    )
+    .await;
+    let observed = observed_physical_nodes(&observer);
+    assert!(
+        observed.iter().any(|node| node.name() == "FusedSeriesExec"),
+        "the grouped discovery did not reach the fused node: {columns:?} {groups:?}"
+    );
+    assert!(
+        observed.iter().all(|node| node.name() != "JoinExec"),
+        "discovery joined metric tables instead of enumerating them: {columns:?} {groups:?}"
+    );
+    // The answer's row order is a plan choice, so the groups are compared by name.
+    let mut named = groups
+        .iter()
+        .map(|(_, labels, value)| (labels.get("__name__").cloned().unwrap_or_default(), *value))
+        .collect::<Vec<_>>();
+    named.sort_by(|left, right| left.0.cmp(&right.0));
+    assert_eq!(
+        named,
+        vec![
+            ("discovery_two_api".to_string(), 2.0),
+            ("discovery_two_web".to_string(), 3.0),
+        ],
+        "each discovered metric stays its own group: {groups:?}"
+    );
 }
 
 /// Two tables whose tags, field and time index are named differently, partly flushed and partly
@@ -6202,16 +8363,80 @@ async fn native_promql_info_enriches_from_the_info_table() {
     }
 }
 
-/// A two-selector query over a table split into regions never fuses the binary itself.
+/// A window over a table partitioned on a column that is not a tag sees the whole series.
 ///
-/// A fused node with more than one input has no placement on such a table — the dist analyzer
-/// refuses it with "only accept plan with at most one child" — so admitting one used to make the
-/// whole query fail instead of falling back. Each operand may still be fused on its own: that is a
-/// single-input node over a region-local scan, which places fine, and it is what the hybrid
-/// operand route does. What must never appear is a fused node with two children, so that is what
-/// is asserted rather than "no fused node at all".
+/// Such a table splits one series across regions, so a per-region prefix evaluates `rate` over a
+/// fragment and loses every window that straddles the boundary. The cut therefore has to keep each
+/// occurrence's raw source and run the prefix above the reconciliation, exactly as the remote route
+/// does. The fixture puts the two samples of one series on either side of the boundary and compares
+/// the native answer with the existing plan's.
 #[tokio::test(flavor = "multi_thread")]
-async fn native_promql_two_selectors_on_a_partitioned_table_keep_the_binary_unfused() {
+async fn native_promql_window_over_a_time_partitioned_table_keeps_whole_series() {
+    let (standalone, observer) = native_test_instance(GreptimeDbStandaloneBuilder::new(
+        "native_promql_time_partitioned_window",
+    ))
+    .await;
+    let instance = standalone.fe_instance().clone();
+    execute_all(
+        &instance,
+        "CREATE TABLE native_time_partitioned (host STRING, ts TIMESTAMP TIME INDEX, val DOUBLE, \
+         PRIMARY KEY(host)) PARTITION ON COLUMNS (ts) (ts < '1970-01-01 00:02:30', \
+         ts >= '1970-01-01 00:02:30')",
+        QueryContext::arc(),
+    )
+    .await;
+    // One series, one sample in each region: the second is 240s after the first, and the boundary
+    // sits between them, so neither region holds a complete window on its own.
+    execute_all(
+        &instance,
+        "INSERT INTO native_time_partitioned VALUES ('h0', 60000, 60), ('h0', 240000, 240)",
+        QueryContext::arc(),
+    )
+    .await;
+    for query in [
+        "rate(native_time_partitioned[5m]) + rate(native_time_partitioned[5m])",
+        "(rate(native_time_partitioned[5m]) + rate(native_time_partitioned[5m])) \
+         + rate(native_time_partitioned[5m])",
+    ] {
+        let sql = format!("TQL EVAL (300, 300, '1m') {query}");
+        observer.clear();
+        let native = native_result_rows(native_tql_output(&instance, &sql, true).await).await;
+        let legacy = native_result_rows(native_tql_output(&instance, &sql, false).await).await;
+        assert!(
+            !native.is_empty(),
+            "{query}: the native plan answered nothing"
+        );
+        assert_eq!(
+            native, legacy,
+            "{query}: the native plan must match the existing one"
+        );
+        let root = observer.root_plan();
+        let mut inputs = Vec::new();
+        native_region_inputs(&root, &mut inputs);
+        assert!(
+            !inputs.is_empty(),
+            "{query}: the window runs above the region reads: {:?}",
+            display_plan_tree(&root)
+        );
+        // A fallback plan also produces the existing plan's rows, so the admission has to be
+        // asserted separately: the frontend tree must carry a fused node.
+        assert!(
+            find_plan_node(&root, "FusedSeriesExec").is_some(),
+            "{query}: the tree must run natively, not on the existing plan: {:?}",
+            display_plan_tree(&root)
+        );
+    }
+}
+
+/// A query over two selectors of one partitioned table matches above the regions.
+///
+/// A fused node over the bare scans of such a table has no placement in a region — the dist
+/// analyzer refuses it with "only accept plan with at most one child" — so each selector
+/// occurrence reads that table through its own raw region input instead. Every input is one read of
+/// the whole table, and the matching the query asks for runs once above them, over every region's
+/// contribution: two inputs for a two-selector query, three for a three-selector one.
+#[tokio::test(flavor = "multi_thread")]
+async fn native_promql_two_selectors_on_a_partitioned_table_match_above_independent_regions() {
     let (standalone, observer) = native_test_instance(GreptimeDbStandaloneBuilder::new(
         "native_promql_partitioned_pair",
     ))
@@ -6231,10 +8456,11 @@ async fn native_promql_two_selectors_on_a_partitioned_table_keep_the_binary_unfu
         QueryContext::arc(),
     )
     .await;
-    for (query, expected) in [
+    for (query, expected, sources) in [
         (
             "native_partitioned_pair{kind=\"a\"} and on(host) native_partitioned_pair{kind=\"b\",host=\"h0\"}",
             vec![(5_000, "h0".to_string(), 1.0)],
+            2,
         ),
         (
             "native_partitioned_pair{kind=\"a\"} - on(host) native_partitioned_pair{kind=\"b\"}",
@@ -6242,8 +8468,10 @@ async fn native_promql_two_selectors_on_a_partitioned_table_keep_the_binary_unfu
                 (5_000, "h0".to_string(), -1.0),
                 (5_000, "h2".to_string(), -1.0),
             ],
+            2,
         ),
-        // Three selectors: the inner pair may take the hybrid route under the outer join.
+        // Three selectors: the inner pair matches above its own two region inputs, under the outer
+        // match.
         (
             "native_partitioned_pair{kind=\"a\"} - on(host) native_partitioned_pair{kind=\"b\"} \
              + on(host) native_partitioned_pair{kind=\"a\"}",
@@ -6251,19 +8479,30 @@ async fn native_promql_two_selectors_on_a_partitioned_table_keep_the_binary_unfu
                 (5_000, "h0".to_string(), 0.0),
                 (5_000, "h2".to_string(), 2.0),
             ],
+            3,
         ),
     ] {
         let sql = format!("TQL EVAL (5, 5, '1s') {query}");
         observer.clear();
         let native = native_result_rows(native_tql_output(&instance, &sql, true).await).await;
-        if let Some(fused) = observer.fused() {
-            assert_eq!(
-                fused.children().len(),
-                1,
-                "`{query}` fused the two-selector binary, which has no placement on a partitioned \
-                 table: {fused:?}"
-            );
-        }
+        // The frontend's own tree: the fused node above the regions, not the region-side plan the
+        // observer also wraps.
+        let root = observer.root_plan();
+        let mut inputs = Vec::new();
+        native_region_inputs(&root, &mut inputs);
+        assert_eq!(
+            sources,
+            inputs.len(),
+            "`{query}` reads one region input per selector occurrence: {:?}",
+            display_plan_tree(&root)
+        );
+        // The values alone cannot tell native matching from a legacy frontend join that reads the
+        // same regions, so require the native binary in the frontend tree.
+        assert!(
+            find_plan_node(&root, "FusedSeriesExec").is_some(),
+            "`{query}` must match natively above its region inputs: {:?}",
+            display_plan_tree(&root)
+        );
         assert_eq!(native, expected, "{query}");
         let legacy = native_result_rows(native_tql_output(&instance, &sql, false).await).await;
         assert_eq!(native, legacy, "{query}");
@@ -6696,16 +8935,20 @@ async fn native_promql_repeated_selector_binary_uses_independent_scans() {
     let on_empty_sql = format!(
         r#"TQL EVAL (1, 1, '1s') {table}{{host="h001"}} - on() ({table}{{host="h001"}} * 2)"#
     );
-    async fn unlabeled_rows(output: Output) -> Vec<(i64, f64, bool)> {
+    async fn unlabeled_rows(output: Output) -> Vec<(i64, f64)> {
         let batches = match output.data {
             OutputData::Stream(stream) => collect_batches(stream).await.unwrap(),
             OutputData::RecordBatches(batches) => batches,
             _ => unreachable!("TQL EVAL returns record batches"),
         };
+        let schema = batches.schema();
+        let schema = schema.arrow_schema();
+        assert_eq!(schema.fields().len(), 2, "only timestamp and value");
+        assert!(schema.field_with_name("host").is_err());
+        assert!(schema.field_with_name("__name__").is_err());
         batches
             .iter()
             .flat_map(|batch| {
-                assert!(batch.column_by_name("host").is_none());
                 let timestamps = batch
                     .column_by_name("ts")
                     .unwrap()
@@ -6720,13 +8963,7 @@ async fn native_promql_repeated_selector_binary_uses_independent_scans() {
                 assert_eq!(values.len(), 1);
                 let values = values[0].as_any().downcast_ref::<Float64Array>().unwrap();
                 (0..batch.num_rows())
-                    .map(|row| {
-                        (
-                            timestamps.value(row),
-                            values.value(row),
-                            batch.num_columns() == 2,
-                        )
-                    })
+                    .map(|row| (timestamps.value(row), values.value(row)))
                     .collect::<Vec<_>>()
             })
             .collect()
@@ -6734,8 +8971,10 @@ async fn native_promql_repeated_selector_binary_uses_independent_scans() {
     observer.clear();
     let on_empty_rows =
         unlabeled_rows(native_tql_output(&instance, &on_empty_sql, true).await).await;
-    assert!(observer.fused().is_none(), "{on_empty_sql}");
-    assert_eq!(on_empty_rows, vec![(1_000, -1_001.0, true)]);
+    let on_empty_plan = observer.two_input_fused();
+    assert_eq!(on_empty_plan.name(), "FusedSeriesExec", "{on_empty_sql}");
+    assert_eq!(on_empty_plan.schema().fields().len(), 2, "{on_empty_sql}");
+    assert_eq!(on_empty_rows, vec![(1_000, -1_001.0)]);
     let on_empty_legacy =
         unlabeled_rows(native_tql_output(&instance, &on_empty_sql, false).await).await;
     assert_eq!(on_empty_rows, on_empty_legacy);
@@ -6753,29 +8992,125 @@ async fn native_promql_repeated_selector_binary_uses_independent_scans() {
         native_result_rows(native_tql_output(&instance, &different_matchers, false).await).await;
     assert_eq!(different_matcher_rows, different_matcher_legacy);
 
-    // Group matching drops the full series identity, and a subquery stays on the ordinary planner path.
-    let fallback_expected = expected[..HOSTS].to_vec();
-    for (sql, expected_rows) in [
+    // Group matching executes natively: it keeps the many side's series, so the route answers it
+    // with one node over two same-table scans.
+    let grouped_sql = format!(
+        r#"TQL EVAL (0, 0, '1s') {table}{{host!=""}} - on(host) group_left() ({table}{{host!=""}} * 2)"#
+    );
+    observer.clear();
+    let grouped_rows =
+        native_result_rows(native_tql_output(&instance, &grouped_sql, true).await).await;
+    let grouped_plan = observer.two_input_fused();
+    assert_two_source_native_plan(&observer, &grouped_plan, false);
+    assert_eq!(grouped_rows, expected[..HOSTS].to_vec(), "{grouped_sql}");
+    let grouped_legacy =
+        native_result_rows(native_tql_output(&instance, &grouped_sql, false).await).await;
+    assert_eq!(grouped_rows, grouped_legacy, "{grouped_sql}");
+
+    // A subquery is planned natively: `rate` over an evaluated input reads the grid the subquery
+    // produces, and the route compiles that window instead of sending the statement to the ordinary
+    // planner. The rows are what says the plan it runs answers the statement it was given, so the
+    // answer is pinned here and compared with the existing plan's on the same fixture.
+    let subquery_sql = format!(r#"TQL EVAL (1, 1, '1s') rate({table}{{host="h000"}}[2s:1s])"#);
+    observer.clear();
+    let subquery_rows =
+        native_result_rows(native_tql_output(&instance, &subquery_sql, true).await).await;
+    assert!(
+        observer.fused().is_some(),
+        "a subquery is not a fallback shape: {subquery_sql}"
+    );
+    assert_eq!(
+        subquery_rows,
+        vec![(1_000, "h000".to_string(), 0.5)],
+        "{subquery_sql}"
+    );
+    let subquery_legacy =
+        native_result_rows(native_tql_output(&instance, &subquery_sql, false).await).await;
+    assert_eq!(subquery_rows, subquery_legacy, "{subquery_sql}");
+}
+
+/// Empty-key grouped matches retain the many side's labels and report kernel cardinality errors.
+#[tokio::test(flavor = "multi_thread")]
+async fn native_hybrid_binary_empty_on_grouped_matching_and_errors() {
+    common_telemetry::init_default_ut_logging();
+    let (standalone, observer) = native_test_instance(GreptimeDbStandaloneBuilder::new(
+        "native_binary_empty_on_matching",
+    ))
+    .await;
+    let instance = standalone.fe_instance().clone();
+    execute_all(
+        &instance,
+        "CREATE TABLE native_empty_match (host STRING, kind STRING, zone_name STRING, \
+         ts TIMESTAMP TIME INDEX, val DOUBLE, PRIMARY KEY(host, kind, zone_name)); \
+         INSERT INTO native_empty_match VALUES \
+         ('h0', 'a', '', 0, 10), ('h0', 'b', '', 0, 20), ('h0', 'c', 'z', 0, 2)",
+        QueryContext::arc(),
+    )
+    .await;
+
+    let labels = |kind: &str| {
+        [
+            ("host".to_string(), "h0".to_string()),
+            ("kind".to_string(), kind.to_string()),
+            ("zone_name".to_string(), "z".to_string()),
+        ]
+        .into_iter()
+        .collect::<std::collections::BTreeMap<_, _>>()
+    };
+    for (query, expected) in [
         (
-            format!(
-                r#"TQL EVAL (0, 0, '1s') {table}{{host!=""}} - on(host) group_left() ({table}{{host!=""}} * 2)"#
-            ),
-            fallback_expected.clone(),
+            r#"native_empty_match{kind=~"a|b"} - on() group_left(zone_name) native_empty_match{kind="c"}"#,
+            vec![(0, labels("a"), 8.0), (0, labels("b"), 18.0)],
         ),
         (
-            format!(r#"TQL EVAL (1, 1, '1s') rate({table}{{host="h000"}}[2s:1s])"#),
-            vec![(1_000, "h000".to_string(), 0.5)],
+            r#"native_empty_match{kind="c"} - on() group_right(zone_name) native_empty_match{kind=~"a|b"}"#,
+            vec![(0, labels("a"), -8.0), (0, labels("b"), -18.0)],
         ),
     ] {
+        let sql = format!("TQL EVAL (0, 0, '1s') {query}");
         observer.clear();
-        let rows = native_result_rows(native_tql_output(&instance, &sql, true).await).await;
-        assert!(
-            observer.fused().is_none(),
-            "a fallback shape must not plan a fused node: {sql}"
-        );
-        assert_eq!(rows, expected_rows, "{sql}");
-        let legacy_rows = native_result_rows(native_tql_output(&instance, &sql, false).await).await;
-        assert_eq!(rows, legacy_rows, "{sql}");
+        let (columns, rows) =
+            native_labelled_rows(native_tql_output(&instance, &sql, true).await).await;
+        let plan = observer.two_input_fused();
+        assert_eq!(plan.name(), "FusedSeriesExec", "{query}");
+        assert_eq!(columns, vec!["host", "kind", "ts", "val", "zone_name"]);
+        assert_eq!(rows, expected, "{query}");
+        let (_, legacy) =
+            native_labelled_rows(native_tql_output(&instance, &sql, false).await).await;
+        assert_eq!(rows, legacy, "legacy: {query}");
+    }
+
+    for (query, expected_error) in [
+        (
+            r#"native_empty_match{kind="c"} - on() native_empty_match{kind=~"a|b"}"#,
+            "found duplicate series for the match group {} on the right hand-side of the operation at 0 ms",
+        ),
+        (
+            r#"native_empty_match{kind=~"a|b"} - on() native_empty_match{kind="c"}"#,
+            "multiple matches for labels {} at 0 ms: many-to-one matching must be explicit",
+        ),
+        (
+            r#"native_empty_match{kind="c"} - on() group_left() native_empty_match{kind=~"a|b"}"#,
+            "found duplicate series for the match group {} on the right hand-side of the operation at 0 ms",
+        ),
+        (
+            r#"native_empty_match{kind=~"a|b"} - on() group_right() native_empty_match{kind="c"}"#,
+            "found duplicate series for the match group {} on the left hand-side of the operation at 0 ms",
+        ),
+    ] {
+        let sql = format!("TQL EVAL (0, 0, '1s') {query}");
+        observer.clear();
+        let result = instance
+            .do_query(&sql, native_query_context(true, 4))
+            .await
+            .remove(0);
+        let error = match result {
+            Ok(output) => collect_error(output).await,
+            Err(error) => error.to_string(),
+        };
+        let plan = observer.two_input_fused();
+        assert_eq!(plan.name(), "FusedSeriesExec", "{query}");
+        assert!(error.contains(expected_error), "{query}: {error}");
     }
 }
 
@@ -6889,7 +9224,7 @@ async fn native_promql_rate_and_abs_rate_match_legacy_across_storage_encodings()
                 .expect("fused node reads a prepared series scan");
             let RawLabelSource::PrimaryKey {
                 physical_metadata, ..
-            } = series_scan.label_source()
+            } = series_scan.scan_binding()
             else {
                 panic!("fused scan must materialize labels from the primary key");
             };
@@ -7269,7 +9604,7 @@ async fn native_promql_metric_two_aggregate_pair_matches_legacy() {
         // selector, over the scan bound to that selector's metric.
         fn scan_metric(plan: &Arc<dyn datafusion::physical_plan::ExecutionPlan>) -> Option<String> {
             if let Some(scan) = plan.downcast_ref::<SeriesScanExec>() {
-                return match scan.label_source() {
+                return match scan.scan_binding() {
                     store_api::region_engine::RawLabelSource::PrimaryKey {
                         metric_name, ..
                     } => Some(metric_name.to_string()),
@@ -7335,16 +9670,555 @@ async fn native_promql_metric_two_aggregate_pair_matches_legacy() {
     }
 }
 
-/// A grouping by the metric name keeps series the schema would have no column for.
+/// The metric fixture the CTE tests read: one label set in one unpartitioned physical metric
+/// table, sampled `1, 3, 6, 10` one second apart.
+const CTE_NATIVE_FIXTURE: &str = r#"
+CREATE TABLE cte_native_phy (
+    ts TIMESTAMP TIME INDEX,
+    val DOUBLE
+) ENGINE=metric WITH ("physical_metric_table" = "true");
+CREATE TABLE cte_native (
+    host STRING,
+    ts TIMESTAMP TIME INDEX,
+    val DOUBLE,
+    PRIMARY KEY (host)
+) ENGINE=metric WITH ("on_physical_table" = 'cte_native_phy');
+INSERT INTO cte_native (host, ts, val) VALUES ('h', 0, 1), ('h', 1000, 3), ('h', 2000, 6), ('h', 3000, 10);
+"#;
+
+/// The statement under test: a TQL statement embedded in a CTE, so a fused subtree sits under the
+/// CTE's alias and the outer SQL projection instead of at the plan root.
 ///
-/// `sum by (__name__) (a or b)` folds two metrics into two groups that differ only in their metric
-/// name. The native aggregate keeps that name and folds by it, but the label set the node declares is
-/// taken from the existing planner's columns, and `__name__` is no column of any scan - so the two
-/// groups would be reported under one label set, as two rows a reader cannot tell apart. The number
-/// of rows and their full label sets are what this asserts: the values alone would still look
-/// plausible, and only the labels say the identity was lost.
+/// The expression repeats one selector, which is the multi-input shape: the route answers it with
+/// one fused node reading one scan per occurrence.
+const CTE_NATIVE_STATEMENT: &str =
+    "WITH tql AS (TQL EVAL (0, 3, '1s') cte_native + cte_native) SELECT * FROM tql";
+
+/// [`CTE_NATIVE_STATEMENT`] ordered by the time index, which is the order its rows are expected in.
+const CTE_NATIVE_ORDERED_STATEMENT: &str =
+    "WITH tql AS (TQL EVAL (0, 3, '1s') cte_native + cte_native) SELECT * FROM tql ORDER BY ts";
+
+/// [`CTE_NATIVE_STATEMENT`] with an explicit CTE column list plus an outer projection and filter
+/// over the names it declares: the aliasing projection the CTE adds, and SQL above it that names
+/// what it published.
+///
+/// The list is positional, so it is one statement only because the columns the CTE publishes are
+/// the same on both routes: the label `site`, the time index `t` and the value `v`, in that order.
+const CTE_NATIVE_ALIASED_STATEMENT: &str = "WITH tql (site, t, v) AS (TQL EVAL (0, 3, '1s') cte_native + cte_native) \
+     SELECT t, v, site FROM tql WHERE v > 5 ORDER BY t";
+
+/// The rows [`CTE_NATIVE_STATEMENT`] answers: `cte_native + cte_native` doubles every sample, so
+/// `1, 3, 6, 10` becomes `2, 6, 12, 20`.
+fn cte_native_expected_rows() -> Vec<(i64, std::collections::BTreeMap<String, String>, f64)> {
+    let h = || std::collections::BTreeMap::from([("host".to_string(), "h".to_string())]);
+    vec![
+        (0, h(), 2.0),
+        (1_000, h(), 6.0),
+        (2_000, h(), 12.0),
+        (3_000, h(), 20.0),
+    ]
+}
+
+/// The rows the aliased statement answers: the rows of [`CTE_NATIVE_STATEMENT`] with `v > 5`, under
+/// the label name the CTE gave the label column.
+fn cte_native_filtered_rows() -> Vec<(i64, std::collections::BTreeMap<String, String>, f64)> {
+    let site = || std::collections::BTreeMap::from([("site".to_string(), "h".to_string())]);
+    vec![
+        (1_000, site(), 6.0),
+        (2_000, site(), 12.0),
+        (3_000, site(), 20.0),
+    ]
+}
+
+/// The schema a statement publishes, as SQL reads it after distributed planning: every column's
+/// name, Arrow type, nullability and metadata, and the metadata of the schema itself.
+///
+/// A CTE's columns are SQL-visible, and a column list the CTE declares is applied to them by
+/// position, so this is what a route may not change - including the Arrow type `arrow_typeof`
+/// reports for a column, which is why the label below is compared as the encoded type both routes
+/// publish rather than as the strings both answers decode to.
+fn cte_native_published_schema(output: &Output) -> ArrowSchema {
+    let schema = match &output.data {
+        OutputData::Stream(stream) => stream.schema(),
+        OutputData::RecordBatches(batches) => batches.schema(),
+        _ => unreachable!("TQL EVAL returns record batches"),
+    };
+    schema.arrow_schema().as_ref().clone()
+}
+
+/// The metadata the time index column carries on either route.
+fn cte_native_time_index_metadata() -> std::collections::HashMap<String, String> {
+    std::collections::HashMap::from([("greptime:time_index".to_string(), "true".to_string())])
+}
+
+/// The metadata a GreptimeDB schema carries on either route.
+fn cte_native_schema_metadata() -> std::collections::HashMap<String, String> {
+    std::collections::HashMap::from([("greptime:version".to_string(), "0".to_string())])
+}
+
+/// The schema [`CTE_NATIVE_STATEMENT`] publishes on both routes: the existing planner's columns.
+///
+/// The fused plan publishes the time index first and names the value after the tree's own field; the
+/// CTE publishes this over it instead. The label column is read as the string it carries, which is
+/// what a result reports it as on both routes; the encoding behind it is what
+/// [`CTE_NATIVE_ARROW_TYPE_STATEMENT`] compares.
+fn cte_native_published_schema_expected() -> ArrowSchema {
+    ArrowSchema::new_with_metadata(
+        vec![
+            Field::new("host", DataType::Utf8, true),
+            Field::new(
+                "ts",
+                DataType::Timestamp(TimeUnit::Millisecond, None),
+                false,
+            )
+            .with_metadata(cte_native_time_index_metadata()),
+            Field::new("lhs.val + rhs.val", DataType::Float64, true),
+        ],
+        cte_native_schema_metadata(),
+    )
+}
+
+/// The schema [`CTE_NATIVE_ALIASED_STATEMENT`] publishes: the names its CTE declares, in the order it
+/// declares them, over the columns of [`CTE_NATIVE_STATEMENT`].
+fn cte_native_aliased_schema_expected() -> ArrowSchema {
+    ArrowSchema::new_with_metadata(
+        vec![
+            Field::new("t", DataType::Timestamp(TimeUnit::Millisecond, None), false)
+                .with_metadata(cte_native_time_index_metadata()),
+            Field::new("v", DataType::Float64, true),
+            Field::new("site", DataType::Utf8, true),
+        ],
+        cte_native_schema_metadata(),
+    )
+}
+
+/// [`CTE_NATIVE_STATEMENT`] with `arrow_typeof` over each of its columns: the Arrow type SQL sees on
+/// a CTE's column, which the schema above has to agree with.
+const CTE_NATIVE_ARROW_TYPE_STATEMENT: &str = "WITH tql AS (TQL EVAL (0, 3, '1s') cte_native + cte_native) \
+     SELECT arrow_typeof(host) AS host, arrow_typeof(ts) AS ts, \
+     arrow_typeof(\"lhs.val + rhs.val\") AS val FROM tql LIMIT 1";
+
+/// The type names `arrow_typeof` reports for the columns of [`CTE_NATIVE_STATEMENT`].
+async fn cte_native_arrow_types(output: Output) -> Vec<String> {
+    let batches = match output.data {
+        OutputData::Stream(stream) => collect_batches(stream).await.unwrap(),
+        OutputData::RecordBatches(batches) => batches,
+        _ => unreachable!("TQL EVAL returns record batches"),
+    };
+    let batch = batches.iter().next().expect("one row of type names");
+    ["host", "ts", "val"]
+        .iter()
+        .map(|name| {
+            let column = batch.column_by_name(name).unwrap();
+            let column = cast(column.as_ref(), &DataType::Utf8).unwrap();
+            let column = column.as_any().downcast_ref::<StringArray>().unwrap();
+            column.value(0).to_string()
+        })
+        .collect()
+}
+
+/// The type names [`CTE_NATIVE_ARROW_TYPE_STATEMENT`] reports on either route.
+fn cte_native_arrow_types_expected() -> Vec<String> {
+    vec![
+        "Dictionary(UInt32, Utf8)".to_string(),
+        "Timestamp(ms)".to_string(),
+        "Float64".to_string(),
+    ]
+}
+
+/// The rows of a TQL result in the order the statement published them.
+/// The rows of a TQL result in the order the statement published them.
+///
+/// The time index, the one value column and the label set are found by type, so the statement's own
+/// column names - or the names a CTE gave them - do not matter, and a route that orders its rows
+/// differently is visible.
+async fn cte_native_rows(
+    output: Output,
+) -> Vec<(i64, std::collections::BTreeMap<String, String>, f64)> {
+    let batches = match output.data {
+        OutputData::Stream(stream) => collect_batches(stream).await.unwrap(),
+        OutputData::RecordBatches(batches) => batches,
+        _ => unreachable!("TQL EVAL returns record batches"),
+    };
+    let mut rows = Vec::new();
+    for batch in batches.iter() {
+        let batch = batch.df_record_batch();
+        let schema = batch.schema();
+        let mut time = None;
+        let mut value = None;
+        let mut labels = Vec::new();
+        for (field, column) in schema.fields().iter().zip(batch.columns()) {
+            match field.data_type() {
+                DataType::Timestamp(..) => {
+                    time = Some(cast(column.as_ref(), &DataType::Int64).unwrap())
+                }
+                DataType::Float64 | DataType::Int64 => {
+                    assert!(value.is_none(), "one value column: {schema:?}");
+                    value = Some(cast(column.as_ref(), &DataType::Float64).unwrap())
+                }
+                _ => labels.push((
+                    field.name().clone(),
+                    cast(column.as_ref(), &DataType::Utf8).unwrap(),
+                )),
+            }
+        }
+        let time = time.expect("a time index");
+        let time = time.as_any().downcast_ref::<Int64Array>().unwrap();
+        let value = value.expect("a value column");
+        let value = value.as_any().downcast_ref::<Float64Array>().unwrap();
+        for row in 0..batch.num_rows() {
+            let labels = labels
+                .iter()
+                .filter_map(|(name, column)| {
+                    let column = column.as_any().downcast_ref::<StringArray>().unwrap();
+                    (column.is_valid(row) && !column.value(row).is_empty())
+                        .then(|| (name.clone(), column.value(row).to_string()))
+                })
+                .collect();
+            rows.push((time.value(row), labels, value.value(row)));
+        }
+    }
+    rows
+}
+
+/// Every node name the observer captured for the last statement, frontend and region side alike.
+fn cte_native_observed_names(observer: &NativePlanObserver) -> Vec<String> {
+    observed_physical_nodes(observer)
+        .into_iter()
+        .map(|node| node.name().to_string())
+        .collect()
+}
+
+/// Every fused node the observer captured for the last statement.
+fn cte_native_observed_fused(
+    observer: &NativePlanObserver,
+) -> Vec<Arc<dyn datafusion::physical_plan::ExecutionPlan>> {
+    observed_physical_nodes(observer)
+        .into_iter()
+        .filter(|node| node.name() == "FusedSeriesExec")
+        .collect()
+}
+
+/// Every plan the observer captured for the last statement, as trees, so a shape assertion that
+/// fails shows what ran.
+fn cte_native_observed_plan_trees(observer: &NativePlanObserver) -> String {
+    observer
+        .all_plans()
+        .iter()
+        .map(display_plan_tree)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// A TQL statement embedded in a CTE runs the fused plan when the query asks for the route, so no
+/// fallback and no refusal.
+///
+/// The CTE puts a SQL alias and the outer projection above the node, which is what this asserts
+/// changes nothing about where the node runs: the statement is answered by one `FusedSeriesExec`
+/// reading both occurrences of the selector, there is no join anywhere in the plan it ran, and the
+/// rows are the legacy route's rows.
 #[tokio::test(flavor = "multi_thread")]
-async fn native_promql_declines_a_grouping_by_the_metric_name() {
+async fn cte_native_statement_runs_the_fused_plan() {
+    common_telemetry::init_default_ut_logging();
+    let (standalone, observer) =
+        native_test_instance(GreptimeDbStandaloneBuilder::new("cte_native_statement")).await;
+    let instance = standalone.fe_instance().clone();
+    execute_all(&instance, CTE_NATIVE_FIXTURE, QueryContext::arc()).await;
+
+    // The existing plan answers the statement first, so the native answer has an oracle.
+    observer.clear();
+    let legacy_output = native_tql_output(&instance, CTE_NATIVE_ORDERED_STATEMENT, false).await;
+    let legacy_schema = cte_native_published_schema(&legacy_output);
+    let legacy_rows = cte_native_rows(legacy_output).await;
+    assert!(
+        observer.fused().is_none(),
+        "the route is off, so no native node may run:\n{}",
+        cte_native_observed_plan_trees(&observer)
+    );
+    assert_eq!(
+        legacy_schema,
+        cte_native_published_schema_expected(),
+        "legacy schema"
+    );
+    assert_eq!(legacy_rows, cte_native_expected_rows(), "legacy");
+    let legacy_types = cte_native_arrow_types(
+        native_tql_output(&instance, CTE_NATIVE_ARROW_TYPE_STATEMENT, false).await,
+    )
+    .await;
+    assert_eq!(
+        legacy_types,
+        cte_native_arrow_types_expected(),
+        "legacy arrow types"
+    );
+
+    // The native plan: one fused node answers both occurrences, and every row comes back in the
+    // order the statement asked for.
+    observer.clear();
+    let native_output = native_tql_output(&instance, CTE_NATIVE_ORDERED_STATEMENT, true).await;
+    let native_schema = cte_native_published_schema(&native_output);
+    let native_rows = cte_native_rows(native_output).await;
+    let fused = cte_native_observed_fused(&observer);
+    assert_eq!(
+        1,
+        fused.len(),
+        "the statement runs one fused node:\n{}",
+        cte_native_observed_plan_trees(&observer)
+    );
+    let joins = cte_native_observed_names(&observer)
+        .into_iter()
+        .filter(|name| name.contains("Join"))
+        .collect::<Vec<_>>();
+    assert!(
+        joins.is_empty(),
+        "a fused plan joins nothing, but these nodes ran: {joins:?}\n{}",
+        cte_native_observed_plan_trees(&observer)
+    );
+    // One logical table keeps both occurrences region-local: the node reads one scan per
+    // occurrence instead of one raw source per occurrence.
+    let scans = observed_series_scans(&observer);
+    assert_eq!(
+        scans.len(),
+        2,
+        "one independent scan per occurrence of the repeated selector:\n{}",
+        cte_native_observed_plan_trees(&observer)
+    );
+    assert!(
+        observer.take_raw_sources().is_empty(),
+        "one logical table keeps both scans region-local instead of one raw source per input"
+    );
+    assert_eq!(
+        native_schema,
+        cte_native_published_schema_expected(),
+        "the CTE publishes the existing planner's schema over the fused plan"
+    );
+    assert_eq!(
+        native_schema, legacy_schema,
+        "names, order, types, nullability and metadata do not depend on the route"
+    );
+    let native_types = cte_native_arrow_types(
+        native_tql_output(&instance, CTE_NATIVE_ARROW_TYPE_STATEMENT, true).await,
+    )
+    .await;
+    assert_eq!(
+        native_types,
+        cte_native_arrow_types_expected(),
+        "the Arrow types SQL sees on the CTE's columns"
+    );
+    assert_eq!(
+        native_types, legacy_types,
+        "and they are the same ones the existing plan publishes"
+    );
+    assert_eq!(native_rows, cte_native_expected_rows(), "native");
+    assert_eq!(native_rows, legacy_rows);
+
+    // `SELECT *` without an order returns the same rows, and the node still answers them.
+    observer.clear();
+    let unordered_rows =
+        cte_native_rows(native_tql_output(&instance, CTE_NATIVE_STATEMENT, true).await).await;
+    let mut unordered = unordered_rows.clone();
+    unordered.sort_by(|left, right| (left.0, &left.1).cmp(&(right.0, &right.1)));
+    assert_eq!(unordered, cte_native_expected_rows(), "native, unordered");
+    assert_eq!(
+        1,
+        cte_native_observed_fused(&observer).len(),
+        "the unordered statement runs one fused node:\n{}",
+        cte_native_observed_plan_trees(&observer)
+    );
+}
+
+/// The CTE's own column list and an outer projection and filter over it place nothing: the fused
+/// node still answers the statement, and the columns and rows are the ones the existing plan
+/// answers with.
+///
+/// The declared list is positional, so it is one statement only because both routes publish the CTE
+/// the same way: the same columns, in the same order, with the same types. What the list declares,
+/// what the outer projection reads and what the outer filter keeps are all above the node, and none
+/// of them moves it.
+#[tokio::test(flavor = "multi_thread")]
+async fn cte_native_column_aliases_and_outer_filter_keep_the_fused_plan() {
+    common_telemetry::init_default_ut_logging();
+    let (standalone, observer) =
+        native_test_instance(GreptimeDbStandaloneBuilder::new("cte_native_aliased")).await;
+    let instance = standalone.fe_instance().clone();
+    execute_all(&instance, CTE_NATIVE_FIXTURE, QueryContext::arc()).await;
+
+    observer.clear();
+    let legacy_output = native_tql_output(&instance, CTE_NATIVE_ALIASED_STATEMENT, false).await;
+    let legacy_schema = cte_native_published_schema(&legacy_output);
+    let legacy_rows = cte_native_rows(legacy_output).await;
+    assert!(
+        observer.fused().is_none(),
+        "the route is off, so no native node may run:\n{}",
+        cte_native_observed_plan_trees(&observer)
+    );
+    assert_eq!(
+        legacy_schema,
+        cte_native_aliased_schema_expected(),
+        "legacy schema"
+    );
+    assert_eq!(legacy_rows, cte_native_filtered_rows(), "legacy");
+
+    observer.clear();
+    let native_output = native_tql_output(&instance, CTE_NATIVE_ALIASED_STATEMENT, true).await;
+    let native_schema = cte_native_published_schema(&native_output);
+    let native_rows = cte_native_rows(native_output).await;
+    assert_eq!(
+        1,
+        cte_native_observed_fused(&observer).len(),
+        "the aliased statement runs one fused node:\n{}",
+        cte_native_observed_plan_trees(&observer)
+    );
+    let joins = cte_native_observed_names(&observer)
+        .into_iter()
+        .filter(|name| name.contains("Join"))
+        .collect::<Vec<_>>();
+    assert!(
+        joins.is_empty(),
+        "a fused plan joins nothing, but these nodes ran: {joins:?}\n{}",
+        cte_native_observed_plan_trees(&observer)
+    );
+    assert_eq!(
+        native_schema,
+        cte_native_aliased_schema_expected(),
+        "the declared names apply to the same columns on both routes"
+    );
+    assert_eq!(
+        native_schema, legacy_schema,
+        "names, order, types, nullability and metadata do not depend on the route"
+    );
+    assert_eq!(native_rows, cte_native_filtered_rows(), "native");
+    assert_eq!(native_rows, legacy_rows);
+}
+
+/// The control: without the per-request hint the CTE statement keeps the existing plan, so the rows
+/// the route is compared against above come from the plan that answered this statement before the
+/// route existed.
+#[tokio::test(flavor = "multi_thread")]
+async fn cte_native_without_the_hint_keeps_the_legacy_plan() {
+    common_telemetry::init_default_ut_logging();
+    let (standalone, observer) =
+        native_test_instance(GreptimeDbStandaloneBuilder::new("cte_native_control")).await;
+    let instance = standalone.fe_instance().clone();
+    execute_all(&instance, CTE_NATIVE_FIXTURE, QueryContext::arc()).await;
+
+    observer.clear();
+    let output = native_tql_output(&instance, CTE_NATIVE_ORDERED_STATEMENT, false).await;
+    let schema = cte_native_published_schema(&output);
+    let rows = cte_native_rows(output).await;
+    assert!(
+        cte_native_observed_fused(&observer).is_empty(),
+        "the hint is off, so no fused node may run:\n{}",
+        cte_native_observed_plan_trees(&observer)
+    );
+    assert_eq!(schema, cte_native_published_schema_expected());
+    assert_eq!(rows, cte_native_expected_rows());
+}
+
+/// The same CTE statement against real datanodes.
+///
+/// The topology differs from the in-process answer: every selector occurrence reads its region
+/// through a merge scan of its own, and the fused node that reads them both runs in the frontend.
+/// What does not differ is the answer, so the rows are the ones the legacy route returns.
+#[tokio::test(flavor = "multi_thread")]
+async fn distributed_cte_native_runs_the_fused_plan_over_raw_sources() {
+    common_telemetry::init_default_ut_logging();
+    let cluster = GreptimeDbClusterBuilder::new("distributed_cte_native")
+        .await
+        .with_datanodes(2)
+        .with_real_datanode_grpc_addr(true)
+        .with_frontend_real_datanode_grpc(true)
+        .with_query_options(QueryOptions {
+            experimental_native_promql: true,
+            ..Default::default()
+        })
+        .build(false)
+        .await;
+    let instance = cluster.fe_instance().clone();
+    execute_all(&instance, CTE_NATIVE_FIXTURE, QueryContext::arc()).await;
+
+    let query = |enabled| {
+        instance.do_query(
+            CTE_NATIVE_ORDERED_STATEMENT,
+            native_query_context(enabled, 2),
+        )
+    };
+
+    let legacy_output = query(false).await.remove(0).unwrap();
+    let legacy_schema = cte_native_published_schema(&legacy_output);
+    let legacy_rows = cte_native_rows(legacy_output).await;
+    assert_eq!(
+        legacy_schema,
+        cte_native_published_schema_expected(),
+        "legacy schema"
+    );
+    assert_eq!(legacy_rows, cte_native_expected_rows(), "legacy");
+
+    let output = query(true).await.remove(0).unwrap();
+    let native_schema = cte_native_published_schema(&output);
+    let plan = output.meta.plan.clone().expect("frontend physical plan");
+    let names = {
+        let mut names = Vec::new();
+        let mut stack = vec![Arc::clone(&plan)];
+        while let Some(node) = stack.pop() {
+            names.push(node.name().to_string());
+            stack.extend(node.children().into_iter().cloned());
+        }
+        names
+    };
+    assert!(
+        names.iter().any(|name| name == "FusedSeriesExec"),
+        "the frontend must hold the fused node:\n{}",
+        display_plan_tree(&plan)
+    );
+    assert!(
+        names.iter().all(|name| !name.contains("Join")),
+        "a fused plan joins nothing, but these nodes ran: {names:?}\n{}",
+        display_plan_tree(&plan)
+    );
+    // Each child of the fused node reads its own region, so no region runs the pair: the frontend
+    // holds the node over one merge scan per occurrence.
+    let fused = find_plan_node(&plan, "FusedSeriesExec").expect("the frontend fused node");
+    assert_eq!(
+        2,
+        fused.children().len(),
+        "the node reads one region read per occurrence:\n{}",
+        display_plan_tree(&plan)
+    );
+    for (occurrence, child) in fused.children().iter().enumerate() {
+        assert!(
+            find_plan_node(child, "MergeScanExec").is_some(),
+            "occurrence {occurrence} reads its region through a merge scan:\n{}",
+            display_plan_tree(&plan)
+        );
+        assert!(
+            find_plan_node(child, "FusedSeriesExec").is_none(),
+            "occurrence {occurrence} must not run a fused node in its region:\n{}",
+            display_plan_tree(&plan)
+        );
+    }
+    let rows = cte_native_rows(output).await;
+    assert_eq!(
+        native_schema,
+        cte_native_published_schema_expected(),
+        "the CTE publishes the existing planner's schema over the distributed fused plan"
+    );
+    assert_eq!(
+        native_schema, legacy_schema,
+        "names, order, types, nullability and metadata do not depend on the route or the deployment"
+    );
+    assert_eq!(rows, cte_native_expected_rows(), "native");
+    assert_eq!(rows, legacy_rows);
+}
+
+/// A grouping by the metric name reports one group per metric.
+///
+/// `sum by (__name__) (a or b)` reads two metrics whose only distinguishing label is their metric
+/// name. The union reports the name of the side each series came from, and the outer grouping folds
+/// by that name, so the answer is two groups, each named after its own metric. The number of rows
+/// and their full label sets are what this asserts: a plan that dropped the name would report the
+/// two contributions as one group, and the value alone would still look plausible.
+#[tokio::test(flavor = "multi_thread")]
+async fn native_promql_answers_a_grouping_by_the_metric_name() {
     common_telemetry::init_default_ut_logging();
     let (standalone, observer) = native_test_instance(GreptimeDbStandaloneBuilder::new(
         "native_promql_group_by_name",
@@ -7379,30 +10253,37 @@ async fn native_promql_declines_a_grouping_by_the_metric_name() {
     // whose only distinguishing label is the metric name.
     let query = r#"sum by (__name__) (native_name_demo{host="a"} or native_name_other{host="b"})"#;
     let sql = format!("TQL EVAL (0, 0, '1s') {query}");
-    let (_, legacy_rows) =
-        native_labelled_rows(native_tql_output(&instance, &sql, false).await).await;
-    assert!(
-        !legacy_rows.is_empty(),
-        "{query}: the existing plan must answer this, otherwise there is nothing to keep"
-    );
-
     observer.clear();
     let (_, native_rows) =
         native_labelled_rows(native_tql_output(&instance, &sql, true).await).await;
+    let root = datafusion::physical_plan::displayable(observer.root_plan().as_ref())
+        .indent(true)
+        .to_string();
+    // The union has to stay native: the legacy plan joins the two tables and reports no name column
+    // the outer grouping could fold by.
     assert!(
-        observer.fused().is_none(),
-        "{query}: the route must decline a grouping by the metric name, whose groups its declared \
-         schema cannot name"
+        observer.fused().is_some(),
+        "{query}: the union runs as one fused node: {root}"
     );
+    assert!(
+        !root.contains("JoinExec"),
+        "{query}: the union is not a legacy join: {root}"
+    );
+    let named =
+        |name: &str| std::collections::BTreeMap::from([("__name__".to_string(), name.to_string())]);
     assert_eq!(
-        native_rows, legacy_rows,
-        "{query}: the full label sets of every row, not only the values"
+        vec![
+            (0, named("native_name_demo"), 2.0),
+            (0, named("native_name_other"), 8.0),
+        ],
+        native_rows,
+        "{query}: one group per metric name, each named after its own metric"
     );
 }
 
-/// Ordinary Mito sources also decline a multi-source grouping by metric name.
+/// Ordinary Mito sources also report one group per metric under a grouping by the metric name.
 #[tokio::test(flavor = "multi_thread")]
-async fn native_promql_declines_mito_cross_table_grouping_by_metric_name() {
+async fn native_promql_answers_mito_cross_table_grouping_by_metric_name() {
     common_telemetry::init_default_ut_logging();
     let (standalone, observer) = native_test_instance(GreptimeDbStandaloneBuilder::new(
         "native_promql_mito_group_by_name",
@@ -7421,30 +10302,37 @@ async fn native_promql_declines_mito_cross_table_grouping_by_metric_name() {
 
     let query = r#"sum by (__name__) (name_a{host="a"} or name_b{host="b"})"#;
     let sql = format!("TQL EVAL (0, 0, '1s') {query}");
-    let (_, legacy_rows) =
-        native_labelled_rows(native_tql_output(&instance, &sql, false).await).await;
-    assert!(
-        !legacy_rows.is_empty(),
-        "{query}: existing plan must answer"
-    );
-
     observer.clear();
     let (_, native_rows) =
         native_labelled_rows(native_tql_output(&instance, &sql, true).await).await;
+    let root = datafusion::physical_plan::displayable(observer.root_plan().as_ref())
+        .indent(true)
+        .to_string();
     assert!(
-        observer.fused().is_none(),
-        "{query}: native must decline multi-source grouping by __name__"
+        observer.fused().is_some(),
+        "{query}: the union runs as one fused node: {root}"
     );
+    assert!(
+        !root.contains("JoinExec"),
+        "{query}: the union is not a legacy join: {root}"
+    );
+    let named =
+        |name: &str| std::collections::BTreeMap::from([("__name__".to_string(), name.to_string())]);
     assert_eq!(
-        native_rows, legacy_rows,
-        "{query}: compare the full labelled rows from both routes"
+        vec![(0, named("name_a"), 2.0), (0, named("name_b"), 8.0)],
+        native_rows,
+        "{query}: compare the full labelled rows"
     );
 }
 
-/// Unsupported `count_values` groupings keep the legacy plan before labels are lost or execution
-/// reaches a kernel refusal. The outer `sum` prevents a final-schema check from masking the latter.
+/// `count_values` over a union reports one series per metric name, and per value it counted.
+///
+/// `by (__name__)` folds the two inputs into two groups that differ only in their metric name;
+/// `by (val)` names a label no series carries, so both inputs fall into one group and the outer
+/// `sum` folds what `count_values` wrote there. The full label sets of every row are what this
+/// asserts: a plan that dropped the name would report one series where two metrics were counted.
 #[tokio::test(flavor = "multi_thread")]
-async fn native_promql_declines_count_values_groupings_the_node_cannot_honor() {
+async fn native_promql_answers_count_values_groupings_over_a_union() {
     common_telemetry::init_default_ut_logging();
     let (standalone, observer) = native_test_instance(GreptimeDbStandaloneBuilder::new(
         "native_promql_count_values_groups",
@@ -7475,37 +10363,46 @@ async fn native_promql_declines_count_values_groupings_the_node_cannot_honor() {
     )
     .await;
 
-    // `by (__name__)` names a label absent from the declared schema; the outer sum hides the
-    // unsupported `by (val)` grouping from the final schema.
+    // `count_values` writes the value it counted into the label the first argument names, so each
+    // row carries that label beside the group's own labels. `val` is no label of either series, so
+    // the second query groups both inputs together and counts each of them once.
     let by_name = r#"count_values by (__name__) ("sample", native_cv_demo{host="a"} or native_cv_other{host="b"})"#;
     let by_field = r#"sum(count_values by (val) ("sample", native_cv_demo{host="a"} or native_cv_other{host="b"}))"#;
-    for query in [by_name, by_field] {
+    let counted = |name: &str| {
+        std::collections::BTreeMap::from([
+            ("__name__".to_string(), name.to_string()),
+            ("sample".to_string(), "1".to_string()),
+        ])
+    };
+    for (query, expected) in [
+        (
+            by_name,
+            vec![
+                (0, counted("native_cv_demo"), 1.0),
+                (0, counted("native_cv_other"), 1.0),
+            ],
+        ),
+        (by_field, vec![(0, std::collections::BTreeMap::new(), 2.0)]),
+    ] {
         let sql = format!("TQL EVAL (0, 0, '1s') {query}");
-        let (_, legacy_rows) =
-            native_labelled_rows(native_tql_output(&instance, &sql, false).await).await;
-        assert!(
-            !legacy_rows.is_empty(),
-            "{query}: the existing plan must answer this, otherwise there is nothing to keep"
-        );
-
         observer.clear();
         let (_, native_rows) =
             native_labelled_rows(native_tql_output(&instance, &sql, true).await).await;
+        let root = datafusion::physical_plan::displayable(observer.root_plan().as_ref())
+            .indent(true)
+            .to_string();
         assert!(
-            observer.fused().is_none(),
-            "{query}: the route must decline a grouping its declared schema or kernel cannot honor"
+            observer.fused().is_some(),
+            "{query}: the union runs as one fused node: {root}"
+        );
+        assert!(
+            !root.contains("JoinExec"),
+            "{query}: the union is not a legacy join: {root}"
         );
         assert_eq!(
-            native_rows, legacy_rows,
+            expected, native_rows,
             "{query}: the full label sets of every row, not only the values"
         );
-        if query == by_field {
-            assert_eq!(
-                native_rows,
-                vec![(0, std::collections::BTreeMap::new(), 2.0)],
-                "the outer sum counts both input series"
-            );
-        }
     }
 }
 
@@ -7636,10 +10533,11 @@ async fn native_promql_rewrites_the_label_count_values_writes() {
 
 /// `topk`/`bottomk` key their groups by series labels, while the existing plan also accepts a value
 /// field there and forms one group per sample value. A `by(<value field>)` therefore keeps every
-/// group's winner on the existing plan and must not reach the native node, which would fold both
-/// series into one group and return fewer rows.
+/// group's winner, and the native route has to report the same rows: the union below it reports its
+/// series, and the window above it partitions by the same value column. The rows are what this
+/// asserts - one winner per value group - rather than that no native node answers the union.
 #[tokio::test(flavor = "multi_thread")]
-async fn native_promql_declines_ranking_grouped_by_a_value_field() {
+async fn native_promql_keeps_a_ranking_grouped_by_a_value_field() {
     common_telemetry::init_default_ut_logging();
     let (standalone, observer) = native_test_instance(GreptimeDbStandaloneBuilder::new(
         "native_promql_ranking_value_field",
@@ -7671,8 +10569,8 @@ async fn native_promql_declines_ranking_grouped_by_a_value_field() {
     .await;
 
     let pair = r#"native_rank_demo{host="x"} or native_rank_other{host="y"}"#;
-    // `by (val)` forms two groups of one sample each, so both series survive: the existing plan
-    // answers two rows where the native node would keep the single winner of one group.
+    // `by (val)` forms two groups of one sample each, so both series survive: two rows, one winner
+    // per value group, on both routes.
     for query in [
         format!("topk by (val) (1, {pair})"),
         format!("bottomk by (val) (1, {pair})"),
@@ -7681,23 +10579,25 @@ async fn native_promql_declines_ranking_grouped_by_a_value_field() {
         observer.clear();
         let legacy_rows = native_result_rows(native_tql_output(&instance, &sql, false).await).await;
         assert_eq!(
-            legacy_rows.len(),
-            2,
+            legacy_rows,
+            vec![(0, "x".to_string(), 2.0), (0, "y".to_string(), 8.0)],
             "{query}: the existing plan keeps one row per value group"
-        );
-        assert!(
-            legacy_rows
-                .iter()
-                .map(|(_, _, value)| *value)
-                .eq([2.0, 8.0]),
-            "{query}: {legacy_rows:?}"
         );
 
         observer.clear();
         let native_rows = native_result_rows(native_tql_output(&instance, &sql, true).await).await;
+        let root = datafusion::physical_plan::displayable(observer.root_plan().as_ref())
+            .indent(true)
+            .to_string();
+        // The union has to stay native rather than become the legacy join, and it must not fold the
+        // two value groups into one.
         assert!(
-            observer.fused().is_none(),
-            "{query}: the route must decline a grouping its groups cannot honor"
+            observer.fused().is_some(),
+            "{query}: the union runs as one fused node: {root}"
+        );
+        assert!(
+            !root.contains("JoinExec"),
+            "{query}: the union is not a legacy join: {root}"
         );
         assert_eq!(native_rows, legacy_rows, "{query}: full rows");
     }
@@ -7713,19 +10613,26 @@ async fn native_promql_declines_ranking_grouped_by_a_value_field() {
     assert_eq!(native_rows.len(), 2);
 }
 
-/// `limitk` keeps the series that arrive first, so a multi-input node must not answer it.
+/// A selection answers natively, and the shape it cannot answer reports Prometheus's own error.
 ///
-/// A node with more than one input hands its inputs' partitions over in the order they became ready,
-/// while `limitk` keeps the first `k` series of each group in input order: the schedule would decide
-/// which series a query keeps, where Prometheus defines the selection over a series set. The
-/// aggregate split declines it for the same reason, and that refusal is repeated for a multi-input
-/// node.
+/// `limitk` keeps the first `k` series of each group in input order, and Prometheus leaves which
+/// series those are to the engine: a query that selects some of a series set may keep any subset,
+/// so a route that hands its input over in a different order still answers correctly. What the
+/// native route must not do is keep the statement from being answered at all.
 ///
-/// The existing planner cannot plan `limitk` at all - it has no kernel for the operator - so the
-/// statement fails on both routes today. What this pins is that the native route does not change
-/// that outcome by answering it, and in particular does not answer it differently between runs.
+/// That is what the earlier version of this test pinned, and it was wrong: the existing planner has
+/// no kernel for `limitk`, so "the plan this statement already had" was an error, and holding the
+/// native route to it was a coverage loss rather than a safety property. The route answers these
+/// statements now, and the assertions below are on the answers.
+///
+/// Two shapes are checked. The wrapper case is the one that can be answered *incorrectly*: with
+/// `vector(scalar(...))` on the left, `on()` matches the right side's two series against one
+/// label set on the left, and Prometheus refuses that as many-to-many. The route must report that
+/// refusal, not pick a side silently. The plain case selects from a one-series input, so the
+/// first-k rule has one answer and the test can name it; a two-series input would leave the pick to
+/// the engine, which is exactly the freedom Prometheus grants.
 #[tokio::test(flavor = "multi_thread")]
-async fn native_promql_declines_a_selection_that_depends_on_arrival_order() {
+async fn native_promql_answers_a_selection_that_depends_on_input_order() {
     common_telemetry::init_default_ut_logging();
     let (standalone, observer) = native_test_instance(GreptimeDbStandaloneBuilder::new(
         "native_promql_limitk_order",
@@ -7750,43 +10657,58 @@ async fn native_promql_declines_a_selection_that_depends_on_arrival_order() {
             val DOUBLE,
             PRIMARY KEY (host)
         ) ENGINE=metric WITH ("on_physical_table" = 'native_order_phy');
+        CREATE TABLE native_order_only (
+            host STRING,
+            ts TIMESTAMP TIME INDEX,
+            val DOUBLE,
+            PRIMARY KEY (host)
+        ) ENGINE=metric WITH ("on_physical_table" = 'native_order_phy');
         INSERT INTO native_order_left (host, ts, val) VALUES ('a', 0, 2), ('b', 0, 4);
-        INSERT INTO native_order_right (host, ts, val) VALUES ('a', 0, 8), ('b', 0, 8);"#,
+        INSERT INTO native_order_right (host, ts, val) VALUES ('a', 0, 8), ('b', 0, 8);
+        INSERT INTO native_order_only (host, ts, val) VALUES ('a', 0, 8);"#,
         QueryContext::arc(),
     )
     .await;
 
-    let query = "native_order_left and on(host) limitk(1, native_order_right)";
+    // The wrapper answers one value from its input, so the selection below it decides the value
+    // and the `on()` match then pairs one left label set with two right series. Prometheus refuses
+    // that pair, and so must the route: answering `10` or `12` here would be a silent choice
+    // between the two matches.
+    let query = "vector(scalar(limitk(1, native_order_left))) + on() native_order_right";
     let sql = format!("TQL EVAL (0, 0, '1s') {query}");
-
-    // The route declines, so the statement is planned by the one that was always its answer.
     observer.clear();
     let native = instance
         .do_query(&sql, native_query_context(true, 4))
         .await
-        .remove(0);
+        .remove(0)
+        .expect("the route plans the statement");
     assert!(
-        observer.fused().is_none(),
-        "{query}: the route must decline a selection whose answer depends on arrival order"
+        observer.fused().is_some(),
+        "{query}: the route answers a selection, it does not decline it"
     );
-    let legacy = instance
-        .do_query(&sql, native_query_context(false, 4))
-        .await
-        .remove(0);
-    // Both routes report the same outcome: the decline leads to the plan this statement already had,
-    // not to an answer the schedule could change.
+    // The pair is refused while the stream is read, so the error is the answer's, not a planning
+    // refusal that would have kept the statement on the existing plan.
+    let error = collect_error(native).await;
+    assert!(
+        error.contains("found duplicate series for the match group {} on the right hand-side"),
+        "{query}: {error}"
+    );
+    assert!(
+        error.contains("many-to-many matching not allowed"),
+        "{query}: {error}"
+    );
+
+    // One candidate, so the first-`k` rule keeps it and the answer is the series itself.
+    let query = "limitk(1, native_order_only)";
+    let sql = format!("TQL EVAL (0, 0, '1s') {query}");
+    observer.clear();
+    let rows = native_result_rows(native_tql_output(&instance, &sql, true).await).await;
     assert_eq!(
-        native.is_err(),
-        legacy.is_err(),
-        "{query}: the route must not change whether the statement is answerable"
+        observer.take().name(),
+        "FusedSeriesExec",
+        "{query}: the route answers it natively"
     );
-    if let (Err(native_error), Err(legacy_error)) = (native, legacy) {
-        assert_eq!(
-            native_error.to_string(),
-            legacy_error.to_string(),
-            "{query}: the decline must lead to the plan this statement already had"
-        );
-    }
+    assert_eq!(rows, vec![(0, "a".to_string(), 8.0)], "{query}");
 }
 
 /// A tree the native runtime cannot execute keeps the existing plan, rather than failing the
@@ -7944,6 +10866,74 @@ async fn native_promql_delta_temporality_rate_and_increase_match_legacy() {
         );
     }
 
+    // A subquery recurses through the expression tree for the same delta-temporality guard.
+    // Compare against the existing route and assert that native execution declines both functions.
+    for query in [
+        format!("max_over_time(rate({TABLE}[2m])[2m:1m])"),
+        format!("max_over_time(increase({TABLE}[2m])[2m:1m])"),
+    ] {
+        let sql = format!("TQL EVAL (120, 120, '1m') {query}");
+        let legacy_rows = native_marker_rows(native_tql_output(&instance, &sql, false).await).await;
+        assert!(
+            !legacy_rows.is_empty(),
+            "legacy subquery `{query}` must return rows"
+        );
+        observer.clear();
+        let native_rows = native_marker_rows(native_tql_output(&instance, &sql, true).await).await;
+        assert_eq!(
+            native_rows, legacy_rows,
+            "`{query}`: same rows on both routes"
+        );
+        assert!(
+            observer.fused().is_none(),
+            "`{query}`: delta temporality inside a subquery must decline native planning"
+        );
+    }
+
+    // Only the denominator carries the temporality tag; the rated counter is unmarked.
+    // Its zero-point extrapolation yields a rate of 0.25. The second form also requires clamp.
+    execute_all(
+        &instance,
+        &format!(
+            "INSERT INTO {TABLE} (host, ts, val, otlp_aggregation_temporality) VALUES ('a', 60000, 2, '{GREPTIME_TEMPORALITY_DELTA}'), ('a', 120000, 2, '{GREPTIME_TEMPORALITY_DELTA}')"
+        ),
+        QueryContext::arc(),
+    )
+    .await;
+    for (query, expected) in [
+        (format!("rate({CONTROL}[2m]) / on(host) {TABLE}"), 1.0 / 8.0),
+        (
+            format!("rate({CONTROL}[2m]) / on(host) clamp({TABLE}, 0, 1)"),
+            1.0 / 4.0,
+        ),
+    ] {
+        let sql = format!("TQL EVAL (120, 120, '1m') {query}");
+        observer.clear();
+        let (columns, rows) =
+            native_labelled_rows(native_tql_output(&instance, &sql, true).await).await;
+        assert_eq!(columns, vec!["host", "ts", "val"]);
+        assert_eq!(rows.len(), 1, "{query}: {rows:?}");
+        assert_eq!(rows[0].0, 120_000, "{query}");
+        assert_eq!(
+            rows[0].1,
+            [("host".to_string(), "a".to_string())].into(),
+            "{query}"
+        );
+        assert!((rows[0].2 - expected).abs() < 1e-10, "{query}: {rows:?}");
+        let binary = observer.two_input_fused();
+        let display = datafusion::physical_plan::displayable(binary.as_ref())
+            .indent(true)
+            .to_string();
+        assert!(display.contains("Binary"), "{query}: {display}");
+        assert!(
+            !datafusion::physical_plan::displayable(observer.root_plan().as_ref())
+                .indent(true)
+                .to_string()
+                .contains("JoinExec"),
+            "{query}"
+        );
+    }
+
     // The control: a marker-free table (samples 10 and 30 here, unlike the table above) still fuses
     // and agrees with the existing plan, so the decline is about the marker, not the table shape.
     let control_sql = format!("TQL EVAL (120, 120, '1m') sum_over_time({CONTROL}[2m])");
@@ -7961,6 +10951,69 @@ async fn native_promql_delta_temporality_rate_and_increase_match_legacy() {
     assert_eq!(
         control_native, control_legacy,
         "the control agrees with the existing plan"
+    );
+}
+
+/// Legacy wrappers over a native binary retain the binary's values and evaluation grid.
+#[tokio::test(flavor = "multi_thread")]
+async fn native_promql_binary_inside_scalar_and_quantile() {
+    let (standalone, observer) = native_test_instance(GreptimeDbStandaloneBuilder::new(
+        "native_promql_binary_inside_scalar_and_quantile",
+    ))
+    .await;
+    let instance = standalone.fe_instance().clone();
+    execute_all(
+        &instance,
+        "CREATE TABLE nested_native_a (job STRING, ts TIMESTAMP(3) TIME INDEX, val DOUBLE, PRIMARY KEY (job));          CREATE TABLE nested_native_b (job STRING, ts TIMESTAMP(3) TIME INDEX, val DOUBLE, PRIMARY KEY (job));          INSERT INTO nested_native_a VALUES ('api', 60000, 6), ('api', 120000, 8);          INSERT INTO nested_native_b VALUES ('api', 60000, 2), ('api', 120000, 4);",
+        QueryContext::arc(),
+    )
+    .await;
+    for query in [
+        "scalar(nested_native_a + on(job) nested_native_b)",
+        "quantile(0.5, nested_native_a + on(job) nested_native_b)",
+    ] {
+        let sql = format!("TQL EVAL (60, 120, '1m') {query}");
+        let (_, legacy) =
+            native_labelled_rows(native_tql_output(&instance, &sql, false).await).await;
+        observer.clear();
+        let (_, rows) = native_labelled_rows(native_tql_output(&instance, &sql, true).await).await;
+        assert_eq!(rows, legacy, "{query}");
+        assert_eq!(
+            rows,
+            vec![
+                (60_000, Default::default(), 8.0),
+                (120_000, Default::default(), 12.0)
+            ],
+            "{query}"
+        );
+        let binary = observer.two_input_fused();
+        let display = datafusion::physical_plan::displayable(binary.as_ref())
+            .indent(true)
+            .to_string();
+        assert!(display.contains("Binary"), "{query}: {display}");
+        let root = datafusion::physical_plan::displayable(observer.root_plan().as_ref())
+            .indent(true)
+            .to_string();
+        assert!(!root.contains("JoinExec"), "{query}: {root}");
+    }
+    let query = "scalar(clamp(nested_native_a, 0, 1) / on(job) nested_native_b)";
+    let sql = format!("TQL EVAL (60, 120, '1m') {query}");
+    observer.clear();
+    let (_, rows) = native_labelled_rows(native_tql_output(&instance, &sql, true).await).await;
+    assert_eq!(
+        rows,
+        vec![
+            (60_000, Default::default(), 0.5),
+            (120_000, Default::default(), 0.25)
+        ]
+    );
+    let binary = observer.two_input_fused();
+    let display = datafusion::physical_plan::displayable(binary.as_ref())
+        .indent(true)
+        .to_string();
+    assert!(
+        display.contains("Binary") && display.contains("clamp"),
+        "{query}: {display}"
     );
 }
 
@@ -8149,10 +11202,14 @@ async fn native_promql_columnar_fused_series_matches_legacy() {
         metric_name,
         physical_metadata,
         logical_tags,
-    } = series_scan.label_source()
+    } = series_scan.scan_binding()
     else {
-        panic!("the fused scan must materialize labels from the primary key");
+        panic!("the fused scan must bind labels from the primary key");
     };
+    assert!(matches!(
+        series_scan.label_source(),
+        RawLabelSource::Explicit
+    ));
     assert_eq!(metric_name.as_ref(), TABLE);
     assert_eq!(
         logical_tags
@@ -8215,6 +11272,19 @@ async fn native_promql_columnar_fused_series_matches_legacy() {
     let legacy_rows = native_result_rows(native_tql_output(&instance, &sql, false).await).await;
     assert_eq!(native_rows, legacy_rows, "same rows on both routes");
     assert!(observer.fused().is_none(), "the legacy route must not fuse");
+    // An instant selector preserves identities across scan partitions even when frames carry
+    // explicit labels. The binding, rather than the frame encoding, proves completeness.
+    observer.clear();
+    let instant = format!("TQL EVAL (120, 120, '1m') {TABLE}");
+    native_result_rows(native_tql_output(&instance, &instant, true).await).await;
+    let instant_plan = observer.take();
+    let fused = instant_plan
+        .downcast_ref::<promql::extension_plan::FusedSeriesExec>()
+        .unwrap();
+    assert!(fused.has_partition_disjoint_identities());
+    let matched = format!("TQL EVAL (120, 120, '1m') sum_over_time({TABLE}{{host=\"b\"}}[2m])");
+    let matched_rows = native_result_rows(native_tql_output(&instance, &matched, true).await).await;
+    assert_eq!(matched_rows, vec![(120_000, "b".to_string(), 80.0)]);
 }
 
 /// No published series index: the columnar `Float64` selector must answer from the raw memtable
@@ -8556,6 +11626,75 @@ async fn native_promql_dynamic_scalars_match_prometheus_and_legacy() {
         \n+---------------------+-------+--------+\
         \n| 1970-01-01T00:00:00 | 1.0   | 1      |\
         \n+---------------------+-------+--------+"
+    );
+}
+
+/// A same-table scalar broadcast gathers simultaneous series from distinct physical regions.
+/// `scalar(m)` is NaN for two series, so `m == bool scalar(m)` answers zero for both. Evaluating
+/// the scalar separately in each region would instead compare each series to itself and answer one.
+#[tokio::test(flavor = "multi_thread")]
+async fn native_promql_same_table_partitioned_scalar_broadcast_gathers_whole_vector() {
+    let (standalone, observer) = native_test_instance(GreptimeDbStandaloneBuilder::new(
+        "native_promql_partitioned_scalar_broadcast",
+    ))
+    .await;
+    let instance = standalone.fe_instance().clone();
+    execute_all(
+        &instance,
+        "CREATE TABLE native_partitioned_scalar (host STRING, ts TIMESTAMP TIME INDEX, \
+         val DOUBLE, PRIMARY KEY(host)) PARTITION ON COLUMNS (host) (host < 'm', host >= 'm'); \
+         INSERT INTO native_partitioned_scalar VALUES ('a', 5000, 2), ('z', 5000, 7)",
+        QueryContext::arc(),
+    )
+    .await;
+
+    let sql =
+        "TQL EVAL (5, 5, '1s') native_partitioned_scalar == bool scalar(native_partitioned_scalar)";
+    observer.clear();
+    let rows = native_result_rows(native_tql_output(&instance, sql, true).await).await;
+    assert_eq!(
+        rows,
+        vec![(5_000, "a".to_string(), 0.0), (5_000, "z".to_string(), 0.0)],
+        "the global scalar is NaN and equality is false for both series"
+    );
+
+    let root = observer.root_plan();
+    let fused = find_plan_node(&root, "FusedSeriesExec").unwrap_or_else(|| {
+        panic!(
+            "the frontend must answer natively: {}",
+            display_plan_tree(&root)
+        )
+    });
+    assert_eq!(
+        observer.answering_node().as_deref(),
+        Some("FusedSeriesExec")
+    );
+    assert_eq!(
+        fused.children().len(),
+        2,
+        "one input per selector: {}",
+        display_plan_tree(&root)
+    );
+    assert_eq!(
+        fused.output_partitioning().partition_count(),
+        1,
+        "the whole vector is gathered: {}",
+        display_plan_tree(&root)
+    );
+    let shape = native_plan_shape(&root);
+    assert_eq!(
+        shape.regions_per_scan,
+        vec![2, 2],
+        "each selector reads both declared host ranges: {}",
+        display_plan_tree(&root)
+    );
+    // The disjoint declared ranges place `a` and `z` in different physical regions; both scans
+    // select those regions. Compare the two NaN equalities with a literal false control as well.
+    let literal = "TQL EVAL (5, 5, '1s') native_partitioned_scalar == bool 0";
+    let legacy = native_result_rows(native_tql_output(&instance, literal, false).await).await;
+    assert_eq!(
+        rows, legacy,
+        "a literal false comparison yields the same labelled rows"
     );
 }
 
@@ -9930,6 +13069,447 @@ async fn native_promql_real_query_q04_namespace_cpu_requests() {
     );
 }
 
+/// A multi-field `scalar()` input declines the native route and keeps the existing plan.
+#[tokio::test(flavor = "multi_thread")]
+async fn native_promql_scalar_multi_field_falls_back() {
+    common_telemetry::init_default_ut_logging();
+    let (standalone, observer) = native_test_instance(GreptimeDbStandaloneBuilder::new(
+        "native_promql_scalar_multi_field_fallback",
+    ))
+    .await;
+    let instance = standalone.fe_instance().clone();
+    execute_all(
+        &instance,
+        "CREATE TABLE native_scalar_multi (host STRING, ts TIMESTAMP TIME INDEX, val DOUBLE, val2 DOUBLE, PRIMARY KEY(host)); \
+         INSERT INTO native_scalar_multi (host, ts, val, val2) VALUES ('a', 0, 1, 10)",
+        QueryContext::arc(),
+    )
+    .await;
+    let sql = "TQL EVAL (0, 0, '1s') scalar(native_scalar_multi)";
+    let error = instance
+        .do_query(sql, native_query_context(true, 4))
+        .await
+        .remove(0)
+        .unwrap_err();
+    assert!(
+        format!("{error:?}").contains("Multi fields calculation is not supported in scalar"),
+        "unexpected multi-field scalar error: {error:?}"
+    );
+    assert!(
+        observer.fused().is_none(),
+        "multi-field scalar() must fall back"
+    );
+}
+
+/// A dynamic classic histogram quantile matches each equivalent constant-phi evaluation.
+#[tokio::test(flavor = "multi_thread")]
+async fn native_promql_dynamic_histogram_quantile() {
+    common_telemetry::init_default_ut_logging();
+    let config = mito2::config::MitoConfig {
+        experimental_series_scan_v2: true,
+        ..Default::default()
+    };
+    let (standalone, observer) = native_test_instance(
+        GreptimeDbStandaloneBuilder::new("native_dynamic_histogram_quantile")
+            .with_mito_config(config),
+    )
+    .await;
+    let instance = standalone.fe_instance().clone();
+    execute_all(&instance, "CREATE TABLE native_dyn_hist (ts TIMESTAMP TIME INDEX, le STRING, v DOUBLE, PRIMARY KEY(le)); INSERT INTO native_dyn_hist (ts, le, v) VALUES (-60000, '1', 0), (0, '1', 5), (60000, '1', 10), (-60000, '2', 0), (0, '2', 9), (60000, '2', 18), (-60000, '+Inf', 0), (0, '+Inf', 10), (60000, '+Inf', 20)", QueryContext::arc()).await;
+    let query = "sum by(le)(rate(native_dyn_hist[5m]))";
+    let sql = format!("TQL EVAL (0, 60, '60s') histogram_quantile(time() / 150 + 0.5, {query})");
+    observer.clear();
+    let native = native_labelled_rows(native_tql_output(&instance, &sql, true).await).await;
+    assert!(
+        observer.fused().is_some(),
+        "dynamic histogram query did not run natively"
+    );
+    // The legacy planner requires literal histogram parameters, so compare each point with its constant-phi equivalent.
+    let mut expected = Vec::new();
+    for (t, phi) in [(0, 0.5), (60, 0.9)] {
+        let literal = format!("TQL EVAL ({t}, {t}, '60s') histogram_quantile({phi}, {query})");
+        let (_, mut rows) =
+            native_labelled_rows(native_tql_output(&instance, &literal, false).await).await;
+        expected.append(&mut rows);
+    }
+    let mut actual = native.1;
+    actual.sort_by_key(|row| row.0);
+    expected.sort_by_key(|row| row.0);
+    assert_eq!(actual, expected);
+
+    // A literal lower bound and a dynamic upper bound exercise both parameter paths together.
+    let fraction_sql =
+        format!("TQL EVAL (0, 60, '60s') histogram_fraction(0, time() / 150 + 0.5, {query})");
+    observer.clear();
+    let fraction_native =
+        native_labelled_rows(native_tql_output(&instance, &fraction_sql, true).await).await;
+    assert!(
+        observer.fused().is_some(),
+        "dynamic histogram fraction did not run natively: {fraction_sql}"
+    );
+    let mut fraction_expected = Vec::new();
+    for (t, upper) in [(0, 0.5), (60, 0.9)] {
+        let literal = format!("TQL EVAL ({t}, {t}, '60s') histogram_fraction(0, {upper}, {query})");
+        let (_, mut rows) =
+            native_labelled_rows(native_tql_output(&instance, &literal, false).await).await;
+        fraction_expected.append(&mut rows);
+    }
+    let mut fraction_actual = fraction_native.1;
+    fraction_actual.sort_by_key(|row| row.0);
+    fraction_expected.sort_by_key(|row| row.0);
+    assert_eq!(fraction_actual, fraction_expected, "{fraction_sql}");
+
+    let wrapped_query =
+        "abs(histogram_quantile(time() / 150 + 0.5, sum by(le)(rate(native_dyn_hist[5m]))))";
+    let wrapped_sql = format!("TQL EVAL (0, 60, '60s') {wrapped_query}");
+    observer.clear();
+    let wrapped_native =
+        native_labelled_rows(native_tql_output(&instance, &wrapped_sql, true).await).await;
+    assert!(
+        observer.fused().is_some(),
+        "wrapped dynamic histogram query did not run natively: {wrapped_sql}"
+    );
+    let mut wrapped_expected = Vec::new();
+    for (t, phi) in [(0, 0.5), (60, 0.9)] {
+        let literal = format!("TQL EVAL ({t}, {t}, '60s') abs(histogram_quantile({phi}, {query}))");
+        let (_, mut rows) =
+            native_labelled_rows(native_tql_output(&instance, &literal, false).await).await;
+        wrapped_expected.append(&mut rows);
+    }
+    let mut wrapped_actual = wrapped_native.1;
+    wrapped_actual.sort_by_key(|row| row.0);
+    wrapped_expected.sort_by_key(|row| row.0);
+    assert_eq!(wrapped_actual, wrapped_expected, "{wrapped_sql}");
+}
+
+/// A dynamic `topk` parameter is evaluated at each TQL evaluation timestamp. `time() / 60 + 1`
+/// truncates to k = 1, 2, 3 at 0s, 60s, and 120s respectively.
+#[tokio::test(flavor = "multi_thread")]
+async fn native_promql_dynamic_topk_matches_legacy() {
+    common_telemetry::init_default_ut_logging();
+    let config = mito2::config::MitoConfig {
+        experimental_series_scan_v2: true,
+        ..Default::default()
+    };
+    let (standalone, observer) = native_test_instance(
+        GreptimeDbStandaloneBuilder::new("native_promql_dynamic_topk_e2e").with_mito_config(config),
+    )
+    .await;
+    let instance = standalone.fe_instance().clone();
+    execute_all(
+        &instance,
+        r#"CREATE TABLE native_dyn_topk (host STRING, ts TIMESTAMP TIME INDEX, val DOUBLE, PRIMARY KEY(host));
+         INSERT INTO native_dyn_topk (host, ts, val) VALUES
+         ('h0', -60000, 0), ('h0', 0, 1), ('h0', 60000, 2), ('h0', 120000, 3),
+         ('h1', -60000, 0), ('h1', 0, 2), ('h1', 60000, 4), ('h1', 120000, 6),
+         ('h2', -60000, 0), ('h2', 0, 3), ('h2', 60000, 6), ('h2', 120000, 9),
+         ('h3', -60000, 0), ('h3', 0, 4), ('h3', 60000, 8), ('h3', 120000, 12),
+         ('h4', -60000, 0), ('h4', 0, 5), ('h4', 60000, 10), ('h4', 120000, 15),
+         ('h5', -60000, 0), ('h5', 0, 6), ('h5', 60000, 12), ('h5', 120000, 18),
+         ('h6', -60000, 0), ('h6', 0, 7), ('h6', 60000, 14), ('h6', 120000, 21),
+         ('h7', -60000, 0), ('h7', 0, 8), ('h7', 60000, 16), ('h7', 120000, 24)"#,
+        QueryContext::arc(),
+    )
+    .await;
+    let query_body = "sum by(host)(rate(native_dyn_topk[5m]))";
+    let sql = format!("TQL EVAL (0, 120, '60s') topk(time() / 60 + 1, {query_body})");
+    observer.clear();
+    let native = native_labelled_rows(native_tql_output(&instance, &sql, true).await).await;
+    assert!(
+        observer.fused().is_some(),
+        "dynamic topk did not run natively"
+    );
+    let counts = [0, 60_000, 120_000].map(|timestamp| {
+        native
+            .1
+            .iter()
+            .filter(|(ts, _, _)| *ts == timestamp)
+            .count()
+    });
+    assert_eq!(counts, [1, 2, 3], "k = 1, 2, 3 at 0s, 60s, 120s");
+    // The legacy planner requires a literal topk parameter, so compare each timestamp against
+    // its equivalent literal-k query (the k values are computed above from `time() / 60 + 1`).
+    let mut legacy_rows = Vec::new();
+    for (timestamp_seconds, k) in [(0, 1), (60, 2), (120, 3)] {
+        let legacy_sql = format!(
+            "TQL EVAL ({timestamp_seconds}, {timestamp_seconds}, '60s') topk({k}, {query_body})"
+        );
+        let (_, mut rows) =
+            native_labelled_rows(native_tql_output(&instance, &legacy_sql, false).await).await;
+        legacy_rows.append(&mut rows);
+    }
+    let mut native_rows = native.1.clone();
+    native_rows.sort_by(|left, right| (&left.0, &left.1).cmp(&(&right.0, &right.1)));
+    legacy_rows.sort_by(|left, right| (&left.0, &left.1).cmp(&(&right.0, &right.1)));
+    assert_eq!(native_rows, legacy_rows);
+
+    for is_abs in [true, false] {
+        let wrapped_query = if is_abs {
+            format!("abs(topk(time() / 60 + 1, {query_body}))")
+        } else {
+            format!("topk(time() / 60 + 1, {query_body}) + 1")
+        };
+        let wrapped_sql = format!("TQL EVAL (0, 120, '60s') {wrapped_query}");
+        observer.clear();
+        let wrapped_native =
+            native_labelled_rows(native_tql_output(&instance, &wrapped_sql, true).await).await;
+        assert!(
+            observer.fused().is_some(),
+            "wrapped dynamic topk did not run natively: {wrapped_sql}"
+        );
+        let mut wrapped_expected = Vec::new();
+        for (timestamp_seconds, k) in [(0, 1), (60, 2), (120, 3)] {
+            let wrapped_literal = if is_abs {
+                format!("abs(topk({k}, {query_body}))")
+            } else {
+                format!("topk({k}, {query_body}) + 1")
+            };
+            let literal_sql = format!(
+                "TQL EVAL ({timestamp_seconds}, {timestamp_seconds}, '60s') {wrapped_literal}"
+            );
+            let (_, mut rows) =
+                native_labelled_rows(native_tql_output(&instance, &literal_sql, false).await).await;
+            wrapped_expected.append(&mut rows);
+        }
+        let mut wrapped_actual = wrapped_native.1;
+        wrapped_actual.sort_by(|left, right| (&left.0, &left.1).cmp(&(&right.0, &right.1)));
+        wrapped_expected.sort_by(|left, right| (&left.0, &left.1).cmp(&(&right.0, &right.1)));
+        assert_eq!(wrapped_actual, wrapped_expected, "{wrapped_sql}");
+    }
+
+    let outer_sql =
+        format!("TQL EVAL (0, 120, '60s') topk(1, topk(time() / 60 + 1, {query_body}))");
+    observer.clear();
+    let outer_native =
+        native_labelled_rows(native_tql_output(&instance, &outer_sql, true).await).await;
+    // `topk` above a split aggregate needs a whole-vector boundary, so no split answers this
+    // statement: the one fused node that reads the series answers it whole.
+    assert_eq!(
+        observer.answering_node().as_deref(),
+        Some("FusedSeriesExec"),
+        "outer constant topk over a dynamic topk did not answer natively: {outer_sql}"
+    );
+    let mut outer_expected = Vec::new();
+    for (timestamp_seconds, k) in [(0, 1), (60, 2), (120, 3)] {
+        let literal = format!(
+            "TQL EVAL ({timestamp_seconds}, {timestamp_seconds}, '60s') topk(1, topk({k}, {query_body}))"
+        );
+        let (_, mut rows) =
+            native_labelled_rows(native_tql_output(&instance, &literal, false).await).await;
+        outer_expected.append(&mut rows);
+    }
+    let mut outer_actual = outer_native.1;
+    outer_actual.sort_by(|left, right| (&left.0, &left.1).cmp(&(&right.0, &right.1)));
+    outer_expected.sort_by(|left, right| (&left.0, &left.1).cmp(&(&right.0, &right.1)));
+    assert_eq!(outer_actual, outer_expected, "{outer_sql}");
+
+    let literal_sql = format!("TQL EVAL (0, 120, '60s') topk(3, {query_body})");
+    observer.clear();
+    let literal_native =
+        native_labelled_rows(native_tql_output(&instance, &literal_sql, true).await).await;
+    assert!(
+        observer.fused().is_some(),
+        "literal topk did not run natively"
+    );
+    let literal_legacy =
+        native_labelled_rows(native_tql_output(&instance, &literal_sql, false).await).await;
+    // The value column keeps the compiled tree's field name on this route, which the existing
+    // planner names after its own rewrite, so only the rows are comparable.
+    assert_eq!(literal_native.1, literal_legacy.1);
+
+    // A bare per-point ranking over one plain scan: nothing splits, and the whole vector is ranked
+    // where every series of it is gathered rather than per partition.
+    let bare_dynamic_sql = "TQL EVAL (0, 120, '60s') topk(time() / 60 + 1, native_dyn_topk)";
+    observer.clear();
+    let bare_dynamic_native =
+        native_labelled_rows(native_tql_output(&instance, bare_dynamic_sql, true).await).await;
+    let bare_dynamic_answering = observer.answering_node();
+    assert_eq!(
+        bare_dynamic_answering.as_deref(),
+        Some("FusedSeriesExec"),
+        "a bare per-point ranking must answer natively: {bare_dynamic_sql}"
+    );
+    assert!(
+        !bare_dynamic_native.1.is_empty(),
+        "a bare per-point ranking must produce rows: {bare_dynamic_sql}"
+    );
+    let mut bare_dynamic_expected = Vec::new();
+    for (timestamp_seconds, k) in [(0, 1), (60, 2), (120, 3)] {
+        let literal = format!(
+            "TQL EVAL ({timestamp_seconds}, {timestamp_seconds}, '60s') topk({k}, native_dyn_topk)"
+        );
+        let (_, mut rows) =
+            native_labelled_rows(native_tql_output(&instance, &literal, false).await).await;
+        bare_dynamic_expected.append(&mut rows);
+    }
+    let mut bare_dynamic_actual = bare_dynamic_native.1;
+    bare_dynamic_actual.sort_by(|left, right| (&left.0, &left.1).cmp(&(&right.0, &right.1)));
+    bare_dynamic_expected.sort_by(|left, right| (&left.0, &left.1).cmp(&(&right.0, &right.1)));
+    assert_eq!(
+        bare_dynamic_actual, bare_dynamic_expected,
+        "{bare_dynamic_sql}"
+    );
+
+    // The same ranking with a parameter that is *only* `time()`: this is the shape a per-point
+    // `same_source` guard misclassifies, because the value it carries is a bare per-point constant
+    // rather than an arithmetic expression over one. `k` is 0, 60 and 120 at 0s, 60s and 120s, so
+    // the first point selects nothing and the other two select every series.
+    let bare_time_sql = "TQL EVAL (0, 120, '60s') topk(time(), native_dyn_topk)";
+    observer.clear();
+    let bare_time_native =
+        native_labelled_rows(native_tql_output(&instance, bare_time_sql, true).await).await;
+    let bare_time_answering = observer.answering_node();
+    assert_eq!(
+        bare_time_answering.as_deref(),
+        Some("FusedSeriesExec"),
+        "a bare topk whose k is `time()` must answer natively: {bare_time_sql}"
+    );
+    let mut bare_time_expected = Vec::new();
+    for (timestamp_seconds, k) in [(0, 0), (60, 60), (120, 120)] {
+        let literal = format!(
+            "TQL EVAL ({timestamp_seconds}, {timestamp_seconds}, '60s') topk({k}, native_dyn_topk)"
+        );
+        let (_, mut rows) =
+            native_labelled_rows(native_tql_output(&instance, &literal, false).await).await;
+        bare_time_expected.append(&mut rows);
+    }
+    assert_eq!(
+        bare_time_native.1.len(),
+        bare_time_expected.len(),
+        "{bare_time_sql}"
+    );
+    assert!(
+        !bare_time_native.1.is_empty(),
+        "a bare topk at k = time() must produce rows: {bare_time_sql}"
+    );
+    let mut bare_time_actual = bare_time_native.1;
+    bare_time_actual.sort_by(|left, right| (&left.0, &left.1).cmp(&(&right.0, &right.1)));
+    bare_time_expected.sort_by(|left, right| (&left.0, &left.1).cmp(&(&right.0, &right.1)));
+    assert_eq!(bare_time_actual, bare_time_expected, "{bare_time_sql}");
+
+    // A bare `topk` has no aggregate beneath it, so there is nothing for the split to cut: the
+    // whole statement is one whole-vector node over the scan, and it must answer exactly what the
+    // existing planner does.
+    let bare_sql = "TQL EVAL (0, 120, '60s') topk(3, native_dyn_topk)";
+    observer.clear();
+    let bare_native =
+        native_labelled_rows(native_tql_output(&instance, bare_sql, true).await).await;
+    let bare_answering = observer.answering_node();
+    let bare_legacy =
+        native_labelled_rows(native_tql_output(&instance, bare_sql, false).await).await;
+    assert_eq!(
+        bare_answering.as_deref(),
+        Some("FusedSeriesExec"),
+        "a bare topk above no aggregate runs natively: {bare_sql}"
+    );
+    assert_eq!(bare_native, bare_legacy);
+}
+
+/// A `scalar()` parameter that reads its own selector runs natively: the parameter reads a metric
+/// logical table of the same physical table, so the split declines and the multi-input path answers
+/// the statement itself.
+///
+/// The parameter may read a different selector than the input (`topk(scalar(a), sum by(host)(b))`),
+/// which makes the planner prepare two sources and the compiler bind both; a metric logical table's
+/// id is part of the identity its scan reads, so the two are one table's two metrics and no split
+/// can be cut between them.
+#[tokio::test(flavor = "multi_thread")]
+async fn native_promql_scalar_parameter_reads_its_own_selector() {
+    common_telemetry::init_default_ut_logging();
+    let (standalone, observer) = native_test_instance(GreptimeDbStandaloneBuilder::new(
+        "native_promql_scalar_param_selector",
+    ))
+    .await;
+    let instance = standalone.fe_instance().clone();
+    execute_all(
+        &instance,
+        "CREATE TABLE native_scalar_param_phy (ts TIMESTAMP TIME INDEX, v DOUBLE) ENGINE=metric WITH ('physical_metric_table'='true'); \
+         CREATE TABLE native_scalar_param_a (host STRING, ts TIMESTAMP TIME INDEX, v DOUBLE, PRIMARY KEY(host)) ENGINE=metric WITH ('on_physical_table'='native_scalar_param_phy'); \
+         CREATE TABLE native_scalar_param_b (host STRING, ts TIMESTAMP TIME INDEX, v DOUBLE, PRIMARY KEY(host)) ENGINE=metric WITH ('on_physical_table'='native_scalar_param_phy'); \
+         INSERT INTO native_scalar_param_a (host, ts, v) VALUES ('h1', 0, 2), ('h1', 60000, 4); \
+         INSERT INTO native_scalar_param_b (host, ts, v) VALUES ('h1', 0, 10), ('h1', 60000, 20)",
+        QueryContext::arc(),
+    )
+    .await;
+    // `scalar(native_scalar_param_a)` is 2 at t=0 and 4 at t=60s, so the parameter differs per
+    // point.
+    //
+    // `topk` over one metric whose `k` reads another: a per-point `k` from a second prepared
+    // source, in the order the compiler binds them (`b` first, then the parameter's `a`).
+    let sql = "TQL EVAL (0, 60, '60s') topk(scalar(native_scalar_param_a), sum by(host)(native_scalar_param_b))";
+    observer.clear();
+    let topk_native = native_labelled_rows(native_tql_output(&instance, sql, true).await).await;
+    let fused = observer.fused();
+    let answering = observer.answering_node();
+    assert!(
+        fused.is_some(),
+        "a scalar() parameter that reads a selector must run natively: {sql}"
+    );
+    assert_eq!(
+        answering.as_deref(),
+        Some("FusedSeriesExec"),
+        "the fused node must answer a scalar() parameter that reads a selector: {sql}"
+    );
+    assert_eq!(
+        topk_native.1.len(),
+        2,
+        "one row per evaluation point: {sql}"
+    );
+    assert_eq!(
+        topk_native.1.iter().map(|row| row.0).collect::<Vec<_>>(),
+        vec![0, 60_000],
+        "the expected evaluation timestamps: {sql}"
+    );
+    // The existing planner rejects `scalar()` over a selector, so each evaluation point is compared
+    // against the same statement with the scalar's value at that point written as a literal `k`.
+    let mut topk_expected = Vec::new();
+    for (t, k) in [(0, 2), (60, 4)] {
+        let literal =
+            format!("TQL EVAL ({t}, {t}, '60s') topk({k}, sum by(host)(native_scalar_param_b))");
+        let (_, mut rows) =
+            native_labelled_rows(native_tql_output(&instance, &literal, false).await).await;
+        topk_expected.append(&mut rows);
+    }
+    topk_expected.sort_by(|left, right| (&left.0, &left.1).cmp(&(&right.0, &right.1)));
+    let mut topk_actual = topk_native.1;
+    topk_actual.sort_by(|left, right| (&left.0, &left.1).cmp(&(&right.0, &right.1)));
+    assert_eq!(topk_actual, topk_expected, "{sql}");
+
+    // The same per-point value as a `clamp` bound and as a broadcast operand.
+    //
+    // `clamp_max` is the bound the scalar actually decides here: `b` is 10 and 20 while `a` is 2
+    // and 4, so the answer is `a` at both points and a node that ignored the parameter would answer
+    // `b` instead. `clamp_min` cannot tell those apart - `b` is above `a` everywhere, so it answers
+    // `b` either way - but it is the statement that used to *fail* before the wait was added, and
+    // that failure is what it still pins.
+    for expression in [
+        "clamp_min(native_scalar_param_b, scalar(native_scalar_param_a))",
+        "clamp_max(native_scalar_param_b, scalar(native_scalar_param_a))",
+        "native_scalar_param_b + scalar(native_scalar_param_a)",
+    ] {
+        let sql = format!("TQL EVAL (0, 60, '60s') {expression}");
+        observer.clear();
+        let native = native_labelled_rows(native_tql_output(&instance, &sql, true).await).await;
+        assert_eq!(
+            observer.answering_node().as_deref(),
+            Some("FusedSeriesExec"),
+            "cross-table dynamic scalar must run natively: {sql}"
+        );
+        let mut expected = Vec::new();
+        for (t, value) in [(0, 2), (60, 4)] {
+            let literal = expression.replace("scalar(native_scalar_param_a)", &value.to_string());
+            let literal_sql = format!("TQL EVAL ({t}, {t}, '60s') {literal}");
+            let (_, mut rows) =
+                native_labelled_rows(native_tql_output(&instance, &literal_sql, false).await).await;
+            expected.append(&mut rows);
+        }
+        let mut actual = native.1;
+        actual.sort_by(|left, right| (&left.0, &left.1).cmp(&(&right.0, &right.1)));
+        expected.sort_by(|left, right| (&left.0, &left.1).cmp(&(&right.0, &right.1)));
+        assert_eq!(actual, expected, "{sql}");
+    }
+}
+
 /// `round` and the `clamp` functions read a varying parameter at each step, as Prometheus does. A
 /// parameter that reads no data runs per partition over the scan. The answers are Prometheus'
 /// literal ones: the existing planner does not plan a parameter that is not a number literal, so it
@@ -11126,4 +14706,573 @@ async fn native_promql_root_canonical_merge_keeps_the_scan_width() {
             "the existing plan reports the overlap too: {consumer}: {legacy_error}"
         );
     }
+}
+
+/// A subquery evaluates its inner expression on its own grid, on the native route.
+///
+/// A window over an aggregate is the split's one admitted evaluated-input shape: the subquery's
+/// declared input grid equals the suffix's, so the split carries it rather than declining. Each
+/// answer is compared with the existing planner's, and the route is asserted through the observer.
+///
+/// A window over an evaluated input is not a per-series prefix, though: it drops the metric name, so
+/// the dist analyzer reads it as cross-series and will not place a segment over one. The shapes below
+/// it - a raw window's `rate`, a `label_replace` map - are cut instead, and where nothing below the
+/// window can carry the tree the statement keeps the plan the existing route builds. Either way it
+/// answers the rows Prometheus does, and never the "no installed planner" failure a segment the
+/// analyzer refuses produces.
+#[tokio::test(flavor = "multi_thread")]
+async fn native_promql_subqueries_match_legacy() {
+    common_telemetry::init_default_ut_logging();
+    let config = mito2::config::MitoConfig {
+        experimental_series_scan_v2: true,
+        ..Default::default()
+    };
+    let (standalone, observer) = native_test_instance(
+        GreptimeDbStandaloneBuilder::new("native_promql_subqueries").with_mito_config(config),
+    )
+    .await;
+    let instance = standalone.fe_instance().clone();
+    execute_all(
+        &instance,
+        r#"CREATE TABLE native_subq (host STRING, job STRING, ts TIMESTAMP(3) TIME INDEX, val DOUBLE, PRIMARY KEY (host, job));
+         INSERT INTO native_subq (host, job, ts, val) VALUES
+         ('h0', 'a', 60000, 0), ('h0', 'a', 120000, 10), ('h0', 'a', 180000, 20),
+         ('h1', 'a', 60000, 0), ('h1', 'a', 120000, 30), ('h1', 'a', 180000, 60),
+         ('h0', 'b', 60000, 0), ('h0', 'b', 120000, 40), ('h0', 'b', 180000, 80),
+         ('h1', 'b', 60000, 0), ('h1', 'b', 120000, 50), ('h1', 'b', 180000, 100)"#,
+        QueryContext::arc(),
+    )
+    .await;
+
+    for sql in [
+        "TQL EVAL (180, 180, '1m') avg_over_time(native_subq[2m:1m])",
+        "TQL EVAL (180, 180, '1m') max_over_time(rate(native_subq[2m])[2m:1m])",
+        "TQL EVAL (180, 180, '1m') avg_over_time((sum by (job, host) (rate(native_subq[2m])))[2m:1m])",
+        "TQL EVAL (180, 180, '1m') avg_over_time((sum by (job, host) (rate(native_subq[2m])))[2m:1m] @ 180)",
+        "TQL EVAL (180, 180, '1m') max_over_time(max_over_time(native_subq[2m:1m])[2m:1m])",
+        // A subquery body that is a mapped selection rather than a fold: the segment under the
+        // window is the `Map` that clamps, and it has to publish on the subquery's own grid - the
+        // two points at 120000 and 180000 at one-minute steps - rather than on the statement's,
+        // which holds the single point at 180000. The two grids therefore differ in both their
+        // start and their length, not just in identity.
+        "TQL EVAL (180, 180, '1m') avg_over_time(clamp(native_subq, 0, 1)[2m:1m])",
+    ] {
+        observer.clear();
+        let mut native = native_result_rows(native_tql_output(&instance, sql, true).await).await;
+        assert!(
+            observer.fused().is_some(),
+            "{sql} did not execute a FusedSeriesExec: {:#?}",
+            observer.root_plan()
+        );
+        observer.clear();
+        let mut legacy = native_result_rows(native_tql_output(&instance, sql, false).await).await;
+        // The two routes emit the same rows but not in the same order: the helper sorts within a
+        // batch, and a series' label is one column of that batch's own order.
+        assert!(
+            observer.fused().is_none(),
+            "{sql} must keep the existing plan when the native route is off"
+        );
+        native.sort_by(|a, b| (a.0, &a.1).cmp(&(b.0, &b.1)).then(a.2.total_cmp(&b.2)));
+        legacy.sort_by(|a, b| (a.0, &a.1).cmp(&(b.0, &b.1)).then(a.2.total_cmp(&b.2)));
+        assert_eq!(native, legacy, "{sql}");
+    }
+
+    // The anchored shape is compared with the existing route only at its anchor. Past the anchor the
+    // existing route re-folds the subquery's window on every outer step, and the split must not copy
+    // that bug, so the later steps are held to the invariant on the native answer alone: an anchored
+    // subquery's range vector is fixed at 180, so each outer step has to publish 180's value for a
+    // series rather than fold a fresh one.
+    let anchored = "TQL EVAL (180, 360, '1m') \
+                    avg_over_time((sum by (job, host) (rate(native_subq[2m])))[2m:1m] @ 180)";
+    observer.clear();
+    let anchored_rows = native_rows(native_tql_output(&instance, anchored, true).await, None).await;
+    assert!(
+        observer.fused().is_some(),
+        "{anchored} did not execute a FusedSeriesExec: {:#?}",
+        observer.root_plan()
+    );
+    // Every label column names the series, so `job` is part of the key as well as `host`.
+    let mut series =
+        std::collections::BTreeMap::<&str, std::collections::BTreeMap<i64, f64>>::new();
+    for (ts, label, value) in &anchored_rows {
+        assert!(
+            series
+                .entry(label.as_str())
+                .or_default()
+                .insert(*ts, *value)
+                .is_none(),
+            "{anchored} answered {label} twice at {ts}"
+        );
+    }
+    assert!(
+        !series.is_empty(),
+        "{anchored} answered no series: {:#?}",
+        observer.root_plan()
+    );
+    for step in [180000, 240000, 300000] {
+        assert!(
+            series.values().all(|steps| steps.contains_key(&step)),
+            "{anchored} did not answer {step} for every series: {anchored_rows:?}"
+        );
+    }
+    // An anchored subquery must not re-fold when the outer step advances.
+    for (label, steps) in &series {
+        let anchor = steps[&180000];
+        for (step, value) in steps {
+            assert_eq!(
+                anchor, *value,
+                "{anchored}: {label} holds the anchored value at 180000 but folded {value} at {step}"
+            );
+        }
+    }
+
+    // A fold over a subquery whose input is not a bare selection. The window is not itself cut as a
+    // segment - it drops the metric name, so the analyzer reads it as cross-series - and what keeps
+    // the scan width is the per-series prefix below it or the canonical boundary a rewrite needs.
+    // `fused` says which plan answers, and every case is compared with the existing route row by
+    // row. The one shape that still keeps the existing plan is the rewrite: its window's input is
+    // cross-series, so `region_local_segment` refuses the cut and there is no per-series prefix
+    // inside the window to take instead.
+    for (sql, label, fused) in [
+        (
+            "TQL EVAL (180, 180, '1m') sum by (job) (max_over_time(rate(native_subq[2m])[5m:1m]))",
+            Some("job"),
+            true,
+        ),
+        // The rewrite writes a new label, so its map is per-series: the subquery's inner map is
+        // the segment, and it publishes on the subquery's grid rather than the statement's. It
+        // runs natively now; the rows below are what say it answers what the existing plan does.
+        (
+            "TQL EVAL (180, 180, '1m') sum by (x) \
+             (avg_over_time(label_replace(native_subq, \"x\", \"$1\", \"job\", \"(.*)\")[5m:1m]))",
+            Some("x"),
+            true,
+        ),
+        (
+            "TQL EVAL (180, 180, '1m') max_over_time(sum by (job) \
+             (max_over_time(rate(native_subq[2m])[3m:1m]))[5m:1m])",
+            Some("job"),
+            true,
+        ),
+        // This shape used to keep the existing plan, on the grounds that a subquery evaluates its
+        // own body on a grid of its own. It runs natively now: the `rate` over the raw scan is the
+        // per-series segment and the window above it publishes, so the fused node below is the plan
+        // that answers. The rows are what says that plan answers what the existing one does.
+        (
+            "TQL EVAL (180, 180, '1m') sum_over_time(rate(native_subq[5m])[1h:])",
+            None,
+            true,
+        ),
+    ] {
+        observer.clear();
+        let mut native = native_rows(native_tql_output(&instance, sql, true).await, label).await;
+        assert_eq!(
+            fused,
+            observer.fused().is_some(),
+            "{sql}: the native request must {} a FusedSeriesExec: {:#?}",
+            if fused {
+                "run"
+            } else {
+                "keep the existing plan for"
+            },
+            observer.root_plan()
+        );
+        assert!(
+            !native.is_empty(),
+            "{sql} answered no rows: {:#?}",
+            observer.root_plan()
+        );
+        let mut legacy = native_rows(native_tql_output(&instance, sql, false).await, label).await;
+        native.sort_by(|a, b| (a.0, &a.1).cmp(&(b.0, &b.1)).then(a.2.total_cmp(&b.2)));
+        legacy.sort_by(|a, b| (a.0, &a.1).cmp(&(b.0, &b.1)).then(a.2.total_cmp(&b.2)));
+        assert_eq!(native, legacy, "{sql}");
+    }
+
+    // A rewrite that writes a label the series already carry collapses them: the canonicalizer puts
+    // a merge at the statement root, and the segmentation below runs with canonical segmentation on.
+    // The fold inside the subquery is a global consumer, so it is cut recursively, and that nested
+    // segment answers the subquery's own grid - the two points at 120000 and 180000 - while the
+    // statement's grid holds the single point at 180000. Publishing the nested segment on the
+    // caller's grid rejects its binding, and the rejection aborts the whole route, so the statement
+    // has to stay native here and answer what the existing plan answers.
+    //
+    // `host="h0"` keeps one series: the rewrite makes every series' label set `host="all"`, and two
+    // of them meeting at one grid point is the overlap both routes report as an error.
+    let collapse = "TQL EVAL (180, 180, '1m') label_replace(avg_over_time((sum by (host) \
+                    (native_subq{host=\"h0\"}))[2m:1m]), \"host\", \"all\", \"\", \"\")";
+    observer.clear();
+    let collapse_native =
+        native_result_rows(native_tql_output(&instance, collapse, true).await).await;
+    assert!(
+        observer.fused().is_some(),
+        "{collapse} must run on the native route: {:#?}",
+        observer.root_plan()
+    );
+    observer.clear();
+    let collapse_legacy =
+        native_result_rows(native_tql_output(&instance, collapse, false).await).await;
+    assert!(
+        observer.fused().is_none(),
+        "{collapse} must keep the existing plan when the native route is off"
+    );
+    // `h0` sums to 10 + 40 at 120000 and 20 + 80 at 180000, so the fold over the subquery's two
+    // points averages to 75 at the statement's one step.
+    assert_eq!(
+        collapse_native,
+        vec![(180_000, "all".to_string(), 75.0)],
+        "{collapse}"
+    );
+    assert_eq!(collapse_native, collapse_legacy, "{collapse}");
+}
+
+/// An aggregate inside a subquery is still an aggregate, so it keeps that operand out of the
+/// hybrid-binary join.
+///
+/// Both statements below are two single-selector vector operands on the same matching labels, which
+/// is what the join admits - but one operand folds a group one subquery down. With the fold counted
+/// as a fold, both run on the native route through `build_evaluated_segment` and answer the same
+/// rows the existing route does.
+#[tokio::test(flavor = "multi_thread")]
+async fn native_promql_aggregate_subquery_operands_run_natively() {
+    common_telemetry::init_default_ut_logging();
+    let config = mito2::config::MitoConfig {
+        experimental_series_scan_v2: true,
+        ..Default::default()
+    };
+    let (standalone, observer) = native_test_instance(
+        GreptimeDbStandaloneBuilder::new("native_promql_aggregate_subquery")
+            .with_mito_config(config),
+    )
+    .await;
+    let instance = standalone.fe_instance().clone();
+    execute_all(
+        &instance,
+        r#"CREATE TABLE native_pm (host STRING, job STRING, ts TIMESTAMP(3) TIME INDEX, val DOUBLE, PRIMARY KEY (host, job));
+         INSERT INTO native_pm (host, job, ts, val) VALUES
+         ('h0', 'a', 60000, 0), ('h0', 'a', 120000, 10), ('h0', 'a', 180000, 20),
+         ('h1', 'a', 60000, 0), ('h1', 'a', 120000, 30), ('h1', 'a', 180000, 60),
+         ('h0', 'b', 60000, 0), ('h0', 'b', 120000, 40), ('h0', 'b', 180000, 80),
+         ('h1', 'b', 60000, 0), ('h1', 'b', 120000, 50), ('h1', 'b', 180000, 100);
+         CREATE TABLE native_pn (host STRING, job STRING, ts TIMESTAMP(3) TIME INDEX, val DOUBLE, PRIMARY KEY (host, job));
+         INSERT INTO native_pn (host, job, ts, val) VALUES
+         ('h0', 'a', 60000, 1), ('h0', 'a', 120000, 2), ('h0', 'a', 180000, 3),
+         ('h1', 'a', 60000, 4), ('h1', 'a', 120000, 5), ('h1', 'a', 180000, 6),
+         ('h0', 'b', 60000, 7), ('h0', 'b', 120000, 8), ('h0', 'b', 180000, 9),
+         ('h1', 'b', 60000, 10), ('h1', 'b', 120000, 11), ('h1', 'b', 180000, 12)"#,
+        QueryContext::arc(),
+    )
+    .await;
+
+    for sql in [
+        "TQL EVAL (180, 180, '1m') avg_over_time((sum by (job, host) (native_pm))[5m:1m]) + on(job, host) native_pn",
+        "TQL EVAL (180, 180, '1m') native_pm + on(job, host) avg_over_time((sum by (job, host) (native_pn))[5m:1m])",
+    ] {
+        observer.clear();
+        let (_, mut native) =
+            native_labelled_rows(native_tql_output(&instance, sql, true).await).await;
+        assert!(
+            !native.is_empty(),
+            "{sql} answered no rows: {:#?}",
+            observer.root_plan()
+        );
+        assert!(
+            observer.fused().is_some(),
+            "{sql} must run on the native route"
+        );
+        observer.clear();
+        let (_, mut legacy) =
+            native_labelled_rows(native_tql_output(&instance, sql, false).await).await;
+        native.sort_by(|a, b| (a.0, &a.1).cmp(&(b.0, &b.1)).then(a.2.total_cmp(&b.2)));
+        legacy.sort_by(|a, b| (a.0, &a.1).cmp(&(b.0, &b.1)).then(a.2.total_cmp(&b.2)));
+        assert_eq!(native, legacy, "{sql}");
+    }
+}
+#[tokio::test(flavor = "multi_thread")]
+async fn native_promql_matrix_root_matches_legacy() {
+    common_telemetry::init_default_ut_logging();
+    let mito_config = mito2::config::MitoConfig {
+        experimental_series_scan_v2: true,
+        ..Default::default()
+    };
+    let (standalone, observer) = native_test_instance(
+        GreptimeDbStandaloneBuilder::new("native_promql_matrix_root").with_mito_config(mito_config),
+    )
+    .await;
+    let instance = standalone.fe_instance().clone();
+    execute_all(
+        &instance,
+        "CREATE TABLE native_matrix_root (host STRING, ts TIMESTAMP TIME INDEX, val DOUBLE, PRIMARY KEY(host))",
+        QueryContext::arc(),
+    )
+    .await;
+    let mut values = Vec::new();
+    for host in 0..4 {
+        for minute in 0..=10 {
+            values.push(format!(
+                "('h{host}', {}, {})",
+                minute * 60_000,
+                host * 1000 + minute
+            ));
+        }
+    }
+    execute_all(
+        &instance,
+        &format!(
+            "INSERT INTO native_matrix_root (host, ts, val) VALUES {}",
+            values.join(",")
+        ),
+        QueryContext::arc(),
+    )
+    .await;
+
+    async fn run(
+        instance: &Arc<Instance>,
+        observer: &NativePlanObserver,
+        sql: &str,
+        native: bool,
+    ) -> Vec<(i64, String, f64)> {
+        observer.clear();
+        native_result_rows(native_tql_output(instance, sql, native).await).await
+    }
+
+    let sql = "TQL EVAL (600, 600, '1m') native_matrix_root[5m:1m]";
+    let native = run(&instance, &observer, sql, true).await;
+    assert!(
+        observer.fused().is_some(),
+        "subquery root did not run natively: {sql}"
+    );
+    let legacy = run(&instance, &observer, sql, false).await;
+    assert_eq!(native, legacy);
+    assert_eq!(
+        native
+            .iter()
+            .map(|row| row.0)
+            .collect::<std::collections::BTreeSet<_>>(),
+        [360_000, 420_000, 480_000, 540_000, 600_000].into()
+    );
+
+    let sql = "TQL EVAL (600, 600, '1m') native_matrix_root[5m:1m] offset 1m";
+    let native = run(&instance, &observer, sql, true).await;
+    assert!(
+        observer.fused().is_some(),
+        "offset subquery root did not run natively: {sql}"
+    );
+    let legacy = run(&instance, &observer, sql, false).await;
+    assert_eq!(native, legacy);
+    assert_eq!(
+        native
+            .iter()
+            .map(|row| row.0)
+            .collect::<std::collections::BTreeSet<_>>(),
+        [300_000, 360_000, 420_000, 480_000, 540_000].into()
+    );
+
+    // PromQL's `@ 420` is seconds, so this anchor is 420,000ms on the stored timestamp grid.
+    let anchor_sql = "TQL EVAL (600, 600, '1m') native_matrix_root[5m:1m] @ 420";
+    let anchored = run(&instance, &observer, anchor_sql, true).await;
+    let other_instant = "TQL EVAL (540, 540, '1m') native_matrix_root[5m:1m] @ 420";
+    let anchored_other = run(&instance, &observer, other_instant, true).await;
+    assert_eq!(
+        anchored, anchored_other,
+        "@ anchor must ignore query instant"
+    );
+    assert_eq!(
+        anchored
+            .iter()
+            .map(|row| row.0)
+            .collect::<std::collections::BTreeSet<_>>(),
+        [180_000, 240_000, 300_000, 360_000, 420_000].into()
+    );
+    let mut expected_values = (0..4)
+        .flat_map(|host| {
+            (3..=7).map(move |minute| {
+                (
+                    minute * 60_000,
+                    format!("h{host}"),
+                    (host * 1000 + minute) as f64,
+                )
+            })
+        })
+        .collect::<Vec<_>>();
+    expected_values.sort_by(|left, right| (left.0, &left.1).cmp(&(right.0, &right.1)));
+    assert_eq!(anchored, expected_values);
+
+    for (expr, grid) in [
+        (
+            "(native_matrix_root @ start())[5m:1m]",
+            [360_000, 420_000, 480_000, 540_000, 600_000],
+        ),
+        (
+            "(native_matrix_root @ end())[5m:1m]",
+            [360_000, 420_000, 480_000, 540_000, 600_000],
+        ),
+    ] {
+        let sql = format!("TQL EVAL (600, 600, '1m') {expr}");
+        let native = run(&instance, &observer, &sql, true).await;
+        assert!(observer.fused().is_some(), "{expr} did not run natively");
+        let legacy = run(&instance, &observer, &sql, false).await;
+        assert_eq!(native, legacy, "{expr}");
+        assert_eq!(
+            native
+                .iter()
+                .map(|row| row.0)
+                .collect::<std::collections::BTreeSet<_>>(),
+            grid.into()
+        );
+    }
+
+    let sql = "TQL EVAL (60, 60, '1m') native_matrix_root[5m:1m]";
+    let native = run(&instance, &observer, sql, true).await;
+    assert!(
+        observer.fused().is_some(),
+        "negative child grid did not run natively"
+    );
+    let legacy = run(&instance, &observer, sql, false).await;
+    assert_eq!(native, legacy, "negative child grid");
+
+    // A statement before the Unix epoch is valid PromQL, and the subquery root rebuilds the
+    // statement from the planner's own bounds. -60s has to stay 60 seconds *before* the epoch: read
+    // as a magnitude it lands hundreds of millions of years in the future, which is not a grid this
+    // route can build, and an error there would replace the answer the existing planner gives.
+    // The bounds are quoted because `TQL EVAL` only accepts a pre-epoch time as a string: an
+    // unquoted `-60` is a negation, which the TQL parser rejects before planning.
+    async fn run_timestamps(
+        instance: &Arc<Instance>,
+        observer: &NativePlanObserver,
+        sql: &str,
+        native: bool,
+    ) -> Vec<(i64, f64)> {
+        observer.clear();
+        native_timestamp_rows(native_tql_output(instance, sql, native).await).await
+    }
+    // `vector(time())` is the shape the pre-epoch grid is read on: it reads no data, so its rows are
+    // the subquery's child grid, and every one of them is before the epoch. Only the native route
+    // can be asked for it — the existing planner's `vector()` takes a literal only — so this case
+    // asserts the answer itself, five negative timestamps 60s apart ending at the instant.
+    let pre_epoch_time = "TQL EVAL ('-60', '-60', '1m') vector(time())[5m:1m]";
+    let native = run_timestamps(&instance, &observer, pre_epoch_time, true).await;
+    assert!(
+        observer.fused().is_some(),
+        "pre-epoch subquery root did not run natively: {pre_epoch_time}"
+    );
+    assert_eq!(
+        native,
+        [
+            (-300_000, -300.0),
+            (-240_000, -240.0),
+            (-180_000, -180.0),
+            (-120_000, -120.0),
+            (-60_000, -60.0),
+        ],
+        "the pre-epoch grid keeps its negative milliseconds"
+    );
+
+    // A constant is the same pre-epoch statement on a shape both routes plan, so the answer can be
+    // compared: the native grid has to be the one the existing planner works on.
+    let pre_epoch_constant = "TQL EVAL ('-60', '-60', '1m') vector(1)[5m:1m]";
+    let native = run_timestamps(&instance, &observer, pre_epoch_constant, true).await;
+    assert!(
+        observer.fused().is_some(),
+        "pre-epoch constant subquery root did not run natively: {pre_epoch_constant}"
+    );
+    assert_eq!(
+        native,
+        [
+            (-300_000, 1.0),
+            (-240_000, 1.0),
+            (-180_000, 1.0),
+            (-120_000, 1.0),
+            (-60_000, 1.0),
+        ],
+        "the pre-epoch constant grid keeps its negative milliseconds"
+    );
+    let legacy = run_timestamps(&instance, &observer, pre_epoch_constant, false).await;
+    assert_eq!(native, legacy, "pre-epoch subquery root");
+
+    // The same pre-epoch statement anchored at 420s: the anchor decides the child grid.
+    let pre_epoch_anchored = "TQL EVAL ('-60', '-60', '1m') vector(1)[5m:1m] @ 420";
+    let native = run_timestamps(&instance, &observer, pre_epoch_anchored, true).await;
+    assert!(
+        observer.fused().is_some(),
+        "anchored pre-epoch subquery root did not run natively: {pre_epoch_anchored}"
+    );
+    let legacy = run_timestamps(&instance, &observer, pre_epoch_anchored, false).await;
+    assert_eq!(native, legacy, "anchored pre-epoch subquery root");
+
+    // The bounds route the statement, not the root shape: this one has no subquery and no matrix
+    // root at all, a plain aggregate over a selector, and its pre-epoch start still takes the
+    // native route. It is kept apart from the matrix-root cases because the bound alone is what
+    // puts it there. The fixture starts at the epoch, so of the five 30s steps over the statement's
+    // own range only the three from the epoch on have anything inside the 5m lookback: the four
+    // hosts carry `host * 1000 + minute`, so the epoch step and the one 30s later both read minute
+    // 0 (0 + 1000 + 2000 + 3000) and the step at 60s reads minute 1 (6004).
+    let pre_epoch_aggregate = "TQL EVAL ('-60', '60', '30s') sum(native_matrix_root)";
+    let native = run_timestamps(&instance, &observer, pre_epoch_aggregate, true).await;
+    assert!(
+        observer.fused().is_some(),
+        "pre-epoch statement without a matrix root did not run natively: {pre_epoch_aggregate}"
+    );
+    let legacy = run_timestamps(&instance, &observer, pre_epoch_aggregate, false).await;
+    assert_eq!(native, legacy, "pre-epoch aggregate over a selector");
+    assert_eq!(
+        native,
+        [(0, 6000.0), (30_000, 6000.0), (60_000, 6004.0)],
+        "the pre-epoch aggregate did not answer on its own 30s grid"
+    );
+
+    // A matrix root whose inner expression is folded rather than merely selected reaches the
+    // split-aggregate lowering, which builds its own final node: that node has to publish on the
+    // grid the tree was compiled on, which is the subquery's child grid. `sum(...)` answers without
+    // the tag, so it is compared on its timestamps alone.
+    let sum_expr = "sum(native_matrix_root)[5m:1m]";
+    let sql = format!("TQL EVAL (600, 600, '1m') {sum_expr}");
+    let native = run_timestamps(&instance, &observer, &sql, true).await;
+    assert!(
+        observer.fused().is_some(),
+        "matrix root over an aggregate did not run natively: {sum_expr}"
+    );
+    let legacy = run_timestamps(&instance, &observer, &sql, false).await;
+    assert_eq!(native, legacy, "{sum_expr}");
+    assert_eq!(
+        native.iter().map(|row| row.0).collect::<Vec<_>>(),
+        [360_000, 420_000, 480_000, 540_000, 600_000],
+        "{sum_expr} did not answer on the subquery's child grid"
+    );
+
+    for expr in [
+        "(sum by (host) (rate(native_matrix_root[2m])))[5m:1m]",
+        "(sum by (host) (rate(native_matrix_root[2m])))[5m:1m] @ 600",
+        "(sum by (host) (rate(native_matrix_root[2m])) * 2)[5m:1m]",
+    ] {
+        let sql = format!("TQL EVAL (600, 600, '1m') {expr}");
+        let native = run(&instance, &observer, &sql, true).await;
+        assert!(
+            observer.fused().is_some(),
+            "matrix root over a folded inner expression did not run natively: {expr}"
+        );
+        let legacy = run(&instance, &observer, &sql, false).await;
+        assert_eq!(native, legacy, "{expr}");
+        assert!(!native.is_empty(), "{expr} produced no rows");
+    }
+
+    let range_query = "TQL EVAL (600, 1200, '1m') native_matrix_root[5m:1m]";
+    let err = instance
+        .do_query(range_query, native_query_context(true, 4))
+        .await
+        .remove(0)
+        .unwrap_err();
+    assert!(
+        format!("{err:?}").contains("invalid expression type \"range vector\" for range query"),
+        "{err:?}"
+    );
+
+    // This remains on the existing planner: a raw-sample matrix has no evaluation grid to bind.
+    let sql = "TQL EVAL (600, 600, '1m') native_matrix_root[5m]";
+    let native = run(&instance, &observer, sql, true).await;
+    assert!(
+        observer.fused().is_none(),
+        "raw matrix roots must use existing planning"
+    );
+    let legacy = run(&instance, &observer, sql, false).await;
+    assert_eq!(native, legacy);
 }

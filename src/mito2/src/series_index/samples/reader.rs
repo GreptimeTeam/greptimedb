@@ -30,7 +30,9 @@ use object_store::{ObjectStore, Reader};
 use snafu::ResultExt;
 use tokio::sync::OnceCell;
 
-use crate::cache::columnar::{self as metadata_cache, MetadataCache};
+use crate::cache::columnar::{
+    self as metadata_cache, MetadataCache, PayloadCache, PayloadPartCache,
+};
 use crate::error::{NewRecordBatchSnafu, OpenDalSnafu, Result, SerdeJsonSnafu};
 use crate::metrics::ColumnarReadMetrics;
 use crate::series_index::artifact::{ArtifactFormat, SamplesFileHandle};
@@ -49,6 +51,7 @@ pub(crate) struct SamplesReader {
     manifest: Arc<Manifest>,
     schema: SchemaRef,
     cache: Option<MetadataCache>,
+    payload_cache: Option<PayloadCache>,
     handle: SamplesFileHandle,
     parts: Arc<Vec<OnceCell<Reader>>>,
 }
@@ -89,7 +92,13 @@ impl SamplesReader {
             manifest: descriptor.0.clone(),
             schema: descriptor.1.clone(),
             cache,
+            payload_cache: None,
         })
+    }
+
+    pub(crate) fn with_payload_cache(mut self, cache: Option<PayloadCache>) -> Self {
+        self.payload_cache = cache;
+        self
     }
 
     pub async fn open(store: ObjectStore, handle: SamplesFileHandle) -> Result<Self> {
@@ -176,6 +185,7 @@ impl SamplesReader {
             parts: Arc::new((0..manifest.files.len()).map(|_| OnceCell::new()).collect()),
             schema: manifest.schema(),
             cache: None,
+            payload_cache: None,
             manifest: Arc::new(manifest),
             handle,
         })
@@ -215,13 +225,19 @@ impl SamplesFormatReader for SamplesReader {
                 .project(&projection)
                 .map_err(|e| invalid(format!("sample projection: {e}")))?,
         );
+        let field_ids: HashSet<_> = projection
+            .iter()
+            .filter(|&&index| index >= 5)
+            .map(|&index| self.manifest.fields[index - 5].column_id)
+            .collect();
         let cache = self.cache.clone();
         let manifest = self.manifest.clone();
         let store = self.store.clone();
         let handle = self.handle.clone();
         let parts = self.parts.clone();
+        let payload_cache = self.payload_cache.clone();
         Ok(Box::pin(async_stream::try_stream! {
-            let _handle = handle;
+            let _handle = &handle;
             let mut metrics = ColumnarReadMetrics::default();
             if empty { return; }
             let mut previous: Option<BlockOrder> = None;
@@ -243,6 +259,11 @@ impl SamplesFormatReader for SamplesReader {
                 let trailer = Trailer::decode(&bytes, part.file_size)?;
                     Ok(trailer)
                 }).await?;
+                let payload_reader = PayloadReader {
+                    reader,
+                    cache: payload_cache.as_ref().map(|cache| cache.part(handle.entry().artifact.generation, part.part_id, size)),
+                    end: trailer.payload_end,
+                };
                 require(trailer.root.bounds == bounds, "sample root/part bounds mismatch")?;
                 let root = load_metadata_page(cache.as_ref(), reader, (&path, size), &trailer.root, trailer.depth, trailer.payload_end, &manifest).await?;
                 metrics.add_elapsed("columnar_metadata_wall", metadata_started.elapsed());
@@ -259,7 +280,8 @@ impl SamplesFormatReader for SamplesReader {
                         page
                     };
                     let blocks = match page.as_ref() { Page::Leaf(blocks) => blocks, Page::Internal(_) => Err(unsupported("internal child in sample depth-two tree"))? };
-                    for block in blocks {
+                    let mut prefetched = PrefetchedBlocks::default();
+                    for (block_index, block) in blocks.iter().enumerate() {
                         row_count = row_count.checked_add(u64::from(block.rows)).ok_or_else(|| invalid("samples row count overflow"))?;
                         block_count += 1;
                         if let Some(prior) = &previous { block.follows(prior, adjacent)?; }
@@ -269,9 +291,14 @@ impl SamplesFormatReader for SamplesReader {
                             payload_position = column.payload.end()?;
                         }
                         let batch = if matches(block.bounds(), &request) {
+                            if block_index >= prefetched.end {
+                                // Release the previous window before reserving the next one.
+                                drop(std::mem::take(&mut prefetched));
+                                prefetched = prefetch_blocks(&payload_reader, blocks, block_index, &field_ids, &request, &projection, trailer.payload_end, &mut metrics).await?;
+                            }
                             *metrics.counts.entry("blocks").or_default() += 1;
                             *metrics.counts.entry("decoded_rows").or_default() += u64::from(block.rows);
-                            read_block(reader, block, &manifest, &request, &projection, projected.clone(), &mut metrics).await?
+                            read_block(&payload_reader, block, &manifest, &request, &projection, &field_ids, projected.clone(), &mut prefetched, &mut metrics).await?
                         } else { None };
                         if let Some((batch, _reservation)) = batch {
                             *metrics.counts.entry("batches").or_default() += 1;
@@ -354,7 +381,11 @@ async fn load_metadata_page(
     .await
 }
 /// Keep column loads separate from metadata for future Mito cache integration.
-fn load_column_chunk(buffers: &HashMap<u64, bytes::Bytes>, column: &Column) -> Result<Vec<u8>> {
+fn load_column_chunk<'a>(
+    buffers: &'a HashMap<u64, bytes::Bytes>,
+    column: &Column,
+    decoder: &'a mut codec::PayloadDecoder,
+) -> Result<&'a [u8]> {
     let allowed = match column.role {
         1 => matches!(column.payload.encoding, 1 | 2),
         2 => matches!(column.payload.encoding, 3 | 4),
@@ -368,7 +399,7 @@ fn load_column_chunk(buffers: &HashMap<u64, bytes::Bytes>, column: &Column) -> R
     let bytes = buffers
         .get(&column.payload.offset)
         .ok_or_else(|| invalid("missing prefetched sample column"))?;
-    column.payload.unpack(bytes)
+    column.payload.unpack_with_decoder(bytes, decoder)
 }
 fn timestamp_array(values: impl Iterator<Item = i64>, unit: TimestampUnit) -> ArrayRef {
     match unit {
@@ -378,23 +409,21 @@ fn timestamp_array(values: impl Iterator<Item = i64>, unit: TimestampUnit) -> Ar
         TimestampUnit::Nanosecond => Arc::new(TimestampNanosecondArray::from_iter_values(values)),
     }
 }
+#[allow(clippy::too_many_arguments)]
 async fn read_block(
-    reader: &Reader,
+    reader: &PayloadReader<'_>,
     block: &Block,
     manifest: &Manifest,
     request: &SamplesReadRequest,
     projection: &[usize],
+    field_ids: &HashSet<u32>,
     schema: SchemaRef,
+    prefetched: &mut PrefetchedBlocks,
     metrics: &mut ColumnarReadMetrics,
 ) -> Result<Option<(RecordBatch, Option<MemoryReservation>)>> {
     let boundary = request.start.is_some_and(|start| start > block.min)
         || request.end.is_some_and(|end| end <= block.max);
     let needs_time = boundary || projection.contains(&2);
-    let field_ids: HashSet<_> = projection
-        .iter()
-        .filter(|&&index| index >= 5)
-        .map(|&index| manifest.fields[index - 5].column_id)
-        .collect();
     let columns: Vec<_> = block
         .columns
         .iter()
@@ -412,30 +441,69 @@ async fn read_block(
         .map(|pool| MemoryConsumer::new("ColumnarSamplesBuffers").register(pool));
     // Stored buffers, decompression, typed values, selection, and Arrow output coexist.
     // Reserve before any payload I/O/allocation. The reservation survives the yield.
-    let bytes = columns
+    let ranges = columns
         .iter()
-        .map(|column| column.payload.stored as usize + column.payload.decoded as usize)
-        .sum::<usize>()
+        .map(|c| Ok(c.payload.offset..c.payload.end()?))
+        .collect::<Result<Vec<_>>>()?;
+    let gap_bytes = merge_read_ranges(&ranges)
+        .iter()
+        .map(|r| r.end - r.start)
+        .sum::<u64>()
+        - ranges.iter().map(|r| r.end - r.start).sum::<u64>();
+    let base_bytes = 2 * gap_bytes as usize
+        + columns
+            .iter()
+            .map(|column| column.payload.stored as usize + column.payload.decoded as usize)
+            .sum::<usize>()
         + block.rows as usize * (32 * (projection.len() + 1) + std::mem::size_of::<usize>())
         + columns.len() * 128;
+    let bytes = base_bytes + reader.reservation_bytes(&ranges);
+    let mut bypass_cache = false;
     if let Some(reservation) = &reservation {
-        reservation
-            .try_grow(bytes)
-            .context(crate::error::ScanMemoryExhaustedSnafu)?;
+        let mut result = reservation.try_grow(bytes);
+        if result.is_err() && !prefetched.buffers.is_empty() {
+            // Read-ahead must not prevent a block that fits on its own from being read.
+            // Drop every shared slice and its reservation before retrying, and avoid
+            // attempting the same window again on the next block.
+            *prefetched = PrefetchedBlocks {
+                end: prefetched.end,
+                ..Default::default()
+            };
+            result = reservation.try_grow(bytes);
+        }
+        if result.is_err() && reader.cache.is_some() {
+            // Alignment is optional. A block that fits without it must remain readable,
+            // including on cache hits, whose shared backing buffers still need accounting.
+            result = reservation.try_grow(base_bytes);
+            bypass_cache = result.is_ok();
+        }
+        result.context(crate::error::ScanMemoryExhaustedSnafu)?;
     }
+    let uncached = PayloadReader {
+        reader: reader.reader,
+        cache: None,
+        end: reader.end,
+    };
+    let reader = if bypass_cache { &uncached } else { reader };
     let mut buffers = HashMap::new();
+    for column in &columns {
+        if let Some(bytes) = prefetched.buffers.get(&column.payload.offset) {
+            buffers.insert(column.payload.offset, bytes.clone());
+        }
+    }
     if boundary {
         fetch_columns(reader, &[&block.columns[0]], &mut buffers, metrics).await?;
     } else {
         fetch_columns(reader, &columns, &mut buffers, metrics).await?;
     }
+    let mut decoder = codec::PayloadDecoder::default();
     let decode_started = Instant::now();
     let mut selected: Vec<usize> = (0..block.rows as usize).collect();
     let mut times = None;
     if needs_time {
         let column = &block.columns[0];
         let values = codec::decode_numbers(
-            &load_column_chunk(&buffers, column)?,
+            load_column_chunk(&buffers, column, &mut decoder)?,
             column.payload.encoding,
             block.rows as usize,
         )?;
@@ -458,11 +526,14 @@ async fn read_block(
     }
     metrics.add_elapsed("columnar_decode", decode_started.elapsed());
     if boundary {
+        // Release decoder scratch and context before waiting for the remaining payloads.
+        drop(decoder);
         let remaining = columns
             .into_iter()
             .filter(|column| column.role != 1)
             .collect::<Vec<_>>();
         fetch_columns(reader, &remaining, &mut buffers, metrics).await?;
+        decoder = codec::PayloadDecoder::default();
     }
     let decode_started = Instant::now();
     let mut arrays: BTreeMap<usize, ArrayRef> = BTreeMap::new();
@@ -485,7 +556,7 @@ async fn read_block(
             3 => {
                 let column = &block.columns[1];
                 let values = codec::decode_numbers(
-                    &load_column_chunk(&buffers, column)?,
+                    load_column_chunk(&buffers, column, &mut decoder)?,
                     column.payload.encoding,
                     block.rows as usize,
                 )?;
@@ -503,7 +574,7 @@ async fn read_block(
             4 => {
                 let column = &block.columns[2];
                 let values = codec::decode_operations(
-                    &load_column_chunk(&buffers, column)?,
+                    load_column_chunk(&buffers, column, &mut decoder)?,
                     column.payload.encoding,
                     block.rows as usize,
                 )?;
@@ -515,7 +586,7 @@ async fn read_block(
                 let id = manifest.fields[field - 5].column_id;
                 if let Some(column) = block.columns.iter().find(|c| c.role == 4 && c.id == id) {
                     let values = codec::decode_float(
-                        &load_column_chunk(&buffers, column)?,
+                        load_column_chunk(&buffers, column, &mut decoder)?,
                         block.rows as usize,
                         column.nulls,
                     )?;
@@ -561,15 +632,20 @@ async fn read_part_range(reader: &Reader, start: u64, end: u64) -> Result<bytes:
     Ok(bytes)
 }
 
-/// Fetch selected ranges with zero-gap coalescing, without reading unselected
-/// fields or blocks. The block size and scan reservation bound retained buffers;
+/// Fetch selected ranges with bounded gap coalescing and shared-buffer slices.
+/// The read window and scan reservation bound retained buffers;
 /// OpenDAL bounds concurrency to 8.
 async fn fetch_columns(
-    reader: &Reader,
+    reader: &PayloadReader<'_>,
     columns: &[&Column],
     buffers: &mut HashMap<u64, bytes::Bytes>,
     metrics: &mut ColumnarReadMetrics,
 ) -> Result<()> {
+    let columns: Vec<_> = columns
+        .iter()
+        .copied()
+        .filter(|c| !buffers.contains_key(&c.payload.offset))
+        .collect();
     if columns.is_empty() {
         return Ok(());
     }
@@ -577,25 +653,355 @@ async fn fetch_columns(
         .iter()
         .map(|column| Ok(column.payload.offset..column.payload.end()?))
         .collect::<Result<Vec<_>>>()?;
+    let merged = merge_read_ranges(&ranges);
     *metrics.counts.entry("column_ranges").or_default() += ranges.len() as u64;
     *metrics.bytes.entry("requested").or_default() +=
         ranges.iter().map(|r| r.end - r.start).sum::<u64>();
+    if reader.cache.is_some() {
+        return fetch_cached_columns(reader, &columns, &ranges, buffers, metrics).await;
+    }
+    *metrics.counts.entry("payload_reads").or_default() += merged.len() as u64;
     let started = Instant::now();
-    let fetched = reader.fetch(ranges).await.context(OpenDalSnafu)?;
+    let fetched = reader
+        .reader
+        .fetch(merged.clone())
+        .await
+        .context(OpenDalSnafu)?;
     metrics.add_elapsed("columnar_payload_fetch_wall", started.elapsed());
-    *metrics.bytes.entry("fetched").or_default() +=
-        fetched.iter().map(|b| b.len() as u64).sum::<u64>();
     require(
-        fetched.len() == columns.len(),
+        fetched.len() == merged.len(),
         "sample fetch response count mismatch",
     )?;
-    for (column, buffer) in columns.iter().zip(fetched) {
+    let mut column_index = 0;
+    for (range, buffer) in merged.iter().zip(fetched) {
         let bytes = buffer.to_bytes();
         require(
-            bytes.len() == column.payload.stored as usize,
+            bytes.len() as u64 == range.end - range.start,
             "sample range length mismatch",
         )?;
+        *metrics.bytes.entry("fetched").or_default() += bytes.len() as u64;
+        while let Some(column) = columns.get(column_index) {
+            if column.payload.offset >= range.end {
+                break;
+            }
+            require(
+                column.payload.offset >= range.start && column.payload.end()? <= range.end,
+                "sample column outside fetched range",
+            )?;
+            let start = (column.payload.offset - range.start) as usize;
+            let end = (column.payload.end()? - range.start) as usize;
+            require(end <= bytes.len(), "sample column outside fetched range")?;
+            buffers.insert(column.payload.offset, bytes.slice(start..end));
+            column_index += 1;
+        }
+    }
+    require(
+        column_index == columns.len(),
+        "missing sample column response",
+    )?;
+    Ok(())
+}
+
+/// Stable cache units; adjacent missing units still use bounded merged reads.
+const PAYLOAD_BLOCK_BYTES: u64 = 16 * 1024;
+
+struct PayloadReader<'a> {
+    reader: &'a Reader,
+    cache: Option<PayloadPartCache>,
+    end: u64,
+}
+
+impl PayloadReader<'_> {
+    fn reservation_bytes(&self, ranges: &[std::ops::Range<u64>]) -> usize {
+        if self.cache.is_none() {
+            return 0;
+        }
+        // Aligned read allocations and assembly can coexist. Cache-owned copies
+        // are separately charged to the shared page-cache budget.
+        2 * aligned_payload_ranges(ranges, self.end)
+            .iter()
+            .map(|r| (r.end - r.start) as usize)
+            .sum::<usize>()
+    }
+}
+
+fn aligned_payload_ranges(ranges: &[std::ops::Range<u64>], end: u64) -> Vec<std::ops::Range<u64>> {
+    let mut offsets = std::collections::BTreeSet::new();
+    for range in ranges {
+        if range.start >= range.end {
+            continue;
+        }
+        for block in range.start / PAYLOAD_BLOCK_BYTES..=(range.end - 1) / PAYLOAD_BLOCK_BYTES {
+            offsets.insert(block * PAYLOAD_BLOCK_BYTES);
+        }
+    }
+    offsets
+        .into_iter()
+        .map(|start| start..start.saturating_add(PAYLOAD_BLOCK_BYTES).min(end))
+        .collect()
+}
+
+async fn fetch_cached_columns(
+    reader: &PayloadReader<'_>,
+    columns: &[&Column],
+    ranges: &[std::ops::Range<u64>],
+    buffers: &mut HashMap<u64, bytes::Bytes>,
+    metrics: &mut ColumnarReadMetrics,
+) -> Result<()> {
+    let Some(cache) = &reader.cache else {
+        return Err(invalid("missing payload cache"));
+    };
+    let aligned = aligned_payload_ranges(ranges, reader.end);
+    let mut blocks = HashMap::new();
+    let mut missing = Vec::new();
+    for range in &aligned {
+        if let Some(bytes) = cache.get(range) {
+            *metrics.bytes.entry("cache_hit").or_default() += bytes.len() as u64;
+            blocks.insert(range.start, bytes);
+        } else {
+            missing.push(range.clone());
+        }
+    }
+    let merged = merge_read_ranges(&missing);
+    if !merged.is_empty() {
+        *metrics.counts.entry("payload_reads").or_default() += merged.len() as u64;
+        let started = Instant::now();
+        // No shared guard or pending-owner dependency crosses this await. A
+        // backpressured or cancelled stream cannot stall another partition.
+        let fetched = reader
+            .reader
+            .fetch(merged.clone())
+            .await
+            .context(OpenDalSnafu)?;
+        metrics.add_elapsed("columnar_payload_fetch_wall", started.elapsed());
+        require(
+            fetched.len() == merged.len(),
+            "sample fetch response count mismatch",
+        )?;
+        let mut missing = missing.iter().peekable();
+        for (range, buffer) in merged.iter().zip(fetched) {
+            let bytes = buffer.to_bytes();
+            require(
+                bytes.len() as u64 == range.end - range.start,
+                "sample range length mismatch",
+            )?;
+            *metrics.bytes.entry("fetched").or_default() += bytes.len() as u64;
+            while let Some(block) = missing.peek() {
+                if block.start >= range.end {
+                    break;
+                }
+                require(
+                    block.start >= range.start && block.end <= range.end,
+                    "aligned block outside fetched range",
+                )?;
+                let data = bytes.slice(
+                    (block.start - range.start) as usize..(block.end - range.start) as usize,
+                );
+                cache.insert(block, &data);
+                blocks.insert(block.start, data);
+                missing.next();
+            }
+        }
+        require(missing.next().is_none(), "missing aligned block response")?;
+    }
+    for (column, range) in columns.iter().zip(ranges) {
+        let start = range.start / PAYLOAD_BLOCK_BYTES * PAYLOAD_BLOCK_BYTES;
+        let first = blocks
+            .get(&start)
+            .ok_or_else(|| invalid("missing cached payload block"))?;
+        let offset = (range.start - start) as usize;
+        let len = (range.end - range.start) as usize;
+        let bytes = if offset + len <= first.len() {
+            first.slice(offset..offset + len)
+        } else {
+            let mut assembled = bytes::BytesMut::with_capacity(len);
+            let mut position = range.start;
+            while position < range.end {
+                let start = position / PAYLOAD_BLOCK_BYTES * PAYLOAD_BLOCK_BYTES;
+                let block = blocks
+                    .get(&start)
+                    .ok_or_else(|| invalid("missing cached payload block"))?;
+                let offset = (position - start) as usize;
+                let take = ((range.end - position) as usize).min(block.len() - offset);
+                require(take > 0, "empty cached payload block")?;
+                assembled.extend_from_slice(&block[offset..offset + take]);
+                position += take as u64;
+            }
+            assembled.freeze()
+        };
         buffers.insert(column.payload.offset, bytes);
     }
     Ok(())
+}
+
+const MAX_READ_GAP: u64 = 4 * 1024;
+const MAX_READ_BYTES: u64 = 256 * 1024;
+
+/// Allows bounded over-read to amortize filesystem and scheduling costs.
+fn can_merge_ranges(previous: &std::ops::Range<u64>, next: &std::ops::Range<u64>) -> bool {
+    next.start
+        .checked_sub(previous.end)
+        .is_some_and(|gap| gap <= MAX_READ_GAP)
+        && next
+            .end
+            .checked_sub(previous.start)
+            .is_some_and(|bytes| bytes <= MAX_READ_BYTES)
+}
+
+fn merge_read_ranges(ranges: &[std::ops::Range<u64>]) -> Vec<std::ops::Range<u64>> {
+    let mut merged: Vec<std::ops::Range<u64>> = Vec::new();
+    for range in ranges {
+        if let Some(previous) = merged.last_mut()
+            && can_merge_ranges(previous, range)
+        {
+            previous.end = range.end;
+        } else {
+            merged.push(range.clone());
+        }
+    }
+    merged
+}
+
+/// A bounded read-ahead window. Byte slices retain the shared fetched allocation;
+/// the reservation therefore lives until the whole window is replaced or cancelled.
+#[derive(Default)]
+struct PrefetchedBlocks {
+    end: usize,
+    buffers: HashMap<u64, bytes::Bytes>,
+    _reservation: Option<MemoryReservation>,
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn prefetch_blocks(
+    reader: &PayloadReader<'_>,
+    blocks: &[Block],
+    start: usize,
+    field_ids: &HashSet<u32>,
+    request: &SamplesReadRequest,
+    projection: &[usize],
+    payload_end: u64,
+    metrics: &mut ColumnarReadMetrics,
+) -> Result<PrefetchedBlocks> {
+    const MAX_BLOCKS: usize = 128;
+    let mut columns = Vec::new();
+    let mut bytes = 0usize;
+    let mut last_range: Option<std::ops::Range<u64>> = None;
+    let mut payload_ranges = Vec::new();
+    let mut end = start;
+    for block in blocks.iter().skip(start).take(MAX_BLOCKS) {
+        if !matches(block.bounds(), request) {
+            end += 1;
+            continue;
+        }
+        let boundary = request.start.is_some_and(|t| t > block.min)
+            || request.end.is_some_and(|t| t <= block.max);
+        // Boundary blocks request timestamps first. Coalescing may include value
+        // bytes in gaps, but values are only decoded after timestamp pruning.
+        let selected: Vec<_> = block
+            .columns
+            .iter()
+            .filter(|column| {
+                if boundary {
+                    return column.role == 1;
+                }
+                match column.role {
+                    1 => projection.contains(&2),
+                    2 => projection.contains(&3),
+                    3 => projection.contains(&4),
+                    4 => field_ids.contains(&column.id),
+                    _ => false,
+                }
+            })
+            .collect();
+        let mut next_bytes = bytes;
+        let mut next_range = last_range.clone();
+        for column in &selected {
+            column
+                .payload
+                .validate(metadata::HEADER_SIZE, payload_end, false)?;
+            let range = column.payload.offset..column.payload.end()?;
+            if let Some(previous) = next_range.as_mut()
+                && can_merge_ranges(previous, &range)
+            {
+                next_bytes += (range.end - previous.end) as usize;
+                previous.end = range.end;
+            } else {
+                next_bytes += column.payload.stored as usize;
+                next_range = Some(range);
+            }
+        }
+        let previous_len = payload_ranges.len();
+        for column in &selected {
+            payload_ranges.push(column.payload.offset..column.payload.end()?);
+        }
+        let fetch_bytes = if reader.cache.is_some() {
+            aligned_payload_ranges(&payload_ranges, reader.end)
+                .iter()
+                .map(|range| (range.end - range.start) as usize)
+                .sum()
+        } else {
+            next_bytes
+        };
+        if fetch_bytes > MAX_READ_BYTES as usize {
+            payload_ranges.truncate(previous_len);
+            break;
+        }
+        bytes = next_bytes;
+        last_range = next_range;
+        columns.extend(selected);
+        end += 1;
+    }
+    // A single oversized block uses the existing per-block reservation and read path.
+    let end = end.max(start + 1);
+    let reservation = request
+        .memory_pool
+        .as_ref()
+        .map(|pool| MemoryConsumer::new("ColumnarSamplesPrefetch").register(pool));
+    // Include aligned payload buffers in the optional read-ahead reservation.
+    if let Some(reservation) = &reservation
+        && reservation
+            .try_grow(
+                2 * bytes
+                    + columns.len() * 256
+                    + reader.reservation_bytes(
+                        &columns
+                            .iter()
+                            .map(|c| Ok(c.payload.offset..c.payload.end()?))
+                            .collect::<Result<Vec<_>>>()?,
+                    ),
+            )
+            .is_err()
+    {
+        return Ok(PrefetchedBlocks {
+            end,
+            ..Default::default()
+        });
+    }
+    let mut buffers = HashMap::new();
+    fetch_columns(reader, &columns, &mut buffers, metrics).await?;
+    Ok(PrefetchedBlocks {
+        end,
+        buffers,
+        _reservation: reservation,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn coalesces_bounded_gaps_and_caps_reads() {
+        assert_eq!(vec![0..24], merge_read_ranges(&[0..4, 4..8, 8..12, 20..24]));
+        assert!(merge_read_ranges(&[]).is_empty());
+        assert_eq!(vec![0..8], merge_read_ranges(&[0..4, 5..8]));
+        assert_eq!(
+            vec![0..4, 8192..8200],
+            merge_read_ranges(&[0..4, 8192..8200])
+        );
+        assert_eq!(
+            vec![0..MAX_READ_BYTES, MAX_READ_BYTES..MAX_READ_BYTES + 1],
+            merge_read_ranges(&[0..MAX_READ_BYTES, MAX_READ_BYTES..MAX_READ_BYTES + 1])
+        );
+    }
 }

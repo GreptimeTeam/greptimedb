@@ -24,6 +24,7 @@ use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+use common_query::promql_annotations::PromqlAnnotationCollector;
 use datafusion::error::{DataFusionError, Result};
 use datafusion::execution::memory_pool::{MemoryConsumer, MemoryPool, MemoryReservation};
 use datatypes::series::histogram::{CounterResetHint, HistogramBatchBuilder, HistogramView};
@@ -33,6 +34,7 @@ use datatypes::series::samples::{
 use datatypes::series::time::{EvalGrid, GridRunPair, GridSpan, TimeAxis};
 use datatypes::series::{Label, SeriesLabels};
 
+use crate::functions::{NativeHistogramAdd, NativeHistogramSub};
 use crate::grid_series::{GridSample, GridSeriesBuilder, METADATA_LABELS, external, owned};
 use crate::histogram_eval::float_histogram::FloatHistogram;
 
@@ -201,7 +203,7 @@ pub fn binary_vectors(
     rhs_schema: &SeriesSchema,
     rhs: &[Series],
 ) -> Result<Vec<Series>> {
-    binary_vectors_inner(matching, lhs_schema, lhs, rhs_schema, rhs, None, None)
+    binary_vectors_inner(matching, lhs_schema, lhs, rhs_schema, rhs, None, None, None)
 }
 
 /// [`binary_vectors`], handing the live workspace it holds to `reserve` as it allocates.
@@ -225,6 +227,7 @@ struct FieldEvidence<'a> {
     evidence: &'a DuplicateEvidence,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn binary_vectors_with_reservation(
     matching: &BinaryMatching,
     lhs_schema: &SeriesSchema,
@@ -232,6 +235,7 @@ pub(crate) fn binary_vectors_with_reservation(
     rhs_schema: &SeriesSchema,
     rhs: &[Series],
     evidence: Option<NodeEvidence<'_>>,
+    annotations: Option<&PromqlAnnotationCollector>,
     reserve: &mut dyn FnMut(usize) -> Result<()>,
 ) -> Result<Vec<Series>> {
     let mut budget = Budget::new(reserve);
@@ -242,12 +246,14 @@ pub(crate) fn binary_vectors_with_reservation(
         rhs_schema,
         rhs,
         evidence,
+        annotations,
         Some(&mut budget),
     )
 }
 
 /// The one binary kernel: one walk, one lookup and one error order, whether or not a caller
 /// accounts for the workspace. Every figure is reserved only when `budget` is held.
+#[allow(clippy::too_many_arguments)]
 fn binary_vectors_inner(
     matching: &BinaryMatching,
     lhs_schema: &SeriesSchema,
@@ -255,6 +261,7 @@ fn binary_vectors_inner(
     rhs_schema: &SeriesSchema,
     rhs: &[Series],
     evidence: Option<NodeEvidence<'_>>,
+    annotations: Option<&PromqlAnnotationCollector>,
     mut budget: Option<&mut Budget<'_>>,
 ) -> Result<Vec<Series>> {
     // The grid both operands are evaluated on, checked before anything is reserved for them.
@@ -284,6 +291,7 @@ fn binary_vectors_inner(
             &rhs,
             &mut errors,
             field_evidence,
+            annotations,
             budget.as_deref_mut(),
         )?;
         // The field's flags, tables and sort are destroyed with its frame, so its phase ends here:
@@ -734,6 +742,7 @@ fn histogram_phase_bytes(many: &Operand<'_>, one: &Operand<'_>) -> usize {
 /// The field's tables and the match set it builds are its own workspace: they replace what the field
 /// before held and are gone when it returns, which is why the caller admits that release after the
 /// call. The messages it appended and the rows it filed are what stays live.
+#[allow(clippy::too_many_arguments)]
 fn binary_field(
     matching: &BinaryMatching,
     grid: &EvalGrid,
@@ -741,6 +750,7 @@ fn binary_field(
     rhs: &Operand<'_>,
     errors: &mut Vec<(usize, u8, String)>,
     evidence: Option<FieldEvidence<'_>>,
+    annotations: Option<&PromqlAnnotationCollector>,
     mut budget: Option<&mut Budget<'_>>,
 ) -> Result<Results> {
     let (many, one, include, one_is_left) = match &matching.cardinality {
@@ -845,6 +855,7 @@ fn binary_field(
     let mut pairs = Pairs {
         matching,
         one_is_left,
+        annotations,
         group_keys: Vec::new(),
         group_ids: HashMap::new(),
         // One-to-one: a match group may be matched once per point; Prometheus counts a filtered
@@ -913,6 +924,7 @@ fn binary_field(
                         point,
                         many_value,
                         one_value,
+                        true,
                         budget.as_deref_mut(),
                     )?;
                 }
@@ -955,6 +967,7 @@ fn binary_field(
                         point,
                         sample,
                         SampleRef::Float(value),
+                        false,
                         budget.as_deref_mut(),
                     )?;
                 }
@@ -999,6 +1012,7 @@ fn binary_field(
                         point,
                         SampleRef::Float(value),
                         sample,
+                        false,
                         budget.as_deref_mut(),
                     )?;
                 }
@@ -1085,6 +1099,7 @@ fn binary_field(
 struct Pairs<'a> {
     matching: &'a BinaryMatching,
     one_is_left: bool,
+    annotations: Option<&'a PromqlAnnotationCollector>,
     group_keys: Vec<GroupKey>,
     group_ids: HashMap<GroupKey, usize>,
     /// The match groups an operation matched at a point, kept where Prometheus consults them:
@@ -1125,6 +1140,7 @@ impl Pairs<'_> {
         point: usize,
         many_value: SampleRef<'_>,
         one_value: SampleRef<'_>,
+        actual_pair: bool,
         mut budget: Option<&mut Budget<'_>>,
     ) -> Result<RowSlot<'s>> {
         if matches!(many_value, SampleRef::Missing) || matches!(one_value, SampleRef::Missing) {
@@ -1135,7 +1151,27 @@ impl Pairs<'_> {
         } else {
             (many_value, one_value)
         };
-        let Some((result, keep)) = elem_binop(self.matching.op, lhs_value, rhs_value)? else {
+        // Prometheus runs the operation on the float a fill value puts in place of a missing sample,
+        // so a filled pair reports the legacy dropped-sample Info too. What stays out is not the
+        // fill but the pair: one missing a side never reaches here, and a supported operation that
+        // declines for another reason -- incompatible bucket layouts -- is already outside what
+        // [`unsupported_histogram_arithmetic`] reports.
+        let dropped_op = if self.annotations.is_some() {
+            unsupported_histogram_arithmetic(self.matching.op, &lhs_value, &rhs_value)
+        } else {
+            None
+        };
+        // A fill value is a float, so a filled pair never holds the two histograms `elem_binop`
+        // states its reconciliation and reset diagnostics for: those stay off for it.
+        let pair_annotations = if actual_pair { self.annotations } else { None };
+        let Some((result, keep)) =
+            elem_binop(self.matching.op, lhs_value, rhs_value, pair_annotations)?
+        else {
+            if let (Some(collector), Some(op)) = (self.annotations, dropped_op) {
+                collector.record_info(format!(
+                    "{op}: dropped native histogram samples because this binary operation is not supported for native histograms"
+                ));
+            }
             // The operator skipped the pair and nothing of it was filed.
             return Ok(slot);
         };
@@ -2156,14 +2192,45 @@ impl<'a> Operand<'a> {
     }
 }
 
+/// The legacy Info applies only to unsupported histogram arithmetic, not to other reasons a
+/// supported histogram operation can decline a pair (such as incompatible bucket layouts).
+fn unsupported_histogram_arithmetic(
+    op: BinaryOp,
+    lhs: &SampleRef<'_>,
+    rhs: &SampleRef<'_>,
+) -> Option<&'static str> {
+    let symbol = match op {
+        BinaryOp::Add => "+",
+        BinaryOp::Sub => "-",
+        BinaryOp::Mul => "*",
+        BinaryOp::Div => "/",
+        BinaryOp::Mod => "%",
+        BinaryOp::Pow => "^",
+        BinaryOp::Atan2 => "atan2",
+        _ => return None,
+    };
+    let unsupported = match (lhs, rhs) {
+        (SampleRef::Histogram(_), SampleRef::Histogram(_)) => {
+            !matches!(op, BinaryOp::Add | BinaryOp::Sub)
+        }
+        (SampleRef::Histogram(_), SampleRef::Float(_)) => {
+            !matches!(op, BinaryOp::Mul | BinaryOp::Div)
+        }
+        (SampleRef::Float(_), SampleRef::Histogram(_)) => op != BinaryOp::Mul,
+        _ => false,
+    };
+    unsupported.then_some(symbol)
+}
+
 /// Prometheus `vectorElemBinop` over present samples: the value and whether to keep it, or
 /// `None` when Prometheus reports the pair as an annotation and skips it without counting the
 /// match: an operator the sample types do not support, or an addition or subtraction of
-/// histograms that mix exponential and custom buckets or whose counter reset hints collide.
+/// histograms that mix exponential and custom buckets.
 fn elem_binop(
     op: BinaryOp,
     lhs: SampleRef<'_>,
     rhs: SampleRef<'_>,
+    annotations: Option<&PromqlAnnotationCollector>,
 ) -> Result<Option<(GridSample, bool)>> {
     let histogram = |view: &HistogramView<'_>| FloatHistogram::try_from_view(view);
     let mut result = match (lhs, rhs) {
@@ -2192,16 +2259,50 @@ fn elem_binop(
                     return Ok(Some((GridSample::Histogram(Box::new(lhs)), keep)));
                 }
                 BinaryOp::Add | BinaryOp::Sub => {
+                    let name = if op == BinaryOp::Add {
+                        NativeHistogramAdd::name()
+                    } else {
+                        NativeHistogramSub::name()
+                    };
+                    // The layouts decide whether there is a pair at all: Prometheus reports a pair
+                    // whose bucket layouts cannot be combined as that one error, before it looks at
+                    // the reset hints, so a pair that fails both carries only the schema warning.
+                    // Synthetic fill samples have no collector here.
                     if lhs.uses_custom_buckets() != rhs.uses_custom_buckets() {
+                        if let Some(collector) = annotations {
+                            collector.record_warning(format!(
+                                "{name}: dropped native histogram sample with incompatible schemas"
+                            ));
+                        }
                         return Ok(None);
+                    }
+                    if let Some(collector) = annotations
+                        && matches!(
+                            (lhs.reset_hint, rhs.reset_hint),
+                            (
+                                CounterResetHint::CounterReset,
+                                CounterResetHint::NotCounterReset
+                            ) | (
+                                CounterResetHint::NotCounterReset,
+                                CounterResetHint::CounterReset
+                            )
+                        )
+                    {
+                        collector.record_warning(format!(
+                            "{name}: native histogram counter reset hints contradict"
+                        ));
                     }
                     let outcome = if op == BinaryOp::Add {
                         lhs.add(&rhs)?
                     } else {
                         lhs.sub(&rhs)?
                     };
-                    if outcome.counter_reset_collision {
-                        return Ok(None);
+                    if outcome.custom_bounds_reconciled
+                        && let Some(collector) = annotations
+                    {
+                        collector.record_info(format!(
+                            "{name}: reconciled native histograms with different custom buckets"
+                        ));
                     }
                     if op == BinaryOp::Sub {
                         lhs.reset_hint = CounterResetHint::Gauge;

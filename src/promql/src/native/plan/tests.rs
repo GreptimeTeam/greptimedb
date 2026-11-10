@@ -14,7 +14,7 @@
 
 use std::sync::Arc;
 
-use datafusion::common::{DFSchema, DataFusionError};
+use datafusion::common::DFSchema;
 use datatypes::series::SeriesOrdering;
 use datatypes::series::aggregate_state::{AggregateStateKind, StateComponent};
 use datatypes::series::samples::{FieldSpec, SeriesSchema};
@@ -250,6 +250,255 @@ fn add() -> BinaryMatching {
         cardinality: Cardinality::OneToOne,
         fill: FillValues::default(),
     }
+}
+
+#[test]
+fn parameterized_topk_validates_scalar_and_grid() {
+    let out = grid(0, 60_000, 4);
+    let vector = map_over(window_on(input(), None, Arc::clone(&out)));
+    let make = |parameter, op| NativeNode {
+        expr: NativeExpr::ParameterizedTopK {
+            input: Box::new(vector.clone()),
+            op,
+            parameter: Box::new(parameter),
+        },
+        output: vector.output.clone(),
+    };
+    let op = BoundVectorOp::TopK {
+        k: 0.0,
+        top: true,
+        group: Grouping::By(Arc::from([])),
+    };
+    assert!(
+        make(scalar_on(1.0, Arc::clone(&out)), op.clone())
+            .validate()
+            .is_ok()
+    );
+    assert!(
+        make(scalar_on(1.0, grid(0, 30_000, 8)), op.clone())
+            .validate()
+            .is_err()
+    );
+    assert!(make(vector.clone(), op.clone()).validate().is_err());
+    assert!(
+        make(
+            scalar_on(1.0, out),
+            BoundVectorOp::LimitK {
+                k: 1.0,
+                group: Grouping::By(Arc::from([]))
+            }
+        )
+        .validate()
+        .is_err()
+    );
+}
+
+#[test]
+fn binary_histogram_float_kind_matches_supported_operations() {
+    use crate::extension_plan::FieldKind;
+
+    let histogram = input_on(grid(0, 60_000, 1));
+    let float = NativeNode {
+        expr: NativeExpr::Timestamp {
+            input: Box::new(histogram.clone()),
+        },
+        output: histogram.output.clone(),
+    };
+    for (left, op, right, expected) in [
+        (
+            &histogram,
+            BinaryOp::Mul,
+            &float,
+            Some(FieldKind::Histogram),
+        ),
+        (
+            &float,
+            BinaryOp::Mul,
+            &histogram,
+            Some(FieldKind::Histogram),
+        ),
+        (
+            &histogram,
+            BinaryOp::Div,
+            &float,
+            Some(FieldKind::Histogram),
+        ),
+        (&float, BinaryOp::Div, &histogram, Some(FieldKind::Float)),
+        (&histogram, BinaryOp::Add, &float, Some(FieldKind::Float)),
+        (&histogram, BinaryOp::Sub, &float, Some(FieldKind::Float)),
+        (
+            &histogram,
+            BinaryOp::Add,
+            &histogram,
+            Some(FieldKind::Histogram),
+        ),
+        (
+            &histogram,
+            BinaryOp::Sub,
+            &histogram,
+            Some(FieldKind::Histogram),
+        ),
+        (
+            &histogram,
+            BinaryOp::Mul,
+            &histogram,
+            Some(FieldKind::Float),
+        ),
+        (
+            &histogram,
+            BinaryOp::Div,
+            &histogram,
+            Some(FieldKind::Float),
+        ),
+        (&float, BinaryOp::Add, &float, Some(FieldKind::Float)),
+    ] {
+        let node = NativeNode {
+            expr: NativeExpr::Binary {
+                left: Box::new(left.clone()),
+                right: Box::new(right.clone()),
+                matching: BinaryMatching { op, ..add() },
+            },
+            output: histogram.output.clone(),
+        };
+        assert_eq!(
+            node.output_field_kind(FieldKind::Histogram),
+            expected,
+            "{op:?}"
+        );
+    }
+}
+
+/// Arithmetic kinds cover both histogram/float directions without declining empty results.
+#[test]
+fn binary_arithmetic_field_kind_matrix() {
+    use super::binary_output_field_kind;
+    use crate::extension_plan::FieldKind::{Float, Histogram};
+
+    for op in [
+        BinaryOp::Add,
+        BinaryOp::Sub,
+        BinaryOp::Mul,
+        BinaryOp::Div,
+        BinaryOp::Mod,
+        BinaryOp::Pow,
+        BinaryOp::Atan2,
+    ] {
+        let histogram_pair = if matches!(op, BinaryOp::Add | BinaryOp::Sub) {
+            Histogram
+        } else {
+            Float
+        };
+        let histogram_float = if matches!(op, BinaryOp::Mul | BinaryOp::Div) {
+            Histogram
+        } else {
+            Float
+        };
+        let float_histogram = if op == BinaryOp::Mul {
+            Histogram
+        } else {
+            Float
+        };
+        for (left, right, expected) in [
+            (Float, Float, Float),
+            (Histogram, Histogram, histogram_pair),
+            (Histogram, Float, histogram_float),
+            (Float, Histogram, float_histogram),
+        ] {
+            assert_eq!(
+                binary_output_field_kind(left, right, op, false, FillValues::default()),
+                Some(expected),
+                "{left:?} {op:?} {right:?}"
+            );
+        }
+    }
+}
+
+/// Fill pairs contribute their real payload kind; unsupported pairs contribute no kind.
+#[test]
+fn binary_arithmetic_field_kind_accounts_for_fill() {
+    use super::binary_output_field_kind;
+    use crate::extension_plan::FieldKind::{Float, Histogram};
+
+    let absent = FillValues::default();
+    let left = FillValues {
+        lhs: Some(2.0),
+        rhs: None,
+    };
+    let right = FillValues {
+        lhs: None,
+        rhs: Some(2.0),
+    };
+    let both = FillValues {
+        lhs: Some(2.0),
+        rhs: Some(2.0),
+    };
+    for (op, fill, expected) in [
+        (BinaryOp::Mul, absent, Float),
+        (BinaryOp::Mul, left, Histogram),
+        (BinaryOp::Mul, right, Histogram),
+        (BinaryOp::Mul, both, Histogram),
+        (BinaryOp::Div, absent, Float),
+        (BinaryOp::Div, left, Float),
+        (BinaryOp::Div, right, Histogram),
+        (BinaryOp::Div, both, Histogram),
+        (BinaryOp::Add, both, Histogram),
+        (BinaryOp::Sub, both, Histogram),
+        (BinaryOp::Mod, both, Float),
+        (BinaryOp::Pow, both, Float),
+        (BinaryOp::Atan2, both, Float),
+    ] {
+        assert_eq!(
+            binary_output_field_kind(Histogram, Histogram, op, false, fill),
+            Some(expected),
+            "{op:?} {fill:?}"
+        );
+        // The tree-level walk must pass the same fill on to the shared kind helper.
+        let histogram = input_on(grid(0, 60_000, 1));
+        let node = NativeNode {
+            expr: NativeExpr::Binary {
+                left: Box::new(histogram.clone()),
+                right: Box::new(histogram.clone()),
+                matching: BinaryMatching { op, fill, ..add() },
+            },
+            output: histogram.output.clone(),
+        };
+        assert_eq!(
+            node.output_field_kind(Histogram),
+            Some(expected),
+            "{op:?} {fill:?}"
+        );
+    }
+
+    // The real mixed-kind operation and a fill may emit different kinds in one field. Neither
+    // silently claims homogeneity; mixed no-fill composition and comparisons keep their old kinds.
+    assert_eq!(
+        binary_output_field_kind(Histogram, Float, BinaryOp::Mul, false, left),
+        None
+    );
+    assert_eq!(
+        binary_output_field_kind(Float, Histogram, BinaryOp::Mul, false, right),
+        None
+    );
+    assert_eq!(
+        binary_output_field_kind(Histogram, Float, BinaryOp::Add, false, left),
+        Some(Float)
+    );
+    assert_eq!(
+        binary_output_field_kind(Histogram, Float, BinaryOp::Mul, false, absent),
+        Some(Histogram)
+    );
+    assert_eq!(
+        binary_output_field_kind(Histogram, Histogram, BinaryOp::Eq, false, both),
+        Some(Histogram)
+    );
+    assert_eq!(
+        binary_output_field_kind(Histogram, Float, BinaryOp::Eq, false, both),
+        None
+    );
+    assert_eq!(
+        binary_output_field_kind(Histogram, Float, BinaryOp::Eq, true, both),
+        Some(Float)
+    );
 }
 
 /// A compiled tree is accepted when every node's contract holds.
@@ -951,6 +1200,14 @@ fn a_constant_operand_reads_one_series_at_a_time() {
         aggregate,
         scalar_on(100.0, Arc::clone(&shared))
     )));
+    // `scalar(rate(v0[5m]))` must inspect all the series at each point.
+    let scalar_of = NativeNode {
+        expr: NativeExpr::ScalarOf {
+            input: Box::new(vector()),
+        },
+        output: NativeType::Scalar(Arc::clone(&shared)),
+    };
+    assert!(reads_across_series(&scalar_of));
     // `rate(v0[5m]) + rate(v0[5m])` matches two vectors by label.
     assert!(reads_across_series(&binary(vector(), vector())));
     // `1 + 2` answers one value for every series there is.
@@ -1995,9 +2252,7 @@ fn info_still_refuses_an_evaluated_value_vector() {
 }
 
 #[test]
-fn native_tree_depth_limit_holds_across_lifecycle_on_named_worker_stack() {
-    use super::MAX_NATIVE_NODE_DEPTH;
-
+fn native_tree_deeper_than_64_round_trips_and_validates() {
     fn nested_maps(map_count: usize) -> NativeTree {
         let mut node = input_on(grid(0, 60_000, 1));
         let output = node.output.clone();
@@ -2015,34 +2270,121 @@ fn native_tree_depth_limit_holds_across_lifecycle_on_named_worker_stack() {
         NativeTree { root: node }
     }
 
-    // A leaf counts as one node; test exactly the cap and rejection on a named 2 MiB worker.
-    std::thread::Builder::new()
-        .name("native-tree-depth-boundary".to_string())
-        .stack_size(2 * 1024 * 1024)
-        .spawn(|| {
-            let at_limit = nested_maps(MAX_NATIVE_NODE_DEPTH - 1);
-            let checked = NativeTree::try_new(at_limit.root.clone()).unwrap();
-            let bytes = postcard::to_stdvec(&checked).unwrap();
-            let decoded: NativeTree = postcard::from_bytes(&bytes).unwrap();
-            decoded.root().validate().unwrap();
-            drop((decoded, bytes, checked, at_limit));
+    // This tests a representative depth, not a guarantee about the available worker stack.
+    let deep = nested_maps(80);
+    let checked = NativeTree::try_new(deep.root.clone()).unwrap();
+    let bytes = postcard::to_stdvec(&checked).unwrap();
+    let decoded: NativeTree = postcard::from_bytes(&bytes).unwrap();
+    assert_eq!(checked, decoded);
+    decoded.root().validate().unwrap();
 
-            // Construct wire data beyond the cap without passing through try_new.
-            let over_limit = nested_maps(MAX_NATIVE_NODE_DEPTH);
-            let bytes = postcard::to_stdvec(&over_limit).unwrap();
-            assert_eq!(
-                postcard::from_bytes::<NativeTree>(&bytes).unwrap_err(),
-                postcard::Error::SerdeDeCustom
-            );
-            assert!(matches!(
-                NativeTree::try_new(over_limit.root.clone()),
-                Err(DataFusionError::NotImplemented(_))
-            ));
-            drop(over_limit);
-        })
-        .unwrap()
-        .join()
-        .unwrap();
+    // Decoding must still validate the tree's structural contract.
+    let mut invalid = nested_maps(80);
+    invalid.root.output = NativeType::Scalar(grid(0, 60_000, 1));
+    assert!(NativeTree::try_new(invalid.root.clone()).is_err());
+    let bytes = postcard::to_stdvec(&invalid).unwrap();
+    assert!(postcard::from_bytes::<NativeTree>(&bytes).is_err());
+}
+
+/// The index postcard writes for a [`NativeExpr`] variant is a wire contract, not an implementation
+/// detail: postcard encodes a variant as its index, and a version 3 `FusedSeries` envelope carries
+/// the whole tree rather than a prefix of it, so a variant inserted anywhere but the end renames
+/// every variant after it for a reader of an earlier build.
+///
+/// The numbers here are the ones already written to the wire. New variants are appended after
+/// `Info`; every variant above them keeps the index below.
+#[test]
+fn native_expr_variant_indices_are_a_wire_contract() {
+    use crate::histogram_eval::HistogramFunction;
+
+    // A node carries its expression first, so this is also the tag of any node or tree holding it.
+    fn tag(expr: &NativeExpr) -> u8 {
+        let encoded = postcard::to_stdvec(expr).expect("a native expression encodes");
+        *encoded.first().expect("a variant tag is the first byte")
+    }
+
+    let on_grid = || grid(0, 60_000, 1);
+    let vector = || map_over(input_on(on_grid()));
+    let scalar = || scalar_on(1.0, on_grid());
+    let cases = [
+        (
+            NativeExpr::Input(BoundInput {
+                source_index: 0,
+                output: raw(),
+                ordering: SeriesOrdering::KeyThenTime,
+            }),
+            0u8,
+            "Input",
+        ),
+        (NativeExpr::Scalar(BoundScalar { value: 1.0 }), 1, "Scalar"),
+        (NativeExpr::EvalTime { date: None }, 2, "EvalTime"),
+        (
+            NativeExpr::VectorOf {
+                input: Box::new(scalar()),
+            },
+            3,
+            "VectorOf",
+        ),
+        (
+            NativeExpr::Merge {
+                input: Box::new(vector()),
+            },
+            5,
+            "Merge",
+        ),
+        (
+            NativeExpr::Timestamp {
+                input: Box::new(vector()),
+            },
+            9,
+            "Timestamp",
+        ),
+        (
+            NativeExpr::Aggregate {
+                input: Box::new(vector()),
+                op: BoundAggregate {
+                    kind: AggregateKind::Sum,
+                    group: Grouping::By(Arc::new(["job".into()])),
+                    stage: AggregateStage::Complete,
+                },
+            },
+            10,
+            "Aggregate",
+        ),
+        // The dynamic forms are the last three, which is what keeps every index above them.
+        (
+            NativeExpr::ScalarOf {
+                input: Box::new(vector()),
+            },
+            15,
+            "ScalarOf",
+        ),
+        (
+            NativeExpr::ParameterizedTopK {
+                input: Box::new(vector()),
+                op: BoundVectorOp::TopK {
+                    k: 1.0,
+                    top: true,
+                    group: Grouping::By(Arc::from([])),
+                },
+                parameter: Box::new(scalar()),
+            },
+            16,
+            "ParameterizedTopK",
+        ),
+        (
+            NativeExpr::ParameterizedHistogram {
+                input: Box::new(vector()),
+                op: BoundVectorOp::Histogram(HistogramFunction::Quantile(0.9)),
+                parameters: vec![scalar()],
+            },
+            17,
+            "ParameterizedHistogram",
+        ),
+    ];
+    for (expr, index, variant) in cases {
+        assert_eq!(index, tag(&expr), "{variant} changed the index it encodes");
+    }
 }
 
 #[test]

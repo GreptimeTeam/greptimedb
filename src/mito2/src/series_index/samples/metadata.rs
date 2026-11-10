@@ -81,12 +81,23 @@ impl PayloadReference {
         require(c.u32()? == 0, "nonzero sample payload reserved field")?;
         Ok(result)
     }
-    pub fn unpack(&self, bytes: &[u8]) -> Result<Vec<u8>> {
+    fn validate_payload(&self, bytes: &[u8]) -> Result<()> {
         require(
             bytes.len() == self.stored as usize && codec::checksum(bytes) == self.checksum,
             "sample checksum mismatch",
-        )?;
+        )
+    }
+    pub fn unpack(&self, bytes: &[u8]) -> Result<Vec<u8>> {
+        self.validate_payload(bytes)?;
         codec::decompress(bytes, self.compression, self.decoded as usize)
+    }
+    pub fn unpack_with_decoder<'a>(
+        &self,
+        bytes: &'a [u8],
+        decoder: &'a mut codec::PayloadDecoder,
+    ) -> Result<&'a [u8]> {
+        self.validate_payload(bytes)?;
+        decoder.decompress(bytes, self.compression, self.decoded as usize)
     }
 }
 pub(super) fn pack(

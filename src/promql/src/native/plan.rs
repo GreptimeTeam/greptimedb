@@ -27,35 +27,8 @@
 //! constant, so `time()` and `scalar(v)` have no node. The legality below is therefore about the
 //! operations that exist, not about PromQL's whole surface.
 
-use std::cell::Cell;
 use std::hash::Hash;
 use std::sync::Arc;
-
-const MAX_NATIVE_NODE_DEPTH: usize = 64;
-thread_local! {
-    static NATIVE_NODE_DEPTH: Cell<usize> = const { Cell::new(0) };
-}
-
-struct NativeNodeDepthGuard;
-impl NativeNodeDepthGuard {
-    fn enter<E: serde::de::Error>() -> std::result::Result<Self, E> {
-        NATIVE_NODE_DEPTH.with(|depth| {
-            let current = depth.get();
-            if current >= MAX_NATIVE_NODE_DEPTH {
-                return Err(E::custom(format!(
-                    "native tree nesting exceeds {MAX_NATIVE_NODE_DEPTH}"
-                )));
-            }
-            depth.set(current + 1);
-            Ok(Self)
-        })
-    }
-}
-impl Drop for NativeNodeDepthGuard {
-    fn drop(&mut self) {
-        NATIVE_NODE_DEPTH.with(|depth| depth.set(depth.get() - 1));
-    }
-}
 
 use datafusion::arrow::datatypes::DataType;
 use datafusion::error::{DataFusionError, Result};
@@ -74,7 +47,9 @@ use crate::map_label::LabelRewrite;
 use crate::map_time::DateFunction;
 use crate::range_eval::{RangeFunction, RangeWindow};
 use crate::select::SortOrder;
-use crate::vector_match::{BinaryMatching, BinaryOp, Cardinality, MatchingLabels, SetOp};
+use crate::vector_match::{
+    BinaryMatching, BinaryOp, Cardinality, FillValues, MatchingLabels, SetOp,
+};
 
 /// The bucket-bound label a classic histogram's series carry, which the histogram function folds and
 /// its result does not report.
@@ -90,12 +65,14 @@ const PROMQL_METADATA_LABELS: [&str; 3] = ["__name__", "__type__", "__unit__"];
 /// by `on` or `ignoring`; `and` and `unless` keep the left side's series and `or` adds the right
 /// side's; `info` adds the data labels of the info table; an operation with a scalar or a function
 /// of each value keeps its operand's; a scalar and `vector(s)` have none; `count_values` keeps its
-/// grouping and the label it writes. `None` for a node whose labels this walk does not derive - a
-/// label rewrite of the metric name, an `absent` naming a label no input column carries, and a
-/// `count_values` whose destination is the metric name or no label at all, none of which is a column
-/// here - so a tree holding one reports no label set here. `None` is not the query's answer: the
-/// caller asks the existing planner for the columns the node is named after instead of declining the
-/// query.
+/// grouping and the label it writes; a fill that answers a missing many-side sample files the one
+/// side's matching labels, so they join the set, while a grouped `include` label joins them only when
+/// the one side carries it or the matching keeps it in the key a fill reads. `None` for a node whose
+/// labels this walk does not derive - a label rewrite of the metric name, an `absent` naming a label
+/// no input column carries, and a `count_values` whose destination is the metric name or no label at
+/// all, none of which is a column here - so a tree holding one reports no label set here. `None` is
+/// not the query's answer: the caller asks the existing planner for the columns the node is named
+/// after instead of declining the query.
 pub fn fused_output_tags(node: &NativeNode, source_tags: &[Vec<String>]) -> Option<Vec<String>> {
     match &node.expr {
         NativeExpr::Input(input) => source_tags.get(input.source_index).cloned(),
@@ -125,6 +102,19 @@ pub fn fused_output_tags(node: &NativeNode, source_tags: &[Vec<String>]) -> Opti
         // Its parameters are scalars, which carry no labels, so what the node reports are its
         // input's labels.
         NativeExpr::ParameterizedMap { input, .. } => fused_output_tags(input, source_tags),
+        // `scalar()` reports one value and no labels, like the scalar it produces.
+        NativeExpr::ScalarOf { .. } => Some(Vec::new()),
+        // Its parameter is a scalar, which carries no labels, and ranking keeps each selected
+        // series' own labels.
+        NativeExpr::ParameterizedTopK { input, .. } => fused_output_tags(input, source_tags),
+        // A parameterized histogram function folds the bucket series that share the other labels
+        // into one series and drops `le` along with the metadata labels, exactly as its bound
+        // counterpart does. Its parameters are scalars and carry no labels.
+        NativeExpr::ParameterizedHistogram { input, .. } => {
+            let mut tags = fused_output_tags(input, source_tags)?;
+            tags.retain(|tag| tag != LE_LABEL && !PROMQL_METADATA_LABELS.contains(&tag.as_str()));
+            Some(tags)
+        }
         // An aggregate reports the grouping labels its input carries: `by(...)` keeps exactly the
         // ones it names, and `without(...)` keeps the rest and drops the metric name, as Prometheus
         // does.
@@ -239,7 +229,7 @@ pub fn fused_output_tags(node: &NativeNode, source_tags: &[Vec<String>]) -> Opti
             _ => {
                 let kept = |tags: Vec<String>| -> Vec<String> {
                     match &matching.labels {
-                        MatchingLabels::On(names) if !names.is_empty() => tags
+                        MatchingLabels::On(names) => tags
                             .into_iter()
                             .filter(|tag| names.iter().any(|name| name.as_ref() == tag.as_str()))
                             .collect(),
@@ -247,16 +237,14 @@ pub fn fused_output_tags(node: &NativeNode, source_tags: &[Vec<String>]) -> Opti
                             .into_iter()
                             .filter(|tag| !names.iter().any(|name| name.as_ref() == tag.as_str()))
                             .collect(),
-                        MatchingLabels::On(_) => tags,
                     }
                 };
                 let left_tags = fused_output_tags(left, source_tags)?;
                 let right_tags = fused_output_tags(right, source_tags)?;
-                // `on`/`ignoring` narrow which of the many side's labels survive; a group modifier
-                // then copies the names it lists *from the one side*, with that side's values. The
-                // names are bound in the modifier and the values come from the series, so both
-                // halves are needed to say what the output carries: a `group_left(container)`
-                // keeps the left side's labels and adds `container`, which only the right side has.
+                // One-to-one matching narrows the left side's labels with `on`/`ignoring`.
+                // A group retains the many side's labels and copies the named labels from the one
+                // side: `group_left(container)` keeps the left labels and adds `container` from
+                // the right.
                 let mut tags = match &matching.cardinality {
                     Cardinality::OneToOne => kept(left_tags.clone()),
                     Cardinality::ManyToOne(_) => left_tags.clone(),
@@ -275,10 +263,57 @@ pub fn fused_output_tags(node: &NativeNode, source_tags: &[Vec<String>]) -> Opti
                         tags.push(tag.clone());
                     }
                 }
-                // A filled left side takes an unmatched right series' matching labels, so those
-                // results carry the right side's tags.
-                if matching.fill.lhs.is_some() {
-                    for tag in kept(fused_output_tags(right, source_tags)?) {
+                // A grouped result carries an include label only when a row can give it one.
+                // `result_metric` removes the label from the many side's labels unless the one side
+                // has it, so a paired row and a row filed from a one-side series take it from the
+                // one series, which is what the loop above declares. A row filed from a many-side
+                // series takes it from that series' match key instead, so it carries the label only
+                // when the matching keeps the label in the key. Everything else the many side
+                // carries is the base above, so a label neither of those can provide has to leave
+                // the set: nothing would ever fill its column.
+                if !includes.is_empty() {
+                    let many_rows_filled = match &matching.cardinality {
+                        // `group_right` puts the one side on the left, so the fills trade places:
+                        // `fill_left` is the one that answers a missing one-side sample there.
+                        Cardinality::OneToMany(_) => matching.fill.lhs,
+                        Cardinality::ManyToOne(_) | Cardinality::OneToOne => matching.fill.rhs,
+                    }
+                    .is_some();
+                    let in_match_key = |label: &str| match &matching.labels {
+                        MatchingLabels::On(names) => {
+                            names.iter().any(|name| name.as_ref() == label)
+                        }
+                        // A match key is built from a series' tags, which never hold the metric name.
+                        MatchingLabels::Ignoring(names) => {
+                            label != "__name__" && !names.iter().any(|name| name.as_ref() == label)
+                        }
+                    };
+                    tags.retain(|tag| {
+                        // The name is not an ordinary label here: this walk reports it by
+                        // `__name__` in the set, which the nodes above decide.
+                        tag == "__name__"
+                            || !includes.iter().any(|label| label.as_ref() == tag.as_str())
+                            || include_tags.contains(tag)
+                            || (many_rows_filled && in_match_key(tag))
+                    });
+                }
+                // A fill answers a missing sample from the series of the other side, and the kernel
+                // files that row at the label set the series it has gives it
+                // (`vector_match::binary_field`): a many-side series keeps all of its labels, which
+                // `tags` already holds, while a one-side series keeps only its matching labels plus
+                // the group labels the modifier names, which the loop above adds. So what a fill can
+                // add here is the one side's matching labels, and only a fill that can file a
+                // one-side row has any to add: one where the many side is the missing side. Which
+                // fill that is follows the kernel, which trades the two for `group_right`, whose one
+                // side is the left - there it is `fill_right` that leaves the many side missing.
+                let (one_tags, fills_many_side) = match &matching.cardinality {
+                    Cardinality::OneToMany(_) => (&left_tags, matching.fill.rhs),
+                    Cardinality::ManyToOne(_) | Cardinality::OneToOne => {
+                        (&right_tags, matching.fill.lhs)
+                    }
+                };
+                if fills_many_side.is_some() {
+                    for tag in kept(one_tags.clone()) {
                         if !tags.contains(&tag) {
                             tags.push(tag);
                         }
@@ -410,6 +445,57 @@ pub fn uniform_field_kind<'a>(
     answer
 }
 
+/// The output kind of a binary operation over two evaluated vectors, including fill pairs.
+pub fn binary_output_field_kind(
+    left: FieldKind,
+    right: FieldKind,
+    op: BinaryOp,
+    return_bool: bool,
+    fill: FillValues,
+) -> Option<FieldKind> {
+    if return_bool {
+        return Some(FieldKind::Float);
+    }
+    match op {
+        BinaryOp::Add
+        | BinaryOp::Sub
+        | BinaryOp::Mul
+        | BinaryOp::Div
+        | BinaryOp::Mod
+        | BinaryOp::Pow
+        | BinaryOp::Atan2 => {
+            // An unsupported pair emits no sample, not a float. Fill values are floats, so one
+            // field can be produced by the real pair and by either enabled synthetic pair.
+            let payload_kind = |left, right| match (left, op, right) {
+                (FieldKind::Float, _, FieldKind::Float) => Some(FieldKind::Float),
+                (FieldKind::Histogram, BinaryOp::Add | BinaryOp::Sub, FieldKind::Histogram)
+                | (FieldKind::Histogram, BinaryOp::Mul | BinaryOp::Div, FieldKind::Float)
+                | (FieldKind::Float, BinaryOp::Mul, FieldKind::Histogram) => {
+                    Some(FieldKind::Histogram)
+                }
+                _ => None,
+            };
+            let candidates = [
+                payload_kind(left, right),
+                fill.rhs.and_then(|_| payload_kind(left, FieldKind::Float)),
+                fill.lhs.and_then(|_| payload_kind(FieldKind::Float, right)),
+            ];
+            let mut kind = None;
+            for candidate in candidates.into_iter().flatten() {
+                if kind.is_some_and(|existing| existing != candidate) {
+                    return None;
+                }
+                kind = Some(candidate);
+            }
+            // With no possible samples, retain the legacy float layout for an empty result.
+            Some(kind.unwrap_or(FieldKind::Float))
+        }
+        // Comparison and bool behavior is separate from arithmetic's empty-field layout.
+        _ if left == right => Some(left),
+        _ => None,
+    }
+}
+
 impl NativeNode {
     /// The kind this node's output field carries, given the kind its input carries.
     ///
@@ -455,9 +541,9 @@ impl NativeNode {
                 Some(kind)
             }
             // A constant beside a vector is broadcast over it, so the operation answers with the
-            // vector's own samples: a histogram times a float is still a histogram. Two vectors are
-            // only one column if both sides carry the same kind; a mixed result needs two columns
-            // per field, which this route does not declare.
+            // vector's own samples: a histogram times a float is still a histogram. Two vectors
+            // use the arithmetic result's kind, including any samples emitted by fill, and an
+            // empty float field only when no possible pairing can emit a sample.
             NativeExpr::Binary {
                 left,
                 right,
@@ -474,7 +560,14 @@ impl NativeNode {
                     (_, NativeExpr::Scalar(_)) => kind_of(left),
                     (_, _) => {
                         let left_kind = kind_of(left)?;
-                        (left_kind == kind_of(right)?).then_some(left_kind)
+                        let right_kind = kind_of(right)?;
+                        binary_output_field_kind(
+                            left_kind,
+                            right_kind,
+                            matching.op,
+                            false,
+                            matching.fill,
+                        )
                     }
                 }
             }
@@ -490,10 +583,20 @@ impl NativeNode {
                 let left_kind = kind_of(left)?;
                 (left_kind == kind_of(right)?).then_some(left_kind)
             }
-            // An aggregate folds float state only: the admission gate keeps a histogram from
-            // entering one, so whatever a histogram statement aggregates answers floats. Naming it
-            // here is what lets `sum(count_over_time(h[5m]))` - a float built from histograms -
-            // declare a float column instead of keeping the existing plan.
+            // `scalar()` answers one float per grid point, whatever its input holds.
+            NativeExpr::ScalarOf { .. } => Some(FieldKind::Float),
+            // A ranking hands on the series it selected, so the field keeps the kind it read; its
+            // parameter is a scalar, which carries no samples of its own.
+            NativeExpr::ParameterizedTopK { input, .. } => kind_of(input),
+            // `histogram_quantile` and `histogram_fraction` reduce a histogram to one float per
+            // sample whatever their arguments are, constant or per point.
+            NativeExpr::ParameterizedHistogram { .. } => Some(FieldKind::Float),
+            // Every aggregate answers floats: `count`/`group` answer a count or a `1` whatever the
+            // samples they counted, `min`/`max`/`stddev`/`stdvar` fold the float samples and skip
+            // the histogram ones, and `sum`/`avg` - the only two that would fold the payload - keep
+            // a histogram out at admission. Naming it here is what lets `sum(count_over_time(h[5m]))`
+            // - a float built from histograms - declare a float column instead of keeping the
+            // existing plan.
             NativeExpr::Aggregate { .. } => Some(FieldKind::Float),
             _ => None,
         }
@@ -789,6 +892,13 @@ pub struct BoundSetOp {
 }
 
 /// What a node computes. Every variant holds a bound operation, never a name to resolve.
+///
+/// The variants are numbered by their position, and postcard writes that number, so these indices
+/// are a wire contract: a version 3 [`crate::extension_plan::FusedSeries`] envelope carries the
+/// whole [`NativeTree`] rather than a prefix of it, and a variant inserted anywhere but the end
+/// renames every variant after it for a reader of an earlier build. New variants are therefore
+/// appended after `Info`, and `native_expr_variant_indices_are_a_wire_contract` in the tests below
+/// pins the numbers.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq, Hash)]
 pub enum NativeExpr {
     /// A scan or an exchange boundary.
@@ -862,6 +972,24 @@ pub enum NativeExpr {
         info: Box<NativeNode>,
         selector: InfoSelector,
     },
+    /// `scalar(v)`: at each grid point, the sole sample value or NaN when the vector has zero or
+    /// more than one sample.
+    ScalarOf { input: Box<NativeNode> },
+    /// `topk`/`bottomk` whose `k` is evaluated at every grid point instead of bound as a constant.
+    ///
+    /// `op` is still the `TopK` the constant path binds; its `k` is unused here, because the value
+    /// this node selects with is the parameter's, read once per point.
+    ParameterizedTopK {
+        input: Box<NativeNode>,
+        op: BoundVectorOp,
+        parameter: Box<NativeNode>,
+    },
+    /// A classic histogram vector operation whose arguments vary on the output grid.
+    ParameterizedHistogram {
+        input: Box<NativeNode>,
+        op: BoundVectorOp,
+        parameters: Vec<NativeNode>,
+    },
 }
 
 /// One node of a bound tree.
@@ -919,9 +1047,15 @@ pub fn duplicates_canonical_labels(node: &NativeNode, source_tags: &[Vec<String>
         NativeExpr::Instant { input, .. }
         | NativeExpr::Window { input, .. }
         | NativeExpr::Timestamp { input }
-        | NativeExpr::ParameterizedMap { input, .. } => {
+        | NativeExpr::ParameterizedMap { input, .. }
+        | NativeExpr::ParameterizedTopK { input, .. } => {
             duplicates_canonical_labels(input, source_tags)
         }
+        // `scalar()` answers one value, which names no label set at all.
+        NativeExpr::ScalarOf { .. } => false,
+        // The histogram functions fold the bucket series of one histogram into one series, so two
+        // pieces of one label set cannot survive them.
+        NativeExpr::ParameterizedHistogram { .. } => false,
         // A rewrite writes a caller-chosen destination label, so two series can end under one set -
         // but only if that label was one of the input's, because writing a label no series carries
         // leaves every series' identity distinct. `map_writes_existing_label` is that question, and
@@ -1020,8 +1154,17 @@ pub fn reads_across_series(node: &NativeNode) -> bool {
         NativeExpr::Instant { input, .. }
         | NativeExpr::VectorOf { input }
         | NativeExpr::Map { input, .. }
-        | NativeExpr::ParameterizedMap { input, .. }
         | NativeExpr::Timestamp { input } => reads_across_series(input),
+        // A parameterized operation reads its parameters too, and one of them can read across series
+        // as well: `clamp_min(b, scalar(a))` bounds each series of `b` by a value that only exists
+        // once the whole of `a` is gathered, so the node reads across series wherever its parameter
+        // does.
+        NativeExpr::ParameterizedMap {
+            input, parameters, ..
+        } => reads_across_series(input) || parameters.iter().any(reads_across_series),
+        // `scalar()` needs the whole vector: which series carries the one value at a point decides
+        // the answer, so the node reads across series.
+        NativeExpr::ScalarOf { .. } => true,
         NativeExpr::Binary { left, right, .. } => {
             let scalar = |side: &NativeNode| matches!(side.output, NativeType::Scalar(_));
             if scalar(left) || scalar(right) {
@@ -1031,6 +1174,9 @@ pub fn reads_across_series(node: &NativeNode) -> bool {
                 true
             }
         }
+        // A parameterized operation reads its parameter too, and a `k` that changes per point
+        // decides which series survive.
+        NativeExpr::ParameterizedTopK { .. } | NativeExpr::ParameterizedHistogram { .. } => true,
         NativeExpr::Aggregate { .. }
         | NativeExpr::Vector { .. }
         | NativeExpr::Set { .. }
@@ -1074,10 +1220,8 @@ pub struct NativeTree {
 impl NativeTree {
     /// Creates a tree over `root`, checking that every node's contract holds.
     ///
-    /// A structurally inconsistent tree is a compiler defect; a tree beyond the native depth
-    /// limit is unsupported by this route and can fall back to the existing planner.
+    /// A structurally inconsistent tree is a compiler defect.
     pub fn try_new(root: NativeNode) -> Result<Self> {
-        ensure_native_node_depth(&root)?;
         root.validate()?;
         Ok(Self { root })
     }
@@ -1092,7 +1236,6 @@ impl<'de> serde::Deserialize<'de> for NativeNode {
     fn deserialize<D: serde::Deserializer<'de>>(
         deserializer: D,
     ) -> std::result::Result<Self, D::Error> {
-        let _guard = NativeNodeDepthGuard::enter::<D::Error>()?;
         #[derive(serde::Deserialize)]
         struct Wire {
             expr: NativeExpr,
@@ -1115,54 +1258,31 @@ impl<'de> serde::Deserialize<'de> for NativeTree {
             root: NativeNode,
         }
         let wire = Wire::deserialize(deserializer)?;
-        ensure_native_node_depth(&wire.root).map_err(serde::de::Error::custom)?;
         wire.root.validate().map_err(serde::de::Error::custom)?;
         Ok(Self { root: wire.root })
     }
 }
 
-fn ensure_native_node_depth(root: &NativeNode) -> Result<()> {
-    fn visit(node: &NativeNode, depth: usize) -> Result<()> {
-        if depth > MAX_NATIVE_NODE_DEPTH {
-            return Err(DataFusionError::NotImplemented(format!(
-                "native tree nesting exceeds {MAX_NATIVE_NODE_DEPTH}"
-            )));
-        }
-        match &node.expr {
-            NativeExpr::VectorOf { input }
-            | NativeExpr::Instant { input, .. }
-            | NativeExpr::Merge { input }
-            | NativeExpr::Window { input, .. }
-            | NativeExpr::Map { input, .. }
-            | NativeExpr::Timestamp { input }
-            | NativeExpr::Aggregate { input, .. }
-            | NativeExpr::Vector { input, .. } => visit(input, depth + 1),
-            NativeExpr::ParameterizedMap {
-                input, parameters, ..
-            } => {
-                visit(input, depth + 1)?;
-                for parameter in parameters {
-                    visit(parameter, depth + 1)?;
-                }
-                Ok(())
-            }
-            NativeExpr::Binary { left, right, .. } | NativeExpr::Set { left, right, .. } => {
-                visit(left, depth + 1)?;
-                visit(right, depth + 1)
-            }
-            NativeExpr::Info { base, info, .. } => {
-                visit(base, depth + 1)?;
-                visit(info, depth + 1)
-            }
-            NativeExpr::Input(_) | NativeExpr::Scalar(_) | NativeExpr::EvalTime { .. } => Ok(()),
-        }
-    }
-    visit(root, 1)
-}
+/// Stack one [`NativeNode::validate`] level needs below it before the check grows its stack.
+///
+/// The check recurses once per tree level, and a debug build's frame for one level is large:
+/// measured on an 80-term chain, the whole check needed about 1.9 MiB, which overflows the 2 MiB
+/// stack a test thread has. There is no depth limit on the trees this route compiles, so the check
+/// grows its stack on demand rather than relying on the caller's.
+const VALIDATE_STACK_RED_ZONE: usize = 256 * 1024;
+
+/// Stack a growth adds when the reserve above is spent. It holds several levels of the same check.
+const VALIDATE_STACK_GROWTH: usize = 4 * 1024 * 1024;
 
 impl NativeNode {
     /// Checks this node and its inputs against the contract of its operation.
     pub fn validate(&self) -> Result<()> {
+        stacker::maybe_grow(VALIDATE_STACK_RED_ZONE, VALIDATE_STACK_GROWTH, || {
+            self.validate_within_stack()
+        })
+    }
+
+    fn validate_within_stack(&self) -> Result<()> {
         match &self.expr {
             NativeExpr::Input(input) => {
                 // An input node's output is exactly the binding it was bound to: a scan hands over
@@ -1176,6 +1296,18 @@ impl NativeNode {
             NativeExpr::Scalar(_) | NativeExpr::EvalTime { .. } => {
                 if !matches!(self.output, NativeType::Scalar(_)) {
                     return Err(invalid("a scalar node does not produce a scalar"));
+                }
+            }
+            NativeExpr::ScalarOf { input } => {
+                input.validate()?;
+                let Some((_, input_grid)) = evaluated_vector(&input.output) else {
+                    return Err(invalid("scalar() consumes an evaluated vector"));
+                };
+                let NativeType::Scalar(output_grid) = &self.output else {
+                    return Err(invalid("scalar() does not produce a scalar"));
+                };
+                if output_grid.spec() != input_grid.spec() {
+                    return Err(invalid("scalar() output is not on its input's grid"));
                 }
             }
             NativeExpr::VectorOf { input } => {
@@ -1314,6 +1446,72 @@ impl NativeNode {
                 ensure_samples(&self.output, "a parameterized map")?;
                 ensure_same_fields(&input.output, &self.output, "a parameterized map")?;
                 ensure_grid(&self.output, input_grid, "a parameterized map")?;
+            }
+            NativeExpr::ParameterizedTopK {
+                input,
+                op,
+                parameter,
+            } => {
+                input.validate()?;
+                parameter.validate()?;
+                if !matches!(op, BoundVectorOp::TopK { .. }) {
+                    return Err(invalid("a parameterized topk operation is not TopK"));
+                }
+                let Some((_, output_grid)) = evaluated_vector(&self.output) else {
+                    return Err(invalid(
+                        "a parameterized topk does not produce an evaluated vector",
+                    ));
+                };
+                if !matches!(&parameter.output, NativeType::Scalar(grid) if grid.spec() == output_grid.spec())
+                {
+                    return Err(invalid(
+                        "a topk parameter is not a scalar on its output grid",
+                    ));
+                }
+                let Some((_, input_grid)) = evaluated_vector(&input.output) else {
+                    return Err(invalid("a parameterized topk consumes a non-vector"));
+                };
+                ensure_same_fields(&input.output, &self.output, "a vector operation")?;
+                ensure_grid(&input.output, input_grid, "a vector operation")?;
+                ensure_grid(&self.output, input_grid, "a vector operation")?;
+            }
+            NativeExpr::ParameterizedHistogram {
+                input,
+                op,
+                parameters,
+            } => {
+                input.validate()?;
+                if !matches!(op, BoundVectorOp::Histogram(_)) {
+                    return Err(invalid(
+                        "a parameterized histogram operation is not Histogram",
+                    ));
+                }
+                let expected = match op {
+                    BoundVectorOp::Histogram(HistogramFunction::Quantile(_)) => 1,
+                    BoundVectorOp::Histogram(HistogramFunction::Fraction { .. }) => 2,
+                    _ => {
+                        return Err(invalid(
+                            "parameterized histogram operation is not Histogram",
+                        ));
+                    }
+                };
+                if parameters.len() != expected {
+                    return Err(invalid("parameterized histogram has the wrong arity"));
+                }
+                let Some((_, input_grid)) = evaluated_vector(&input.output) else {
+                    return Err(invalid("a parameterized histogram consumes a non-vector"));
+                };
+                for parameter in parameters {
+                    parameter.validate()?;
+                    if !matches!(&parameter.output, NativeType::Scalar(grid) if grid.spec() == input_grid.spec())
+                    {
+                        return Err(invalid(
+                            "a histogram parameter is not a scalar on its input grid",
+                        ));
+                    }
+                }
+                ensure_same_fields(&input.output, &self.output, "a vector operation")?;
+                ensure_grid(&self.output, input_grid, "a vector operation")?;
             }
             NativeExpr::Vector { input, .. } => {
                 input.validate()?;
@@ -1699,6 +1897,13 @@ pub fn unifies_its_own_contributions(node: &NativeNode) -> Option<bool> {
         // A map can rewrite labels, so two series can end under one label set and the runtime
         // records what it wrote in an `Emitted` table.
         NativeExpr::Map { .. } | NativeExpr::ParameterizedMap { .. } => Some(false),
+        // `topk` hands back the series it read with their labels, so the input's answer is its own -
+        // exactly as for the bound operation.
+        NativeExpr::ParameterizedTopK { input, .. } => unifies_its_own_contributions(input),
+        // A histogram function groups its rows by label set itself, so it emits one series per set.
+        NativeExpr::ParameterizedHistogram { .. } => Some(true),
+        // `scalar()` answers one value per point, which is not several series.
+        NativeExpr::ScalarOf { .. } => Some(true),
         // A timestamp reports a position under the metric name dropped.
         NativeExpr::Timestamp { .. } => Some(false),
         NativeExpr::Binary {

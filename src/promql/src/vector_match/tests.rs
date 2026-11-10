@@ -1154,11 +1154,9 @@ fn histogram_operators_match_prometheus() {
     );
 }
 
-/// Prometheus skips a histogram `+` or `-` whose counter reset hints collide, before counting
-/// the match: the colliding pair gives nothing and does not make the other pair of its group a
-/// second match.
+/// Contradictory reset hints retain the value and therefore count as a successful match.
 #[test]
-fn colliding_reset_hints_skip_the_pair() {
+fn colliding_reset_hints_still_count_as_a_match() {
     let grid = Arc::new(EvalGrid::try_new(GridSpec::try_new(0, 10_000, 1).unwrap()).unwrap());
     let schema = Arc::new(SeriesSchema {
         fields: vec![FieldSpec {
@@ -1182,7 +1180,6 @@ fn colliding_reset_hints_skip_the_pair() {
         )
         .unwrap()
     };
-    // Hints: 0 unknown, 1 counter reset, 2 not a counter reset.
     let lhs = [
         series(&[("__name__", "a"), ("instance", "1"), ("job", "x")], 1),
         series(&[("__name__", "a"), ("instance", "2"), ("job", "x")], 0),
@@ -1196,8 +1193,13 @@ fn colliding_reset_hints_skip_the_pair() {
             cardinality: Cardinality::OneToOne,
             fill: FillValues::default(),
         };
-        let result = binary_vectors(&matching, &schema, &lhs, &schema, &rhs).unwrap();
-        assert_eq!(result.len(), 1, "{op:?}");
+        let error = binary_vectors(&matching, &schema, &lhs, &schema, &rhs)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("many-to-one matching must be explicit"),
+            "{op:?}: {error}"
+        );
     }
 }
 
@@ -1252,6 +1254,268 @@ fn a_failed_pair_leaves_its_sample_to_the_fill() {
         result[0].fields.as_slice()[0].sample(0),
         SampleRef::Float(value) if value == 12.0
     ));
+}
+
+/// A pair a fill value made is a pair the operation is run on, so an unsupported histogram pairing
+/// it makes reports the same dropped-samples Info a matched pair does.
+///
+/// Prometheus fills a missing side and then runs `doBinOp` on the pair it formed, so a histogram
+/// filled with a float meets the unsupported pairing `histogram + float` at every point and carries
+/// the Info a matched pair would. What must not carry it is a fill that answers with a sample the
+/// operation supports, and a point whose pair is never formed at all.
+#[test]
+fn a_filled_pair_reports_the_dropped_histogram_info() {
+    use common_query::promql_annotations::PromqlAnnotationCollector;
+
+    let grid = Arc::new(EvalGrid::try_new(GridSpec::try_new(0, 10_000, 2).unwrap()).unwrap());
+    let schema = Arc::new(schema(1, &grid));
+    let labels = |name: &str, job: &str| -> Labels {
+        Labels::from([
+            ("__name__".to_string(), name.to_string()),
+            ("job".to_string(), job.to_string()),
+        ])
+    };
+    // count 5, sum 5: one span of one bucket holding 5.
+    let text = "0/0/0/4014000000000000/4014000000000000/0/0_1/4014000000000000///";
+    let histograms = |job: &str| {
+        mixed_series(
+            &schema,
+            &labels("hist", job),
+            &BTreeMap::new(),
+            &BTreeMap::from([(0, text.to_string()), (1, text.to_string())]),
+        )
+        .unwrap()
+    };
+    let floats = |job: &str| {
+        mixed_series(
+            &schema,
+            &labels("float", job),
+            &BTreeMap::from([(0, 2.0f64.to_bits()), (1, 2.0f64.to_bits())]),
+            &BTreeMap::new(),
+        )
+        .unwrap()
+    };
+    // The two series carry different `job` labels, so no point of either is matched; with a fill
+    // value every point of each is paired with the float the modifier names instead.
+    let diagnostics = |matching: &BinaryMatching,
+                       lhs: &[Series],
+                       rhs: &[Series]|
+     -> (usize, Vec<String>, Vec<String>) {
+        let collector = PromqlAnnotationCollector::default();
+        let output = binary_vectors_with_reservation(
+            matching,
+            &schema,
+            lhs,
+            &schema,
+            rhs,
+            None,
+            Some(&collector),
+            &mut |_| Ok(()),
+        )
+        .unwrap();
+        let mut warnings = Vec::new();
+        let mut infos = Vec::new();
+        collector.append_to(&mut warnings, &mut infos);
+        (output.len(), warnings, infos)
+    };
+    let matching = |op: BinaryOp, fill: FillValues| BinaryMatching {
+        op,
+        return_bool: false,
+        labels: MatchingLabels::On(vec![Arc::from("job")]),
+        cardinality: Cardinality::OneToOne,
+        fill,
+    };
+    let dropped = |symbol: &str| {
+        vec![format!(
+            "{symbol}: dropped native histogram samples because this binary operation is not supported for native histograms"
+        )]
+    };
+    // `fill_right` answers a missing right-hand sample, so the histogram is the left one and each
+    // point is the pair `histogram + 0`.
+    assert_eq!(
+        diagnostics(
+            &matching(
+                BinaryOp::Add,
+                FillValues {
+                    lhs: None,
+                    rhs: Some(0.0)
+                }
+            ),
+            &[histograms("x")],
+            &[floats("y")],
+        ),
+        (0, Vec::new(), dropped("+")),
+    );
+    // `fill_left` answers a missing left-hand one, so the histogram is the right one and the pair
+    // is `0 + histogram`.
+    assert_eq!(
+        diagnostics(
+            &matching(
+                BinaryOp::Add,
+                FillValues {
+                    lhs: Some(0.0),
+                    rhs: None
+                }
+            ),
+            &[floats("y")],
+            &[histograms("x")],
+        ),
+        (0, Vec::new(), dropped("+")),
+    );
+    // A fill the operation supports answers a sample: nothing was dropped, so nothing is reported.
+    assert_eq!(
+        diagnostics(
+            &matching(
+                BinaryOp::Mul,
+                FillValues {
+                    lhs: None,
+                    rhs: Some(2.0)
+                }
+            ),
+            &[histograms("x")],
+            &[floats("y")],
+        ),
+        (1, Vec::new(), Vec::new()),
+    );
+    // With no fill value the two sides never pair, so no sample exists to be dropped.
+    assert_eq!(
+        diagnostics(
+            &matching(BinaryOp::Add, FillValues::default()),
+            &[histograms("x")],
+            &[floats("y")],
+        ),
+        (0, Vec::new(), Vec::new()),
+    );
+}
+
+/// A pair whose bucket layouts cannot be combined carries that one error, and no reset-collision
+/// warning even when its hints contradict.
+///
+/// Prometheus reports the incompatible layouts before it reaches the hints, so a pair that fails
+/// both is reported once. Contradictory hints still earn their warning when the layouts can be
+/// combined: the check order decides which diagnostic a pair that fails both carries, not whether
+/// the collision is ever reported.
+#[test]
+fn an_incompatible_bucket_layout_drops_the_reset_collision_warning() {
+    use common_query::promql_annotations::PromqlAnnotationCollector;
+    use datatypes::series::histogram::CounterResetHint;
+
+    let grid = Arc::new(EvalGrid::try_new(GridSpec::try_new(0, 10_000, 1).unwrap()).unwrap());
+    let schema = Arc::new(schema(1, &grid));
+    let labels = |job: &str| -> Labels {
+        Labels::from([
+            ("__name__".to_string(), "hist".to_string()),
+            ("job".to_string(), job.to_string()),
+        ])
+    };
+    let operand = |job: &str, text: &str, hint: CounterResetHint| -> Series {
+        let histogram = OwnedHistogram::parse(text);
+        let mut read = FloatHistogram::try_from_view(&histogram.view()).unwrap();
+        read.reset_hint = hint;
+        let mut builder = GridSeriesBuilder::try_new(schema.clone()).unwrap();
+        builder
+            .push_samples(0, &[Some(GridSample::Histogram(Box::new(read)))])
+            .unwrap();
+        builder.finish(metric(&labels(job))).unwrap().unwrap()
+    };
+    // count 5, sum 5: one span of one bucket holding 5, no custom bounds.
+    let exponential = "0/0/0/4014000000000000/4014000000000000/0/0_1/4014000000000000///";
+    // count 2, sum 3: one span of one bucket holding 2, over the custom upper bounds given.
+    let custom = |bounds: &str| {
+        format!("-53/0/0/4000000000000000/4008000000000000/0/0_1/4000000000000000///{bounds}")
+    };
+    // Both operands carry the same `job`, so they match on it and the operation is applied to the
+    // pair; what it reports is what is under test.
+    let diagnostics = |lhs: &Series, rhs: &Series| -> (usize, Vec<String>, Vec<String>) {
+        let matching = BinaryMatching {
+            op: BinaryOp::Add,
+            return_bool: false,
+            labels: MatchingLabels::On(vec![Arc::from("job")]),
+            cardinality: Cardinality::OneToOne,
+            fill: FillValues::default(),
+        };
+        let collector = PromqlAnnotationCollector::default();
+        let output = binary_vectors_with_reservation(
+            &matching,
+            &schema,
+            std::slice::from_ref(lhs),
+            &schema,
+            std::slice::from_ref(rhs),
+            None,
+            Some(&collector),
+            &mut |_| Ok(()),
+        )
+        .unwrap();
+        let mut warnings = Vec::new();
+        let mut infos = Vec::new();
+        collector.append_to(&mut warnings, &mut infos);
+        (output.len(), warnings, infos)
+    };
+    let schema_warning = vec![
+        "prom_native_histogram_add: dropped native histogram sample with incompatible schemas"
+            .to_string(),
+    ];
+    let collision = vec![
+        "prom_native_histogram_add: native histogram counter reset hints contradict".to_string(),
+    ];
+    let reconciled = vec![
+        "prom_native_histogram_add: reconciled native histograms with different custom buckets"
+            .to_string(),
+    ];
+
+    // One exponential layout and one custom one, in either order: the layouts cannot be combined,
+    // so the pair is answered with the schema warning and never reaches the hints.
+    let one_bound = custom("3ff0000000000000");
+    for (lhs, rhs, hints) in [
+        (
+            exponential,
+            one_bound.as_str(),
+            (
+                CounterResetHint::CounterReset,
+                CounterResetHint::NotCounterReset,
+            ),
+        ),
+        (
+            one_bound.as_str(),
+            exponential,
+            (
+                CounterResetHint::NotCounterReset,
+                CounterResetHint::CounterReset,
+            ),
+        ),
+    ] {
+        assert_eq!(
+            diagnostics(&operand("a", lhs, hints.0), &operand("a", rhs, hints.1)),
+            (0, schema_warning.clone(), Vec::new()),
+            "{lhs} + {rhs}",
+        );
+    }
+
+    // The same contradiction over one exponential layout, and over two custom ones the operation
+    // reconciles: there the collision is reported, and only the layouts that cannot be combined
+    // silence it.
+    assert_eq!(
+        diagnostics(
+            &operand("a", exponential, CounterResetHint::CounterReset),
+            &operand("a", exponential, CounterResetHint::NotCounterReset),
+        ),
+        (1, collision.clone(), Vec::new()),
+    );
+    assert_eq!(
+        diagnostics(
+            &operand(
+                "a",
+                &custom("3ff0000000000000"),
+                CounterResetHint::CounterReset
+            ),
+            &operand(
+                "a",
+                &custom("3ff0000000000000,4000000000000000"),
+                CounterResetHint::NotCounterReset,
+            ),
+        ),
+        (1, collision, reconciled),
+    );
 }
 
 /// A binary pairing walks two operands of many single-position runs and still reports every
@@ -1629,6 +1893,7 @@ fn budgeted(
         lhs,
         rhs_schema,
         rhs,
+        None,
         None,
         &mut |total| {
             if total > limit {
@@ -3238,6 +3503,7 @@ fn a_histogram_comparison_filter_keeps_the_payload_of_the_operand_it_keeps() {
             &schema,
             &rhs,
             None,
+            None,
             &mut |total| {
                 reserved.push(total);
                 Ok(())
@@ -3573,6 +3839,7 @@ fn binary_field_publishes_presence_and_records_excluded_duplicate() {
             node: 7,
             evidence: &evidence,
         }),
+        None,
         None,
     );
     assert!(

@@ -42,11 +42,14 @@ use crate::grid_series::{
     series_bytes, table_bytes,
 };
 use crate::histogram_eval::float_histogram::FloatHistogram;
-use crate::histogram_eval::{evaluate_histograms_with_annotations, map_native_histogram};
+use crate::histogram_eval::{
+    HistogramFunction, HistogramParameters, evaluate_histograms_with_annotations,
+    map_native_histogram,
+};
 use crate::info::{InfoSelector, info_with_reservation};
 use crate::instant_eval::{
-    info_sample_times, select_instant_at, select_instants, timestamp_of_evaluated,
-    timestamp_of_selection,
+    info_sample_times, instant_candidate_span, select_instant_at, select_instants,
+    timestamp_of_evaluated, timestamp_of_selection,
 };
 use crate::map::{
     ArithmeticOp, Comparison, ComparisonOp, ParameterizedMath, ScalarOperand, ScalarSeriesOperand,
@@ -523,9 +526,10 @@ impl NodeBuffer {
     fn record(&self) {
         self.metrics.record_reserved_bytes(self.reservation.size());
     }
+}
 
-    /// Returns every byte this node holds to the pool.
-    fn release(&mut self) {
+impl Drop for NodeBuffer {
+    fn drop(&mut self) {
         self.reservation.free();
         self.record();
     }
@@ -890,19 +894,11 @@ impl InstantRuntime {
             .saturating_add(rows_of_points.saturating_mul(2))
     }
 
-    /// The number of grid points [`select_instants`] clips the buffered series to.
+    /// The number of candidate grid points [`select_instants`] reserves for the buffered series.
     ///
-    /// The gather clips its scan to the series it holds instead of reading the whole planned grid:
-    /// the candidate points run from the first sample's instant to the last sample's plus the
-    /// lookback, aligned to the grid and held inside the query range. A workspace is charged per
-    /// point, so the count has to be the clipped one -- charging the planned grid charges the pool
-    /// for rows a short series can never produce, and a pool sized for what the series costs then
-    /// refuses the gather. The clipping below is [`select_instants`]' own, repeated rather than
-    /// approximated: an estimate that disagrees with the kernel is a bug here rather than a
-    /// conservative bound. It is the kernel's own candidate count -- the one it sizes its arrays
-    /// with -- so it bounds the rows it can report even though a candidate at the lookback edge
-    /// itself selects nothing. Both ends come from chunks the node already holds, so the count
-    /// reads two timestamps rather than the rows.
+    /// Candidate points can select nothing, but charging the whole planned grid would refuse short
+    /// series that fit the pool. The shared clipping uses only the first and last buffered samples,
+    /// so admission does not gather the series or scan its samples.
     fn selected_points(&self, closing: &RawSeriesChunk) -> usize {
         let spec = self.selection.output_grid.spec();
         if self.selection.at_ms.is_some() {
@@ -912,40 +908,26 @@ impl InstantRuntime {
         if spec.step_ms <= 0 || self.selection.lookback_ms < 0 {
             return 0;
         }
-        let query_start = i128::from(spec.start_ms);
-        let query_end = i128::from(grid_end_ms(spec));
-        if query_end < query_start {
+        let query_end = grid_end_ms(spec);
+        if query_end < spec.start_ms {
             return 0;
         }
         let series = || self.chunks.iter().chain(std::iter::once(closing));
-        let (Some(first), Some(last)) = (
-            series().find_map(|chunk| chunk.time.as_buffer().first().copied()),
-            series()
-                .rev()
-                .find_map(|chunk| chunk.time.as_buffer().last().copied()),
-        ) else {
-            // A series of no sample decides no point.
-            return 0;
-        };
-        let offset = i128::from(self.selection.offset_ms);
-        let lookback = i128::from(self.selection.lookback_ms);
-        let first = i128::from(first) + offset;
-        let last = i128::from(last) + offset;
-        let useful_last = if lookback == 0 {
-            last
-        } else {
-            last + lookback - 1
-        };
-        let max_start = first.max(query_start);
-        let min_end = useful_last.min(query_end);
-        if max_start > min_end {
-            return 0;
-        }
-        let step = i128::from(spec.step_ms);
-        let aligned_start = query_start + (max_start - query_start) / step * step;
-        let aligned_end = query_end - (query_end - min_end) / step * step;
-        let points = (aligned_end - aligned_start) / step + 1;
-        usize::try_from(points).unwrap_or(usize::MAX)
+        let endpoints = series()
+            .find_map(|chunk| chunk.time.as_buffer().first().copied())
+            .zip(
+                series()
+                    .rev()
+                    .find_map(|chunk| chunk.time.as_buffer().last().copied()),
+            );
+        let span = instant_candidate_span(
+            endpoints,
+            spec.start_ms..=query_end,
+            spec.step_ms,
+            self.selection.lookback_ms,
+            self.selection.offset_ms,
+        );
+        usize::try_from(span.count).unwrap_or(usize::MAX)
     }
 
     /// The largest histogram a row of each field can carry, `None` for a field of floats.
@@ -1476,6 +1458,8 @@ struct BinaryRuntime {
     node_index: usize,
     /// Evidence shared with the other output partitions of this fused-series execution.
     evidence: Option<Arc<DuplicateEvidence>>,
+    /// The query's collector for dropped histogram sample pairs, when requested.
+    annotations: Option<PromqlAnnotationCollector>,
     /// The kernel and the modifiers the compiler bound it with.
     kernel: PairKernel,
     /// The layout each operand is bound to, what a chunk of it is checked against: `0` is the left
@@ -1557,6 +1541,7 @@ impl BinaryRuntime {
         Self {
             node_index,
             evidence,
+            annotations: None,
             kernel,
             schemas,
             operands: [RetainedInput::default(), RetainedInput::default()],
@@ -1607,7 +1592,7 @@ impl BinaryRuntime {
         self.operands
             .get(side)
             .map(|operand| operand.pending(chunk))
-            .ok_or_else(no_binary)
+            .ok_or_else(invalid_binary_operand)
     }
 
     /// Reports an operand that ended inside a series.
@@ -1628,7 +1613,7 @@ impl BinaryRuntime {
         // number of fields, or fewer samples than its axis places rows. The kernel's own check is
         // run here, before the chunk enters the buffer, and the side is added to what it reports.
         let Some(schema) = self.schemas.get(side) else {
-            return Err(no_binary());
+            return Err(invalid_binary_operand());
         };
         validate_binary_operand(schema.as_ref(), std::slice::from_ref(&chunk.series)).map_err(
             |error| {
@@ -1641,7 +1626,7 @@ impl BinaryRuntime {
         )?;
         let reader = self.reader(side);
         let Some(operand) = self.operands.get_mut(side) else {
-            return Err(no_binary());
+            return Err(invalid_binary_operand());
         };
         operand.retain(chunk, reader)
     }
@@ -1717,6 +1702,7 @@ impl BinaryRuntime {
                             node: self.slot(0).0,
                             evidence,
                         }),
+                        self.annotations.as_ref(),
                         &mut reserve,
                     )
                 }
@@ -1769,6 +1755,10 @@ struct VectorRuntime {
     /// Whether the kernel has run. It runs at most once: the input it read is gone afterwards.
     computed: bool,
     annotations: Option<PromqlAnnotationCollector>,
+    /// The per-point k of a parameterized topk/bottomk, in grid position order.
+    parameter: Option<Vec<Option<f64>>>,
+    /// The bytes charged for the parameter values.
+    parameter_bytes: usize,
 }
 
 impl VectorRuntime {
@@ -1807,6 +1797,8 @@ impl VectorRuntime {
             merge_input: false,
             computed: false,
             annotations: None,
+            parameter: None,
+            parameter_bytes: 0,
         })
     }
 
@@ -1817,11 +1809,21 @@ impl VectorRuntime {
     /// ([`vector_workspace_bytes`]). The kernels do not report their workspace as they allocate,
     /// so the estimate is reserved once, before the kernel runs.
     fn compute(&mut self, buffer: &mut NodeBuffer) -> Result<Option<Vec<Series>>> {
+        self.compute_with_histogram_parameters(buffer, &[])
+    }
+
+    fn compute_with_histogram_parameters(
+        &mut self,
+        buffer: &mut NodeBuffer,
+        parameters: &[&[Option<f64>]],
+    ) -> Result<Option<Vec<Series>>> {
         if self.computed {
             return Ok(None);
         }
         self.input.ensure_closed(Reader::Vector)?;
-        let retained = self.input.held;
+        // What a failed assembly leaves the node holding: the input it retains beside the per-point
+        // values it read its parameters into, which outlive the assembly.
+        let retained = self.input.held.saturating_add(self.parameter_bytes);
         let assembly = self
             .input
             .assembly_bytes(&self.schema)
@@ -1850,11 +1852,95 @@ impl VectorRuntime {
         } else {
             assembled
         };
+        if !parameters.is_empty() && !matches!(self.op, BoundVectorOp::Histogram(_)) {
+            return Err(DataFusionError::Internal(
+                "histogram parameters supplied to non-histogram op".into(),
+            ));
+        }
+        let assembled = if !parameters.is_empty() {
+            let rows = assembled.iter().map(|series| series.time.len()).sum();
+            buffer.grow(merge_workspace_bytes(
+                rows,
+                assembled.len(),
+                self.schema.fields.len(),
+            ))?;
+            merge_same_labelset(&self.schema, assembled)?
+        } else {
+            assembled
+        };
+        if !parameters.is_empty() {
+            let grid = self
+                .schema
+                .eval_grid
+                .as_ref()
+                .ok_or_else(|| DataFusionError::Internal("histogram grid missing".into()))?;
+            if parameters
+                .iter()
+                .any(|values| values.len() != grid.spec().len as usize)
+            {
+                return Err(DataFusionError::Internal(
+                    "histogram parameter length differs from its grid".into(),
+                ));
+            }
+        }
+        if self.parameter.is_some() && !matches!(self.op, BoundVectorOp::TopK { .. }) {
+            return Err(DataFusionError::Internal(
+                "only topk accepts a per-point k".into(),
+            ));
+        }
+        if let Some(values) = self.parameter.as_ref() {
+            let grid = self
+                .schema
+                .eval_grid
+                .as_ref()
+                .ok_or_else(|| DataFusionError::Internal("topk grid missing".into()))?;
+            if values.len() != grid.spec().len as usize {
+                return Err(DataFusionError::Internal(
+                    "topk parameter length differs from its grid".into(),
+                ));
+            }
+        }
         buffer.grow(vector_workspace_bytes(&self.op, &self.schema, &assembled))?;
         let metrics = Arc::clone(&buffer.metrics);
         let output = {
             let _timer = metrics.timer();
-            vector_series(&self.op, &self.schema, assembled, self.annotations.as_ref())?
+            if parameters.is_empty() {
+                vector_series_with_k(
+                    &self.op,
+                    &self.schema,
+                    &assembled,
+                    self.parameter.as_deref(),
+                    self.annotations.as_ref(),
+                )?
+            } else {
+                let function = match self.op {
+                    BoundVectorOp::Histogram(function) => function,
+                    _ => {
+                        return Err(DataFusionError::Internal(
+                            "parameterized histogram op mismatch".into(),
+                        ));
+                    }
+                };
+                let histogram_parameters = match function {
+                    HistogramFunction::Quantile(_) => HistogramParameters {
+                        quantile: Some(parameters[0]),
+                        lower: None,
+                        upper: None,
+                    },
+                    HistogramFunction::Fraction { .. } => HistogramParameters {
+                        quantile: None,
+                        lower: Some(parameters[0]),
+                        upper: Some(parameters[1]),
+                    },
+                };
+                evaluate_histograms_with_annotations(
+                    function,
+                    &self.schema,
+                    &assembled,
+                    Some(histogram_parameters),
+                    self.annotations.as_ref(),
+                )?
+            }
         };
         self.input.release();
         self.computed = true;
@@ -1871,11 +1957,11 @@ fn vector_overflow() -> DataFusionError {
     )
 }
 
-/// Runs the kernel `op` binds over the whole input.
-fn vector_series(
+fn vector_series_with_k(
     op: &BoundVectorOp,
     schema: &Arc<SeriesSchema>,
-    series: Vec<Series>,
+    series: &[Series],
+    values: Option<&[Option<f64>]>,
     collector: Option<&PromqlAnnotationCollector>,
 ) -> Result<Vec<Series>> {
     let grouping = |group: &Grouping| match group {
@@ -1884,20 +1970,45 @@ fn vector_series(
     };
     match op {
         BoundVectorOp::TopK { k, top, group } => {
-            select::topk(*k, *top, &grouping(group), schema, &series)
+            if let Some(values) = values {
+                let grid = schema.eval_grid.as_ref().ok_or_else(|| {
+                    DataFusionError::Internal("topk output has no evaluation grid".into())
+                })?;
+                if values.len() != grid.spec().len as usize {
+                    return Err(DataFusionError::Internal(
+                        "topk parameter length differs from its grid".into(),
+                    ));
+                }
+                select::topk_at(
+                    // A point the parameter series holds no sample at selects nothing, which is
+                    // Prometheus' empty parameter there; a sample that is present and NaN is still
+                    // an error, as [`select::validate_topk_parameters`] rules.
+                    |point| match values[point] {
+                        Some(k) => select::k_param(k, series.len()),
+                        None => Ok(None),
+                    },
+                    *top,
+                    &grouping(group),
+                    schema,
+                    series,
+                )
+            } else {
+                select::topk(*k, *top, &grouping(group), schema, series)
+            }
         }
-        BoundVectorOp::LimitK { k, group } => select::limitk(*k, &grouping(group), schema, &series),
-        BoundVectorOp::LimitRatio { ratio } => select::limit_ratio(*ratio, schema, &series),
+        BoundVectorOp::LimitK { k, group } => select::limitk(*k, &grouping(group), schema, series),
+        BoundVectorOp::LimitRatio { ratio } => select::limit_ratio(*ratio, schema, series),
         // A sort hands back the series it was given, rebuilding only those `sort` and `sort_desc`
         // drop histogram samples from.
-        BoundVectorOp::Sort(order) => select::sort_instant(order, schema, series),
+        BoundVectorOp::Sort(order) => select::sort_instant(order, schema, series.to_vec()),
         // The kernel groups bucket series by label set and takes one native histogram series per
         // set, so pieces of one label set -- an empty tag and an absent one, or what a map folded
         // -- are merged first, and two of them holding one point fail as they do elsewhere.
         BoundVectorOp::Histogram(function) => evaluate_histograms_with_annotations(
             *function,
             schema,
-            &merge_same_labelset(schema, series)?,
+            &merge_same_labelset(schema, series.to_vec())?,
+            None,
             collector,
         ),
         BoundVectorOp::CountValues { label, group } => {
@@ -1911,9 +2022,9 @@ fn vector_series(
             } else {
                 aggregate::Grouping::Without(&labels)
             };
-            aggregate::count_values(schema, &series, label, grouping)
+            aggregate::count_values(schema, series, label, grouping)
         }
-        BoundVectorOp::Absent { labels } => Ok(select::absent(schema, &series, labels.clone())?
+        BoundVectorOp::Absent { labels } => Ok(select::absent(schema, series, labels.clone())?
             .into_iter()
             .collect()),
     }
@@ -2347,6 +2458,19 @@ fn grid_end_ms(spec: GridSpec) -> i64 {
 /// skip, so it is reported instead of dropped.
 fn grid_position(grid: &EvalGrid, timestamp: i64) -> Result<usize> {
     let spec = grid.spec();
+    // This runs once per reported point, so the common case stays in `i64`: `div` and `rem` on the
+    // same operands become one machine divide, where the `i128` path below divides twice. A grid
+    // whose numbers do not fit, or a timestamp off the lattice, falls through to that path, which
+    // computes the same answer.
+    if spec.step_ms > 0
+        && let Some(offset) = timestamp.checked_sub(spec.start_ms)
+        && offset >= 0
+    {
+        let (position, remainder) = (offset / spec.step_ms, offset % spec.step_ms);
+        if remainder == 0 && (position as u64) < spec.len {
+            return Ok(position as usize);
+        }
+    }
     let offset = i128::from(timestamp) - i128::from(spec.start_ms);
     let step = i128::from(spec.step_ms);
     let position = offset.div_euclid(step);
@@ -2666,9 +2790,18 @@ struct RuntimeNode {
     op: RuntimeOp,
 }
 
+// Each payload precedes its NodeState, so it drops before that node's reservation.
 enum RuntimeOp {
     Input(InputId),
     Scalar,
+    ScalarOf {
+        input: Box<RuntimeNode>,
+        input_schema: Arc<SeriesSchema>,
+        grid: Arc<EvalGrid>,
+        retained: RetainedInput,
+        produced: bool,
+        state: NodeState,
+    },
     /// The evaluation time or a date function of it, produced once as one closed chunk.
     EvalTime {
         grid: Arc<EvalGrid>,
@@ -2687,7 +2820,7 @@ enum RuntimeOp {
     },
     Instant {
         input: Box<RuntimeNode>,
-        instant: Option<InstantRuntime>,
+        instant: InstantRuntime,
         state: NodeState,
     },
     Merge {
@@ -2697,51 +2830,71 @@ enum RuntimeOp {
     },
     Window {
         input: Box<RuntimeNode>,
+        // `finish` consumes the evaluator; it is taken only during the terminal finish pass.
         window: Option<RangeEvaluator>,
         merge: Option<MergeInput>,
         state: NodeState,
     },
     Map {
         input: Box<RuntimeNode>,
-        map: Option<MapRuntime>,
+        map: MapRuntime,
         state: NodeState,
     },
     ParameterizedMap {
         input: Box<RuntimeNode>,
         parameters: Vec<RuntimeNode>,
-        map: Option<ParameterizedMapRuntime>,
+        map: ParameterizedMapRuntime,
         state: NodeState,
     },
     Timestamp {
         input: Box<RuntimeNode>,
-        schema: Option<Arc<SeriesSchema>>,
+        schema: Arc<SeriesSchema>,
         state: NodeState,
     },
     Binary {
         left: Box<RuntimeNode>,
         right: Box<RuntimeNode>,
-        binary: Option<BinaryRuntime>,
+        binary: BinaryRuntime,
         state: NodeState,
     },
     Broadcast {
         left: Box<RuntimeNode>,
         right: Box<RuntimeNode>,
-        broadcast: Option<BroadcastRuntime>,
+        broadcast: BroadcastRuntime,
         state: NodeState,
     },
     Aggregate {
         input: Box<RuntimeNode>,
-        aggregate: Option<AggregateRuntime>,
+        aggregate: AggregateRuntime,
         state: NodeState,
     },
     Vector {
         input: Box<RuntimeNode>,
-        vector: Option<VectorRuntime>,
+        vector: VectorRuntime,
+        state: NodeState,
+    },
+    ParameterizedTopK {
+        input: Box<RuntimeNode>,
+        // Taken and dropped after its scalar values are installed.
+        parameter: Option<Box<RuntimeNode>>,
+        vector: VectorRuntime,
+        state: NodeState,
+    },
+    ParameterizedHistogram {
+        input: Box<RuntimeNode>,
+        // Each parameter is taken and dropped after its scalar values are installed.
+        parameters: Vec<Option<RuntimeNode>>,
+        literals: Vec<Option<f64>>,
+        vector: VectorRuntime,
+        values: Vec<Option<Vec<Option<f64>>>>,
+        parameter_bytes: Vec<usize>,
         state: NodeState,
     },
 }
 
 /// State shared by the stateful operators.
+///
+/// The queue and emitted history must precede the buffer so they drop before its reservation.
 struct NodeState {
     queued: VecDeque<(NativeChunk, usize)>,
     queued_tables: usize,
@@ -2803,17 +2956,17 @@ struct InputSlot {
     state: NodeState,
 }
 
-/// State for one execution of a bound tree.
-///
-/// The state owns its runtime tree outright: the topology is the one the compiled tree built, and
-/// nothing outside reaches into it, so a descent and the release that follows a failure are both
-/// borrows of this one owner.
+/// State for one execution of a bound tree. The live tree and input slots are dropped together
+/// when the executor finishes or fails; the public state remains available for inspection.
 pub struct NativeExecutionState {
+    live: Option<LiveExecution>,
+}
+
+struct LiveExecution {
     root: RuntimeNode,
     inputs: Vec<InputSlot>,
     /// A constant root waiting for its only pull; operand scalars remain chunkless.
     scalar_root: Option<(Arc<EvalGrid>, f64, NodeState)>,
-    annotations: Option<PromqlAnnotationCollector>,
 }
 
 impl NodeState {
@@ -2835,8 +2988,46 @@ impl NodeState {
     }
 }
 
+/// Stack one [`RuntimeNode::build`] or [`RuntimeNode::pull`] level needs below it before the
+/// recursion grows its stack.
+///
+/// Both walks recurse once per tree level, and a debug build's frame for one level of either is
+/// large: measured on a 100-term chain, a `build` level used about 140 KiB and a `pull` level about
+/// 80 KiB, which is what aborted the shared 8 MiB runtime worker on a tree the compiler admits.
+/// There is no depth limit to keep that from happening, so the recursion grows its stack instead;
+/// the reserve is several levels' worth rather than a bare guard page, because it has to hold the
+/// level that is about to be entered, not only the one that asked.
+const NATIVE_STACK_RED_ZONE: usize = 512 * 1024;
+
+/// Stack a growth adds when the reserve above is spent. It holds several levels of the same walk.
+const NATIVE_STACK_GROWTH: usize = 4 * 1024 * 1024;
+
 impl RuntimeNode {
+    /// Builds the runtime node for `node` and, recursively, for its inputs.
+    ///
+    /// A deep tree is executed rather than refused: there is no depth limit, so what has to fit is
+    /// the recursion, and it grows its stack on demand instead of relying on the caller's.
     fn build(
+        node: &NativeNode,
+        pool: &Arc<dyn MemoryPool>,
+        inputs: &mut Vec<InputSlot>,
+        binary_before: &mut usize,
+        location: String,
+        duplicate_evidence: Option<Arc<DuplicateEvidence>>,
+    ) -> Result<(Self, bool)> {
+        stacker::maybe_grow(NATIVE_STACK_RED_ZONE, NATIVE_STACK_GROWTH, || {
+            Self::build_within_stack(
+                node,
+                pool,
+                inputs,
+                binary_before,
+                location,
+                duplicate_evidence,
+            )
+        })
+    }
+
+    fn build_within_stack(
         node: &NativeNode,
         pool: &Arc<dyn MemoryPool>,
         inputs: &mut Vec<InputSlot>,
@@ -2870,6 +3061,42 @@ impl RuntimeNode {
                 (RuntimeOp::Input(id), false)
             }
             NativeExpr::Scalar(_) => (RuntimeOp::Scalar, false),
+            NativeExpr::ScalarOf { input } => {
+                let input_schema = input.output.samples().cloned().ok_or_else(|| {
+                    DataFusionError::Execution("scalar() consumes non-sample input".to_string())
+                })?;
+                if input_schema.fields.len() != 1 {
+                    return Err(DataFusionError::NotImplemented(
+                        "the native runtime does not execute multi-field scalar()".into(),
+                    ));
+                }
+                let grid = input_schema.eval_grid.clone().ok_or_else(|| {
+                    DataFusionError::Execution("scalar() consumes raw samples".to_string())
+                })?;
+                let (child, _) = Self::build(
+                    input,
+                    pool,
+                    inputs,
+                    binary_before,
+                    format!("{location}.input"),
+                    duplicate_evidence.clone(),
+                )?;
+                (
+                    RuntimeOp::ScalarOf {
+                        input: Box::new(child),
+                        input_schema,
+                        grid,
+                        retained: RetainedInput::default(),
+                        produced: false,
+                        state: NodeState::new(
+                            format!("native.scalar_of at {location}"),
+                            Arc::clone(&metrics),
+                            pool,
+                        ),
+                    },
+                    false,
+                )
+            }
             NativeExpr::EvalTime { date } => {
                 let NativeType::Scalar(grid) = &node.output else {
                     return Err(DataFusionError::Execution(
@@ -2938,7 +3165,7 @@ impl RuntimeNode {
                 (
                     RuntimeOp::Instant {
                         input: Box::new(child),
-                        instant: Some(InstantRuntime::try_new(&input_schema, op)?),
+                        instant: InstantRuntime::try_new(&input_schema, op)?,
                         state: {
                             let mut state = NodeState::new(
                                 format!("native.instant at {location}"),
@@ -3040,10 +3267,10 @@ impl RuntimeNode {
                 (
                     RuntimeOp::Map {
                         input: Box::new(child),
-                        map: Some(MapRuntime {
+                        map: MapRuntime {
                             ops: Arc::clone(&op.ops),
                             schema,
-                        }),
+                        },
                         state,
                     },
                     true,
@@ -3097,13 +3324,13 @@ impl RuntimeNode {
                     RuntimeOp::ParameterizedMap {
                         input: Box::new(child),
                         parameters: nodes,
-                        map: Some(ParameterizedMapRuntime {
+                        map: ParameterizedMapRuntime {
                             op: *op,
                             schema,
                             literals,
                             values: vec![None; parameters.len()],
                             parameter_bytes: 0,
-                        }),
+                        },
                         state,
                     },
                     true,
@@ -3130,7 +3357,7 @@ impl RuntimeNode {
                 (
                     RuntimeOp::Timestamp {
                         input: Box::new(child),
-                        schema: Some(schema),
+                        schema,
                         state,
                     },
                     true,
@@ -3182,7 +3409,7 @@ impl RuntimeNode {
                         RuntimeOp::Binary {
                             left: Box::new(left_node),
                             right: Box::new(right_node),
-                            binary: Some(binary),
+                            binary,
                             state: NodeState::new(
                                 format!("native.binary at {location}"),
                                 Arc::clone(&metrics),
@@ -3214,7 +3441,7 @@ impl RuntimeNode {
                             RuntimeOp::Broadcast {
                                 left: Box::new(left_node),
                                 right: Box::new(right_node),
-                                broadcast: Some(broadcast),
+                                broadcast,
                                 state,
                             },
                             shared,
@@ -3264,7 +3491,7 @@ impl RuntimeNode {
                     RuntimeOp::Binary {
                         left: Box::new(left_node),
                         right: Box::new(right_node),
-                        binary: Some(set),
+                        binary: set,
                         state: NodeState::new(
                             format!("native.set at {location}"),
                             Arc::clone(&metrics),
@@ -3315,7 +3542,7 @@ impl RuntimeNode {
                     RuntimeOp::Binary {
                         left: Box::new(base_node),
                         right: Box::new(info_node),
-                        binary: Some(runtime),
+                        binary: runtime,
                         state: NodeState::new(
                             format!("native.info at {location}"),
                             Arc::clone(&metrics),
@@ -3339,11 +3566,7 @@ impl RuntimeNode {
                     Arc::clone(&metrics),
                     pool,
                 );
-                let aggregate = Some(AggregateRuntime::new(
-                    op.clone(),
-                    schema,
-                    &mut state.buffer,
-                )?);
+                let aggregate = AggregateRuntime::new(op.clone(), schema, &mut state.buffer)?;
                 let (child, _) = Self::build(
                     input,
                     pool,
@@ -3357,6 +3580,126 @@ impl RuntimeNode {
                         input: Box::new(child),
                         aggregate,
                         state,
+                    },
+                    false,
+                )
+            }
+            NativeExpr::ParameterizedTopK {
+                input,
+                op,
+                parameter,
+            } => {
+                let schema = node.output.samples().cloned().ok_or_else(|| {
+                    DataFusionError::Execution("parameterized topk does not produce samples".into())
+                })?;
+                let one_field = schema.fields.len() == 1;
+                if !one_field {
+                    return Err(DataFusionError::NotImplemented(
+                        "the native runtime does not execute multi-field vector operations".into(),
+                    ));
+                }
+                let vector = VectorRuntime::try_new(op.clone(), schema)?;
+                let (child, child_shared) = Self::build(
+                    input,
+                    pool,
+                    inputs,
+                    binary_before,
+                    format!("{location}.input"),
+                    duplicate_evidence.clone(),
+                )?;
+                let (parameter, _) = Self::build(
+                    parameter,
+                    pool,
+                    inputs,
+                    binary_before,
+                    format!("{location}.parameter"),
+                    duplicate_evidence.clone(),
+                )?;
+                let state = NodeState::new(
+                    format!("native.vector at {location}"),
+                    Arc::clone(&metrics),
+                    pool,
+                );
+                (
+                    RuntimeOp::ParameterizedTopK {
+                        input: Box::new(child),
+                        parameter: Some(Box::new(parameter)),
+                        vector,
+                        state,
+                    },
+                    // `topk` keeps whole input series and canonicalises no label set, so a dynamic
+                    // `k` changes what the node reads and not what it hands on: it shares its
+                    // input's label sets exactly as the literal `TopK` does.
+                    child_shared,
+                )
+            }
+            NativeExpr::ParameterizedHistogram {
+                input,
+                op,
+                parameters,
+            } => {
+                if !matches!(op, BoundVectorOp::Histogram(_)) {
+                    return Err(DataFusionError::Internal(
+                        "parameterized histogram has non-histogram op".into(),
+                    ));
+                }
+                if parameters.len()
+                    != match op {
+                        BoundVectorOp::Histogram(HistogramFunction::Quantile(_)) => 1,
+                        BoundVectorOp::Histogram(HistogramFunction::Fraction { .. }) => 2,
+                        _ => 0,
+                    }
+                {
+                    return Err(DataFusionError::Internal(
+                        "parameterized histogram has the wrong arity".into(),
+                    ));
+                }
+                let literals = parameters
+                    .iter()
+                    .map(|parameter| match &parameter.expr {
+                        NativeExpr::Scalar(BoundScalar { value }) => Some(*value),
+                        _ => None,
+                    })
+                    .collect();
+                let schema = node.output.samples().cloned().ok_or_else(|| {
+                    DataFusionError::Execution(
+                        "parameterized histogram does not produce samples".into(),
+                    )
+                })?;
+                let vector = VectorRuntime::try_new(op.clone(), schema)?;
+                let (child, _) = Self::build(
+                    input,
+                    pool,
+                    inputs,
+                    binary_before,
+                    format!("{location}.input"),
+                    duplicate_evidence.clone(),
+                )?;
+                let mut built = Vec::with_capacity(parameters.len());
+                for (index, parameter) in parameters.iter().enumerate() {
+                    let (runtime, _) = Self::build(
+                        parameter,
+                        pool,
+                        inputs,
+                        binary_before,
+                        format!("{location}.parameter{index}"),
+                        duplicate_evidence.clone(),
+                    )?;
+                    built.push(Some(runtime));
+                }
+                (
+                    RuntimeOp::ParameterizedHistogram {
+                        input: Box::new(child),
+                        parameter_bytes: vec![0; built.len()],
+                        values: vec![None; built.len()],
+                        parameters: built,
+                        literals,
+                        vector,
+                        state: NodeState::new(
+                            format!("native.vector at {location}"),
+                            Arc::clone(&metrics),
+                            pool,
+                        ),
                     },
                     false,
                 )
@@ -3402,7 +3745,7 @@ impl RuntimeNode {
                 (
                     RuntimeOp::Vector {
                         input: Box::new(child),
-                        vector: Some(vector),
+                        vector,
                         state: NodeState::new(
                             format!("native.vector at {location}"),
                             Arc::clone(&metrics),
@@ -3420,6 +3763,9 @@ impl RuntimeNode {
         self.metrics.register(name, set, partition);
         match &self.op {
             RuntimeOp::Input(_) | RuntimeOp::Scalar | RuntimeOp::EvalTime { .. } => {}
+            RuntimeOp::ScalarOf { input, .. } => {
+                input.register_metrics(&format!("{name}.input"), set, partition)
+            }
             RuntimeOp::Instant { input, .. }
             | RuntimeOp::Window { input, .. }
             | RuntimeOp::Merge { input, .. }
@@ -3433,6 +3779,24 @@ impl RuntimeNode {
             RuntimeOp::Binary { left, right, .. } | RuntimeOp::Broadcast { left, right, .. } => {
                 left.register_metrics(&format!("{name}.left"), set, partition);
                 right.register_metrics(&format!("{name}.right"), set, partition);
+            }
+            RuntimeOp::ParameterizedTopK {
+                input, parameter, ..
+            } => {
+                input.register_metrics(&format!("{name}.input"), set, partition);
+                if let Some(parameter) = parameter {
+                    parameter.register_metrics(&format!("{name}.parameter"), set, partition);
+                }
+            }
+            RuntimeOp::ParameterizedHistogram {
+                input, parameters, ..
+            } => {
+                input.register_metrics(&format!("{name}.input"), set, partition);
+                for (i, parameter) in parameters.iter().enumerate() {
+                    if let Some(parameter) = parameter {
+                        parameter.register_metrics(&format!("{name}.parameter{i}"), set, partition);
+                    }
+                }
             }
             RuntimeOp::ParameterizedMap {
                 input, parameters, ..
@@ -3449,6 +3813,13 @@ impl RuntimeNode {
         match &self.op {
             RuntimeOp::Input(_) | RuntimeOp::Scalar => 0,
             RuntimeOp::EvalTime { state, .. } => state.buffer.reservation.size(),
+            // The retention path resizes this reservation to what the node retains, so the figure is
+            // read off the one reservation rather than charging the retained bytes a second time.
+            RuntimeOp::ScalarOf { input, state, .. } => state
+                .buffer
+                .reservation
+                .size()
+                .saturating_add(input.reserved_bytes()),
             RuntimeOp::Instant { input, state, .. }
             | RuntimeOp::Window { input, state, .. }
             | RuntimeOp::Merge { input, state, .. }
@@ -3472,6 +3843,30 @@ impl RuntimeNode {
                 .size()
                 .saturating_add(left.reserved_bytes())
                 .saturating_add(right.reserved_bytes()),
+            RuntimeOp::ParameterizedHistogram {
+                input,
+                parameters,
+                state,
+                ..
+            } => parameters.iter().fold(
+                state
+                    .buffer
+                    .reservation
+                    .size()
+                    .saturating_add(input.reserved_bytes()),
+                |n, p| n.saturating_add(p.as_ref().map_or(0, RuntimeNode::reserved_bytes)),
+            ),
+            RuntimeOp::ParameterizedTopK {
+                input,
+                parameter,
+                state,
+                ..
+            } => state
+                .buffer
+                .reservation
+                .size()
+                .saturating_add(input.reserved_bytes())
+                .saturating_add(parameter.as_ref().map_or(0, |p| p.reserved_bytes())),
             RuntimeOp::ParameterizedMap {
                 input,
                 parameters,
@@ -3519,7 +3914,13 @@ impl RuntimeNode {
             RuntimeOp::VectorOf { input, .. }
             | RuntimeOp::Instant { input, .. }
             | RuntimeOp::Merge { input, .. } => input.set_annotations(collector),
-            RuntimeOp::Binary { left, right, .. } => {
+            RuntimeOp::Binary {
+                left,
+                right,
+                binary,
+                ..
+            } => {
+                binary.annotations = Some(collector.clone());
                 left.set_annotations(collector.clone());
                 right.set_annotations(collector);
             }
@@ -3529,19 +3930,52 @@ impl RuntimeNode {
                 broadcast,
                 ..
             } => {
-                if let Some(broadcast) = broadcast {
-                    broadcast.annotations = Some(collector.clone());
-                }
+                broadcast.annotations = Some(collector.clone());
                 left.set_annotations(collector.clone());
                 right.set_annotations(collector);
             }
-            RuntimeOp::Aggregate { input, .. } => input.set_annotations(collector),
+            RuntimeOp::Aggregate {
+                input, aggregate, ..
+            } => {
+                // An aggregate that skips histogram samples reports that it did, so it needs the
+                // collector as well as its child.
+                aggregate.set_annotations(collector.clone());
+                input.set_annotations(collector);
+            }
             RuntimeOp::Timestamp { input, .. } => input.set_annotations(collector),
             RuntimeOp::Vector { input, vector, .. } => {
-                if let Some(vector) = vector {
-                    vector.annotations = Some(collector.clone());
-                }
+                vector.annotations = Some(collector.clone());
                 input.set_annotations(collector);
+            }
+            // `scalar()` answers a value of its own and records nothing, so only its input needs the
+            // collector.
+            RuntimeOp::ScalarOf { input, .. } => input.set_annotations(collector),
+            // Ranking records nothing of its own: the parameter and the input are what read it.
+            RuntimeOp::ParameterizedTopK {
+                input,
+                parameter,
+                vector,
+                ..
+            } => {
+                vector.annotations = Some(collector.clone());
+                input.set_annotations(collector.clone());
+                if let Some(parameter) = parameter {
+                    parameter.set_annotations(collector);
+                }
+            }
+            // The histogram kernel reports a native histogram and classic buckets of one label set
+            // through the collector, so the runtime it runs on needs it as well as its children.
+            RuntimeOp::ParameterizedHistogram {
+                input,
+                parameters,
+                vector,
+                ..
+            } => {
+                vector.annotations = Some(collector.clone());
+                input.set_annotations(collector.clone());
+                for parameter in parameters.iter_mut().flatten() {
+                    parameter.set_annotations(collector.clone());
+                }
             }
             RuntimeOp::Input(_) | RuntimeOp::Scalar | RuntimeOp::EvalTime { .. } => {}
         }
@@ -3552,7 +3986,21 @@ impl RuntimeNode {
     /// `inputs_finished` is the caller's word that no more source chunks will arrive. A node that
     /// decides nothing until its whole input is there reads it to tell the last pull that found
     /// nothing -- "nothing more" -- from the ones before it, which meant "nothing yet".
+    ///
+    /// The pull recurses once per tree level, so a deep tree grows the stack it runs on rather than
+    /// being refused ([`NATIVE_STACK_RED_ZONE`]). The stack is the driver's, whichever thread polls
+    /// the result stream: a shared runtime worker has 8 MiB of it in a debug build.
     fn pull(
+        &mut self,
+        inputs: &mut [InputSlot],
+        inputs_finished: bool,
+    ) -> Result<Option<NativeChunk>> {
+        stacker::maybe_grow(NATIVE_STACK_RED_ZONE, NATIVE_STACK_GROWTH, || {
+            self.pull_within_stack(inputs, inputs_finished)
+        })
+    }
+
+    fn pull_within_stack(
         &mut self,
         inputs: &mut [InputSlot],
         inputs_finished: bool,
@@ -3573,6 +4021,103 @@ impl RuntimeNode {
             // value is the constant on the tree, which the consumer reads off its own binding. A
             // pull of it is therefore empty by construction and says nothing has stalled.
             RuntimeOp::Scalar => Ok(None),
+            RuntimeOp::ScalarOf {
+                input,
+                input_schema,
+                grid,
+                retained,
+                produced,
+                state,
+            } => {
+                while let Some(chunk) = input.pull(inputs, inputs_finished)? {
+                    let NativeChunk::Evaluated(chunk) = chunk else {
+                        return Err(DataFusionError::Execution(
+                            "scalar() consumes evaluated chunks, not raw samples".into(),
+                        ));
+                    };
+                    validate_binary_operand(input_schema, std::slice::from_ref(&chunk.series))
+                        .map_err(|error| {
+                            DataFusionError::Execution(format!(
+                                "scalar() rejected its input: {error}"
+                            ))
+                        })?;
+                    let pending = retained.pending(&chunk);
+                    state.buffer.grow(pending).map_err(|e| state.context(e))?;
+                    retained
+                        .retain(chunk, Reader::Vector)
+                        .map_err(|e| state.context(e))?;
+                    state
+                        .buffer
+                        .resize(retained.held)
+                        .map_err(|e| state.context(e))?;
+                }
+                if !inputs_finished || !input.settled(inputs) {
+                    return Ok(None);
+                }
+                if !*produced {
+                    let len = grid.spec().len as usize;
+                    let bytes = grid_chunk_bytes(grid).map_err(|e| state.context(e))?;
+                    // The counts are decided beside the assembled input and read until the answer
+                    // exists, so they are reserved on top of the chunk the node hands over.
+                    let counts_bytes = len.saturating_mul(std::mem::size_of::<u8>());
+                    let assembly = retained
+                        .assembly_bytes(input_schema)
+                        .ok_or_else(vector_overflow)?;
+                    state
+                        .buffer
+                        .grow(assembly.saturating_add(bytes).saturating_add(counts_bytes))
+                        .map_err(|e| state.context(e))?;
+                    let assembled = retained
+                        .assemble(input_schema, Reader::Vector)
+                        .map_err(|e| state.context(e))?;
+                    retained.release();
+                    let mut values = vec![f64::NAN; len];
+                    let mut counts = vec![0u8; len];
+                    for series in assembled {
+                        let mut cursor = series
+                            .fields
+                            .get(0)
+                            .expect("scalar() input has one field")
+                            .cursor();
+                        for (point, row) in series.time.positions() {
+                            match cursor.at(row) {
+                                Some(SampleRef::Float(value)) => {
+                                    counts[point] = counts[point].saturating_add(1);
+                                    values[point] = value;
+                                }
+                                Some(SampleRef::Histogram(_)) => {}
+                                Some(SampleRef::Missing) | None => {}
+                            }
+                        }
+                    }
+                    for point in 0..len {
+                        if counts[point] != 1 {
+                            values[point] = f64::NAN;
+                        }
+                    }
+                    // The assembled input is consumed and the counts are read, so what this node
+                    // holds from here on is the one chunk the values become.
+                    drop(counts);
+                    state.buffer.resize(bytes).map_err(|e| state.context(e))?;
+                    let schema = scalar_schema(Arc::clone(grid));
+                    let time =
+                        GridRange::try_new(Arc::clone(grid), 0, len).map_err(series_error)?;
+                    let fields = SeriesFields::one(Samples::from_float(Float64Array::from(values)));
+                    let series = Series::try_new(
+                        &schema,
+                        SeriesLabels::try_new(None, Vec::new()).map_err(series_error)?,
+                        TimeAxis::Grid(time),
+                        fields,
+                    )
+                    .map_err(series_error)?;
+                    state.queued.push_back((
+                        NativeChunk::Evaluated(EvaluatedChunk::try_new(series, true)?),
+                        bytes,
+                    ));
+                    *produced = true;
+                }
+                state.pop_queued(evaluated_values)
+            }
             RuntimeOp::EvalTime {
                 grid,
                 date,
@@ -3633,9 +4178,7 @@ impl RuntimeNode {
                 instant,
                 state,
             } => {
-                let Some(selection) = instant.as_mut() else {
-                    return Err(no_instant());
-                };
+                let selection = instant;
                 // A selection decides a whole series at once, so every chunk before the one that
                 // closes it yields nothing and the selection asks its input again.
                 loop {
@@ -3703,9 +4246,7 @@ impl RuntimeNode {
                 }
             }
             RuntimeOp::Map { input, map, state } => {
-                let Some(operation) = map.as_ref() else {
-                    return Err(no_map());
-                };
+                let operation = map;
                 // An operation that empties every position yields no chunk, and the map asks its
                 // input again rather than reporting a decision it did not make.
                 loop {
@@ -3731,9 +4272,7 @@ impl RuntimeNode {
                 map,
                 state,
             } => {
-                let Some(operation) = map.as_mut() else {
-                    return Err(no_map());
-                };
+                let operation = map;
                 // Every parameter is read whole first, as a broadcast reads its scalar; a constant
                 // one is materialized from its binding.
                 for (index, parameter) in parameters.iter_mut().enumerate() {
@@ -3761,8 +4300,15 @@ impl RuntimeNode {
                 // A parameter reads no data, so it hands its value over on its first pull and is
                 // always ready by now.
                 if !operation.ready() {
+                    // A parameter that folds its own input answers only once that input ends, so
+                    // its absence is a reason to be pulled again rather than a failure.
+                    if !inputs_finished
+                        || !parameters.iter().all(|parameter| parameter.settled(inputs))
+                    {
+                        return Ok(None);
+                    }
                     return Err(DataFusionError::Execution(
-                        "a map parameter did not hand over its value when it was read".to_string(),
+                        "a map parameter did not hand over its value".to_string(),
                     ));
                 }
                 loop {
@@ -3794,36 +4340,29 @@ impl RuntimeNode {
                 input,
                 schema,
                 state,
-            } => {
-                let schema = schema.as_ref().ok_or_else(|| {
-                    DataFusionError::Execution("timestamp schema was released".into())
-                })?;
-                loop {
-                    let Some(chunk) = input.pull(inputs, inputs_finished)? else {
-                        return Ok(None);
-                    };
-                    let NativeChunk::Evaluated(chunk) = chunk else {
-                        return Err(DataFusionError::Execution(
-                            "timestamp consumes evaluated samples, not raw samples".into(),
-                        ));
-                    };
-                    if let Some(output) = state
-                        .timestamp(schema, chunk)
-                        .map_err(|error| state.context(error))?
-                    {
-                        return Ok(Some(NativeChunk::Evaluated(output)));
-                    }
+            } => loop {
+                let Some(chunk) = input.pull(inputs, inputs_finished)? else {
+                    return Ok(None);
+                };
+                let NativeChunk::Evaluated(chunk) = chunk else {
+                    return Err(DataFusionError::Execution(
+                        "timestamp consumes evaluated samples, not raw samples".into(),
+                    ));
+                };
+                if let Some(output) = state
+                    .timestamp(schema, chunk)
+                    .map_err(|error| state.context(error))?
+                {
+                    return Ok(Some(NativeChunk::Evaluated(output)));
                 }
-            }
+            },
             RuntimeOp::Binary {
                 left,
                 right,
                 binary,
                 state,
             } => {
-                let Some(operation) = binary.as_mut() else {
-                    return Err(no_binary());
-                };
+                let operation = binary;
                 // Both operands are read to the end of what they hand over: before the input ends a
                 // binary node only retains the chunks, because a pair is not decided until both
                 // sides are whole, and after it ends this is the drain that empties the two.
@@ -3856,9 +4395,7 @@ impl RuntimeNode {
                 broadcast,
                 state,
             } => {
-                let Some(operation) = broadcast.as_mut() else {
-                    return Err(no_broadcast());
-                };
+                let operation = broadcast;
                 // A constant is on the node's binding, so only the vector side is pulled. A varying
                 // scalar is read first, whole; then each vector chunk is transformed as it arrives
                 // and handed up, which is what keeps a broadcast over a whole vector from costing
@@ -3877,12 +4414,14 @@ impl RuntimeNode {
                             .map_err(|error| state.context(error))?;
                     }
                 }
-                // A varying scalar reads no data, so it hands its value over on its first pull and
-                // is always ready by now.
                 if operation.awaits_scalar() {
+                    // A scalar that folds its own input answers only once that input ends, so
+                    // its absence is a reason to be pulled again rather than a failure.
+                    if !inputs_finished || !scalar.settled(inputs) {
+                        return Ok(None);
+                    }
                     return Err(DataFusionError::Execution(
-                        "a broadcast scalar did not hand over its value when it was read"
-                            .to_string(),
+                        "a broadcast scalar did not hand over its value".to_string(),
                     ));
                 }
                 // An operation that empties every position yields no chunk, and the node asks its
@@ -3904,9 +4443,7 @@ impl RuntimeNode {
                 aggregate,
                 state,
             } => {
-                let Some(fold) = aggregate.as_mut() else {
-                    return Err(no_aggregate());
-                };
+                let fold = aggregate;
                 // What the fold reads is not retained -- a chunk is folded as it arrives and
                 // dropped -- so reading the child dry costs the fold's states and not the input's
                 // bytes. Nothing is answered before the input ends: until then a group's value at a
@@ -3926,14 +4463,205 @@ impl RuntimeNode {
                 // are counted rather than read as its positions, as a binary result's are.
                 state.pop_queued(evaluated_values)
             }
+            RuntimeOp::ParameterizedTopK {
+                input,
+                parameter,
+                vector,
+                state,
+            } => {
+                let operation = vector;
+                if operation.parameter.is_none() {
+                    let mut slot = None;
+                    let parameter_node = parameter.as_mut().ok_or_else(|| {
+                        DataFusionError::Internal("topk parameter already consumed".into())
+                    })?;
+                    while let Some(chunk) = parameter_node.pull(inputs, inputs_finished)? {
+                        state
+                            .hold_scalar(&mut operation.parameter_bytes, &mut slot, chunk)
+                            .map_err(|error| state.context(error))?;
+                    }
+                    let series = {
+                        // A parameter that folds its own input (a `scalar()` over a selector) has
+                        // nothing to hand over until that input ends, so its absence is a reason to
+                        // be pulled again rather than a failure.
+                        if !parameter_node.settled(inputs) {
+                            return Ok(None);
+                        }
+                        slot.ok_or_else(|| {
+                            DataFusionError::Execution("topk parameter produced no scalar".into())
+                        })?
+                    };
+                    let grid = operation
+                        .schema
+                        .eval_grid
+                        .as_ref()
+                        .ok_or_else(|| DataFusionError::Internal("topk grid missing".into()))?;
+                    let len = grid.spec().len as usize;
+                    if series.time.len() != len {
+                        return Err(DataFusionError::Execution(
+                            "topk parameter does not cover its grid".into(),
+                        ));
+                    }
+                    // The values the parameter is read into are held beside the input for as long
+                    // as the node lives, so the pool admits them before they are allocated.
+                    let bytes = len.saturating_mul(std::mem::size_of::<Option<f64>>());
+                    state
+                        .buffer
+                        .grow(bytes)
+                        .map_err(|error| state.context(error))?;
+                    let mut values = Vec::with_capacity(len);
+                    {
+                        let mut cursor = series.fields.as_slice()[0].cursor();
+                        for row in 0..len {
+                            values.push(match cursor.at(row) {
+                                Some(SampleRef::Float(value)) => Some(value),
+                                _ => None,
+                            });
+                        }
+                    }
+                    select::validate_topk_parameters(&values)
+                        .map_err(|error| state.context(error))?;
+                    operation.parameter = Some(values);
+                    // The series was the parameter until its values were read off it; what the node
+                    // holds from here on is the values themselves.
+                    drop(series);
+                    operation.parameter_bytes = bytes;
+                    state
+                        .settle_vector(operation)
+                        .map_err(|error| state.context(error))?;
+                    // Finish windows before dropping the consumed subtree; its children may still
+                    // hold charged emitted history or scalar series even after the scalar was read.
+                    parameter_node.finish_windows()?;
+                    *parameter = None;
+                }
+                while let Some(chunk) = input.pull(inputs, inputs_finished)? {
+                    state
+                        .retain_vector(operation, chunk)
+                        .map_err(|error| state.context(error))?;
+                }
+                if !inputs_finished || !input.settled(inputs) {
+                    return Ok(None);
+                }
+                state
+                    .compute_vector(operation)
+                    .map_err(|error| state.context(error))?;
+                state.pop_queued(evaluated_values)
+            }
+            RuntimeOp::ParameterizedHistogram {
+                input,
+                parameters,
+                literals,
+                vector,
+                values,
+                parameter_bytes,
+                state,
+            } => {
+                let operation = vector;
+                for index in 0..parameters.len() {
+                    if values[index].is_none() {
+                        let mut slot = None;
+                        if let Some(value) = literals[index] {
+                            let grid = operation.schema.eval_grid.clone().ok_or_else(|| {
+                                DataFusionError::Internal("histogram grid missing".into())
+                            })?;
+                            state.hold_constant(
+                                &mut parameter_bytes[index],
+                                &mut slot,
+                                grid,
+                                value,
+                            )?;
+                        } else {
+                            let parameter = parameters[index].as_mut().ok_or_else(|| {
+                                DataFusionError::Internal(
+                                    "histogram parameter already consumed".into(),
+                                )
+                            })?;
+                            while let Some(chunk) = parameter.pull(inputs, inputs_finished)? {
+                                state.hold_scalar(&mut parameter_bytes[index], &mut slot, chunk)?;
+                            }
+                            if !parameter.settled(inputs) {
+                                return Ok(None);
+                            }
+                        }
+                        let series = slot.ok_or_else(|| {
+                            DataFusionError::Execution(
+                                "histogram parameter produced no scalar".into(),
+                            )
+                        })?;
+                        let len = operation
+                            .schema
+                            .eval_grid
+                            .as_ref()
+                            .ok_or_else(|| {
+                                DataFusionError::Internal("histogram grid missing".into())
+                            })?
+                            .spec()
+                            .len as usize;
+                        if series.time.len() != len {
+                            return Err(DataFusionError::Execution(
+                                "histogram parameter does not cover its grid".into(),
+                            ));
+                        }
+                        // The values each parameter is read into are held beside the input for as
+                        // long as the node lives, so the pool admits them before they are allocated.
+                        let bytes = len.saturating_mul(std::mem::size_of::<Option<f64>>());
+                        state.buffer.grow(bytes)?;
+                        let collected = {
+                            let mut cursor = series.fields.as_slice()[0].cursor();
+                            (0..len)
+                                .map(|row| match cursor.at(row) {
+                                    Some(SampleRef::Float(v)) => Some(v),
+                                    _ => None,
+                                })
+                                .collect::<Vec<Option<f64>>>()
+                        };
+                        values[index] = Some(collected);
+                        // What the node holds for this parameter is its values, not the series they
+                        // were read from, so the one replaces the other as soon as the series is
+                        // gone: the reservation is settled here, before the next parameter is read,
+                        // so a later conversion is admitted against what the node keeps rather than
+                        // against a series it no longer holds.
+                        parameter_bytes[index] = bytes;
+                        drop(series);
+                        operation.parameter_bytes = parameter_bytes
+                            .iter()
+                            .copied()
+                            .fold(0usize, usize::saturating_add);
+                        state.settle_vector(operation)?;
+                        if let Some(parameter) = &mut parameters[index] {
+                            parameter.finish_windows()?;
+                        }
+                        parameters[index] = None;
+                    }
+                }
+                // Nothing is settled here: what this node holds changes as a parameter is converted
+                // above and as a chunk is retained below, and each of those changes settles the
+                // reservation. A settle over the state as it stands would drop the charge for the
+                // results an earlier pull has computed and queued, which their handover then takes
+                // back from.
+                while let Some(chunk) = input.pull(inputs, inputs_finished)? {
+                    state.retain_vector(operation, chunk)?;
+                }
+                if !inputs_finished || !input.settled(inputs) {
+                    return Ok(None);
+                }
+                let collected = values
+                    .iter()
+                    .map(|v| {
+                        v.as_deref().ok_or_else(|| {
+                            DataFusionError::Internal("histogram parameters not collected".into())
+                        })
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                state.compute_histogram(operation, &collected)?;
+                state.pop_queued(evaluated_values)
+            }
             RuntimeOp::Vector {
                 input,
                 vector,
                 state,
             } => {
-                let Some(operation) = vector.as_mut() else {
-                    return Err(no_vector());
-                };
+                let operation = vector;
                 // Which samples are kept at a point is not decided until the whole input has
                 // arrived, so the input is read to the end before anything is handed over.
                 while let Some(chunk) = input.pull(inputs, inputs_finished)? {
@@ -3972,16 +4700,44 @@ impl RuntimeNode {
             RuntimeOp::EvalTime {
                 produced, state, ..
             } => *produced && state.queued.is_empty(),
+            RuntimeOp::ScalarOf {
+                input,
+                produced,
+                retained,
+                state,
+                ..
+            } => {
+                *produced && state.queued.is_empty() && retained.held == 0 && input.settled(inputs)
+            }
             RuntimeOp::ParameterizedMap {
                 input,
                 parameters,
-                map,
                 state,
+                ..
             } => {
                 state.queued.is_empty()
-                    && map.is_some()
                     && input.settled(inputs)
                     && parameters.iter().all(|parameter| parameter.settled(inputs))
+            }
+            RuntimeOp::ParameterizedHistogram {
+                input,
+                vector,
+                state,
+                ..
+            } => {
+                // Parameter nodes are released after their values are installed; `computed`
+                // already implies those values were consumed.
+                state.queued.is_empty() && vector.computed && input.settled(inputs)
+            }
+            RuntimeOp::ParameterizedTopK {
+                input,
+                vector,
+                state,
+                ..
+            } => {
+                // Parameter nodes are released after their values are installed; `computed`
+                // already implies the parameter was consumed.
+                state.queued.is_empty() && vector.computed && input.settled(inputs)
             }
             RuntimeOp::VectorOf {
                 input,
@@ -4019,20 +4775,12 @@ impl RuntimeNode {
                 input,
                 aggregate,
                 state,
-            } => {
-                state.queued.is_empty()
-                    && aggregate.as_ref().is_some_and(|fold| fold.computed)
-                    && input.settled(inputs)
-            }
+            } => state.queued.is_empty() && aggregate.computed && input.settled(inputs),
             RuntimeOp::Vector {
                 input,
                 vector,
                 state,
-            } => {
-                state.queued.is_empty()
-                    && vector.as_ref().is_some_and(|operation| operation.computed)
-                    && input.settled(inputs)
-            }
+            } => state.queued.is_empty() && vector.computed && input.settled(inputs),
             // A vector match is settled once its kernel ran and both operands are: what one side
             // answers at a point depends on the other side.
             RuntimeOp::Binary {
@@ -4042,23 +4790,15 @@ impl RuntimeNode {
                 state,
             } => {
                 state.queued.is_empty()
-                    && binary.as_ref().is_some_and(|operation| operation.computed)
+                    && binary.computed
                     && left.settled(inputs)
                     && right.settled(inputs)
             }
             // A broadcast owes what its sides have not handed over yet. A constant side is settled
             // from the start.
             RuntimeOp::Broadcast {
-                left,
-                right,
-                broadcast,
-                state,
-            } => {
-                state.queued.is_empty()
-                    && broadcast.is_some()
-                    && left.settled(inputs)
-                    && right.settled(inputs)
-            }
+                left, right, state, ..
+            } => state.queued.is_empty() && left.settled(inputs) && right.settled(inputs),
         }
     }
 
@@ -4072,6 +4812,7 @@ impl RuntimeNode {
     fn flush_ready_merges(&mut self, inputs: &[InputSlot]) -> Result<bool> {
         match &mut self.op {
             RuntimeOp::Input(_) | RuntimeOp::Scalar | RuntimeOp::EvalTime { .. } => Ok(false),
+            RuntimeOp::ScalarOf { input, .. } => input.flush_ready_merges(inputs),
             RuntimeOp::ParameterizedMap {
                 input, parameters, ..
             } => {
@@ -4087,6 +4828,24 @@ impl RuntimeNode {
             | RuntimeOp::Aggregate { input, .. }
             | RuntimeOp::Vector { input, .. }
             | RuntimeOp::VectorOf { input, .. } => input.flush_ready_merges(inputs),
+            RuntimeOp::ParameterizedHistogram {
+                input, parameters, ..
+            } => {
+                let mut flushed = input.flush_ready_merges(inputs)?;
+                for p in parameters.iter_mut().flatten() {
+                    flushed |= p.flush_ready_merges(inputs)?;
+                }
+                Ok(flushed)
+            }
+            RuntimeOp::ParameterizedTopK {
+                input, parameter, ..
+            } => {
+                let mut flushed = input.flush_ready_merges(inputs)?;
+                if let Some(parameter) = parameter {
+                    flushed |= parameter.flush_ready_merges(inputs)?;
+                }
+                Ok(flushed)
+            }
             RuntimeOp::Binary { left, right, .. } | RuntimeOp::Broadcast { left, right, .. } => {
                 let left_flushed = left.flush_ready_merges(inputs)?;
                 let right_flushed = right.flush_ready_merges(inputs)?;
@@ -4133,6 +4892,7 @@ impl RuntimeNode {
     fn any_merge_pending(&self) -> bool {
         match &self.op {
             RuntimeOp::Input(_) | RuntimeOp::Scalar | RuntimeOp::EvalTime { .. } => false,
+            RuntimeOp::ScalarOf { input, .. } => input.any_merge_pending(),
             RuntimeOp::ParameterizedMap {
                 input, parameters, ..
             } => input.any_merge_pending() || parameters.iter().any(RuntimeNode::any_merge_pending),
@@ -4142,6 +4902,21 @@ impl RuntimeNode {
             | RuntimeOp::Aggregate { input, .. }
             | RuntimeOp::Vector { input, .. }
             | RuntimeOp::VectorOf { input, .. } => input.any_merge_pending(),
+            RuntimeOp::ParameterizedHistogram {
+                input, parameters, ..
+            } => {
+                input.any_merge_pending()
+                    || parameters
+                        .iter()
+                        .flatten()
+                        .any(RuntimeNode::any_merge_pending)
+            }
+            RuntimeOp::ParameterizedTopK {
+                input, parameter, ..
+            } => {
+                input.any_merge_pending()
+                    || parameter.as_ref().is_some_and(|p| p.any_merge_pending())
+            }
             RuntimeOp::Binary { left, right, .. } | RuntimeOp::Broadcast { left, right, .. } => {
                 left.any_merge_pending() || right.any_merge_pending()
             }
@@ -4160,6 +4935,17 @@ impl RuntimeNode {
     fn unclosed(&self) -> Result<()> {
         match &self.op {
             RuntimeOp::Input(_) | RuntimeOp::Scalar | RuntimeOp::EvalTime { .. } => Ok(()),
+            RuntimeOp::ScalarOf {
+                input,
+                retained,
+                state,
+                ..
+            } => {
+                retained
+                    .ensure_closed(Reader::Vector)
+                    .map_err(|error| state.context(error))?;
+                input.unclosed()
+            }
             RuntimeOp::ParameterizedMap {
                 input, parameters, ..
             } => {
@@ -4173,15 +4959,46 @@ impl RuntimeNode {
             | RuntimeOp::Aggregate { input, .. }
             | RuntimeOp::VectorOf { input, .. }
             | RuntimeOp::Merge { input, .. } => input.unclosed(),
+            RuntimeOp::ParameterizedTopK {
+                input,
+                parameter,
+                vector,
+                state,
+            } => {
+                vector
+                    .input
+                    .ensure_closed(Reader::Vector)
+                    .map_err(|e| state.context(e))?;
+                input.unclosed()?;
+                if let Some(parameter) = parameter {
+                    parameter.unclosed()?;
+                }
+                Ok(())
+            }
+            RuntimeOp::ParameterizedHistogram {
+                input,
+                parameters,
+                vector,
+                state,
+                ..
+            } => {
+                vector
+                    .input
+                    .ensure_closed(Reader::Vector)
+                    .map_err(|e| state.context(e))?;
+                input.unclosed()?;
+                parameters
+                    .iter()
+                    .flatten()
+                    .try_for_each(RuntimeNode::unclosed)
+            }
             RuntimeOp::Binary {
                 left,
                 right,
                 binary,
                 state,
             } => {
-                if let Some(operation) = binary {
-                    operation.closed().map_err(|error| state.context(error))?;
-                }
+                binary.closed().map_err(|error| state.context(error))?;
                 left.unclosed()?;
                 right.unclosed()
             }
@@ -4194,12 +5011,10 @@ impl RuntimeNode {
                 vector,
                 state,
             } => {
-                if let Some(operation) = vector {
-                    operation
-                        .input
-                        .ensure_closed(Reader::Vector)
-                        .map_err(|error| state.context(error))?;
-                }
+                vector
+                    .input
+                    .ensure_closed(Reader::Vector)
+                    .map_err(|error| state.context(error))?;
                 input.unclosed()
             }
         }
@@ -4214,6 +5029,7 @@ impl RuntimeNode {
     fn finish_windows(&mut self) -> Result<()> {
         match &mut self.op {
             RuntimeOp::Input(_) | RuntimeOp::Scalar | RuntimeOp::EvalTime { .. } => Ok(()),
+            RuntimeOp::ScalarOf { input, .. } => input.finish_windows(),
             RuntimeOp::ParameterizedMap {
                 input, parameters, ..
             } => {
@@ -4231,6 +5047,23 @@ impl RuntimeNode {
             | RuntimeOp::Vector { input, .. }
             | RuntimeOp::VectorOf { input, .. }
             | RuntimeOp::Merge { input, .. } => input.finish_windows(),
+            RuntimeOp::ParameterizedTopK {
+                input, parameter, ..
+            } => {
+                let first = input.finish_windows();
+                let parameter = parameter.as_mut().map_or(Ok(()), |p| p.finish_windows());
+                first.and(parameter)
+            }
+            RuntimeOp::ParameterizedHistogram {
+                input, parameters, ..
+            } => {
+                let first = input.finish_windows();
+                parameters
+                    .iter_mut()
+                    .flatten()
+                    .map(RuntimeNode::finish_windows)
+                    .fold(first, Result::and)
+            }
             RuntimeOp::Binary { left, right, .. } | RuntimeOp::Broadcast { left, right, .. } => {
                 // Both sides are finished even when the first one fails: the failure is reported
                 // from here, and an evaluator left holding a series would keep its bytes.
@@ -4250,121 +5083,6 @@ impl RuntimeNode {
                     .map_or(Ok(()), RangeEvaluator::finish)
                     .map_err(|error| state.context(error));
                 child.and(own)
-            }
-        }
-    }
-
-    /// Gives back everything this node and its children hold, keeping the topology.
-    ///
-    /// The operation's payload goes first: it is what the reservation was taken for, and dropping
-    /// it after the reservation went back would hand the pool bytes it cannot admit while they are
-    /// still read. A released node keeps its shape — an input keeps its routing slot, a binary both
-    /// of its operands — because what a node is does not change when the bytes it held go back.
-    fn release(&mut self) {
-        match &mut self.op {
-            // A source keeps its queue in the caller-owned slot, which is released beside the tree,
-            // and a scalar holds nothing at all.
-            RuntimeOp::Input(_) | RuntimeOp::Scalar => {}
-            RuntimeOp::EvalTime { state, .. } => state.release(),
-            RuntimeOp::ParameterizedMap {
-                input,
-                parameters,
-                map,
-                state,
-            } => {
-                *map = None;
-                state.release();
-                input.release();
-                for parameter in parameters {
-                    parameter.release();
-                }
-            }
-            RuntimeOp::VectorOf { input, state, .. } => {
-                state.release();
-                input.release();
-            }
-            RuntimeOp::Instant {
-                input,
-                instant,
-                state,
-            } => {
-                *instant = None;
-                state.release();
-                input.release();
-            }
-            RuntimeOp::Merge {
-                input,
-                merge,
-                state,
-            } => {
-                *merge = None;
-                state.release();
-                input.release();
-            }
-            RuntimeOp::Window {
-                input,
-                window,
-                merge,
-                state,
-            } => {
-                *window = None;
-                *merge = None;
-                state.release();
-                input.release();
-            }
-            RuntimeOp::Map { input, map, state } => {
-                *map = None;
-                state.release();
-                input.release();
-            }
-            RuntimeOp::Timestamp {
-                input,
-                schema,
-                state,
-            } => {
-                *schema = None;
-                state.release();
-                input.release();
-            }
-            RuntimeOp::Aggregate {
-                input,
-                aggregate,
-                state,
-            } => {
-                *aggregate = None;
-                state.release();
-                input.release();
-            }
-            RuntimeOp::Vector {
-                input,
-                vector,
-                state,
-            } => {
-                *vector = None;
-                state.release();
-                input.release();
-            }
-            RuntimeOp::Binary {
-                left,
-                right,
-                binary,
-                state,
-            } => {
-                *binary = None;
-                state.release();
-                left.release();
-                right.release();
-            }
-            RuntimeOp::Broadcast {
-                left,
-                right,
-                broadcast,
-                state,
-            } => {
-                *broadcast = None;
-                state.release();
-                left.release();
-                right.release();
             }
         }
     }
@@ -4413,17 +5131,17 @@ impl NativeExecutionState {
             NativeType::AggregateState(_) => {}
         }
         Ok(Self {
-            root,
-            inputs,
-            scalar_root,
-            annotations: None,
+            live: Some(LiveExecution {
+                root,
+                inputs,
+                scalar_root,
+            }),
         })
     }
 
     pub fn set_annotations(&mut self, collector: Option<PromqlAnnotationCollector>) {
-        self.annotations = collector.clone();
-        if let Some(collector) = collector {
-            self.root.set_annotations(collector);
+        if let (Some(live), Some(collector)) = (&mut self.live, collector) {
+            live.root.set_annotations(collector);
         }
     }
 
@@ -4433,39 +5151,39 @@ impl NativeExecutionState {
     /// nodes' own counters and gauges, so a later read of it reports what they recorded and keeps
     /// no topology of this execution alive.
     pub(crate) fn register_metrics(&self, set: &ExecutionPlanMetricsSet, partition: usize) {
-        self.root.register_metrics("root", set, partition);
+        if let Some(live) = &self.live {
+            live.root.register_metrics("root", set, partition);
+        }
     }
 
     /// Returns the runtime input slots bound to `source_index`.
     pub fn input_ids(&self, source_index: usize) -> impl Iterator<Item = InputId> + '_ {
-        self.inputs
+        self.live
             .iter()
+            .flat_map(|live| live.inputs.iter())
             .enumerate()
             .filter(move |(_, slot)| slot.source_index == source_index)
             .map(|(index, _)| InputId::new(index))
     }
 
     pub fn reserved_bytes(&self) -> usize {
-        self.inputs
-            .iter()
-            .map(|slot| slot.state.buffer.reservation.size())
-            .fold(0usize, usize::saturating_add)
-            .saturating_add(self.root.reserved_bytes())
-            .saturating_add(
-                self.scalar_root
-                    .as_ref()
-                    .map_or(0, |(_, _, state)| state.buffer.reservation.size()),
-            )
+        self.live.as_ref().map_or(0, |live| {
+            live.inputs
+                .iter()
+                .map(|slot| slot.state.buffer.reservation.size())
+                .fold(0usize, usize::saturating_add)
+                .saturating_add(live.root.reserved_bytes())
+                .saturating_add(
+                    live.scalar_root
+                        .as_ref()
+                        .map_or(0, |(_, _, state)| state.buffer.reservation.size()),
+                )
+        })
     }
 }
 
-/// What the driver asks of one execution's state.
-///
-/// Every operation borrows the tree this state owns — exclusively to pull, shared to inspect it —
-/// while it works on the nodes below, and gives the borrow back before returning. Nothing else
-/// reaches into the tree, so a failed operation leaves nothing held behind it and the release that
-/// follows a failure borrows the same tree again.
-impl NativeExecutionState {
+/// Pulls and checks the one live tree the execution owns.
+impl LiveExecution {
     /// Pulls the next chunk the root of this state's tree hands over.
     ///
     /// `inputs_finished` is the caller's word that no more source chunks will arrive; it is passed
@@ -4511,54 +5229,9 @@ impl NativeExecutionState {
         self.root.any_merge_pending()
     }
 
-    /// Closes the execution: finishes every window's evaluator and gives everything back.
-    ///
-    /// The evaluators are finished before anything is released, so the first failure is reported
-    /// from the state that caused it. Everything is released whether or not one of them failed:
-    /// the caller reads the error either way, and holding the bytes past it would keep the query's
-    /// memory in use for as long as the executor is alive.
-    fn close(&mut self) -> Result<()> {
-        let finished = self.root.finish_windows();
-        self.root.release();
-        if let Some((_, _, mut state)) = self.scalar_root.take() {
-            state.release();
-        }
-        // The slots are taken rather than only released: what a released slot still holds is its
-        // schema and the grid that schema is addressed on, and a caller that keeps the stopped
-        // executor would otherwise keep the input's schema and materialized timestamps alive past
-        // the execution. The leaf itself stays -- the root keeps its `Input(InputId)` and the
-        // nodes keep their metric handles -- and it holds neither.
-        for mut slot in std::mem::take(&mut self.inputs) {
-            slot.release();
-        }
-        finished
-    }
-
-    /// Gives back everything this execution still holds: its payloads, its slots and the bytes
-    /// they reserved.
-    ///
-    /// The slots are taken here as they are when the execution closes, so the input's schema and
-    /// grid do not outlive it in an executor its caller still holds; a second call finds an empty
-    /// vector and nothing left to take.
-    fn release(&mut self) {
-        self.root.release();
-        if let Some((_, _, mut state)) = self.scalar_root.take() {
-            state.release();
-        }
-        for mut slot in std::mem::take(&mut self.inputs) {
-            slot.release();
-        }
-    }
-}
-
-impl Drop for NativeExecutionState {
-    /// Returns what the execution never gave back itself.
-    ///
-    /// The tree goes with this state, so its payloads would be dropped here in any case; the
-    /// release is what gives the pool their bytes back and leaves the counters reporting what the
-    /// nodes did rather than what they held.
-    fn drop(&mut self) {
-        self.release();
+    /// Finishes every window before dropping the live tree and its reservations.
+    fn close(mut self) -> Result<()> {
+        self.root.finish_windows()
     }
 }
 
@@ -5048,7 +5721,18 @@ impl NodeState {
         let Some(output) = output else {
             return Ok(());
         };
-        self.queue_results(output, false)
+        self.queue_results(output, false, 0)
+    }
+
+    /// Settles a vector node's reservation on what it holds: the input it retains and, for a
+    /// parameterized operator, the per-point values it read its parameters into.
+    ///
+    /// Both outlive every chunk the node is handed: the values are read whole before the input is
+    /// pulled and are released with the node, so a reservation set from the retained input alone
+    /// would drop their bytes while they are still read.
+    fn settle_vector(&mut self, vector: &VectorRuntime) -> Result<()> {
+        let held = vector.input.held.saturating_add(vector.parameter_bytes);
+        self.buffer.resize(held)
     }
 
     /// Retains one chunk of a vector node's input, reserved for before it is retained, as
@@ -5074,21 +5758,34 @@ impl NodeState {
         {
             let _timer = metrics.timer();
             vector.input.retain(chunk, Reader::Vector)?;
-            let retained = vector.input.held;
-            self.buffer.resize(retained)?;
+            // The input this node retains is held beside the parameter values it read whole first,
+            // which this chunk does not replace.
+            self.settle_vector(vector)?;
         }
         metrics.record_input(1, positions);
         Ok(())
     }
 
     /// Runs this node's vector kernel and queues the series it kept.
+    fn compute_histogram(
+        &mut self,
+        vector: &mut VectorRuntime,
+        parameters: &[&[Option<f64>]],
+    ) -> Result<()> {
+        let output = vector.compute_with_histogram_parameters(&mut self.buffer, parameters)?;
+        if let Some(output) = output {
+            self.queue_results(output, false, vector.parameter_bytes)?;
+        }
+        Ok(())
+    }
+
     fn compute_vector(&mut self, vector: &mut VectorRuntime) -> Result<()> {
         let shares_input = matches!(vector.op, BoundVectorOp::Sort(_));
         let output = vector.compute(&mut self.buffer)?;
         let Some(output) = output else {
             return Ok(());
         };
-        self.queue_results(output, shares_input)
+        self.queue_results(output, shares_input, vector.parameter_bytes)
     }
 
     /// Queues the series a kernel that reads its whole input produced, and settles the reservation
@@ -5100,7 +5797,16 @@ impl NodeState {
     /// the allocations its slices belong to, which would count a buffer once per chunk. The tables
     /// are billed once, to the queue ([`NodeState::queued_tables`]), since several results can
     /// keep one alive.
-    fn queue_results(&mut self, output: Vec<Series>, shares_input: bool) -> Result<()> {
+    ///
+    /// `beside` is what the node keeps past the queue, such as a parameterized operator's per-point
+    /// parameter values: those are read before the kernel runs and released with the node, so the
+    /// reservation covers them beside the results it hands over.
+    fn queue_results(
+        &mut self,
+        output: Vec<Series>,
+        shares_input: bool,
+        beside: usize,
+    ) -> Result<()> {
         let mut tables = HashSet::new();
         // The results are queued the way a node that produces a chunk per input queues what it
         // hands on: the queue is the one source of chunk order and of the bytes queued chunks hold.
@@ -5136,7 +5842,7 @@ impl NodeState {
             .fold(self.queued_tables, |total, (_, bytes)| {
                 total.saturating_add(*bytes)
             });
-        self.buffer.resize(queued)
+        self.buffer.resize(queued.saturating_add(beside))
     }
 
     /// Folds one chunk into this node's aggregate.
@@ -5549,23 +6255,6 @@ impl NodeState {
     fn emitted_bytes(&self) -> usize {
         self.emitted.as_ref().map_or(0, Emitted::bytes)
     }
-
-    /// Returns the shared state this node holds: its queue, its tables and its reservation.
-    ///
-    /// The operation's own payload — the evaluator, the retained operands, the fold — is not this
-    /// state's: it belongs to the node that owns this state, and it is dropped there before this
-    /// runs. Dropping it first is what keeps the reservation from going back to the pool while the
-    /// memory it was taken for is still held.
-    fn release(&mut self) {
-        // The label sets this node handed out and the chunks it queued go first, for the same
-        // reason: their memory is what the reservation below returns.
-        self.emitted = None;
-        self.queued.clear();
-        self.queued.shrink_to_fit();
-        self.queued_tables = 0;
-        // The reservation is returned once, below, for everything this node still held.
-        self.buffer.release();
-    }
 }
 
 impl InputSlot {
@@ -5607,16 +6296,6 @@ impl InputSlot {
             self.state.buffer.metrics.record_completed_series(1);
         }
         Ok(Some(chunk))
-    }
-
-    /// Returns what this input still holds: its open-series flag, its queue and its reservation.
-    ///
-    /// A leaf that holds no chunk holds no series either, so nothing it handed over is still open
-    /// for it: the flag is what closing the execution reads, and it must not survive the state that
-    /// could have kept a series alive.
-    fn release(&mut self) {
-        self.open_source_series = false;
-        self.state.release();
     }
 }
 
@@ -5675,6 +6354,14 @@ impl NativeExecutor {
     /// The state this driver runs.
     pub fn state(&self) -> &NativeExecutionState {
         &self.state
+    }
+
+    fn live(&self) -> Result<&LiveExecution> {
+        self.state.live.as_ref().ok_or_else(no_live_execution)
+    }
+
+    fn live_mut(&mut self) -> Result<&mut LiveExecution> {
+        self.state.live.as_mut().ok_or_else(no_live_execution)
     }
 
     /// Queues one raw source chunk at the input `input` names.
@@ -5775,7 +6462,8 @@ impl NativeExecutor {
         loop {
             // The state's tree is the one this execution was built from, and a pull is asked of its
             // root; the nodes below it read their own children from there.
-            match self.state.pull(self.inputs_finished) {
+            let inputs_finished = self.inputs_finished;
+            match self.live_mut()?.pull(inputs_finished) {
                 Ok(Some(chunk)) => return Ok(Some(chunk)),
                 // Nothing has settled: the stages below decide whether that is a stall or an end.
                 Ok(None) => {}
@@ -5795,7 +6483,7 @@ impl NativeExecutor {
                 // series the caller never closed is still open here and nowhere else. It is
                 // refused before a binary node computes: half a vector is not a vector, so the
                 // kernel must not allocate a workspace to match one.
-                if let Err(error) = self.state.unclosed() {
+                if let Err(error) = self.live()?.unclosed() {
                     self.stop(&error);
                     return Err(error);
                 }
@@ -5807,7 +6495,7 @@ impl NativeExecutor {
             // first is what keeps the two in order: the window produces, the pull that follows
             // carries its output to whoever reads it, and only then can a binary node decide
             // whether both of its operands are complete.
-            match self.state.flush_ready_merges() {
+            match self.live_mut()?.flush_ready_merges() {
                 // A window answered: what it queued is pulled on the next turn, and that pull is
                 // also what carries its answer to a node above it.
                 Ok(true) => continue,
@@ -5817,7 +6505,7 @@ impl NativeExecutor {
                     return Err(error);
                 }
             }
-            if self.state.any_merge_pending() {
+            if self.live()?.any_merge_pending() {
                 // A window still holds collected input, so something below it has not finished:
                 // pulling again is what gives that node its turn.
                 continue;
@@ -5825,7 +6513,8 @@ impl NativeExecutor {
             // Every node has answered everything it can. Closing them is what hands back the
             // reservations they were charged, so pulling to exhaustion leaves the pool as it found
             // it.
-            return match self.state.close() {
+            let live = self.state.live.take().ok_or_else(no_live_execution)?;
+            return match live.close() {
                 Ok(()) => {
                     self.phase = Phase::Finished;
                     Ok(None)
@@ -5902,9 +6591,9 @@ impl NativeExecutor {
         // The id counts the leaves left to right, so an id past the last one names no leaf at all:
         // a caller that miscounted its tree is refused rather than answered from whichever leaf the
         // count happened to reach.
-        let count = self.state.inputs.len();
-        let slot = self
-            .state
+        let live = self.live_mut()?;
+        let count = live.inputs.len();
+        let slot = live
             .inputs
             .get_mut(input.index())
             .ok_or_else(|| no_input(count, input))?;
@@ -5931,7 +6620,7 @@ impl NativeExecutor {
     /// here -- its payload, its queue and its reservation -- so a stopped execution holds nothing
     /// while the caller still owns it.
     fn stop(&mut self, error: &DataFusionError) {
-        self.state.release();
+        self.state.live = None;
         self.phase = Phase::Failed(error.to_string());
     }
 }
@@ -6121,34 +6810,14 @@ fn no_input(inputs: usize, input: InputId) -> DataFusionError {
     ))
 }
 
-/// The error for a node asked to compute without the runtime its kind holds.
-fn no_binary() -> DataFusionError {
-    DataFusionError::Execution("the node holds no binary operation".to_string())
+/// A binary operation was asked to read an operand other than its two inputs.
+fn invalid_binary_operand() -> DataFusionError {
+    DataFusionError::Internal("invalid binary operand index".to_string())
 }
 
-/// The error for an aggregate node whose fold is missing.
-fn no_aggregate() -> DataFusionError {
-    DataFusionError::Execution("the node holds no aggregate".to_string())
-}
-
-/// The error for a node asked to run a vector operation without one.
-fn no_vector() -> DataFusionError {
-    DataFusionError::Execution("the node holds no vector operation".to_string())
-}
-
-/// The error for a node asked to broadcast without the broadcast its kind holds.
-fn no_broadcast() -> DataFusionError {
-    DataFusionError::Execution("the node holds no scalar broadcast".to_string())
-}
-
-/// The error for a node asked to map without the operation its kind holds.
-fn no_map() -> DataFusionError {
-    DataFusionError::Execution("the node holds no map operation".to_string())
-}
-
-/// The error for a node asked to select without the selection its kind holds.
-fn no_instant() -> DataFusionError {
-    DataFusionError::Execution("the node holds no instant selection".to_string())
+/// A running executor must own its live state.
+fn no_live_execution() -> DataFusionError {
+    DataFusionError::Internal("the running native execution has no state".to_string())
 }
 
 /// The error for a node asked to evaluate a window without its evaluator.

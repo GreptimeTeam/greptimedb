@@ -289,6 +289,23 @@ fn a_long_statement_grid_is_deferred() {
     assert_eq!(grid_of(tree.root()), (0, 1, 86_400_001));
 }
 
+#[test]
+fn literal_topk_keeps_the_constant_vector_plan() {
+    let tree = compile(
+        &eval_stmt("topk(3, x)"),
+        raw_schema(),
+        SeriesOrdering::KeyThenTime,
+    )
+    .unwrap();
+    assert!(matches!(
+        tree.root().expr,
+        NativeExpr::Vector {
+            op: promql::native::plan::BoundVectorOp::TopK { k: 3.0, .. },
+            ..
+        }
+    ));
+}
+
 /// `rate(x[5m])` becomes a window over the raw input, on the statement's grid.
 #[test]
 fn a_rate_over_a_selector_becomes_a_window_over_raw_input() {
@@ -2247,6 +2264,13 @@ fn a_math_function_with_a_varying_parameter_binds_its_parameters_as_scalars() {
         NativeExpr::EvalTime { date: None }
     ));
 
+    let scalar_tree =
+        compile_statement(&eval_stmt("topk(scalar(vector(time())), vector(time()))")).unwrap();
+    let NativeExpr::ParameterizedTopK { parameter, .. } = &scalar_tree.root().expr else {
+        panic!("expected parameterized topk")
+    };
+    assert!(matches!(parameter.expr, NativeExpr::ScalarOf { .. }));
+
     let tree = compiled("round(x, 2 * 5)").tree;
     assert!(matches!(
         map_op(tree.root()),
@@ -2860,20 +2884,30 @@ fn the_aggregates_that_are_not_a_fold_bind_a_vector_operation() {
         assert_eq!(root, format!("  root Vector {op}"), "`{query}`");
     }
 
-    let error = compile(
+    let compiled = compile_selectors(
         &eval_stmt("topk(scalar(x), x)"),
+        &|_| Ok(raw_schema()),
+        SeriesOrdering::KeyThenTime,
+    )
+    .expect("scalar(selector) is now compiled as a dynamic k");
+    let NativeExpr::ParameterizedTopK { parameter, .. } = &compiled.tree.root().expr else {
+        panic!("expected parameterized topk")
+    };
+    assert!(matches!(parameter.expr, NativeExpr::ScalarOf { .. }));
+
+    // `limitk` has no policy for a `k` that changes per point, so it keeps the constant rejection
+    // and its message is the one that quotes the shapes this compiler accepts.
+    let error = compile(
+        &eval_stmt("limitk(scalar(x), x)"),
         raw_schema(),
         SeriesOrdering::KeyThenTime,
     )
     .expect_err("a run-time k compiled");
-    assert!(
-        matches!(error, DataFusionError::NotImplemented(_)),
-        "{error}"
-    );
     let message = error.to_string();
     assert!(message.contains("first argument"), "{message}");
-    // The rejection quotes the accepted subset, so that quote has to name every aggregator this
-    // compiler takes: one stale word there makes every rejection lie about what it binds.
+    // That quote is the only description a reader of a rejection gets, so it has to name every
+    // aggregator this compiler takes: one stale word there makes every rejection lie about what it
+    // binds.
     for aggregator in [
         "sum",
         "avg",
@@ -4283,6 +4317,7 @@ fn whole_vector_functions_bind_a_vector_operation() {
             "histogram_quantile(1 - 0.1, rate(x[5m]))",
             "histogram_quantile 0.9",
         ),
+        ("histogram_quantile(0.9, x)", "histogram_quantile 0.9"),
         ("histogram_fraction(0, 0.5, x)", "histogram_fraction 0 0.5"),
         ("absent(rate(x[5m]))", "absent {}"),
     ];
@@ -4293,6 +4328,265 @@ fn whole_vector_functions_bind_a_vector_operation() {
         let root = display.lines().nth(1).expect("a compiled tree has a root");
         assert_eq!(root, format!("  root Vector {op}"), "`{query}`");
     }
+}
+
+/// `absent_over_time(m[d])` binds `absent`'s own operation over a read of the window, so the labels
+/// it answers with are derived from the range selector's matchers exactly as `absent` derives them
+/// from a vector selector's.
+#[test]
+fn absent_over_time_binds_absent_over_a_presence_read() {
+    let cases = [
+        // A selector that names no metric answers with every equality matcher: this is the shape
+        // the existing plan cannot answer, because its per-series UDF needs a metric name to read a
+        // table from and a nameless selector writes none.
+        (
+            r#"absent_over_time({no_such_label="x", job="api"}[5m])"#,
+            r#"absent {job="api", no_such_label="x"}"#,
+        ),
+        // The table-choosing matchers are not labels of the answer, as they are not for `absent`.
+        (
+            r#"absent_over_time(x{job="a", env=~"p.*", instance!="", __field__="v"}[5m])"#,
+            r#"absent {job="a"}"#,
+        ),
+        // `job!="b"` accepts a missing `job`, so it reads after `job="a"` and removes it.
+        (r#"absent_over_time(x{job!="b", job="a"}[5m])"#, "absent {}"),
+        // A subquery is a matrix too, and it is not a selector, so it fixes no label.
+        (r#"absent_over_time(rate(x[1m])[5m:1m])"#, "absent {}"),
+    ];
+    for (query, op) in cases {
+        let tree = compile(&eval_stmt(query), raw_schema(), SeriesOrdering::KeyThenTime)
+            .unwrap_or_else(|error| panic!("`{query}` was refused: {error}"));
+        let display = tree.to_string();
+        let root = display.lines().nth(1).expect("a compiled tree has a root");
+        assert_eq!(root, format!("  root Vector {op}"), "`{query}`");
+        // The fold that reports presence keeps the metric name, so two discovered metrics that
+        // share their ordinary labels stay two series on the way up: `present_over_time` drops it.
+        assert!(
+            display.contains("input Window last_over_time [300000ms]"),
+            "`{query}` does not read its window through the presence fold: {display}"
+        );
+    }
+}
+
+/// `absent_over_time(x)` with `argument` in place of its matrix.
+///
+/// The parser types and counts a call's arguments, so a call whose matrix is not a matrix can only
+/// reach this compiler on a statement built here.
+fn with_absent_over_time_argument(argument: &str) -> EvalStmt {
+    let mut stmt = eval_stmt("absent_over_time(x[5m])");
+    let PromExpr::Call(call) = &mut stmt.expr else {
+        unreachable!("`absent_over_time(x[5m])` parses to a call");
+    };
+    *call.args.args[0] = promql_parser::parser::parse(argument).unwrap();
+    stmt
+}
+
+/// A call that is not `absent_over_time(<matrix>)` is refused as that, rather than read as another
+/// statement's shape.
+#[test]
+fn absent_over_time_refuses_what_is_not_a_matrix() {
+    // A call's argument count and types are the parser's, so neither of these reaches a plan.
+    for query in ["absent_over_time(x)", "absent_over_time(x[5m], 1)"] {
+        assert!(
+            promql_parser::parser::parse(query).is_err(),
+            "`{query}` is a call this compiler would have had to refuse"
+        );
+    }
+    // A matrix position holding something else, which only a built statement can express.
+    let error = compile(
+        &with_absent_over_time_argument("x"),
+        raw_schema(),
+        SeriesOrdering::KeyThenTime,
+    )
+    .expect_err("a call over a vector was accepted");
+    assert!(
+        error
+            .to_string()
+            .contains("whose matrix is `x`, where it has to be a range selector"),
+        "{error}"
+    );
+    // Alternative (`or`) matchers are alternatives no one scan can filter, so the labels they would
+    // fix are not this compiler's to derive.
+    let error = compile(
+        &eval_stmt(r#"absent_over_time(x{a="b" or c="d"}[5m])"#),
+        raw_schema(),
+        SeriesOrdering::KeyThenTime,
+    )
+    .expect_err("alternative matchers were accepted");
+    assert!(
+        error
+            .to_string()
+            .contains("whose matchers are alternatives"),
+        "{error}"
+    );
+}
+
+/// `value` at each of [`eval_stmt`]'s 21 grid points.
+fn grid_values(value: f64) -> Vec<(usize, Option<f64>)> {
+    (0..21).map(|position| (position, Some(value))).collect()
+}
+
+/// The points `absent_over_time` answers at are the ones no series has a sample at, and the labels
+/// are the ones its selector's matchers fix.
+///
+/// Prometheus v0.315 answers the same statements the same way: `absent_over_time(a[5m])` reports
+/// nothing while the window holds a sample and one unlabelled series once it does not, and
+/// `absent_over_time({no_such_label="x", job="api"}[5m])` reports `{job="api", no_such_label="x"}
+/// = 1`, because a series that carries no `no_such_label` reads as the empty string and the matcher
+/// wants `x`.
+#[test]
+fn absent_over_time_answers_only_the_points_no_series_has_a_sample_at() {
+    let schema = raw_schema();
+    let timestamps = agg_timestamps_0_to_100();
+    let values: Vec<f64> = (1..=21).map(f64::from).collect();
+    let with_samples = || {
+        vec![agg_raw_chunk(
+            &schema,
+            b"a",
+            agg_metric("a", &[("job", "api")]),
+            &timestamps,
+            &values,
+        )]
+    };
+
+    // Every window holds a sample of `a`, so there is nothing to report.
+    assert!(
+        aggregate_results(&execute_compiled("absent_over_time(a[5m])", with_samples())).is_empty(),
+        "a series holding a sample in every window is not absent"
+    );
+
+    // The metric exists but holds nothing in the window: the answer has no `__name__` to report,
+    // because the matcher that named the metric is not a label of an `absent` answer.
+    assert_eq!(
+        aggregate_results(&execute_compiled("absent_over_time(a[5m])", Vec::new())),
+        vec![(None, Vec::new(), grid_values(1.0))],
+        "a metric with no sample in any window answers the empty label set"
+    );
+
+    // A matcher that no row satisfies is the shape the existing plan declines: the labels still
+    // have to reach the answer, at every point of the grid.
+    assert_eq!(
+        aggregate_results(&execute_compiled(
+            r#"absent_over_time({no_such_label="x", job="api"}[5m])"#,
+            Vec::new()
+        )),
+        vec![(
+            None,
+            vec![
+                ("job".to_string(), "api".to_string()),
+                ("no_such_label".to_string(), "x".to_string()),
+            ],
+            grid_values(1.0),
+        )]
+    );
+
+    // An equality matcher on a label a present series carries fixes that label too.
+    assert_eq!(
+        aggregate_results(&execute_compiled(
+            r#"absent_over_time(a{job="api"}[5m])"#,
+            Vec::new()
+        )),
+        vec![(
+            None,
+            vec![("job".to_string(), "api".to_string())],
+            grid_values(1.0)
+        )]
+    );
+}
+
+/// The fold reads one window per grid point, so a sample outside the window does not make the point
+/// present, and an instant statement answers at its one point alone.
+#[test]
+fn absent_over_time_reads_the_window_and_not_the_series() {
+    let schema = raw_schema();
+    let chunk_at = |timestamps: &[i64]| {
+        vec![agg_raw_chunk(
+            &schema,
+            b"a",
+            agg_metric("a", &[("job", "api")]),
+            timestamps,
+            &[1.0; 2],
+        )]
+    };
+    let labels = vec![("job".to_string(), "api".to_string())];
+
+    // Samples a minute and a half before the statement's start are inside every five-minute window
+    // it evaluates, so every point reads the series and `absent` has nothing to say.
+    assert!(
+        aggregate_results(&execute_compiled(
+            "absent_over_time(a[5m])",
+            chunk_at(&[-90_000, -60_000])
+        ))
+        .is_empty(),
+        "a window reaching back past the samples holds them"
+    );
+
+    // Samples four minutes before it are outside every one of those windows: the metric exists and
+    // holds nothing the windows read, so the equality matcher's label is the whole answer.
+    assert_eq!(
+        aggregate_results(&execute_compiled(
+            r#"absent_over_time(a{job="api"}[5m])"#,
+            chunk_at(&[-400_000, -350_000])
+        )),
+        vec![(None, labels.clone(), grid_values(1.0))]
+    );
+
+    // The same statement as an instant query answers at its one point alone.
+    let instant = eval_stmt_between(
+        r#"absent_over_time(a{job="api"}[5m])"#,
+        Duration::from_secs(100),
+        Duration::from_secs(100),
+    );
+    let tree = compile(&instant, raw_schema(), SeriesOrdering::KeyThenTime).unwrap();
+    let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(1 << 20));
+    let mut execution =
+        NativeExecutor::new(NativeExecutionState::try_new(&tree, pool, None).unwrap());
+    for chunk in chunk_at(&[-400_000, -350_000]) {
+        execution.push_raw(InputId::new(0), chunk).unwrap();
+    }
+    let output = execution.finish().unwrap();
+    assert_eq!(
+        aggregate_results(&output),
+        vec![(None, labels, vec![(0, Some(1.0))])],
+        "an instant statement answers at its one grid point"
+    );
+}
+
+/// Two metrics that share their ordinary labels are two series, not one: the presence fold keeps
+/// the name, so `absent` still sees a vector and answers nothing rather than reading the pair as one
+/// series and failing.
+///
+/// This is the shape a selector that names no metric is discovered into: one source per metric,
+/// each reporting its own name.
+#[test]
+fn absent_over_time_keeps_two_discovered_metrics_apart() {
+    let schema = raw_schema();
+    let timestamps = agg_timestamps_0_to_100();
+    let values: Vec<f64> = (1..=21).map(f64::from).collect();
+    let chunks = vec![
+        agg_raw_chunk(
+            &schema,
+            b"a",
+            agg_metric("a", &[("job", "api")]),
+            &timestamps,
+            &values,
+        ),
+        agg_raw_chunk(
+            &schema,
+            b"b",
+            agg_metric("b", &[("job", "api")]),
+            &timestamps,
+            &values,
+        ),
+    ];
+    assert!(
+        aggregate_results(&execute_compiled(
+            r#"absent_over_time({job="api"}[5m])"#,
+            chunks
+        ))
+        .is_empty(),
+        "two metrics holding samples are present, whatever labels they share"
+    );
 }
 
 /// One raw chunk of `metric`, keyed by `key`, closing the series.
@@ -5142,7 +5436,8 @@ fn validate_inputs_rejects_misbound_occurrences_and_accepts_scalar_wrappers() {
             | NativeExpr::Timestamp { input }
             | NativeExpr::Vector { input, .. }
             | NativeExpr::Aggregate { input, .. }
-            | NativeExpr::VectorOf { input } => set_input_source(input, source),
+            | NativeExpr::VectorOf { input }
+            | NativeExpr::ScalarOf { input } => set_input_source(input, source),
             NativeExpr::Binary { left, right, .. }
             | NativeExpr::Set { left, right, .. }
             | NativeExpr::Info {
@@ -5152,6 +5447,20 @@ fn validate_inputs_rejects_misbound_occurrences_and_accepts_scalar_wrappers() {
             } => {
                 set_input_source(left, source);
                 set_input_source(right, source);
+            }
+            NativeExpr::ParameterizedTopK {
+                input, parameter, ..
+            } => {
+                set_input_source(input, source);
+                set_input_source(parameter, source);
+            }
+            NativeExpr::ParameterizedHistogram {
+                input, parameters, ..
+            } => {
+                set_input_source(input, source);
+                for parameter in parameters {
+                    set_input_source(parameter, source);
+                }
             }
             NativeExpr::ParameterizedMap {
                 input, parameters, ..

@@ -1374,3 +1374,64 @@ async fn large_repeated_tags_across_small_batches() {
         }
     }
 }
+
+#[test]
+fn reusable_payload_decoder_preserves_bounds_and_recovers_after_errors() {
+    let mut decoder = codec::PayloadDecoder::default();
+    let plain = b"already uncompressed";
+    let borrowed = decoder.decompress(plain, 0, plain.len()).unwrap();
+    assert_eq!(borrowed.as_ptr(), plain.as_ptr());
+    assert!(decoder.decompress(plain, 0, plain.len() - 1).is_err());
+    assert!(decoder.decompress(plain, 42, plain.len()).is_err());
+    assert!(decoder.decompress(plain, 1, usize::MAX).is_err());
+
+    let first = vec![7; 4096];
+    let compressed = codec::compress(&first, Compression::Zstd, 3).unwrap();
+    let pointer = {
+        let decoded = decoder.decompress(&compressed, 1, first.len()).unwrap();
+        assert_eq!(decoded, first);
+        decoded.as_ptr()
+    };
+    let smaller = vec![3; 1024];
+    let smaller_frame = codec::compress(&smaller, Compression::Zstd, 3).unwrap();
+    let decoded = decoder
+        .decompress(&smaller_frame, 1, smaller.len())
+        .unwrap();
+    assert_eq!(decoded, smaller);
+    assert_eq!(pointer, decoded.as_ptr());
+
+    assert!(decoder.decompress(&compressed, 1, 16).is_err());
+    assert!(decoder.decompress(&compressed, 1, first.len() + 1).is_err());
+    assert!(
+        decoder
+            .decompress(&compressed[..compressed.len() - 1], 1, first.len())
+            .is_err()
+    );
+    assert!(decoder.decompress(b"invalid frame", 1, 10).is_err());
+    assert_eq!(
+        decoder
+            .decompress(&smaller_frame, 1, smaller.len())
+            .unwrap(),
+        smaller
+    );
+
+    let mut concatenated = compressed.clone();
+    concatenated.extend_from_slice(&smaller_frame);
+    let expected = [first.as_slice(), smaller.as_slice()].concat();
+    assert_eq!(
+        decoder
+            .decompress(&concatenated, 1, expected.len())
+            .unwrap(),
+        expected
+    );
+    concatenated.push(255);
+    assert!(
+        decoder
+            .decompress(&concatenated, 1, expected.len())
+            .is_err()
+    );
+    assert_eq!(
+        decoder.decompress(&compressed, 1, first.len()).unwrap(),
+        first
+    );
+}

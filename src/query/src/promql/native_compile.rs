@@ -31,6 +31,7 @@
 //!   <histogram function>(<expression>)             e.g. histogram_count(x)
 //!   <sort>(<expression>[, <string>]*)              e.g. sort_desc(x), sort_by_label(x, "job")
 //!   absent(<expression>)                           e.g. absent(x{job="a"})
+//!   absent_over_time(<matrix>)                     e.g. absent_over_time(x{job="a"}[5m])
 //!   <histogram>(<constant>+, <expression>)         e.g. histogram_quantile(0.9, rate(x[5m]))
 //!   <label function>(<expression>, <string>*)       e.g. label_replace(x, "a", "$1", "b", "(.*)")
 //!   <expression> <operator> <scalar>               e.g. x * 100, x > bool time()
@@ -265,8 +266,9 @@ const SUPPORTED: &str = "a selector — `x`, optionally with an `offset` — a r
                          grouped by `by` or `without` as in `avg by(job)(rate(x[5m]) * 100)`; \
                          `topk`, `bottomk`, `limitk`, `limit_ratio` or `count_values` over any of \
                          them, as in `topk(3, x) by(job)` and `count_values(\"v\", x)`; a \
-                         sort, `absent` or `histogram_quantile` / `histogram_fraction` over any of \
-                         them (`sort_desc(x)`, `absent(x{job=\"a\"})`, \
+                         sort, `absent`, `absent_over_time` or `histogram_quantile` / \
+                         `histogram_fraction` over any of them (`sort_desc(x)`, \
+                         `absent(x{job=\"a\"})`, `absent_over_time(x{job=\"a\"}[5m])`, \
                          `histogram_quantile(0.9, rate(x[5m]))`); a range function's own \
                          constants sit where that function takes them, before \
                          the matrix for `quantile_over_time(0.9, x[5m])` and after it for \
@@ -324,6 +326,12 @@ fn data_free_value_field(stmt: &EvalStmt) -> Arc<str> {
                             targets.extend(labels.labels.iter().cloned());
                         }
                     }
+                }
+                // An aggregate's parameter is an expression since `topk` and friends take one, and
+                // the grouping labels it binds are names the value field must not collide with:
+                // an aggregate refuses to group by the field it folds.
+                if let Some(param) = &aggregate.param {
+                    visit(param, targets);
                 }
                 visit(&aggregate.expr, targets);
             }
@@ -383,6 +391,30 @@ pub fn compile_statement(stmt: &EvalStmt) -> Result<NativeTree> {
     Ok(compiled.tree)
 }
 
+/// Compiles `stmt` with an explicit evaluation grid, instead of the one its bounds derive.
+///
+/// A subquery root's inner expression is evaluated on the subquery's child grid, while the
+/// statement's own bounds stay where `@ start()` and `@ end()` resolve against them.
+pub(crate) fn compile_statement_with_grid(
+    stmt: &EvalStmt,
+    grid: Arc<EvalGrid>,
+) -> Result<NativeTree> {
+    let output_field = data_free_value_field(stmt);
+    let compiled = compile_selectors_with_grid_and_value_field(
+        stmt,
+        &|_| {
+            Err(not_implemented(&format!(
+                "a selector in `{}`, which is compiled as a statement that reads no data",
+                stmt.expr
+            )))
+        },
+        SeriesOrdering::Contiguous,
+        output_field,
+        Some(grid),
+    )?;
+    Ok(compiled.tree)
+}
+
 /// Compiles `stmt` into a tree and returns a binding record for each selector occurrence.
 ///
 /// `bindings` is called once per selector with its requirements. The resulting source indices are
@@ -395,11 +427,37 @@ pub fn compile_selectors(
     compile_selectors_with_value_field(stmt, bindings, ordering, Arc::from(VECTOR_FIELD))
 }
 
+/// Compiles `stmt` with an explicit evaluation grid. See [`compile_statement_with_grid`].
+pub(crate) fn compile_selectors_with_grid(
+    stmt: &EvalStmt,
+    bindings: &dyn Fn(&SelectorRequirement) -> Result<Arc<SeriesSchema>>,
+    ordering: SeriesOrdering,
+    grid: Arc<EvalGrid>,
+) -> Result<CompiledTree> {
+    compile_selectors_with_grid_and_value_field(
+        stmt,
+        bindings,
+        ordering,
+        Arc::from(VECTOR_FIELD),
+        Some(grid),
+    )
+}
+
 fn compile_selectors_with_value_field(
     stmt: &EvalStmt,
     bindings: &dyn Fn(&SelectorRequirement) -> Result<Arc<SeriesSchema>>,
     ordering: SeriesOrdering,
     value_field: Arc<str>,
+) -> Result<CompiledTree> {
+    compile_selectors_with_grid_and_value_field(stmt, bindings, ordering, value_field, None)
+}
+
+fn compile_selectors_with_grid_and_value_field(
+    stmt: &EvalStmt,
+    bindings: &dyn Fn(&SelectorRequirement) -> Result<Arc<SeriesSchema>>,
+    ordering: SeriesOrdering,
+    value_field: Arc<str>,
+    grid: Option<Arc<EvalGrid>>,
 ) -> Result<CompiledTree> {
     if ordering == SeriesOrdering::Interleaved {
         return Err(not_implemented(
@@ -427,7 +485,12 @@ fn compile_selectors_with_value_field(
         bindings,
         ordering,
         inputs: &inputs,
-        grid: statement_grid(stmt)?,
+        // The grid is derived only once the statement is a shape this compiler answers, so an
+        // unsupported statement reports the reason it has no tree rather than a grid complaint.
+        grid: match grid {
+            Some(grid) => grid,
+            None => statement_grid(stmt)?,
+        },
         value_field,
     };
     let tree = NativeTree::try_new(compile_expr(&context, &stmt.expr)?)?;
@@ -463,7 +526,8 @@ fn validate_inputs(root: &NativeNode, inputs: &[CompiledInput]) -> Result<()> {
             | NativeExpr::Timestamp { input }
             | NativeExpr::Vector { input, .. }
             | NativeExpr::Aggregate { input, .. }
-            | NativeExpr::VectorOf { input } => check(input, inputs, next),
+            | NativeExpr::VectorOf { input }
+            | NativeExpr::ScalarOf { input } => check(input, inputs, next),
             NativeExpr::Binary { left, right, .. }
             | NativeExpr::Set { left, right, .. }
             | NativeExpr::Info {
@@ -472,6 +536,17 @@ fn validate_inputs(root: &NativeNode, inputs: &[CompiledInput]) -> Result<()> {
                 ..
             } => check(left, inputs, next) && check(right, inputs, next),
             NativeExpr::ParameterizedMap {
+                input, parameters, ..
+            } => {
+                check(input, inputs, next)
+                    && parameters
+                        .iter()
+                        .all(|parameter| check(parameter, inputs, next))
+            }
+            NativeExpr::ParameterizedTopK {
+                input, parameter, ..
+            } => check(input, inputs, next) && check(parameter, inputs, next),
+            NativeExpr::ParameterizedHistogram {
                 input, parameters, ..
             } => {
                 check(input, inputs, next)
@@ -580,21 +655,7 @@ fn binary_operation(context: &Context, binary: &BinaryExpr) -> Result<NativeNode
     {
         let left = compile_expr(context, &binary.lhs)?;
         let right = compile_expr(context, &binary.rhs)?;
-        let (Some(lhs), Some(rhs)) = (left.output.samples(), right.output.samples()) else {
-            return Err(DataFusionError::Internal(format!(
-                "the binary operation `{binary}` compiled a vector operand to something other than \
-                 samples: a vector-typed expression compiles to samples, so the two disagree"
-            )));
-        };
-        let output = NativeType::Samples(binary_output_schema(lhs, rhs)?);
-        return Ok(NativeNode {
-            expr: NativeExpr::Binary {
-                left: Box::new(left),
-                right: Box::new(right),
-                matching: vector_matching(binary, op)?,
-            },
-            output,
-        });
+        return bind_vector_binary(binary, left, right, op);
     }
     // What is left has a constant on one side, and a modifier is refused rather than dropped. This
     // is deliberately narrower than Prometheus, which drops an `on` or `ignoring` written on a
@@ -632,6 +693,44 @@ fn binary_operation(context: &Context, binary: &BinaryExpr) -> Result<NativeNode
         op,
         binary.return_bool(),
     ))
+}
+
+/// Binds the same vector operation over compiled or already evaluated operands.
+fn bind_vector_binary(
+    binary: &BinaryExpr,
+    left: NativeNode,
+    right: NativeNode,
+    op: BinaryOp,
+) -> Result<NativeNode> {
+    let (Some(lhs), Some(rhs)) = (left.output.samples(), right.output.samples()) else {
+        return Err(DataFusionError::Internal(format!(
+            "the binary operation `{binary}` compiled a vector operand to something other than samples"
+        )));
+    };
+    let output = NativeType::Samples(binary_output_schema(lhs, rhs)?);
+    Ok(NativeNode {
+        expr: NativeExpr::Binary {
+            left: Box::new(left),
+            right: Box::new(right),
+            matching: vector_matching(binary, op)?,
+        },
+        output,
+    })
+}
+
+/// Uses the ordinary binary binder for two evaluated frame inputs.
+pub(crate) fn bind_evaluated_binary(
+    binary: &BinaryExpr,
+    left: NativeNode,
+    right: NativeNode,
+) -> Result<NativeTree> {
+    let op = binary_op(&binary.op).ok_or_else(|| {
+        not_implemented(&format!(
+            "the binary operator `{}` in `{binary}`",
+            binary.op
+        ))
+    })?;
+    NativeTree::try_new(bind_vector_binary(binary, left, right, op)?)
 }
 
 /// Compiles `and`, `or` or `unless` between two vectors, matched by the labels the query wrote.
@@ -926,6 +1025,23 @@ fn vector_aggregate(context: &Context, aggregate: &AggregateExpr) -> Result<Nati
         ))
     })?;
     let group = grouping(modifier.as_ref());
+    if matches!(op.id(), token::T_TOPK | token::T_BOTTOMK) && constant_value(param).is_none() {
+        let input = compile_expr(context, expr)?;
+        let output = input.output.clone();
+        let parameter = compile_expr(context, param)?;
+        return Ok(NativeNode {
+            expr: NativeExpr::ParameterizedTopK {
+                input: Box::new(input),
+                op: BoundVectorOp::TopK {
+                    k: 0.0,
+                    top: op.id() == token::T_TOPK,
+                    group,
+                },
+                parameter: Box::new(parameter),
+            },
+            output,
+        });
+    }
     let bound = match op.id() {
         token::T_TOPK | token::T_BOTTOMK => BoundVectorOp::TopK {
             k: constant_argument(&name, param, 0)?,
@@ -1280,12 +1396,20 @@ fn compile_call(context: &Context, call: &Call) -> Result<NativeNode> {
     if call.func.name == "info" {
         return info_call(context, &call.args.args);
     }
+    // `absent_over_time` reads a matrix where `absent` reads a vector, so it cannot ride the vector
+    // path below: the operation it binds is `absent`'s own, over a presence read of the window.
+    if call.func.name == ABSENT_OVER_TIME {
+        return absent_over_time_call(context, &call.args.args);
+    }
     let Call { func, args } = call;
     if let Some(node) = scalar_call(context, func.name, &args.args)? {
         return Ok(node);
     }
     if let Some(signature) = range_signature(func.name) {
         return window_call(context, func.name, signature, &args.args);
+    }
+    if let Some(node) = parameterized_histogram_call(context, func.name, &args.args)? {
+        return Ok(node);
     }
     if let Some((op, vector)) = vector_op(func.name, &args.args)? {
         return vector_call(context, func.name, op, vector);
@@ -1342,6 +1466,24 @@ fn scalar_call(
             &grid(),
             &context.value_field,
         ),
+        ("scalar", [vector]) => {
+            if vector.value_type() != ValueType::Vector {
+                return Err(not_implemented("scalar() requires a vector argument"));
+            }
+            let input = compile_expr(context, vector)?;
+            let NativeType::Samples(schema) = &input.output else {
+                return Err(not_implemented("scalar() requires an evaluated vector"));
+            };
+            let Some(input_grid) = schema.eval_grid.clone() else {
+                return Err(not_implemented("scalar() requires an evaluated vector"));
+            };
+            NativeNode {
+                expr: NativeExpr::ScalarOf {
+                    input: Box::new(input),
+                },
+                output: NativeType::Scalar(input_grid),
+            }
+        }
         (name, []) => match math_signature(name) {
             Some(MathSignature::Unary(MathOp::Date(date))) => {
                 vector_of(eval_time(Some(date)), &grid(), &context.value_field)
@@ -1526,6 +1668,126 @@ fn vector_call(
     })
 }
 
+/// Compiles a classic histogram call with at least one varying scalar argument.
+fn parameterized_histogram_call(
+    context: &Context,
+    name: &str,
+    arguments: &[Box<PromExpr>],
+) -> Result<Option<NativeNode>> {
+    if !matches!(name, "histogram_quantile" | "histogram_fraction") {
+        return Ok(None);
+    }
+    let Some((vector, args)) = arguments.split_last() else {
+        return Ok(None);
+    };
+    let expected = if name == "histogram_quantile" { 1 } else { 2 };
+    if args.len() != expected || args.iter().all(|arg| constant_value(arg).is_some()) {
+        return Ok(None);
+    }
+    if vector.value_type() != ValueType::Vector {
+        return Err(not_implemented(&format!(
+            "a call to `{name}` whose vector argument is `{vector}` is not a vector"
+        )));
+    }
+    let function = if name == "histogram_quantile" {
+        HistogramFunction::Quantile(
+            args.first()
+                .and_then(|arg| constant_value(arg))
+                .unwrap_or(0.0),
+        )
+    } else {
+        HistogramFunction::Fraction {
+            lower: args
+                .first()
+                .and_then(|arg| constant_value(arg))
+                .unwrap_or(0.0),
+            upper: args
+                .get(1)
+                .and_then(|arg| constant_value(arg))
+                .unwrap_or(0.0),
+        }
+    };
+    let input = compile_expr(context, vector)?;
+    let output = input.output.clone();
+    let parameters = args
+        .iter()
+        .map(|arg| compile_expr(context, arg))
+        .collect::<Result<Vec<_>>>()?;
+    Ok(Some(NativeNode {
+        expr: NativeExpr::ParameterizedHistogram {
+            input: Box::new(input),
+            op: BoundVectorOp::Histogram(function),
+            parameters,
+        },
+        output,
+    }))
+}
+
+/// The PromQL name of `absent_over_time`, which is not a range function here: it reads a matrix but
+/// answers with `absent`'s vector operation rather than with one value per series.
+const ABSENT_OVER_TIME: &str = "absent_over_time";
+
+/// The range function `absent_over_time` folds a window with, to learn whether a series has a sample
+/// in it.
+///
+/// `absent` answers at every point its input holds no series at, so the matrix has to become one
+/// series per series holding a sample: a range function at all, rather than a value no series
+/// states. Which range function is therefore a question of which points a window reports, and
+/// `present_over_time` and `last_over_time` report the same ones — a window with at least one
+/// sample. The name is what separates them: `present_over_time` drops the metric name, and a
+/// selector written without one is discovered as one source per metric, so two metrics carrying the
+/// same ordinary labels would arrive at the fold as one label set. The window refuses two values of
+/// one label set at one point, because everything above it reads them as one series: the query
+/// would fail where Prometheus answers with the empty vector. Keeping the name keeps those two
+/// series apart, and `absent` reads presence alone, so the value this fold computes is not part of
+/// the answer.
+const PRESENCE_FOLD: RangeFunction = RangeFunction::LastOverTime;
+
+/// Binds `absent_over_time(m[d])` into `absent`'s own vector operation, over a presence read of the
+/// window.
+///
+/// Both halves are `absent`'s: the labels come from the matrix selector's matchers exactly as
+/// `absent` derives them from a vector selector's, and the operation tests whether its input holds
+/// a series at each grid point. What differs is only where that input comes from — a matrix folds a
+/// window rather than selecting an instant — which is why the call is bound here and not by
+/// [`vector_call`]: `absent_over_time` reads a matrix, and nothing in it is a vector expression the
+/// recursion could compile.
+///
+/// The existing plan answers this call per series with a UDF, which needs a metric name to read a
+/// table from; a selector written without one names its metrics only by the labels that pick them,
+/// which is exactly the shape `absent_over_time` is asked for when nothing matches.
+fn absent_over_time_call(context: &Context, arguments: &[Box<PromExpr>]) -> Result<NativeNode> {
+    let [matrix] = arguments else {
+        return Err(not_implemented(&format!(
+            "a call to `{ABSENT_OVER_TIME}` with {} argument(s), where it takes one matrix",
+            arguments.len()
+        )));
+    };
+    let labels = absent_labels_of(matrix)?;
+    let input = match unparen(matrix) {
+        PromExpr::MatrixSelector(MatrixSelector { vs, range }) => {
+            window_selection(context, PRESENCE_FOLD, vs, range)?
+        }
+        PromExpr::Subquery(subquery) => {
+            subquery_window(context, ABSENT_OVER_TIME, PRESENCE_FOLD, subquery)?
+        }
+        other => {
+            return Err(not_implemented(&format!(
+                "a call to `{ABSENT_OVER_TIME}` whose matrix is `{other}`, where it has to be a \
+                 range selector like `x[5m]` or a subquery like `x[5m:1m]`"
+            )));
+        }
+    };
+    let output = input.output.clone();
+    Ok(NativeNode {
+        expr: NativeExpr::Vector {
+            input: Box::new(input),
+            op: BoundVectorOp::Absent { labels },
+        },
+        output,
+    })
+}
+
 /// The vector operation a sort, `absent` or a classic histogram function binds, and the vector it reads,
 /// or `None` when `name` is none of them.
 fn vector_op<'a>(
@@ -1604,22 +1866,30 @@ fn vector_op<'a>(
     Ok(Some((BoundVectorOp::Sort(order), vector)))
 }
 
-/// The labels `absent(expr)` answers with, as Prometheus `createLabelsForAbsentFunction` derives
-/// them: from the matchers of a vector selector, and none for any other expression.
+/// The labels `absent(expr)` and `absent_over_time(m[d])` answer with, as Prometheus
+/// `createLabelsForAbsentFunction` derives them: from the matchers of a vector or range selector,
+/// and none for any other expression.
+///
+/// Both selectors carry the same matchers, and Prometheus derives the labels from them the same way
+/// in either position, so the range selector of `absent_over_time` reads exactly as the vector
+/// selector of `absent` does.
 ///
 /// `__field__`, `__schema__` and `__database__` choose what is read rather than match a label, so
 /// they are not labels of the answer, as in the existing planner.
 fn absent_labels_of(expr: &PromExpr) -> Result<SeriesLabels> {
-    let PromExpr::VectorSelector(selector) = unparen(expr) else {
-        return absent_labels(&[]);
+    let (selector, alternatives) = match unparen(expr) {
+        PromExpr::VectorSelector(selector) => (&selector.matchers, &selector.matchers.or_matchers),
+        PromExpr::MatrixSelector(MatrixSelector { vs, .. }) => {
+            (&vs.matchers, &vs.matchers.or_matchers)
+        }
+        _ => return absent_labels(&[]),
     };
-    if !selector.matchers.or_matchers.is_empty() {
+    if !alternatives.is_empty() {
         return Err(not_implemented(&format!(
-            "`absent` over `{selector}`, whose matchers are alternatives"
+            "`absent` or `absent_over_time` over `{expr}`, whose matchers are alternatives"
         )));
     }
     let matchers = selector
-        .matchers
         .matchers
         .iter()
         .filter(|matcher| {
@@ -1712,6 +1982,71 @@ fn window_selection(
 /// than a number either caller may choose.
 const DEFAULT_SUBQUERY_STEP_MS: i64 = 60_000;
 
+/// The grid a subquery's inner expression is evaluated on, and the window that reads it.
+///
+/// Both halves of the native route need the same answer: the compiler binds the grid into the node,
+/// where it tells the window which points its input was evaluated at, and the planner binds the tree
+/// it compiles to the grid its rows carry. A second derivation would let the two disagree about the
+/// default step or the conversion of the range, and a tree bound to a grid it was not compiled on
+/// cannot be planned, so the numbers are derived here once.
+pub(crate) struct SubqueryGrid {
+    /// The interval the range function folds, and how far back from the anchor it reads.
+    pub(crate) window: RangeWindow,
+    /// The grid `subquery.expr` is evaluated on.
+    pub(crate) grid: Arc<EvalGrid>,
+}
+
+/// Derives the [`SubqueryGrid`] of `subquery`, whose outer statement is evaluated on `outer`.
+///
+/// The child grid is one point per `step` over the interval the subquery's window reads, which its
+/// `@` anchor, offset and range decide; without an anchor it is the statement's own range. Every
+/// number is converted checked, so a range or a step too large to name a millisecond is reported as
+/// itself rather than wrapped into a different interval.
+///
+/// `None` when the anchored interval contains no step boundary, which names no evaluation point at
+/// all. Declining is the caller's decision: the compiler reports the shape it cannot fold, while the
+/// planner keeps the plan the existing path builds.
+pub(crate) fn subquery_child_grid(
+    stmt: &EvalStmt,
+    outer: &EvalGrid,
+    subquery: &SubqueryExpr,
+) -> Result<Option<SubqueryGrid>> {
+    // The anchor is resolved by the same function a range selector's is, so `start()`, `end()` and a
+    // literal — including a negative one — mean the same thing in both shapes.
+    let anchor_ms = selector_anchor_ms(&subquery.at, stmt)?;
+    let range_ms = range_millis(subquery.range.as_millis())?;
+    // A subquery step of zero names no evaluation point at all, so it is reported as its own value
+    // rather than as an empty grid.
+    let step_ms = match subquery.step {
+        Some(step) => millis(step.as_millis()).ok_or_else(|| {
+            DataFusionError::Plan(format!(
+                "the subquery's step of {}ms is out of range",
+                step.as_millis()
+            ))
+        })?,
+        None => DEFAULT_SUBQUERY_STEP_MS,
+    };
+    if step_ms <= 0 {
+        return Err(DataFusionError::Plan(format!(
+            "the subquery's step is {step_ms}ms, and a step has to be longer than zero"
+        )));
+    }
+    let offset_ms = selector_offset_ms(&subquery.offset)?;
+    let window = RangeWindow {
+        range_ms,
+        offset_ms,
+        anchor_ms,
+        modifier: None,
+    };
+    let Some(spec) = subquery_grid(outer.spec(), window, step_ms)? else {
+        return Ok(None);
+    };
+    // Keep subquery grids deferred: selector binding needs only their spec endpoints, not a
+    // materialized timestamp vector proportional to the range.
+    let grid = Arc::new(EvalGrid::try_deferred(spec).map_err(grid_error)?);
+    Ok(Some(SubqueryGrid { window, grid }))
+}
+
 /// Binds `function` over `subquery`, whose inner expression is evaluated on a grid of its own.
 ///
 /// A range function folds a matrix, and PromQL writes a matrix two ways. A range selector reads raw
@@ -1731,16 +2066,7 @@ fn subquery_window(
     function: RangeFunction,
     subquery: &SubqueryExpr,
 ) -> Result<NativeNode> {
-    let SubqueryExpr {
-        expr,
-        range,
-        step,
-        offset,
-        at,
-    } = subquery;
-    // The anchor is resolved by the same function a range selector's is, so `start()`, `end()` and a
-    // literal — including a negative one — mean the same thing in both shapes.
-    let anchor_ms = selector_anchor_ms(at, context.stmt)?;
+    let SubqueryExpr { expr, .. } = subquery;
     // A subquery evaluates an expression and hands the window one value per grid point per field, so
     // the expression inside it has to be a vector: a scalar has no fields for the window to fold.
     if expr.value_type() != ValueType::Vector {
@@ -1750,39 +2076,16 @@ fn subquery_window(
             expr.value_type()
         )));
     }
-    let range_ms = range_millis(range.as_millis())?;
-    // A subquery step of zero names no evaluation point at all, so it is reported as its own value
-    // rather than as an empty grid.
-    let step_ms = match step {
-        Some(step) => millis(step.as_millis()).ok_or_else(|| {
-            DataFusionError::Plan(format!(
-                "the subquery's step of {}ms is out of range",
-                step.as_millis()
-            ))
-        })?,
-        None => DEFAULT_SUBQUERY_STEP_MS,
-    };
-    if step_ms <= 0 {
-        return Err(DataFusionError::Plan(format!(
-            "the subquery's step is {step_ms}ms, and a step has to be longer than zero"
+    let Some(SubqueryGrid {
+        window,
+        grid: child_grid,
+    }) = subquery_child_grid(context.stmt, &context.grid, subquery)?
+    else {
+        return Err(not_implemented(&format!(
+            "the subquery `{subquery}`, which names no evaluation point in its anchored interval or \
+             the statement's range"
         )));
-    }
-    let offset_ms = selector_offset_ms(offset)?;
-    let window = RangeWindow {
-        range_ms,
-        offset_ms,
-        anchor_ms,
-        modifier: None,
     };
-    let child_spec = subquery_grid(context.grid.spec(), window, step_ms)?.ok_or_else(|| {
-        not_implemented(&format!(
-            "the subquery over {range_ms}ms at {step_ms}ms per step, which names no evaluation point \
-             in its anchored interval or the statement's range"
-        ))
-    })?;
-    // Keep subquery grids deferred: selector binding needs only their spec endpoints, not a
-    // materialized timestamp vector proportional to the range.
-    let child_grid = Arc::new(EvalGrid::try_deferred(child_spec).map_err(grid_error)?);
     let inner = compile_expr(
         &Context {
             stmt: context.stmt,
