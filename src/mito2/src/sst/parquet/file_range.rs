@@ -16,15 +16,16 @@
 //! is usually a row group in a parquet file.
 
 use std::collections::{HashMap, HashSet};
-use std::ops::{BitAnd, Range};
+use std::ops::{BitAnd, BitOrAssign, Range};
 use std::sync::Arc;
 
 use api::v1::{OpType, SemanticType};
-use common_telemetry::error;
+use common_telemetry::{debug, error};
 use datafusion::physical_plan::PhysicalExpr;
 use datafusion::physical_plan::expressions::DynamicFilterPhysicalExpr;
-use datatypes::arrow::array::{Array as _, ArrayRef, BooleanArray};
+use datatypes::arrow::array::{Array as _, ArrayRef, BooleanArray, new_null_array};
 use datatypes::arrow::buffer::BooleanBuffer;
+use datatypes::arrow::datatypes::Field;
 use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::schema::Schema;
 use futures::StreamExt;
@@ -674,13 +675,25 @@ impl RangeBase {
 
         // Apply partition filter
         if let Some(partition_filter) = &self.partition_filter {
-            let record_batch = self.project_record_batch_for_pruning_flat(
+            match self.project_record_batch_for_pruning_flat(
                 &input,
                 &partition_filter.partition_schema,
                 &mut tag_decode_state,
-            )?;
-            let partition_mask = self.evaluate_partition_filter(&record_batch, partition_filter)?;
-            mask = mask.bitand(&partition_mask);
+            )? {
+                Some(prune_batch) => {
+                    let partition_mask = self.evaluate_partition_filter(
+                        &prune_batch.batch,
+                        partition_filter,
+                        prune_batch.substituted,
+                    )?;
+                    mask = mask.bitand(&partition_mask);
+                }
+                None => {
+                    // The partition expression can't be evaluated against this file, so we
+                    // can't prove any row is outside the region partition. Partition pruning
+                    // is only an optimization, dropping rows here would lose data.
+                }
+            }
         }
 
         let num_selected = mask.count_set_bits();
@@ -905,10 +918,16 @@ impl RangeBase {
     }
 
     /// Evaluates the partition filter against the input `RecordBatch`.
+    ///
+    /// If `keep_nulls` is true, rows whose partition expression evaluates to NULL are kept.
+    /// It is set when the batch was padded with default values for columns the SST doesn't
+    /// contain: such rows hold an unknown partition value, so we can't prove they are
+    /// outside the partition.
     fn evaluate_partition_filter(
         &self,
         record_batch: &RecordBatch,
         partition_filter: &PartitionFilterContext,
+        keep_nulls: bool,
     ) -> Result<BooleanBuffer> {
         let columnar_value = partition_filter
             .region_partition_physical_expr
@@ -925,10 +944,16 @@ impl RangeBase {
                     reason: "Failed to downcast to BooleanArray".to_string(),
                 })?;
 
-        // also need to consider nulls in the partition filter result. If a value is null, it should be treated as false (filtered out).
+        // also need to consider nulls in the partition filter result. If a value is null, it
+        // should be treated as false (filtered out), unless the batch was padded with columns
+        // the SST doesn't have (see `keep_nulls`).
         let mut mask = boolean_array.values().clone();
         if let Some(nulls) = boolean_array.nulls() {
-            mask = mask.bitand(nulls.inner());
+            if keep_nulls {
+                mask.bitor_assign(&!nulls.inner());
+            } else {
+                mask = mask.bitand(nulls.inner());
+            }
         }
 
         Ok(mask)
@@ -938,14 +963,23 @@ impl RangeBase {
     ///
     /// This is used for partition expression evaluation. The schema should only contain
     /// the columns referenced by the partition expression to minimize overhead.
+    ///
+    /// Columns referenced by the partition expression may be absent from the SST, e.g. a
+    /// column added by `ALTER TABLE` after the file was written. Those columns are padded
+    /// with the value every persisted row of this file holds: the column's default value,
+    /// or NULL for a nullable column without a default.
+    ///
+    /// Returns `None` if the projection can't be built, which means the partition
+    /// expression can't be evaluated against this file and all its rows must be kept.
     fn project_record_batch_for_pruning_flat(
         &self,
         input: &RecordBatch,
         schema: &Arc<Schema>,
         tag_decode_state: &mut TagDecodeState,
-    ) -> Result<RecordBatch> {
+    ) -> Result<Option<PartitionPruneBatch>> {
         let arrow_schema = schema.arrow_schema();
         let mut columns = Vec::with_capacity(arrow_schema.fields().len());
+        let mut substituted = false;
 
         let metadata = self.read_format.metadata();
 
@@ -953,14 +987,16 @@ impl RangeBase {
             let column_id = metadata.column_by_name(field.name()).map(|c| c.column_id);
 
             let Some(column_id) = column_id else {
-                return UnexpectedSnafu {
-                    reason: format!(
-                        "Partition pruning schema expects column '{}' but it is missing in \
-                         region metadata",
-                        field.name()
-                    ),
-                }
-                .fail();
+                // The column doesn't exist in this SST, so the file holds no value for it.
+                let Some(default_column) =
+                    default_partition_column_array(schema, field, input.num_rows())
+                else {
+                    // We can't tell which value the persisted rows hold, so we can't prune.
+                    return Ok(None);
+                };
+                columns.push(default_column);
+                substituted = true;
+                continue;
             };
 
             if let Some(idx) = self.read_format.projected_index_by_id(column_id) {
@@ -981,19 +1017,59 @@ impl RangeBase {
                 continue;
             }
 
-            return UnexpectedSnafu {
-                reason: format!(
-                    "Partition pruning schema expects column '{}' (id {}) but it is not \
-                     present in projected record batch",
-                    field.name(),
-                    column_id
-                ),
-            }
-            .fail();
+            // The column exists in the SST but the range doesn't read it, so the partition
+            // expression can't be evaluated for this batch. Keep the rows.
+            debug!(
+                "Partition pruning can't read column '{}' (id {}) from SST, skip partition pruning",
+                field.name(),
+                column_id
+            );
+            return Ok(None);
         }
 
-        RecordBatch::try_new(arrow_schema.clone(), columns).context(NewRecordBatchSnafu)
+        let batch =
+            RecordBatch::try_new(arrow_schema.clone(), columns).context(NewRecordBatchSnafu)?;
+        Ok(Some(PartitionPruneBatch { batch, substituted }))
     }
+}
+
+/// A batch projected to the schema of a partition expression.
+struct PartitionPruneBatch {
+    /// Batch containing only the columns referenced by the partition expression.
+    batch: RecordBatch,
+    /// Whether some referenced columns are missing in the SST and were filled with their
+    /// default value.
+    substituted: bool,
+}
+
+/// Returns an array of `num_rows` values that every row persisted in a file which lacks
+/// `field` holds, which is the column's default value (NULL for a nullable column without
+/// a default).
+///
+/// Returns `None` if the column has no default value we can assume (e.g. a non-nullable
+/// column without a default), so the partition expression can't be evaluated.
+fn default_partition_column_array(
+    schema: &Schema,
+    field: &Field,
+    num_rows: usize,
+) -> Option<ArrayRef> {
+    let column_schema = schema.column_schema_by_name(field.name())?;
+    if column_schema.default_constraint().is_none() && column_schema.is_nullable() {
+        // Rows written before the column existed hold NULL.
+        return Some(new_null_array(field.data_type(), num_rows));
+    }
+
+    let default_vector = column_schema
+        .create_default_vector(num_rows)
+        .ok()
+        .flatten()?;
+    let array = default_vector.to_arrow_array();
+    if array.data_type() == field.data_type() {
+        return Some(array);
+    }
+    // The pruning schema may use another representation of the type, e.g. a dictionary
+    // for string tags.
+    datatypes::arrow::compute::cast(&array, field.data_type()).ok()
 }
 
 #[cfg(test)]
@@ -1014,7 +1090,7 @@ mod tests {
     };
     use datatypes::arrow::datatypes::UInt32Type;
     use datatypes::prelude::ConcreteDataType;
-    use datatypes::schema::ColumnSchema;
+    use datatypes::schema::{ColumnDefaultConstraint, ColumnSchema};
     use datatypes::value::Value;
     use mito_codec::row_converter::SparsePrimaryKeyCodec;
     use parquet::arrow::arrow_reader::RowSelector;
@@ -1068,6 +1144,105 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(mask.count_set_bits(), 2);
+    }
+
+    /// Creates a range base over an SST (`sst_region_metadata`, which has no `zn` column)
+    /// plus a partition filter referencing `zn`.
+    ///
+    /// This models a file written before `ALTER TABLE ... ADD COLUMN zn` when the region is
+    /// already partitioned on `zn`: the partition expression references a column the SST
+    /// doesn't contain.
+    fn new_partition_filter_base_for_missing_column(
+        zn_column: ColumnSchema,
+        partition_expr: partition::expr::PartitionExpr,
+    ) -> RangeBase {
+        let mut base = new_test_range_base(vec![]);
+        let partition_schema = Arc::new(Schema::new(vec![zn_column]));
+        base.partition_filter = Some(PartitionFilterContext {
+            region_partition_physical_expr: partition_expr
+                .try_as_physical_expr(partition_schema.arrow_schema())
+                .unwrap(),
+            partition_schema,
+        });
+        base
+    }
+
+    fn zn_column_schema(default: Option<&str>, is_nullable: bool) -> ColumnSchema {
+        let column = ColumnSchema::new(
+            "zn".to_string(),
+            ConcreteDataType::string_datatype(),
+            is_nullable,
+        );
+        column
+            .with_default_constraint(
+                default.map(|value| ColumnDefaultConstraint::Value(Value::String(value.into()))),
+            )
+            .unwrap()
+    }
+
+    #[test]
+    fn test_partition_filter_keeps_rows_when_column_missing_in_sst() {
+        // `zn` is nullable without a default, so every row persisted before the column
+        // existed holds NULL. A NULL partition value never proves a row is outside the
+        // partition, so the batch must be kept instead of failing.
+        let base = new_partition_filter_base_for_missing_column(
+            zn_column_schema(None, true),
+            partition_col("zn").eq(Value::String("a".into())),
+        );
+        let batch = new_record_batch_with_custom_sequence(&["b", "x"], 0, 4, 1);
+
+        let filtered = base
+            .precise_filter_flat(batch.clone(), false, false)
+            .unwrap()
+            .unwrap();
+        assert_eq!(filtered.num_rows(), batch.num_rows());
+    }
+
+    #[test]
+    fn test_partition_filter_uses_default_of_missing_column() {
+        let batch = new_record_batch_with_custom_sequence(&["b", "x"], 0, 4, 1);
+
+        // The rows persisted before `zn` existed hold its default value 'b', which is
+        // inside the partition.
+        let base = new_partition_filter_base_for_missing_column(
+            zn_column_schema(Some("b"), true),
+            partition_col("zn").eq(Value::String("b".into())),
+        );
+        let filtered = base
+            .precise_filter_flat(batch.clone(), false, false)
+            .unwrap()
+            .unwrap();
+        assert_eq!(filtered.num_rows(), batch.num_rows());
+
+        // The default value 'b' provably doesn't match the partition expression, so the
+        // whole file can be pruned.
+        let base = new_partition_filter_base_for_missing_column(
+            zn_column_schema(Some("b"), true),
+            partition_col("zn").eq(Value::String("a".into())),
+        );
+        assert!(
+            base.precise_filter_flat(batch, false, false)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn test_partition_filter_keeps_rows_when_missing_column_has_no_default() {
+        // `zn` is NOT NULL without a default value: there is no value we can assume for the
+        // rows persisted before the column existed, so the partition expression can't be
+        // evaluated and the rows must be kept.
+        let base = new_partition_filter_base_for_missing_column(
+            zn_column_schema(None, false),
+            partition_col("zn").eq(Value::String("a".into())),
+        );
+        let batch = new_record_batch_with_custom_sequence(&["b", "x"], 0, 4, 1);
+
+        let filtered = base
+            .precise_filter_flat(batch.clone(), false, false)
+            .unwrap()
+            .unwrap();
+        assert_eq!(filtered.num_rows(), batch.num_rows());
     }
 
     #[test]
