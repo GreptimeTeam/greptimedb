@@ -141,10 +141,11 @@ struct RawScanPreparation {
 /// Why a scanner-wide preflight runs, which decides how much of the assignment it must cover.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SeriesInputMode {
-    /// The raw partition adapter returns every assigned source in one stream, so it needs the
-    /// all-or-nothing answer.
+    /// Regions outside the columnar series gate keep the all-or-nothing answer, so the raw
+    /// partition adapter reads every assigned source (including memtables) with the ordinary scan.
     Raw,
-    /// Native ordinal-range reads are served by the ready subset of the assignment.
+    /// Regions whose columnar series gate is on serve the ready subset of the assignment, both to
+    /// the native ordinal-range entry and to the raw partition adapter.
     Native,
 }
 
@@ -157,6 +158,31 @@ struct SeriesPreflight {
     columnar_fields_supported: bool,
     /// Inputs a columnar read may serve, captured from this scanner's pinned snapshot.
     selection: prepared::SelectedInputs,
+}
+
+/// Whether a capture lets `mode` serve this scan from columnar artifacts.
+///
+/// The preflight answer (`prepared_columnar`) and the preparation gate both call this rule, so a
+/// scan that planned the native read can never be declined at execution, and a scan that fell back
+/// to the ordinary reader can never claim artifacts.
+fn selection_serves(
+    mode: SeriesInputMode,
+    selection: &prepared::SelectedInputs,
+    columnar_fields_supported: bool,
+) -> bool {
+    if !columnar_fields_supported {
+        // The prepared reader serves `Float64` fields only.
+        return false;
+    }
+    match mode {
+        // The raw partition adapter returns every assigned source in one stream, so it needs the
+        // all-or-nothing answer. This is only reachable outside the columnar gate, where the
+        // capture is empty and the answer is therefore `false`.
+        SeriesInputMode::Raw => selection.all_ready,
+        // The native entry serves the ready subset: an empty subset leaves nothing to prepare, so
+        // an assigned memtable is skipped instead of disabling the sources that are ready.
+        SeriesInputMode::Native => !selection.ready_files.is_empty(),
+    }
 }
 
 struct CandidateReceiver {
@@ -275,6 +301,20 @@ impl SeriesScan {
             .is_some_and(|context| context.format == crate::config::SeriesIndexFormat::Columnar)
     }
 
+    /// How this scanner's entries read their input.
+    ///
+    /// This is the one place that decides the mode: the region's columnar series gate switches
+    /// both the raw and the native entry to the ready subset, and every entrypoint
+    /// (`raw_series_schema`, `raw_series_has_explicit_labels`, `scan_series_partition`,
+    /// `prepare_series`) derives its answer from here so planning and execution cannot disagree.
+    fn series_input_mode(&self) -> SeriesInputMode {
+        if self.uses_columnar() {
+            SeriesInputMode::Native
+        } else {
+            SeriesInputMode::Raw
+        }
+    }
+
     /// Whether every selected *field* is a `Float64`, which is all the columnar prepared reader
     /// serves.
     ///
@@ -298,9 +338,10 @@ impl SeriesScan {
 
     /// Prepares the raw scan and captures the inputs a columnar read may serve.
     ///
-    /// The preflight is shared by both entrypoints: only the readiness answer the caller needs
-    /// differs, so `mode` only selects the predicate domain. Every label-binding, field-type,
-    /// predicate, scan-option, and schema check stays identical for both.
+    /// The preflight is shared by both entrypoints: `mode` selects both how much of the assignment
+    /// the capture must cover and, because a served scan reads artifacts that carry no region
+    /// predicates, the predicate domain. Every label-binding, field-type, scan-option, and schema
+    /// check stays identical for both.
     fn prepare_raw_scan(
         &self,
         label_source: &RawLabelSource,
@@ -466,16 +507,16 @@ impl SeriesScan {
         } else {
             prepared::SelectedInputs::default()
         };
-        let prepared_columnar = selection.all_ready && columnar_fields_supported;
+        let prepared_columnar = selection_serves(mode, &selection, columnar_fields_supported);
         let schema = Arc::new(SeriesSchema {
             fields: specs.into(),
             eval_grid: None,
         });
         let typed_schema = input.mapper.input_arrow_schema(false);
         let mut predicates = Vec::new();
-        let predicate = if prepared_columnar || mode == SeriesInputMode::Native {
-            // A native read is served from artifacts whenever its ready subset is non-empty, and
-            // artifacts carry no region predicates.
+        let predicate = if prepared_columnar {
+            // This scan is served from artifacts, and artifacts carry no region predicates, so the
+            // residual filtering has to apply the whole predicate.
             input.predicate_group().predicate()
         } else {
             // The ordinary scan applies region predicates before this residual filtering.
@@ -563,19 +604,15 @@ impl SeriesScan {
             let Some(preflight) = preflight? else {
                 return Ok(None);
             };
-            if !preflight.columnar_fields_supported {
-                // The prepared reader serves `Float64` fields only.
-                return Ok(None);
-            }
-            let servable = match mode {
-                SeriesInputMode::Raw => preflight.selection.all_ready,
-                // The native entry serves the ready subset of the assignment: an empty subset
-                // leaves nothing to prepare, while an assigned memtable is skipped rather than
-                // disabling the sources that are ready.
-                SeriesInputMode::Native => !preflight.selection.ready_files.is_empty(),
-            };
-            if !servable {
-                // Known unsupported coverage: the caller keeps the ordinary scan instead.
+            // The same rule the preflight used, so the answer the caller planned with is the one
+            // this gate gives.
+            if !selection_serves(
+                mode,
+                &preflight.selection,
+                preflight.columnar_fields_supported,
+            ) {
+                // Known unsupported coverage or field types: the caller keeps the ordinary scan
+                // instead.
                 return Ok(None);
             }
             state
@@ -986,19 +1023,22 @@ impl RegionScanner for SeriesScan {
         label_source: &RawLabelSource,
     ) -> Result<Option<Arc<SeriesSchema>>, BoxedError> {
         Ok(self
-            .prepare_raw_scan(label_source, SeriesInputMode::Raw)?
+            .prepare_raw_scan(label_source, self.series_input_mode())?
             .map(|preflight| preflight.raw.schema))
     }
 
     fn raw_series_has_explicit_labels(&self, labels: &RawLabelSource) -> Result<bool, BoxedError> {
-        let Some(mut preflight) = self.prepare_raw_scan(labels, SeriesInputMode::Raw)? else {
+        let mode = self.series_input_mode();
+        let Some(mut preflight) = self.prepare_raw_scan(labels, mode)? else {
             return Ok(false);
         };
-        Ok(preflight.selection.all_ready
-            && preflight.columnar_fields_supported
-            && prepared::sample_merge_schema(&self.stream_ctx, &mut preflight.raw)
-                .map_err(BoxedError::new)?
-                .is_some())
+        Ok(selection_serves(
+            mode,
+            &preflight.selection,
+            preflight.columnar_fields_supported,
+        ) && prepared::sample_merge_schema(&self.stream_ctx, &mut preflight.raw)
+            .map_err(BoxedError::new)?
+            .is_some())
     }
 
     fn scan_series_partition(
@@ -1008,10 +1048,15 @@ impl RegionScanner for SeriesScan {
         partition: usize,
         label_source: &RawLabelSource,
     ) -> Result<Option<SendableRawSeriesStream>, BoxedError> {
-        let Some(preflight) = self.prepare_raw_scan(label_source, SeriesInputMode::Raw)? else {
+        let mode = self.series_input_mode();
+        let Some(preflight) = self.prepare_raw_scan(label_source, mode)? else {
             return Ok(None);
         };
-        if preflight.selection.all_ready && preflight.columnar_fields_supported {
+        if selection_serves(
+            mode,
+            &preflight.selection,
+            preflight.columnar_fields_supported,
+        ) {
             let partitions = self.properties.num_partitions().max(1);
             if partition >= partitions {
                 return Err(BoxedError::new(
@@ -1033,13 +1078,8 @@ impl RegionScanner for SeriesScan {
                 .check_scan_limit()
                 .map_err(BoxedError::new)
                 .map(|_| Some(preflight));
-            let future = self.prepare_series_with_raw(
-                ctx,
-                metrics_set,
-                label_source,
-                SeriesInputMode::Raw,
-                preparation,
-            );
+            let future =
+                self.prepare_series_with_raw(ctx, metrics_set, label_source, mode, preparation);
             let labels = label_source.clone();
             let stream = async_stream::try_stream! {
                 let source = future.await?.ok_or_else(|| BoxedError::new(InvalidRecordBatchSnafu { reason: "columnar prepared capability disappeared" }.build()))?;
@@ -1057,8 +1097,8 @@ impl RegionScanner for SeriesScan {
                 Box::pin(stream),
             )));
         }
-        // Stored sources without columnar artifacts (memtables, unindexed SSTs) are read by the
-        // ordinary scan, so the raw path stays available.
+        // Sources the artifacts do not cover yet (memtables, uncovered SSTs) and regions outside
+        // the columnar gate are read by the ordinary scan, so the raw path stays available.
         let metrics = new_partition_metrics(
             &self.stream_ctx,
             ctx.explain_verbose,
@@ -1089,18 +1129,19 @@ impl RegionScanner for SeriesScan {
         'static,
         Result<Option<Arc<dyn store_api::region_engine::PreparedSeriesSource>>, BoxedError>,
     > {
+        // Only a region under the columnar gate has a native subset to prepare.
         if !self.uses_columnar() {
             return Box::pin(async { Ok(None) });
         }
         let preparation = self
             .check_scan_limit()
             .map_err(BoxedError::new)
-            .and_then(|_| self.prepare_raw_scan(label_source, SeriesInputMode::Native));
+            .and_then(|_| self.prepare_raw_scan(label_source, self.series_input_mode()));
         self.prepare_series_with_raw(
             ctx,
             metrics_set,
             label_source,
-            SeriesInputMode::Native,
+            self.series_input_mode(),
             preparation,
         )
     }

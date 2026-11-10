@@ -185,6 +185,10 @@ pub(crate) struct SelectedInputs {
 ///
 /// Returns whether every assigned source can be read from columnar artifacts. `false` is not an
 /// error: the caller scans those sources with the ordinary reader instead.
+///
+/// Test-only: the production entries capture the whole selection with [`select_inputs`] and answer
+/// with [`selection_serves`](super::selection_serves), which also needs the ready subset.
+#[cfg(test)]
 pub(crate) fn validate_inputs(context: &StreamContext, ranges: &[PartitionRange]) -> Result<bool> {
     select_inputs(context, ranges).map(|inputs| inputs.all_ready)
 }
