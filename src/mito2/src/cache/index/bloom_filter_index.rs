@@ -22,11 +22,13 @@ use bytes::Bytes;
 use index::bloom_filter::error::{Error, IoSnafu, Result, SharedReadSnafu};
 use index::bloom_filter::reader::{BloomFilterReadMetrics, BloomFilterReader};
 use index::target::IndexTarget;
+use puffin::puffin_manager::file_key::PuffinFileKey;
 use snafu::IntoError;
-use store_api::storage::{FileId, IndexVersion};
+use store_api::storage::FileId;
 
 use crate::cache::index::{INDEX_METADATA_TYPE, IndexCache};
 use crate::metrics::{CACHE_HIT, CACHE_MISS};
+use crate::sst::file::RegionIndexId;
 
 const INDEX_TYPE_BLOOM_FILTER_INDEX: &str = "bloom_filter_index";
 
@@ -37,7 +39,7 @@ pub enum Tag {
     Fulltext,
 }
 
-pub type BloomFilterIndexKey = (FileId, IndexVersion, Arc<IndexTarget>, Tag);
+pub type BloomFilterIndexKey = (PuffinFileKey<RegionIndexId>, Arc<IndexTarget>, Tag);
 
 /// Cache for bloom filter index.
 pub type BloomFilterIndexCache = IndexCache<BloomFilterIndexKey, BloomFilterMeta>;
@@ -59,15 +61,14 @@ impl BloomFilterIndexCache {
 
     /// Removes all cached entries for the given `file_id`.
     pub fn invalidate_file(&self, file_id: FileId) {
-        self.invalidate_if(move |key| key.0 == file_id);
+        self.invalidate_if(move |key| key.0.handle().file_id() == file_id);
     }
 }
 
 /// Calculates weight for bloom filter index metadata.
 fn bloom_filter_index_metadata_weight(k: &BloomFilterIndexKey, meta: &Arc<BloomFilterMeta>) -> u32 {
-    let base = k.0.as_bytes().len()
-        + std::mem::size_of::<IndexVersion>()
-        + k.2.approx_mem_size()
+    let base = k.0.estimated_size()
+        + k.1.approx_mem_size()
         + std::mem::size_of::<Tag>()
         + std::mem::size_of::<BloomFilterMeta>();
 
@@ -79,13 +80,12 @@ fn bloom_filter_index_metadata_weight(k: &BloomFilterIndexKey, meta: &Arc<BloomF
 
 /// Calculates weight for bloom filter index content.
 fn bloom_filter_index_content_weight((k, _): &(BloomFilterIndexKey, u64), v: &Bytes) -> u32 {
-    (k.0.as_bytes().len() + k.2.approx_mem_size() + v.len()) as u32
+    (k.0.estimated_size() + k.1.approx_mem_size() + v.len()) as u32
 }
 
 /// Bloom filter index blob reader with cache.
 pub struct CachedBloomFilterIndexBlobReader<R> {
-    file_id: FileId,
-    index_version: IndexVersion,
+    file_key: PuffinFileKey<RegionIndexId>,
     target: Arc<IndexTarget>,
     tag: Tag,
     blob_size: u64,
@@ -96,8 +96,7 @@ pub struct CachedBloomFilterIndexBlobReader<R> {
 impl<R> CachedBloomFilterIndexBlobReader<R> {
     /// Creates a new bloom filter index blob reader with cache.
     pub fn new(
-        file_id: FileId,
-        index_version: IndexVersion,
+        file_key: PuffinFileKey<RegionIndexId>,
         target: IndexTarget,
         tag: Tag,
         blob_size: u64,
@@ -105,8 +104,7 @@ impl<R> CachedBloomFilterIndexBlobReader<R> {
         cache: BloomFilterIndexCacheRef,
     ) -> Self {
         Self {
-            file_id,
-            index_version,
+            file_key,
             target: Arc::new(target),
             tag,
             blob_size,
@@ -129,12 +127,7 @@ impl<R: BloomFilterReader + Send> BloomFilterReader for CachedBloomFilterIndexBl
         let (result, cache_metrics) = self
             .cache
             .get_or_load(
-                (
-                    self.file_id,
-                    self.index_version,
-                    self.target.clone(),
-                    self.tag,
-                ),
+                (self.file_key.clone(), self.target.clone(), self.tag),
                 self.blob_size,
                 offset,
                 size,
@@ -167,12 +160,7 @@ impl<R: BloomFilterReader + Send> BloomFilterReader for CachedBloomFilterIndexBl
         let (pages, total_cache_metrics) = self
             .cache
             .get_or_load_vec(
-                (
-                    self.file_id,
-                    self.index_version,
-                    self.target.clone(),
-                    self.tag,
-                ),
+                (self.file_key.clone(), self.target.clone(), self.tag),
                 self.blob_size,
                 ranges,
                 move |ranges| async move { inner.read_vec(&ranges, None).await },
@@ -197,12 +185,7 @@ impl<R: BloomFilterReader + Send> BloomFilterReader for CachedBloomFilterIndexBl
         &self,
         metrics: Option<&mut BloomFilterReadMetrics>,
     ) -> Result<Arc<BloomFilterMeta>> {
-        let key = (
-            self.file_id,
-            self.index_version,
-            self.target.clone(),
-            self.tag,
-        );
+        let key = (self.file_key.clone(), self.target.clone(), self.tag);
         if let Some(cached) = self.cache.get_metadata(key.clone()).await {
             CACHE_HIT.with_label_values(&[INDEX_METADATA_TYPE]).inc();
             if let Some(m) = metrics {
@@ -251,10 +234,107 @@ fn map_page_error(error: Arc<std::io::Error>) -> Error {
 
 #[cfg(test)]
 mod test {
+    use puffin::puffin_manager::file_key::PuffinStorageScope;
     use rand::{Rng, RngCore};
     use store_api::storage::ColumnId;
+    use store_api::storage::{IndexVersion, RegionId};
 
     use super::*;
+    use crate::sst::file::RegionFileId;
+
+    fn file_key(file_id: FileId, version: IndexVersion) -> PuffinFileKey<RegionIndexId> {
+        PuffinFileKey::new(
+            Arc::new(PuffinStorageScope::new(
+                "memory".into(),
+                "test".into(),
+                "/".into(),
+            )),
+            format!("{file_id}.{version}.puffin"),
+            RegionIndexId::new(RegionFileId::new(RegionId::new(1, 1), file_id), version),
+        )
+    }
+
+    #[tokio::test]
+    async fn test_cache_keys_isolate_storage_and_generation() {
+        let cache = BloomFilterIndexCache::new(1024 * 1024, 1024 * 1024, 1024);
+        let file_id = FileId::random();
+        let original = file_key(file_id, 0);
+        let keys = [
+            original.clone(),
+            file_key(file_id, 1),
+            PuffinFileKey::new(
+                Arc::new(PuffinStorageScope::new(
+                    "memory".into(),
+                    "other".into(),
+                    "/".into(),
+                )),
+                format!("{file_id}.0.puffin"),
+                *original.handle(),
+            ),
+            PuffinFileKey::new(
+                Arc::new(PuffinStorageScope::new(
+                    "memory".into(),
+                    "test".into(),
+                    "/".into(),
+                )),
+                format!("other/{file_id}.0.puffin"),
+                *original.handle(),
+            ),
+        ];
+        let keys = keys.map(|key| (key, Arc::new(IndexTarget::ColumnId(1)), Tag::Skipping));
+        let metas: Vec<_> = keys
+            .iter()
+            .map(|_| Arc::new(BloomFilterMeta::default()))
+            .collect();
+        for (i, key) in keys.iter().enumerate() {
+            assert!(cache.get_metadata(key.clone()).await.is_none());
+            cache.put_metadata(key.clone(), metas[i].clone()).await;
+            let (bytes, metrics) = cache
+                .get_or_load(key.clone(), 1, 0, 1, |_| async move {
+                    Ok::<_, std::io::Error>(vec![bytes::Bytes::from(vec![i as u8])])
+                })
+                .await
+                .unwrap();
+            assert_eq!(bytes.as_ref(), &[i as u8]);
+            assert_eq!(metrics.cache_miss, 1);
+        }
+        let reconstructed = (
+            file_key(file_id, 0),
+            Arc::new(IndexTarget::ColumnId(1)),
+            Tag::Skipping,
+        );
+        assert!(Arc::ptr_eq(
+            &cache.get_metadata(reconstructed).await.unwrap(),
+            &metas[0]
+        ));
+        for (i, key) in keys.iter().enumerate() {
+            assert!(Arc::ptr_eq(
+                &cache.get_metadata(key.clone()).await.unwrap(),
+                &metas[i]
+            ));
+            let (bytes, metrics) = cache
+                .get_or_load(key.clone(), 1, 0, 1, |_| async {
+                    Err::<Vec<bytes::Bytes>, _>(std::io::Error::other(
+                        "cached page must not reload",
+                    ))
+                })
+                .await
+                .unwrap();
+            assert_eq!(bytes.as_ref(), &[i as u8]);
+            assert_eq!(metrics.cache_hit, 1);
+        }
+        cache.invalidate_file(file_id);
+        for key in keys {
+            assert!(cache.get_metadata(key.clone()).await.is_none());
+            let (_, metrics) = cache
+                .get_or_load(key, 1, 0, 1, |_| async {
+                    Ok::<_, std::io::Error>(vec![bytes::Bytes::from_static(&[42])])
+                })
+                .await
+                .unwrap();
+            assert_eq!(metrics.cache_miss, 1);
+        }
+    }
 
     const FUZZ_REPEAT_TIMES: usize = 100;
 
@@ -305,8 +385,7 @@ mod test {
         for fail in [false, true] {
             let cache = Arc::new(BloomFilterIndexCache::new(4096, 4096, 1024));
             let reader = CachedBloomFilterIndexBlobReader::new(
-                FileId::random(),
-                0,
+                file_key(FileId::random(), 0),
                 IndexTarget::ColumnId(42),
                 Tag::Skipping,
                 8192,
@@ -364,14 +443,12 @@ mod test {
         let cache = BloomFilterIndexCache::new(1024 * 1024, 1024 * 1024, 1024);
         let file_id = FileId::random();
         let first = (
-            file_id,
-            0,
+            file_key(file_id, 0),
             Arc::new(IndexTarget::new_json_path(1, vec!["a".into(), "b".into()]).unwrap()),
             Tag::Skipping,
         );
         let second = (
-            file_id,
-            0,
+            file_key(file_id, 0),
             Arc::new(IndexTarget::new_json_path(1, vec!["a.b".into()]).unwrap()),
             Tag::Skipping,
         );
@@ -435,16 +512,14 @@ mod test {
 
         let weight = bloom_filter_index_metadata_weight(
             &(
-                file_id,
-                version,
+                file_key(file_id, version),
                 Arc::new(IndexTarget::ColumnId(column_id)),
                 tag,
             ),
             &Arc::new(meta.clone()),
         );
 
-        let base = file_id.as_bytes().len()
-            + std::mem::size_of::<IndexVersion>()
+        let base = file_key(file_id, version).estimated_size()
             + std::mem::size_of::<IndexTarget>()
             + std::mem::size_of::<Tag>()
             + std::mem::size_of::<BloomFilterMeta>();

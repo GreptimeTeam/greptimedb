@@ -33,7 +33,7 @@ use crate::metrics::INDEX_PUBLICATION_STALE_TOTAL;
 use crate::region::options::IndexOptions;
 use crate::region::{IndexBuildSource, MitoRegionRef, RegionLeaderState, RegionRoleState};
 use crate::request::{BuildIndexRequest, IndexBuildFinished, IndexBuildStopped, OptionOutputTx};
-use crate::sst::file::{FileHandle, FileMeta, RegionFileId, RegionIndexId};
+use crate::sst::file::{self, FileHandle, FileMeta, RegionFileId, RegionIndexId};
 use crate::sst::index::{
     IndexBuildOutcome, IndexBuildTask, IndexBuildType, IndexerBuilderImpl, ResultMpscSender,
     cleanup_stale_index_caches,
@@ -76,9 +76,11 @@ impl<S> RegionWorkerLoop<S> {
         let indexer_builder_ref = Arc::new(IndexerBuilderImpl {
             build_type: build_type.clone(),
             metadata: snapshot.metadata.clone(),
-            inverted_index_config: self.config.inverted_index.clone(),
-            fulltext_index_config: self.config.fulltext_index.clone(),
-            bloom_filter_index_config: self.config.bloom_filter_index.clone(),
+            registry: Arc::new(crate::sst::index::registry::IndexRegistry::new(
+                self.config.inverted_index.clone(),
+                self.config.fulltext_index.clone(),
+                self.config.bloom_filter_index.clone(),
+            )),
             index_options: snapshot.index_options.clone(),
             intermediate_manager,
             puffin_manager,
@@ -192,7 +194,11 @@ impl<S> RegionWorkerLoop<S> {
                 .levels()
                 .iter()
                 .flat_map(|level| level.files.iter())
-                .filter(|(_, handle)| !handle.is_deleted() && !handle.compacting())
+                .filter(|(_, handle)| {
+                    !handle.is_deleted()
+                        && !handle.compacting()
+                        && handle.level() < file::LEVEL_SHARED
+                })
                 .map(|(id, handle)| (*id, handle.clone()))
                 .collect();
             let snapshot = IndexBuildSnapshot {

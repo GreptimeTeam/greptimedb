@@ -247,7 +247,7 @@ impl RegionEngine for MetricEngine {
                     .alter_regions(vec![(region_id, alter)], &mut extension_return_value)
                     .await
             }
-            RegionRequest::Compact(_) => {
+            RegionRequest::Compact(_) | RegionRequest::CancelCompaction(_) => {
                 if self.inner.is_physical_region(region_id) {
                     self.inner
                         .mito
@@ -661,8 +661,9 @@ mod test {
     use store_api::metric_engine_consts::PHYSICAL_TABLE_METADATA_KEY;
     use store_api::mito_engine_options::WAL_OPTIONS_KEY;
     use store_api::region_request::{
-        PathType, RegionCleanUpRequest, RegionCloseRequest, RegionDropRequest, RegionFlushRequest,
-        RegionOpenRequest, RegionPutRequest, RegionRequest, RegionTruncateRequest,
+        PathType, RegionCancelCompactionRequest, RegionCleanUpRequest, RegionCloseRequest,
+        RegionDropRequest, RegionFlushRequest, RegionOpenRequest, RegionPutRequest, RegionRequest,
+        RegionTruncateRequest,
     };
 
     use super::*;
@@ -691,6 +692,34 @@ mod test {
             .unwrap_err();
         let error = format!("{error:?}");
         assert!(error.contains("series index is disabled"), "{error}");
+        let error = env
+            .metric()
+            .handle_request(env.default_logical_region_id(), request())
+            .await
+            .unwrap_err();
+        assert_eq!(
+            common_error::status_code::StatusCode::Unsupported,
+            error.status_code()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_cancel_compaction_physical_and_logical_regions() {
+        let env = TestEnv::new().await;
+        env.init_metric_region().await;
+        let request = || {
+            RegionRequest::CancelCompaction(RegionCancelCompactionRequest {
+                task_id: "stale-task-id".to_string(),
+            })
+        };
+        // Mito returns zero for an absent task; reaching that result proves forwarding.
+        let response = env
+            .metric()
+            .handle_request(env.default_physical_region_id(), request())
+            .await
+            .unwrap();
+        assert_eq!(response.affected_rows, 0);
+
         let error = env
             .metric()
             .handle_request(env.default_logical_region_id(), request())

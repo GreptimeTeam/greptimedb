@@ -21,6 +21,7 @@ use std::time::Instant;
 use common_base::range_read::RangeReader;
 use common_base::term_token::{extract_like_probes, extract_term_probes};
 use common_telemetry::{tracing, warn};
+use datatypes::schema::{FulltextBackend, FulltextOptions};
 use index::bloom_filter::applier::{BloomFilterApplier, InListPredicate};
 use index::bloom_filter::reader::{BloomFilterReadMetrics, BloomFilterReaderImpl};
 use index::fulltext_index::Config;
@@ -28,27 +29,28 @@ use index::fulltext_index::search::{FulltextIndexSearcher, RowId, TantivyFulltex
 use index::target::IndexTarget;
 use object_store::ObjectStore;
 use puffin::puffin_manager::cache::PuffinMetadataCacheRef;
+use puffin::puffin_manager::file_key::PuffinFileKey;
 use puffin::puffin_manager::{GuardWithMetadata, PuffinManager, PuffinReader};
 use snafu::ResultExt;
+use store_api::metadata::RegionMetadata;
 use store_api::region_request::PathType;
-use store_api::storage::ColumnId;
 
 use crate::access_layer::{RegionFilePathFactory, WriteCachePathProvider};
 use crate::cache::file_cache::{FileCacheRef, FileType, IndexKey};
 use crate::cache::index::bloom_filter_index::{
     BloomFilterIndexCacheRef, CachedBloomFilterIndexBlobReader, Tag,
 };
-use crate::cache::index::result_cache::PredicateKey;
 use crate::error::{
     ApplyBloomFilterIndexSnafu, ApplyFulltextIndexSnafu, MetadataSnafu, PuffinBuildReaderSnafu,
     PuffinReadBlobSnafu, Result,
 };
 use crate::metrics::INDEX_APPLY_ELAPSED;
 use crate::sst::file::RegionIndexId;
+use crate::sst::index::column::fulltext_target_options;
 use crate::sst::index::fulltext_index::applier::builder::FulltextRequest;
 use crate::sst::index::fulltext_index::{INDEX_BLOB_TYPE_BLOOM, INDEX_BLOB_TYPE_TANTIVY};
 use crate::sst::index::puffin_manager::{
-    PuffinManagerFactory, SstPuffinBlob, SstPuffinDir, SstPuffinReader,
+    PuffinManagerFactory, SstPuffinBlob, SstPuffinDir, SstPuffinManager, SstPuffinReader,
 };
 use crate::sst::index::{TYPE_FULLTEXT_INDEX, trigger_index_background_download};
 
@@ -146,16 +148,16 @@ impl FulltextIndexApplyMetrics {
 /// `FulltextIndexApplier` is responsible for applying fulltext index to the provided SST files
 pub struct FulltextIndexApplier {
     /// Requests to be applied.
-    requests: Arc<BTreeMap<ColumnId, FulltextRequest>>,
+    requests: Arc<BTreeMap<IndexTarget, FulltextRequest>>,
+
+    /// Expected fulltext settings from the current schema.
+    expected_options: BTreeMap<IndexTarget, FulltextOptions>,
 
     /// The source of the index.
     index_source: IndexSource,
 
     /// Cache for bloom filter index.
     bloom_filter_index_cache: Option<BloomFilterIndexCacheRef>,
-
-    /// Predicate key. Used to identify the predicate and fetch result from cache.
-    predicate_key: PredicateKey,
 }
 
 pub type FulltextIndexApplierRef = Arc<FulltextIndexApplier>;
@@ -166,18 +168,54 @@ impl FulltextIndexApplier {
         table_dir: String,
         path_type: PathType,
         store: ObjectStore,
-        requests: BTreeMap<ColumnId, FulltextRequest>,
+        requests: BTreeMap<IndexTarget, FulltextRequest>,
         puffin_manager_factory: PuffinManagerFactory,
+        metadata: &RegionMetadata,
     ) -> Self {
+        let expected_options = requests
+            .keys()
+            .filter_map(|target| {
+                fulltext_target_options(metadata, target)
+                    .inspect_err(|err| warn!(err; "Failed to resolve expected fulltext options for {target:?}"))
+                    .ok()
+                    .flatten()
+                    .map(|options| (target.clone(), options))
+            })
+            .collect();
         let requests = Arc::new(requests);
         let index_source = IndexSource::new(table_dir, path_type, puffin_manager_factory, store);
 
         Self {
-            predicate_key: PredicateKey::new_fulltext(requests.clone()),
             requests,
+            expected_options,
             index_source,
             bloom_filter_index_cache: None,
         }
+    }
+
+    /// Keeps ordinary string columns and JSON paths with compatible saved fulltext settings.
+    /// Returns `None` when no compatible request remains for this SST.
+    pub fn compatible_requests_for_sst(
+        &self,
+        metadata: &RegionMetadata,
+    ) -> Option<Arc<BTreeMap<IndexTarget, FulltextRequest>>> {
+        if self
+            .requests
+            .keys()
+            .all(|target| self.is_target_compatible(metadata, target))
+        {
+            return Some(self.requests.clone());
+        }
+        let requests: BTreeMap<_, _> = self
+            .requests
+            .iter()
+            .filter(|(target, _)| self.is_target_compatible(metadata, target))
+            .map(|(target, request)| (target.clone(), request.clone()))
+            .collect();
+        if requests.is_empty() {
+            return None;
+        }
+        Some(Arc::new(requests))
     }
 
     /// Sets the file cache.
@@ -205,9 +243,28 @@ impl FulltextIndexApplier {
         self
     }
 
-    /// Returns the predicate key.
-    pub fn predicate_key(&self) -> &PredicateKey {
-        &self.predicate_key
+    fn is_target_compatible(&self, metadata: &RegionMetadata, target: &IndexTarget) -> bool {
+        let Some(expected) = self.expected_options.get(target) else {
+            return false;
+        };
+        if let IndexTarget::ColumnId(id) = target {
+            // Rebuilding an ordinary column's index does not update Parquet metadata.
+            // Check only its type here; index readers use the actual blob's config.
+            return metadata
+                .column_by_id(*id)
+                .is_some_and(|column| column.column_schema.data_type.is_string());
+        }
+        let Some(actual) = fulltext_target_options(metadata, target)
+            .inspect_err(|err| warn!(err; "Failed to resolve SST fulltext options for {target:?}"))
+            .ok()
+            .flatten()
+        else {
+            return false;
+        };
+        // JSON path hints can change backend, case sensitivity, and analyzer.
+        expected.backend == actual.backend
+            && expected.case_sensitive == actual.case_sensitive
+            && (expected.backend == FulltextBackend::Bloom || expected.analyzer == actual.analyzer)
     }
 }
 
@@ -218,6 +275,7 @@ impl FulltextIndexApplier {
     /// # Arguments
     /// * `file_id` - The region file ID to apply predicates to
     /// * `file_size_hint` - Optional hint for file size to avoid extra metadata reads
+    /// * `requests` - Compatible requests for this SST
     /// * `metrics` - Optional mutable reference to collect metrics on demand
     #[tracing::instrument(
         skip_all,
@@ -227,12 +285,13 @@ impl FulltextIndexApplier {
         &self,
         file_id: RegionIndexId,
         file_size_hint: Option<u64>,
+        requests: &BTreeMap<IndexTarget, FulltextRequest>,
         mut metrics: Option<&mut FulltextIndexApplyMetrics>,
     ) -> Result<Option<BTreeSet<RowId>>> {
         let apply_start = Instant::now();
 
         let mut row_ids: Option<BTreeSet<RowId>> = None;
-        for (column_id, request) in self.requests.iter() {
+        for (target, request) in requests.iter() {
             // Tantivy tokens don't follow `matches_term` boundaries, e.g. `SimpleTokenizer`
             // keeps "错误error日志" as one token, so terms and patterns are left to the
             // bloom backend.
@@ -244,7 +303,7 @@ impl FulltextIndexApplier {
                 .apply_fine_one_column(
                     file_size_hint,
                     file_id,
-                    *column_id,
+                    target,
                     request,
                     metrics.as_deref_mut(),
                 )
@@ -283,11 +342,11 @@ impl FulltextIndexApplier {
         &self,
         file_size_hint: Option<u64>,
         file_id: RegionIndexId,
-        column_id: ColumnId,
+        target: &IndexTarget,
         request: &FulltextRequest,
         metrics: Option<&mut FulltextIndexApplyMetrics>,
     ) -> Result<Option<BTreeSet<RowId>>> {
-        let target_key = IndexTarget::ColumnId(column_id).encode();
+        let target_key = target.encode();
         let blob_key = format!("{INDEX_BLOB_TYPE_TANTIVY}-{target_key}");
         let dir = self
             .index_source
@@ -342,6 +401,7 @@ impl FulltextIndexApplier {
     /// * `file_id` - The region file ID to apply predicates to
     /// * `file_size_hint` - Optional hint for file size to avoid extra metadata reads
     /// * `row_groups` - Iterator of row group lengths and whether to search in the row group
+    /// * `requests` - Compatible requests for this SST
     /// * `metrics` - Optional mutable reference to collect metrics on demand
     #[allow(clippy::type_complexity)]
     #[tracing::instrument(
@@ -353,6 +413,7 @@ impl FulltextIndexApplier {
         file_id: RegionIndexId,
         file_size_hint: Option<u64>,
         row_groups: impl Iterator<Item = (usize, bool)>,
+        requests: &BTreeMap<IndexTarget, FulltextRequest>,
         mut metrics: Option<&mut FulltextIndexApplyMetrics>,
     ) -> Result<Option<Vec<(usize, Vec<Range<usize>>)>>> {
         let apply_start = Instant::now();
@@ -360,7 +421,7 @@ impl FulltextIndexApplier {
         let (input, mut output) = Self::init_coarse_output(row_groups);
         let mut applied = false;
 
-        for (column_id, request) in self.requests.iter() {
+        for (target, request) in requests.iter() {
             if request.terms.is_empty() && request.likes.is_empty() {
                 continue;
             }
@@ -369,7 +430,7 @@ impl FulltextIndexApplier {
                 .apply_coarse_one_column(
                     file_id,
                     file_size_hint,
-                    *column_id,
+                    target,
                     request,
                     &mut output,
                     metrics.as_deref_mut(),
@@ -400,14 +461,14 @@ impl FulltextIndexApplier {
         &self,
         file_id: RegionIndexId,
         file_size_hint: Option<u64>,
-        column_id: ColumnId,
+        target: &IndexTarget,
         request: &FulltextRequest,
         output: &mut [(usize, Vec<Range<usize>>)],
         mut metrics: Option<&mut FulltextIndexApplyMetrics>,
     ) -> Result<bool> {
-        let target_key = IndexTarget::ColumnId(column_id).encode();
+        let target_key = target.encode();
         let blob_key = format!("{INDEX_BLOB_TYPE_BLOOM}-{target_key}");
-        let Some(reader) = self
+        let Some((file_key, reader)) = self
             .index_source
             .blob(file_id, &blob_key, file_size_hint, metrics.as_deref_mut())
             .await?
@@ -430,9 +491,8 @@ impl FulltextIndexApplier {
                 .context(MetadataSnafu)?
                 .content_length;
             let reader = CachedBloomFilterIndexBlobReader::new(
-                file_id.file_id(),
-                file_id.version,
-                IndexTarget::ColumnId(column_id),
+                file_key,
+                target.clone(),
                 Tag::Fulltext,
                 blob_size,
                 BloomFilterReaderImpl::new(range_reader),
@@ -542,6 +602,7 @@ impl FulltextIndexApplier {
 }
 
 /// The source of the index.
+#[derive(Clone)]
 struct IndexSource {
     table_dir: String,
 
@@ -550,6 +611,10 @@ struct IndexSource {
 
     /// The puffin manager factory.
     puffin_manager_factory: PuffinManagerFactory,
+
+    /// Managers keep backend identity resolution out of per-blob reads.
+    remote_puffin_manager: SstPuffinManager,
+    cached_puffin_manager: Option<SstPuffinManager>,
 
     /// Store responsible for accessing remote index files.
     remote_store: ObjectStore,
@@ -568,10 +633,16 @@ impl IndexSource {
         puffin_manager_factory: PuffinManagerFactory,
         remote_store: ObjectStore,
     ) -> Self {
+        let remote_puffin_manager = puffin_manager_factory.build(
+            remote_store.clone(),
+            RegionFilePathFactory::new(table_dir.clone(), path_type),
+        );
         Self {
             table_dir,
             path_type,
             puffin_manager_factory,
+            remote_puffin_manager,
+            cached_puffin_manager: None,
             remote_store,
             file_cache: None,
             puffin_metadata_cache: None,
@@ -579,6 +650,13 @@ impl IndexSource {
     }
 
     fn set_file_cache(&mut self, file_cache: Option<FileCacheRef>) {
+        self.cached_puffin_manager = file_cache.as_ref().map(|cache| {
+            self.puffin_manager_factory.build_cached(
+                &self.remote_puffin_manager,
+                cache.local_store(),
+                WriteCachePathProvider::new(cache.clone()),
+            )
+        });
         self.file_cache = file_cache;
     }
 
@@ -595,7 +673,12 @@ impl IndexSource {
         key: &str,
         file_size_hint: Option<u64>,
         metrics: Option<&mut FulltextIndexApplyMetrics>,
-    ) -> Result<Option<GuardWithMetadata<SstPuffinBlob>>> {
+    ) -> Result<
+        Option<(
+            PuffinFileKey<RegionIndexId>,
+            GuardWithMetadata<SstPuffinBlob>,
+        )>,
+    > {
         let (reader, fallbacked) = self.ensure_reader(file_id, file_size_hint).await?;
 
         // Track cache miss if fallbacked to remote
@@ -605,7 +688,7 @@ impl IndexSource {
 
         let res = reader.blob(key).await;
         match res {
-            Ok(blob) => Ok(Some(blob)),
+            Ok(blob) => Ok(Some((reader.file_key(), blob))),
             Err(err) if err.is_blob_not_found() => Ok(None),
             Err(err) => {
                 if fallbacked {
@@ -615,7 +698,7 @@ impl IndexSource {
                     let reader = self.build_remote(file_id, file_size_hint).await?;
                     let res = reader.blob(key).await;
                     match res {
-                        Ok(blob) => Ok(Some(blob)),
+                        Ok(blob) => Ok(Some((reader.file_key(), blob))),
                         Err(err) if err.is_blob_not_found() => Ok(None),
                         Err(err) => Err(err).context(PuffinReadBlobSnafu),
                     }
@@ -694,7 +777,9 @@ impl IndexSource {
         file_id: RegionIndexId,
         file_size_hint: Option<u64>,
     ) -> Result<Option<SstPuffinReader>> {
-        let Some(file_cache) = &self.file_cache else {
+        let (Some(file_cache), Some(puffin_manager)) =
+            (&self.file_cache, &self.cached_puffin_manager)
+        else {
             return Ok(None);
         };
 
@@ -707,12 +792,8 @@ impl IndexSource {
             return Ok(None);
         };
 
-        let puffin_manager = self
-            .puffin_manager_factory
-            .build(
-                file_cache.local_store(),
-                WriteCachePathProvider::new(file_cache.clone()),
-            )
+        let puffin_manager = puffin_manager
+            .clone()
             .with_puffin_metadata_cache(self.puffin_metadata_cache.clone());
         let reader = puffin_manager
             .reader(&file_id)
@@ -739,8 +820,8 @@ impl IndexSource {
         );
 
         let puffin_manager = self
-            .puffin_manager_factory
-            .build(self.remote_store.clone(), path_factory)
+            .remote_puffin_manager
+            .clone()
             .with_puffin_metadata_cache(self.puffin_metadata_cache.clone());
 
         let reader = puffin_manager
@@ -755,16 +836,158 @@ impl IndexSource {
 
 #[cfg(test)]
 mod tests {
+    use api::v1::SemanticType;
     use common_function::scalars::matches_term::MatchesTermFinder;
     use datatypes::arrow::array::{Scalar, StringArray};
     use datatypes::arrow::compute::kernels::comparison::like;
+    use datatypes::data_type::ConcreteDataType;
+    use datatypes::extension::json::{Json2ExtensionType, JsonMetadata};
+    use datatypes::json::{JsonSettings, JsonTypeHint};
+    use datatypes::schema::{ColumnSchema, FulltextAnalyzer};
     use index::fulltext_index::Analyzer;
     use index::fulltext_index::tokenizer::{self, ScriptTokenizer};
     use rand::rngs::StdRng;
     use rand::{Rng, SeedableRng};
+    use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder};
+    use store_api::storage::RegionId;
 
     use super::*;
+    use crate::cache::index::result_cache::PredicateKey;
     use crate::sst::index::fulltext_index::applier::builder::{FulltextLike, FulltextTerm};
+
+    #[test]
+    fn test_json_fulltext_sst_compatibility() {
+        let (_dir, factory) = PuffinManagerFactory::new_for_test_block("json_fulltext_plan");
+        let ordinary = IndexTarget::ColumnId(1);
+        let path = IndexTarget::new_json_path(3, vec!["message".into()]).unwrap();
+        let other = IndexTarget::new_json_path(3, vec!["other".into()]).unwrap();
+        let missing = IndexTarget::new_json_path(3, vec!["missing".into()]).unwrap();
+        for backend in [FulltextBackend::Bloom, FulltextBackend::Tantivy] {
+            let options = FulltextOptions {
+                enable: true,
+                backend: backend.clone(),
+                ..Default::default()
+            };
+            let metadata = json_metadata(Some(options.clone()));
+            let requests = BTreeMap::from([
+                (ordinary.clone(), FulltextRequest::default()),
+                (path.clone(), FulltextRequest::default()),
+                (other.clone(), FulltextRequest::default()),
+            ]);
+            let applier = FulltextIndexApplier::new(
+                "test".into(),
+                PathType::Bare,
+                object_store::ObjectStore::new(object_store::services::Memory::default()).unwrap(),
+                requests,
+                factory.clone(),
+                &metadata,
+            );
+            let unchanged = applier.compatible_requests_for_sst(&metadata).unwrap();
+            assert!(Arc::ptr_eq(&unchanged, &applier.requests));
+            for name in [
+                "granularity",
+                "false_positive_rate",
+                "analyzer",
+                "case_sensitive",
+                "backend",
+                "disabled",
+                "missing",
+            ] {
+                let mut changed = options.clone();
+                match name {
+                    "granularity" => changed.granularity += 1,
+                    "false_positive_rate" => changed.false_positive_rate_in_10000 += 1,
+                    "analyzer" => changed.analyzer = FulltextAnalyzer::Chinese,
+                    "case_sensitive" => changed.case_sensitive = true,
+                    "backend" => {
+                        changed.backend = if backend == FulltextBackend::Bloom {
+                            FulltextBackend::Tantivy
+                        } else {
+                            FulltextBackend::Bloom
+                        };
+                    }
+                    "disabled" => changed.enable = false,
+                    "missing" => {}
+                    _ => unreachable!(),
+                }
+                let compatible = matches!(name, "granularity" | "false_positive_rate")
+                    || (name == "analyzer" && backend == FulltextBackend::Bloom);
+                let sst = json_metadata((name != "missing").then_some(changed));
+                let requests = applier.compatible_requests_for_sst(&sst).unwrap();
+                assert!(requests.contains_key(&ordinary));
+                assert!(requests.contains_key(&other));
+                assert_eq!(
+                    requests.contains_key(&path),
+                    compatible,
+                    "{backend:?}, {name}"
+                );
+                assert_eq!(Arc::ptr_eq(&requests, &applier.requests), compatible);
+                assert_eq!(
+                    PredicateKey::new_fulltext(requests)
+                        == PredicateKey::new_fulltext(applier.requests.clone()),
+                    compatible,
+                );
+            }
+            // An unresolved query-side target must not become compatible merely
+            // because the expected options map has no entry for it.
+            let applier = FulltextIndexApplier::new(
+                "test".into(),
+                PathType::Bare,
+                object_store::ObjectStore::new(object_store::services::Memory::default()).unwrap(),
+                BTreeMap::from([(missing.clone(), FulltextRequest::default())]),
+                factory.clone(),
+                &metadata,
+            );
+            assert!(applier.compatible_requests_for_sst(&metadata).is_none());
+            // Missing current options are also fail-closed even if the SST has them.
+            let applier = FulltextIndexApplier::new(
+                "test".into(),
+                PathType::Bare,
+                object_store::ObjectStore::new(object_store::services::Memory::default()).unwrap(),
+                BTreeMap::from([(path.clone(), FulltextRequest::default())]),
+                factory.clone(),
+                &json_metadata(None),
+            );
+            assert!(applier.compatible_requests_for_sst(&metadata).is_none());
+        }
+    }
+
+    #[test]
+    fn test_ordinary_fulltext_sst_compatibility() {
+        let (_dir, factory) = PuffinManagerFactory::new_for_test_block("ordinary_fulltext_plan");
+        let metadata = mock_metadata_with_fulltext(FulltextBackend::Bloom);
+        let applier = FulltextIndexApplier::new(
+            "test".into(),
+            PathType::Bare,
+            object_store::ObjectStore::new(object_store::services::Memory::default()).unwrap(),
+            BTreeMap::from([(IndexTarget::ColumnId(1), FulltextRequest::default())]),
+            factory,
+            &metadata,
+        );
+        assert!(applier.compatible_requests_for_sst(&metadata).is_some());
+        assert!(
+            applier
+                .compatible_requests_for_sst(&mock_metadata_with_fulltext(FulltextBackend::Tantivy))
+                .is_some()
+        );
+        let mut non_string = metadata.clone();
+        non_string.column_metadatas[0].column_schema.data_type = ConcreteDataType::int64_datatype();
+        assert!(applier.compatible_requests_for_sst(&non_string).is_none());
+        assert!(
+            applier
+                .compatible_requests_for_sst(&mock_metadata_without_fulltext())
+                .is_some()
+        );
+        let mut disabled = metadata.clone();
+        disabled.column_metadatas[0]
+            .column_schema
+            .set_fulltext_options(&FulltextOptions {
+                enable: false,
+                ..Default::default()
+            })
+            .unwrap();
+        assert!(applier.compatible_requests_for_sst(&disabled).is_some());
+    }
 
     /// A `matches_term` or `LIKE` predicate on `col`, or on `lower(col)` when `lowered`.
     enum Predicate<'a> {
@@ -994,5 +1217,79 @@ mod tests {
                 }
             }
         }
+    }
+    pub(crate) fn json_metadata(options: Option<FulltextOptions>) -> RegionMetadata {
+        let mut builder = RegionMetadataBuilder::from_existing(mock_metadata_with_fulltext(
+            FulltextBackend::Bloom,
+        ));
+        let mut column =
+            ColumnSchema::new("attrs", ConcreteDataType::json2(Default::default()), true);
+        column.with_extension_type(&Json2ExtensionType::new(Arc::new(JsonMetadata::new(
+            JsonSettings::try_new(
+                vec![
+                    JsonTypeHint {
+                        path: vec!["message".into()],
+                        data_type: ConcreteDataType::string_datatype(),
+                        inverted_index: false,
+                        skipping_index: None,
+                        fulltext_index: options,
+                    },
+                    JsonTypeHint {
+                        path: vec!["other".into()],
+                        data_type: ConcreteDataType::string_datatype(),
+                        inverted_index: false,
+                        skipping_index: None,
+                        fulltext_index: Some(FulltextOptions {
+                            enable: true,
+                            ..Default::default()
+                        }),
+                    },
+                ],
+                Some(0),
+            )
+            .unwrap(),
+        ))));
+        builder.push_column_metadata(ColumnMetadata {
+            column_schema: column,
+            semantic_type: SemanticType::Field,
+            column_id: 3,
+        });
+        builder.build().unwrap()
+    }
+
+    pub(crate) fn mock_metadata_without_fulltext() -> RegionMetadata {
+        let mut builder = RegionMetadataBuilder::new(RegionId::new(1, 2));
+        builder
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new("text", ConcreteDataType::string_datatype(), true),
+                semantic_type: SemanticType::Field,
+                column_id: 1,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "ts",
+                    ConcreteDataType::timestamp_millisecond_datatype(),
+                    false,
+                ),
+                semantic_type: SemanticType::Timestamp,
+                column_id: 2,
+            });
+
+        builder.build().unwrap()
+    }
+
+    pub(crate) fn mock_metadata_with_fulltext(backend: FulltextBackend) -> RegionMetadata {
+        let mut metadata = mock_metadata_without_fulltext();
+        metadata.column_metadatas[0]
+            .column_schema
+            .set_fulltext_options(&FulltextOptions {
+                enable: true,
+                backend,
+                ..Default::default()
+            })
+            .unwrap();
+        RegionMetadataBuilder::from_existing(metadata)
+            .build()
+            .unwrap()
     }
 }

@@ -26,6 +26,7 @@ use common_grpc::channel_manager::{ChannelConfig, ChannelManager, load_client_tl
 use common_meta::peer::{Peer, PeerDiscovery};
 use common_query::{Output, OutputData};
 use common_telemetry::warn;
+use common_time::Timezone;
 use futures::stream::{FuturesUnordered, StreamExt};
 use meta_client::client::MetaClient;
 use query::datafusion::QUERY_PARALLELISM_HINT;
@@ -363,7 +364,10 @@ impl FrontendClient {
         })
     }
 
-    /// Execute a SQL statement on the frontend.
+    /// Executes SQL with optional Flow budget extensions and an optional
+    /// timezone override.
+    ///
+    /// `timezone`, when set, overrides the session timezone for this statement.
     ///
     /// `extensions` are forwarded to the executing frontend exactly like
     /// `query_with_terminal_metrics` does: as query context extensions in
@@ -382,10 +386,14 @@ impl FrontendClient {
         schema: &str,
         sql: &str,
         extensions: &[(&str, &str)],
+        timezone: Option<Timezone>,
     ) -> Result<Output, Error> {
         match self {
             FrontendClient::Distributed { .. } => {
-                let db = self.get_random_active_frontend(catalog, schema).await?;
+                let mut db = self.get_random_active_frontend(catalog, schema).await?;
+                if let Some(timezone) = timezone {
+                    db.database.set_timezone(timezone.to_string());
+                }
                 db.database
                     .flight_request()
                     .with_flow_extensions(extensions)
@@ -397,46 +405,46 @@ impl FrontendClient {
             FrontendClient::Standalone {
                 database_client, ..
             } => {
-                let extensions = HashMap::from_iter(
-                    extensions
-                        .iter()
-                        .map(|(key, value)| ((*key).to_string(), (*value).to_string())),
-                );
-                let ctx = QueryContextBuilder::default()
+                // Each request gets fresh query state, including read snapshots.
+                let mut ctx = QueryContextBuilder::default()
                     .current_catalog(catalog.to_string())
                     .current_schema(schema.to_string())
-                    .extensions(extensions)
-                    .build();
-                let ctx = Arc::new(ctx);
-                {
-                    let database_client = {
-                        database_client
-                            .handler
-                            .lock()
-                            .map_err(|e| {
-                                UnexpectedSnafu {
-                                    reason: format!("Failed to lock database client: {e}"),
-                                }
-                                .build()
-                            })?
-                            .as_ref()
-                            .context(UnexpectedSnafu {
-                                reason: "Standalone's frontend instance is not set",
-                            })?
-                            .upgrade()
-                            .context(UnexpectedSnafu {
-                                reason: "Failed to upgrade database client",
-                            })?
-                    };
-                    let req = Request::Query(QueryRequest {
-                        query: Some(Query::Sql(sql.to_string())),
-                    });
-                    database_client
-                        .do_query(req, ctx)
-                        .await
-                        .map_err(BoxedError::new)
-                        .context(ExternalSnafu)
+                    .extensions(HashMap::from_iter(
+                        extensions
+                            .iter()
+                            .map(|(key, value)| ((*key).to_string(), (*value).to_string())),
+                    ));
+                if let Some(timezone) = timezone {
+                    ctx = ctx.timezone(timezone);
                 }
+                let ctx = Arc::new(ctx.build());
+                let database_client = {
+                    database_client
+                        .handler
+                        .lock()
+                        .map_err(|e| {
+                            UnexpectedSnafu {
+                                reason: format!("Failed to lock database client: {e}"),
+                            }
+                            .build()
+                        })?
+                        .as_ref()
+                        .context(UnexpectedSnafu {
+                            reason: "Standalone's frontend instance is not set",
+                        })?
+                        .upgrade()
+                        .context(UnexpectedSnafu {
+                            reason: "Failed to upgrade database client",
+                        })?
+                };
+                let req = Request::Query(QueryRequest {
+                    query: Some(Query::Sql(sql.to_string())),
+                });
+                database_client
+                    .do_query(req, ctx)
+                    .await
+                    .map_err(BoxedError::new)
+                    .context(ExternalSnafu)
             }
         }
     }
@@ -1139,6 +1147,64 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_sql_timezone_and_fresh_context() {
+        struct ContextHandler {
+            expected_timezone: Timezone,
+            contexts: Mutex<Vec<QueryContextRef>>,
+        }
+
+        #[async_trait::async_trait]
+        impl GrpcQueryHandlerWithBoxedError for ContextHandler {
+            async fn do_query(
+                &self,
+                request: Request,
+                ctx: QueryContextRef,
+            ) -> std::result::Result<Output, BoxedError> {
+                assert_eq!(ctx.current_catalog(), "test_catalog");
+                assert_eq!(ctx.current_schema(), "test_schema");
+                assert_eq!(ctx.timezone(), self.expected_timezone);
+                assert!(ctx.snapshots().is_empty());
+                ctx.set_snapshot(1, 42);
+                self.contexts.lock().unwrap().push(ctx);
+                assert!(matches!(request, Request::Query(QueryRequest {
+                    query: Some(Query::Sql(sql)),
+                }) if sql == "SELECT to_unixtime('2026-01-01 00:00:00')"));
+                Ok(Output::new_with_affected_rows(0))
+            }
+        }
+
+        for timezone in [None, Some("UTC"), Some("+08:00")] {
+            let timezone = timezone.map(|tz| Timezone::from_tz_string(tz).unwrap());
+            let handler = Arc::new(ContextHandler {
+                expected_timezone: timezone
+                    .clone()
+                    .unwrap_or_else(|| QueryContextBuilder::default().build().timezone()),
+                contexts: Mutex::new(Vec::new()),
+            });
+            let grpc_handler: Arc<dyn GrpcQueryHandlerWithBoxedError> = handler.clone();
+            let client = FrontendClient::from_grpc_handler(
+                Arc::downgrade(&grpc_handler),
+                QueryOptions::default(),
+            );
+            for _ in 0..2 {
+                client
+                    .sql(
+                        "test_catalog",
+                        "test_schema",
+                        "SELECT to_unixtime('2026-01-01 00:00:00')",
+                        &[],
+                        timezone.clone(),
+                    )
+                    .await
+                    .unwrap();
+            }
+            let contexts = handler.contexts.lock().unwrap();
+            assert_eq!(contexts.len(), 2);
+            assert!(!Arc::ptr_eq(&contexts[0], &contexts[1]));
+        }
+    }
+
+    #[tokio::test]
     async fn wait_initialized() {
         let (client, handler_mut) =
             FrontendClient::from_empty_grpc_handler(QueryOptions::default());
@@ -1229,6 +1295,7 @@ mod tests {
                     (query::options::FLOW_MAX_MEMORY_BYTES, "536870912"),
                     (query::options::FLOW_ID, "7"),
                 ],
+                None,
             )
             .await
             .unwrap();
@@ -1267,7 +1334,7 @@ mod tests {
             FrontendClient::from_grpc_handler(Arc::downgrade(&handler), QueryOptions::default());
 
         client
-            .sql("greptime", "public", "select 1", &[])
+            .sql("greptime", "public", "select 1", &[], None)
             .await
             .unwrap();
 

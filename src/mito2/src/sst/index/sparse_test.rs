@@ -37,7 +37,7 @@ use store_api::storage::consts::ReservedColumnId;
 
 use super::{IndexBuildType, IndexerBuilder, IndexerBuilderImpl};
 use crate::region::options::IndexOptions;
-use crate::sst::file::{RegionFileId, RegionIndexId};
+use crate::sst::file::{IndexType, RegionFileId, RegionIndexId};
 use crate::sst::index::bloom_filter::creator::tests::TestPathProvider;
 use crate::sst::index::intermediate::IntermediateManager;
 use crate::sst::index::puffin_manager::PuffinManagerFactory;
@@ -138,9 +138,11 @@ async fn sparse_and_materialized_tags_produce_identical_indexes() {
             .await
             .unwrap(),
         index_options: options,
-        inverted_index_config: Default::default(),
-        fulltext_index_config: Default::default(),
-        bloom_filter_index_config: Default::default(),
+        registry: Arc::new(crate::sst::index::registry::IndexRegistry::new(
+            Default::default(),
+            Default::default(),
+            Default::default(),
+        )),
     };
     let mut expected = None;
     for batch in [materialized, sparse, mixed] {
@@ -150,15 +152,22 @@ async fn sparse_and_materialized_tags_produce_identical_indexes() {
         indexer.update_flat(&batch.slice(0, 2)).await;
         indexer.update_flat(&batch.slice(2, 9)).await;
         let output = indexer.finish().await;
-        assert_eq!(output.inverted_index.row_count, 11);
-        assert_eq!(output.bloom_filter.row_count, 11);
-        assert_eq!(output.inverted_index.columns.len(), 4);
-        assert_eq!(output.bloom_filter.columns.len(), 4);
+        for kind in [IndexType::InvertedIndex, IndexType::BloomFilterIndex] {
+            assert_eq!(
+                output
+                    .entries
+                    .iter()
+                    .filter(|entry| entry.kind.index_type() == kind)
+                    .count(),
+                4
+            );
+        }
 
         let reader = puffin.reader(&RegionIndexId::new(file, 0)).await.unwrap();
         let blob = reader.blob("greptime-inverted-index-v1").await.unwrap();
         let inverted = InvertedIndexBlobReader::new(blob.reader().await.unwrap());
         let metas = inverted.metadata(None).await.unwrap();
+        assert_eq!(metas.total_row_count, 11);
         let mut index_bytes = BTreeMap::new();
         // Columns can be emitted in a different order; compare each column's FST and bitmaps.
         for (name, meta) in &metas.metas {

@@ -89,9 +89,9 @@ order by t.i desc;
 | logical_plan_| Sort: t.i DESC NULLS FIRST_|
 |_|_SubqueryAlias: t_|
 |_|_Cross Join:_|
-|_|_Projection: integers.i_|
 |_|_MergeScan [is_placeholder=false, remote_input=[_|
-|_| Filter: integers.i IS NOT NULL_|
+|_| Projection: integers.i_|
+|_|_Filter: integers.i IS NOT NULL_|
 |_|_TableScan: integers, partial_filters=[integers.i IS NOT NULL, Boolean(true)] |
 |_| ]]_|
 |_|_Projection:_|
@@ -101,7 +101,6 @@ order by t.i desc;
 | physical_plan | SortPreservingMergeExec: [i@0 DESC]_|
 |_|_SortExec: expr=[i@0 DESC], preserve_partitioning=[true]_|
 |_|_CrossJoinExec_|
-|_|_ProjectionExec: expr=[i@0 as i]_|
 |_|_MergeScanExec: REDACTED
 |_|_RepartitionExec: partitioning=REDACTED
 |_|_ProjectionExec: expr=[]_|
@@ -129,9 +128,9 @@ EXPLAIN INSERT INTO other SELECT i, 2 FROM integers WHERE i=(SELECT MAX(i) FROM 
 |                     |   Aggregate: groupBy=[[]], aggr=[[max(integers.i)]]                         |
 |                     |     TableScan: integers                                                     |
 |                     | ]]                                                                          |
-|                     |       Projection: integers.i                                                |
-|                     |         MergeScan [is_placeholder=false, remote_input=[                     |
-|                     | TableScan: integers                                                         |
+|                     |       MergeScan [is_placeholder=false, remote_input=[                       |
+|                     | Projection: integers.i                                                      |
+|                     |   TableScan: integers                                                       |
 |                     | ]]                                                                          |
 | physical_plan_error | This feature is not implemented: Insert into not implemented for this table |
 +---------------------+-----------------------------------------------------------------------------+
@@ -203,9 +202,9 @@ EXPLAIN SELECT * FROM integers i1 WHERE EXISTS(SELECT count(i) FROM integers WHE
 |_|_Filter: integers.i IS NOT NULL_|
 |_|_TableScan: integers, partial_filters=[integers.i IS NOT NULL]_|
 |_| ]]_|
-|_|_Projection: __correlated_sq_1.i_|
 |_|_MergeScan [is_placeholder=false, remote_input=[_|
-|_| SubqueryAlias: __correlated_sq_1_|
+|_| Projection: __correlated_sq_1.i_|
+|_|_SubqueryAlias: __correlated_sq_1_|
 |_|_Projection: count(integers.i), integers.i_|
 |_|_Aggregate: groupBy=[[integers.i]], aggr=[[count(integers.i)]]_|
 |_|_Filter: integers.i IS NOT NULL_|
@@ -217,7 +216,6 @@ EXPLAIN SELECT * FROM integers i1 WHERE EXISTS(SELECT count(i) FROM integers WHE
 |_|_RepartitionExec: partitioning=REDACTED
 |_|_MergeScanExec: REDACTED
 |_|_RepartitionExec: partitioning=REDACTED
-|_|_ProjectionExec: expr=[i@1 as i]_|
 |_|_MergeScanExec: REDACTED
 |_|_|
 +-+-+
@@ -773,9 +771,9 @@ EXPLAIN SELECT (SELECT SUM(v) FROM nested_scalar_part WHERE v > (SELECT AVG(v) F
 |_| Aggregate: groupBy=[[]], aggr=[[__avg_state(CAST(nested_scalar_part.v AS Float64))]]_|
 |_|_TableScan: nested_scalar_part_|
 |_| ]]_|
-|_|_Projection: nested_scalar_part.v_|
 |_|_MergeScan [is_placeholder=false, remote_input=[_|
-|_| TableScan: nested_scalar_part_|
+|_| Projection: nested_scalar_part.v_|
+|_|_TableScan: nested_scalar_part_|
 |_| ]]_|
 |_|_Projection:_|
 |_|_Limit: skip=0, fetch=1_|
@@ -795,7 +793,6 @@ EXPLAIN SELECT (SELECT SUM(v) FROM nested_scalar_part WHERE v > (SELECT AVG(v) F
 |_|_AggregateExec: mode=Partial, gby=[], aggr=[sum(nested_scalar_part.v)]_|
 |_|_FilterExec: CAST(v@0 AS Float64) > scalar_subquery(<pending>)_|
 |_|_RepartitionExec: partitioning=REDACTED
-|_|_ProjectionExec: expr=[v@1 as v]_|
 |_|_MergeScanExec: REDACTED
 |_|_AggregateExec: mode=Final, gby=[], aggr=[__avg_merge(__avg_state(nested_scalar_part.v)) as avg(nested_scalar_part.v)]_|
 |_|_CoalescePartitionsExec_|

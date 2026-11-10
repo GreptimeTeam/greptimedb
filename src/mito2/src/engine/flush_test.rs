@@ -352,7 +352,7 @@ async fn test_manual_flush_with_format(flat_format: bool) {
 }
 
 #[tokio::test]
-async fn test_flushed_parquet_bytes() {
+async fn test_ingested_parquet_bytes() {
     for flat_format in [false, true] {
         let mut env = TestEnv::with_prefix("flushed-parquet-bytes").await;
         let engine = env
@@ -374,7 +374,7 @@ async fn test_flushed_parquet_bytes() {
             .await
             .unwrap();
         let statistic = || engine.get_region_statistic(region_id).unwrap();
-        assert_eq!(statistic().flushed_parquet_bytes, 0);
+        assert_eq!(statistic().ingested_parquet_bytes, 0);
 
         let mut previous_bytes = 0;
         for start in [0, 10] {
@@ -387,7 +387,7 @@ async fn test_flushed_parquet_bytes() {
                 },
             )
             .await;
-            assert_eq!(statistic().flushed_parquet_bytes, previous_bytes);
+            assert_eq!(statistic().ingested_parquet_bytes, previous_bytes);
             flush_region(&engine, region_id, None).await;
             let manifest = engine
                 .get_region(region_id)
@@ -397,11 +397,11 @@ async fn test_flushed_parquet_bytes() {
                 .await;
             let parquet_bytes: u64 = manifest.files.values().map(|file| file.file_size).sum();
             assert!(parquet_bytes > previous_bytes);
-            assert_eq!(statistic().flushed_parquet_bytes, parquet_bytes);
+            assert_eq!(statistic().ingested_parquet_bytes, parquet_bytes);
             previous_bytes = parquet_bytes;
         }
         flush_region(&engine, region_id, None).await;
-        assert_eq!(statistic().flushed_parquet_bytes, previous_bytes);
+        assert_eq!(statistic().ingested_parquet_bytes, previous_bytes);
 
         // A generic edit can add the same file metadata without producing a flush.
         let file = engine
@@ -430,7 +430,7 @@ async fn test_flushed_parquet_bytes() {
             )
             .await
             .unwrap();
-        assert_eq!(statistic().flushed_parquet_bytes, previous_bytes);
+        assert_eq!(statistic().ingested_parquet_bytes, previous_bytes);
 
         engine
             .handle_request(
@@ -446,11 +446,11 @@ async fn test_flushed_parquet_bytes() {
             )
             .await
             .unwrap();
-        assert_eq!(statistic().flushed_parquet_bytes, previous_bytes);
+        assert_eq!(statistic().ingested_parquet_bytes, previous_bytes);
         assert_eq!(statistic().sst_num, 1);
         reopen_region(&engine, region_id, table_dir, true, HashMap::new()).await;
         assert!(statistic().sst_size > 0);
-        assert_eq!(statistic().flushed_parquet_bytes, 0);
+        assert_eq!(statistic().ingested_parquet_bytes, 0);
     }
 }
 

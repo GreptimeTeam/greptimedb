@@ -44,6 +44,40 @@ use crate::worker::WorkerId;
 #[snafu(visibility(pub))]
 #[stack_trace_debug]
 pub enum Error {
+    #[cfg(feature = "enterprise")]
+    #[snafu(display("Failed to route multi-region compaction input"))]
+    RouteMultiRegion {
+        #[snafu(source)]
+        source: PartitionError,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[cfg(feature = "enterprise")]
+    #[snafu(display("Invalid multi-region compaction: {reason}"))]
+    InvalidMultiRegionCompaction {
+        reason: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[cfg(feature = "enterprise")]
+    #[snafu(display("Multi-region compaction resource limit: {reason}"))]
+    MultiRegionCompactionResource {
+        reason: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("SST writer {kind} needs {bytes} bytes, budget is {limit}"))]
+    SstWriteMemoryExceeded {
+        kind: &'static str,
+        bytes: usize,
+        limit: usize,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Unexpected data type"))]
     DataTypeMismatch {
         source: datatypes::error::Error,
@@ -109,6 +143,25 @@ pub enum Error {
     SerializeColumnMetadata {
         #[snafu(source)]
         error: serde_json::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Manifest version {version} conflicts in {manifest_dir}: {reason}"))]
+    ManifestVersionConflict {
+        version: ManifestVersion,
+        manifest_dir: String,
+        reason: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display(
+        "Manifest checkpoint {version} in {manifest_dir} was removed after it was listed"
+    ))]
+    ManifestCheckpointVanished {
+        version: ManifestVersion,
+        manifest_dir: String,
         #[snafu(implicit)]
         location: Location,
     },
@@ -1491,7 +1544,9 @@ impl Error {
     /// from a revoked key, a changed bucket policy or clock skew) never proves nothing was written.
     pub(crate) fn may_have_persisted_manifest_update(&self) -> bool {
         match self {
-            Error::UpdateManifest { .. }
+            // Applicability and capability checks reject the edit before storage I/O.
+            Error::InvalidRequest { .. }
+            | Error::UpdateManifest { .. }
             | Error::RegionState { .. }
             | Error::RegionTruncated { .. }
             | Error::RegionStopped { .. }
@@ -1519,10 +1574,19 @@ impl ErrorExt for Error {
         use Error::*;
 
         match self {
+            #[cfg(feature = "enterprise")]
+            RouteMultiRegion { source, .. } => source.status_code(),
+            #[cfg(feature = "enterprise")]
+            InvalidMultiRegionCompaction { .. } => StatusCode::InvalidArguments,
+            #[cfg(feature = "enterprise")]
+            MultiRegionCompactionResource { .. } => StatusCode::RuntimeResourcesExhausted,
+            SstWriteMemoryExceeded { .. } => StatusCode::RuntimeResourcesExhausted,
             DataTypeMismatch { source, .. } => source.status_code(),
-            OpenDal { .. } | ManifestDeltaNotFound { .. } | ReadParquet { .. } => {
-                StatusCode::StorageUnavailable
-            }
+            OpenDal { .. }
+            | ManifestDeltaNotFound { .. }
+            | ManifestVersionConflict { .. }
+            | ManifestCheckpointVanished { .. }
+            | ReadParquet { .. } => StatusCode::StorageUnavailable,
             WriteWal { source, .. }
             | ReadWal { source, .. }
             | DeleteWal { source, .. }
@@ -1743,7 +1807,9 @@ impl ErrorExt for Error {
             | RegionBusy { .. }
             | ManualCompactionAlreadyRunning { .. }
             | FlushableRegionState { .. }
-            | ManifestDeltaNotFound { .. } => RetryHint::Retryable,
+            | ManifestDeltaNotFound { .. }
+            | ManifestVersionConflict { .. }
+            | ManifestCheckpointVanished { .. } => RetryHint::Retryable,
 
             OpenDal { error, .. }
             | DeleteSsts { error, .. }
@@ -1957,9 +2023,24 @@ mod tests {
         let region_id = RegionId::new(1, 1);
         let error = RegionTruncatedSnafu { region_id }.build();
         assert!(!error.may_have_persisted_manifest_update());
+        let error = InvalidRequestSnafu {
+            region_id,
+            reason: "manifest applicability check rejected the edit",
+        }
+        .build();
+        assert!(!error.may_have_persisted_manifest_update());
 
         // This can be raised while applying an edit after its manifest file was saved.
         let error = RegionMetadataNotFoundSnafu {}.build();
         assert!(error.may_have_persisted_manifest_update());
+
+        let error = ManifestVersionConflictSnafu {
+            version: 1u64,
+            manifest_dir: "manifest/",
+            reason: "test",
+        }
+        .build();
+        assert!(error.may_have_persisted_manifest_update());
+        assert!(error.retry_hint().is_retryable());
     }
 }

@@ -1491,6 +1491,48 @@ mod tests {
         );
     }
 
+    async fn assert_inverted_and_bloom_artifacts(
+        manager: &crate::sst::index::puffin_manager::SstPuffinManager,
+        region_id: RegionId,
+        info: &SstInfo,
+    ) {
+        use crate::sst::file::{IndexType, RegionFileId, RegionIndexId};
+        use index::bloom_filter::reader::{BloomFilterReader, BloomFilterReaderImpl};
+        use index::inverted_index::format::reader::{InvertedIndexBlobReader, InvertedIndexReader};
+        use puffin::puffin_manager::{PuffinManager, PuffinReader};
+
+        let columns = |kind| {
+            info.index_metadata
+                .entries
+                .iter()
+                .filter(|entry| entry.kind.index_type() == kind)
+                .filter_map(|entry| entry.column_id)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(columns(IndexType::InvertedIndex), vec![0]);
+        assert_eq!(columns(IndexType::BloomFilterIndex), vec![1]);
+        let reader = manager
+            .reader(&RegionIndexId::new(
+                RegionFileId::new(region_id, info.file_id),
+                info.index_metadata.version,
+            ))
+            .await
+            .unwrap();
+        let blob = reader.blob("greptime-inverted-index-v1").await.unwrap();
+        assert!(blob.metadata().length > 0);
+        let inverted = InvertedIndexBlobReader::new(blob.reader().await.unwrap());
+        let metadata = inverted.metadata(None).await.unwrap();
+        assert_eq!(metadata.total_row_count, 200);
+        assert_eq!(
+            metadata.metas.keys().cloned().collect::<Vec<_>>(),
+            vec!["0".to_string()]
+        );
+        let blob = reader.blob("greptime-bloom-filter-v1-1").await.unwrap();
+        assert!(blob.metadata().length > 0);
+        let bloom = BloomFilterReaderImpl::new(blob.reader().await.unwrap());
+        assert_eq!(bloom.metadata(None).await.unwrap().row_count, 200);
+    }
+
     #[tokio::test]
     async fn test_write_read_with_index() {
         let mut env = TestEnv::new().await;
@@ -1529,9 +1571,11 @@ mod tests {
                     ..Default::default()
                 },
             },
-            inverted_index_config: Default::default(),
-            fulltext_index_config: Default::default(),
-            bloom_filter_index_config: Default::default(),
+            registry: Arc::new(crate::sst::index::registry::IndexRegistry::new(
+                Default::default(),
+                Default::default(),
+                Default::default(),
+            )),
         };
 
         let mut metrics = Metrics::new(WriteType::Flush);
@@ -1554,13 +1598,13 @@ mod tests {
         assert!(info.file_size > 0);
         assert!(info.index_metadata.file_size > 0);
 
-        assert!(info.index_metadata.inverted_index.index_size > 0);
-        assert_eq!(info.index_metadata.inverted_index.row_count, 200);
-        assert_eq!(info.index_metadata.inverted_index.columns, vec![0]);
-
-        assert!(info.index_metadata.bloom_filter.index_size > 0);
-        assert_eq!(info.index_metadata.bloom_filter.row_count, 200);
-        assert_eq!(info.index_metadata.bloom_filter.columns, vec![1]);
+        assert_inverted_and_bloom_artifacts(
+            &env.get_puffin_manager()
+                .build(object_store.clone(), file_path.clone()),
+            metadata.region_id,
+            &info,
+        )
+        .await;
 
         assert_eq!(
             (
@@ -1579,7 +1623,7 @@ mod tests {
                 file_size: info.file_size,
                 max_row_group_uncompressed_size: info.max_row_group_uncompressed_size,
                 available_indexes: info.index_metadata.build_available_indexes(),
-                indexes: info.index_metadata.build_indexes(),
+                indexes: info.index_metadata.build_indexes().unwrap(),
                 index_file_size: info.index_metadata.file_size,
                 index_version: 0,
                 num_row_groups: info.num_row_groups,
@@ -2073,9 +2117,11 @@ mod tests {
                     ..Default::default()
                 },
             },
-            inverted_index_config: Default::default(),
-            fulltext_index_config: Default::default(),
-            bloom_filter_index_config: Default::default(),
+            registry: Arc::new(crate::sst::index::registry::IndexRegistry::new(
+                Default::default(),
+                Default::default(),
+                Default::default(),
+            )),
         }
     }
 
@@ -2120,7 +2166,7 @@ mod tests {
                 file_size: info.file_size,
                 max_row_group_uncompressed_size: info.max_row_group_uncompressed_size,
                 available_indexes: info.index_metadata.build_available_indexes(),
-                indexes: info.index_metadata.build_indexes(),
+                indexes: info.index_metadata.build_indexes().unwrap(),
                 index_file_size: info.index_metadata.file_size,
                 index_version: 0,
                 num_row_groups: info.num_row_groups,
@@ -2192,9 +2238,11 @@ mod tests {
                     ..Default::default()
                 },
             },
-            inverted_index_config: Default::default(),
-            fulltext_index_config: Default::default(),
-            bloom_filter_index_config: Default::default(),
+            registry: Arc::new(crate::sst::index::registry::IndexRegistry::new(
+                Default::default(),
+                Default::default(),
+                Default::default(),
+            )),
         };
 
         let mut metrics = Metrics::new(WriteType::Flush);
@@ -2217,13 +2265,13 @@ mod tests {
         assert!(info.file_size > 0);
         assert!(info.index_metadata.file_size > 0);
 
-        assert!(info.index_metadata.inverted_index.index_size > 0);
-        assert_eq!(info.index_metadata.inverted_index.row_count, 200);
-        assert_eq!(info.index_metadata.inverted_index.columns, vec![0]);
-
-        assert!(info.index_metadata.bloom_filter.index_size > 0);
-        assert_eq!(info.index_metadata.bloom_filter.row_count, 200);
-        assert_eq!(info.index_metadata.bloom_filter.columns, vec![1]);
+        assert_inverted_and_bloom_artifacts(
+            &env.get_puffin_manager()
+                .build(object_store.clone(), file_path.clone()),
+            metadata.region_id,
+            &info,
+        )
+        .await;
 
         assert_eq!(
             (
@@ -3154,7 +3202,7 @@ mod tests {
             metadata.clone(),
         );
 
-        let mut info = write_flat_sst(
+        let info = write_flat_sst(
             object_store.clone(),
             metadata.clone(),
             indexer_builder,
@@ -3167,12 +3215,49 @@ mod tests {
         assert!(info.file_size > 0);
         assert!(info.index_metadata.file_size > 0);
 
-        // Verify fulltext indexes were created
-        assert!(info.index_metadata.fulltext_index.index_size > 0);
-        assert_eq!(info.index_metadata.fulltext_index.row_count, 200);
-        // text_bloom (column_id 1) and text_tantivy (column_id 2)
-        info.index_metadata.fulltext_index.columns.sort_unstable();
-        assert_eq!(info.index_metadata.fulltext_index.columns, vec![1, 2]);
+        // Verify both persisted backends, not just their output descriptors.
+        use crate::sst::file::{RegionFileId, RegionIndexId};
+        use crate::sst::index::kind::IndexKind;
+        use index::bloom_filter::reader::{BloomFilterReader, BloomFilterReaderImpl};
+        use puffin::puffin_manager::{PuffinManager, PuffinReader};
+        let mut columns = info
+            .index_metadata
+            .entries
+            .iter()
+            .filter(|entry| entry.kind == IndexKind::Fulltext)
+            .filter_map(|entry| entry.column_id)
+            .collect::<Vec<_>>();
+        columns.sort_unstable();
+        assert_eq!(columns, vec![1, 2]);
+        let manager = env
+            .get_puffin_manager()
+            .build(object_store.clone(), file_path.clone());
+        let reader = manager
+            .reader(&RegionIndexId::new(
+                RegionFileId::new(metadata.region_id, info.file_id),
+                info.index_metadata.version,
+            ))
+            .await
+            .unwrap();
+        let footer = reader.metadata().await.unwrap();
+        for key in [
+            "greptime-fulltext-index-bloom-v2-1",
+            "greptime-fulltext-index-v1-2",
+        ] {
+            assert!(
+                footer
+                    .blobs
+                    .iter()
+                    .any(|blob| blob.blob_type == key && blob.length > 0)
+            );
+        }
+        let blob = reader
+            .blob("greptime-fulltext-index-bloom-v2-1")
+            .await
+            .unwrap();
+        let bloom = BloomFilterReaderImpl::new(blob.reader().await.unwrap());
+        assert_eq!(bloom.metadata(None).await.unwrap().row_count, 200);
+        // The following query assertions exercise both backends against all 200 rows.
 
         assert_eq!(
             (

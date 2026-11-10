@@ -109,6 +109,17 @@ impl CompactionUnit {
         Some(units)
     }
 
+    /// Estimates merge work from distinct input bytes. Expiration-only units do
+    /// not read SSTs; admission assigns them its minimum positive service charge.
+    pub(crate) fn estimated_input_bytes(&self) -> u64 {
+        if self.outputs.is_empty() {
+            return 0;
+        }
+        self.inputs
+            .iter()
+            .fold(0u64, |total, file| total.saturating_add(file.size()))
+    }
+
     /// Estimates merge memory once per input, even when several outputs read it.
     pub(crate) fn estimated_memory_bytes(&self) -> u64 {
         if self.outputs.is_empty() {
@@ -134,7 +145,7 @@ mod tests {
     use store_api::storage::FileId;
 
     use super::*;
-    use crate::compaction::test_util::new_file_handle;
+    use crate::compaction::test_util::{new_file_handle, new_file_handle_with_size_and_sequence};
 
     /// Builds an L1 output that preserves deletion markers for grouping tests.
     fn output(inputs: Vec<FileHandle>) -> CompactionOutput {
@@ -149,7 +160,9 @@ mod tests {
     #[test]
     fn test_compaction_unit_transitive_inputs() {
         let files: Vec<_> = (0..3)
-            .map(|_| new_file_handle(FileId::random(), 0, 100, 0))
+            .map(|i| {
+                new_file_handle_with_size_and_sequence(FileId::random(), 0, 100, 0, 0, (i + 1) * 10)
+            })
             .collect();
         let units = CompactionUnit::from_picker(PickerOutput {
             outputs: vec![
@@ -167,6 +180,8 @@ mod tests {
         assert_eq!(3, units[0].outputs.len());
         assert_eq!(2, units[0].inputs.len());
         assert_eq!(files[2].file_id(), units[1].inputs[0].file_id());
+        assert_eq!(30, units[0].estimated_input_bytes());
+        assert_eq!(30, units[1].estimated_input_bytes());
         assert_eq!(Some(1024), units[0].max_file_size);
         assert_eq!(100, units[1].time_window_size);
     }

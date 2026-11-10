@@ -53,8 +53,8 @@ use session::write_progress::WriteProgress;
 use snafu::{IntoError, ResultExt};
 use table::requests::{
     OTLP_METRIC_COMPAT_KEY, OTLP_METRIC_COMPAT_PROM, SEMANTIC_PER_TABLE_INDEX_KEY,
-    SEMANTIC_SIGNAL_TYPE, SEMANTIC_SOURCE, SIGNAL_TYPE_LOG, SIGNAL_TYPE_METRIC,
-    SOURCE_OPENTELEMETRY,
+    SEMANTIC_PIPELINE, SEMANTIC_SIGNAL_TYPE, SEMANTIC_SOURCE, SIGNAL_TYPE_LOG, SIGNAL_TYPE_METRIC,
+    SOURCE_OPENTELEMETRY, TABLE_DATA_MODEL, TABLE_DATA_MODEL_LOG_V1,
 };
 
 pub(crate) use self::trace_ingest::TraceAuxCache;
@@ -460,6 +460,15 @@ impl OpenTelemetryProtocolHandler for Instance {
             let mut c = (*ctx).clone();
             c.set_extension(SEMANTIC_SIGNAL_TYPE, SIGNAL_TYPE_LOG);
             c.set_extension(SEMANTIC_SOURCE, SOURCE_OPENTELEMETRY);
+            // Only applied when the table is auto-created. The v1 rows are built only
+            // when the table didn't exist at read time; pipeline-defined tables have no
+            // built-in schema.
+            if matches!(pipeline, PipelineWay::OtlpLogDirect(_)) {
+                c.set_extension(TABLE_DATA_MODEL, TABLE_DATA_MODEL_LOG_V1);
+                c.set_extension(SEMANTIC_PIPELINE, TABLE_DATA_MODEL_LOG_V1);
+                // TODO: declare the `service` entity on `service_name` once the cost of
+                // scanning log tables during entity-graph derivation is measured.
+            }
             Arc::new(c)
         };
 

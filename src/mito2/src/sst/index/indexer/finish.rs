@@ -12,54 +12,50 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use common_telemetry::{debug, warn};
-use index::target::IndexTarget;
+use common_telemetry::warn;
 use puffin::puffin_manager::{PuffinManager, PuffinWriter};
-use store_api::storage::ColumnId;
 
 use crate::sst::file::{RegionFileId, RegionIndexId};
 use crate::sst::index::puffin_manager::SstPuffinWriter;
-use crate::sst::index::statistics::{ByteCount, RowCount};
-use crate::sst::index::{
-    BloomFilterOutput, FulltextIndexOutput, IndexOutput, Indexer, InvertedIndexOutput,
-};
+use crate::sst::index::statistics::ByteCount;
+use crate::sst::index::{IndexOutput, Indexer};
 
 impl Indexer {
     pub(crate) async fn do_finish(&mut self) -> IndexOutput {
         self.dense_pk_decoder = None;
-        let mut output = IndexOutput::default();
-
+        if self.is_empty() {
+            return IndexOutput::default();
+        }
         let Some(mut writer) = self.build_puffin_writer().await else {
             self.do_abort().await;
-            return output;
+            return IndexOutput::default();
         };
-
-        let success = self
-            .do_finish_inverted_index(&mut writer, &mut output)
-            .await;
-        if !success {
-            self.do_abort().await;
-            return IndexOutput::default();
+        let mut output = IndexOutput::default();
+        while !self.creators.is_empty() {
+            let mut active = self.creators.remove(0);
+            match active.creator.finish(&mut writer).await {
+                Ok(entries) => {
+                    if let Err(err) = entries.iter().try_for_each(|entry| entry.validate()) {
+                        warn!(err; "Invalid index completion, region_id: {}, file_id: {}", self.region_id, self.file_id);
+                        drop(active);
+                        self.do_abort().await;
+                        return IndexOutput::default();
+                    }
+                    output.entries.extend(entries);
+                }
+                Err(err) => {
+                    if cfg!(any(test, feature = "test")) {
+                        panic!("Failed to finish index: {err:?}");
+                    }
+                    warn!(err; "Failed to finish index, region_id: {}, file_id: {}, kind: {:?}", self.region_id, self.file_id, active.kind);
+                    drop(active);
+                    self.do_abort().await;
+                    return IndexOutput::default();
+                }
+            }
         }
-
-        let success = self
-            .do_finish_fulltext_index(&mut writer, &mut output)
-            .await;
-        if !success {
-            self.do_abort().await;
-            return IndexOutput::default();
-        }
-
-        let success = self.do_finish_bloom_filter(&mut writer, &mut output).await;
-        if !success {
-            self.do_abort().await;
-            return IndexOutput::default();
-        }
-
         self.do_prune_intm_sst_dir().await;
         output.file_size = self.do_finish_puffin_writer(writer).await;
-        // A failed puffin file must not advertise the indexes written into it. Not covered by
-        // tests: `do_finish_puffin_writer` panics on failure in test builds.
         if output.file_size == 0 {
             return IndexOutput::default();
         }
@@ -102,198 +98,14 @@ impl Indexer {
             Err(err) => err,
         };
 
-        if cfg!(any(test, feature = "test")) {
-            panic!(
-                "Failed to finish puffin writer, region_id: {}, file_id: {}, err: {:?}",
-                self.region_id, self.file_id, err
-            );
-        } else {
-            warn!(
-                err; "Failed to finish puffin writer, region_id: {}, file_id: {}",
-                self.region_id, self.file_id,
-            );
-        }
+        // Use the production best-effort path in tests as well, so injected
+        // close failures can verify that no index descriptors are published.
+        warn!(
+            err; "Failed to finish puffin writer, region_id: {}, file_id: {}",
+            self.region_id, self.file_id,
+        );
 
         0
-    }
-
-    /// Returns false if the finish failed.
-    async fn do_finish_inverted_index(
-        &mut self,
-        puffin_writer: &mut SstPuffinWriter,
-        index_output: &mut IndexOutput,
-    ) -> bool {
-        let Some(mut indexer) = self.inverted_indexer.take() else {
-            return true;
-        };
-
-        let column_ids = indexer
-            .indexed_targets()
-            .filter_map(|target| match target {
-                IndexTarget::ColumnId(id) => Some(*id),
-                IndexTarget::JsonPath(_) => None,
-            })
-            .collect();
-        let err = match indexer.finish(puffin_writer).await {
-            Ok((row_count, byte_count)) => {
-                self.fill_inverted_index_output(
-                    &mut index_output.inverted_index,
-                    row_count,
-                    byte_count,
-                    column_ids,
-                );
-                return true;
-            }
-            Err(err) => err,
-        };
-
-        if cfg!(any(test, feature = "test")) {
-            panic!(
-                "Failed to finish inverted index, region_id: {}, file_id: {}, err: {:?}",
-                self.region_id, self.file_id, err
-            );
-        } else {
-            warn!(
-                err; "Failed to finish inverted index, region_id: {}, file_id: {}",
-                self.region_id, self.file_id,
-            );
-        }
-
-        false
-    }
-
-    async fn do_finish_fulltext_index(
-        &mut self,
-        puffin_writer: &mut SstPuffinWriter,
-        index_output: &mut IndexOutput,
-    ) -> bool {
-        let Some(mut indexer) = self.fulltext_indexer.take() else {
-            return true;
-        };
-
-        let column_ids = indexer.column_ids().collect();
-        index_output.fulltext_bloom_columns = indexer.bloom_column_ids().collect();
-        let err = match indexer.finish(puffin_writer).await {
-            Ok((row_count, byte_count)) => {
-                self.fill_fulltext_index_output(
-                    &mut index_output.fulltext_index,
-                    row_count,
-                    byte_count,
-                    column_ids,
-                );
-                return true;
-            }
-            Err(err) => err,
-        };
-
-        if cfg!(any(test, feature = "test")) {
-            panic!(
-                "Failed to finish full-text index, region_id: {}, file_id: {}, err: {:?}",
-                self.region_id, self.file_id, err
-            );
-        } else {
-            warn!(
-                err; "Failed to finish full-text index, region_id: {}, file_id: {}",
-                self.region_id, self.file_id,
-            );
-        }
-
-        false
-    }
-
-    async fn do_finish_bloom_filter(
-        &mut self,
-        puffin_writer: &mut SstPuffinWriter,
-        index_output: &mut IndexOutput,
-    ) -> bool {
-        let Some(mut indexer) = self.bloom_filter_indexer.take() else {
-            return true;
-        };
-
-        let column_ids = indexer
-            .indexed_targets()
-            .filter_map(|target| match target {
-                IndexTarget::ColumnId(id) => Some(*id),
-                IndexTarget::JsonPath(_) => None,
-            })
-            .collect();
-        let err = match indexer.finish(puffin_writer).await {
-            Ok((row_count, byte_count)) => {
-                self.fill_bloom_filter_output(
-                    &mut index_output.bloom_filter,
-                    row_count,
-                    byte_count,
-                    column_ids,
-                );
-                return true;
-            }
-            Err(err) => err,
-        };
-
-        if cfg!(any(test, feature = "test")) {
-            panic!(
-                "Failed to finish bloom filter, region_id: {}, file_id: {}, err: {:?}",
-                self.region_id, self.file_id, err
-            );
-        } else {
-            warn!(
-                err; "Failed to finish bloom filter, region_id: {}, file_id: {}",
-                self.region_id, self.file_id,
-            );
-        }
-
-        false
-    }
-
-    fn fill_inverted_index_output(
-        &mut self,
-        output: &mut InvertedIndexOutput,
-        row_count: RowCount,
-        byte_count: ByteCount,
-        column_ids: Vec<ColumnId>,
-    ) {
-        debug!(
-            "Inverted index created, region_id: {}, file_id: {}, written_bytes: {}, written_rows: {}, columns: {:?}",
-            self.region_id, self.file_id, byte_count, row_count, column_ids
-        );
-
-        output.index_size = byte_count;
-        output.row_count = row_count;
-        output.columns = column_ids;
-    }
-
-    fn fill_fulltext_index_output(
-        &mut self,
-        output: &mut FulltextIndexOutput,
-        row_count: RowCount,
-        byte_count: ByteCount,
-        column_ids: Vec<ColumnId>,
-    ) {
-        debug!(
-            "Full-text index created, region_id: {}, file_id: {}, written_bytes: {}, written_rows: {}, columns: {:?}",
-            self.region_id, self.file_id, byte_count, row_count, column_ids
-        );
-
-        output.index_size = byte_count;
-        output.row_count = row_count;
-        output.columns = column_ids;
-    }
-
-    fn fill_bloom_filter_output(
-        &mut self,
-        output: &mut BloomFilterOutput,
-        row_count: RowCount,
-        byte_count: ByteCount,
-        column_ids: Vec<ColumnId>,
-    ) {
-        debug!(
-            "Bloom filter created, region_id: {}, file_id: {}, written_bytes: {}, written_rows: {}, columns: {:?}",
-            self.region_id, self.file_id, byte_count, row_count, column_ids
-        );
-
-        output.index_size = byte_count;
-        output.row_count = row_count;
-        output.columns = column_ids;
     }
 
     pub(crate) async fn do_prune_intm_sst_dir(&mut self) {

@@ -30,7 +30,7 @@ use crate::error::{RegionMetadataNotFoundSnafu, Result, SerdeJsonSnafu, Utf8Snaf
 use crate::manifest::manager::RemoveFileOptions;
 use crate::region::ManifestStats;
 use crate::sst::FormatType;
-use crate::sst::file::FileMeta;
+use crate::sst::file::{self, FileMeta};
 use crate::wal::EntryId;
 
 /// Actions that can be applied to region manifest.
@@ -83,7 +83,7 @@ pub struct RegionChange {
     pub append_mode: Option<bool>,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq)]
 pub struct RegionEdit {
     pub files_to_add: Vec<FileMeta>,
     pub files_to_remove: Vec<FileMeta>,
@@ -95,6 +95,31 @@ pub struct RegionEdit {
     pub flushed_entry_id: Option<EntryId>,
     pub flushed_sequence: Option<SequenceNumber>,
     pub committed_sequence: Option<SequenceNumber>,
+}
+
+impl RegionEdit {
+    /// Shared reclassification must be add-only for a file ID: the manifest removes
+    /// by ID, while the in-memory Version removes from the specified level.
+    pub(crate) fn validate_shared_reclassification(&self, region_id: RegionId) -> Result<()> {
+        let shared_ids: HashSet<_> = self
+            .files_to_add
+            .iter()
+            .filter(|file| file.level == file::LEVEL_SHARED)
+            .map(|file| file.file_id)
+            .collect();
+        snafu::ensure!(
+            shared_ids.is_empty()
+                || self
+                    .files_to_remove
+                    .iter()
+                    .all(|file| !shared_ids.contains(&file.file_id)),
+            crate::error::InvalidRequestSnafu {
+                region_id,
+                reason: "Cannot add and remove the same shared SST in one edit",
+            }
+        );
+        Ok(())
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -179,6 +204,15 @@ impl PartialEq for RegionManifest {
             && self.truncated_entry_id == other.truncated_entry_id
             && self.compaction_time_window == other.compaction_time_window
             && self.committed_sequence == other.committed_sequence
+    }
+}
+
+impl RegionManifest {
+    /// Rejects prototype task state before deserializing, so callers cannot
+    /// silently drop recovery evidence that this build cannot interpret.
+    pub(crate) fn decode(bytes: &[u8]) -> Result<Self> {
+        crate::manifest::compat::validate_manifest(bytes)?;
+        serde_json::from_slice(bytes).context(SerdeJsonSnafu)
     }
 }
 
@@ -526,7 +560,7 @@ impl RegionCheckpoint {
 
     pub fn decode(bytes: &[u8]) -> Result<Self> {
         let data = std::str::from_utf8(bytes).context(Utf8Snafu)?;
-
+        crate::manifest::compat::validate_checkpoint(data)?;
         serde_json::from_str(data).context(SerdeJsonSnafu)
     }
 }
@@ -614,7 +648,7 @@ impl RegionMetaActionList {
 
     pub fn decode(bytes: &[u8]) -> Result<Self> {
         let data = std::str::from_utf8(bytes).context(Utf8Snafu)?;
-
+        crate::manifest::compat::validate_actions(data)?;
         serde_json::from_str(data).context(SerdeJsonSnafu)
     }
 }
@@ -629,6 +663,51 @@ mod tests {
     // These tests are used to ensure backward compatibility of manifest files.
     // DO NOT modify the serialized string when they fail, check if your
     // modification to manifest-related structs is compatible with older manifests.
+    #[test]
+    fn test_sketch_index_manifest_fixture() {
+        use crate::sst::file::IndexType;
+
+        // Frozen persisted names. Keep this fixture unchanged when extending the format.
+        let fixture = r#"{"actions":[{"Edit":{"files_to_add":[{
+                "region_id":0,"file_id":"bc5896ec-e4d8-4017-a80d-f2de73188d55",
+                "time_range":[{"value":0,"unit":"Millisecond"},{"value":1,"unit":"Millisecond"}],
+                "level":0,"index_version":7,"index_file_size":128,
+                "available_indexes":["InvertedIndex","HllIndex","KllIndex","MgIndex"],
+                "indexes":[{"column_id":3,"created_indexes":["InvertedIndex","HllIndex","KllIndex","MgIndex"]}]
+            }],"files_to_remove":[],"compaction_time_window":null}}]}"#;
+        let actions = RegionMetaActionList::decode(fixture.as_bytes()).unwrap();
+        let RegionMetaAction::Edit(edit) = &actions.actions[0] else {
+            panic!("expected a file edit");
+        };
+        assert_eq!(actions.actions.len(), 1);
+        assert_eq!(edit.files_to_add.len(), 1);
+        let file = &edit.files_to_add[0];
+        let expected = [
+            IndexType::InvertedIndex,
+            IndexType::HllIndex,
+            IndexType::KllIndex,
+            IndexType::MgIndex,
+        ];
+        assert_eq!(file.available_indexes.as_slice(), expected);
+        assert_eq!(file.indexes.len(), 1);
+        assert_eq!(file.indexes[0].column_id, 3);
+        assert_eq!(file.indexes[0].created_indexes.as_slice(), expected);
+        assert_eq!(file.index_version(), Some(7));
+        assert_eq!(file.index_file_size, 128);
+        let encoded = actions.encode().unwrap();
+        assert_eq!(RegionMetaActionList::decode(&encoded).unwrap(), actions);
+        let encoded: serde_json::Value = serde_json::from_slice(&encoded).unwrap();
+        let names = serde_json::json!(["InvertedIndex", "HllIndex", "KllIndex", "MgIndex"]);
+        assert_eq!(
+            encoded["actions"][0]["Edit"]["files_to_add"][0]["available_indexes"],
+            names
+        );
+        assert_eq!(
+            encoded["actions"][0]["Edit"]["files_to_add"][0]["indexes"][0]["created_indexes"],
+            names
+        );
+    }
+
     #[test]
     fn test_region_action_compatibility() {
         let region_edit = r#"{

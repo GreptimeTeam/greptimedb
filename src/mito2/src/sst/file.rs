@@ -114,8 +114,38 @@ where
 
 /// Type to store SST level.
 pub type Level = u8;
-/// Maximum level of SSTs.
-pub const MAX_LEVEL: Level = 2;
+/// Shared inputs owned by table compaction, not a deeper region-compaction level.
+/// This sentinel is persisted; L0=0 and L1=1 retain their original meanings, and
+/// taking the maximum value keeps every future ordinary level below it.
+pub const LEVEL_SHARED: Level = Level::MAX;
+/// Storage slot that holds shared references inside the fixed level array.
+pub(crate) const SHARED_LEVEL_SLOT: usize = 2;
+/// Number of level storage slots: L0, L1 and the shared slot.
+pub(crate) const LEVEL_SLOT_COUNT: usize = SHARED_LEVEL_SLOT + 1;
+
+/// Maps a persisted level to its storage slot, if the level is representable.
+pub(crate) const fn level_slot(level: Level) -> Option<usize> {
+    match level {
+        0 | 1 => Some(level as usize),
+        LEVEL_SHARED => Some(SHARED_LEVEL_SLOT),
+        _ => None,
+    }
+}
+
+pub(crate) const fn is_supported_level(level: Level) -> bool {
+    level <= 1 || (cfg!(feature = "enterprise") && level == LEVEL_SHARED)
+}
+
+fn deserialize_level<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Level, D::Error> {
+    let level = Level::deserialize(deserializer)?;
+    if !is_supported_level(level) {
+        return Err(serde::de::Error::custom(format!(
+            "Unsupported SST level {level}"
+        )));
+    }
+    Ok(level)
+}
+
 /// Type to store index types for a column.
 pub type IndexTypes = SmallVec<[IndexType; 4]>;
 
@@ -213,6 +243,7 @@ pub struct FileMeta {
     /// data in the SST.
     pub time_range: FileTimeRange,
     /// SST level of the file.
+    #[serde(deserialize_with = "deserialize_level")]
     pub level: Level,
     /// Size of the file.
     pub file_size: u64,
@@ -335,7 +366,7 @@ impl Debug for FileMeta {
                 "max_row_group_uncompressed_size",
                 &ReadableSize(self.max_row_group_uncompressed_size),
             );
-        if !self.available_indexes.is_empty() {
+        if self.exists_index() {
             debug_struct
                 .field("available_indexes", &self.available_indexes)
                 .field("indexes", &self.indexes)
@@ -383,6 +414,12 @@ pub enum IndexType {
     BloomFilterIndex,
     /// Retained for manifests written with the removed experimental vector index.
     VectorIndex,
+    /// HyperLogLog distinct-value estimate.
+    HllIndex,
+    /// KLL rank estimate.
+    KllIndex,
+    /// Misra–Gries frequency estimate.
+    MgIndex,
 }
 
 /// Metadata of indexes created for a specific column in an SST file.
@@ -413,6 +450,18 @@ fn is_zero(version: &u8) -> bool {
 }
 
 impl FileMeta {
+    /// Returns whether this file's row sequences are trusted in the target region.
+    ///
+    /// Foreign files use their target-local sequence barrier; local files require
+    /// the preserve marker because their physical sequences belong to this region.
+    pub(crate) fn is_effective_target_sequence_trusted(&self, target_region_id: RegionId) -> bool {
+        if self.region_id != target_region_id {
+            self.sequence.is_some()
+        } else {
+            self.preserve_row_sequence
+        }
+    }
+
     /// Returns the primary key range if both min and max are present.
     pub fn primary_key_range(&self) -> Option<(Bytes, Bytes)> {
         match (&self.primary_key_min, &self.primary_key_max) {
@@ -423,6 +472,16 @@ impl FileMeta {
 
     pub fn exists_index(&self) -> bool {
         !self.available_indexes.is_empty()
+            || self
+                .indexes
+                .iter()
+                .any(|index| !index.created_indexes.is_empty())
+    }
+
+    /// Returns whether the index has a known readable length for cache downloads.
+    /// A zero size does not remove the descriptor or its cleanup obligations.
+    pub fn has_downloadable_index(&self) -> bool {
+        self.exists_index() && self.index_file_size > 0
     }
 
     pub fn index_version(&self) -> Option<IndexVersion> {
@@ -557,6 +616,22 @@ impl fmt::Debug for FileHandle {
     }
 }
 
+/// Folds file-level sequence bounds into the output sequence bound of a merge.
+///
+/// A bound can be a row maximum or an admission marker; compaction must
+/// preserve both for sequence-based pruning. Unknown bounds must remain
+/// unknown rather than being replaced with a partial maximum.
+pub(crate) fn known_max_input_sequence<'a>(
+    inputs: impl IntoIterator<Item = &'a FileMeta>,
+) -> Option<NonZeroU64> {
+    let mut max: Option<NonZeroU64> = None;
+    for input in inputs {
+        let sequence = input.sequence?;
+        max = Some(max.map_or(sequence, |current| current.max(sequence)));
+    }
+    max
+}
+
 impl FileHandle {
     /// Creates a new logical SST reference. Index replacements must reuse its lifetime.
     pub fn new(meta: FileMeta, file_purger: FilePurgerRef) -> FileHandle {
@@ -604,11 +679,8 @@ impl FileHandle {
     /// Foreign files use their target-local sequence barrier; local files require
     /// the preserve marker because their physical sequences belong to this region.
     pub(crate) fn is_effective_target_sequence_trusted(&self, target_region_id: RegionId) -> bool {
-        if self.region_id() != target_region_id {
-            self.meta_ref().sequence.is_some()
-        } else {
-            self.meta_ref().preserve_row_sequence
-        }
+        self.meta_ref()
+            .is_effective_target_sequence_trusted(target_region_id)
     }
 
     /// Returns the cross-region file id.
@@ -1150,6 +1222,50 @@ mod tests {
             num_series: 0,
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn test_sketch_manifest_compatibility() {
+        let legacy = r#"{
+            "region_id": 0,
+            "file_id": "bc5896ec-e4d8-4017-a80d-f2de73188d55",
+            "time_range": [
+                {"value": 0, "unit": "Millisecond"},
+                {"value": 0, "unit": "Millisecond"}
+            ],
+            "available_indexes": [],
+            "indexes": [],
+            "level": 0
+        }"#;
+        let legacy: FileMeta = serde_json::from_str(legacy).unwrap();
+        assert!(legacy.indexes.is_empty());
+        assert!(!legacy.exists_index());
+        let old_column = r#"{"column_id":3,"created_indexes":["InvertedIndex"]}"#;
+        let column: ColumnIndexMetadata = serde_json::from_str(old_column).unwrap();
+        assert_eq!(
+            serde_json::to_value(&column).unwrap(),
+            serde_json::from_str::<serde_json::Value>(old_column).unwrap()
+        );
+        let mut metadata = legacy.clone();
+        metadata.index_version = 7;
+        metadata.indexes = vec![ColumnIndexMetadata {
+            column_id: 3,
+            created_indexes: SmallVec::from_iter([
+                IndexType::HllIndex,
+                IndexType::KllIndex,
+                IndexType::MgIndex,
+            ]),
+            ..Default::default()
+        }];
+        let encoded = serde_json::to_string(&metadata).unwrap();
+        let decoded: FileMeta = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(metadata, decoded);
+        assert!(decoded.exists_index());
+        assert_eq!(decoded.index_version(), Some(7));
+        assert_eq!(
+            serde_json::to_value(&decoded.indexes[0].created_indexes).unwrap(),
+            serde_json::json!(["HllIndex", "KllIndex", "MgIndex"])
+        );
     }
 
     #[test]

@@ -16,6 +16,7 @@ pub mod builder;
 mod copy_in;
 mod dashboard;
 mod entity_graph;
+mod exemplar;
 mod export_database;
 mod grpc;
 mod import_packed;
@@ -1129,6 +1130,11 @@ impl SqlQueryHandler for Instance {
         stmt: Option<Statement>,
         query_ctx: QueryContextRef,
     ) -> server_error::Result<Output> {
+        // Prepared statements reach here with a plan built before their current execution.
+        let plan = query::plan::refresh_partition_columns(plan, &self.catalog_manager, &query_ctx)
+            .await
+            .map_err(BoxedError::new)
+            .context(server_error::ExecutePlanSnafu)?;
         self.do_exec_plan_inner(plan, stmt, query_ctx)
             .await
             .map_err(BoxedError::new)
@@ -1306,6 +1312,14 @@ impl Instance {
 
 #[async_trait]
 impl PrometheusHandler for Instance {
+    async fn query_exemplars(
+        &self,
+        query: servers::exemplar::query::Query,
+        ctx: QueryContextRef,
+    ) -> server_error::Result<Vec<servers::exemplar::query::Series>> {
+        self.query_exemplars_inner(query, ctx).await
+    }
+
     #[tracing::instrument(skip_all)]
     async fn do_query(
         &self,

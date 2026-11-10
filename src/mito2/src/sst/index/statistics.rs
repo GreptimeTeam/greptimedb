@@ -16,22 +16,28 @@ use std::time::{Duration, Instant};
 
 use crate::metrics::{INDEX_CREATE_BYTES_TOTAL, INDEX_CREATE_ELAPSED, INDEX_CREATE_ROWS_TOTAL};
 
-pub(crate) type ByteCount = u64;
-pub(crate) type RowCount = usize;
+pub type ByteCount = u64;
+pub type RowCount = usize;
 
 /// Stage of the index creation process.
 enum Stage {
     Update,
+    #[cfg(feature = "enterprise")]
+    Merge,
     Finish,
     Cleanup,
 }
 
 /// Statistics for index creation. Flush metrics when dropped.
-pub(crate) struct Statistics {
+pub struct Statistics {
     /// Index type.
     index_type: &'static str,
     /// Accumulated elapsed time for the index update stage.
     update_elapsed: Duration,
+    /// Whether update and total elapsed time can be attributed to this index.
+    update_timing_available: bool,
+    /// Accumulated time spent merging existing index states.
+    merge_elapsed: Duration,
     /// Accumulated elapsed time for the index finish stage.
     finish_elapsed: Duration,
     /// Accumulated elapsed time for the cleanup stage.
@@ -43,10 +49,13 @@ pub(crate) struct Statistics {
 }
 
 impl Statistics {
+    /// Creates index statistics whose accumulated metrics are published on drop.
     pub fn new(index_type: &'static str) -> Self {
         Self {
             index_type,
             update_elapsed: Duration::default(),
+            update_timing_available: true,
+            merge_elapsed: Duration::default(),
             finish_elapsed: Duration::default(),
             cleanup_eplased: Duration::default(),
             row_count: 0,
@@ -54,10 +63,36 @@ impl Statistics {
         }
     }
 
+    /// Creates counters for interleaved work whose update time cannot be attributed
+    /// to this index. Update and total histograms remain absent until `record_update`.
+    #[cfg(feature = "enterprise")]
+    pub fn new_without_update_timing(index_type: &'static str) -> Self {
+        let mut stats = Self::new(index_type);
+        stats.update_timing_available = false;
+        stats
+    }
+
+    /// Counts rows without taking a clock sample or claiming an update duration.
+    #[cfg(feature = "enterprise")]
+    pub fn inc_row_count(&mut self, rows: RowCount) {
+        self.row_count += rows;
+    }
+
     /// Starts timing the update stage, returning a `TimerGuard` to automatically record duration.
     #[must_use]
     pub fn record_update(&mut self) -> TimerGuard<'_> {
+        self.update_timing_available = true;
         TimerGuard::new(self, Stage::Update)
+    }
+
+    /// Starts timing merges of existing index states.
+    ///
+    /// Merged input rows are represented rows, not newly scanned output rows. Callers
+    /// count actual output rows separately through the update or finish guard.
+    #[must_use]
+    #[cfg(feature = "enterprise")]
+    pub fn record_merge(&mut self) -> TimerGuard<'_> {
+        TimerGuard::new(self, Stage::Merge)
     }
 
     /// Starts timing the finish stage, returning a `TimerGuard` to automatically record duration.
@@ -85,20 +120,33 @@ impl Statistics {
 
 impl Drop for Statistics {
     fn drop(&mut self) {
-        INDEX_CREATE_ELAPSED
-            .with_label_values(&["update", self.index_type])
-            .observe(self.update_elapsed.as_secs_f64());
+        if self.update_timing_available {
+            INDEX_CREATE_ELAPSED
+                .with_label_values(&["update", self.index_type])
+                .observe(self.update_elapsed.as_secs_f64());
+        }
+        if !self.merge_elapsed.is_zero() {
+            INDEX_CREATE_ELAPSED
+                .with_label_values(&["merge", self.index_type])
+                .observe(self.merge_elapsed.as_secs_f64());
+        }
         INDEX_CREATE_ELAPSED
             .with_label_values(&["finish", self.index_type])
             .observe(self.finish_elapsed.as_secs_f64());
         INDEX_CREATE_ELAPSED
             .with_label_values(&["cleanup", self.index_type])
             .observe(self.cleanup_eplased.as_secs_f64());
-        INDEX_CREATE_ELAPSED
-            .with_label_values(&["total", self.index_type])
-            .observe(
-                (self.update_elapsed + self.finish_elapsed + self.cleanup_eplased).as_secs_f64(),
-            );
+        if self.update_timing_available {
+            INDEX_CREATE_ELAPSED
+                .with_label_values(&["total", self.index_type])
+                .observe(
+                    (self.update_elapsed
+                        + self.merge_elapsed
+                        + self.finish_elapsed
+                        + self.cleanup_eplased)
+                        .as_secs_f64(),
+                );
+        }
 
         INDEX_CREATE_ROWS_TOTAL
             .with_label_values(&[self.index_type])
@@ -111,7 +159,7 @@ impl Drop for Statistics {
 
 /// `TimerGuard` is a RAII struct that ensures elapsed time
 /// is recorded when it goes out of scope.
-pub(crate) struct TimerGuard<'a> {
+pub struct TimerGuard<'a> {
     stats: &'a mut Statistics,
     stage: Stage,
     timer: Instant,
@@ -144,6 +192,10 @@ impl Drop for TimerGuard<'_> {
             Stage::Update => {
                 self.stats.update_elapsed += self.timer.elapsed();
             }
+            #[cfg(feature = "enterprise")]
+            Stage::Merge => {
+                self.stats.merge_elapsed += self.timer.elapsed();
+            }
             Stage::Finish => {
                 self.stats.finish_elapsed += self.timer.elapsed();
             }
@@ -157,6 +209,46 @@ impl Drop for TimerGuard<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "enterprise")]
+    #[test]
+    fn test_unmeasured_updates_do_not_publish_zero_durations() {
+        let name = "test_sketch_fused_counter_only";
+        let update = INDEX_CREATE_ELAPSED.with_label_values(&["update", name]);
+        let total = INDEX_CREATE_ELAPSED.with_label_values(&["total", name]);
+        let update_before = update.get_sample_count();
+        let total_before = total.get_sample_count();
+        let mut stats = Statistics::new_without_update_timing(name);
+        stats.inc_row_count(7);
+        assert_eq!(stats.row_count(), 7);
+        drop(stats);
+        assert_eq!(update.get_sample_count(), update_before);
+        assert_eq!(total.get_sample_count(), total_before);
+        let mut measured = Statistics::new_without_update_timing(name);
+        {
+            let _timer = measured.record_update();
+        }
+        drop(measured);
+        assert_eq!(update.get_sample_count(), update_before + 1);
+        assert_eq!(total.get_sample_count(), total_before + 1);
+    }
+
+    #[cfg(feature = "enterprise")]
+    #[test]
+    fn test_merge_does_not_count_input_rows_as_output_rows() {
+        let mut stats = Statistics::new("test_merge");
+        {
+            let _guard = stats.record_merge();
+        }
+        assert_eq!(stats.row_count(), 0);
+        {
+            let mut guard = stats.record_finish();
+            guard.inc_row_count(7);
+            guard.inc_byte_count(32);
+        }
+        assert_eq!(stats.row_count(), 7);
+        assert_eq!(stats.byte_count(), 32);
+    }
 
     #[test]
     fn test_statistics_basic() {

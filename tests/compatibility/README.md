@@ -29,6 +29,25 @@ Frozen objects of the object store WAL are checked byte for byte by the format t
 `log-store`. The SQL runner cannot cover the object store WAL: it owns `wal.provider`. See the
 [fixture notes](wal/object_store/README.md).
 
+## Manifest fixtures
+
+[Table-compaction fixtures](manifest/table_compaction/README.md) are exercised by
+mito2's Rust tests. They cover ordinary file-edit compatibility, supported SST
+levels, and explicit rejection of unpublished prototype task-state records.
+
+The inline sketch-index fixtures in `src/mito2/src/manifest/action.rs` cover both
+file-level and column-level descriptors and mixed builtin/sketch indexes. They run without the enterprise feature:
+
+```shell
+cargo nextest run -p mito2 -E 'test(test_sketch_index_manifest_fixture)'
+```
+
+These fixtures verify supported-reader decoding, not downgrade support for binaries
+that predate the new index types. Upgrade all manifest readers before enabling a
+writer that emits these descriptors; downgrade only to readers that recognize them.
+The OSS build does not generate sketch payloads, so SQL restart cases cannot create
+these descriptors through an OSS writer.
+
 ## Quick Start
 
 ```shell

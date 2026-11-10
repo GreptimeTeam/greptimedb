@@ -17,6 +17,8 @@ pub mod compactor;
 mod json2;
 mod last_non_null;
 pub mod memory_manager;
+#[cfg(feature = "enterprise")]
+pub mod multi_region;
 mod overlap;
 pub mod picker;
 mod reader;
@@ -41,7 +43,8 @@ pub(crate) use json2::{
 };
 pub use scheduler::CompactionRequest;
 pub(crate) use scheduler::{
-    CompactionExecution, CompactionPickFinished, CompactionScheduler, CompactionTransition,
+    CancelCompactionResult, CompactionCoordinator, CompactionExecution, CompactionPickFinished,
+    CompactionScheduler, CompactionState, CompactionStateRef, CompactionTransition,
 };
 use serde::{Deserialize, Serialize};
 use snafu::ResultExt;

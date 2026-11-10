@@ -14,15 +14,12 @@
 
 use chrono::Utc;
 use common_telemetry::{debug, info};
-use snafu::ResultExt;
 use store_api::logstore::LogStore;
 use store_api::region_request::ApplyStagingManifestRequest;
 use store_api::storage::RegionId;
 use tokio::sync::oneshot;
 
-use crate::error::{
-    RegionStateSnafu, Result, SerdeJsonSnafu, StagingPartitionExprMismatchSnafu, UnexpectedSnafu,
-};
+use crate::error::{RegionStateSnafu, Result, StagingPartitionExprMismatchSnafu, UnexpectedSnafu};
 use crate::manifest::action::{RegionEdit, RegionManifest};
 use crate::manifest::storage::manifest_dir;
 use crate::manifest::storage::staging::{StagingBlobStorage, staging_blob_path};
@@ -140,7 +137,8 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                         region_id, edit,
                         // we don't need to preload sst cache during repartition, as it may cause extra network overhead.
                         false, tx,
-                    ),
+                    )
+                    .for_staging(request.partition_expr),
                 )))
                 .await;
 
@@ -193,6 +191,6 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         );
         let staging_manifest = staging_blob_storage.get(manifest_path).await?;
 
-        serde_json::from_slice::<RegionManifest>(&staging_manifest).context(SerdeJsonSnafu)
+        RegionManifest::decode(&staging_manifest)
     }
 }

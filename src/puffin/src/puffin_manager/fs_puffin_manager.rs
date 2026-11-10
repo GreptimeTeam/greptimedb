@@ -24,6 +24,7 @@ use crate::error::Result;
 use crate::puffin_manager::PuffinManager;
 use crate::puffin_manager::cache::PuffinMetadataCacheRef;
 use crate::puffin_manager::file_accessor::PuffinFileAccessor;
+use crate::puffin_manager::file_key::PuffinFileKey;
 use crate::puffin_manager::stager::Stager;
 
 /// `FsPuffinManager` is a `PuffinManager` that provides readers and writers for puffin data in filesystem.
@@ -71,6 +72,10 @@ where
     type Reader = FsPuffinReader<S, F>;
     type Writer = FsPuffinWriter<S, F::Writer>;
     type FileHandle = F::FileHandle;
+
+    fn file_key(&self, handle: &Self::FileHandle) -> PuffinFileKey<Self::FileHandle> {
+        self.puffin_file_accessor.file_key(handle)
+    }
 
     async fn reader(&self, handle: &Self::FileHandle) -> Result<Self::Reader> {
         Ok(FsPuffinReader::new(

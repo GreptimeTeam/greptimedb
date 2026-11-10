@@ -27,6 +27,7 @@ use datafusion_common::DataFusionError;
 use datafusion_expr::{Expr, TableProviderFilterPushDown, TableType};
 use futures::StreamExt;
 use mito2::engine::MitoEngine;
+use store_api::compaction_task::{CompactionTaskBatchBuilder, CompactionTaskEntry};
 use store_api::sst_entry::{ManifestSstBatchBuilder, ManifestSstEntry};
 
 /// Supplies batches for an internal inspection table. Implementations may prune
@@ -153,6 +154,48 @@ impl InspectSource for ManifestSstSource {
             request.schema.clone(),
             stream,
         ))
+    }
+}
+
+/// Reads live compaction state only when a scan is executed.
+pub(crate) struct CompactionTasksSource {
+    engine: MitoEngine,
+}
+
+impl CompactionTasksSource {
+    /// Creates a source backed by the engine's live compaction cycles.
+    pub(crate) fn new(engine: MitoEngine) -> Self {
+        Self { engine }
+    }
+}
+
+impl std::fmt::Debug for CompactionTasksSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CompactionTasksSource")
+            .finish_non_exhaustive()
+    }
+}
+
+impl InspectSource for CompactionTasksSource {
+    fn schema(&self) -> SchemaRef {
+        CompactionTaskEntry::schema().arrow_schema().clone()
+    }
+
+    fn scan(&self, request: &InspectScan, _ctx: Arc<TaskContext>) -> SendableRecordBatchStream {
+        let engine = self.engine.clone();
+        let request = request.clone();
+        let schema = request.schema.clone();
+        let builder = CompactionTaskBatchBuilder::new(schema.clone());
+        let stream = async_stream::try_stream! {
+            let entries = engine
+                .inspect_compaction_tasks(&request.filters)
+                .await
+                .map_err(|error| DataFusionError::External(Box::new(error)))?;
+            for entries in entries.chunks(request.batch_size) {
+                yield builder.build(entries)?;
+            }
+        };
+        Box::pin(RecordBatchStreamAdapter::new(schema, stream))
     }
 }
 
@@ -307,5 +350,140 @@ mod tests {
         );
         assert_eq!(source.scans.load(Ordering::SeqCst), 1);
         assert_eq!(source.drops.load(Ordering::SeqCst), 1);
+    }
+    #[tokio::test]
+    async fn test_manifest_optimized_sql_pruning() {
+        use std::sync::Mutex;
+
+        use datafusion_expr::{col, lit};
+        use mito2::config::MitoConfig;
+        use mito2::manifest::action::RegionEdit;
+        use mito2::sst::file::FileMeta;
+        use mito2::test_util::{CreateRequestBuilder, TestEnv};
+        use store_api::region_engine::RegionEngine;
+        use store_api::region_request::RegionRequest;
+        use store_api::storage::{FileId, RegionId};
+
+        #[derive(Debug)]
+        struct RecordingSource {
+            inner: ManifestSstSource,
+            filters: Mutex<Vec<Expr>>,
+            candidates: Arc<AtomicUsize>,
+        }
+
+        impl InspectSource for RecordingSource {
+            fn schema(&self) -> SchemaRef {
+                self.inner.schema()
+            }
+
+            fn scan(
+                &self,
+                request: &InspectScan,
+                ctx: Arc<TaskContext>,
+            ) -> SendableRecordBatchStream {
+                *self.filters.lock().unwrap() = request.filters.clone();
+                let candidates = self.candidates.clone();
+                let stream = self.inner.scan(request, ctx).map(move |batch| {
+                    if let Ok(batch) = &batch {
+                        candidates.fetch_add(batch.num_rows(), Ordering::SeqCst);
+                    }
+                    batch
+                });
+                Box::pin(RecordBatchStreamAdapter::new(
+                    request.schema.clone(),
+                    stream,
+                ))
+            }
+        }
+
+        let mut env = TestEnv::new().await.with_node_id(42);
+        let engine = env
+            .create_engine(MitoConfig {
+                schedule_compaction_after_edit: false,
+                ..Default::default()
+            })
+            .await;
+        let region_id = RegionId::new(11, 1);
+        engine
+            .handle_request(
+                region_id,
+                RegionRequest::Create(CreateRequestBuilder::new().build()),
+            )
+            .await
+            .unwrap();
+        engine
+            .edit_region(
+                region_id,
+                RegionEdit {
+                    files_to_add: vec![FileMeta {
+                        region_id,
+                        file_id: FileId::from_bytes(1u128.to_be_bytes()),
+                        ..Default::default()
+                    }],
+                    files_to_remove: vec![],
+                    timestamp_ms: None,
+                    compaction_time_window: None,
+                    flushed_entry_id: None,
+                    flushed_sequence: None,
+                    committed_sequence: None,
+                },
+            )
+            .await
+            .unwrap();
+        let source = Arc::new(RecordingSource {
+            inner: ManifestSstSource::new(engine),
+            filters: Mutex::new(Vec::new()),
+            candidates: Arc::new(AtomicUsize::new(0)),
+        });
+        let ctx = SessionContext::new();
+        ctx.register_table("manifest", Arc::new(InspectTable::new(source.clone())))
+            .unwrap();
+        for (predicate, expected_filter, expected_count) in [
+            ("node_id = 99".to_string(), col("node_id").eq(lit(99u64)), 0),
+            (
+                "node_id != 42".to_string(),
+                col("node_id").not_eq(lit(42u64)),
+                0,
+            ),
+            ("node_id = 42".to_string(), col("node_id").eq(lit(42u64)), 1),
+            (
+                "region_id = 0".to_string(),
+                col("region_id").eq(lit(0u64)),
+                0,
+            ),
+            (
+                format!("region_id = {}", region_id.as_u64()),
+                col("region_id").eq(lit(region_id.as_u64())),
+                1,
+            ),
+        ] {
+            source.candidates.store(0, Ordering::SeqCst);
+            source.filters.lock().unwrap().clear();
+            // collect() runs the default optimizer and the actual inspection provider.
+            let batches = ctx
+                .sql(&format!("SELECT file_id FROM manifest WHERE {predicate}"))
+                .await
+                .unwrap()
+                .collect()
+                .await
+                .unwrap();
+            // The scanner receives a UInt64 comparison, with no Decimal cast.
+            assert_eq!(
+                *source.filters.lock().unwrap(),
+                vec![expected_filter],
+                "{predicate}"
+            );
+            // Count the manifest source's candidates before DataFusion's residual filter.
+            assert_eq!(
+                source.candidates.load(Ordering::SeqCst),
+                expected_count,
+                "{predicate}"
+            );
+            assert_eq!(
+                batches.iter().map(|batch| batch.num_rows()).sum::<usize>(),
+                expected_count,
+                "{predicate}"
+            );
+        }
     }
 }

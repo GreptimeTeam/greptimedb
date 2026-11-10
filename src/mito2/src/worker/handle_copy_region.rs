@@ -13,8 +13,9 @@
 // limitations under the License.
 
 use common_telemetry::{debug, error, info};
-use snafu::OptionExt;
+use snafu::{OptionExt, ResultExt, ensure};
 use store_api::region_engine::MitoCopyRegionFromResponse;
+use store_api::region_request::PathType;
 use store_api::storage::{FileId, RegionId};
 
 use crate::error::{InvalidRequestSnafu, MissingManifestSnafu, Result};
@@ -25,7 +26,7 @@ use crate::region::{
 use crate::request::{
     BackgroundNotify, CopyRegionFromFinished, CopyRegionFromRequest, WorkerRequest,
 };
-use crate::sst::file::FileMeta;
+use crate::sst::file::{self, FileMeta};
 use crate::sst::location::region_dir_from_table_dir;
 use crate::worker::{RegionWorkerLoop, WorkerRequestWithTime};
 
@@ -64,8 +65,11 @@ impl<S> RegionWorkerLoop<S> {
             return;
         }
 
-        let region_metadata_loader =
-            RegionMetadataLoader::new(self.config.clone(), self.object_store_manager.clone());
+        let region_metadata_loader = RegionMetadataLoader::new(
+            self.config.clone(),
+            self.object_store_manager.clone(),
+            self.node_lease.is_enabled(),
+        );
         let worker_sender = self.sender.clone();
 
         common_runtime::spawn_global(async move {
@@ -86,6 +90,45 @@ impl<S> RegionWorkerLoop<S> {
             };
 
             match region_edit {
+                Some(region_edit)
+                    if region_edit
+                        .files_to_add
+                        .iter()
+                        .any(|file| file.level == file::LEVEL_SHARED) =>
+                {
+                    // Shared references and their target admission sequence must enter
+                    // the serialized edit lane, not the asynchronous physical-copy path.
+                    // The response lists installed references, including shared SSTs
+                    // whose objects stay in place; it is not a physical COPY count.
+                    let copied_file_ids = region_edit
+                        .files_to_add
+                        .iter()
+                        .map(|file| file.file_id)
+                        .collect();
+                    let (tx, rx) = tokio::sync::oneshot::channel();
+                    if worker_sender
+                        .send(WorkerRequestWithTime::new(WorkerRequest::EditRegion(
+                            crate::request::RegionEditRequest::new(
+                                region_id,
+                                region_edit,
+                                false,
+                                tx,
+                            ),
+                        )))
+                        .await
+                        .is_err()
+                    {
+                        let _ = sender.send(crate::error::RegionNotFoundSnafu { region_id }.fail());
+                        return;
+                    }
+                    let result = match rx.await {
+                        Ok(result) => {
+                            result.map(|_| MitoCopyRegionFromResponse { copied_file_ids })
+                        }
+                        Err(error) => Err(error).context(crate::error::RecvSnafu),
+                    };
+                    let _ = sender.send(result);
+                }
                 Some(region_edit) => {
                     if let Err(e) = worker_sender
                         .send(WorkerRequestWithTime::new(WorkerRequest::Background {
@@ -137,7 +180,7 @@ impl<S> RegionWorkerLoop<S> {
         let _ = sender.send(Ok(MitoCopyRegionFromResponse { copied_file_ids }));
     }
 
-    /// Returns the region edit and the file ids that were copied from the source region to the target region.
+    /// Returns the region edit and source file IDs, including shared logical references.
     ///
     /// If no need to copy files, returns (None, source_file_ids).
     async fn copy_region_from(
@@ -154,11 +197,25 @@ impl<S> RegionWorkerLoop<S> {
             "Loading source region manifest from region dir: {region_dir}, target region: {target_region_id}"
         );
         let source_region_manifest = region_metadata_loader
-            .load_manifest(&region_dir, &region.version().options.storage)
+            .load_manifest(&region_dir, &region.version().options)
             .await?
             .context(MissingManifestSnafu {
                 region_id: source_region_id,
             })?;
+        // Metadata sync transforms copied rows and then removes these references.
+        // It cannot retire shared inputs through the ordinary edit API, so reject
+        // them before either physical copying or extending the target manifest.
+        ensure!(
+            path_type != PathType::Metadata
+                || source_region_manifest
+                    .files
+                    .values()
+                    .all(|file| file.level != file::LEVEL_SHARED),
+            InvalidRequestSnafu {
+                region_id: target_region_id,
+                reason: "Shared SST references are not supported in metadata-region copies",
+            }
+        );
         let mut new_file_metas = vec![];
         let target_region_manifest = region.manifest_ctx.manifest().await;
         let source_file_ids = source_region_manifest
@@ -172,7 +229,11 @@ impl<S> RegionWorkerLoop<S> {
         );
         for (file_id, file_meta) in &source_region_manifest.files {
             if !target_region_manifest.files.contains_key(file_id) {
-                new_file_metas.push(remap_copied_file_meta(file_meta, target_region_id));
+                new_file_metas.push(if file_meta.level == file::LEVEL_SHARED {
+                    file_meta.clone()
+                } else {
+                    remap_copied_file_meta(file_meta, target_region_id)
+                });
             }
         }
         if new_file_metas.is_empty() {
@@ -181,6 +242,7 @@ impl<S> RegionWorkerLoop<S> {
 
         let file_descriptors = new_file_metas
             .iter()
+            .filter(|file| file.level != file::LEVEL_SHARED)
             .flat_map(file_descriptors_for_meta)
             .collect();
         debug!("File descriptors to copy: {:?}", file_descriptors);
@@ -203,6 +265,13 @@ impl<S> RegionWorkerLoop<S> {
             flushed_sequence: None,
             committed_sequence: None,
         };
+        if edit
+            .files_to_add
+            .iter()
+            .any(|file| file.level == file::LEVEL_SHARED)
+        {
+            return Ok((Some(edit), source_file_ids));
+        }
         let action_list = RegionMetaActionList::with_action(RegionMetaAction::Edit(edit.clone()));
         info!(
             "Applying {:?} to region {target_region_id}, reason: CopyRegionFrom",

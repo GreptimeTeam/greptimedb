@@ -78,6 +78,9 @@ impl Inner {
         self.last_checkpoint_version
             .store(version, Ordering::Relaxed);
 
+        // Logical retention changes when the checkpoint is published, even if cleanup fails.
+        self.manifest_store.retain_manifest_size_after(version);
+
         if let Err(e) = self.manifest_store.delete_until(version, true).await {
             warn!(e; "Failed to delete manifest actions until version {} for region {}, leftover files will be ignored on recovery", version, region_id);
         }

@@ -586,7 +586,6 @@ fn scan_series_file_ranges(
         }
 
         reader_metrics.observe_rows("series_data");
-        reader_metrics.filter_metrics.observe();
         part_metrics.merge_reader_metrics(&reader_metrics, None);
     }
 }
