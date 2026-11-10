@@ -160,6 +160,24 @@ impl TaskState {
         self.abandon_fenced_repair();
     }
 
+    /// Drop every stored cursor and re-enter FullSnapshot mode from scratch.
+    ///
+    /// Unlike [`Self::mark_full_snapshot`], which keeps the checkpoint map and
+    /// only abandons a fenced repair, and [`Self::advance_checkpoints`], which
+    /// replaces the map but promotes the task back to `Incremental`, this drops
+    /// the cursors themselves: they belong to a data layout that no longer
+    /// exists (for example after a region edit reassigned which rows a region
+    /// owns). A fresh full-snapshot watermark proof is required before
+    /// incremental mode may resume.
+    ///
+    /// `incremental_disabled` is left untouched: a permanently disabled task
+    /// stays disabled.
+    pub fn reset_to_full_snapshot(&mut self) {
+        self.checkpoints.clear();
+        self.abandon_fenced_repair();
+        self.checkpoint_mode = CheckpointMode::FullSnapshot;
+    }
+
     /// Replace full-snapshot checkpoints with a complete watermark proof.
     /// Clears fenced repair state and enters Incremental unless disabled.
     pub fn advance_checkpoints(&mut self, watermark_map: HashMap<u64, u64>) {
@@ -1406,6 +1424,56 @@ mod test {
         assert_eq!(state.checkpoint_mode(), CheckpointMode::FullSnapshot);
         assert!(state.pending_fenced_repair().is_none());
         assert_eq!(state.dirty_time_windows.len(), 2);
+    }
+
+    #[test]
+    fn test_reset_to_full_snapshot_drops_cursors_and_fenced_state() {
+        let query_ctx = QueryContext::arc();
+        let (_tx, rx) = tokio::sync::oneshot::channel();
+        let mut state = TaskState::new(query_ctx, rx);
+        state.advance_checkpoints(HashMap::from([(1_u64, 10_u64), (2_u64, 20_u64)]));
+        assert_eq!(state.checkpoint_mode(), CheckpointMode::Incremental);
+        assert!(!state.is_incremental_disabled());
+
+        for second in [30, 40] {
+            state.dirty_time_windows.add_window(
+                Timestamp::new_second(second),
+                Some(Timestamp::new_second(second + 5)),
+            );
+        }
+        state
+            .start_fenced_repair(BTreeMap::from([(1_u64, 10_u64)]))
+            .unwrap();
+        assert!(state.pending_fenced_repair().is_some());
+
+        state.reset_to_full_snapshot();
+
+        // The cursors themselves are gone: they belonged to a data layout that
+        // no longer exists.
+        assert!(state.checkpoints().is_empty());
+        // The fenced repair is abandoned and its pending windows return to the
+        // live dirty queue, so a later full snapshot still covers the backlog.
+        assert!(state.pending_fenced_repair().is_none());
+        assert_eq!(state.dirty_time_windows.len(), 2);
+        assert_eq!(state.checkpoint_mode(), CheckpointMode::FullSnapshot);
+        // Resetting the cursors never re-enables a disabled task.
+        assert!(!state.is_incremental_disabled());
+    }
+
+    #[test]
+    fn test_reset_to_full_snapshot_keeps_incremental_disabled() {
+        let query_ctx = QueryContext::arc();
+        let (_tx, rx) = tokio::sync::oneshot::channel();
+        let mut state = TaskState::new(query_ctx, rx);
+        state.advance_checkpoints(HashMap::from([(1_u64, 10_u64)]));
+        state.disable_incremental();
+        assert!(state.is_incremental_disabled());
+
+        state.reset_to_full_snapshot();
+
+        assert!(state.checkpoints().is_empty());
+        assert!(state.is_incremental_disabled());
+        assert_eq!(state.checkpoint_mode(), CheckpointMode::FullSnapshot);
     }
 
     #[test]

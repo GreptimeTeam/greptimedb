@@ -677,18 +677,28 @@ impl RegionOpener {
             }
         };
 
-        if let Some(committed_in_manifest) = manifest.committed_sequence {
-            let committed_after_replay = version_control.committed_sequence();
-            if committed_in_manifest > committed_after_replay {
-                info!(
-                    "Overriding committed sequence, region: {}, flushed_sequence: {}, committed_sequence: {} -> {}",
-                    self.region_id,
-                    version_control.current().version.flushed_sequence,
-                    version_control.committed_sequence(),
-                    committed_in_manifest
-                );
-                version_control.set_committed_sequence(committed_in_manifest);
-            }
+        // A recorded boundary above the flushed frontier means the operation that wrote it also
+        // attributed the sequences up to `B` (a discard of unflushed rows, a truncation or a
+        // region edit). Recovery must report a commit watermark of at least `B` as well: a
+        // recovery that stopped at the flushed frontier would reject reads at `B` and hand the
+        // next write a sequence that a Flow checkpoint at `B` has already consumed. The flushed
+        // frontier itself keeps the value the WAL and the manifest name; only the commit
+        // watermark (and through it `last_sequence`) is raised.
+        let boundary = version_control.current().version.last_invalid_seq();
+        let recovered_committed = manifest
+            .committed_sequence
+            .unwrap_or_default()
+            .max(boundary);
+        let committed_after_replay = version_control.committed_sequence();
+        if recovered_committed > committed_after_replay {
+            info!(
+                "Overriding committed sequence, region: {}, flushed_sequence: {}, committed_sequence: {} -> {}",
+                self.region_id,
+                version_control.current().version.flushed_sequence,
+                committed_after_replay,
+                recovered_committed
+            );
+            version_control.set_committed_sequence(recovered_committed);
         }
 
         let now = self.time_provider.current_time_millis();
@@ -814,6 +824,11 @@ pub(crate) fn version_builder_from_manifest(
         .add_files(file_purger, manifest.files.values().cloned())
         .flushed_entry_id(manifest.flushed_entry_id)
         .flushed_sequence(manifest.flushed_sequence)
+        // The manifest keeps the max edit boundary any edit recorded, so a reopened
+        // region keeps rejecting cursors that predate the edit. A manifest written
+        // before the field existed reads as unknown (0), which never invalidates a
+        // cursor: an older edit cannot be traced.
+        .last_invalid_seq(manifest.last_invalid_seq.unwrap_or_default())
         .truncated_entry_id(manifest.truncated_entry_id)
         .compaction_time_window(manifest.compaction_time_window)
         .options(region_options)
@@ -1543,6 +1558,7 @@ mod tests {
             flushed_entry_id: 0,
             flushed_sequence: 0,
             committed_sequence: None,
+            last_invalid_seq: None,
             manifest_version: 0,
             truncated_entry_id: None,
             compaction_time_window: None,

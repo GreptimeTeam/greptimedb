@@ -115,6 +115,7 @@ async fn get_snapshot_preserves_related_region_old_index_readers() {
                 flushed_sequence: None,
                 committed_sequence: None,
                 wal_recovery: Default::default(),
+                last_invalid_seq: None,
             })),
             false,
         )
@@ -221,6 +222,7 @@ async fn get_snapshot_preserves_old_index_readers_until_release(
                 flushed_sequence: None,
                 committed_sequence: None,
                 wal_recovery: Default::default(),
+                last_invalid_seq: None,
             })),
             false,
         )

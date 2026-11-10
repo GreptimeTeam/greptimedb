@@ -177,12 +177,27 @@ async fn test_apply_staging_manifest_sequence_domain_with_format(
         .manifest()
         .await;
     assert_eq!(manifest.files.len(), 1);
-    assert_eq!(manifest.committed_sequence, Some(1));
+    // The staging exit publishes its own boundary `B` (= the staging apply's
+    // allocation, 1, plus one) and raises the committed watermark to at least `B`
+    // in the same action list, so the persisted manifest proves `H >= B`.
+    assert_eq!(manifest.committed_sequence, Some(2));
+    assert_eq!(Some(2), manifest.last_invalid_seq);
+    // A cursor below `B` predates a layout that no longer exists.
+    assert_eq!(
+        2,
+        engine
+            .get_region(target)
+            .unwrap()
+            .version()
+            .last_invalid_seq()
+    );
     let imported_file = manifest.files.values().next().unwrap();
     assert_eq!(imported_file.region_id, source);
+    // The staging exit re-marks every merged file at the published boundary (2), so
+    // file-level pruning can never skip data that only the exit made visible.
     assert_eq!(
         imported_file.sequence,
-        Some(std::num::NonZeroU64::new(1).unwrap())
+        Some(std::num::NonZeroU64::new(2).unwrap())
     );
 
     put_rows(
@@ -258,10 +273,12 @@ async fn test_apply_staging_manifest_sequence_domain_with_format(
             .find(|file| output_ids.contains(&file.meta_ref().file_id))
             .expect("target-owned compaction output");
         assert!(output.meta_ref().preserve_row_sequence);
-        // The imported rows are virtualized at target barrier 1 and the local
-        // row has physical sequence 2, so the output frontier is 2.
+        // The staging exit publishes its own boundary (2) and raises the committed
+        // watermark to it in the same publish, while ordinary writes are queued by its
+        // publish window. The local row written afterwards therefore has sequence 3 and
+        // the output frontier is 3.
         assert_eq!(
-            Some(std::num::NonZeroU64::new(2).unwrap()),
+            Some(std::num::NonZeroU64::new(3).unwrap()),
             output.meta_ref().sequence
         );
 
@@ -284,36 +301,85 @@ async fn test_apply_staging_manifest_sequence_domain_with_format(
             .as_any()
             .downcast_ref::<UInt64Array>()
             .expect("sequence column");
-        // The target partition excludes source field_0 = 0, leaving two
-        // imported rows at barrier 1 and the local row at sequence 2.
+        // The staging exit re-marked the imported file at the published boundary (2),
+        // and the target partition excludes source field_0 = 0: two imported rows at
+        // barrier 2 plus the local row at sequence 3.
         assert_eq!(
             2,
-            sequences.values().iter().filter(|&&seq| seq == 1).count()
+            sequences.values().iter().filter(|&&seq| seq == 2).count()
         );
         assert_eq!(
             1,
-            sequences.values().iter().filter(|&&seq| seq == 2).count()
+            sequences.values().iter().filter(|&&seq| seq == 3).count()
         );
 
-        for (min, max, expected_rows) in [(0, 1, 2), (1, 2, 1)] {
-            let stream = engine
-                .scan_to_stream(
-                    target,
-                    ScanRequest {
-                        exact_sequence_range: true,
-                        memtable_min_sequence: Some(min),
-                        memtable_max_sequence: Some(max),
-                        ..Default::default()
-                    },
-                )
-                .await
-                .unwrap();
-            let batches = RecordBatches::try_collect(stream).await.unwrap();
-            assert_eq!(
-                expected_rows,
-                batches.iter().map(|batch| batch.num_rows()).sum::<usize>()
-            );
-        }
+        // A cursor at or below the staging apply boundary cannot resume: the rows
+        // it has not consumed may have moved in or out of the region, so the exact
+        // request must be rejected instead of replaying only the rows that happen
+        // to remain locally addressable. C=1 is the watermark the staging apply
+        // itself published, and it is still below the exit boundary 2.
+        let err = engine
+            .scanner(
+                target,
+                ScanRequest {
+                    exact_sequence_range: true,
+                    memtable_min_sequence: Some(1),
+                    memtable_max_sequence: Some(2),
+                    ..Default::default()
+                },
+            )
+            .await
+            .err()
+            .expect("a cursor below the staging apply boundary must be rejected");
+        assert!(
+            err.to_string()
+                .starts_with("sequence range cursor invalid:")
+        );
+        assert!(
+            matches!(
+                err,
+                Error::IncrementalQueryStale {
+                    given_seq: 1,
+                    min_readable_seq: 2,
+                    ..
+                }
+            ),
+            "unexpected err: {err}"
+        );
+
+        // A cursor at the boundary is served: only rows published after it are in
+        // the delta.
+        put_rows(
+            &engine,
+            target,
+            Rows {
+                schema: schema.clone(),
+                rows: build_rows_for_key("2", 5, 6, 99),
+            },
+        )
+        .await;
+        engine
+            .handle_request(target, RegionRequest::Flush(RegionFlushRequest::default()))
+            .await
+            .unwrap();
+        let stream = engine
+            .scan_to_stream(
+                target,
+                ScanRequest {
+                    exact_sequence_range: true,
+                    memtable_min_sequence: Some(2),
+                    memtable_max_sequence: Some(5),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let batches = RecordBatches::try_collect(stream).await.unwrap();
+        assert_eq!(
+            2,
+            batches.iter().map(|batch| batch.num_rows()).sum::<usize>(),
+            "the (2, 5] delta holds the local row (seq 3) and the new row (seq 4)"
+        );
     }
 }
 
@@ -871,6 +937,7 @@ async fn test_apply_staging_manifest_change_edit_different_columns_fails_with_fo
                     flushed_sequence: None,
                     committed_sequence: None,
                     wal_recovery: Default::default(),
+                    last_invalid_seq: None,
                 }),
             ]),
             true,

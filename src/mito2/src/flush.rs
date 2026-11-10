@@ -536,6 +536,7 @@ impl RegionFlushTask {
             flushed_sequence: Some(version_data.committed_sequence),
             committed_sequence: None,
             wal_recovery: Default::default(),
+            last_invalid_seq: None,
         };
         info!("Applying {edit:?} to region {}", self.region_id);
 
@@ -1945,6 +1946,7 @@ mod tests {
                     flushed_sequence: None,
                     committed_sequence: None,
                     wal_recovery: Default::default(),
+                    last_invalid_seq: None,
                 },
                 memtables_to_remove: smallvec![],
             }),
@@ -2200,6 +2202,7 @@ mod tests {
                 flushed_sequence: None,
                 committed_sequence: None,
                 wal_recovery: Default::default(),
+                last_invalid_seq: None,
             }),
             &[0],
             builder.file_purger(),
@@ -2509,6 +2512,7 @@ mod tests {
                 flushed_sequence: None,
                 committed_sequence: None,
                 wal_recovery: Default::default(),
+                last_invalid_seq: None,
             }),
             &[0],
             builder.file_purger(),
@@ -2584,6 +2588,7 @@ mod tests {
                 flushed_sequence: None,
                 committed_sequence: None,
                 wal_recovery: Default::default(),
+                last_invalid_seq: None,
             }),
             &[0],
             builder.file_purger(),

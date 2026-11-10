@@ -270,6 +270,7 @@ impl RegionManifestManager {
                 flushed_sequence: None,
                 committed_sequence: None,
                 wal_recovery: Default::default(),
+                last_invalid_seq: None,
             }));
         }
 
@@ -755,6 +756,25 @@ impl RegionManifestManager {
         (!self.staged.actions.actions.is_empty()).then_some(&self.staged.actions)
     }
 
+    /// Returns whether an end commit of the staged actions may have been written, so a retry
+    /// has to commit the same payload (see [Self::commit_staged]).
+    pub(crate) fn staged_attempt_pending(&self) -> bool {
+        self.staged.attempted.is_some()
+    }
+
+    /// Replaces the staged actions with `merged`, the single payload the end commit persists.
+    ///
+    /// An exit that changes the sequence domain merges the staged edits, allocates a boundary
+    /// and re-marks the files it publishes. A retry must neither merge again nor allocate a
+    /// second boundary, so the merged payload becomes the staged one: [Self::commit_staged]
+    /// persists it once and, when the write may have landed, keeps its bytes for the retry.
+    ///
+    /// The staged view stays: the merged payload adds the same files, so the manifest with the
+    /// staged actions applied does not change.
+    pub(crate) fn replace_staged_actions(&mut self, merged: RegionMetaActionList) {
+        self.staged.actions = merged;
+    }
+
     /// Stages `action_list` in memory.
     fn stage(&mut self, action_list: RegionMetaActionList) -> Result<()> {
         if self.staged.attempted.is_some() {
@@ -1135,6 +1155,7 @@ mod test {
                         flushed_sequence: None,
                         committed_sequence: None,
                         wal_recovery: Default::default(),
+                        last_invalid_seq: None,
                     })]),
                     false,
                 )

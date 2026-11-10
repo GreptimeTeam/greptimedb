@@ -92,6 +92,7 @@ pub(crate) fn pending_tails_edit(pending_tails: Vec<PendingTail>) -> RegionEdit 
             pending_tails: Some(pending_tails),
             handoff_floor: None,
         },
+        last_invalid_seq: None,
     }
 }
 

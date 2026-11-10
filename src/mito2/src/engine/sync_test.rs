@@ -211,6 +211,7 @@ async fn test_sync_after_flush_region_with_format(flat_format: bool) {
                 flushed_sequence: None,
                 committed_sequence: None,
                 wal_recovery: Default::default(),
+                last_invalid_seq: None,
             },
         )
         .await

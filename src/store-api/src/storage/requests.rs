@@ -87,6 +87,32 @@ pub struct ScanRequest {
     ///
     /// Historical `memtable_only` reads must never set this flag.
     pub exact_sequence_range: bool,
+    /// Whether this scan is a Flow recovery read-only window discovery: it only
+    /// needs the timestamps of the rows a stale cursor may have missed, and never
+    /// accumulates an incremental delta.
+    ///
+    /// Such a scan (1) may read across `last_invalid_seq`, because refusing it
+    /// would deadlock recovery — the discovery query itself is what rediscovers the
+    /// windows a stale cursor can no longer explain, (2) prunes at file granularity
+    /// only (a file whose admission barrier is at or below the cursor was fully
+    /// consumed; a file without a barrier is kept), and (3) does not require
+    /// row-level sequence exactness, so files admitted by an edit are readable even
+    /// though their row sequences cannot be trusted. The result is a conservative
+    /// superset of windows, which is safe: those windows are simply recomputed.
+    ///
+    /// Ordinary incremental deltas must leave it `false`.
+    pub repair_discovery_scan: bool,
+    /// Whether this scan is the fenced repair DML: it recomputes whole windows under
+    /// a frozen high watermark and therefore reads its selected files completely.
+    ///
+    /// It differs from [`Self::repair_discovery_scan`] in two ways: it must **not**
+    /// prune at file granularity and must **not** force row-sequence override,
+    /// otherwise the rows of a partially consumed file would be dropped and the
+    /// repaired window would be wrong. What it shares with discovery is the
+    /// stale-cursor bypass (`C < last_invalid_seq` is allowed, because this read is
+    /// what repairs that state) and the requirement to prove
+    /// `last_invalid_seq <= H` before its result may be committed.
+    pub fenced_repair_scan: bool,
     /// Optional hint for the distribution of time-series data.
     pub distribution: Option<TimeSeriesDistribution>,
     /// Optional hint from query-driven JSON type concretization.

@@ -399,6 +399,7 @@ impl<S> RegionWorkerLoop<S> {
                     flushed_sequence: None,
                     flushed_entry_id: None,
                     committed_sequence: None,
+                    last_invalid_seq: None,
                     compaction_time_window: None,
                     wal_recovery: Default::default(),
                 }),

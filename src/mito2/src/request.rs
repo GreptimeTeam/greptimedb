@@ -1157,6 +1157,20 @@ pub(crate) enum BackgroundNotify {
         /// The reloaded instance.
         result: Result<MitoRegionRef>,
     },
+    /// The staging edit of a region landed: open the publish window in the worker loop
+    /// and publish the staged layout in the background.
+    ExitStaging(ExitStagingRequest),
+    /// A publish window that queued ordinary writes was released: admit them again.
+    EditingWindowClosed,
+}
+
+/// Notifies that the staged layout of a region must be published.
+#[derive(Debug)]
+pub(crate) struct ExitStagingRequest {
+    /// Region id.
+    pub(crate) region_id: RegionId,
+    /// Result sender of the apply staging request.
+    pub(crate) sender: OptionOutputTx,
 }
 
 /// Notifies a flush job is finished.
@@ -1307,6 +1321,8 @@ pub(crate) struct TruncateResult {
     /// Truncate result.
     pub(crate) result: Result<()>,
     pub(crate) kind: TruncateKind,
+    /// Repartition boundary recorded by the truncate action.
+    pub(crate) last_invalid_seq: Option<SequenceNumber>,
 }
 
 /// Notifies the result of discarding unflushed data from a region.
@@ -1326,6 +1342,8 @@ pub(crate) struct DiscardUnflushedResult {
     pub(crate) discarded_rows: u64,
     /// Estimated number of discarded bytes.
     pub(crate) discarded_bytes: u64,
+    /// Repartition boundary recorded by the discard action.
+    pub(crate) last_invalid_seq: Option<SequenceNumber>,
 }
 
 /// Notifies the region the result of writing region change action.

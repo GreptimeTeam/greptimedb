@@ -32,14 +32,14 @@ use datafusion::sql::unparser::expr_to_sql;
 use datafusion_common::tree_node::{Transformed, TreeNode};
 use datafusion_common::utils::quote_identifier;
 use datafusion_common::{DFSchemaRef, ScalarValue, TableReference};
-use datafusion_expr::{DmlStatement, LogicalPlan, Projection, WriteOp, col, lit};
+use datafusion_expr::{DmlStatement, Limit, LogicalPlan, Projection, WriteOp, col, lit};
 use datatypes::schema::Schema;
 use datatypes::vectors::Helper;
 use futures::TryStreamExt;
 use query::QueryEngineRef;
 use query::options::{
     FLOW_INCREMENTAL_AFTER_SEQS, FLOW_INCREMENTAL_MODE, FLOW_INCREMENTAL_MODE_SEQUENCE_RANGE,
-    FLOW_RETURN_REGION_SEQ,
+    FLOW_REPAIR_MODE, FLOW_REPAIR_MODE_DISCOVERY, FLOW_RETURN_REGION_SEQ,
 };
 use query::query_engine::DefaultSerializer;
 use session::context::QueryContextRef;
@@ -198,6 +198,37 @@ fn encode_insert_plan_request(
             },
         )),
     })
+}
+
+/// Wraps the watermark projection in the `LIMIT 1` that keeps every source scan alive.
+///
+/// `LIMIT 0` cannot be used: the frontend re-decodes the plan with optimization on
+/// and `EliminateLimit` turns `LIMIT 0` into an `EmptyRelation`, so no region opens
+/// and no watermark is reported.
+fn region_watermark_plan(projection: LogicalPlan) -> LogicalPlan {
+    LogicalPlan::Limit(Limit {
+        skip: None,
+        fetch: Some(Box::new(lit(1_u64))),
+        input: Arc::new(projection),
+    })
+}
+
+/// Consumes an output so its terminal metrics become ready.
+async fn drain_output_data(output: &mut OutputData) -> Result<(), Error> {
+    match output {
+        OutputData::AffectedRows(_) => Ok(()),
+        OutputData::RecordBatches(_) => Ok(()),
+        OutputData::Stream(stream) => {
+            while stream
+                .try_next()
+                .await
+                .map_err(BoxedError::new)
+                .context(ExternalSnafu)?
+                .is_some()
+            {}
+            Ok(())
+        }
+    }
 }
 
 fn recovery_aggregate_input(plan: &LogicalPlan) -> Result<LogicalPlan, Error> {
@@ -740,6 +771,106 @@ impl BatchingTask {
     /// The caller owns the execution guard and freezes this bound with its recovery scope.
     /// This read-only method leaves task state untouched. Terminal proof must cover every
     /// region in `lower`; subset or pruned proofs are rejected.
+    /// Reads the region watermark map of this flow's sources **without reading
+    /// business rows**.
+    ///
+    /// This is the baseline/degraded-advance read: it projects only the time-index
+    /// column under `LIMIT 1` and asks for `flow.return_region_seq`, and it sends no
+    /// incremental `after_seqs`, so
+    /// - it never runs an insert plan and never writes the sink;
+    /// - it does not depend on `sequence_range_capable()`.
+    ///
+    /// Watermarks are reported by the sources' terminal metrics, which are only ready
+    /// once the output has been consumed, so the caller drains the output before it
+    /// reads the map. The map is therefore non-empty whenever a source region was
+    /// opened.
+    ///
+    /// Cost: at most one row is produced (never an aggregate, because the aggregate is
+    /// stripped from the input), and the underlying scans stay open just long enough to
+    /// report their watermarks. This is a metadata-reporting read, not a data scan.
+    pub async fn query_region_watermarks(
+        &self,
+        engine: &QueryEngineRef,
+        frontend_client: &FrontendClient,
+    ) -> Result<BTreeMap<u64, u64>, Error> {
+        let query_ctx = self.query_context_snapshot();
+        let plan = sql_to_df_plan(query_ctx, engine.clone(), &self.config.query, false).await?;
+        let input = recovery_aggregate_input(&plan)?;
+        let column_name = self
+            .config
+            .time_window_expr
+            .as_ref()
+            .map(|expr| expr.column_name.clone())
+            .context(UnexpectedSnafu {
+                reason: format!(
+                    "Flow {} region watermark query requires a time-window expression",
+                    self.config.flow_id
+                ),
+            })?;
+        let projection = LogicalPlan::Projection(
+            Projection::try_new(vec![col(&column_name)], Arc::new(input)).context(
+                DatafusionSnafu {
+                    context: "Failed to project the region watermark source".to_string(),
+                },
+            )?,
+        );
+        let catalog = &self.config.sink_table_name[0];
+        let schema = &self.config.sink_table_name[1];
+        // The decoded plan carries the source tables under their `datafusion.public`
+        // names; resolve them back to the flow's catalog/schema like the recovery
+        // window capture does, otherwise the frontend cannot find the table.
+        let projection = projection
+            .transform_down_with_subqueries(|p| {
+                if let LogicalPlan::TableScan(mut table_scan) = p {
+                    let resolved = table_scan.table_name.resolve(catalog, schema);
+                    table_scan.table_name = resolved.into();
+                    Ok(Transformed::yes(LogicalPlan::TableScan(table_scan)))
+                } else {
+                    Ok(Transformed::no(p))
+                }
+            })
+            .with_context(|_| DatafusionSnafu {
+                context: "Failed to fix table ref in the region watermark plan".to_string(),
+            })?
+            .data;
+        // `LIMIT 1`, not `LIMIT 0`: the frontend re-decodes the plan and
+        // `EliminateLimit` would rewrite `LIMIT 0` into `EmptyRelation`, so no source
+        // region would ever open and no watermark would be reported. One row keeps
+        // every source scan alive while still bounding the read.
+        let plan = region_watermark_plan(projection);
+        let message = DFLogicalSubstraitConvertor {}
+            .encode(&plan, DefaultSerializer)
+            .context(SubstraitEncodeLogicalPlanSnafu)?;
+        let request = api::v1::QueryRequest {
+            query: Some(api::v1::query_request::Query::LogicalPlan(message.to_vec())),
+        };
+        let mut peer_desc = None;
+        // No `after_seqs`: this read must not depend on exact incremental capability.
+        let extensions = [(FLOW_RETURN_REGION_SEQ, "true")];
+        let mut result = frontend_client
+            .query_with_terminal_metrics(
+                catalog,
+                schema,
+                request,
+                &extensions,
+                &HashMap::new(),
+                &mut peer_desc,
+            )
+            .await?;
+        // Terminal metrics are only ready once the output is fully consumed, so drain
+        // the stream (at most one row) before reading the watermark map.
+        drain_output_data(&mut result.output.data).await?;
+        result
+            .region_watermark_map()
+            .map(|watermarks| watermarks.into_iter().collect::<BTreeMap<u64, u64>>())
+            .context(UnexpectedSnafu {
+                reason: format!(
+                    "Flow {} region watermark query returned no per-region watermarks",
+                    self.config.flow_id
+                ),
+            })
+    }
+
     pub async fn capture_recovery_windows_since(
         &self,
         engine: &QueryEngineRef,
@@ -852,6 +983,10 @@ impl BatchingTask {
             (FLOW_RETURN_REGION_SEQ, "true"),
             (FLOW_INCREMENTAL_MODE, FLOW_INCREMENTAL_MODE_SEQUENCE_RANGE),
             (FLOW_INCREMENTAL_AFTER_SEQS, lower_json.as_str()),
+            // This query only discovers the windows a stale cursor can no longer
+            // explain; it must read across `last_invalid_seq` and does not need
+            // row-level sequence exactness.
+            (FLOW_REPAIR_MODE, FLOW_REPAIR_MODE_DISCOVERY),
         ];
         let mut peer_desc = None;
         let result = frontend_client

@@ -41,7 +41,7 @@ use crate::memtable::MemtableBuilderProvider;
 use crate::metrics::WRITE_CACHE_INFLIGHT_DOWNLOAD;
 use crate::region::opener::{sanitize_region_options, version_builder_from_manifest};
 use crate::region::options::RegionOptions;
-use crate::region::version::VersionControlRef;
+use crate::region::version::{SequenceDomainChange, VersionControlRef, invalid_seq_boundary};
 use crate::region::{MitoRegionRef, RegionLeaderState, RegionRoleState};
 use crate::request::{
     BackgroundNotify, BuildIndexRequest, DiscardUnflushedResult, OptionOutputTx,
@@ -384,6 +384,22 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             waiters.reply_with(|| Err(error.clone()).context(EditRegionSnafu { region_id }));
             return RegionEditDispatch::Rejected;
         }
+        // The single policy point decides whether this edit may reassign the
+        // region's rows; when it may, record `B = last_sequence + 1`, strictly
+        // above every sequence already allocated or published, so a Flow
+        // checkpoint equal to the previous high watermark still detects the
+        // change. Every request served here (imports such as `ingest_sst`,
+        // repartitions, staging applies) is treated conservatively: the edit
+        // layer cannot prove that admitted row sequences are safe for an existing
+        // cursor. Flush, write and compaction edits never reach this path.
+        //
+        // `prepare_region_edit` already assigned the destination sequence to the
+        // added files (and cleared `preserve_row_sequence`, keeping the source
+        // sequence of adopted shared files), so only the boundary is recorded
+        // here.
+        let file_sequence = region.version_control.current().last_sequence + 1;
+        edit.last_invalid_seq =
+            invalid_seq_boundary(SequenceDomainChange::RegionEdit, file_sequence);
 
         // Allow retrieving `is_staging` before spawn the edit region task.
         let is_staging = region.is_staging();
@@ -669,6 +685,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 sender,
                 result,
                 kind: truncate.kind,
+                last_invalid_seq: truncate.last_invalid_seq,
             };
             let _ = request_sender
                 .send(WorkerRequestWithTime::new(WorkerRequest::Background {
@@ -699,6 +716,14 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         let request_sender = self.sender.clone();
         let manifest_ctx = region.manifest_ctx.clone();
         let durability_barrier = self.wal.durability_barrier(region_id, &region.provider);
+        // Discarding unflushed data drops rows the region owned, so the shared
+        // policy records an edit boundary above every allocated sequence.
+        // This edit carries no `files_to_remove`, so the boundary cannot be
+        // inferred from the edit shape.
+        let last_invalid_seq = invalid_seq_boundary(
+            SequenceDomainChange::DiscardUnflushed,
+            region.version_control.current().last_sequence + 1,
+        );
 
         common_runtime::spawn_global(async move {
             // The frontier moves to the last written entry and sequence, so replaying the
@@ -711,8 +736,15 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 compaction_time_window: None,
                 flushed_entry_id: Some(discarded_entry_id),
                 flushed_sequence: Some(discarded_sequence),
-                committed_sequence: None,
+                // The boundary is above the sequence of every discarded row, so it is also the
+                // commit watermark a recovery round has to report: a reopened region that keeps
+                // `committed_sequence` at the flushed frontier would reject reads at `B` and let
+                // the next write reuse a sequence a Flow checkpoint already consumed. The flushed
+                // frontier itself stays where the WAL says it is.
+                committed_sequence: last_invalid_seq
+                    .map(|boundary| discarded_sequence.max(boundary)),
                 wal_recovery: Default::default(),
+                last_invalid_seq,
             };
             let action_list = RegionMetaActionList::with_action(RegionMetaAction::Edit(edit));
             let result = match durability_barrier.wait(discarded_entry_id).await {
@@ -731,6 +763,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 discarded_sequence,
                 discarded_rows,
                 discarded_bytes,
+                last_invalid_seq,
             };
             let _ = request_sender
                 .send(WorkerRequestWithTime::new(WorkerRequest::Background {

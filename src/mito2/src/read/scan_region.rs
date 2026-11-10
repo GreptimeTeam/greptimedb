@@ -58,8 +58,8 @@ use crate::access_layer::AccessLayerRef;
 use crate::cache::CacheStrategy;
 use crate::config::DEFAULT_MAX_CONCURRENT_SCAN_FILES;
 use crate::error::{
-    EvalPartitionFilterSnafu, InvalidPartitionExprSnafu, InvalidRequestSnafu,
-    RegionSequenceDomainBrokenSnafu, Result, SequenceRangeUnsupportedSnafu,
+    EvalPartitionFilterSnafu, IncrementalQueryStaleSnafu, InvalidPartitionExprSnafu,
+    InvalidRequestSnafu, RegionSequenceDomainBrokenSnafu, Result, SequenceRangeUnsupportedSnafu,
 };
 #[cfg(feature = "enterprise")]
 use crate::extension::{BoxedExtensionRange, BoxedExtensionRangeProvider};
@@ -599,6 +599,7 @@ impl ScanRegion {
                     .flatten(),
             )
             .with_sequence_range(sequence_range)
+            .with_repair_discovery_scan(self.request.repair_discovery_scan)
             .with_query_stat_counters(self.query_stat_counters);
         #[cfg(feature = "enterprise")]
         let input = if !self.request.skip_sst_files
@@ -972,6 +973,9 @@ pub struct ScanInput {
     /// carries an explicit exact range. When set, SST readers apply the same
     /// `(checkpoint, upper_bound]` row-level filter as memtables.
     pub(crate) sequence_range: Option<SequenceRange>,
+    /// Whether this scan is Flow recovery window discovery: every selected SST's
+    /// rows are virtualized at the file's admission barrier.
+    pub(crate) repair_discovery_scan: bool,
     /// Whether this scan is for compaction.
     pub(crate) compaction: bool,
     /// Max number of compaction inputs decoded concurrently ahead of the merge.
@@ -1041,6 +1045,7 @@ impl ScanInput {
                 explain_flat_format: false,
                 snapshot_sequence: None,
                 sequence_range: None,
+                repair_discovery_scan: false,
                 compaction: false,
                 compaction_read_parallelism: 1,
                 json2_rewrite_targets: Arc::default(),
@@ -1393,6 +1398,13 @@ impl ScanInputBuilder {
         self
     }
 
+    /// Sets whether this scan is Flow recovery window discovery.
+    #[must_use]
+    pub(crate) fn with_repair_discovery_scan(mut self, repair_discovery_scan: bool) -> Self {
+        self.input.repair_discovery_scan = repair_discovery_scan;
+        self
+    }
+
     /// Sets whether this scan is for compaction.
     #[must_use]
     pub(crate) fn with_compaction(mut self, compaction: bool) -> Self {
@@ -1584,6 +1596,9 @@ impl ScanInput {
         };
         let res = reader
             .expected_metadata(Some(self.mapper.metadata().clone()))
+            // Recovery discovery virtualizes every row at the file's barrier instead
+            // of trusting the file's own sequence column.
+            .force_sequence_override(self.repair_discovery_scan)
             .compaction(self.compaction)
             .pre_filter_mode(pre_filter_mode)
             .enable_predicate_prefilter(enable_predicate_prefilter)
@@ -1908,6 +1923,110 @@ pub(crate) fn exact_sequence_range(
 ) -> Result<(Vec<FileHandle>, Option<SequenceRange>)> {
     if request.skip_sst_files {
         return Ok((Vec::new(), None));
+    }
+
+    if request.repair_discovery_scan {
+        // Recovery window discovery: prune at file granularity only. A file whose
+        // admission barrier is at or below the cursor was fully consumed, so it
+        // cannot contribute to the missing windows; a file without a barrier cannot
+        // be proven disjoint, so it is kept (conservative). Row-level exactness is
+        // deliberately not requested: returning no `SequenceRange` keeps every row
+        // of the selected files, and the caller only needs their timestamps. The
+        // result may therefore be a superset of the affected windows, which is safe
+        // because those windows are recomputed.
+        let after = request.memtable_min_sequence;
+        let time_index = version.metadata.time_index_column();
+        let unit = time_index
+            .column_schema
+            .data_type
+            .as_timestamp()
+            .expect("Time index must have timestamp-compatible type")
+            .unit();
+        let time_range =
+            build_time_range_predicate(&time_index.column_schema.name, unit, &request.filters);
+        let files = version
+            .ssts
+            .levels()
+            .iter()
+            .flat_map(|level| level.files.values())
+            .filter(|file| file_in_range(file, &time_range))
+            .filter(|file| match (after, file.meta_ref().sequence) {
+                (Some(after), Some(sequence)) => sequence.get() > after,
+                _ => true,
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        // A file without an admission barrier cannot be pruned: keeping it would
+        // silently degrade discovery into a full scan, which is forbidden. Report the
+        // incomplete candidate set instead, using the shared "exactness unavailable"
+        // vocabulary so the caller can decide whether to fail or accept a superset.
+        let unprunable = files
+            .iter()
+            .filter(|file| file.meta_ref().sequence.is_none())
+            .count();
+        if unprunable > 0 {
+            return SequenceRangeUnsupportedSnafu {
+                region_id: version.metadata.region_id,
+                min_seq: after.unwrap_or_default(),
+                max_seq: after.unwrap_or_default(),
+                reason: format!(
+                    "recovery discovery cannot prove its candidate file set is complete: {unprunable} of {} selected files carry no admission barrier, so it would read the whole region",
+                    files.len()
+                ),
+            }
+            .fail();
+        }
+        if files.is_empty() && version.memtables.is_empty() {
+            // An empty candidate set is reported, never silently treated as "no
+            // window": the caller decides whether to accept it or advance instead.
+            // A non-empty memtable is a candidate too: its rows carry sequences the
+            // region itself assigned, so discovery must read it (the scan keeps no
+            // row-level range here, which only widens the discovered window set).
+            return SequenceRangeUnsupportedSnafu {
+                region_id: version.metadata.region_id,
+                min_seq: after.unwrap_or_default(),
+                max_seq: after.unwrap_or_default(),
+                reason: "recovery discovery found no candidate file above the cursor, so it cannot report an empty window set as complete"
+                    .to_string(),
+            }
+            .fail();
+        }
+        return Ok((files, None));
+    }
+
+    // `last_invalid_seq` is the latest publication boundary after which an old
+    // checkpoint can no longer explain the visible data (row re-homing, data
+    // deletion or replacement, a visible partition-range change), so a cursor
+    // below it predates a layout in which the rows it has not consumed were
+    // renumbered. Reject it instead of serving a partial `(C, H]` delta. Flush,
+    // compaction, index updates and pure new-data writes never advance it, so they
+    // never invalidate a cursor.
+    //
+    // An absent cursor (`memtable_min_sequence == None`, i.e. a full-snapshot
+    // round) never triggers this check: a complete rebuild must always be allowed
+    // through, and it returns `H >= B` so the next round can resume incrementally.
+    //
+    // This runs on the same pinned `Version` as file selection below, and before
+    // it, so a stale cursor is reported even when the selected files could not
+    // support an exact read anyway.
+    // A Flow recovery discovery read only needs the timestamps of the rows a stale
+    // cursor may have missed, so it reads across the boundary: rejecting it would
+    // deadlock recovery, because that query is what rediscovers the windows a stale
+    // cursor can no longer explain.
+    if request.exact_sequence_range
+        && !request.repair_discovery_scan
+        && !request.fenced_repair_scan
+        && let Some(after_seq) = request.memtable_min_sequence
+    {
+        let boundary = version.last_invalid_seq();
+        ensure!(
+            after_seq >= boundary,
+            IncrementalQueryStaleSnafu {
+                region_id: version.metadata.region_id,
+                given_seq: after_seq,
+                min_readable_seq: boundary,
+            }
+        );
     }
 
     let time_index = version.metadata.time_index_column();
