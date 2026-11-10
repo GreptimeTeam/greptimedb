@@ -97,7 +97,7 @@ otel-arrow-rust.workspace = true
 parking_lot.workspace = true
 partition.workspace = true
 pg_interval = "0.6"
-pgwire = { version = "0.41", default-features = false, features = [
+pgwire = { version = "0.41.2", default-features = false, features = [
     "server-api-aws-lc-rs",
     "pg-ext-types",
 ] }
