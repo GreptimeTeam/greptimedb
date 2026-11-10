@@ -183,6 +183,185 @@ fn strips_only_tsid(plan: &LogicalPlan, inner: &LogicalPlan) -> bool {
     projected == stripped && projected.len() + 1 == inner.schema().fields().len()
 }
 
+/// Whether `plan` runs on the native fused-series route.
+fn contains_native_fused(plan: &LogicalPlan) -> bool {
+    if let LogicalPlan::Extension(extension) = plan
+        && extension
+            .node
+            .as_any()
+            .is::<promql::extension_plan::FusedSeries>()
+    {
+        return true;
+    }
+    plan.inputs()
+        .iter()
+        .any(|input| contains_native_fused(input))
+}
+
+/// Whether `schema` is a series frame's declaration, which describes the columns below it.
+fn publishes_series_frame(schema: &DFSchema) -> bool {
+    schema
+        .metadata()
+        .keys()
+        .any(|key| key.starts_with("greptime.series."))
+}
+
+/// Whether `published` publishes `wanted`'s columns: the same names, in the same order, with the
+/// same types, nullability, per-column metadata and schema metadata.
+///
+/// Qualifiers are not compared: a CTE's plan is read through the alias the CTE registers, which
+/// names every column after the CTE on both routes.
+fn publishes_columns(published: &DFSchema, wanted: &DFSchema) -> bool {
+    published.fields().len() == wanted.fields().len()
+        && published.metadata() == wanted.metadata()
+        && published
+            .iter()
+            .zip(wanted.iter())
+            .all(|((_, published), (_, wanted))| {
+                published.name() == wanted.name()
+                    && published.data_type() == wanted.data_type()
+                    && published.is_nullable() == wanted.is_nullable()
+                    && published.metadata() == wanted.metadata()
+            })
+}
+
+/// The type a column names once its dictionary encoding is taken off.
+///
+/// A label column is dictionary-encoded in the existing planner's plan and plain text in the fused
+/// plan's. That is the one difference between the two answers for the same column that an
+/// expression can carry: a cast reproduces the encoding, and the values stay the same strings.
+fn unwrap_dictionary(data_type: &DataType) -> &DataType {
+    let mut data_type = data_type;
+    while let DataType::Dictionary(_, inner) = data_type {
+        data_type = inner.as_ref();
+    }
+    data_type
+}
+
+/// The native plan, wrapped in the projection that publishes `legacy`'s columns over it.
+///
+/// A hybrid CTE registers the plan as a table the outer SQL query reads, so the columns this plan
+/// publishes *are* the CTE's columns: their names, their order, their types, their nullability and
+/// the metadata they carry are what the statement's SQL sees, and a column list the CTE declares is
+/// applied to them by position. The two routes do not agree on that schema - the fused node takes
+/// its names from the compiled tree and publishes the time index first, while the existing planner
+/// names each value column after the expression it planned and publishes the labels first - so a CTE
+/// answered natively would make one statement mean different things depending on which route planned
+/// it. This wraps the native plan in the projection that publishes the existing planner's answer for
+/// the same statement instead, so what a CTE exposes does not depend on the route.
+///
+/// The projection is made of expressions - an alias per column, and a cast where the two routes carry
+/// the same values in different Arrow types - because that is what survives analysis: the analyzer
+/// rebuilds a projection's schema from its expressions, so anything the projection declared but its
+/// expressions did not carry would be gone by the time the CTE's columns are read.
+///
+/// The mapping is the identity on every column both plans publish alike - the time index and the
+/// label columns, which carry the same metadata on both routes now - and is a cast for a column
+/// whose identity is unambiguous: one native column of the same type once both are unencoded, no
+/// per-column metadata to lose and the same nullability. `None` says the two plans admit no such
+/// mapping - a differently named time index, an ambiguous set of columns left over, or a column a
+/// cast cannot reproduce faithfully - and the caller then keeps the existing plan rather than publish
+/// a column it cannot fill faithfully.
+fn publish_legacy_schema(native: LogicalPlan, legacy: &LogicalPlan) -> Option<LogicalPlan> {
+    let native_schema = native.schema().clone();
+    let legacy_schema = legacy.schema();
+
+    // A frame's declaration is schema metadata describing the columns under it, and a projection
+    // that renames and reorders them cannot keep it. A statement that publishes one keeps the
+    // existing plan.
+    if publishes_series_frame(native_schema.as_ref()) {
+        return None;
+    }
+    if publishes_columns(native_schema.as_ref(), legacy_schema.as_ref()) {
+        return Some(native);
+    }
+
+    let native_fields = native_schema
+        .iter()
+        .map(|(qualifier, field)| (qualifier.cloned(), field))
+        .collect::<Vec<_>>();
+    let mut taken = vec![false; native_fields.len()];
+    let mut source: Vec<Option<usize>> = vec![None; legacy_schema.fields().len()];
+    // First the columns both plans publish alike: the same name and the same column, metadata
+    // included. These are read as they are, so nothing about them is re-declared here.
+    for (legacy_index, (_, legacy_field)) in legacy_schema.iter().enumerate() {
+        let found =
+            native_fields
+                .iter()
+                .enumerate()
+                .find_map(|(native_index, (_, native_field))| {
+                    (!taken[native_index]
+                        && native_field.name() == legacy_field.name()
+                        && native_field.data_type() == legacy_field.data_type()
+                        && native_field.is_nullable() == legacy_field.is_nullable()
+                        && native_field.metadata() == legacy_field.metadata())
+                    .then_some(native_index)
+                });
+        if let Some(native_index) = found {
+            taken[native_index] = true;
+            source[legacy_index] = Some(native_index);
+        }
+    }
+    // Then the columns whose only difference is that the routes carry them in different Arrow
+    // types. A cast reproduces the existing planner's type, so it is only paired when exactly one
+    // native column can be that column: the same type once both are unencoded, the same
+    // nullability, and no metadata a cast would drop.
+    for (legacy_index, source) in source.iter_mut().enumerate() {
+        if source.is_some() {
+            continue;
+        }
+        let legacy_field = legacy_schema.field(legacy_index);
+        if !legacy_field.metadata().is_empty() {
+            continue;
+        }
+        let candidates = native_fields
+            .iter()
+            .enumerate()
+            .filter(|(native_index, (_, native_field))| {
+                !taken[*native_index]
+                    && unwrap_dictionary(native_field.data_type())
+                        == unwrap_dictionary(legacy_field.data_type())
+                    && native_field.is_nullable() == legacy_field.is_nullable()
+            })
+            .map(|(native_index, _)| native_index)
+            .collect::<Vec<_>>();
+        if let [native_index] = candidates.as_slice() {
+            taken[*native_index] = true;
+            *source = Some(*native_index);
+        }
+    }
+    let source = source.into_iter().collect::<Option<Vec<usize>>>()?;
+
+    let mut exprs = Vec::with_capacity(source.len());
+    for ((_, legacy_field), native_index) in legacy_schema.iter().zip(source) {
+        let (native_qualifier, native_field) = &native_fields[native_index];
+        let column = DfExpr::Column(datafusion_common::Column::new(
+            native_qualifier.clone(),
+            native_field.name().clone(),
+        ));
+        // A column the two plans publish alike is read as it is; one they carry in different Arrow
+        // types is cast to the existing planner's type, which keeps the same values under the same
+        // name - and keeps them when the analyzer rebuilds this projection.
+        let value = if native_field.data_type() == legacy_field.data_type() {
+            column
+        } else {
+            DfExpr::Cast(datafusion_expr::Cast::new(
+                Box::new(column),
+                legacy_field.data_type().clone(),
+            ))
+        };
+        exprs.push(value.alias(legacy_field.name().clone()));
+    }
+    let plan = LogicalPlanBuilder::from(native)
+        .project(exprs)
+        .ok()?
+        .build()
+        .ok()?;
+    // The published columns are the ones this set out to publish, or the native plan is not used at
+    // all: what a CTE exposes may not change for a reason this did not predict.
+    publishes_columns(plan.schema().as_ref(), legacy_schema.as_ref()).then_some(plan)
+}
+
 pub struct DfLogicalPlanner {
     engine_state: Arc<QueryEngineState>,
     session_state: SessionState,
@@ -615,15 +794,30 @@ impl DfLogicalPlanner {
                 };
                 let stmt = QueryLanguageParser::parse_promql(&prom_query, &query_ctx)?;
                 // A hybrid CTE registers this plan as a table the outer SQL query reads, so the
-                // `FusedSeries` node would sit under a SQL root. The in-process encodability
-                // exception is scoped to a plan whose root is the node, so here the node would be
-                // cut off and left in the frontend, where the physical planner cannot build it -
-                // a query that used to answer would fail instead. The route is therefore not
-                // offered for an embedded statement.
+                // `FusedSeries` node sits under a SQL alias and projection instead of at the plan
+                // root. Neither decides where a fused subtree runs: placement asks whether the
+                // node's own contract allows a region to run it, and the column requirements a
+                // node above makes are enforced by their lineage rather than by the shape of the
+                // subtree they travel through, so an alias or projection over the CTE does not
+                // block a multi-input fused subtree. The route is therefore offered here like it
+                // is for a top-level statement.
                 let QueryStatement::Promql(eval, _alias) = &stmt else {
                     unreachable!("a TQL eval parses to a PromQL statement");
                 };
-                self.plan_pql(eval, query_ctx, false).await
+                let plan = self.plan_pql(eval, query_ctx.clone(), true).await?;
+                if !contains_native_fused(&plan) {
+                    // The route was not taken - it is off for this query, or it declined this
+                    // shape - so this is the existing plan, which already publishes what a CTE has
+                    // always published.
+                    return Ok(plan);
+                }
+                // What the CTE publishes is SQL-visible, and this route names and orders its output
+                // its own way, so its own schema cannot stand in for the existing planner's: plan
+                // the statement for that schema and publish it over the native answer. A statement
+                // whose columns that projection cannot fill faithfully keeps the existing plan
+                // instead of changing the schema the CTE exposes.
+                let existing = self.plan_pql(eval, query_ctx, false).await?;
+                Ok(publish_legacy_schema(plan, &existing).unwrap_or(existing))
             }
             Tql::Explain(_) => UnimplementedSnafu {
                 operation: "TQL EXPLAIN in CTEs",
@@ -1999,6 +2193,228 @@ mod tests {
         assert_eq!(types.get("$2"), Some(&Some(DataType::Utf8)));
         assert_eq!(types.get("$3"), Some(&Some(DataType::Int32)));
         assert_eq!(types.get("$4"), Some(&Some(DataType::Utf8)));
+    }
+
+    /// A plan that publishes `columns` as its output, one literal per column, named and typed as
+    /// the column is.
+    fn plan_publishing(columns: &[(&str, ScalarValue)]) -> LogicalPlan {
+        let exprs = columns
+            .iter()
+            .map(|(name, value)| DfExpr::Literal(value.clone(), None).alias(*name))
+            .collect::<Vec<_>>();
+        LogicalPlanBuilder::empty(false)
+            .project(exprs)
+            .unwrap()
+            .build()
+            .unwrap()
+    }
+
+    /// [`plan_publishing`], declaring what a plan of either route declares: the time index marked as
+    /// one, and the schema version GreptimeDB's schemas carry.
+    fn plan_publishing_marked(columns: &[(&str, ScalarValue)], time_index: &str) -> LogicalPlan {
+        let plan = plan_publishing(columns);
+        let LogicalPlan::Projection(projection) = plan else {
+            unreachable!("plan_publishing builds a projection")
+        };
+        let fields = projection
+            .schema
+            .iter()
+            .map(|(_, field)| {
+                let field =
+                    if field.name() == time_index {
+                        Arc::new(field.as_ref().clone().with_metadata(
+                            std::collections::HashMap::from([(
+                                datatypes::schema::TIME_INDEX_KEY.to_string(),
+                                "true".to_string(),
+                            )]),
+                        ))
+                    } else {
+                        Arc::clone(field)
+                    };
+                (None, field)
+            })
+            .collect::<Vec<_>>();
+        let schema = Arc::new(
+            DFSchema::new_with_metadata(
+                fields,
+                std::collections::HashMap::from([(
+                    datatypes::schema::VERSION_KEY.to_string(),
+                    datatypes::schema::Schema::INITIAL_VERSION.to_string(),
+                )]),
+            )
+            .unwrap(),
+        );
+        LogicalPlan::Projection(
+            datafusion_expr::Projection::try_new_with_schema(
+                projection.expr.clone(),
+                projection.input.clone(),
+                schema,
+            )
+            .unwrap(),
+        )
+    }
+
+    /// The label column the existing planner publishes: dictionary-encoded text.
+    fn dictionary_label(value: &str) -> ScalarValue {
+        ScalarValue::Dictionary(
+            Box::new(DataType::UInt32),
+            Box::new(ScalarValue::Utf8(Some(value.to_string()))),
+        )
+    }
+
+    /// The names of a plan's output columns, in order.
+    fn column_names(plan: &LogicalPlan) -> Vec<String> {
+        plan.schema()
+            .fields()
+            .iter()
+            .map(|field| field.name().clone())
+            .collect()
+    }
+
+    fn time_value() -> ScalarValue {
+        ScalarValue::TimestampMillisecond(Some(0), None)
+    }
+
+    /// The native answer for the statement these tests use: time index first, the value under the
+    /// tree's own field name, the labels last.
+    fn native_answer() -> LogicalPlan {
+        plan_publishing_marked(
+            &[
+                ("ts", time_value()),
+                ("val", ScalarValue::Float64(Some(2.0))),
+                ("host", ScalarValue::Utf8(Some("a".to_string()))),
+            ],
+            "ts",
+        )
+    }
+
+    /// The existing planner's answer for the same statement: labels first, then the time index, then
+    /// the value named after the expression it planned, with the label dictionary-encoded.
+    fn existing_answer() -> LogicalPlan {
+        plan_publishing_marked(
+            &[
+                ("host", dictionary_label("a")),
+                ("ts", time_value()),
+                ("lhs.val + rhs.val", ScalarValue::Float64(Some(2.0))),
+            ],
+            "ts",
+        )
+    }
+
+    /// A CTE publishes the existing planner's columns over a native plan as well.
+    ///
+    /// The fused plan publishes the time index first, the value under the tree's field name and the
+    /// labels last, in plain text; the existing planner publishes the labels first, then the time
+    /// index, then the value under the name of the expression it planned, in dictionary-encoded text.
+    /// What a CTE exposes is the second one, whichever route answered the statement, because a CTE's
+    /// columns are SQL-visible - and a column list the CTE declares is applied to them by position.
+    #[test]
+    fn a_cte_publishes_the_existing_planners_columns_over_a_native_plan() {
+        let native = native_answer();
+        let existing = existing_answer();
+
+        let published = publish_legacy_schema(native, &existing)
+            .expect("every column has one answer in the other plan");
+
+        assert_eq!(
+            column_names(&published),
+            vec!["host", "ts", "lhs.val + rhs.val"],
+            "the CTE publishes the existing planner's column order and names"
+        );
+        assert!(
+            publishes_columns(published.schema().as_ref(), existing.schema().as_ref()),
+            "and every column it publishes: name, order, type, nullability and metadata: {}",
+            published.schema()
+        );
+        assert_eq!(
+            published
+                .schema()
+                .field_with_name(None, "host")
+                .unwrap()
+                .data_type(),
+            &DataType::Dictionary(Box::new(DataType::UInt32), Box::new(DataType::Utf8)),
+            "a label is published as the encoding the existing planner publishes"
+        );
+        let LogicalPlan::Projection(projection) = &published else {
+            panic!("the native plan is wrapped in a projection: {published}");
+        };
+        assert_eq!(
+            column_names(projection.input.as_ref()),
+            vec!["ts", "val", "host"],
+            "the native plan is kept as the projection's input"
+        );
+    }
+
+    /// What the CTE publishes survives the analyzer, which rebuilds every projection from its
+    /// expressions.
+    ///
+    /// The declared schema of a projection is not what analysis keeps: the analyzer calls
+    /// `with_new_exprs`, which rebuilds the projection and derives its schema from the expressions
+    /// and their input. So the columns have to be carried by the expressions themselves - an alias
+    /// per column and a cast for the encoding - or they are gone by the time the CTE is read.
+    #[test]
+    fn what_a_cte_publishes_survives_the_analyzer_rebuilding_the_projection() {
+        let existing = existing_answer();
+        let published = publish_legacy_schema(native_answer(), &existing).unwrap();
+
+        // The rebuild `DistPlannerAnalyzer` performs on every projection it visits.
+        let rebuilt = published
+            .with_new_exprs(
+                published.expressions(),
+                published.inputs().into_iter().cloned().collect(),
+            )
+            .unwrap();
+
+        assert!(
+            publishes_columns(rebuilt.schema().as_ref(), existing.schema().as_ref()),
+            "the rebuilt projection publishes the same columns: {}",
+            rebuilt.schema()
+        );
+        assert_eq!(
+            rebuilt.to_string(),
+            published.to_string(),
+            "and the same expressions"
+        );
+    }
+
+    /// A statement whose columns do not pair keeps the existing plan.
+    ///
+    /// Publishing a column this cannot fill would change what the CTE means, so a shape it cannot
+    /// map faithfully is refused instead: the caller keeps the existing plan and the CTE keeps the
+    /// columns it has always published.
+    #[test]
+    fn a_shape_with_no_faithful_column_mapping_keeps_the_existing_plan() {
+        // One native value column cannot fill two of the existing plan's value columns.
+        let two_values = plan_publishing_marked(
+            &[
+                ("host", dictionary_label("a")),
+                ("ts", time_value()),
+                ("lhs.val + rhs.val", ScalarValue::Float64(Some(2.0))),
+                ("lhs.val - rhs.val", ScalarValue::Float64(Some(0.0))),
+            ],
+            "ts",
+        );
+        assert!(publish_legacy_schema(native_answer(), &two_values).is_none());
+
+        // A time index the other route had to rename is marked as the time index on both sides, and
+        // a column that carries metadata is never reproduced by a cast.
+        let renamed_time = plan_publishing_marked(
+            &[
+                ("native_time_0", time_value()),
+                ("val", ScalarValue::Float64(Some(2.0))),
+                ("host", ScalarValue::Utf8(Some("a".to_string()))),
+            ],
+            "native_time_0",
+        );
+        let existing = plan_publishing_marked(
+            &[
+                ("host", dictionary_label("a")),
+                ("ts", time_value()),
+                ("val", ScalarValue::Float64(Some(2.0))),
+            ],
+            "ts",
+        );
+        assert!(publish_legacy_schema(renamed_time, &existing).is_none());
     }
 
     #[tokio::test]

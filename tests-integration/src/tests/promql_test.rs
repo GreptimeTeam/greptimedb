@@ -31,7 +31,7 @@ use datatypes::arrow::array::{
     Array, Float64Array, Int64Array, StringArray, TimestampMillisecondArray,
 };
 use datatypes::arrow::compute::cast;
-use datatypes::arrow::datatypes::{DataType, TimeUnit};
+use datatypes::arrow::datatypes::{DataType, Field, Schema as ArrowSchema, TimeUnit};
 use frontend::instance::Instance;
 use query::datafusion::{QUERY_FALLBACK_HINT, QUERY_PARALLELISM_HINT};
 use query::dist_plan::MergeScanExec;
@@ -9532,6 +9532,546 @@ async fn native_promql_metric_two_aggregate_pair_matches_legacy() {
             datafusion::physical_plan::displayable(observer.root_plan().as_ref()).indent(true)
         );
     }
+}
+
+/// The metric fixture the CTE tests read: one label set in one unpartitioned physical metric
+/// table, sampled `1, 3, 6, 10` one second apart.
+const CTE_NATIVE_FIXTURE: &str = r#"
+CREATE TABLE cte_native_phy (
+    ts TIMESTAMP TIME INDEX,
+    val DOUBLE
+) ENGINE=metric WITH ("physical_metric_table" = "true");
+CREATE TABLE cte_native (
+    host STRING,
+    ts TIMESTAMP TIME INDEX,
+    val DOUBLE,
+    PRIMARY KEY (host)
+) ENGINE=metric WITH ("on_physical_table" = 'cte_native_phy');
+INSERT INTO cte_native (host, ts, val) VALUES ('h', 0, 1), ('h', 1000, 3), ('h', 2000, 6), ('h', 3000, 10);
+"#;
+
+/// The statement under test: a TQL statement embedded in a CTE, so a fused subtree sits under the
+/// CTE's alias and the outer SQL projection instead of at the plan root.
+///
+/// The expression repeats one selector, which is the multi-input shape: the route answers it with
+/// one fused node reading one scan per occurrence.
+const CTE_NATIVE_STATEMENT: &str =
+    "WITH tql AS (TQL EVAL (0, 3, '1s') cte_native + cte_native) SELECT * FROM tql";
+
+/// [`CTE_NATIVE_STATEMENT`] ordered by the time index, which is the order its rows are expected in.
+const CTE_NATIVE_ORDERED_STATEMENT: &str =
+    "WITH tql AS (TQL EVAL (0, 3, '1s') cte_native + cte_native) SELECT * FROM tql ORDER BY ts";
+
+/// [`CTE_NATIVE_STATEMENT`] with an explicit CTE column list plus an outer projection and filter
+/// over the names it declares: the aliasing projection the CTE adds, and SQL above it that names
+/// what it published.
+///
+/// The list is positional, so it is one statement only because the columns the CTE publishes are
+/// the same on both routes: the label `site`, the time index `t` and the value `v`, in that order.
+const CTE_NATIVE_ALIASED_STATEMENT: &str = "WITH tql (site, t, v) AS (TQL EVAL (0, 3, '1s') cte_native + cte_native) \
+     SELECT t, v, site FROM tql WHERE v > 5 ORDER BY t";
+
+/// The rows [`CTE_NATIVE_STATEMENT`] answers: `cte_native + cte_native` doubles every sample, so
+/// `1, 3, 6, 10` becomes `2, 6, 12, 20`.
+fn cte_native_expected_rows() -> Vec<(i64, std::collections::BTreeMap<String, String>, f64)> {
+    let h = || std::collections::BTreeMap::from([("host".to_string(), "h".to_string())]);
+    vec![
+        (0, h(), 2.0),
+        (1_000, h(), 6.0),
+        (2_000, h(), 12.0),
+        (3_000, h(), 20.0),
+    ]
+}
+
+/// The rows the aliased statement answers: the rows of [`CTE_NATIVE_STATEMENT`] with `v > 5`, under
+/// the label name the CTE gave the label column.
+fn cte_native_filtered_rows() -> Vec<(i64, std::collections::BTreeMap<String, String>, f64)> {
+    let site = || std::collections::BTreeMap::from([("site".to_string(), "h".to_string())]);
+    vec![
+        (1_000, site(), 6.0),
+        (2_000, site(), 12.0),
+        (3_000, site(), 20.0),
+    ]
+}
+
+/// The schema a statement publishes, as SQL reads it after distributed planning: every column's
+/// name, Arrow type, nullability and metadata, and the metadata of the schema itself.
+///
+/// A CTE's columns are SQL-visible, and a column list the CTE declares is applied to them by
+/// position, so this is what a route may not change - including the Arrow type `arrow_typeof`
+/// reports for a column, which is why the label below is compared as the encoded type both routes
+/// publish rather than as the strings both answers decode to.
+fn cte_native_published_schema(output: &Output) -> ArrowSchema {
+    let schema = match &output.data {
+        OutputData::Stream(stream) => stream.schema(),
+        OutputData::RecordBatches(batches) => batches.schema(),
+        _ => unreachable!("TQL EVAL returns record batches"),
+    };
+    schema.arrow_schema().as_ref().clone()
+}
+
+/// The metadata the time index column carries on either route.
+fn cte_native_time_index_metadata() -> std::collections::HashMap<String, String> {
+    std::collections::HashMap::from([("greptime:time_index".to_string(), "true".to_string())])
+}
+
+/// The metadata a GreptimeDB schema carries on either route.
+fn cte_native_schema_metadata() -> std::collections::HashMap<String, String> {
+    std::collections::HashMap::from([("greptime:version".to_string(), "0".to_string())])
+}
+
+/// The schema [`CTE_NATIVE_STATEMENT`] publishes on both routes: the existing planner's columns.
+///
+/// The fused plan publishes the time index first and names the value after the tree's own field; the
+/// CTE publishes this over it instead. The label column is read as the string it carries, which is
+/// what a result reports it as on both routes; the encoding behind it is what
+/// [`CTE_NATIVE_ARROW_TYPE_STATEMENT`] compares.
+fn cte_native_published_schema_expected() -> ArrowSchema {
+    ArrowSchema::new_with_metadata(
+        vec![
+            Field::new("host", DataType::Utf8, true),
+            Field::new(
+                "ts",
+                DataType::Timestamp(TimeUnit::Millisecond, None),
+                false,
+            )
+            .with_metadata(cte_native_time_index_metadata()),
+            Field::new("lhs.val + rhs.val", DataType::Float64, true),
+        ],
+        cte_native_schema_metadata(),
+    )
+}
+
+/// The schema [`CTE_NATIVE_ALIASED_STATEMENT`] publishes: the names its CTE declares, in the order it
+/// declares them, over the columns of [`CTE_NATIVE_STATEMENT`].
+fn cte_native_aliased_schema_expected() -> ArrowSchema {
+    ArrowSchema::new_with_metadata(
+        vec![
+            Field::new("t", DataType::Timestamp(TimeUnit::Millisecond, None), false)
+                .with_metadata(cte_native_time_index_metadata()),
+            Field::new("v", DataType::Float64, true),
+            Field::new("site", DataType::Utf8, true),
+        ],
+        cte_native_schema_metadata(),
+    )
+}
+
+/// [`CTE_NATIVE_STATEMENT`] with `arrow_typeof` over each of its columns: the Arrow type SQL sees on
+/// a CTE's column, which the schema above has to agree with.
+const CTE_NATIVE_ARROW_TYPE_STATEMENT: &str = "WITH tql AS (TQL EVAL (0, 3, '1s') cte_native + cte_native) \
+     SELECT arrow_typeof(host) AS host, arrow_typeof(ts) AS ts, \
+     arrow_typeof(\"lhs.val + rhs.val\") AS val FROM tql LIMIT 1";
+
+/// The type names `arrow_typeof` reports for the columns of [`CTE_NATIVE_STATEMENT`].
+async fn cte_native_arrow_types(output: Output) -> Vec<String> {
+    let batches = match output.data {
+        OutputData::Stream(stream) => collect_batches(stream).await.unwrap(),
+        OutputData::RecordBatches(batches) => batches,
+        _ => unreachable!("TQL EVAL returns record batches"),
+    };
+    let batch = batches.iter().next().expect("one row of type names");
+    ["host", "ts", "val"]
+        .iter()
+        .map(|name| {
+            let column = batch.column_by_name(name).unwrap();
+            let column = cast(column.as_ref(), &DataType::Utf8).unwrap();
+            let column = column.as_any().downcast_ref::<StringArray>().unwrap();
+            column.value(0).to_string()
+        })
+        .collect()
+}
+
+/// The type names [`CTE_NATIVE_ARROW_TYPE_STATEMENT`] reports on either route.
+fn cte_native_arrow_types_expected() -> Vec<String> {
+    vec![
+        "Dictionary(UInt32, Utf8)".to_string(),
+        "Timestamp(ms)".to_string(),
+        "Float64".to_string(),
+    ]
+}
+
+/// The rows of a TQL result in the order the statement published them.
+/// The rows of a TQL result in the order the statement published them.
+///
+/// The time index, the one value column and the label set are found by type, so the statement's own
+/// column names - or the names a CTE gave them - do not matter, and a route that orders its rows
+/// differently is visible.
+async fn cte_native_rows(
+    output: Output,
+) -> Vec<(i64, std::collections::BTreeMap<String, String>, f64)> {
+    let batches = match output.data {
+        OutputData::Stream(stream) => collect_batches(stream).await.unwrap(),
+        OutputData::RecordBatches(batches) => batches,
+        _ => unreachable!("TQL EVAL returns record batches"),
+    };
+    let mut rows = Vec::new();
+    for batch in batches.iter() {
+        let batch = batch.df_record_batch();
+        let schema = batch.schema();
+        let mut time = None;
+        let mut value = None;
+        let mut labels = Vec::new();
+        for (field, column) in schema.fields().iter().zip(batch.columns()) {
+            match field.data_type() {
+                DataType::Timestamp(..) => {
+                    time = Some(cast(column.as_ref(), &DataType::Int64).unwrap())
+                }
+                DataType::Float64 | DataType::Int64 => {
+                    assert!(value.is_none(), "one value column: {schema:?}");
+                    value = Some(cast(column.as_ref(), &DataType::Float64).unwrap())
+                }
+                _ => labels.push((
+                    field.name().clone(),
+                    cast(column.as_ref(), &DataType::Utf8).unwrap(),
+                )),
+            }
+        }
+        let time = time.expect("a time index");
+        let time = time.as_any().downcast_ref::<Int64Array>().unwrap();
+        let value = value.expect("a value column");
+        let value = value.as_any().downcast_ref::<Float64Array>().unwrap();
+        for row in 0..batch.num_rows() {
+            let labels = labels
+                .iter()
+                .filter_map(|(name, column)| {
+                    let column = column.as_any().downcast_ref::<StringArray>().unwrap();
+                    (column.is_valid(row) && !column.value(row).is_empty())
+                        .then(|| (name.clone(), column.value(row).to_string()))
+                })
+                .collect();
+            rows.push((time.value(row), labels, value.value(row)));
+        }
+    }
+    rows
+}
+
+/// Every node name the observer captured for the last statement, frontend and region side alike.
+fn cte_native_observed_names(observer: &NativePlanObserver) -> Vec<String> {
+    observed_physical_nodes(observer)
+        .into_iter()
+        .map(|node| node.name().to_string())
+        .collect()
+}
+
+/// Every fused node the observer captured for the last statement.
+fn cte_native_observed_fused(
+    observer: &NativePlanObserver,
+) -> Vec<Arc<dyn datafusion::physical_plan::ExecutionPlan>> {
+    observed_physical_nodes(observer)
+        .into_iter()
+        .filter(|node| node.name() == "FusedSeriesExec")
+        .collect()
+}
+
+/// Every plan the observer captured for the last statement, as trees, so a shape assertion that
+/// fails shows what ran.
+fn cte_native_observed_plan_trees(observer: &NativePlanObserver) -> String {
+    observer
+        .all_plans()
+        .iter()
+        .map(display_plan_tree)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// A TQL statement embedded in a CTE runs the fused plan when the query asks for the route, so no
+/// fallback and no refusal.
+///
+/// The CTE puts a SQL alias and the outer projection above the node, which is what this asserts
+/// changes nothing about where the node runs: the statement is answered by one `FusedSeriesExec`
+/// reading both occurrences of the selector, there is no join anywhere in the plan it ran, and the
+/// rows are the legacy route's rows.
+#[tokio::test(flavor = "multi_thread")]
+async fn cte_native_statement_runs_the_fused_plan() {
+    common_telemetry::init_default_ut_logging();
+    let (standalone, observer) =
+        native_test_instance(GreptimeDbStandaloneBuilder::new("cte_native_statement")).await;
+    let instance = standalone.fe_instance().clone();
+    execute_all(&instance, CTE_NATIVE_FIXTURE, QueryContext::arc()).await;
+
+    // The existing plan answers the statement first, so the native answer has an oracle.
+    observer.clear();
+    let legacy_output = native_tql_output(&instance, CTE_NATIVE_ORDERED_STATEMENT, false).await;
+    let legacy_schema = cte_native_published_schema(&legacy_output);
+    let legacy_rows = cte_native_rows(legacy_output).await;
+    assert!(
+        observer.fused().is_none(),
+        "the route is off, so no native node may run:\n{}",
+        cte_native_observed_plan_trees(&observer)
+    );
+    assert_eq!(
+        legacy_schema,
+        cte_native_published_schema_expected(),
+        "legacy schema"
+    );
+    assert_eq!(legacy_rows, cte_native_expected_rows(), "legacy");
+    let legacy_types = cte_native_arrow_types(
+        native_tql_output(&instance, CTE_NATIVE_ARROW_TYPE_STATEMENT, false).await,
+    )
+    .await;
+    assert_eq!(
+        legacy_types,
+        cte_native_arrow_types_expected(),
+        "legacy arrow types"
+    );
+
+    // The native plan: one fused node answers both occurrences, and every row comes back in the
+    // order the statement asked for.
+    observer.clear();
+    let native_output = native_tql_output(&instance, CTE_NATIVE_ORDERED_STATEMENT, true).await;
+    let native_schema = cte_native_published_schema(&native_output);
+    let native_rows = cte_native_rows(native_output).await;
+    let fused = cte_native_observed_fused(&observer);
+    assert_eq!(
+        1,
+        fused.len(),
+        "the statement runs one fused node:\n{}",
+        cte_native_observed_plan_trees(&observer)
+    );
+    let joins = cte_native_observed_names(&observer)
+        .into_iter()
+        .filter(|name| name.contains("Join"))
+        .collect::<Vec<_>>();
+    assert!(
+        joins.is_empty(),
+        "a fused plan joins nothing, but these nodes ran: {joins:?}\n{}",
+        cte_native_observed_plan_trees(&observer)
+    );
+    // One logical table keeps both occurrences region-local: the node reads one scan per
+    // occurrence instead of one raw source per occurrence.
+    let scans = observed_series_scans(&observer);
+    assert_eq!(
+        scans.len(),
+        2,
+        "one independent scan per occurrence of the repeated selector:\n{}",
+        cte_native_observed_plan_trees(&observer)
+    );
+    assert!(
+        observer.take_raw_sources().is_empty(),
+        "one logical table keeps both scans region-local instead of one raw source per input"
+    );
+    assert_eq!(
+        native_schema,
+        cte_native_published_schema_expected(),
+        "the CTE publishes the existing planner's schema over the fused plan"
+    );
+    assert_eq!(
+        native_schema, legacy_schema,
+        "names, order, types, nullability and metadata do not depend on the route"
+    );
+    let native_types = cte_native_arrow_types(
+        native_tql_output(&instance, CTE_NATIVE_ARROW_TYPE_STATEMENT, true).await,
+    )
+    .await;
+    assert_eq!(
+        native_types,
+        cte_native_arrow_types_expected(),
+        "the Arrow types SQL sees on the CTE's columns"
+    );
+    assert_eq!(
+        native_types, legacy_types,
+        "and they are the same ones the existing plan publishes"
+    );
+    assert_eq!(native_rows, cte_native_expected_rows(), "native");
+    assert_eq!(native_rows, legacy_rows);
+
+    // `SELECT *` without an order returns the same rows, and the node still answers them.
+    observer.clear();
+    let unordered_rows =
+        cte_native_rows(native_tql_output(&instance, CTE_NATIVE_STATEMENT, true).await).await;
+    let mut unordered = unordered_rows.clone();
+    unordered.sort_by(|left, right| (left.0, &left.1).cmp(&(right.0, &right.1)));
+    assert_eq!(unordered, cte_native_expected_rows(), "native, unordered");
+    assert_eq!(
+        1,
+        cte_native_observed_fused(&observer).len(),
+        "the unordered statement runs one fused node:\n{}",
+        cte_native_observed_plan_trees(&observer)
+    );
+}
+
+/// The CTE's own column list and an outer projection and filter over it place nothing: the fused
+/// node still answers the statement, and the columns and rows are the ones the existing plan
+/// answers with.
+///
+/// The declared list is positional, so it is one statement only because both routes publish the CTE
+/// the same way: the same columns, in the same order, with the same types. What the list declares,
+/// what the outer projection reads and what the outer filter keeps are all above the node, and none
+/// of them moves it.
+#[tokio::test(flavor = "multi_thread")]
+async fn cte_native_column_aliases_and_outer_filter_keep_the_fused_plan() {
+    common_telemetry::init_default_ut_logging();
+    let (standalone, observer) =
+        native_test_instance(GreptimeDbStandaloneBuilder::new("cte_native_aliased")).await;
+    let instance = standalone.fe_instance().clone();
+    execute_all(&instance, CTE_NATIVE_FIXTURE, QueryContext::arc()).await;
+
+    observer.clear();
+    let legacy_output = native_tql_output(&instance, CTE_NATIVE_ALIASED_STATEMENT, false).await;
+    let legacy_schema = cte_native_published_schema(&legacy_output);
+    let legacy_rows = cte_native_rows(legacy_output).await;
+    assert!(
+        observer.fused().is_none(),
+        "the route is off, so no native node may run:\n{}",
+        cte_native_observed_plan_trees(&observer)
+    );
+    assert_eq!(
+        legacy_schema,
+        cte_native_aliased_schema_expected(),
+        "legacy schema"
+    );
+    assert_eq!(legacy_rows, cte_native_filtered_rows(), "legacy");
+
+    observer.clear();
+    let native_output = native_tql_output(&instance, CTE_NATIVE_ALIASED_STATEMENT, true).await;
+    let native_schema = cte_native_published_schema(&native_output);
+    let native_rows = cte_native_rows(native_output).await;
+    assert_eq!(
+        1,
+        cte_native_observed_fused(&observer).len(),
+        "the aliased statement runs one fused node:\n{}",
+        cte_native_observed_plan_trees(&observer)
+    );
+    let joins = cte_native_observed_names(&observer)
+        .into_iter()
+        .filter(|name| name.contains("Join"))
+        .collect::<Vec<_>>();
+    assert!(
+        joins.is_empty(),
+        "a fused plan joins nothing, but these nodes ran: {joins:?}\n{}",
+        cte_native_observed_plan_trees(&observer)
+    );
+    assert_eq!(
+        native_schema,
+        cte_native_aliased_schema_expected(),
+        "the declared names apply to the same columns on both routes"
+    );
+    assert_eq!(
+        native_schema, legacy_schema,
+        "names, order, types, nullability and metadata do not depend on the route"
+    );
+    assert_eq!(native_rows, cte_native_filtered_rows(), "native");
+    assert_eq!(native_rows, legacy_rows);
+}
+
+/// The control: without the per-request hint the CTE statement keeps the existing plan, so the rows
+/// the route is compared against above come from the plan that answered this statement before the
+/// route existed.
+#[tokio::test(flavor = "multi_thread")]
+async fn cte_native_without_the_hint_keeps_the_legacy_plan() {
+    common_telemetry::init_default_ut_logging();
+    let (standalone, observer) =
+        native_test_instance(GreptimeDbStandaloneBuilder::new("cte_native_control")).await;
+    let instance = standalone.fe_instance().clone();
+    execute_all(&instance, CTE_NATIVE_FIXTURE, QueryContext::arc()).await;
+
+    observer.clear();
+    let output = native_tql_output(&instance, CTE_NATIVE_ORDERED_STATEMENT, false).await;
+    let schema = cte_native_published_schema(&output);
+    let rows = cte_native_rows(output).await;
+    assert!(
+        cte_native_observed_fused(&observer).is_empty(),
+        "the hint is off, so no fused node may run:\n{}",
+        cte_native_observed_plan_trees(&observer)
+    );
+    assert_eq!(schema, cte_native_published_schema_expected());
+    assert_eq!(rows, cte_native_expected_rows());
+}
+
+/// The same CTE statement against real datanodes.
+///
+/// The topology differs from the in-process answer: every selector occurrence reads its region
+/// through a merge scan of its own, and the fused node that reads them both runs in the frontend.
+/// What does not differ is the answer, so the rows are the ones the legacy route returns.
+#[tokio::test(flavor = "multi_thread")]
+async fn distributed_cte_native_runs_the_fused_plan_over_raw_sources() {
+    common_telemetry::init_default_ut_logging();
+    let cluster = GreptimeDbClusterBuilder::new("distributed_cte_native")
+        .await
+        .with_datanodes(2)
+        .with_real_datanode_grpc_addr(true)
+        .with_frontend_real_datanode_grpc(true)
+        .with_query_options(QueryOptions {
+            experimental_native_promql: true,
+            ..Default::default()
+        })
+        .build(false)
+        .await;
+    let instance = cluster.fe_instance().clone();
+    execute_all(&instance, CTE_NATIVE_FIXTURE, QueryContext::arc()).await;
+
+    let query = |enabled| {
+        instance.do_query(
+            CTE_NATIVE_ORDERED_STATEMENT,
+            native_query_context(enabled, 2),
+        )
+    };
+
+    let legacy_output = query(false).await.remove(0).unwrap();
+    let legacy_schema = cte_native_published_schema(&legacy_output);
+    let legacy_rows = cte_native_rows(legacy_output).await;
+    assert_eq!(
+        legacy_schema,
+        cte_native_published_schema_expected(),
+        "legacy schema"
+    );
+    assert_eq!(legacy_rows, cte_native_expected_rows(), "legacy");
+
+    let output = query(true).await.remove(0).unwrap();
+    let native_schema = cte_native_published_schema(&output);
+    let plan = output.meta.plan.clone().expect("frontend physical plan");
+    let names = {
+        let mut names = Vec::new();
+        let mut stack = vec![Arc::clone(&plan)];
+        while let Some(node) = stack.pop() {
+            names.push(node.name().to_string());
+            stack.extend(node.children().into_iter().cloned());
+        }
+        names
+    };
+    assert!(
+        names.iter().any(|name| name == "FusedSeriesExec"),
+        "the frontend must hold the fused node:\n{}",
+        display_plan_tree(&plan)
+    );
+    assert!(
+        names.iter().all(|name| !name.contains("Join")),
+        "a fused plan joins nothing, but these nodes ran: {names:?}\n{}",
+        display_plan_tree(&plan)
+    );
+    // Each child of the fused node reads its own region, so no region runs the pair: the frontend
+    // holds the node over one merge scan per occurrence.
+    let fused = find_plan_node(&plan, "FusedSeriesExec").expect("the frontend fused node");
+    assert_eq!(
+        2,
+        fused.children().len(),
+        "the node reads one region read per occurrence:\n{}",
+        display_plan_tree(&plan)
+    );
+    for (occurrence, child) in fused.children().iter().enumerate() {
+        assert!(
+            find_plan_node(child, "MergeScanExec").is_some(),
+            "occurrence {occurrence} reads its region through a merge scan:\n{}",
+            display_plan_tree(&plan)
+        );
+        assert!(
+            find_plan_node(child, "FusedSeriesExec").is_none(),
+            "occurrence {occurrence} must not run a fused node in its region:\n{}",
+            display_plan_tree(&plan)
+        );
+    }
+    let rows = cte_native_rows(output).await;
+    assert_eq!(
+        native_schema,
+        cte_native_published_schema_expected(),
+        "the CTE publishes the existing planner's schema over the distributed fused plan"
+    );
+    assert_eq!(
+        native_schema, legacy_schema,
+        "names, order, types, nullability and metadata do not depend on the route or the deployment"
+    );
+    assert_eq!(rows, cte_native_expected_rows(), "native");
+    assert_eq!(rows, legacy_rows);
 }
 
 /// A grouping by the metric name reports one group per metric.

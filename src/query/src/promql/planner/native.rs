@@ -3010,13 +3010,23 @@ fn fused_output_schema(
         FieldKind::Histogram => native_histogram_value_type().as_arrow_type(),
     };
     let mut columns = Vec::with_capacity(fields.len() + tags.len() + 1);
+    // The time index is marked as one, the way the existing planner's plans mark the table's own
+    // time index: what a plan publishes is a result either way, and a reader of the marker - a
+    // `RANGE` query over the plan, a schema converted back to GreptimeDB's - has to see the same
+    // column on both routes.
     columns.push((
         None,
-        Arc::new(Field::new(
-            time_index,
-            ArrowDataType::Timestamp(ArrowTimeUnit::Millisecond, None),
-            false,
-        )),
+        Arc::new(
+            Field::new(
+                time_index,
+                ArrowDataType::Timestamp(ArrowTimeUnit::Millisecond, None),
+                false,
+            )
+            .with_metadata(std::collections::HashMap::from([(
+                datatypes::schema::TIME_INDEX_KEY.to_string(),
+                "true".to_string(),
+            )])),
+        ),
     ));
     for name in fields {
         columns.push((None, Arc::new(Field::new(name, field_type.clone(), true))));
@@ -3033,8 +3043,17 @@ fn fused_output_schema(
     }
 
     Ok(Arc::new(
-        DFSchema::new_with_metadata(columns, Default::default())
-            .context(DataFusionPlanningSnafu)?,
+        DFSchema::new_with_metadata(
+            columns,
+            // GreptimeDB's schemas carry their version, and a result schema is no different: a
+            // schema read back from this plan is one, exactly as the existing planner's answer for
+            // the same statement is.
+            std::collections::HashMap::from([(
+                datatypes::schema::VERSION_KEY.to_string(),
+                datatypes::schema::Schema::INITIAL_VERSION.to_string(),
+            )]),
+        )
+        .context(DataFusionPlanningSnafu)?,
     ))
 }
 

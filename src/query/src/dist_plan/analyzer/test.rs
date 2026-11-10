@@ -630,84 +630,191 @@ fn unencodable_unnest_stays_above_merge_scan() {
     }
 }
 
-/// The naming projection over a native plan keeps the in-process exception, and nothing wider.
-///
-/// A split aggregate publishes the statement's own value names from a projection above the `Final`
-/// node, so the exception has to see through that one wrapper. It must not see through computed
-/// projections, stacked wrappers, or a projection over a shape that was never admitted.
-#[test]
-fn a_naming_projection_does_not_widen_the_in_process_exception() {
+/// A scan of the test table qualified by `alias`, so one table can stand on both sides of a join.
+fn aliased_scan(alias: &str) -> LogicalPlan {
     let table = TestTable::table_with_name(0, "t".to_string());
-    let plan = hybrid_fused(
-        LogicalPlanBuilder::scan(
-            "t",
-            Arc::new(DefaultTableSource::new(Arc::new(
-                DfTableProviderAdapter::new(table),
-            ))),
-            None,
-        )
-        .unwrap()
-        .build()
-        .unwrap(),
+    LogicalPlanBuilder::scan(
         "t",
-    );
-    assert!(
-        is_in_process_plan(&plan),
-        "the bare native root is the exception"
-    );
-
-    // One column-or-alias projection is the naming layer the route builds.
-    let named = LogicalPlanBuilder::from(plan.clone())
-        .project(vec![col("v0").alias("sum(t.v0)")])
-        .unwrap()
-        .build()
-        .unwrap();
-    assert!(
-        is_in_process_plan(&named),
-        "a column alias above the native root keeps the exception"
-    );
-
-    // Anything else loses it, because the exception is not a general wrapper allowance.
-    let computed = LogicalPlanBuilder::from(plan.clone())
-        .project(vec![(col("v0") + lit(1.0)).alias("sum(t.v0)")])
-        .unwrap()
-        .build()
-        .unwrap();
-    assert!(
-        !is_in_process_plan(&computed),
-        "a computed projection is not a rename"
-    );
-
-    let stacked = LogicalPlanBuilder::from(named)
-        .project(vec![col("sum(t.v0)")])
-        .unwrap()
-        .build()
-        .unwrap();
-    assert!(
-        !is_in_process_plan(&stacked),
-        "the exception admits one wrapper, not two"
-    );
-
-    // The same projection over a plan that is not the native route keeps the exception off too.
-    let foreign = LogicalPlanBuilder::from(
-        LogicalPlanBuilder::scan(
-            "t",
-            Arc::new(DefaultTableSource::new(Arc::new(
-                DfTableProviderAdapter::new(TestTable::table_with_name(0, "t".to_string())),
-            ))),
-            None,
-        )
-        .unwrap()
-        .build()
-        .unwrap(),
+        Arc::new(DefaultTableSource::new(Arc::new(
+            DfTableProviderAdapter::new(table),
+        ))),
+        None,
     )
-    .project(vec![col("number").alias("sum(t.number)")])
+    .unwrap()
+    .alias(TableReference::bare(alias))
     .unwrap()
     .build()
-    .unwrap();
+    .unwrap()
+}
+
+/// `Projection → Join → two aliased scans`: a real join, wrapped the way a query plan wraps one.
+fn join_under_projection() -> LogicalPlan {
+    LogicalPlanBuilder::from(aliased_scan("l"))
+        .join(
+            aliased_scan("r"),
+            JoinType::Inner,
+            (
+                vec![Column::new(Some(TableReference::bare("l")), "number")],
+                vec![Column::new(Some(TableReference::bare("r")), "number")],
+            ),
+            None,
+        )
+        .unwrap()
+        .project(vec![col("l.number")])
+        .unwrap()
+        .build()
+        .unwrap()
+}
+
+/// The same join, with one input deeper than the other, so a plan inside one branch has a level no
+/// node of the other branch shares.
+fn lopsided_join_under_projection() -> LogicalPlan {
+    let left = LogicalPlanBuilder::from(aliased_scan("l"))
+        .project(vec![col("l.number"), col("l.pk1")])
+        .unwrap()
+        .project(vec![col("l.number")])
+        .unwrap()
+        .build()
+        .unwrap();
+    LogicalPlanBuilder::from(left)
+        .join(
+            aliased_scan("r"),
+            JoinType::Inner,
+            (
+                vec![Column::new(Some(TableReference::bare("l")), "number")],
+                vec![Column::new(Some(TableReference::bare("r")), "number")],
+            ),
+            None,
+        )
+        .unwrap()
+        .project(vec![col("l.number")])
+        .unwrap()
+        .build()
+        .unwrap()
+}
+
+/// A multi-input node is only the requirement rewriter's business when a requirement has to travel
+/// through it. With nothing to require there is nothing to enforce, and the subtree comes back
+/// exactly as it went in: the join is not rejected for having two inputs.
+#[test]
+fn empty_requirements_leave_a_multi_input_subtree_untouched() {
+    let plan = join_under_projection();
+    let LogicalPlan::Projection(projection) = &plan else {
+        panic!("expected the join under a projection: {plan}");
+    };
     assert!(
-        !is_in_process_plan(&foreign),
-        "a rename above an ordinary scan is not the exception"
+        matches!(projection.input.as_ref(), LogicalPlan::Join(_)),
+        "the join must be part of the subtree: {plan}"
+    );
+
+    let mut rewriter = EnforceDistRequirementRewriter::new(Vec::new(), 1);
+    assert!(!rewriter.has_applicable_requirements());
+    let rewritten = plan.clone().rewrite(&mut rewriter).unwrap().data;
+
+    assert_eq!(plan, rewritten);
+    assert!(
+        rewriter.visited.len() > 3,
+        "the rewrite did walk both join inputs"
+    );
+
+    // The same plan through the analyzer, which reaches the same conclusion and carries on: a join
+    // nothing requires a column of is planned as before.
+    for analyzer in [
+        DistPlannerAnalyzer::default(),
+        DistPlannerAnalyzer::new(true),
+    ] {
+        let analyzed = analyzer
+            .analyze(plan.clone(), &ConfigOptions::default())
+            .unwrap();
+        assert_eq!(
+            2,
+            count_merge_scans(&analyzed),
+            "each join input keeps its own region: {analyzed}"
+        );
+    }
+}
+
+/// A requirement is still satisfied: the projection that has to publish a required column gets it,
+/// even though the plan that required it is a level below.
+#[test]
+fn a_projection_publishes_the_column_a_plan_below_it_requires() {
+    let plan = LogicalPlanBuilder::from(aliased_scan("t"))
+        .project(vec![col("t.number"), col("t.pk1")])
+        .unwrap()
+        .project(vec![col("t.number")])
+        .unwrap()
+        .build()
+        .unwrap();
+    let LogicalPlan::Projection(outer) = &plan else {
+        panic!("expected a projection at the root: {plan}");
+    };
+    let LogicalPlan::Projection(inner) = outer.input.as_ref() else {
+        panic!("expected the repaired projection over a projection: {plan}");
+    };
+    assert_eq!(2, inner.expr.len(), "the inner projection exposes pk1");
+
+    // `pk1` as the inner projection publishes it, required at that projection's own level.
+    let mut requirement = EnforceDistRequirementRewriter::new(
+        vec![(
+            HashSet::from([Column::new(Some(TableReference::bare("t")), "pk1")]),
+            2,
+        )],
+        1,
+    );
+    assert!(requirement.has_applicable_requirements());
+    let rewritten = plan.clone().rewrite(&mut requirement).unwrap().data;
+
+    assert_eq!(
+        [
+            "Projection: t.number, t.pk1",
+            "  Projection: t.number, t.pk1",
+            "    SubqueryAlias: t",
+            "      TableScan: t",
+        ]
+        .join("\n"),
+        rewritten.to_string(),
+        "the outer projection republishes the required column"
+    );
+}
+
+/// A requirement whose lineage runs through a real join is refused rather than guessed at.
+///
+/// A requirement was made inside a join input. Neither direction of the join maps a column of an
+/// output row to a column of one input: an input can be reached through the join only by picking a
+/// branch, and a level both inputs have names two possible origins. Both cases stop the rewrite with
+/// an error instead of publishing a column that may come from the wrong side.
+#[test]
+fn a_requirement_that_has_to_cross_a_join_is_refused() {
+    let required = |plan: &str, level: usize| {
+        EnforceDistRequirementRewriter::new(
+            vec![(
+                HashSet::from([Column::new(Some(TableReference::bare(plan)), "number")]),
+                level,
+            )],
+            1,
+        )
+    };
+
+    // One origin - the left input's own alias node - reached through the join.
+    let plan = lopsided_join_under_projection();
+    let err = plan
+        .clone()
+        .rewrite(&mut required("l", 5))
+        .expect_err("a column requirement cannot be traced through a join");
+    assert!(
+        err.to_string().contains("at most one child"),
+        "expected the lineage through the join to be unresolvable, got: {err}"
+    );
+
+    // Two origins, one in each join input, at the level the requirement names.
+    let plan = join_under_projection();
+    let err = plan
+        .clone()
+        .rewrite(&mut required("l", 3))
+        .expect_err("a column requirement over two branches cannot be resolved");
+    assert!(
+        err.to_string().contains("ambiguous"),
+        "expected the two branches to be reported as ambiguous, got: {err}"
     );
 }
 

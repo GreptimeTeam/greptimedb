@@ -700,17 +700,6 @@ mod tests {
         LogicalPlan::TableScan(scan)
     }
 
-    fn remote_fused_pair(plan: &LogicalPlan) -> Option<&FusedSeries> {
-        if let Some(merge_scan) = as_merge_scan(plan)
-            && let LogicalPlan::Extension(extension) = merge_scan.input()
-            && let Some(fused) = extension.node.as_any().downcast_ref::<FusedSeries>()
-            && fused.children().len() == 2
-        {
-            return Some(fused);
-        }
-        plan.inputs().into_iter().find_map(remote_fused_pair)
-    }
-
     fn holds_fused_series(plan: &LogicalPlan) -> bool {
         if let LogicalPlan::Extension(extension) = plan
             && extension.node.as_any().is::<FusedSeries>()
@@ -1068,62 +1057,142 @@ mod tests {
         );
     }
 
-    #[test]
-    fn in_process_pair_bypasses_generic_multi_input_requirement_gate_only_for_root_pair() {
-        let left = table_scan_plan_with_filter("left");
-        let right = table_scan_plan_with_filter("right");
-        let pair = fused_pair_plan(left, right);
-        let result = analyzed(DistPlannerAnalyzer::new(true), pair.clone());
-        assert!(
-            result.is_ok(),
-            "in-process root pair should be placeable: {result:?}"
+    /// The number of merge scans in `plan`'s visible tree.
+    fn merge_scan_count(plan: &LogicalPlan) -> usize {
+        usize::from(as_merge_scan(plan).is_some())
+            + plan
+                .inputs()
+                .into_iter()
+                .map(merge_scan_count)
+                .sum::<usize>()
+    }
+
+    /// Asserts the same-table pair landed, whole, in one merge scan's region input.
+    ///
+    /// What the pair computes survives placement: both selectors still read their own scan, with
+    /// the filter each selector was built from, and the tree still names them by source index, so
+    /// the first selector reads the first child.
+    fn assert_pair_lands_in_one_region(plan: &LogicalPlan, label: &str) {
+        assert_eq!(1, merge_scan_count(plan), "{label}: {plan}");
+        let merge_scan = first_merge_scan(plan)
+            .unwrap_or_else(|| panic!("{label}: expected one merge scan in: {plan}"));
+        let remote = merge_scan.input();
+        let fused = first_fused_series(remote)
+            .unwrap_or_else(|| panic!("{label}: expected the pair in the region input: {remote}"));
+        let children = fused.children();
+        assert_eq!(
+            2,
+            children.len(),
+            "{label}: expected the pair over exactly its two scans, got: {remote}"
         );
-        let analyzed_plan = result.unwrap();
-        let fused = remote_fused_pair(&analyzed_plan).expect("one remote root pair");
-        assert_eq!(2, fused.children().len());
-        let remote_scan = first_merge_scan(&analyzed_plan).expect("one merge scan");
-        let LogicalPlan::Extension(remote_pair) = remote_scan.input() else {
-            panic!("expected fused remote input: {}", remote_scan.input());
+        let [LogicalPlan::TableScan(left), LogicalPlan::TableScan(right)] = children else {
+            panic!("{label}: expected the pair to read two scans: {remote}");
         };
-        let remote_fused = remote_pair
-            .node
-            .as_any()
-            .downcast_ref::<FusedSeries>()
-            .unwrap();
-        let LogicalPlan::TableScan(left) = &remote_fused.children()[0] else {
-            unreachable!()
-        };
-        let LogicalPlan::TableScan(right) = &remote_fused.children()[1] else {
-            unreachable!()
-        };
-        assert_ne!(left.filters, right.filters);
-        let inputs = fused.tree().root();
-        let NativeExpr::Binary { left, right, .. } = &inputs.expr else {
-            panic!("expected binary root: {:?}", inputs.expr);
+        assert_ne!(
+            left.filters, right.filters,
+            "{label}: each selector keeps its own filter: {remote}"
+        );
+
+        let NativeExpr::Binary { left, right, .. } = &fused.tree().root().expr else {
+            panic!(
+                "{label}: expected a binary root: {:?}",
+                fused.tree().root().expr
+            );
         };
         let NativeExpr::Instant { input: left, .. } = &left.expr else {
-            panic!("expected left selector input: {:?}", left.expr);
+            panic!("{label}: expected a left selector: {:?}", left.expr);
         };
         let NativeExpr::Input(left) = &left.expr else {
-            panic!("expected left source: {:?}", left.expr);
+            panic!("{label}: expected a left source: {:?}", left.expr);
         };
         let NativeExpr::Instant { input: right, .. } = &right.expr else {
-            panic!("expected right selector input: {:?}", right.expr);
+            panic!("{label}: expected a right selector: {:?}", right.expr);
         };
         let NativeExpr::Input(right) = &right.expr else {
-            panic!("expected right source: {:?}", right.expr);
+            panic!("{label}: expected a right source: {:?}", right.expr);
         };
-        assert_eq!((0, 1), (left.source_index, right.source_index));
-
-        let not_in_process = analyzed(DistPlannerAnalyzer::new(false), pair);
-        assert!(
-            not_in_process.is_err()
-                || remote_fused_pair(not_in_process.as_ref().unwrap()).is_none(),
-            "wire transport must not carry the pair exception"
+        assert_eq!(
+            (0, 1),
+            (left.source_index, right.source_index),
+            "{label}: the selectors keep their source indexes: {remote}"
         );
     }
 
-    /// Ordinary fused producers are serializable; placement follows the in-process routing rules.
+    /// The pair is placed by what the plan is, never by how the engine reaches its regions.
+    ///
+    /// One same-table pair, one placement: both deployment constructions put the whole pair in one
+    /// merge scan's region input, no matter which wrappers a plan puts above it. The wrappers
+    /// decide what the pair's input looks like only in that each selector keeps its own filter and
+    /// its own source index.
+    #[test]
+    fn a_same_table_pair_is_placed_the_same_way_by_both_transports() {
+        let pair = || {
+            fused_pair_plan(
+                table_scan_plan_with_filter("left"),
+                table_scan_plan_with_filter("right"),
+            )
+        };
+        let projection_over = |input: LogicalPlan| {
+            LogicalPlanBuilder::from(input)
+                .project(vec![datafusion_expr::col("v0")])
+                .unwrap()
+                .build()
+                .unwrap()
+        };
+        let filter_over = |input: LogicalPlan| {
+            LogicalPlanBuilder::from(input)
+                .filter(datafusion_expr::col("v0").gt(datafusion_expr::lit(0.0f64)))
+                .unwrap()
+                .build()
+                .unwrap()
+        };
+        let alias_over = |input: LogicalPlan| {
+            LogicalPlanBuilder::from(input)
+                .alias(datafusion_common::TableReference::bare("some_metric"))
+                .unwrap()
+                .build()
+                .unwrap()
+        };
+        // One way to put a node above the plan under test.
+        type Wrapper = fn(LogicalPlan) -> LogicalPlan;
+        let wrapped: [(&str, Wrapper); 4] = [
+            ("at the root", |pair| pair),
+            ("under a projection", projection_over),
+            ("under a filter", filter_over),
+            ("under an alias", alias_over),
+        ];
+
+        for (label, wrap) in wrapped {
+            let plan = wrap(pair());
+            let in_process = analyzed(DistPlannerAnalyzer::new(true), plan.clone())
+                .unwrap_or_else(|err| panic!("{label}: {err}"));
+            let wire = analyzed(DistPlannerAnalyzer::new(false), plan.clone())
+                .unwrap_or_else(|err| panic!("{label}: {err}"));
+            assert_eq!(
+                in_process.to_string(),
+                wire.to_string(),
+                "{label}: the transport must not move the pair"
+            );
+            assert_pair_lands_in_one_region(&in_process, label);
+        }
+
+        // The same wrappers stacked are still the same plan for placement purposes.
+        let stacked = projection_over(filter_over(alias_over(pair())));
+        let in_process = analyzed(DistPlannerAnalyzer::new(true), stacked.clone())
+            .unwrap_or_else(|err| panic!("stacked: {err}"));
+        let wire = analyzed(DistPlannerAnalyzer::new(false), stacked)
+            .unwrap_or_else(|err| panic!("stacked: {err}"));
+        assert_eq!(
+            in_process.to_string(),
+            wire.to_string(),
+            "stacked: the transport must not move the pair"
+        );
+        assert_pair_lands_in_one_region(&in_process, "stacked");
+    }
+
+    /// Ordinary fused producers are serializable, and where they may run is a placement decision
+    /// with no transport in it: the encoder carries the plan, the categorizer says if the region
+    /// may have it.
     #[test]
     fn fused_series_encoding_and_placement_are_independent() {
         let plan = fused_series_plan(table_scan_plan());
@@ -1339,9 +1408,10 @@ mod tests {
         })
     }
 
-    /// The state exception covers the state-exporting producer only. An ordinary values-producing
-    /// fused child over the same scan is placed by the encoding gate instead: it encodes, so the
-    /// region may run it, while the final half still never crosses.
+    /// A state-exporting producer satisfies the node above it, and nothing else. An ordinary
+    /// values-producing fused child over the same scan travels with the plan the region runs, while
+    /// the final half still never crosses: the categorizer places each by its own shape, and the
+    /// encoder is not part of the decision.
     #[test]
     fn an_ordinary_producer_is_placed_by_encodability_not_by_the_state_exception() {
         let scan = table_scan_plan();
@@ -1369,11 +1439,8 @@ mod tests {
         );
     }
 
-    /// Skipping the encoding gate removes one reason to expand and adds none: a node that does not
-    /// encode for its own reasons, and that the categorizer refuses, still draws the boundary at
-    /// itself when regions are reached in process.
-    ///
-    /// Without this, the skip would amount to placing every unencodable node region-side.
+    /// A node the categorizer refuses draws the boundary at itself, whatever the transport: being
+    /// unencodable is one more reason the region cannot run it, not the reason it stays above.
     #[test]
     fn a_plan_that_does_not_encode_for_another_reason_still_expands_at_that_node() {
         let plan = unserializable_plan(table_scan_plan());
