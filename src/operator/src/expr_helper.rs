@@ -194,44 +194,25 @@ async fn create_relational_expr(
         })?;
 
     let remote_columns = crate::relational::fetch_mysql_columns(&connection, &remote_table).await?;
+    let remote_names = remote_columns
+        .iter()
+        .map(|column| column.name.as_str())
+        .collect::<HashSet<_>>();
 
-    // `INFORMATION_SCHEMA.COLUMNS` nullability is not (yet) read, so treat
-    // every remote column as nullable.
-    let remote_column_schemas: Vec<ColumnSchema> = remote_columns
-        .into_iter()
-        .map(|column| ColumnSchema::new(column.name, column.data_type, true))
-        .collect();
-
-    let (time_index, primary_keys, table_column_schemas) = if !create.columns.is_empty() {
-        // Expanded form: user-declared columns/constraints, like the file engine.
-        // No synthetic time index is appended here, so a remote column named
-        // `greptime_timestamp` is an ordinary column, not a name clash.
+    let (time_index, primary_keys, table_column_schemas, remote_column_schemas) = if !create
+        .columns
+        .is_empty()
+    {
+        // Declared form: the user lists a subset of the remote table's
+        // columns, so only those columns are mapped and validated; the rest
+        // of the remote table is ignored. No synthetic time index is
+        // appended here, so a remote column named `greptime_timestamp` is an
+        // ordinary column, not a name clash.
         let time_index = find_time_index(&create.constraints)?;
         let primary_keys = find_primary_keys(&create.columns, &create.constraints)?;
-        let column_schemas =
+        let table_column_schemas =
             columns_to_column_schemas(&create.columns, &time_index, Some(&query_ctx.timezone()))?;
-        (time_index, primary_keys, column_schemas)
-    } else {
-        // Inferred form: expose all remote columns + a synthetic time index.
-        // The synthetic column is reserved, so a remote column with the same
-        // name must be rejected rather than silently replaced.
-        let synthetic_time_index = greptime_timestamp();
-        ensure!(
-            !remote_column_schemas
-                .iter()
-                .any(|column| column.name == synthetic_time_index),
-            ReservedTimeIndexColumnSnafu {
-                name: synthetic_time_index.to_string(),
-            }
-        );
-        let (column_schemas, time_index) = file_column_schemas_to_table(&remote_column_schemas);
-        // No user columns → no PRIMARY KEY to derive; external tables are read-only.
-        let primary_keys = vec![];
-        (time_index, primary_keys, column_schemas)
-    };
-
-    if !create.columns.is_empty() {
-        let remote_names = remote_column_schemas
+        let declared_names = table_column_schemas
             .iter()
             .map(|column| column.name.as_str())
             .collect::<HashSet<_>>();
@@ -243,7 +224,50 @@ async fn create_relational_expr(
                 }
             );
         }
-    }
+        // `INFORMATION_SCHEMA.COLUMNS` nullability is not (yet) read, so
+        // treat every remote column as nullable.
+        let remote_column_schemas: Vec<ColumnSchema> =
+            crate::relational::map_mysql_columns(&remote_columns, Some(&declared_names))?
+                .into_iter()
+                .map(|column| ColumnSchema::new(column.name, column.data_type, true))
+                .collect();
+        (
+            time_index,
+            primary_keys,
+            table_column_schemas,
+            remote_column_schemas,
+        )
+    } else {
+        // Inferred form: expose all remote columns + a synthetic time
+        // index. Every remote column is mapped, so an unmappable type is
+        // rejected here. The synthetic column is reserved, so a remote
+        // column with the same name must be rejected rather than silently
+        // replaced.
+        let remote_column_schemas: Vec<ColumnSchema> =
+            crate::relational::map_mysql_columns(&remote_columns, None)?
+                .into_iter()
+                .map(|column| ColumnSchema::new(column.name, column.data_type, true))
+                .collect();
+        let synthetic_time_index = greptime_timestamp();
+        ensure!(
+            !remote_column_schemas
+                .iter()
+                .any(|column| column.name == synthetic_time_index),
+            ReservedTimeIndexColumnSnafu {
+                name: synthetic_time_index.to_string(),
+            }
+        );
+        let (table_column_schemas, time_index) =
+            file_column_schemas_to_table(&remote_column_schemas);
+        // No user columns → no PRIMARY KEY to derive; external tables are read-only.
+        let primary_keys = vec![];
+        (
+            time_index,
+            primary_keys,
+            table_column_schemas,
+            remote_column_schemas,
+        )
+    };
 
     check_file_to_table_schema_compatibility(&remote_column_schemas, &table_column_schemas)
         .context(SchemaIncompatibleSnafu)?;

@@ -19,6 +19,7 @@
 //! Types that cannot be mapped faithfully (e.g. `BIT`, spatial types, or a
 //! `DECIMAL` wider than 38 digits) are rejected rather than silently degraded.
 
+use std::collections::HashSet;
 use std::net::{IpAddr, ToSocketAddrs};
 use std::time::Duration;
 
@@ -60,6 +61,14 @@ pub struct MySqlColumnType {
     pub scale: Option<i64>,
     /// `DATETIME_PRECISION` for `time` / `datetime` / `timestamp`.
     pub fsp: Option<u8>,
+}
+
+/// A remote column read from `INFORMATION_SCHEMA.COLUMNS`, before its type is
+/// mapped to a GreptimeDB [`ConcreteDataType`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct MySqlColumn {
+    pub name: String,
+    pub column_type: MySqlColumnType,
 }
 
 #[cfg(test)]
@@ -254,12 +263,10 @@ type RawColumnRow = (
 );
 
 /// Connects to the remote MySQL instance and reads the column list of
-/// `remote_table` from `INFORMATION_SCHEMA.COLUMNS`, mapping each column to a
-/// GreptimeDB [`ConcreteDataType`] via [`map_mysql_column_type`].
-pub async fn fetch_mysql_columns(
-    connection: &str,
-    remote_table: &str,
-) -> Result<Vec<RelationalColumn>> {
+/// `remote_table` from `INFORMATION_SCHEMA.COLUMNS`. Each column keeps its
+/// driver-reported type, so callers decide which columns to map to a
+/// GreptimeDB [`ConcreteDataType`].
+pub async fn fetch_mysql_columns(connection: &str, remote_table: &str) -> Result<Vec<MySqlColumn>> {
     let url = Url::parse(connection)
         .map_err(|e| box_foreign_error(e, connection))
         .with_context(|_| ConnectRemoteSnafu {
@@ -344,13 +351,34 @@ pub async fn fetch_mysql_columns(
             scale,
             fsp: fsp.map(|v| v as u8),
         };
-        columns.push(RelationalColumn {
-            name,
-            data_type: map_mysql_column_type(&column_type)?,
-        });
+        columns.push(MySqlColumn { name, column_type });
     }
 
     Ok(columns)
+}
+
+/// Maps raw MySQL columns to GreptimeDB [`ConcreteDataType`]s via
+/// [`map_mysql_column_type`].
+///
+/// `selected` controls which columns are mapped:
+/// - `Some(names)`: map only the named columns, ignoring the rest. This is the
+///   declared form of `CREATE EXTERNAL TABLE`, where the user lists a subset of
+///   the remote table's columns.
+/// - `None`: map every column, preserving their remote order. This is the
+///   inferred form, which exposes the whole remote table.
+pub fn map_mysql_columns(
+    raw: &[MySqlColumn],
+    selected: Option<&HashSet<&str>>,
+) -> Result<Vec<RelationalColumn>> {
+    raw.iter()
+        .filter(|column| selected.map_or(true, |names| names.contains(column.name.as_str())))
+        .map(|column| {
+            Ok(RelationalColumn {
+                name: column.name.clone(),
+                data_type: map_mysql_column_type(&column.column_type)?,
+            })
+        })
+        .collect()
 }
 
 /// Boxes a foreign driver error into a [`BoxedError`]. The message is scrubbed:
@@ -544,5 +572,39 @@ mod tests {
         assert!(map_mysql_column_type(&MySqlColumnType::new("bit")).is_err());
         assert!(map_mysql_column_type(&MySqlColumnType::new("geometry")).is_err());
         assert!(map_mysql_column_type(&MySqlColumnType::new("point")).is_err());
+    }
+
+    #[test]
+    fn test_map_mysql_columns_selected_subset() {
+        let raw = vec![
+            MySqlColumn {
+                name: "id".into(),
+                column_type: MySqlColumnType::new("int"),
+            },
+            MySqlColumn {
+                name: "ts".into(),
+                column_type: MySqlColumnType::new("timestamp"),
+            },
+            MySqlColumn {
+                name: "shape".into(),
+                column_type: MySqlColumnType::new("geometry"),
+            },
+        ];
+
+        // Declared form: mapping a subset skips the unselected, unsupported
+        // `shape` column.
+        let selected: std::collections::HashSet<&str> = ["id", "ts"].into_iter().collect();
+        let mapped = map_mysql_columns(&raw, Some(&selected)).unwrap();
+        assert_eq!(2, mapped.len());
+        let names: Vec<&str> = mapped.iter().map(|column| column.name.as_str()).collect();
+        assert_eq!(names, ["id", "ts"]);
+
+        // Declared form: selecting the unsupported column maps it and fails.
+        let selected: std::collections::HashSet<&str> = ["id", "shape"].into_iter().collect();
+        assert!(map_mysql_columns(&raw, Some(&selected)).is_err());
+
+        // Inferred form: every column is mapped, so the unsupported column
+        // still fails.
+        assert!(map_mysql_columns(&raw, None).is_err());
     }
 }
