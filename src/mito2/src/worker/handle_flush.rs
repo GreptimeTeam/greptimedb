@@ -422,6 +422,16 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         // which is important for remote WAL pruning.
         self.update_topic_latest_entry_id(&region);
 
+        // The flushed SSTs are visible now. Build the series indexes that cover them in the
+        // background so bulk-flushed data does not wait for the next periodic maintenance pass.
+        // Staging flushes publish nothing and closing flushes remove the region right away.
+        if !request.is_staging
+            && request.flush_reason != FlushReason::Closing
+            && !request.edit.files_to_add.is_empty()
+        {
+            self.submit_series_index_build(&region);
+        }
+
         // Delete wal.
         info!(
             "Region {} flush finished, tries to bump wal to {}",

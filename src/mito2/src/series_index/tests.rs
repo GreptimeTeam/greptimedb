@@ -20,10 +20,12 @@ use std::time::Duration;
 use api::v1::helper::row;
 use api::v1::value::ValueData;
 use api::v1::{ColumnDataType, Rows, SemanticType, WriteHint};
+use futures::TryStreamExt;
 use object_store::ObjectStore;
 use object_store::layers::mock::{self, MockLayerBuilder, oio};
 use object_store::services::Memory;
 use store_api::codec::PrimaryKeyEncoding;
+use store_api::metadata::RegionMetadata;
 use store_api::metric_engine_consts::PRIMARY_KEY_ENCODING;
 use store_api::region_engine::RegionEngine;
 use store_api::region_request::{RegionPutRequest, RegionRequest};
@@ -38,7 +40,10 @@ use super::maintenance::reconcile_series_indexes;
 use super::purger::series_index_channel;
 use crate::config::MitoConfig;
 use crate::engine::MitoEngine;
+use crate::manifest::action::RegionEdit;
 use crate::region::{MitoRegionRef, RegionMap};
+use crate::sst::file::{FileMeta, RegionFileId};
+use crate::sst::location;
 use crate::test_util::sst_util::{new_sparse_primary_key, sst_region_metadata_with_encoding};
 use crate::test_util::{CreateRequestBuilder, TestEnv, flush_region, rows_schema};
 use crate::time_provider::StdTimeProvider;
@@ -1115,5 +1120,396 @@ async fn test_manual_reconcile_returns_storage_failure(#[case] catalog_failure: 
     );
     state.stop();
     task.await.unwrap();
+    engine.stop().await.unwrap();
+}
+
+/// Config for the ingestion-trigger tests.
+///
+/// Periodic maintenance is neutralized (one hour) so only the ingestion triggers can publish
+/// coverage, and compaction is kept away from the source SSTs.
+fn ingestion_trigger_config(enable_series_index: bool) -> MitoConfig {
+    MitoConfig {
+        experimental_enable_series_index: enable_series_index,
+        experimental_series_index_maintenance_interval: Duration::from_secs(3600),
+        min_compaction_interval: Duration::from_secs(3600),
+        schedule_compaction_after_edit: false,
+        ..Default::default()
+    }
+}
+
+/// Creates a sparse metrics region whose SSTs stay stable while a test runs.
+///
+/// Returns the schema of the rows accepted by `Put`.
+async fn create_metrics_region(
+    engine: &MitoEngine,
+    region_id: RegionId,
+    metadata: &Arc<RegionMetadata>,
+) -> Vec<api::v1::ColumnSchema> {
+    let mut request = CreateRequestBuilder::new().build();
+    request.column_metadatas = metadata.column_metadatas.clone();
+    request.primary_key = metadata.primary_key.clone();
+    request
+        .options
+        .insert(PRIMARY_KEY_ENCODING.to_string(), "sparse".to_string());
+    request
+        .options
+        .insert("memtable.type".to_string(), "bulk".to_string());
+    request
+        .options
+        .insert("sst_format".to_string(), "flat".to_string());
+    request
+        .options
+        .insert("compaction.type".to_string(), "twcs".to_string());
+    request.options.insert(
+        "compaction.twcs.time_window".to_string(),
+        "100s".to_string(),
+    );
+    for window in ["active_window", "inactive_window"] {
+        request.options.insert(
+            format!("compaction.twcs.{window}.trigger_file_num"),
+            "100".to_string(),
+        );
+    }
+    let full_schema = rows_schema(&request);
+    let mut pk_column = full_schema[0].clone();
+    pk_column.column_name = PRIMARY_KEY_COLUMN_NAME.to_string();
+    pk_column.datatype = ColumnDataType::Binary.into();
+    pk_column.semantic_type = SemanticType::Tag.into();
+    let schema = vec![pk_column, full_schema[5].clone(), full_schema[4].clone()];
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+    schema
+}
+
+/// Writes one sparse series with the given timestamps into the region.
+async fn put_metric_rows(
+    engine: &MitoEngine,
+    region_id: RegionId,
+    metadata: &Arc<RegionMetadata>,
+    schema: &[api::v1::ColumnSchema],
+    timestamps: &[i64],
+) {
+    let rows = timestamps
+        .iter()
+        .map(|ts| {
+            row(vec![
+                ValueData::BinaryValue(new_sparse_primary_key(&["a", "x"], metadata, 10, 0)),
+                ValueData::TimestampMillisecondValue(*ts),
+                ValueData::U64Value(*ts as u64),
+            ])
+        })
+        .collect::<Vec<_>>();
+    let result = engine
+        .handle_request(
+            region_id,
+            RegionRequest::Put(RegionPutRequest {
+                rows: Rows {
+                    schema: schema.to_vec(),
+                    rows,
+                },
+                hint: Some(WriteHint {
+                    primary_key_encoding: api::v1::PrimaryKeyEncoding::Sparse.into(),
+                }),
+                skip_wal: false,
+                partition_expr_version: None,
+            }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(timestamps.len(), result.affected_rows);
+}
+
+/// Returns the metadata of the single SST the region currently stores.
+fn single_sst(region: &MitoRegionRef) -> FileMeta {
+    let version = region.version();
+    let files = version
+        .ssts
+        .levels()
+        .iter()
+        .flat_map(|level| level.files())
+        .collect::<Vec<_>>();
+    assert_eq!(1, files.len(), "expected exactly one SST in the region");
+    files[0].meta_ref().clone()
+}
+
+/// Returns the metadata of `file_id` as stored in the region version.
+fn region_file_meta(region: &MitoRegionRef, file_id: FileId) -> FileMeta {
+    region
+        .version()
+        .ssts
+        .levels()
+        .iter()
+        .flat_map(|level| level.files())
+        .find(|file| file.file_id().file_id() == file_id)
+        .map(|file| file.meta_ref().clone())
+        .unwrap_or_else(|| panic!("SST {} is not in region {}", file_id, region.region_id))
+}
+
+/// Copies a flushed SST into `target`'s directory under the target region id, like the writers of
+/// a bulk ingestion job do, and installs it through `RegionEdit::files_to_add`.
+async fn install_foreign_sst(
+    engine: &MitoEngine,
+    source: &MitoRegionRef,
+    target: &MitoRegionRef,
+    source_meta: &FileMeta,
+) -> FileId {
+    let layer = target.access_layer.clone();
+    let source_path = location::sst_file_path(
+        source.table_dir(),
+        RegionFileId::new(source.region_id, source_meta.file_id),
+        layer.path_type(),
+    );
+    let target_path = location::sst_file_path(
+        layer.table_dir(),
+        RegionFileId::new(target.region_id, source_meta.file_id),
+        layer.path_type(),
+    );
+    layer
+        .object_store()
+        .copy(&source_path, &target_path)
+        .await
+        .unwrap();
+
+    let mut installed = source_meta.clone();
+    installed.region_id = target.region_id;
+    // The puffin index lives beside the SST and is keyed by the file's region id as well.
+    if source_meta.exists_index() {
+        let source_index = location::index_file_path(
+            source.table_dir(),
+            source_meta.index_id(),
+            layer.path_type(),
+        );
+        let target_index =
+            location::index_file_path(layer.table_dir(), installed.index_id(), layer.path_type());
+        layer
+            .object_store()
+            .copy(&source_index, &target_index)
+            .await
+            .unwrap();
+    }
+    let file_id = installed.file_id;
+    engine
+        .edit_region(
+            target.region_id,
+            RegionEdit {
+                files_to_add: vec![installed],
+                files_to_remove: Vec::new(),
+                timestamp_ms: None,
+                compaction_time_window: None,
+                flushed_entry_id: None,
+                flushed_sequence: None,
+                committed_sequence: None,
+            },
+        )
+        .await
+        .unwrap();
+    file_id
+}
+
+/// Waits until the region publishes a series index that lists `file_id` as a source.
+///
+/// The wait is bounded and returns as soon as the condition holds, so it cannot pass by timing.
+async fn wait_for_series_index(
+    region: &MitoRegionRef,
+    file_id: FileId,
+) -> Arc<super::SeriesIndexVersion> {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    loop {
+        let version = region.series_index_version();
+        if version
+            .series_indexes
+            .values()
+            .any(|handle| handle.entry().source_file_ids.contains(&file_id))
+        {
+            return version;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "timed out waiting for region {} to publish a series index for SST {}",
+            region.region_id,
+            file_id
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+/// Asserts the region's series-index catalog has been persisted to the local index store.
+async fn assert_series_catalog_published(env: &TestEnv, region_id: RegionId) {
+    let path = env
+        .data_home()
+        .join("series_index")
+        .join(series_catalog_path(region_id));
+    assert!(
+        tokio::fs::try_exists(&path).await.unwrap(),
+        "series-index catalog should be persisted at {}",
+        path.display()
+    );
+}
+
+/// Reads all source timestamps through the native raw series-scan path.
+async fn raw_series_timestamps(engine: &MitoEngine, region_id: RegionId) -> Vec<i64> {
+    use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
+    use store_api::region_engine::{BoundTag, PrepareRequest, QueryScanContext, RawLabelSource};
+    use store_api::storage::TimeSeriesDistribution;
+
+    let mut scanner = engine
+        .handle_query(
+            region_id,
+            store_api::storage::ScanRequest {
+                distribution: Some(TimeSeriesDistribution::PerSeries),
+                preserve_pk_dictionary_encoding: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let metadata = scanner.metadata();
+    let source = RawLabelSource::PrimaryKey {
+        metric_name: Arc::from("fixture_metric"),
+        physical_metadata: metadata.clone(),
+        logical_tags: metadata
+            .column_metadatas
+            .iter()
+            .filter(|column| {
+                column.semantic_type == SemanticType::Tag
+                    && !store_api::storage::consts::is_internal_column(&column.column_schema.name)
+                    && !store_api::metric_engine_consts::is_metric_engine_internal_column(
+                        &column.column_schema.name,
+                    )
+            })
+            .map(|column| BoundTag {
+                column_id: column.column_id,
+                name: Arc::from(column.column_schema.name.as_str()),
+            })
+            .collect::<Vec<_>>()
+            .into(),
+    };
+    let ranges = scanner.properties().partitions.clone();
+    scanner
+        .prepare(PrepareRequest {
+            ranges: Some(ranges.clone()),
+            target_partitions: Some(ranges.len()),
+            ..Default::default()
+        })
+        .unwrap();
+    let metrics = ExecutionPlanMetricsSet::default();
+    let mut times = Vec::new();
+    for partition in 0..ranges.len() {
+        let Some(stream) = scanner
+            .scan_series_partition(&QueryScanContext::default(), &metrics, partition, &source)
+            .unwrap()
+        else {
+            continue;
+        };
+        for chunk in stream.try_collect::<Vec<_>>().await.unwrap() {
+            times.extend(chunk.time.as_buffer().iter().copied());
+        }
+    }
+    times
+}
+
+/// Installs an existing metrics SST through the bulk-ingestion edit path.
+///
+/// The target region has no memtable, no flush and no manual reconcile, and periodic maintenance
+/// is neutralized, so only the edit trigger can publish the index.
+#[tokio::test]
+async fn test_installed_sst_triggers_series_index_build() {
+    let mut env = TestEnv::with_prefix("series-ingest-trigger").await;
+    let engine = env.create_engine(ingestion_trigger_config(true)).await;
+    let metadata = Arc::new(sst_region_metadata_with_encoding(
+        PrimaryKeyEncoding::Sparse,
+    ));
+    let source_id = RegionId::new(1, 1);
+    let target_id = RegionId::new(1, 2);
+    let schema = create_metrics_region(&engine, source_id, &metadata).await;
+    create_metrics_region(&engine, target_id, &metadata).await;
+    let source = engine.get_region(source_id).unwrap();
+    let target = engine.get_region(target_id).unwrap();
+
+    let timestamps = vec![1000, 2000, 3000, 4000];
+    put_metric_rows(&engine, source_id, &metadata, &schema, &timestamps).await;
+    flush_region(&engine, source_id, None).await;
+    let flushed = single_sst(&source);
+
+    let file_id = install_foreign_sst(&engine, &source, &target, &flushed).await;
+    // No memtable and no flush: the ingested SST is the only source of the region.
+    assert!(target.version().memtables.is_empty());
+
+    let published = wait_for_series_index(&target, file_id).await;
+    let installed = region_file_meta(&target, file_id);
+    assert!(
+        published
+            .series_indexes
+            .values()
+            .any(|handle| handle.entry().covers_file(&installed, target_id)),
+        "the published series index should cover the ingested SST"
+    );
+    assert_series_catalog_published(&env, target_id).await;
+    assert_eq!(timestamps, raw_series_timestamps(&engine, target_id).await);
+
+    engine.stop().await.unwrap();
+}
+
+/// Flushes a bulk memtable and expects the flush to publish the series index of its SSTs.
+#[tokio::test]
+async fn test_bulk_flush_triggers_series_index_build() {
+    let mut env = TestEnv::with_prefix("series-flush-trigger").await;
+    let engine = env.create_engine(ingestion_trigger_config(true)).await;
+    let metadata = Arc::new(sst_region_metadata_with_encoding(
+        PrimaryKeyEncoding::Sparse,
+    ));
+    let region_id = RegionId::new(1, 1);
+    let schema = create_metrics_region(&engine, region_id, &metadata).await;
+    let region = engine.get_region(region_id).unwrap();
+
+    let timestamps = vec![1000, 2000, 3000];
+    put_metric_rows(&engine, region_id, &metadata, &schema, &timestamps).await;
+    assert!(region.series_index_version().series_indexes.is_empty());
+    flush_region(&engine, region_id, None).await;
+    let flushed = single_sst(&region);
+
+    let published = wait_for_series_index(&region, flushed.file_id).await;
+    let installed = region_file_meta(&region, flushed.file_id);
+    assert!(
+        published
+            .series_indexes
+            .values()
+            .any(|handle| handle.entry().covers_file(&installed, region_id)),
+        "the published series index should cover the flushed SST"
+    );
+    assert_series_catalog_published(&env, region_id).await;
+    assert_eq!(timestamps, raw_series_timestamps(&engine, region_id).await);
+
+    engine.stop().await.unwrap();
+}
+
+/// Without the series-index task the edit and flush paths must still succeed and publish nothing.
+#[tokio::test]
+async fn test_disabled_series_index_keeps_ingestion_working() {
+    let mut env = TestEnv::with_prefix("series-ingest-disabled").await;
+    let engine = env.create_engine(ingestion_trigger_config(false)).await;
+    let metadata = Arc::new(sst_region_metadata_with_encoding(
+        PrimaryKeyEncoding::Sparse,
+    ));
+    let source_id = RegionId::new(1, 1);
+    let target_id = RegionId::new(1, 2);
+    let schema = create_metrics_region(&engine, source_id, &metadata).await;
+    create_metrics_region(&engine, target_id, &metadata).await;
+    let source = engine.get_region(source_id).unwrap();
+    let target = engine.get_region(target_id).unwrap();
+
+    let timestamps = vec![1000, 2000];
+    put_metric_rows(&engine, source_id, &metadata, &schema, &timestamps).await;
+    flush_region(&engine, source_id, None).await;
+    let flushed = single_sst(&source);
+    install_foreign_sst(&engine, &source, &target, &flushed).await;
+
+    assert!(source.series_index_version().series_indexes.is_empty());
+    assert!(target.series_index_version().series_indexes.is_empty());
+    // The ingested rows stay queryable without a series index.
+    assert_eq!(timestamps, raw_series_timestamps(&engine, target_id).await);
+
     engine.stop().await.unwrap();
 }
