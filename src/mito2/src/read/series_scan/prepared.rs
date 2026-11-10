@@ -27,7 +27,7 @@ use common_error::ext::BoxedError;
 use common_recordbatch::filter::SimpleFilterEvaluator;
 use common_time::Timestamp;
 use datafusion::execution::memory_pool::{MemoryConsumer, MemoryReservation};
-use datafusion_expr::utils::split_conjunction;
+use datafusion_expr::{Expr, utils::split_conjunction};
 use datatypes::arrow::array::{
     Array, ArrayRef, BinaryArray, BooleanArray, DictionaryArray, StringArray, UInt32Array,
     UInt64Array,
@@ -257,13 +257,11 @@ fn collect_inputs(
     Ok(ready.then_some((file_indices, indexes)))
 }
 
-/// Push only supported conjuncts; residual evaluation still enforces the complete predicate.
-fn series_read_request(schema: &Schema, predicate: Option<&Predicate>) -> SeriesReadRequest {
-    let exprs: Vec<_> = predicate
-        .into_iter()
-        .flat_map(|predicate| predicate.exprs())
-        .flat_map(split_conjunction)
-        .collect();
+/// Pushes the supported conjuncts into the request.
+///
+/// The second element reports, for every input conjunct, whether `ColumnarReader`
+/// applies it exactly, so callers must not evaluate those conjuncts again.
+fn series_read_request(schema: &Schema, conjuncts: &[&Expr]) -> (SeriesReadRequest, Vec<bool>) {
     let mut request = SeriesReadRequest {
         projection: schema
             .fields()
@@ -273,13 +271,15 @@ fn series_read_request(schema: &Schema, predicate: Option<&Predicate>) -> Series
             .collect(),
         ..Default::default()
     };
-    for expr in exprs {
+    let mut accepted = Vec::with_capacity(conjuncts.len());
+    for expr in conjuncts {
         let Some(filter) = SimpleFilterEvaluator::try_new_with_column_type(expr, &|name| {
             schema
                 .field_with_name(name)
                 .ok()
                 .map(|field| field.data_type().clone())
         }) else {
+            accepted.push(false);
             continue;
         };
         if !request
@@ -287,6 +287,7 @@ fn series_read_request(schema: &Schema, predicate: Option<&Predicate>) -> Series
             .iter()
             .any(|name| name == filter.column_name())
         {
+            accepted.push(false);
             continue;
         }
         if filter.column_name() == DATA_SCHEMA_TABLE_ID_COLUMN_NAME
@@ -297,8 +298,18 @@ fn series_read_request(schema: &Schema, predicate: Option<&Predicate>) -> Series
             request.table_id = Some(table_id);
         }
         request.filters.push(filter);
+        accepted.push(true);
     }
-    request
+    (request, accepted)
+}
+
+/// Flattens the scanner predicate into the conjuncts shared by pushdown and residual filters.
+fn predicate_conjuncts(predicate: Option<&Predicate>) -> Vec<&Expr> {
+    predicate
+        .into_iter()
+        .flat_map(|predicate| predicate.exprs())
+        .flat_map(split_conjunction)
+        .collect()
 }
 
 struct Candidate {
@@ -463,6 +474,7 @@ impl ColumnarPreparedSource {
         preparation_metrics.bytes.insert("prepare_encoded_keys", 0);
         preparation_metrics.counts.insert("prepare_batch_series", 0);
         let direct_labels = sample_schema.is_some();
+        let conjuncts = predicate_conjuncts(input.predicate_group().predicate());
         let mut candidates = BTreeMap::<MetricSeriesId, Candidate>::new();
         for id in indexes {
             let timer = preparation_metrics.timer("columnar_prepare_series_open_wall");
@@ -486,7 +498,7 @@ impl ColumnarPreparedSource {
                 })
                 .collect::<Result<Vec<_>>>()?;
             tags.sort_unstable_by(|a, b| a.1.cmp(&b.1));
-            let request = series_read_request(&schema, input.predicate_group().predicate());
+            let (request, accepted) = series_read_request(&schema, &conjuncts);
             let projection = request
                 .projection
                 .iter()
@@ -498,19 +510,20 @@ impl ColumnarPreparedSource {
                     .map_err(|e| invalid(e.to_string()))?,
             );
             let mut filters = Vec::new();
-            if let Some(predicate) = input.predicate_group().predicate() {
-                for expr in predicate.exprs().iter().flat_map(split_conjunction) {
-                    if expr
+            for (expr, accepted) in conjuncts.iter().zip(&accepted) {
+                // The reader already applied accepted conjuncts exactly.
+                if *accepted
+                    || !expr
                         .column_refs()
                         .iter()
                         .all(|column| projected_schema.index_of(&column.name).is_ok())
-                    {
-                        filters.push(
-                            Predicate::to_physical_expr(expr, &projected_schema)
-                                .map_err(|e| invalid(e.to_string()))?,
-                        );
-                    }
+                {
+                    continue;
                 }
+                filters.push(
+                    Predicate::to_physical_expr(expr, &projected_schema)
+                        .map_err(|e| invalid(e.to_string()))?,
+                );
             }
             preparation_metrics.add_elapsed("columnar_prepare_compile", started.elapsed());
             let mut batches = reader.read(request)?;
