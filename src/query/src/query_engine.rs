@@ -107,10 +107,10 @@ pub trait QueryEngine: Send + Sync {
     /// The default declares no scope: only engines that bound memory per unit
     /// of work override this.
     ///
-    /// Call this (or [`QueryEngine::with_flow_memory_scope`]) at the request
-    /// entry, before anything captures the context, so every execution that
-    /// re-enters the engine under it shares one budget instead of deriving one
-    /// budget each.
+    /// Call this (or [`QueryEngine::with_flow_memory_scope_fallible`]) at the
+    /// request entry, before anything captures the context, so every execution
+    /// that re-enters the engine under it shares one budget instead of deriving
+    /// one budget each.
     fn flow_memory_scope_for(&self, _query_ctx: &QueryContextRef) -> Option<QueryMemoryScope> {
         None
     }
@@ -140,6 +140,25 @@ pub trait QueryEngine: Send + Sync {
         let mut forked = query_ctx.fork();
         forked.set_memory_scope(scope);
         Arc::new(forked)
+    }
+
+    /// Fallible [`QueryEngine::with_flow_memory_scope`]: the same resolution, but
+    /// a budget this build does not support is returned as an error instead of
+    /// being dropped.
+    ///
+    /// The request entry points call this one, because the entry is the last
+    /// place every request goes through: a statement dispatched without ever
+    /// building an engine context - a plain `INSERT ... VALUES` is written
+    /// through the fast path of the statement executor - would otherwise run
+    /// under a budget that is not enforced.
+    ///
+    /// The default cannot fail: an engine that resolves no scope has nothing to
+    /// reject.
+    fn with_flow_memory_scope_fallible(
+        &self,
+        query_ctx: QueryContextRef,
+    ) -> Result<QueryContextRef> {
+        Ok(self.with_flow_memory_scope(query_ctx))
     }
 
     /// Retrieve the query engine state [`QueryEngineState`]

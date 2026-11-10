@@ -51,8 +51,8 @@ use table::table::adapter::DfTableProviderAdapter;
 use table::table_name::TableName;
 
 use crate::error::{
-    CatalogSnafu, DataFusionSnafu, Error, ExternalSnafu, IncompleteGrpcRequestSnafu,
-    NotSupportedSnafu, PermissionSnafu, PlanStatementSnafu, Result,
+    CatalogSnafu, DataFusionSnafu, Error, ExecLogicalPlanSnafu, ExternalSnafu,
+    IncompleteGrpcRequestSnafu, NotSupportedSnafu, PermissionSnafu, PlanStatementSnafu, Result,
     SubstraitDecodeLogicalPlanSnafu, TableNotFoundSnafu, TableOperationSnafu,
 };
 use crate::instance::{Instance, attach_timer};
@@ -67,17 +67,26 @@ impl GrpcQueryHandler for Instance {
         request: Request,
         ctx: QueryContextRef,
     ) -> server_error::Result<Output> {
-        // Resolve a Flow's declared memory budget once, here, before anything
-        // captures the context: table lookup captures it (the computed
-        // semantic-graph tables keep it while resolving and re-enter the engine
-        // with it later), and so does every nested execution this request fans
-        // out into. A scope attached only in `engine_context` never reaches a
-        // context captured before `engine_context` runs, so each of those
-        // executions would derive an independent full budget instead of sharing
-        // one. The context is forked, never mutated in place, and comes back
-        // unchanged when the request declares no budget.
-        let ctx = self.query_engine().with_flow_memory_scope(ctx);
         let result: Result<Output> = async {
+            // Resolve a Flow's declared memory budget once, here, before anything
+            // captures the context: table lookup captures it (the computed
+            // semantic-graph tables keep it while resolving and re-enter the engine
+            // with it later), and so does every nested execution this request fans
+            // out into. A scope attached only in `engine_context` never reaches a
+            // context captured before `engine_context` runs, so each of those
+            // executions would derive an independent full budget instead of sharing
+            // one. The context is forked, never mutated in place, and comes back
+            // unchanged when the request declares no budget.
+            //
+            // Resolution is fallible and runs before the statement is dispatched:
+            // a budget this build does not support must fail the request here,
+            // because not every statement reaches `engine_context` (a literal
+            // `INSERT ... VALUES` is written through the statement executor's fast
+            // path). A limit that is not enforced must not look like one that is.
+            let ctx = self
+                .query_engine()
+                .with_flow_memory_scope_fallible(ctx)
+                .context(ExecLogicalPlanSnafu)?;
             let interceptor_ref = self.plugins.get::<GrpcQueryInterceptorRef<Error>>();
             let interceptor = interceptor_ref.as_ref();
             interceptor.pre_execute(&request, ctx.clone())?;

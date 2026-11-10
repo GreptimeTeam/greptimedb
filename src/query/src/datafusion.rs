@@ -653,28 +653,6 @@ impl DatafusionQueryEngine {
         }
     }
 
-    /// Fallible [`QueryEngine::with_flow_memory_scope`]: returns `query_ctx` with
-    /// the memory scope it resolves to recorded on it, propagating the error of a
-    /// budget this build does not support.
-    ///
-    /// [`QueryEngine::with_flow_memory_scope`] itself cannot fail - it runs at the
-    /// request entry, before there is anything to report an error to - so it only
-    /// records the scope, while every execution resolves (and can reject) it here.
-    fn with_flow_memory_scope_fallible(
-        &self,
-        query_ctx: QueryContextRef,
-    ) -> Result<QueryContextRef> {
-        if query_ctx.memory_scope().is_some() {
-            return Ok(query_ctx);
-        }
-        let Some(scope) = self.flow_memory_scope(&query_ctx)? else {
-            return Ok(query_ctx);
-        };
-        let mut forked = query_ctx.fork();
-        forked.set_memory_scope(scope);
-        Ok(Arc::new(forked))
-    }
-
     /// Builds the process-local memory scope a Flow asked for through the query
     /// extensions of `query_ctx`, or returns `Ok(None)` when the query declares
     /// no budget of its own.
@@ -867,11 +845,31 @@ impl QueryEngine for DatafusionQueryEngine {
         // land on the same pool.
         match query_ctx.memory_scope() {
             Some(scope) => Some(scope.clone()),
-            // A budget this build does not support is reported by
-            // `engine_context`, which every execution goes through; this entry
-            // point cannot fail, so it leaves the context on the node pool.
+            // This hint-style entry point cannot fail, so a budget this build
+            // does not support leaves the context on the node pool here. It is
+            // rejected by `with_flow_memory_scope_fallible` at the request entry
+            // - the path every request goes through - and by `engine_context`
+            // for an execution that is entered directly.
             None => self.flow_memory_scope(query_ctx).ok().flatten(),
         }
+    }
+
+    fn with_flow_memory_scope_fallible(
+        &self,
+        query_ctx: QueryContextRef,
+    ) -> Result<QueryContextRef> {
+        // Only the resolution can fail - it rejects a budget this build does not
+        // support - so an already scoped context is returned as is, without
+        // re-deriving (and possibly re-creating) its pool.
+        if query_ctx.memory_scope().is_some() {
+            return Ok(query_ctx);
+        }
+        let Some(scope) = self.flow_memory_scope(&query_ctx)? else {
+            return Ok(query_ctx);
+        };
+        let mut forked = query_ctx.fork();
+        forked.set_memory_scope(scope);
+        Ok(Arc::new(forked))
     }
 
     fn engine_context(&self, query_ctx: QueryContextRef) -> Result<QueryEngineContext> {
@@ -900,7 +898,9 @@ impl QueryEngine for DatafusionQueryEngine {
         //
         // Resolution is fallible: a build without the `enterprise` feature does
         // not support the `max_memory` flow option, so a declared budget fails
-        // this query here instead of running it unbudgeted.
+        // this query here instead of running it unbudgeted. The request entry
+        // rejects it first, so this is the backstop for an execution that is
+        // entered directly - not the only place the promise is kept.
         let query_ctx = self.with_flow_memory_scope_fallible(query_ctx)?;
         if let Some(pool) = query_ctx.memory_scope().map(QueryMemoryScope::pool) {
             let session_id = state.session_id().to_string();
