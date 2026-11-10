@@ -217,6 +217,13 @@ pub struct ParquetReaderBuilder {
     expected_metadata: Option<RegionMetadataRef>,
     /// Whether this reader is for compaction.
     compaction: bool,
+    /// Force every row's sequence to the file's admission barrier, whatever the
+    /// file's own sequence column and trust markers say.
+    ///
+    /// Used only by Flow recovery window discovery, which needs the timestamps of
+    /// the rows a harness cannot trust row by row; ordinary reads leave it `false`
+    /// and keep the foreign/legacy conditional override.
+    force_sequence_override: bool,
     /// Mode to pre-filter columns.
     pre_filter_mode: PreFilterMode,
     /// Whether to run the reduced-column predicate prefilter pass.
@@ -263,6 +270,7 @@ impl ParquetReaderBuilder {
             fulltext_index_appliers: [None, None],
             expected_metadata: None,
             compaction: false,
+            force_sequence_override: false,
             pre_filter_mode: PreFilterMode::All,
             enable_predicate_prefilter: true,
             postpone_time_index_filter: false,
@@ -358,6 +366,17 @@ impl ParquetReaderBuilder {
     #[must_use]
     pub fn compaction(mut self, compaction: bool) -> Self {
         self.compaction = compaction;
+        self
+    }
+
+    /// Forces the row-level sequence override to the file's admission barrier.
+    ///
+    /// Only Flow recovery window discovery sets this: it needs the timestamps of
+    /// every selected file's rows and must not depend on the file's sequence column
+    /// or on its trust markers.
+    #[must_use]
+    pub fn force_sequence_override(mut self, force_sequence_override: bool) -> Self {
+        self.force_sequence_override = force_sequence_override;
         self
     }
 
@@ -544,7 +563,13 @@ impl ParquetReaderBuilder {
             );
         }
         let file_meta = self.file_handle.meta_ref();
-        let override_sequence = if is_foreign {
+        let override_sequence = if self.force_sequence_override {
+            // Recovery discovery: virtualize every row at the file's own admission
+            // barrier. The rows may carry a foreign or legacy sequence column, and
+            // discovery only needs their timestamps, so the barrier is the only
+            // sequence that can be trusted.
+            file_meta.sequence.map(|sequence| sequence.get())
+        } else if is_foreign {
             file_meta.sequence.map(|sequence| sequence.get())
         } else if file_meta.preserve_row_sequence {
             None

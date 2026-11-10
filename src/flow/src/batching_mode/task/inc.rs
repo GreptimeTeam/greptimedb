@@ -21,7 +21,8 @@ use datafusion_expr::{DmlStatement, LogicalPlan};
 use query::QueryEngineRef;
 use query::options::{
     FLOW_INCREMENTAL_AFTER_SEQS, FLOW_INCREMENTAL_MODE, FLOW_INCREMENTAL_MODE_MEMTABLE_ONLY,
-    FLOW_INCREMENTAL_MODE_SEQUENCE_RANGE, FLOW_SINK_TABLE_ID,
+    FLOW_INCREMENTAL_MODE_SEQUENCE_RANGE, FLOW_REPAIR_MODE, FLOW_REPAIR_MODE_FENCED,
+    FLOW_SINK_TABLE_ID,
 };
 use snafu::ResultExt;
 use store_api::mito_engine_options::PRESERVE_ROW_SEQUENCE;
@@ -265,6 +266,11 @@ impl BatchingTask {
     ) -> Result<Vec<(&'static str, String)>, Error> {
         let mut extensions = vec![("flow.return_region_seq", "true".to_string())];
 
+        let repair_fenced = {
+            let state = self.state.read().unwrap();
+            state.pending_fenced_repair().is_some()
+        };
+
         let incremental_checkpoints_json = {
             let state = self.state.read().unwrap();
             if incremental_safe
@@ -322,6 +328,14 @@ impl BatchingTask {
             extensions.push((FLOW_SINK_TABLE_ID, sink_table_id.to_string()));
             extensions.push((FLOW_INCREMENTAL_MODE, incremental_mode.to_string()));
             extensions.push((FLOW_INCREMENTAL_AFTER_SEQS, checkpoints_json));
+        }
+
+        // Repair reads are marked independently of the incremental branch: a fenced
+        // repair DML is not an incremental delta (it advances no checkpoint) yet it
+        // must still read across `last_invalid_seq`, otherwise the repair it performs
+        // is rejected by `C < B` and recovery can never make progress.
+        if repair_fenced {
+            extensions.push((FLOW_REPAIR_MODE, FLOW_REPAIR_MODE_FENCED.to_string()));
         }
 
         Ok(extensions)

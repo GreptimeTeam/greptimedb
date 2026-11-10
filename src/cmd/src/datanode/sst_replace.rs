@@ -209,6 +209,7 @@ impl SstReplaceCommand {
             flushed_sequence: None,
             committed_sequence: None,
             wal_recovery: Default::default(),
+            last_invalid_seq: None,
         };
         let version = manifest_manager
             .update(

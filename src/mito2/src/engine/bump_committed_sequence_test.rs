@@ -85,6 +85,7 @@ async fn test_bump_committed_sequence_with_format(flat_format: bool) {
                 flushed_sequence: None,
                 committed_sequence: None,
                 wal_recovery: Default::default(),
+                last_invalid_seq: None,
             },
         )
         .await

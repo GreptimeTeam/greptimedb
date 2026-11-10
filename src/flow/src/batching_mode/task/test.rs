@@ -39,7 +39,8 @@ use pretty_assertions::assert_eq;
 use prost::Message;
 use query::options::{
     FLOW_INCREMENTAL_AFTER_SEQS, FLOW_INCREMENTAL_MODE, FLOW_INCREMENTAL_MODE_MEMTABLE_ONLY,
-    FLOW_SCHEDULED_TIME_MILLIS, FLOW_SINK_TABLE_ID, QueryOptions,
+    FLOW_REPAIR_MODE, FLOW_REPAIR_MODE_FENCED, FLOW_SCHEDULED_TIME_MILLIS, FLOW_SINK_TABLE_ID,
+    QueryOptions,
 };
 use session::context::QueryContext;
 use snafu::ResultExt;
@@ -4706,4 +4707,74 @@ async fn test_fenced_incremental_delta_default_wrapper_rejects_before_dispatch()
     let state = task.state.read().unwrap();
     assert_eq!(state.checkpoints(), &BTreeMap::from([(1_u64, 10_u64)]));
     assert_eq!(state.checkpoint_mode(), CheckpointMode::Incremental);
+}
+
+/// The region-watermark plan must not use `LIMIT 0`: the frontend re-decodes the plan
+/// with optimization on and `EliminateLimit` rewrites `LIMIT 0` into `EmptyRelation`,
+/// so no source region opens and no watermark is reported. `LIMIT 1` keeps every scan
+/// alive while still bounding the read.
+#[test]
+fn test_region_watermark_plan_keeps_sources_alive() {
+    // A trivial input plan: only the limit wrapper is under test.
+    let input = LogicalPlan::EmptyRelation(datafusion_expr::EmptyRelation {
+        produce_one_row: false,
+        schema: Arc::new(datafusion_common::DFSchema::empty()),
+    });
+    let plan = super::region_watermark_plan(input);
+
+    let LogicalPlan::Limit(limit) = &plan else {
+        panic!("the watermark plan must be a Limit, got: {plan:?}");
+    };
+    let fetch = match limit.fetch.as_deref() {
+        Some(datafusion_expr::Expr::Literal(
+            datafusion_common::ScalarValue::UInt64(Some(value)),
+            _,
+        )) => Some(*value),
+        _ => None,
+    };
+    assert_eq!(
+        Some(1),
+        fetch,
+        "the watermark plan must use LIMIT 1 so the frontend keeps the source scans, got: {plan:?}"
+    );
+}
+
+/// Regression: the fenced repair DML is not an incremental delta, but it must still
+/// carry `flow.repair_mode=fenced`, otherwise mito2 rejects it with `C < B` and the
+/// repair loop never terminates.
+#[tokio::test]
+async fn test_build_flow_query_extensions_marks_fenced_repair_dml() {
+    let (task, _) = new_test_task_engine_and_plan_with_query(
+        "SELECT number, ts FROM numbers_with_ts",
+        "numbers_with_ts",
+    )
+    .await
+    .into_task_and_plan();
+
+    task.state
+        .write()
+        .unwrap()
+        .advance_checkpoints(HashMap::from([(1_u64, 10_u64)]));
+    task.state.write().unwrap().start_fenced_repair_windows(
+        BTreeMap::from([(1_u64, 10_u64)]),
+        vec![(Timestamp::new_second(0), Timestamp::new_second(10))],
+    );
+
+    // `can_advance_checkpoints == false`: exactly what a fenced repair DML gets.
+    let extensions = task
+        .build_flow_query_extensions(false, false)
+        .await
+        .unwrap();
+    assert!(
+        extensions.contains(&(FLOW_REPAIR_MODE, FLOW_REPAIR_MODE_FENCED.to_string())),
+        "fenced repair DML must mark the repair mode, got: {extensions:?}"
+    );
+
+    // An ordinary delta (no pending repair) must not mark it.
+    task.state.write().unwrap().abandon_fenced_repair();
+    let extensions = task.build_flow_query_extensions(true, true).await.unwrap();
+    assert!(
+        !extensions.iter().any(|(key, _)| *key == FLOW_REPAIR_MODE),
+        "ordinary deltas must not mark the repair mode, got: {extensions:?}"
+    );
 }

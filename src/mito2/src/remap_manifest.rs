@@ -111,6 +111,7 @@ impl RemapManifest {
                 flushed_entry_id: 0,
                 flushed_sequence: 0,
                 committed_sequence: None,
+                last_invalid_seq: None,
                 manifest_version: 0,
                 truncated_entry_id: None,
                 compaction_time_window: None,
@@ -252,6 +253,8 @@ impl RemapManifest {
                 manifest.truncated_entry_id = previous_manifest.truncated_entry_id;
                 manifest.compaction_time_window = previous_manifest.compaction_time_window;
                 manifest.committed_sequence = previous_manifest.committed_sequence;
+                // Never regress a boundary recorded on the kept region.
+                manifest.last_invalid_seq = previous_manifest.last_invalid_seq;
             } else {
                 // new region
                 manifest.flushed_entry_id = 0;
@@ -467,6 +470,7 @@ mod tests {
             truncated_entry_id: None,
             compaction_time_window: None,
             committed_sequence: None,
+            last_invalid_seq: None,
             sst_format: FormatType::PrimaryKey,
             append_mode: None,
             pending_tails: Default::default(),

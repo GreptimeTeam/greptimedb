@@ -326,6 +326,7 @@ async fn test_gc_reclaims_obsolete_index_after_readers_and_linger_release(
                     flushed_sequence: None,
                     committed_sequence: None,
                     wal_recovery: Default::default(),
+                    last_invalid_seq: None,
                 })),
                 false,
             )

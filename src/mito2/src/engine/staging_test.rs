@@ -761,6 +761,7 @@ async fn test_staging_exit_success_with_manifests_with_format(flat_format: bool)
                     flushed_sequence: None,
                     committed_sequence: None,
                     wal_recovery: Default::default(),
+                    last_invalid_seq: None,
                 },
             )
             .await
@@ -890,6 +891,7 @@ async fn test_staging_exit_success_with_manifests_with_format(flat_format: bool)
                         flushed_sequence: None,
                         committed_sequence: None,
                         wal_recovery: Default::default(),
+                        last_invalid_seq: None,
                     })]),
                     true,
                 )
@@ -945,10 +947,34 @@ async fn test_staging_exit_success_with_manifests_with_format(flat_format: bool)
     let workers = &engine.inner.workers;
     let region = workers.get_region(region_id).unwrap();
     let current = region.version_control.current();
+    // The exit publishes its own invalid-seq boundary `B = 13` (last_sequence 12 + 1) and
+    // raises the commit watermark to it in the same publish. It holds the publish window
+    // (the `Editing` state) while it allocates, persists and publishes, so no write can be
+    // attributed a sequence at or below `B`: every write admitted afterwards obtains
+    // `B + 1` (14) or later, and `last_sequence` never runs ahead of a failed publish.
     assert_eq!(
         (current.last_sequence, current.committed_sequence),
-        (12, 12)
+        (13, 13)
     );
+    assert_eq!(13, current.version.last_invalid_seq());
+    // Every staged file must carry the published boundary: the persisted action list
+    // applies the final merged edit exactly once, so no original edit can overwrite
+    // the barrier on replay.
+    let manifest = region.manifest_ctx.manifest().await;
+    assert!(!manifest.files.is_empty());
+    assert!(
+        manifest
+            .files
+            .values()
+            .all(|meta| meta.sequence.map(|sequence| sequence.get()) == Some(13)),
+        "all staged files must carry the published boundary, got: {:?}",
+        manifest
+            .files
+            .values()
+            .map(|meta| meta.sequence.map(|sequence| sequence.get()))
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(Some(13), manifest.last_invalid_seq);
     assert!(
         !region.is_staging(),
         "Region should no longer be in staging mode"
@@ -1119,6 +1145,7 @@ async fn test_staging_exit_conflict_partition_expr_change_and_change_with_format
                     flushed_sequence: None,
                     committed_sequence: None,
                     wal_recovery: Default::default(),
+                    last_invalid_seq: None,
                 }),
             ]),
             true,
@@ -1557,6 +1584,7 @@ fn edit_adding(file: FileMeta) -> RegionEdit {
         flushed_sequence: None,
         committed_sequence: None,
         wal_recovery: Default::default(),
+        last_invalid_seq: None,
     }
 }
 
@@ -1917,6 +1945,7 @@ async fn test_successful_staging_end_keeps_rows_of_rejected_flush() {
                 flushed_sequence: None,
                 committed_sequence: None,
                 wal_recovery: Default::default(),
+                last_invalid_seq: None,
             },
         )
         .await
@@ -2372,6 +2401,7 @@ async fn test_close_after_end_of_staging_is_queued_keeps_committed_result() {
                 flushed_sequence: None,
                 committed_sequence: None,
                 wal_recovery: Default::default(),
+                last_invalid_seq: None,
             },
         )
         .await
@@ -2582,4 +2612,425 @@ async fn test_migration_flush_retries_while_staging_ends() {
         .manifest_ctx
         .leave_ending_staging(region_id, started, &Ok::<(), Error>(()));
     assert_eq!(0, migration_flush().await.unwrap().affected_rows);
+}
+
+/// Waits until the region reaches `state`.
+async fn wait_until_region_state(region: &MitoRegionRef, state: RegionLeaderState) {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while region.state() != RegionRoleState::Leader(state) {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("region did not reach the expected state in time");
+}
+
+/// Returns the admission barrier of `file_id` in the region's current SST version.
+fn file_sequence(region: &MitoRegionRef, file_id: FileId) -> Option<u64> {
+    region
+        .version()
+        .ssts
+        .levels()
+        .iter()
+        .flat_map(|level| level.files.iter())
+        .find(|(id, _)| **id == file_id)
+        .and_then(|(_, file)| file.meta_ref().sequence)
+        .map(|sequence| sequence.get())
+}
+
+/// The staging exit holds the worker-coordinated publish window while it allocates the
+/// boundary, persists the merged layout and makes it visible. Ordinary writes that arrive
+/// during the window are queued by the worker, so none of them can be attributed a sequence
+/// at or below the published boundary: a row at the boundary (or above it) written before
+/// the publish was visible would let a Flow cursor reach that sequence and then prune the
+/// published files as already consumed.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_staging_exit_publish_window_queues_writes() {
+    common_telemetry::init_default_ut_logging();
+    let partition_expr = float_range_expr("field_0", 0., 100.).as_json_str().unwrap();
+    let mut env = TestEnv::new().await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+
+    let region_id = RegionId::new(1024, 0);
+    let request = CreateRequestBuilder::new().build();
+    let column_schemas = rows_schema(&request);
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+
+    // One visible flush; rows written during staging stay in the staging memtable because a
+    // staging region keeps its WAL and flushes nothing, so the exit is what publishes them.
+    put_rows(
+        &engine,
+        region_id,
+        Rows {
+            schema: column_schemas.clone(),
+            rows: build_rows(0, 3),
+        },
+    )
+    .await;
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::Flush(RegionFlushRequest::default()),
+        )
+        .await
+        .unwrap();
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::EnterStaging(EnterStagingRequest {
+                partition_directive: StagingPartitionDirective::UpdatePartitionExpr(partition_expr),
+            }),
+        )
+        .await
+        .unwrap();
+    put_rows(
+        &engine,
+        region_id,
+        Rows {
+            schema: column_schemas.clone(),
+            rows: build_rows(3, 5),
+        },
+    )
+    .await;
+    // A staging region publishes nothing on its own, so the exit needs an edit to merge and
+    // re-mark; import one file from a source region to give it that edit.
+    let source_region_id = RegionId::new(1024, 1);
+    engine
+        .handle_request(
+            source_region_id,
+            RegionRequest::Create(CreateRequestBuilder::new().build()),
+        )
+        .await
+        .unwrap();
+    put_rows(
+        &engine,
+        source_region_id,
+        Rows {
+            schema: column_schemas.clone(),
+            rows: build_rows(0, 2),
+        },
+    )
+    .await;
+    flush_region(&engine, source_region_id, None).await;
+    let source_file = first_file(&engine.get_region(source_region_id).unwrap()).await;
+    engine
+        .handle_request(
+            source_region_id,
+            RegionRequest::Close(RegionCloseRequest::default()),
+        )
+        .await
+        .unwrap();
+    engine
+        .edit_region(
+            region_id,
+            RegionEdit {
+                files_to_add: vec![source_file],
+                files_to_remove: vec![],
+                timestamp_ms: None,
+                compaction_time_window: None,
+                flushed_entry_id: None,
+                flushed_sequence: None,
+                committed_sequence: None,
+                last_invalid_seq: None,
+                wal_recovery: Default::default(),
+            },
+        )
+        .await
+        .unwrap();
+
+    let region = engine.get_region(region_id).unwrap();
+    let last_sequence_before_exit = region.version_control.current().last_sequence;
+
+    // Holding the manifest write lock keeps the exit inside its publish window: the worker
+    // loop opens the window before the background publish runs, so the region stays in the
+    // `Editing` state and the worker keeps queuing writes.
+    let manifest_guard = region.manifest_ctx.manifest_manager.write().await;
+    let exit_engine = engine.clone();
+    let exit_task = tokio::spawn(async move {
+        exit_engine
+            .set_region_role_state_gracefully(region_id, SettableRegionRoleState::Leader)
+            .await
+    });
+    wait_until_region_state(&region, RegionLeaderState::Editing).await;
+
+    // A write that arrives while the window is open must be queued, not admitted.
+    let write_engine = engine.clone();
+    let write_rows = Rows {
+        schema: column_schemas.clone(),
+        rows: build_rows(5, 7),
+    };
+    let write_task =
+        tokio::spawn(async move { put_rows(&write_engine, region_id, write_rows).await });
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(
+        !write_task.is_finished(),
+        "a write must be queued while the publish window of the staging exit is open"
+    );
+    assert_eq!(
+        last_sequence_before_exit,
+        region.version_control.current().last_sequence,
+        "a queued write must not allocate a sequence during the publish"
+    );
+
+    // Releasing the lock lets the publish become visible, which closes the window: only then
+    // is the queued write admitted.
+    drop(manifest_guard);
+    exit_task.await.unwrap().unwrap();
+    write_task.await.unwrap();
+
+    let boundary = region.version().last_invalid_seq();
+    assert_eq!(
+        last_sequence_before_exit + 1,
+        boundary,
+        "the staging exit must publish at last_sequence + 1"
+    );
+    assert_eq!(
+        RegionRoleState::Leader(RegionLeaderState::Writable),
+        region.state(),
+        "the publish window must be released after the publish"
+    );
+    assert!(
+        region.version_control.current().last_sequence > boundary,
+        "the queued write must be attributed a sequence above the published boundary, \
+         last_sequence: {}, boundary: {}",
+        region.version_control.current().last_sequence,
+        boundary
+    );
+
+    // The invariant the window exists for: a Flow cursor that reaches the boundary after the
+    // publish cannot be handed a file it never consumed, because file-level pruning skips
+    // files at or below the cursor. Every file this region produces after the publish
+    // therefore carries a sequence strictly above the boundary.
+    let files_before_flush = region
+        .version()
+        .ssts
+        .levels()
+        .iter()
+        .flat_map(|level| level.files.keys().copied())
+        .collect::<std::collections::HashSet<_>>();
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::Flush(RegionFlushRequest::default()),
+        )
+        .await
+        .unwrap();
+    let post_publish_version = region.version();
+    let post_publish_files = post_publish_version
+        .ssts
+        .levels()
+        .iter()
+        .flat_map(|level| level.files.values())
+        .filter(|file| !files_before_flush.contains(&file.meta_ref().file_id))
+        .collect::<Vec<_>>();
+    assert!(
+        !post_publish_files.is_empty(),
+        "the queued write must have been flushed"
+    );
+    for file in post_publish_files {
+        let sequence = file
+            .meta_ref()
+            .sequence
+            .map(|sequence| sequence.get())
+            .expect("a flushed file carries an admission barrier");
+        assert!(
+            sequence > boundary,
+            "a post-publish file must stay above the published boundary (cursor), \
+             file sequence: {sequence}, boundary: {boundary}"
+        );
+    }
+}
+
+/// Every staged edit must be published at the exit boundary, even when several staged edits
+/// added files at different barriers. The persisted action list keeps the metadata /
+/// partition actions in order and applies the final merged edit exactly once, so a reopen
+/// replays the exit boundary for all staged files instead of restoring a stale sequence from
+/// an original edit (which would leave a file at or below a cursor that never consumed it).
+#[tokio::test]
+async fn test_staging_exit_reopen_applies_boundary_to_every_staged_edit() {
+    common_telemetry::init_default_ut_logging();
+    let partition_expr = float_range_expr("field_0", 0., 100.).as_json_str().unwrap();
+    let mut env = TestEnv::new().await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+
+    let region_id = RegionId::new(1024, 0);
+    let request = CreateRequestBuilder::new().build();
+    let column_schemas = rows_schema(&request);
+    let table_dir = request.table_dir.clone();
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+
+    put_rows(
+        &engine,
+        region_id,
+        Rows {
+            schema: column_schemas.clone(),
+            rows: build_rows(0, 3),
+        },
+    )
+    .await;
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::Flush(RegionFlushRequest::default()),
+        )
+        .await
+        .unwrap();
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::EnterStaging(EnterStagingRequest {
+                partition_directive: StagingPartitionDirective::UpdatePartitionExpr(partition_expr),
+            }),
+        )
+        .await
+        .unwrap();
+    // Rows written during staging stay in the staging memtable; staged files are imported
+    // one edit at a time, so the staging layout holds several distinct files.
+    put_rows(
+        &engine,
+        region_id,
+        Rows {
+            schema: column_schemas.clone(),
+            rows: build_rows(3, 5),
+        },
+    )
+    .await;
+    // A source region provides the files that staging imports.
+    let source_region_id = RegionId::new(1024, 1);
+    engine
+        .handle_request(
+            source_region_id,
+            RegionRequest::Create(CreateRequestBuilder::new().build()),
+        )
+        .await
+        .unwrap();
+    for (start, end) in [(10, 13), (13, 15)] {
+        put_rows(
+            &engine,
+            source_region_id,
+            Rows {
+                schema: column_schemas.clone(),
+                rows: build_rows(start, end),
+            },
+        )
+        .await;
+        flush_region(&engine, source_region_id, None).await;
+    }
+    let source_files = engine
+        .get_region(source_region_id)
+        .unwrap()
+        .manifest_ctx
+        .manifest()
+        .await
+        .files
+        .values()
+        .cloned()
+        .collect::<Vec<_>>();
+    engine
+        .handle_request(
+            source_region_id,
+            RegionRequest::Close(RegionCloseRequest::default()),
+        )
+        .await
+        .unwrap();
+
+    let region = engine.get_region(region_id).unwrap();
+    // Each imported file is added by its own staged edit, so the staging layout holds files
+    // that were admitted at different barriers.
+    for file in source_files {
+        engine
+            .edit_region(
+                region_id,
+                RegionEdit {
+                    files_to_add: vec![file],
+                    files_to_remove: vec![],
+                    timestamp_ms: None,
+                    compaction_time_window: None,
+                    flushed_entry_id: None,
+                    flushed_sequence: None,
+                    committed_sequence: None,
+                    last_invalid_seq: None,
+                    wal_recovery: Default::default(),
+                },
+            )
+            .await
+            .unwrap();
+    }
+    // Two distinct staged files, each added by its own staged edit at its own barrier.
+    let staged_files = {
+        let manager = region.manifest_ctx.manifest_manager.read().await;
+        let mut seen = std::collections::HashSet::new();
+        manager
+            .staging_manifest()
+            .unwrap()
+            .files
+            .values()
+            .filter(|file| seen.insert(file.file_id))
+            .take(2)
+            .cloned()
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(2, staged_files.len(), "need two distinct staged files");
+    for file in &staged_files {
+        engine
+            .edit_region(
+                region_id,
+                RegionEdit {
+                    files_to_add: vec![file.clone()],
+                    files_to_remove: vec![],
+                    timestamp_ms: None,
+                    compaction_time_window: None,
+                    flushed_entry_id: None,
+                    flushed_sequence: None,
+                    committed_sequence: None,
+                    last_invalid_seq: None,
+                    wal_recovery: Default::default(),
+                },
+            )
+            .await
+            .unwrap();
+    }
+    let last_sequence_before_exit = region.version_control.current().last_sequence;
+    let boundary = last_sequence_before_exit + 1;
+
+    engine
+        .set_region_role_state_gracefully(region_id, SettableRegionRoleState::Leader)
+        .await
+        .unwrap();
+    assert_eq!(
+        boundary,
+        region.version().last_invalid_seq(),
+        "the exit must publish its own boundary"
+    );
+    for file in &staged_files {
+        assert_eq!(
+            Some(boundary),
+            file_sequence(&region, file.file_id),
+            "the in-memory publish must re-mark every staged file at the boundary"
+        );
+    }
+
+    // Replaying the persisted action list must agree with the in-memory publish: the merged
+    // edit is applied exactly once and after every metadata action, so no original edit can
+    // overwrite the boundary with its own stale sequence.
+    reopen_region(&engine, region_id, table_dir, true, Default::default()).await;
+    let reopened = engine.get_region(region_id).unwrap();
+    assert_eq!(
+        boundary,
+        reopened.version().last_invalid_seq(),
+        "the exit boundary must survive a reopen"
+    );
+    for file in &staged_files {
+        assert_eq!(
+            Some(boundary),
+            file_sequence(&reopened, file.file_id),
+            "every staged edit must carry the exit boundary after a reopen"
+        );
+    }
 }

@@ -22,6 +22,7 @@ use store_api::storage::RegionId;
 use crate::error::RegionNotFoundSnafu;
 use crate::manifest::action::{RegionTruncate, TruncateKind};
 use crate::region::RegionLeaderState;
+use crate::region::version::{SequenceDomainChange, invalid_seq_boundary};
 use crate::request::{DdlRequest, DiscardUnflushedResult, OptionOutputTx, TruncateResult};
 use crate::worker::RegionWorkerLoop;
 
@@ -81,7 +82,9 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 let truncated_entry_id = version_data.last_entry_id;
                 let truncated_sequence = version_data.committed_sequence;
 
-                // Write region truncated to manifest.
+                // Write region truncated to manifest. The single policy point
+                // decides whether the truncation reassigns the region's rows; when
+                // it does, the action records the boundary `B = last_sequence + 1`.
                 let truncate = RegionTruncate {
                     region_id,
                     kind: TruncateKind::All {
@@ -89,6 +92,10 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                         truncated_sequence,
                     },
                     timestamp_ms: None,
+                    last_invalid_seq: invalid_seq_boundary(
+                        SequenceDomainChange::Truncate,
+                        version_data.last_sequence + 1,
+                    ),
                 };
 
                 self.handle_manifest_truncate_action(region, truncate, sender);
@@ -175,6 +182,12 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                         files_to_remove: files_to_truncate,
                     },
                     timestamp_ms: None,
+                    // Removing files drops rows owned by this region, so the
+                    // shared policy records the boundary through the same point.
+                    last_invalid_seq: invalid_seq_boundary(
+                        SequenceDomainChange::Truncate,
+                        version_data.last_sequence + 1,
+                    ),
                 };
                 self.handle_manifest_truncate_action(region, truncate, sender);
             }
@@ -199,10 +212,12 @@ impl<S: LogStore> RegionWorkerLoop<S> {
 
         match truncate_result.result {
             Ok(()) => {
-                // Applies the truncate action to the region.
-                region
-                    .version_control
-                    .truncate(truncate_result.kind.clone());
+                // Applies the truncate action to the region, publishing the same
+                // edit boundary the manifest recorded.
+                region.version_control.truncate(
+                    truncate_result.kind.clone(),
+                    truncate_result.last_invalid_seq,
+                );
             }
             Err(e) => {
                 // Unable to truncate the region.
@@ -259,9 +274,11 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             return;
         }
 
-        region
-            .version_control
-            .discard_unflushed(result.discarded_entry_id, result.discarded_sequence);
+        region.version_control.discard_unflushed(
+            result.discarded_entry_id,
+            result.discarded_sequence,
+            result.last_invalid_seq,
+        );
 
         // The flush and compaction schedulers are already quiesced because the request
         // queued itself behind any running job, so these two are usually no-ops. Index

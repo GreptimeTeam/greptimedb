@@ -1394,6 +1394,48 @@ fn validate_sequence_fences(
     exact_sequence_range_available: bool,
     extension_provider_blocks_exact: bool,
 ) -> Result<()> {
+    // Recovery window discovery prunes at file granularity and reads no row-level
+    // sequence range, so no sequence fence applies: the caller only needs the
+    // timestamps of the surviving rows, and rejecting the request would deadlock
+    // recovery.
+    if request.repair_discovery_scan || request.fenced_repair_scan {
+        // A repair read may cross `last_invalid_seq` — it is the query that repairs
+        // the stale cursor — but its result may only be committed when the layout it
+        // read is still the one `H` was taken from. A publication above `H` means the
+        // region changed underneath the snapshot, so the caller must rediscover
+        // instead of committing this result. This gate covers both repair kinds:
+        // dirty-window discovery and the fenced repair DML.
+        if let Some(high) = request.memtable_max_sequence {
+            let boundary = version.last_invalid_seq();
+            ensure!(
+                boundary <= high,
+                IncrementalQueryStaleSnafu {
+                    region_id,
+                    given_seq: high,
+                    min_readable_seq: boundary,
+                }
+            );
+            // The fenced repair DML has no incremental lower bound and no exact
+            // sequence-range mode, so `H` bounds memtables only. When `H` is behind
+            // the flushed frontier an SST cannot be filtered by `H`, and a plain
+            // flush that landed after `H` was frozen would be aggregated into the
+            // repaired window and then counted again by the next round. Keep the
+            // SST upper-bound fence so the caller rediscovers instead.
+            if request.fenced_repair_scan && !request.skip_sst_files {
+                let min_enforceable_seq = version.flushed_sequence;
+                ensure!(
+                    high >= min_enforceable_seq,
+                    SnapshotFenceStaleSnafu {
+                        region_id,
+                        given_seq: high,
+                        min_enforceable_seq,
+                    }
+                );
+            }
+        }
+        return Ok(());
+    }
+
     if request.exact_sequence_range {
         // Exact `sequence_range` mode: when the capability is available the
         // requested (C, H] delta is enforced row-level on memtables and every
@@ -1911,6 +1953,7 @@ mod tests {
             flushed_sequence: None,
             committed_sequence: None,
             wal_recovery: Default::default(),
+            last_invalid_seq: None,
         };
         assert!(is_valid_region_edit(&edit));
 
@@ -1924,6 +1967,7 @@ mod tests {
             flushed_sequence: None,
             committed_sequence: None,
             wal_recovery: Default::default(),
+            last_invalid_seq: None,
         };
         assert!(!is_valid_region_edit(&edit));
 
@@ -1937,6 +1981,7 @@ mod tests {
             flushed_sequence: None,
             committed_sequence: None,
             wal_recovery: Default::default(),
+            last_invalid_seq: None,
         };
         assert!(is_valid_region_edit(&edit));
 
@@ -1950,6 +1995,7 @@ mod tests {
             flushed_sequence: None,
             committed_sequence: None,
             wal_recovery: Default::default(),
+            last_invalid_seq: None,
         };
         assert!(is_valid_region_edit(&edit));
 
@@ -1963,6 +2009,7 @@ mod tests {
             flushed_sequence: None,
             committed_sequence: None,
             wal_recovery: Default::default(),
+            last_invalid_seq: None,
         };
         assert!(!is_valid_region_edit(&edit));
         let edit = RegionEdit {
@@ -1974,6 +2021,7 @@ mod tests {
             flushed_sequence: None,
             committed_sequence: None,
             wal_recovery: Default::default(),
+            last_invalid_seq: None,
         };
         assert!(!is_valid_region_edit(&edit));
         let edit = RegionEdit {
@@ -1985,6 +2033,7 @@ mod tests {
             flushed_sequence: Some(1),
             committed_sequence: None,
             wal_recovery: Default::default(),
+            last_invalid_seq: None,
         };
         assert!(!is_valid_region_edit(&edit));
         let edit = RegionEdit {
@@ -1999,6 +2048,7 @@ mod tests {
                 pending_tails: Some(vec![]),
                 handoff_floor: None,
             },
+            last_invalid_seq: None,
         };
         assert!(!is_valid_region_edit(&edit));
     }

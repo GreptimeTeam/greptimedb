@@ -13,13 +13,15 @@
 // limitations under the License.
 
 use common_telemetry::{debug, error, info};
-use snafu::{OptionExt, ResultExt, ensure};
+use snafu::{OptionExt, ensure};
+use store_api::logstore::LogStore;
 use store_api::region_engine::MitoCopyRegionFromResponse;
 use store_api::region_request::PathType;
 use store_api::storage::{FileId, RegionId};
 
-use crate::error::{InvalidRequestSnafu, MissingManifestSnafu, Result};
+use crate::error::{InvalidRequestSnafu, MissingManifestSnafu, RegionNotFoundSnafu, Result};
 use crate::manifest::action::{RegionEdit, RegionMetaAction, RegionMetaActionList};
+use crate::region::version::{SequenceDomainChange, invalid_seq_boundary};
 use crate::region::{
     FileDescriptor, MitoRegionRef, RegionFileCopier, RegionLeaderState, RegionMetadataLoader,
 };
@@ -28,9 +30,9 @@ use crate::request::{
 };
 use crate::sst::file::{self, FileMeta};
 use crate::sst::location::region_dir_from_table_dir;
-use crate::worker::{RegionWorkerLoop, WorkerRequestWithTime};
+use crate::worker::{RegionWorkerLoop, WorkerRequestWithTime, resume_queued_writes};
 
-impl<S> RegionWorkerLoop<S> {
+impl<S: LogStore> RegionWorkerLoop<S> {
     pub(crate) fn handle_copy_region_from_request(&mut self, request: CopyRegionFromRequest) {
         let region_id = request.region_id;
         let source_region_id = request.source_region_id;
@@ -72,6 +74,16 @@ impl<S> RegionWorkerLoop<S> {
         );
         let worker_sender = self.sender.clone();
 
+        // Hold the publish window for the whole copy. The boundary the copy allocates
+        // must be above every sequence already attributed to a row, and no write may be
+        // admitted before the copied files are visible: the loop is the only place that
+        // can prove no write context is in flight, so open the window here and keep it
+        // open until the copied edit is applied (see `handle_copy_region_from_finished`).
+        if let Err(e) = region.begin_publish_window(RegionLeaderState::Writable) {
+            let _ = sender.send(Err(e));
+            return;
+        }
+
         common_runtime::spawn_global(async move {
             let (region_edit, source_file_ids) = match Self::copy_region_from(
                 &region,
@@ -84,51 +96,27 @@ impl<S> RegionWorkerLoop<S> {
             {
                 Ok(region_files) => region_files,
                 Err(e) => {
+                    // Nothing was published, so return the region to its pre-window state
+                    // and admit the writes the window queued.
+                    if let Err(release) = region.end_publish_window(RegionLeaderState::Writable) {
+                        error!(release; "Failed to release the copy publish window of region {}", region_id);
+                    }
+                    resume_queued_writes(&worker_sender, region_id).await;
                     let _ = sender.send(Err(e));
                     return;
                 }
             };
 
             match region_edit {
-                Some(region_edit)
-                    if region_edit
-                        .files_to_add
-                        .iter()
-                        .any(|file| file.level == file::LEVEL_SHARED) =>
-                {
-                    // Shared references and their target admission sequence must enter
-                    // the serialized edit lane, not the asynchronous physical-copy path.
-                    // The response lists installed references, including shared SSTs
-                    // whose objects stay in place; it is not a physical COPY count.
-                    let copied_file_ids = region_edit
-                        .files_to_add
-                        .iter()
-                        .map(|file| file.file_id)
-                        .collect();
-                    let (tx, rx) = tokio::sync::oneshot::channel();
-                    if worker_sender
-                        .send(WorkerRequestWithTime::new(WorkerRequest::EditRegion(
-                            crate::request::RegionEditRequest::new(
-                                region_id,
-                                region_edit,
-                                false,
-                                tx,
-                            ),
-                        )))
-                        .await
-                        .is_err()
-                    {
-                        let _ = sender.send(crate::error::RegionNotFoundSnafu { region_id }.fail());
-                        return;
-                    }
-                    let result = match rx.await {
-                        Ok(result) => {
-                            result.map(|_| MitoCopyRegionFromResponse { copied_file_ids })
-                        }
-                        Err(error) => Err(error).context(crate::error::RecvSnafu),
-                    };
-                    let _ = sender.send(result);
-                }
+                // The edit — including shared references — is published by the worker
+                // loop inside the window opened above: it persists the boundary and the
+                // file set, then makes them visible in one version. Routing the shared
+                // case back as a region edit instead would queue it behind that very
+                // window, because the region is `Editing` for the whole copy, so the
+                // copy would wait for an edit the loop only starts after the window is
+                // released by the copy itself. The response lists installed references,
+                // including shared SSTs whose objects stay in place; it is not a
+                // physical COPY count.
                 Some(region_edit) => {
                     if let Err(e) = worker_sender
                         .send(WorkerRequestWithTime::new(WorkerRequest::Background {
@@ -144,9 +132,19 @@ impl<S> RegionWorkerLoop<S> {
                         .await
                     {
                         error!(e; "Failed to send copy region from finished notification to worker, region_id: {}", region_id);
+                        if let Err(release) = region.end_publish_window(RegionLeaderState::Writable)
+                        {
+                            error!(release; "Failed to release the copy publish window of region {}", region_id);
+                        }
+                        resume_queued_writes(&worker_sender, region_id).await;
                     }
                 }
                 None => {
+                    // Nothing to publish: release the window before acknowledging.
+                    if let Err(e) = region.end_publish_window(RegionLeaderState::Writable) {
+                        error!(e; "Failed to release the copy publish window of region {}", region_id);
+                    }
+                    resume_queued_writes(&worker_sender, region_id).await;
                     let _ = sender.send(Ok(MitoCopyRegionFromResponse {
                         copied_file_ids: source_file_ids,
                     }));
@@ -155,15 +153,17 @@ impl<S> RegionWorkerLoop<S> {
         });
     }
 
-    pub(crate) fn handle_copy_region_from_finished(&mut self, request: CopyRegionFromFinished) {
+    pub(crate) async fn handle_copy_region_from_finished(
+        &mut self,
+        request: CopyRegionFromFinished,
+    ) {
         let region_id = request.region_id;
         let sender = request.sender;
-        let region = match self.regions.writable_region(region_id) {
-            Ok(region) => region,
-            Err(e) => {
-                let _ = sender.send(Err(e));
-                return;
-            }
+        // The state is `Editing` while the publish window is open, so it cannot be looked
+        // up through `writable_region`.
+        let Some(region) = self.regions.get_region(region_id) else {
+            let _ = sender.send(RegionNotFoundSnafu { region_id }.fail());
+            return;
         };
 
         let copied_file_ids = request
@@ -173,11 +173,18 @@ impl<S> RegionWorkerLoop<S> {
             .map(|file_meta| file_meta.file_id)
             .collect();
 
+        // Publish the copied files and the boundary in one version, then release the
+        // window: the queued writes are admitted afterwards and obtain a sequence above
+        // the boundary (see `handle_editing_window_closed`).
         region
             .version_control
             .apply_edit(Some(request.edit), &[], region.file_purger.clone());
+        if let Err(e) = region.end_publish_window(RegionLeaderState::Writable) {
+            error!(e; "Failed to release the copy publish window of region {}", region_id);
+        }
 
         let _ = sender.send(Ok(MitoCopyRegionFromResponse { copied_file_ids }));
+        self.handle_editing_window_closed(region_id).await;
     }
 
     /// Returns the region edit and source file IDs, including shared logical references.
@@ -256,23 +263,39 @@ impl<S> RegionWorkerLoop<S> {
                 parallelism,
             )
             .await?;
-        let edit = RegionEdit {
+        let edit_sequence = region.version_control.current().last_sequence + 1;
+        // Backfill the barrier on the copied files in the same publish that records
+        // `last_invalid_seq = B`: a barrier-less copy would be reported as an
+        // incomplete discovery candidate set forever, so the degraded path could
+        // never make progress. The rows are virtualized at `B`, which is exactly what
+        // `remap_copied_file_meta` refuses to trust from the source domain.
+        let mut new_file_metas = new_file_metas;
+        for file in &mut new_file_metas {
+            file.sequence = std::num::NonZeroU64::new(edit_sequence);
+            file.preserve_row_sequence = false;
+        }
+        let mut edit = RegionEdit {
             files_to_add: new_file_metas,
             files_to_remove: vec![],
             timestamp_ms: Some(chrono::Utc::now().timestamp_millis()),
             compaction_time_window: None,
             flushed_entry_id: None,
             flushed_sequence: None,
-            committed_sequence: None,
+            // Publish the boundary together with a committed watermark of at least
+            // `B`, so a later full rebuild returns `H >= B` and does not fall back
+            // again on the same boundary.
+            committed_sequence: Some(edit_sequence),
             wal_recovery: Default::default(),
+            last_invalid_seq: None,
         };
-        if edit
-            .files_to_add
-            .iter()
-            .any(|file| file.level == file::LEVEL_SHARED)
-        {
-            return Ok((Some(edit), source_file_ids));
-        }
+        // The single policy point decides whether this copy reassigns the target's
+        // rows; when it does, the target records `B = last_sequence + 1`.
+        edit.last_invalid_seq =
+            invalid_seq_boundary(SequenceDomainChange::RegionEdit, edit_sequence);
+        // Shared references are persisted on this path too. Handing them to the region
+        // edit lane instead would drop them back onto the publish window the copy holds,
+        // which is `Editing` for the whole copy, so they must be persisted and published
+        // in the window like physically copied files (see `handle_copy_region_from_request`).
         let action_list = RegionMetaActionList::with_action(RegionMetaAction::Edit(edit.clone()));
         info!(
             "Applying {:?} to region {target_region_id}, reason: CopyRegionFrom",
@@ -280,7 +303,7 @@ impl<S> RegionWorkerLoop<S> {
         );
         let version = region
             .manifest_ctx
-            .update_manifest(RegionLeaderState::Writable, action_list, false)
+            .update_manifest(RegionLeaderState::Editing, action_list, false)
             .await?;
         info!(
             "Successfully update manifest version to {version}, region: {target_region_id}, reason: CopyRegionFrom"

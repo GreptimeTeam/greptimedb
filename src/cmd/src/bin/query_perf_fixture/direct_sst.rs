@@ -507,6 +507,7 @@ pub(super) async fn run_direct_sst(args: DirectArgs) {
         flushed_entry_id: overall_seq,
         flushed_sequence: overall_seq,
         committed_sequence: Some(overall_seq),
+        last_invalid_seq: None,
         manifest_version: args.checkpoint_version,
         truncated_entry_id: None,
         compaction_time_window: None,
