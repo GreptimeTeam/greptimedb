@@ -10596,10 +10596,14 @@ async fn native_promql_columnar_matching_two_scan_partitions() {
             metric_name,
             physical_metadata,
             logical_tags,
-        } = scan.label_source()
+        } = scan.scan_binding()
         else {
-            panic!("scan {index} must materialize labels from the primary key");
+            panic!("scan {index} must bind labels from the primary key");
         };
+        assert!(
+            matches!(scan.label_source(), RawLabelSource::Explicit),
+            "scan {index} must encode labels explicitly from that binding"
+        );
         assert_eq!(metric_name.as_ref(), TABLE, "scan {index}: metric name");
         assert_eq!(
             logical_tags
