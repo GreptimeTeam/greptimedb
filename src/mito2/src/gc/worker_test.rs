@@ -20,9 +20,13 @@ use api::v1::Rows;
 use async_trait::async_trait;
 use bytes::Bytes;
 use common_base::Plugins;
+use common_datasource::compression::CompressionType;
 use common_telemetry::init_default_ut_logging;
 use common_time::Timestamp;
 use futures::TryStreamExt;
+use object_store::layers::mock::{
+    Error as MockError, ErrorKind, MockLayerBuilder, Result as MockResult, oio,
+};
 use object_store::{Entry, ObjectStore, services};
 use store_api::metadata::RegionMetadataRef;
 use store_api::region_engine::{RegionEngine as _, RegionRole};
@@ -33,10 +37,12 @@ use crate::access_layer::AccessLayerRef;
 use crate::config::MitoConfig;
 use crate::engine::MitoEngine;
 use crate::engine::compaction_test::{delete_and_flush, put_and_flush};
+use crate::engine::pending_tail_test::{set_pending_tails, tail};
 use crate::engine::region_hook::{RegionGcInfo, RegionHook, RegionHookRef};
 use crate::error::UnexpectedSnafu;
 use crate::gc::{GcConfig, LocalGcWorker, should_delete_file};
 use crate::manifest::action::{RegionEdit, RegionMetaAction, RegionMetaActionList, RemovedFile};
+use crate::manifest::storage::{delta_file, gen_path};
 use crate::metrics::GC_SKIPPED_UNPARSABLE_FILES;
 use crate::region::{MitoRegionRef, RegionLeaderState};
 use crate::sst::file::{ColumnIndexMetadata, FileHandle, FileMeta, IndexType, RegionIndexId};
@@ -319,6 +325,7 @@ async fn test_gc_reclaims_obsolete_index_after_readers_and_linger_release(
                     flushed_entry_id: None,
                     flushed_sequence: None,
                     committed_sequence: None,
+                    wal_recovery: Default::default(),
                 })),
                 false,
             )
@@ -1787,4 +1794,84 @@ async fn test_on_region_gc_failure_routes_region_to_retry() {
         !report.deleted_files.contains_key(&region_id),
         "a failed extension cleanup must not report deleted_files for the region"
     );
+}
+
+struct FailingLister;
+
+impl oio::List for FailingLister {
+    async fn next(&mut self) -> MockResult<Option<oio::Entry>> {
+        Err(MockError::new(ErrorKind::Unexpected, "mock list failure"))
+    }
+}
+
+#[rstest::rstest]
+#[case::pending_tails("pending_tails")]
+#[case::newer_manifest("newer_manifest")]
+#[case::manifest_list_failure("manifest_list_failure")]
+#[tokio::test]
+async fn test_full_listing_gc_skips_region(#[case] cause: &str) {
+    let fail_manifest_lists = Arc::new(AtomicBool::new(false));
+    let fail = fail_manifest_lists.clone();
+    let mock_layer = MockLayerBuilder::default()
+        .lister_factory(Arc::new(move |path, _, inner| {
+            if fail.load(Ordering::Relaxed) && path.contains("/manifest/") {
+                Box::new(FailingLister)
+            } else {
+                inner
+            }
+        }))
+        .build()
+        .unwrap();
+    let mut env = TestEnv::new().await.with_mock_layer(mock_layer);
+    let hook = Arc::new(GcCountingHook::default());
+    let plugins = Plugins::new();
+    plugins.insert(hook.clone() as RegionHookRef);
+    let config = MitoConfig {
+        gc: GcConfig {
+            enable: true,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let engine = env.create_engine_with_plugins(config, plugins).await;
+    let region_id = RegionId::new(1, 1);
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::Create(CreateRequestBuilder::new().build()),
+        )
+        .await
+        .unwrap();
+    let region = engine.get_region(region_id).unwrap();
+    let run_gc = async || {
+        let file_ref_manifest = FileRefsManifest {
+            file_refs: Default::default(),
+            manifest_version: [(region_id, region.manifest_ctx.manifest_version().await)].into(),
+            cross_region_refs: HashMap::new(),
+        };
+        let regions = BTreeMap::from([(region_id, Some(region.clone()))]);
+        let gc_worker = create_gc_worker(&engine, regions, &file_ref_manifest, true).await;
+        gc_worker.run().await.unwrap();
+    };
+    run_gc().await;
+    assert_eq!(1, hook.gc_calls.load(Ordering::Relaxed));
+
+    match cause {
+        "pending_tails" => set_pending_tails(&engine, region_id, vec![tail(1, 0, 1)]).await,
+        "newer_manifest" => {
+            let store = region.manifest_ctx.manifest_manager.read().await.store();
+            let version = region.manifest_ctx.manifest_version().await;
+            let path = gen_path(
+                store.manifest_dir(),
+                &delta_file(version + 1),
+                CompressionType::Uncompressed,
+            );
+            let object_store = region.access_layer.object_store();
+            object_store.write(&path, b"".as_slice()).await.unwrap();
+        }
+        _ => fail_manifest_lists.store(true, Ordering::Relaxed),
+    }
+    run_gc().await;
+
+    assert_eq!(1, hook.gc_calls.load(Ordering::Relaxed));
 }

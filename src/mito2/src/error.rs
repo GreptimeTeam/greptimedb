@@ -730,6 +730,13 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Region {} still has WAL tails to recover", region_id))]
+    RegionPendingTails {
+        region_id: RegionId,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Region {} does not hold a valid leader lease", region_id))]
     RegionLeaseExpired {
         region_id: RegionId,
@@ -1693,6 +1700,7 @@ impl ErrorExt for Error {
             InvalidRegionRequest { source, .. } => source.status_code(),
             RegionState { .. } | UpdateManifest { .. } => StatusCode::RegionNotReady,
             RegionLeaseExpired { .. } | UnacknowledgedWrite { .. } => StatusCode::RegionNotReady,
+            RegionPendingTails { .. } => StatusCode::RegionNotReady,
             JsonOptions { .. } => StatusCode::InvalidArguments,
             EmptyRegionDir { .. } | EmptyManifestDir { .. } => StatusCode::RegionNotFound,
             ConvertValue { source, .. } => source.status_code(),
@@ -1805,6 +1813,7 @@ impl ErrorExt for Error {
             | UpdateManifest { .. }
             | RegionStopped { .. }
             | RegionBusy { .. }
+            | RegionPendingTails { .. }
             | ManualCompactionAlreadyRunning { .. }
             | FlushableRegionState { .. }
             | ManifestDeltaNotFound { .. }

@@ -63,6 +63,8 @@ mod open_test;
 #[cfg(test)]
 mod parallel_test;
 #[cfg(test)]
+pub(crate) mod pending_tail_test;
+#[cfg(test)]
 mod projection_test;
 #[cfg(test)]
 mod prune_test;
@@ -159,7 +161,7 @@ use crate::error::{
 #[cfg(feature = "enterprise")]
 use crate::extension::BoxedExtensionRangeProviderFactory;
 use crate::gc::GcLimiterRef;
-use crate::manifest::action::RegionEdit;
+use crate::manifest::action::{RegionEdit, WalRecoveryEdit};
 use crate::memtable::MemtableStats;
 use crate::metrics::{
     HANDLE_REQUEST_ELAPSED, SCAN_MEMORY_EXHAUSTED_TOTAL, SCAN_MEMORY_USAGE_BYTES,
@@ -586,6 +588,7 @@ impl MitoEngine {
             .context(RegionNotFoundSnafu { region_id })?;
 
         let version = region.version();
+        version.ensure_no_pending_tails()?;
         let memtable_stats = version
             .memtables
             .list_memtables()
@@ -841,6 +844,7 @@ fn is_valid_region_edit(edit: &RegionEdit) -> bool {
                 ..
             }
         )
+        && edit.wal_recovery == WalRecoveryEdit::default()
 }
 
 /// Inner struct of [MitoEngine].
@@ -1172,6 +1176,7 @@ impl EngineInner {
         });
         let version_data = region.version_control.current();
         let version = version_data.version;
+        version.ensure_no_pending_tails()?;
 
         if request.snapshot_on_scan && request.memtable_max_sequence.is_none() {
             request.memtable_max_sequence = Some(version_data.committed_sequence);
@@ -1889,6 +1894,7 @@ mod tests {
             flushed_entry_id: None,
             flushed_sequence: None,
             committed_sequence: None,
+            wal_recovery: Default::default(),
         };
         assert!(is_valid_region_edit(&edit));
 
@@ -1901,6 +1907,7 @@ mod tests {
             flushed_entry_id: None,
             flushed_sequence: None,
             committed_sequence: None,
+            wal_recovery: Default::default(),
         };
         assert!(!is_valid_region_edit(&edit));
 
@@ -1913,6 +1920,7 @@ mod tests {
             flushed_entry_id: None,
             flushed_sequence: None,
             committed_sequence: None,
+            wal_recovery: Default::default(),
         };
         assert!(is_valid_region_edit(&edit));
 
@@ -1925,6 +1933,7 @@ mod tests {
             flushed_entry_id: None,
             flushed_sequence: None,
             committed_sequence: None,
+            wal_recovery: Default::default(),
         };
         assert!(is_valid_region_edit(&edit));
 
@@ -1937,6 +1946,7 @@ mod tests {
             flushed_entry_id: None,
             flushed_sequence: None,
             committed_sequence: None,
+            wal_recovery: Default::default(),
         };
         assert!(!is_valid_region_edit(&edit));
         let edit = RegionEdit {
@@ -1947,6 +1957,7 @@ mod tests {
             flushed_entry_id: Some(1),
             flushed_sequence: None,
             committed_sequence: None,
+            wal_recovery: Default::default(),
         };
         assert!(!is_valid_region_edit(&edit));
         let edit = RegionEdit {
@@ -1957,6 +1968,21 @@ mod tests {
             flushed_entry_id: None,
             flushed_sequence: Some(1),
             committed_sequence: None,
+            wal_recovery: Default::default(),
+        };
+        assert!(!is_valid_region_edit(&edit));
+        let edit = RegionEdit {
+            files_to_add: vec![FileMeta::default()],
+            files_to_remove: vec![],
+            timestamp_ms: None,
+            compaction_time_window: None,
+            flushed_entry_id: None,
+            flushed_sequence: None,
+            committed_sequence: None,
+            wal_recovery: WalRecoveryEdit {
+                pending_tails: Some(vec![]),
+                handoff_floor: None,
+            },
         };
         assert!(!is_valid_region_edit(&edit));
     }

@@ -426,6 +426,7 @@ async fn test_ingested_parquet_bytes() {
                     flushed_entry_id: None,
                     flushed_sequence: None,
                     committed_sequence: None,
+                    wal_recovery: Default::default(),
                 },
             )
             .await

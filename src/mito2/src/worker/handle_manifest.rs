@@ -35,6 +35,7 @@ use crate::error::{
 };
 use crate::manifest::action::{
     RegionChange, RegionEdit, RegionMetaAction, RegionMetaActionList, RegionTruncate, TruncateKind,
+    WalRecoveryEdit,
 };
 use crate::memtable::MemtableBuilderProvider;
 use crate::metrics::WRITE_CACHE_INFLIGHT_DOWNLOAD;
@@ -115,6 +116,7 @@ impl RegionEditQueue {
                 && edit.flushed_entry_id.is_none()
                 && edit.flushed_sequence.is_none()
                 && edit.committed_sequence.is_none()
+                && edit.wal_recovery == WalRecoveryEdit::default()
         }
 
         let mut merged = self.requests.pop_front()?;
@@ -693,6 +695,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 flushed_entry_id: Some(discarded_entry_id),
                 flushed_sequence: Some(discarded_sequence),
                 committed_sequence: None,
+                wal_recovery: Default::default(),
             };
             let action_list = RegionMetaActionList::with_action(RegionMetaAction::Edit(edit));
             let result = match durability_barrier.wait(discarded_entry_id).await {

@@ -48,6 +48,9 @@ writer that emits these descriptors; downgrade only to readers that recognize th
 The OSS build does not generate sketch payloads, so SQL restart cases cannot create
 these descriptors through an OSS writer.
 
+Frozen region manifests that carry pending WAL tails are checked by the manifest tests of `mito2`.
+No SQL statement records a pending tail. See the [fixture notes](manifest/pending_tails/README.md).
+
 ## Quick Start
 
 ```shell

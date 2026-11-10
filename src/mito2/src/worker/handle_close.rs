@@ -36,6 +36,13 @@ impl<S: LogStore> RegionWorkerLoop<S> {
 
         info!("Try to close region {}, worker: {}", region_id, self.id);
 
+        if request.flush_on_close
+            && let Err(e) = region.version().ensure_no_pending_tails()
+        {
+            sender.send(Err(e));
+            return;
+        }
+
         if region.is_staging_or_staged_edit() {
             // A staging region cannot flush, so it leaves staging before the close-time flush
             // below. The manifest lock lets a successful end of staging in progress finish first,

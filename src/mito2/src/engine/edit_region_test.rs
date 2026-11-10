@@ -137,6 +137,7 @@ async fn test_edit_region_schedule_compaction_with_format(
         flushed_entry_id: None,
         flushed_sequence: None,
         committed_sequence: None,
+        wal_recovery: Default::default(),
     };
     engine
         .edit_region(region.region_id, new_edit(&[0, 10, 50, 80]))
@@ -266,6 +267,7 @@ async fn test_edit_region_fill_cache(
         flushed_entry_id: None,
         flushed_sequence: None,
         committed_sequence: None,
+        wal_recovery: Default::default(),
     };
     engine.edit_region(region.region_id, edit).await.unwrap();
 
@@ -775,6 +777,7 @@ fn test_region_edit(region_id: RegionId, file_id: FileId) -> RegionEdit {
         flushed_entry_id: None,
         flushed_sequence: None,
         committed_sequence: None,
+        wal_recovery: Default::default(),
     }
 }
 
@@ -864,6 +867,7 @@ async fn test_edit_region_concurrently_with_format(flat_format: bool) {
                     flushed_entry_id: None,
                     flushed_sequence: None,
                     committed_sequence: None,
+                    wal_recovery: Default::default(),
                 };
                 engine
                     .edit_region(self.region.region_id, edit)

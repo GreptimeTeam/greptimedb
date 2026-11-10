@@ -27,6 +27,7 @@ use store_api::storage::RegionId;
 use crate::config::{IndexBuildMode, MitoConfig};
 use crate::error::{RegionBusySnafu, RegionNotFoundSnafu, Result};
 use crate::flush::{FlushReason, RegionFlushTask};
+use crate::manifest::action::cap_wal_release;
 use crate::region::version::VersionRef;
 use crate::region::{MitoRegion, MitoRegionRef};
 use crate::request::{BuildIndexRequest, FlushFailed, FlushFinished, OnFailure, OptionOutputTx};
@@ -364,6 +365,13 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             }
         };
 
+        if request.reason == Some(RegionFlushReason::Repartition)
+            && let Err(e) = region.version().ensure_no_pending_tails()
+        {
+            sender.send(Err(e));
+            return;
+        }
+
         // `update_topic_latest_entry_id` updates `topic_latest_entry_id` when memtables are empty.
         // But the flush is skipped if memtables are empty. Thus should update the `topic_latest_entry_id`
         // when handling flush request instead of in `schedule_flush` or `flush_finished`.
@@ -484,13 +492,18 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         self.update_topic_latest_entry_id(&region);
 
         // Delete wal.
+        let obsolete_entry_id = cap_wal_release(
+            &region.version().pending_tails,
+            self.file_ref_manager.node_id(),
+            request.flushed_entry_id,
+        );
         info!(
             "Region {} flush finished, tries to bump wal to {}",
-            region_id, request.flushed_entry_id
+            region_id, obsolete_entry_id
         );
         if let Err(e) = self
             .wal
-            .obsolete(region_id, request.flushed_entry_id, &region.provider)
+            .obsolete(region_id, obsolete_entry_id, &region.provider)
             .await
         {
             error!(e; "Failed to write wal, region: {}", region_id);

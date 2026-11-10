@@ -41,6 +41,7 @@ use crate::compaction::test_util::new_file_handle;
 use crate::compaction::twcs::PickClass;
 use crate::compaction::{CompactionOutput, find_dynamic_options};
 use crate::config::MitoConfig;
+use crate::engine::pending_tail_test::{pending_tails_edit, tail};
 use crate::error::InvalidSchedulerStateSnafu;
 use crate::manifest::manager::{RegionManifestManager, RegionManifestOptions};
 use crate::metrics::COMPACTION_MEMORY_REJECTED;
@@ -51,9 +52,9 @@ use crate::schedule::remote_job_scheduler::{RemoteJob, RemoteJobSchedulerRef};
 use crate::schedule::scheduler::{Job, Scheduler};
 use crate::sst::FormatType;
 use crate::sst::file::FileHandle;
-use crate::test_util::mock_schema_metadata_manager;
 use crate::test_util::scheduler_util::{SchedulerEnv, VecScheduler};
 use crate::test_util::version_util::{VersionControlBuilder, apply_edit};
+use crate::test_util::{mock_schema_metadata_manager, new_noop_file_purger};
 
 struct FailingScheduler;
 
@@ -1193,6 +1194,7 @@ async fn test_pick_result_refreshes_replaced_selected_file() {
             flushed_entry_id: None,
             flushed_sequence: None,
             committed_sequence: None,
+            wal_recovery: Default::default(),
         }),
         &[],
         stale.file_purger(),
@@ -3360,6 +3362,7 @@ async fn test_compaction_tasks_partial_memory_admission() {
             flushed_entry_id: None,
             flushed_sequence: None,
             committed_sequence: None,
+            wal_recovery: Default::default(),
         }),
         &[],
         builder.file_purger(),
@@ -3662,6 +3665,110 @@ async fn test_compaction_tasks_linear_local_publication(#[case] reject_after_fir
         .unwrap();
     assert_eq!(result.is_err(), reject_after_first);
     assert!(!scheduler.is_compacting(region_id));
+}
+
+#[tokio::test]
+async fn test_finishing_compaction_with_pending_tails_starts_nothing() {
+    let env = SchedulerEnv::new().await;
+    let (tx, _rx) = mpsc::channel(4);
+    let mut scheduler = env.mock_compaction_scheduler(tx);
+    let builder = VersionControlBuilder::new();
+    let version_control = Arc::new(builder.build());
+    let region_id = builder.region_id();
+    let manifest_ctx = env
+        .mock_manifest_context(version_control.current().version.metadata.clone())
+        .await;
+    let (schema_metadata_manager, _kv_backend) = mock_schema_metadata_manager();
+    let (waiter_tx, mut waiter_rx) = oneshot::channel();
+    let mut status =
+        CompactionStatus::for_test(region_id, version_control.clone(), env.access_layer.clone());
+    status.start_local_task();
+    status.set_pending_request(PendingCompaction {
+        options: Options::Regular(Default::default()),
+        waiter: OptionOutputTx::from(waiter_tx),
+        max_parallelism: 1,
+        time_range: None,
+    });
+    scheduler.region_status.insert(region_id, status);
+    let pending_id = scheduler.inspect_tasks(&MetadataFilter::default(), None)[0]
+        .task_id
+        .clone();
+    version_control.apply_edit(
+        Some(pending_tails_edit(vec![tail(1, 0, 1)])),
+        &[],
+        builder.file_purger(),
+    );
+
+    scheduler
+        .on_compaction_finished(region_id, &manifest_ctx, schema_metadata_manager, true)
+        .await;
+
+    assert_eq!(0, waiter_rx.try_recv().unwrap().unwrap());
+    assert!(!scheduler.is_compacting(region_id));
+    assert!(
+        scheduler
+            .inspect_tasks(&MetadataFilter::default(), None)
+            .is_empty()
+    );
+    assert_eq!(
+        scheduler.cancel_task(region_id, &pending_id),
+        CancelCompactionResult::NotFound
+    );
+}
+
+#[tokio::test]
+async fn test_cancelled_compaction_with_pending_tails_starts_nothing() {
+    let env = SchedulerEnv::new().await;
+    let (tx, mut rx) = mpsc::channel(8);
+    let mut scheduler = env.mock_compaction_scheduler(tx);
+    let version = compactable_version();
+    let region_id = version.region_id();
+    let (finished, manifest, schemas) =
+        begin_pick_result(&env, &mut scheduler, &mut rx, &version).await;
+    let active_id = scheduler.inspect_tasks(&MetadataFilter::default(), None)[0]
+        .task_id
+        .clone();
+    let (sender, mut receiver) = oneshot::channel();
+    scheduler
+        .schedule_manual_compaction(
+            Options::Regular(Default::default()),
+            &version,
+            &env.access_layer,
+            sender.into(),
+            &manifest,
+            schemas.clone(),
+            1,
+            None,
+        )
+        .unwrap();
+    let pending_id = scheduler.inspect_tasks(&MetadataFilter::default(), None)[1]
+        .task_id
+        .clone();
+    assert_eq!(
+        scheduler.cancel_task(region_id, &active_id),
+        CancelCompactionResult::CancelIssued
+    );
+    version.apply_edit(
+        Some(pending_tails_edit(vec![tail(1, 0, 1)])),
+        &[],
+        new_noop_file_purger(),
+    );
+
+    scheduler
+        .handle_compaction_pick_finished(finished, &manifest, schemas)
+        .await;
+
+    assert_eq!(0, receiver.try_recv().unwrap().unwrap());
+    assert!(!scheduler.is_compacting(region_id));
+    assert!(
+        scheduler
+            .inspect_tasks(&MetadataFilter::default(), None)
+            .is_empty()
+    );
+    assert_eq!(
+        scheduler.cancel_task(region_id, &pending_id),
+        CancelCompactionResult::NotFound
+    );
 }
 
 /// Pending task identity survives promotion, but replacement invalidates the old identity.

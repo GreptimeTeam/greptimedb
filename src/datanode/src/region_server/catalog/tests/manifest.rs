@@ -74,6 +74,7 @@ async fn manifest_engine(regions: u32, files_per_region: usize) -> (TestEnv, Mit
                     flushed_entry_id: None,
                     flushed_sequence: None,
                     committed_sequence: None,
+                    wal_recovery: Default::default(),
                 },
             )
             .await
@@ -189,6 +190,7 @@ async fn test_manifest_referring_region_and_origin_path() {
                 flushed_entry_id: None,
                 flushed_sequence: None,
                 committed_sequence: None,
+                wal_recovery: Default::default(),
             },
         )
         .await
