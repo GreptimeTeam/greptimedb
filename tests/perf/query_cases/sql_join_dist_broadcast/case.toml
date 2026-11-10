@@ -142,8 +142,9 @@ max_candidate_latency_regression_pct = 50
 # rewrite (path B) rejects it. With experimental_dist_join=true the candidate
 # uses the materialized broadcast path (path C): the small side is materialized
 # once on the frontend, then dispatched to the probe regions.
-# The base opts in too, but its build predates path C and path B rejects the
-# volatile shape, so it still joins on the frontend.
+# The base opts in too and takes path B, because its build predates path C.
+# Path B re-executes the volatile small side on every probe region, so the base
+# row is a latency reference for the rewrite, not a correctness reference.
 #
 # candidate_remote_operator is intentionally absent: the C hook runs after the
 # analyzer but EXPLAIN ANALYZE bypasses it, so the preflight would not see the
