@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Planning and creation contracts for built-in indexes.
+//! Planning and creation contracts for built-in and injected indexes.
 
 pub(crate) mod builtin;
 
@@ -24,51 +24,83 @@ use common_error::ext::BoxedError;
 use datatypes::arrow::record_batch::RecordBatch;
 use index::target::IndexTarget;
 use store_api::metadata::RegionMetadataRef;
+use store_api::storage::ColumnId;
 
 use crate::read::Batch;
 use crate::region::options::IndexOptions;
-use crate::sst::file::RegionIndexId;
+use crate::sst::file::{ColumnIndexMetadata, RegionIndexId};
 use crate::sst::index::intermediate::IntermediateManager;
 use crate::sst::index::kind::IndexKind;
-use crate::sst::index::puffin_manager::SstPuffinWriter;
+use crate::sst::index::puffin_manager::{SstPuffinManager, SstPuffinWriter};
 use crate::sst::index::{CompletedEntry, IndexBuildType};
 
+/// A requested column format; typed implementation parameters stay in its plan.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlanEntry {
+    /// Column to index.
+    pub column_id: ColumnId,
+    /// Implementation owning this entry.
+    pub kind: IndexKind,
+    /// Requested format version. The manifest records extension types, not versions.
+    /// A format upgrade requires a forced rebuild; the provider validates Puffin
+    /// properties and payload compatibility before reusing input state.
+    pub format_version: u32,
+}
+
 /// Schema and options used to prepare work without reading input files.
-pub(crate) struct PlanContext<'a> {
+pub struct PlanContext<'a> {
     /// Shared region schema.
     pub metadata: &'a RegionMetadataRef,
     /// Region index options.
     pub index_options: &'a IndexOptions,
     /// Lifecycle event requesting the build.
     pub build_type: IndexBuildType,
+    /// Existing descriptors when maintaining an already published file.
+    pub existing_indexes: &'a [ColumnIndexMetadata],
 }
 
 /// Inputs for constructing all of one handler's indexes in a single output file.
-pub(crate) struct BuildContext<'a> {
+pub struct BuildContext<'a> {
     /// Shared output schema.
     pub metadata: &'a RegionMetadataRef,
     /// Physical output index identity.
     pub output: RegionIndexId,
+    /// Output manager, possibly backed by a local write cache.
+    pub puffin_manager: &'a SstPuffinManager,
     /// Existing intermediate-file facility shared by built-in creators.
     pub intermediate_manager: &'a IntermediateManager,
     /// Actual output row-group size used to align inverted-index segments.
     pub row_group_size: Option<usize>,
 }
 
-/// Prepares one built-in index implementation.
-pub(crate) trait IndexKindHandler: Send + Sync + Debug {
-    /// Built-in implementation owned by this handler.
-    fn kind(&self) -> IndexKind;
+/// Shared plugin installed by the embedding application.
+pub type IndexKindProviderRef = Arc<dyn IndexKindProvider>;
 
-    /// Prepares typed parameters. `None` means no work.
+/// Supplies extension handlers while the engine retains the complete lifecycle.
+pub trait IndexKindProvider: Send + Sync + Debug {
+    /// Related algorithms may share one handler to reuse row traversal.
+    fn handlers(&self) -> Vec<Arc<dyn IndexKindHandler>>;
+}
+
+/// Owns one or more related kinds that can share preparation and row traversal.
+pub trait IndexKindHandler: Send + Sync + Debug {
+    /// Nonempty, unique kinds exclusively owned by this handler. A group must be
+    /// entirely built-in or entirely extension kinds.
+    fn kinds(&self) -> &[IndexKind];
+
+    /// Prepares typed parameters. `None` means no work; an empty entry list may
+    /// still request removal of obsolete descriptors during maintenance.
     fn plan(&self, context: &PlanContext<'_>) -> Result<Option<Arc<dyn PlannedIndex>>, BoxedError>;
 }
 
 /// An immutable typed plan shared by output files of an operation.
 #[async_trait]
-pub(crate) trait PlannedIndex: Send + Sync + Debug {
-    /// Built-in implementation owned by this plan.
-    fn kind(&self) -> IndexKind;
+pub trait PlannedIndex: Send + Sync + Debug {
+    /// Nonempty, unique subset of the handler's kinds, including removal plans.
+    fn kinds(&self) -> &[IndexKind];
+
+    /// Requested column formats. Every entry kind must belong to this plan.
+    fn entries(&self) -> &[PlanEntry];
 
     /// Creates a per-file index creator before any output batch is consumed.
     async fn build(
@@ -80,7 +112,7 @@ pub(crate) trait PlannedIndex: Send + Sync + Debug {
 /// Accumulates rows and writes blobs into the engine-owned Puffin lifecycle.
 /// Implementations release retained state on drop, including cancellation.
 #[async_trait]
-pub(crate) trait IndexCreator: Send {
+pub trait IndexCreator: Send {
     /// Borrows a batch and its reusable primary-key decode cache.
     async fn update(&mut self, batch: &mut Batch) -> Result<(), BoxedError>;
 

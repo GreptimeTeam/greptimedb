@@ -17,14 +17,14 @@ mod column;
 #[cfg(test)]
 mod column_test;
 pub(crate) mod fulltext_index;
-pub(crate) mod handler;
+pub mod handler;
 mod indexer;
 pub mod intermediate;
 pub(crate) mod inverted_index;
-pub(crate) mod kind;
+pub mod kind;
 mod primary_key;
 pub mod puffin_manager;
-pub(crate) mod registry;
+pub mod registry;
 #[cfg(test)]
 mod sparse_test;
 mod statistics;
@@ -36,6 +36,7 @@ use std::ops::ControlFlow;
 use std::sync::Arc;
 
 use bytes::Bytes;
+use common_error::ext::BoxedError;
 use common_telemetry::{debug, error, info, warn};
 use datatypes::arrow::record_batch::RecordBatch;
 use index::target::IndexTarget;
@@ -44,7 +45,7 @@ use object_store::ObjectStore;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use puffin_manager::SstPuffinManager;
 use smallvec::SmallVec;
-use snafu::ResultExt;
+use snafu::{IntoError, ResultExt};
 #[cfg(feature = "enterprise")]
 pub use statistics::{Statistics, TimerGuard};
 use store_api::codec::PrimaryKeyEncoding;
@@ -61,7 +62,7 @@ use crate::cache::{CacheManagerRef, CacheStrategy};
 #[cfg(test)]
 use crate::config::{BloomFilterConfig, InvertedIndexConfig};
 use crate::error::{
-    BuildIndexAsyncSnafu, Error, InvalidConfigSnafu, JoinSnafu, RegionClosedSnafu,
+    BuildIndexAsyncSnafu, Error, ExternalSnafu, InvalidConfigSnafu, JoinSnafu, RegionClosedSnafu,
     RegionDroppedSnafu, RegionTruncatedSnafu, Result,
 };
 use crate::metrics::{
@@ -90,6 +91,7 @@ use crate::sst::index::inverted_index::creator::InvertedIndexer;
 use crate::sst::parquet::SstInfo;
 use crate::worker::WorkerListener;
 
+pub(crate) const TYPE_EXTENSION_INDEX: &str = "extension";
 pub(crate) const TYPE_INVERTED_INDEX: &str = kind::IndexKind::Inverted.as_str();
 pub(crate) const TYPE_FULLTEXT_INDEX: &str = kind::IndexKind::Fulltext.as_str();
 pub(crate) const TYPE_BLOOM_FILTER_INDEX: &str = kind::IndexKind::Bloom.as_str();
@@ -161,13 +163,14 @@ pub(crate) fn trigger_index_background_download(
 
 /// One index successfully written into the enclosing Puffin file.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct CompletedEntry {
+pub struct CompletedEntry {
     /// Indexed column. `None` is reserved for file-level built-in indexes, such as
     /// JSON-path-only indexes; these appear only in `available_indexes`.
     pub column_id: Option<ColumnId>,
     /// Registered index identity.
     pub kind: crate::sst::index::kind::IndexKind,
-    /// Fulltext bloom version published in column metadata.
+    /// Fulltext bloom version published in column metadata. Extension format
+    /// versions belong to their Puffin blob properties and are not published here.
     pub format_version: u32,
 }
 
@@ -182,6 +185,12 @@ impl CompletedEntry {
     }
 
     fn validate(&self) -> Result<()> {
+        if self.column_id.is_none() && !self.kind.is_builtin() {
+            return InvalidConfigSnafu {
+                reason: "extension index completion requires a column id".to_string(),
+            }
+            .fail();
+        }
         if self.kind.index_type() == IndexType::FulltextIndex {
             self.fulltext_bloom_version()?;
         }
@@ -197,24 +206,19 @@ pub struct IndexOutput {
     /// Index version.
     pub version: u64,
     /// Successfully written column indexes.
-    pub(crate) entries: Vec<CompletedEntry>,
+    pub entries: Vec<CompletedEntry>,
 }
 
 impl IndexOutput {
     pub fn build_available_indexes(&self) -> SmallVec<[IndexType; 4]> {
-        // Preserve the established order independently of handler registration.
-        [
-            IndexType::InvertedIndex,
-            IndexType::FulltextIndex,
-            IndexType::BloomFilterIndex,
-        ]
-        .into_iter()
-        .filter(|kind| {
-            self.entries
-                .iter()
-                .any(|entry| entry.kind.index_type() == *kind)
-        })
-        .collect()
+        let mut kinds = SmallVec::<[kind::IndexKind; 4]>::new();
+        for entry in &self.entries {
+            if !kinds.contains(&entry.kind) {
+                kinds.push(entry.kind);
+            }
+        }
+        kinds.sort_unstable();
+        kinds.into_iter().map(kind::IndexKind::index_type).collect()
     }
 
     /// Builds column metadata, rejecting values that cannot be represented on disk.
@@ -253,9 +257,16 @@ pub struct Indexer {
     creators: Vec<ActiveIndex>,
     dense_pk_decoder: Option<DensePrimaryKeyCodec>,
     intermediate_manager: Option<IntermediateManager>,
+    /// First failure retained even if best-effort execution discards a creator.
+    failure: Option<Arc<Error>>,
 }
 
 impl Indexer {
+    /// Reports failures even when surviving creators produced a partial result.
+    pub fn check_success(&self) -> Result<(), Arc<Error>> {
+        self.failure.clone().map_or(Ok(()), Err)
+    }
+
     /// Returns true if no index creator is active.
     pub(crate) fn is_empty(&self) -> bool {
         self.creators.is_empty()
@@ -263,17 +274,21 @@ impl Indexer {
 
     #[cfg(test)]
     fn has_kind(&self, kind: kind::IndexKind) -> bool {
-        self.creators.iter().any(|active| active.kind == kind)
+        self.creators
+            .iter()
+            .any(|active| active.kinds.contains(&kind))
     }
 
-    fn push_creator(&mut self, kind: kind::IndexKind, creator: Box<dyn handler::IndexCreator>) {
+    fn push_creator(
+        &mut self,
+        kinds: Vec<kind::IndexKind>,
+        creator: Box<dyn handler::IndexCreator>,
+        label: &'static str,
+    ) {
         self.creators.push(ActiveIndex {
-            kind,
+            kinds,
             creator,
-            memory: IndexMemoryUsage {
-                label: kind.as_str(),
-                bytes: 0,
-            },
+            memory: IndexMemoryUsage { label, bytes: 0 },
         });
     }
 
@@ -289,10 +304,18 @@ impl Indexer {
             ..Default::default()
         };
         if let Some(creator) = inverted_indexer {
-            indexer.push_creator(kind::IndexKind::Inverted, Box::new(creator));
+            indexer.push_creator(
+                vec![kind::IndexKind::Inverted],
+                Box::new(creator),
+                TYPE_INVERTED_INDEX,
+            );
         }
         if let Some(creator) = bloom_filter_indexer {
-            indexer.push_creator(kind::IndexKind::Bloom, Box::new(creator));
+            indexer.push_creator(
+                vec![kind::IndexKind::Bloom],
+                Box::new(creator),
+                TYPE_BLOOM_FILTER_INDEX,
+            );
         }
         indexer.prepare_dense_pk_decoder(metadata);
         indexer
@@ -351,6 +374,17 @@ impl Indexer {
         self.flush_mem_metrics();
     }
 
+    fn record_failure(&mut self, source: BoxedError) {
+        self.failure.get_or_insert_with(|| {
+            Arc::new(
+                ExternalSnafu {
+                    context: "index creation".to_string(),
+                }
+                .into_error(source),
+            )
+        });
+    }
+
     fn flush_mem_metrics(&mut self) {
         for active in &mut self.creators {
             let bytes = active.creator.memory_usage();
@@ -364,9 +398,15 @@ impl Indexer {
 
 /// One handler's active creator and its shared memory accounting.
 struct ActiveIndex {
-    kind: kind::IndexKind,
+    kinds: Vec<kind::IndexKind>,
     creator: Box<dyn handler::IndexCreator>,
     memory: IndexMemoryUsage,
+}
+
+impl ActiveIndex {
+    fn is_builtin(&self) -> bool {
+        self.kinds.iter().all(|kind| kind.is_builtin())
+    }
 }
 
 /// Releases each creator's gauge contribution on completion or cancellation.
@@ -393,7 +433,6 @@ pub trait IndexerBuilder {
         row_group_size: Option<usize>,
     ) -> Indexer;
 }
-
 #[derive(Clone)]
 pub(crate) struct IndexerBuilderImpl {
     pub(crate) registry: registry::IndexRegistryRef,
@@ -427,25 +466,48 @@ impl IndexerBuilder for IndexerBuilderImpl {
             metadata: &self.metadata,
             index_options: &self.index_options,
             build_type: self.build_type.clone(),
+            existing_indexes: &[],
         };
         let plan = self.registry.plan(&context);
+        indexer.failure = plan.check_success().err();
         let context = handler::BuildContext {
             metadata: &self.metadata,
             output: RegionIndexId::new(region_file_id, index_version),
+            puffin_manager: &self.puffin_manager,
             intermediate_manager: &self.intermediate_manager,
             row_group_size,
         };
         for planned in plan.planned() {
+            let Some(first_kind) = planned.kinds().first() else {
+                let err = BoxedError::new(
+                    InvalidConfigSnafu {
+                        reason: "index plan must own at least one kind",
+                    }
+                    .build(),
+                );
+                warn!(err; "Failed to create index, region_id: {}", self.metadata.region_id);
+                indexer.record_failure(err);
+                continue;
+            };
+            let builtin = planned.kinds().iter().all(|kind| kind.is_builtin());
             match planned.build(&context).await {
                 Ok(Some(creator)) => {
-                    indexer.push_creator(planned.kind(), creator);
+                    let label = if builtin {
+                        first_kind.as_str()
+                    } else {
+                        TYPE_EXTENSION_INDEX
+                    };
+                    indexer.push_creator(planned.kinds().to_vec(), creator, label);
                 }
                 Ok(None) => {}
                 Err(err) => {
-                    if cfg!(any(test, feature = "test")) {
+                    if planned.kinds().iter().all(|kind| kind.is_builtin())
+                        && cfg!(any(test, feature = "test"))
+                    {
                         panic!("Failed to create index: {err:?}");
                     }
-                    warn!(err; "Failed to create index, region_id: {}, kind: {:?}", self.metadata.region_id, planned.kind());
+                    warn!(err; "Failed to create index, region_id: {}, kinds: {:?}", self.metadata.region_id, planned.kinds());
+                    indexer.record_failure(err);
                 }
             }
         }
@@ -1732,6 +1794,48 @@ mod tests {
     }
 
     #[test]
+    fn test_completed_entries_preserve_all_kinds_in_order() {
+        use crate::sst::index::kind::{ExtensionIndexKind, IndexKind};
+
+        let output = IndexOutput {
+            entries: [
+                IndexKind::Extension(ExtensionIndexKind::Mg),
+                IndexKind::Fulltext,
+                IndexKind::Extension(ExtensionIndexKind::Kll),
+                IndexKind::Bloom,
+                IndexKind::Extension(ExtensionIndexKind::Hll),
+                IndexKind::Inverted,
+                IndexKind::Extension(ExtensionIndexKind::Hll),
+            ]
+            .into_iter()
+            .enumerate()
+            .map(|(position, kind)| CompletedEntry {
+                column_id: Some(if position == 6 { 2 } else { 1 }),
+                kind,
+                format_version: 0,
+            })
+            .collect(),
+            ..Default::default()
+        };
+        let expected = [
+            IndexType::InvertedIndex,
+            IndexType::FulltextIndex,
+            IndexType::BloomFilterIndex,
+            IndexType::HllIndex,
+            IndexType::KllIndex,
+            IndexType::MgIndex,
+        ];
+        assert_eq!(output.build_available_indexes().as_slice(), &expected);
+        let columns = output.build_indexes().unwrap();
+        assert_eq!(columns.len(), 2);
+        assert_eq!(columns[0].created_indexes.as_slice(), &expected);
+        assert_eq!(
+            columns[1].created_indexes.as_slice(),
+            &[IndexType::HllIndex]
+        );
+    }
+
+    #[test]
     fn test_completed_entries_preserve_builtin_metadata() {
         use crate::sst::index::kind::IndexKind;
 
@@ -1820,6 +1924,10 @@ mod tests {
         };
         assert!(entry.validate().is_ok());
         entry.format_version += 1;
+        assert!(entry.validate().is_err());
+        entry.kind = kind::IndexKind::Extension(kind::ExtensionIndexKind::Hll);
+        assert!(entry.validate().is_ok()); // Extension versions belong to Puffin.
+        entry.column_id = None;
         assert!(entry.validate().is_err());
     }
 

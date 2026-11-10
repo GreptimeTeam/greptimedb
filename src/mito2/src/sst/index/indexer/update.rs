@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::sync::Arc;
+
 use common_telemetry::warn;
 use datatypes::arrow::record_batch::RecordBatch;
 
@@ -28,6 +30,7 @@ impl Indexer {
                 panic!("Failed to decode primary key for indexes: {err:?}");
             }
             warn!(err; "Failed to decode primary key for indexes, region_id: {}, file_id: {}", self.region_id, self.file_id);
+            self.failure.get_or_insert_with(|| Arc::new(err));
             self.do_abort().await;
             return;
         }
@@ -36,12 +39,17 @@ impl Indexer {
             match self.creators[position].creator.update(batch).await {
                 Ok(()) => position += 1,
                 Err(err) => {
-                    if cfg!(any(test, feature = "test")) {
+                    let builtin = self.creators[position].is_builtin();
+                    if builtin && cfg!(any(test, feature = "test")) {
                         panic!("Failed to update index: {err:?}");
                     }
-                    warn!(err; "Failed to update index, region_id: {}, file_id: {}, kind: {:?}", self.region_id, self.file_id, self.creators[position].kind);
-                    self.do_abort().await;
-                    return;
+                    warn!(err; "Failed to update index, region_id: {}, file_id: {}, kinds: {:?}", self.region_id, self.file_id, self.creators[position].kinds);
+                    self.record_failure(err);
+                    if builtin {
+                        self.do_abort().await;
+                        return;
+                    }
+                    self.abort_creator(position).await;
                 }
             }
         }
@@ -56,12 +64,17 @@ impl Indexer {
             match self.creators[position].creator.update_flat(batch).await {
                 Ok(()) => position += 1,
                 Err(err) => {
-                    if cfg!(any(test, feature = "test")) {
+                    let builtin = self.creators[position].is_builtin();
+                    if builtin && cfg!(any(test, feature = "test")) {
                         panic!("Failed to update flat index: {err:?}");
                     }
-                    warn!(err; "Failed to update flat index, region_id: {}, file_id: {}, kind: {:?}", self.region_id, self.file_id, self.creators[position].kind);
-                    self.do_abort().await;
-                    return;
+                    warn!(err; "Failed to update flat index, region_id: {}, file_id: {}, kinds: {:?}", self.region_id, self.file_id, self.creators[position].kinds);
+                    self.record_failure(err);
+                    if builtin {
+                        self.do_abort().await;
+                        return;
+                    }
+                    self.abort_creator(position).await;
                 }
             }
         }

@@ -25,8 +25,10 @@ use index::target::IndexTarget;
 use crate::config::BloomFilterConfig;
 use crate::read::Batch;
 use crate::sst::index::bloom_filter::creator::BloomFilterIndexer;
-use crate::sst::index::handler::builtin::column_target_id;
-use crate::sst::index::handler::{BuildContext, IndexCreator, PlanContext, PlannedIndex};
+use crate::sst::index::handler::builtin::{column_target_id, normalize_entries, target_column_id};
+use crate::sst::index::handler::{
+    BuildContext, IndexCreator, PlanContext, PlanEntry, PlannedIndex,
+};
 use crate::sst::index::kind::IndexKind;
 use crate::sst::index::puffin_manager::SstPuffinWriter;
 use crate::sst::index::{CompletedEntry, IndexBuildType};
@@ -35,6 +37,7 @@ use crate::sst::index::{CompletedEntry, IndexBuildType};
 #[derive(Debug)]
 pub(crate) struct BloomPlan {
     config: BloomFilterConfig,
+    entries: Vec<PlanEntry>,
     targets: Vec<(IndexTarget, SkippingIndexOptions)>,
 }
 
@@ -53,18 +56,26 @@ impl BloomPlan {
             return Ok(None);
         }
         let mut targets = Vec::new();
+        let mut entries = Vec::new();
         for column in &context.metadata.column_metadatas {
             for (target, options) in
                 BloomFilterIndexer::targets(column, &context.build_type).map_err(BoxedError::new)?
             {
+                entries.push(PlanEntry {
+                    column_id: target_column_id(&target),
+                    kind: IndexKind::Bloom,
+                    format_version: 0,
+                });
                 targets.push((target, options));
             }
         }
-        if targets.is_empty() {
+        normalize_entries(&mut entries);
+        if entries.is_empty() {
             return Ok(None);
         }
         Ok(Some(Arc::new(Self {
             config: config.clone(),
+            entries,
             targets,
         })))
     }
@@ -72,8 +83,12 @@ impl BloomPlan {
 
 #[async_trait]
 impl PlannedIndex for BloomPlan {
-    fn kind(&self) -> IndexKind {
-        IndexKind::Bloom
+    fn kinds(&self) -> &[IndexKind] {
+        &[IndexKind::Bloom]
+    }
+
+    fn entries(&self) -> &[PlanEntry] {
+        &self.entries
     }
 
     async fn build(
