@@ -412,6 +412,12 @@ impl ManifestObjectStore {
         }
     }
 
+    /// Reads the delta of `version` directly from storage, under the name [Self::save] uses.
+    /// Returns `None` if it does not exist.
+    pub(crate) async fn read_delta(&self, version: ManifestVersion) -> Result<Option<Vec<u8>>> {
+        self.delta_storage.read_delta(version).await
+    }
+
     /// Fails with a version conflict unless LIST proves that no checkpoint at or above `version`
     /// exists.
     ///

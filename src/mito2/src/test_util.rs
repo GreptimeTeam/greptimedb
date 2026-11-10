@@ -55,7 +55,8 @@ use log_store::test_util::log_store_util;
 use moka::future::CacheBuilder;
 use object_store::ObjectStore;
 use object_store::layers::mock::{
-    Buffer, Deleter, Metadata, MockLayer, MockLayerBuilder, OpDelete, Result as MockResult, Writer,
+    Buffer, BytesRange, Deleter, Error as MockError, ErrorKind, Metadata, MockLayer,
+    MockLayerBuilder, OpDelete, Result as MockResult, RpRead, Writer, oio,
 };
 use object_store::manager::{ObjectStoreManager, ObjectStoreManagerRef};
 use object_store::services::{Fs, Memory};
@@ -249,6 +250,84 @@ impl object_store::layers::mock::Write for BlockingManifestWriter {
 
     async fn abort(&mut self) -> MockResult<()> {
         self.inner.abort().await
+    }
+}
+
+/// Injects faults into the manifest deltas of a mock object store.
+#[derive(Clone, Default)]
+pub(crate) struct DeltaFaults {
+    /// Whether the next delta write lands but reports an error, like a lost response.
+    lose_response: Arc<AtomicBool>,
+    /// The error that delta reads fail with, if any.
+    read_error: Arc<std::sync::Mutex<Option<ErrorKind>>>,
+}
+
+impl DeltaFaults {
+    pub(crate) fn lose_next_response(&self) {
+        self.lose_response.store(true, Ordering::Relaxed);
+    }
+
+    pub(crate) fn fail_reads(&self, kind: Option<ErrorKind>) {
+        *self.read_error.lock().unwrap() = kind;
+    }
+
+    pub(crate) fn layer(&self) -> MockLayer {
+        let (writes, reads) = (self.clone(), self.clone());
+        let is_delta = |path: &str| {
+            !path.contains("staging") && is_delta_file(path.rsplit('/').next().unwrap_or(path))
+        };
+        MockLayerBuilder::default()
+            .writer_factory(Arc::new(move |path, _args, inner| {
+                if is_delta(path) {
+                    Box::new(LostResponseWriter {
+                        inner,
+                        faults: writes.clone(),
+                    })
+                } else {
+                    inner
+                }
+            }))
+            .reader_factory(Arc::new(move |path, _args, inner| {
+                match *reads.read_error.lock().unwrap() {
+                    Some(kind) if is_delta(path) => {
+                        Box::new(oio::StreamReader::new(FailingReader(kind)))
+                    }
+                    _ => inner,
+                }
+            }))
+            .build()
+            .unwrap()
+    }
+}
+
+struct LostResponseWriter {
+    inner: Writer,
+    faults: DeltaFaults,
+}
+
+impl object_store::layers::mock::Write for LostResponseWriter {
+    async fn write(&mut self, bs: Buffer) -> MockResult<()> {
+        self.inner.write(bs).await
+    }
+
+    async fn close(&mut self) -> MockResult<Metadata> {
+        let metadata = self.inner.close().await?;
+        if self.faults.lose_response.swap(false, Ordering::Relaxed) {
+            return Err(MockError::new(ErrorKind::Unexpected, "mock lost response"));
+        }
+        Ok(metadata)
+    }
+
+    async fn abort(&mut self) -> MockResult<()> {
+        self.inner.abort().await
+    }
+}
+
+struct FailingReader(ErrorKind);
+
+impl oio::StreamRead for FailingReader {
+    async fn open(&self, _: BytesRange) -> MockResult<(RpRead, Box<dyn oio::ReadStreamDyn>)> {
+        Err(MockError::new(self.0, "mock read failure"))
     }
 }
 

@@ -14,7 +14,6 @@
 
 use std::collections::HashSet;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::{assert_matches, fs};
 
 use api::v1::Rows;
@@ -25,10 +24,7 @@ use common_recordbatch::RecordBatches;
 use datatypes::arrow::array::{AsArray, UInt64Array};
 use datatypes::arrow::datatypes::Float64Type;
 use datatypes::value::Value;
-use object_store::Buffer;
-use object_store::layers::mock::{
-    Error as MockError, ErrorKind, Metadata, MockLayerBuilder, Result as MockResult, Write, Writer,
-};
+use object_store::layers::mock::ErrorKind;
 use partition::expr::{PartitionExpr, col};
 use store_api::region_engine::{
     RegionEngine, RegionRole, RemapManifestsRequest, SettableRegionRoleState,
@@ -45,11 +41,11 @@ use crate::error::Error;
 use crate::manifest::action::{
     RegionChange, RegionEdit, RegionManifest, RegionMetaAction, RegionMetaActionList,
 };
-use crate::manifest::storage::is_delta_file;
 use crate::sst::FormatType;
 use crate::sst::file::FileMeta;
 use crate::test_util::{
-    CreateRequestBuilder, TestEnv, build_rows, build_rows_for_key, put_rows, rows_schema,
+    CreateRequestBuilder, DeltaFaults, TestEnv, build_rows, build_rows_for_key, put_rows,
+    rows_schema,
 };
 
 fn range_expr(col_name: &str, start: i64, end: i64) -> PartitionExpr {
@@ -1367,74 +1363,41 @@ async fn test_merge_repartition_data_integrity() {
     );
 }
 
-/// Reports an error after a manifest delta has landed while `lost` is set, like a save whose
-/// response was lost.
-struct LostResponseWriter {
-    inner: Writer,
-    lost: Arc<AtomicBool>,
-}
-
-impl Write for LostResponseWriter {
-    async fn write(&mut self, bs: Buffer) -> MockResult<()> {
-        self.inner.write(bs).await
-    }
-
-    async fn close(&mut self) -> MockResult<Metadata> {
-        let metadata = self.inner.close().await?;
-        if self.lost.swap(false, Ordering::Relaxed) {
-            return Err(MockError::new(ErrorKind::Unexpected, "mock lost response"));
-        }
-        Ok(metadata)
-    }
-
-    async fn abort(&mut self) -> MockResult<()> {
-        self.inner.abort().await
-    }
-}
-
+/// The end commit lands but its response is lost; `read_error` makes reading it back fail.
+#[rstest::rstest]
+#[case::landed(None, false)]
+#[case::absent(Some(ErrorKind::NotFound), false)]
+#[case::unsettled(Some(ErrorKind::Unexpected), false)]
+#[case::unsettled_then_left_staging(Some(ErrorKind::Unexpected), true)]
 #[tokio::test]
-async fn test_apply_staging_manifest_retries_uncertain_commit() {
-    let lost = Arc::new(AtomicBool::new(false));
-    let layer_lost = lost.clone();
-    let mock_layer = MockLayerBuilder::default()
-        .writer_factory(Arc::new(move |path, _args, inner| {
-            let file_name = path.rsplit('/').next().unwrap_or(path);
-            if is_delta_file(file_name) && !path.contains("staging") {
-                Box::new(LostResponseWriter {
-                    inner,
-                    lost: layer_lost.clone(),
-                })
-            } else {
-                inner
-            }
-        }))
-        .build()
-        .unwrap();
-    let mut env = TestEnv::with_prefix("apply-uncertain-commit")
+async fn test_apply_staging_manifest_after_lost_response(
+    #[case] read_error: Option<ErrorKind>,
+    #[case] leave_staging: bool,
+) {
+    let faults = DeltaFaults::default();
+    let mut env = TestEnv::with_prefix("apply-lost-response")
         .await
-        .with_mock_layer(mock_layer);
+        .with_mock_layer(faults.layer());
     let engine = env.create_engine(MitoConfig::default()).await;
     let region_id = RegionId::new(2, 2);
     let request = CreateRequestBuilder::new().build();
-    let column_schemas = rows_schema(&request);
+    let schema = rows_schema(&request);
     engine
         .handle_request(region_id, RegionRequest::Create(request))
         .await
         .unwrap();
+    let rows = build_rows(0, 3);
     put_rows(
         &engine,
         region_id,
         Rows {
-            schema: column_schemas,
-            rows: build_rows(0, 3),
+            schema: schema.clone(),
+            rows,
         },
     )
     .await;
     engine
-        .handle_request(
-            region_id,
-            RegionRequest::Flush(RegionFlushRequest::default()),
-        )
+        .handle_request(region_id, RegionRequest::Flush(Default::default()))
         .await
         .unwrap();
     let partition_expr = range_expr("tag_0", 0, 50).as_json_str().unwrap();
@@ -1458,84 +1421,77 @@ async fn test_apply_staging_manifest_retries_uncertain_commit() {
         })
         .await
         .unwrap();
-    let apply = ApplyStagingManifestRequest {
-        partition_expr: partition_expr.clone(),
-        central_region_id: region_id,
-        manifest_path: remap_result.manifest_paths[&region_id].clone(),
+    let apply = || {
+        RegionRequest::ApplyStagingManifest(ApplyStagingManifestRequest {
+            partition_expr: partition_expr.clone(),
+            central_region_id: region_id,
+            manifest_path: remap_result.manifest_paths[&region_id].clone(),
+        })
     };
-
-    // The commit lands but reports an error: the region stays staging with its edits kept.
-    lost.store(true, Ordering::Relaxed);
-    let err = engine
-        .handle_request(
-            region_id,
-            RegionRequest::ApplyStagingManifest(apply.clone()),
-        )
-        .await
-        .unwrap_err();
-    assert_eq!(RetryHint::Retryable, err.retry_hint());
     let region = engine.get_region(region_id).unwrap();
-    assert!(region.is_staging());
-    {
-        let manager = region.manifest_ctx.manifest_manager.read().await;
-        assert!(manager.staged_actions().is_some());
-        // The retry reads the blob again.
-        manager
-            .store()
-            .staging_storage()
-            .blob_storage()
-            .get(&apply.manifest_path)
-            .await
-            .unwrap();
+    let version = region.manifest_ctx.manifest_version().await;
+
+    faults.lose_next_response();
+    faults.fail_reads(read_error);
+    let result = engine.handle_request(region_id, apply()).await;
+    if read_error.is_some() {
+        // Not known to be written: the region stays staging and keeps its edits for a retry.
+        assert_eq!(RetryHint::Retryable, result.unwrap_err().retry_hint());
+        let other = FileMeta {
+            region_id,
+            file_id: FileId::random(),
+            ..Default::default()
+        };
+        let edit = RegionEdit {
+            files_to_add: vec![other],
+            ..Default::default()
+        };
+        let err = engine.edit_region(region_id, edit).await.unwrap_err();
+        assert_eq!(RetryHint::Retryable, err.retry_hint());
+        assert!(region.is_staging());
+        assert!(
+            !region
+                .manifest_ctx
+                .manifest_manager
+                .read()
+                .await
+                .is_stopped()
+        );
+        if leave_staging {
+            // A Leader lease ends staging. Commits wait until the end commit can be read back.
+            region.set_role(RegionRole::Leader);
+            put_rows(
+                &engine,
+                region_id,
+                Rows {
+                    schema,
+                    rows: build_rows(3, 5),
+                },
+            )
+            .await;
+            let flush =
+                || engine.handle_request(region_id, RegionRequest::Flush(Default::default()));
+            assert_eq!(
+                RetryHint::Retryable,
+                flush().await.unwrap_err().retry_hint()
+            );
+            faults.fail_reads(None);
+            flush().await.unwrap();
+        } else {
+            faults.fail_reads(None);
+            engine.handle_request(region_id, apply()).await.unwrap();
+        }
+    } else {
+        result.unwrap();
     }
 
-    // Until the commit is retried, another edit is refused without closing the region.
-    let other = FileMeta {
-        region_id,
-        file_id: FileId::random(),
-        ..Default::default()
-    };
-    let err = engine
-        .edit_region(
-            region_id,
-            RegionEdit {
-                files_to_add: vec![other.clone()],
-                files_to_remove: vec![],
-                timestamp_ms: None,
-                compaction_time_window: None,
-                flushed_entry_id: None,
-                flushed_sequence: None,
-                committed_sequence: None,
-            },
-        )
-        .await
-        .unwrap_err();
-    assert_eq!(RetryHint::Retryable, err.retry_hint());
-    assert!(engine.get_region(region_id).is_some());
-    assert!(region.is_staging());
-    assert!(
-        !region
-            .manifest_ctx
-            .manifest_manager
-            .read()
-            .await
-            .is_stopped()
-    );
-
-    // The retried request stages nothing new and commits the kept edits.
-    engine
-        .handle_request(region_id, RegionRequest::ApplyStagingManifest(apply))
-        .await
-        .unwrap();
     assert!(!region.is_staging());
-    let manifest = region.manifest_ctx.manifest().await;
+    assert_eq!(
+        version + 1 + leave_staging as u64,
+        region.manifest_ctx.manifest_version().await
+    );
     assert_eq!(
         Some(partition_expr.as_str()),
-        manifest.metadata.partition_expr.as_deref()
-    );
-    assert!(!manifest.files.contains_key(&other.file_id));
-    assert_eq!(
-        Some(partition_expr),
-        region.version().metadata.partition_expr.clone()
+        region.version().metadata.partition_expr.as_deref()
     );
 }

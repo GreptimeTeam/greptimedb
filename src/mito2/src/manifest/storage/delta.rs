@@ -349,22 +349,48 @@ impl<T: Tracker> DeltaStorage<T> {
             }
             .build()
         };
-        let existing = self
-            .object_store
-            .read(path)
+        let (stored_size, existing) = self
+            .read_delta_at(path, CompressionType::Gzip)
             .await
-            .map_err(|e| conflict(format!("cannot read the existing delta: {e}")))?;
-        let stored_size = existing.len();
-        let existing = CompressionType::Gzip
-            .decode(existing)
-            .await
-            .map_err(|e| conflict(format!("cannot decode the existing delta: {e}")))?;
+            .map_err(|e| conflict(format!("cannot read the existing delta: {e}")))?
+            .ok_or_else(|| conflict("the existing delta is gone".to_string()))?;
         if existing != bytes {
             return Err(conflict(
                 "the existing delta has different content".to_string(),
             ));
         }
         Ok(stored_size)
+    }
+
+    /// Reads the delta of `version` that [Self::save] writes, directly from storage. Returns
+    /// `None` if it does not exist.
+    pub(crate) async fn read_delta(&self, version: ManifestVersion) -> Result<Option<Vec<u8>>> {
+        let path = self.delta_file_path(version);
+        let delta = self.read_delta_at(&path, self.compress_type).await?;
+        Ok(delta.map(|(_, data)| data))
+    }
+
+    /// Reads and decodes the object at `path`, bypassing the cache. Returns its stored size and
+    /// content, or `None` if it does not exist.
+    async fn read_delta_at(
+        &self,
+        path: &str,
+        compress_type: CompressionType,
+    ) -> Result<Option<(usize, Vec<u8>)>> {
+        let stored = match self.object_store.read(path).await {
+            Ok(stored) => stored,
+            Err(e) if e.kind() == ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(e).context(OpenDalSnafu),
+        };
+        let stored_size = stored.len();
+        let data = compress_type
+            .decode(stored)
+            .await
+            .context(DecompressObjectSnafu {
+                compress_type,
+                path,
+            })?;
+        Ok(Some((stored_size, data)))
     }
 }
 

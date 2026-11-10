@@ -27,8 +27,8 @@ use store_api::{MAX_VERSION, MIN_VERSION, ManifestVersion};
 use crate::cache::manifest_cache::ManifestCache;
 use crate::config::MitoConfig;
 use crate::error::{
-    self, InstallManifestToSnafu, NoCheckpointSnafu, NoManifestsSnafu, RegionBusySnafu,
-    RegionStoppedSnafu, Result,
+    self, InstallManifestToSnafu, ManifestUnsettledSnafu, NoCheckpointSnafu, NoManifestsSnafu,
+    RegionBusySnafu, RegionStoppedSnafu, Result,
 };
 use crate::manifest::action::{
     RegionChange, RegionCheckpoint, RegionEdit, RegionManifest, RegionManifestBuilder,
@@ -171,6 +171,9 @@ pub struct RegionManifestManager {
     staging_manifest: Option<Arc<RegionManifest>>,
     /// Actions of a staging region, committed as one version when staging ends.
     staged: StagedActions,
+    /// The version and encoded bytes of an end of staging that may have been written under
+    /// overwrite publication, until a read-back tells whether it was.
+    unsettled: Option<(ManifestVersion, Vec<u8>)>,
     stats: ManifestStats,
     stopped: bool,
 }
@@ -286,6 +289,7 @@ impl RegionManifestManager {
             manifest: Arc::new(manifest),
             staging_manifest: None,
             staged: StagedActions::default(),
+            unsettled: None,
             stats: stats.clone(),
             stopped: false,
         };
@@ -417,6 +421,7 @@ impl RegionManifestManager {
             manifest: Arc::new(manifest),
             staging_manifest: None,
             staged: StagedActions::default(),
+            unsettled: None,
             stats: stats.clone(),
             stopped: false,
         };
@@ -448,6 +453,13 @@ impl RegionManifestManager {
         target_version: ManifestVersion,
     ) -> Result<ManifestVersion> {
         let (version, loaded_checkpoint) = self.install_manifest_to_inner(target_version).await?;
+        if self
+            .unsettled
+            .as_ref()
+            .is_some_and(|(unsettled, _)| *unsettled <= version)
+        {
+            self.unsettled = None;
+        }
         if !loaded_checkpoint && let Err(error) = self.store.update_manifest_size(version).await {
             warn!(error; "Failed to update manifest size after sync for region {}", self.manifest.metadata.region_id);
         }
@@ -613,6 +625,7 @@ impl RegionManifestManager {
         action_list: RegionMetaActionList,
         is_staging: bool,
     ) -> Result<ManifestVersion> {
+        self.settle().await?;
         self.update_with_verification(action_list, is_staging, !is_staging, || true)
             .await
     }
@@ -663,8 +676,128 @@ impl RegionManifestManager {
         }
 
         let bytes = action_list.encode()?;
-        self.commit(action_list.actions, &bytes, allow_checkpoint, must_verify)
-            .await
+        self.commit(
+            action_list.actions,
+            &bytes,
+            allow_checkpoint,
+            must_verify,
+            false,
+        )
+        .await
+    }
+
+    /// Saves `bytes`, the encoded `actions`, as the next version and applies the actions.
+    ///
+    /// Overwrite publication takes the version before the save, so a later commit never
+    /// overwrites a save that may have landed. With `settle`, the version is taken only once the
+    /// result is known: a failed save is read back at once, and if that cannot tell, the commit
+    /// stays unsettled and every later commit waits for [Self::settle].
+    async fn commit(
+        &mut self,
+        actions: Vec<RegionMetaAction>,
+        bytes: &[u8],
+        mut allow_checkpoint: bool,
+        must_verify: impl FnOnce() -> bool,
+        settle: bool,
+    ) -> Result<ManifestVersion> {
+        if let Some((version, _)) = &self.unsettled {
+            return ManifestUnsettledSnafu {
+                version: *version,
+                reason: "it is not read back yet",
+            }
+            .fail();
+        }
+        let conditional = self.store.is_conditional_publication();
+        let version = if conditional || settle {
+            self.last_version() + 1
+        } else {
+            self.increase_version()
+        };
+        if let Err(e) = self.store.save(version, bytes).await {
+            if conditional || !settle {
+                return Err(e);
+            }
+            match self.read_back(version, bytes).await {
+                Ok(Some(true)) => {}
+                Ok(None) => return Err(e),
+                _ => {
+                    self.unsettled = Some((version, bytes.to_vec()));
+                    return Err(e);
+                }
+            }
+        }
+        if conditional && must_verify() {
+            self.store.ensure_version_not_checkpointed(version).await?;
+            allow_checkpoint = false;
+        }
+        self.publish(version, actions, allow_checkpoint).await?;
+        Ok(version)
+    }
+
+    /// Settles an end of staging whose result was unknown by reading its version back. If it
+    /// landed, it is applied, and its version and actions are returned; if it is absent, it is
+    /// forgotten. Fails with [ManifestUnsettled](crate::error::Error::ManifestUnsettled) while
+    /// neither can be told.
+    pub(crate) async fn settle(
+        &mut self,
+    ) -> Result<Option<(ManifestVersion, RegionMetaActionList)>> {
+        let Some((version, bytes)) = self.unsettled.take() else {
+            return Ok(None);
+        };
+        let reason = match self.read_back(version, &bytes).await {
+            Ok(Some(true)) => None,
+            Ok(None) => return Ok(None),
+            Ok(Some(false)) => Some("another delta has this version".to_string()),
+            Err(e) => Some(e.to_string()),
+        };
+        if let Some(reason) = reason {
+            self.unsettled = Some((version, bytes));
+            return ManifestUnsettledSnafu { version, reason }.fail();
+        }
+
+        // A retry of the end of staging that landed has nothing left to commit.
+        if self.staged.attempted.as_ref() == Some(&bytes) {
+            self.clear_staged();
+        }
+        let action_list = RegionMetaActionList::decode(&bytes)?;
+        self.publish(version, action_list.actions.clone(), false)
+            .await?;
+        Ok(Some((version, action_list)))
+    }
+
+    /// Reads `version` back directly from storage. Returns whether it holds `bytes`, or `None` if
+    /// it does not exist.
+    async fn read_back(&self, version: ManifestVersion, bytes: &[u8]) -> Result<Option<bool>> {
+        let saved = self.store.read_delta(version).await?;
+        Ok(saved.map(|saved| saved == bytes))
+    }
+
+    /// Applies `actions`, written as `version`, to the manifest.
+    async fn publish(
+        &mut self,
+        version: ManifestVersion,
+        actions: Vec<RegionMetaAction>,
+        allow_checkpoint: bool,
+    ) -> Result<()> {
+        self.set_version(version);
+        let mut manifest_builder =
+            RegionManifestBuilder::with_checkpoint(Some(self.manifest.as_ref().clone()));
+        self.apply_actions(&mut manifest_builder, version, actions);
+        let new_manifest = manifest_builder.try_build()?;
+        new_manifest
+            .removed_files
+            .update_file_removed_cnt_to_stats(&self.stats);
+        let updated_manifest = self
+            .checkpointer
+            .update_manifest_removed_files(new_manifest)?;
+        self.manifest = Arc::new(updated_manifest);
+        if allow_checkpoint {
+            self.checkpointer
+                .maybe_do_checkpoint(self.manifest.as_ref())
+                .await;
+        }
+
+        Ok(())
     }
 
     /// Commits the staged actions as one version and clears them. Returns the version.
@@ -692,7 +825,7 @@ impl RegionManifestManager {
             None => RegionMetaActionList::new(self.staged.actions.clone()).encode()?,
         };
         let result = self
-            .commit(self.staged.actions.clone(), &bytes, true, must_verify)
+            .commit(self.staged.actions.clone(), &bytes, true, must_verify, true)
             .await;
         match &result {
             Ok(_) => self.clear_staged(),
@@ -708,49 +841,6 @@ impl RegionManifestManager {
     pub(crate) fn staged_actions(&self) -> Option<RegionMetaActionList> {
         (!self.staged.actions.is_empty())
             .then(|| RegionMetaActionList::new(self.staged.actions.clone()))
-    }
-
-    /// Saves `bytes`, the encoded `actions`, as the next version and applies the actions.
-    async fn commit(
-        &mut self,
-        actions: Vec<RegionMetaAction>,
-        bytes: &[u8],
-        mut allow_checkpoint: bool,
-        must_verify: impl FnOnce() -> bool,
-    ) -> Result<ManifestVersion> {
-        let conditional = self.store.is_conditional_publication();
-        let version = if conditional {
-            self.last_version() + 1
-        } else {
-            self.increase_version()
-        };
-        self.store.save(version, bytes).await?;
-        if conditional {
-            if must_verify() {
-                self.store.ensure_version_not_checkpointed(version).await?;
-                allow_checkpoint = false;
-            }
-            self.set_version(version);
-        }
-
-        let mut manifest_builder =
-            RegionManifestBuilder::with_checkpoint(Some(self.manifest.as_ref().clone()));
-        self.apply_actions(&mut manifest_builder, version, actions);
-        let new_manifest = manifest_builder.try_build()?;
-        new_manifest
-            .removed_files
-            .update_file_removed_cnt_to_stats(&self.stats);
-        let updated_manifest = self
-            .checkpointer
-            .update_manifest_removed_files(new_manifest)?;
-        self.manifest = Arc::new(updated_manifest);
-        if allow_checkpoint {
-            self.checkpointer
-                .maybe_do_checkpoint(self.manifest.as_ref())
-                .await;
-        }
-
-        Ok(version)
     }
 
     /// Stages `action_list` in memory.

@@ -442,31 +442,36 @@ impl RegionOpener {
             .with_file_protection(self.hook.clone()),
         );
         let now = self.time_provider.current_time_millis();
+        let file_purger = create_file_purger(
+            config.gc.enable,
+            self.path_type,
+            self.purge_scheduler,
+            access_layer.clone(),
+            self.cache_manager,
+            self.file_ref_manager.clone(),
+            self.series_index_store
+                .clone()
+                .map(|store| RangeIndexDeleter::new(store, region_id)),
+        );
 
         Ok(Arc::new(MitoRegion {
             region_id,
             compaction_state: Default::default(),
-            version_control,
+            version_control: version_control.clone(),
             series_index_version_control: Default::default(),
-            series_index_store: self.series_index_store.clone(),
-            access_layer: access_layer.clone(),
+            series_index_store: self.series_index_store,
+            access_layer,
             // Region is writable after it is created.
-            manifest_ctx: Arc::new(ManifestContext::new(
-                manifest_manager,
-                RegionRoleState::Leader(RegionLeaderState::Writable),
-                self.hook.clone(),
-                self.node_lease.clone(),
-            )),
-            file_purger: create_file_purger(
-                config.gc.enable,
-                self.path_type,
-                self.purge_scheduler,
-                access_layer,
-                self.cache_manager,
-                self.file_ref_manager.clone(),
-                self.series_index_store
-                    .map(|store| RangeIndexDeleter::new(store, region_id)),
+            manifest_ctx: Arc::new(
+                ManifestContext::new(
+                    manifest_manager,
+                    RegionRoleState::Leader(RegionLeaderState::Writable),
+                    self.hook.clone(),
+                    self.node_lease.clone(),
+                )
+                .with_region_version(version_control, file_purger.clone()),
             ),
+            file_purger,
             provider,
             last_flush_millis: AtomicI64::new(now),
             last_schedule_compaction_millis: AtomicI64::new(now),
@@ -711,12 +716,15 @@ impl RegionOpener {
             series_index_store: self.series_index_store.clone(),
             access_layer: access_layer.clone(),
             // Region is always opened in read only mode.
-            manifest_ctx: Arc::new(ManifestContext::new(
-                manifest_manager,
-                RegionRoleState::Follower,
-                self.hook.clone(),
-                self.node_lease.clone(),
-            )),
+            manifest_ctx: Arc::new(
+                ManifestContext::new(
+                    manifest_manager,
+                    RegionRoleState::Follower,
+                    self.hook.clone(),
+                    self.node_lease.clone(),
+                )
+                .with_region_version(version_control.clone(), file_purger.clone()),
+            ),
             file_purger,
             provider: provider.clone(),
             last_flush_millis: AtomicI64::new(now),
