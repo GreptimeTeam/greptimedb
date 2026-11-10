@@ -2508,14 +2508,14 @@ async fn native_absent_over_time_plans_over_discovered_metrics() {
     let fused = find_fused_series(&plan).expect("fused plan");
     let tree = fused.tree().to_string();
     assert!(
-        tree.contains(r#"root Vector absent {no_such_label="x", tag_0="api"}"#),
+        tree.contains(r#"Vector: absent {no_such_label="x", tag_0="api"}"#),
         "the labels are the selector's matchers: {tree}"
     );
     // A statement whose window runs where its samples are is planned as one tree per stage, so the
     // presence read is asserted across the plan rather than under the root node the frontend holds.
     let trees = fused_trees(&plan).join("\n");
     assert!(
-        trees.contains("Window last_over_time [300000ms]"),
+        trees.contains("Window: last_over_time [300000ms]"),
         "the presence read folds the window: {trees}"
     );
     // The metric name is not a label of an `absent` answer, so the output has none.
@@ -2547,7 +2547,7 @@ async fn native_absent_over_time_plans_over_discovered_metrics() {
     let fused = find_fused_series(&plan).expect("fused plan");
     let tree = fused.tree().to_string();
     assert!(
-        tree.contains(r#"root Vector absent {no_such_label="x", tag_0="api"}"#),
+        tree.contains(r#"Vector: absent {no_such_label="x", tag_0="api"}"#),
         "a selector that matched no table still answers its matchers: {tree}"
     );
 
@@ -2585,7 +2585,7 @@ async fn native_absent_over_time_plans_over_discovered_metrics() {
     let fused = find_fused_series(&plan).expect("fused plan");
     let tree = fused.tree().to_string();
     assert!(
-        tree.contains(r#"root Vector absent {tag_0="x"}"#),
+        tree.contains(r#"Vector: absent {tag_0="x"}"#),
         "a named metric is not a label of the answer: {tree}"
     );
 }

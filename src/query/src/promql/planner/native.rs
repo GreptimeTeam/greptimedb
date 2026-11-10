@@ -3112,12 +3112,8 @@ fn plan_split_aggregate(
         },
         ..binding.clone()
     };
-    let partial = FusedSeries::try_new_state_export(
-        partial,
-        partial_binding,
-        vec![rawinput],
-    )
-    .context(DataFusionPlanningSnafu)?;
+    let partial = FusedSeries::try_new_state_export(partial, partial_binding, vec![rawinput])
+        .context(DataFusionPlanningSnafu)?;
     let output_schema = match format {
         FusedOutputFormat::PlainRows => value_schema,
         // The final node's output is the frame its own evaluated root declares, so it is derived

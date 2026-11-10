@@ -4353,12 +4353,12 @@ fn absent_over_time_binds_absent_over_a_presence_read() {
         let tree = compile(&eval_stmt(query), raw_schema(), SeriesOrdering::KeyThenTime)
             .unwrap_or_else(|error| panic!("`{query}` was refused: {error}"));
         let display = tree.to_string();
-        let root = display.lines().nth(1).expect("a compiled tree has a root");
-        assert_eq!(root, format!("  root Vector {op}"), "`{query}`");
+        let root = display.lines().next().expect("a compiled tree has a root");
+        assert_eq!(root, format!("Vector: {op}"), "`{query}`");
         // The fold that reports presence keeps the metric name, so two discovered metrics that
         // share their ordinary labels stay two series on the way up: `present_over_time` drops it.
         assert!(
-            display.contains("input Window last_over_time [300000ms]"),
+            display.contains("  Window: last_over_time [300000ms]"),
             "`{query}` does not read its window through the presence fold: {display}"
         );
     }

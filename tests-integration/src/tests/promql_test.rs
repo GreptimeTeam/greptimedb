@@ -2405,6 +2405,18 @@ fn assert_two_source_native_plan(
     assert_eq!(display.matches("source=1").count(), 1, "{display}");
 }
 
+/// The registrations the fused node's tree made, exactly as they were recorded.
+///
+/// [`datafusion::physical_plan::ExecutionPlan::metrics`] leaves them out: a flat set cannot say
+/// which tree node recorded what, so the node keeps its own set for readers that key by name.
+fn fused_metric_set(
+    plan: &Arc<dyn datafusion::physical_plan::ExecutionPlan>,
+) -> datafusion::physical_plan::metrics::MetricsSet {
+    plan.downcast_ref::<promql::extension_plan::FusedSeriesExec>()
+        .unwrap_or_else(|| panic!("the plan is a FusedSeriesExec, not {}", plan.name()))
+        .node_metric_set()
+}
+
 fn output_values_per_partition(
     plan: &Arc<dyn datafusion::physical_plan::ExecutionPlan>,
 ) -> Option<Vec<u64>> {
@@ -2414,7 +2426,7 @@ fn output_values_per_partition(
         return None;
     }
     let partition_count = plan.output_partitioning().partition_count();
-    let metrics = plan.metrics()?;
+    let metrics = fused_metric_set(plan);
     let mut values_by_partition = vec![0_u64; partition_count];
     let mut found_metric = false;
     for metric in metrics.iter() {
@@ -2705,9 +2717,7 @@ fn nonempty_partitions(
     use datafusion::physical_plan::metrics::MetricValue;
 
     let partition_count = plan.output_partitioning().partition_count();
-    let metrics = plan
-        .metrics()
-        .unwrap_or_else(|| panic!("the plan reports metrics: {}", display_plan_tree(plan)));
+    let metrics = fused_metric_set(plan);
     let mut recorded = vec![0_u64; partition_count];
     let mut found = false;
     for entry in metrics.iter() {
@@ -4881,7 +4891,17 @@ async fn distributed_native_promql_zero_match_or_real() {
             "{}",
             datafusion::physical_plan::displayable(fused.as_ref()).one_line()
         );
-        assert!(display.contains("root Set or"), "{expression}: {display}");
+        // The node draws the tree it runs, one line per node: no query string, no path prefix and
+        // no `segment` wording, and the set names its own operator and matching labels.
+        assert!(
+            display.contains("native_tree=[\nSet: or ignoring []"),
+            "{expression}: {display}"
+        );
+        assert!(
+            display.contains("\n  Input: evaluated samples source=0, contiguous")
+                && display.contains("\n  Input: evaluated samples source=1, contiguous"),
+            "{expression}: {display}"
+        );
         let children = fused.children();
         assert_eq!(children.len(), 2, "{expression}: {display}");
         assert!(
@@ -5518,9 +5538,7 @@ async fn native_promql_label_rewrites_reach_the_native_route_and_keep_prometheus
     let split_rows = native_result_rows(split_parts).await;
     assert_eq!(split_rows.len(), 2, "{split_rows:?}");
     let split_plan = observer.take();
-    let nonempty = split_plan
-        .metrics()
-        .expect("fused plan metrics")
+    let nonempty = fused_metric_set(&split_plan)
         .iter()
         .filter(|metric| metric.value().name() == "native.root.output_values")
         .filter_map(|metric| match metric.value() {
@@ -6830,9 +6848,7 @@ async fn native_promql_instant_at_uses_sample_time_and_anchor() {
         let native_rows = native_result_rows(native).await;
         let plan = observer.take();
         assert_eq!(plan.name(), "FusedSeriesExec", "{expr}");
-        let output_count = plan
-            .metrics()
-            .unwrap()
+        let output_count = fused_metric_set(&plan)
             .iter()
             .filter_map(|metric| match metric.value() {
                 datafusion::physical_plan::metrics::MetricValue::Count { name, count }
@@ -7085,9 +7101,7 @@ async fn native_promql_binary_join_uses_two_independent_scans() {
     let plan = observer.take();
     assert_eq!(plan.name(), "FusedSeriesExec");
     assert_two_source_native_plan(&observer, &plan, true);
-    let input_samples = plan
-        .metrics()
-        .expect("fused metrics")
+    let input_samples = fused_metric_set(&plan)
         .iter()
         .filter_map(|metric| match metric.value() {
             datafusion::physical_plan::metrics::MetricValue::Count { name, count }
@@ -7107,9 +7121,7 @@ async fn native_promql_binary_join_uses_two_independent_scans() {
         ("native.root.left.input_samples", HOSTS * 4),
         ("native.root.right.input_samples", HOSTS * 2),
     ] {
-        let source_samples = plan
-            .metrics()
-            .expect("fused metrics")
+        let source_samples = fused_metric_set(&plan)
             .iter()
             .filter_map(|metric| match metric.value() {
                 datafusion::physical_plan::metrics::MetricValue::Count { name, count }
@@ -9403,9 +9415,7 @@ async fn native_promql_repeated_selector_binary_uses_independent_scans() {
         scan_frame_rows, 1,
         "the anchored range returns one packed raw-series frame"
     );
-    let root_values = bounded_plan
-        .metrics()
-        .expect("fused metrics")
+    let root_values = fused_metric_set(&bounded_plan)
         .iter()
         .filter_map(|metric| match metric.value() {
             datafusion::physical_plan::metrics::MetricValue::Count { name, count }
@@ -9417,9 +9427,7 @@ async fn native_promql_repeated_selector_binary_uses_independent_scans() {
         })
         .sum::<usize>();
     assert_eq!(root_values, 1, "the bounded native result was executed");
-    let root_input_samples = bounded_plan
-        .metrics()
-        .expect("fused metrics")
+    let root_input_samples = fused_metric_set(&bounded_plan)
         .iter()
         .filter_map(|metric| match metric.value() {
             datafusion::physical_plan::metrics::MetricValue::Count { name, count }
@@ -9779,9 +9787,7 @@ async fn native_promql_explain_and_analyze_execute_fused_plan() {
             assert!(text.contains("FusedSeriesExec"));
             assert!(text.contains("output_values"));
             let plan = observer.take();
-            let output_values = plan
-                .metrics()
-                .expect("fused plan metrics")
+            let output_values = fused_metric_set(&plan)
                 .iter()
                 .filter_map(|metric| match metric.value() {
                     datafusion::physical_plan::metrics::MetricValue::Count { name, count }
@@ -11777,9 +11783,7 @@ async fn native_promql_columnar_fused_series_matches_legacy() {
             .all(|entry| entry["artifact"]["format"] == "columnar-series")
     );
     // One value per series: the node ran, rather than being merely planned.
-    let output_values = plan
-        .metrics()
-        .expect("fused plan metrics")
+    let output_values = fused_metric_set(&plan)
         .iter()
         .filter_map(|metric| match metric.value() {
             datafusion::physical_plan::metrics::MetricValue::Count { name, count }
@@ -11875,9 +11879,7 @@ async fn native_promql_columnar_unindexed_float64_matches_legacy(
     // fused node to have run.
     let plan = observer.take();
     assert_eq!(native_rows, expected, "{stage}: fused route must answer");
-    let output_values = plan
-        .metrics()
-        .expect("fused plan metrics")
+    let output_values = fused_metric_set(&plan)
         .iter()
         .filter_map(|metric| match metric.value() {
             datafusion::physical_plan::metrics::MetricValue::Count { name, count }
@@ -11964,9 +11966,7 @@ async fn native_promql_columnar_partial_index_float64_matches_legacy(
     // fused node to have run.
     let plan = observer.take();
     assert_eq!(native_rows, expected, "{stage}: fused route must answer");
-    let output_values = plan
-        .metrics()
-        .expect("fused plan metrics")
+    let output_values = fused_metric_set(&plan)
         .iter()
         .filter_map(|metric| match metric.value() {
             datafusion::physical_plan::metrics::MetricValue::Count { name, count }

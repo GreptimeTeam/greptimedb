@@ -988,7 +988,6 @@ fn deep_native_tree_executes_after_fused_series_round_trip() {
             let output_schema =
                 Arc::new(DFSchema::try_from(output_schema.as_ref().clone()).unwrap());
             let node = FusedSeries::try_new_with_format(
-                Arc::from("deep"),
                 tree,
                 FusedSeriesBinding {
                     grid: Arc::clone(&grid),
