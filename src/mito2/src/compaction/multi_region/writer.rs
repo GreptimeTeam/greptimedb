@@ -105,6 +105,7 @@ impl<'a> TargetWriter<'a> {
         bloom.mem_threshold_on_create = self.index_threshold(bloom.mem_threshold_on_create());
         let source = output_projection(self.target, source, self.context.cancellation.clone())?;
         Ok(SstWriteRequest {
+            index_build_inputs: None,
             op_type: OperationType::Compact,
             metadata: self.target.metadata.clone(),
             source,

@@ -653,6 +653,7 @@ impl SstMerger for DefaultSstMerger {
             .access_layer
             .write_sst(
                 SstWriteRequest {
+                    index_build_inputs: None,
                     op_type: OperationType::Compact,
                     metadata: region_metadata.clone(),
                     source,

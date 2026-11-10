@@ -44,6 +44,7 @@ use crate::metrics::{COMPACTION_STAGE_ELAPSED, FLUSH_ELAPSED};
 use crate::read::FlatSource;
 use crate::region::options::IndexOptions;
 use crate::sst::file::{FileHandle, RegionFileId, RegionIndexId};
+use crate::sst::index::build::IndexBuildInputs;
 use crate::sst::index::intermediate::IntermediateManager;
 use crate::sst::index::puffin_manager::{PuffinManagerFactory, SstPuffinManager};
 use crate::sst::index::registry::IndexRegistry;
@@ -441,6 +442,7 @@ impl AccessLayer {
                 self.puffin_manager_factory.clone()
             };
             let indexer_builder = IndexerBuilderImpl {
+                index_build_inputs: request.index_build_inputs,
                 build_type: request.op_type.into(),
                 metadata: request.metadata.clone(),
                 puffin_manager: puffin_factory.build(store, path_provider.clone()),
@@ -671,6 +673,8 @@ pub enum OperationType {
 
 /// Contents to build a SST.
 pub struct SstWriteRequest {
+    /// Optional preplanned index work and physical input files.
+    pub index_build_inputs: Option<IndexBuildInputs>,
     pub op_type: OperationType,
     pub metadata: RegionMetadataRef,
     pub source: FlatSource,
@@ -707,6 +711,7 @@ impl EncodedSstIndexBuildParams {
         intermediate_manager: IntermediateManager,
     ) -> IndexerBuilderImpl {
         IndexerBuilderImpl {
+            index_build_inputs: None,
             build_type: OperationType::Flush.into(),
             metadata: self.metadata,
             puffin_manager,
@@ -1026,6 +1031,7 @@ mod tests {
             access_layer
                 .write_sst(
                     SstWriteRequest {
+                        index_build_inputs: None,
                         op_type,
                         metadata,
                         source: new_flat_source_from_record_batches(vec![

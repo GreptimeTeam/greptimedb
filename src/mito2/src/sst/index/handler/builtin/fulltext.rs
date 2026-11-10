@@ -19,14 +19,17 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use common_error::ext::BoxedError;
 use datatypes::arrow::record_batch::RecordBatch;
+use datatypes::schema::FulltextBackend;
 use index::target::IndexTarget;
 
 use crate::config::FulltextIndexConfig;
 use crate::read::Batch;
 use crate::sst::index::fulltext_index;
 use crate::sst::index::fulltext_index::creator::{FulltextIndexer, FulltextTarget};
-use crate::sst::index::handler::builtin::column_target_id;
-use crate::sst::index::handler::{BuildContext, IndexCreator, PlanContext, PlannedIndex};
+use crate::sst::index::handler::builtin::{column_target_id, normalize_entries, target_column_id};
+use crate::sst::index::handler::{
+    BuildContext, IndexCreator, PlanContext, PlanEntry, PlannedIndex,
+};
 use crate::sst::index::kind::IndexKind;
 use crate::sst::index::puffin_manager::SstPuffinWriter;
 use crate::sst::index::{CompletedEntry, IndexBuildType};
@@ -35,6 +38,7 @@ use crate::sst::index::{CompletedEntry, IndexBuildType};
 #[derive(Debug)]
 pub(crate) struct FulltextPlan {
     config: FulltextIndexConfig,
+    entries: Vec<PlanEntry>,
     targets: Vec<FulltextTarget>,
 }
 
@@ -53,10 +57,20 @@ impl FulltextPlan {
             return Ok(None);
         }
         let mut targets = Vec::new();
+        let mut entries = Vec::new();
         for column in &context.metadata.column_metadatas {
             for (target, options) in
                 FulltextIndexer::targets(column, &context.build_type).map_err(BoxedError::new)?
             {
+                entries.push(PlanEntry {
+                    column_id: target_column_id(&target),
+                    kind: IndexKind::Fulltext,
+                    format_version: if options.backend == FulltextBackend::Bloom {
+                        u32::from(fulltext_index::FULLTEXT_BLOOM_VERSION)
+                    } else {
+                        0
+                    },
+                });
                 targets.push((
                     column.column_id,
                     column.column_schema.name.clone(),
@@ -65,11 +79,13 @@ impl FulltextPlan {
                 ));
             }
         }
-        if targets.is_empty() {
+        normalize_entries(&mut entries);
+        if entries.is_empty() {
             return Ok(None);
         }
         Ok(Some(Arc::new(Self {
             config: config.clone(),
+            entries,
             targets,
         })))
     }
@@ -77,8 +93,12 @@ impl FulltextPlan {
 
 #[async_trait]
 impl PlannedIndex for FulltextPlan {
-    fn kind(&self) -> IndexKind {
-        IndexKind::Fulltext
+    fn kinds(&self) -> &[IndexKind] {
+        &[IndexKind::Fulltext]
+    }
+
+    fn entries(&self) -> &[PlanEntry] {
+        &self.entries
     }
 
     async fn build(

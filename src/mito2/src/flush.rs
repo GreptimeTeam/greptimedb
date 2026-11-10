@@ -851,6 +851,7 @@ impl RegionFlushTask {
             .map(|f| f == FormatType::Flat)
             .unwrap_or(self.engine_config.default_flat_format);
         SstWriteRequest {
+            index_build_inputs: None,
             op_type: OperationType::Flush,
             metadata: version.metadata.clone(),
             source,

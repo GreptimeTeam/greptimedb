@@ -38,6 +38,11 @@ pub const STAGING_TYPE: &str = "index_staging";
 /// Recycle bin type label.
 pub const RECYCLE_TYPE: &str = "recycle_bin";
 
+/// Discard reason when an operation cannot admit extension index work.
+pub(crate) const INDEX_DISCARD_ADMISSION_REJECTED: &str = "admission_rejected";
+/// Discard reason when a creator exceeds its retained-memory allowance.
+pub(crate) const INDEX_DISCARD_MEMORY_BUDGET_EXCEEDED: &str = "memory_budget_exceeded";
+
 // Write metrics.
 lazy_static! {
     /// Global write buffer size in bytes.
@@ -505,7 +510,15 @@ lazy_static! {
         &[TYPE_LABEL],
     )
     .unwrap();
-    /// Gauge of index create memory usage.
+    /// Optional index kinds discarded by a resource policy, not a build error.
+    pub static ref INDEX_CREATE_DISCARDED_TOTAL: IntCounterVec = register_int_counter_vec!(
+        "greptime_index_create_discarded_total",
+        "index kinds omitted or discarded by resource policy",
+        &[TYPE_LABEL, "reason"],
+    ).unwrap();
+    /// Gauge of index create memory usage. The `extension` type aggregates retained
+    /// memory across optional creators, not individual algorithms: one creator may
+    /// share state across several algorithms.
     pub static ref INDEX_CREATE_MEMORY_USAGE: IntGaugeVec = register_int_gauge_vec!(
         "greptime_index_create_memory_usage",
         "index create memory usage",
