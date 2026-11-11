@@ -265,10 +265,10 @@ Because keys are only read for blocks a request selects, this content check cove
 keys actually loaded: unvisited ranges are validated structurally, not by content. It
 is chained, though, so a selection that skips a block, a page, or a whole part cannot
 hide the two keys around the gap: the check compares each loaded key with the previous
-loaded key, not with the previous traversed block. When the two are not consecutive
-blocks, the order must still increase and the ordinal must still grow, but the ordinal
-need not be exactly one greater; only immediately adjacent blocks require that, along
-with an unchanged series.
+loaded key, not with the previous traversed block. Loaded keys must be nondecreasing.
+Within one exact key the ordinal must strictly increase, and only immediately adjacent
+blocks of that same key require it to be exactly one greater; a different key starts a
+new series at ordinal zero, so no ordering between the two series' ordinals is required.
 
 ### Metadata pages
 
