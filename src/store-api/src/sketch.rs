@@ -12,7 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! In-process, SST-only statistics requests. No wire protocol is defined here.
+//! SST-only statistics requests and region RPC conversion.
+
+mod proto;
 
 use async_trait::async_trait;
 use common_error::ext::{BoxedError, PlainError};
@@ -40,6 +42,8 @@ pub enum SketchQuery {
     Quantile { fraction: f64 },
     /// Bounds the occurrence count of a value, including NULL.
     Frequency { value: Value },
+    /// Estimates the fraction of non-null values strictly less than the supplied value.
+    Rank { value: Value },
 }
 
 /// Selects whole time buckets inside a required range. The implementation validates request limits.
@@ -63,6 +67,8 @@ impl SketchRequest {
             Some("sketch request must select at least one column")
         } else if self.queries.is_empty() {
             Some("sketch request must select at least one query")
+        } else if self.queries.iter().any(|query| matches!(query, SketchQuery::Rank { value } if value.is_null())) {
+            Some("rank requires a non-null value")
         } else if self.queries.iter().any(|query| {
             matches!(query, SketchQuery::Quantile { fraction } if !fraction.is_finite() || !(0.0..=1.0).contains(fraction))
         }) {
@@ -132,6 +138,10 @@ pub enum SketchValue {
     },
     Quantile {
         value: Value,
+    },
+    Rank {
+        /// Fraction of non-null represented rows strictly below the requested value.
+        fraction: f64,
     },
     Frequency {
         /// Inclusive lower bound on occurrences among represented rows.

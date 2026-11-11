@@ -7,6 +7,9 @@ license.workspace = true
 [lints]
 workspace = true
 
+[features]
+enterprise = ["datatypes/enterprise", "mito2/enterprise"]
+
 [dependencies]
 api.workspace = true
 aquamarine.workspace = true

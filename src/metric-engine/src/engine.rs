@@ -181,6 +181,7 @@ impl RegionEngine for MetricEngine {
                     affected_rows: rows,
                     extensions: extension_return_value,
                     metadata: Vec::new(),
+                    sketch: None,
                 })
             }
             BatchRegionDdlRequest::Alter(requests) => {
@@ -195,6 +196,7 @@ impl RegionEngine for MetricEngine {
                     affected_rows: rows,
                     extensions: extension_return_value,
                     metadata: Vec::new(),
+                    sketch: None,
                 })
             }
             BatchRegionDdlRequest::Drop(requests) => {
@@ -337,6 +339,7 @@ impl RegionEngine for MetricEngine {
             affected_rows: rows,
             extensions: extension_return_value,
             metadata: Vec::new(),
+            sketch: None,
         })
     }
 
@@ -539,6 +542,10 @@ impl RegionEngine for MetricEngine {
         }
     }
 
+    fn sketch_reader(&self) -> Option<&dyn store_api::sketch::SketchReader> {
+        self.inner.mito.sketch_reader().map(|_| self as _)
+    }
+
     fn as_any(&self) -> &dyn Any {
         self
     }
@@ -646,6 +653,7 @@ impl MetricEngine {
             affected_rows,
             extensions,
             metadata: Vec::new(),
+            sketch: None,
         })
     }
 }
