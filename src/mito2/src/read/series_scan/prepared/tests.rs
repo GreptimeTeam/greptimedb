@@ -54,14 +54,6 @@ use crate::series_index::samples::ColumnarSamplesFormat;
 use crate::test_util::sst_util::{new_sparse_primary_key, sst_region_metadata_with_encoding};
 use crate::test_util::{TestEnv, flush_region};
 
-/// Reads one exported columnar preparation count. The counters are process-global, so a test
-/// compares the value it saw before its own preparation with the value afterwards.
-fn prepared_count(kind: &'static str) -> u64 {
-    crate::metrics::COLUMNAR_READ_COUNT
-        .with_label_values(&[kind])
-        .get()
-}
-
 async fn fixture() -> (TestEnv, MitoEngine, MitoRegionRef) {
     fixture_with(false).await
 }
