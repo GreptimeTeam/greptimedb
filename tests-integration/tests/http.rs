@@ -5909,9 +5909,9 @@ async fn native_histogram_composition_query(
     assert!(
         descriptions.iter().any(|description| {
             description.lines().any(|line| {
-                let mut words = line.split_whitespace();
-                matches!(words.next(), Some("root" | "input" | "left" | "right"))
-                    && words.next() == Some("Binary")
+                // A tree line names its node first, so a `Binary` line is a binary node wherever it
+                // sits in the tree.
+                matches!(line.split_whitespace().next(), Some("Binary" | "Binary:"))
             })
         }),
         "`{query}` did not execute a native Binary: {descriptions:?}; response: {body}"
