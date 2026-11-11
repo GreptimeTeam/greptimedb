@@ -588,6 +588,7 @@ mod test {
         // check explicit projection
         let projection = Some(vec![0, 1, 2, 3, 4, 5, 6]);
         let scan_req = ScanRequest {
+            expected_partition_expr_version: Some(42),
             projection,
             filters: vec![],
             series_row_selector: Some(TimeSeriesRowSelector::LastRow { after_merge: true }),
@@ -605,6 +606,7 @@ mod test {
             scan_req.projection.as_deref().unwrap(),
             &[11, 10, 9, 8, 0, 1, 4]
         );
+        assert_eq!(scan_req.expected_partition_expr_version, Some(42));
         assert_eq!(scan_req.filters.len(), 1);
         assert_eq!(
             scan_req.series_row_selector,
