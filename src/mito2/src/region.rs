@@ -1201,10 +1201,7 @@ impl MitoRegion {
         }
 
         let ending_started_at = self.manifest_ctx.begin_ending_staging(self.region_id)?;
-        let result = self
-            .manifest_ctx
-            .commit_staged_locked(manager, staged_actions)
-            .await;
+        let result = self.manifest_ctx.commit_staged_locked(manager).await;
         if let Ok(pending) = &result {
             info!(
                 "Successfully committed staged manifests for region {}, new version: {}",
@@ -1684,15 +1681,19 @@ impl ManifestContext {
         ))
     }
 
-    /// Commits the staged actions of `manager`, `staged_actions`, as one version under a
-    /// caller-held write lock, and returns a [`PendingManifestHook`] to
-    /// [`fire`](PendingManifestHook::fire) after dropping the lock.
+    /// Commits the staged actions of `manager` as one version under a caller-held write lock,
+    /// and returns a [`PendingManifestHook`] to [`fire`](PendingManifestHook::fire) after
+    /// dropping the lock.
     pub(crate) async fn commit_staged_locked(
         &self,
         manager: &mut RegionManifestManager,
-        staged_actions: RegionMetaActionList,
     ) -> Result<PendingManifestHook> {
         let region_id = manager.manifest().metadata.region_id;
+        // Copied before the commit clears them, so the hook still sees what was written.
+        let actions_for_hook = self
+            .hook
+            .as_ref()
+            .and_then(|_| manager.staged_actions().cloned());
         let version = self
             .commit_locked(manager, async |manager| {
                 manager
@@ -1703,7 +1704,7 @@ impl ManifestContext {
 
         Ok(PendingManifestHook::new(
             region_id,
-            self.hook.as_ref().map(|_| staged_actions),
+            actions_for_hook,
             version,
             self.hook.clone(),
             false,

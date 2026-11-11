@@ -179,7 +179,7 @@ pub struct RegionManifestManager {
 /// staging ends.
 #[derive(Debug, Default)]
 struct StagedActions {
-    actions: Vec<RegionMetaAction>,
+    list: RegionMetaActionList,
     /// Encoded bytes of an end commit that may have been written. A retry commits the same bytes,
     /// and no other action is appended while they are kept.
     attempted: Option<Vec<u8>>,
@@ -190,7 +190,7 @@ impl StagedActions {
     /// import does.
     fn contains_import(&self, action_list: &RegionMetaActionList) -> bool {
         let is_staged = |meta: &file::FileMeta| {
-            self.actions.iter().any(|action| {
+            self.list.actions.iter().any(|action| {
                 matches!(action, RegionMetaAction::Edit(edit)
                     if edit.files_to_add.iter().any(|staged| staged.file_id == meta.file_id))
             })
@@ -730,10 +730,11 @@ impl RegionManifestManager {
 
         let bytes = match &self.staged.attempted {
             Some(bytes) => bytes.clone(),
-            None => RegionMetaActionList::new(self.staged.actions.clone()).encode()?,
+            None => self.staged.list.encode()?,
         };
+        // The staged actions stay until the commit succeeds, for a retry.
         let result = self
-            .commit(self.staged.actions.clone(), &bytes, true, must_verify)
+            .commit(self.staged.list.actions.clone(), &bytes, true, must_verify)
             .await;
         match &result {
             Ok(_) => self.clear_staged(),
@@ -746,9 +747,8 @@ impl RegionManifestManager {
     }
 
     /// Returns the staged actions, or `None` if nothing is staged.
-    pub(crate) fn staged_actions(&self) -> Option<RegionMetaActionList> {
-        (!self.staged.actions.is_empty())
-            .then(|| RegionMetaActionList::new(self.staged.actions.clone()))
+    pub(crate) fn staged_actions(&self) -> Option<&RegionMetaActionList> {
+        (!self.staged.list.actions.is_empty()).then_some(&self.staged.list)
     }
 
     /// Stages `action_list` in memory.
@@ -774,7 +774,7 @@ impl RegionManifestManager {
             action_list.actions.iter().cloned(),
         );
         self.staging_manifest = Some(Arc::new(manifest_builder.try_build()?));
-        self.staged.actions.extend(action_list.actions);
+        self.staged.list.actions.extend(action_list.actions);
         Ok(())
     }
 

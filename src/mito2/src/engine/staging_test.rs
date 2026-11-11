@@ -1038,7 +1038,7 @@ async fn test_enter_staging_writes_partition_expr_change_action_with_format(flat
 
     let mut found_partition_expr_change = false;
     let mut found_change = false;
-    for action in staged_actions.actions {
+    for action in &staged_actions.actions {
         match action {
             RegionMetaAction::PartitionExprChange(change) => {
                 found_partition_expr_change = true;
