@@ -95,7 +95,7 @@ pub(crate) fn pending_tails_edit(pending_tails: Vec<PendingTail>) -> RegionEdit 
     }
 }
 
-async fn commit_edit(engine: &MitoEngine, region_id: RegionId, edit: RegionEdit) {
+pub(crate) async fn commit_edit(engine: &MitoEngine, region_id: RegionId, edit: RegionEdit) {
     let region = engine.get_region(region_id).unwrap();
     region
         .manifest_ctx

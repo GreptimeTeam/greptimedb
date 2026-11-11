@@ -51,9 +51,11 @@ use crate::engine::object_store_wal_test::{
     count_rows, count_ssts, create_leased_region_on, create_region, encode_delta, is_replaced,
     next_manifest_version, publish_delta, put_range, wait_until, wal_config, wal_options,
 };
-use crate::engine::pending_tail_test::{add_field, set_pending_tails};
+use crate::engine::pending_tail_test::{
+    add_field, commit_edit, pending_tails_edit, set_pending_tails,
+};
 use crate::error::Error;
-use crate::manifest::action::{PendingTail, UptoKind};
+use crate::manifest::action::{PendingTail, RegionEdit, UptoKind};
 use crate::manifest::storage::delta_file;
 use crate::region::RegionLeaderState;
 use crate::region::version::VersionRef;
@@ -202,7 +204,12 @@ impl TestRegion {
 
     /// Records `tails` and reopens the region as a Follower, which replays none of them.
     async fn reopen_with_tails(&self, tails: Vec<PendingTail>) {
-        set_pending_tails(&self.engine, self.region_id, tails).await;
+        self.reopen_with_edit(pending_tails_edit(tails)).await;
+    }
+
+    /// Commits `edit`, which records tails, and reopens the region as a Follower.
+    async fn reopen_with_edit(&self, edit: RegionEdit) {
+        commit_edit(&self.engine, self.region_id, edit).await;
         reopen_region(
             &self.engine,
             self.region_id,
@@ -298,6 +305,23 @@ impl TestRegion {
             .list_upper_bound(self.region_id)
             .await
             .unwrap()
+    }
+
+    /// Writes 99 to the row of key "6", which [Self::write_remote_rows] also writes.
+    async fn overwrite_remote_row(&self) {
+        let rows = Rows {
+            schema: rows_schema(&CreateRequestBuilder::new().build()),
+            rows: build_rows_for_key("6", 6, 7, 99),
+        };
+        put_rows(&self.engine, self.region_id, rows).await;
+    }
+
+    /// Returns whether a scan sees the value [Self::overwrite_remote_row] wrote.
+    async fn sees_overwrite(&self) -> bool {
+        let request = ScanRequest::default();
+        let stream = self.engine.scan_to_stream(self.region_id, request).await;
+        let batches = RecordBatches::try_collect(stream.unwrap()).await.unwrap();
+        batches.pretty_print().unwrap().contains("99.0")
     }
 
     fn version(&self) -> VersionRef {
@@ -554,19 +578,31 @@ async fn test_writes_after_replay_win_over_replayed_rows() {
     region.catchup().await;
     region.wait_until_replayed().await;
 
-    let rows = Rows {
-        schema: rows_schema(&CreateRequestBuilder::new().build()),
-        rows: build_rows_for_key("6", 6, 7, 99),
-    };
-    put_rows(&region.engine, region.region_id, rows).await;
+    region.overwrite_remote_row().await;
 
-    let stream = region
-        .engine
-        .scan_to_stream(region.region_id, ScanRequest::default())
-        .await
-        .unwrap();
-    let batches = RecordBatches::try_collect(stream).await.unwrap();
-    assert!(batches.pretty_print().unwrap().contains("99.0"));
+    assert!(region.sees_overwrite().await);
+}
+
+#[tokio::test]
+async fn test_writes_during_replay_win_over_replayed_rows() {
+    let region = TestRegion::new("tail-replay-earlier-writes", false, None).await;
+    let last = region.write_remote_rows(region.region_id, 6, 9).await;
+    // Whatever records tails raises the committed sequence to theirs, here 100 to 102, so
+    // writes accepted during the replay get larger sequences.
+    let edit = RegionEdit {
+        committed_sequence: Some(102),
+        ..pending_tails_edit(vec![remote_tail(0, last, UptoKind::Reported)])
+    };
+    region.reopen_with_edit(edit).await;
+    region.listener.hold_from(1);
+    region.catchup().await;
+    wait_until(|| region.listener.commits() == 1).await;
+
+    region.overwrite_remote_row().await;
+    region.listener.hold_from(0);
+    region.wait_until_replayed().await;
+
+    assert!(region.sees_overwrite().await);
 }
 
 #[tokio::test]

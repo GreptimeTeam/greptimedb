@@ -140,7 +140,9 @@ Tests live next to the code as `*_test.rs` (e.g. `src/mito2/src/engine/flush_tes
   role change makes the region writable. Each tail goes into its own SSTs, since an
   SST can give all its rows its largest sequence. The task commits outside the edit queue
   (`ManifestContext::update_manifest_for_tails`) and always reports its end, which
-  lets the worker start the next replay or reload a fenced region.
+  lets the worker start the next replay or reload a fenced region. The edit that records
+  tails must raise the committed sequence to theirs, or writes accepted during the replay
+  lose to replayed rows.
 - Lock ordering: take the manifest lock before updating `version_control`; the
   reverse deadlocks against concurrent flush/compaction.
 - All region I/O runs on tokio workers; never `block_on` inside a worker.
