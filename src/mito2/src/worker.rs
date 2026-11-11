@@ -64,7 +64,7 @@ use crate::cache::{CacheManager, CacheManagerRef, WriteCacheUploadStoreWrapperRe
 use crate::compaction::memory_manager::{CompactionMemoryManager, new_compaction_memory_manager};
 use crate::compaction::{CancelCompactionResult, CompactionCoordinator, CompactionScheduler};
 use crate::config::MitoConfig;
-use crate::error::{self, CreateDirSnafu, JoinSnafu, Result, WorkerStoppedSnafu};
+use crate::error::{self, CreateDirSnafu, ExternalSnafu, JoinSnafu, Result, WorkerStoppedSnafu};
 use crate::flush::{FlushScheduler, WriteBufferManagerImpl, WriteBufferManagerRef};
 use crate::gc::{GcLimiter, GcLimiterRef};
 use crate::lease::NodeLease;
@@ -87,8 +87,10 @@ use crate::series_index::{
 use crate::sst::file::RegionFileId;
 use crate::sst::file_ref::FileReferenceManagerRef;
 use crate::sst::index::IndexBuildScheduler;
+use crate::sst::index::handler::IndexKindProviderRef;
 use crate::sst::index::intermediate::IntermediateManager;
 use crate::sst::index::puffin_manager::PuffinManagerFactory;
+use crate::sst::index::registry::{IndexRegistry, IndexRegistryRef};
 #[cfg(feature = "hdfs-object-store")]
 use crate::temp_file_sweeper;
 use crate::time_provider::{StdTimeProvider, TimeProviderRef};
@@ -646,6 +648,23 @@ pub async fn write_cache_from_config(
 pub(crate) fn worker_init_check_delay() -> Duration {
     let init_check_delay = rng().random_range(0..MAX_INITIAL_CHECK_DELAY_SECS);
     Duration::from_secs(init_check_delay)
+}
+
+/// Constructs the shared registry for region creation and index maintenance.
+fn index_registry(
+    config: &MitoConfig,
+    provider: Option<IndexKindProviderRef>,
+) -> Result<IndexRegistryRef> {
+    IndexRegistry::new(
+        config.inverted_index.clone(),
+        config.fulltext_index.clone(),
+        config.bloom_filter_index.clone(),
+    )
+    .with_provider(provider)
+    .map(Arc::new)
+    .with_context(|_| ExternalSnafu {
+        context: "registering index handlers".to_string(),
+    })
 }
 
 /// Worker start config.

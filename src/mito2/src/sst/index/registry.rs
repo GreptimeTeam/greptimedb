@@ -72,6 +72,14 @@ impl IndexRegistry {
         Ok(self)
     }
 
+    /// Strictly validates configured options before a region is opened.
+    pub fn validate(&self, context: &PlanContext<'_>) -> Result<(), BoxedError> {
+        for handler in &self.handlers {
+            handler.validate(context)?;
+        }
+        Ok(())
+    }
+
     /// Installs a handler, rejecting empty or overlapping kind ownership.
     pub fn register(&mut self, handler: Arc<dyn IndexKindHandler>) -> Result<(), BoxedError> {
         self.validate_registration(handler.kinds())?;

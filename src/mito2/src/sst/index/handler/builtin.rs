@@ -47,6 +47,12 @@ impl IndexKindHandler for BuiltinIndexHandler {
         }
     }
 
+    fn validate(&self, _context: &PlanContext<'_>) -> Result<(), BoxedError> {
+        // Built-in options retain their existing schema/build-time validation.
+        // Planning here would make region creation reject inputs it previously accepted.
+        Ok(())
+    }
+
     fn plan(&self, context: &PlanContext<'_>) -> Result<Option<Arc<dyn PlannedIndex>>, BoxedError> {
         match self {
             Self::Inverted(config) => InvertedPlan::plan(config, context)
@@ -89,6 +95,45 @@ mod tests {
     use crate::region::options::IndexOptions;
     use crate::sst::index::IndexBuildType;
     use crate::test_util::sst_util;
+
+    #[test]
+    fn test_builtin_validation_preserves_build_time_option_errors() {
+        for (handler, key) in [
+            (
+                BuiltinIndexHandler::Fulltext(FulltextIndexConfig::default()),
+                datatypes::schema::FULLTEXT_KEY,
+            ),
+            (
+                BuiltinIndexHandler::Bloom(BloomFilterConfig::default()),
+                datatypes::schema::SKIPPING_INDEX_KEY,
+            ),
+        ] {
+            let mut metadata = sst_util::sst_region_metadata();
+            let column = metadata
+                .column_metadatas
+                .iter_mut()
+                .find(|column| column.semantic_type == api::v1::SemanticType::Field)
+                .unwrap();
+            column.column_schema =
+                column
+                    .column_schema
+                    .clone()
+                    .with_metadata(std::collections::HashMap::from([(
+                        key.to_string(),
+                        "invalid json".to_string(),
+                    )]));
+            let metadata = Arc::new(metadata);
+            let options = IndexOptions::default();
+            let context = PlanContext {
+                metadata: &metadata,
+                index_options: &options,
+                build_type: IndexBuildType::Flush,
+                existing_indexes: &[],
+            };
+            assert!(handler.validate(&context).is_ok());
+            assert!(handler.plan(&context).is_err());
+        }
+    }
 
     #[test]
     fn test_builtin_planning_reports_invalid_options() {
