@@ -52,6 +52,7 @@ use sqlparser::ast::{AccessExpr, Value, visit_expressions_mut};
 use store_api::metric_engine_consts::DATA_SCHEMA_TSID_COLUMN_NAME;
 
 use crate::dist_plan::DistPlannerOptions;
+use crate::dist_plan::region_local_node;
 use crate::error::{
     CteColumnSchemaMismatchSnafu, PlanSqlSnafu, QueryPlanSnafu, Result, SqlSnafu,
     UnimplementedSnafu,
@@ -80,34 +81,63 @@ pub trait LogicalPlanner: Send + Sync {
     fn as_any(&self) -> &dyn Any;
 }
 
-/// A native plan a distributed planner splits over regions may place fused evaluation only above
-/// independent raw sources. In particular, a bare scan under FusedSeries would place a fused node
-/// that expects to run where it was planned below a region boundary, which this gate must not
-/// admit.
+/// A native plan a distributed planner splits over regions may place fused evaluation in one of two
+/// places: above one independent raw source per region, or inside the region whose own scan it
+/// reads.
+///
+/// The second placement is the analyzer's to give. It moves a node into a region only when it
+/// classifies the node as running where its scan is, and a bare scan is never shipped across a
+/// region boundary on its own: nothing below the boundary could read it. So a scan is admitted only
+/// under a node the analyzer would move, and every other input of the plan has to be a raw source
+/// that names the region it reads.
 ///
 /// A fused node that reads no region is the one exception: it has nothing to place in a region, so
 /// the frontend evaluates it and the transport this gate protects is never used.
 fn remote_native_raw_plan_supported(plan: &LogicalPlan) -> bool {
-    fn walk(plan: &LogicalPlan, found_raw: &mut bool) -> bool {
-        if matches!(plan, LogicalPlan::TableScan(_)) {
-            return false;
+    /// `region_local` says the nearest enclosing node reads its scan where that scan is planned, so
+    /// the subtree below it travels inside the region's own plan.
+    fn walk(
+        plan: &LogicalPlan,
+        region_local: bool,
+        found_raw: &mut bool,
+        found_region_local: &mut bool,
+    ) -> bool {
+        match plan {
+            LogicalPlan::TableScan(_) => region_local,
+            LogicalPlan::Extension(extension) => {
+                if extension
+                    .node
+                    .as_any()
+                    .is::<promql::extension_plan::RawSeriesSource>()
+                {
+                    *found_raw = true;
+                    return matches!(
+                        extension.node.inputs().as_slice(),
+                        [LogicalPlan::TableScan(_)]
+                    );
+                }
+                let region_local = extension
+                    .node
+                    .as_any()
+                    .is::<promql::extension_plan::FusedSeries>()
+                    && region_local_node(extension.node.as_ref());
+                *found_region_local |= region_local;
+                extension
+                    .node
+                    .inputs()
+                    .iter()
+                    .all(|child| walk(child, region_local, found_raw, found_region_local))
+            }
+            _ => plan
+                .inputs()
+                .iter()
+                .all(|child| walk(child, region_local, found_raw, found_region_local)),
         }
-        if let LogicalPlan::Extension(extension) = plan
-            && extension
-                .node
-                .as_any()
-                .is::<promql::extension_plan::RawSeriesSource>()
-        {
-            *found_raw = true;
-            return matches!(
-                extension.node.inputs().as_slice(),
-                [LogicalPlan::TableScan(_)]
-            );
-        }
-        plan.inputs().iter().all(|child| walk(child, found_raw))
     }
     let mut found_raw = false;
-    walk(plan, &mut found_raw) && (found_raw || is_regionless_fused_plan(plan))
+    let mut found_region_local = false;
+    walk(plan, false, &mut found_raw, &mut found_region_local)
+        && (found_raw || found_region_local || is_regionless_fused_plan(plan))
 }
 
 /// Whether `plan` is a native fused plan with no region below it.
@@ -1487,20 +1517,20 @@ mod tests {
         assert!(message.contains("Expected true or false"), "{message}");
     }
 
-    /// One deployment, one topology: a distributed planner plans every native statement over
-    /// per-selector raw sources, so the raw-topology admission gate admits the same shapes wherever
-    /// its regions are, and an engine with no distributed planner plans no region for the gate to
-    /// judge.
+    /// One deployment, one topology: the raw-topology admission gate admits the same shapes
+    /// wherever an engine's regions are, and an engine with no distributed planner plans no region
+    /// for the gate to judge.
+    ///
+    /// A per-series statement reads its table where that table is, in both deployments: only a
+    /// statement whose result depends on pieces held by different regions - cross-table work here -
+    /// reads through one source per region.
     #[tokio::test]
     async fn test_native_promql_admission_is_the_same_for_both_deployments() {
         for (with_dist_planner, query, sourced) in [
-            // Two tables are cross-table work, which needs one source per table whether or not a
-            // distributed planner is installed; a single selector reads its table directly unless
-            // the distributed planner asks for the source-backed topology.
             (false, "some_metric + other_metric", true),
             (false, "rate(some_metric[5m])", false),
             (true, "some_metric + other_metric", true),
-            (true, "rate(some_metric[5m])", true),
+            (true, "rate(some_metric[5m])", false),
         ] {
             let engine = create_promql_test_engine_with(
                 crate::options::QueryOptions {
@@ -1533,8 +1563,8 @@ mod tests {
                 "with_dist_planner={with_dist_planner}, query={query}: {display}"
             );
             if with_dist_planner {
-                // Every native plan a distributed planner produces is the raw topology, so the
-                // admission gate admits it instead of replanning it through the legacy route.
+                // The gate admits the plan instead of replanning it through the legacy route: a
+                // per-series read inside the region that holds it, or one source per region.
                 assert!(remote_native_raw_plan_supported(&plan), "{display}");
             }
             assert_eq!(

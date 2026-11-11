@@ -8993,12 +8993,13 @@ async fn native_promql_two_selectors_on_a_partitioned_table_match_above_independ
         assert_eq!(native, legacy, "{query}");
     }
 
-    // A rewrite that overwrites the partition column cannot be answered from one region. The series
-    // `h0` and `h2` live in different regions of `native_partitioned_pair`, so collapsing `host` to
-    // one value gives two series of one label set a value at the same evaluation point - the error
-    // Prometheus reports. A native route plans one canonical producer per region, and that producer
-    // only collects the pieces its own region holds, so it could never see the collision: the route
-    // has to decline, and the existing planner - which reads both regions - is what answers.
+    // A rewrite that overwrites the partition column collapses `host` on two series that live in
+    // different regions of `native_partitioned_pair`: `h0` and `h2` become one label set with two
+    // values at the same evaluation point, which is the error Prometheus reports. The read is not
+    // confined to one region, so the canonical boundary is placed above both of them - each region
+    // reads the table through its own raw source, the producer merges what one region holds, and
+    // the router collects the pieces of the label set from every region - and that collection is
+    // where the two values meet.
     let collapsing = r#"label_replace(native_partitioned_pair, "host", "same", "host", ".*")"#;
     let collapsing_sql = format!("TQL EVAL (5, 5, '1s') {collapsing}");
     observer.clear();
@@ -9006,10 +9007,26 @@ async fn native_promql_two_selectors_on_a_partitioned_table_match_above_independ
         .do_query(&collapsing_sql, native_query_context(true, 4))
         .await
         .remove(0);
+    let fused = observer
+        .fused()
+        .unwrap_or_else(|| panic!("a collapsing rewrite over a partitioned table runs natively"));
+    assert_eq!(
+        fused.name(),
+        "FusedSeriesExec",
+        "the frontend reads the boundary's frames: {}",
+        display_plan_tree(&fused)
+    );
+    let shape = native_plan_shape(&observer.root_plan());
+    assert_eq!(
+        shape.regions_per_scan,
+        vec![2],
+        "the boundary reads both declared host ranges: {:?}",
+        display_plan_tree(&observer.root_plan())
+    );
     assert!(
-        observer.fused().is_none(),
-        "a collapsing rewrite over a partitioned table must not plan a fused node: {:?}",
-        observer.fused().map(|plan| display_plan_tree(&plan))
+        canonical_router(&observer).is_some(),
+        "the canonical router collects the pieces of the label set from both regions: {}",
+        display_plan_tree(&observer.root_plan())
     );
     let native_error = match native {
         Ok(output) => collect_error(output).await,
@@ -9017,7 +9034,7 @@ async fn native_promql_two_selectors_on_a_partitioned_table_match_above_independ
     };
     assert!(
         native_error.contains("cannot contain metrics with the same labelset"),
-        "the existing planner answers this shape and reports the overlap: {native_error}"
+        "the native route answers this shape and reports the overlap: {native_error}"
     );
     let legacy = instance
         .do_query(&collapsing_sql, native_query_context(false, 4))

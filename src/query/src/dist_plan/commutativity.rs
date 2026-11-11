@@ -35,6 +35,41 @@ use crate::dist_plan::analyzer::AliasMapping;
 use crate::dist_plan::merge_sort::{MergeSortLogicalPlan, merge_sort_transformer};
 use crate::promql::planner::native::{independent_scan_pair, pointwise_operand, same_table_scans};
 
+/// Whether `fused`'s canonical boundary may run inside one region.
+///
+/// A canonical producer merges the pieces of one label set that its own input partitions hold, and
+/// its physical canonical router collects those pieces from exactly those partitions. It may run
+/// where those partitions are the whole read, which is what the planner's proof states: a read only
+/// one region serves is answered there without asking any other region for a piece of the same label
+/// set. Without the proof the node runs above the regions with one source per region under it, where
+/// its router sees every piece.
+///
+/// The proof is the whole predicate. The conditions this node used to be held to - a series-frame
+/// output, a prefix that is safe at its local width, at least one input - say nothing about where
+/// the pieces of a label set are, and each is already a property of how the node is built: the
+/// boundary's constructor emits a series-frame producer, the planner refuses a tree whose merge
+/// prefix is not local before it builds one, and a boundary that reads nothing has no read to place.
+/// Holding a region-local producer to the shape of its children would be worse than redundant: a
+/// canonical cut wraps its inputs in sources whichever scan was chosen for them, and those are still
+/// one region's pieces.
+fn canonical_boundary_region_node(fused: &FusedSeries) -> bool {
+    fused.reads_single_region()
+}
+
+/// Whether `node` is a node the analyzer runs where the scan it reads is planned.
+///
+/// A region only ever runs a fused node over its own scan, and the analyzer puts one there by
+/// classifying it as commutative - which is also the only placement a node over a bare scan has,
+/// because a bare scan is never shipped across a region boundary. A planner that has to commit to
+/// a plan before the analyzer runs asks this to know whether that placement exists: `false` says
+/// every input of this node has to be a source that names its region.
+pub(crate) fn region_local_node(node: &dyn UserDefinedLogicalNode) -> bool {
+    matches!(
+        Categorizer::check_extension_plan(node, &AliasMapping::default()),
+        Commutativity::Commutative
+    )
+}
+
 pub struct StepTransformAction {
     extra_parent_plans: Vec<LogicalPlan>,
     new_child_plan: Option<LogicalPlan>,
@@ -260,11 +295,18 @@ impl Categorizer {
                     // partitions hold, and its physical canonical router collects those pieces from
                     // exactly those partitions. A region holds only part of a label set, so a
                     // producer there would answer a label set from one region's share whenever the
-                    // pieces are spread. It is placed by its own contract and not by the shape below
-                    // it: the node stays above the regions with its router, and it must not fall
-                    // through to the per-series rules below, which describe what a node computes and
-                    // say nothing about where the pieces of one label set are.
-                    return Commutativity::NonCommutative;
+                    // pieces are spread; the one placement that covers a whole label set is a read
+                    // that one region holds entire, and only the planner's proof says that this
+                    // statement's read is one of those. The shape below the node says nothing about
+                    // it - a proven single-region read can hold sources, because a canonical cut
+                    // wraps its inputs in sources independently of how the scan was chosen - so the
+                    // proof is what decides, and the per-series rules below are not consulted: they
+                    // describe what a node computes, not where the pieces of a label set are.
+                    return if canonical_boundary_region_node(fused) {
+                        Commutativity::Commutative
+                    } else {
+                        Commutativity::NonCommutative
+                    };
                 }
                 // The raw-series reader supports one scan, or the narrow same-table multi-scan
                 // one-to-one case. This classification is for region-local execution only.
@@ -618,6 +660,18 @@ mod tests {
     /// collection. The children are exactly what the caller supplies, so a test can hand the node
     /// the region's own scan and ask where such a node may run.
     fn canonical_producer_plan(input: LogicalPlan) -> LogicalPlan {
+        canonical_producer_plan_with_proof(input, false)
+    }
+
+    /// The same producer, told that the planner proved its read stays inside one region.
+    fn proven_canonical_producer_plan(input: LogicalPlan) -> LogicalPlan {
+        canonical_producer_plan_with_proof(input, true)
+    }
+
+    fn canonical_producer_plan_with_proof(
+        input: LogicalPlan,
+        single_region_read: bool,
+    ) -> LogicalPlan {
         let stmt = native_statement();
         let grid = statement_grid(&stmt).unwrap();
         let evaluated = NativeType::Samples(Arc::new(SeriesSchema {
@@ -652,7 +706,8 @@ mod tests {
                     binding,
                     vec![input],
                 )
-                .unwrap(),
+                .unwrap()
+                .with_single_region_read(single_region_read),
             ),
         })
     }
@@ -850,10 +905,11 @@ mod tests {
         ));
     }
 
-    /// A canonical producer never runs in a region, whatever its children look like: its router
-    /// collects the pieces of one label set from exactly the partitions the producer runs on, and a
-    /// region holds only part of a label set. A bare scan underneath does not on its own admit the
-    /// producer, so the node stays above the regions with its router.
+    /// A canonical producer without the planner's single-region proof never runs in a region,
+    /// whatever its children look like: its router collects the pieces of one label set from
+    /// exactly the partitions the producer runs on, and a region holds only part of a label set. A
+    /// bare scan underneath does not on its own admit the producer, so the node stays above the
+    /// regions with its router.
     #[test]
     fn a_canonical_producer_is_not_commutative_even_over_a_bare_scan() {
         let plan = canonical_producer_plan(table_scan_plan());
@@ -867,6 +923,28 @@ mod tests {
         assert!(matches!(
             Categorizer::check_plan(&plan, None).unwrap(),
             Commutativity::NonCommutative
+        ));
+    }
+
+    /// The proof is what admits a canonical producer to a region, and nothing about the shape below
+    /// it. A read that one region holds entire is answered there: the producer merges what that
+    /// region holds and its router collects the pieces from the same partitions, so there is no
+    /// piece of the label set it cannot see. A bare scan underneath is not what says so - a proven
+    /// single-region read can hold sources as well - which is why the fact is carried on the node
+    /// and asked here.
+    #[test]
+    fn a_canonical_producer_with_a_single_region_proof_is_commutative() {
+        let plan = proven_canonical_producer_plan(table_scan_plan());
+        let LogicalPlan::Extension(extension) = &plan else {
+            unreachable!();
+        };
+        assert!(matches!(
+            Categorizer::check_extension_plan(extension.node.as_ref(), &AliasMapping::default()),
+            Commutativity::Commutative
+        ));
+        assert!(matches!(
+            Categorizer::check_plan(&plan, None).unwrap(),
+            Commutativity::Commutative
         ));
     }
 
