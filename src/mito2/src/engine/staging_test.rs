@@ -2498,3 +2498,31 @@ async fn test_writes_after_staging_ends_wait_for_stalled_writes() {
 
     assert_eq!(0, count_rows(&engine, region_id).await);
 }
+
+#[tokio::test]
+async fn test_migration_flush_retries_while_staging_ends() {
+    let mut env = TestEnv::new().await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+    let region_id = RegionId::new(1024, 0);
+    let (schema, _) = create_staging_region(&engine, region_id).await;
+    put_range(&engine, region_id, &schema, (0, 3)).await;
+    let region = engine.get_region(region_id).unwrap();
+    let migration_flush = || {
+        engine.handle_request(
+            region_id,
+            RegionRequest::Flush(RegionFlushRequest {
+                reason: Some(RegionFlushReason::RegionMigration),
+                ..Default::default()
+            }),
+        )
+    };
+
+    let started = region.manifest_ctx.begin_ending_staging(region_id).unwrap();
+    let error = migration_flush().await.unwrap_err();
+    assert_eq!(RetryHint::Retryable, error.retry_hint());
+
+    region
+        .manifest_ctx
+        .finish_ending_staging(region_id, started, &Ok::<(), Error>(()));
+    assert_eq!(0, migration_flush().await.unwrap().affected_rows);
+}

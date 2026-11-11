@@ -611,6 +611,16 @@ async fn test_apply_staging_manifest_success_with_format(flat_format: bool) {
     assert_eq!(manifest.files.len(), 0);
     let staging_manifest = region.manifest_ctx.staging_manifest().await.unwrap();
     assert_eq!(staging_manifest.files.len(), 0);
+    // A delta that an older binary left in the staging directory goes when staging ends.
+    let data_home = env.data_home();
+    let region_dir = format!("{}/data/test/1_0000000002", data_home.display());
+    let staging_manifest_dir = format!("{}/staging/manifest", region_dir);
+    fs::create_dir_all(&staging_manifest_dir).unwrap();
+    fs::write(
+        format!("{staging_manifest_dir}/00000000000000000001.json"),
+        "{}",
+    )
+    .unwrap();
 
     engine
         .handle_request(
@@ -640,9 +650,6 @@ async fn test_apply_staging_manifest_success_with_format(flat_format: bool) {
     // The staging partition expr should be cleared.
     assert!(region.manifest_ctx.staging_partition_info().is_none());
     // The staging manifest directory should be empty.
-    let data_home = env.data_home();
-    let region_dir = format!("{}/data/test/1_0000000001", data_home.display());
-    let staging_manifest_dir = format!("{}/staging/manifest", region_dir);
     let staging_files = fs::read_dir(&staging_manifest_dir)
         .map(|entries| {
             entries
