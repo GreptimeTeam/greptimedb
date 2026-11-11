@@ -73,11 +73,7 @@ where
     pub fn new(opts: T, instance: Arc<Instance>, plugins: Plugins) -> Self {
         let feopts = opts.clone().into();
         instance.init_logical_batcher(&feopts);
-        // Create server request memory limiter for all server protocols
-        let server_memory_limiter = ServerMemoryLimiter::new(
-            feopts.max_in_flight_write_bytes.as_bytes(),
-            feopts.write_bytes_exhausted_policy,
-        );
+        let server_memory_limiter = instance.server_memory_limiter().clone();
 
         Self {
             opts,

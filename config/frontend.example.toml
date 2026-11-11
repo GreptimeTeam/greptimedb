@@ -27,13 +27,15 @@ default_column_prefix = "greptime"
 ## @toml2docs:none-default
 #+ user_provider = "static_user_provider:file:/path/to/users"
 
-## Maximum total memory for all concurrent write request bodies and messages (HTTP, gRPC, Flight).
+## Shared quota for concurrent write request bodies and messages (HTTP, gRPC, Flight)
+## and estimated PB-to-Arrow conversion memory for ordinary-table batching.
 ## Set to 0 to disable the limit. Default: "0" (unlimited)
 ## @toml2docs:none-default="0"
 #+ max_in_flight_write_bytes = "1GB"
 
 ## Policy when write bytes quota is exhausted.
 ## Options: "wait" (default, 10s timeout), "wait(<duration>)" (e.g., "wait(30s)"), "fail"
+## Table-batch conversion never waits for additional memory; contention remains retryable.
 #+ write_bytes_exhausted_policy = "wait"
 
 ## The runtime options.

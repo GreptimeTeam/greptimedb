@@ -89,6 +89,7 @@ use servers::prometheus_handler::{
     ParsedPromQuery, PrometheusHandler, resolve_schema_from_matchers,
 };
 use servers::query_handler::sql::SqlQueryHandler;
+use servers::request_memory_limiter::ServerMemoryLimiter;
 use session::context::{Channel, QueryContextRef};
 use session::table_name::table_idents_to_full_name;
 use snafu::prelude::*;
@@ -116,6 +117,7 @@ use crate::stream_wrapper::CancellableStreamWrapper;
 /// [`servers::query_handler::sql::SqlQueryHandler`], etc.
 #[derive(Clone)]
 pub struct Instance {
+    server_memory_limiter: ServerMemoryLimiter,
     frontend_peer_addr: String,
     catalog_manager: CatalogManagerRef,
     pipeline_operator: Arc<PipelineOperator>,
@@ -139,6 +141,11 @@ pub struct Instance {
 }
 
 impl Instance {
+    /// Returns the memory pool shared by protocol admission and table-batch conversion.
+    pub fn server_memory_limiter(&self) -> &ServerMemoryLimiter {
+        &self.server_memory_limiter
+    }
+
     pub fn frontend_peer_addr(&self) -> &str {
         &self.frontend_peer_addr
     }
