@@ -5,7 +5,8 @@ and validation limits for samples artifacts. The version number stays 1: the
 exact-identity change is enforced by the mandatory `identity_encoding` manifest
 discriminator, not by a version bump.
 
-Every block stores the exact series identity (the canonical sparse primary key).
+Every block names the exact series identity (the canonical sparse primary key), which
+the part stores once per series in its key area.
 An artifact written before exact identity has the same version number and recorded
 only `(table_id, tsid)`, a hash; it can be structurally valid and perfectly ordered
 while two distinct series were merged. Nothing in such an artifact proves
@@ -84,11 +85,13 @@ including the internal names below. Tags are not sample fields and are not store
 The stored logical Arrow schema is `__table_id: UInt32`, `__tsid: UInt64`, the
 timestamp column with its recorded unit, `__sequence: UInt64`, `__op_type: UInt8`,
 then nullable Float64 fields in manifest order, and finally
-`__primary_key: Binary` holding the exact key of the block that produced each row.
+`__primary_key: Binary` naming the exact key of the block that produced each row.
 The five internal columns and `__primary_key` are non-null; value fields stay
 nullable, as the manifest declares them. `__table_id`/`__tsid` are the coarse,
 hash-based prefix of that key. Tag columns are not stored; the exact key is the
-identity.
+identity. A reader returns that key once per output batch — each block belongs to
+exactly one series — instead of materializing the column per row, and rejects a
+request that projects it.
 
 Each `files` entry contains `part_id: u32`, `file_size: u64`, `num_rows: u64`,
 `num_blocks: u64`, `first`, `last`, `min_timestamp: i64`, and `max_timestamp: i64`.
@@ -123,10 +126,13 @@ the manifest.
 │   Block 0: time, sequence, operation, fields  │
 │   Block 1: ...                               │
 ├──────────────────────────────────────────────┤ ← payload_end
+│ Key area: one exact series key per series,   │
+│   back to back, not page bounded             │
+├──────────────────────────────────────────────┤ ← key_end
 │ Leaf pages (one is the root at depth 1)       │
 │ Optional internal root (depth 2)              │
 ├──────────────────────────────────────────────┤
-│ Trailer                            112 bytes │
+│ Trailer                            120 bytes │
 └──────────────────────────────────────────────┘
 ```
 
@@ -145,8 +151,9 @@ Reserved fields must be zero, and decoded structures must have no trailing bytes
 
 ### Column payloads and row semantics
 
-Each block contains exactly one series and stores that series' exact canonical
-sparse primary key once in its descriptor. The key is the SST's own encoding of
+Each block contains exactly one series and names it by that series' exact canonical
+sparse primary key, which is stored once per series in the part's [key area](#key-area)
+and referenced by the block descriptor. The key is the SST's own encoding of
 `(table_id, tsid, label column-id/value pairs sorted by name, non-null only)`, and
 `(table_id, tsid)` is only its order-preserving prefix. Two distinct series may
 share a prefix. Timestamp, sequence, operation type, and each present value field
@@ -161,7 +168,10 @@ Block keys are nondecreasing in byte-lexicographic order, timestamps are
 nondecreasing within one exact key, and sequences are nonincreasing within equal
 timestamps, including across parts. A change of exact key restarts timestamps and
 ordinals, even when the coarse `(table_id, tsid)` prefix is unchanged. Equal
-ordering keys retain input order; operation type is not a sorting key.
+ordering keys retain input order; operation type is not a sorting key. The key area
+follows the same order, one copy per series; because key bytes are read lazily, a
+reader validates ordering on the descriptor's `(table_id, tsid)` and on the order of
+key references instead of on the label bytes.
 
 Blocks split on an identity change or before the next row would exceed a packing
 limit. There is no hourly split and no padding of short blocks. The default row
@@ -203,6 +213,31 @@ offsets to 4 GiB. Verify the checksum before decompression; require exactly the
 declared decoded length, with bounded output even if a codec frame claims more.
 Checksums detect accidental corruption, not malicious modification.
 
+### Key area
+
+The exact series keys occupy their own region between the column payloads and the
+metadata pages: `[payload_end, key_end)`. Keys are written back to back with no
+padding and no alignment, in block order, and every block of one series shares one
+copy of that series' key. The area therefore holds exactly one key per distinct
+series of the part, ordered by exact key. A descriptor's key reference is unique per
+series, ordered, and disjoint from every other series' copy, which is why an equal
+reference means "the same exact series" without reading the bytes.
+
+A key's length is bounded by the part, not by a page or a chunk. Version 1 puts no
+page inside the key area, so one key may be far longer than the 65,536-byte page
+limit; the `u32` length in a descriptor is validated against `key_end`, so a
+corrupt length can never address bytes outside the part. There is no per-key
+compression, checksum, or extra framing: a key is stored exactly as the SST encodes
+it, and its own primary-key framing (a fixed reserved prefix plus dense or sparse
+label encoding) is what validates it.
+
+Reading stays lazy. A reader reads only the byte ranges of the keys of the blocks a
+request selects, at most once per series, and validates a fetched key's framing and
+its `(table_id, tsid)` prefix against the descriptor that referenced it. A reference is
+rejected as soon as its descriptor is decoded — before any row is emitted — when it
+starts before `payload_end`, when `offset + length` exceeds `key_end`, when the length
+is zero, or when two consecutive descriptors that do not name one series overlap.
+
 ### Metadata pages
 
 A leaf describes blocks. An internal page references leaves. The root is either
@@ -224,11 +259,11 @@ Leaf (kind 0):                     Internal root (kind 1):
 ```
 
 Pages are nonempty and limited to 65,536 decoded bytes, including the 12-byte
-prefix. Descriptors never straddle pages. A descriptor carries one variable-size series
-key and then fixed-width columns. A key has no separate length limit: it is bounded
-only by the page it shares with its block descriptor. The writer requires the 12-byte
-leaf prefix and the descriptor, key included, to fit in one 65,536-byte page, so no
-oversized-leaf exception is needed.
+prefix. Descriptors never straddle pages, and every descriptor is fixed-width because
+the key it names is not stored in it. The writer requires the 12-byte leaf prefix and
+one descriptor to fit in a configured page, which for the 1,024-field maximum is
+`12 + 56 + 44 * 1,027 = 45,256` decoded bytes. The page limit is a bound on
+descriptors only: it no longer bounds the length of a series key.
 
 #### Block descriptor
 
@@ -236,8 +271,8 @@ oversized-leaf exception is needed.
 | --- | ---: | --- |
 | Table ID | 4 | Coarse prefix of the constant key in this block |
 | TSID | 8 | Coarse prefix of the constant key in this block |
-| Key length | 4 | 1..=65,344, and short enough for the block's own page |
-| Series key | variable | Exact canonical sparse primary key; its `(table_id, tsid)` prefix must equal the two fields above |
+| Key offset | 8 | Absolute offset of the block's exact key in the part's key area |
+| Key length | 4 | Nonzero; the key's `(table_id, tsid)` prefix must equal the two fields above |
 | Minimum timestamp | 8 | Signed i64, first row's timestamp |
 | Maximum timestamp | 8 | Signed i64, last row's timestamp |
 | Block ordinal | 8 | Per-identifier ordinal across the artifact |
@@ -245,11 +280,14 @@ oversized-leaf exception is needed.
 | Column count | 4 | Number of following column descriptors |
 | Column descriptors | 44 each | Defined below |
 
-The fixed prefix is 48 bytes plus the series key. Ordinals start at zero for each
-exact key and increase by one across block and part boundaries while that key
-continues. Blocks sort by exact key. Adjacent blocks of the same exact key satisfy
+The fixed prefix is 56 bytes and does not depend on the key: `4 table ID + 8 TSID +
+8 key offset + 4 key length + 8 minimum timestamp + 8 maximum timestamp + 8 ordinal +
+4 row count + 4 column count`. Ordinals start at zero for each exact key and increase
+by one across block and part boundaries while that key continues. Blocks sort by exact
+key. Adjacent blocks of the same exact key share one key reference and satisfy
 `previous.max_timestamp <= next.min_timestamp`; equality is permitted. Blocks of
-different keys have no timestamp relation at all.
+different keys have no timestamp relation at all, and a new series' key copy starts at
+or after the end of the previous copy.
 
 Each column descriptor is:
 
@@ -268,14 +306,15 @@ all rows null is omitted and synthesized as null by the reader; present value
 chunks have `null_count < row_count`. No value statistics are stored.
 
 A block with `P` present fields has `C = 3 + P` chunks and a descriptor of
-`48 + 44 * C + key_length` bytes. For one present field the fixed part is
-`48 + 44 * 4 = 224` bytes; at the 1,024-field maximum it is `48 + 44 * 1,027 = 45,236`
-bytes, and the 12-byte leaf prefix makes that `45,248`. Every one of those figures is
-`base + key_length`, so the page-fit requirement above is what bounds the key: at the
-widest field count a key of at most `65,536 - 45,248 = 20,288` bytes still fits, and
-fewer fields leave room for correspondingly longer keys. All chunks
-are physically ordered and disjoint in the column area, across blocks as well
-as within a block. There is no inline block header or block-wide compression.
+`56 + 44 * C` bytes, whatever its key's length. For one present field that is
+`56 + 44 * 4 = 232` bytes; at the 1,024-field maximum it is `56 + 44 * 1,027 = 45,244`
+bytes, and the 12-byte leaf prefix makes that `45,256`. Key length is therefore not
+part of any page budget: a part whose exact key is far longer than a page produces the
+same descriptors, and the earlier `base + key_length` ceiling — 65,344 bytes with no
+value field, 65,300 with one, and 20,288 at the 1,024-field maximum — no longer
+exists. All chunks are physically ordered and disjoint in the column area, across
+blocks as well as within a block, and the key area follows the column area. There is no
+inline block header or block-wide compression.
 
 #### Page reference and time bounds
 
@@ -359,15 +398,17 @@ The series-index format has no sample timestamps or time bounds.
 | Index depth | 4 | 1 or 2 |
 | File version | 4 | 1 |
 | File length | 8 | Includes header and trailer |
-| `payload_end` | 8 | End of column area, start of metadata area |
+| `payload_end` | 8 | End of column area, start of key area |
+| `key_end` | 8 | End of key area, start of metadata area |
 | Magic | 8 | ASCII `GTSAMPLE` |
-| Trailer checksum | 8 | XXH64 of the preceding 104 trailer bytes, seed zero |
+| Trailer checksum | 8 | XXH64 of the preceding 112 trailer bytes (the 104-byte body and the magic), seed zero |
 
-The trailer is 112 bytes. Locate it using the recorded object size without a stat
+The trailer is 120 bytes. Locate it using the recorded object size without a stat
 request. Validate the checksum, magic, version, length, depth, area boundaries,
 root bounds against the manifest part descriptor, and root end position before
-traversal. Column references must lie in `[16, payload_end)`; page references lie
-in `[payload_end, file_length - 112)`. The header and trailer versions must agree.
+traversal. Column references must lie in `[16, payload_end)`; key references must lie
+in `[payload_end, key_end)`; page references lie in `[key_end, file_length - 120)`.
+The header and trailer versions must agree.
 
 ## Encodings and compression
 
@@ -459,7 +500,9 @@ field values.
 
 An individual chunk has at most 1 MiB of encoded bytes after decompression and
 1 MiB plus 64 KiB of stored bytes. Pages have at most 65,536 decoded and 131,072
-stored bytes. Bound sizes before allocating, fetching, or decompressing. Validate
+stored bytes. Series keys are stored in the key area rather than in a page or a
+chunk, so a key's length is bounded by the part and by its `u32` reference length,
+not by `PAGE_LIMIT`; a key longer than a page is a supported part of this version. Bound sizes before allocating, fetching, or decompressing. Validate
 counts against enclosing bytes before allocating descriptor vectors; row counts
 must also satisfy the decoded-block formula. Null output materialization remains
 subject to the same block bound even when chunks are omitted.
@@ -489,12 +532,18 @@ contain several generations with disjoint source sets (at most 64 SSTs per merge
 and each generation may contain multiple bounded part files. Source Parquet files
 are never rewritten.
 
-The local series-index cache layout version is 2. On upgrade from layout 1,
-startup resets the rebuildable index cache before opening regions; ordinary SST
-reads remain available while artifacts rebuild. Rolling back to a layout-1 binary
-likewise resets the incompatible cache. Allow for rebuild time and I/O in either
-direction; do not reuse daily catalogs with an older reader outside this startup
-check. Existing per-SST catalog entries remain readable by the new reader.
+This branch has no deployments, so the local series-index cache token is pinned to
+`1`: a cache written by any other build is discarded on startup and rebuilt from
+the SSTs before regions open, and ordinary SST reads remain available meanwhile.
+That is the only migration this layout has. An artifact written by an earlier build
+of this branch — keys inside the descriptor, a 112-byte trailer without `key_end` —
+carries the same file version and the same `identity_encoding` discriminator, so
+nothing in it names the old shape; the reader locates a trailer from the recorded
+object size, reads the last 120 bytes of such a part, and rejects the shifted frame
+instead of decoding it. Such an artifact is therefore unreadable and is rebuilt,
+not read partially. Allow for rebuild time and I/O in either direction; do not reuse
+daily catalogs with an older reader outside this startup check. Existing per-SST
+catalog entries remain readable by the new reader.
 
 A prepared scan uses a grouped artifact only when all of its sources belong to
 that scan's assignment or were excluded solely by its time filter. Partial coverage

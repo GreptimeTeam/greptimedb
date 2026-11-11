@@ -36,6 +36,14 @@ asserts that opening them through `SamplesFormat` fails on the missing
 artifact from its SSTs instead of reusing it. Legacy catalog identifier coverage
 remains in `series_index::catalog` tests.
 
+The part bytes above also predate two later version-1 shapes, neither of which is
+migrated: block descriptors now carry a fixed-size key reference into a separate key
+area instead of the key bytes, and the trailer records that area (`key_end`) and is
+120 bytes, not 112. The fixture is still rejected for the same reason — the
+discriminator is missing — and that rejection happens while opening the manifest,
+before any part byte is decoded, so the frozen bytes are not a reader for the current
+part layout and must not be regenerated to look like one.
+
 Do not regenerate this fixture just to make a reader change pass. Preserve its
 bytes for future reader compatibility; introduce a separate versioned fixture
 when the approved format changes. This is a frozen-byte compatibility check,

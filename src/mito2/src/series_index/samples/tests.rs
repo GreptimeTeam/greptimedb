@@ -34,7 +34,7 @@ use store_api::storage::FileId;
 use super::metadata::{Bounds, HEADER_SIZE, Page, PayloadReference, TRAILER_SIZE, Trailer};
 use super::*;
 use crate::series_index::artifact::{SamplesEntry, SamplesFileHandle};
-use crate::series_index::format::{SamplesFormat, SamplesReadRequest};
+use crate::series_index::format::{SamplesBatch, SamplesFormat, SamplesReadRequest};
 use crate::series_index::identity::ExactSeriesKey;
 use crate::series_index::purger::series_index_channel;
 use crate::sst::file::RegionFileId;
@@ -205,7 +205,7 @@ async fn root_page(
         &trailer.root.payload.unpack(stored).unwrap(),
         &trailer.root,
         trailer.depth,
-        trailer.payload_end,
+        trailer.areas(),
         &manifest,
     )
     .unwrap();
@@ -239,7 +239,7 @@ fn full_request() -> SamplesReadRequest {
         "field_0",
     ])
 }
-fn collect_rows(batches: &[RecordBatch]) -> Vec<Sample> {
+fn collect_rows(batches: &[SamplesBatch]) -> Vec<Sample> {
     batches
         .iter()
         .flat_map(|b| {
@@ -414,9 +414,12 @@ async fn equal_timestamps_cross_leaves_and_parts() {
     assert!(manifest.files.len() >= 4);
     let first = store.read(&manifest.part_path(0)).await.unwrap().to_bytes();
     assert_eq!(
-        Trailer::decode(&first[first.len() - 112..], first.len() as u64)
-            .unwrap()
-            .depth,
+        Trailer::decode(
+            &first[first.len() - TRAILER_SIZE as usize..],
+            first.len() as u64
+        )
+        .unwrap()
+        .depth,
         2
     );
     let reader = format.reader(store, handle).await.unwrap();
@@ -502,14 +505,20 @@ async fn long_keys_round_trip() {
         read_key(reader.as_ref(), selection).await,
         vec![(1, 7, 100, 1, 0, Some(0)), (1, 7, 200, 1, 0, Some(0)),]
     );
-    // The stored descriptor keeps the key byte for byte, so a read returns the same bytes the
-    // writer received.
-    let (_, _, page, _) = root_page(&store, &handle).await;
+    // The key area keeps the key byte for byte, so a read returns the same bytes the writer
+    // received; the descriptor only references it.
+    let (_, trailer, page, bytes) = root_page(&store, &handle).await;
     let Page::Leaf(blocks) = page else {
         panic!("one leaf page holds the fixture")
     };
     assert_eq!(1, blocks.len());
-    assert_eq!(key.as_slice(), blocks[0].key.bytes());
+    let reference = blocks[0].key;
+    reference.validate(trailer.keys()).unwrap();
+    let end = reference.offset + u64::from(reference.length);
+    assert_eq!(
+        key.as_slice(),
+        &bytes[reference.offset as usize..end as usize]
+    );
 }
 
 /// The captured pair in the samples artifact: two distinct series with one
@@ -889,8 +898,9 @@ async fn selective_reads_pin_the_artifact() {
     assert_eq!(result.len(), 1);
     assert_eq!(result[0].column(0).null_count(), 1);
     assert!(purges.try_recv().is_ok());
-    // Header, trailer, one leaf/root. The all-null projected field has no payload.
-    assert_eq!(reads.lock().unwrap().len(), 3);
+    // Header, trailer, one leaf/root, and the selected block's key from the key area. The
+    // all-null projected field has no payload.
+    assert_eq!(reads.lock().unwrap().len(), 4);
 }
 #[test]
 fn payload_limits_and_timestamp_envelopes() {
@@ -949,7 +959,7 @@ async fn malformed_framing_and_payload_corruption() {
     let manifest = manifest(&store, &handle).await;
     let path = manifest.part_path(0);
     let original = store.read(&path).await.unwrap().to_vec();
-    let end = original.len() - 112;
+    let end = original.len() - TRAILER_SIZE as usize;
     let trailer = Trailer::decode(&original[end..], original.len() as u64).unwrap();
     for (encoding, compression) in [(99, 0), (1, 99)] {
         let mut unsupported = Trailer::decode(&original[end..], original.len() as u64).unwrap();
@@ -963,7 +973,7 @@ async fn malformed_framing_and_payload_corruption() {
         .unpack(&original[trailer.root.payload.offset as usize..end])
         .unwrap();
     let Page::Leaf(blocks) =
-        Page::decode(&decoded, &trailer.root, 1, trailer.payload_end, &manifest).unwrap()
+        Page::decode(&decoded, &trailer.root, 1, trailer.areas(), &manifest).unwrap()
     else {
         panic!()
     };
@@ -987,7 +997,7 @@ async fn malformed_framing_and_payload_corruption() {
             .await
             .is_err()
     );
-    for offset in [0, end + 72, end + 104] {
+    for offset in [0, end + 72, end + TRAILER_SIZE as usize - 8] {
         let mut bad = original.clone();
         bad[offset] ^= 3;
         store.write(&path, bad).await.unwrap();
@@ -1006,7 +1016,7 @@ async fn malformed_framing_and_payload_corruption() {
                 &decoded[..length],
                 &trailer.root,
                 1,
-                trailer.payload_end,
+                trailer.areas(),
                 &manifest
             )
             .is_err()
@@ -1591,8 +1601,9 @@ async fn batches_column_io_reuses_readers_and_releases_reservations() {
     assert_eq!(1, creations.load(Ordering::Relaxed));
     {
         let reads = reads.lock().unwrap();
-        // Each stream reads framing/root plus one payload read across both blocks.
-        assert_eq!(8, reads.len());
+        // Each stream reads framing/root, one payload read across both blocks, and the part's
+        // exact keys from the key area.
+        assert_eq!(10, reads.len());
         assert_eq!(
             2 * part_size,
             reads
@@ -1608,7 +1619,7 @@ async fn batches_column_io_reuses_readers_and_releases_reservations() {
         .try_collect::<Vec<_>>()
         .await
         .unwrap();
-    assert_eq!(4, sparse.iter().map(RecordBatch::num_rows).sum::<usize>());
+    assert_eq!(4, sparse.iter().map(|b| b.num_rows()).sum::<usize>());
     assert!(
         reads
             .lock()
@@ -1697,11 +1708,19 @@ async fn boundary_blocks_fetch_remaining_columns_only_for_selected_rows() {
         .unwrap();
     assert!(batches.is_empty());
     assert_eq!(1, creations.load(Ordering::Relaxed));
+    // Anchor the timestamp read by provenance rather than by position: the timestamp chunk is
+    // the first chunk of a part, so its read starts at the payload header. Positional indexing
+    // would silently point at the key-area read instead.
     let timestamp_read = {
         let reads = reads.lock().unwrap();
-        // Header, trailer, root, then timestamps only. The other part is pruned.
-        assert_eq!(4, reads.len());
-        reads[3].clone()
+        // Header, trailer, root, the selected block's key, then timestamps only. The other part
+        // is pruned.
+        assert_eq!(5, reads.len());
+        reads
+            .iter()
+            .find(|(_, range)| range.offset() == HEADER_SIZE)
+            .cloned()
+            .expect("the timestamp chunk must be read")
     };
 
     reads.lock().unwrap().clear();
@@ -1717,9 +1736,15 @@ async fn boundary_blocks_fetch_remaining_columns_only_for_selected_rows() {
     assert_eq!(input[1..5], collect_rows(&batches));
     assert_eq!(2, creations.load(Ordering::Relaxed));
     let reads = reads.lock().unwrap();
-    // Both boundary blocks read timestamps before fetching remaining columns.
-    assert_eq!(10, reads.len());
-    assert_eq!(timestamp_read, reads[3]);
+    // Both boundary blocks read timestamps before fetching remaining columns, and each part
+    // reads its own keys.
+    assert_eq!(12, reads.len());
+    assert_eq!(
+        Some(&timestamp_read),
+        reads
+            .iter()
+            .find(|(_, range)| range.offset() == HEADER_SIZE)
+    );
 }
 
 #[tokio::test]
@@ -1761,9 +1786,11 @@ async fn series_read_windows_are_bounded_and_gap_rows_are_not_returned() {
     assert_eq!(input, collect_rows(&all));
     let (full_bytes, first_window_bytes) = {
         let reads = reads.lock().unwrap();
-        // Header, trailer, root, two leaves (each block descriptor also stores its
-        // exact series key), then three windows of at most 128 blocks.
-        assert_eq!(8, reads.len());
+        // Header, trailer, root (one leaf: a fixed 56-byte descriptor no longer carries the
+        // series key, so this fixture's 260 blocks fit one page where a key-carrying descriptor
+        // needed two), three windows of at most 128 blocks, and one merged key read for the
+        // page's selected keys.
+        assert_eq!(7, reads.len());
         // The initial read-ahead window is the first read of block 0's first column: it starts
         // at the payload header, while the header, trailer, and page reads do not. Anchor on
         // that range rather than on an index so a reordered traversal cannot point the
@@ -1829,9 +1856,15 @@ async fn series_read_windows_are_bounded_and_gap_rows_are_not_returned() {
     assert_eq!(5, reads.lock().unwrap().len());
 
     use datafusion::execution::memory_pool::{GreedyMemoryPool, MemoryPool};
-    // The first pool rejects read-ahead outright. The second admits the first
-    // 128-block, four-column window but leaves no room for block decoding.
-    for capacity in [64 * 1024, 2 * first_window_bytes + 128 * 4 * 256] {
+    // The first pool rejects read-ahead outright. The second admits the first 128-block,
+    // four-column window but leaves no room for block decoding. Both also hold the part's
+    // retained exact keys, which are charged to the scan pool before the window is attempted:
+    // 260 series x (key bytes + the struct + allocator rounding).
+    let keys_bytes = 260 * (new_sparse_primary_key(&["a", "b"], &m, 1, 0).len() + 32 + 64);
+    for capacity in [
+        64 * 1024,
+        2 * first_window_bytes + 128 * 4 * 256 + keys_bytes,
+    ] {
         reads.lock().unwrap().clear();
         let pool = Arc::new(GreedyMemoryPool::new(capacity));
         let mut request = full_request();
@@ -1884,6 +1917,9 @@ async fn aligned_payload_cache_reuses_gap_bytes_across_readers() {
         &[batch(&m, &input, false)],
     )
     .await;
+    // The part's key area, so the loop below can tell a key read from a payload read.
+    let (_, framing, _, _) = root_page(&store, &handle).await;
+    let key_area = framing.keys();
     let reads = Arc::new(Mutex::new(Vec::new()));
     let observed = reads.clone();
     let store = store.layer(
@@ -1934,8 +1970,16 @@ async fn aligned_payload_cache_reuses_gap_bytes_across_readers() {
             collect_rows(&rows)
         );
         if id == 2 {
+            // A different series reuses the aligned over-read for its payload, including boundary
+            // values. Its exact key is new, and the key area is part of the same part file, so
+            // the only read left is the aligned block that covers it.
+            let reads = reads.lock().unwrap();
             assert!(
-                reads.lock().unwrap().is_empty(),
+                reads.len() <= 1
+                    && reads.iter().all(|(_, range)| {
+                        range.offset() >= key_area.start
+                            && range.offset() + range.size().unwrap() <= key_area.end
+                    }),
                 "a different series must reuse the aligned over-read, including boundary values"
             );
         }
@@ -2011,10 +2055,10 @@ async fn aligned_payload_cache_assembles_columns_across_blocks() {
     );
 }
 
-/// Metadata pages retain each block's exact key on the heap, so the cache weight of a page
-/// must count those bytes as well.
+/// Keys live in the part's key area, not in the metadata pages: a page keeps a fixed-size
+/// reference whatever the key length is, and the area holds one copy per covered series.
 #[tokio::test]
-async fn retained_metadata_pages_count_the_key_heap() {
+async fn keys_are_kept_out_of_metadata_pages() {
     let store = store();
     let meta = metadata();
     let format = ColumnarSamplesFormat::default();
@@ -2029,19 +2073,24 @@ async fn retained_metadata_pages_count_the_key_heap() {
         &[keyed_batch(&meta, &keys, &[100, 100, 100], false)],
     )
     .await;
-    let (_, _, page, _) = root_page(&store, &handle).await;
+    let (_, trailer, page, _) = root_page(&store, &handle).await;
     assert!(
-        page.retained_size() >= 3 * 1024,
-        "retained size {} omits the retained keys",
+        page.retained_size() < 3 * 1024,
+        "retained size {} still stores the keys in the page",
         page.retained_size()
+    );
+    assert_eq!(
+        keys.iter().map(|key| key.len() as u64).sum::<u64>(),
+        trailer.key_end - trailer.payload_end,
+        "the key area holds one copy of each key"
     );
 }
 
-/// The exact key column allocates one key per output row, so the scan reservation has to
-/// budget the key bytes rather than a fixed per-column estimate: one block of 8192 rows with
-/// a 1 KiB key retains ~8 MiB of keys.
+/// A block belongs to exactly one exact series, so its key is emitted once per batch. The
+/// scan reservation therefore budgets one key per block instead of one per row: a block of
+/// 8192 rows with a 1 KiB key costs 1 KiB of identity, not 8 MiB.
 #[tokio::test]
-async fn exact_key_output_is_budgeted_per_row() {
+async fn exact_key_is_emitted_once_per_batch() {
     use datafusion::execution::memory_pool::{GreedyMemoryPool, MemoryPool};
 
     let store = store();
@@ -2058,38 +2107,32 @@ async fn exact_key_output_is_budgeted_per_row() {
     )
     .await;
     let reader = format.reader(store, handle).await.unwrap();
-    let mut request = request(&[TABLE_ID_COLUMN, TSID_COLUMN, "ts", PRIMARY_KEY]);
+    let mut request = request(&[TABLE_ID_COLUMN, TSID_COLUMN, "ts"]);
     request.keys = Some(BTreeSet::from([exact(&m, &[label.as_str(), "z"], 1, 7)]));
-    // A pool that cannot hold the key column must refuse the read, not under-report it.
-    let small = Arc::new(GreedyMemoryPool::new(4 * 1024 * 1024));
-    let mut rejected = request.clone();
-    rejected.memory_pool = Some(small.clone());
-    assert!(
-        reader
-            .read(rejected)
-            .unwrap()
-            .try_collect::<Vec<_>>()
-            .await
-            .is_err(),
-        "a 4 MiB pool cannot hold 8192 rows of 1 KiB keys"
-    );
-    assert_eq!(0, small.reserved());
-    // A pool that does cover the keys still returns every row.
-    let large = Arc::new(GreedyMemoryPool::new(64 * 1024 * 1024));
-    request.memory_pool = Some(large.clone());
-    let rows = reader
+    // A pooled read that only has to hold one key per batch succeeds; a per-row key column of
+    // 8 MiB would not fit here.
+    let pool = Arc::new(GreedyMemoryPool::new(4 * 1024 * 1024));
+    request.memory_pool = Some(pool.clone());
+    let batches = reader
         .read(request)
         .unwrap()
         .try_collect::<Vec<_>>()
         .await
         .unwrap();
-    assert_eq!(8192, rows.iter().map(|b| b.num_rows()).sum::<usize>());
-    assert_eq!(0, large.reserved());
+    assert_eq!(8192, batches.iter().map(|b| b.num_rows()).sum::<usize>());
+    let expected = exact(&m, &[label.as_str(), "z"], 1, 7);
+    assert!(batches.iter().all(|batch| batch.key == expected));
+    // The key is the batch's, not a column: the artifact schema keeps it, output batches do not.
+    assert!(
+        batches
+            .iter()
+            .all(|batch| batch.batch.column_by_name(PRIMARY_KEY).is_none())
+    );
+    assert_eq!(0, pool.reserved());
 }
 
-/// The reservation must cover what the key column actually retains. A builder that grows its
-/// value buffer doubles it, so a non-power-of-two row count used to retain nearly twice the key
-/// bytes the reservation asked for.
+/// The reservation must cover what a batch actually retains, and identity must not be charged
+/// per row: 2135 rows under a 1 KiB key would be over 2 MiB of keys alone.
 #[tokio::test]
 async fn exact_key_output_reservation_covers_the_retained_array() {
     use datafusion::execution::memory_pool::{GreedyMemoryPool, MemoryPool};
@@ -2098,8 +2141,6 @@ async fn exact_key_output_reservation_covers_the_retained_array() {
     let m = metadata();
     let format = ColumnarSamplesFormat::default();
     let label = "x".repeat(1024);
-    // Rows just past a doubling step of a value buffer that grows from zero, so a builder that
-    // starts empty ends up sized for nearly twice the key data.
     let rows = 2135;
     let keys = vec![new_sparse_primary_key(&[label.as_str(), "z"], &m, 1, 7); rows];
     let key_len = keys[0].len();
@@ -2112,8 +2153,18 @@ async fn exact_key_output_reservation_covers_the_retained_array() {
     )
     .await;
     let reader = format.reader(store.clone(), handle).await.unwrap();
+    // The key is returned with the batch, so projecting it as a column is refused instead of
+    // silently repeating it once per row.
+    assert!(
+        reader
+            .read(SamplesReadRequest {
+                projection: vec![PRIMARY_KEY.to_string()],
+                ..Default::default()
+            })
+            .is_err()
+    );
     let pool = Arc::new(GreedyMemoryPool::new(128 * 1024 * 1024));
-    let mut request = request(&[TABLE_ID_COLUMN, TSID_COLUMN, "ts", PRIMARY_KEY]);
+    let mut request = request(&[TABLE_ID_COLUMN, TSID_COLUMN, "ts"]);
     request.keys = Some(BTreeSet::from([exact(&m, &[label.as_str(), "z"], 1, 7)]));
     request.memory_pool = Some(pool.clone());
     let mut stream = reader.read(request).unwrap();
@@ -2126,52 +2177,15 @@ async fn exact_key_output_reservation_covers_the_retained_array() {
         reserved >= retained,
         "reservation {reserved} is below the {retained} bytes the yielded batch retains"
     );
-    // The key column itself keeps no growth slack: what it retains is the key data rounded up
-    // to the allocator's 64-byte granularity, one offset per row, and the array's own header.
-    let key_memory = batch
-        .column_by_name(PRIMARY_KEY)
-        .unwrap()
-        .get_array_memory_size();
-    let key_data = key_len * rows;
+    // No per-row identity term survives: the estimate is far below one key per row, and the
+    // key itself is retained once rather than once per row.
     assert!(
-        key_memory <= key_data.div_ceil(64) * 64 + 4 * (rows + 1) + 1024,
-        "the exact key column retains {key_memory} bytes for {key_data} key bytes"
+        reserved < rows * key_len,
+        "reservation {reserved} still charges {rows} keys of {key_len} bytes"
     );
-    // Proportional as well: the estimate tracks the retained bytes in both directions.
     assert!(
-        reserved < 2 * retained,
+        reserved < retained + rows * key_len,
         "reservation {reserved} dwarfs the {retained} bytes retained"
-    );
-    drop(batch);
-    drop(stream);
-    assert_eq!(0, pool.reserved());
-
-    // A one-row block with a key-only projection selects no payload column, so nothing but the
-    // key itself and the per-row allowance is in the estimate. The key array's own header still
-    // has to be covered, which the per-row bytes cannot do at one row.
-    let handle = build(
-        &format,
-        &store,
-        m.clone(),
-        &[keyed_batch(&m, &keys[..1], &times[..1], false)],
-    )
-    .await;
-    let reader = format.reader(store, handle).await.unwrap();
-    let pool = Arc::new(GreedyMemoryPool::new(1024 * 1024));
-    let mut key_only = SamplesReadRequest {
-        projection: vec![PRIMARY_KEY.to_string()],
-        ..Default::default()
-    };
-    key_only.keys = Some(BTreeSet::from([exact(&m, &[label.as_str(), "z"], 1, 7)]));
-    key_only.memory_pool = Some(pool.clone());
-    let mut stream = reader.read(key_only).unwrap();
-    let batch = stream.try_next().await.unwrap().expect("one batch");
-    assert_eq!(1, batch.num_rows());
-    let retained = batch.get_array_memory_size();
-    let reserved = pool.reserved();
-    assert!(
-        reserved >= retained,
-        "a key-only one-row projection reserves {reserved} for {retained} retained bytes"
     );
     drop(batch);
     drop(stream);
@@ -2182,7 +2196,10 @@ async fn exact_key_output_reservation_covers_the_retained_array() {
 #[rstest::rstest]
 #[case(1024 * 1024)]
 #[case(128 * 1024)]
-#[case(16 * 1024)]
+// Retained exact keys are charged to the scan pool: 128 selected series cost
+// 128 * (key bytes + ExactSeriesKey + allocator rounding) ~= 14.3 KB, so a 16 KiB pool can no
+// longer hold both the keys and one block's payload reservation.
+#[case(64 * 1024)]
 #[tokio::test]
 async fn sparse_cached_reads_fit_the_scan_pool(#[case] capacity: usize) {
     use crate::cache::{CacheManager, CacheStrategy};
@@ -2261,3 +2278,5 @@ async fn sparse_cached_reads_fit_the_scan_pool(#[case] capacity: usize) {
         }
     }
 }
+
+mod keys;

@@ -54,6 +54,14 @@ use crate::series_index::samples::ColumnarSamplesFormat;
 use crate::test_util::sst_util::{new_sparse_primary_key, sst_region_metadata_with_encoding};
 use crate::test_util::{TestEnv, flush_region};
 
+/// Reads one exported columnar preparation count. The counters are process-global, so a test
+/// compares the value it saw before its own preparation with the value afterwards.
+fn prepared_count(kind: &'static str) -> u64 {
+    crate::metrics::COLUMNAR_READ_COUNT
+        .with_label_values(&[kind])
+        .get()
+}
+
 async fn fixture() -> (TestEnv, MitoEngine, MitoRegionRef) {
     fixture_with(false).await
 }
@@ -1082,7 +1090,9 @@ impl SamplesFormatReader for SamplesReadRecorder {
     fn read(
         &self,
         request: SamplesReadRequest,
-    ) -> Result<futures::stream::BoxStream<'static, Result<RecordBatch>>> {
+    ) -> Result<
+        futures::stream::BoxStream<'static, Result<crate::series_index::format::SamplesBatch>>,
+    > {
         self.requests.lock().unwrap().push(request.clone());
         self.inner.read(request)
     }
@@ -1150,7 +1160,6 @@ async fn ordinal_range_batches_sample_requests_and_pushes_time_bounds() {
         raw: source.raw.clone(),
         sample_schema: source.sample_schema.clone(),
         candidates: source.candidates.clone(),
-        retained_rows: source.retained_rows,
         metrics: source.metrics.clone(),
         reservation: source.reservation.clone(),
         samples: Arc::new(
@@ -1186,10 +1195,17 @@ async fn ordinal_range_batches_sample_requests_and_pushes_time_bounds() {
         let keys = source
             .candidates
             .iter()
-            .map(|c| c.exact.clone())
+            .map(|c| c.merge_key.to_vec())
             .collect::<BTreeSet<_>>();
         for request in requests.iter() {
-            assert_eq!(Some(&keys), request.keys.as_ref());
+            let requested = request
+                .keys
+                .as_ref()
+                .unwrap()
+                .iter()
+                .map(|key| key.bytes().to_vec())
+                .collect::<BTreeSet<_>>();
+            assert_eq!(keys, requested);
             assert_eq!(Some(1001), request.start);
             assert_eq!(Some(1601), request.end);
         }
@@ -1629,12 +1645,14 @@ async fn metadata_cache_reuses_structures_and_isolates_storage() {
         let reader = SamplesReader::open_cached(store.clone(), samples.clone(), context)
             .await
             .unwrap();
+        // The exact key is returned with each batch, so it is never a projected column.
         let request = SamplesReadRequest {
             projection: reader
                 .schema()
                 .fields()
                 .iter()
                 .map(|field| field.name().clone())
+                .filter(|name| name != store_api::storage::consts::PRIMARY_KEY_COLUMN_NAME)
                 .collect(),
             ..Default::default()
         };
@@ -2341,6 +2359,8 @@ async fn overlapping_buckets_retain_only_new_label_rows() {
     build(&engine, &region).await;
     assert!(region.series_index_version().series_indexes.len() >= 2);
     let scan = scanner(&region, region.series_index_store.clone().unwrap());
+    let unique_before = prepared_count("prepare_unique_series");
+    let retained_before = prepared_count("prepare_retained_rows");
     scan.prepare_series(
         &QueryScanContext::default(),
         &ExecutionPlanMetricsSet::new(),
@@ -2351,8 +2371,14 @@ async fn overlapping_buckets_retain_only_new_label_rows() {
     .unwrap();
     let prepared = scan.prepared.source.get().unwrap().as_ref().unwrap();
     assert_eq!(34, prepared.candidates.len());
-    // Duplicate rows from the overlapping bucket are dropped before labels are retained.
-    assert_eq!(34, prepared.retained_rows);
+    // Duplicate rows from the overlapping bucket are dropped before labels are retained:
+    // 66 written rows retain one row per series. The counters are process-global, so the
+    // preparation's own contribution is the pair of deltas: concurrent preparations can add
+    // to both, but only a preparation that keeps duplicates makes them diverge.
+    assert_eq!(
+        prepared_count("prepare_unique_series") - unique_before,
+        prepared_count("prepare_retained_rows") - retained_before,
+    );
     for candidate in prepared.candidates.iter() {
         let expected = if candidate.id.tsid == 0 {
             "x".to_string()
@@ -2429,7 +2455,7 @@ async fn overlapping_buckets_keep_colliding_physical_tags(#[case] mixed: bool) {
     let identities: HashSet<Vec<u8>> = source
         .candidates
         .iter()
-        .map(|candidate| candidate.exact.bytes().to_vec())
+        .map(|candidate| candidate.merge_key.to_vec())
         .collect();
     assert_eq!(2, identities.len(), "colliding series keep distinct keys");
     if !mixed {

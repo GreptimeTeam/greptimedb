@@ -232,8 +232,9 @@ impl Manifest {
         fields.extend(self.fields.iter().map(|f| {
             crate::sst::with_field_id(Field::new(&f.name, DataType::Float64, true), f.column_id)
         }));
-        // Appended after the data fields so stored row indices stay stable. Readers that
-        // must attribute samples to an exact series project this column.
+        // Appended after the data fields so stored row indices stay stable. The column is the
+        // artifact's exact-identity marker: readers attribute every row of a batch by the key
+        // they return with it and never project this column.
         fields.push(Field::new(PRIMARY_KEY, DataType::Binary, false));
         Arc::new(Schema::new(fields))
     }

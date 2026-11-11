@@ -63,7 +63,7 @@ use crate::read::series_scan::{RawScanPreparation, raw};
 use crate::read::stream::ScanBatch;
 use crate::series_index::artifact::ArtifactFormat;
 use crate::series_index::format::{
-    self, FormatReader, SamplesFormatReader, SamplesReadRequest, SeriesReadRequest,
+    self, FormatReader, SamplesBatch, SamplesFormatReader, SamplesReadRequest, SeriesReadRequest,
 };
 use crate::series_index::identity::ExactSeriesKey;
 use crate::series_index::{MetricSeriesId, ROW_COUNT_COLUMN};
@@ -314,10 +314,13 @@ fn predicate_conjuncts(predicate: Option<&Predicate>) -> Vec<&Expr> {
 }
 
 struct Candidate {
+    /// Coarse prefix of the exact key; only a hash, never identity.
     id: MetricSeriesId,
-    /// Exact canonical sparse key; `id` is only its coarse prefix.
-    exact: ExactSeriesKey,
+    /// The one owned key allocation: the region-qualified exact key.
     key: Buffer,
+    /// The canonical sparse key, a view of `key`'s bytes. This is the identity every
+    /// comparison and sample attribution uses, so it is stored once rather than once per
+    /// representation.
     merge_key: Buffer,
     tags: HashMap<u32, Option<String>>,
     metric: Option<SeriesLabels>,
@@ -329,11 +332,6 @@ struct ColumnarPreparedSource {
     raw: Arc<RawScanPreparation>,
     sample_schema: Option<SchemaRef>,
     candidates: Arc<Vec<Candidate>>,
-    /// Rows retained across the scanned series indexes, one per candidate plus any
-    /// duplicate rows the scan could not drop. Bounds the label metadata held alive;
-    /// tests pin the compaction invariant through it.
-    #[allow(dead_code)]
-    retained_rows: usize,
     samples: Arc<Vec<Arc<dyn SamplesFormatReader>>>,
     metrics: PartitionMetrics,
     // Readers retain this reservation with the candidate set.
@@ -635,7 +633,25 @@ impl ColumnarPreparedSource {
                         }
                     }
                     tag_values += values.len() as u64;
-                    let bytes = exact.bytes().len()
+                    // `merge_key` is always the exact key bytes. Explicit-label chunks keep
+                    // the region-qualified form as their `key`, so `primary_key` stays
+                    // region-scoped while identity and ordering stay exact.
+                    let key = if direct_labels {
+                        let mut buffer = Vec::with_capacity(8 + exact.bytes().len());
+                        buffer.extend_from_slice(&metadata.region_id.as_u64().to_be_bytes());
+                        buffer.extend_from_slice(exact.bytes());
+                        Buffer::from(buffer)
+                    } else {
+                        Buffer::from(exact.bytes().to_vec())
+                    };
+                    let merge_key = if direct_labels {
+                        key.slice_with_length(8, exact.bytes().len())
+                    } else {
+                        key.clone()
+                    };
+                    // The exact key is stored once: `merge_key` is a view of `key`, so the
+                    // reservation charges the single key allocation the candidate retains.
+                    let bytes = key.len()
                         + values.values().flatten().map(String::len).sum::<usize>()
                         + values.capacity() * (std::mem::size_of::<(u32, Option<String>)>() + 16)
                         + std::mem::size_of::<Candidate>()
@@ -659,28 +675,11 @@ impl ColumnarPreparedSource {
                     } else {
                         None
                     };
-                    // `merge_key` is always the exact key bytes. Explicit-label chunks keep
-                    // the region-qualified form as their `key`, so `primary_key` stays
-                    // region-scoped while identity and ordering stay exact.
-                    let key = if direct_labels {
-                        let mut buffer = Vec::with_capacity(8 + exact.bytes().len());
-                        buffer.extend_from_slice(&metadata.region_id.as_u64().to_be_bytes());
-                        buffer.extend_from_slice(exact.bytes());
-                        Buffer::from(buffer)
-                    } else {
-                        Buffer::from(exact.bytes().to_vec())
-                    };
-                    let merge_key = if direct_labels {
-                        key.slice_with_length(8, exact.bytes().len())
-                    } else {
-                        key.clone()
-                    };
                     let id = exact.id();
                     candidates.insert(
-                        exact.clone(),
+                        exact,
                         Candidate {
                             id,
-                            exact,
                             key,
                             merge_key,
                             tags: values,
@@ -723,7 +722,6 @@ impl ColumnarPreparedSource {
             raw: Arc::new(raw),
             sample_schema,
             candidates: Arc::new(candidates),
-            retained_rows,
             samples: Arc::new(samples),
             metrics,
             reservation: Arc::new(reservation),
@@ -785,7 +783,7 @@ impl PreparedSeriesSource for ColumnarPreparedSource {
                         .iter()
                         .map(|candidate| {
                             std::mem::size_of::<ExactSeriesKey>()
-                                + candidate.exact.bytes().len()
+                                + candidate.merge_key.len()
                                 + std::mem::size_of::<MetricSeriesId>()
                                 + 64
                         })
@@ -794,10 +792,14 @@ impl PreparedSeriesSource for ColumnarPreparedSource {
                     // Exact ownership: a block is read only when its own key is selected,
                     // never because a colliding partner shares the identifier. Coarse
                     // pruning bounds are derived from these keys inside the reader.
+                    // The keys are built from the one key the candidate retains, so the
+                    // selection costs one owned copy per series rather than a second copy
+                    // alongside every candidate.
+                    let mut offsets = mito_codec::row_converter::SparseOffsetsCache::new();
                     let keys = candidates[range.clone()]
                         .iter()
-                        .map(|c| c.exact.clone())
-                        .collect::<BTreeSet<_>>();
+                        .map(|c| ExactSeriesKey::from_sparse_key(c.merge_key.as_slice(), &mut offsets))
+                        .collect::<Result<BTreeSet<_>>>()?;
                     let mut stage_metrics = crate::metrics::ColumnarReadMetrics::default();
                     let mut batches = reader.read(SamplesReadRequest {
                         projection: sample_projection(&reader.schema(), &context),
@@ -807,36 +809,25 @@ impl PreparedSeriesSource for ColumnarPreparedSource {
                         end,
                         ..Default::default()
                     })?;
-                    while let Some(batch) = batches.try_next().await? {
-                        // Every returned row names the exact series key that owns it.
-                        let keys = batch
-                            .column_by_name(store_api::storage::consts::PRIMARY_KEY_COLUMN_NAME)
-                            .and_then(|a| a.as_any().downcast_ref::<BinaryArray>())
-                            .ok_or_else(|| invalid("missing or invalid sample primary key column"))?;
-                        let mut offset = 0;
-                        while offset < batch.num_rows() {
-                            let key = keys.value(offset);
-                            let ordinal = candidates[range.clone()]
-                                .binary_search_by(|candidate| {
-                                    candidate.merge_key.as_slice().cmp(key)
-                                })
-                                .map_err(|_| invalid("sample contains an unselected series"))?
-                                + range.start;
-                            let mut end = offset + 1;
-                            while end < batch.num_rows() && keys.value(end) == key {
-                                end += 1;
-                            }
-                            let started = std::time::Instant::now();
-                            let flat = sample_to_flat(batch.slice(offset, end - offset), &candidates[ordinal], &context, sample_schema.as_ref())?;
-                            let flat = filter_visibility(flat, &context)?;
-                            stage_metrics.add_elapsed("columnar_sample_adapt", started.elapsed());
-                            offset = end;
-                            if flat.num_rows() == 0 { continue; }
-                            let bytes = flat.get_array_memory_size();
-                            reservation.try_grow(bytes).context(crate::error::ScanMemoryExhaustedSnafu)?;
-                            yield flat;
-                            reservation.shrink(bytes);
-                        }
+                    while let Some(samples) = batches.try_next().await? {
+                        // A block belongs to exactly one series, so the reader returns its
+                        // exact key once and the whole batch is attributed at once.
+                        let SamplesBatch { batch, key } = samples;
+                        let ordinal = candidates[range.clone()]
+                            .binary_search_by(|candidate| {
+                                candidate.merge_key.as_slice().cmp(key.bytes())
+                            })
+                            .map_err(|_| invalid("sample contains an unselected series"))?
+                            + range.start;
+                        let started = std::time::Instant::now();
+                        let flat = sample_to_flat(batch, &candidates[ordinal], &context, sample_schema.as_ref())?;
+                        let flat = filter_visibility(flat, &context)?;
+                        stage_metrics.add_elapsed("columnar_sample_adapt", started.elapsed());
+                        if flat.num_rows() == 0 { continue; }
+                        let bytes = flat.get_array_memory_size();
+                        reservation.try_grow(bytes).context(crate::error::ScanMemoryExhaustedSnafu)?;
+                        yield flat;
+                        reservation.shrink(bytes);
                     }
                 }));
             }
@@ -1115,7 +1106,8 @@ fn filter_visibility(batch: RecordBatch, context: &StreamContext) -> Result<Reco
 }
 
 /// The mapper includes projected and residual-filter columns. Identity/time and
-/// merge visibility columns are always needed by the native source adapter.
+/// merge visibility columns are always needed by the native source adapter. The exact
+/// series key is not projected: the samples reader returns it once per batch.
 fn sample_projection(
     schema: &datatypes::arrow::datatypes::Schema,
     context: &StreamContext,
@@ -1125,7 +1117,10 @@ fn sample_projection(
         .fields()
         .iter()
         .enumerate()
-        .filter(|(index, field)| *index < 5 || input.index_of(field.name()).is_ok())
+        .filter(|(index, field)| {
+            field.name() != store_api::storage::consts::PRIMARY_KEY_COLUMN_NAME
+                && (*index < 5 || input.index_of(field.name()).is_ok())
+        })
         .map(|(_, field)| field.name().clone())
         .collect()
 }

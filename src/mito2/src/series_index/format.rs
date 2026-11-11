@@ -98,9 +98,29 @@ pub(crate) struct SamplesReadRequest {
     pub(crate) end: Option<i64>,
 }
 
+/// One samples output batch and the exact series that owns every row in it.
+///
+/// A sample block belongs to exactly one series, so the exact key travels with the batch
+/// instead of being repeated once per row: consumers attribute the whole batch at once.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct SamplesBatch {
+    pub(crate) batch: RecordBatch,
+    pub(crate) key: ExactSeriesKey,
+}
+
+/// Batches read as batches: the key is the only column the wrapped batch does not carry.
+impl std::ops::Deref for SamplesBatch {
+    type Target = RecordBatch;
+
+    fn deref(&self) -> &RecordBatch {
+        &self.batch
+    }
+}
+
 pub(crate) trait SamplesFormatReader: Send + Sync {
     fn schema(&self) -> SchemaRef;
-    fn read(&self, request: SamplesReadRequest) -> Result<BoxStream<'static, Result<RecordBatch>>>;
+    fn read(&self, request: SamplesReadRequest)
+    -> Result<BoxStream<'static, Result<SamplesBatch>>>;
 }
 
 /// Builds and opens immutable per-SST samples artifacts.
