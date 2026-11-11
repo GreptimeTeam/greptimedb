@@ -435,6 +435,28 @@ async fn test_reported_tail_must_reach_its_upto() {
 }
 
 #[tokio::test]
+async fn test_tail_read_stops_at_its_upto() {
+    let region = TestRegion::new("tail-replay-stop-at-upto", false, None).await;
+    region
+        .reopen_with_tails(vec![own_tail(0, region.entries[0], UptoKind::Reported)])
+        .await;
+    // Makes the entry after the tail unreadable.
+    let prefix = wal_config().node_prefix(NODE_ID, STANDALONE_GENERATION);
+    let objects = region
+        .wal_store
+        .list(&format!("{prefix}/objects/"))
+        .await
+        .unwrap();
+    let last = objects.iter().map(|entry| entry.path()).max().unwrap();
+    region.wal_store.delete(last).await.unwrap();
+
+    region.promote();
+    region.wait_until_replayed().await;
+
+    assert_eq!(region.entries[0], region.version().flushed_entry_id);
+}
+
+#[tokio::test]
 async fn test_catchup_replays_remote_reported_tail() {
     let region = TestRegion::new("tail-replay-remote-reported", false, None).await;
     let last = region.write_remote_rows(region.region_id, 6, 9).await;

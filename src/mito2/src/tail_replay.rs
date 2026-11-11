@@ -226,6 +226,9 @@ impl<S: LogStore> TailReplayTask<S> {
                     files.extend(self.write_chunk(&chunk, uncommitted).await?);
                     chunk = self.new_chunk();
                 }
+                if entry_id == tail.upto {
+                    break;
+                }
             }
             ensure!(
                 last_entry_id == Some(tail.upto) || tail.upto_kind == UptoKind::Listed,
