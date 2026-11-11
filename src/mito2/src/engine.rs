@@ -181,6 +181,7 @@ use crate::sst::file::{FileMeta, RegionFileId, RegionIndexId};
 use crate::sst::file_ref::FileReferenceManagerRef;
 use crate::sst::index::intermediate::IntermediateManager;
 use crate::sst::index::puffin_manager::PuffinManagerFactory;
+use crate::tail_replay::is_replaying_leader;
 use crate::wal::entry_distributor::{
     DEFAULT_ENTRY_RECEIVER_BUFFER_SIZE, build_wal_entry_distributor_and_receivers,
 };
@@ -1337,9 +1338,9 @@ impl EngineInner {
     }
 
     /// Asks the worker to replay the pending tails of `region` if a role change made it
-    /// writable.
+    /// writable. The worker may already have started an ALTER or an edit of the region.
     fn notify_if_became_writable(&self, region: &MitoRegion, was_writable: bool) {
-        if !was_writable && region.is_writable() {
+        if !was_writable && is_replaying_leader(region) {
             self.workers.notify_writable(region);
         }
     }

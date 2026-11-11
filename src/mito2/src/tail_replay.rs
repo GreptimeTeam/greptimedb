@@ -58,7 +58,8 @@ pub(crate) fn should_replay_tails(region: &MitoRegion) -> bool {
     is_replaying_leader(region) && region.version().has_pending_tails()
 }
 
-fn is_replaying_leader(region: &MitoRegion) -> bool {
+/// Returns whether `region` is a leader that is writable, altering or applying an edit.
+pub(crate) fn is_replaying_leader(region: &MitoRegion) -> bool {
     matches!(
         region.state(),
         RegionRoleState::Leader(

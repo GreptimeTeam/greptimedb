@@ -1024,3 +1024,23 @@ async fn test_replay_backs_off_while_altering() {
 
     assert_eq!(6, count_rows(&region.engine, region.region_id).await);
 }
+
+#[tokio::test]
+async fn test_promotion_replays_tails_of_region_altered_meanwhile() {
+    let region = TestRegion::new("tail-replay-promote-altering", false, None).await;
+    region
+        .reopen_with_tails(vec![own_tail(0, region.entries[1], UptoKind::Reported)])
+        .await;
+    // The worker starts an ALTER between the promotion and its check of the new role.
+    let mito_region = region.engine.get_region(region.region_id).unwrap();
+    mito_region.set_role(RegionRole::Leader);
+    mito_region.set_altering().unwrap();
+    region
+        .engine
+        .inner
+        .notify_if_became_writable(&mito_region, false);
+
+    wait_until(|| region.listener.commits() > 0).await;
+    mito_region.switch_state_to_writable(RegionLeaderState::Altering);
+    region.wait_until_replayed().await;
+}
