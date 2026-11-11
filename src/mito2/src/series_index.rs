@@ -14,7 +14,7 @@
 
 //! Series index construction, search, and maintenance.
 //!
-//! Under development. Index files are currently stored on the local filesystem.
+//! Remote index artifacts with best-effort local disk caching.
 
 pub(crate) mod artifact;
 mod artifact_writer;
@@ -92,3 +92,27 @@ pub struct MetricSeriesId {
 
 /// Stream of bounded batches of matching metric-series IDs.
 pub type MetricSeriesIdStream = BoxStream<'static, Result<Vec<MetricSeriesId>>>;
+
+/// Wraps a region's configured store while sharing the node's disk budget.
+pub(crate) fn cached_store(
+    cache: &Arc<object_store::layers::DiskCache>,
+    store: ObjectStore,
+    storage: Option<&str>,
+) -> ObjectStore {
+    let info = store.info();
+    let storage = storage.map_or_else(
+        || "default".to_string(),
+        |name| format!("named:{}", name.to_lowercase()),
+    );
+    let namespace = format!(
+        "{storage}:{}:{}:{}",
+        info.scheme(),
+        info.name(),
+        info.root()
+    );
+    store.layer(cache.layer(namespace, |path| {
+        !path.ends_with("/series-index.json")
+            && !path.ends_with("/range-index.json")
+            && !path.ends_with("/samples.json")
+    }))
+}

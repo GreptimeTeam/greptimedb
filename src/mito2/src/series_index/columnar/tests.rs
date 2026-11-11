@@ -562,7 +562,11 @@ async fn explicit_abort_drop_and_failed_finish_cleanup() {
         .collect();
     for drop_writer in [false, true] {
         let entry = entry();
-        let prefix = format!("{}/series/{}/", meta.region_id.as_u64(), entry.index_uuid);
+        let prefix = format!(
+            "series_index/{}/series/{}/",
+            meta.region_id.as_u64(),
+            entry.index_uuid
+        );
         let mut writer = format
             .writer(meta.clone(), store.clone(), &entry)
             .await
@@ -598,7 +602,11 @@ async fn explicit_abort_drop_and_failed_finish_cleanup() {
         .unwrap();
     }
     let entry = entry();
-    let prefix = format!("{}/series/{}/", meta.region_id.as_u64(), entry.index_uuid);
+    let prefix = format!(
+        "series_index/{}/series/{}/",
+        meta.region_id.as_u64(),
+        entry.index_uuid
+    );
     let mut writer = format.writer(meta, store.clone(), &entry).await.unwrap();
     writer.write(&batch(&keys, false, 0)).await.unwrap();
     assert!(writer.write(&batch(&keys, false, 0)).await.is_err());
@@ -836,17 +844,9 @@ async fn real_format_reconciliation_and_fallback() {
         old_catalog,
         store.read(&catalog_path).await.unwrap().to_bytes()
     );
-    let cleanup = purges.try_recv().unwrap().objects.unwrap();
-    assert_eq!(cleanup.len(), 2);
-    assert!(cleanup.iter().all(|path| {
-        !old.entry()
-            .artifact
-            .as_ref()
-            .unwrap()
-            .objects
-            .iter()
-            .any(|object| &object.path == path)
-    }));
+    // A remote close failure can have an ambiguous commit outcome. Keep new
+    // objects rather than risk deleting artifacts referenced by a committed catalog.
+    assert!(purges.try_recv().is_err());
     engine.stop().await.unwrap();
 }
 
@@ -895,7 +895,11 @@ async fn opendal_write_close_and_manifest_failures() {
             .build()
             .unwrap();
         let entry = entry();
-        let prefix = format!("{}/series/{}/", meta.region_id.as_u64(), entry.index_uuid);
+        let prefix = format!(
+            "series_index/{}/series/{}/",
+            meta.region_id.as_u64(),
+            entry.index_uuid
+        );
         let format = ColumnarSeriesFormat {
             block_rows: 1,
             ..Default::default()
@@ -1081,7 +1085,11 @@ async fn cancelled_finish_aborts_live_writer() {
     let store = store();
     let meta = metadata();
     let entry = entry();
-    let prefix = format!("{}/series/{}/", meta.region_id.as_u64(), entry.index_uuid);
+    let prefix = format!(
+        "series_index/{}/series/{}/",
+        meta.region_id.as_u64(),
+        entry.index_uuid
+    );
     let closing = Arc::new(tokio::sync::Notify::new());
     let observed = closing.clone();
     let layer = MockLayerBuilder::default()

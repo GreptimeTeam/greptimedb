@@ -95,6 +95,8 @@ impl Drop for SeriesIndexFileHandleInner {
                 self.purger.purge(PurgeRequest {
                     file_id: self.file_id,
                     objects: None,
+                    store: None,
+                    owner: None,
                 });
             }
         }

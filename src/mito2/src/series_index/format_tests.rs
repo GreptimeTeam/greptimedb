@@ -214,7 +214,10 @@ async fn format_skeleton_abort_removes_all_objects() {
     );
     assert!(
         store
-            .list_with(&format!("{}/samples/", region.region_id.as_u64()))
+            .list_with(&format!(
+                "series_index/{}/samples/",
+                region.region_id.as_u64()
+            ))
             .recursive(true)
             .await
             .unwrap()
@@ -432,15 +435,7 @@ async fn format_catalog_failure_preserves_published_artifacts() {
     assert!(format!("{error:?}").contains("injected artifact catalog failure"));
     assert!(Arc::ptr_eq(&before, &region.series_index_version()));
     assert_eq!(catalog, store.read(&catalog_path).await.unwrap().to_bytes());
-    let cleanup = purges.try_recv().unwrap().objects.unwrap();
-    assert_eq!(2, cleanup.len());
-    assert!(cleanup.iter().all(|path| {
-        !old.entry()
-            .artifact
-            .objects
-            .iter()
-            .any(|object| &object.path == path)
-    }));
+    // Preserve outputs on an ambiguous remote catalog failure.
     assert!(purges.try_recv().is_err());
     let reopened = load_version_control(&store, region.region_id, &purger).await;
     assert_eq!(

@@ -782,7 +782,10 @@ impl TestEnv {
     pub(crate) fn create_object_store_manager(&self) -> ObjectStoreManager {
         let data_home = self.data_home.path();
         let data_path = data_home.join("data").as_path().display().to_string();
-        let builder = Fs::default().root(&data_path);
+        // Match production filesystem stores: catalog replacement must be atomic.
+        let builder = Fs::default()
+            .root(&data_path)
+            .atomic_write_dir(&format!("{data_path}/tmp"));
 
         let object_store = if let Some(mock_layer) = self.object_store_mock_layer.as_ref() {
             debug!("create object store with mock layer");

@@ -162,7 +162,29 @@ pub(crate) async fn reconcile_series_indexes_with_mode(
     // Persist changed catalogs before making the new snapshot visible to readers.
     let publish_result: Result<()> = async {
         if let Some(next) = next {
-            persist_index_catalogs(&store, region.region_id, &next, &stats).await?;
+            // Serialize publication with graceful ownership changes and region DDL.
+            let manager = region.manifest_ctx.manifest_manager.write().await;
+            let latest = region.version();
+            let source_files = version.ssts.levels().iter()
+                .flat_map(|level| level.files()).map(|file| file.file_id()).collect::<HashSet<_>>();
+            let current_files = latest.ssts.levels().iter()
+                .flat_map(|level| level.files()).map(|file| file.file_id()).collect::<HashSet<_>>();
+            if region.state() != RegionRoleState::Leader(RegionLeaderState::Writable)
+                || manager.is_stopped()
+                || latest.metadata.schema_version != version.metadata.schema_version
+                || current_files != source_files
+            {
+                return crate::error::InvalidRequestSnafu {
+                    region_id: region.region_id,
+                    reason: "region ownership or source SSTs changed during series-index reconciliation",
+                }.fail();
+            }
+            if let Err(error) = persist_index_catalogs(&store, region.region_id, &next, &stats).await {
+                // A remote write can commit before its response is lost. Keep outputs
+                // rather than deleting objects a committed catalog might reference.
+                unpublished.disarm();
+                return Err(error);
+            }
             publish_index_version(&region, Arc::new(next));
             unpublished.disarm();
         }
@@ -278,7 +300,7 @@ async fn build_index_version(
                     .context(crate::error::OpenDalSnafu)?;
             }
         }
-        if manual && reusable && entry.artifact.is_none() {
+        if reusable && entry.artifact.is_none() {
             reusable = store
                 .exists(&crate::series_index::catalog::series_index_path(
                     region.region_id,
@@ -298,6 +320,25 @@ async fn build_index_version(
         }
         if !reusable {
             unusable.insert(entry.index_uuid);
+        }
+    }
+    let mut missing_ranges = HashSet::new();
+    if enable_range_index {
+        for id in current
+            .range_indexes
+            .keys()
+            .filter(|id| visible.contains(id))
+        {
+            if !store
+                .exists(&crate::series_index::catalog::range_index_path(
+                    region.region_id,
+                    *id,
+                ))
+                .await
+                .context(crate::error::OpenDalSnafu)?
+            {
+                missing_ranges.insert(*id);
+            }
         }
     }
     let mut reusable_samples = HashSet::new();
@@ -370,6 +411,7 @@ async fn build_index_version(
         return Ok((next, stats));
     }
     if !manual
+        && missing_ranges.is_empty()
         && plan.builds.is_empty()
         && next.is_none()
         && formats.samples.is_none()
@@ -389,6 +431,7 @@ async fn build_index_version(
         series_indexes: current.series_indexes.clone(),
         index_buckets: Default::default(),
     });
+    range_indexes.retain(|id, _| !missing_ranges.contains(id));
     let index_buckets = plan.index_buckets;
     if formats.samples.is_none() {
         stats.removed_samples += samples.len();

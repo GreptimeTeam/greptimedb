@@ -17,6 +17,8 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use futures::TryStreamExt;
+
 use api::v1::helper::row;
 use api::v1::value::ValueData;
 use api::v1::{ColumnDataType, Rows, SemanticType, WriteHint};
@@ -391,28 +393,27 @@ async fn test_reconcile_restores_and_reuses_indexes() {
         restored.series_indexes[&first_id].entry()
     );
 
-    // Catalog changes are not reloaded, and missing index files are not repaired.
-    for path in [
-        range_catalog_path(region.region_id),
-        series_catalog_path(region.region_id),
-    ] {
-        store.write(&path, "{}").await.unwrap();
-    }
+    // Maintenance repairs missing objects even when their catalog entries remain.
     let stats = test.reconcile(store.clone()).await.unwrap();
-    assert_eq!((0, 0), (stats.built_range, stats.built_series));
-    assert!(Arc::ptr_eq(&first, &region.series_index_version()));
-    for path in [
-        range_catalog_path(region.region_id),
-        series_catalog_path(region.region_id),
-    ] {
-        assert_eq!(
-            b"{}".as_slice(),
-            store.read(&path).await.unwrap().to_bytes().as_ref()
+    assert_eq!((1, 1), (stats.built_range, stats.built_series));
+    let repaired = region.series_index_version();
+    assert!(!repaired.series_indexes.contains_key(&first_id));
+    assert!(store.exists(&missing_paths[0]).await.unwrap());
+    for id in repaired.series_indexes.keys() {
+        assert!(
+            store
+                .exists(&series_index_path(region.region_id, *id))
+                .await
+                .unwrap()
         );
     }
-    for path in &missing_paths {
-        assert!(!store.exists(path).await.unwrap());
-    }
+    let restored = load_version_control(store, region.region_id, purger)
+        .await
+        .current();
+    assert_eq!(repaired.range_indexes, restored.range_indexes);
+    assert_eq!(repaired.index_buckets, restored.index_buckets);
+    let stats = test.reconcile(store.clone()).await.unwrap();
+    assert_eq!((0, 0), (stats.built_range, stats.built_series));
     engine.stop().await.unwrap();
 }
 
@@ -829,12 +830,20 @@ async fn test_failed_reconcile_retires_only_unpublished_series() {
             assert!(retired.insert(path));
             drain_purger.purge(request);
         }
-        assert_eq!(completed, retired);
+        if failure.ends_with(".json") {
+            // The remote catalog may have committed before reporting failure.
+            assert!(retired.is_empty());
+        } else {
+            assert_eq!(completed, retired);
+        }
         drop(drain_purger);
         run_index_purge_task(0, store.clone(), drain_receiver).await;
         let attempted_paths = attempted.lock().unwrap().clone();
         for path in attempted_paths {
-            assert!(!store.exists(&path).await.unwrap());
+            assert_eq!(
+                failure.ends_with(".json"),
+                store.exists(&path).await.unwrap()
+            );
         }
         assert!(store.exists(&reused_path).await.unwrap());
 
@@ -902,7 +911,6 @@ async fn test_maintenance_wakeup_and_timer(#[case] enable_range_index: bool) {
         purger,
         receiver,
         Arc::default(),
-        u64::MAX,
         Duration::from_secs(3600),
         clock.clone(),
         enable_range_index,
@@ -984,7 +992,6 @@ async fn test_drop_catalogs_and_retained_snapshot_after_task_stop() {
         purger,
         receiver,
         Arc::default(),
-        u64::MAX,
         Duration::from_secs(3600),
         Arc::new(StdTimeProvider),
         true,
@@ -1009,21 +1016,40 @@ async fn test_drop_catalogs_and_retained_snapshot_after_task_stop() {
 }
 
 #[rstest::rstest]
-#[case(true)]
-#[case(false)]
+#[case(true, crate::config::SeriesIndexFormat::Legacy)]
+#[case(true, crate::config::SeriesIndexFormat::Columnar)]
+#[case(false, crate::config::SeriesIndexFormat::Legacy)]
 #[tokio::test]
-async fn test_build_series_index_region_request(#[case] enabled: bool) {
+async fn test_build_series_index_region_request(
+    #[case] enabled: bool,
+    #[case] format: crate::config::SeriesIndexFormat,
+) {
     use api::v1::region::build_index_request;
     use store_api::region_request::RegionBuildIndexRequest;
 
     let mut env = TestEnv::with_prefix("series-manual-request").await;
     let config = MitoConfig {
         experimental_enable_series_index: enabled,
+        experimental_series_index_format: format,
+        experimental_series_index_max_size: common_base::readable_size::ReadableSize(1024),
         experimental_series_index_maintenance_interval: Duration::from_secs(3600),
         ..Default::default()
     };
-    let (engine, region) =
-        prepare_region_with_config(&mut env, &[1000, 2000, 3000, 4000], config).await;
+    let mut metadata = sst_region_metadata_with_encoding(PrimaryKeyEncoding::Sparse);
+    metadata
+        .column_metadatas
+        .iter_mut()
+        .find(|c| c.column_id == 2)
+        .unwrap()
+        .column_schema
+        .data_type = datatypes::prelude::ConcreteDataType::float64_datatype();
+    let (engine, region) = prepare_region_with_metadata(
+        &mut env,
+        &[1000, 2000, 3000, 4000],
+        config,
+        Arc::new(metadata),
+    )
+    .await;
     for _ in 0..2 {
         let result = engine
             .handle_request(
@@ -1043,6 +1069,63 @@ async fn test_build_series_index_region_request(#[case] enabled: bool) {
                     .to_string()
                     .contains("series index is disabled")
             );
+        }
+    }
+    if enabled {
+        let version = region.series_index_version();
+        assert!(version.disk_usage() > 1024);
+        let remote = region.access_layer.object_store().clone();
+        let catalog = if format == crate::config::SeriesIndexFormat::Columnar {
+            super::catalog::samples_catalog_path(region.region_id)
+        } else {
+            series_catalog_path(region.region_id)
+        };
+        assert!(remote.exists(&catalog).await.unwrap());
+        // Reopen coverage through a fresh cache, with no local copies at all.
+        let empty = common_test_util::temp_dir::create_temp_dir("series-cold-cache");
+        let local = crate::access_layer::new_fs_cache_store(empty.path().to_str().unwrap())
+            .await
+            .unwrap();
+        let cache = object_store::layers::DiskCache::new(local, 1024);
+        let cold = super::cached_store(&cache, remote.clone(), None);
+        let (purger, _receiver) = series_index_channel(cold.clone());
+        let restored = load_version_control(&cold, region.region_id, &purger)
+            .await
+            .current();
+        assert_eq!(version.index_buckets, restored.index_buckets);
+        assert_eq!(version.disk_usage(), restored.disk_usage());
+        let backend = region
+            .series_index_version_control
+            .formats
+            .read()
+            .unwrap()
+            .index
+            .clone();
+        for handle in restored.series_indexes.values() {
+            if let Some(backend) = &backend {
+                let reader = backend.reader(cold.clone(), handle.clone()).await.unwrap();
+                let batches = reader
+                    .read(Default::default())
+                    .unwrap()
+                    .try_collect::<Vec<_>>()
+                    .await
+                    .unwrap();
+                assert!(batches.iter().map(|batch| batch.num_rows()).sum::<usize>() > 0);
+            } else {
+                let path = series_index_path(region.region_id, handle.entry().index_uuid);
+                assert_eq!(
+                    remote.read(&path).await.unwrap().to_bytes(),
+                    cold.read(&path).await.unwrap().to_bytes()
+                );
+            }
+        }
+        for handle in restored.samples.values() {
+            for object in &handle.entry().artifact.objects {
+                assert_eq!(
+                    remote.read(&object.path).await.unwrap().to_bytes(),
+                    cold.read(&object.path).await.unwrap().to_bytes()
+                );
+            }
         }
     }
     engine.stop().await.unwrap();
@@ -1088,7 +1171,6 @@ async fn test_manual_reconcile_returns_storage_failure(#[case] catalog_failure: 
         purger,
         purge_receiver,
         Arc::default(),
-        u64::MAX,
         Duration::from_secs(3600),
         Arc::new(StdTimeProvider),
         false,

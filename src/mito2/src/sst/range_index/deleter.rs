@@ -26,16 +26,48 @@ use crate::metrics::SERIES_INDEX_FILE_OPERATION_TOTAL;
 pub struct RangeIndexDeleter {
     store: ObjectStore,
     region_id: RegionId,
+    owner: Option<std::sync::Weak<crate::region::ManifestContext>>,
 }
 
 impl RangeIndexDeleter {
     /// Creates a deleter using the owning region ID, including for imported SSTs.
     pub fn new(store: ObjectStore, region_id: RegionId) -> Self {
-        Self { store, region_id }
+        Self {
+            store,
+            region_id,
+            owner: None,
+        }
+    }
+
+    pub(crate) fn with_owner(
+        mut self,
+        owner: &std::sync::Arc<crate::region::ManifestContext>,
+    ) -> Self {
+        self.owner = Some(std::sync::Arc::downgrade(owner));
+        self
     }
 
     /// Deletes the range index directly from the index store.
     pub async fn delete(&self, file_id: FileId) -> Result<()> {
+        let owner = self.owner.as_ref().and_then(std::sync::Weak::upgrade);
+        if self.owner.is_some() && owner.is_none() {
+            return Ok(());
+        }
+        let _guard = if let Some(owner) = &owner {
+            let guard = owner.manifest_manager.read().await;
+            if !matches!(
+                owner.current_state(),
+                crate::region::RegionRoleState::Leader(
+                    crate::region::RegionLeaderState::Writable
+                        | crate::region::RegionLeaderState::Dropping
+                )
+            ) {
+                return Ok(());
+            }
+            Some(guard)
+        } else {
+            None
+        };
         let path = range_index_path(self.region_id, file_id);
         let result = match self.store.delete(&path).await {
             Ok(()) => Ok(()),
@@ -54,5 +86,8 @@ impl RangeIndexDeleter {
 }
 
 pub(crate) fn range_index_path(region_id: RegionId, file_id: FileId) -> String {
-    format!("{}/range/{file_id}.parquet", region_id.as_u64())
+    format!(
+        "series_index/{}/range/{file_id}.parquet",
+        region_id.as_u64()
+    )
 }

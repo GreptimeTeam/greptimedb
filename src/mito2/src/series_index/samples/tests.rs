@@ -126,7 +126,10 @@ async fn build(
 ) -> SamplesFileHandle {
     let file_id = FileId::random();
     let generation = FileId::random();
-    let prefix = format!("{}/samples/{generation}/", meta.region_id.as_u64());
+    let prefix = format!(
+        "series_index/{}/samples/{generation}/",
+        meta.region_id.as_u64()
+    );
     let mut writer = format
         .writer(meta.clone(), store.clone(), &prefix, file_id, generation)
         .await
@@ -436,7 +439,10 @@ async fn failed_writer_and_abort_remove_outputs() {
     for drop_writer in [false, true] {
         let id = FileId::random();
         let generation = FileId::random();
-        let prefix = format!("{}/samples/{generation}/", m.region_id.as_u64());
+        let prefix = format!(
+            "series_index/{}/samples/{generation}/",
+            m.region_id.as_u64()
+        );
         let mut writer = format
             .writer(m.clone(), store.clone(), &prefix, id, generation)
             .await
@@ -824,22 +830,7 @@ async fn real_samples_reconcile_reopen_and_retire(
     );
     assert!(Arc::ptr_eq(&before, &region.series_index_version()));
     assert_eq!(catalog, store.read(&catalog_path).await.unwrap().to_bytes());
-    let rebuilt_days = before
-        .samples
-        .values()
-        .filter(|h| h.entry().source_file_ids == old.entry().source_file_ids)
-        .count();
-    for _ in 0..rebuilt_days {
-        let cleanup = purges.try_recv().unwrap().objects.unwrap();
-        assert_eq!(cleanup.len(), 2);
-        assert!(cleanup.iter().all(|path| before.samples.values().all(|h| {
-            h.entry()
-                .artifact
-                .objects
-                .iter()
-                .all(|object| object.path != *path)
-        })));
-    }
+    // Retain outputs if the remote catalog's commit outcome is uncertain.
     assert!(purges.try_recv().is_err());
     use store_api::region_engine::RegionEngine;
     engine.stop().await.unwrap();
@@ -991,7 +982,10 @@ async fn wide_schema_byte_bound_and_unsupported_input() {
     ));
     let id = FileId::random();
     let generation = FileId::random();
-    let prefix = format!("{}/samples/{generation}/", m.region_id.as_u64());
+    let prefix = format!(
+        "series_index/{}/samples/{generation}/",
+        m.region_id.as_u64()
+    );
     assert!(
         format
             .writer(wrong, store.clone(), &prefix, id, generation)
@@ -1076,7 +1070,10 @@ async fn output_failures_and_cancelled_finish_clean_up() {
             .unwrap();
         let id = FileId::random();
         let generation = FileId::random();
-        let prefix = format!("{}/samples/{generation}/", m.region_id.as_u64());
+        let prefix = format!(
+            "series_index/{}/samples/{generation}/",
+            m.region_id.as_u64()
+        );
         let mut writer = format
             .writer(
                 m.clone(),

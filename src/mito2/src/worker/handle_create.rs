@@ -71,7 +71,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         .metadata_builder(builder)
         .parse_options(request.options)?
         .cache(Some(self.cache_manager.clone()))
-        .series_index_store(self.series_index_store.clone())
+        .series_index_cache(self.series_index_cache.clone())
         .series_index_purger(self.series_index_purger.clone())
         .hook(self.plugins.get());
 

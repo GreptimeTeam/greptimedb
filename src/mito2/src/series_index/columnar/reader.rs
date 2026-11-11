@@ -96,7 +96,10 @@ impl ColumnarReader {
             "series artifact identity mismatch",
         )?;
         let region = handle.file_id().region_id().as_u64();
-        let path = format!("{region}/series/{}/manifest.json", entry.index_uuid);
+        let path = format!(
+            "{}manifest.json",
+            crate::series_index::columnar::series_prefix(region, entry.index_uuid)
+        );
         let mut objects = HashMap::with_capacity(artifact.objects.len());
         for object in &artifact.objects {
             require(

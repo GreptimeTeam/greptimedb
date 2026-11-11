@@ -143,19 +143,22 @@ pub(crate) struct SamplesCatalog {
 }
 
 pub(crate) fn samples_catalog_path(region_id: RegionId) -> String {
-    format!("{}/{SAMPLES_CATALOG}", region_id.as_u64())
+    format!("series_index/{}/{SAMPLES_CATALOG}", region_id.as_u64())
 }
 
 pub(crate) fn range_catalog_path(region_id: RegionId) -> String {
-    format!("{}/{RANGE_CATALOG}", region_id.as_u64())
+    format!("series_index/{}/{RANGE_CATALOG}", region_id.as_u64())
 }
 
 pub(crate) fn series_index_path(region_id: RegionId, index_uuid: FileId) -> String {
-    format!("{}/{SERIES_DIR}/{index_uuid}.parquet", region_id.as_u64())
+    format!(
+        "series_index/{}/{SERIES_DIR}/{index_uuid}.parquet",
+        region_id.as_u64()
+    )
 }
 
 pub(crate) fn series_catalog_path(region_id: RegionId) -> String {
-    format!("{}/{SERIES_CATALOG}", region_id.as_u64())
+    format!("series_index/{}/{SERIES_CATALOG}", region_id.as_u64())
 }
 
 pub(crate) fn series_metadata(entry: &SeriesIndexEntry) -> Result<Vec<KeyValue>> {

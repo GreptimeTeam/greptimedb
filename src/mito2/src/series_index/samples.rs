@@ -233,5 +233,5 @@ fn valid_rows(rows: usize, fields: usize) -> bool {
 
 /// Immutable samples output directory, independent of the source SST identity.
 pub(crate) fn samples_prefix(region_id: u64, generation: FileId) -> String {
-    format!("{region_id}/samples/{generation}/")
+    format!("series_index/{region_id}/samples/{generation}/")
 }

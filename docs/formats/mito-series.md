@@ -13,9 +13,9 @@ Legacy catalog entries and the `parquet` identifier keep their existing meaning.
 One immutable artifact owns the following objects under a unique generation:
 
 ```text
-<region_id>/series/<index_uuid>/manifest.json
-<region_id>/series/<index_uuid>/part-0.series
-<region_id>/series/<index_uuid>/part-1.series
+series_index/<region_id>/series/<index_uuid>/manifest.json
+series_index/<region_id>/series/<index_uuid>/part-0.series
+series_index/<region_id>/series/<index_uuid>/part-1.series
 ...
 ```
 
@@ -397,5 +397,7 @@ payload permits.
 
 The local series-index cache has a root `version` marker independent of this
 format version. Before workers start, a missing or incompatible marker causes
-the entire derived cache (including samples, ranges, and catalogs) to be reset.
-Matching-version restarts preserve the cache.
+local files to be reset. Cached copies are disposable and are discarded on restart.
+Artifacts and catalogs remain in the region's configured object store; opening a region
+loads its remote catalog without requiring local files. Catalog reads and maintenance
+existence checks bypass the disk cache. Missing remote artifacts are rebuilt from SSTs.

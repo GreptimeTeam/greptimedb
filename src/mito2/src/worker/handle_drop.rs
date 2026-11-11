@@ -130,7 +130,7 @@ where
             )
             .await?;
 
-        if let Some(store) = &self.series_index_store {
+        if let Some(store) = &region.series_index_store {
             crate::series_index::delete_catalogs(store, region_id).await;
         }
 

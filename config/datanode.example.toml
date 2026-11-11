@@ -537,16 +537,16 @@ experimental_manifest_keep_removed_file_ttl = "1h"
 compress_manifest = false
 
 ## Under development; do not enable. Whether to enable series indexes.
-## Indexes are stored on the local filesystem under `{data_home}/series_index`.
+## Indexes are persisted in the region's configured object store under `series_index/<region-id>/`.
+## Local copies are cached under `{data_home}/cache/series_index`.
 #+ experimental_enable_series_index = false
 
 ## Under development. Select legacy Parquet indexes or paired columnar series and samples.
 #+ experimental_series_index_format = "legacy"
 
-## Approximate series and range index size limit in open regions, shared across workers.
-## Workers periodically refresh usage and skip maintenance when full. In-flight reconciliation
-## can exceed the limit. Closed-region files, temporary output, catalogs, and old snapshots
-## retained by readers are not counted.
+## Node-wide local disk cache capacity for series, samples, and range objects.
+## Eviction removes only local copies; capacity never limits remote index construction.
+## Active readers and in-progress downloads can temporarily retain additional disk space.
 ## Minimum: 1KiB. Takes effect on restart.
 #+ experimental_series_index_max_size = "5GiB"
 

@@ -134,7 +134,7 @@ impl Manifest {
     }
 
     pub(crate) fn prefix(&self) -> String {
-        format!("{}/series/{}/", self.region_id, self.generation)
+        series_prefix(self.region_id, self.generation)
     }
     pub(crate) fn part_path(&self, id: u32) -> String {
         format!("{}part-{id}.series", self.prefix())
@@ -171,4 +171,8 @@ pub(crate) fn unsupported(reason: impl Into<String>) -> crate::error::Error {
         err_msg: reason.into(),
     }
     .build()
+}
+
+pub(crate) fn series_prefix(region_id: u64, generation: FileId) -> String {
+    format!("series_index/{region_id}/series/{generation}/")
 }

@@ -197,7 +197,7 @@ impl WorkerGroup {
             .with_buffer_size(Some(config.index.write_buffer_size.as_bytes() as _));
         let index_build_job_pool =
             Arc::new(LocalScheduler::new(config.max_background_index_builds));
-        let series_index_store = series_index_store_from_config(&config, data_home).await?;
+        let series_index_cache = series_index_cache_from_config(&config, data_home).await?;
         let series_index_disk_usage = Arc::new(AtomicU64::new(0));
         let flush_job_pool = Arc::new(LocalScheduler::new(config.max_background_flushes));
         let compact_job_pool = Arc::new(LocalScheduler::new(config.max_background_compactions));
@@ -251,7 +251,7 @@ impl WorkerGroup {
                     object_store_manager: object_store_manager.clone(),
                     write_buffer_manager: write_buffer_manager.clone(),
                     index_build_job_pool: index_build_job_pool.clone(),
-                    series_index_store: series_index_store.clone(),
+                    series_index_cache: series_index_cache.clone(),
                     series_index_disk_usage: series_index_disk_usage.clone(),
                     flush_job_pool: flush_job_pool.clone(),
                     compact_job_pool: compact_job_pool.clone(),
@@ -411,7 +411,7 @@ impl WorkerGroup {
         });
         let index_build_job_pool =
             Arc::new(LocalScheduler::new(config.max_background_index_builds));
-        let series_index_store = series_index_store_from_config(&config, data_home).await?;
+        let series_index_cache = series_index_cache_from_config(&config, data_home).await?;
         let series_index_disk_usage = Arc::new(AtomicU64::new(0));
         let flush_job_pool = Arc::new(LocalScheduler::new(config.max_background_flushes));
         let compact_job_pool = Arc::new(LocalScheduler::new(config.max_background_compactions));
@@ -466,7 +466,7 @@ impl WorkerGroup {
                     object_store_manager: object_store_manager.clone(),
                     write_buffer_manager: write_buffer_manager.clone(),
                     index_build_job_pool: index_build_job_pool.clone(),
-                    series_index_store: series_index_store.clone(),
+                    series_index_cache: series_index_cache.clone(),
                     series_index_disk_usage: series_index_disk_usage.clone(),
                     flush_job_pool: flush_job_pool.clone(),
                     compact_job_pool: compact_job_pool.clone(),
@@ -516,23 +516,32 @@ fn region_id_to_index(id: RegionId, num_workers: usize) -> usize {
         % num_workers
 }
 
-/// Opens the fixed local series-index store only when the feature is enabled.
-async fn series_index_store_from_config(
+/// Opens the shared local cache only when series indexes are enabled.
+async fn series_index_cache_from_config(
     config: &MitoConfig,
     data_home: &str,
-) -> Result<Option<ObjectStore>> {
+) -> Result<Option<Arc<object_store::layers::DiskCache>>> {
     if !config.experimental_enable_series_index {
         return Ok(None);
     }
 
-    let root = Path::new(data_home).join("series_index");
+    let root = Path::new(data_home).join("cache").join("series_index");
     let store = new_fs_cache_store(&root.to_string_lossy()).await?;
     initialize_series_index_cache(&store).await?;
-    Ok(Some(store))
+    // Cached objects are disposable; do not recover incomplete downloads after a crash.
+    store
+        .delete_with("objects/")
+        .recursive(true)
+        .await
+        .context(crate::error::OpenDalSnafu)?;
+    Ok(Some(object_store::layers::DiskCache::new(
+        store,
+        config.experimental_series_index_max_size.as_bytes(),
+    )))
 }
 
 /// Bump when the rebuildable local index layout becomes incompatible.
-const SERIES_INDEX_CACHE_VERSION: &str = "2";
+const SERIES_INDEX_CACHE_VERSION: &str = "3";
 
 /// Resets incompatible caches before any worker or reader can use their catalogs.
 async fn initialize_series_index_cache(store: &ObjectStore) -> Result<()> {
@@ -612,7 +621,7 @@ struct WorkerStarter<S> {
     write_buffer_manager: WriteBufferManagerRef,
     compact_job_pool: SchedulerRef,
     index_build_job_pool: SchedulerRef,
-    series_index_store: Option<ObjectStore>,
+    series_index_cache: Option<Arc<object_store::layers::DiskCache>>,
     series_index_disk_usage: Arc<AtomicU64>,
     flush_job_pool: SchedulerRef,
     purge_scheduler: SchedulerRef,
@@ -642,7 +651,7 @@ impl<S: LogStore> WorkerStarter<S> {
         let (sender, receiver) = mpsc::channel(self.config.worker_channel_size);
 
         let running = Arc::new(AtomicBool::new(true));
-        let (series_index_task_state, series_index_receiver) = if self.series_index_store.is_some()
+        let (series_index_task_state, series_index_receiver) = if self.series_index_cache.is_some()
         {
             let (state, receiver) =
                 SeriesIndexTaskState::new(self.id, self.config.worker_channel_size);
@@ -652,11 +661,16 @@ impl<S: LogStore> WorkerStarter<S> {
         };
         let mut series_index_purger = None;
         let series_index_handle = self
-            .series_index_store
+            .series_index_cache
             .clone()
             .zip(series_index_task_state.clone())
             .zip(series_index_receiver)
-            .map(|((store, state), receiver)| {
+            .map(|((cache, state), receiver)| {
+                let store = crate::series_index::cached_store(
+                    &cache,
+                    self.object_store_manager.default_object_store().clone(),
+                    None,
+                );
                 let (purger, purge_receiver) = series_index_channel(store.clone());
                 series_index_purger = Some(purger.clone());
                 spawn_series_index_tasks(
@@ -669,7 +683,6 @@ impl<S: LogStore> WorkerStarter<S> {
                     purger,
                     purge_receiver,
                     self.series_index_disk_usage.clone(),
-                    self.config.experimental_series_index_max_size.as_bytes(),
                     self.config.experimental_series_index_maintenance_interval,
                     self.time_provider.clone(),
                     self.config.experimental_enable_range_index,
@@ -700,7 +713,7 @@ impl<S: LogStore> WorkerStarter<S> {
                 self.config.max_background_index_builds,
             ),
             series_index_task_state: series_index_task_state.clone(),
-            series_index_store: self.series_index_store,
+            series_index_cache: self.series_index_cache,
             series_index_purger,
             flush_scheduler: FlushScheduler::new(self.flush_job_pool),
             compaction_scheduler: CompactionScheduler::new(
@@ -1001,8 +1014,8 @@ struct RegionWorkerLoop<S> {
     index_build_scheduler: IndexBuildScheduler,
     /// Controls the worker-owned series-index task.
     series_index_task_state: Option<Arc<SeriesIndexTaskState>>,
-    /// Local store for series and range indexes managed by reconciliation.
-    series_index_store: Option<ObjectStore>,
+    /// Shared disk cache for remote series and range indexes.
+    series_index_cache: Option<Arc<object_store::layers::DiskCache>>,
     series_index_purger: Option<IndexFilePurger>,
     /// Schedules background flush requests.
     flush_scheduler: FlushScheduler,
@@ -1818,7 +1831,7 @@ mod tests {
         for (enabled, existing_index) in [(false, false), (true, false), (false, true)] {
             // Use a fresh WAL directory for each case: stopping workers does not stop the log store.
             let env = TestEnv::with_prefix("group-stop").await;
-            let root = env.data_home().join("series_index");
+            let root = env.data_home().join("cache").join("series_index");
             if existing_index {
                 tokio::fs::create_dir_all(&root).await.unwrap();
                 tokio::fs::write(root.join("retained"), b"index")

@@ -18,9 +18,9 @@ a bounded group of snapshot SSTs contributing to one UTC day. It owns
 these objects:
 
 ```text
-<region_id>/samples/<generation>/manifest.json
-<region_id>/samples/<generation>/part-0.samples
-<region_id>/samples/<generation>/part-1.samples
+series_index/<region_id>/samples/<generation>/manifest.json
+series_index/<region_id>/samples/<generation>/part-0.samples
+series_index/<region_id>/samples/<generation>/part-1.samples
 ...
 ```
 
@@ -453,8 +453,8 @@ metadata trees require an explicit reader-support and rollout decision; an
 unchanged layout alone does not make them readable by version-1 implementations.
 
 The local cache root contains a layout-version marker. Startup clears the entire
-series-index cache when this marker is absent or incompatible, then rebuilds
-artifacts through existing maintenance. Source SST identity remains in metadata.
+local cache when this marker is absent or incompatible. Remote catalogs and artifacts
+are unaffected. Source SST identity remains in metadata.
 
 ### Local cache rollout
 
@@ -464,12 +464,11 @@ contain several generations with disjoint source sets (at most 64 SSTs per merge
 and each generation may contain multiple bounded part files. Source Parquet files
 are never rewritten.
 
-The local series-index cache layout version is 2. On upgrade from layout 1,
-startup resets the rebuildable index cache before opening regions; ordinary SST
-reads remain available while artifacts rebuild. Rolling back to a layout-1 binary
-likewise resets the incompatible cache. Allow for rebuild time and I/O in either
-direction; do not reuse daily catalogs with an older reader outside this startup
-check. Existing per-SST catalog entries remain readable by the new reader.
+The local series-index cache layout version is 3. Startup discards local copies;
+remote catalogs restore coverage without requiring a rebuild. On upgrade from the
+local-only implementation, old local catalogs are not imported into remote object stores; maintenance builds
+remote artifacts from SSTs. The disk capacity setting bounds cached copies, never
+remote coverage. Existing per-SST catalog entries remain readable by the new reader.
 
 A prepared scan uses a grouped artifact only when all of its sources belong to
 that scan's assignment or were excluded solely by its time filter. Partial coverage

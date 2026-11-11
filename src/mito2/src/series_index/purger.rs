@@ -43,12 +43,15 @@ impl IndexFileType {
 pub(crate) struct PurgeRequest {
     pub(crate) file_id: RegionFileId,
     pub(crate) objects: Option<Vec<String>>,
+    pub(crate) store: Option<ObjectStore>,
+    pub(crate) owner: Option<std::sync::Weak<crate::region::ManifestContext>>,
 }
 
 #[derive(Clone)]
 pub(crate) struct IndexFilePurger {
     store: ObjectStore,
     sender: UnboundedSender<PurgeRequest>,
+    owner: Option<std::sync::Weak<crate::region::ManifestContext>>,
 }
 
 impl Debug for IndexFilePurger {
@@ -58,14 +61,34 @@ impl Debug for IndexFilePurger {
 }
 
 impl IndexFilePurger {
+    pub(crate) fn with_store(&self, store: ObjectStore) -> Self {
+        Self {
+            store,
+            sender: self.sender.clone(),
+            owner: self.owner.clone(),
+        }
+    }
+
+    pub(crate) fn with_owner(
+        mut self,
+        owner: &std::sync::Arc<crate::region::ManifestContext>,
+    ) -> Self {
+        self.owner = Some(std::sync::Arc::downgrade(owner));
+        self
+    }
+
     pub(crate) fn purge_objects(&self, file_id: RegionFileId, objects: Vec<String>) {
         self.purge(PurgeRequest {
             file_id,
             objects: Some(objects),
+            store: None,
+            owner: None,
         });
     }
 
-    pub(crate) fn purge(&self, request: PurgeRequest) {
+    pub(crate) fn purge(&self, mut request: PurgeRequest) {
+        request.store = Some(self.store.clone());
+        request.owner = self.owner.clone();
         if let Err(error) = self.sender.send(request) {
             let store = self.store.clone();
             common_runtime::spawn_compact(async move {
@@ -95,6 +118,26 @@ pub(crate) async fn run_index_purge_task(
 }
 
 async fn purge_file(store: &ObjectStore, request: PurgeRequest) {
+    let owner = request.owner.as_ref().and_then(std::sync::Weak::upgrade);
+    if request.owner.is_some() && owner.is_none() {
+        return;
+    }
+    let _guard = if let Some(owner) = &owner {
+        let guard = owner.manifest_manager.read().await;
+        if !matches!(
+            owner.current_state(),
+            crate::region::RegionRoleState::Leader(
+                crate::region::RegionLeaderState::Writable
+                    | crate::region::RegionLeaderState::Dropping
+            )
+        ) {
+            return;
+        }
+        Some(guard)
+    } else {
+        None
+    };
+    let store = request.store.as_ref().unwrap_or(store);
     let objects = request.objects.unwrap_or_else(|| {
         vec![series_index_path(
             request.file_id.region_id(),
@@ -121,7 +164,14 @@ pub(crate) fn series_index_channel(
     store: ObjectStore,
 ) -> (IndexFilePurger, UnboundedReceiver<PurgeRequest>) {
     let (sender, receiver) = unbounded_channel();
-    (IndexFilePurger { store, sender }, receiver)
+    (
+        IndexFilePurger {
+            store,
+            sender,
+            owner: None,
+        },
+        receiver,
+    )
 }
 
 #[cfg(test)]
@@ -147,6 +197,8 @@ mod tests {
             purger.purge(PurgeRequest {
                 file_id,
                 objects: None,
+                store: None,
+                owner: None,
             });
         }
         drop(purger);
@@ -172,6 +224,8 @@ mod tests {
         purger.purge(PurgeRequest {
             file_id,
             objects: None,
+            store: None,
+            owner: None,
         });
         tokio::time::timeout(Duration::from_secs(10), async {
             while store.exists(&path).await.unwrap() {

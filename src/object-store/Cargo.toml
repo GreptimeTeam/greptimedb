@@ -8,10 +8,10 @@ license.workspace = true
 workspace = true
 
 [features]
-hdfs-object-store = ["dep:hdfs-native", "opendal/services-hdfs-native", "uuid"]
+hdfs-object-store = ["dep:hdfs-native", "opendal/services-hdfs-native"]
 mysql-object-store = ["opendal/services-mysql"]
 services-memory = ["opendal/services-memory"]
-testing = ["derive_builder", "uuid"]
+testing = ["derive_builder"]
 
 [dependencies]
 bytes.workspace = true
@@ -40,7 +40,7 @@ reqwest.workspace = true
 serde.workspace = true
 snafu.workspace = true
 tokio.workspace = true
-uuid = { workspace = true, optional = true }
+uuid.workspace = true
 
 [dev-dependencies]
 anyhow = "1.0"

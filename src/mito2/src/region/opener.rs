@@ -166,7 +166,7 @@ pub(crate) struct RegionOpener {
     file_ref_manager: FileReferenceManagerRef,
     partition_expr_fetcher: PartitionExprFetcherRef,
     hook: Option<RegionHookRef>,
-    series_index_store: Option<ObjectStore>,
+    series_index_cache: Option<Arc<object_store::layers::DiskCache>>,
     series_index_purger: Option<IndexFilePurger>,
 }
 
@@ -207,14 +207,17 @@ impl RegionOpener {
             file_ref_manager,
             partition_expr_fetcher,
             hook: None,
-            series_index_store: None,
+            series_index_cache: None,
             series_index_purger: None,
         }
     }
 
     /// Sets the store for companion range indexes.
-    pub(crate) fn series_index_store(mut self, store: Option<ObjectStore>) -> Self {
-        self.series_index_store = store;
+    pub(crate) fn series_index_cache(
+        mut self,
+        cache: Option<Arc<object_store::layers::DiskCache>>,
+    ) -> Self {
+        self.series_index_cache = cache;
         self
     }
 
@@ -424,6 +427,18 @@ impl RegionOpener {
             .flushed_entry_id(flushed_entry_id)
             .build();
         let version_control = Arc::new(VersionControl::new(version));
+        let manifest_ctx = Arc::new(ManifestContext::new(
+            manifest_manager,
+            RegionRoleState::Leader(RegionLeaderState::Writable),
+            self.hook.clone(),
+        ));
+        let series_index_store = self.series_index_cache.as_ref().map(|cache| {
+            crate::series_index::cached_store(
+                cache,
+                object_store.clone(),
+                version_control.current().version.options.storage.as_deref(),
+            )
+        });
         let access_layer = Arc::new(AccessLayer::new(
             self.table_dir.clone(),
             self.path_type,
@@ -438,14 +453,10 @@ impl RegionOpener {
             version_control,
             series_index_version_control: crate::series_index::SeriesIndexVersionControl::default()
                 .with_format(config.experimental_series_index_format),
-            series_index_store: self.series_index_store.clone(),
+            series_index_store: series_index_store.clone(),
             access_layer: access_layer.clone(),
             // Region is writable after it is created.
-            manifest_ctx: Arc::new(ManifestContext::new(
-                manifest_manager,
-                RegionRoleState::Leader(RegionLeaderState::Writable),
-                self.hook.clone(),
-            )),
+            manifest_ctx: manifest_ctx.clone(),
             file_purger: create_file_purger(
                 config.gc.enable,
                 self.path_type,
@@ -453,8 +464,9 @@ impl RegionOpener {
                 access_layer,
                 self.cache_manager,
                 self.file_ref_manager.clone(),
-                self.series_index_store
-                    .map(|store| RangeIndexDeleter::new(store, region_id)),
+                series_index_store.map(|store| {
+                    RangeIndexDeleter::new(store, region_id).with_owner(&manifest_ctx)
+                }),
             ),
             provider,
             last_flush_millis: AtomicI64::new(now),
@@ -557,6 +569,23 @@ impl RegionOpener {
             region_id, self.table_dir, self.options
         );
 
+        let manifest_ctx = Arc::new(ManifestContext::new(
+            manifest_manager,
+            RegionRoleState::Follower,
+            self.hook.clone(),
+        ));
+        let series_index_store = self.series_index_cache.as_ref().map(|cache| {
+            crate::series_index::cached_store(
+                cache,
+                object_store.clone(),
+                region_options.storage.as_deref(),
+            )
+        });
+        let series_index_purger = self
+            .series_index_purger
+            .as_ref()
+            .zip(series_index_store.as_ref())
+            .map(|(purger, store)| purger.with_store(store.clone()).with_owner(&manifest_ctx));
         let access_layer = Arc::new(AccessLayer::new(
             self.table_dir.clone(),
             self.path_type,
@@ -571,9 +600,9 @@ impl RegionOpener {
             access_layer.clone(),
             self.cache_manager.clone(),
             self.file_ref_manager.clone(),
-            self.series_index_store
+            series_index_store
                 .clone()
-                .map(|store| RangeIndexDeleter::new(store, region_id)),
+                .map(|store| RangeIndexDeleter::new(store, region_id).with_owner(&manifest_ctx)),
         );
         // We should sanitize the region options before creating a new memtable.
         let memtable_builder = self
@@ -668,29 +697,24 @@ impl RegionOpener {
 
         let now = self.time_provider.current_time_millis();
 
-        let series_index_version_control =
-            match (&self.series_index_store, &self.series_index_purger) {
-                (Some(store), Some(purger))
-                    if is_sparse_metric_metadata(&version_control.current().version.metadata) =>
-                {
-                    load_version_control(store, self.region_id, purger).await
-                }
-                _ => Default::default(),
-            };
+        let series_index_version_control = match (&series_index_store, &series_index_purger) {
+            (Some(store), Some(purger))
+                if is_sparse_metric_metadata(&version_control.current().version.metadata) =>
+            {
+                load_version_control(store, self.region_id, purger).await
+            }
+            _ => Default::default(),
+        };
 
         let region = MitoRegion {
             region_id: self.region_id,
             version_control: version_control.clone(),
             series_index_version_control: series_index_version_control
                 .with_format(config.experimental_series_index_format),
-            series_index_store: self.series_index_store.clone(),
+            series_index_store: series_index_store.clone(),
             access_layer: access_layer.clone(),
             // Region is always opened in read only mode.
-            manifest_ctx: Arc::new(ManifestContext::new(
-                manifest_manager,
-                RegionRoleState::Follower,
-                self.hook.clone(),
-            )),
+            manifest_ctx,
             file_purger,
             provider: provider.clone(),
             last_flush_millis: AtomicI64::new(now),
