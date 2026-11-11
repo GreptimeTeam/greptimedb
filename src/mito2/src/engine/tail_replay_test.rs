@@ -458,11 +458,20 @@ async fn test_reported_tail_must_reach_its_upto() {
     assert!(region.has_pending_tails());
 }
 
+#[rstest]
+#[case::reported(UptoKind::Reported)]
+#[case::listed(UptoKind::Listed)]
 #[tokio::test]
-async fn test_tail_read_stops_at_its_upto() {
+async fn test_tail_read_stops_at_its_upto(#[case] upto_kind: UptoKind) {
     let region = TestRegion::new("tail-replay-stop-at-upto", false, None).await;
+    // The object store WAL keeps an entry's position in the low 20 bits, so the listed bound
+    // is the last id of the first entry's object and names no entry.
+    let upto = match upto_kind {
+        UptoKind::Reported => region.entries[0],
+        UptoKind::Listed => region.entries[0] | ((1 << 20) - 1),
+    };
     region
-        .reopen_with_tails(vec![own_tail(0, region.entries[0], UptoKind::Reported)])
+        .reopen_with_tails(vec![own_tail(0, upto, upto_kind)])
         .await;
     // Makes the entry after the tail unreadable.
     let prefix = wal_config().node_prefix(NODE_ID, STANDALONE_GENERATION);

@@ -245,9 +245,10 @@ impl<S: LogStore> Wal<S> {
         }
     }
 
-    /// Streams the region's entries of `tail` from the WAL of its node, from this log store's
-    /// own WAL when that is node `node_id`, starting after `tail.after`. A stream of this
-    /// node's WAL may go past `tail.upto`.
+    /// Streams the region's entries of `tail` from the WAL of its node, starting after
+    /// `tail.after`. A reported tail of node `node_id` comes from this log store's own WAL,
+    /// whose stream may go past `tail.upto`. A listed bound may name no entry, so the read of
+    /// every listed tail stops at its bound through `read_node`.
     pub(crate) async fn read_tail(
         &self,
         provider: &Provider,
@@ -255,7 +256,7 @@ impl<S: LogStore> Wal<S> {
         node_id: Option<u64>,
         tail: &PendingTail,
     ) -> Result<WalEntryStream<'static>> {
-        if Some(tail.node_id) == node_id {
+        if Some(tail.node_id) == node_id && tail.upto_kind == UptoKind::Reported {
             return self
                 .wal_entry_reader(provider, region_id)
                 .read(provider, tail.after + 1);
