@@ -3470,7 +3470,7 @@ mod tests {
         // The analyzer expands a raw source into a merge scan. The recovery projection the Fused
         // planner repairs is the one the physical planner derives from the source's own frame
         // schema, not an extra analyzer node.
-        let analyzed = DistPlannerAnalyzer::new(false)
+        let analyzed = DistPlannerAnalyzer::default()
             .analyze(raw, &ConfigOptions::default())
             .unwrap();
         assert_eq!(

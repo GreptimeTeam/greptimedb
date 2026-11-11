@@ -24,8 +24,8 @@ use datafusion_common::tree_node::{TreeNode, TreeNodeRecursion};
 use datafusion_expr::expr::NullTreatment;
 use datafusion_expr::{Expr, LogicalPlan, UserDefinedLogicalNode};
 use promql::extension_plan::{
-    EmptyMetric, FusedOutputFormat, FusedSeries, InstantManipulate, RangeManipulate,
-    RawSeriesSource, SeriesDivide, SeriesNormalize,
+    EmptyMetric, FusedSeries, InstantManipulate, RangeManipulate, RawSeriesSource, SeriesDivide,
+    SeriesNormalize,
 };
 use promql::native::plan::{AggregateStage, NativeExpr, reads_across_series};
 use store_api::metric_engine_consts::DATA_SCHEMA_TSID_COLUMN_NAME;
@@ -34,31 +34,6 @@ use crate::dist_plan::MergeScanLogicalPlan;
 use crate::dist_plan::analyzer::AliasMapping;
 use crate::dist_plan::merge_sort::{MergeSortLogicalPlan, merge_sort_transformer};
 use crate::promql::planner::native::{independent_scan_pair, pointwise_operand, same_table_scans};
-
-/// Whether `fused` is a canonical producer that may run inside one region.
-///
-/// A canonical producer merges the pieces of one label set that its own input partitions hold, and
-/// its physical canonical router collects those pieces from exactly those partitions. It may only
-/// run where those partitions cover the whole table. In process that is the region's own read: the
-/// region holds every piece its router has to see and the node belongs there. Ordinary consumers
-/// above it do not carry the producer marker and retain their normal placement requirements.
-///
-/// Over the wire every selector input is a [`RawSeriesSource`] answered per region, so no region
-/// holds every piece of a label set. A producer placed below the raw sources would run once per
-/// region and its router would collect the pieces of the region it runs in and no others, which
-/// answers a label set from one region's share whenever the pieces are spread. Declining this
-/// classification is what keeps that from happening: the analyzer expands each raw source into a
-/// merge scan and the producer, with the router it inserts above itself, stays on the frontend over
-/// every region.
-fn canonical_boundary_region_node(fused: &FusedSeries, in_process_region_transport: bool) -> bool {
-    if !fused.is_canonical_producer() {
-        return false;
-    }
-    in_process_region_transport
-        && fused.format() == FusedOutputFormat::SeriesFrame
-        && fused.canonical_producer_prefix_is_local()
-        && !fused.children().is_empty()
-}
 
 pub struct StepTransformAction {
     extra_parent_plans: Vec<LogicalPlan>,
@@ -125,7 +100,6 @@ impl Categorizer {
     pub fn check_plan(
         plan: &LogicalPlan,
         partition_cols: Option<AliasMapping>,
-        in_process_region_transport: bool,
     ) -> DfResult<Commutativity> {
         // Subquery is treated separately in `inspect_plan_with_subquery`. To avoid rewrite the
         // "maybe rewritten" plan, stop the check here.
@@ -226,11 +200,9 @@ impl Categorizer {
                     Commutativity::Unimplemented
                 }
             }
-            LogicalPlan::Extension(extension) => Self::check_extension_plan(
-                extension.node.as_ref() as _,
-                &partition_cols,
-                in_process_region_transport,
-            ),
+            LogicalPlan::Extension(extension) => {
+                Self::check_extension_plan(extension.node.as_ref() as _, &partition_cols)
+            }
             LogicalPlan::Distinct(_) => {
                 if partition_cols.is_empty() {
                     Commutativity::Commutative
@@ -256,7 +228,6 @@ impl Categorizer {
     pub fn check_extension_plan(
         plan: &dyn UserDefinedLogicalNode,
         partition_cols: &AliasMapping,
-        in_process_region_transport: bool,
     ) -> Commutativity {
         match plan.name() {
             name if name == SeriesDivide::name() => {
@@ -285,16 +256,15 @@ impl Categorizer {
             name if name == FusedSeries::name() => {
                 let fused = plan.as_any().downcast_ref::<FusedSeries>().unwrap();
                 if fused.is_canonical_producer() {
-                    // A canonical producer is placed by its own contract and not by the shape below
-                    // it: either the region holds every piece its router collects, or the node stays
-                    // above the raw sources with its router. It must not fall through to the
-                    // per-series rules below, which describe what a node computes and say nothing
-                    // about where the pieces of one label set are.
-                    return if canonical_boundary_region_node(fused, in_process_region_transport) {
-                        Commutativity::Commutative
-                    } else {
-                        Commutativity::NonCommutative
-                    };
+                    // A canonical producer merges the pieces of one label set that its own input
+                    // partitions hold, and its physical canonical router collects those pieces from
+                    // exactly those partitions. A region holds only part of a label set, so a
+                    // producer there would answer a label set from one region's share whenever the
+                    // pieces are spread. It is placed by its own contract and not by the shape below
+                    // it: the node stays above the regions with its router, and it must not fall
+                    // through to the per-series rules below, which describe what a node computes and
+                    // say nothing about where the pieces of one label set are.
+                    return Commutativity::NonCommutative;
                 }
                 // The raw-series reader supports one scan, or the narrow same-table multi-scan
                 // one-to-one case. This classification is for region-local execution only.
@@ -500,8 +470,7 @@ mod tests {
             BTreeSet::from([Column::from_name("some_partition_col")]),
         )]);
 
-        let commutativity =
-            Categorizer::check_extension_plan(&series_divide, &partition_cols, false);
+        let commutativity = Categorizer::check_extension_plan(&series_divide, &partition_cols);
         assert!(matches!(commutativity, Commutativity::Commutative));
     }
 
@@ -846,7 +815,7 @@ mod tests {
         let plan = fused_series_plan(table_scan_plan());
 
         assert!(matches!(
-            Categorizer::check_plan(&plan, None, true).unwrap(),
+            Categorizer::check_plan(&plan, None).unwrap(),
             Commutativity::Commutative
         ));
     }
@@ -864,7 +833,7 @@ mod tests {
         let plan = fused_series_plan(input);
 
         assert!(matches!(
-            Categorizer::check_plan(&plan, None, true).unwrap(),
+            Categorizer::check_plan(&plan, None).unwrap(),
             Commutativity::NonCommutative
         ));
     }
@@ -876,35 +845,27 @@ mod tests {
         let plan = fused_series_plan_named(table_scan_plan(), None);
 
         assert!(matches!(
-            Categorizer::check_plan(&plan, None, true).unwrap(),
+            Categorizer::check_plan(&plan, None).unwrap(),
             Commutativity::NonCommutative
         ));
     }
 
-    /// The transport decides where a canonical producer runs, not the shape of its children: its
-    /// router collects the pieces of one label set from exactly the partitions the producer runs
-    /// on, so those partitions have to be the region's whole read - which is only true in process.
-    /// A bare scan underneath must not on its own admit the producer to a wire plan.
+    /// A canonical producer never runs in a region, whatever its children look like: its router
+    /// collects the pieces of one label set from exactly the partitions the producer runs on, and a
+    /// region holds only part of a label set. A bare scan underneath does not on its own admit the
+    /// producer, so the node stays above the regions with its router.
     #[test]
-    fn a_canonical_producer_is_not_commutative_on_the_wire_even_over_a_bare_scan() {
+    fn a_canonical_producer_is_not_commutative_even_over_a_bare_scan() {
         let plan = canonical_producer_plan(table_scan_plan());
         let LogicalPlan::Extension(extension) = &plan else {
             unreachable!();
         };
         assert!(matches!(
-            Categorizer::check_extension_plan(
-                extension.node.as_ref(),
-                &AliasMapping::default(),
-                true
-            ),
-            Commutativity::Commutative
+            Categorizer::check_extension_plan(extension.node.as_ref(), &AliasMapping::default()),
+            Commutativity::NonCommutative
         ));
         assert!(matches!(
-            Categorizer::check_extension_plan(
-                extension.node.as_ref(),
-                &AliasMapping::default(),
-                false
-            ),
+            Categorizer::check_plan(&plan, None).unwrap(),
             Commutativity::NonCommutative
         ));
     }
@@ -966,11 +927,7 @@ mod tests {
             unreachable!();
         };
         assert!(matches!(
-            Categorizer::check_extension_plan(
-                extension.node.as_ref(),
-                &AliasMapping::default(),
-                true
-            ),
+            Categorizer::check_extension_plan(extension.node.as_ref(), &AliasMapping::default()),
             Commutativity::Commutative
         ));
 
@@ -989,11 +946,7 @@ mod tests {
             unreachable!();
         };
         assert!(matches!(
-            Categorizer::check_extension_plan(
-                extension.node.as_ref(),
-                &AliasMapping::default(),
-                true
-            ),
+            Categorizer::check_extension_plan(extension.node.as_ref(), &AliasMapping::default()),
             Commutativity::NonCommutative
         ));
     }
@@ -1030,7 +983,7 @@ mod tests {
             source(other_table, "other_metric"),
         );
 
-        let analyzed_plan = analyze(DistPlannerAnalyzer::new(true), pair);
+        let analyzed_plan = analyze(DistPlannerAnalyzer::default(), pair);
         let LogicalPlan::Extension(root) = &analyzed_plan else {
             panic!("the pair stays the root: {analyzed_plan}");
         };
@@ -1128,14 +1081,13 @@ mod tests {
         );
     }
 
-    /// The pair is placed by what the plan is, never by how the engine reaches its regions.
+    /// The pair is placed by what the plan is.
     ///
-    /// One same-table pair, one placement: both deployment constructions put the whole pair in one
-    /// merge scan's region input, no matter which wrappers a plan puts above it. The wrappers
-    /// decide what the pair's input looks like only in that each selector keeps its own filter and
-    /// its own source index.
+    /// One same-table pair, one placement: the whole pair lands in one merge scan's region input, no
+    /// matter which wrappers a plan puts above it. The wrappers decide what the pair's input looks
+    /// like only in that each selector keeps its own filter and its own source index.
     #[test]
-    fn a_same_table_pair_is_placed_the_same_way_by_both_transports() {
+    fn a_same_table_pair_lands_whole_in_one_region() {
         let pair = || {
             fused_pair_plan(
                 table_scan_plan_with_filter("left"),
@@ -1174,30 +1126,16 @@ mod tests {
 
         for (label, wrap) in wrapped {
             let plan = wrap(pair());
-            let in_process = analyzed(DistPlannerAnalyzer::new(true), plan.clone())
+            let analyzed_plan = analyzed(DistPlannerAnalyzer::default(), plan)
                 .unwrap_or_else(|err| panic!("{label}: {err}"));
-            let wire = analyzed(DistPlannerAnalyzer::new(false), plan.clone())
-                .unwrap_or_else(|err| panic!("{label}: {err}"));
-            assert_eq!(
-                in_process.to_string(),
-                wire.to_string(),
-                "{label}: the transport must not move the pair"
-            );
-            assert_pair_lands_in_one_region(&in_process, label);
+            assert_pair_lands_in_one_region(&analyzed_plan, label);
         }
 
-        // The same wrappers stacked are still the same plan for placement purposes.
+        // The same wrappers stacked are still one pair in one region.
         let stacked = projection_over(filter_over(alias_over(pair())));
-        let in_process = analyzed(DistPlannerAnalyzer::new(true), stacked.clone())
+        let analyzed_plan = analyzed(DistPlannerAnalyzer::default(), stacked)
             .unwrap_or_else(|err| panic!("stacked: {err}"));
-        let wire = analyzed(DistPlannerAnalyzer::new(false), stacked)
-            .unwrap_or_else(|err| panic!("stacked: {err}"));
-        assert_eq!(
-            in_process.to_string(),
-            wire.to_string(),
-            "stacked: the transport must not move the pair"
-        );
-        assert_pair_lands_in_one_region(&in_process, "stacked");
+        assert_pair_lands_in_one_region(&analyzed_plan, "stacked");
     }
 
     /// Ordinary fused producers are serializable, and where they may run is a placement decision
@@ -1211,7 +1149,7 @@ mod tests {
             .expect("FusedSeries uses its ordinary serializer");
         assert!(!encoded.is_empty());
 
-        let in_process = analyze(DistPlannerAnalyzer::new(true), plan.clone());
+        let in_process = analyze(DistPlannerAnalyzer::default(), plan.clone());
         assert!(any_remote_input_holds(&in_process, holds_fused_series));
 
         // A partial producer exports aggregate state, which the codec carries like any other
@@ -1228,7 +1166,7 @@ mod tests {
                 .is_ok(),
             "a state-exporting producer encodes like any other node"
         );
-        let placed = analyze(DistPlannerAnalyzer::new(true), split);
+        let placed = analyze(DistPlannerAnalyzer::default(), split);
         assert!(as_final_split(&placed).is_some());
         let child = placed.inputs();
         let [child] = child.as_slice() else {
@@ -1343,7 +1281,7 @@ mod tests {
     fn a_split_aggregate_is_commutative_only_below_the_cut() {
         let plan = split_aggregate_plan(table_scan_plan());
         assert!(matches!(
-            Categorizer::check_plan(&plan, None, true).unwrap(),
+            Categorizer::check_plan(&plan, None).unwrap(),
             Commutativity::NonCommutative
         ));
 
@@ -1352,14 +1290,16 @@ mod tests {
             panic!("expected the final node to have one partial child: {plan}");
         };
         assert!(matches!(
-            Categorizer::check_plan(partial, None, true).unwrap(),
+            Categorizer::check_plan(partial, None).unwrap(),
             Commutativity::Commutative
         ));
     }
 
-    /// The final half stays on the frontend and the partial half rides inside the region scan.
+    /// The final half stays on the frontend and the partial half rides inside the region scan, for
+    /// every deployment: the split aggregate's two halves are decided by what the plan is, so a
+    /// stand-alone deployment and a distributed frontend share the structure.
     #[test]
-    fn a_split_aggregate_finalizes_above_the_region_only_in_process() {
+    fn a_split_aggregate_finalizes_above_the_region() {
         let plan = split_aggregate_plan(table_scan_plan());
         assert!(
             DFLogicalSubstraitConvertor
@@ -1368,19 +1308,20 @@ mod tests {
             "a split plan encodes like any other plan; where it may run is a placement decision"
         );
 
-        let in_process = analyze(DistPlannerAnalyzer::new(true), plan.clone());
+        let analyzed_plan = analyze(DistPlannerAnalyzer::default(), plan);
         assert!(
-            as_final_split(&in_process).is_some(),
-            "the final node must stay on the frontend: {in_process}"
+            as_final_split(&analyzed_plan).is_some(),
+            "the final node must stay on the frontend: {analyzed_plan}"
         );
-        let final_node = as_final_split(&in_process).unwrap();
+        let final_node = as_final_split(&analyzed_plan).unwrap();
         let [child] = final_node.children() else {
-            panic!("expected the final node to keep one input: {in_process}");
+            panic!("expected the final node to keep one input: {analyzed_plan}");
         };
-        let merge_scan = first_merge_scan(child)
-            .unwrap_or_else(|| panic!("expected a merge scan below the final node: {in_process}"));
+        let merge_scan = first_merge_scan(child).unwrap_or_else(|| {
+            panic!("expected a merge scan below the final node: {analyzed_plan}")
+        });
         let partial = first_fused_series(merge_scan.input()).unwrap_or_else(|| {
-            panic!("expected the partial node in the region input: {in_process}")
+            panic!("expected the partial node in the region input: {analyzed_plan}")
         });
         assert!(!partial.reads_aggregate_state());
         assert!(matches!(
@@ -1388,13 +1329,11 @@ mod tests {
             NativeExpr::Aggregate { op, .. } if op.stage == AggregateStage::Partial
         ));
         assert!(holds_table_scan(merge_scan.input()));
-
-        let encoded = analyze(DistPlannerAnalyzer::new(false), plan);
         // The analyzer, not the codec, decides placement: a split aggregate's partial producer is
         // region-local work and belongs below the boundary.
         assert!(
-            any_remote_input_holds(&encoded, holds_fused_series),
-            "the analyzer keeps the partial producer below the region boundary: {encoded}"
+            any_remote_input_holds(&analyzed_plan, holds_fused_series),
+            "the analyzer keeps the partial producer below the region boundary: {analyzed_plan}"
         );
     }
 
@@ -1426,7 +1365,7 @@ mod tests {
     fn an_ordinary_producer_is_placed_by_encodability_not_by_the_state_exception() {
         let scan = table_scan_plan();
         let split = split_aggregate_plan(scan.clone());
-        let producer_placed = analyze(DistPlannerAnalyzer::new(true), split.clone());
+        let producer_placed = analyze(DistPlannerAnalyzer::default(), split.clone());
         assert!(
             any_remote_input_holds(&producer_placed, holds_fused_series),
             "the split's partial producer rides inside the final node: {producer_placed}"
@@ -1434,7 +1373,7 @@ mod tests {
 
         let values = fused_series_plan(scan);
         let swapped = final_over(split, values);
-        let analyzed = analyze(DistPlannerAnalyzer::new(true), swapped);
+        let analyzed = analyze(DistPlannerAnalyzer::default(), swapped);
         assert!(
             as_final_split(&analyzed).is_some(),
             "the final half never crosses the wire: {analyzed}"
@@ -1461,7 +1400,7 @@ mod tests {
             "the stand-in node has a serializer branch now, so it no longer proves anything"
         );
 
-        let analyzed = analyze(DistPlannerAnalyzer::new(true), plan);
+        let analyzed = analyze(DistPlannerAnalyzer::default(), plan);
 
         assert!(
             !any_remote_input_holds(&analyzed, holds_unserializable_node),
@@ -1537,7 +1476,7 @@ mod test {
             fetch: None,
         });
         assert!(matches!(
-            Categorizer::check_plan(&plan, Some(Default::default()), false).unwrap(),
+            Categorizer::check_plan(&plan, Some(Default::default())).unwrap(),
             Commutativity::Commutative
         ));
     }
