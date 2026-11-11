@@ -848,6 +848,54 @@ async fn test_staging_save_after_deadline_sends_nothing() {
 }
 
 #[tokio::test]
+async fn test_end_of_staging_after_deadline_sends_nothing() {
+    let mut env = TestEnv::with_prefix("end-staging-after-deadline").await;
+    let region_id = RegionId::new(1, 1);
+    let (engine, _log_store, table_dir, schema, deadline) =
+        create_leased_region(&mut env, region_id).await;
+    put_range(&engine, region_id, &schema, 0, 3).await;
+    flush_region(&engine, region_id, None).await;
+    let region = engine.get_region(region_id).unwrap();
+    let file = region
+        .manifest_ctx
+        .manifest()
+        .await
+        .files
+        .values()
+        .next()
+        .unwrap()
+        .clone();
+    engine
+        .handle_request(region_id, enter_staging_request())
+        .await
+        .unwrap();
+    engine
+        .edit_region(region_id, edit_files(vec![file], vec![]))
+        .await
+        .unwrap();
+    let version = next_manifest_version(&region).await;
+
+    engine.freeze_lease_clock(deadline);
+    let response = engine
+        .set_region_role_state_gracefully(region_id, SettableRegionRoleState::Leader)
+        .await
+        .unwrap();
+
+    assert!(response.is_invalid_transition(), "{response:?}");
+    assert_eq!(version, next_manifest_version(&region).await);
+    let store = env.get_object_store().unwrap();
+    let region_dir = region_dir_from_table_dir(&table_dir, region_id, PathType::Bare);
+    let delta = gen_path(
+        &manifest_dir(&region_dir),
+        &delta_file(version),
+        CompressionType::Gzip,
+    );
+    assert!(!store.exists(&delta).await.unwrap());
+    assert!(region.is_follower());
+    assert!(!region.manifest_ctx.is_reload_pending());
+}
+
+#[tokio::test]
 async fn test_default_mode_commit_ignores_leader_deadline() {
     let mut env = TestEnv::with_prefix("default-mode-deadline").await;
     let (engine, _log_store) = new_engine(&mut env).await;

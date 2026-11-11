@@ -1672,26 +1672,15 @@ impl ManifestContext {
         // checkpoint barrier.
         let allow_checkpoint = !is_staging
             && self.state.load() != RegionRoleState::Leader(RegionLeaderState::Downgrading);
-        // A writer past its Leader deadline may no longer hold the region, so it sends nothing.
-        let result = if manager.is_conditional_publication() && self.is_leader_lease_expired() {
-            RegionLeaseExpiredSnafu { region_id }.fail()
-        } else {
-            manager
-                .update_with_verification(action_list, is_staging, allow_checkpoint, || {
-                    self.is_leader_lease_expired()
-                })
-                .await
-        };
-        let version = match result {
-            Ok(version) => version,
-            Err(e) => {
-                error!(e; "Failed to update manifest, region_id: {}", region_id);
-                if matches!(e, Error::ManifestVersionConflict { .. }) {
-                    self.fence_for_reload(manager, region_id).await;
-                }
-                return Err(e);
-            }
-        };
+        let version = self
+            .commit_locked(manager, async |manager| {
+                manager
+                    .update_with_verification(action_list, is_staging, allow_checkpoint, || {
+                        self.is_leader_lease_expired()
+                    })
+                    .await
+            })
+            .await?;
 
         Ok(PendingManifestHook::new(
             region_id,
@@ -1711,12 +1700,13 @@ impl ManifestContext {
         staged_actions: RegionMetaActionList,
     ) -> Result<PendingManifestHook> {
         let region_id = manager.manifest().metadata.region_id;
-        let version = manager
-            .commit_staged(|| self.is_leader_lease_expired())
-            .await
-            .inspect_err(
-                |e| error!(e; "Failed to commit staged manifest, region_id: {}", region_id),
-            )?;
+        let version = self
+            .commit_locked(manager, async |manager| {
+                manager
+                    .commit_staged(|| self.is_leader_lease_expired())
+                    .await
+            })
+            .await?;
 
         Ok(PendingManifestHook::new(
             region_id,
@@ -1725,6 +1715,30 @@ impl ManifestContext {
             self.hook.clone(),
             false,
         ))
+    }
+
+    /// Runs the manifest commit `commit` under a caller-held write lock. A writer past its
+    /// Leader deadline may no longer hold the region, so in conditional publication it sends
+    /// nothing; a commit that finds a newer manifest fences the region (see
+    /// [Self::fence_for_reload]).
+    async fn commit_locked(
+        &self,
+        manager: &mut RegionManifestManager,
+        commit: impl AsyncFnOnce(&mut RegionManifestManager) -> Result<ManifestVersion>,
+    ) -> Result<ManifestVersion> {
+        let region_id = manager.manifest().metadata.region_id;
+        let result = if manager.is_conditional_publication() && self.is_leader_lease_expired() {
+            RegionLeaseExpiredSnafu { region_id }.fail()
+        } else {
+            commit(manager).await
+        };
+        if let Err(e) = &result {
+            error!(e; "Failed to update manifest, region_id: {}", region_id);
+            if matches!(e, Error::ManifestVersionConflict { .. }) {
+                self.fence_for_reload(manager, region_id).await;
+            }
+        }
+        result
     }
 
     /// Returns whether the region's Leader deadline has passed. No deadline counts as passed.
