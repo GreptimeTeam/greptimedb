@@ -35,6 +35,8 @@ pub struct RegionResponse {
     pub affected_rows: AffectedRows,
     pub extensions: HashMap<String, Vec<u8>>,
     pub metadata: Vec<u8>,
+    /// Structured response for persisted sketch operations.
+    pub sketch: Option<greptime_proto::v1::region::SketchResponse>,
 }
 
 /// Successful entries and failed-entry errors indexed by input order.
@@ -58,6 +60,7 @@ impl RegionResponse {
             affected_rows: region_response.affected_rows as _,
             extensions: region_response.extensions,
             metadata: region_response.metadata,
+            sketch: region_response.sketch,
         }
     }
 
@@ -67,6 +70,7 @@ impl RegionResponse {
             affected_rows,
             extensions: Default::default(),
             metadata: Vec::new(),
+            sketch: None,
         }
     }
 
@@ -76,6 +80,7 @@ impl RegionResponse {
             affected_rows: 0,
             extensions: Default::default(),
             metadata,
+            sketch: None,
         }
     }
 }

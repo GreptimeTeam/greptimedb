@@ -579,6 +579,7 @@ impl MetaStateHandler {
 }
 
 pub struct Metasrv {
+    node_manager: common_meta::node_manager::NodeManagerRef,
     state: StateRef,
     started: Arc<AtomicBool>,
     start_time_ms: u64,
@@ -905,6 +906,11 @@ impl Metasrv {
 
     pub fn procedure_manager(&self) -> &ProcedureManagerRef {
         &self.procedure_manager
+    }
+
+    /// Shares the existing datanode connections with internal planners.
+    pub fn node_manager(&self) -> &common_meta::node_manager::NodeManagerRef {
+        &self.node_manager
     }
 
     pub fn table_metadata_manager(&self) -> &TableMetadataManagerRef {

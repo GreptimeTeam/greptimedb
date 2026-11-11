@@ -129,6 +129,33 @@ impl MetricEngineInner {
         let physical_region_options = PhysicalRegionOptions::try_from(&request.options)?;
         let (data_region_id, metadata_region_id) = Self::transform_region_id(region_id);
 
+        // create data region
+        let create_data_region_request = self.create_request_for_data_region(&request);
+        #[cfg(feature = "enterprise")]
+        let create_data_region_request = {
+            let mut request = create_data_region_request;
+            let enabled = match std::env::var("GREPTIMEDB_EXPERIMENTAL_TABLE_ID_SKETCHES") {
+                Ok(value) => value.parse::<bool>().map_err(|error| {
+                    UnexpectedRequestSnafu {
+                        reason: format!(
+                            "invalid GREPTIMEDB_EXPERIMENTAL_TABLE_ID_SKETCHES: {error}"
+                        ),
+                    }
+                    .build()
+                })?,
+                Err(std::env::VarError::NotPresent) => false,
+                Err(error) => {
+                    return UnexpectedRequestSnafu {
+                        reason: error.to_string(),
+                    }
+                    .fail();
+                }
+            };
+            if enabled {
+                enable_table_id_sketches(&mut request)?;
+            }
+            request
+        };
         // create metadata region
         let create_metadata_region_request = self.create_request_for_metadata_region(&request);
         self.mito
@@ -141,8 +168,6 @@ impl MetricEngineInner {
                 region_type: METADATA_REGION_SUBDIR,
             })?;
 
-        // create data region
-        let create_data_region_request = self.create_request_for_data_region(&request);
         let physical_columns = create_data_region_request
             .column_metadatas
             .iter()
@@ -570,6 +595,29 @@ impl MetricEngineInner {
 
         data_region_request
     }
+}
+
+/// Persists options only on the physical table identity; other columns retain their settings.
+#[cfg(feature = "enterprise")]
+fn enable_table_id_sketches(request: &mut RegionCreateRequest) -> Result<()> {
+    use datatypes::schema::{HllOptions, KllOptions, MgOptions};
+
+    for column in &mut request.column_metadatas {
+        if is_metric_name_col(column) {
+            let schema = &mut column.column_schema;
+            schema
+                .set_hll_options(&HllOptions::default())
+                .and_then(|_| schema.set_kll_options(&KllOptions::default()))
+                .and_then(|_| schema.set_mg_options(&MgOptions::default()))
+                .map_err(|error| {
+                    UnexpectedRequestSnafu {
+                        reason: error.to_string(),
+                    }
+                    .build()
+                })?;
+        }
+    }
+    Ok(())
 }
 
 fn table_id_col() -> ColumnMetadata {
@@ -1013,6 +1061,41 @@ mod test {
             data_region_request.requirements,
             RegionRequirements::object_storage()
         );
+
+        #[cfg(feature = "enterprise")]
+        {
+            let mut enabled = data_region_request.clone();
+            enable_table_id_sketches(&mut enabled).unwrap();
+            for column in &enabled.column_metadatas {
+                assert_eq!(
+                    column.column_schema.hll_options().unwrap().is_some(),
+                    is_metric_name_col(column)
+                );
+                assert_eq!(
+                    column.column_schema.kll_options().unwrap().is_some(),
+                    is_metric_name_col(column)
+                );
+                assert_eq!(
+                    column.column_schema.mg_options().unwrap().is_some(),
+                    is_metric_name_col(column)
+                );
+            }
+            let before = data_region_request
+                .column_metadatas
+                .iter()
+                .find(|c| is_metric_name_col(c))
+                .unwrap();
+            let after = enabled
+                .column_metadatas
+                .iter()
+                .find(|c| is_metric_name_col(c))
+                .unwrap();
+            assert_eq!(
+                before.column_schema.skipping_index_options().unwrap(),
+                after.column_schema.skipping_index_options().unwrap()
+            );
+            assert_eq!(data_region_request.primary_key, enabled.primary_key);
+        }
 
         // check create metadata region request
         let metadata_region_request = engine_inner.create_request_for_metadata_region(&request);
