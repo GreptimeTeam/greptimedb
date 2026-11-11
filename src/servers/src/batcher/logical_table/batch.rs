@@ -295,6 +295,10 @@ async fn flush_batch_physical_tracked(
             .await?
     };
     let partition_columns = partition_rule.partition_columns();
+    // `partition_columns()` is an allow list that may be wider than the schema this
+    // function resolves against. It is only matched against fields present in the
+    // logical batches below, so absent names are inert (see
+    // `PartitionRule::partition_columns`).
     let partition_columns_set: HashSet<&str> =
         partition_columns.iter().map(String::as_str).collect();
 

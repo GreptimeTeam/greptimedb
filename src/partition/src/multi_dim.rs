@@ -64,7 +64,9 @@ struct PhysicalPartitionExprs {
 /// single-dimension rule, this will evaluate expression on each column separately.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct MultiDimPartitionRule {
-    /// Allow list of which columns can be used for partitioning.
+    /// Lookup allow list of the columns the partition expressions may reference.
+    /// It includes every column the expressions mention, which may be a column the
+    /// table doesn't declare; see [`PartitionRule::partition_columns`].
     partition_columns: Vec<String>,
     /// Name to index of `partition_columns`. Used for quick lookup.
     name_to_index: HashMap<String, usize>,
