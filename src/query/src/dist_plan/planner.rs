@@ -14,6 +14,7 @@
 
 //! [ExtensionPlanner] implementation for distributed planner
 
+use std::borrow::Cow;
 use std::sync::Arc;
 
 use ahash::HashMap;
@@ -272,11 +273,27 @@ impl DistExtensionPlanner {
         let table_info = table.table_info();
         let (physical_table_id, physical_table_route) = self
             .partition_rule_manager
-            .find_physical_table_route_with_id(table_info.table_id())
+            .find_physical_read_route_with_id(table_info.table_id())
             .await
             .context(PartitionRuleManagerSnafu)?;
-        let all_regions = physical_table_route
-            .region_routes
+        // New repartition targets may be routed before their logical regions exist.
+        // Use the same visible routes for fallback scans and partition pruning.
+        let routes = &physical_table_route.region_routes;
+        let read_routes = if routes
+            .iter()
+            .any(|route| route.is_repartition_pending_read())
+        {
+            Cow::Owned(
+                routes
+                    .iter()
+                    .filter(|route| !route.is_repartition_pending_read())
+                    .cloned()
+                    .collect::<Vec<_>>(),
+            )
+        } else {
+            Cow::Borrowed(routes.as_slice())
+        };
+        let all_regions = read_routes
             .iter()
             .map(|r| RegionId::new(table_info.table_id(), r.region.id.region_number()))
             .collect::<Vec<_>>();
@@ -331,20 +348,18 @@ impl DistExtensionPlanner {
         };
 
         // Get partition information for the table if partition rule manager is available
-        let partitions = match create_partitions_from_region_routes(
-            table_info.table_id(),
-            &physical_table_route.region_routes,
-        ) {
-            Ok(partitions) => partitions,
-            Err(err) => {
-                common_telemetry::debug!(
-                    "Failed to get partition information for table {}, using all regions: {:?}",
-                    table_name,
-                    err
-                );
-                return Ok(all_regions);
-            }
-        };
+        let partitions =
+            match create_partitions_from_region_routes(table_info.table_id(), &read_routes) {
+                Ok(partitions) => partitions,
+                Err(err) => {
+                    common_telemetry::debug!(
+                        "Failed to get partition information for table {}, using all regions: {:?}",
+                        table_name,
+                        err
+                    );
+                    return Ok(all_regions);
+                }
+            };
         if partitions.is_empty() {
             return Ok(all_regions);
         }
@@ -549,10 +564,12 @@ mod tests {
     use catalog::{CatalogManagerRef, RegisterTableRequest};
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
     use common_meta::cache::new_table_route_cache;
-    use common_meta::key::TableMetadataManager;
-    use common_meta::key::table_route::TableRouteValue;
+    use common_meta::key::table_route::{TableRouteKey, TableRouteValue};
+    use common_meta::key::{MetadataKey, MetadataValue, TableMetadataManager};
+    use common_meta::kv_backend::KvBackendRef;
     use common_meta::kv_backend::memory::MemoryKvBackend;
     use common_meta::rpc::router::{Region, RegionRoute};
+    use common_meta::rpc::store::{DeleteRangeRequest, PutRequest};
     use common_query::request::QueryRequest;
     use common_recordbatch::SendableRecordBatchStream;
     use datafusion::datasource::DefaultTableSource;
@@ -670,6 +687,20 @@ mod tests {
         physical_partition_keys: Vec<usize>,
         expressions: Vec<Option<PartitionExpr>>,
     ) -> (DistExtensionPlanner, LogicalPlan, TableName) {
+        let routes = expressions
+            .into_iter()
+            .enumerate()
+            .map(|(index, expression)| region_route(index as u32 + 1, expression))
+            .collect();
+        let (planner, plan, name, _) =
+            planner_and_plan_with_routes(physical_partition_keys, routes).await;
+        (planner, plan, name)
+    }
+
+    async fn planner_and_plan_with_routes(
+        physical_partition_keys: Vec<usize>,
+        routes: Vec<RegionRoute>,
+    ) -> (DistExtensionPlanner, LogicalPlan, TableName, KvBackendRef) {
         let logical_info = table_info(LOGICAL_TABLE_ID, "logical", &["host"], vec![0]);
         let physical_info = table_info(
             PHYSICAL_TABLE_ID,
@@ -695,11 +726,6 @@ mod tests {
 
         let backend = Arc::new(MemoryKvBackend::default());
         let metadata_manager = TableMetadataManager::new(backend.clone());
-        let routes = expressions
-            .into_iter()
-            .enumerate()
-            .map(|(index, expression)| region_route(index as u32 + 1, expression))
-            .collect();
         metadata_manager
             .create_table_metadata(
                 physical_info,
@@ -728,7 +754,7 @@ mod tests {
             table_route_cache.clone(),
         ));
         let partition_rule_manager = Arc::new(PartitionRuleManager::new(
-            backend,
+            backend.clone(),
             table_route_cache,
             partition_info_cache,
         ));
@@ -763,7 +789,64 @@ mod tests {
             planner,
             plan,
             TableName::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, "logical"),
+            backend,
         )
+    }
+
+    #[tokio::test]
+    async fn test_pending_repartition_targets_excluded_from_reads() {
+        let expression = Some(partition_col("host").lt(Value::String("z".into())));
+        let mut source = region_route(1, expression.clone());
+        source.set_leader_staging();
+        let mut target = region_route(2, expression);
+        target.set_repartition_pending_read();
+        // The metadata backend and route cache must preserve the pending marker.
+        let (planner, plan, name, backend) =
+            planner_and_plan_with_routes(vec![0], vec![source.clone(), target.clone()]).await;
+        assert_eq!(
+            planner.get_regions(&name, &plan).await.unwrap(),
+            vec![RegionId::new(LOGICAL_TABLE_ID, 1)]
+        );
+        let LogicalPlan::Filter(filter) = &plan else {
+            panic!("expected filtered test plan")
+        };
+        assert_eq!(
+            planner.get_regions(&name, &filter.input).await.unwrap(),
+            vec![RegionId::new(LOGICAL_TABLE_ID, 1)]
+        );
+        // Synchronization makes the target readable; a staging source remains readable throughout.
+        target.clear_repartition_pending_read();
+        // Deliberately do not invalidate the cached pending snapshot.
+        backend
+            .put(
+                PutRequest::new()
+                    .with_key(TableRouteKey::new(PHYSICAL_TABLE_ID).to_bytes())
+                    .with_value(
+                        TableRouteValue::physical(vec![source, target])
+                            .try_as_raw_value()
+                            .unwrap(),
+                    ),
+            )
+            .await
+            .unwrap();
+        let mut visible = planner.get_regions(&name, &plan).await.unwrap();
+        visible.sort_unstable();
+        assert_eq!(
+            visible,
+            vec![
+                RegionId::new(LOGICAL_TABLE_ID, 1),
+                RegionId::new(LOGICAL_TABLE_ID, 2)
+            ]
+        );
+        backend
+            .delete_range(
+                DeleteRangeRequest::new()
+                    .with_key(TableRouteKey::new(PHYSICAL_TABLE_ID).to_bytes()),
+            )
+            .await
+            .unwrap();
+        // A failed authoritative refresh must not fall back to silently hiding targets.
+        assert!(planner.get_regions(&name, &plan).await.is_err());
     }
 
     fn physical_partition_expressions() -> Vec<Option<PartitionExpr>> {

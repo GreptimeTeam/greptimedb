@@ -1,0 +1,1 @@
+{"region":{"id":4294967298,"name":"target","partition_expr":"","attrs":{"greptime:repartition-pending-read":"true","unrelated":"retained"}},"leader_peer":{"id":1,"addr":"datanode:4001"},"follower_peers":[],"leader_down_since":null}
