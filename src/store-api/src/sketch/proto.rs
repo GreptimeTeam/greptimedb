@@ -24,7 +24,7 @@ use datatypes::value::Value;
 
 use crate::sketch::{
     ColumnSketchResult, SketchBucket, SketchGap, SketchGapReason, SketchQuery, SketchRequest,
-    SketchResponse, SketchTimeRange, SketchValue,
+    SketchResponse, SketchSample, SketchSampling, SketchTimeRange, SketchValue,
 };
 use crate::storage::{FileId, RegionId};
 
@@ -138,6 +138,10 @@ impl TryFrom<pb::SketchRequest> for SketchRequest {
                 .time_range
                 .ok_or_else(|| invalid("missing sketch time range"))?
                 .try_into()?,
+            sampling: request.sampling.map(|sampling| SketchSampling {
+                max_files: sampling.max_files,
+                seed: sampling.seed,
+            }),
             columns: request.columns,
             queries: request
                 .queries
@@ -157,6 +161,10 @@ impl SketchRequest {
         Ok(pb::SketchRequest {
             region_id: region_id.as_u64(),
             time_range: Some(self.time_range.try_into()?),
+            sampling: self.sampling.map(|sampling| pb::SketchSampling {
+                max_files: sampling.max_files,
+                seed: sampling.seed,
+            }),
             columns: self.columns,
             queries: self.queries.into_iter().map(Into::into).collect(),
         })
@@ -291,7 +299,16 @@ impl TryFrom<SketchResponse> for pb::SketchResponse {
                 })
             })
             .collect::<Result<_, BoxedError>>()?;
-        Ok(Self { results })
+        Ok(Self {
+            results,
+            sample: response.sample.map(|sample| pb::SketchSample {
+                candidate_files: sample.candidate_files,
+                sampled_files: sample.sampled_files,
+                fingerprint: sample.fingerprint,
+                rows_squared_sum: sample.rows_squared_sum,
+                max_file_rows: sample.max_file_rows,
+            }),
+        })
     }
 }
 
@@ -359,7 +376,26 @@ impl TryFrom<pb::SketchResponse> for SketchResponse {
                 })
             })
             .collect::<Result<_, BoxedError>>()?;
-        Ok(Self { results })
+        let sample = response
+            .sample
+            .map(|sample| {
+                if sample.sampled_files > sample.candidate_files
+                    || (sample.candidate_files > 0 && sample.sampled_files == 0)
+                    || !sample.rows_squared_sum.is_finite()
+                    || sample.rows_squared_sum < 0.0
+                {
+                    return Err(invalid("invalid sketch file sample diagnostics"));
+                }
+                Ok(SketchSample {
+                    candidate_files: sample.candidate_files,
+                    sampled_files: sample.sampled_files,
+                    fingerprint: sample.fingerprint,
+                    rows_squared_sum: sample.rows_squared_sum,
+                    max_file_rows: sample.max_file_rows,
+                })
+            })
+            .transpose()?;
+        Ok(Self { results, sample })
     }
 }
 
@@ -458,6 +494,10 @@ mod tests {
     fn test_request_roundtrip() {
         let region_id = RegionId::new(42, 7);
         let request = SketchRequest {
+            sampling: Some(SketchSampling {
+                max_files: 512,
+                seed: 42,
+            }),
             time_range: SketchTimeRange {
                 start: Timestamp::new_microsecond(1001),
                 end: Timestamp::new_microsecond(2003),
@@ -493,6 +533,13 @@ mod tests {
 
     fn response() -> SketchResponse {
         SketchResponse {
+            sample: Some(SketchSample {
+                candidate_files: 1000,
+                sampled_files: 512,
+                fingerprint: 42,
+                rows_squared_sum: 512.0,
+                max_file_rows: 1,
+            }),
             results: vec![ColumnSketchResult {
                 column_name: "__table_id".to_string(),
                 column_id: 3,
