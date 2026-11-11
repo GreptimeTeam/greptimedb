@@ -637,6 +637,7 @@ impl MitoRegion {
                 // Only allowed from writable leader state
                 match current_state {
                     RegionRoleState::Leader(RegionLeaderState::Writable) => {
+                        self.version().ensure_no_pending_tails()?;
                         info!("Entering staging mode for region {}", self.region_id);
                         self.set_staging(&mut manager).await?;
                     }
