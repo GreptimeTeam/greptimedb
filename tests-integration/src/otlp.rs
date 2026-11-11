@@ -2136,9 +2136,9 @@ WITH(
         let mut metrics = Vec::new();
         for (i, key) in [
             "greptime_metric",
-            "exemplar_labels",
+            "greptime_exemplar_labels",
             "greptime.metric",
-            "exemplar.labels",
+            "greptime.exemplar.labels",
         ]
         .into_iter()
         .enumerate()
@@ -2177,9 +2177,9 @@ WITH(
         assert_eq!(dropped.get(), before + 9);
         for (table, column) in [
             ("collision_0", "greptime_metric"),
-            ("collision_1", "exemplar_labels"),
+            ("collision_1", "greptime_exemplar_labels"),
             ("collision_2", "greptime_metric"),
-            ("collision_3", "exemplar_labels"),
+            ("collision_3", "greptime_exemplar_labels"),
             ("collision_default", "greptime_metric"),
         ] {
             assert_trace_v2_query(

@@ -43,6 +43,10 @@ source tables. Exemplars are stored in the target database's
 `greptime_metrics_exemplars` table using ordinary Mito storage with sparse primary
 keys and append mode. Remote Write v1 uses the same exemplar write path.
 
+Exemplar-owned labels are stored in a JSON2 field named
+`<default_column_prefix>_exemplar_labels`. The default name is
+`greptime_exemplar_labels`; an empty prefix produces `exemplar_labels`.
+
 Native histogram rows follow the same metric-engine switch as samples. They do
 not use the pending rows batcher yet because the batcher assumes the classic
 timestamp + Float64 value + string tags shape.

@@ -754,7 +754,7 @@ mod tests {
         let instance = standalone.fe_instance();
         query(instance, "CREATE DATABASE other").await;
         for schema in ["public", "other"] {
-            create_table(instance, &format!("CREATE TABLE {schema}.{METRICS_EXEMPLARS_TABLE} (__table_id INT UNSIGNED NOT NULL, __tsid BIGINT UNSIGNED NOT NULL, greptime_timestamp TIMESTAMP(9) TIME INDEX, greptime_metric STRING, greptime_value DOUBLE, exemplar_labels JSON2, PRIMARY KEY (__table_id, __tsid, greptime_metric)) WITH ('append_mode'='true', 'primary_key_encoding'='sparse')")).await;
+            create_table(instance, &format!("CREATE TABLE {schema}.{METRICS_EXEMPLARS_TABLE} (__table_id INT UNSIGNED NOT NULL, __tsid BIGINT UNSIGNED NOT NULL, greptime_timestamp TIMESTAMP(9) TIME INDEX, greptime_metric STRING, greptime_value DOUBLE, greptime_exemplar_labels JSON2, PRIMARY KEY (__table_id, __tsid, greptime_metric)) WITH ('append_mode'='true', 'primary_key_encoding'='sparse')")).await;
         }
         for expression in [
             "rate(metric{__schema__=\"public\"}[5m]) + metric{__database__=\"secret\"}",

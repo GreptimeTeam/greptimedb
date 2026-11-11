@@ -55,7 +55,7 @@ use common_meta::rpc::ddl::TriggerReason;
 use common_query::Output;
 use common_query::native_histogram::{is_native_histogram_value_type, native_histogram_value_type};
 use common_query::prelude::{
-    EXEMPLAR_LABELS_COLUMN, EXEMPLAR_METRIC_COLUMN, greptime_timestamp, greptime_value,
+    EXEMPLAR_METRIC_COLUMN, greptime_exemplar_labels, greptime_timestamp, greptime_value,
 };
 use common_telemetry::tracing_context::TracingContext;
 use common_telemetry::{debug, error, warn};
@@ -2293,11 +2293,11 @@ pub fn validate_exemplar_table(table: &TableInfo) -> Result<()> {
             reason: "exemplar value must be a DOUBLE field"
         }
     );
-    let (labels_index, labels) = lookup(EXEMPLAR_LABELS_COLUMN)?;
+    let (labels_index, labels) = lookup(greptime_exemplar_labels())?;
     ensure!(
         labels.data_type.is_json2() && !meta.primary_key_indices.contains(&labels_index),
         InvalidInsertRequestSnafu {
-            reason: "exemplar_labels must be a JSON2 field"
+            reason: format!("{} must be a JSON2 field", greptime_exemplar_labels())
         }
     );
     if let Some(extension) = labels
@@ -2326,7 +2326,7 @@ pub fn validate_exemplar_table(table: &TableInfo) -> Result<()> {
             greptime_timestamp(),
             greptime_value(),
             EXEMPLAR_METRIC_COLUMN,
-            EXEMPLAR_LABELS_COLUMN,
+            greptime_exemplar_labels(),
             DATA_SCHEMA_TABLE_ID_COLUMN_NAME,
             DATA_SCHEMA_TSID_COLUMN_NAME,
         ]
