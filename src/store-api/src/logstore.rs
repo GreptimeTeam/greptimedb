@@ -175,8 +175,8 @@ pub trait LogStore: Send + Sync + 'static + std::fmt::Debug {
     }
 }
 
-/// Upper bound of a WAL range read from another node. A reported final entry must be
-/// present, whereas a LIST boundary need not contain entries of the region.
+/// Upper bound of a WAL range read through [`LogStore::read_node`]. A reported final entry
+/// must be present, whereas a LIST boundary need not contain entries of the region.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WalReadUpperBound {
     /// The durable last entry reported by the source on downgrade.

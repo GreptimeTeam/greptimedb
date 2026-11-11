@@ -134,7 +134,7 @@ pub struct ObjectStoreLogStore {
     /// derives from them, so all nodes under the root share this store's generation.
     config: ObjectStoreWalConfig,
     generation: u64,
-    /// Reads the WAL of other nodes, see [`LogStore::read_node`].
+    /// Reads the WAL of any node, this node's included, see [`LogStore::read_node`].
     node_readers: ObjectStoreWalReaders,
     /// The storage the prefix is read from, as configured, for messages.
     storage: String,
