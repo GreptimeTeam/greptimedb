@@ -1,0 +1,19 @@
+.github/workflows/ci-command-permission-smoke.yml
+  s_034afdcaf00129::t_e7102a6b71197a 1-70
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "b0d6985ecc63d2af3ef745783860ac5d3cf402d6",
+  "prompts": {},
+  "sessions": {
+    "s_034afdcaf00129": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0ce32-325f-7cd0-87f0-861218b89e49",
+        "model": "unknown"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

@@ -1,0 +1,35 @@
+src/servers/src/grpc/flight/stream.rs
+  s_aa353de59809cc::t_5a6630bc15eb5a 52,55-67,166-167,171-174,183-186,190,195-198,207-208,217
+  s_aa353de59809cc::t_01f83fca911744 46-49,53-54,187-189,218-220
+  s_aa353de59809cc::t_5bafb3a6df5734 541-563
+  s_aa353de59809cc::t_5a1192e01045df 504-506,567,599-601,656-658,712-714,757-759,798-800
+  s_aa353de59809cc::t_f5c58b93671d5d 221,540
+src/datanode/src/region_server.rs
+  s_aa353de59809cc::t_460e808b791898 70-71,994-998
+src/servers/src/grpc/flight.rs
+  s_aa353de59809cc::t_fc84f091721647 55-57
+  s_aa353de59809cc::t_6fb61fba823a24 33
+  s_aa353de59809cc::t_96bb3f5d330686 225-226,228,578-579,584-604,606-607,616,618,623,626
+tests-integration/src/grpc/flight.rs
+  s_aa353de59809cc::t_d71154f46c9609 46,86,88-90
+src/servers/src/grpc/greptime_handler.rs
+  s_aa353de59809cc::t_f8df2dab483f9e 18,84-87,90,92-95,100,102-103,105-109,111,117-118,135,137-138,146,154
+  s_aa353de59809cc::t_effcec67c01c8d 24
+  s_aa353de59809cc::t_64bcad2a43da71 119,139-145,147-153
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.24",
+  "base_commit_sha": "5e5037c201303ea2fcb46fbfd908fd60345de7b8",
+  "prompts": {},
+  "sessions": {
+    "s_aa353de59809cc": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a037e5-dc74-7ce3-b341-3c26620c3721",
+        "model": "gpt-5.6-terra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

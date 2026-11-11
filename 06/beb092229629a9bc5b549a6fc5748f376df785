@@ -1,0 +1,14 @@
+src/common/procedure/src/error.rs
+  h_623774b620da8e 365
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.7",
+  "base_commit_sha": "06beb092229629a9bc5b549a6fc5748f376df785",
+  "prompts": {},
+  "humans": {
+    "h_623774b620da8e": {
+      "author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

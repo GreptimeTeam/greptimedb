@@ -1,0 +1,19 @@
+.github/workflows/ci-slash.yml
+  s_034afdcaf00129::t_b8374136b8fea1 11,67
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "c6025a5a4b3fa2ad16f7e0d3ebd846c36f5ab12b",
+  "prompts": {},
+  "sessions": {
+    "s_034afdcaf00129": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0ce32-325f-7cd0-87f0-861218b89e49",
+        "model": "unknown"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

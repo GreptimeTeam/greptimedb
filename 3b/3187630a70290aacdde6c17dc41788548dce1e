@@ -1,0 +1,19 @@
+tests-integration/tests/repartition.rs
+  s_917668e5144aba::t_1347ca9119b729 27,123,141,162-181,184-185,187,200-201
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.0",
+  "base_commit_sha": "3b3187630a70290aacdde6c17dc41788548dce1e",
+  "prompts": {},
+  "sessions": {
+    "s_917668e5144aba": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0a314-ffdd-78a2-bd53-2b272122e83a",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

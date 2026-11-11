@@ -1,0 +1,39 @@
+src/common/batcher/src/flush_limiter.rs
+  s_c8f343c7af25c4::t_e94695aa2b404d 1-69
+src/common/batcher/src/lib.rs
+  s_c8f343c7af25c4::t_104ead08e18890 1-25
+src/common/batcher/src/flush_policy.rs
+  s_c8f343c7af25c4::t_debac6d8375c95 1-43
+Cargo.lock
+  s_c8f343c7af25c4::t_3c52b3ecd328b5 2319-2325
+src/common/batcher/src/pending_worker.rs
+  s_c8f343c7af25c4::t_fac09a50b7cffd 1-236,240-241,248-250,254,256
+  s_c8f343c7af25c4::t_2c904c1c97a662 237-239
+  s_c8f343c7af25c4::t_d3e04c01cb5c5a 242-247,251-253,255,257-264
+src/common/batcher/src/pending_batch.rs
+  s_c8f343c7af25c4::t_c2509230bc761f 1-115
+src/common/batcher/Cargo.toml
+  s_c8f343c7af25c4::t_0fea30beb05a26 1-17
+Cargo.toml
+  s_c8f343c7af25c4::t_e2ebc6c3892f24 11,291
+src/common/batcher/src/flush_policy/timing.rs
+  s_c8f343c7af25c4::t_c9fcd620e49529 1-147
+src/common/batcher/src/flush_timer.rs
+  s_c8f343c7af25c4::t_84bc4a37394de8 1-141
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.0",
+  "base_commit_sha": "328e542928afc5dceac587c3e1708ade5565caea",
+  "prompts": {},
+  "sessions": {
+    "s_c8f343c7af25c4": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a08b53-a26f-77d0-b428-df57ebdefffd",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

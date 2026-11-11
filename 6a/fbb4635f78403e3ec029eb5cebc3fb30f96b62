@@ -1,0 +1,24 @@
+.github/actions/setup-greptimedb-cluster/with-minio-repartition-gc.yaml
+  s_236c00cdb544fa::t_f846cc98ed9837 8-10
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.3",
+  "base_commit_sha": "6afbb4635f78403e3ec029eb5cebc3fb30f96b62",
+  "prompts": {},
+  "humans": {
+    "h_623774b620da8e": {
+      "author": "WenyXu <wenymedia@gmail.com>"
+    }
+  },
+  "sessions": {
+    "s_236c00cdb544fa": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_16f2df060ffeB6H42T2vtKQzp3",
+        "model": "gpt-5.5"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

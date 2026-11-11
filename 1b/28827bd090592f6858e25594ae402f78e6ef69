@@ -1,0 +1,50 @@
+src/cli/src/metadata/control/put.rs
+  37ee86a4fe02a164 15-19,23-24,30-31,38
+src/cli/src/metadata/control/put/table.rs
+  37ee86a4fe02a164 16,18,21-23,31-32,56-58,71,97-107,113-114,117,120,122-127,129,132,145-147,160,188-196,199-200,223-228,233-257,306-307,309-340,387,405,444-445,460-490,513,554,570
+  0d5e97c4740333fb 1-15,17,19-20,24-30,33-55,59-70,72-96,108-112,115-116,118-119,121,128,130-131,133-144,148-159,161-187,197-198,201,203-211,213-215,217-222,229-232,258-305,308,341-386,388-404,406-443,446-459,491-512,514-553,555-569,571-583
+  h_6bf4f2d0301578 202,212,216
+src/cli/src/metadata/control/put/key.rs
+  0d5e97c4740333fb 1-414,416-432,434-449,451-468
+  37ee86a4fe02a164 415,433,450
+src/cli/src/metadata/control/put/selector.rs
+  37ee86a4fe02a164 1-100
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.3.0",
+  "base_commit_sha": "1b28827bd090592f6858e25594ae402f78e6ef69",
+  "prompts": {
+    "0d5e97c4740333fb": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_265d965d9ffecEBrVdDjXqtf7U",
+        "model": "openai/gpt-5.4"
+      },
+      "human_author": "WenyXu",
+      "messages": [],
+      "total_additions": 1108,
+      "total_deletions": 505,
+      "accepted_lines": 895,
+      "overriden_lines": 2
+    },
+    "37ee86a4fe02a164": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_2655e8402ffeoOTyLjfPt4s47I",
+        "model": "openai/gpt-5.4"
+      },
+      "human_author": "WenyXu",
+      "messages": [],
+      "total_additions": 319,
+      "total_deletions": 664,
+      "accepted_lines": 265,
+      "overriden_lines": 0
+    }
+  },
+  "humans": {
+    "h_6bf4f2d0301578": {
+      "author": "WenyXu"
+    }
+  }
+}

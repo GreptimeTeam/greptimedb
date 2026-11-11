@@ -1,0 +1,37 @@
+src/mito2/src/read/scan_region.rs
+  s_917668e5144aba::t_849d21d17183e2 1691-1711,2348-2384
+src/mito2/src/read/seq_scan.rs
+  s_917668e5144aba::t_36f861d3d087b7 79-80,564-569
+src/mito2/src/read/series_scan.rs
+  s_917668e5144aba::t_9b57ff2e503d36 150-151,575-580
+src/mito2/src/read/unordered_scan.rs
+  s_917668e5144aba::t_c3b9379cba636c 64-65,347-353
+src/query/src/datafusion.rs
+  s_917668e5144aba::t_e6a27ac090f4f4 904
+src/store-api/src/region_engine.rs
+  s_917668e5144aba::t_31e66e15d06a23 309-311,340-345,352,387-391,502-503,1122
+src/table/src/table/scan.rs
+  s_917668e5144aba::t_b6e5ee5fb8e288 485,489-492,746,850-875
+tests-integration/tests/repartition.rs
+  s_917668e5144aba::t_c1da64e42cb57c 136,150,152,158-159,207-211,219,221,270
+tests/cases/distributed/optimizer/count.result
+  s_917668e5144aba::t_58e3320f3222fa 287-288,290-291
+tests/cases/standalone/optimizer/count.result
+  s_917668e5144aba::t_35a490419ad6e7 284-285,287-288
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.0",
+  "base_commit_sha": "0ac79277c786d82bcc2c68b3a6dba761785fee82",
+  "prompts": {},
+  "sessions": {
+    "s_917668e5144aba": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0a314-ffdd-78a2-bd53-2b272122e83a",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

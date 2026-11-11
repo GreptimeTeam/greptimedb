@@ -1,0 +1,19 @@
+src/meta-srv/src/gc/procedure.rs
+  s_bab36d2c764e36::t_433758f4d50edf 43
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.17",
+  "base_commit_sha": "0785e39b3d0b6a1f5e00bdf37785e7826b6fe512",
+  "prompts": {},
+  "sessions": {
+    "s_bab36d2c764e36": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019fa8b5-aa96-72a0-b7fd-65f77a728723",
+        "model": "gpt-5.6-terra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

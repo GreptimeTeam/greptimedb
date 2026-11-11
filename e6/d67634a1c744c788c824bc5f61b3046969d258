@@ -1,0 +1,49 @@
+src/common/batcher/src/flush_limiter.rs
+  s_c8f343c7af25c4::t_a2ec1d175d6472 26-29,48-53,58
+src/common/batcher/src/flush_policy/timing.rs
+  s_c8f343c7af25c4::t_3cb58065e43c60 29,33-35,51,89,96,136,152-153
+src/common/batcher/src/notifier.rs
+  s_c8f343c7af25c4::t_6f6bfbb95eec3c 39-41,44,95-97,111
+src/common/batcher/src/request_limiter.rs
+  s_c8f343c7af25c4::t_691876393b85ed 29-32,64,66-67,73,91,106
+src/servers/src/batcher/flow_notifier.rs
+  s_c8f343c7af25c4::t_046b1cccdc7112 38,120-121,157
+src/servers/src/batcher/logical_table/batch.rs
+  s_c8f343c7af25c4::t_c1884f300bbacf 431,723
+src/servers/src/batcher/logical_table/flow_notifier.rs
+  s_c8f343c7af25c4::t_560493d6f12d51 69,110
+src/servers/src/batcher/logical_table/pending_worker.rs
+  s_c8f343c7af25c4::t_86967a431f652b 312-313,355-356,503-504,507,519
+src/servers/src/batcher/table/flow_notifier.rs
+  s_c8f343c7af25c4::t_a08b51dff9c833 54,107-108,159-160
+src/common/batcher/src/pending_worker.rs
+  s_2432582dedaf5f::t_5f1f7728345200 127
+src/servers/src/batcher/logical_table.rs
+  s_c8f343c7af25c4::t_c34d0b75afce14 142-143,145,147
+src/servers/src/batcher/table.rs
+  s_c8f343c7af25c4::t_e11bc1bea15d9d 87-89,549-550,581
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.0",
+  "base_commit_sha": "e6d67634a1c744c788c824bc5f61b3046969d258",
+  "prompts": {},
+  "sessions": {
+    "s_2432582dedaf5f": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a08e51-436e-7e22-8f81-250159664969",
+        "model": "unknown"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    },
+    "s_c8f343c7af25c4": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a08b53-a26f-77d0-b428-df57ebdefffd",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

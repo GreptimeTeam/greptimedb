@@ -1,0 +1,37 @@
+src/servers/src/batcher.rs
+  s_c8f343c7af25c4::t_7db8ca90fe6938 15,17,19-20
+src/servers/src/batcher/flow_notifier.rs
+  s_c8f343c7af25c4::t_186f34c0561b70 1-176
+src/servers/src/batcher/logical_table.rs
+  s_c8f343c7af25c4::t_3c08395bff4eed 42,57-59,112,155-158,423-435
+src/servers/src/batcher/logical_table/batch.rs
+  s_c8f343c7af25c4::t_b7ddcda55695a3 28,33,61,97,119,297,310,313,322,383,587-747
+src/servers/src/batcher/logical_table/batch_convert.rs
+  s_c8f343c7af25c4::t_5ac29145ba3cd3 293,296
+src/servers/src/batcher/logical_table/flow_notifier.rs
+  s_c8f343c7af25c4::t_57ad3ca8f5d66e 15,18,20,22,25-28,30,50,57-60,70-74,101-102,104,108,113-121,125-126,134,205,246,282-333
+src/servers/src/batcher/logical_table/pending_worker.rs
+  s_c8f343c7af25c4::t_04d2fe9ec0f23e 32,105,295,306,508-512,603-662
+src/servers/src/batcher/logical_table/region_write.rs
+  s_c8f343c7af25c4::t_f1e3a0c87be514 517-590
+src/servers/src/batcher/logical_table/tables.rs
+  s_c8f343c7af25c4::t_78627be5079078 427,541-550
+src/servers/src/lib.rs
+  s_c8f343c7af25c4::t_91e200a8c3bbb4 25
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.0",
+  "base_commit_sha": "43a6883b78ac1b8257b37a9ee2a39b0be3504468",
+  "prompts": {},
+  "sessions": {
+    "s_c8f343c7af25c4": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a08b53-a26f-77d0-b428-df57ebdefffd",
+        "model": "unknown"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

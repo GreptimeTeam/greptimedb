@@ -1,0 +1,77 @@
+src/common/meta/src/ddl/tests.rs
+  s_9b4b6f01d7f1ad::t_e7cf86ba1bce86 25
+config/standalone.example.toml
+  s_9b4b6f01d7f1ad::t_2b42ae97f6f03f 898
+src/common/meta/Cargo.toml
+  s_9b4b6f01d7f1ad::t_2b42ae97f6f03f 101
+  s_73b58ef5b07fe7::t_8f2aaca5e7e865 37
+src/common/meta/src/ddl/tests/drop_flow.rs
+  s_9b4b6f01d7f1ad::t_67a42253f9172b 33-36
+  s_9b4b6f01d7f1ad::t_e7cf86ba1bce86 32
+src/common/meta/src/ddl/tests/create_flow.rs
+  s_9b4b6f01d7f1ad::t_e7cf86ba1bce86 43
+src/common/meta/src/ddl/event/flow.rs
+  s_9b4b6f01d7f1ad::t_1a59b43180515d 1-16,19-21,24-42,44-51,53-59,62-88,90-111,113-160,168-184
+  s_9b4b6f01d7f1ad::t_9d1250644dc18e 17
+  s_9b4b6f01d7f1ad::t_a49f1a384a6a08 43,52,60-61,89,112
+  s_9b4b6f01d7f1ad::t_e23ce461a7a67a 22-23,162-167
+  s_9b4b6f01d7f1ad::t_0dc5829629bca0 18,161
+src/common/meta/src/ddl/tests/event.rs
+  s_9b4b6f01d7f1ad::t_e7cf86ba1bce86 1-15
+src/common/event-recorder/src/event_table.rs
+  s_9b4b6f01d7f1ad::t_e23ce461a7a67a 115-120,226-236
+  s_9b4b6f01d7f1ad::t_409e15c85801cd 237-239
+  s_9b4b6f01d7f1ad::t_af992842c5cc9e 240-242
+src/common/meta/src/ddl/create_flow.rs
+  s_9b4b6f01d7f1ad::t_229d9c9d0ed8b8 27-28,211-220,415-416,421-449
+  s_9b4b6f01d7f1ad::t_a49f1a384a6a08 42,417-420
+Cargo.lock
+  s_9b4b6f01d7f1ad::t_0607b40194da76 2596
+src/common/meta/src/ddl/drop_flow.rs
+  s_9b4b6f01d7f1ad::t_b55c2c37910258 24-25,224-225,230-241
+  s_9b4b6f01d7f1ad::t_a49f1a384a6a08 35,226-229
+config/config.md
+  s_9b4b6f01d7f1ad::t_5f3eb1bfd468fa 232,439
+tests-integration/tests/flow_ddl_event.rs
+  s_9b4b6f01d7f1ad::t_7bc5dd6d6efb35 2-81,83-94,96-121,123-130,133-282
+  s_9b4b6f01d7f1ad::t_a49f1a384a6a08 82,95,122,131-132
+  s_9b4b6f01d7f1ad::t_644379209ebaea 1
+src/common/meta/src/ddl/tests/event/flow.rs
+  s_9b4b6f01d7f1ad::t_e23ce461a7a67a 22-23,218-219
+  s_9b4b6f01d7f1ad::t_21420d2611e006 19
+  s_9b4b6f01d7f1ad::t_aea1396eaaff04 35,37,169-174,181-186,221-227,235,254-258,276-287
+  s_9b4b6f01d7f1ad::t_e7cf86ba1bce86 1-18,20-21,24-34,36,38-168,175-180,187-217,220,228-234,236-253,259-275,289
+  s_9b4b6f01d7f1ad::t_9c8354bd53263d 288,290-294
+src/common/meta/src/ddl.rs
+  s_9b4b6f01d7f1ad::t_90b74f49ea04c2 47
+tests-integration/tests/main.rs
+  s_9b4b6f01d7f1ad::t_6c353c9c01eab6 21
+src/common/meta/src/ddl/event.rs
+  s_9b4b6f01d7f1ad::t_4fe8e0b663a917 1-15
+config/metasrv.example.toml
+  s_9b4b6f01d7f1ad::t_2b42ae97f6f03f 309
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "581a390055b7190eecca70a0a1d146b333237c48",
+  "prompts": {},
+  "sessions": {
+    "s_73b58ef5b07fe7": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019fa410-acae-74a3-a7f0-f8dc11781d0f",
+        "model": "gpt-5.6-terra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    },
+    "s_9b4b6f01d7f1ad": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019fa418-2ca0-7c20-bb43-8d484e1dab20",
+        "model": "gpt-5.6-terra"
+      },
+      "human_author": null
+    }
+  }
+}

@@ -1,0 +1,24 @@
+src/common/meta/src/ddl/alter_table.rs
+  s_3fb4b19d033cbf::t_4eefc1dd799fa5 130,346
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.7",
+  "base_commit_sha": "0f5c26d49ec7782e1e5530e181403d9e37246f15",
+  "prompts": {},
+  "humans": {
+    "h_623774b620da8e": {
+      "author": "WenyXu <wenymedia@gmail.com>"
+    }
+  },
+  "sessions": {
+    "s_3fb4b19d033cbf": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_14552c200ffeccN1tnIyAbdsWl",
+        "model": "gpt-5.5"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

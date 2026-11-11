@@ -1,0 +1,14 @@
+src/cli/src/metadata/control/put/table.rs
+  h_6bf4f2d0301578 104-109
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.3.0",
+  "base_commit_sha": "3d01bdf27e5252e755bb4e643e9c6014beda62e3",
+  "prompts": {},
+  "humans": {
+    "h_6bf4f2d0301578": {
+      "author": "WenyXu"
+    }
+  }
+}

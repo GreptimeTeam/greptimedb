@@ -1,0 +1,32 @@
+src/common/event-recorder/Cargo.toml
+  s_b6df70616bf082::t_dd80aea48baa45 7-9
+src/common/event-recorder/src/event_table.rs
+  s_b6df70616bf082::t_eefe6430f3d15b 1-236
+src/common/event-recorder/src/lib.rs
+  s_b6df70616bf082::t_ed2879716ef32c 18,21-23
+src/common/event-recorder/src/testing.rs
+  s_b6df70616bf082::t_34e7ec6d2a4d24 1-77
+src/common/procedure/src/event.rs
+  s_b6df70616bf082::t_7c9e70e55c50de 18,21-24,29-32,80,122-123,125-127,130,157-159,169-170,172,180-228,231-236,238-248,250-263
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "7730a36a130f045b77b1952632253b4cdd9b00b9",
+  "prompts": {},
+  "humans": {
+    "h_623774b620da8e": {
+      "author": "WenyXu <wenymedia@gmail.com>"
+    }
+  },
+  "sessions": {
+    "s_b6df70616bf082": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019fa19c-ed21-7f23-a85f-c4ca1333776f",
+        "model": "gpt-5.6-terra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

@@ -1,0 +1,22 @@
+src/common/meta/src/region_keeper.rs
+  766f83437f082beb 16,19,29,55,64-68,88,91-94,96-97,105-106,129,131,148-150,163-164,166-169,171-177
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.4.8",
+  "base_commit_sha": "dc66363f89d687933d5694d5a106d32c9808360e",
+  "prompts": {
+    "766f83437f082beb": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_26fda9c9affez3errKHJkwOiJK",
+        "model": "openai/gpt-5.4"
+      },
+      "human_author": "WenyXu",
+      "total_additions": 0,
+      "total_deletions": 0,
+      "accepted_lines": 188,
+      "overriden_lines": 0
+    }
+  }
+}

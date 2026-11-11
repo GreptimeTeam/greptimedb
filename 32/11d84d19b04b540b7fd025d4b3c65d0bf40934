@@ -1,0 +1,19 @@
+tests-integration/src/tests/instance_test.rs
+  s_48927d6d27aa2b::t_c4a880e98b351c 2352-2390
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.3",
+  "base_commit_sha": "3211d84d19b04b540b7fd025d4b3c65d0bf40934",
+  "prompts": {},
+  "sessions": {
+    "s_48927d6d27aa2b": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_16f757dd9ffeGpz81x1RwF1b51",
+        "model": "gpt-5.5"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

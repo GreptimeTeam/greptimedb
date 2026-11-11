@@ -1,0 +1,33 @@
+src/meta-srv/src/procedure/region_migration.rs
+  s_c9a37f2d9d2643::t_7acae157585549 42,665-666,668,670-673,681-684,686-711
+src/meta-srv/src/procedure/region_migration/upgrade_candidate_region.rs
+  s_c9a37f2d9d2643::t_72923264345108 424-435,437-439,451-452,454-483,488,500-503,505-520
+  s_c9a37f2d9d2643::t_57f1c95d15705f 136-137,362
+  s_c9a37f2d9d2643::t_e8d3669979a20a 32,138,143
+  s_c9a37f2d9d2643::t_20ff0f7d7f192d 358,440-444,489-493
+  s_c9a37f2d9d2643::t_aa4db71dff8c60 385-394,396-403,405-406
+  s_c9a37f2d9d2643::t_a5c520a820840b 445-450,453,494-499,504
+  s_c9a37f2d9d2643::t_9ad729efbe16f6 359,436,484-487
+src/datanode/src/utils.rs
+  s_c9a37f2d9d2643::t_2e9109940c43a3 20-23,104-112
+  s_c9a37f2d9d2643::t_57f1c95d15705f 100-101
+src/common/meta/src/key/topic_region.rs
+  s_c9a37f2d9d2643::t_36fea0268ffd1e 129-156
+  s_c9a37f2d9d2643::t_6252b82c2167ed 400-451
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.2",
+  "base_commit_sha": "dbba55e16b37dc187315d2a68d9f95d0b8aa8e1e",
+  "prompts": {},
+  "sessions": {
+    "s_c9a37f2d9d2643": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_178d298adffeGIJEg6GiJ7jt01",
+        "model": "gpt-5.5"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

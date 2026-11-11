@@ -1,0 +1,20 @@
+src/query/src/dist_plan/analyzer.rs
+  h_623774b620da8e 565
+src/operator/src/statement/ddl.rs
+  h_623774b620da8e 1521
+src/query/src/dist_plan/analyzer/fallback.rs
+  h_623774b620da8e 67
+src/query/src/dist_plan/planner.rs
+  h_623774b620da8e 230
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.3",
+  "base_commit_sha": "115d7ac24c1ceacb8e5ff4744bd765304000ca75",
+  "prompts": {},
+  "humans": {
+    "h_623774b620da8e": {
+      "author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

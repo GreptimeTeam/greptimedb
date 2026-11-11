@@ -1,0 +1,18 @@
+src/servers/src/batcher/logical_table.rs
+  h_623774b620da8e 15,17,23,40,45,47,49-50,59,92,103,134,468,577,928-930,935-938,946-947,1883,1944
+src/servers/src/batcher/logical_table/batch.rs
+  h_623774b620da8e 1-269
+src/servers/src/batcher/logical_table/pending_worker.rs
+  h_623774b620da8e 1-271
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.0",
+  "base_commit_sha": "f01441219de3c4c2ba001e06fea583337adc2b8b",
+  "prompts": {},
+  "humans": {
+    "h_623774b620da8e": {
+      "author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

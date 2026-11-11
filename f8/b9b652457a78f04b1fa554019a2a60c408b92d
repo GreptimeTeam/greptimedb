@@ -1,0 +1,69 @@
+src/mito2/src/wal.rs
+  s_62c601b727c0fc::t_c206086fa974ad 131
+  s_62c601b727c0fc::t_7d7c4db1624e6f 35,115-118
+src/log-store/src/noop/log_store.rs
+  s_62c601b727c0fc::t_7d7c4db1624e6f 20
+src/log-store/src/kafka/consumer.rs
+  s_62c601b727c0fc::t_1e44b1781abf1b 29,91,145,150,153,160,162-163,176,179-180,199,209,216,303,352,358,368
+src/mito2/src/wal/raw_entry_reader.rs
+  s_62c601b727c0fc::t_3900e3eb7f529e 21
+  s_62c601b727c0fc::t_7d7c4db1624e6f 45,55,122
+src/log-store/src/kafka/offset.rs
+  s_62c601b727c0fc::t_3485153bcc923b 17-18
+  s_62c601b727c0fc::t_9dddeb08edba47 20
+src/log-store/src/kafka.rs
+  s_62c601b727c0fc::t_3485153bcc923b 18
+src/log-store/src/kafka/log_store.rs
+  s_62c601b727c0fc::t_ed6a9ea3e20248 145
+  s_62c601b727c0fc::t_2148ba0f7402e5 476-478
+  s_62c601b727c0fc::t_7d7c4db1624e6f 34
+  s_62c601b727c0fc::t_64a6aa933e5dc4 147
+  s_62c601b727c0fc::t_3900e3eb7f529e 373,375
+  s_62c601b727c0fc::t_1e44b1781abf1b 40,374,456,461,466
+src/log-store/src/raft_engine/log_store.rs
+  s_62c601b727c0fc::t_7d7c4db1624e6f 28
+src/log-store/src/test_util/log_store_util.rs
+  s_62c601b727c0fc::t_2148ba0f7402e5 37-39,42-43
+src/store-api/src/region_request.rs
+  s_62c601b727c0fc::t_1e44b1781abf1b 1496,1500
+src/common/meta/src/instruction.rs
+  s_62c601b727c0fc::t_c7253b609522c9 1180
+  s_62c601b727c0fc::t_0746019fd21cf8 1262
+src/mito2/src/region/catchup.rs
+  s_62c601b727c0fc::t_3900e3eb7f529e 97
+src/datanode/src/datanode.rs
+  s_62c601b727c0fc::t_5196be8ba6aae8 74
+  s_62c601b727c0fc::t_ed6a9ea3e20248 653
+  s_62c601b727c0fc::t_64a6aa933e5dc4 19,580,654
+src/log-store/src/kafka/worker/flush.rs
+  s_62c601b727c0fc::t_64a6aa933e5dc4 41
+src/log-store/src/kafka/offset/iterator.rs
+  s_62c601b727c0fc::t_3485153bcc923b 15,27-28,68,104,107,111,116-117,159-160,163,166-168
+src/mito2/src/region/opener.rs
+  s_62c601b727c0fc::t_c206086fa974ad 484
+src/store-api/src/logstore.rs
+  s_62c601b727c0fc::t_1e44b1781abf1b 53,56,59,62
+src/log-store/src/kafka/util/record.rs
+  s_62c601b727c0fc::t_1ba72bd4f16b94 21,23,31
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.6",
+  "base_commit_sha": "f8b9b652457a78f04b1fa554019a2a60c408b92d",
+  "prompts": {},
+  "humans": {
+    "h_623774b620da8e": {
+      "author": "WenyXu <wenymedia@gmail.com>"
+    }
+  },
+  "sessions": {
+    "s_62c601b727c0fc": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_14a643751ffey50Kzy1nQIzVGA",
+        "model": "gpt-5.5"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

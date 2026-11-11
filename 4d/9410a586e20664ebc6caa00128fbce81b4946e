@@ -1,0 +1,19 @@
+tests-integration/tests/region_migration.rs
+  s_d0d43704cb1be1::t_ffb753d7ac192d 1307,1312-1316,1466-1475,1481-1482
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.21",
+  "base_commit_sha": "4d9410a586e20664ebc6caa00128fbce81b4946e",
+  "prompts": {},
+  "sessions": {
+    "s_d0d43704cb1be1": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019fec6d-a6da-74a1-a7ce-5525e2a9ce84",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

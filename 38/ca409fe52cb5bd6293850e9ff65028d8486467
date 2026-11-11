@@ -1,0 +1,21 @@
+src/common/grpc/src/flight.rs
+  s_c8f343c7af25c4::t_3c9a90031326bb 40-68,407-451
+src/servers/src/pending_rows_batcher.rs
+  s_c8f343c7af25c4::t_5a69638203d4f0 39-40,1802,1844-1850
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.0",
+  "base_commit_sha": "38ca409fe52cb5bd6293850e9ff65028d8486467",
+  "prompts": {},
+  "sessions": {
+    "s_c8f343c7af25c4": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a08b53-a26f-77d0-b428-df57ebdefffd",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

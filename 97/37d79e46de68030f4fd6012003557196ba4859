@@ -1,0 +1,28 @@
+src/servers/src/batcher/logical_table/flow_notifier.rs
+  h_623774b620da8e 1-434
+src/servers/src/batcher/logical_table/batch.rs
+  h_623774b620da8e 29,33,269-744
+src/servers/src/batcher/logical_table/test_util.rs
+  h_623774b620da8e 1-187
+src/servers/src/batcher/logical_table/region_write.rs
+  h_623774b620da8e 357-591
+src/servers/src/batcher/logical_table.rs
+  h_623774b620da8e 17,20-22,28,32,40,45-47,55-57,60,325,327,332-334
+src/servers/src/batcher/logical_table/tables.rs
+  h_623774b620da8e 1-550
+src/servers/src/batcher/logical_table/batch_convert.rs
+  h_623774b620da8e 287-686
+src/servers/src/batcher/logical_table/pending_worker.rs
+  h_623774b620da8e 33,36,273-660
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.0",
+  "base_commit_sha": "9737d79e46de68030f4fd6012003557196ba4859",
+  "prompts": {},
+  "humans": {
+    "h_623774b620da8e": {
+      "author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

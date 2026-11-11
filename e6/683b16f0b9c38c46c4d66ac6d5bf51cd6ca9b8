@@ -1,0 +1,69 @@
+src/mito2/src/engine/basic_test.rs
+  s_2c1513be1c7e01::t_6399ec4605f3e9 1503-1506,1631,1663,1699,1757-1763,1840-1874
+src/mito2/src/engine/scan_test.rs
+  s_f48675a217605d::t_3c188d793e86c7 59,2785-2788,2791-2799,2850-2884,2896
+src/mito2/src/engine/skip_wal_test.rs
+  s_f48675a217605d::t_f2e984cd2023bb 15,38,924-1112
+src/mito2/src/flush.rs
+  s_473c1a6130a8d1::t_c222ca9ba3ef24 235
+src/mito2/src/memtable/version.rs
+  s_b2474a730829f0::t_2813ab57e4ac60 18,27-29,37,44-46,53,55,57,61-65,108-111,118,120,126,135-137,143-145,150-151,163-165,209-418
+src/mito2/src/read/scan_region.rs
+  s_b2474a730829f0::t_3993ae5aec466f 2804,2809,3083,3088,3123,3128,3140-3158,3173-3192
+src/mito2/src/region/opener.rs
+  s_2c1513be1c7e01::t_4bb87e5c023af4 61,71,413-414,586-587,780,956,1007
+src/mito2/src/region/version.rs
+  s_b2474a730829f0::t_706085a9a3c5b9 35,322-323,328,405
+src/mito2/src/region_write_ctx.rs
+  s_2c1513be1c7e01::t_3dc07c8228e796 73-79,82-85,134,144-145,179,273-295,375,384,438,441,616,698,735,779,816-822,840-975
+src/mito2/src/sst/index.rs
+  s_b2474a730829f0::t_f29c6ab032e50d 1614,1619
+src/mito2/src/sst/primary_key.rs
+  s_b2474a730829f0::t_4961349a36c42d 273,278
+src/mito2/src/test_util/version_util.rs
+  s_b2474a730829f0::t_c4a1b05e53496f 135
+src/mito2/src/worker/handle_manifest.rs
+  s_b2474a730829f0::t_4449a34eeea531 260-263
+src/mito2/src/worker/handle_write.rs
+  s_2c1513be1c7e01::t_ac5f620a2b090a 36,129,138,347,492,898,948,962,996,1033,1050
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "e6683b16f0b9c38c46c4d66ac6d5bf51cd6ca9b8",
+  "prompts": {},
+  "sessions": {
+    "s_2c1513be1c7e01": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a10591-10e9-7712-8d62-13c70901feb5",
+        "model": "unknown"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    },
+    "s_473c1a6130a8d1": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a10576-3b1f-72a0-b3aa-e242470bfb1d",
+        "model": "unknown"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    },
+    "s_b2474a730829f0": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a10590-e876-7013-ab9b-fa2fbac48e59",
+        "model": "unknown"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    },
+    "s_f48675a217605d": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a10591-343d-7313-aea9-25457abca166",
+        "model": "unknown"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

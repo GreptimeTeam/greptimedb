@@ -1,0 +1,14 @@
+.github/workflows/agent-observability.yml
+  h_623774b620da8e 109
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "f723cc00e22b6b36c131f94c79711f3fc2408748",
+  "prompts": {},
+  "humans": {
+    "h_623774b620da8e": {
+      "author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

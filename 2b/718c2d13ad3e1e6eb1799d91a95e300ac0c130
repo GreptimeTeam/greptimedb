@@ -1,0 +1,35 @@
+src/common/wal/src/config.rs
+  s_c9a37f2d9d2643::t_657d20f29fc1ee 24-25,75-78,230-231
+src/common/wal/src/config/kafka/datanode.rs
+  s_c9a37f2d9d2643::t_534076655bdca3 47
+  s_c9a37f2d9d2643::t_c46e333be47efe 20-22,48-49,65
+src/log-store/src/kafka/log_store.rs
+  s_c9a37f2d9d2643::t_b45c2e8e0585b1 153-155
+src/meta-srv/src/metasrv/builder.rs
+  s_c9a37f2d9d2643::t_ca2063de1c9ac3 446-447
+src/common/wal/src/config/kafka/common.rs
+  s_c9a37f2d9d2643::t_c46e333be47efe 47-52
+src/common/wal/src/config/kafka/metasrv.rs
+  s_c9a37f2d9d2643::t_c46e333be47efe 22-23,48-49,51-52,65-66
+  s_c9a37f2d9d2643::t_534076655bdca3 47,50
+src/meta-srv/src/region/flush_trigger.rs
+  s_c9a37f2d9d2643::t_5133f51f30163e 97
+  s_c9a37f2d9d2643::t_4fc657ad963eea 32,85-88,106-107,123-136,138,147-148,251,298
+  s_c9a37f2d9d2643::t_ca2063de1c9ac3 939-940,1013-1014
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.2",
+  "base_commit_sha": "2b718c2d13ad3e1e6eb1799d91a95e300ac0c130",
+  "prompts": {},
+  "sessions": {
+    "s_c9a37f2d9d2643": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_178d298adffeGIJEg6GiJ7jt01",
+        "model": "gpt-5.5"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

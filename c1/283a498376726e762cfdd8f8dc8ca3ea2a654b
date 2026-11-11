@@ -1,0 +1,26 @@
+tests-integration/Cargo.toml
+  h_623774b620da8e 68
+tests-integration/src/standalone.rs
+  h_623774b620da8e 65-66,347
+tests-integration/src/test_util.rs
+  h_623774b620da8e 15-17,32,34-35,47-48,51-53,76-79,81,84-247
+tests-integration/src/tests/instance_test.rs
+  h_623774b620da8e 1177-1225
+tests-integration/src/tests/test_util.rs
+  h_623774b620da8e 45,91
+tests-integration/tests/grpc.rs
+  h_623774b620da8e 18-20,24-27,67,69-70,784-830,1207-1344
+tests-integration/tests/http.rs
+  h_623774b620da8e 74,76,82-83,448-468,1653-1673,2695-2733,4220-4240,5449-5469,6650-6666,7462-7499,8570-8587,8878-8910,9319-9331,11035-11047,11156-11277
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.0",
+  "base_commit_sha": "c1283a498376726e762cfdd8f8dc8ca3ea2a654b",
+  "prompts": {},
+  "humans": {
+    "h_623774b620da8e": {
+      "author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

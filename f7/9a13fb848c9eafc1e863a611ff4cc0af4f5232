@@ -1,0 +1,14 @@
+src/flow/src/batching_mode/frontend_client.rs
+  h_623774b620da8e 21,343-389
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.24",
+  "base_commit_sha": "f79a13fb848c9eafc1e863a611ff4cc0af4f5232",
+  "prompts": {},
+  "humans": {
+    "h_623774b620da8e": {
+      "author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

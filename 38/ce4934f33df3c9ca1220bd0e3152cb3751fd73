@@ -1,0 +1,14 @@
+src/mito2/src/region.rs
+  h_623774b620da8e 1092
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.4.8",
+  "base_commit_sha": "38ce4934f33df3c9ca1220bd0e3152cb3751fd73",
+  "prompts": {},
+  "humans": {
+    "h_623774b620da8e": {
+      "author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

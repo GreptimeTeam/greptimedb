@@ -1,0 +1,51 @@
+Cargo.lock
+  s_cbf051d9e59a54::t_2cf0512673562b 6100
+Cargo.toml
+  s_cbf051d9e59a54::t_314e995281f471 162
+src/client/src/database.rs
+  s_cbf051d9e59a54::t_ec05b945fc1605 828-836,838
+src/frontend/src/instance/grpc.rs
+  s_cbf051d9e59a54::t_51ce684f3d05cc 456
+src/metric-engine/src/engine/bulk_insert.rs
+  s_cbf051d9e59a54::t_cb4fbc63fe7d05 127,249-251,254-257,262,297-301,304,347,364-368,376,382,407,423-464,479,513,563,586,594,617,639,681
+src/mito2/src/engine/alter_test.rs
+  s_cbf051d9e59a54::t_200bb1a455a078 3006
+src/mito2/src/engine/edit_region_test.rs
+  s_cbf051d9e59a54::t_337193c63ce8fd 703
+src/mito2/src/engine/scan_test.rs
+  s_cbf051d9e59a54::t_1c11e6b7adf89d 2390,2403-2535
+src/mito2/src/flush.rs
+  s_cbf051d9e59a54::t_24e044fc58b266 1731
+src/mito2/src/region/opener.rs
+  s_cbf051d9e59a54::t_a73d21b2193f1d 978-979
+src/mito2/src/region_write_ctx.rs
+  s_cbf051d9e59a54::t_93bcf6115f1e01 321,327-336,560-563,566-569,610,613-616,722-762,765-769,777-779
+src/mito2/src/request.rs
+  s_cbf051d9e59a54::t_130a8780c4ed98 563
+src/mito2/src/worker/handle_bulk_insert.rs
+  s_cbf051d9e59a54::t_24fa45231fff31 99
+src/mito2/src/worker/handle_write.rs
+  s_cbf051d9e59a54::t_cdce46351a6580 564,929-932,935,941-954,962,1022-1026,1038
+src/operator/src/bulk_insert.rs
+  s_cbf051d9e59a54::t_ab57886701a233 47,107,223
+src/servers/src/pending_rows_batcher.rs
+  s_cbf051d9e59a54::t_3de3e4a2c6cb3c 226,331,341,1621,1798,1816,1935-1941,2908-2932,2940,2957,3049,3780-3784,3812,3820
+src/store-api/src/region_request.rs
+  s_cbf051d9e59a54::t_1629eec4720d79 475,497,1760-1761
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.0",
+  "base_commit_sha": "bd98fcddf608cf39da2a0c13d647a07d1da4b1bc",
+  "prompts": {},
+  "sessions": {
+    "s_cbf051d9e59a54": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0864c-1d9c-7932-be89-8b66f62d14b3",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

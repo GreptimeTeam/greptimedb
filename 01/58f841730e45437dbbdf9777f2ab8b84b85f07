@@ -1,0 +1,25 @@
+src/meta-srv/src/gc/procedure.rs
+  s_bab36d2c764e36::t_110fb178bd8a37 288-292,1040,1052,1059-1070
+  s_bab36d2c764e36::t_5b64064fd0b9f2 1054
+src/meta-srv/src/event/gc.rs
+  s_bab36d2c764e36::t_e1d939257e3f37 463-471,500-504
+  s_bab36d2c764e36::t_14122e3fe8c458 441-462,472-499
+  s_bab36d2c764e36::t_110fb178bd8a37 91,253,267,306,309,512
+  s_bab36d2c764e36::t_494e5f449d095d 505-506
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.17",
+  "base_commit_sha": "0158f841730e45437dbbdf9777f2ab8b84b85f07",
+  "prompts": {},
+  "sessions": {
+    "s_bab36d2c764e36": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019fa8b5-aa96-72a0-b7fd-65f77a728723",
+        "model": "gpt-5.6-terra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

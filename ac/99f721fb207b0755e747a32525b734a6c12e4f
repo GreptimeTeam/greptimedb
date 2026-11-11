@@ -1,0 +1,101 @@
+src/servers/Cargo.toml
+  s_c8f343c7af25c4::t_adaa4a0cbd5561 157,165
+src/servers/src/batcher.rs
+  s_c8f343c7af25c4::t_02d8a15714a89c 1-22
+src/servers/src/batcher/flow_notifier.rs
+  s_c8f343c7af25c4::t_581f9ab8f426e9 1-172
+src/servers/src/batcher/flow_sender.rs
+  s_c8f343c7af25c4::t_9800abbc388495 1-212
+src/servers/src/batcher/table.rs
+  s_c8f343c7af25c4::t_dc8cca251e2892 1-228,230-256,258-365,372-400,402-405,407-408,412-434,436-815
+src/servers/src/batcher/table/batch.rs
+  s_c8f343c7af25c4::t_42bbdf3e387efb 1-21,23-49,53-154
+src/servers/src/batcher/table/flow_notifier.rs
+  s_c8f343c7af25c4::t_45f2f7cad6be87 1-167
+src/servers/src/batcher/table/metrics.rs
+  s_c8f343c7af25c4::t_7b14b8411ae652 1-64
+src/servers/src/batcher/table/pending_batch.rs
+  s_c8f343c7af25c4::t_18fc8ef6a28dfb 1-96
+src/servers/src/batcher/table/pending_worker.rs
+  s_c8f343c7af25c4::t_ae22e04f5e0a54 1-185
+src/servers/src/batcher/test_util.rs
+  s_c8f343c7af25c4::t_fb6097d7af7691 1-46
+src/servers/src/lib.rs
+  s_c8f343c7af25c4::t_01677756619444 25
+src/operator/src/error.rs
+  s_c8f343c7af25c4::t_bb73472c74ceeb 16,96-102,1053,1156
+config/config.md
+  s_5bcaf68390e7c4::t_089b206393ea3f 77-83,335-341
+config/frontend.example.toml
+  s_5bcaf68390e7c4::t_7f741e3470e78c 229-259
+config/standalone.example.toml
+  s_5bcaf68390e7c4::t_b648acd91e1c2b 208-238
+src/frontend/src/frontend.rs
+  s_5bcaf68390e7c4::t_c0713623c8ef24 38-39,68-69,105,214,224-257,265-266
+src/frontend/src/instance.rs
+  s_5bcaf68390e7c4::t_a3a3937bb1302a 1859
+src/frontend/src/instance/builder.rs
+  s_5bcaf68390e7c4::t_05d1b48997481f 27,35,53-54,64,222-227,229-264
+src/frontend/src/instance/influxdb.rs
+  s_5bcaf68390e7c4::t_26d720080d8caf 211
+src/frontend/src/instance/opentsdb.rs
+  s_5bcaf68390e7c4::t_7abfa3fcec3f40 24,47,58-77,81,117
+src/frontend/src/service_config.rs
+  s_5bcaf68390e7c4::t_30c1f44fd340a2 20,29
+src/frontend/src/service_config/influxdb.rs
+  s_5bcaf68390e7c4::t_f42bc71fcc5f04 52
+src/frontend/src/service_config/pending_rows_batcher.rs
+  s_5bcaf68390e7c4::t_d9ad5f08493b9e 1-150
+src/operator/src/insert.rs
+  s_5bcaf68390e7c4::t_efbfb3111e579f 27,68,76,85-86,99,169,173-181,283-287,311-323,339-412,461-490,505-511,523-531,1705
+src/operator/src/req_convert/insert.rs
+  s_5bcaf68390e7c4::t_5a2760646c0db0 25
+src/operator/src/req_convert/insert/stmt_to_region.rs
+  s_5bcaf68390e7c4::t_8bb3ea73775e30 67-101,191
+src/operator/src/req_convert/insert/table_to_region.rs
+  s_5bcaf68390e7c4::t_24e885bbd45179 15,40-47,52-55,57-62,64,90,94,96,101-112
+src/servers/src/http.rs
+  s_425c029c259ad0::t_7ed47877131caf 24,30,43,192-207,217,238-253,650,660,667-672,894,928,946,1104,1191-1194,1230-1233,1310-1313,1338-1341,1369-1372,1378-1386,1442-1450,1453,1467-1470,1477-1480,1497-1500,1674,2409-2525
+src/servers/src/http/opentsdb.rs
+  s_5bcaf68390e7c4::t_08eb3429003381 100,175-255
+src/servers/src/query_handler.rs
+  s_5bcaf68390e7c4::t_ad2494159bd9a4 97-103
+src/servers/tests/http/prom_store_test.rs
+  s_5bcaf68390e7c4::t_2b6cd254d25891 43,65,84-89,101,161-166,252-262,821-895
+src/session/src/context.rs
+  s_5bcaf68390e7c4::t_1b48d1d2befe0e 82-84,436-445,610,727,876-889
+src/standalone/src/options.rs
+  s_5bcaf68390e7c4::t_10c7f532e2d113 27-28,59-60,102,164,215-264
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.0",
+  "base_commit_sha": "ac99f721fb207b0755e747a32525b734a6c12e4f",
+  "prompts": {},
+  "sessions": {
+    "s_425c029c259ad0": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0a831-a1ad-7b62-96ed-c7393ceb8431",
+        "model": "gpt-5.6-terra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    },
+    "s_5bcaf68390e7c4": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a09ee4-560d-7e31-838b-8d023b84ada5",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    },
+    "s_c8f343c7af25c4": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a08b53-a26f-77d0-b428-df57ebdefffd",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

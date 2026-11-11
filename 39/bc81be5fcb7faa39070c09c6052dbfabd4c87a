@@ -1,0 +1,19 @@
+.github/workflows/vmbench-long-range.yml
+  s_6d34f78fa90b16::t_0f74ce41d6039d 36,202,261-272,278
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "39bc81be5fcb7faa39070c09c6052dbfabd4c87a",
+  "prompts": {},
+  "sessions": {
+    "s_6d34f78fa90b16": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a09ef3-09f3-7a80-8f06-aaef49cd7108",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

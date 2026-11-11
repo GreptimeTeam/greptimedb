@@ -1,0 +1,25 @@
+src/meta-srv/src/procedure/repartition/allocate_region.rs
+  s_9f23f2cd4f45a6::t_a27284e67ab9c4 402-406,409-411,413,418-421,478-559,716-769
+  h_623774b620da8e 205-209
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.4.8",
+  "base_commit_sha": "518a55bdb9e184939bfaaa45b900cde6f8e8082e",
+  "prompts": {},
+  "humans": {
+    "h_623774b620da8e": {
+      "author": "WenyXu <wenymedia@gmail.com>"
+    }
+  },
+  "sessions": {
+    "s_9f23f2cd4f45a6": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_1db995b0affele6q2a29N8qk6u",
+        "model": "gpt-5.5"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

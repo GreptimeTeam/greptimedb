@@ -1,0 +1,16 @@
+src/meta-srv/src/service/procedure.rs
+  h_623774b620da8e 29,185
+tests-integration/tests/region_migration.rs
+  h_623774b620da8e 28,31,51,108,426,428-443,460,486,511,569-676
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.23",
+  "base_commit_sha": "4fdfde5a8870b54966a62308b528c0b5014ebafd",
+  "prompts": {},
+  "humans": {
+    "h_623774b620da8e": {
+      "author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

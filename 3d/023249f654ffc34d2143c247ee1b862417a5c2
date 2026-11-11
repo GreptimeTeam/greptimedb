@@ -1,0 +1,72 @@
+src/common/batcher/src/flush_limiter.rs
+  s_c8f343c7af25c4::t_e94695aa2b404d 1-69
+src/common/batcher/src/lib.rs
+  s_c8f343c7af25c4::t_104ead08e18890 1-17,19-22,24-25
+  s_c8f343c7af25c4::t_5acfc32a182a92 18
+  s_c8f343c7af25c4::t_76191f4c4d517f 23,26-27
+src/common/batcher/src/flush_policy.rs
+  s_c8f343c7af25c4::t_debac6d8375c95 1-43
+Cargo.lock
+  s_c8f343c7af25c4::t_3c52b3ecd328b5 2319-2322,2324-2326
+  s_c8f343c7af25c4::t_f2a553c6eebe2e 13495
+  s_c8f343c7af25c4::t_2946b0f3878e19 2323
+src/common/batcher/src/pending_worker.rs
+  s_c8f343c7af25c4::t_fac09a50b7cffd 1-236,240-241,248-250,254,256
+  s_c8f343c7af25c4::t_2c904c1c97a662 237-239
+  s_c8f343c7af25c4::t_d3e04c01cb5c5a 242-247,251-253,255,257-264
+src/common/batcher/src/pending_batch.rs
+  s_c8f343c7af25c4::t_c2509230bc761f 1-115
+src/common/batcher/Cargo.toml
+  s_c8f343c7af25c4::t_0fea30beb05a26 1-13,15-18
+  s_c8f343c7af25c4::t_c2fa4218700ef1 14
+Cargo.toml
+  s_c8f343c7af25c4::t_e2ebc6c3892f24 11,291
+src/common/batcher/src/flush_policy/timing.rs
+  s_c8f343c7af25c4::t_c9fcd620e49529 1-147
+src/common/batcher/src/flush_timer.rs
+  s_c8f343c7af25c4::t_84bc4a37394de8 1-141
+src/servers/Cargo.toml
+  s_c8f343c7af25c4::t_26f8aff50e707a 39
+src/servers/src/pending_rows_batcher.rs
+  s_c8f343c7af25c4::t_eefbe33a6a9d0f 33-35,37,351,356,393-396,414,421,883-884,934-935,938,940,951-957,969-977,981,1000,1017-1018,1025,1030,1065-1076,1103,1105,1873,1929,1934-1935,2381-2382,2386-2392,2394-2396,2411-2416,2419-2421,2428-2440,2442-2479,3097,3135,3147-3148,3156,3167-3170,3187-3202,3204-3211
+  s_c8f343c7af25c4::t_4853d56437cd7e 36,38-39,44,55,89,305,327,349,355,357,397-400,403-404,422,444-445,467,480-481,844-856,858,861-866,874,926,932,1044,1048-1049,1053-1057,1102,1318,1340,1423,1426,1451,1512-1516,1520-1522,1532-1533,1872,1876,1926-1928,1930,1932-1933,1936-1940,2165-2166,2178-2183,2393,2441,2644-2645,2977-2995,3003,3005-3006,3009-3011,3020-3022,3024-3026,3055,3105,3107-3109,3131-3132,3213,3219
+src/common/batcher/src/notifier.rs
+  s_c8f343c7af25c4::t_64919ff7fab13a 1-47,53-97,99-145
+  s_c8f343c7af25c4::t_9fe16186e5bc9e 48-52,98
+src/common/batcher/src/request_limiter.rs
+  s_c8f343c7af25c4::t_bf439adb019ff6 1-117
+src/common/batcher/src/worker_registry.rs
+  s_c8f343c7af25c4::t_aff04e5fd5b828 1-188
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.0",
+  "base_commit_sha": "3d023249f654ffc34d2143c247ee1b862417a5c2",
+  "prompts": {},
+  "sessions": {
+    "s_18a6ebf5b4dd05": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a08b53-a2ac-7f62-a116-8695794c4d70",
+        "model": "unknown"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    },
+    "s_29c61b17acb0a9": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a08c3b-daf2-7751-a27f-d1dba5d99ab9",
+        "model": "unknown"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    },
+    "s_c8f343c7af25c4": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a08b53-a26f-77d0-b428-df57ebdefffd",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

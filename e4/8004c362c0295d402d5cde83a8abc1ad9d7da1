@@ -1,0 +1,25 @@
+src/servers/src/batcher.rs
+  s_c8f343c7af25c4::t_19eb03fdab357f 16-19
+src/servers/src/batcher/flow_sender.rs
+  s_c8f343c7af25c4::t_54b25ed3fb0f1f 1-212
+src/servers/src/batcher/logical_table/flow_notifier.rs
+  s_c8f343c7af25c4::t_854f34e4e612c7 25-26,101-109,147-148
+src/servers/src/batcher/test_util.rs
+  s_c8f343c7af25c4::t_a39472801add53 1-46
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.0",
+  "base_commit_sha": "e48004c362c0295d402d5cde83a8abc1ad9d7da1",
+  "prompts": {},
+  "sessions": {
+    "s_c8f343c7af25c4": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a08b53-a26f-77d0-b428-df57ebdefffd",
+        "model": "unknown"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

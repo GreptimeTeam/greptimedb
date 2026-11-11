@@ -1,0 +1,19 @@
+src/common/wal/Cargo.toml
+  s_60b64c7401857d::t_3a927c8eaea10d 33
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.0",
+  "base_commit_sha": "26a5b898bdddc9204efbcc434113e99e5bc9869c",
+  "prompts": {},
+  "sessions": {
+    "s_60b64c7401857d": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a060ff-196a-7a21-b2f8-10c725cd9db6",
+        "model": "gpt-5.6-terra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

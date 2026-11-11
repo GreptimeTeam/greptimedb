@@ -1,0 +1,26 @@
+src/flow/src/error.rs
+  s_abc59d71f18a4d::t_a84e9721ffd226 21,376-403
+src/frontend/src/error.rs
+  s_abc59d71f18a4d::t_a84e9721ffd226 19,451-489
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.7",
+  "base_commit_sha": "f22c6fb407821306562abce823d1311a819ba857",
+  "prompts": {},
+  "humans": {
+    "h_623774b620da8e": {
+      "author": "WenyXu <wenymedia@gmail.com>"
+    }
+  },
+  "sessions": {
+    "s_abc59d71f18a4d": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_14a7bfa0affeEwe6BgYqF7nPHZ",
+        "model": "gpt-5.5"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

@@ -1,0 +1,26 @@
+.github/workflows/develop.yml
+  s_c230139cef7d3f::t_6296c578354eed 332-338,388-391,393,395-405,429-432,435-439,452-455,461-464
+  s_c230139cef7d3f::t_2af230e9687375 392,394,465
+  s_c230139cef7d3f::t_45f80dfa54a3d4 468
+  s_c230139cef7d3f::t_98da2446989c95 433-434
+.github/actions/setup-greptimedb-cluster/with-remote-wal-logical-prune.yaml
+  s_c230139cef7d3f::t_6296c578354eed 1-62
+.github/actions/setup-greptimedb-cluster/kafka-wal-helper.yaml
+  s_c230139cef7d3f::t_98da2446989c95 19
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.7",
+  "base_commit_sha": "9decb5782501bfa66f701adf7b9c83f546126c78",
+  "prompts": {},
+  "sessions": {
+    "s_c230139cef7d3f": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_16e375a80ffeqVm4ShzIwI76v7",
+        "model": "gpt-5.5"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

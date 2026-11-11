@@ -1,0 +1,27 @@
+tests-fuzz/targets/ddl/fuzz_repartition_table_chaos.rs
+  s_5a4420f255a114::t_4f7f6c3f16f3e0 77
+  h_623774b620da8e 65,516-524,526
+  s_5a4420f255a114::t_cade45ce2b429d 58,78-79,240-256,267-283
+  s_5a4420f255a114::t_1cc6c55186f968 525
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.6",
+  "base_commit_sha": "b51dd55591f9b6ae6e4727a860096b9ec708945a",
+  "prompts": {},
+  "humans": {
+    "h_623774b620da8e": {
+      "author": "WenyXu <wenymedia@gmail.com>"
+    }
+  },
+  "sessions": {
+    "s_5a4420f255a114": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_150745dd8ffeL2YbhgGOD2y1JO",
+        "model": "gpt-5.5"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

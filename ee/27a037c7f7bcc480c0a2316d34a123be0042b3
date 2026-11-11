@@ -1,0 +1,21 @@
+tests/cases/distributed/optimizer/count.result
+  s_917668e5144aba::t_d3b2e387de781a 287-290,292-295
+tests/cases/standalone/optimizer/count.result
+  s_917668e5144aba::t_58c5d97abfd3fe 284-287,289-292
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.0",
+  "base_commit_sha": "ee27a037c7f7bcc480c0a2316d34a123be0042b3",
+  "prompts": {},
+  "sessions": {
+    "s_917668e5144aba": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0a314-ffdd-78a2-bd53-2b272122e83a",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

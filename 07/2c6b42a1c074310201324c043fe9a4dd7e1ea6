@@ -1,0 +1,39 @@
+src/common/meta/src/ddl/tests/create_view.rs
+  s_e27283a068f275::t_d5cd392a7f2e12 20,24-25,104-122,143-155
+  s_e27283a068f275::t_6acb292081d2f6 23,36
+  s_e27283a068f275::t_e6cd145105e406 139,186,219,243,266,298
+src/common/meta/src/ddl/drop_view.rs
+  s_e27283a068f275::t_e6cd145105e406 31,217-220
+src/common/meta/src/ddl/tests/drop_view.rs
+  s_e27283a068f275::t_80f22732d630d6 34
+  s_e27283a068f275::t_e6cd145105e406 56
+  s_e27283a068f275::t_3aeddf9676ac59 22,70-82,128
+  s_e27283a068f275::t_6acb292081d2f6 23,32
+  s_e27283a068f275::t_87f9b21e5b7835 18
+src/common/meta/src/ddl/event.rs
+  s_e27283a068f275::t_6acb292081d2f6 1-15
+src/common/meta/src/ddl/create_view.rs
+  s_e27283a068f275::t_e6cd145105e406 30,275-278
+src/common/meta/src/ddl.rs
+  s_e27283a068f275::t_e6cd145105e406 47
+src/common/meta/Cargo.toml
+  s_e27283a068f275::t_3aeddf9676ac59 101
+src/common/meta/src/ddl/event/view.rs
+  s_e27283a068f275::t_a9fd4c834c6b90 18,21-23,213-227,233-236
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "072c6b42a1c074310201324c043fe9a4dd7e1ea6",
+  "prompts": {},
+  "sessions": {
+    "s_e27283a068f275": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019fa418-4ce8-71c1-97b8-eb1ebaf9aad1",
+        "model": "gpt-5.6-terra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

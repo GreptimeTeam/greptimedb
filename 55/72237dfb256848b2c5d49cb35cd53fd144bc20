@@ -1,0 +1,31 @@
+tests-integration/Cargo.toml
+  s_cbf051d9e59a54::t_0f62c86bfe4353 109
+tests-integration/src/grpc/flight.rs
+  s_cbf051d9e59a54::t_f49286d7945255 52,63,72,404-465,802-809,842
+tests-integration/src/standalone.rs
+  s_cbf051d9e59a54::t_f0e452094bfcec 65-66,347
+tests-integration/src/test_util.rs
+  s_cbf051d9e59a54::t_c3a75765b64210 15-17,32,34-35,47-48,51-53,76-79,81,84
+tests-integration/src/tests/test_util.rs
+  s_cbf051d9e59a54::t_22aa8abc507d1f 45,91
+tests-integration/tests/http.rs
+  s_cbf051d9e59a54::t_6448b0da530dcf 61,83
+tests-integration/tests/main.rs
+  s_cbf051d9e59a54::t_39db01a1dc83e3 44-50
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.0",
+  "base_commit_sha": "5572237dfb256848b2c5d49cb35cd53fd144bc20",
+  "prompts": {},
+  "sessions": {
+    "s_cbf051d9e59a54": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0864c-1d9c-7932-be89-8b66f62d14b3",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

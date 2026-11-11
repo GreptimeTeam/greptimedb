@@ -1,0 +1,38 @@
+src/common/meta/src/ddl/comment_on.rs
+  h_623774b620da8e 434
+  s_158bb16fd6fd65::t_f51800114e7b16 426
+  s_158bb16fd6fd65::t_196c6d59d6348b 41-42,109-116,118-131,204-216,419,422-425,427,430-433,435,480-485,494,496
+src/operator/src/statement/comment.rs
+  h_623774b620da8e 46-49,52-53,80-83,86-87
+  s_158bb16fd6fd65::t_0a8909bef50ded 17,27-29,45,50-51,63-71,79,84-85,97-105
+src/common/meta/src/ddl_manager.rs
+  s_158bb16fd6fd65::t_7c411af1082e24 577,580-585
+src/common/meta/src/rpc/ddl.rs
+  s_158bb16fd6fd65::t_827e8c55af8d25 61,1372-1373,1375-1378,1381,1387-1390,1393,1398,1440-1441
+  s_158bb16fd6fd65::t_677999e32e85d6 1352,1355-1359,1362,1365-1371
+  s_158bb16fd6fd65::t_8113aeab4172d8 1379-1380,1391-1392
+  s_158bb16fd6fd65::t_92ed576a0be61e 63-64,1382-1386,1394-1397,1399-1402,1405-1419,1425-1439,1442-1444
+  h_623774b620da8e 44,60,1374,1403-1404,1420-1424
+  s_158bb16fd6fd65::t_05c924904078c2 1353-1354,1360-1361
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.6",
+  "base_commit_sha": "74eb552f889444c7e19f68385e09bfb549b20b66",
+  "prompts": {},
+  "humans": {
+    "h_623774b620da8e": {
+      "author": "WenyXu <wenymedia@gmail.com>"
+    }
+  },
+  "sessions": {
+    "s_158bb16fd6fd65": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_0e45a0472ffeRN89fpNh6D2SHW",
+        "model": "gpt-5.5"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

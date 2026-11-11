@@ -1,0 +1,20 @@
+.github/scripts/pull-benchmark-image.sh
+  h_623774b620da8e 1-25
+.github/workflows/agent-observability.yml
+  h_623774b620da8e 269
+.github/workflows/tracesbench.yml
+  h_623774b620da8e 123,230,234-242
+tests/perf/test_ci_runner_scripts.py
+  h_623774b620da8e 19,405-527
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "e3a7654105291eda4764a1780453824f742b4bb3",
+  "prompts": {},
+  "humans": {
+    "h_623774b620da8e": {
+      "author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

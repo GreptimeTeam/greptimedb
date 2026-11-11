@@ -1,0 +1,23 @@
+.github/scripts/tracesbench-summary.py
+  s_03430c64913cae::t_9b7bb8f95f6e71 129-130
+.github/workflows/checks.yml
+  s_03430c64913cae::t_3e5660ad86687f 102
+tests/perf/test_tracesbench_summary.py
+  s_03430c64913cae::t_75927a722cd00f 1-54
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "af169837994fcc7f46fe529e635f9da7ad6efe42",
+  "prompts": {},
+  "sessions": {
+    "s_03430c64913cae": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0e5e7-152b-75d2-b3b7-29b2ce2b0171",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

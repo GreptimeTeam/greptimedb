@@ -1,0 +1,36 @@
+tests-integration/fixtures/etcd-tls-certs/client.crt
+  s_9d2128035a8801::t_b1dd3ada7246cd 2,4-19
+tests-integration/fixtures/etcd-tls-certs/client-key.pem
+  s_9d2128035a8801::t_b1dd3ada7246cd 2-27
+tests-integration/fixtures/etcd-tls-certs/ca.crt
+  s_9d2128035a8801::t_b1dd3ada7246cd 2,4-5,7-20
+tests-integration/fixtures/etcd-tls-certs/server-key.pem
+  s_9d2128035a8801::t_b1dd3ada7246cd 2-27
+tests-integration/fixtures/etcd-tls-certs/ca-key.pem
+  s_9d2128035a8801::t_b1dd3ada7246cd 2-27
+tests-integration/fixtures/etcd-tls-certs/ca.srl
+  s_9d2128035a8801::t_b1dd3ada7246cd 1
+tests-integration/fixtures/etcd-tls-certs/server.crt
+  s_9d2128035a8801::t_b1dd3ada7246cd 2,4-11,14-20
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.24",
+  "base_commit_sha": "b4c2235fbcb2c3926c1f0d6ca3e070bef52c5abf",
+  "prompts": {},
+  "humans": {
+    "h_623774b620da8e": {
+      "author": "WenyXu <wenymedia@gmail.com>"
+    }
+  },
+  "sessions": {
+    "s_9d2128035a8801": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a03c42-1968-7e51-aa9f-277e54752ca2",
+        "model": "gpt-5.6-terra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

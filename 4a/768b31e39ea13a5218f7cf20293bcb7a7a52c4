@@ -1,0 +1,14 @@
+Cargo.toml
+  h_623774b620da8e 78
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "4a768b31e39ea13a5218f7cf20293bcb7a7a52c4",
+  "prompts": {},
+  "humans": {
+    "h_623774b620da8e": {
+      "author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

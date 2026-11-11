@@ -1,0 +1,19 @@
+src/common/telemetry/src/logging/file_retention.rs
+  s_9fa045a615ffdf::t_c40345a33ba1b0 142,424-425,433,650-672
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.0",
+  "base_commit_sha": "ce051ae8875e5aa5c8c65d8aaa5bb9f4dcf99b5a",
+  "prompts": {},
+  "sessions": {
+    "s_9fa045a615ffdf": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a05bbd-089e-7b53-a93b-e82921c3b522",
+        "model": "unknown"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

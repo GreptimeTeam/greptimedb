@@ -1,0 +1,30 @@
+src/meta-srv/src/procedure/wal_prune.rs
+  s_2a9e18b5bc423a::t_2df5e42be4b5b8 393,450,487,497-498,507,515-541,566
+  s_2a9e18b5bc423a::t_62836acaf6aeac 70,76-77,98,113,124,128,153,171,214,218-229,231,235-236
+src/meta-srv/src/procedure/wal_prune/utils.rs
+  s_2a9e18b5bc423a::t_236b14979f12eb 146,159
+src/common/event-recorder/src/event_table.rs
+  s_2a9e18b5bc423a::t_2f62d5ad31dd50 136
+  s_2a9e18b5bc423a::t_d071f93e8ad4cc 137-138
+  s_2a9e18b5bc423a::t_236b14979f12eb 130-132,456-457,461-462
+tests-integration/tests/wal_prune_event.rs
+  s_2a9e18b5bc423a::t_236b14979f12eb 104-105
+src/meta-srv/src/event/wal_prune.rs
+  s_2a9e18b5bc423a::t_236b14979f12eb 22,40,44-45,50,53-54,59-60,81-82,90-91,106,114,121-122,140,142
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "490dfe43110f1039e9ae99342c319daa72d92a3f",
+  "prompts": {},
+  "sessions": {
+    "s_2a9e18b5bc423a": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019fabec-71ad-7f72-95c4-75227a000213",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

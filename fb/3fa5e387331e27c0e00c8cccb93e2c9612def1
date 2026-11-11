@@ -1,0 +1,25 @@
+.github/scripts/tests/test_ci_slash.py
+  s_65f202b19898b5::t_f2c9c3febad475 17,20-21,104-116
+  s_65f202b19898b5::t_276a48013d88c9 33-35,89-103,117-134
+  s_65f202b19898b5::t_bfb069b4706d34 135
+.github/scripts/ci-slash.py
+  s_65f202b19898b5::t_276a48013d88c9 32,63-70
+.github/workflows/ci-slash.yml
+  s_65f202b19898b5::t_276a48013d88c9 52,57-60
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "fb3fa5e387331e27c0e00c8cccb93e2c9612def1",
+  "prompts": {},
+  "sessions": {
+    "s_65f202b19898b5": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0c91c-23ea-7370-8b94-2d4baa0d085b",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

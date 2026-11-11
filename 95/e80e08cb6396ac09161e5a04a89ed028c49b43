@@ -1,0 +1,19 @@
+src/common/procedure/src/local.rs
+  s_8221d1372c4881::t_eae401b0ba85ee 1672
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.2",
+  "base_commit_sha": "95e80e08cb6396ac09161e5a04a89ed028c49b43",
+  "prompts": {},
+  "sessions": {
+    "s_8221d1372c4881": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_1a0c3a386ffeuHnHggr3VdpOb6",
+        "model": "gpt-5.5"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

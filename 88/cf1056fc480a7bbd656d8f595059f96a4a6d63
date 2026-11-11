@@ -1,0 +1,19 @@
+src/servers/src/grpc/flight/stream.rs
+  s_aa353de59809cc::t_e0ff7e904ffcdc 60,67-69
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.24",
+  "base_commit_sha": "88cf1056fc480a7bbd656d8f595059f96a4a6d63",
+  "prompts": {},
+  "sessions": {
+    "s_aa353de59809cc": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a037e5-dc74-7ce3-b341-3c26620c3721",
+        "model": "gpt-5.6-terra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

@@ -1,0 +1,38 @@
+src/common/meta/src/error/retry_hint/mysql.rs
+  s_ebc8bb056b0403::t_a694fa3b0dd03e 149-152,154-157,281-283,286-287,289
+  s_ebc8bb056b0403::t_055dbce0b24df9 136,143-148,284,288,290
+  s_ebc8bb056b0403::t_9626314e5f6e35 162-163
+  s_ebc8bb056b0403::t_927e5ba8caf59f 153
+  s_ebc8bb056b0403::t_92e1c0d9832e61 164-167
+  s_ebc8bb056b0403::t_09b9d9138a2195 285
+src/common/meta/src/error.rs
+  h_623774b620da8e 1345
+  s_ebc8bb056b0403::t_a694fa3b0dd03e 1346,1349-1350
+src/common/meta/src/error/retry_hint/postgres.rs
+  s_ebc8bb056b0403::t_a694fa3b0dd03e 84-90,95-96,139-144,146-151
+  s_ebc8bb056b0403::t_4819d26be8132a 91-94,145
+src/common/meta/src/error/retry_hint.rs
+  h_623774b620da8e 16
+  s_ebc8bb056b0403::t_a694fa3b0dd03e 23,25-28
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.8",
+  "base_commit_sha": "4e00bb7b130c3300390b0cb4fe2bc3bcc33b275a",
+  "prompts": {},
+  "humans": {
+    "h_623774b620da8e": {
+      "author": "WenyXu <wenymedia@gmail.com>"
+    }
+  },
+  "sessions": {
+    "s_ebc8bb056b0403": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_126554944ffepRZnOGAXFznuvx",
+        "model": "gpt-5.5"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

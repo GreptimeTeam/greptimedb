@@ -1,0 +1,24 @@
+src/common/recordbatch/src/adapter.rs
+  s_10fbd04729022c::t_07513a4dc818ca 290-294
+  s_10fbd04729022c::t_c39e9b0f188987 283-289,295-300,413-415
+  s_10fbd04729022c::t_3e4003c30648da 416,1012-1017,1024-1054
+  s_10fbd04729022c::t_31430f09b818f9 1018-1023
+  s_10fbd04729022c::t_4b73092482ee06 417-418
+  s_10fbd04729022c::t_5dc0b0d9c3566e 1011
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.8",
+  "base_commit_sha": "59295f781e2f0b46fddc74088fb96fe1b7c1c180",
+  "prompts": {},
+  "sessions": {
+    "s_10fbd04729022c": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_0df3e1963ffe2s74hrRp5vj9gk",
+        "model": "gpt-5.5"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

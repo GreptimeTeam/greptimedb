@@ -1,0 +1,19 @@
+src/object-store/src/secure_fs.rs
+  s_02f3035243c944::t_6080b2b4cd4eee 24,111,636,640-667
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.0",
+  "base_commit_sha": "09460467d0ca284595712a54f742e894c3ef3d48",
+  "prompts": {},
+  "sessions": {
+    "s_02f3035243c944": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a07a98-64e7-7a81-8f52-3e5330bfb94a",
+        "model": "unknown"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

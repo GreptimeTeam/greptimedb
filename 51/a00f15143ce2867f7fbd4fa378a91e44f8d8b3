@@ -1,0 +1,59 @@
+config/config.md
+  s_c8f343c7af25c4::t_96bf85161484d7 78,346
+config/frontend.example.toml
+  s_c8f343c7af25c4::t_7c1ac9792b97fc 234,239-240,251-252
+config/standalone.example.toml
+  s_c8f343c7af25c4::t_299e26d56d7b87 213,218-219,230-231
+src/frontend/src/frontend.rs
+  s_c8f343c7af25c4::t_52b96971035ea6 209,253,271
+src/frontend/src/instance/builder.rs
+  s_c8f343c7af25c4::t_683096dc64b30f 53
+src/frontend/src/instance/logical_batcher.rs
+  s_c8f343c7af25c4::t_eeaa53fe6a8014 19
+src/frontend/src/server.rs
+  s_c8f343c7af25c4::t_9b318fd8ba8252 27,37,372-380,396-405,422-433,470-474,676-679
+src/frontend/src/service_config/pending_rows_batcher.rs
+  s_c8f343c7af25c4::t_12f437f8ed1c37 20,41,45,241-242,256,258-260
+src/servers/src/batcher.rs
+  s_c8f343c7af25c4::t_bda24e9d2added 42-80
+src/servers/src/http.rs
+  s_c8f343c7af25c4::t_f6b73f70b0df36 56,2466,2469
+src/servers/src/mysql/handler.rs
+  s_c8f343c7af25c4::t_27644325f58598 88,126,130-141,512,542,586,1056-1066
+src/servers/src/mysql/server.rs
+  s_c8f343c7af25c4::t_6e781ac1d655a7 89,106,110-115,224-225
+src/servers/src/postgres.rs
+  s_c8f343c7af25c4::t_8e41d1dee41f5c 83,118-123,136
+src/servers/src/postgres/handler.rs
+  s_c8f343c7af25c4::t_577c60ad7ffd7f 62-69,79,429
+src/servers/src/postgres/server.rs
+  s_c8f343c7af25c4::t_1e823284ce907b 41,70,76-81,88,114-115
+src/servers/tests/http/prom_store_test.rs
+  s_c8f343c7af25c4::t_f6593f8fc5b48f 39,44
+src/session/src/context.rs
+  s_c8f343c7af25c4::t_9d7677000c428c 474
+src/standalone/src/options.rs
+  s_c8f343c7af25c4::t_3732e39dd40a36 220,270,289
+tests-integration/src/otlp.rs
+  s_c8f343c7af25c4::t_d5db37572cf343 517
+tests-integration/src/standalone.rs
+  s_c8f343c7af25c4::t_51e31288ba1ace 93,115,126-132,401
+tests-integration/tests/sql.rs
+  s_c8f343c7af25c4::t_45a1741f5809d8 2444-2624
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "51a00f15143ce2867f7fbd4fa378a91e44f8d8b3",
+  "prompts": {},
+  "sessions": {
+    "s_c8f343c7af25c4": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a08b53-a26f-77d0-b428-df57ebdefffd",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

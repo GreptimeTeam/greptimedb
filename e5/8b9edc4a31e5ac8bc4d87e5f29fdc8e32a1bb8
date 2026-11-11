@@ -1,0 +1,24 @@
+src/common/error/src/ext.rs
+  s_abc59d71f18a4d::t_3ac729efa18c9c 17,24-29,33-39,42-50,53-57,65-74,242-243
+  s_abc59d71f18a4d::t_32887b81b463cc 30-32,40-41,51-52
+src/common/error/tests/ext.rs
+  s_abc59d71f18a4d::t_e005a63549372b 192-222
+  s_abc59d71f18a4d::t_901d5049d77808 16-17,19,159-191
+  s_abc59d71f18a4d::t_3ba7933a94d3dd 75,77,86,88,130,132,142,144
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.6",
+  "base_commit_sha": "e58b9edc4a31e5ac8bc4d87e5f29fdc8e32a1bb8",
+  "prompts": {},
+  "sessions": {
+    "s_abc59d71f18a4d": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_14a7bfa0affeEwe6BgYqF7nPHZ",
+        "model": "gpt-5.5"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

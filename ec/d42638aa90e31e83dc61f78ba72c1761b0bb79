@@ -1,0 +1,32 @@
+src/meta-srv/src/procedure/repartition/group/update_metadata/exit_staging_region.rs
+  s_b057752657fc65::t_86d1803abc1927 170-205
+src/meta-srv/src/procedure/repartition/group/update_metadata/apply_staging_region.rs
+  s_b057752657fc65::t_b6da94985ac07c 201-261
+src/meta-srv/src/procedure/repartition/group/repartition_start.rs
+  s_b057752657fc65::t_10c49286549cb9 35-36,38,41,43,83
+  s_b057752657fc65::t_0b1b4a78169428 273-330
+src/meta-srv/src/procedure/repartition/utils.rs
+  s_b057752657fc65::t_753f50401811df 426-478
+  s_b057752657fc65::t_2cfc0d73fcaeb2 156
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.1",
+  "base_commit_sha": "ecd42638aa90e31e83dc61f78ba72c1761b0bb79",
+  "prompts": {},
+  "humans": {
+    "h_623774b620da8e": {
+      "author": "WenyXu <wenymedia@gmail.com>"
+    }
+  },
+  "sessions": {
+    "s_b057752657fc65": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_1a1f675cdfferUb3XaDagXPp5H",
+        "model": "gpt-5.5"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

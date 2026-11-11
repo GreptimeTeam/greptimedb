@@ -1,0 +1,31 @@
+.github/scripts/ci-slash.py
+  s_ce6b58861b3f3d::t_dd98f8da649750 61
+.github/scripts/tests/test_ci_slash.py
+  s_ce6b58861b3f3d::t_d4232ef0e6cbc0 57,61
+.github/workflows/cargo-lock-check.yml
+  s_ce6b58861b3f3d::t_cc6aa0c54e6fd8 8
+.github/workflows/check-git-deps.yml
+  s_ce6b58861b3f3d::t_06d3213fcaa513 5
+.github/workflows/ci-slash.yml
+  s_ce6b58861b3f3d::t_6d978e3d33eebf 43-46,48,50-56
+.github/workflows/dependency-check.yml
+  s_ce6b58861b3f3d::t_227ed63108dbf0 5
+.github/workflows/grafana.yml
+  s_ce6b58861b3f3d::t_fa5db007672e87 5
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "e566ad64f9151a737c5d271958024a53a7f46688",
+  "prompts": {},
+  "sessions": {
+    "s_ce6b58861b3f3d": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0b406-e02b-7c83-814b-cd4bb98506ac",
+        "model": "gpt-5.6-terra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

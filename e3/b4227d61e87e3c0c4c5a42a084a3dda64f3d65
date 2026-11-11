@@ -1,0 +1,19 @@
+src/meta-srv/src/region/flush_trigger.rs
+  s_4c26062267d0d1::t_8905118c867eb1 286,390,399-419
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.6",
+  "base_commit_sha": "e3b4227d61e87e3c0c4c5a42a084a3dda64f3d65",
+  "prompts": {},
+  "sessions": {
+    "s_4c26062267d0d1": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_15089c245ffe0qmyMU0xhr5Rxj",
+        "model": "gpt-5.5"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

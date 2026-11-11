@@ -1,0 +1,67 @@
+src/meta-client/src/client.rs
+  s_f9f42fa04e4dc7::t_a00821f85479d2 340,853,856-857,876-877
+  s_f9f42fa04e4dc7::t_aa9a26e7cb48e5 858
+src/common/function/src/admin/purge_table.rs
+  s_f9f42fa04e4dc7::t_24373132d3c503 68,135
+  s_f9f42fa04e4dc7::t_945c709f980e94 149,166,169
+src/operator/src/procedure.rs
+  s_f9f42fa04e4dc7::t_98c77dd1635b79 198,201
+  s_f9f42fa04e4dc7::t_9e318819a6aff9 30,63,92,142,155
+  s_f9f42fa04e4dc7::t_24373132d3c503 290,324,346-347
+  s_f9f42fa04e4dc7::t_f3b4da6739834b 95,98,145,147,158,160
+  s_f9f42fa04e4dc7::t_7f79a0feb647a4 83
+src/operator/src/statement/ddl.rs
+  s_f9f42fa04e4dc7::t_7f79a0feb647a4 732,794,1109,1192,1225,1304,1789,1913,2016,2035,2050,2072,2089,2103,2125,2215,2818
+  s_f9f42fa04e4dc7::t_98c77dd1635b79 2893,2896
+src/common/meta/src/procedure_executor.rs
+  s_f9f42fa04e4dc7::t_f3d30f2149e86e 18-19,53,138,141
+src/operator/src/utils.rs
+  s_f9f42fa04e4dc7::t_f3b4da6739834b 17,45-51
+src/common/function/src/admin/gc.rs
+  s_f9f42fa04e4dc7::t_945c709f980e94 285,312,321
+  s_f9f42fa04e4dc7::t_24373132d3c503 278
+  s_f9f42fa04e4dc7::t_f3b4da6739834b 28,48,76
+src/common/function/src/state.rs
+  s_f9f42fa04e4dc7::t_945c709f980e94 71,98,111
+  s_f9f42fa04e4dc7::t_24373132d3c503 64
+src/operator/src/statement/comment.rs
+  s_f9f42fa04e4dc7::t_7f79a0feb647a4 60,92
+src/common/function/src/admin/migrate_region.rs
+  s_f9f42fa04e4dc7::t_f3b4da6739834b 26,86
+src/common/meta/src/ddl_manager.rs
+  s_f9f42fa04e4dc7::t_aa9a26e7cb48e5 875-876
+  s_f9f42fa04e4dc7::t_ff1fda2e893694 1499,1524
+  s_f9f42fa04e4dc7::t_a65190b6ca097d 22,24,1492,1791-1799,1803,1824,1892-1895
+  s_f9f42fa04e4dc7::t_f3d30f2149e86e 60,65,861,864-874,877,879
+  s_f9f42fa04e4dc7::t_e7b5c686c0041a 1491
+src/meta-client/src/client/procedure.rs
+  s_f9f42fa04e4dc7::t_a00821f85479d2 849-852
+  s_f9f42fa04e4dc7::t_5153e0ddf2b1eb 731,736,742,777
+src/common/event-recorder/src/context.rs
+  s_f9f42fa04e4dc7::t_f3d30f2149e86e 50-58,84,86-87,93-94
+  s_f9f42fa04e4dc7::t_5153e0ddf2b1eb 206-214
+src/meta-srv/src/service/procedure.rs
+  s_f9f42fa04e4dc7::t_ff1fda2e893694 760
+  s_f9f42fa04e4dc7::t_d10bda73a440b9 26,29,55,78,87,139-142,153-158,162
+src/common/function/src/handlers.rs
+  s_f9f42fa04e4dc7::t_24373132d3c503 92
+  s_f9f42fa04e4dc7::t_f3b4da6739834b 97,116,123
+src/frontend/src/instance.rs
+  s_f9f42fa04e4dc7::t_98c77dd1635b79 2264,2341
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.21",
+  "base_commit_sha": "52960c230a23d470f4e7f47ca523d443e7e28385",
+  "prompts": {},
+  "sessions": {
+    "s_f9f42fa04e4dc7": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019ff18c-729f-7dd2-9ff0-4d84b144a51a",
+        "model": "gpt-5.6-terra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

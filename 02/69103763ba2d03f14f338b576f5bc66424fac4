@@ -1,0 +1,14 @@
+src/metric-engine/src/engine/put.rs
+  h_623774b620da8e 92-95,105-108
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.4.11",
+  "base_commit_sha": "0269103763ba2d03f14f338b576f5bc66424fac4",
+  "prompts": {},
+  "humans": {
+    "h_623774b620da8e": {
+      "author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

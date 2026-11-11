@@ -1,0 +1,29 @@
+src/meta-srv/src/procedure/region_migration/close_downgraded_region.rs
+  s_3f02b45448515f::t_cbdd3392936639 43,55
+src/meta-srv/src/procedure/region_migration/migration_abort.rs
+  s_3f02b45448515f::t_cbdd3392936639 44,52
+src/meta-srv/src/procedure/region_migration.rs
+  s_3f02b45448515f::t_01575b4a0f3d17 1147,1150,1152,1177,1181
+  s_3f02b45448515f::t_50525d80969c9a 447-449,451
+  s_3f02b45448515f::t_db3ffba51737c5 450,452-453,1003-1005,1140
+src/meta-srv/src/procedure/region_migration/open_candidate_region.rs
+  s_3f02b45448515f::t_db3ffba51737c5 76,290,325,340
+  s_3f02b45448515f::t_b3a3df613ee475 52,54,81
+  s_3f02b45448515f::t_722b2785fc72f1 50,53,55,73-75,77,324,326-327,339,341-342
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.21",
+  "base_commit_sha": "a82e1b8b7416631ab4255b7c41bfd221aa54e29d",
+  "prompts": {},
+  "sessions": {
+    "s_3f02b45448515f": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019feb04-12f9-7d33-93fd-394a212a696d",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

@@ -1,0 +1,43 @@
+.github/workflows/release.yml
+  s_0d872f39c89c6f::t_571b571b2edb83 744,765
+cyborg/package.json
+  s_cff2c397ce9326::t_0e0a6e013d19ae 7-9
+cyborg/bin/bump-versions.ts
+  s_dd9491d4dd8bdd::t_beecebd8295e50 19,62,64,83
+cyborg/src/docs-version.test.ts
+  s_dd9491d4dd8bdd::t_f04be687bd36cc 1-49
+cyborg/src/docs-version.ts
+  s_dd9491d4dd8bdd::t_83ade44ab2e5f5 1-49
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.0",
+  "base_commit_sha": "cacca289db047c45d8e20b2c8fd5e8b22106a876",
+  "prompts": {},
+  "sessions": {
+    "s_0d872f39c89c6f": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a06000-f089-75d0-a34b-cafec6125bff",
+        "model": "gpt-5.6-terra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    },
+    "s_cff2c397ce9326": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a06104-9e26-7371-8476-eea909644035",
+        "model": "gpt-5.6-terra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    },
+    "s_dd9491d4dd8bdd": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a06000-f108-7753-869d-fb9588a9b29b",
+        "model": "unknown"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

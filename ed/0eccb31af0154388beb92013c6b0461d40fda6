@@ -1,0 +1,14 @@
+src/meta-client/src/client.rs
+  h_6bf4f2d0301578 573-574
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.3.4",
+  "base_commit_sha": "ed0eccb31af0154388beb92013c6b0461d40fda6",
+  "prompts": {},
+  "humans": {
+    "h_6bf4f2d0301578": {
+      "author": "WenyXu"
+    }
+  }
+}

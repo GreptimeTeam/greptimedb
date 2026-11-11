@@ -1,0 +1,14 @@
+src/meta-srv/src/region/flush_trigger.rs
+  h_623774b620da8e 49
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.6",
+  "base_commit_sha": "9a6d60409e70eff8c9882262bb43eb2f5f59c4dd",
+  "prompts": {},
+  "humans": {
+    "h_623774b620da8e": {
+      "author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

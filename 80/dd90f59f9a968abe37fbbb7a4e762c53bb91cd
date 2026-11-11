@@ -1,0 +1,14 @@
+src/common/procedure/src/local.rs
+  h_623774b620da8e 888
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.1",
+  "base_commit_sha": "80dd90f59f9a968abe37fbbb7a4e762c53bb91cd",
+  "prompts": {},
+  "humans": {
+    "h_623774b620da8e": {
+      "author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

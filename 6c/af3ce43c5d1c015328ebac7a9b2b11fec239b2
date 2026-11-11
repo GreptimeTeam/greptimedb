@@ -1,0 +1,23 @@
+config/config.md
+  s_73b58ef5b07fe7::t_b7042141cc0c93 232,439
+config/metasrv.example.toml
+  s_73b58ef5b07fe7::t_81d10a6356dff3 309-310
+config/standalone.example.toml
+  s_73b58ef5b07fe7::t_e0078d4eceaaf5 898-899
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "6caf3ce43c5d1c015328ebac7a9b2b11fec239b2",
+  "prompts": {},
+  "sessions": {
+    "s_73b58ef5b07fe7": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019fa410-acae-74a3-a7f0-f8dc11781d0f",
+        "model": "gpt-5.6-terra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

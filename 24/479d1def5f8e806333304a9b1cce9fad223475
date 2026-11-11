@@ -1,0 +1,19 @@
+src/common/meta/src/error/retry_hint/mysql.rs
+  s_ebc8bb056b0403::t_8d3fef9a1c38e1 165
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.8",
+  "base_commit_sha": "24479d1def5f8e806333304a9b1cce9fad223475",
+  "prompts": {},
+  "sessions": {
+    "s_ebc8bb056b0403": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_126554944ffepRZnOGAXFznuvx",
+        "model": "gpt-5.5"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

@@ -1,0 +1,82 @@
+src/common/meta/src/ddl/truncate_table.rs
+  s_386ae40ce19d4b::t_28eff4741c68dc 38
+  s_386ae40ce19d4b::t_30efc197d4b027 23-24,39-40,93-107
+src/common/meta/src/ddl/undrop_table.rs
+  s_386ae40ce19d4b::t_28eff4741c68dc 38
+  s_386ae40ce19d4b::t_27c3ed312abb0d 23-24,39-40,433-457
+src/common/meta/src/ddl/drop_table.rs
+  s_386ae40ce19d4b::t_28eff4741c68dc 42
+  s_386ae40ce19d4b::t_dce09eb0f55300 22,25-26,43-44,372-386
+src/common/meta/src/ddl/alter_logical_tables.rs
+  s_386ae40ce19d4b::t_28eff4741c68dc 39
+  s_386ae40ce19d4b::t_7d96c57dd57f83 23,40-41,322-353
+src/common/meta/src/ddl/create_logical_tables.rs
+  s_386ae40ce19d4b::t_28eff4741c68dc 42
+  s_386ae40ce19d4b::t_be50a54858a724 24,26-29,43-44,262-325
+src/common/meta/src/ddl/tests/alter_table.rs
+  s_386ae40ce19d4b::t_28eff4741c68dc 48
+  s_386ae40ce19d4b::t_98761db00cf04f 25,31-34,49-52,159-259
+src/common/meta/src/ddl/event/mod.rs
+  s_386ae40ce19d4b::t_36a7572e8c82b3 1-17
+src/common/meta/src/ddl/tests/event/table.rs
+  s_386ae40ce19d4b::t_28eff4741c68dc 1-244
+src/common/meta/src/ddl/tests.rs
+  s_386ae40ce19d4b::t_36a7572e8c82b3 25
+  s_386ae40ce19d4b::t_aa2b5e1c2bf832 26
+src/common/meta/src/ddl/tests/alter_logical_tables.rs
+  s_386ae40ce19d4b::t_28eff4741c68dc 38
+  s_386ae40ce19d4b::t_3de8239c1e67fe 22-23,25-28,153-266
+src/common/meta/src/ddl/purge_dropped_table.rs
+  s_386ae40ce19d4b::t_28eff4741c68dc 35
+  s_386ae40ce19d4b::t_7f027f1f265ab1 20-21,36-37,263-275
+src/common/meta/src/ddl/alter_table.rs
+  s_386ae40ce19d4b::t_28eff4741c68dc 43
+  s_386ae40ce19d4b::t_d51b7795a47ca8 28-29,44-45,400-415
+src/common/meta/src/ddl/tests/event.rs
+  s_386ae40ce19d4b::t_36a7572e8c82b3 1-15
+src/common/meta/src/ddl.rs
+  s_386ae40ce19d4b::t_56d63c8602fd0e 47
+src/common/meta/src/ddl/create_table.rs
+  s_386ae40ce19d4b::t_28eff4741c68dc 41
+  s_386ae40ce19d4b::t_212ab2bc920fcf 25-28,42-43,403-447
+Cargo.lock
+  s_386ae40ce19d4b::t_ae7097b6d7d24b 2596
+src/common/meta/src/ddl/event/table.rs
+  s_386ae40ce19d4b::t_fd709086e1817d 1-282
+src/common/meta/src/ddl/tests/create_logical_tables.rs
+  s_386ae40ce19d4b::t_d071d49ad9a229 19,23,26-29,96-212
+src/common/meta/src/ddl/tests/create_table.rs
+  s_386ae40ce19d4b::t_e5dec7d43c9731 22-23,26-29,140-231
+src/common/meta/src/ddl/tests/table_procedure_events.rs
+  s_386ae40ce19d4b::t_670cdc0f3ec737 1-185
+tests-integration/tests/main.rs
+  s_386ae40ce19d4b::t_96db4ed2ab3d2d 27
+src/common/meta/Cargo.toml
+  s_386ae40ce19d4b::t_ad25624e1d5678 37,101
+tests-integration/tests/table_ddl_events.rs
+  s_9b4b6f01d7f1ad::t_7302918db1a964 1-337
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "43610222ab8344a1a68604b4615871edf2052cf8",
+  "prompts": {},
+  "sessions": {
+    "s_386ae40ce19d4b": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019fa417-65b4-7d13-a763-977980c6e9cb",
+        "model": "gpt-5.6-terra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    },
+    "s_9b4b6f01d7f1ad": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019fa418-2ca0-7c20-bb43-8d484e1dab20",
+        "model": "unknown"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

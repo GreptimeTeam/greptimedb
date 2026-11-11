@@ -1,0 +1,14 @@
+src/mito2/src/manifest/storage/utils.rs
+  h_623774b620da8e 61-63
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.14",
+  "base_commit_sha": "9057ecbf1b962ca0d62b71a6f65ad1b9166fc81a",
+  "prompts": {},
+  "humans": {
+    "h_623774b620da8e": {
+      "author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

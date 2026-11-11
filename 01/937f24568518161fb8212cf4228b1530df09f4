@@ -1,0 +1,27 @@
+tests-integration/src/cluster.rs
+  h_623774b620da8e 172,206,253-259,541-544
+tests-integration/src/standalone.rs
+  h_623774b620da8e 30,88,107,118-127,384
+src/common/meta/src/datanode.rs
+  h_623774b620da8e 34-35
+src/operator/src/insert.rs
+  h_623774b620da8e 32-33,36-37,40,520-529,590-596,598-601,643-645,652-661,685-695
+  h_623774b620da8e 496-498
+tests-integration/tests/database_ddl_event.rs
+  h_623774b620da8e 18,23,27,33-174,189
+tests-integration/tests/grpc.rs
+  h_623774b620da8e 27-29,32,90-91,490-637
+src/meta-srv/src/handler/persist_stats_handler.rs
+  h_623774b620da8e 25,208,538
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.0",
+  "base_commit_sha": "01937f24568518161fb8212cf4228b1530df09f4",
+  "prompts": {},
+  "humans": {
+    "h_623774b620da8e": {
+      "author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

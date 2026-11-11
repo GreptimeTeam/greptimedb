@@ -1,0 +1,20 @@
+src/datanode/src/heartbeat/handler/downgrade_region.rs
+  s_8b303b46a38c84::t_204abd242f855d 528
+  s_8b303b46a38c84::t_598b150a00b85b 538-539
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.22",
+  "base_commit_sha": "b2ac2c833c29f1e337e0c22140768b1a56390a99",
+  "prompts": {},
+  "sessions": {
+    "s_8b303b46a38c84": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019fea61-c84d-7091-8f30-ff6275e94ed9",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

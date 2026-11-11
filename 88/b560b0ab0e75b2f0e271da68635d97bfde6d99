@@ -1,0 +1,18 @@
+.github/workflows/agent-observability.yml
+  h_623774b620da8e 109
+.github/workflows/tracesbench.yml
+  h_623774b620da8e 117
+.github/workflows/vmbench-long-range.yml
+  h_623774b620da8e 98
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "88b560b0ab0e75b2f0e271da68635d97bfde6d99",
+  "prompts": {},
+  "humans": {
+    "h_623774b620da8e": {
+      "author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

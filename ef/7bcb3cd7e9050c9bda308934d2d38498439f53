@@ -1,0 +1,21 @@
+.github/workflows/agent-observability.yml
+  s_03430c64913cae::t_5ee60d3a02a830 109
+.github/workflows/tracesbench.yml
+  s_03430c64913cae::t_97b6400d0130ae 117,222-225,403
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "ef7bcb3cd7e9050c9bda308934d2d38498439f53",
+  "prompts": {},
+  "sessions": {
+    "s_03430c64913cae": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0e5e7-152b-75d2-b3b7-29b2ce2b0171",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

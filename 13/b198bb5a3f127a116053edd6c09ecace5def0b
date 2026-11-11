@@ -1,0 +1,14 @@
+.github/actions/setup-greptimedb-cluster/with-remote-wal-logical-prune.yaml
+  h_623774b620da8e 40
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.7",
+  "base_commit_sha": "13b198bb5a3f127a116053edd6c09ecace5def0b",
+  "prompts": {},
+  "humans": {
+    "h_623774b620da8e": {
+      "author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

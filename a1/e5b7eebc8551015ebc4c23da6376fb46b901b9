@@ -1,0 +1,35 @@
+src/frontend/src/instance/prom_store.rs
+  s_2432582dedaf5f::t_272aa9bf908289 49
+src/frontend/src/server.rs
+  s_2432582dedaf5f::t_511eed60d405f5 41,132,566
+src/servers/benches/flush_batch_physical.rs
+  s_2432582dedaf5f::t_724736af143441 32
+src/servers/src/batcher.rs
+  s_2432582dedaf5f::t_4b16eef765179b 1-15
+src/servers/src/batcher/logical_table.rs
+  s_2432582dedaf5f::t_f65fb341bb72ae 348,365,889,1914,1916,2152,2359,2630
+src/servers/src/http.rs
+  s_2432582dedaf5f::t_096ad6e4cd6479 76,686
+src/servers/src/http/prom_store.rs
+  s_2432582dedaf5f::t_af847832cd42a4 48,78,361,363,390,456
+src/servers/src/lib.rs
+  s_2432582dedaf5f::t_903fc195b85f9a 40
+src/servers/src/prom_row_builder.rs
+  s_2432582dedaf5f::t_ec80e03ecc7eca 40
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.0",
+  "base_commit_sha": "a1e5b7eebc8551015ebc4c23da6376fb46b901b9",
+  "prompts": {},
+  "sessions": {
+    "s_2432582dedaf5f": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a08e51-436e-7e22-8f81-250159664969",
+        "model": "unknown"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

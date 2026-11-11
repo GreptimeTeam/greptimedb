@@ -1,0 +1,32 @@
+tests-fuzz/Cargo.toml
+  s_c230139cef7d3f::t_da97a6a9f86453 174-180
+remote-wal-logical-prune-fuzz-plan.md
+  s_c230139cef7d3f::t_c89411ba1871e2 56
+  s_c230139cef7d3f::t_10c2c4e9fb74ee 103,109,148,150-161,170,172-173,182,184-206,208-213,215,219,221-228,230,233-238,240-245,247-251,253,255,291,293,296,298,302,305-319,335-340,351,353,357-360,362,385,387,394-399
+  s_c230139cef7d3f::t_a17434ee6eec0f 1-45,48-53,55,57-102,104-108,110-147,217-218,220,229,231-232,278,292,297,304,320,328,330-332,334,341-346,378-384,386,388-390,392-393
+  s_c230139cef7d3f::t_3876bd93bc4f3d 371
+  s_c230139cef7d3f::t_1df2ea76db3ecb 149,162-169,171,174-181,183,207,214,216,239,246,252,254,256-277,279-290,294-295,299-301,303,321-327,329,333,347-350,352,354-356,361,363-370,372-377
+  s_c230139cef7d3f::t_259ba617f6f9ff 46-47,54,391
+tests-fuzz/targets/wal/fuzz_remote_wal_logical_prune.rs
+  s_c230139cef7d3f::t_f101d2d4c8036a 1-89,94-128,132-354,356-493
+  s_c230139cef7d3f::t_ff45b543a73aa4 90-93
+  s_c230139cef7d3f::t_6efc585463f492 129
+  s_c230139cef7d3f::t_9f9a3d229f222b 130-131
+  s_c230139cef7d3f::t_61a84028b4fb9c 355
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.3",
+  "base_commit_sha": "56cb07eb120f8fcee90058615071bc6e58e8d5eb",
+  "prompts": {},
+  "sessions": {
+    "s_c230139cef7d3f": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_16e375a80ffeqVm4ShzIwI76v7",
+        "model": "gpt-5.5"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

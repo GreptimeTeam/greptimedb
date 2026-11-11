@@ -1,0 +1,21 @@
+src/servers/src/grpc/context_auth.rs
+  s_ee5e15630afc9a::t_9244aa67b58dcc 57-67,215-224
+src/servers/src/grpc/greptime_handler.rs
+  s_ee5e15630afc9a::t_836907de1f7b66 205,244-271,381-406
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.0",
+  "base_commit_sha": "d0cfbed5dcc8f78192f682fa5758ca4773c395e0",
+  "prompts": {},
+  "sessions": {
+    "s_ee5e15630afc9a": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a08741-8460-7082-b1e4-8cbcb2450830",
+        "model": "unknown"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

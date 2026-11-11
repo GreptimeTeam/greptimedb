@@ -1,0 +1,32 @@
+.github/scripts/tests/test_ci_slash.py
+  s_d4896e4c642f16::t_e28c153e30c9cb 75-82
+  s_d4896e4c642f16::t_5d7efdd6f74b9e 60,64,70
+.github/workflows/docs.yml
+  s_d4896e4c642f16::t_5d4d887f8c9e31 33-36,44-55,57-58,68-69,79-80
+.github/scripts/ci-slash.py
+  s_d4896e4c642f16::t_5d7efdd6f74b9e 58-61,66
+.github/workflows/checks.yml
+  s_d4896e4c642f16::t_1c7488286d7b2b 23-26,38-49,51-52,67-68,84-85,122-123,152-153
+.github/workflows/integration.yml
+  s_d4896e4c642f16::t_5d4d887f8c9e31 23-26,44-55,57-58,277-278,335-336,587-588
+.github/workflows/ci-slash.yml
+  s_d4896e4c642f16::t_5d7efdd6f74b9e 39,49
+.github/workflows/rust.yml
+  s_d4896e4c642f16::t_1c7488286d7b2b 23-26,38-49,51-52,70-71,97-98,125-126,152-153,182-183,194,197
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "e61ce861f16e1af4323c7643dd3e5c3921cc20ab",
+  "prompts": {},
+  "sessions": {
+    "s_d4896e4c642f16": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0c2b4-6796-7cd1-8617-ab49903c2216",
+        "model": "gpt-5.6-terra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

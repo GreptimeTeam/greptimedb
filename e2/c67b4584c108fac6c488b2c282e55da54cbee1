@@ -1,0 +1,22 @@
+src/meta-srv/src/procedure/utils.rs
+  s_9f6bec49930da4::t_7bd1547e503b88 63,65,67,71-72
+  s_9f6bec49930da4::t_3635346359ed9d 73-74
+src/meta-srv/src/gc/procedure.rs
+  s_9f6bec49930da4::t_7bd1547e503b88 47,675
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.3",
+  "base_commit_sha": "e2c67b4584c108fac6c488b2c282e55da54cbee1",
+  "prompts": {},
+  "sessions": {
+    "s_9f6bec49930da4": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_0ee866756ffeaOTbCZQ1Mj0hU7",
+        "model": "gpt-5.5"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

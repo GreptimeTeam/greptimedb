@@ -1,0 +1,27 @@
+src/common/batcher/src/flush_limiter.rs
+  s_d1140b6a37d6d5::t_3f264769d0df3d 26-29,48-53,58
+src/common/batcher/src/flush_policy/timing.rs
+  s_d1140b6a37d6d5::t_0d4717694cf152 29,33-35,51,89,96,136,152-153
+src/common/batcher/src/notifier.rs
+  s_d1140b6a37d6d5::t_ad91f070097f4e 39-41,44,95-97,111
+src/common/batcher/src/pending_worker.rs
+  s_d1140b6a37d6d5::t_c83f1fc9999aef 127
+src/common/batcher/src/request_limiter.rs
+  s_d1140b6a37d6d5::t_7e47cda6b27149 29-32,64,66-67,73,91,106
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.0",
+  "base_commit_sha": "12558f4ce95eebabcf12d54dfe9f8d53bf29d9e6",
+  "prompts": {},
+  "sessions": {
+    "s_d1140b6a37d6d5": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a085df-416d-7100-9b16-05c8a5e7279d",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

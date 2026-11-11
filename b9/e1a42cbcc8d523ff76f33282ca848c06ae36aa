@@ -1,0 +1,21 @@
+src/servers/Cargo.toml
+  s_c8f343c7af25c4::t_c69ea5b9c525d6 157
+src/servers/src/batcher/logical_table.rs
+  s_c8f343c7af25c4::t_fb0d93f545bb02 428-455
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.0",
+  "base_commit_sha": "b9e1a42cbcc8d523ff76f33282ca848c06ae36aa",
+  "prompts": {},
+  "sessions": {
+    "s_c8f343c7af25c4": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a08b53-a26f-77d0-b428-df57ebdefffd",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

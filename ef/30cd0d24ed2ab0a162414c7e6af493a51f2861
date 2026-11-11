@@ -1,0 +1,36 @@
+src/common/meta/src/ddl/create_table.rs
+  s_b2c1f5f63bb6a4::t_13cfcf60321667 424
+  s_b2c1f5f63bb6a4::t_c3aacd45408eb2 203
+  s_b2c1f5f63bb6a4::t_b8b03f8710d5db 190-194,246,251
+  s_b2c1f5f63bb6a4::t_4b893b2721f169 18-19,26,29,45-46,62-63,100,118,185-189,195-202,244-245,247-250,252-258,345
+  s_b2c1f5f63bb6a4::t_67896ebd59247e 204-219,221-243
+  s_b2c1f5f63bb6a4::t_67c565d94d3ee9 417-420,423,426-427,430
+src/meta-srv/src/procedure/wal_prune.rs
+  s_b2c1f5f63bb6a4::t_99a49be4283dfc 175-180
+src/common/meta/src/wal_provider/topic_manager.rs
+  h_623774b620da8e 18
+src/common/meta/src/wal_provider.rs
+  s_b2c1f5f63bb6a4::t_d37611ec008dd4 178,180
+  s_b2c1f5f63bb6a4::t_aa289f8b6f6ca0 335
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.6",
+  "base_commit_sha": "ef30cd0d24ed2ab0a162414c7e6af493a51f2861",
+  "prompts": {},
+  "humans": {
+    "h_623774b620da8e": {
+      "author": "WenyXu <wenymedia@gmail.com>"
+    }
+  },
+  "sessions": {
+    "s_b2c1f5f63bb6a4": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_14a06f7a3ffetYZYY9HX7UMRL2",
+        "model": "gpt-5.5"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

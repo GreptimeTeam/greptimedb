@@ -1,0 +1,49 @@
+config/frontend.example.toml
+  s_c8f343c7af25c4::t_76781d83509f78 229-259
+config/standalone.example.toml
+  s_c8f343c7af25c4::t_ca8d1c5aa057fc 208-238
+src/frontend/src/frontend.rs
+  s_c8f343c7af25c4::t_d79c82458d1831 38-39,68-69,105,214,224-257,265-266
+src/frontend/src/instance.rs
+  s_c8f343c7af25c4::t_891ab15df1e8f9 1859
+src/frontend/src/instance/builder.rs
+  s_c8f343c7af25c4::t_014cee2abe9a63 27,35,53,63,221-226,228-261
+src/frontend/src/instance/influxdb.rs
+  s_c8f343c7af25c4::t_5f4d018254562f 211
+src/frontend/src/instance/opentsdb.rs
+  s_c8f343c7af25c4::t_f39e21c55e58a2 24,47,58-77,81,117
+src/frontend/src/server.rs
+  s_c8f343c7af25c4::t_0b8fcc00488ba9 36,52,110,132-134,140,142-147,432-447,454-468,470,491,509-599
+src/frontend/src/service_config.rs
+  s_c8f343c7af25c4::t_fafe372b94b836 20,29
+src/frontend/src/service_config/influxdb.rs
+  s_c8f343c7af25c4::t_1f9fa1481e5e42 52
+src/frontend/src/service_config/pending_rows_batcher.rs
+  s_c8f343c7af25c4::t_b4a3dbee6c1db0 1-143
+src/servers/src/http.rs
+  s_c8f343c7af25c4::t_f7ccf78368b5fa 24,30,43,192-207,217,238-253,650,660,667-672,894,928,946,1104,1191-1194,1230-1233,1310-1313,1338-1341,1369-1372,1378-1386,1442-1450,1453,1467-1470,1477-1480,1497-1500,1674,2409-2525
+src/servers/src/http/opentsdb.rs
+  s_c8f343c7af25c4::t_4ec6d06be583d1 100,175-255
+src/servers/src/query_handler.rs
+  s_c8f343c7af25c4::t_44549babcfd8d1 97-103
+src/servers/tests/http/prom_store_test.rs
+  s_c8f343c7af25c4::t_b1713c7b136907 43,65,84-89,101,161-166,252-262,821-895
+src/standalone/src/options.rs
+  s_c8f343c7af25c4::t_d3621838fb8ee3 27-28,59-60,102,164,215-264
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.0",
+  "base_commit_sha": "522259e48c9479b0ab4a1495da9572326c737bab",
+  "prompts": {},
+  "sessions": {
+    "s_c8f343c7af25c4": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a08b53-a26f-77d0-b428-df57ebdefffd",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

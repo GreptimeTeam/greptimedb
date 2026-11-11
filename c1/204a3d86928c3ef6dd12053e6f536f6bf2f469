@@ -1,0 +1,61 @@
+src/datanode/src/heartbeat/handler/gc_worker.rs
+  s_abc59d71f18a4d::t_00a1383d169f73 135
+  s_abc59d71f18a4d::t_b6e09fa2f0f664 121-125
+src/datanode/src/heartbeat/handler/file_ref.rs
+  s_abc59d71f18a4d::t_b6e09fa2f0f664 16
+  s_abc59d71f18a4d::t_00a1383d169f73 39-41,59-63
+src/datanode/src/heartbeat/handler/upgrade_region.rs
+  s_abc59d71f18a4d::t_9e67239783ee08 461
+  s_abc59d71f18a4d::t_d2992df68ef5e1 18,81
+  s_abc59d71f18a4d::t_901ea8ca89665d 62,69
+src/datanode/src/heartbeat/handler/sync_region.rs
+  s_abc59d71f18a4d::t_f7d6aaa96da115 15-17,73-75,95
+src/datanode/src/heartbeat/handler/enter_staging.rs
+  s_abc59d71f18a4d::t_f7d6aaa96da115 16-17,73-75,112
+src/datanode/src/heartbeat/handler/open_region.rs
+  s_abc59d71f18a4d::t_00a1383d169f73 15,76
+  s_abc59d71f18a4d::t_b6e09fa2f0f664 86
+src/datanode/src/heartbeat/handler/close_region.rs
+  s_abc59d71f18a4d::t_00a1383d169f73 16,72-74
+src/common/meta/src/instruction.rs
+  s_abc59d71f18a4d::t_f0145940500d94 37,55-87,97-98,200,216,225,240,248,651,669,965,1052,1076,1098
+  s_abc59d71f18a4d::t_b1ae57d7e2876d 1767-1770,1793
+  s_abc59d71f18a4d::t_39388bf0a3d8df 1780-1783
+  s_abc59d71f18a4d::t_92ec77739eebcf 276-278
+  s_abc59d71f18a4d::t_bc8730ccebf01b 1130
+  s_abc59d71f18a4d::t_c4f343d4a245ae 110-121
+src/datanode/src/heartbeat/handler/apply_staging_manifest.rs
+  s_abc59d71f18a4d::t_f7d6aaa96da115 80-82,110
+  s_abc59d71f18a4d::t_b6e09fa2f0f664 16-17
+src/datanode/src/heartbeat/handler/downgrade_region.rs
+  s_abc59d71f18a4d::t_d2992df68ef5e1 16-17,93,103,139,142,150,208,218
+  s_abc59d71f18a4d::t_9e67239783ee08 356,396,459,476-483,548
+src/datanode/src/heartbeat/handler/flush_region.rs
+  s_abc59d71f18a4d::t_00a1383d169f73 18-19,128
+src/datanode/src/heartbeat/handler/remap_manifest.rs
+  s_abc59d71f18a4d::t_f7d6aaa96da115 15-17,59-61,89
+src/meta-srv/src/procedure/test_util.rs
+  s_abc59d71f18a4d::t_5e71119af8ec53 107,122-125,151-154,209,237,266,295
+  s_abc59d71f18a4d::t_901ea8ca89665d 21-22,45-47
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.8",
+  "base_commit_sha": "c1204a3d86928c3ef6dd12053e6f536f6bf2f469",
+  "prompts": {},
+  "humans": {
+    "h_623774b620da8e": {
+      "author": "WenyXu <wenymedia@gmail.com>"
+    }
+  },
+  "sessions": {
+    "s_abc59d71f18a4d": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_14a7bfa0affeEwe6BgYqF7nPHZ",
+        "model": "gpt-5.5"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

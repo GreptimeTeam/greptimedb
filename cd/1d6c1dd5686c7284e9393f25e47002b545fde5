@@ -1,0 +1,71 @@
+src/servers/src/lib.rs
+  s_c8f343c7af25c4::t_457726367aa54c 25
+src/datatypes/src/timestamp.rs
+  s_c8f343c7af25c4::t_a73dcb2b15720a 16,182-194,197-199,232-273
+src/servers/src/batcher/flow_notifier.rs
+  s_c8f343c7af25c4::t_abf34d80282184 1-176
+src/frontend/src/server.rs
+  s_c8f343c7af25c4::t_b6d374f0d32831 27-29
+  s_2432582dedaf5f::t_5a0e23c273b70a 134,568
+src/servers/src/batcher/logical_table/batch_convert.rs
+  s_c8f343c7af25c4::t_8b41e864906741 19-304,334,364,373,387,398,409,418,432,450,459,464,477,486,500,511,521,578,602,626,655,685-686
+src/servers/src/http/prom_store.rs
+  s_c8f343c7af25c4::t_a1be2d149f71c5 43,78,361,363,390,456
+src/servers/src/batcher/logical_table/tables.rs
+  s_c8f343c7af25c4::t_0d42daef85ae13 1-551
+src/servers/src/batcher/test_util.rs
+  s_c8f343c7af25c4::t_1fbcaba9586500 1-46
+src/servers/src/batcher/logical_table/test_util.rs
+  s_c8f343c7af25c4::t_6edfcd347a755c 1-162
+src/servers/src/batcher.rs
+  s_c8f343c7af25c4::t_ffa0400af6bb02 1-22
+src/servers/src/prom_row_builder.rs
+  s_c8f343c7af25c4::t_da9c63c95368b8 38
+src/servers/src/batcher/logical_table.rs
+  s_c8f343c7af25c4::t_91ee2670aae05c 15-436
+  s_c8f343c7af25c4::t_ae37a18b1cc3e3 1-14
+src/servers/benches/flush_batch_physical.rs
+  s_c8f343c7af25c4::t_7e9435a6b3a1ed 31,35
+src/frontend/src/instance/prom_store.rs
+  s_c8f343c7af25c4::t_89021b66334d06 45
+src/servers/src/batcher/logical_table/pending_worker.rs
+  s_c8f343c7af25c4::t_a704e43fd892f9 1-663
+src/servers/src/batcher/logical_table/region_write.rs
+  s_c8f343c7af25c4::t_152c5eab118c00 1-591
+src/servers/src/batcher/flow_sender.rs
+  s_c8f343c7af25c4::t_dd7f2f5909fc2f 1-212
+src/servers/src/batcher/logical_table/flow_notifier.rs
+  s_c8f343c7af25c4::t_fccf8ae9ca38ab 1-334
+src/servers/src/batcher/logical_table/batch.rs
+  s_c8f343c7af25c4::t_cc9c8be97c6009 1-748
+tests-integration/src/test_util.rs
+  s_c8f343c7af25c4::t_d95a4c39d82ca3 50,674
+src/common/batcher/src/worker_registry.rs
+  s_c8f343c7af25c4::t_3fa09f55456b96 19,55-71,205-248
+src/servers/src/http.rs
+  s_2432582dedaf5f::t_18e83dbf78616a 55,686
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.0",
+  "base_commit_sha": "cd1d6c1dd5686c7284e9393f25e47002b545fde5",
+  "prompts": {},
+  "sessions": {
+    "s_2432582dedaf5f": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a08e51-436e-7e22-8f81-250159664969",
+        "model": "unknown"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    },
+    "s_c8f343c7af25c4": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a08b53-a26f-77d0-b428-df57ebdefffd",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

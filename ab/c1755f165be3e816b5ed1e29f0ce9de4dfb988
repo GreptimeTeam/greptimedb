@@ -1,0 +1,14 @@
+src/meta-srv/src/handler.rs
+  h_623774b620da8e 347
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.1",
+  "base_commit_sha": "abc1755f165be3e816b5ed1e29f0ce9de4dfb988",
+  "prompts": {},
+  "humans": {
+    "h_623774b620da8e": {
+      "author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

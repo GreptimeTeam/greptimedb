@@ -1,0 +1,19 @@
+tests-integration/tests/http.rs
+  s_9fa045a615ffdf::t_a38fdcd60b49a5 2320
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.0",
+  "base_commit_sha": "6c0b1d06f7d7a10c21043b34726fadef8997ee85",
+  "prompts": {},
+  "sessions": {
+    "s_9fa045a615ffdf": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a05bbd-089e-7b53-a93b-e82921c3b522",
+        "model": "gpt-5.6-terra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

@@ -1,0 +1,29 @@
+Cargo.lock
+  s_cbf051d9e59a54::t_0405661e7ad551 6100
+Cargo.toml
+  s_348dabf0db493c::t_5ace5664ee2ae0 162
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.0",
+  "base_commit_sha": "31ab6b9c0f5dbd1bc41785d8a5d0faa07e5cf91d",
+  "prompts": {},
+  "sessions": {
+    "s_348dabf0db493c": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0864c-1de4-7f41-8d62-7f7167f88197",
+        "model": "unknown"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    },
+    "s_cbf051d9e59a54": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0864c-1d9c-7932-be89-8b66f62d14b3",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

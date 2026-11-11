@@ -1,0 +1,23 @@
+tests-integration/tests/table_ddl_event.rs
+  s_386ae40ce19d4b::t_0dc792f05b976b 32,66-67,76,80,92-93,96-100,111-112,115,117-128,137-139,142,144-155,160,162-163,166,168-172,175-182,185,188,192,194-205,209,212,215,219,221-232,254-255,257-258,262,274-276,279-283,294-295,299,308-314,327-341,343-344,350,353,356,360,364,371-376,378,385,391-392,397,402,414-416,421,427-428,437
+  s_386ae40ce19d4b::t_37299927ed96ce 75,245,253,326
+tests-integration/tests/event_recorder_test_util.rs
+  s_386ae40ce19d4b::t_ec7435768fd58f 21,57-72,144-161
+  s_386ae40ce19d4b::t_4151956b97a9d5 162
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "da5dc3a4fcfd9d9669555a0f45fa04ca3e731955",
+  "prompts": {},
+  "sessions": {
+    "s_386ae40ce19d4b": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019fa417-65b4-7d13-a763-977980c6e9cb",
+        "model": "gpt-5.6-terra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

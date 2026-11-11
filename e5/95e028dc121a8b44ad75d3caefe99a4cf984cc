@@ -1,0 +1,40 @@
+src/common/procedure/src/procedure.rs
+  s_e8469aec8f7e8c::t_7829a0a3c8945c 22
+src/cmd/src/standalone.rs
+  s_a4e97ab3082fe1::t_14deefb769a9a9 617
+  s_a4e97ab3082fe1::t_b07f2fa69a98cc 614-616
+  s_a4e97ab3082fe1::t_c0907ae24565af 618-619
+src/frontend/src/instance.rs
+  s_e8469aec8f7e8c::t_70984de8941a3d 180-181
+  s_e8469aec8f7e8c::t_aadc9f44f6c967 178-179
+  s_e8469aec8f7e8c::t_fd93f198d14eb6 182
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "e595e028dc121a8b44ad75d3caefe99a4cf984cc",
+  "prompts": {},
+  "humans": {
+    "h_623774b620da8e": {
+      "author": "WenyXu <wenymedia@gmail.com>"
+    }
+  },
+  "sessions": {
+    "s_a4e97ab3082fe1": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_067e59fcfffefmW7zbV485v6e4",
+        "model": "gpt-5.6-terra-fast"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    },
+    "s_e8469aec8f7e8c": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_067f569feffeVibvjFKHbmXk9v",
+        "model": "gpt-5.6-terra-fast"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}
