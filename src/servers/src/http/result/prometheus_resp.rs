@@ -2118,7 +2118,8 @@ mod tests {
     /// A declared name column says "this row has no name" with an empty value as well as with a
     /// null, because a plan that carries the name of each row carries it as a string: Prometheus
     /// drops an empty label value, so a row without a name carries no `__name__` label rather than
-    /// an empty one.
+    /// an empty one. A statement-derived name is not a fallback for such a row: the column is what
+    /// names the rows of a plan that declares it.
     #[test]
     fn an_empty_declared_name_reports_no_name() {
         let schema = Arc::new(Schema::new(vec![
@@ -2127,22 +2128,27 @@ mod tests {
                 ConcreteDataType::timestamp_millisecond_datatype(),
                 false,
             ),
-            ColumnSchema::new(
-                "__promql_or_name_0",
-                ConcreteDataType::string_datatype(),
-                false,
-            )
-            .with_metric_name(true),
+            // The column this branch declares: nullable, because a row an operator leaves unnamed
+            // has no name, and marked as the name column rather than named after the old internal
+            // projection the plan used to carry.
+            ColumnSchema::new(METRIC_NAME, ConcreteDataType::string_datatype(), true)
+                .with_metric_name(true),
             ColumnSchema::new("host", ConcreteDataType::string_datatype(), true),
             ColumnSchema::new("value", ConcreteDataType::float64_datatype(), true),
         ]));
         let batch = RecordBatch::new(
             schema.clone(),
             vec![
-                Arc::new(TimestampMillisecondVector::from_vec(vec![1_000, 1_000])) as _,
-                Arc::new(StringVector::from(vec![Some(""), Some("other_metric")])) as _,
-                Arc::new(StringVector::from(vec![Some("a"), Some("b")])) as _,
-                Arc::new(Float64Vector::from(vec![Some(1.0), Some(2.0)])) as _,
+                Arc::new(TimestampMillisecondVector::from_vec(vec![
+                    1_000, 1_000, 1_000,
+                ])) as _,
+                Arc::new(StringVector::from(vec![
+                    Some(""),
+                    None,
+                    Some("other_metric"),
+                ])) as _,
+                Arc::new(StringVector::from(vec![Some("a"), Some("b"), Some("c")])) as _,
+                Arc::new(Float64Vector::from(vec![Some(1.0), Some(2.0), Some(3.0)])) as _,
             ],
         )
         .unwrap();
@@ -2166,7 +2172,8 @@ mod tests {
             serde_json::to_value(&series).unwrap(),
             serde_json::json!([
                 {"metric": {"host": "a"}, "value": [1.0, "1.0"]},
-                {"metric": {"__name__": "other_metric", "host": "b"}, "value": [1.0, "2.0"]},
+                {"metric": {"host": "b"}, "value": [1.0, "2.0"]},
+                {"metric": {"__name__": "other_metric", "host": "c"}, "value": [1.0, "3.0"]},
             ])
         );
     }

@@ -1963,6 +1963,175 @@ async fn native_output_text(output: Output) -> String {
     batches.pretty_print().unwrap()
 }
 
+/// What a rows answer reports in the metric-name column the rows root declares after its labels.
+#[derive(Clone, Copy)]
+enum ReportedName<'a> {
+    /// No name column at all: the existing route declares none.
+    NoColumn,
+    /// The column is declared and every value in it is null, because the statement names no series.
+    Nothing,
+    /// Every row reports this metric name.
+    Metric(&'a str),
+}
+
+/// The batches of a `TQL EVAL` answer.
+async fn rows_batches(output: Output) -> common_recordbatch::RecordBatches {
+    match output.data {
+        OutputData::Stream(stream) => collect_batches(stream).await.unwrap(),
+        OutputData::RecordBatches(batches) => batches,
+        _ => unreachable!("TQL EVAL returns record batches"),
+    }
+}
+
+/// The position of the answer's metric-name column, refused unless it reports exactly `reported`.
+///
+/// A native rows root appends a nullable `__name__` column after the labels, and a row that names
+/// no series leaves it null: a math kernel, a range function and a folding aggregate report a value
+/// of their own and no name. The existing route declares no such column, so a test that compares
+/// the two answers has to say what that one column of the native answer holds rather than leave
+/// whichever column it did not expect out of the assertion.
+fn checked_name_column(
+    fields: &datatypes::arrow::datatypes::Fields,
+    columns: &[datatypes::arrow::array::ArrayRef],
+    reported: ReportedName<'_>,
+) -> Option<usize> {
+    let index = fields.iter().position(|field| field.name() == "__name__");
+    let Some(index) = index else {
+        assert!(
+            matches!(reported, ReportedName::NoColumn),
+            "the rows root declares the metric-name column after its labels: {:?}",
+            fields.iter().map(|field| field.name()).collect::<Vec<_>>()
+        );
+        return None;
+    };
+    assert!(
+        !matches!(reported, ReportedName::NoColumn),
+        "the existing route declares no metric-name column, but this answer has one: {:?}",
+        fields[index]
+    );
+    assert_eq!(
+        index,
+        fields.len() - 1,
+        "the metric-name column is appended after the labels: {fields:?}"
+    );
+    assert!(
+        datatypes::schema::is_metric_name_field(&fields[index]),
+        "the appended column is the layout's metric-name column: {:?}",
+        fields[index]
+    );
+    let names = cast(columns[index].as_ref(), &DataType::Utf8).unwrap();
+    let names = names.as_any().downcast_ref::<StringArray>().unwrap();
+    match reported {
+        ReportedName::Nothing => assert_eq!(
+            names.null_count(),
+            names.len(),
+            "a statement that names no series reports a null name on every row: {names:?}"
+        ),
+        ReportedName::Metric(name) => {
+            assert_eq!(
+                names.null_count(),
+                0,
+                "every row of this statement reports its metric name: {names:?}"
+            );
+            for row in 0..names.len() {
+                assert_eq!(name, names.value(row), "row {row} of {names:?}");
+            }
+        }
+        ReportedName::NoColumn => unreachable!("refused above"),
+    }
+    Some(index)
+}
+
+/// [`checked_name_column`] for every batch of an answer, which agree on the position.
+fn checked_name_columns(
+    batches: &common_recordbatch::RecordBatches,
+    reported: ReportedName<'_>,
+) -> Option<usize> {
+    let mut index = None;
+    for batch in batches.iter() {
+        let batch = batch.df_record_batch();
+        let position = checked_name_column(batch.schema().fields(), batch.columns(), reported);
+        match index {
+            None => index = position,
+            Some(index) => assert_eq!(Some(index), position, "every batch names its rows alike"),
+        }
+    }
+    index
+}
+
+/// The answer rendered as the table it reports, with the metric-name column checked and left out.
+///
+/// Unlike [`eval_text`] this keeps the response's own column and row order, so it compares a
+/// statement that orders its rows - `sort` - and one whose answer is a value of its own.
+fn pretty_rows_without_name(
+    batches: &common_recordbatch::RecordBatches,
+    reported: ReportedName<'_>,
+) -> String {
+    use datatypes::arrow::util::display::FormatOptions;
+    use datatypes::arrow::util::pretty::pretty_format_batches_with_options;
+
+    let name_index = checked_name_columns(batches, reported);
+    let batches = batches
+        .iter()
+        .map(|batch| {
+            let batch = batch.df_record_batch();
+            let Some(name_index) = name_index else {
+                return batch.clone();
+            };
+            let schema = batch.schema();
+            let fields = schema
+                .fields()
+                .iter()
+                .enumerate()
+                .filter(|(position, _)| *position != name_index)
+                .map(|(_, field)| Arc::clone(field))
+                .collect::<Vec<_>>();
+            let columns = batch
+                .columns()
+                .iter()
+                .enumerate()
+                .filter(|(position, _)| *position != name_index)
+                .map(|(_, column)| Arc::clone(column))
+                .collect::<Vec<_>>();
+            let schema = ArrowSchema::new_with_metadata(fields, schema.metadata().clone());
+            datatypes::arrow::array::RecordBatch::try_new(Arc::new(schema), columns)
+                .expect("the answer keeps its column types")
+        })
+        .collect::<Vec<_>>();
+    pretty_format_batches_with_options(&batches, &FormatOptions::default())
+        .expect("the answer formats")
+        .to_string()
+}
+
+/// [`pretty_rows_without_name`] of a `TQL EVAL` answer.
+async fn named_rows_text(output: Output, reported: ReportedName<'_>) -> String {
+    let batches = rows_batches(output).await;
+    pretty_rows_without_name(&batches, reported)
+}
+
+/// The rows a Prometheus answer carries for a statement whose every row reports `name`.
+///
+/// The existing route declares no name column, so the rows it answers are missing exactly the
+/// `__name__` label that a Prometheus answer of the same statement reports. Adding the name to those
+/// rows keeps the native answer whole in the comparison: a wrong or missing name fails it instead of
+/// being dropped from the side that has one.
+fn named_rows(
+    rows: Vec<(i64, std::collections::BTreeMap<String, String>, f64)>,
+    name: &str,
+) -> Vec<(i64, std::collections::BTreeMap<String, String>, f64)> {
+    rows.into_iter()
+        .map(|(second, mut labels, value)| {
+            assert!(
+                labels
+                    .insert("__name__".to_string(), name.to_string())
+                    .is_none(),
+                "the existing route already reported a name: {labels:?}"
+            );
+            (second, labels, value)
+        })
+        .collect()
+}
+
 /// The error a query reports, whether it was raised while planning or while its stream was read.
 async fn collect_error(output: Output) -> String {
     match output.data {
@@ -2033,11 +2202,28 @@ async fn native_site_rows(output: Output) -> Vec<(i64, String, String, f64)> {
 /// `None` labels each row with every label column it carries, by name, so an answer whose label set
 /// is not the `host` one can be compared with the existing route's the same way.
 async fn native_rows(output: Output, label: Option<&str>) -> Vec<(i64, String, f64)> {
+    native_rows_and_names(output, label).await.0
+}
+
+/// [`native_rows`], plus the per-row values of the declared name column, and `None` when the answer
+/// declares no such column at all. A row whose value is computed rather than read reports no name,
+/// which is a null there and not a missing column: a reader that only looks at the labels cannot
+/// tell the two apart, so a caller asserting "answers no name" has to read these.
+async fn native_rows_and_names(
+    output: Output,
+    label: Option<&str>,
+) -> (Vec<(i64, String, f64)>, Option<Vec<Option<String>>>) {
     let batches = match output.data {
         OutputData::Stream(stream) => collect_batches(stream).await.unwrap(),
         OutputData::RecordBatches(batches) => batches,
         _ => unreachable!("TQL EVAL returns record batches"),
     };
+    let declares_name = batches
+        .schema()
+        .arrow_schema()
+        .fields()
+        .iter()
+        .any(|field| datatypes::schema::is_metric_name_field(field));
     let mut rows = batches
         .iter()
         .flat_map(|batch| {
@@ -2096,19 +2282,35 @@ async fn native_rows(output: Output, label: Option<&str>) -> Vec<(i64, String, f
                 .unwrap();
             assert_eq!(timestamps.null_count(), 0);
             assert_eq!(values.null_count(), 0);
+            let names = batch.column_by_name("__name__").map(|column| {
+                let names = column.as_any().downcast_ref::<StringArray>().unwrap();
+                (0..batch.num_rows())
+                    .map(|row| names.is_valid(row).then(|| names.value(row).to_string()))
+                    .collect::<Vec<_>>()
+            });
             (0..batch.num_rows())
                 .map(|row| {
                     (
                         timestamps.value(row),
                         labels[row].clone(),
                         values.value(row),
+                        names.as_ref().map(|names| names[row].clone()),
                     )
                 })
                 .collect::<Vec<_>>()
         })
         .collect::<Vec<_>>();
     rows.sort_by(|left, right| (left.0, &left.1).cmp(&(right.0, &right.1)));
-    rows
+    let names = declares_name.then(|| {
+        rows.iter()
+            .map(|(_, _, _, name)| name.clone().flatten())
+            .collect::<Vec<Option<String>>>()
+    });
+    let rows = rows
+        .into_iter()
+        .map(|(time, labels, value, _)| (time, labels, value))
+        .collect();
+    (rows, names)
 }
 
 async fn native_result_rows(output: Output) -> Vec<(i64, String, f64)> {
@@ -2196,6 +2398,162 @@ async fn native_promql_clamp_aggregates_execute_on_native_segments() {
             );
         }
     }
+}
+
+/// A native rows result names each row after the metric it came from.
+///
+/// The name is part of what the statement answers, not of how a result is displayed: `sum by
+/// (__name__)` groups by the identity of the series, and an `or` reports each side's own name. An
+/// operator that computes a value of its own - a math kernel, a folding aggregate - drops the name
+/// exactly as it drops a label, so its rows answer no `__name__` label at all.
+#[tokio::test(flavor = "multi_thread")]
+async fn native_promql_rows_name_each_row_after_its_metric() {
+    common_telemetry::init_default_ut_logging();
+    let config = mito2::config::MitoConfig {
+        experimental_series_scan_v2: true,
+        ..Default::default()
+    };
+    let (standalone, observer) = native_test_instance(
+        GreptimeDbStandaloneBuilder::new("native_promql_rows_name_each_row")
+            .with_mito_config(config),
+    )
+    .await;
+    let instance = standalone.fe_instance().clone();
+    execute_all(
+        &instance,
+        "CREATE TABLE native_name_phy (ts TIMESTAMP TIME INDEX, v DOUBLE) \
+             ENGINE=metric WITH (\"physical_metric_table\" = \"\"); \
+         CREATE TABLE native_name_demo (host STRING NULL, ts TIMESTAMP NOT NULL, v DOUBLE NULL, \
+             TIME INDEX (ts), PRIMARY KEY (host)) \
+             ENGINE=metric WITH (on_physical_table = 'native_name_phy'); \
+         CREATE TABLE native_name_other (host STRING NULL, ts TIMESTAMP NOT NULL, v DOUBLE NULL, \
+             TIME INDEX (ts), PRIMARY KEY (host)) \
+             ENGINE=metric WITH (on_physical_table = 'native_name_phy'); \
+         INSERT INTO native_name_demo (host, ts, v) VALUES ('a', 0, 2); \
+         INSERT INTO native_name_other (host, ts, v) VALUES ('b', 0, 8)",
+        QueryContext::arc(),
+    )
+    .await;
+
+    // An `or` keeps both sides' names, and a named selector reports its own. A row's label set is
+    // what Prometheus reports for it: `or` returns the left side's whole label set and appends the
+    // right side's series, so each row keeps the labels its own selector read - `host` among them -
+    // and reports the name of the metric it came from.
+    // A selector that names no metric is answered from the metric tables discovery is authorized to
+    // read, and a caller prepares that scope for the statement: the Prometheus handler passes the
+    // schema's tables, and this fixture passes its two. Without a scope the planner declines the
+    // selector, so the statement would keep the existing plan, which refuses it outright.
+    let scoped = || {
+        let mut ctx = QueryContext::with_db_name(None);
+        ctx.set_extension(QUERY_PARALLELISM_HINT, "4".to_string());
+        ctx.set_extension(NATIVE_PROMQL_EXTENSION_KEY, "true".to_string());
+        ctx.set_metric_discovery_scope(MetricDiscoveryScope::allowed([
+            (
+                DEFAULT_CATALOG_NAME.to_string(),
+                DEFAULT_SCHEMA_NAME.to_string(),
+                "native_name_demo".to_string(),
+            ),
+            (
+                DEFAULT_CATALOG_NAME.to_string(),
+                DEFAULT_SCHEMA_NAME.to_string(),
+                "native_name_other".to_string(),
+            ),
+        ]));
+        Arc::new(ctx)
+    };
+    for (query, expected, native) in [
+        (
+            "native_name_demo or native_name_other",
+            vec![
+                (0, "host=a,__name__=native_name_demo".to_string(), 2.0),
+                (0, "host=b,__name__=native_name_other".to_string(), 8.0),
+            ],
+            true,
+        ),
+        // A bare selection has no operator to evaluate, so the scan itself answers it and there is
+        // no native node to observe: its name is the one the statement derives, which #10162 covers.
+        (
+            "native_name_demo",
+            vec![(0, "host=a,__name__=native_name_demo".to_string(), 2.0)],
+            false,
+        ),
+        (
+            "topk(1, native_name_other)",
+            vec![(0, "host=b,__name__=native_name_other".to_string(), 8.0)],
+            true,
+        ),
+        // A selector that names no metric reads every metric the discovery scope allows, and the
+        // name is how a caller tells the rows apart: grouping by it keeps the two metrics in
+        // groups of their own rather than folding their series together.
+        (
+            r#"sum by (__name__) ({host=~"a|b"})"#,
+            vec![
+                (0, "__name__=native_name_demo".to_string(), 2.0),
+                (0, "__name__=native_name_other".to_string(), 8.0),
+            ],
+            true,
+        ),
+        (
+            r#"{host=~"a|b"}"#,
+            vec![
+                (0, "host=a,__name__=native_name_demo".to_string(), 2.0),
+                (0, "host=b,__name__=native_name_other".to_string(), 8.0),
+            ],
+            true,
+        ),
+    ] {
+        observer.clear();
+        let output = instance
+            .do_query(&format!("TQL EVAL (0, 0, '1s') {query}"), scoped())
+            .await
+            .remove(0)
+            .unwrap();
+        let rows = native_rows(output, None).await;
+        assert_eq!(expected, rows, "{query}");
+        if native {
+            assert_native_rows_plan(&observer);
+        }
+    }
+
+    // A math kernel and a folding aggregate report a value of their own, so their rows carry no
+    // name: the column is there and null, and the response reads no label from it.
+    for (query, expected_values) in [
+        ("abs(native_name_demo or native_name_other)", vec![2.0, 8.0]),
+        ("sum(native_name_demo)", vec![2.0]),
+    ] {
+        observer.clear();
+        let (rows, names) = native_rows_and_names(
+            native_tql_output(&instance, &format!("TQL EVAL (0, 0, '1s') {query}"), true).await,
+            None,
+        )
+        .await;
+        // A computed value answers no name; the labels the input carried stay. The column is still
+        // declared, and the names have to be read from it: a row that reports no name is null
+        // there, which a reader that only collects the labels cannot tell from a missing column.
+        let names =
+            names.unwrap_or_else(|| panic!("{query}: the rows answer declares the name column"));
+        assert!(
+            names.iter().all(Option::is_none),
+            "{query}: a computed value answers no name: {names:?}"
+        );
+        assert!(
+            rows.iter().all(|(_, label, _)| !label.contains("__name__")),
+            "{query}: a computed value answers no name: {rows:?}"
+        );
+        let mut values = rows.iter().map(|(_, _, value)| *value).collect::<Vec<_>>();
+        values.sort_by(|left, right| left.partial_cmp(right).unwrap());
+        assert_eq!(expected_values, values, "{query}");
+        assert_native_rows_plan(&observer);
+    }
+}
+
+/// The plan the last query ran is the native one, so a row assertion above is about this route.
+fn assert_native_rows_plan(observer: &NativePlanObserver) {
+    let root = observer.root_plan();
+    let display = datafusion::physical_plan::displayable(root.as_ref())
+        .indent(true)
+        .to_string();
+    assert!(display.contains("FusedSeriesExec"), "{display}");
 }
 
 /// [`native_result_rows`] for a statement whose output carries no series labels, such as the
@@ -2354,13 +2712,16 @@ fn assert_two_source_native_plan(
     );
     assert_eq!(plan.output_partitioning().partition_count(), widths[0]);
     let schema = plan.schema();
+    // The rows layout declares the per-row name column on top of `ts`, the value and `host`; this
+    // match computes values, so those rows carry a null name.
     assert_eq!(
         schema.fields().len(),
-        3,
-        "binary output must have ts, value, host"
+        4,
+        "binary output must have ts, value, host, __name__"
     );
     assert!(schema.field_with_name("ts").is_ok());
     assert!(schema.field_with_name("host").is_ok());
+    assert!(schema.field_with_name("__name__").is_ok());
     assert!(schema.field_with_name("kind").is_err());
     let children = plan.children();
     assert!(!Arc::ptr_eq(children[0], children[1]));
@@ -2948,7 +3309,31 @@ async fn native_scalar_rows(output: Output) -> Vec<(i64, f64)> {
             .filter(|column| column.data_type() == &DataType::Float64)
             .collect::<Vec<_>>();
         assert_eq!(values.len(), 1, "one result value column");
-        assert_eq!(batch.num_columns(), 2, "scalar output has no labels");
+        // A rows layout declares the per-row name column, and a scalar-shaped answer names no row:
+        // the column is there and null for every row rather than absent. Any other column here
+        // would be a label this answer must not carry.
+        let labels = batch
+            .columns()
+            .iter()
+            .filter(|column| {
+                column.data_type() != &DataType::Float64
+                    && !matches!(
+                        column.data_type(),
+                        DataType::Timestamp(TimeUnit::Millisecond, _)
+                    )
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            labels.len() <= 1,
+            "a scalar output has no labels besides the name column"
+        );
+        for label in labels {
+            assert_eq!(
+                label.len(),
+                label.null_count(),
+                "a scalar answer names no row: {label:?}"
+            );
+        }
         let values = values[0].as_any().downcast_ref::<Float64Array>().unwrap();
         for row in 0..batch.num_rows() {
             rows.push((timestamps.value(row), values.value(row)));
@@ -5049,9 +5434,9 @@ async fn distributed_native_promql_metric_discovery_reconciles_mixed_ordering() 
             OutputData::RecordBatches(batches) => batches,
             _ => unreachable!("PromQL returns record batches"),
         };
-        // Neither column is located by position: the result puts `__name__` last, and an aggregate
-        // that folds the name away drops the column instead of emptying it, so a missing `__name__`
-        // is exactly "no metric name".
+        // Neither column is located by position: the result puts `__name__` last. A row whose series
+        // reports no name carries a null there - the column is declared for every samples root, so a
+        // null, not a missing column, is exactly "no metric name".
         let mut rows = Vec::new();
         for batch in batches {
             let names = batch.column_by_name("__name__").map(|column| {
@@ -5069,10 +5454,10 @@ async fn distributed_native_promql_metric_discovery_reconciles_mixed_ordering() 
                 .downcast_ref::<Float64Array>()
                 .unwrap();
             for row in 0..batch.num_rows() {
-                rows.push((
-                    names.as_ref().map(|names| names.value(row).to_string()),
-                    values.value(row),
-                ));
+                let name = names
+                    .as_ref()
+                    .and_then(|names| (!names.is_null(row)).then(|| names.value(row).to_string()));
+                rows.push((name, values.value(row)));
             }
         }
         // The name travels with the value: a plan that grouped by the wrong name, or dropped the
@@ -5257,8 +5642,11 @@ async fn distributed_native_promql_data_free_statement_plans_natively() {
         // `start`/`end` are seconds, so this one-step range evaluates at 3000ms.
         ("time()", &["time", "value"][..], &[(3000, 3.0)][..]),
         (
+            // A samples root declares the name of each row it publishes, and `vector(1)` has
+            // none, so the column is present and null. `time()` above is a scalar root and keeps
+            // two columns.
             r#"label_replace(vector(1), "host", "host1", "", "")"#,
-            &["time", "value", "host"][..],
+            &["time", "value", "host", "__name__"][..],
             &[(3000, 1.0)][..],
         ),
     ] {
@@ -5730,9 +6118,27 @@ async fn native_promql_label_rewrites_reach_the_native_route_and_keep_prometheus
             .remove(0)
             .unwrap();
         let (_, legacy_rows) = native_labelled_rows(legacy).await;
+        // A rewrite adds or deletes a label and reports the series it read, so the rows keep
+        // `probe_two` as their name. The existing route declares no name column, so its rows are
+        // the same answer without that one label.
+        assert!(
+            native_rows
+                .iter()
+                .all(|(_, labels, _)| labels.get("__name__").map(String::as_str)
+                    == Some("probe_two")),
+            "a rewrite keeps the series' name: {native_rows:?}"
+        );
+        let expected_native = legacy_rows
+            .into_iter()
+            .map(|(second, mut labels, value)| {
+                labels.insert("__name__".to_string(), "probe_two".to_string());
+                (second, labels, value)
+            })
+            .collect::<Vec<_>>();
         assert_eq!(
-            native_rows, legacy_rows,
-            "a three-argument `label_join` deletes its destination and must answer as the existing              plan does"
+            native_rows, expected_native,
+            "a three-argument `label_join` deletes its destination and must answer as the existing \
+             plan does"
         );
         assert!(
             native_rows
@@ -5883,8 +6289,8 @@ async fn native_promql_rewrites_the_metric_name() {
     .unwrap();
     let (columns, rows) = native_labelled_rows(deleted).await;
     assert!(
-        !columns.iter().any(|column| column == "__name__"),
-        "a deleted name publishes no column: {columns:?}"
+        columns.iter().any(|column| column == "__name__"),
+        "the rows layout declares the name column even when the rewrite deletes it: {columns:?}"
     );
     assert_eq!(
         rows,
@@ -6393,8 +6799,9 @@ async fn native_promql_sort_absent_and_histogram_quantile_match_legacy() {
             let legacy_rows = legacy.iter().map(|batch| batch.num_rows()).sum::<usize>();
             assert_eq!(native_rows, legacy_rows);
             assert!(native_rows >= 1, "histogram_quantile must produce data");
+            // The rows root lays its columns out as time, values, labels, and the name last.
             assert_eq!(
-                vec!["ts", "val", "host"],
+                vec!["ts", "val", "host", "__name__"],
                 native_columns
                     .iter()
                     .map(|column| column.name.as_str())
@@ -6485,8 +6892,18 @@ async fn native_promql_sort_absent_and_histogram_quantile_match_legacy() {
                 );
             }
         } else {
-            let native = native_output_text(native).await;
-            let legacy = native_output_text(legacy).await;
+            // `sort` and `sort_desc` report the series they rank as they found them, so their rows
+            // keep the metric name; `absent` answers a value of its own for a label set it derives
+            // from the matcher, and Prometheus' `absent` leaves the name out of that set. The
+            // existing route has no name column at all, so the column is checked against what the
+            // shape answers and left out of the comparison.
+            let reported = if shape.starts_with("absent") {
+                ReportedName::Nothing
+            } else {
+                ReportedName::Metric("native_shapes")
+            };
+            let native = named_rows_text(native, reported).await;
+            let legacy = named_rows_text(legacy, ReportedName::NoColumn).await;
             assert_eq!(native, legacy, "{shape}; SQL: {sql}");
         }
     }
@@ -7731,14 +8148,19 @@ async fn native_promql_zero_match_or_real_tql() {
             .remove(0)
             .unwrap();
         let (columns, rows) = native_labelled_rows(output).await;
+        // A rows answer reports the statement's own columns, the per-row name column among them.
+        // `alpha_total` reads one named metric, and `or` reports each side with the label set it
+        // read, so every row here is a series of that metric and keeps its name while the empty
+        // side adds nothing.
         assert_eq!(columns, vec!["__name__", "host", "ts", "val"], "{query}");
         let actual = rows
             .iter()
             .map(|(time, labels, value)| {
                 assert_eq!(labels.len(), 2, "{query}: {labels:?}");
                 assert_eq!(
+                    Some("alpha_total"),
                     labels.get("__name__").map(String::as_str),
-                    Some("alpha_total")
+                    "{query}: the left side reports its own name: {labels:?}"
                 );
                 (*time, labels.get("host").unwrap().as_str(), *value)
             })
@@ -8357,7 +8779,7 @@ async fn native_promql_cross_table_pairs_over_different_schemas() {
                 .collect::<std::collections::BTreeMap<_, _>>()
         };
         let mut union = Vec::new();
-        let mut union_named = Vec::new();
+        let mut union_legacy = Vec::new();
         let mut ratio = Vec::new();
         let mut filled = Vec::new();
         for host in 0..2_i64 {
@@ -8365,43 +8787,43 @@ async fn native_promql_cross_table_pairs_over_different_schemas() {
             for second in 3..10_i64 {
                 let a = (10 * host + second) as f64;
                 let b = (100 + second) as f64;
-                union.push((second * 1_000, labels(&[("host", &name), ("kind", "x")]), a));
-                union.push((second * 1_000, labels(&[("host", &name), ("az", "z")]), b));
-                // `or` reports both operands, so on the native route each row keeps the name of the
-                // table it came from. The legacy route names rows in the response instead, so its
-                // rows are compared against `union`, which carries no name column.
-                union_named.push((
+                union.push((
                     second * 1_000,
-                    labels(&[("__name__", "native_xs_a"), ("host", &name), ("kind", "x")]),
+                    labels(&[("host", &name), ("kind", "x"), ("__name__", "native_xs_a")]),
                     a,
                 ));
-                union_named.push((
+                union.push((
                     second * 1_000,
-                    labels(&[("__name__", "native_xs_b"), ("host", &name), ("az", "z")]),
+                    labels(&[("host", &name), ("az", "z"), ("__name__", "native_xs_b")]),
                     b,
                 ));
+                // `or` reports both operands with the label set each of them read, the metric name
+                // among them. The existing route declares no name column, so its rows answer the
+                // same set without that label; that is a difference of the column, not of the
+                // answer, so the two are compared as the rows each route can report.
+                union_legacy.push((second * 1_000, labels(&[("host", &name), ("kind", "x")]), a));
+                union_legacy.push((second * 1_000, labels(&[("host", &name), ("az", "z")]), b));
+
                 ratio.push((second * 1_000, labels(&[("host", &name)]), a / b));
                 filled.push((second * 1_000, labels(&[("host", &name), ("az", "z")]), b));
             }
         }
         union.sort_by(|left, right| (&left.1, left.0).cmp(&(&right.1, right.0)));
-        union_named.sort_by(|left, right| (&left.1, left.0).cmp(&(&right.1, right.0)));
+        union_legacy.sort_by(|left, right| (&left.1, left.0).cmp(&(&right.1, right.0)));
         ratio.sort_by(|left, right| (&left.1, left.0).cmp(&(&right.1, right.0)));
         filled.sort_by(|left, right| (&left.1, left.0).cmp(&(&right.1, right.0)));
         // The existing plan fails to execute the match over two differently named time indexes
         // (it reads a tag column as the time index), so only the native answer is checked there.
         for (query, columns, expected, legacy_expected) in [
             (
-                // A set operator reports both operands, so the plan carries each row's own
-                // metric name and the result exposes it as a column.
                 "native_xs_a or native_xs_b",
                 vec!["__name__", "az", "host", "kind", "ts", "val"],
-                union_named,
-                Some(union),
+                union,
+                Some(union_legacy),
             ),
             (
                 "native_xs_a / on(host) native_xs_b",
-                vec!["host", "ts", "val"],
+                vec!["__name__", "host", "ts", "val"],
                 ratio,
                 None,
             ),
@@ -8409,7 +8831,7 @@ async fn native_promql_cross_table_pairs_over_different_schemas() {
             // carries `az`.
             (
                 "native_xs_a + fill_left(0) native_xs_b",
-                vec!["az", "host", "kind", "ts", "val"],
+                vec!["__name__", "az", "host", "kind", "ts", "val"],
                 filled,
                 None,
             ),
@@ -8532,26 +8954,26 @@ async fn native_promql_three_selector_trees_bind_every_occurrence() {
     for (query, columns, expected, expected_source_paths) in [
         (
             "native_3_a + native_3_b + native_3_c",
-            vec!["host", "kind", "ts", "val"],
+            vec!["__name__", "host", "kind", "ts", "val"],
             at_five(|h| 10.0 * h + 5.0 + 10.0 + (100.0 + h)),
             3,
         ),
         (
             "(native_3_a - native_3_b) / on(host) native_3_c",
-            vec!["host", "ts", "val"],
+            vec!["__name__", "host", "ts", "val"],
             at_five(|h| (10.0 * h + 5.0 - 10.0) / (100.0 + h)),
             3,
         ),
         (
             "native_3_s{kind=\"x\"} - on(host) native_3_s{kind=\"y\"} + on(host) \
              native_3_s{kind=\"z\"}",
-            vec!["host", "ts", "val"],
+            vec!["__name__", "host", "ts", "val"],
             at_five(|h| 10.0 * h + 5.0 - 10.0 + (100.0 + h)),
             3,
         ),
         (
-            // `or` reports both sides, so the plan carries each row's own metric name. The
-            // arithmetic entry below drops it, as Prometheus does.
+            // `or` reports both sides; a TQL result reports the statement's own columns, so the
+            // per-row name column a Prometheus response reads is not one of them.
             "native_3_a{host=\"h0\"} and native_3_b or native_3_c",
             vec!["__name__", "host", "kind", "ts", "val"],
             at_five(|h| if h == 0.0 { 5.0 } else { 100.0 + h }),
@@ -8559,7 +8981,7 @@ async fn native_promql_three_selector_trees_bind_every_occurrence() {
         ),
         (
             "(native_3_a{host=\"h0\"} or native_3_b) + native_3_c",
-            vec!["host", "kind", "ts", "val"],
+            vec!["__name__", "host", "kind", "ts", "val"],
             at_five(|h| if h == 0.0 { 5.0 } else { 10.0 } + (100.0 + h)),
             3,
         ),
@@ -8783,9 +9205,27 @@ async fn native_promql_info_enriches_from_the_info_table() {
             value as f64,
         )
     };
-    let a = |version| [("instance", "a"), ("job", "j"), ("version", version)];
-    let b = [("instance", "b"), ("job", "j"), ("version", "v1")];
-    let c = [("instance", "c"), ("job", "k")];
+    // `info` enriches the base series' label set and reports the series it read it from, so every
+    // row keeps the base metric's name.
+    let a = |version| {
+        [
+            ("instance", "a"),
+            ("job", "j"),
+            ("version", version),
+            ("__name__", "native_info_up"),
+        ]
+    };
+    let b = [
+        ("instance", "b"),
+        ("job", "j"),
+        ("version", "v1"),
+        ("__name__", "native_info_up"),
+    ];
+    let c = [
+        ("instance", "c"),
+        ("job", "k"),
+        ("__name__", "native_info_up"),
+    ];
     // `a` takes the version current at each step, `b` keeps `v1`, and `c`, which no info series
     // matches, passes through unless the selector requires a version.
     let mut enriched = Vec::new();
@@ -8809,17 +9249,17 @@ async fn native_promql_info_enriches_from_the_info_table() {
     for (query, columns, mut expected) in [
         (
             "info(native_info_up)",
-            vec!["instance", "job", "ts", "val", "version"],
+            vec!["__name__", "instance", "job", "ts", "val", "version"],
             enriched,
         ),
         (
             "info(native_info_up, {version=\"v1\"})",
-            vec!["instance", "job", "ts", "val", "version"],
+            vec!["__name__", "instance", "job", "ts", "val", "version"],
             v1_only,
         ),
         (
             "info(native_info_up offset 1s)",
-            vec!["instance", "job", "ts", "val", "version"],
+            vec!["__name__", "instance", "job", "ts", "val", "version"],
             shifted,
         ),
     ] {
@@ -9420,20 +9860,58 @@ async fn native_promql_repeated_selector_binary_uses_independent_scans() {
     let on_empty_sql = format!(
         r#"TQL EVAL (1, 1, '1s') {table}{{host="h001"}} - on() ({table}{{host="h001"}} * 2)"#
     );
-    async fn unlabeled_rows(output: Output) -> Vec<(i64, f64)> {
+    /// The evaluation timestamp and the one value of each row. `declared_name` says whether this
+    /// route's rows layout declares the per-row name column: the native route does, and the
+    /// existing plan answers the same rows without it.
+    async fn unlabeled_rows(output: Output, declared_name: bool) -> Vec<(i64, f64)> {
         let batches = match output.data {
             OutputData::Stream(stream) => collect_batches(stream).await.unwrap(),
             OutputData::RecordBatches(batches) => batches,
             _ => unreachable!("TQL EVAL returns record batches"),
         };
+        // The rows root always declares the per-row metric-name column after the labels, so the
+        // answer of a computed value is timestamp, value and that one column - which names nothing
+        // here, because a subtraction answers a value of its own and `on()` keeps no labels.
         let schema = batches.schema();
         let schema = schema.arrow_schema();
-        assert_eq!(schema.fields().len(), 2, "only timestamp and value");
+        assert_eq!(
+            schema.fields().len(),
+            if declared_name { 3 } else { 2 },
+            "timestamp, value, and the name column when this route declares one"
+        );
         assert!(schema.field_with_name("host").is_err());
-        assert!(schema.field_with_name("__name__").is_err());
+        if declared_name {
+            let name = schema
+                .field_with_name("__name__")
+                .expect("the rows root declares the metric-name column");
+            assert!(datatypes::schema::is_metric_name_field(name), "{name:?}");
+            assert_eq!(
+                "__name__",
+                schema.fields()[2].name(),
+                "the name column is appended after the labels"
+            );
+        } else {
+            assert!(
+                schema.field_with_name("__name__").is_err(),
+                "the existing plan declares no name column: {schema:?}"
+            );
+        }
         batches
             .iter()
             .flat_map(|batch| {
+                if declared_name {
+                    let names = batch
+                        .column_by_name("__name__")
+                        .unwrap()
+                        .as_any()
+                        .downcast_ref::<StringArray>()
+                        .unwrap();
+                    assert_eq!(
+                        names.null_count(),
+                        names.len(),
+                        "a subtraction names no series: {names:?}"
+                    );
+                }
                 let timestamps = batch
                     .column_by_name("ts")
                     .unwrap()
@@ -9454,14 +9932,36 @@ async fn native_promql_repeated_selector_binary_uses_independent_scans() {
             .collect()
     }
     observer.clear();
-    let on_empty_rows =
-        unlabeled_rows(native_tql_output(&instance, &on_empty_sql, true).await).await;
+    let on_empty_rows = unlabeled_rows(
+        native_tql_output(&instance, &on_empty_sql, true).await,
+        true,
+    )
+    .await;
     let on_empty_plan = observer.two_input_fused();
     assert_eq!(on_empty_plan.name(), "FusedSeriesExec", "{on_empty_sql}");
-    assert_eq!(on_empty_plan.schema().fields().len(), 2, "{on_empty_sql}");
+    // The rows layout declares the per-row name column after the labels; a subtraction answers a
+    // value of its own, so that column exists and is null here (asserted on the batches above).
+    let on_empty_fields = on_empty_plan.schema().fields().clone();
+    assert_eq!(
+        on_empty_fields.len(),
+        3,
+        "{on_empty_sql}: {on_empty_fields:?}"
+    );
+    assert_eq!(
+        on_empty_fields[2].name(),
+        "__name__",
+        "{on_empty_sql}: the name column is appended after the labels"
+    );
+    assert!(
+        datatypes::schema::is_metric_name_field(&on_empty_fields[2]),
+        "{on_empty_sql}: {on_empty_fields:?}"
+    );
     assert_eq!(on_empty_rows, vec![(1_000, -1_001.0)]);
-    let on_empty_legacy =
-        unlabeled_rows(native_tql_output(&instance, &on_empty_sql, false).await).await;
+    let on_empty_legacy = unlabeled_rows(
+        native_tql_output(&instance, &on_empty_sql, false).await,
+        false,
+    )
+    .await;
     assert_eq!(on_empty_rows, on_empty_legacy);
 
     // Different matcher forms can still be joined natively while preserving both source bounds.
@@ -9558,7 +10058,10 @@ async fn native_hybrid_binary_empty_on_grouped_matching_and_errors() {
             native_labelled_rows(native_tql_output(&instance, &sql, true).await).await;
         let plan = observer.two_input_fused();
         assert_eq!(plan.name(), "FusedSeriesExec", "{query}");
-        assert_eq!(columns, vec!["host", "kind", "ts", "val", "zone_name"]);
+        assert_eq!(
+            columns,
+            vec!["__name__", "host", "kind", "ts", "val", "zone_name"]
+        );
         assert_eq!(rows, expected, "{query}");
         let (_, legacy) =
             native_labelled_rows(native_tql_output(&instance, &sql, false).await).await;
@@ -10006,12 +10509,15 @@ async fn native_promql_metric_two_aggregate_pair_matches_legacy() {
         (
             "sum(native_pair_demo) / sum(native_pair_other)",
             vec![(0, std::collections::BTreeMap::new(), 0.375)],
-            vec!["ts", "val"],
+            // The rows root declares the per-row name column after the labels; a division answers
+            // a value of its own and reports no name, so the column is there and every value in it
+            // is null.
+            vec!["ts", "val", "__name__"],
         ),
         (
             "sum by (host) (native_pair_demo) / sum by (host) (native_pair_other)",
             vec![grouped("a", 0.25), grouped("b", 0.5)],
-            vec!["ts", "val", "host"],
+            vec!["ts", "val", "host", "__name__"],
         ),
     ] {
         let sql = format!("TQL EVAL (0, 0, '1s') {query}");
@@ -10128,10 +10634,23 @@ async fn native_promql_metric_two_aggregate_pair_matches_legacy() {
         // after its expression (the same difference is pinned for a cross-table pair by
         // `native_fused_cross_table_pair_reads_each_table_through_its_own_source`). So the
         // shape is asserted, and the value column's name is pinned as the raw field it comes from.
+        // The rows layout declares the per-row name column and this statement has none to report:
+        // a division computes a value of its own and its inputs are aggregates, so every row's name
+        // is null. The column is therefore the only difference from the existing route's schema.
         assert_eq!(
             native_columns.len(),
-            legacy_columns.len(),
+            legacy_columns.len() + 1,
             "{query}: columns"
+        );
+        assert!(
+            native_columns.iter().any(|column| column == "__name__"),
+            "{query}: the declared name column: {native_columns:?}"
+        );
+        assert!(
+            native_rows
+                .iter()
+                .all(|(_, labels, _)| !labels.contains_key("__name__")),
+            "{query}: a division names no row: {native_rows:?}"
         );
         assert!(
             legacy_columns.iter().any(|column| column == "ts"),
@@ -10187,10 +10706,25 @@ const CTE_NATIVE_ORDERED_STATEMENT: &str =
 /// over the names it declares: the aliasing projection the CTE adds, and SQL above it that names
 /// what it published.
 ///
-/// The list is positional, so it is one statement only because the columns the CTE publishes are
-/// the same on both routes: the label `site`, the time index `t` and the value `v`, in that order.
+/// The list is positional and exact, so it names the columns the existing planner publishes: the
+/// label `site`, the time index `t` and the value `v`, in that order.
 const CTE_NATIVE_ALIASED_STATEMENT: &str = "WITH tql (site, t, v) AS (TQL EVAL (0, 3, '1s') cte_native + cte_native) \
      SELECT t, v, site FROM tql WHERE v > 5 ORDER BY t";
+
+/// The same statement for the native route, which publishes the name column as a fourth column and
+/// therefore needs a fourth name in the list. The outer projection still reads the same three.
+const CTE_NATIVE_ALIASED_NAME_STATEMENT: &str = "WITH tql (site, t, v, metric) AS (TQL EVAL (0, 3, '1s') cte_native + cte_native) \
+     SELECT t, v, site FROM tql WHERE v > 5 ORDER BY t";
+
+/// A CTE over a plain selection: the answer keeps the metric name, so the native route publishes it
+/// and the existing route does not.
+const CTE_NATIVE_NAME_STATEMENT: &str =
+    "WITH tql AS (TQL EVAL (0, 0, '1s') cte_native) SELECT * FROM tql";
+
+/// A CTE over a scalar-typed answer: no route declares a name column for it, so the CTE publishes
+/// none either.
+const CTE_NATIVE_SCALAR_STATEMENT: &str =
+    "WITH tql AS (TQL EVAL (0, 0, '1s') time()) SELECT * FROM tql";
 
 /// The rows [`CTE_NATIVE_STATEMENT`] answers: `cte_native + cte_native` doubles every sample, so
 /// `1, 3, 6, 10` becomes `2, 6, 12, 20`.
@@ -10219,9 +10753,13 @@ fn cte_native_filtered_rows() -> Vec<(i64, std::collections::BTreeMap<String, St
 /// name, Arrow type, nullability and metadata, and the metadata of the schema itself.
 ///
 /// A CTE's columns are SQL-visible, and a column list the CTE declares is applied to them by
-/// position, so this is what a route may not change - including the Arrow type `arrow_typeof`
-/// reports for a column, which is why the label below is compared as the encoded type both routes
-/// publish rather than as the strings both answers decode to.
+/// position, so the columns the existing planner publishes keep their names, order, types and
+/// metadata whichever route planned the statement - including the Arrow type `arrow_typeof` reports
+/// for a column, which is why the label below is compared as the encoded type both routes publish
+/// rather than as the strings both answers decode to. A native answer declares one more column than
+/// that, the per-row metric name, and a CTE over it publishes that too: what the CTE exposes follows
+/// the answer, so the column and the number of names a positional list needs depend on the answer
+/// planning selected.
 fn cte_native_published_schema(output: &Output) -> ArrowSchema {
     let schema = match &output.data {
         OutputData::Stream(stream) => stream.schema(),
@@ -10261,6 +10799,29 @@ fn cte_native_published_schema_expected() -> ArrowSchema {
         ],
         cte_native_schema_metadata(),
     )
+}
+
+/// The metadata the declared name column carries.
+fn cte_native_name_metadata() -> std::collections::HashMap<String, String> {
+    std::collections::HashMap::from([("greptime:metric_name".to_string(), "true".to_string())])
+}
+
+/// The schema [`CTE_NATIVE_STATEMENT`] publishes on the native route: the existing planner's
+/// columns, then the per-row name the answer declares.
+///
+/// The name is part of what the statement answers, so a CTE over a native answer publishes it. The
+/// existing planner never publishes it, so the same statement answered by that route has one column
+/// fewer: a CTE's columns follow the answer it was planned from.
+fn cte_native_published_schema_expected_native() -> ArrowSchema {
+    let mut fields = cte_native_published_schema_expected()
+        .fields()
+        .iter()
+        .map(|field| field.as_ref().clone())
+        .collect::<Vec<_>>();
+    fields.push(
+        Field::new("__name__", DataType::Utf8, true).with_metadata(cte_native_name_metadata()),
+    );
+    ArrowSchema::new_with_metadata(fields, cte_native_schema_metadata())
 }
 
 /// The schema [`CTE_NATIVE_ALIASED_STATEMENT`] publishes: the names its CTE declares, in the order it
@@ -10473,12 +11034,22 @@ async fn cte_native_statement_runs_the_fused_plan() {
     );
     assert_eq!(
         native_schema,
-        cte_native_published_schema_expected(),
-        "the CTE publishes the existing planner's schema over the fused plan"
+        cte_native_published_schema_expected_native(),
+        "the CTE publishes the existing planner's columns, then the name the answer declares"
     );
+    let legacy_fields = legacy_schema
+        .fields()
+        .iter()
+        .map(|field| field.as_ref())
+        .collect::<Vec<_>>();
+    let native_prefix = native_schema.fields()[..legacy_fields.len()]
+        .iter()
+        .map(|field| field.as_ref())
+        .collect::<Vec<_>>();
     assert_eq!(
-        native_schema, legacy_schema,
-        "names, order, types, nullability and metadata do not depend on the route"
+        native_prefix, legacy_fields,
+        "and every column the existing route publishes keeps its name, type, nullability and \
+         metadata: only the name column is added"
     );
     let native_types = cte_native_arrow_types(
         native_tql_output(&instance, CTE_NATIVE_ARROW_TYPE_STATEMENT, true).await,
@@ -10515,10 +11086,10 @@ async fn cte_native_statement_runs_the_fused_plan() {
 /// node still answers the statement, and the columns and rows are the ones the existing plan
 /// answers with.
 ///
-/// The declared list is positional, so it is one statement only because both routes publish the CTE
-/// the same way: the same columns, in the same order, with the same types. What the list declares,
-/// what the outer projection reads and what the outer filter keeps are all above the node, and none
-/// of them moves it.
+/// The declared list is positional and exact, so the native answer needs one more name than the
+/// existing one: it publishes the per-row name column, and the existing route does not. What the
+/// list declares, what the outer projection reads and what the outer filter keeps are all above the
+/// node, and none of them moves it.
 #[tokio::test(flavor = "multi_thread")]
 async fn cte_native_column_aliases_and_outer_filter_keep_the_fused_plan() {
     common_telemetry::init_default_ut_logging();
@@ -10544,7 +11115,29 @@ async fn cte_native_column_aliases_and_outer_filter_keep_the_fused_plan() {
     assert_eq!(legacy_rows, cte_native_filtered_rows(), "legacy");
 
     observer.clear();
-    let native_output = native_tql_output(&instance, CTE_NATIVE_ALIASED_STATEMENT, true).await;
+    // The native answer publishes one more column, so the declared list names four. Three names for
+    // four columns is a hard error, and four names for the existing route's three is one too: the
+    // list is positional and exact.
+    let short = instance
+        .do_query(CTE_NATIVE_ALIASED_STATEMENT, native_query_context(true, 4))
+        .await
+        .remove(0);
+    assert!(
+        short.is_err(),
+        "three names for the native answer's four columns"
+    );
+    let long = instance
+        .do_query(
+            CTE_NATIVE_ALIASED_NAME_STATEMENT,
+            native_query_context(false, 4),
+        )
+        .await
+        .remove(0);
+    assert!(
+        long.is_err(),
+        "four names for the existing answer's three columns"
+    );
+    let native_output = native_tql_output(&instance, CTE_NATIVE_ALIASED_NAME_STATEMENT, true).await;
     let native_schema = cte_native_published_schema(&native_output);
     let native_rows = cte_native_rows(native_output).await;
     assert_eq!(
@@ -10565,14 +11158,73 @@ async fn cte_native_column_aliases_and_outer_filter_keep_the_fused_plan() {
     assert_eq!(
         native_schema,
         cte_native_aliased_schema_expected(),
-        "the declared names apply to the same columns on both routes"
-    );
-    assert_eq!(
-        native_schema, legacy_schema,
-        "names, order, types, nullability and metadata do not depend on the route"
+        "the outer projection reads the same three columns on both routes"
     );
     assert_eq!(native_rows, cte_native_filtered_rows(), "native");
     assert_eq!(native_rows, legacy_rows);
+}
+
+/// The CTE publishes the name column exactly when the answer declares one.
+///
+/// A plain selection keeps its series name, and the native answer declares the column for it, so the
+/// CTE publishes it and SQL can read it. The existing answer declares none, so the same statement
+/// answered by that route publishes one column fewer and asking for the name is an error - the CTE's
+/// columns follow the answer it was planned from. A scalar-typed answer declares no such column on
+/// either route, so neither publishes one: the CTE does not invent a column the statement does not
+/// answer.
+#[tokio::test(flavor = "multi_thread")]
+async fn cte_native_publishes_the_name_column_only_when_the_answer_declares_one() {
+    common_telemetry::init_default_ut_logging();
+    let (standalone, observer) =
+        native_test_instance(GreptimeDbStandaloneBuilder::new("cte_native_name")).await;
+    let instance = standalone.fe_instance().clone();
+    execute_all(&instance, CTE_NATIVE_FIXTURE, QueryContext::arc()).await;
+
+    observer.clear();
+    let native = native_tql_output(&instance, CTE_NATIVE_NAME_STATEMENT, true).await;
+    let native_schema = cte_native_published_schema(&native);
+    let name = native_schema
+        .field_with_name("__name__")
+        .expect("the native answer declares the name column");
+    assert!(
+        datatypes::schema::is_metric_name_field(name),
+        "and marks it as one: {native_schema:?}"
+    );
+    let rows = cte_native_rows(native).await;
+    assert!(!rows.is_empty(), "the statement answers rows");
+    assert!(
+        rows.iter()
+            .all(|(_, labels, _)| labels.get("__name__").map(String::as_str) == Some("cte_native")),
+        "every row names the metric it was read from: {rows:?}"
+    );
+
+    let legacy = native_tql_output(&instance, CTE_NATIVE_NAME_STATEMENT, false).await;
+    let legacy_schema = cte_native_published_schema(&legacy);
+    assert!(
+        legacy_schema.field_with_name("__name__").is_err(),
+        "the existing answer declares no name column: {legacy_schema:?}"
+    );
+    cte_native_rows(legacy).await;
+    let missing = instance
+        .do_query(
+            "WITH tql AS (TQL EVAL (0, 0, '1s') cte_native) SELECT __name__ FROM tql",
+            native_query_context(false, 4),
+        )
+        .await
+        .remove(0);
+    assert!(
+        missing.is_err(),
+        "a CTE answered by the existing route has no name column to read"
+    );
+
+    for enabled in [true, false] {
+        let scalar = native_tql_output(&instance, CTE_NATIVE_SCALAR_STATEMENT, enabled).await;
+        let schema = cte_native_published_schema(&scalar);
+        assert!(
+            schema.field_with_name("__name__").is_err(),
+            "a scalar answer declares no name column (native={enabled}): {schema:?}"
+        );
+    }
 }
 
 /// The control: without the per-request hint the CTE statement keeps the existing plan, so the rows
@@ -10684,12 +11336,23 @@ async fn distributed_cte_native_runs_the_fused_plan_over_raw_sources() {
     let rows = cte_native_rows(output).await;
     assert_eq!(
         native_schema,
-        cte_native_published_schema_expected(),
-        "the CTE publishes the existing planner's schema over the distributed fused plan"
+        cte_native_published_schema_expected_native(),
+        "the CTE publishes the existing planner's columns over the distributed fused plan, then \
+         the name the answer declares"
     );
+    let legacy_fields = legacy_schema
+        .fields()
+        .iter()
+        .map(|field| field.as_ref())
+        .collect::<Vec<_>>();
+    let native_prefix = native_schema.fields()[..legacy_fields.len()]
+        .iter()
+        .map(|field| field.as_ref())
+        .collect::<Vec<_>>();
     assert_eq!(
-        native_schema, legacy_schema,
-        "names, order, types, nullability and metadata do not depend on the route or the deployment"
+        native_prefix, legacy_fields,
+        "every column the existing route publishes keeps its name, type, nullability and metadata \
+         on the distributed route too; only the name column is added"
     );
     assert_eq!(rows, cte_native_expected_rows(), "native");
     assert_eq!(rows, legacy_rows);
@@ -11396,7 +12059,7 @@ async fn native_promql_delta_temporality_rate_and_increase_match_legacy() {
         observer.clear();
         let (columns, rows) =
             native_labelled_rows(native_tql_output(&instance, &sql, true).await).await;
-        assert_eq!(columns, vec!["host", "ts", "val"]);
+        assert_eq!(columns, vec!["__name__", "host", "ts", "val"]);
         assert_eq!(rows.len(), 1, "{query}: {rows:?}");
         assert_eq!(rows[0].0, 120_000, "{query}");
         assert_eq!(
@@ -12090,20 +12753,15 @@ async fn native_promql_dynamic_scalars_match_prometheus_and_legacy() {
 
     // `count_values` names a label no scan carries, so the statement keeps a plan that reports it.
     let sql = "TQL EVAL (0, 0, '1s') count_values(\"bucket\", vector(1))";
-    let pretty = |output: Output| async {
-        match output.data {
-            OutputData::Stream(stream) => collect_batches(stream).await.unwrap(),
-            OutputData::RecordBatches(batches) => batches,
-            _ => unreachable!("TQL EVAL returns record batches"),
-        }
-        .pretty_print()
-        .unwrap()
-    };
-    let native = pretty(native_tql_output(&instance, sql, true).await).await;
     // The native route answers `count_values` itself now, so this is its own answer: one series at
-    // t=0 whose generated label is "1" and whose count is 1. The existing planner still plans the
-    // query but names the count column after the aggregate, so the two headers differ while the
-    // numbers agree; the native answer is the one this route reports.
+    // t=0 whose generated label is "1" and whose count is 1. The aggregate drops the metric name -
+    // as Prometheus does - so the declared name column is there and null, and it is the one column
+    // the existing planner's answer does not have; the two headers differ while the numbers agree.
+    let native = named_rows_text(
+        native_tql_output(&instance, sql, true).await,
+        ReportedName::Nothing,
+    )
+    .await;
     assert_eq!(
         native,
         "+---------------------+-------+--------+\
@@ -12225,7 +12883,21 @@ fn eval_values(output: Output) -> Vec<(i64, f64)> {
 /// partitioned, so its rows arrive by partition rather than in one sequence. Comparing the answers
 /// as what they are - a set of (labels, timestamp, value) rows - leaves the values as the only thing
 /// the assertion can fail on.
+///
+/// The metric-name column is the one column the existing route does not have, so `reported` says
+/// what the native answer's name column holds and the column is checked and left out - never
+/// silently ignored.
 fn eval_text(output: Output) -> String {
+    eval_text_rows(output, ReportedName::NoColumn)
+}
+
+/// [`eval_text`] of an answer that names no series: the declared name column is there and null in
+/// every row.
+fn eval_text_nameless(output: Output) -> String {
+    eval_text_rows(output, ReportedName::Nothing)
+}
+
+fn eval_text_rows(output: Output, reported: ReportedName<'_>) -> String {
     use datafusion::arrow::array::RecordBatch;
     use datafusion::arrow::datatypes::{DataType, Field, Schema};
     use datafusion::arrow::util::display::{ArrayFormatter, FormatOptions};
@@ -12239,6 +12911,7 @@ fn eval_text(output: Output) -> String {
     let mut rows: Vec<Vec<String>> = Vec::new();
     for batch in batches {
         let batch = batch.into_df_record_batch();
+        let name_index = checked_name_column(batch.schema().fields(), batch.columns(), reported);
         let fields = batch
             .schema()
             .fields()
@@ -12252,8 +12925,11 @@ fn eval_text(output: Output) -> String {
                 (name, field.data_type().clone(), field.is_nullable())
             })
             .collect::<Vec<_>>();
-        // One column order for every batch: by name, so the two routes agree on it.
-        let mut order = (0..fields.len()).collect::<Vec<_>>();
+        // One column order for every batch: by name, so the two routes agree on it. The name column
+        // is the one this route declares and the existing one does not.
+        let mut order = (0..fields.len())
+            .filter(|index| Some(*index) != name_index)
+            .collect::<Vec<_>>();
         order.sort_by(|left, right| fields[*left].0.cmp(&fields[*right].0));
         let names = order
             .iter()
@@ -12905,7 +13581,7 @@ async fn native_promql_recursive_matching_segments_match_legacy() {
         "matching on host drops job from output labels"
     );
     assert_eq!(
-        vec!["host", "ts", "val"],
+        vec!["__name__", "host", "ts", "val"],
         columns.iter().map(String::as_str).collect::<Vec<_>>()
     );
 }
@@ -12962,7 +13638,7 @@ async fn native_promql_cuts_segments_only_where_a_gather_would_swallow_them() {
     // carry labels, so they are compared whole rather than as bare values.
     for query in ["timestamp(sum(seg_a))", "sum(timestamp(abs(seg_a)))"] {
         let sql = format!("TQL EVAL (0, 1, '1s') {query}");
-        let native = eval_text(native_tql_output(&instance, &sql, true).await);
+        let native = eval_text_nameless(native_tql_output(&instance, &sql, true).await);
         let legacy = eval_text(native_tql_output(&instance, &sql, false).await);
         assert_eq!(native, legacy, "{query}: answers differ");
     }
@@ -13005,7 +13681,7 @@ async fn native_promql_cuts_segments_only_where_a_gather_would_swallow_them() {
     ] {
         let sql = format!("TQL EVAL (0, 1, '1s') {query}");
         observer.clear();
-        let native = eval_text(native_tql_output(&instance, &sql, true).await);
+        let native = eval_text_nameless(native_tql_output(&instance, &sql, true).await);
         let root = observer.root_plan();
         let frontend = fused_in(&root);
         let mut regions = Vec::new();
@@ -13061,7 +13737,7 @@ async fn native_promql_cuts_segments_only_where_a_gather_would_swallow_them() {
     let query = "sum(max by (host) (seg_a)) / sum(seg_b)";
     let sql = format!("TQL EVAL (0, 1, '1s') {query}");
     observer.clear();
-    let native = eval_text(native_tql_output(&instance, &sql, true).await);
+    let native = eval_text_nameless(native_tql_output(&instance, &sql, true).await);
     let root = observer.root_plan();
     let frontend = fused_in(&root);
     let mut regions = 0;
@@ -13886,6 +14562,10 @@ async fn native_promql_dynamic_topk_matches_legacy() {
             native_labelled_rows(native_tql_output(&instance, &literal, false).await).await;
         bare_dynamic_expected.append(&mut rows);
     }
+    // `topk` ranks the series it reads and reports them as it found them, so each row keeps its
+    // name. The existing route declares no name column, so its rows carry every other label: the
+    // name Prometheus reports is added to them rather than dropped from the native answer.
+    let mut bare_dynamic_expected = named_rows(bare_dynamic_expected, "native_dyn_topk");
     let mut bare_dynamic_actual = bare_dynamic_native.1;
     bare_dynamic_actual.sort_by(|left, right| (&left.0, &left.1).cmp(&(&right.0, &right.1)));
     bare_dynamic_expected.sort_by(|left, right| (&left.0, &left.1).cmp(&(&right.0, &right.1)));
@@ -13926,6 +14606,9 @@ async fn native_promql_dynamic_topk_matches_legacy() {
         !bare_time_native.1.is_empty(),
         "a bare topk at k = time() must produce rows: {bare_time_sql}"
     );
+    // The ranking reports the series it selected, name included; the existing route has no name
+    // column, so the name Prometheus reports is added to its rows.
+    let mut bare_time_expected = named_rows(bare_time_expected, "native_dyn_topk");
     let mut bare_time_actual = bare_time_native.1;
     bare_time_actual.sort_by(|left, right| (&left.0, &left.1).cmp(&(&right.0, &right.1)));
     bare_time_expected.sort_by(|left, right| (&left.0, &left.1).cmp(&(&right.0, &right.1)));
@@ -13946,7 +14629,17 @@ async fn native_promql_dynamic_topk_matches_legacy() {
         Some("FusedSeriesExec"),
         "a bare topk above no aggregate runs natively: {bare_sql}"
     );
-    assert_eq!(bare_native, bare_legacy);
+    // The same ranking answers the same rows on both routes; the rows keep the name of the series
+    // `topk` selected, which this route states in its own declared column.
+    let mut named_columns = bare_legacy.0.clone();
+    named_columns.push("__name__".to_string());
+    named_columns.sort();
+    assert_eq!(bare_native.0, named_columns, "{bare_sql}: columns");
+    assert_eq!(
+        bare_native.1,
+        named_rows(bare_legacy.1, "native_dyn_topk"),
+        "{bare_sql}"
+    );
 }
 
 /// A `scalar()` parameter that reads its own selector runs natively: the parameter reads a metric
@@ -14533,9 +15226,30 @@ async fn native_promql_corpus_route_matrix() {
                 case.label
             );
             for (native_row, legacy_row) in native_rows.iter().zip(&legacy_rows) {
+                // The existing route declares no name column, so its rows answer every other label
+                // of the same series. A row that reports a name reports the metric it was read
+                // from - this fixture names each metric table after its series - so the name is
+                // required to be one of the statement's own metrics and the rest of the label set
+                // has to match the existing route exactly.
+                //
+                // This corpus therefore checks the name's *provenance*, not which shapes keep or
+                // drop it: a shape that wrongly kept a name would still pass here. Whether an
+                // operator publishes a name is asserted by the dedicated cases
+                // (`native_promql_rows_name_each_row_after_its_metric` and the rewrite cases),
+                // which read the declared column rather than the labels alone.
+                let mut expected_labels = legacy_row.1.clone();
+                if let Some(name) = native_row.1.get("__name__") {
+                    assert!(
+                        case.metrics.contains(&name.as_str()),
+                        "{}: a row names {name}, which is not one of the metrics the statement \
+                         reads: {native_row:?}",
+                        case.label
+                    );
+                    expected_labels.insert("__name__".to_string(), name.clone());
+                }
                 assert_eq!(
                     (native_row.0, &native_row.1),
-                    (legacy_row.0, &legacy_row.1),
+                    (legacy_row.0, &expected_labels),
                     "{} labels/timestamps",
                     case.label
                 );
@@ -14913,36 +15627,39 @@ async fn native_promql_root_canonical_merge_keeps_the_scan_width() {
         "the pair producer stays regional: {}",
         display_plan_tree(&pair_region)
     );
+    // A rewrite reports the series it read, so every row keeps `root_pair` as its name; the
+    // existing route declares no name column, so its answer is the same rows without that label.
+    let pair_expected: Vec<(i64, std::collections::BTreeMap<String, String>, f64)> = vec![
+        (0, [("host".to_string(), "same".to_string())].into(), 1.0),
+        (
+            60_000,
+            [("host".to_string(), "same".to_string())].into(),
+            1.0,
+        ),
+        (
+            120_000,
+            [("host".to_string(), "same".to_string())].into(),
+            1.0,
+        ),
+        (
+            180_000,
+            [("host".to_string(), "same".to_string())].into(),
+            1.0,
+        ),
+        (
+            240_000,
+            [("host".to_string(), "same".to_string())].into(),
+            1.0,
+        ),
+        (
+            600_000,
+            [("host".to_string(), "same".to_string())].into(),
+            2.0,
+        ),
+    ];
     assert_eq!(
         pair_rows,
-        vec![
-            (0, [("host".to_string(), "same".to_string())].into(), 1.0),
-            (
-                60_000,
-                [("host".to_string(), "same".to_string())].into(),
-                1.0
-            ),
-            (
-                120_000,
-                [("host".to_string(), "same".to_string())].into(),
-                1.0
-            ),
-            (
-                180_000,
-                [("host".to_string(), "same".to_string())].into(),
-                1.0
-            ),
-            (
-                240_000,
-                [("host".to_string(), "same".to_string())].into(),
-                1.0
-            ),
-            (
-                600_000,
-                [("host".to_string(), "same".to_string())].into(),
-                2.0
-            ),
-        ],
+        named_rows(pair_expected.clone(), "root_pair"),
         "the complementary samples form exactly one rewritten series without duplicate rows"
     );
     // The scan looked for the sample at 0 while the evaluation instant was still inside its
@@ -14960,7 +15677,7 @@ async fn native_promql_root_canonical_merge_keeps_the_scan_width() {
         .unwrap();
     let (_, pair_legacy_rows) = native_labelled_rows(pair_legacy).await;
     assert_eq!(
-        pair_legacy_rows, pair_rows,
+        pair_legacy_rows, pair_expected,
         "the existing plan answers the complementary pair the same way"
     );
 
