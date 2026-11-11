@@ -75,7 +75,8 @@ const REMOTE_NODE_ID: u64 = 1;
 #[derive(Default)]
 struct TailReplayListener {
     commits: AtomicUsize,
-    hold_commits: AtomicBool,
+    /// Commit attempts numbered from it on wait until it changes; 0 holds none.
+    held_from: AtomicUsize,
     failures: Mutex<Vec<StatusCode>>,
     ended: AtomicUsize,
 }
@@ -83,8 +84,8 @@ struct TailReplayListener {
 #[async_trait]
 impl EventListener for TailReplayListener {
     async fn on_tail_commit_begin(&self, _region_id: RegionId) {
-        self.commits.fetch_add(1, Ordering::Relaxed);
-        while self.hold_commits.load(Ordering::Relaxed) {
+        let attempt = self.commits.fetch_add(1, Ordering::Relaxed) + 1;
+        while (1..=attempt).contains(&self.held_from.load(Ordering::Relaxed)) {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     }
@@ -99,6 +100,10 @@ impl EventListener for TailReplayListener {
 }
 
 impl TailReplayListener {
+    fn hold_from(&self, attempt: usize) {
+        self.held_from.store(attempt, Ordering::Relaxed);
+    }
+
     fn commits(&self) -> usize {
         self.commits.load(Ordering::Relaxed)
     }
@@ -739,20 +744,17 @@ async fn test_uncertain_commit_is_retried_after_expired_lease() {
         .await;
     let mito_region = region.engine.get_region(region.region_id).unwrap();
     version.store(next_manifest_version(&mito_region).await, Ordering::Relaxed);
-    region.listener.hold_commits.store(true, Ordering::Relaxed);
+    region.listener.hold_from(2);
     region.promote_with_lease();
-    wait_until(|| region.listener.commits() == 1).await;
-    region.listener.hold_commits.store(false, Ordering::Relaxed);
-    // The first commit lands but reports an error; hold the retry until the lease expires.
-    tokio::time::sleep(Duration::from_millis(100)).await;
-    region.listener.hold_commits.store(true, Ordering::Relaxed);
+    // The first attempt lands but reports an error.
     wait_until(|| region.listener.commits() == 2).await;
     let expired = Instant::now() + Duration::from_secs(60);
     region.engine.freeze_lease_clock(expired);
-    region.listener.hold_commits.store(false, Ordering::Relaxed);
+    region.listener.hold_from(3);
 
     wait_until(|| region.listener.commits() == 3).await;
     region.engine.freeze_lease_clock(Instant::now());
+    region.listener.hold_from(0);
     region.wait_until_replayed().await;
 
     assert!(!region.listener.failed());
@@ -769,7 +771,7 @@ async fn test_tail_commit_after_deadline_deletes_chunks() {
     region
         .reopen_with_tails(vec![own_tail(0, region.entries[1], UptoKind::Reported)])
         .await;
-    region.listener.hold_commits.store(true, Ordering::Relaxed);
+    region.listener.hold_from(1);
     region.promote_with_lease();
     wait_until(|| region.listener.commits() == 1).await;
     assert_eq!(1, region.stored_ssts().await);
@@ -777,7 +779,7 @@ async fn test_tail_commit_after_deadline_deletes_chunks() {
     region
         .engine
         .freeze_lease_clock(Instant::now() + Duration::from_secs(60));
-    region.listener.hold_commits.store(false, Ordering::Relaxed);
+    region.listener.hold_from(0);
     wait_until(|| region.listener.failed_with(StatusCode::RegionNotReady)).await;
     region
         .engine
@@ -806,7 +808,7 @@ async fn test_stopping_region_cancels_replay(#[case] stop: Stop) {
     region
         .reopen_with_tails(vec![own_tail(0, region.entries[1], UptoKind::Reported)])
         .await;
-    region.listener.hold_commits.store(true, Ordering::Relaxed);
+    region.listener.hold_from(1);
     region.promote();
     wait_until(|| region.listener.commits() == 1).await;
 
@@ -846,7 +848,7 @@ async fn test_stopping_region_cancels_replay(#[case] stop: Stop) {
                 .unwrap();
         }
     }
-    region.listener.hold_commits.store(false, Ordering::Relaxed);
+    region.listener.hold_from(0);
     wait_until(|| region.listener.ended() == 1).await;
 
     assert_eq!(1, region.listener.commits());
@@ -859,7 +861,7 @@ async fn test_cancelled_replay_does_not_publish_after_promotion() {
     region
         .reopen_with_tails(vec![own_tail(0, region.entries[1], UptoKind::Reported)])
         .await;
-    region.listener.hold_commits.store(true, Ordering::Relaxed);
+    region.listener.hold_from(1);
     region.promote();
     wait_until(|| region.listener.commits() == 1).await;
 
@@ -869,7 +871,7 @@ async fn test_cancelled_replay_does_not_publish_after_promotion() {
         .await
         .unwrap();
     region.promote();
-    region.listener.hold_commits.store(false, Ordering::Relaxed);
+    region.listener.hold_from(0);
     region.wait_until_replayed().await;
 
     assert_eq!(2, region.listener.commits());
@@ -929,13 +931,13 @@ async fn test_replay_backs_off_while_altering() {
     region
         .reopen_with_tails(vec![own_tail(0, region.entries[1], UptoKind::Reported)])
         .await;
-    region.listener.hold_commits.store(true, Ordering::Relaxed);
+    region.listener.hold_from(1);
     region.promote();
     wait_until(|| region.listener.commits() == 1).await;
     let mito_region = region.engine.get_region(region.region_id).unwrap();
     mito_region.set_altering().unwrap();
 
-    region.listener.hold_commits.store(false, Ordering::Relaxed);
+    region.listener.hold_from(0);
     wait_until(|| region.listener.commits() == 2).await;
     assert!(region.has_pending_tails());
     mito_region.switch_state_to_writable(RegionLeaderState::Altering);
