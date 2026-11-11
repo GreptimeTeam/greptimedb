@@ -44,8 +44,10 @@ including caches owned by pipeline and protocol handlers.
   permission checks, timeout/cancellation, and delegates planning/execution to
   `StatementExecutor`. Distributed scans enter through `region_query.rs`.
 - **Exemplar query** (`instance/exemplar.rs`): authorize all selector branches
-  before calling `PromQueryInterceptor::pre_execute_exemplars` for each resolved
-  exemplar table, with that table's schema context, before scanning it.
+  before resolving logical schemas or calling
+  `PromQueryInterceptor::pre_execute_exemplars`. Exact metric selectors project
+  the union of current logical-table tags; broad or unresolved selectors retain
+  all tags. Responses include the stored `__table_id` and `__tsid` as string labels.
 - **Logical-table batch DDL** (`instance.rs`): dedicated SQL handler → bounded
   parse/interception → all-member permissions → operator CREATE preparation →
   one logical-table batch procedure. Keep pre-submission validation side-effect free.
