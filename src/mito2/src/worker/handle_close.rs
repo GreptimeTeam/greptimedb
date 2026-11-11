@@ -20,6 +20,7 @@ use store_api::region_request::{RegionCloseRequest, RegionFlushReason, RegionFlu
 use store_api::storage::RegionId;
 
 use crate::manifest::action::cap_wal_release;
+use crate::metrics::WAL_RELEASE_ADMISSION_FAILURE_TOTAL;
 use crate::request::{DdlRequest, OptionOutputTx, SenderDdlRequest};
 use crate::worker::RegionWorkerLoop;
 
@@ -110,6 +111,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             .release_entries(region_id, release_entry_id, &region.provider)
             .await
         {
+            WAL_RELEASE_ADMISSION_FAILURE_TOTAL.inc();
             warn!(error; "Failed to queue WAL release for closed region {}", region_id);
         }
     }
