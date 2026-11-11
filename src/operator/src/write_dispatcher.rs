@@ -360,6 +360,7 @@ impl WriteDispatcher {
                         affected_rows: response.affected_rows,
                         extensions: response.extensions,
                         metadata: Vec::new(),
+                        sketch: None,
                     })];
                     attempts.extend(response.failures.into_iter().map(|(_, error)| {
                         WriteAttempt::Failed {
@@ -444,6 +445,7 @@ impl WriteDispatcher {
                             affected_rows: response.affected_rows,
                             extensions: response.extensions,
                             metadata: Vec::new(),
+                            sketch: None,
                         }),
                     ),
                 );
