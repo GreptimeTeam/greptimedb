@@ -45,6 +45,7 @@ use crate::http::event::{
     LogIngesterQueryParams, LogState, PipelineIngestRequest,
     extract_pipeline_params_map_from_headers, ingest_logs_inner,
 };
+use crate::http::extractor::string_value_from_header;
 use crate::http::header::constants::{
     GREPTIME_PIPELINE_NAME_HEADER_NAME, GREPTIME_PIPELINE_VERSION_HEADER_NAME,
 };
@@ -161,11 +162,28 @@ async fn do_handle_bulk_api(
     // The pipeline version can be selected with the `version` query parameter or the
     // `x-greptime-pipeline-version` header; the query parameter takes precedence, consistent
     // with how `pipeline_name` is resolved above. Without either, the latest version is used.
-    let pipeline_version = params.version.as_deref().or_else(|| {
-        headers
-            .get(GREPTIME_PIPELINE_VERSION_HEADER_NAME)
-            .and_then(|v| v.to_str().ok())
-    });
+    // Read the header through the shared extractor so a present but non-UTF-8 value is
+    // rejected with 400 instead of silently falling back to the latest pipeline.
+    let header_version = if params.version.is_none() {
+        match string_value_from_header(&headers, &[GREPTIME_PIPELINE_VERSION_HEADER_NAME]) {
+            Ok(version) => version,
+            Err((status, reason)) => {
+                return (
+                    status,
+                    elasticsearch_headers(),
+                    axum::Json(write_bulk_response(
+                        start.elapsed().as_millis() as i64,
+                        0,
+                        status.as_u16() as u32,
+                        reason.as_str(),
+                    )),
+                );
+            }
+        }
+    } else {
+        None
+    };
+    let pipeline_version = params.version.as_deref().or(header_version.as_deref());
 
     // Read the ndjson payload and convert it to a vector of Value.
     let requests = match parse_bulk_request(&payload, &index, &params.msg_field) {
@@ -191,13 +209,16 @@ async fn do_handle_bulk_api(
         Ok(pipeline) => pipeline,
         Err(e) => {
             error!(e; "Failed to ingest logs");
+            // Elasticsearch clients inspect `items[].create.status`, so report the
+            // HTTP status rather than GreptimeDB's internal status code.
+            let http_status = status_code_to_http_status(&e.status_code());
             return (
-                status_code_to_http_status(&e.status_code()),
+                http_status,
                 elasticsearch_headers(),
                 axum::Json(write_bulk_response(
                     start.elapsed().as_millis() as i64,
                     0,
-                    e.status_code() as u32,
+                    http_status.as_u16() as u32,
                     e.to_string().as_str(),
                 )),
             );
@@ -215,13 +236,14 @@ async fn do_handle_bulk_api(
     .await
     {
         error!(e; "Failed to ingest logs");
+        let http_status = status_code_to_http_status(&e.status_code());
         return (
-            status_code_to_http_status(&e.status_code()),
+            http_status,
             elasticsearch_headers(),
             axum::Json(write_bulk_response(
                 start.elapsed().as_millis() as i64,
                 0,
-                e.status_code() as u32,
+                http_status.as_u16() as u32,
                 e.to_string().as_str(),
             )),
         );

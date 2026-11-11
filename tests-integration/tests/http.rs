@@ -10875,6 +10875,19 @@ transform:
         .send()
         .await;
     assert_eq!(res.status(), StatusCode::OK);
+    let content: Value = serde_json::from_str(&res.text().await).unwrap();
+    let version_v2 = content
+        .get("pipelines")
+        .unwrap()
+        .as_array()
+        .unwrap()
+        .first()
+        .unwrap()
+        .get("version")
+        .unwrap()
+        .as_str()
+        .unwrap()
+        .to_string();
 
     let bulk_body = |index: &str| {
         format!(
@@ -10952,6 +10965,55 @@ transform:
         "es_pipeline_version_latest",
         &client,
         "select name_v2 from es_latest;",
+        "[[\"alice\"]]",
+    )
+    .await;
+
+    // 4. An invalid version is rejected with HTTP 400, and the bulk item carries the
+    // same HTTP status so Elasticsearch clients do not see an internal status code.
+    let res = send_req(
+        &client,
+        vec![(
+            HeaderName::from_static("content-type"),
+            HeaderValue::from_static("application/json"),
+        )],
+        "/v1/elasticsearch/_bulk?pipeline_name=esv&version=not-a-timestamp",
+        bulk_body("es_invalid_version").into_bytes(),
+        false,
+    )
+    .await;
+    assert_eq!(StatusCode::BAD_REQUEST, res.status());
+    let content: Value = serde_json::from_str(&res.text().await).unwrap();
+    assert_eq!(content["errors"], json!(true));
+    assert_eq!(content["items"][0]["create"]["status"], json!(400));
+
+    // 5. The query parameter takes precedence over a conflicting header: the header
+    // selects version 1 while the URL selects version 2, so `name_v2` must be written.
+    let encoded_version_v2: String =
+        url::form_urlencoded::byte_serialize(version_v2.as_bytes()).collect();
+    let res = send_req(
+        &client,
+        vec![
+            (
+                HeaderName::from_static("content-type"),
+                HeaderValue::from_static("application/json"),
+            ),
+            (
+                HeaderName::from_static("x-greptime-pipeline-version"),
+                HeaderValue::from_str(&version_v1).unwrap(),
+            ),
+        ],
+        &format!("/v1/elasticsearch/_bulk?pipeline_name=esv&version={encoded_version_v2}"),
+        bulk_body("es_precedence").into_bytes(),
+        false,
+    )
+    .await;
+    assert_eq!(StatusCode::OK, res.status());
+
+    validate_data(
+        "es_pipeline_version_precedence",
+        &client,
+        "select name_v2 from es_precedence;",
         "[[\"alice\"]]",
     )
     .await;
