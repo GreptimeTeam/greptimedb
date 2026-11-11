@@ -1164,7 +1164,7 @@ mod tests {
         );
         let cleanup = RemoteDynFilterRegistrationGuard::new(
             mock_region_server.clone(),
-            query_id.clone(),
+            query_id,
             region_id,
             registered_filter_ids,
         );

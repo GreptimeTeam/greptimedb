@@ -272,8 +272,14 @@ impl DistExtensionPlanner {
         query_ctx: &session::context::QueryContextRef,
     ) -> Option<Vec<DatanodeReadGroup>> {
         // Batching needs more than one region, and it must not change what the frontend plan
-        // promises: verbose explain reads per-region metrics.
-        if regions.len() < 2 || self.enable_per_region_metrics || query_ctx.explain_verbose() {
+        // promises. Grouped batches depend on region placement, so keep explain output on the
+        // ordinary path: the explained plan must not vary with the query's deployment topology.
+        // Verbose explain additionally reads per-region metrics.
+        if regions.len() < 2
+            || self.enable_per_region_metrics
+            || query_ctx.is_explain()
+            || query_ctx.explain_verbose()
+        {
             return None;
         }
         if !grouped_read_context_allowed(query_ctx) {
@@ -336,9 +342,7 @@ impl DistExtensionPlanner {
         // Encode the regional template once and estimate the per-RegionPlan JSON growth before
         // materializing any leaf. This both bounds request memory and lets a byte-heavy template
         // shrink the chunk instead of building an oversized GroupRead first.
-        let Some(table_name_for_plan) = nested_plan_table(remote_plan) else {
-            return None;
-        };
+        let table_name_for_plan = nested_plan_table(remote_plan)?;
         let Ok(nested) = encode_nested_plan(remote_plan) else {
             debug!("Grouped read keeps the ordinary path because its regional plan cannot encode");
             return None;

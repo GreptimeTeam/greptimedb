@@ -380,11 +380,12 @@ impl Instance {
     ) -> Result<Output> {
         match stmt {
             Statement::Query(_) | Statement::Explain(_) | Statement::Delete(_) => {
-                // TODO: remove this when format is supported in datafusion
-                if let Statement::Explain(explain) = &stmt
-                    && let Some(format) = explain.format()
-                {
-                    query_ctx.set_explain_format(format.to_string());
+                if let Statement::Explain(explain) = &stmt {
+                    query_ctx.set_explain(true);
+                    // TODO: remove this when format is supported in datafusion
+                    if let Some(format) = explain.format() {
+                        query_ctx.set_explain_format(format.to_string());
+                    }
                 }
 
                 self.plan_and_exec_sql(stmt, &query_ctx, query_interceptor)

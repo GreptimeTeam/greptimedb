@@ -947,7 +947,7 @@ mod tests {
     }
 
     impl TimedExec {
-        fn new(
+        fn arc(
             name: &'static str,
             children: Vec<Arc<dyn ExecutionPlan>>,
             elapsed_nanos: u64,
@@ -1203,15 +1203,15 @@ mod tests {
         let scan_b = build_query_stat_counter_region_scan(counters_b.clone());
 
         // Region-local chain: Filter(Projection(RegionScanExec)).
-        let filter_a = TimedExec::new("FilterExec", vec![scan_a.clone()], 10);
-        let projection_a = TimedExec::new("ProjectionExec", vec![filter_a.clone()], 20);
+        let filter_a = TimedExec::arc("FilterExec", vec![scan_a.clone()], 10);
+        let projection_a = TimedExec::arc("ProjectionExec", vec![filter_a.clone()], 20);
         // Shared nodes: UnionAll over the region branches, and an Aggregate above the union.
-        let shared_union = TimedExec::new(
+        let shared_union = TimedExec::arc(
             "UnionExec",
             vec![projection_a.clone(), scan_b.clone()],
             1_000,
         );
-        let shared_aggregate = TimedExec::new("AggregateExec", vec![shared_union.clone()], 5_000);
+        let shared_aggregate = TimedExec::arc("AggregateExec", vec![shared_union.clone()], 5_000);
 
         let owners = super::query_stat_owners(&shared_aggregate);
         assert_eq!(2, owners.len());
@@ -1247,12 +1247,12 @@ mod tests {
 
         let counters_left = query_stat_counters_for_test();
         let counters_right = query_stat_counters_for_test();
-        let left = TimedExec::new(
+        let left = TimedExec::arc(
             "ProjectionExec",
             vec![build_query_stat_counter_region_scan(counters_left.clone())],
             7,
         );
-        let right = TimedExec::new(
+        let right = TimedExec::arc(
             "ProjectionExec",
             vec![build_query_stat_counter_region_scan(counters_right.clone())],
             11,
@@ -1275,7 +1275,7 @@ mod tests {
     fn query_stat_owners_keep_single_owner_on_the_normal_path() {
         let counters = query_stat_counters_for_test();
         let scan = build_query_stat_counter_region_scan(counters.clone());
-        let plan = TimedExec::new("ProjectionExec", vec![scan.clone()], 20);
+        let plan = TimedExec::arc("ProjectionExec", vec![scan.clone()], 20);
 
         let owners = super::query_stat_owners(&plan);
         // A single owner never enables the region owner path, so the plain single-region path

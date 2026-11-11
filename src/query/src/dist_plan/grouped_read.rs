@@ -36,6 +36,7 @@ use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use common_error::ext::BoxedError;
 use datafusion::common::Result as DataFusionResult;
 use datafusion::datasource::DefaultTableSource;
 use datafusion::execution::context::SessionState;
@@ -1062,6 +1063,44 @@ fn check_region_rel(rel: &Rel, depth: usize, nodes: &mut usize) -> std::result::
     }
 }
 
+/// Why a `GroupRead` request could not be decoded into an executable plan.
+#[derive(Debug)]
+pub enum GroupReadDecodeError {
+    /// The envelope, the combine tree or one region plan is not well formed.
+    Malformed(String),
+    /// Resolving one region plan against its region catalog failed.
+    Resolve {
+        region_id: RegionId,
+        source: BoxedError,
+    },
+}
+
+impl fmt::Display for GroupReadDecodeError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Malformed(reason) => write!(f, "{reason}"),
+            Self::Resolve { region_id, source } => {
+                write!(f, "cannot resolve the plan of region {region_id}: {source}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for GroupReadDecodeError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Malformed(_) => None,
+            Self::Resolve { source, .. } => Some(source),
+        }
+    }
+}
+
+impl From<String> for GroupReadDecodeError {
+    fn from(reason: String) -> Self {
+        Self::Malformed(reason)
+    }
+}
+
 /// Resolves one `RegionPlan` leaf against its region catalog.
 #[async_trait]
 pub trait RegionPlanResolver: Send + Sync {
@@ -1069,7 +1108,7 @@ pub trait RegionPlanResolver: Send + Sync {
         &self,
         region_id: RegionId,
         plan: &[u8],
-    ) -> std::result::Result<LogicalPlan, String>;
+    ) -> std::result::Result<LogicalPlan, BoxedError>;
 }
 
 /// Decodes a serialized `GroupRead` request into an ordinary logical plan.
@@ -1084,7 +1123,7 @@ pub async fn decode_group_read_request(
     _state: &SessionState,
     payload: GroupReadPayload,
     resolver: &dyn RegionPlanResolver,
-) -> std::result::Result<LogicalPlan, String> {
+) -> std::result::Result<LogicalPlan, GroupReadDecodeError> {
     let plan = Plan::decode(plan_bytes)
         .map_err(|error| format!("cannot parse GroupRead request: {error}"))?;
     let root = plan_root_rel(&plan)?;
@@ -1095,15 +1134,17 @@ pub async fn decode_group_read_request(
                 .as_ref()
                 .ok_or_else(|| "the GroupRead root has no detail".to_string())?;
             if detail.type_url != GROUP_READ_NAME {
-                return Err(format!(
+                return Err(GroupReadDecodeError::Malformed(format!(
                     "a GroupRead request root must be the `{GROUP_READ_NAME}` marker, found `{}`",
                     detail.type_url
-                ));
+                )));
             }
             let root_payload = GroupReadPayload::decode(detail.value.as_ref())
                 .map_err(|error| error.to_string())?;
             if root_payload != payload {
-                return Err("the root marker and the intercepted metadata differ".to_string());
+                return Err(GroupReadDecodeError::Malformed(
+                    "the root marker and the intercepted metadata differ".to_string(),
+                ));
             }
             single
                 .input
@@ -1111,51 +1152,55 @@ pub async fn decode_group_read_request(
                 .ok_or_else(|| "the GroupRead root has no combine tree".to_string())?
         }
         Some(other) => {
-            return Err(format!(
+            return Err(GroupReadDecodeError::Malformed(format!(
                 "a GroupRead request root must be the `{GROUP_READ_NAME}` marker, found {}",
                 rel_kind_name(other)
+            )));
+        }
+        None => {
+            return Err(GroupReadDecodeError::Malformed(
+                "the request root relation is empty".to_string(),
             ));
         }
-        None => return Err("the request root relation is empty".to_string()),
     };
 
     let leaves = group_read_leaf_rels(input)?;
     if leaves.len() > MAX_GROUP_READ_REGIONS {
-        return Err(format!(
+        return Err(GroupReadDecodeError::Malformed(format!(
             "a grouped read names {} regions, above the {MAX_GROUP_READ_REGIONS} bound",
             leaves.len()
-        ));
+        )));
     }
     // First pass: check every member and bound its raw plan before any decoder runs.
     let mut members = Vec::with_capacity(leaves.len());
     let mut seen = BTreeSet::new();
     for leaf in leaves {
         let Some(rel::RelType::ExtensionLeaf(leaf_rel)) = leaf.rel_type.as_ref() else {
-            return Err(format!(
+            return Err(GroupReadDecodeError::Malformed(format!(
                 "a GroupRead member must be a RegionPlan leaf, found {}",
                 leaf.rel_type
                     .as_ref()
                     .map(rel_kind_name)
                     .unwrap_or("an empty relation")
-            ));
+            )));
         };
         let detail = leaf_rel
             .detail
             .as_ref()
             .ok_or_else(|| "a RegionPlan leaf has no detail".to_string())?;
         if detail.type_url != REGION_PLAN_NAME {
-            return Err(format!(
+            return Err(GroupReadDecodeError::Malformed(format!(
                 "unexpected extension leaf `{}` in a GroupRead combine tree",
                 detail.type_url
-            ));
+            )));
         }
         let leaf_payload = RegionPlanPayload::decode(detail.value.as_ref())?;
         let region_id = leaf_payload.region_id();
         payload.validate_region_member(region_id)?;
         if !seen.insert(region_id.as_u64()) {
-            return Err(format!(
+            return Err(GroupReadDecodeError::Malformed(format!(
                 "region {region_id} appears more than once in the combine tree"
-            ));
+            )));
         }
         preflight_region_plan(leaf_payload.plan())?;
         members.push((region_id, leaf_payload));
@@ -1166,10 +1211,10 @@ pub async fn decode_group_read_request(
         .copied()
         .collect::<BTreeSet<_>>();
     if seen != expected {
-        return Err(format!(
+        return Err(GroupReadDecodeError::Malformed(format!(
             "the combine tree does not name the grouped regions exactly once: consumed {seen:?}, \
              expected {expected:?}"
-        ));
+        )));
     }
     // Second pass: decode each preflighted member and accept only its bound region provider.
     let mut plans = Vec::with_capacity(members.len());
@@ -1177,29 +1222,31 @@ pub async fn decode_group_read_request(
     for (region_id, leaf_payload) in members {
         let plan = resolver
             .resolve_region_plan(region_id, leaf_payload.plan())
-            .await?;
+            .await
+            .map_err(|source| GroupReadDecodeError::Resolve { region_id, source })?;
         validate_region_plan(&payload, region_id, &plan)?;
         let schema = plan.schema().clone();
         match expected_schema.as_ref() {
             Some(expected) if expected != &schema => {
-                return Err(format!(
+                return Err(GroupReadDecodeError::Malformed(format!(
                     "region {region_id} decodes to a different output schema"
-                ));
+                )));
             }
             Some(_) => {}
             None => expected_schema = Some(schema),
         }
         plans.push(plan);
     }
-    union_balanced(plans, payload.table_name())
-        .map_err(|error| format!("cannot combine region plans: {error}"))
+    union_balanced(plans, payload.table_name()).map_err(|error| {
+        GroupReadDecodeError::Malformed(format!("cannot combine region plans: {error}"))
+    })
 }
 
 /// Returns the `RegionPlan` leaves directly below the `GroupRead` marker.
 ///
 /// The builder balances a large union into a tree, so the combine tree is a `UnionAll` tree whose
 /// leaves are exactly the region plans; nothing else may appear in it.
-fn group_read_leaf_rels<'a>(input: &'a Rel) -> std::result::Result<Vec<&'a Rel>, String> {
+fn group_read_leaf_rels(input: &Rel) -> std::result::Result<Vec<&Rel>, String> {
     let mut leaves = Vec::new();
     collect_group_read_leaves(input, 1, &mut leaves)?;
     Ok(leaves)
@@ -1294,6 +1341,8 @@ impl DatanodeReadGroup {
 #[cfg(test)]
 mod tests {
     use async_trait::async_trait;
+    use common_error::ext::{ErrorExt, PlainError};
+    use common_error::status_code::StatusCode;
     use datafusion::arrow::datatypes::{DataType, Field, Schema as ArrowSchema};
     use datafusion::catalog::MemTable;
     use datafusion::datasource::DefaultTableSource;
@@ -1388,7 +1437,7 @@ mod tests {
             DataType::Int64,
             false,
         )]));
-        let table = MemTable::try_new(schema, vec![]).unwrap();
+        let table = MemTable::try_new(schema, vec![vec![]]).unwrap();
         LogicalPlanBuilder::scan(
             TableReference::bare("metrics"),
             Arc::new(DefaultTableSource::new(Arc::new(table))),
@@ -1445,7 +1494,7 @@ mod tests {
             &self,
             region_id: RegionId,
             _plan: &[u8],
-        ) -> std::result::Result<LogicalPlan, String> {
+        ) -> std::result::Result<LogicalPlan, BoxedError> {
             Ok(region_scan(region_id))
         }
     }
@@ -1458,7 +1507,7 @@ mod tests {
             &self,
             _region_id: RegionId,
             _plan: &[u8],
-        ) -> std::result::Result<LogicalPlan, String> {
+        ) -> std::result::Result<LogicalPlan, BoxedError> {
             Ok(region_scan(RegionId::new(1024, 77)))
         }
     }
@@ -1471,7 +1520,7 @@ mod tests {
             &self,
             _region_id: RegionId,
             _plan: &[u8],
-        ) -> std::result::Result<LogicalPlan, String> {
+        ) -> std::result::Result<LogicalPlan, BoxedError> {
             Ok(inspect_scan())
         }
     }
@@ -1484,12 +1533,28 @@ mod tests {
             &self,
             region_id: RegionId,
             _plan: &[u8],
-        ) -> std::result::Result<LogicalPlan, String> {
+        ) -> std::result::Result<LogicalPlan, BoxedError> {
             Ok(LogicalPlanBuilder::from(region_scan(region_id))
                 .union(region_scan(region_id))
                 .unwrap()
                 .build()
                 .unwrap())
+        }
+    }
+
+    struct FailingResolver;
+
+    #[async_trait]
+    impl RegionPlanResolver for FailingResolver {
+        async fn resolve_region_plan(
+            &self,
+            _region_id: RegionId,
+            _plan: &[u8],
+        ) -> std::result::Result<LogicalPlan, BoxedError> {
+            Err(BoxedError::new(PlainError::new(
+                "region catalog is unavailable".to_string(),
+                StatusCode::RegionNotFound,
+            )))
         }
     }
 
@@ -1501,7 +1566,7 @@ mod tests {
             &self,
             _region_id: RegionId,
             _plan: &[u8],
-        ) -> std::result::Result<LogicalPlan, String> {
+        ) -> std::result::Result<LogicalPlan, BoxedError> {
             panic!("the resolver must not see an invalid RegionPlan member")
         }
     }
@@ -1666,7 +1731,7 @@ mod tests {
                     .await
                     .unwrap_err();
             assert!(
-                error.contains(&format!("found {kind}")),
+                error.to_string().contains(&format!("found {kind}")),
                 "{kind} must be rejected: {error}"
             );
         }
@@ -1679,7 +1744,7 @@ mod tests {
         let join = LogicalPlanBuilder::from(region_union(&regions(2)))
             .cross_join(
                 LogicalPlanBuilder::from(project_scan())
-                    .alias("right")
+                    .project(vec![col("ts").alias("right_ts"), col("v").alias("right_v")])
                     .unwrap()
                     .build()
                     .unwrap(),
@@ -1724,17 +1789,19 @@ mod tests {
                     .unwrap(),
             ),
             ("Join", join),
-            ("a plain read", project_scan()),
+            ("Projection", project_scan()),
             ("an extension", nested_group_read),
-            ("an extension", other_extension),
+            ("MergeScan", other_extension),
         ];
         for (kind, input) in cases {
             let (bytes, payload) = group_read_request(&regions(2), 1024, input);
             let error = decode_group_read_request(&bytes, &state, payload, &BoundRegionResolver)
                 .await
                 .unwrap_err();
+            let error = error.to_string();
             assert!(
-                error.contains(&format!("found {kind}")),
+                error.contains(&format!("found {kind}"))
+                    || error.contains(&format!("unexpected extension leaf `{kind}`")),
                 "a {kind} combine tree must be rejected: {error}"
             );
         }
@@ -1755,7 +1822,10 @@ mod tests {
         let error = decode_group_read_request(&bytes, &state, payload, &PanicResolver)
             .await
             .unwrap_err();
-        assert!(error.contains("appears more than once"), "{error}");
+        assert!(
+            error.to_string().contains("appears more than once"),
+            "{error}"
+        );
 
         // A payload member without a leaf is rejected after all leaves are consumed.
         let listed = regions(2);
@@ -1766,7 +1836,9 @@ mod tests {
             .await
             .unwrap_err();
         assert!(
-            error.contains("does not name the grouped regions exactly once"),
+            error
+                .to_string()
+                .contains("does not name the grouped regions exactly once"),
             "{error}"
         );
 
@@ -1778,7 +1850,9 @@ mod tests {
             .await
             .unwrap_err();
         assert!(
-            error.contains("is not one of the grouped regions"),
+            error
+                .to_string()
+                .contains("is not one of the grouped regions"),
             "{error}"
         );
 
@@ -1788,7 +1862,10 @@ mod tests {
         let error = decode_group_read_request(&bytes, &state, payload, &PanicResolver)
             .await
             .unwrap_err();
-        assert!(error.contains("belongs to table 2048"), "{error}");
+        assert!(
+            error.to_string().contains("belongs to table 2048"),
+            "{error}"
+        );
     }
 
     #[tokio::test]
@@ -1802,7 +1879,7 @@ mod tests {
                 .await
                 .unwrap_err();
         assert!(
-            error.contains("decoded the provider of region 1024_77"),
+            error.to_string().contains("decoded the provider of region"),
             "{error}"
         );
 
@@ -1810,14 +1887,44 @@ mod tests {
             decode_group_read_request(&bytes, &state, payload.clone(), &InspectProviderResolver)
                 .await
                 .unwrap_err();
-        assert!(error.contains("not the bound region provider"), "{error}");
+        assert!(
+            error.to_string().contains("not the bound region provider"),
+            "{error}"
+        );
 
         let error = decode_group_read_request(&bytes, &state, payload, &MultiInputResolver)
             .await
             .unwrap_err();
         assert!(
-            error.contains("not a single ordinary table read"),
+            error
+                .to_string()
+                .contains("not a single ordinary table read"),
             "{error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn resolver_failure_is_a_region_scoped_resolve_error() {
+        let state = session_state();
+        let listed = regions(2);
+        let (bytes, payload) = group_read_request(&listed, 1024, region_union(&listed));
+
+        let error = decode_group_read_request(&bytes, &state, payload, &FailingResolver)
+            .await
+            .unwrap_err();
+        let (region_id, source) = match error {
+            GroupReadDecodeError::Resolve { region_id, source } => (region_id, source),
+            other => panic!("a resolver failure must stay a resolve error: {other}"),
+        };
+        assert!(
+            listed.contains(&region_id),
+            "the error must name the region whose plan failed to resolve: {region_id}"
+        );
+        // The resolver's own error must survive: its status and retry hint drive the caller.
+        assert_eq!(source.status_code(), StatusCode::RegionNotFound);
+        assert!(
+            source.to_string().contains("region catalog is unavailable"),
+            "{source}"
         );
     }
 
@@ -2021,11 +2128,11 @@ mod tests {
         use datafusion_expr::Subquery;
 
         let plan = LogicalPlanBuilder::from(project_scan())
-            .filter(Expr::ScalarSubquery(Subquery {
+            .filter(col("v").eq(Expr::ScalarSubquery(Subquery {
                 subquery: Arc::new(project_scan()),
                 outer_ref_columns: vec![],
                 spans: Default::default(),
-            }))
+            })))
             .unwrap()
             .build()
             .unwrap();

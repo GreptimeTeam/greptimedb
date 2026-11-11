@@ -322,16 +322,16 @@ impl RegionServer {
             .acquire_read_permit(read_stream_permits(grouped.as_ref()))
             .await?;
         if let Some(payload) = grouped {
-            return self
+            let stream = self
                 .handle_grouped_read_inner(
                     request.header,
                     anchor,
                     Bytes::from(request.plan),
                     query_ctx,
                     payload,
-                    permit,
                 )
-                .await;
+                .await?;
+            return Ok(maybe_guard_stream(stream, permit));
         }
 
         let region_id = anchor;
@@ -440,16 +440,16 @@ impl RegionServer {
             ))
             .await?;
         if let Some((payload, plan_bytes)) = grouped {
-            return self
+            let stream = self
                 .handle_grouped_read_inner(
                     request.header,
                     region_id,
                     Bytes::from(plan_bytes),
                     query_ctx,
                     payload,
-                    permit,
                 )
-                .await;
+                .await?;
+            return Ok(maybe_guard_stream(stream, permit));
         }
 
         let injector_builder = NameAwareDataSourceInjectorBuilder::from_plan(&request.plan)
@@ -1598,7 +1598,7 @@ fn validate_group_read_request(
 /// in-flight read streams, not just query planning.
 struct PermitGuardedStream {
     inner: SendableRecordBatchStream,
-    _permit: OwnedSemaphorePermit,
+    permit: Option<OwnedSemaphorePermit>,
 }
 
 impl RecordBatchStream for PermitGuardedStream {
@@ -1623,7 +1623,13 @@ impl Stream for PermitGuardedStream {
     type Item = common_recordbatch::error::Result<RecordBatch>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        self.inner.as_mut().poll_next(cx)
+        let result = self.inner.as_mut().poll_next(cx);
+        // Release the permit as soon as the stream ends or fails, instead of waiting for the
+        // holder to drop the stream.
+        if matches!(result, Poll::Ready(None)) || matches!(result, Poll::Ready(Some(Err(_)))) {
+            self.permit.take();
+        }
+        result
     }
 }
 
@@ -1636,7 +1642,7 @@ fn maybe_guard_stream(
     match permit {
         Some(permit) => Box::pin(PermitGuardedStream {
             inner: stream,
-            _permit: permit,
+            permit: Some(permit),
         }),
         None => stream,
     }
@@ -2845,8 +2851,7 @@ mod tests {
                 }),
             )
             .await
-            .err()
-            .expect("expected read error");
+            .expect_err("expected read error");
 
         assert_eq!(err.status_code(), StatusCode::RegionBusy);
         assert!(receiver.try_recv().is_err());
@@ -3056,8 +3061,7 @@ mod tests {
                 RegionRequest::Truncate(RegionTruncateRequest::All),
             )
             .await
-            .err()
-            .expect("expected read error");
+            .expect_err("expected read error");
 
         assert_eq!(err.status_code(), StatusCode::RegionNotReady);
     }
@@ -3221,8 +3225,7 @@ mod tests {
                 body: Some(region_request::Body::Inserts(InsertRequests { requests })),
             })
             .await
-            .err()
-            .expect("expected read error");
+            .expect_err("expected read error");
         assert_eq!(StatusCode::RegionBusy, error.status_code());
         assert_eq!(RetryHint::Retryable, error.retry_hint());
     }
@@ -3250,8 +3253,7 @@ mod tests {
         mock_region_server
             .handle_request(region_id, RegionRequest::Create(create_req))
             .await
-            .err()
-            .expect("expected read error");
+            .expect_err("expected read error");
 
         assert!(!mock_region_server.inner.region_map.contains_key(&region_id));
 
@@ -3270,8 +3272,7 @@ mod tests {
                 }),
             )
             .await
-            .err()
-            .expect("expected read error");
+            .expect_err("expected read error");
 
         assert!(mock_region_server.inner.region_map.contains_key(&region_id));
 
@@ -3472,8 +3473,7 @@ mod tests {
                 false,
             )
             .await
-            .err()
-            .expect("expected read error");
+            .expect_err("expected read error");
         assert_matches!(&err, error::Error::HandleBatchOpenRequest { .. });
         assert_eq!(err.status_code(), StatusCode::RegionNotFound);
         assert_eq!(err.retry_hint(), RetryHint::RetryAfterRouteRefresh);
@@ -3681,7 +3681,7 @@ mod tests {
         assert!(second_query.is_ok());
         let third_query = p.acquire_many(1).await;
         assert!(third_query.is_err());
-        let err = third_query.err().expect("expected limiter error");
+        let err = third_query.expect_err("expected limiter error");
         assert_eq!(
             err.output_msg(),
             "Failed to acquire permit under timeouts: deadline has elapsed".to_string()
@@ -3698,22 +3698,14 @@ mod tests {
         let p = RegionServerParallelism::from_opts(3, Duration::from_millis(1)).unwrap();
         let group = p.acquire_many(3).await;
         assert!(group.is_ok());
-        let next = p
-            .acquire_many(1)
-            .await
-            .err()
-            .expect("expected limiter error");
+        let next = p.acquire_many(1).await.expect_err("expected limiter error");
         assert_eq!(next.status_code(), StatusCode::RegionBusy);
         drop(group);
         assert!(p.acquire_many(3).await.is_ok());
 
         // A request that needs more streams than the limiter can ever admit fails immediately
         // instead of waiting for permits that can never exist together.
-        let too_wide = p
-            .acquire_many(4)
-            .await
-            .err()
-            .expect("expected limiter error");
+        let too_wide = p.acquire_many(4).await.expect_err("expected limiter error");
         assert_eq!(too_wide.status_code(), StatusCode::Unsupported);
         assert!(
             too_wide
@@ -3949,11 +3941,9 @@ mod tests {
             .await
             .unwrap();
 
-        let second = server
-            .handle_read(local_group_read_request(&regions))
-            .await
-            .err()
-            .expect("expected read error");
+        let Err(second) = server.handle_read(local_group_read_request(&regions)).await else {
+            panic!("expected read error");
+        };
         assert_eq!(second.status_code(), StatusCode::RegionBusy);
         assert!(
             second.output_msg().contains("deadline has elapsed"),
@@ -3972,16 +3962,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_grouped_read_releases_permits_at_end_of_stream() {
+        let regions = grouped_read_regions();
+        // The capacity equals the group size, so the first group holds every permit.
+        let (server, _) =
+            grouped_read_region_server(regions.len(), Duration::from_millis(50), &regions);
+
+        let mut first = server
+            .handle_read(local_group_read_request(&regions))
+            .await
+            .unwrap();
+        // The test engine yields no batch, so the first poll reaches EOF while the stream is still
+        // alive: the group's permits must already be back.
+        assert!(
+            first.next().await.is_none(),
+            "the test engine must reach end of stream"
+        );
+
+        assert!(
+            server
+                .handle_read(local_group_read_request(&regions))
+                .await
+                .is_ok(),
+            "reaching the end of the group must release its permits"
+        );
+        drop(first);
+    }
+
+    #[tokio::test]
     async fn test_grouped_read_above_limiter_capacity_is_unsupported() {
         let regions = grouped_read_regions();
         let (server, query_engine) =
             grouped_read_region_server(1, Duration::from_millis(50), &regions);
 
-        let err = server
-            .handle_read(local_group_read_request(&regions))
-            .await
-            .err()
-            .expect("expected read error");
+        let Err(err) = server.handle_read(local_group_read_request(&regions)).await else {
+            panic!("expected read error");
+        };
 
         assert_eq!(err.status_code(), StatusCode::Unsupported);
         assert!(
@@ -4003,11 +4019,9 @@ mod tests {
         let mut request = local_group_read_request(&regions);
         request.region_id = RegionId::new(GROUPED_READ_TABLE_ID, 9);
 
-        let err = server
-            .handle_read(request)
-            .await
-            .err()
-            .expect("expected read error");
+        let Err(err) = server.handle_read(request).await else {
+            panic!("expected read error");
+        };
 
         assert_eq!(err.status_code(), StatusCode::InvalidArguments);
         assert!(
@@ -4034,14 +4048,15 @@ mod tests {
         let plan = query::dist_plan::encode_nested_plan(&leaf).unwrap();
 
         let (server, _) = grouped_read_region_server(0, Duration::from_millis(10), &regions);
-        let err = server
+        let Err(err) = server
             .handle_remote_read(
                 remote_group_read_request(&regions, plan),
                 QueryContext::arc(),
             )
             .await
-            .err()
-            .expect("expected read error");
+        else {
+            panic!("expected read error");
+        };
 
         assert_eq!(err.status_code(), StatusCode::InvalidArguments);
         assert!(
@@ -4090,16 +4105,47 @@ mod tests {
         let plan = query::dist_plan::encode_nested_plan(&plan).unwrap();
 
         let (server, _) = grouped_read_region_server(0, Duration::from_millis(10), &regions);
-        let err = server
+        let Err(err) = server
             .handle_remote_read(
                 remote_group_read_request(&regions, plan),
                 QueryContext::arc(),
             )
             .await
-            .err()
-            .expect("expected read error");
+        else {
+            panic!("expected read error");
+        };
 
         assert_eq!(err.status_code(), StatusCode::InvalidArguments);
+    }
+
+    #[tokio::test]
+    async fn test_group_read_unresolvable_region_is_a_region_request_error() {
+        let regions = grouped_read_regions();
+        let (server, query_engine) =
+            grouped_read_region_server(0, Duration::from_millis(10), &regions);
+        // The group names a region this server no longer serves, so that leaf cannot resolve its
+        // plan. A per-region resolution failure must stay a region-scoped error instead of being
+        // flattened into an invalid-request error with a stringified message.
+        server.inner.region_map.remove(&regions[1]);
+
+        let err = match server.handle_read(local_group_read_request(&regions)).await {
+            Ok(_) => panic!("a grouped read over an unresolvable region must fail"),
+            Err(err) => err,
+        };
+
+        assert_ne!(
+            err.status_code(),
+            StatusCode::InvalidArguments,
+            "a resolution failure must not be reported as a malformed request: {}",
+            err.output_msg()
+        );
+        assert!(
+            err.output_msg().contains(&regions[1].to_string()),
+            "the error must name the unresolvable region {}: {}",
+            regions[1],
+            err.output_msg()
+        );
+        assert_eq!(0, query_engine.executed());
     }
 
     fn mock_region_metadata(region_id: RegionId) -> RegionMetadata {
@@ -4270,8 +4316,7 @@ mod tests {
         mock_region_server
             .handle_list_metadata_request(&list_metadata_request)
             .await
-            .err()
-            .expect("expected read error");
+            .expect_err("expected read error");
     }
 
     /// Returns a region server with a Mito engine on a durable object store WAL, the WAL, and the

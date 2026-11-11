@@ -27,6 +27,7 @@ use std::task::{Context, Poll};
 
 use async_trait::async_trait;
 use bytes::Bytes;
+use common_error::ext::BoxedError;
 use common_query::logical_plan::SubstraitPlanDecoderRef;
 use common_query::request::QueryRequest;
 use common_recordbatch::adapter::RecordBatchMetrics;
@@ -35,16 +36,16 @@ use datafusion_expr::LogicalPlan;
 use datatypes::schema::{Schema, SchemaRef};
 use futures::Stream;
 use query::dist_plan::{
-    GROUP_READ_CONTEXT_EXTENSION, GroupReadPayload, MAX_GROUP_READ_PAYLOAD_BYTES,
-    RegionPlanResolver, decode_group_read_request,
+    GROUP_READ_CONTEXT_EXTENSION, GroupReadDecodeError, GroupReadPayload, RegionPlanResolver,
+    decode_group_read_request,
 };
 use session::context::QueryContextRef;
 use snafu::{IntoError, ResultExt};
 use store_api::storage::RegionId;
-use tokio::sync::OwnedSemaphorePermit;
 
 use crate::error::{
-    DecodeLogicalPlanSnafu, InvalidQueryRequestSnafu, NewPlanDecoderSnafu, Result, UnexpectedSnafu,
+    DecodeLogicalPlanSnafu, HandleRegionRequestSnafu, InvalidQueryRequestSnafu,
+    NewPlanDecoderSnafu, Result, UnexpectedSnafu,
 };
 use crate::region_server::RegionServer;
 use crate::region_server::catalog::NameAwareCatalogList;
@@ -58,8 +59,8 @@ impl RegionServer {
     ///
     /// `plan_bytes` is the serialized `GroupRead` envelope, whether it arrived over Flight or was
     /// encoded from the in-process plan of a standalone datanode: both paths bind the region leaves
-    /// through the same request-scoped consumer. `permit` holds one limiter permit per named
-    /// region, or nothing when the limiter is disabled.
+    /// through the same request-scoped consumer. The caller holds the limiter permits and wraps the
+    /// returned stream with them.
     pub(super) async fn handle_grouped_read_inner(
         &self,
         header: Option<api::v1::region::RegionRequestHeader>,
@@ -67,7 +68,6 @@ impl RegionServer {
         plan_bytes: Bytes,
         query_ctx: QueryContextRef,
         payload: GroupReadPayload,
-        permit: Option<OwnedSemaphorePermit>,
     ) -> Result<SendableRecordBatchStream> {
         if query_ctx
             .extensions()
@@ -79,19 +79,7 @@ impl RegionServer {
             }
             .fail();
         }
-        payload
-            .validate_for_request(anchor)
-            .map_err(|reason| InvalidQueryRequestSnafu { reason }.build())?;
-        if plan_bytes.len() > MAX_GROUP_READ_PAYLOAD_BYTES {
-            return InvalidQueryRequestSnafu {
-                reason: format!(
-                    "GroupRead request is {} bytes, above the {} byte bound",
-                    plan_bytes.len(),
-                    MAX_GROUP_READ_PAYLOAD_BYTES
-                ),
-            }
-            .fail();
-        }
+        super::validate_group_read_request(anchor, plan_bytes.len(), &payload)?;
 
         let mut grouped_ctx = (*query_ctx).clone();
         grouped_ctx.set_extension(GROUP_READ_CONTEXT_EXTENSION, "true");
@@ -111,7 +99,16 @@ impl RegionServer {
         };
         let plan = decode_group_read_request(&plan_bytes, engine_ctx.state(), payload, &resolver)
             .await
-            .map_err(|reason| InvalidQueryRequestSnafu { reason }.build())?;
+            .map_err(|error| match error {
+                GroupReadDecodeError::Malformed(reason) => {
+                    InvalidQueryRequestSnafu { reason }.build()
+                }
+                // Keep the resolver's status code and retry hint: a region whose plan cannot be
+                // resolved is a per-region failure, not a malformed request.
+                GroupReadDecodeError::Resolve { region_id, source } => {
+                    HandleRegionRequestSnafu { region_id }.into_error(source)
+                }
+            })?;
 
         let mut guards = Vec::with_capacity(region_ids.len());
         for region in region_ids {
@@ -148,13 +145,7 @@ impl RegionServer {
             inner: None,
             guards,
         });
-        Ok(match permit {
-            Some(permits) => Box::pin(GroupedReadPermitStream {
-                inner: stream,
-                permits: Some(permits),
-            }),
-            None => stream,
-        })
+        Ok(stream)
     }
 }
 
@@ -221,45 +212,6 @@ impl RecordBatchStream for GroupedReadLazyStream {
     }
 }
 
-/// Holds the limiter permits of a grouped read until EOF, error or drop.
-///
-/// The permit is the multi-permit of the whole group: one limiter permit per region the request
-/// names, so `max_concurrent_queries` counts the region-read streams this request keeps open.
-struct GroupedReadPermitStream {
-    inner: SendableRecordBatchStream,
-    permits: Option<OwnedSemaphorePermit>,
-}
-
-impl Stream for GroupedReadPermitStream {
-    type Item = std::result::Result<RecordBatch, common_recordbatch::error::Error>;
-
-    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        let result = self.inner.as_mut().poll_next(cx);
-        if matches!(result, Poll::Ready(None)) || matches!(result, Poll::Ready(Some(Err(_)))) {
-            self.permits.take();
-        }
-        result
-    }
-}
-
-impl RecordBatchStream for GroupedReadPermitStream {
-    fn name(&self) -> &str {
-        self.inner.name()
-    }
-
-    fn schema(&self) -> datatypes::schema::SchemaRef {
-        self.inner.schema()
-    }
-
-    fn output_ordering(&self) -> Option<&[OrderOption]> {
-        self.inner.output_ordering()
-    }
-
-    fn metrics(&self) -> Option<RecordBatchMetrics> {
-        self.inner.metrics()
-    }
-}
-
 struct DatanodeRegionPlanResolver {
     server: RegionServer,
     query_ctx: QueryContextRef,
@@ -272,7 +224,7 @@ impl RegionPlanResolver for DatanodeRegionPlanResolver {
         &self,
         region_id: RegionId,
         plan: &[u8],
-    ) -> std::result::Result<LogicalPlan, String> {
+    ) -> std::result::Result<LogicalPlan, BoxedError> {
         let catalog_list = Arc::new(NameAwareCatalogList::new(
             self.server.clone(),
             region_id,
@@ -281,7 +233,6 @@ impl RegionPlanResolver for DatanodeRegionPlanResolver {
         self.decoder
             .decode(Bytes::from(plan.to_vec()), catalog_list, false)
             .await
-            .context(DecodeLogicalPlanSnafu)
-            .map_err(|error| error.to_string())
+            .map_err(|error| BoxedError::new(DecodeLogicalPlanSnafu.into_error(error)))
     }
 }

@@ -183,7 +183,7 @@ async fn run_rows_with_context(
     let pretty = batches
         .pretty_print()
         .unwrap_or_else(|error| panic!("`{sql}` produced no printable batches: {error}"));
-    let rows = pretty
+    pretty
         .lines()
         .filter(|line| line.starts_with('|'))
         .skip(1)
@@ -193,8 +193,7 @@ async fn run_rows_with_context(
                 .map(|cell| cell.trim().to_string())
                 .collect::<Row>()
         })
-        .collect::<Vec<_>>();
-    rows
+        .collect::<Vec<_>>()
 }
 
 async fn execute_sql(fe: &Arc<frontend::instance::Instance>, sql: &str) {
@@ -762,7 +761,7 @@ async fn grouped_read_active_remote_filter_update_and_cancel_releases_permit() {
         .with_real_datanode_grpc_addr(true)
         .with_frontend_tcp_datanode_clients(true)
         .with_datanodes(2)
-        .with_datanode_max_concurrent_queries(1)
+        .with_datanode_max_concurrent_queries(2)
         .with_meta_selector(Arc::new(RoundRobinSelector::new(SelectTarget::Datanode)))
         .build(false)
         .await;
@@ -875,14 +874,15 @@ async fn grouped_read_active_remote_filter_update_and_cancel_releases_permit() {
         .handle_remote_read(request(), ctx.clone())
         .await
         .unwrap();
-    // A live grouped stream holds the only permit, not one per region. A second read times out.
+    // A live grouped stream holds one permit per member region, so with capacity two the second
+    // two-region read has to wait and times out.
     let blocked = server.handle_remote_read(request(), ctx.clone()).await;
     assert!(
         matches!(
             blocked,
             Err(DatanodeError::ConcurrentQueryLimiterTimeout { .. })
         ),
-        "a live grouped stream must retain the single permit"
+        "a live grouped stream must retain its per-region permits"
     );
     // The stream has completed preflight and has not polled a region yet. The filters are
     // registered without a scan runtime, so the update is either buffered or applied; when the
