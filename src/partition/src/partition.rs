@@ -29,6 +29,16 @@ pub type PartitionRuleRef = Arc<dyn PartitionRule>;
 pub trait PartitionRule: Sync + Send {
     fn as_any(&self) -> &dyn Any;
 
+    /// Columns the rule resolves its partition expressions against.
+    ///
+    /// This is a lookup allow list, not necessarily the table's declared partition
+    /// key: a rule built for a physical table is extended with every column the
+    /// partition expressions reference, so an entry may be a column the table itself
+    /// doesn't have (for example a logical metric table that doesn't carry the tag its
+    /// physical table is partitioned on). Row-based splitting reads a missing column
+    /// as `Value::Null`; record-batch splitting still fails to plan the expression
+    /// when the column is absent, so callers must not assume every name resolves
+    /// against table metadata or a record batch schema.
     fn partition_columns(&self) -> &[String];
 
     /// Finds the target region by the partition values.
