@@ -138,19 +138,21 @@ impl<S: LogStore> TailReplayTask<S> {
             .collect::<Vec<_>>();
         if !files.is_empty() || remaining != *tails {
             let last_entry_id = last_entry_ids.into_iter().flatten().max().unwrap_or(0);
+            let flushed_sequence = files
+                .iter()
+                .filter_map(|file| file.sequence)
+                .map(NonZeroU64::get)
+                .max();
             let edit = RegionEdit {
-                flushed_sequence: files
-                    .iter()
-                    .filter_map(|file| file.sequence)
-                    .map(NonZeroU64::get)
-                    .max(),
+                flushed_sequence,
                 files_to_add: files,
                 files_to_remove: Vec::new(),
                 timestamp_ms: Some(chrono::Utc::now().timestamp_millis()),
                 compaction_time_window: None,
                 flushed_entry_id: (last_entry_id > version.flushed_entry_id)
                     .then_some(last_entry_id),
-                committed_sequence: None,
+                // Later writes of the region take sequences above the replayed rows.
+                committed_sequence: flushed_sequence,
                 wal_recovery: WalRecoveryEdit {
                     pending_tails: Some(remaining.clone()),
                     handoff_floor: None,
@@ -210,13 +212,11 @@ impl<S: LogStore> TailReplayTask<S> {
         let mut last_entry_ids = Vec::with_capacity(tails.len());
         for tail in tails {
             let mut entries = self
-                .wal
-                .read_tail(provider, region_id, self.node_id, tail)
+                .unless_cancelled(self.wal.read_tail(provider, region_id, self.node_id, tail))
                 .await?;
             let mut chunk = self.new_chunk();
             let mut last_entry_id = None;
-            while let Some((entry_id, entry)) = entries.try_next().await? {
-                ensure!(!self.state.is_cancelled(), FlushCancelledSnafu);
+            while let Some((entry_id, entry)) = self.unless_cancelled(entries.try_next()).await? {
                 if entry_id > tail.upto {
                     break;
                 }
@@ -299,11 +299,17 @@ impl<S: LogStore> TailReplayTask<S> {
         let region_id = self.region.region_id;
         let action_list = RegionMetaActionList::with_action(RegionMetaAction::Edit(edit.clone()));
         let mut backoff = MIN_BACKOFF;
+        // Whether an attempt may have persisted the edit, which only the same content confirms.
+        let mut uncertain = false;
         loop {
             self.flush_task
                 .listener
                 .on_tail_commit_begin(region_id)
                 .await;
+            if self.state.is_cancelled() {
+                uncommitted.cleanup().await;
+                return Ok(false);
+            }
             match self
                 .region
                 .manifest_ctx
@@ -336,11 +342,15 @@ impl<S: LogStore> TailReplayTask<S> {
                 }
                 Err(e) if e.may_have_persisted_manifest_update() => {
                     uncommitted.disarm_cleanup();
+                    uncertain = true;
                     error!(e; "Publishing the replayed WAL tails of region {region_id} may have failed, retrying");
                 }
                 Err(Error::RegionStopped { .. }) => {
                     uncommitted.cleanup().await;
                     return Ok(false);
+                }
+                Err(e) if uncertain => {
+                    error!(e; "Failed to publish the replayed WAL tails of region {region_id} again, retrying");
                 }
                 Err(e) => {
                     uncommitted.cleanup().await;
@@ -372,6 +382,13 @@ impl<S: LogStore> TailReplayTask<S> {
         {
             error!(e; "Failed to release the WAL of region {} after publishing its tails", region.region_id);
         }
+    }
+
+    /// Awaits `future` unless the task is cancelled first.
+    async fn unless_cancelled<T>(&self, future: impl Future<Output = Result<T>>) -> Result<T> {
+        CancellableFuture::new(future, self.state.cancel_handle())
+            .await
+            .unwrap_or_else(|_| FlushCancelledSnafu.fail())
     }
 
     /// Sleeps for `delay`. Returns false if the task is cancelled first.

@@ -23,7 +23,7 @@ pub(crate) mod version;
 use std::cell::OnceCell;
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Instant;
 
@@ -61,7 +61,7 @@ use crate::error::{
     InvalidRequestSnafu, RegionBusySnafu, RegionLeaseExpiredSnafu, RegionNotFoundSnafu,
     RegionStateSnafu, RegionTruncatedSnafu, Result, UnexpectedSnafu, UpdateManifestSnafu,
 };
-use crate::lease::{Deadline, NodeLease};
+use crate::lease::{Deadline, NodeLease, lease_nanos};
 use crate::manifest::action::{
     PendingTail, RegionChange, RegionManifest, RegionMetaAction, RegionMetaActionList,
 };
@@ -1348,9 +1348,10 @@ pub(crate) struct ManifestContext {
     /// Decides whether a promotion to Leader applies. The lock covers checking or changing it and
     /// the role change.
     promotion_fence: Mutex<PromotionFence>,
-    /// Whether a catchup made the region writable and no Leader lease applied since. Until one
-    /// applies, the region keeps the unread part of another node's listed tails.
-    writable_by_catchup: AtomicBool,
+    /// When a catchup last made the region writable, in the unit of [Deadline], until a Leader
+    /// lease of a heartbeat sent after it applies; 0 otherwise. While it is set, the region keeps
+    /// the unread part of another node's listed tails.
+    catchup_promoted_at: AtomicU64,
     /// Deadline of the region's latest Leader or StagingLeader lease from the metasrv, which is how
     /// long the Leader role stays valid. The engine extends it from those leases, and writes check
     /// it.
@@ -1380,7 +1381,7 @@ impl ManifestContext {
                 downgrade_started_at: Instant::now(),
                 reload_pending: false,
             }),
-            writable_by_catchup: AtomicBool::new(false),
+            catchup_promoted_at: AtomicU64::new(0),
             leader_deadline: Deadline::default(),
             node_lease,
             staging_partition_info: Mutex::new(None),
@@ -1950,12 +1951,15 @@ impl ManifestContext {
     ) -> bool {
         // A writable leader needs no change; a staging leader is promoted below.
         if self.state.load() == RegionRoleState::Leader(RegionLeaderState::Writable) {
-            self.writable_by_catchup.store(false, Ordering::Relaxed);
+            self.note_leader_lease(issued_at);
             return true;
         }
         let fence = self.promotion_fence.lock().unwrap();
-        issued_at >= fence.downgrade_started_at
-            && self.promote_unless_reload_pending(&fence, region_id, false)
+        if issued_at < fence.downgrade_started_at {
+            return false;
+        }
+        self.note_leader_lease(issued_at);
+        self.promote_unless_reload_pending(&fence, region_id, false)
     }
 
     /// Promotes a region that caught up to a writable leader. Returns false if the region waits
@@ -1975,16 +1979,37 @@ impl ManifestContext {
         if fence.reload_pending {
             return false;
         }
-        // Before the role, so a lease that finds the region writable clears it.
-        self.writable_by_catchup
-            .store(by_catchup, Ordering::Relaxed);
+        if by_catchup {
+            // Before the role, so a lease that finds the region writable compares with it.
+            self.catchup_promoted_at
+                .store(lease_nanos(Instant::now()).max(1), Ordering::Relaxed);
+        }
         self.set_role(RegionRole::Leader, region_id);
         true
     }
 
-    /// Returns whether a catchup made the region writable and no Leader lease applied since.
+    /// Counts an applied Leader lease of a heartbeat sent at `issued_at` as received since the
+    /// last catchup promotion. A heartbeat sent before the promotion does not count: its lease
+    /// may have been granted before an earlier downgrade of this node, which the fast path of
+    /// [Self::promote_unless_downgrade_started_after] does not check, and the lease of the next
+    /// heartbeat counts instead. It reads one atomic, since every lease of a writable leader
+    /// comes here.
+    pub(crate) fn note_leader_lease(&self, issued_at: Instant) {
+        let promoted_at = self.catchup_promoted_at.load(Ordering::Relaxed);
+        if promoted_at != 0 && lease_nanos(issued_at) >= promoted_at {
+            let _ = self.catchup_promoted_at.compare_exchange(
+                promoted_at,
+                0,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            );
+        }
+    }
+
+    /// Returns whether a catchup made the region writable and no Leader lease of a heartbeat
+    /// sent after it applied since.
     pub(crate) fn is_writable_by_catchup(&self) -> bool {
-        self.writable_by_catchup.load(Ordering::Relaxed)
+        self.catchup_promoted_at.load(Ordering::Relaxed) != 0
     }
 
     /// Sets the [`RegionRole`].
@@ -2847,6 +2872,23 @@ mod tests {
             .unwrap();
         });
         assert!(rx.recv_timeout(std::time::Duration::from_secs(10)).unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_lease_sent_before_catchup_promotion_does_not_count() {
+        let env = SchedulerEnv::new().await;
+        let region = build_test_region(&env).await;
+        let manifest_ctx = &region.manifest_ctx;
+        let sent_before = std::time::Instant::now();
+        region.set_role(RegionRole::Follower);
+        std::thread::sleep(std::time::Duration::from_millis(1));
+        assert!(manifest_ctx.promote_after_catchup(region.region_id));
+
+        assert!(manifest_ctx.promote_unless_downgrade_started_after(sent_before, region.region_id));
+        assert!(manifest_ctx.is_writable_by_catchup());
+        let sent_after = std::time::Instant::now();
+        assert!(manifest_ctx.promote_unless_downgrade_started_after(sent_after, region.region_id));
+        assert!(!manifest_ctx.is_writable_by_catchup());
     }
 
     #[tokio::test]

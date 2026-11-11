@@ -24,6 +24,7 @@ use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_recordbatch::RecordBatches;
 use common_wal::config::object_store::STANDALONE_GENERATION;
+use common_wal::options::WAL_OPTIONS_KEY;
 use datatypes::arrow::array::Array;
 use log_store::ObjectStoreLogStore;
 use log_store::object_store_wal::{NodeWalPrefix, ObjectStoreWalReaders};
@@ -59,7 +60,8 @@ use crate::region::version::VersionRef;
 use crate::request::{BackgroundNotify, WorkerRequest};
 use crate::sst::location::region_dir_from_table_dir;
 use crate::test_util::{
-    CreateRequestBuilder, TestEnv, build_rows, nop_action, reopen_region, rows_schema,
+    CreateRequestBuilder, TestEnv, build_rows, build_rows_for_key, nop_action, put_rows,
+    reopen_region, rows_schema,
 };
 use crate::time_provider::StdTimeProvider;
 use crate::wal::{EntryId, Wal};
@@ -503,6 +505,76 @@ async fn test_unread_remote_listed_tail_waits_for_leader_lease() {
 }
 
 #[tokio::test]
+async fn test_writes_after_replay_win_over_replayed_rows() {
+    let region = TestRegion::new("tail-replay-later-writes", false, None).await;
+    let last = region.write_remote_rows(region.region_id, 6, 9).await;
+    region
+        .reopen_with_tails(vec![remote_tail(0, last, UptoKind::Reported)])
+        .await;
+    region.catchup().await;
+    region.wait_until_replayed().await;
+
+    let rows = Rows {
+        schema: rows_schema(&CreateRequestBuilder::new().build()),
+        rows: build_rows_for_key("6", 6, 7, 99),
+    };
+    put_rows(&region.engine, region.region_id, rows).await;
+
+    let stream = region
+        .engine
+        .scan_to_stream(region.region_id, ScanRequest::default())
+        .await
+        .unwrap();
+    let batches = RecordBatches::try_collect(stream).await.unwrap();
+    assert!(batches.pretty_print().unwrap().contains("99.0"));
+}
+
+#[tokio::test]
+async fn test_create_reopening_region_replays_tails() {
+    let region = TestRegion::new("tail-replay-create", false, None).await;
+    let tail = own_tail(0, region.entries[1], UptoKind::Reported);
+    set_pending_tails(&region.engine, region.region_id, vec![tail]).await;
+    let close = RegionRequest::Close(RegionCloseRequest::default());
+    region
+        .engine
+        .handle_request(region.region_id, close)
+        .await
+        .unwrap();
+
+    let request = CreateRequestBuilder::new()
+        .insert_option(WAL_OPTIONS_KEY, &wal_options()[WAL_OPTIONS_KEY])
+        .build();
+    region
+        .engine
+        .handle_request(region.region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+    region.wait_until_replayed().await;
+
+    assert_eq!(6, count_rows(&region.engine, region.region_id).await);
+}
+
+#[tokio::test]
+async fn test_direct_promotion_counts_as_leader_lease() {
+    let region = TestRegion::new("tail-replay-direct-promotion", false, None).await;
+    let last = region.write_remote_rows(region.region_id, 6, 9).await;
+    let upto = region.remote_listed_bound().await;
+    region
+        .reopen_with_tails(vec![remote_tail(0, upto, UptoKind::Listed)])
+        .await;
+    region.catchup().await;
+    let shrunk = vec![remote_tail(last, upto, UptoKind::Listed)];
+    wait_until(|| region.version().pending_tails == shrunk).await;
+
+    region
+        .engine
+        .set_region_role(region.region_id, RegionRole::Follower)
+        .unwrap();
+    region.promote();
+    region.wait_until_replayed().await;
+}
+
+#[tokio::test]
 async fn test_replay_fills_columns_added_after_the_tail() {
     let region = TestRegion::new("tail-replay-alter", false, None).await;
     region
@@ -641,6 +713,44 @@ async fn test_tail_commit_with_unknown_result_is_retried() {
 }
 
 #[tokio::test]
+async fn test_uncertain_commit_is_retried_after_expired_lease() {
+    let version = Arc::new(AtomicU64::new(u64::MAX));
+    let region = TestRegion::new(
+        "tail-replay-uncertain-expired",
+        true,
+        Some(lose_delta_response(version.clone())),
+    )
+    .await;
+    region
+        .reopen_with_tails(vec![own_tail(0, region.entries[1], UptoKind::Reported)])
+        .await;
+    let mito_region = region.engine.get_region(region.region_id).unwrap();
+    version.store(next_manifest_version(&mito_region).await, Ordering::Relaxed);
+    region.listener.hold_commits.store(true, Ordering::Relaxed);
+    region.promote_with_lease();
+    wait_until(|| region.listener.commits() == 1).await;
+    region.listener.hold_commits.store(false, Ordering::Relaxed);
+    // The first commit lands but reports an error; hold the retry until the lease expires.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    region.listener.hold_commits.store(true, Ordering::Relaxed);
+    wait_until(|| region.listener.commits() == 2).await;
+    let expired = Instant::now() + Duration::from_secs(60);
+    region.engine.freeze_lease_clock(expired);
+    region.listener.hold_commits.store(false, Ordering::Relaxed);
+
+    wait_until(|| region.listener.commits() == 3).await;
+    region.engine.freeze_lease_clock(Instant::now());
+    region.wait_until_replayed().await;
+
+    assert!(!region.listener.failed());
+    assert_eq!(1, region.stored_ssts().await);
+    assert!(Arc::ptr_eq(
+        &mito_region,
+        &region.engine.get_region(region.region_id).unwrap()
+    ));
+}
+
+#[tokio::test]
 async fn test_tail_commit_after_deadline_deletes_chunks() {
     let region = TestRegion::new("tail-replay-deadline", true, None).await;
     region
@@ -728,6 +838,28 @@ async fn test_stopping_region_cancels_replay(#[case] stop: Stop) {
 
     assert_eq!(1, region.listener.commits());
     assert_eq!(0, region.stored_ssts().await);
+}
+
+#[tokio::test]
+async fn test_cancelled_replay_does_not_publish_after_promotion() {
+    let region = TestRegion::new("tail-replay-cancel-promote", false, None).await;
+    region
+        .reopen_with_tails(vec![own_tail(0, region.entries[1], UptoKind::Reported)])
+        .await;
+    region.listener.hold_commits.store(true, Ordering::Relaxed);
+    region.promote();
+    wait_until(|| region.listener.commits() == 1).await;
+
+    region
+        .engine
+        .set_region_role_state_gracefully(region.region_id, SettableRegionRoleState::Follower)
+        .await
+        .unwrap();
+    region.promote();
+    region.listener.hold_commits.store(false, Ordering::Relaxed);
+    region.wait_until_replayed().await;
+
+    assert_eq!(2, region.listener.commits());
 }
 
 #[tokio::test]

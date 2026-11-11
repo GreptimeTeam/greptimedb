@@ -1200,6 +1200,8 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         );
         self.regions.insert_region(region.clone());
         region.activate_region_manifest_size_metric();
+        // A create can open an existing region as a writable leader.
+        self.maybe_replay_tails(region.region_id);
     }
 
     /// Starts the worker loop.

@@ -1328,6 +1328,10 @@ impl EngineInner {
         let region = self.find_region(region_id)?;
         let was_writable = region.is_writable();
         region.set_role(role);
+        if role == RegionRole::Leader {
+            // No lease comes for a direct promotion, so it counts as one.
+            region.manifest_ctx.note_leader_lease(Instant::now());
+        }
         self.notify_if_became_writable(&region, was_writable);
         Ok(())
     }
