@@ -67,8 +67,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         }
     }
 
-    /// Applies the published result of a tail replay, unless the instance it ran for was
-    /// replaced, in which case the new instance has loaded it from the manifest.
+    /// Applies a published tail replay unless its instance was replaced by one that loaded it.
     pub(crate) async fn handle_tails_committed(
         &mut self,
         region_id: RegionId,
@@ -80,8 +79,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             info!("Region {region_id} changed after its tails were published");
             return;
         }
-        // A truncate takes the last entry id as its truncated entry id, which must not pull
-        // the flushed entry id back.
+        // A truncate uses the last entry id, which must not be below the flushed entry id.
         if let Some(flushed_entry_id) = edit.flushed_entry_id
             && flushed_entry_id > region.version_control.current().last_entry_id
         {
