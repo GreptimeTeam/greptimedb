@@ -1065,6 +1065,22 @@ impl PrefilterMasks {
     /// against another, so a dynamic mask whose generation moved on is discarded and the
     /// incoming selection of the row group is kept as it was. Only the live filter above
     /// the scan decides which rows a query returns.
+    ///
+    /// # Producer contract
+    ///
+    /// Committing a dynamic mask takes two properties from the producer:
+    ///
+    /// * **Stable snapshot.** The mask was computed from the single expression captured
+    ///   at `generation` and is only committed while the handle is still at that
+    ///   generation (see [`PhysicalFilterContext::capture_dynamic_snapshot`]).
+    /// * **A publication is a necessary condition for the same execution.** A committed
+    ///   mask removes every row that generation rejects, so a publication is only allowed
+    ///   to reject rows the enclosing join or limit rejects too. The supported producers
+    ///   publish completed state: a `HashJoin` publishes its immutable, completed
+    ///   build-side map, and `TopK` publishes a monotone (only ever tightening) threshold.
+    ///   Arbitrary independently mutable nested expressions are not promised, and nothing
+    ///   here compares two generations: a newer publication is simply re-evaluated by the
+    ///   next pass, while the live filter above the scan stays authoritative.
     fn commit(self, prefilter_ctx: &PrefilterContext) -> Option<BooleanBuffer> {
         let mut mask = self.static_mask;
         for (idx, dynamic_mask) in self.dynamic_masks {
@@ -1545,13 +1561,13 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use bytes::Bytes;
-    use common_recordbatch::filter::SimpleFilterEvaluator;
+    use common_recordbatch::filter::{SimpleFilterEvaluator, batch_filter};
     use datafusion::physical_plan::expressions::{Column, DynamicFilterPhysicalExpr};
     use datafusion_common::ScalarValue;
     use datafusion_expr::{col, lit};
     use datatypes::arrow::array::{
-        ArrayRef, DictionaryArray, Int32Array, TimestampMillisecondArray, UInt8Array, UInt32Array,
-        UInt64Array,
+        ArrayRef, DictionaryArray, Float64Array, Int32Array, TimestampMillisecondArray, UInt8Array,
+        UInt32Array, UInt64Array,
     };
     use datatypes::arrow::datatypes::{DataType, Field, Schema, UInt32Type};
     use datatypes::arrow::record_batch::RecordBatch;
@@ -2637,6 +2653,172 @@ mod tests {
         let filter = physical_filters[0].filter().unwrap();
         let mask = evaluate_physical_mask(&batch, &physical_filters[0], filter, "test").unwrap();
         assert_eq!(mask.count_set_bits(), 1);
+    }
+
+    /// The producer's input schema, where `field_0` is its fourth column rather than the
+    /// only column of a prefilter batch.
+    fn producer_schema(field_type: DataType) -> SchemaRef {
+        Arc::new(Schema::new(vec![
+            Field::new("tag_0", DataType::Utf8, true),
+            Field::new("tag_1", DataType::Utf8, true),
+            Field::new("ts", DataType::UInt64, true),
+            Field::new("field_0", field_type, true),
+        ]))
+    }
+
+    fn full_read_format(metadata: &RegionMetadataRef) -> FlatReadFormat {
+        FlatReadFormat::new(
+            metadata.clone(),
+            ReadColumns::new(metadata.column_metadatas.iter().map(|c| c.column_id)),
+            None,
+            "test",
+            false,
+        )
+        .unwrap()
+    }
+
+    /// Evaluates a producer-owned dynamic filter over `batch` both ways: as a prefilter
+    /// mask, and as the live `batch_filter` that runs above the scan.
+    ///
+    /// `batch` carries the filter column plus a `row` column holding row indexes, so the
+    /// rows the upper filter keeps come back as values. Both evaluations see the same
+    /// rows, so the returned row lists are directly comparable.
+    fn prefilter_and_upper_rows(
+        metadata: &RegionMetadataRef,
+        read_format: &FlatReadFormat,
+        producer_schema: &SchemaRef,
+        published: &Expr,
+        batch: &RecordBatch,
+    ) -> (Vec<usize>, Vec<usize>) {
+        let key = Arc::new(Column::new("field_0", 3)) as Arc<dyn PhysicalExpr>;
+        let handle = Arc::new(DynamicFilterPhysicalExpr::new(
+            vec![key],
+            Predicate::to_physical_expr(&lit(true), producer_schema).unwrap(),
+        ));
+        handle
+            .update(Predicate::to_physical_expr(published, producer_schema).unwrap())
+            .unwrap();
+        let filter_ctx =
+            PhysicalFilterContext::new_dynamic(metadata, None, read_format, &handle).unwrap();
+        let snapshot = filter_ctx.capture_dynamic_snapshot().unwrap();
+
+        let mask = evaluate_physical_mask(batch, &filter_ctx, &snapshot.expr, "test").unwrap();
+        let prefilter_rows = mask
+            .iter()
+            .enumerate()
+            .filter_map(|(row, keep)| keep.then_some(row))
+            .collect::<Vec<_>>();
+
+        let filtered = batch_filter(batch, &snapshot.expr).unwrap();
+        let upper_rows = filtered
+            .column(1)
+            .as_any()
+            .downcast_ref::<UInt64Array>()
+            .unwrap()
+            .values()
+            .iter()
+            .map(|row| *row as usize)
+            .collect::<Vec<_>>();
+
+        (prefilter_rows, upper_rows)
+    }
+
+    /// A batch of `field_0` values plus a `row` column holding their indexes.
+    fn indexed_batch(field: ArrayRef, data_type: DataType) -> RecordBatch {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("field_0", data_type, true),
+            Field::new("row", DataType::UInt64, false),
+        ]));
+        let rows = Arc::new(UInt64Array::from_iter_values(0..field.len() as u64)) as ArrayRef;
+        RecordBatch::try_new(schema, vec![field, rows]).unwrap()
+    }
+
+    /// A bare `col IN (...)` leaves a NULL comparison UNKNOWN, and the prefilter must
+    /// reject that row exactly like the live filter above the scan: it adds no NULL guard
+    /// of its own, because the producer owns the NULL semantics of its expression.
+    #[test]
+    fn test_dynamic_filter_mask_matches_upper_filter_for_nullable_bare_in() {
+        let metadata: RegionMetadataRef = Arc::new(sst_region_metadata());
+        let read_format = full_read_format(&metadata);
+        let published = col("field_0").in_list(vec![lit(1_u64), lit(3_u64)], false);
+        // Row 1 is NULL, and `NULL IN (1, 3)` is neither a member nor a non-member.
+        let batch = indexed_batch(
+            Arc::new(UInt64Array::from(vec![Some(1), None, Some(2), Some(3)])) as ArrayRef,
+            DataType::UInt64,
+        );
+
+        let (prefilter_rows, upper_rows) = prefilter_and_upper_rows(
+            &metadata,
+            &read_format,
+            &producer_schema(DataType::UInt64),
+            &published,
+            &batch,
+        );
+
+        assert_eq!(vec![0, 3], prefilter_rows);
+        assert_eq!(
+            prefilter_rows, upper_rows,
+            "the prefilter must keep exactly the rows the upper filter keeps"
+        );
+    }
+
+    /// Float membership compares with a total order, so `NaN` is a member of a list that
+    /// holds `NaN` while `-0.0` is not a member of a list that holds `0.0`. The prefilter
+    /// must reproduce those semantics exactly, which it can only do by evaluating the
+    /// producer's whole expression instead of substituting an IEEE `==` or a re-derived
+    /// comparison.
+    #[test]
+    fn test_dynamic_filter_mask_matches_upper_filter_for_float_nan_membership() {
+        let metadata = metadata_with_field_type(ConcreteDataType::float64_datatype());
+        let read_format = full_read_format(&metadata);
+        let published = col("field_0").in_list(vec![lit(0.0_f64), lit(f64::NAN)], false);
+        // Rows: `0.0` and `NaN` are members, `-0.0` is not (total order, not IEEE `==`),
+        // and the NULL row is UNKNOWN.
+        let batch = indexed_batch(
+            Arc::new(Float64Array::from(vec![
+                Some(0.0),
+                Some(-0.0),
+                Some(f64::NAN),
+                None,
+            ])) as ArrayRef,
+            DataType::Float64,
+        );
+        let unlisted = indexed_batch(
+            Arc::new(Float64Array::from(vec![
+                Some(1.5),
+                Some(f64::NAN),
+                Some(0.0),
+                None,
+            ])) as ArrayRef,
+            DataType::Float64,
+        );
+
+        let (prefilter_rows, upper_rows) = prefilter_and_upper_rows(
+            &metadata,
+            &read_format,
+            &producer_schema(DataType::Float64),
+            &published,
+            &batch,
+        );
+
+        assert_eq!(
+            prefilter_rows, upper_rows,
+            "the prefilter must keep exactly the rows the upper filter keeps"
+        );
+        assert_eq!(vec![0, 2], prefilter_rows);
+
+        let (unlisted_prefilter_rows, unlisted_upper_rows) = prefilter_and_upper_rows(
+            &metadata,
+            &read_format,
+            &producer_schema(DataType::Float64),
+            &published,
+            &unlisted,
+        );
+        assert_eq!(
+            unlisted_prefilter_rows, unlisted_upper_rows,
+            "the prefilter must keep exactly the rows the upper filter keeps"
+        );
+        assert_eq!(vec![1, 2], unlisted_prefilter_rows);
     }
 
     #[test]

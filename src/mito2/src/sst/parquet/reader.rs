@@ -2184,7 +2184,9 @@ pub(crate) struct PhysicalFilterContext {
 /// A stable snapshot of the expression a producer published for a dynamic filter.
 ///
 /// The expression is rebound to the single-column prefilter schema and is only
-/// trustworthy while the producer stays at `generation`.
+/// trustworthy while the producer stays at `generation`. See
+/// [`PhysicalFilterContext::capture_dynamic_snapshot`] for the producer contract this
+/// snapshot depends on.
 #[derive(Clone)]
 pub(crate) struct DynamicFilterSnapshot {
     /// Captured expression, rebound to the prefilter schema.
@@ -2291,6 +2293,33 @@ impl PhysicalFilterContext {
     /// before and after [`DynamicFilterPhysicalExpr::current`] differs), or the published
     /// expression cannot be rebound to the single-column prefilter schema, which includes
     /// every reference outside this filter's column. Callers must keep every row then.
+    ///
+    /// # Producer contract
+    ///
+    /// The snapshot is evaluated as-is for a whole row-group prefilter pass, so the
+    /// published expression has to be usable on its own:
+    ///
+    /// * **A publication is a stable snapshot.** It is a value the producer hands over,
+    ///   not a view of state the producer keeps mutating: one expression is captured per
+    ///   pass and evaluated against every batch of that pass.
+    /// * **A publication is a necessary condition for the same execution.** The prefilter
+    ///   only ever drops rows its snapshot rejects, so a publication that accepts every
+    ///   row the enclosing join or limit keeps can never change the query result, however
+    ///   loose it is. A publication must therefore never reject a row the execution's own
+    ///   semantics keeps.
+    /// * **Only this handle's generation is observed.** A
+    ///   [`DynamicFilterPhysicalExpr`] nested inside the published expression that
+    ///   republishes on its own is invisible to
+    ///   [`Self::dynamic_snapshot_is_current`]; such an expression is not promised to be
+    ///   snapshotted at all.
+    ///
+    /// The supported producers publish completed, self-contained state: a `HashJoin`
+    /// publishes its immutable, completed build-side map (the build side does not change
+    /// once the filter is published), and `TopK` publishes its monotone (only ever
+    /// tightening) threshold as a fresh comparison expression. Arbitrary independently
+    /// mutable nested expressions are not promised: the snapshot is then either rejected
+    /// here and the pass keeps every row, or the producer's own generation keeps it
+    /// honest. The live filter above the scan stays authoritative either way.
     pub(crate) fn capture_dynamic_snapshot(&self) -> Option<DynamicFilterSnapshot> {
         let handle = self.dynamic.as_ref()?;
         let generation = handle.snapshot_generation();
@@ -2636,13 +2665,20 @@ mod tests {
     use common_function::scalars::json::json_get::JsonGetWithType;
     use common_function::scalars::udf::create_udf;
     use common_recordbatch::ext::RecordBatchExt;
+    use common_recordbatch::filter::batch_filter;
     use datafusion::arrow::datatypes::DataType;
-    use datafusion::physical_plan::expressions::{Column, lit as physical_lit};
+    use datafusion::physical_plan::expressions::{
+        BinaryExpr, CaseExpr, Column, lit as physical_lit,
+    };
+    use datafusion::physical_plan::joins::join_hash_map::{JoinHashMapType, JoinHashMapU32};
+    use datafusion::physical_plan::joins::{HashExpr, HashTableLookupExpr, Map, SeededRandomState};
+    use datafusion::physical_plan::repartition::REPARTITION_RANDOM_STATE;
     use datafusion_common::ScalarValue;
+    use datafusion_common::hash_utils::create_hashes;
     use datafusion_expr::expr::ScalarFunction;
     use datafusion_expr::{
-        ColumnarValue, Expr, ScalarFunctionArgs, ScalarUDF, ScalarUDFImpl, Signature, Volatility,
-        col, lit,
+        ColumnarValue, Expr, Operator, ScalarFunctionArgs, ScalarUDF, ScalarUDFImpl, Signature,
+        Volatility, col, lit,
     };
     use datatypes::arrow::array::{
         ArrayRef, BinaryDictionaryBuilder, Int64Array, StringArray, StructArray,
@@ -3092,6 +3128,9 @@ mod tests {
         )
     }
 
+    /// A row group whose filters are already proven by its statistics keeps the incoming
+    /// selection, and the prefilter pass requests no pages or ranges for it: every fetch
+    /// counter stays at zero.
     #[tokio::test(flavor = "current_thread")]
     async fn test_execute_prefilter_proven_filters_preserve_selection_without_fetching() {
         let object_store = ObjectStore::new(Memory::default()).unwrap();
@@ -3131,6 +3170,8 @@ mod tests {
             assert_eq!(result.refined_selection, expected);
             assert_eq!(result.filtered_rows, 0);
             let metrics = fetch_metrics.data.lock().unwrap();
+            // `pages_to_fetch_*` count the page ranges requested per source, so these
+            // are store, mem-cache and write-cache range counts rather than pages.
             assert_eq!(metrics.pages_to_fetch_store, 0);
             assert_eq!(metrics.pages_to_fetch_mem, 0);
             assert_eq!(metrics.pages_to_fetch_write_cache, 0);
@@ -3179,6 +3220,8 @@ mod tests {
                 RowSelection::from(vec![RowSelector::select(1), RowSelector::skip(2),])
             );
             if pass == 1 {
+                // The cached pass adds no store range count: the second pass reuses the
+                // cached masks instead of reading the row group again.
                 assert_eq!(fetch_metrics.data.lock().unwrap().pages_to_fetch_store, 0);
             }
         }
@@ -3340,14 +3383,99 @@ mod tests {
         assert_eq!(0, result.filtered_rows);
     }
 
+    /// The prefilter of the expression a real `HashJoin` publishes keeps exactly the rows
+    /// the live `batch_filter` above the same scan keeps.
+    ///
+    /// The published shape is what a partitioned join builds for a large build side: a
+    /// hash-table lookup over the probe key per build partition, routed by
+    /// `hash_repartition(key) % 2` inside a `CASE` — not a logical `IN` list. The
+    /// prefilter evaluates it on the reduced projection; the filter above the scan
+    /// evaluates the same expression on the projected read. Both must select the same
+    /// rows of the same row group.
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_execute_prefilter_hash_lookup_matches_upper_filter() {
+        // The build side holds 1, 3 and 5; rows 0, 2 and 4 are not members.
+        let build_keys = [1_u64, 3, 5];
+        let handle = Arc::new(DynamicFilterPhysicalExpr::new(
+            vec![Arc::new(Column::new("field_0", 3)) as Arc<dyn PhysicalExpr>],
+            physical_lit(true),
+        ));
+        handle
+            .update(partitioned_hash_join_lookup(
+                &dynamic_producer_schema(),
+                &build_keys,
+            ))
+            .unwrap();
+        let published = handle.current().unwrap();
+        assert!(
+            published.is::<CaseExpr>(),
+            "a partitioned join routes its lookups: {published}"
+        );
+        assert!(
+            published.to_string().contains("hash_lookup")
+                && published.to_string().contains("hash_repartition"),
+            "the published shape must be the hash lookup a producer builds: {published}"
+        );
+
+        let (reader_builder, _) = prefilter_test_builder_with(
+            ObjectStore::new(Memory::default()).unwrap(),
+            6,
+            1,
+            PageIndexPolicy::Skip,
+            None,
+            Predicate::with_dyn_filters(vec![], vec![handle.clone()]),
+            CacheStrategy::Disabled,
+        )
+        .await;
+
+        let result = execute_test_prefilter(&reader_builder, 0).await;
+        assert_eq!(
+            3, result.filtered_rows,
+            "the lookup must prune the rows outside the build side"
+        );
+
+        let (all_batches, _) = read_test_row_group(&reader_builder, 0, None).await;
+        let (selected_batches, _) =
+            read_test_row_group(&reader_builder, 0, Some(result.refined_selection)).await;
+
+        // The upper filter evaluates the same published expression, but on the wide
+        // projected batch it guards instead of the single prefilter column.
+        let schema = all_batches[0].schema();
+        let upper_expr = reassign_expr_columns(Arc::clone(&published), schema.as_ref()).unwrap();
+        let upper_batches = all_batches
+            .iter()
+            .map(|batch| batch_filter(batch, &upper_expr).unwrap())
+            .collect::<Vec<_>>();
+        let upper_values = test_field_values(&upper_batches);
+        assert_eq!(
+            build_keys.to_vec(),
+            upper_values,
+            "the upper filter keeps exactly the build-side members"
+        );
+        assert_eq!(
+            upper_values,
+            test_field_values(&selected_batches),
+            "the prefilter must keep exactly the rows the upper filter keeps"
+        );
+    }
+
     /// A multi-page row group returns the same rows for the rows a dynamic prefilter
-    /// selects, and the projected read fetches fewer bytes for them.
+    /// selects, and the projected reader fetches fewer bytes for them.
+    ///
+    /// The metrics below belong to the projected read only: `page_size_to_fetch_store` is
+    /// the number of bytes of the projected columns that read covers, and
+    /// `pages_to_fetch_store` the number of store ranges it requests. The saving is a
+    /// projection-byte saving, not a net scan saving: this row group's filter column was
+    /// already read by the prefilter pass, and store range count is not part of the claim —
+    /// a partial selection can split a column into more ranges than a full read. The row
+    /// counts asserted here are the rows the projected reader returns, not the rows of the
+    /// filter column the prefilter decoded.
     ///
     /// The row group is large enough that the pages a partial selection skips span more
     /// than the store's fetch merge gap; below that the fetched byte ranges merge back
     /// into the whole row group whatever the selection is.
     #[tokio::test(flavor = "current_thread")]
-    async fn test_execute_prefilter_dynamic_selection_fetches_fewer_bytes() {
+    async fn test_execute_prefilter_dynamic_selection_saves_projected_store_bytes() {
         const ROWS: i64 = 100_000;
         const PAGE_ROWS: usize = 20_000;
 
@@ -3411,15 +3539,21 @@ mod tests {
         assert_eq!(
             vec![0],
             test_field_values(&selected_batches),
-            "the row selection must not change the rows it keeps"
+            "the row selection must not change the rows the projected reader returns"
         );
 
         let all = all_metrics.data.lock().unwrap().clone();
         let selected = selected_metrics.data.lock().unwrap().clone();
         assert!(
             all.page_size_to_fetch_store > 0,
-            "the control read must hit the store"
+            "the control read must fetch projected bytes from the store"
         );
+        // Store range count (`pages_to_fetch_store`) is deliberately not asserted: a
+        // partial selection can request more ranges than a full read, because one range
+        // per column can become one range per page.
+        //
+        // Projection-byte savings: the projected read covers fewer bytes, because the
+        // selection drops the pages of the rows the producer rejects.
         assert!(
             selected.page_size_to_fetch_store < all.page_size_to_fetch_store,
             "selected {} bytes vs all {} bytes",
@@ -3428,8 +3562,8 @@ mod tests {
         );
     }
 
-    /// Reads one row group of the projected columns and returns its batches with the fetch
-    /// metrics of exactly that read.
+    /// Reads one row group of the projected columns through the projected reader and
+    /// returns its batches with the fetch metrics of exactly that read.
     async fn read_test_row_group(
         reader_builder: &RowGroupReaderBuilder,
         row_group_idx: usize,
@@ -4080,6 +4214,88 @@ mod tests {
         let published = Predicate::to_physical_expr(published, producer_schema).unwrap();
         handle.update(published).unwrap();
         handle
+    }
+
+    /// Returns a hash-table lookup over the probe key that contains `keys`, i.e. one
+    /// build partition of a `HashJoin` that picked the hash-map pushdown strategy.
+    fn hash_lookup_expr(keys: &[u64], seed: &SeededRandomState) -> Arc<dyn PhysicalExpr> {
+        // The lookup compares hashes computed with the seed the producer built its map
+        // with, so the map is filled with the same `create_hashes` output.
+        let keys: ArrayRef = Arc::new(UInt64Array::from(keys.to_vec()));
+        let mut hashes = vec![0_u64; keys.len()];
+        create_hashes([keys], seed.random_state(), &mut hashes).unwrap();
+        let mut map = JoinHashMapU32::with_capacity(hashes.len().max(1));
+        map.update_from_iter(Box::new(hashes.iter().enumerate()), 0);
+
+        Arc::new(HashTableLookupExpr::new(
+            vec![Arc::new(Column::new("field_0", 3)) as Arc<dyn PhysicalExpr>],
+            seed.clone(),
+            Arc::new(Map::HashMap(Box::new(map))),
+            "hash_lookup".to_string(),
+            None,
+        ))
+    }
+
+    /// The dynamic filter a partitioned `HashJoin` publishes once every build partition
+    /// reported: one hash-table lookup per build partition, selected by
+    /// `hash_repartition(key) % partitions` in a `CASE`.
+    ///
+    /// `build_keys` is the whole build side. Each key is routed like the join routes a
+    /// probe row, so the branch that owns a key is the branch whose map contains it.
+    fn partitioned_hash_join_lookup(
+        producer_schema: &SchemaRef,
+        build_keys: &[u64],
+    ) -> Arc<dyn PhysicalExpr> {
+        const PARTITIONS: usize = 2;
+        let seed = SeededRandomState::with_seed(0);
+        let probe_key = || Arc::new(Column::new("field_0", 3)) as Arc<dyn PhysicalExpr>;
+        let route = Arc::new(BinaryExpr::new(
+            Arc::new(HashExpr::new(
+                vec![probe_key()],
+                REPARTITION_RANDOM_STATE,
+                "hash_repartition".to_string(),
+            )),
+            Operator::Modulo,
+            physical_lit(ScalarValue::UInt64(Some(PARTITIONS as u64))),
+        )) as Arc<dyn PhysicalExpr>;
+
+        // Route the build keys exactly like probe rows, with the producer schema so the
+        // routing expression reads `field_0` at the producer's column index.
+        let build_batch = RecordBatch::try_new(
+            Arc::clone(producer_schema),
+            vec![
+                Arc::new(StringArray::from(vec![""; build_keys.len()])) as ArrayRef,
+                Arc::new(StringArray::from(vec![""; build_keys.len()])) as ArrayRef,
+                Arc::new(UInt64Array::from(vec![0_u64; build_keys.len()])) as ArrayRef,
+                Arc::new(UInt64Array::from(build_keys.to_vec())) as ArrayRef,
+            ],
+        )
+        .unwrap();
+        let routes = route
+            .evaluate(&build_batch)
+            .unwrap()
+            .into_array(build_keys.len())
+            .unwrap();
+        let routes = routes.as_any().downcast_ref::<UInt64Array>().unwrap();
+        let mut partition_keys = vec![Vec::new(); PARTITIONS];
+        for (key, partition) in build_keys.iter().zip(routes.values()) {
+            partition_keys[*partition as usize].push(*key);
+        }
+
+        // The last partition is the `ELSE` branch, as the producer emits it.
+        let when_then_expr = partition_keys[..PARTITIONS - 1]
+            .iter()
+            .enumerate()
+            .map(|(partition, keys)| {
+                (
+                    physical_lit(ScalarValue::UInt64(Some(partition as u64))),
+                    hash_lookup_expr(keys, &seed),
+                )
+            })
+            .collect::<Vec<_>>();
+        let else_expr = hash_lookup_expr(&partition_keys[PARTITIONS - 1], &seed);
+
+        Arc::new(CaseExpr::try_new(Some(route), when_then_expr, Some(else_expr)).unwrap())
     }
 
     #[test]
