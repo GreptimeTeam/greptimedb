@@ -546,7 +546,7 @@ async fn test_reconcile_table_preserves_column_order_and_pk_order() {
     let builder =
         GreptimeDbClusterBuilder::new("test_reconcile_table_preserves_column_order_and_pk_order")
             .await;
-    let mut test_context = TestContext::new(MockInstanceBuilder::Distributed(builder)).await;
+    let test_context = TestContext::new(MockInstanceBuilder::Distributed(builder)).await;
     let frontend = test_context.frontend();
     let metasrv = test_context.metasrv();
     let reconciliation_manager = metasrv.reconciliation_manager();
