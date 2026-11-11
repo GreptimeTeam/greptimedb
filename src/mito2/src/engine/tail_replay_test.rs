@@ -30,8 +30,8 @@ use log_store::ObjectStoreLogStore;
 use log_store::object_store_wal::{NodeWalPrefix, ObjectStoreWalReaders};
 use object_store::ObjectStore;
 use object_store::layers::mock::{
-    Buffer, Error as MockError, ErrorKind, Metadata, MockLayer, MockLayerBuilder,
-    Result as MockResult, Write, Writer,
+    Buffer, Entry as ListEntry, Error as MockError, ErrorKind, List, Metadata, MockLayer,
+    MockLayerBuilder, Result as MockResult, Write, Writer,
 };
 use object_store::services::Memory;
 use rstest::rstest;
@@ -132,11 +132,24 @@ impl TestRegion {
     /// Creates a region on the object store WAL of node [NODE_ID], with leases when
     /// `leased`, and writes rows `[0, 3)` and `[3, 6)` in two WAL entries.
     async fn new(prefix: &str, leased: bool, mock_layer: Option<MockLayer>) -> Self {
+        Self::with_wal_layer(prefix, leased, mock_layer, None).await
+    }
+
+    /// As [Self::new], with `wal_layer` over the WAL storage of every node.
+    async fn with_wal_layer(
+        prefix: &str,
+        leased: bool,
+        mock_layer: Option<MockLayer>,
+        wal_layer: Option<MockLayer>,
+    ) -> Self {
         let mut env = TestEnv::with_prefix(prefix).await.with_node_id(NODE_ID);
         if let Some(mock_layer) = mock_layer {
             env = env.with_mock_layer(mock_layer);
         }
-        let wal_store = ObjectStore::new(Memory::default()).unwrap();
+        let mut wal_store = ObjectStore::new(Memory::default()).unwrap();
+        if let Some(wal_layer) = wal_layer {
+            wal_store = wal_store.layer(wal_layer);
+        }
         let log_store = ObjectStoreLogStore::try_new(
             wal_store.clone(),
             &wal_config(),
@@ -860,6 +873,54 @@ async fn test_cancelled_replay_does_not_publish_after_promotion() {
     region.wait_until_replayed().await;
 
     assert_eq!(2, region.listener.commits());
+}
+
+/// Parks every listing of the WAL of [REMOTE_NODE_ID] once `stall` is set, and counts them.
+fn stall_remote_listings(stall: Arc<AtomicBool>, stalled: Arc<AtomicUsize>) -> MockLayer {
+    MockLayerBuilder::default()
+        .lister_factory(Arc::new(move |path, _args, inner| {
+            if path.starts_with(&remote_prefix()) && stall.load(Ordering::Relaxed) {
+                stalled.fetch_add(1, Ordering::Relaxed);
+                Box::new(StalledLister)
+            } else {
+                inner
+            }
+        }))
+        .build()
+        .unwrap()
+}
+
+struct StalledLister;
+
+impl List for StalledLister {
+    async fn next(&mut self) -> MockResult<Option<ListEntry>> {
+        std::future::pending().await
+    }
+}
+
+#[tokio::test]
+async fn test_close_cancels_stalled_remote_read() {
+    let stall = Arc::new(AtomicBool::new(false));
+    let stalled = Arc::new(AtomicUsize::new(0));
+    let layer = stall_remote_listings(stall.clone(), stalled.clone());
+    let region =
+        TestRegion::with_wal_layer("tail-replay-stalled-read", false, None, Some(layer)).await;
+    let last = region.write_remote_rows(region.region_id, 6, 9).await;
+    region
+        .reopen_with_tails(vec![remote_tail(0, last, UptoKind::Reported)])
+        .await;
+    stall.store(true, Ordering::Relaxed);
+    region.catchup().await;
+    wait_until(|| stalled.load(Ordering::Relaxed) > 0).await;
+
+    let close = RegionRequest::Close(RegionCloseRequest::default());
+    region
+        .engine
+        .handle_request(region.region_id, close)
+        .await
+        .unwrap();
+
+    wait_until(|| region.listener.ended() == 1).await;
 }
 
 #[tokio::test]
