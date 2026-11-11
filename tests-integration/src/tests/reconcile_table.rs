@@ -603,7 +603,10 @@ async fn test_reconcile_table_preserves_column_order_and_pk_order() {
     let ts_pos = column_section.find("ts").expect("ts column missing");
     let a_pos = column_section.find("a string").expect("a column missing");
     let b_pos = column_section.find("b string").expect("b column missing");
-    assert!(ts_pos < a_pos && a_pos < b_pos, "expected column order ts, a, b, got:\n{formatted}");
+    assert!(
+        ts_pos < a_pos && a_pos < b_pos,
+        "expected column order ts, a, b, got:\n{formatted}"
+    );
 
     let key_section = normalized
         .split("primary key")
