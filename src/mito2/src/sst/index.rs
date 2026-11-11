@@ -1069,18 +1069,27 @@ impl IndexBuildTask {
         Ok(ControlFlow::Continue(()))
     }
 
-    /// Reads the SST and builds a replacement index file.
+    /// Builds a replacement index file, scanning data only when a creator needs rows.
     async fn create_index(
         &self,
         region_file_id: RegionFileId,
         new_index_version: u64,
     ) -> Result<ControlFlow<IndexBuildReport, (Indexer, IndexOutput)>> {
-        let mut parquet_reader = self
+        let reader_builder = self
             .access_layer
             .read_sst(self.file.clone())
-            .expected_metadata(Some(self.target_region_metadata.clone()))
-            .build()
-            .await?;
+            .expected_metadata(Some(self.target_region_metadata.clone()));
+        let plan = self.indexer_builder.plan();
+        // Inverted segments must align with the actual SST row groups. Other
+        // creators can decide input reuse without opening the Parquet file.
+        let needs_row_group_size = plan
+            .entries()
+            .any(|entry| entry.kind.index_type() == IndexType::InvertedIndex);
+        let mut parquet_reader = if needs_row_group_size {
+            reader_builder.build().await?
+        } else {
+            None
+        };
 
         let row_group_size = parquet_reader.as_ref().and_then(|reader| {
             reader
@@ -1102,8 +1111,19 @@ impl IndexBuildTask {
             return Ok(ControlFlow::Break(self.aborted("No index to build")));
         }
 
-        if let Some(mut reader) = parquet_reader.take() {
-            loop {
+        if indexer.requires_row_scan() && !needs_row_group_size {
+            parquet_reader = match reader_builder.build().await {
+                Ok(reader) => reader,
+                Err(err) => {
+                    indexer.abort().await;
+                    return Err(err);
+                }
+            };
+        }
+        if indexer.requires_row_scan()
+            && let Some(mut reader) = parquet_reader.take()
+        {
+            while indexer.requires_row_scan() {
                 match reader.next_record_batch().await {
                     Ok(Some(batch)) => {
                         indexer.update_flat(&batch).await;
@@ -3573,6 +3593,112 @@ mod tests {
         assert!(purger.0.lock().unwrap().is_empty());
         drop(reader);
         assert_eq!(*purger.0.lock().unwrap(), vec![refreshed]);
+    }
+
+    #[tokio::test]
+    async fn test_rebuild_scans_only_when_a_creator_requires_rows() {
+        for with_builtin in [false, true] {
+            let env = SchedulerEnv::new().await;
+            let mut metadata = sst_region_metadata();
+            if !with_builtin {
+                for column in &mut metadata.column_metadatas {
+                    column.column_schema.set_inverted_index(false);
+                    column.column_schema.unset_skipping_options().unwrap();
+                }
+            }
+            let metadata = Arc::new(metadata);
+            let manifest_ctx = env.mock_manifest_context(metadata.clone()).await;
+            let file_purger = Arc::new(NoopFilePurger {});
+            let info = mock_sst_file(metadata.clone(), &env, IndexBuildMode::Async).await;
+            let file_meta = FileMeta {
+                region_id: metadata.region_id,
+                file_id: info.file_id,
+                file_size: info.file_size,
+                max_row_group_uncompressed_size: info.max_row_group_uncompressed_size,
+                num_rows: info.num_rows as u64,
+                num_row_groups: info.num_row_groups,
+                ..Default::default()
+            };
+            seed_manifest_file(&manifest_ctx, &file_meta).await;
+            let version = mock_version_control(
+                metadata.clone(),
+                file_purger.clone(),
+                HashMap::from([(file_meta.file_id, file_meta.clone())]),
+            )
+            .await;
+            let mut builder = mock_indexer_builder(metadata.clone(), &env).await;
+            let mutable = Arc::make_mut(&mut builder);
+            mutable.build_type = IndexBuildType::Manual;
+            Arc::make_mut(&mut mutable.registry)
+                .register(Arc::new(FailingProvider(ProviderFailure::Reused)))
+                .unwrap();
+            let (tx, _rx) = mpsc::channel(4);
+            let mut task = IndexBuildTask {
+                region_id: metadata.region_id,
+                file: FileHandle::new(file_meta.clone(), file_purger.clone()),
+                target_region_metadata: metadata.clone(),
+                source: IndexBuildSource::new(file_meta.clone(), metadata.schema_version),
+                reason: IndexBuildType::Manual,
+                access_layer: env.access_layer.clone(),
+                listener: WorkerListener::default(),
+                manifest_ctx: manifest_ctx.clone(),
+                write_cache: None,
+                cache_manager: None,
+                file_purger,
+                indexer_builder: builder,
+                request_sender: tx,
+                index_options: IndexOptions::default(),
+                result_senders: Vec::new(),
+            };
+            if !with_builtin {
+                // A reuse-only build must not open even the Parquet footer.
+                // Keep the file identity published, but make footer reads fail.
+                let path = task
+                    .file
+                    .file_path(env.access_layer.table_dir(), env.access_layer.path_type());
+                env.access_layer
+                    .object_store()
+                    .write(&path, Bytes::from_static(b"not a parquet file"))
+                    .await
+                    .unwrap();
+            }
+            // The reused creator rejects row updates, even when built-in creators need a scan.
+            task.index_build(version).await.unwrap();
+            let published = manifest_ctx.manifest().await.files[&file_meta.file_id].clone();
+            assert!(published.available_indexes.contains(&IndexType::HllIndex));
+            assert!(published.index_file_size > 0);
+            let reader = env
+                .access_layer
+                .build_puffin_manager()
+                .reader(&RegionIndexId::new(
+                    RegionFileId::new(metadata.region_id, file_meta.file_id),
+                    published.index_version,
+                ))
+                .await
+                .unwrap();
+            reader.blob("test-sketch").await.unwrap();
+            if with_builtin {
+                assert!(
+                    published
+                        .available_indexes
+                        .contains(&IndexType::InvertedIndex)
+                );
+                let blob = reader.blob(inverted_index::INDEX_BLOB_TYPE).await.unwrap();
+                let index_metadata =
+                    index::inverted_index::format::reader::InvertedIndexBlobReader::new(
+                        blob.reader().await.unwrap(),
+                    )
+                    .metadata(None)
+                    .await
+                    .unwrap();
+                assert_eq!(index_metadata.total_row_count, file_meta.num_rows);
+            } else {
+                assert_eq!(
+                    published.available_indexes.as_slice(),
+                    &[IndexType::HllIndex]
+                );
+            }
+        }
     }
 
     #[tokio::test]
