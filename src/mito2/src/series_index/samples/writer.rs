@@ -111,7 +111,8 @@ impl PendingBlock {
 /// copy of the key. Consecutive equal keys therefore reuse the previous reference, while every
 /// new series appends its bytes after the previous copy: references are ordered, disjoint, and
 /// unique per series, which is what lets a reader treat an equal reference as the same series
-/// without reading the bytes.
+/// without reading the bytes. Each copy is followed by its XXH64, which the reference does not
+/// count: a reader verifies the bytes before they can name a series.
 fn place_keys(leaves: Vec<Vec<PendingBlock>>, start: u64) -> Result<(Vec<Vec<Block>>, Vec<u8>)> {
     let mut area: Vec<u8> = Vec::new();
     let mut previous: Option<(Vec<u8>, KeyRef)> = None;
@@ -135,6 +136,7 @@ fn place_keys(leaves: Vec<Vec<PendingBlock>>, start: u64) -> Result<(Vec<Vec<Blo
                         )
                         .ok_or_else(|| invalid("sample key offset overflow"))?;
                     area.extend_from_slice(block.key.bytes());
+                    area.extend_from_slice(&codec::checksum(block.key.bytes()).to_le_bytes());
                     let reference = KeyRef { offset, length };
                     previous = Some((block.key.bytes().to_vec(), reference));
                     reference
@@ -171,7 +173,8 @@ pub(super) struct SamplesWriter {
     position: u64,
     part_rows: u64,
     part_blocks: u64,
-    /// Key bytes this part has accumulated, one copy per series, counted before they are written.
+    /// Bytes this part's key area is charged, one copy per series with its checksum, counted
+    /// before they are written.
     part_key_bytes: u64,
     /// The last series whose key this part already counts, to charge one copy per series.
     part_last_key: Option<ExactSeriesKey>,
@@ -219,7 +222,7 @@ impl SamplesWriter {
         let manifest = Manifest {
             format: ArtifactFormat::ColumnarSamples,
             version: VERSION,
-            identity_encoding: IdentityEncoding::CURRENT,
+            identity_encoding: IdentityEncoding::CURRENT_SAMPLES,
             region_id: metadata.region_id.as_u64(),
             source_file_id,
             generation,
@@ -406,10 +409,9 @@ impl SamplesWriter {
             .as_ref()
             .ok_or_else(|| invalid("sample block has no series key"))?;
         let (mut block, chunks) = encode_block(&rows, key, &self.manifest, self.ordinal)?;
-        // One key copy per series, decided before any rollover: a part that starts below still
-        // has to account for this block's key.
-        let key_len = key.bytes().len() as u64;
-        let new_key_copy = self.part_last_key.as_ref() != self.series_key.as_ref();
+        // Bytes one copy of this series' key costs in a part's key area: the key and its stored
+        // checksum.
+        let key_len = key.bytes().len() as u64 + metadata::KEY_CHECKSUM_BYTES;
         self.ordinal = self
             .ordinal
             .checked_add(1)
@@ -459,7 +461,9 @@ impl SamplesWriter {
             .push(block);
         // Keys live in their own area but are still bytes of this part: count one copy per
         // series so the part target covers them too, and a key-heavy part still rolls over.
-        if new_key_copy {
+        // This is decided after the rollover above, which cleared the part's accounting: a series
+        // that starts a new part still needs its copy counted in that part.
+        if self.part_last_key.as_ref() != self.series_key.as_ref() {
             self.part_key_bytes = self
                 .part_key_bytes
                 .checked_add(key_len)
@@ -591,6 +595,23 @@ impl SamplesWriter {
             objects,
             file_size,
         })
+    }
+}
+
+#[cfg(test)]
+impl SamplesWriter {
+    /// The current part's accounting, for the rollover tests: `(position, counted key bytes,
+    /// blocks in the current part, finished parts)`.
+    ///
+    /// A key copy that is not counted defers the part boundary silently, and the parts it makes
+    /// are still readable, so only the accounting itself shows the difference.
+    pub(super) fn part_accounting(&self) -> (u64, u64, u64, usize) {
+        (
+            self.position,
+            self.part_key_bytes,
+            self.part_blocks,
+            self.manifest.files.len(),
+        )
     }
 }
 #[async_trait]

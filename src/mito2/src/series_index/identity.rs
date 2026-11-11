@@ -30,24 +30,41 @@ use store_api::storage::ColumnId;
 use crate::error::{DecodeSnafu, Result};
 use crate::series_index::MetricSeriesId;
 
-/// The identity semantics an artifact was written with.
+/// The identity semantics *and storage layout* an artifact was written with.
 ///
 /// This is the one mandatory discriminator every artifact manifest carries. Artifacts
 /// written under hash-only identity are structurally valid and perfectly ordered, so
 /// nothing else in them distinguishes them from exact ones: an already collapsed series
 /// index looks fine and its lost labels cannot be recovered. A manifest that does not
 /// name this encoding is therefore not reusable, whatever its coverage says.
+///
+/// The serialized value names the layout as well as the identity, because two artifacts can
+/// store the same exact key in incompatible places: the samples format kept one copy per block
+/// inside its pages, then moved to one copy per series in a dedicated key area with a stored
+/// checksum. An artifact of the older layout is structurally valid and ordered too, so without
+/// the layout in this value maintenance would mark it reusable and only a part read would fail.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "kebab-case")]
 pub(crate) enum IdentityEncoding {
-    /// Identity is [`ExactSeriesKey`]: the exact canonical sparse primary key, with
-    /// `(table_id, tsid)` only as its coarse, hash-based prefix.
+    /// Identity is [`ExactSeriesKey`], stored inside the artifact's own pages: the
+    /// series-index layout, and the retired samples layout that repeated the key in every
+    /// block descriptor.
+    #[serde(rename = "exact-sparse-key")]
     ExactSparseKey,
+    /// Identity is [`ExactSeriesKey`], stored once per series in a part-level key area after
+    /// the column payloads, each copy followed by its checksum.
+    #[serde(rename = "exact-sparse-key-area")]
+    ExactSparseKeyArea,
 }
 
 impl IdentityEncoding {
-    /// The encoding new artifacts are written with; readers require exactly this.
-    pub(crate) const CURRENT: Self = Self::ExactSparseKey;
+    /// The encoding new samples artifacts are written with; their readers require exactly this.
+    ///
+    /// Distinct from the series-index encoding on purpose: it names the key-area layout, so an
+    /// artifact written before the key area cannot be taken for a current one.
+    pub(crate) const CURRENT_SAMPLES: Self = Self::ExactSparseKeyArea;
+
+    /// The encoding new series-index artifacts are written with; their readers require this.
+    pub(crate) const CURRENT_SERIES_INDEX: Self = Self::ExactSparseKey;
 }
 
 /// The exact identity of one series: its canonical sparse primary-key bytes.

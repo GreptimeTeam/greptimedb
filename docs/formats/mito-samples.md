@@ -6,13 +6,17 @@ exact-identity change is enforced by the mandatory `identity_encoding` manifest
 discriminator, not by a version bump.
 
 Every block names the exact series identity (the canonical sparse primary key), which
-the part stores once per series in its key area.
+the part stores once per series in its [key area](#key-area), followed by that copy's
+checksum.
 An artifact written before exact identity has the same version number and recorded
 only `(table_id, tsid)`, a hash; it can be structurally valid and perfectly ordered
 while two distinct series were merged. Nothing in such an artifact proves
 otherwise, so a manifest without the `identity_encoding` discriminator is
-rejected, and its artifact rebuilt from SSTs; there is no dual reader. It shares
-artifact conventions with
+rejected, and its artifact rebuilt from SSTs; there is no dual reader. The same
+applies to an artifact of the earlier layout of this format, whose keys sat inside
+the block descriptors: its `identity_encoding` value is the older
+`exact-sparse-key`, so it is refused when the manifest is opened rather than when a
+part is first read. It shares artifact conventions with
 [Mito columnar series format](mito-series.md).
 
 Samples store nullable Float64 fields, timestamps, sequences, and operation types
@@ -62,7 +66,7 @@ generation is unique for each build. A manifest contains:
 | --- | --- |
 | `format` | String `columnar-samples` |
 | `version` | Integer 1 |
-| `identity_encoding` | String `exact-sparse-key`; required, never defaulted. Absent or different means the artifact is not readable |
+| `identity_encoding` | String `exact-sparse-key-area`; required, never defaulted. It names the identity *and* the layout that stores it, so `exact-sparse-key` (keys inline in the block descriptors) is different and not readable |
 | `region_id` | Physical region ID, u64 |
 | `source_file_id` | Artifact owner ID matching `SamplesEntry.file_id`; the SST ID for legacy artifacts, or the generation ID for daily artifacts |
 | `generation` | `FileId` matching the catalog artifact generation |
@@ -169,9 +173,12 @@ nondecreasing within one exact key, and sequences are nonincreasing within equal
 timestamps, including across parts. A change of exact key restarts timestamps and
 ordinals, even when the coarse `(table_id, tsid)` prefix is unchanged. Equal
 ordering keys retain input order; operation type is not a sorting key. The key area
-follows the same order, one copy per series; because key bytes are read lazily, a
-reader validates ordering on the descriptor's `(table_id, tsid)` and on the order of
-key references instead of on the label bytes.
+follows the same order, one copy per series. Block keys never decrease, so a key that
+is read must not sort before the key read before it; a repeated key must continue its
+timestamps and ordinals rather than restart them. Because key bytes are read lazily,
+the descriptor-only checks use the `(table_id, tsid)` prefix and the order, disjointness,
+and reuse of key references inside one part, and only the keys a request actually loads
+are checked for byte order and continuation.
 
 Blocks split on an identity change or before the next row would exceed a packing
 limit. There is no hourly split and no padding of short blocks. The default row
@@ -226,17 +233,35 @@ reference means "the same exact series" without reading the bytes.
 A key's length is bounded by the part, not by a page or a chunk. Version 1 puts no
 page inside the key area, so one key may be far longer than the 65,536-byte page
 limit; the `u32` length in a descriptor is validated against `key_end`, so a
-corrupt length can never address bytes outside the part. There is no per-key
-compression, checksum, or extra framing: a key is stored exactly as the SST encodes
-it, and its own primary-key framing (a fixed reserved prefix plus dense or sparse
-label encoding) is what validates it.
+corrupt length can never address bytes outside the part.
+
+Each copy is `[key bytes][checksum]`, where the checksum is the u64 XXH64 of those
+key bytes with seed zero, stored little-endian. A reference's `length` counts the key
+bytes only, so the checksum is always the eight bytes after `offset + length` and is
+never part of what the reference names. There is no per-key compression and no other
+framing: the key bytes between them are stored exactly as the SST encodes them, and
+their own primary-key framing (a fixed reserved prefix plus dense or sparse label
+encoding) is what decodes them. The checksum is what protects them. A key previously
+sat inside a metadata page, whose stored bytes the page reference already checksummed;
+without a per-key checksum, flipping one label byte would keep the framing and the
+`(table_id, tsid)` prefix valid and silently attribute the block's rows to another
+series.
 
 Reading stays lazy. A reader reads only the byte ranges of the keys of the blocks a
-request selects, at most once per series, and validates a fetched key's framing and
-its `(table_id, tsid)` prefix against the descriptor that referenced it. A reference is
-rejected as soon as its descriptor is decoded — before any row is emitted — when it
-starts before `payload_end`, when `offset + length` exceeds `key_end`, when the length
-is zero, or when two consecutive descriptors that do not name one series overlap.
+request selects, at most once per series, and validates a fetched key's checksum, its
+framing, and its `(table_id, tsid)` prefix against the descriptor that referenced it. A
+reference is rejected as soon as its descriptor is decoded — before any row is emitted
+— when it starts before `payload_end`, when `offset + length + 8` exceeds `key_end`,
+when the length is zero, or when two consecutive descriptors of one part that do not
+name one series overlap.
+
+A key reference is an offset into one part's key area, so the references of two parts
+are unrelated numbers and are never compared. Whether one exact series continues in
+another part is decided on the exact key bytes: the last key a request loaded from one
+part is compared with the first it loads from the next, and an equal key must continue
+timestamps and ordinals, while a greater key starts a new series at ordinal zero.
+Because keys are only read for blocks a request selects, this content check covers the
+keys actually loaded: unvisited ranges are validated structurally, not by content.
 
 ### Metadata pages
 
@@ -535,15 +560,18 @@ are never rewritten.
 This branch has no deployments, so the local series-index cache token is pinned to
 `1`: a cache written by any other build is discarded on startup and rebuilt from
 the SSTs before regions open, and ordinary SST reads remain available meanwhile.
-That is the only migration this layout has. An artifact written by an earlier build
-of this branch — keys inside the descriptor, a 112-byte trailer without `key_end` —
-carries the same file version and the same `identity_encoding` discriminator, so
-nothing in it names the old shape; the reader locates a trailer from the recorded
-object size, reads the last 120 bytes of such a part, and rejects the shifted frame
-instead of decoding it. Such an artifact is therefore unreadable and is rebuilt,
-not read partially. Allow for rebuild time and I/O in either direction; do not reuse
-daily catalogs with an older reader outside this startup check. Existing per-SST
-catalog entries remain readable by the new reader.
+That is the only cache migration this layout has. An artifact written by an earlier
+build of this branch — keys inside the block descriptors, a key area without stored
+checksums, a 112-byte trailer without `key_end` — carries a different
+`identity_encoding` value, `exact-sparse-key` instead of `exact-sparse-key-area`, so
+it is refused when its manifest is opened. Maintenance treats that refusal as "not
+reusable" and rebuilds the artifact, so an old artifact is never marked reusable and
+then fails on the first part read. A part reached without that check would also be
+rejected: the reader locates a trailer from the recorded object size, reads the last
+120 bytes of such a part, and refuses the shifted frame instead of decoding it.
+Allow for rebuild time and I/O in either direction; do not reuse daily catalogs with
+an older reader outside this startup check. Existing per-SST catalog entries remain
+readable by the new reader.
 
 A prepared scan uses a grouped artifact only when all of its sources belong to
 that scan's assignment or were excluded solely by its time filter. Partial coverage

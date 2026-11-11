@@ -238,6 +238,16 @@ impl KeyRef {
             .ok_or_else(|| invalid("sample key offset overflow"))
     }
 
+    /// End of this key's stored entry: its bytes followed by its checksum.
+    ///
+    /// `length` covers the key only, so the stored checksum is exactly [`KEY_CHECKSUM_BYTES`]
+    /// past [`Self::end`] and never part of what the reference itself names.
+    pub fn checksum_end(&self) -> Result<u64> {
+        self.end()?
+            .checked_add(KEY_CHECKSUM_BYTES)
+            .ok_or_else(|| invalid("sample key offset overflow"))
+    }
+
     fn encode(&self, out: &mut Vec<u8>) {
         put_u64(out, self.offset);
         put_u32(out, self.length);
@@ -250,21 +260,32 @@ impl KeyRef {
         })
     }
 
-    /// Requires this reference to name a nonempty key inside `area`.
+    /// Requires this reference to name a nonempty key entry inside `area`.
+    ///
+    /// The entry includes the stored checksum, so a reference whose key ends inside the area but
+    /// whose checksum would not is rejected like any other out-of-area reference.
     pub fn validate(&self, area: KeyArea) -> Result<()> {
         require(
-            self.length > 0 && self.offset >= area.start && self.end()? <= area.end,
+            self.length > 0 && self.offset >= area.start && self.checksum_end()? <= area.end,
             "sample key reference outside key area",
         )
     }
 }
 
+/// Bytes of the XXH64 stored after each key, seed zero.
+///
+/// A key copy is `[key bytes][checksum]`; the descriptor's reference names only the key, so a
+/// fetched key can be verified before it is used to attribute rows to a series. Without it a
+/// flipped label byte would silently move rows to another series, which the old inline-key layout
+/// could not suffer: its keys sat in a page whose stored bytes were already checksummed.
+pub(super) const KEY_CHECKSUM_BYTES: u64 = std::mem::size_of::<u64>() as u64;
+
 /// A part's key area: exact series keys stored back to back, outside every metadata page.
 ///
 /// Keys are appended in block order and are never page-bounded, so their length is bounded by
-/// the part, not by `PAGE_LIMIT`. Because blocks are ordered by exact key, every block of one
-/// series is adjacent and shares a single copy of the key, which makes an equal [`KeyRef`] mean
-/// "the same exact series".
+/// the part, not by `PAGE_LIMIT`. Every copy is followed by its checksum. Because blocks are
+/// ordered by exact key, every block of one series is adjacent and shares a single copy of the
+/// key, which makes an equal [`KeyRef`] mean "the same exact series".
 #[derive(Debug, Clone, Copy)]
 pub(super) struct KeyArea {
     pub start: u64,
@@ -300,23 +321,113 @@ pub(super) struct Block {
     pub rows: u32,
     pub columns: Vec<Column>,
 }
-/// The ordering boundary retained between pages, without their column descriptors.
-#[derive(Clone, Copy)]
+/// The ordering boundary retained between pages and parts, without column descriptors.
+///
+/// A [`KeyRef`] is an offset inside one part's key area, so two references are comparable only
+/// when they belong to the same part; `part` carries that scope in the boundary itself so no
+/// caller can compare references across a part boundary by accident. Two parts hold unrelated
+/// key areas, which is why a series that spans parts is recognised by [`BlockOrder::continues`]
+/// on the exact key bytes instead.
+#[derive(Debug, Clone, Copy)]
 pub(crate) struct BlockOrder {
+    part: u32,
     id: MetricSeriesId,
     key: KeyRef,
+    min: i64,
     max: i64,
     ordinal: u64,
 }
 
+impl BlockOrder {
+    /// The part this block belongs to.
+    pub(crate) fn part(&self) -> u32 {
+        self.part
+    }
+
+    /// The coarse `(table_id, tsid)` prefix, which is ordered across parts as well.
+    pub(crate) fn id(&self) -> MetricSeriesId {
+        self.id
+    }
+
+    /// The block's key reference, a location inside [`Self::part`]'s key area.
+    pub(crate) fn key(&self) -> KeyRef {
+        self.key
+    }
+
+    /// Checks the next block of the *same* part against this boundary.
+    ///
+    /// Ownership and ordering of a part are decided on the exact `(table_id, tsid)` and on the
+    /// key reference only: two blocks of one part that share one reference share one key copy,
+    /// so they are one exact series, while a different series always has its own copy, placed
+    /// after the previous one and restarting the ordinal. Only descriptor fields are read, so a
+    /// block this request prunes is never fetched and its key content is not validated.
+    pub(crate) fn precedes(&self, next: &Self, adjacent: bool) -> Result<()> {
+        require(
+            self.part == next.part,
+            "sample key references compared across parts",
+        )?;
+        require(self.id <= next.id, "unordered sample series keys")?;
+        if next.key == self.key {
+            self.continues(next, adjacent)?;
+        } else {
+            // A different series must place its one key copy after the previous series' copy.
+            // Overlap, or a second copy of a key that is still current, is a corrupt reference
+            // rather than a silent second read of the same bytes.
+            require(
+                self.key.checksum_end()? <= next.key.offset,
+                "overlapping sample key references",
+            )?;
+            if adjacent {
+                require(next.ordinal == 0, "first sample block has nonzero ordinal")?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Requires `next` to continue one exact series in time and ordinal.
+    ///
+    /// Equal exact key bytes are what make two blocks the same series across a part boundary,
+    /// where their references belong to different key areas. A repeated key that restarts its
+    /// ordinal or goes back in time is a corrupt part, not a second series.
+    pub(crate) fn continues(&self, next: &Self, adjacent: bool) -> Result<()> {
+        require(
+            self.max <= next.min && self.ordinal < next.ordinal,
+            "unordered sample blocks",
+        )?;
+        if adjacent {
+            require(
+                self.ordinal.checked_add(1) == Some(next.ordinal),
+                "nonconsecutive sample ordinal",
+            )?;
+        }
+        Ok(())
+    }
+}
+
 impl Block {
-    pub(crate) fn order(&self) -> BlockOrder {
+    /// The ordering boundary this block contributes, scoped to its part.
+    pub(crate) fn order(&self, part: u32) -> BlockOrder {
         BlockOrder {
+            part,
             id: self.id,
             key: self.key,
+            min: self.min,
             max: self.max,
             ordinal: self.ordinal,
         }
+    }
+
+    /// Checks this block against the previous block of the same page.
+    ///
+    /// A page never spans parts, so both references name one key area and are comparable; a block
+    /// in another part is compared through [`BlockOrder::continues`] and its exact key instead.
+    fn follows_in_page(&self, previous: &Self, adjacent: bool) -> Result<()> {
+        // One scope for both sides: a page belongs to exactly one part, and no reference built
+        // here outlives the page.
+        const PAGE_SCOPE: u32 = 0;
+        previous
+            .order(PAGE_SCOPE)
+            .precedes(&self.order(PAGE_SCOPE), adjacent)
     }
 
     /// The coarse bounds used for pruning. Exact ownership lives in `key`.
@@ -433,42 +544,6 @@ impl Block {
             columns,
         })
     }
-    /// Checks this block against the previous one.
-    ///
-    /// Ownership and ordering are decided on the descriptor's exact `(table_id, tsid)` and on
-    /// the block's key reference. The label bytes themselves live in the key area and are read
-    /// only for blocks a request selects, so they cannot take part in validating every
-    /// descriptor. Blocks of one exact series share one reference, so equal references mean
-    /// "the same series": two blocks that share one `(table_id, tsid)` but differ in labels are
-    /// a key collision, always carry different references, and may restart timestamps and
-    /// ordinals. Only the same exact series keeps the monotonic rules.
-    pub fn follows(&self, previous: &BlockOrder, adjacent: bool) -> Result<()> {
-        require(previous.id <= self.id, "unordered sample series keys")?;
-        if self.key == previous.key {
-            require(
-                previous.max <= self.min && previous.ordinal < self.ordinal,
-                "unordered sample blocks",
-            )?;
-            if adjacent {
-                require(
-                    previous.ordinal.checked_add(1) == Some(self.ordinal),
-                    "nonconsecutive sample ordinal",
-                )?;
-            }
-        } else {
-            // A different series must place its one key copy after the previous series' copy.
-            // Overlap, or a second copy of a key that is still current, is a corrupt reference
-            // rather than a silent second read of the same bytes.
-            require(
-                previous.key.end()? <= self.key.offset,
-                "overlapping sample key references",
-            )?;
-            if adjacent {
-                require(self.ordinal == 0, "first sample block has nonzero ordinal")?;
-            }
-        }
-        Ok(())
-    }
 }
 #[derive(Debug)]
 pub(super) enum Page {
@@ -553,7 +628,7 @@ impl Page {
                 for _ in 0..count {
                     let block = Block::decode(&mut c, manifest, areas, &mut end)?;
                     if let Some(previous) = blocks.last() {
-                        block.follows(&previous.order(), true)?;
+                        block.follows_in_page(previous, true)?;
                     }
                     blocks.push(block);
                 }

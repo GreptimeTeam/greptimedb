@@ -31,11 +31,13 @@ use store_api::codec::PrimaryKeyEncoding;
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::FileId;
 
-use super::metadata::{Bounds, HEADER_SIZE, Page, PayloadReference, TRAILER_SIZE, Trailer};
+use super::metadata::{
+    Bounds, HEADER_SIZE, KEY_CHECKSUM_BYTES, Page, PayloadReference, TRAILER_SIZE, Trailer,
+};
 use super::*;
 use crate::series_index::artifact::{SamplesEntry, SamplesFileHandle};
 use crate::series_index::format::{SamplesBatch, SamplesFormat, SamplesReadRequest};
-use crate::series_index::identity::ExactSeriesKey;
+use crate::series_index::identity::{ExactSeriesKey, IdentityEncoding};
 use crate::series_index::purger::series_index_channel;
 use crate::sst::file::RegionFileId;
 use crate::test_util::sst_util::{new_sparse_primary_key, sst_region_metadata_with_encoding};
@@ -1193,6 +1195,141 @@ async fn real_samples_reconcile_reopen_and_retire(
     engine.stop().await.unwrap();
 }
 
+/// An artifact written by the previous layout keeps its key in every block descriptor and names
+/// that older encoding in its manifest.
+///
+/// Nothing else separates it from a current artifact: it is structurally valid, ordered, and has
+/// the same version. Without the layout in `identity_encoding`, maintenance opens it, finds it
+/// sound, and keeps it - and only the first part read fails. The manifest must be refused instead,
+/// so an unreadable artifact is rebuilt before it is ever marked reusable.
+#[tokio::test]
+async fn inline_key_artifact_is_rebuilt_not_reused() {
+    use std::collections::HashMap;
+
+    use crate::config::MitoConfig;
+    use crate::series_index::format::SeriesFormats;
+    use crate::series_index::maintenance::reconcile_series_indexes;
+    use crate::series_index::version::SeriesIndexVersion;
+    use crate::test_util::TestEnv;
+
+    let mut env = TestEnv::with_prefix("columnar-samples-inline-keys").await;
+    let (engine, region) = crate::series_index::tests::prepare_region_with_metadata_and_flush(
+        &mut env,
+        &[1000, 2000],
+        MitoConfig {
+            experimental_enable_series_index: true,
+            experimental_series_index_maintenance_interval: Duration::from_secs(3600),
+            min_compaction_interval: Duration::from_secs(3600),
+            ..Default::default()
+        },
+        metadata(),
+        true,
+    )
+    .await;
+    let format = Arc::new(ColumnarSamplesFormat::default());
+    *region.series_index_version_control.formats.write().unwrap() = Arc::new(SeriesFormats {
+        samples: Some(format.clone()),
+        ..Default::default()
+    });
+    let store = region.series_index_store.clone().unwrap();
+    let (purger, _purges) = series_index_channel(store.clone());
+    let reconcile = || {
+        reconcile_series_indexes(
+            0,
+            store.clone(),
+            region.clone(),
+            Duration::from_secs(100),
+            0,
+            purger.clone(),
+            false,
+            true,
+        )
+    };
+    assert_eq!(1, reconcile().await.unwrap().built_samples);
+
+    // Rewrite every samples manifest to the value an artifact written before the key area carries.
+    let current = region.series_index_version();
+    let mut samples = HashMap::new();
+    for (id, handle) in &current.samples {
+        let mut entry = handle.entry().clone();
+        for object in &mut entry.artifact.objects {
+            if !object.path.ends_with("manifest.json") {
+                continue;
+            }
+            let bytes = store.read(&object.path).await.unwrap().to_bytes();
+            let mut manifest: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            manifest["identity_encoding"] = serde_json::json!("exact-sparse-key");
+            let rewritten = serde_json::to_vec(&manifest).unwrap();
+            object.file_size = rewritten.len() as u64;
+            store.write(&object.path, rewritten).await.unwrap();
+        }
+        entry.artifact.file_size = entry
+            .artifact
+            .objects
+            .iter()
+            .map(|object| object.file_size)
+            .sum();
+        samples.insert(
+            *id,
+            SamplesFileHandle::new(handle.file_id(), entry, purger.clone()),
+        );
+    }
+    region
+        .series_index_version_control
+        .publish(Arc::new(SeriesIndexVersion {
+            samples: samples.clone(),
+            range_indexes: current.range_indexes.clone(),
+            series_indexes: current.series_indexes.clone(),
+            index_buckets: current.index_buckets.clone(),
+        }));
+
+    // The manifest alone refuses it: no part has to be read to see the old layout.
+    let legacy = samples.values().next().unwrap().clone();
+    let error = format
+        .reader(store.clone(), legacy.clone())
+        .await
+        .err()
+        .expect("an inline-key artifact must be refused at open");
+    let message = error.to_string();
+    assert!(message.contains("rebuild"), "{message}");
+
+    // Maintenance must rebuild it, not mark it reusable and fail on the first read.
+    let stats = reconcile().await.unwrap();
+    assert_eq!(
+        1, stats.built_samples,
+        "an artifact the format refuses must be rebuilt"
+    );
+    let rebuilt = region.series_index_version();
+    assert_eq!(1, rebuilt.samples.len());
+    for handle in rebuilt.samples.values() {
+        assert_ne!(
+            handle.entry().artifact.generation,
+            legacy.entry().artifact.generation,
+            "the refused artifact must be replaced"
+        );
+        let manifest = manifest(&store, handle).await;
+        assert_eq!(
+            IdentityEncoding::CURRENT_SAMPLES,
+            manifest.identity_encoding
+        );
+        let reader = format.reader(store.clone(), handle.clone()).await.unwrap();
+        let batches = reader
+            .read(full_request())
+            .unwrap()
+            .try_collect::<Vec<_>>()
+            .await
+            .unwrap();
+        let mut times = collect_rows(&batches)
+            .into_iter()
+            .map(|row| row.2)
+            .collect::<Vec<_>>();
+        times.sort_unstable();
+        assert_eq!(vec![1000, 2000], times);
+    }
+    use store_api::region_engine::RegionEngine;
+    engine.stop().await.unwrap();
+}
+
 /// Fields the frozen v1 manifest still has; unknown-to-the-current-format ones are
 /// deliberately not parsed, so the artifact reaches the reader's rejection path.
 #[derive(serde::Deserialize)]
@@ -2080,9 +2217,11 @@ async fn keys_are_kept_out_of_metadata_pages() {
         page.retained_size()
     );
     assert_eq!(
-        keys.iter().map(|key| key.len() as u64).sum::<u64>(),
+        keys.iter()
+            .map(|key| key.len() as u64 + KEY_CHECKSUM_BYTES)
+            .sum::<u64>(),
         trailer.key_end - trailer.payload_end,
-        "the key area holds one copy of each key"
+        "the key area holds one copy of each key and its checksum"
     );
 }
 

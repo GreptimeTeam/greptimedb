@@ -127,7 +127,7 @@ impl ColumnarReader {
         }
         // Old artifacts can be structurally valid and perfectly ordered, so identity
         // encoding is the only thing that keeps their lost labels out of reads.
-        if manifest.identity_encoding != IdentityEncoding::CURRENT {
+        if manifest.identity_encoding != IdentityEncoding::CURRENT_SERIES_INDEX {
             return Err(unsupported(
                 "series manifest identity encoding; rebuild the series index",
             ));

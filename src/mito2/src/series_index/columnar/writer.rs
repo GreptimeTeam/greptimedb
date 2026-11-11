@@ -91,7 +91,7 @@ impl ColumnarWriter {
         let manifest = Manifest {
             format: ArtifactFormat::ColumnarSeries,
             version: VERSION,
-            identity_encoding: IdentityEncoding::CURRENT,
+            identity_encoding: IdentityEncoding::CURRENT_SERIES_INDEX,
             region_id: metadata.region_id.as_u64(),
             generation: entry.index_uuid,
             tags: tags

@@ -147,7 +147,7 @@ impl SamplesReader {
         }
         // Old artifacts can be structurally valid and perfectly ordered, so identity
         // encoding is the only thing that keeps their lost labels out of reads.
-        if manifest.identity_encoding != IdentityEncoding::CURRENT {
+        if manifest.identity_encoding != IdentityEncoding::CURRENT_SAMPLES {
             return Err(unsupported(
                 "samples manifest identity encoding; rebuild the samples artifact",
             ));
@@ -270,7 +270,15 @@ impl SamplesFormatReader for SamplesReader {
             let _handle = &handle;
             let mut metrics = ColumnarReadMetrics::default();
             if empty { return; }
+            // The last block this stream visited, its key reference scoped to its part, and the
+            // exact key of that block when it is still at hand. A reference is a location inside
+            // one part: the exact bytes are what decides whether a series continues into another
+            // part.
             let mut previous: Option<BlockOrder> = None;
+            // The last visited block's exact key when it belongs to another part. References are
+            // part-relative, so the previous part's key has to be carried out of its own map. At
+            // most one key is retained this way, matching the per-block identity allowance.
+            let mut spanning_key: Option<ExactSeriesKey> = None;
             let mut adjacent = true;
             for part in &manifest.files {
                 let bounds = Bounds { first: part.first, last: part.last, min: part.min_timestamp, max: part.max_timestamp };
@@ -338,8 +346,19 @@ impl SamplesFormatReader for SamplesReader {
                     for (block_index, block) in blocks.iter().enumerate() {
                         row_count = row_count.checked_add(u64::from(block.rows)).ok_or_else(|| invalid("samples row count overflow"))?;
                         block_count += 1;
-                        if let Some(prior) = &previous { block.follows(prior, adjacent)?; }
-                        else if complete { require(block.ordinal == 0, "initial sample ordinal is not zero")?; }
+                        let order = block.order(part.part_id);
+                        if let Some(prior) = &previous {
+                            if prior.part() == order.part() {
+                                // Reference positions are part-relative: only a block of the same
+                                // part may be compared with the previous block's reference.
+                                prior.precedes(&order, adjacent)?;
+                            } else {
+                                // Across a part boundary the references name unrelated key areas,
+                                // so only the ordered identifier applies here. Whether the same
+                                // series continues is decided on the exact keys below.
+                                require(prior.id() <= order.id(), "unordered sample series keys")?;
+                            }
+                        } else if complete { require(block.ordinal == 0, "initial sample ordinal is not zero")?; }
                         for column in &block.columns {
                             column.payload.validate(payload_position, trailer.payload_end, false)?;
                             payload_position = column.payload.end()?;
@@ -347,24 +366,20 @@ impl SamplesFormatReader for SamplesReader {
                         // Ownership is exact, so it needs the block's key rather than its
                         // coarse identifier. Pruned blocks never load one, and every key this
                         // page selects was already fetched in one merged read.
-                        let mut owner = None;
+                        let key_id = (block.key.offset, block.key.length);
+                        let mut owner = false;
                         if matches(block.bounds(), &request, ids.as_ref()) {
-                            let key_id = (block.key.offset, block.key.length);
                             if let std::collections::hash_map::Entry::Vacant(slot) =
                                 part_keys.entry(key_id)
                             {
                                 // The page-level prefetch was refused by the memory pool, or
-                                // this series has no copy cached for the part yet.
-                                if let Some(reservation) = &keys_reservation {
-                                    let bytes = block.key.length as usize + KEY_ENTRY_BYTES;
-                                    reservation
-                                        .try_grow(bytes)
-                                        .context(crate::error::ScanMemoryExhaustedSnafu)?;
-                                }
+                                // this series has no copy cached for the part yet. This path
+                                // reserves its own read before issuing it.
                                 let key = load_block_key(
                                     &payload_reader,
                                     trailer.areas(),
                                     block,
+                                    keys_reservation.as_ref(),
                                     &mut key_offsets,
                                     &mut metrics,
                                 )
@@ -380,11 +395,34 @@ impl SamplesFormatReader for SamplesReader {
                                 key.id() == block.id,
                                 "sample block series key disagrees with its identifier",
                             )?;
-                            if owns(key.bytes(), &request) {
-                                owner = Some(key.clone());
+                            // Only the keys this stream loaded can be checked here: a reference
+                            // is a location, and selection prunes blocks without reading theirs,
+                            // so unvisited ranges are not content-validated. Loaded keys must be
+                            // nondecreasing in visit order, and a repeated key must continue its
+                            // series instead of restarting it. That is also the only way a series
+                            // that spans a part boundary is recognised: its two references name
+                            // unrelated key areas.
+                            if let Some(prior) = &previous {
+                                let prior_key = if prior.part() == order.part() {
+                                    let reference = prior.key();
+                                    part_keys.get(&(reference.offset, reference.length))
+                                } else {
+                                    spanning_key.as_ref()
+                                };
+                                if let Some(prior_key) = prior_key {
+                                    require(key >= prior_key, "unordered sample exact series keys")?;
+                                    if key == prior_key {
+                                        prior.continues(&order, adjacent)?;
+                                    } else if adjacent {
+                                        // A new series starts at ordinal zero, which the
+                                        // structural check above only covers inside one part.
+                                        require(block.ordinal == 0, "first sample block has nonzero ordinal")?;
+                                    }
+                                }
                             }
+                            owner = owns(key.bytes(), &request);
                         }
-                        let batch = if owner.is_some() {
+                        let batch = if owner {
                             if block_index >= prefetched.end {
                                 // Release the previous window before reserving the next one.
                                 drop(std::mem::take(&mut prefetched));
@@ -394,14 +432,29 @@ impl SamplesFormatReader for SamplesReader {
                             *metrics.counts.entry("decoded_rows").or_default() += u64::from(block.rows);
                             read_block(&payload_reader, block, &manifest, &request, &projection, &field_ids, projected.clone(), &mut prefetched, &mut metrics).await?
                         } else { None };
-                        if let (Some((batch, _reservation)), Some(key)) = (batch, owner) {
+                        if let Some((batch, _reservation)) = batch {
+                            // The key is copied only now: `read_block` has just reserved the
+                            // bytes the batch retains, so the clone is paid for before it
+                            // happens instead of being allocated first and charged after.
+                            let key = part_keys
+                                .get(&key_id)
+                                .ok_or_else(|| invalid("missing sample key"))?
+                                .clone();
                             *metrics.counts.entry("batches").or_default() += 1;
                             *metrics.counts.entry("output_rows").or_default() += batch.num_rows() as u64;
                             // The block's key is emitted once, not once per row.
                             yield SamplesBatch { batch, key };
                         }
-                        previous = Some(block.order()); adjacent = true;
+                        previous = Some(order); adjacent = true;
                     }
+                }
+                // The next part's references name its own key area, so the last visited block's
+                // exact key is the only thing that can prove a series continues there.
+                if let Some(prior) = previous.filter(|prior| prior.part() == part.part_id) {
+                    let reference = prior.key();
+                    spanning_key = part_keys
+                        .get(&(reference.offset, reference.length))
+                        .cloned();
                 }
                 if complete { require(row_count == part.num_rows && block_count == part.num_blocks, "sample part totals mismatch")?; }
             }
@@ -419,20 +472,105 @@ fn owns(key: &[u8], request: &SamplesReadRequest) -> bool {
 /// per-block identity allowance, so a page of short keys still fits a small scan pool.
 const KEY_ENTRY_BYTES: usize = std::mem::size_of::<ExactSeriesKey>() + BUFFER_ALIGNMENT;
 
+/// Bytes of the checksum stored after each key in the key area.
+const KEY_CHECKSUM_BYTES: usize = metadata::KEY_CHECKSUM_BYTES as usize;
+
+/// Retained bytes of one cached key: its bytes, the boxed key, and the allocator's rounding.
+fn retained_key_bytes(length: u32) -> usize {
+    length as usize + KEY_ENTRY_BYTES
+}
+
+/// One key's stored entry: its bytes and the checksum that follows them.
+fn stored_key_bytes(length: u32) -> usize {
+    length as usize + KEY_CHECKSUM_BYTES
+}
+
+/// Reserves `bytes` for a key fetch, or reports scan-memory exhaustion.
+///
+/// The reservation is taken before the read, so a pool that cannot hold the fetched key entry and
+/// the owned key it becomes fails without issuing I/O.
+fn reserve_keys(reservation: Option<&MemoryReservation>, bytes: usize) -> Result<()> {
+    if let Some(reservation) = reservation {
+        reservation
+            .try_grow(bytes)
+            .context(crate::error::ScanMemoryExhaustedSnafu)?;
+    }
+    Ok(())
+}
+
+/// Reserves `bytes` for a key fetch if the pool can pay for it.
+///
+/// A prefetch is optional: refusing it leaves the keys to [`load_block_key`], which is where an
+/// unpayable key reports exhaustion.
+fn try_reserve_keys(reservation: Option<&MemoryReservation>, bytes: usize) -> bool {
+    reservation.is_none_or(|reservation| reservation.try_grow(bytes).is_ok())
+}
+
+/// Releases the transient part of a key-fetch reservation.
+///
+/// The fetched bytes and the owned keys decoded from them coexist, so the pool is charged the
+/// peak up front. Once the buffers are dropped only the owned keys remain, and the difference
+/// goes back to the pool.
+struct KeyPeak<'a> {
+    reservation: Option<&'a MemoryReservation>,
+    transient: usize,
+}
+impl Drop for KeyPeak<'_> {
+    fn drop(&mut self) {
+        if let Some(reservation) = self.reservation
+            && self.transient > 0
+        {
+            let _ = reservation.try_shrink(self.transient);
+        }
+    }
+}
+
+/// Splits one stored key entry into its key bytes after verifying the stored checksum.
+///
+/// The reference's length covers the key only, so the entry is exactly one key followed by
+/// [`KEY_CHECKSUM_BYTES`]. A flipped label byte keeps the key's framing and identifier valid, so
+/// this is the only place that notices it before the bytes attribute rows to a series.
+fn verified_key(entry: &[u8], length: u32) -> Result<&[u8]> {
+    let length = length as usize;
+    require(
+        entry.len() == length + KEY_CHECKSUM_BYTES,
+        "sample key entry length mismatch",
+    )?;
+    let (key, stored) = entry.split_at(length);
+    let stored: [u8; KEY_CHECKSUM_BYTES] = stored
+        .try_into()
+        .map_err(|_| invalid("sample key checksum framing"))?;
+    require(
+        codec::checksum(key) == u64::from_le_bytes(stored),
+        "sample key checksum mismatch",
+    )?;
+    Ok(key)
+}
+
 /// Reads one block's exact key from the part's key area.
 ///
 /// The page-level prefetch serves a whole page in one read, but it is charged up front. When the
 /// scan pool cannot take that, this path reads one key at a time, so a block that fits the pool
-/// stays readable.
+/// stays readable. Either way the pool is charged the coexisting peak before any I/O: the fetched
+/// key entry and the owned key built from it.
 async fn load_block_key(
     reader: &PayloadReader<'_>,
     areas: Areas,
     block: &Block,
+    reservation: Option<&MemoryReservation>,
     offsets: &mut mito_codec::row_converter::SparseOffsetsCache,
     metrics: &mut ColumnarReadMetrics,
 ) -> Result<ExactSeriesKey> {
     block.key.validate(areas.keys)?;
-    let range = block.key.offset..block.key.end()?;
+    let retained = retained_key_bytes(block.key.length);
+    // The fetched entry and the owned key are live at the same time.
+    let peak = retained + stored_key_bytes(block.key.length);
+    reserve_keys(reservation, peak)?;
+    let _peak = KeyPeak {
+        reservation,
+        transient: peak - retained,
+    };
+    let range = block.key.offset..block.key.checksum_end()?;
     let mut fetched = fetch_ranges(
         reader,
         areas.keys.end,
@@ -440,10 +578,10 @@ async fn load_block_key(
         metrics,
     )
     .await?;
-    let bytes = fetched
+    let entry = fetched
         .pop()
         .ok_or_else(|| invalid("missing sample key response"))?;
-    let key = ExactSeriesKey::from_sparse_key(&bytes, offsets)?;
+    let key = ExactSeriesKey::from_sparse_key(verified_key(&entry, block.key.length)?, offsets)?;
     // A key that parses but claims another identifier is a malformed reference: ownership would
     // silently point at the wrong series.
     require(
@@ -453,13 +591,43 @@ async fn load_block_key(
     Ok(key)
 }
 
+/// Peak bytes [`fetch_ranges`] can hold at once while serving `ranges`.
+///
+/// The merge rule bounds one read, not a whole fetch: every merged range comes back as its own
+/// buffer and all of them are live together. With the aligned cache, the aligned copies and any
+/// range assembled from several of them coexist as well.
+fn fetch_peak(
+    reader: &PayloadReader<'_>,
+    ranges: &[std::ops::Range<u64>],
+    area_end: u64,
+    aligned: bool,
+) -> usize {
+    if !aligned {
+        return merge_read_ranges(ranges)
+            .iter()
+            .map(|range| (range.end - range.start) as usize)
+            .sum();
+    }
+    reader.reservation_bytes(ranges, area_end)
+        + ranges
+            .iter()
+            .map(|range| (range.end - range.start) as usize)
+            .sum::<usize>()
+}
+
 /// Fetches the exact keys of the blocks of one metadata page that survive coarse selection.
 ///
 /// A descriptor only references its key, so identity never costs a copy per row or per block
 /// descriptor. Keys are read only for selected blocks and at most once per series, and the
 /// selected blocks of a page are merged into runs bounded by [`MAX_READ_BYTES`], so a page of
-/// many short series costs one read rather than one per series. The bytes are charged to the
-/// scan's memory pool before the fetch, because they are retained for the rest of the part.
+/// many short series costs one read rather than one per series.
+///
+/// The pool is charged the coexisting peak before the read - the fetched or aligned and assembled
+/// bytes plus the owned keys decoded from them - and shrunk back to the retained keys afterwards.
+/// A pool that cannot pay the aligned peak is asked for the unbuffered one, then for a narrower
+/// window; the keys left out are read one at a time, which is where a key that does not fit at all
+/// reports exhaustion. Reading first and refusing the key afterwards would leave the bytes already
+/// fetched.
 #[allow(clippy::too_many_arguments)]
 async fn load_page_keys(
     reader: &PayloadReader<'_>,
@@ -490,33 +658,66 @@ async fn load_page_keys(
     if wanted.is_empty() {
         return Ok(());
     }
-    let ranges = wanted
-        .iter()
-        .map(|block| Ok(block.key.offset..block.key.end()?))
-        .collect::<Result<Vec<_>>>()?;
     // The same range fetch the column chunks use: aligned blocks of the part are shared with the
-    // payload cache, so a part that is already cached costs no key read at all.
-    let fetched = fetch_ranges(reader, areas.keys.end, &ranges, metrics).await?;
-    // Fetched bytes are transient: they are released before any payload of this page is read, so
-    // only the retained keys are charged, one at a time, exactly as the per-series path would. A
-    // key the pool refuses stops the prefetch and leaves the rest to the on-demand path, which is
-    // where a scan that cannot fit a key at all reports exhaustion.
-    for (block, bytes) in wanted.into_iter().zip(fetched) {
-        let key = ExactSeriesKey::from_sparse_key(&bytes, offsets)?;
+    // payload cache, so a part that is already cached costs no key read at all. Alignment is the
+    // first choice and the first victim: it costs a whole aligned block per key area touched.
+    let uncached = PayloadReader {
+        reader: reader.reader,
+        cache: None,
+        end: reader.end,
+        key_end: reader.key_end,
+    };
+    let mut window = wanted.len();
+    let mut attempt = None;
+    while window > 0 {
+        let selected = &wanted[..window];
+        let ranges = selected
+            .iter()
+            .map(|block| Ok(block.key.offset..block.key.checksum_end()?))
+            .collect::<Result<Vec<_>>>()?;
+        let retained = selected
+            .iter()
+            .map(|block| retained_key_bytes(block.key.length))
+            .sum::<usize>();
+        let mut candidates = Vec::with_capacity(2);
+        if reader.cache.is_some() {
+            candidates.push(true);
+        }
+        candidates.push(false);
+        for aligned in candidates {
+            // The fetched entries and the owned keys they become are live together; the fetch
+            // peak already covers the entries themselves.
+            let peak = fetch_peak(reader, &ranges, areas.keys.end, aligned) + retained;
+            if try_reserve_keys(reservation, peak) {
+                attempt = Some((aligned, peak, retained, ranges));
+                break;
+            }
+        }
+        if attempt.is_some() {
+            break;
+        }
+        // Halve the window rather than give up: the keys left out keep their own, smaller,
+        // on-demand reservation.
+        window /= 2;
+    }
+    let Some((aligned, peak, retained, ranges)) = attempt else {
+        return Ok(());
+    };
+    let _peak = KeyPeak {
+        reservation,
+        transient: peak - retained,
+    };
+    let target = if aligned { reader } else { &uncached };
+    let fetched = fetch_ranges(target, areas.keys.end, &ranges, metrics).await?;
+    for (block, entry) in wanted.iter().take(window).zip(fetched) {
+        let key =
+            ExactSeriesKey::from_sparse_key(verified_key(&entry, block.key.length)?, offsets)?;
         // A key that parses but claims another identifier is a malformed reference: ownership
         // would silently point at the wrong series.
         require(
             key.id() == block.id,
             "sample block series key disagrees with its identifier",
         )?;
-        if let Some(reservation) = reservation
-            && reservation
-                .try_grow(block.key.length as usize + KEY_ENTRY_BYTES)
-                .is_err()
-        {
-            // Stop prefetching this page; the blocks left are read one key at a time.
-            return Ok(());
-        }
         keys.insert((block.key.offset, block.key.length), key);
     }
     Ok(())
@@ -688,7 +889,7 @@ async fn read_block(
         // term that keeps its array accounted for.
         + projection.len() * (ARRAY_HEADER_BYTES + BUFFER_ALIGNMENT)
         + columns.len() * 128;
-    let bytes = base_bytes + reader.reservation_bytes(&ranges);
+    let bytes = base_bytes + reader.reservation_bytes(&ranges, reader.end);
     let mut bypass_cache = false;
     if let Some(reservation) = &reservation {
         let mut result = reservation.try_grow(bytes);
@@ -1058,13 +1259,14 @@ struct PayloadReader<'a> {
 }
 
 impl PayloadReader<'_> {
-    fn reservation_bytes(&self, ranges: &[std::ops::Range<u64>]) -> usize {
+    /// Aligned and assembled bytes that serving `ranges` inside `area_end` can hold at once.
+    fn reservation_bytes(&self, ranges: &[std::ops::Range<u64>], area_end: u64) -> usize {
         if self.cache.is_none() {
             return 0;
         }
         // Aligned read allocations and assembly can coexist. Cache-owned copies
         // are separately charged to the shared page-cache budget.
-        2 * aligned_ranges(ranges, self.end)
+        2 * aligned_ranges(ranges, area_end)
             .iter()
             .map(|r| (r.end - r.start) as usize)
             .sum::<usize>()
@@ -1223,6 +1425,7 @@ async fn prefetch_blocks(
                             .iter()
                             .map(|c| Ok(c.payload.offset..c.payload.end()?))
                             .collect::<Result<Vec<_>>>()?,
+                        reader.end,
                     ),
             )
             .is_err()
