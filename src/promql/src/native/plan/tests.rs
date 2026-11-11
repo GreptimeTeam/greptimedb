@@ -26,6 +26,7 @@ use super::{
     NativeType, duplicates_canonical_labels, fused_output_tags, reads_across_series,
 };
 use crate::extension_plan::{FusedSeries, FusedSeriesBinding};
+use crate::histogram_eval::NativeHistogramFunction;
 use crate::info::InfoSelector;
 use crate::map::MathOp;
 use crate::range_eval::{RangeFunction, RangeWindow};
@@ -1924,13 +1925,18 @@ fn info_reads_the_sample_times_of_one_field() {
 
 /// `label_replace(x, dst, "$1", src, "(.*)")` over `inner`, a rewrite that writes `dst`.
 fn rewritten(inner: NativeNode, dst: &str, src: &str) -> NativeNode {
+    replaced(inner, dst, "$1", src)
+}
+
+/// `label_replace(x, dst, replacement, src, "(.*)")` over `inner`.
+fn replaced(inner: NativeNode, dst: &str, replacement: &str, src: &str) -> NativeNode {
     let output = inner.output.clone();
     NativeNode {
         expr: NativeExpr::Map {
             input: Box::new(inner),
             op: BoundMap {
                 ops: Arc::new([MapOp::Label(Arc::new(
-                    crate::map_label::LabelRewrite::replace(dst, "$1", src, "(.*)")
+                    crate::map_label::LabelRewrite::replace(dst, replacement, src, "(.*)")
                         .expect("the rewrite compiles"),
                 ))]),
             },
@@ -1977,6 +1983,225 @@ fn a_rewrite_of_an_existing_label_aliases() {
         &rewritten(inner, "host", "host"),
         &scan_tags()
     ));
+}
+
+/// A scan bound to one metric names every series it hands over, so `__name__` is one of its runtime
+/// labels even though it is not a tag column. A rewrite of that name writes an existing label and
+/// can fold two metrics whose ordinary labels are equal into one identity.
+#[test]
+fn a_rewrite_of_the_metric_name_aliases_a_named_source() {
+    let out = grid(0, 60_000, 4);
+    let inner = input_on(Arc::clone(&out));
+    let named = vec![vec!["host".to_string(), "__name__".to_string()]];
+    assert!(duplicates_canonical_labels(
+        &rewritten(inner, "__name__", "__name__"),
+        &named
+    ));
+    // The delete-only form can fold the same two identities, so it is collected too.
+    let inner = input_on(Arc::clone(&out));
+    assert!(duplicates_canonical_labels(
+        &replaced(inner, "__name__", "", "__name__"),
+        &named
+    ));
+}
+
+/// A name write is collected even above a kernel that dropped the name: the scan below `abs`, a
+/// `timestamp` or a range function can still hold several metrics whose ordinary labels are equal,
+/// so writing one name puts those identities under one label set. A fresh ordinary destination is
+/// still uncollected, because no scan can carry an ordinary label it does not declare.
+#[test]
+fn a_name_rewrite_above_a_dropped_name_is_collected() {
+    let out = grid(0, 60_000, 4);
+    let named = vec![vec!["host".to_string(), "__name__".to_string()]];
+    let selected = || input_on(Arc::clone(&out));
+    let timestamp = |inner: NativeNode| NativeNode {
+        expr: NativeExpr::Timestamp {
+            input: Box::new(inner),
+        },
+        output: evaluated(fields(1), Arc::clone(&out)),
+    };
+    for (name, dropped) in [
+        ("abs", map_over(selected())),
+        ("timestamp", timestamp(selected())),
+        // `rate` computes a value of its own, so it drops the name too.
+        (
+            "rate",
+            window_fields(input_with_fields(1), Arc::clone(&out), 1),
+        ),
+    ] {
+        assert!(
+            duplicates_canonical_labels(
+                &replaced(dropped.clone(), "__name__", "same", "missing"),
+                &named
+            ),
+            "{name}: a name write may alias metrics the kernel left indistinguishable"
+        );
+        assert!(
+            !duplicates_canonical_labels(&rewritten(dropped, "dst", "host"), &named),
+            "{name}: a fresh ordinary destination cannot alias"
+        );
+    }
+}
+
+/// The label walk keeps a name a rewrite writes and drops it wherever the kernel does, so the
+/// query's output columns never claim a name the runtime does not report.
+#[test]
+fn a_written_name_survives_only_where_the_tree_keeps_it() {
+    let out = grid(0, 60_000, 4);
+    let selected = || input_on(Arc::clone(&out));
+    // A scan bound to one metric: its runtime labels carry the name, its columns do not.
+    let runtime = vec![vec!["host".to_string(), "__name__".to_string()]];
+    let columns = vec![vec!["host".to_string()]];
+    let written = || rewritten(selected(), "__name__", "__name__");
+    let name_kept = |tags: Option<Vec<String>>| {
+        tags.is_some_and(|tags| tags.iter().any(|tag| tag == "__name__"))
+    };
+
+    assert_eq!(
+        Some(vec!["host".to_string(), "__name__".to_string()]),
+        fused_output_tags(&written(), &runtime)
+    );
+    // A column set gains the name because the rewrite writes a value into it.
+    assert_eq!(
+        Some(vec!["host".to_string(), "__name__".to_string()]),
+        fused_output_tags(&written(), &columns)
+    );
+    // A delete-only rewrite over a scan that publishes no name column publishes none.
+    assert_eq!(
+        Some(vec!["host".to_string()]),
+        fused_output_tags(&replaced(selected(), "__name__", "", "__name__"), &columns)
+    );
+    // The delete-only rewrite over a set that carries the name keeps it: whether a series keeps its
+    // value depends on the regex, so the label is still part of the set.
+    assert_eq!(
+        Some(vec!["host".to_string(), "__name__".to_string()]),
+        fused_output_tags(&replaced(selected(), "__name__", "", "__name__"), &runtime)
+    );
+
+    let histogram = |inner: NativeNode| NativeNode {
+        expr: NativeExpr::Map {
+            input: Box::new(inner),
+            op: BoundMap {
+                ops: Arc::new([MapOp::Histogram(NativeHistogramFunction::Count)]),
+            },
+        },
+        output: evaluated(fields(1), Arc::clone(&out)),
+    };
+    let timestamp = |inner: NativeNode| NativeNode {
+        expr: NativeExpr::Timestamp {
+            input: Box::new(inner),
+        },
+        output: evaluated(fields(1), Arc::clone(&out)),
+    };
+    for (name, dropped) in [
+        ("abs", map_over(written())),
+        ("histogram_count", histogram(written())),
+        ("timestamp", timestamp(written())),
+        ("rate", window_fields(written(), Arc::clone(&out), 1)),
+    ] {
+        assert!(!name_kept(fused_output_tags(&dropped, &runtime)), "{name}");
+        assert!(!name_kept(fused_output_tags(&dropped, &columns)), "{name}");
+    }
+}
+
+/// `group_left(__name__)` copies the one side's name onto an arithmetic result: the kernel drops the
+/// metadata before it copies an included label, so the name the one side carries is what the result
+/// reports, while a one side without the name removes it from the result.
+#[test]
+fn an_included_metric_name_survives_an_arithmetic_match() {
+    let out = grid(0, 60_000, 4);
+    let input = |source_index: usize| {
+        let output = NativeType::Samples(Arc::new(SeriesSchema {
+            fields: fields(1),
+            eval_grid: None,
+        }));
+        NativeNode {
+            expr: NativeExpr::Input(BoundInput {
+                output: output.clone(),
+                source_index,
+                ordering: SeriesOrdering::KeyThenTime,
+            }),
+            output,
+        }
+    };
+    let binary = |left: NativeNode, right: NativeNode, matching: BinaryMatching| NativeNode {
+        expr: NativeExpr::Binary {
+            left: Box::new(left),
+            right: Box::new(right),
+            matching,
+        },
+        output: evaluated(fields(1), Arc::clone(&out)),
+    };
+    let group_left = || BinaryMatching {
+        op: BinaryOp::Mul,
+        return_bool: false,
+        labels: MatchingLabels::On(vec![Arc::from("host")]),
+        cardinality: Cardinality::ManyToOne(vec![Arc::from("__name__")]),
+        fill: FillValues::default(),
+    };
+    let source_tags = vec![
+        vec!["host".to_string(), "__name__".to_string()],
+        vec!["host".to_string(), "__name__".to_string()],
+    ];
+    let tagged = |source_index: usize| input(source_index);
+
+    // The one side (right) carries a rewritten name, so the include puts it on the result.
+    let renamed = replaced(tagged(1), "__name__", "renamed", "__name__");
+    assert_eq!(
+        Some(vec!["host".to_string(), "__name__".to_string()]),
+        fused_output_tags(&binary(tagged(0), renamed, group_left()), &source_tags)
+    );
+    // A one side without the name cannot give the include one, so the result drops it.
+    let unnamed_tags = vec![
+        vec!["host".to_string(), "__name__".to_string()],
+        vec!["host".to_string()],
+    ];
+    assert_eq!(
+        Some(vec!["host".to_string()]),
+        fused_output_tags(&binary(tagged(0), tagged(1), group_left()), &unnamed_tags)
+    );
+    // `group_right` trades the sides: the include is read from the left (one) side there.
+    let group_right = || BinaryMatching {
+        op: BinaryOp::Mul,
+        return_bool: false,
+        labels: MatchingLabels::On(vec![Arc::from("host")]),
+        cardinality: Cardinality::OneToMany(vec![Arc::from("__name__")]),
+        fill: FillValues::default(),
+    };
+    let renamed = replaced(tagged(0), "__name__", "renamed", "__name__");
+    assert_eq!(
+        Some(vec!["host".to_string(), "__name__".to_string()]),
+        fused_output_tags(&binary(renamed, tagged(1), group_right()), &source_tags)
+    );
+    // A `bool` comparison drops the name like arithmetic does, and the include still copies the one
+    // side's name afterwards: the drop happens before the include.
+    let bool_comparison = || BinaryMatching {
+        op: BinaryOp::Eq,
+        return_bool: true,
+        labels: MatchingLabels::On(vec![Arc::from("host")]),
+        cardinality: Cardinality::ManyToOne(vec![Arc::from("__name__")]),
+        fill: FillValues::default(),
+    };
+    let renamed = replaced(tagged(1), "__name__", "renamed", "__name__");
+    assert_eq!(
+        Some(vec!["host".to_string(), "__name__".to_string()]),
+        fused_output_tags(&binary(tagged(0), renamed, bool_comparison()), &source_tags)
+    );
+
+    // A filtering comparison keeps the name of the side it reports, but an included name the one
+    // side does not carry still leaves the set: `result_metric` removes an included label it cannot
+    // copy, and the base name is not exempt.
+    let filtering = || BinaryMatching {
+        op: BinaryOp::Eq,
+        return_bool: false,
+        labels: MatchingLabels::On(vec![Arc::from("host")]),
+        cardinality: Cardinality::ManyToOne(vec![Arc::from("__name__")]),
+        fill: FillValues::default(),
+    };
+    assert_eq!(
+        Some(vec!["host".to_string()]),
+        fused_output_tags(&binary(tagged(0), tagged(1), filtering()), &unnamed_tags)
+    );
 }
 
 /// A source the caller says nothing about proves nothing: the pass has to assume the destination
@@ -2121,13 +2346,19 @@ fn count_values_reports_its_grouping_and_the_label_it_writes() {
             &source_tags
         )
     );
-    // A destination naming the metric name writes no column this walk can name.
+    // A destination naming the metric name writes the name, which is the one label the node's
+    // result carries when its grouping names nothing else.
     assert_eq!(
-        None,
+        tags(&["__name__"]),
         fused_output_tags(
             &counted("__name__", Grouping::By(Arc::new([]))),
             &source_tags
         )
+    );
+    // An empty destination cannot be a label, so the walk declines rather than name a column.
+    assert_eq!(
+        None,
+        fused_output_tags(&counted("", Grouping::By(Arc::new([]))), &source_tags)
     );
 }
 
