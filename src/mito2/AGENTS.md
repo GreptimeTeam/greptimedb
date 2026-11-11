@@ -142,7 +142,9 @@ Tests live next to the code as `*_test.rs` (e.g. `src/mito2/src/engine/flush_tes
   (`ManifestContext::update_manifest_for_tails`) and always reports its end, which
   lets the worker start the next replay or reload a fenced region. The edit that records
   tails must raise the committed sequence to theirs, or writes accepted during the replay
-  lose to replayed rows.
+  lose to replayed rows. This node's later entry ids must be above every tail's `upto`, and
+  its unflushed entries at or below one must be in its own tails, or the tail commit's
+  flushed entry id skips them.
 - Lock ordering: take the manifest lock before updating `version_control`; the
   reverse deadlocks against concurrent flush/compaction.
 - All region I/O runs on tokio workers; never `block_on` inside a worker.

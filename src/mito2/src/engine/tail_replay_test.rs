@@ -62,8 +62,8 @@ use crate::region::version::VersionRef;
 use crate::request::{BackgroundNotify, WorkerRequest};
 use crate::sst::location::region_dir_from_table_dir;
 use crate::test_util::{
-    CreateRequestBuilder, TestEnv, build_rows, build_rows_for_key, nop_action, put_rows,
-    reopen_region, rows_schema,
+    CreateRequestBuilder, TestEnv, build_rows, build_rows_for_key, flush_region, nop_action,
+    put_rows, reopen_region, rows_schema,
 };
 use crate::time_provider::StdTimeProvider;
 use crate::wal::{EntryId, Wal};
@@ -596,8 +596,9 @@ async fn test_writes_after_replay_win_over_replayed_rows() {
 async fn test_writes_during_replay_win_over_replayed_rows() {
     let region = TestRegion::new("tail-replay-earlier-writes", false, None).await;
     let last = region.write_remote_rows(region.region_id, 6, 9).await;
-    // Whatever records tails raises the committed sequence to theirs, here 100 to 102, so
-    // writes accepted during the replay get larger sequences.
+    // Whatever records tails raises the committed sequence to theirs (100 to 102) and leaves
+    // this node no unflushed entry at or below theirs: later writes win and stay in the WAL.
+    flush_region(&region.engine, region.region_id, None).await;
     let edit = RegionEdit {
         committed_sequence: Some(102),
         ..pending_tails_edit(vec![remote_tail(0, last, UptoKind::Reported)])
@@ -611,6 +612,9 @@ async fn test_writes_during_replay_win_over_replayed_rows() {
     region.listener.hold_from(0);
     region.wait_until_replayed().await;
 
+    assert!(region.sees_overwrite().await);
+    region.reopen_with_tails(vec![]).await;
+    assert_eq!(9, count_rows(&region.engine, region.region_id).await);
     assert!(region.sees_overwrite().await);
 }
 
