@@ -61,14 +61,15 @@ use tokio::sync::{Mutex, Semaphore, mpsc, oneshot, watch};
 use crate::access_layer::new_fs_cache_store;
 use crate::cache::write_cache::{WriteCache, WriteCacheRef};
 use crate::cache::{CacheManager, CacheManagerRef, WriteCacheUploadStoreWrapperRef};
-use crate::compaction::CompactionScheduler;
 use crate::compaction::memory_manager::{CompactionMemoryManager, new_compaction_memory_manager};
+use crate::compaction::{CancelCompactionResult, CompactionCoordinator, CompactionScheduler};
 use crate::config::MitoConfig;
 use crate::error::{self, CreateDirSnafu, JoinSnafu, Result, WorkerStoppedSnafu};
 use crate::flush::{FlushScheduler, WriteBufferManagerImpl, WriteBufferManagerRef};
 use crate::gc::{GcLimiter, GcLimiterRef};
 use crate::lease::NodeLease;
 use crate::memtable::MemtableBuilderProvider;
+use crate::memtable::bulk::CompactDispatcher;
 use crate::metrics::{REGION_COUNT, REQUEST_WAIT_TIME, WRITE_STALLING};
 use crate::region::opener::PartitionExprFetcherRef;
 use crate::region::{
@@ -92,6 +93,7 @@ use crate::sst::index::puffin_manager::PuffinManagerFactory;
 use crate::temp_file_sweeper;
 use crate::time_provider::{StdTimeProvider, TimeProviderRef};
 use crate::wal::Wal;
+use crate::worker::handle_flush::StagingRegionsRef;
 use crate::worker::handle_manifest::RegionEditQueues;
 
 /// Identifier for a worker.
@@ -147,7 +149,7 @@ pub(crate) struct WorkerGroup {
     /// Flush background job pool.
     flush_job_pool: SchedulerRef,
     /// Compaction background job pool.
-    compact_job_pool: SchedulerRef,
+    compact_job_pool: Arc<CompactionCoordinator>,
     /// Scheduler for index build jobs.
     index_build_job_pool: SchedulerRef,
     /// Scheduler for file purgers.
@@ -204,7 +206,11 @@ impl WorkerGroup {
         let series_index_store = series_index_store_from_config(&config, data_home).await?;
         let series_index_disk_usage = Arc::new(AtomicU64::new(0));
         let flush_job_pool = Arc::new(LocalScheduler::new(config.max_background_flushes));
-        let compact_job_pool = Arc::new(LocalScheduler::new(config.max_background_compactions));
+        let compact_job_pool = Arc::new(CompactionCoordinator::new_local(
+            config.max_background_compactions,
+        ));
+        let memtable_compact_dispatcher =
+            Arc::new(CompactDispatcher::new(config.max_background_compactions));
         let flush_semaphore = Arc::new(Semaphore::new(config.max_background_flushes));
         // We use another scheduler to avoid purge jobs blocking other jobs.
         let purge_scheduler = Arc::new(LocalScheduler::new(config.max_background_purges));
@@ -253,13 +259,15 @@ impl WorkerGroup {
         let sweep_limiter = (config.gc.max_concurrent_gc_job > 0)
             .then(|| Arc::new(Semaphore::new(config.gc.max_concurrent_gc_job)));
         let node_lease = Arc::new(NodeLease::default());
+        let staging_regions = StagingRegionsRef::default();
+        let wal = Wal::new(log_store);
 
         let workers = (0..config.num_workers)
             .map(|id| {
                 WorkerStarter {
                     id: id as WorkerId,
                     config: config.clone(),
-                    log_store: log_store.clone(),
+                    wal: wal.clone(),
                     object_store_manager: object_store_manager.clone(),
                     write_buffer_manager: write_buffer_manager.clone(),
                     index_build_job_pool: index_build_job_pool.clone(),
@@ -268,6 +276,7 @@ impl WorkerGroup {
                     flush_job_pool: flush_job_pool.clone(),
                     compact_job_pool: compact_job_pool.clone(),
                     purge_scheduler: purge_scheduler.clone(),
+                    memtable_compact_dispatcher: memtable_compact_dispatcher.clone(),
                     listener: WorkerListener::default(),
                     cache_manager: cache_manager.clone(),
                     compaction_memory_manager: compaction_memory_manager.clone(),
@@ -284,6 +293,7 @@ impl WorkerGroup {
                     #[cfg(feature = "hdfs-object-store")]
                     sweep_limiter: sweep_limiter.clone(),
                     node_lease: node_lease.clone(),
+                    staging_regions: staging_regions.clone(),
                 }
                 .start()
             })
@@ -312,7 +322,7 @@ impl WorkerGroup {
 
         // TODO(yingwen): Do we need to stop gracefully?
         // Stops the scheduler gracefully.
-        self.compact_job_pool.stop(true).await?;
+        self.compact_job_pool.stop().await?;
         // Stops the scheduler gracefully.
         self.flush_job_pool.stop(true).await?;
         // Stops the purge scheduler gracefully.
@@ -468,7 +478,11 @@ impl WorkerGroup {
         let series_index_store = series_index_store_from_config(&config, data_home).await?;
         let series_index_disk_usage = Arc::new(AtomicU64::new(0));
         let flush_job_pool = Arc::new(LocalScheduler::new(config.max_background_flushes));
-        let compact_job_pool = Arc::new(LocalScheduler::new(config.max_background_compactions));
+        let memtable_compact_dispatcher =
+            Arc::new(CompactDispatcher::new(config.max_background_compactions));
+        let compact_job_pool = Arc::new(CompactionCoordinator::new_local(
+            config.max_background_compactions,
+        ));
         let flush_semaphore = Arc::new(Semaphore::new(config.max_background_flushes));
         let purge_scheduler = Arc::new(LocalScheduler::new(config.max_background_flushes));
         let puffin_manager_factory = PuffinManagerFactory::new(
@@ -519,12 +533,14 @@ impl WorkerGroup {
         let sweep_limiter = (config.gc.max_concurrent_gc_job > 0)
             .then(|| Arc::new(Semaphore::new(config.gc.max_concurrent_gc_job)));
         let node_lease = Arc::new(NodeLease::default());
+        let staging_regions = StagingRegionsRef::default();
+        let wal = Wal::new(log_store);
         let workers = (0..config.num_workers)
             .map(|id| {
                 WorkerStarter {
                     id: id as WorkerId,
                     config: config.clone(),
-                    log_store: log_store.clone(),
+                    wal: wal.clone(),
                     object_store_manager: object_store_manager.clone(),
                     write_buffer_manager: write_buffer_manager.clone(),
                     index_build_job_pool: index_build_job_pool.clone(),
@@ -533,6 +549,7 @@ impl WorkerGroup {
                     flush_job_pool: flush_job_pool.clone(),
                     compact_job_pool: compact_job_pool.clone(),
                     purge_scheduler: purge_scheduler.clone(),
+                    memtable_compact_dispatcher: memtable_compact_dispatcher.clone(),
                     listener: WorkerListener::new(listener.clone()),
                     cache_manager: cache_manager.clone(),
                     compaction_memory_manager: compaction_memory_manager.clone(),
@@ -549,6 +566,7 @@ impl WorkerGroup {
                     #[cfg(feature = "hdfs-object-store")]
                     sweep_limiter: sweep_limiter.clone(),
                     node_lease: node_lease.clone(),
+                    staging_regions: staging_regions.clone(),
                 }
                 .start()
             })
@@ -636,15 +654,16 @@ pub(crate) fn worker_init_check_delay() -> Duration {
 struct WorkerStarter<S> {
     id: WorkerId,
     config: Arc<MitoConfig>,
-    log_store: Arc<S>,
+    wal: Wal<S>,
     object_store_manager: ObjectStoreManagerRef,
     write_buffer_manager: WriteBufferManagerRef,
-    compact_job_pool: SchedulerRef,
+    compact_job_pool: Arc<CompactionCoordinator>,
     index_build_job_pool: SchedulerRef,
     series_index_store: Option<ObjectStore>,
     series_index_disk_usage: Arc<AtomicU64>,
     flush_job_pool: SchedulerRef,
     purge_scheduler: SchedulerRef,
+    memtable_compact_dispatcher: Arc<CompactDispatcher>,
     listener: WorkerListener,
     cache_manager: CacheManagerRef,
     compaction_memory_manager: Arc<CompactionMemoryManager>,
@@ -665,6 +684,7 @@ struct WorkerStarter<S> {
     /// no concurrent GC job.
     sweep_limiter: Option<Arc<Semaphore>>,
     node_lease: Arc<NodeLease>,
+    staging_regions: StagingRegionsRef,
 }
 
 impl<S: LogStore> WorkerStarter<S> {
@@ -720,12 +740,14 @@ impl<S: LogStore> WorkerStarter<S> {
             opening_regions: opening_regions.clone(),
             sender: sender.clone(),
             receiver,
-            wal: Wal::new(self.log_store),
+            wal_flush_receiver: self.wal.subscribe_flush_candidates(),
+            wal: self.wal,
             object_store_manager: self.object_store_manager.clone(),
             running: running.clone(),
             memtable_builder_provider: MemtableBuilderProvider::new(
                 Some(self.write_buffer_manager.clone()),
                 self.config.clone(),
+                self.memtable_compact_dispatcher.clone(),
             ),
             purge_scheduler: self.purge_scheduler.clone(),
             write_buffer_manager: self.write_buffer_manager,
@@ -760,6 +782,7 @@ impl<S: LogStore> WorkerStarter<S> {
             region_count: REGION_COUNT.with_label_values(&[&id_string]),
             request_wait_time: REQUEST_WAIT_TIME.with_label_values(&[&id_string]),
             region_edit_queues: RegionEditQueues::default(),
+            pending_alters: Default::default(),
             schema_metadata_manager: self.schema_metadata_manager,
             file_ref_manager: self.file_ref_manager.clone(),
             partition_expr_fetcher: self.partition_expr_fetcher,
@@ -768,6 +791,7 @@ impl<S: LogStore> WorkerStarter<S> {
             #[cfg(feature = "hdfs-object-store")]
             sweep_limiter: self.sweep_limiter,
             node_lease: self.node_lease,
+            staging_regions: self.staging_regions,
         };
         let handle = common_runtime::spawn_global(async move {
             worker_thread.run().await;
@@ -783,6 +807,8 @@ impl<S: LogStore> WorkerStarter<S> {
             series_index_handle: Mutex::new(series_index_handle),
             series_index_task_state,
             running,
+            #[cfg(test)]
+            memtable_compact_dispatcher: self.memtable_compact_dispatcher.clone(),
         })
     }
 }
@@ -807,6 +833,10 @@ pub(crate) struct RegionWorker {
     series_index_task_state: Option<Arc<SeriesIndexTaskState>>,
     /// Whether to run the worker thread.
     running: Arc<AtomicBool>,
+    #[cfg(test)]
+    /// Dispatcher for bulk memtable compactions, shared by all workers in the group.
+    /// Kept only so tests can check that every worker holds the same one.
+    memtable_compact_dispatcher: Arc<CompactDispatcher>,
 }
 
 impl RegionWorker {
@@ -1038,6 +1068,8 @@ struct RegionWorkerLoop<S> {
     receiver: Receiver<WorkerRequestWithTime>,
     /// WAL of the engine.
     wal: Wal<S>,
+    /// Shared WAL pressure candidates, independently of memory-pressure wakeups.
+    wal_flush_receiver: watch::Receiver<Arc<[RegionId]>>,
     /// Manages object stores for manifest and SSTs.
     object_store_manager: ObjectStoreManagerRef,
     /// Whether the worker thread is still running.
@@ -1085,6 +1117,8 @@ struct RegionWorkerLoop<S> {
     request_wait_time: Histogram,
     /// Queues for region edit requests.
     region_edit_queues: RegionEditQueues,
+    /// ALTER requests waiting for the current edit or ALTER to finish.
+    pending_alters: handle_alter::PendingAlters,
     /// Database level metadata manager.
     schema_metadata_manager: SchemaMetadataManagerRef,
     /// Datanode level file references manager.
@@ -1100,14 +1134,24 @@ struct RegionWorkerLoop<S> {
     /// no concurrent GC job.
     sweep_limiter: Option<Arc<Semaphore>>,
     node_lease: Arc<NodeLease>,
+    /// Staging regions of this node that have received writes.
+    staging_regions: StagingRegionsRef,
 }
 
 impl<S: LogStore> RegionWorkerLoop<S> {
     /// Publishes a loaded region together with its resident compaction state.
     fn register_region(&mut self, region: MitoRegionRef) {
-        self.compaction_scheduler
-            .register_region(&region.version_control, &region.access_layer);
-        self.regions.insert_region(region);
+        if let Some(old) = self.regions.get_region(region.region_id) {
+            old.deactivate_region_manifest_size_metric();
+        }
+
+        self.compaction_scheduler.register_region(
+            &region.version_control,
+            &region.access_layer,
+            &region.compaction_state,
+        );
+        self.regions.insert_region(region.clone());
+        region.activate_region_manifest_size_metric();
     }
 
     /// Starts the worker loop.
@@ -1178,6 +1222,30 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                         self.handle_stalled_requests().await;
                         continue;
                     }
+                }
+                result = self.wal_flush_receiver.changed() => {
+                    if result.is_err() {
+                        break;
+                    }
+                    let candidates = self.wal_flush_receiver.borrow_and_update().clone();
+                    if let Err(e) = self.flush_for_wal_pressure(&candidates) {
+                        error!(e; "Failed to flush regions under WAL pressure");
+                    }
+                    #[cfg(any(test, feature = "test"))]
+                    if let Some(listener) = &self.listener.listener {
+                        for &region_id in candidates.iter() {
+                            if self.regions.get_region(region_id).is_some() {
+                                listener.on_wal_pressure_checked(
+                                    region_id,
+                                    self.flush_scheduler.is_flush_requested(region_id),
+                                );
+                            }
+                        }
+                    }
+                    // Notifications reset the loop's sleep, so they must also
+                    // check periodic work even when the candidate list is empty.
+                    self.handle_periodical_tasks();
+                    continue;
                 }
                 _ = &mut sleep => {
                     // Timeout. Checks periodical tasks.
@@ -1321,6 +1389,31 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 WorkerRequest::EditRegion(request) => {
                     self.handle_region_edit(request);
                 }
+                WorkerRequest::CancelCompaction {
+                    region_id,
+                    task_id,
+                    sender,
+                } => {
+                    let result = match self.compaction_scheduler.cancel_task(region_id, &task_id) {
+                        CancelCompactionResult::CancelIssued
+                        | CancelCompactionResult::AlreadyCancelling => Ok(1),
+                        CancelCompactionResult::NotFound => Ok(0),
+                        CancelCompactionResult::TooLateToCancel => error::InvalidRequestSnafu {
+                            region_id,
+                            reason: format!(
+                                "Compaction task {task_id} has crossed its commit boundary"
+                            ),
+                        }
+                        .fail(),
+                        CancelCompactionResult::Unsupported => error::UnsupportedOperationSnafu {
+                            err_msg: format!(
+                                "Cancellation of remote compaction task {task_id} is unsupported"
+                            ),
+                        }
+                        .fail(),
+                    };
+                    sender.send(result);
+                }
                 WorkerRequest::Stop => {
                     debug_assert!(!self.running.load(Ordering::Relaxed));
                 }
@@ -1434,6 +1527,8 @@ impl<S: LogStore> RegionWorkerLoop<S> {
 
         self.last_periodical_check_millis = self.time_provider.current_time_millis();
 
+        self.wal
+            .refresh_flush_candidates(self.last_periodical_check_millis, CHECK_REGION_INTERVAL);
         if let Err(e) = self.flush_periodically() {
             error!(e; "Failed to flush regions periodically");
         }
@@ -1565,6 +1660,7 @@ impl<S> RegionWorkerLoop<S> {
         // Closes remaining regions.
         let regions = self.regions.list_regions();
         for region in regions {
+            region.deactivate_region_manifest_size_metric();
             region.stop().await;
         }
 
@@ -1877,5 +1973,27 @@ mod tests {
                 .expect("series-index tasks should stop without waiting for their interval")
                 .unwrap();
         }
+    }
+
+    /// Checks that all workers in a group share one bulk memtable compaction dispatcher.
+    #[tokio::test]
+    async fn test_workers_share_memtable_compact_dispatcher() {
+        let env = TestEnv::with_prefix("share-dispatcher").await;
+        let group = env
+            .create_worker_group(MitoConfig {
+                num_workers: 4,
+                ..Default::default()
+            })
+            .await;
+        let first = &group.workers[0].memtable_compact_dispatcher;
+        for (index, worker) in group.workers.iter().enumerate() {
+            let current = &worker.memtable_compact_dispatcher;
+            assert!(
+                Arc::ptr_eq(first, current),
+                "worker {index} has its own memtable compaction dispatcher"
+            );
+        }
+
+        group.stop().await.unwrap();
     }
 }

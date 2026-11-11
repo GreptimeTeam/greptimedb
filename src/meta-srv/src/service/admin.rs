@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+pub(crate) mod datanode;
 pub(crate) mod health;
 pub(crate) mod heartbeat;
 pub(crate) mod leader;
@@ -255,6 +256,24 @@ pub fn admin_axum_router(metasrv: Arc<Metasrv>) -> AxumRouter {
     };
 
     let admin_router = AxumRouter::new()
+        .nest(
+            "/datanode",
+            AxumRouter::new()
+                .route("/drain", routing::post(datanode::drain))
+                .route(
+                    "/mark-schedulable",
+                    routing::post(datanode::mark_schedulable),
+                )
+                .route(
+                    "/scheduling/status",
+                    routing::get(datanode::scheduling_status),
+                )
+                .with_state(metasrv.clone()),
+        )
+        .route(
+            "/procedure/status",
+            routing::get(procedure::procedure_status).with_state(metasrv),
+        )
         .route("/health", routing::get(health::health))
         .route(
             "/node-lease",

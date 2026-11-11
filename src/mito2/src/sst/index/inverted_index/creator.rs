@@ -713,6 +713,7 @@ mod tests {
                             data_type: ConcreteDataType::int64_datatype(),
                             inverted_index: true,
                             skipping_index: None,
+                            fulltext_index: None,
                         }],
                         Some(0),
                     )

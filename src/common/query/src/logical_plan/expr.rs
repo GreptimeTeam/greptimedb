@@ -15,12 +15,40 @@
 use common_time::Timestamp;
 use common_time::range::TimestampRange;
 use common_time::timestamp::TimeUnit;
+use datafusion::arrow::datatypes::DataType as ArrowDataType;
 use datafusion_common::{Column, ScalarValue};
 use datafusion_expr::expr::Expr;
 use datafusion_expr::{Operator, and, binary_expr};
 use datatypes::data_type::DataType;
 use datatypes::schema::ColumnSchema;
 use datatypes::value::Value;
+
+/// Whether a scalar type is in the conservative lossless Substrait transport subset.
+///
+/// In particular, timestamp timezone identifiers are lost by Substrait even when
+/// encoding succeeds. Additional Arrow types need transport coverage first.
+pub fn is_lossless_substrait_type(data_type: &ArrowDataType) -> bool {
+    matches!(
+        data_type,
+        ArrowDataType::Null
+            | ArrowDataType::Boolean
+            | ArrowDataType::Int8
+            | ArrowDataType::Int16
+            | ArrowDataType::Int32
+            | ArrowDataType::Int64
+            | ArrowDataType::UInt8
+            | ArrowDataType::UInt16
+            | ArrowDataType::UInt32
+            | ArrowDataType::UInt64
+            | ArrowDataType::Float32
+            | ArrowDataType::Float64
+            | ArrowDataType::Utf8
+            | ArrowDataType::Binary
+            | ArrowDataType::Date32
+            | ArrowDataType::Timestamp(_, None)
+            | ArrowDataType::Decimal128(_, _)
+    )
+}
 
 /// Builds a filter for a timestamp column with the same type as the timestamp column.
 /// Returns [None] if time range is [None] or full time range.

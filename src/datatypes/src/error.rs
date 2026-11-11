@@ -278,6 +278,14 @@ pub enum Error {
         location: Location,
     },
 
+    #[cfg(feature = "enterprise")]
+    #[snafu(display("Invalid sketch option: {}", msg))]
+    InvalidSketchOption {
+        msg: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Invalid skipping index option: {}", msg))]
     InvalidSkippingIndexOption {
         msg: String,
@@ -369,6 +377,9 @@ impl ErrorExt for Error {
             | InvalidFulltextOption { .. }
             | InvalidSkippingIndexOption { .. }
             | InvalidCompressionOption { .. } => StatusCode::InvalidArguments,
+
+            #[cfg(feature = "enterprise")]
+            InvalidSketchOption { .. } => StatusCode::InvalidArguments,
 
             ValueExceedsPrecision { .. }
             | CastType { .. }

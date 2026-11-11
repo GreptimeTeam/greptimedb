@@ -84,12 +84,34 @@ pub struct BloomFilterIndexer {
 impl BloomFilterIndexer {
     /// Creates a new bloom filter indexer.
     /// JSON paths are included only for flush and compaction builds.
+    #[cfg(any(test, feature = "testing"))]
     pub fn new(
         sst_file_id: FileId,
         metadata: &RegionMetadataRef,
         intermediate_manager: IntermediateManager,
         memory_usage_threshold: Option<usize>,
         build_type: IndexBuildType,
+    ) -> Result<Option<Self>> {
+        let mut targets = Vec::new();
+        for column in &metadata.column_metadatas {
+            targets.extend(Self::targets(column, &build_type)?);
+        }
+        Self::new_with_targets(
+            sst_file_id,
+            metadata,
+            intermediate_manager,
+            memory_usage_threshold,
+            targets,
+        )
+    }
+
+    /// Creates one file-level creator from already resolved targets.
+    pub(crate) fn new_with_targets(
+        sst_file_id: FileId,
+        metadata: &RegionMetadataRef,
+        intermediate_manager: IntermediateManager,
+        memory_usage_threshold: Option<usize>,
+        targets: Vec<(IndexTarget, datatypes::schema::SkippingIndexOptions)>,
     ) -> Result<Option<Self>> {
         let mut creators = HashMap::new();
 
@@ -99,48 +121,15 @@ impl BloomFilterIndexer {
         ));
         let global_memory_usage = Arc::new(AtomicUsize::new(0));
 
-        for column in &metadata.column_metadatas {
-            let options =
-                column
-                    .column_schema
-                    .skipping_index_options()
-                    .context(IndexOptionsSnafu {
-                        column_name: &column.column_schema.name,
-                    })?;
-
-            let mut targets = Vec::new();
-            if let Some(options) = options {
-                targets.push((IndexTarget::ColumnId(column.column_id), options));
-            }
-            // Only flush and compaction builds collect JSON targets; manual and schema-change
-            // rebuilds skip them because existing SSTs may not materialize the current hints.
-            // FIXME: Rebuilds replace the whole Puffin file and can drop existing JSON path indexes.
-            if matches!(build_type, IndexBuildType::Flush | IndexBuildType::Compact)
-                && column.column_schema.data_type.is_json2()
-                && let Ok(Some(extension)) =
-                    column.column_schema.extension_type::<Json2ExtensionType>()
-            {
-                for hint in extension.metadata().json_settings().type_hints() {
-                    let Some(options) = &hint.skipping_index else {
-                        continue;
-                    };
-                    if let Ok(target) =
-                        IndexTarget::new_json_path(column.column_id, hint.path.clone())
-                    {
-                        targets.push((target, options.clone()));
-                    }
-                }
-            }
-            for (target, options) in targets {
-                let creator = BloomFilterCreator::new(
-                    options.granularity as _,
-                    options.false_positive_rate(),
-                    temp_file_provider.clone(),
-                    global_memory_usage.clone(),
-                    memory_usage_threshold,
-                );
-                creators.insert(target, creator);
-            }
+        for (target, options) in targets {
+            let creator = BloomFilterCreator::new(
+                options.granularity as _,
+                options.false_positive_rate(),
+                temp_file_provider.clone(),
+                global_memory_usage.clone(),
+                memory_usage_threshold,
+            );
+            creators.insert(target, creator);
         }
 
         if creators.is_empty() {
@@ -163,6 +152,42 @@ impl BloomFilterIndexer {
             metadata: metadata.clone(),
         };
         Ok(Some(indexer))
+    }
+
+    /// Resolves all targets of one column without creating index state.
+    pub(crate) fn targets(
+        column: &store_api::metadata::ColumnMetadata,
+        build_type: &IndexBuildType,
+    ) -> Result<Vec<(IndexTarget, datatypes::schema::SkippingIndexOptions)>> {
+        let options = column
+            .column_schema
+            .skipping_index_options()
+            .context(IndexOptionsSnafu {
+                column_name: &column.column_schema.name,
+            })?;
+
+        let mut targets = Vec::new();
+        if let Some(options) = options {
+            targets.push((IndexTarget::ColumnId(column.column_id), options));
+        }
+        // Only flush and compaction builds collect JSON targets; manual and schema-change
+        // rebuilds skip them because existing SSTs may not materialize the current hints.
+        // FIXME: Rebuilds replace the whole Puffin file and can drop existing JSON path indexes.
+        if matches!(build_type, IndexBuildType::Flush | IndexBuildType::Compact)
+            && column.column_schema.data_type.is_json2()
+            && let Ok(Some(extension)) = column.column_schema.extension_type::<Json2ExtensionType>()
+        {
+            for hint in extension.metadata().json_settings().type_hints() {
+                let Some(options) = &hint.skipping_index else {
+                    continue;
+                };
+                if let Ok(target) = IndexTarget::new_json_path(column.column_id, hint.path.clone())
+                {
+                    targets.push((target, options.clone()));
+                }
+            }
+        }
+        Ok(targets)
     }
 
     /// Updates index with a batch of rows.

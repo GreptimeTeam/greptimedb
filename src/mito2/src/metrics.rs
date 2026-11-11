@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+pub(crate) mod manifest_size;
+
 use std::time::Duration;
 
 use lazy_static::lazy_static;
@@ -35,6 +37,11 @@ pub const PARTITION_LABEL: &str = "partition";
 pub const STAGING_TYPE: &str = "index_staging";
 /// Recycle bin type label.
 pub const RECYCLE_TYPE: &str = "recycle_bin";
+
+/// Discard reason when an operation cannot admit extension index work.
+pub(crate) const INDEX_DISCARD_ADMISSION_REJECTED: &str = "admission_rejected";
+/// Discard reason when a creator exceeds its retained-memory allowance.
+pub(crate) const INDEX_DISCARD_MEMORY_BUDGET_EXCEEDED: &str = "memory_budget_exceeded";
 
 // Write metrics.
 lazy_static! {
@@ -179,6 +186,18 @@ lazy_static! {
     pub static ref COMPACTION_FAILURE_COUNT: IntCounter =
         register_int_counter!("greptime_mito_compaction_failure_total", "mito compaction failure total").unwrap();
 
+    /// Prepared compaction units waiting for global admission.
+    pub static ref COMPACTION_READY_UNITS: IntGauge = register_int_gauge!(
+        "greptime_mito_compaction_ready_units", "prepared units waiting for global admission"
+    ).unwrap();
+    /// Includes authorized work not yet polled, through task exit and lease release.
+    pub static ref COMPACTION_ADMITTED_UNITS: IntGauge = register_int_gauge!(
+        "greptime_mito_compaction_admitted_units", "compaction units holding global execution capacity"
+    ).unwrap();
+    pub static ref COMPACTION_ADMISSION_WAIT: Histogram = register_histogram!(
+        "greptime_mito_compaction_admission_wait_seconds", "time prepared units wait for admission",
+        exponential_buckets(0.001, 4.0, 10).unwrap()
+    ).unwrap();
     /// Gauge for inflight compaction tasks: local units and remote jobs.
     pub static ref INFLIGHT_COMPACTION_COUNT: IntGauge =
         register_int_gauge!(
@@ -491,7 +510,15 @@ lazy_static! {
         &[TYPE_LABEL],
     )
     .unwrap();
-    /// Gauge of index create memory usage.
+    /// Optional index kinds discarded by a resource policy, not a build error.
+    pub static ref INDEX_CREATE_DISCARDED_TOTAL: IntCounterVec = register_int_counter_vec!(
+        "greptime_index_create_discarded_total",
+        "index kinds omitted or discarded by resource policy",
+        &[TYPE_LABEL, "reason"],
+    ).unwrap();
+    /// Gauge of index create memory usage. The `extension` type aggregates retained
+    /// memory across optional creators, not individual algorithms: one creator may
+    /// share state across several algorithms.
     pub static ref INDEX_CREATE_MEMORY_USAGE: IntGaugeVec = register_int_gauge_vec!(
         "greptime_index_create_memory_usage",
         "index create memory usage",
@@ -853,6 +880,7 @@ pub(crate) fn cache_page_fetch_metrics(
 
 #[cfg(test)]
 mod tests {
+
     use super::*;
     use common_cache::paged::{PageEvent, PageFetchStats};
 

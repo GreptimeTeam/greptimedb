@@ -120,8 +120,8 @@
 //! immediately after SST files are written but **before** the manifest is committed.
 //!
 //! `on_manifest_updated` is funneled through [`ManifestContext::update_locked`],
-//! the sole caller of the low-level [`RegionManifestManager::update`], which
-//! packages each successful write into a [`PendingManifestHook`]. The caller
+//! which calls the low-level [`RegionManifestManager::update_with_verification`]
+//! and packages each successful write into a [`PendingManifestHook`]. The caller
 //! owns the write lock, drops it, and *then* fires the receipt — the hook must
 //! never run under the lock. [`ManifestContext::update_manifest`] is the common
 //! case: it acquires the lock, delegates to `update_locked`, and fires the
@@ -148,10 +148,11 @@
 //! [`on_region_dropped`]: RegionHook::on_region_dropped
 //! [`on_region_files_removed`]: RegionHook::on_region_files_removed
 //! [`on_region_gc`]: RegionHook::on_region_gc
-//! [`RegionManifestManager::update`]: crate::manifest::manager::RegionManifestManager::update
+//! [`RegionManifestManager::update_with_verification`]: crate::manifest::manager::RegionManifestManager::update_with_verification
 //! [`ManifestContext::update_locked`]: crate::region::ManifestContext::update_locked
 //! [`ManifestContext::update_manifest`]: crate::region::ManifestContext::update_manifest
 
+use std::collections::HashSet;
 use std::fmt::Debug;
 use std::sync::Arc;
 
@@ -160,10 +161,10 @@ use store_api::ManifestVersion;
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::RegionId;
 
-use crate::access_layer::AccessLayerRef;
+use crate::access_layer::{AccessLayer, AccessLayerRef};
 use crate::error::Result;
 use crate::manifest::action::{RegionMetaActionList, RemovedFile};
-use crate::sst::file::FileMeta;
+use crate::sst::file::{FileMeta, RegionFileId};
 use crate::sst::parquet::SstInfo;
 
 /// A deferred [`RegionHook::on_manifest_updated`] notification produced by a
@@ -297,6 +298,21 @@ pub trait RegionHook: Send + Sync + Debug {
         files: &[SstFileInfo<'_>],
     ) {
         let _ = (region_id, region_metadata, files);
+    }
+
+    /// Queries durable file protections immediately before deletion. Implementations
+    /// must include pending uploads, inputs and undecided outputs, and fail on
+    /// unavailable/uncertain state. File identities are scoped by the access layer's
+    /// storage, table directory and PathType; protection covers all index generations.
+    /// GC rechecks the manifest after this await. This is not `on_region_gc`, which
+    /// is too late to protect anything. Calls must not retain a manifest lock.
+    async fn protected_sst_files(
+        &self,
+        access: &AccessLayer,
+        files: &[RegionFileId],
+    ) -> Result<HashSet<RegionFileId>> {
+        let _ = (access, files);
+        Ok(HashSet::new())
     }
 
     /// Called after the region manifest is successfully committed to the **live**

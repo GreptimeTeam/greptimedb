@@ -105,8 +105,9 @@ class Benchmark:
         self.endpoint = os.environ.get("S3_ENDPOINT", "")
         if self.endpoint and not local_smoke:
             raise ValueError("Custom S3 endpoints are restricted to local smoke")
-        if not local_smoke and os.environ["S3_REGION"] != "ap-southeast-1":
-            raise ValueError("Cloud benchmark requires ap-southeast-1")
+        if not local_smoke and (not os.environ["S3_REGION"].strip()
+                                or os.environ["S3_REGION"] != os.environ["RUNNER_REGION"]):
+            raise ValueError("Cloud benchmark requires the same nonempty bucket and runner region")
         self.containers = set()
         self.network_created = False
         self.phases = []
@@ -324,7 +325,7 @@ level = "info"
         lines = ["# Metric packed snapshot benchmark", "", f"Image: `{self.image}`",
                  f"Source commit: `{self.commit}`", "",
                  "Local smoke only; timings are not AWS results." if self.local_smoke else
-                 "AWS S3 in ap-southeast-1; source and target use local File storage.", "",
+                 f"S3 in {os.environ['S3_REGION']}; source and target use local File storage.", "",
                  "| Round | Phase | Seconds | Result |", "| --- | --- | ---: | --- |"]
         for phase in self.phases:
             lines.append(f"| {phase['round']} | {phase['phase']} | {phase['wall_seconds']:.3f} | {phase['outcome']} |")

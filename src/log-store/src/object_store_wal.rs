@@ -71,12 +71,26 @@
 //! Entry ids are object-sequence-major, see [`entry_id`]: the high bits of an
 //! id name the object that holds the entry, the low bits its position among
 //! the entries of its region in that object.
+//!
+//! Remote recovery uses [`ObjectStoreWalReaders`] to share a read-only reader
+//! per source prefix. Listing an upper bound reads no object indexes; preparing
+//! a range refreshes the listing and reuses cached indexes. Known last-entry
+//! bounds anchor their own chains, while listed bounds use the complete-chain
+//! selection of startup recovery with an additional maximum-epoch check.
+//! Neither path opens a writable store or modifies the source. The caller owns
+//! the lifetime of pending recovery ranges and
+//! publishes progress only after a successful read.
 
 mod batch;
 mod catalog;
 mod format;
+mod history;
+mod index;
 mod io;
+mod prefetch;
+mod reader;
 mod store;
 
 pub use batch::entry_id;
+pub use reader::{NodeWalPrefix, ObjectStoreWalReader, ObjectStoreWalReaders, WalReadUpperBound};
 pub use store::{ObjectStoreLogStore, WalHole};

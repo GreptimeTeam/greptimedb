@@ -15,6 +15,7 @@ headerPath = "licenses/enterprise-header.txt"
 # with the "# enterprise" block in `licenserc.toml`'s `excludes` — both are
 # enforced by `make check-enterprise-license`.
 includes = [
+    "src/datatypes/src/schema/sketch.rs",
     "src/common/meta/src/rpc/ddl/trigger.rs",
     "src/operator/src/expr_helper/trigger.rs",
     "src/sql/src/statements/alter/trigger.rs",
@@ -25,6 +26,12 @@ includes = [
     "src/sql/src/parsers/create_parser/trigger.rs",
     "src/sql/src/parsers/show_parser/trigger.rs",
     "src/mito2/src/extension.rs",
+    "src/mito2/src/compaction/multi_region.rs",
+    "src/mito2/src/compaction/multi_region/source.rs",
+    "src/mito2/src/compaction/multi_region/memory.rs",
+    "src/mito2/src/compaction/multi_region/worker.rs",
+    "src/mito2/src/compaction/multi_region/writer.rs",
+    "src/mito2/src/compaction/multi_region/tests.rs",
     "src/common/function/src/admin/purge_table.rs",
     "src/catalog/src/system_schema/information_schema/recycle_bin.rs",
     "src/common/meta/src/ddl/purge_dropped_table.rs",

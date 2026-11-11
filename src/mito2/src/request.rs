@@ -793,6 +793,13 @@ pub(crate) enum WorkerRequest {
         sender: Sender<SetRegionRoleStateResponse>,
     },
 
+    /// Cancels one live compaction on its owning worker.
+    CancelCompaction {
+        region_id: RegionId,
+        task_id: String,
+        sender: OptionOutputTx,
+    },
+
     /// Notify a worker to stop.
     Stop,
 
@@ -924,6 +931,11 @@ impl WorkerRequest {
                 sender: sender.into(),
                 request: DdlRequest::Compact(v),
             }),
+            RegionRequest::CancelCompaction(v) => WorkerRequest::CancelCompaction {
+                region_id,
+                task_id: v.task_id,
+                sender: sender.into(),
+            },
             RegionRequest::BuildIndex(v) => WorkerRequest::Ddl(SenderDdlRequest {
                 region_id,
                 sender: sender.into(),
@@ -1152,8 +1164,6 @@ pub(crate) struct FlushFinished {
     pub(crate) edit: RegionEdit,
     /// Memtables to remove.
     pub(crate) memtables_to_remove: SmallVec<[MemtableId; 2]>,
-    /// Whether the region is in staging mode.
-    pub(crate) is_staging: bool,
 }
 
 impl FlushFinished {
@@ -1372,6 +1382,9 @@ pub(crate) struct RegionEditRequest {
     pub(crate) preload_sst_cache: bool,
     /// The waiters that are waiting for this region edit's result.
     pub(crate) waiters: Waiters,
+    /// The partition expression of the staging this edit belongs to, if any.
+    /// The edit must not run unless the region is staging for that expression.
+    pub(crate) staging_partition_expr: Option<String>,
 }
 
 impl RegionEditRequest {
@@ -1386,7 +1399,14 @@ impl RegionEditRequest {
             edit,
             preload_sst_cache,
             waiters: Waiters::one(waiter),
+            staging_partition_expr: None,
         }
+    }
+
+    /// Binds the edit to the staging for `partition_expr`.
+    pub(crate) fn for_staging(mut self, partition_expr: String) -> Self {
+        self.staging_partition_expr = Some(partition_expr);
+        self
     }
 }
 
@@ -1395,6 +1415,8 @@ impl RegionEditRequest {
 pub(crate) struct RegionEditResult {
     /// Region id.
     pub(crate) region_id: RegionId,
+    /// Prevents a delayed completion from mutating a reopened region with the same id.
+    pub(crate) origin: MitoRegionRef,
     /// Result waiters.
     pub(crate) waiters: Waiters,
     /// Region edit to apply.
@@ -1466,6 +1488,33 @@ mod tests {
     use super::*;
     use crate::error::Error;
     use crate::test_util::ts_ms_value;
+
+    #[tokio::test]
+    async fn test_cancel_compaction_is_worker_control_request() {
+        let region_id = RegionId::new(7, 3);
+        let (request, receiver) = WorkerRequest::try_from_region_request(
+            region_id,
+            RegionRequest::CancelCompaction(
+                store_api::region_request::RegionCancelCompactionRequest {
+                    task_id: "task-1".to_string(),
+                },
+            ),
+            None,
+        )
+        .unwrap();
+        let WorkerRequest::CancelCompaction {
+            region_id: actual_region_id,
+            task_id,
+            sender,
+        } = request
+        else {
+            panic!("cancellation must bypass the DDL queue");
+        };
+        assert_eq!(actual_region_id, region_id);
+        assert_eq!(task_id, "task-1");
+        sender.send(Ok(1));
+        assert_eq!(receiver.await.unwrap().unwrap(), 1);
+    }
 
     fn new_column_schema(
         name: &str,

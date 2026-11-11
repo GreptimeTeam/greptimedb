@@ -4,6 +4,11 @@ name: GreptimeDB Development Build
 on:
   workflow_dispatch: # Allows you to run this workflow manually.
     inputs:
+      ec2_volume_size:
+        description: Root volume size in GiB for each EC2 build runner
+        type: number
+        required: false
+        default: 500
       large-page-size:
         description: Build GreptimeDB with large page size (65536).
         type: boolean
@@ -133,6 +138,7 @@ jobs:
           aws-region: ${{ vars.EC2_RUNNER_REGION }}
           github-token: ${{ secrets.GH_PERSONAL_ACCESS_TOKEN }}
           image-id: ${{ vars.EC2_RUNNER_LINUX_AMD64_IMAGE_ID }}
+          ec2-volume-size: ${{ inputs.ec2_volume_size || 500 }}
           security-group-id: ${{ vars.EC2_RUNNER_SECURITY_GROUP_ID }}
           subnet-id: ${{ vars.EC2_RUNNER_SUBNET_ID }}
 
@@ -147,6 +153,7 @@ jobs:
           aws-region: ${{ vars.EC2_RUNNER_REGION }}
           github-token: ${{ secrets.GH_PERSONAL_ACCESS_TOKEN }}
           image-id: ${{ vars.EC2_RUNNER_LINUX_ARM64_IMAGE_ID }}
+          ec2-volume-size: ${{ inputs.ec2_volume_size || 500 }}
           security-group-id: ${{ vars.EC2_RUNNER_SECURITY_GROUP_ID }}
           subnet-id: ${{ vars.EC2_RUNNER_SUBNET_ID }}
 

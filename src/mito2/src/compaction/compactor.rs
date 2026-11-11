@@ -26,7 +26,7 @@ use itertools::Itertools;
 use object_store::manager::ObjectStoreManagerRef;
 use partition::expr::PartitionExpr;
 use serde::{Deserialize, Serialize};
-use snafu::{OptionExt, ResultExt};
+use snafu::{OptionExt, ResultExt, ensure};
 use store_api::ManifestVersion;
 use store_api::metadata::RegionMetadataRef;
 use store_api::region_request::PathType;
@@ -53,7 +53,7 @@ use crate::region::version::VersionRef;
 use crate::region::{ManifestContext, RegionLeaderState, RegionRoleState};
 use crate::schedule::scheduler::LocalScheduler;
 use crate::sst::FormatType;
-use crate::sst::file::{FileHandle, FileMeta, UncommittedSsts};
+use crate::sst::file::{self, FileHandle, FileMeta, UncommittedSsts};
 use crate::sst::file_purger::LocalFilePurger;
 use crate::sst::index::intermediate::IntermediateManager;
 use crate::sst::index::puffin_manager::PuffinManagerFactory;
@@ -292,6 +292,7 @@ impl CompactionRegionOpener {
             manifest_manager,
             RegionRoleState::Leader(RegionLeaderState::Writable),
             hook,
+            Default::default(),
         ));
 
         let file_purger = {
@@ -451,6 +452,7 @@ impl CompactionContext {
             flushed_entry_id: None,
             flushed_sequence: None,
             committed_sequence: None,
+            wal_recovery: Default::default(),
         };
 
         let action_list = RegionMetaActionList::with_action(RegionMetaAction::Edit(edit.clone()));
@@ -582,16 +584,24 @@ fn output_sequence_metadata(
 }
 
 /// Computes the maximum target-domain sequence bound of the output of merging
-/// `inputs`. A bound can be a row maximum or an admission marker; compaction
-/// must preserve both for sequence-based pruning. Unknown bounds must remain
-/// unknown rather than being replaced with a partial maximum.
+/// `inputs`.
 fn known_max_input_sequence(inputs: &[FileHandle]) -> Option<NonZeroU64> {
-    let mut max: Option<NonZeroU64> = None;
-    for input in inputs {
-        let sequence = input.meta_ref().sequence?;
-        max = Some(max.map_or(sequence, |current| current.max(sequence)));
-    }
-    max
+    crate::sst::file::known_max_input_sequence(inputs.iter().map(FileHandle::meta_ref))
+}
+
+fn validate_region_compaction_output(region_id: RegionId, output: &CompactionOutput) -> Result<()> {
+    ensure!(
+        output.output_level < file::LEVEL_SHARED
+            && output
+                .inputs
+                .iter()
+                .all(|file| file.level() < file::LEVEL_SHARED),
+        error::InvalidRequestSnafu {
+            region_id,
+            reason: "Region compaction cannot consume or produce shared SSTs",
+        }
+    );
+    Ok(())
 }
 
 #[async_trait::async_trait]
@@ -603,6 +613,7 @@ impl SstMerger for DefaultSstMerger {
         write_opts: WriteOptions,
     ) -> Result<(Vec<FileMeta>, Vec<SstInfo>)> {
         let region_id = context.region_id;
+        validate_region_compaction_output(region_id, &output)?;
         let index_options = context.version_options.index_options.clone();
         let append_mode = context.version_options.append_mode;
         let merge_mode = context.version_options.merge_mode();
@@ -642,6 +653,7 @@ impl SstMerger for DefaultSstMerger {
             .access_layer
             .write_sst(
                 SstWriteRequest {
+                    index_build_inputs: None,
                     op_type: OperationType::Compact,
                     metadata: region_metadata.clone(),
                     source,
@@ -689,7 +701,7 @@ impl SstMerger for DefaultSstMerger {
                     None => (None, None),
                 };
 
-                FileMeta {
+                Ok(FileMeta {
                     region_id,
                     file_id: sst_info.file_id,
                     time_range: sst_info.time_range,
@@ -697,7 +709,7 @@ impl SstMerger for DefaultSstMerger {
                     file_size: sst_info.file_size,
                     max_row_group_uncompressed_size: sst_info.max_row_group_uncompressed_size,
                     available_indexes: sst_info.index_metadata.build_available_indexes(),
-                    indexes: sst_info.index_metadata.build_indexes(),
+                    indexes: sst_info.index_metadata.build_indexes()?,
                     index_file_size: sst_info.index_metadata.file_size,
                     index_version: 0,
                     num_rows: sst_info.num_rows as u64,
@@ -708,9 +720,9 @@ impl SstMerger for DefaultSstMerger {
                     primary_key_min,
                     primary_key_max,
                     preserve_row_sequence: sequence_metadata.exact_sequence_trusted,
-                }
+                })
             })
-            .collect::<Vec<_>>();
+            .collect::<Result<Vec<_>>>()?;
         let output_file_names = output_files.iter().map(|f| f.file_id.to_string()).join(",");
         info!(
             "Region {} compaction inputs: [{}], outputs: [{}], flat_format: {}, metrics: {:?}",
@@ -834,6 +846,19 @@ where
         compaction_region: &CompactionRegion,
         mut picker_output: PickerOutput,
     ) -> Result<MergeOutput> {
+        for output in &picker_output.outputs {
+            validate_region_compaction_output(compaction_region.region_id, output)?;
+        }
+        ensure!(
+            picker_output
+                .expired_ssts
+                .iter()
+                .all(|file| file.level() < file::LEVEL_SHARED),
+            error::InvalidRequestSnafu {
+                region_id: compaction_region.region_id,
+                reason: "Region compaction cannot expire shared SSTs",
+            }
+        );
         let internal_parallelism = compaction_region.max_parallelism.max(1);
         let compaction_time_window = picker_output.time_window_size;
         let region_id = compaction_region.region_id;
@@ -1121,6 +1146,7 @@ mod tests {
                         compaction_time_window: None,
                         flushed_entry_id: None,
                         flushed_sequence: None,
+                        wal_recovery: Default::default(),
                     })),
                     false,
                 )

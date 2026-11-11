@@ -24,6 +24,7 @@ snapshot isolation). It implements the `RegionEngine` trait from `store-api`.
 | `memtable` | `src/mito2/src/memtable/` | In-memory write buffers (time-series / bulk / partition) |
 | `flush` | `src/mito2/src/flush.rs` | `FlushScheduler`, `WriteBufferManager`, memtable → SST |
 | `compaction` | `src/mito2/src/compaction/` | Compaction scheduler (`scheduler.rs` + `scheduler/`), TWCS picker, strict-window manual picker, compactor, memory control |
+| `compaction/multi_region` | `src/mito2/src/compaction/multi_region.rs` | Enterprise lossless routing by a captured table partition rule; selected SSTs to per-region outputs, without manifest publication |
 | `access_layer` | `src/mito2/src/access_layer.rs` | SST read/write over the object store |
 | `sst` | `src/mito2/src/sst/` | Parquet format, file metadata, index layout |
 | `series_index` | `src/mito2/src/series_index/` | Series index writer/searcher, bucket planning, catalogs, worker-owned reconciliation (`maintenance.rs`), shared approximate usage (`task.rs`), catalogs, and index lifecycle |
@@ -57,6 +58,18 @@ Internal series merges use the query runtime pool forwarded through
 `QueryScanContext`; reader and output-batch accounting uses the separate scan
 memory tracker. Direct scanner callers default to an unbounded operator pool.
 
+Live compaction queries read shared per-region state directly from `MitoRegion`,
+without sending a worker request. The scheduler publishes active and pending task
+state together; readers clone task Arcs under a short read lock, then filter and
+build rows outside the lock. Execution handles provide live background phases.
+There is no second task registry or completed-task history. See
+`compaction/scheduler/state.rs`. The datanode provider reuses the lazy inspection scan
+path and retains residual SQL filters.
+Task cancellation uses `RegionRequest::CancelCompaction` through `Region.Handle`;
+the owning worker matches the live task ID without entering the DDL queue.
+Task-specific cancellation preserves other pending manual work when no DDL is
+pending. DDL cancellation retains its existing scheduling fence and priority.
+
 ## Public surface
 
 - Entry: `MitoEngine` in `src/mito2/src/engine.rs`, built via `MitoEngineBuilder`.
@@ -66,7 +79,11 @@ memory tracker. Direct scanner callers default to an unbounded operator pool.
 ## When you change X, also touch Y
 
 - **Manifest format** (`manifest/action.rs`): affects crash recovery and
-  follower replay. Keep it backward compatible.
+  follower replay. Keep it backward compatible. Compaction task state does not
+  belong in the manifest; publication uses ordinary file edits after locked input
+  checks. Shared SSTs require Enterprise capability. Compatibility fixtures:
+  `tests/compatibility/manifest/table_compaction/` and
+  `tests/compatibility/manifest/pending_tails/`.
 - **SST/Parquet layout** (`sst/`): readers must stay compatible with existing files.
 - **Series-index disk limit**: tasks estimate usage from entry sizes in open-region snapshots
   and defer new builds when the shared estimate is full. Cleanup still prunes obsolete
@@ -88,15 +105,38 @@ Tests live next to the code as `*_test.rs` (e.g. `src/mito2/src/engine/flush_tes
 
 ## Gotchas
 
+- Parquet row groups have uniform row counts except for the final group
+  (`sst/parquet/row_selection.rs`). Memory-pressure flushing must not create
+  arbitrary partial groups: readers and index row IDs rely on this layout.
 - Sequence numbers are strictly increasing per region; dedup and snapshot reads
   depend on this. Do not change assignment lightly.
 - Manifest version is monotonic — never reset or skip it.
+- In regions whose writes require a lease and whose WAL is the object store WAL,
+  each manifest version has one fixed object name, created conditionally. A late
+  create can succeed again once checkpoint cleanup frees the name, so a commit
+  checks its result (`ensure_version_not_checkpointed` in `manifest/storage.rs`).
+- Pending tails (`RegionManifest::pending_tails`) are WAL ranges a region still has
+  to recover; the flushed entry id never prunes them. Opening a region replays its
+  WAL after `RegionManifest::wal_replay_start`. The WAL releases at open and after
+  a flush stay below this node's tails (`cap_wal_release`); truncate, drop, offline
+  cleanup and catchup release without that cap. Handoff floors are dropped once the
+  flushed entry id reaches them, in `RegionManifestBuilder::try_build`. While a
+  region has pending tails, scans and memtable/SST stats fail with
+  `RegionPendingTails`, and so do truncate, entering staging, a repartition flush,
+  a close with `flush_on_close`, and every ALTER other than adding nullable columns
+  without a default or changing options; compaction pauses. These checks run
+  before any region state changes. Full-listing GC skips a region that has pending
+  tails or whose manifest `has_update()` reports newer, or fails to check.
 - Lock ordering: take the manifest lock before updating `version_control`; the
   reverse deadlocks against concurrent flush/compaction.
 - All region I/O runs on tokio workers; never `block_on` inside a worker.
 - Loaded regions have resident compaction state, including `Idle` and handed-off
   DDLs. Publish create/open/catchup results through the worker's `register_region`;
   only close/drop unregisters them. See `compaction/scheduler/state.rs`.
+- Explicit truncate retires shared references too (`worker/handle_truncate.rs`):
+  `All` removes all data; `ByTimeRanges` removes fully contained files. Other
+  regions/readers still protect the shared objects. Stale compaction results must
+  not reinstate truncated inputs.
 - Local compaction units use the snapshot-free `CompactionContext`. Retaining a
   full `CompactionRegion` in a unit pins other units' inputs and delays SST purge.
 - Candidate waiting history is owned by the region scheduler (`scheduler/history.rs`).
@@ -104,9 +144,16 @@ Tests live next to the code as `*_test.rs` (e.g. `src/mito2/src/engine/flush_tes
   resident history, and an accepted plan consumes the fairness turn for each selected
   key. Execution success or failure must not rewrite waiting ages. TWCS discovery
   must not mutate scheduler state.
+- Compaction admission is engine-wide (`compaction/scheduler/coordinator.rs`),
+  but pick/DDL state remains worker-owned. Repick only after every batch unit's
+  `Released`; FIFO submission is not admission and pipeline children share the
+  parent unit's slot. Keep service accounting across batches until region unload.
 - In flat batches, equal `__primary_key` dictionary keys imply the same series, but
   not the reverse: `wrap_pk_binary_to_dict` gives every row its own key. Compare key
   bytes when grouping rows by series.
+- Staging regions never flush: a flush would move rows into the staging manifest and
+  release their WAL, losing them if staging does not end successfully. Every flush
+  trigger in `worker/handle_flush.rs` must skip them, and `handle_close` leaves staging first.
 
 ## Maintenance contract
 

@@ -63,6 +63,7 @@ use rskafka::client::partition::{Compression, UnknownTopicHandling};
 use rskafka::client::{Client, ClientBuilder};
 use rskafka::record::Record;
 use rstest_reuse::template;
+use store_api::ManifestVersion;
 use store_api::logstore::LogStore;
 use store_api::metadata::{ColumnMetadata, RegionMetadataRef};
 use store_api::region_engine::{RegionEngine, RegionRole};
@@ -79,8 +80,11 @@ use crate::engine::listener::EventListenerRef;
 use crate::engine::{MITO_ENGINE_NAME, MitoEngine};
 use crate::error::Result;
 use crate::flush::{WriteBufferManager, WriteBufferManagerRef};
+use crate::manifest::action::{RegionEdit, RegionMetaAction, RegionMetaActionList};
 use crate::manifest::manager::{RegionManifestManager, RegionManifestOptions};
-use crate::manifest::storage::{is_checkpoint_file, is_delta_file};
+use crate::manifest::storage::{
+    LAST_CHECKPOINT_FILE, delta_file, is_checkpoint_file, is_delta_file,
+};
 use crate::read::{Batch, BatchBuilder};
 use crate::region::opener::{PartitionExprFetcher, PartitionExprFetcherRef};
 use crate::sst::FormatType;
@@ -91,7 +95,21 @@ use crate::sst::index::puffin_manager::PuffinManagerFactory;
 use crate::time_provider::{StdTimeProvider, TimeProviderRef};
 use crate::worker::WorkerGroup;
 
-/// Controls a mock object-store layer that blocks a checkpoint task once.
+/// Returns a manifest action list with one empty edit.
+pub(crate) fn nop_action() -> RegionMetaActionList {
+    RegionMetaActionList::new(vec![RegionMetaAction::Edit(RegionEdit {
+        files_to_add: vec![],
+        files_to_remove: vec![],
+        timestamp_ms: None,
+        compaction_time_window: None,
+        flushed_entry_id: None,
+        flushed_sequence: None,
+        committed_sequence: None,
+        wal_recovery: Default::default(),
+    })])
+}
+
+/// Controls a mock object-store layer that blocks one manifest write or checkpoint cleanup.
 #[derive(Clone)]
 pub(crate) struct CheckpointTaskBlocker {
     entered: Arc<Notify>,
@@ -123,23 +141,12 @@ impl CheckpointTaskBlocker {
 
     /// Blocks publication of `_last_checkpoint` at writer close.
     pub(crate) fn block_last_checkpoint_write() -> (Self, MockLayer) {
-        let blocker = Self {
-            entered: Arc::new(Notify::new()),
-            release: Arc::new(Notify::new()),
-            armed: Arc::new(AtomicBool::new(true)),
-        };
-        let factory_blocker = blocker.clone();
-        let layer = MockLayerBuilder::default()
-            .writer_factory(Arc::new(move |path, _args, inner| {
-                Box::new(BlockingCheckpointWriter {
-                    path: path.to_string(),
-                    inner,
-                    blocker: factory_blocker.clone(),
-                })
-            }))
-            .build()
-            .unwrap();
-        (blocker, layer)
+        Self::block_write(LAST_CHECKPOINT_FILE.to_string(), true)
+    }
+
+    /// Blocks the first write of the delta of `version`, before any of its bytes reach storage.
+    pub(crate) fn block_delta_write(version: ManifestVersion) -> (Self, MockLayer) {
+        Self::block_write(delta_file(version), false)
     }
 
     pub(crate) async fn wait_until_blocked(&self) {
@@ -152,6 +159,30 @@ impl CheckpointTaskBlocker {
 
     pub(crate) fn arm_next_close(&self) {
         self.armed.store(true, Ordering::Release);
+    }
+
+    fn block_write(file_name: String, at_close: bool) -> (Self, MockLayer) {
+        let blocker = Self {
+            entered: Arc::new(Notify::new()),
+            release: Arc::new(Notify::new()),
+            armed: Arc::new(AtomicBool::new(true)),
+        };
+        let factory_blocker = blocker.clone();
+        let layer = MockLayerBuilder::default()
+            .writer_factory(Arc::new(move |path, _args, inner| {
+                if path.contains(&file_name) {
+                    Box::new(BlockingManifestWriter {
+                        inner,
+                        blocker: factory_blocker.clone(),
+                        at_close,
+                    })
+                } else {
+                    inner
+                }
+            }))
+            .build()
+            .unwrap();
+        (blocker, layer)
     }
 
     async fn block_once(&self) {
@@ -195,19 +226,22 @@ fn is_manifest_checkpoint_file(path: &str) -> bool {
     is_delta_file(file_name) || is_checkpoint_file(file_name)
 }
 
-struct BlockingCheckpointWriter {
-    path: String,
+struct BlockingManifestWriter {
     inner: Writer,
     blocker: CheckpointTaskBlocker,
+    at_close: bool,
 }
 
-impl object_store::layers::mock::Write for BlockingCheckpointWriter {
+impl object_store::layers::mock::Write for BlockingManifestWriter {
     async fn write(&mut self, bs: Buffer) -> MockResult<()> {
+        if !self.at_close {
+            self.blocker.block_once().await;
+        }
         self.inner.write(bs).await
     }
 
     async fn close(&mut self) -> MockResult<Metadata> {
-        if self.path.ends_with("_last_checkpoint") {
+        if self.at_close {
             self.blocker.block_once().await;
         }
         self.inner.close().await
@@ -405,6 +439,12 @@ impl TestEnv {
         }
     }
 
+    /// Sets the node identity used by engines created in this environment.
+    pub fn with_node_id(mut self, node_id: u64) -> Self {
+        self.file_ref_manager = Arc::new(FileReferenceManager::new(Some(node_id)));
+        self
+    }
+
     /// Overwrites the original `log_store_factory`.
     pub fn with_log_store_factory(mut self, log_store_factory: LogStoreFactory) -> TestEnv {
         self.log_store_factory = log_store_factory;
@@ -513,6 +553,32 @@ impl TestEnv {
             self.file_ref_manager.clone(),
             self.partition_expr_fetcher.clone(),
             Plugins::new(),
+        )
+        .await
+        .unwrap()
+    }
+
+    /// Creates an engine on the supplied WAL with a controllable periodic clock.
+    pub(crate) async fn create_engine_with_log_store_and_time<S: LogStore>(
+        &mut self,
+        config: MitoConfig,
+        log_store: Arc<S>,
+        time_provider: TimeProviderRef,
+        listener: Option<EventListenerRef>,
+    ) -> MitoEngine {
+        let object_store_manager = Arc::new(self.create_object_store_manager());
+        self.object_store_manager = Some(object_store_manager.clone());
+        MitoEngine::new_for_test(
+            &self.data_home().display().to_string(),
+            config,
+            log_store,
+            object_store_manager,
+            None,
+            listener,
+            time_provider,
+            self.schema_metadata_manager.clone(),
+            self.file_ref_manager.clone(),
+            self.partition_expr_fetcher.clone(),
         )
         .await
         .unwrap()
@@ -833,6 +899,7 @@ impl TestEnv {
             checkpoint_distance,
             remove_file_options: Default::default(),
             manifest_cache: None,
+            conditional_publication: false,
         };
 
         if let Some(metadata) = initial_metadata {

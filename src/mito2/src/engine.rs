@@ -63,6 +63,8 @@ mod open_test;
 #[cfg(test)]
 mod parallel_test;
 #[cfg(test)]
+pub(crate) mod pending_tail_test;
+#[cfg(test)]
 mod projection_test;
 #[cfg(test)]
 mod prune_test;
@@ -77,6 +79,8 @@ mod scan_test;
 mod sequence_test;
 #[cfg(test)]
 mod set_role_state_test;
+#[cfg(test)]
+mod shared_file_test;
 #[cfg(test)]
 mod skip_wal_test;
 #[cfg(test)]
@@ -123,6 +127,7 @@ use region_hook::RegionHookRef;
 use snafu::{OptionExt, ResultExt, ensure};
 use store_api::ManifestVersion;
 use store_api::codec::PrimaryKeyEncoding;
+use store_api::compaction_task::{self, CompactionTaskEntry};
 use store_api::logstore::LogStore;
 use store_api::logstore::provider::{KafkaProvider, Provider};
 use store_api::metadata::{ColumnMetadata, RegionMetadataRef};
@@ -145,6 +150,7 @@ use tokio::sync::{Semaphore, oneshot};
 
 use crate::access_layer::RegionFilePathFactory;
 use crate::cache::{CacheManagerRef, CacheStrategy};
+use crate::compaction::CompactionState;
 use crate::config::{MitoConfig, ScanMemoryMode};
 use crate::engine::puffin_index::{IndexEntryContext, collect_index_entries_from_puffin};
 use crate::error::{
@@ -155,7 +161,7 @@ use crate::error::{
 #[cfg(feature = "enterprise")]
 use crate::extension::BoxedExtensionRangeProviderFactory;
 use crate::gc::GcLimiterRef;
-use crate::manifest::action::RegionEdit;
+use crate::manifest::action::{RegionEdit, WalRecoveryEdit};
 use crate::memtable::MemtableStats;
 use crate::metrics::{
     HANDLE_REQUEST_ELAPSED, SCAN_MEMORY_EXHAUSTED_TOTAL, SCAN_MEMORY_USAGE_BYTES,
@@ -582,6 +588,7 @@ impl MitoEngine {
             .context(RegionNotFoundSnafu { region_id })?;
 
         let version = region.version();
+        version.ensure_no_pending_tails()?;
         let memtable_stats = version
             .memtables
             .list_memtables()
@@ -750,6 +757,40 @@ impl MitoEngine {
         results
     }
 
+    /// Reads current compaction cycles with conservative metadata predicate pruning.
+    pub async fn inspect_compaction_tasks(
+        &self,
+        filters: &[Expr],
+    ) -> Result<Vec<CompactionTaskEntry>> {
+        let filters = MetadataFilter::new(filters);
+        let node_id = self.inner.workers.file_ref_manager().node_id();
+        let mut entries = Vec::new();
+        for region in self.inner.workers.all_regions() {
+            if !filters.matches(|column| match column {
+                compaction_task::REGION_ID => {
+                    Some(ScalarValue::UInt64(Some(region.region_id.as_u64())))
+                }
+                compaction_task::TABLE_ID => {
+                    Some(ScalarValue::UInt32(Some(region.region_id.table_id())))
+                }
+                compaction_task::NODE_ID => Some(ScalarValue::UInt64(node_id)),
+                _ => None,
+            }) {
+                continue;
+            }
+            // Clone only task handles under the region's lock. Snapshot materialization
+            // and residual metadata filtering never hold that lock or queue worker work.
+            let (active, pending) = CompactionState::current(&region.compaction_state);
+            for task in active.into_iter().chain(pending) {
+                let entry = task.snapshot(node_id);
+                if entry.matches(&filters) {
+                    entries.push(entry);
+                }
+            }
+        }
+        Ok(entries)
+    }
+
     /// Lists region info entries of all regions in the engine.
     pub async fn all_region_infos(&self) -> Vec<RegionInfoEntry> {
         let node_id = self.inner.workers.file_ref_manager().node_id();
@@ -803,6 +844,7 @@ fn is_valid_region_edit(edit: &RegionEdit) -> bool {
                 ..
             }
         )
+        && edit.wal_recovery == WalRecoveryEdit::default()
 }
 
 /// Inner struct of [MitoEngine].
@@ -1134,6 +1176,7 @@ impl EngineInner {
         });
         let version_data = region.version_control.current();
         let version = version_data.version;
+        version.ensure_no_pending_tails()?;
 
         if request.snapshot_on_scan && request.memtable_max_sequence.is_none() {
             request.memtable_max_sequence = Some(version_data.committed_sequence);
@@ -1851,6 +1894,7 @@ mod tests {
             flushed_entry_id: None,
             flushed_sequence: None,
             committed_sequence: None,
+            wal_recovery: Default::default(),
         };
         assert!(is_valid_region_edit(&edit));
 
@@ -1863,6 +1907,7 @@ mod tests {
             flushed_entry_id: None,
             flushed_sequence: None,
             committed_sequence: None,
+            wal_recovery: Default::default(),
         };
         assert!(!is_valid_region_edit(&edit));
 
@@ -1875,6 +1920,7 @@ mod tests {
             flushed_entry_id: None,
             flushed_sequence: None,
             committed_sequence: None,
+            wal_recovery: Default::default(),
         };
         assert!(is_valid_region_edit(&edit));
 
@@ -1887,6 +1933,7 @@ mod tests {
             flushed_entry_id: None,
             flushed_sequence: None,
             committed_sequence: None,
+            wal_recovery: Default::default(),
         };
         assert!(is_valid_region_edit(&edit));
 
@@ -1899,6 +1946,7 @@ mod tests {
             flushed_entry_id: None,
             flushed_sequence: None,
             committed_sequence: None,
+            wal_recovery: Default::default(),
         };
         assert!(!is_valid_region_edit(&edit));
         let edit = RegionEdit {
@@ -1909,6 +1957,7 @@ mod tests {
             flushed_entry_id: Some(1),
             flushed_sequence: None,
             committed_sequence: None,
+            wal_recovery: Default::default(),
         };
         assert!(!is_valid_region_edit(&edit));
         let edit = RegionEdit {
@@ -1919,6 +1968,21 @@ mod tests {
             flushed_entry_id: None,
             flushed_sequence: Some(1),
             committed_sequence: None,
+            wal_recovery: Default::default(),
+        };
+        assert!(!is_valid_region_edit(&edit));
+        let edit = RegionEdit {
+            files_to_add: vec![FileMeta::default()],
+            files_to_remove: vec![],
+            timestamp_ms: None,
+            compaction_time_window: None,
+            flushed_entry_id: None,
+            flushed_sequence: None,
+            committed_sequence: None,
+            wal_recovery: WalRecoveryEdit {
+                pending_tails: Some(vec![]),
+                handoff_floor: None,
+            },
         };
         assert!(!is_valid_region_edit(&edit));
     }

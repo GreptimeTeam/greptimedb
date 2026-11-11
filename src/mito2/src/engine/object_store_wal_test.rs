@@ -17,8 +17,11 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::time::{Duration, Instant};
 
-use api::v1::Rows;
+use api::v1::region::{StrictWindow, compact_request};
+use api::v1::{ColumnSchema, Rows};
+use common_datasource::compression::CompressionType;
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_recordbatch::RecordBatches;
@@ -26,19 +29,24 @@ use common_wal::config::object_store::{ObjectStoreWalConfig, STANDALONE_GENERATI
 use common_wal::options::{ObjectStoreWalOptions, WAL_OPTIONS_KEY, WalOptions};
 use futures::TryStreamExt;
 use log_store::ObjectStoreLogStore;
+use object_store::ObjectStore;
+use rstest::rstest;
 use store_api::logstore::LogStore;
 use store_api::logstore::provider::Provider;
-use store_api::region_engine::RegionEngine;
+use store_api::region_engine::{RegionEngine, RegionRole};
 use store_api::region_request::{
-    PathType, RegionCleanUpRequest, RegionCloseRequest, RegionDropRequest, RegionOpenRequest,
-    RegionRequest,
+    PathType, RegionCleanUpRequest, RegionCloseRequest, RegionCompactRequest, RegionDropRequest,
+    RegionFlushRequest, RegionOpenRequest, RegionRequest, RegionTruncateRequest,
 };
 use store_api::storage::{RegionId, ScanRequest};
 
 use crate::config::MitoConfig;
 use crate::engine::MitoEngine;
+use crate::manifest::storage::{delta_file, gen_path, manifest_dir};
+use crate::sst::location::region_dir_from_table_dir;
 use crate::test_util::{
-    CreateRequestBuilder, TestEnv, build_rows, flush_region, put_rows, reopen_region, rows_schema,
+    CheckpointTaskBlocker, CreateRequestBuilder, TestEnv, build_rows, flush_region, nop_action,
+    put_rows, reopen_region, rows_schema,
 };
 use crate::wal::EntryId;
 
@@ -376,4 +384,188 @@ async fn test_object_store_wal_options_reject_raft_engine_log_store() {
         .await
         .unwrap_err();
     assert_eq!(StatusCode::InvalidArguments, err.status_code());
+}
+
+/// Returns a config that starts a checkpoint on every commit.
+fn checkpoint_every_commit_config() -> MitoConfig {
+    MitoConfig {
+        manifest_checkpoint_distance: 1,
+        ..Default::default()
+    }
+}
+
+/// Creates a region whose writes require a lease. Returns the lease deadline, which the frozen
+/// clock of the lease checks has not reached.
+async fn create_leased_region(
+    env: &mut TestEnv,
+    region_id: RegionId,
+) -> (
+    MitoEngine,
+    Arc<ObjectStoreLogStore>,
+    String,
+    Vec<ColumnSchema>,
+    Instant,
+) {
+    let (engine, log_store) = env
+        .create_engine_with_object_store_wal(checkpoint_every_commit_config(), &wal_config())
+        .await;
+    engine.require_write_lease();
+    engine.freeze_lease_clock(Instant::now());
+    let (table_dir, schema) = create_region(&engine, region_id).await;
+    let deadline = Instant::now() + Duration::from_secs(10);
+    engine
+        .set_region_role_with_lease(region_id, RegionRole::Leader, Instant::now(), deadline)
+        .unwrap();
+    (engine, log_store, table_dir, schema, deadline)
+}
+
+async fn count_ssts(store: &ObjectStore, region_dir: &str) -> usize {
+    let entries = store.list(region_dir).await.unwrap();
+    entries
+        .iter()
+        .filter(|e| e.name().ends_with(".parquet"))
+        .count()
+}
+
+#[rstest]
+#[case::flush(RegionRequest::Flush(RegionFlushRequest::default()), 1)]
+#[case::compaction(
+    RegionRequest::Compact(RegionCompactRequest {
+        options: compact_request::Options::StrictWindow(StrictWindow { window_seconds: 3600 }),
+        ..Default::default()
+    }),
+    1
+)]
+#[case::truncate(RegionRequest::Truncate(RegionTruncateRequest::All), 0)]
+#[tokio::test]
+async fn test_stale_commit_on_deleted_delta_name_conflicts(
+    #[case] commit: RegionRequest,
+    #[case] new_ssts: usize,
+) {
+    common_telemetry::init_default_ut_logging();
+    // The creation is version 0 and the flushes below are versions 1 and 2.
+    const VERSION: u64 = 3;
+    let (blocker, layer) = CheckpointTaskBlocker::block_delta_write(VERSION);
+    let mut env = TestEnv::with_prefix("stale-manifest-commit")
+        .await
+        .with_mock_layer(layer);
+    let region_id = RegionId::new(1, 1);
+    let (old_leader, log_store, table_dir, schema, deadline) =
+        create_leased_region(&mut env, region_id).await;
+    let rows = |start| Rows {
+        schema: schema.clone(),
+        rows: build_rows(start, start + 3),
+    };
+    for start in [0, 3] {
+        put_rows(&old_leader, region_id, rows(start)).await;
+        flush_region(&old_leader, region_id, None).await;
+    }
+    put_rows(&old_leader, region_id, rows(6)).await;
+
+    let region = old_leader.get_region(region_id).unwrap();
+    let (manifest, checkpoint) = {
+        let mut manager = region.manifest_ctx.manifest_manager.write().await;
+        manager.wait_for_pending_checkpoint().await;
+        (
+            manager.manifest(),
+            manager.checkpointer().last_checkpoint_version(),
+        )
+    };
+    let store = env.get_object_store().unwrap();
+    let region_dir = region_dir_from_table_dir(&table_dir, region_id, PathType::Bare);
+    let ssts = count_ssts(&store, &region_dir).await;
+
+    let engine = old_leader.clone();
+    let commit = tokio::spawn(async move { engine.handle_request(region_id, commit).await });
+    blocker.wait_until_blocked().await;
+    let version = region.version_control.current().version;
+    let entry_ids = stored_entry_ids(&log_store, region_id).await;
+
+    let new_holder = env
+        .create_engine_with_log_store(checkpoint_every_commit_config(), log_store.clone())
+        .await;
+    new_holder.require_write_lease();
+    let open = RegionRequest::Open(open_request(table_dir.clone()));
+    new_holder.handle_request(region_id, open).await.unwrap();
+    let delta = gen_path(
+        &manifest_dir(&region_dir),
+        &delta_file(VERSION),
+        CompressionType::Gzip,
+    );
+    {
+        let held = new_holder.get_region(region_id).unwrap();
+        let mut manager = held.manifest_ctx.manifest_manager.write().await;
+        assert_eq!(VERSION - 1, manager.last_version());
+        while manager.last_version() < VERSION || store.exists(&delta).await.unwrap() {
+            manager
+                .update_with_verification(nop_action(), false, true, || false)
+                .await
+                .unwrap();
+            manager.wait_for_pending_checkpoint().await;
+        }
+    }
+
+    old_leader.freeze_lease_clock(deadline);
+    blocker.release();
+    let error = commit.await.unwrap().unwrap_err();
+    assert!(error.retry_hint().is_retryable(), "{error:?}");
+    assert!(format!("{error:?}").contains("conflicts"), "{error:?}");
+
+    let manager = region.manifest_ctx.manifest_manager.read().await;
+    assert_eq!(VERSION - 1, manager.last_version());
+    assert!(Arc::ptr_eq(&manifest, &manager.manifest()));
+    assert_eq!(checkpoint, manager.checkpointer().last_checkpoint_version());
+    assert!(!manager.checkpointer().is_doing_checkpoint());
+    drop(manager);
+    assert!(Arc::ptr_eq(
+        &version,
+        &region.version_control.current().version
+    ));
+    assert_eq!(ssts + new_ssts, count_ssts(&store, &region_dir).await);
+    assert!(store.exists(&delta).await.unwrap());
+    assert_eq!(entry_ids, stored_entry_ids(&log_store, region_id).await);
+
+    reopen_region(&new_holder, region_id, table_dir, false, wal_options()).await;
+    assert_eq!(9, count_rows(&new_holder, region_id).await);
+}
+
+#[tokio::test]
+async fn test_commit_crossing_deadline_applies_without_checkpoint() {
+    common_telemetry::init_default_ut_logging();
+    let (blocker, layer) = CheckpointTaskBlocker::block_delta_write(1);
+    let mut env = TestEnv::with_prefix("commit-crossing-deadline")
+        .await
+        .with_mock_layer(layer);
+    let region_id = RegionId::new(1, 1);
+    let (engine, log_store, table_dir, schema, deadline) =
+        create_leased_region(&mut env, region_id).await;
+    let rows = Rows {
+        schema,
+        rows: build_rows(0, 3),
+    };
+    put_rows(&engine, region_id, rows).await;
+
+    let flush = {
+        let engine = engine.clone();
+        tokio::spawn(async move {
+            let request = RegionRequest::Flush(RegionFlushRequest::default());
+            engine.handle_request(region_id, request).await
+        })
+    };
+    blocker.wait_until_blocked().await;
+    engine.freeze_lease_clock(deadline);
+    blocker.release();
+    flush.await.unwrap().unwrap();
+
+    let region = engine.get_region(region_id).unwrap();
+    let manager = region.manifest_ctx.manifest_manager.read().await;
+    assert_eq!(1, manager.last_version());
+    assert_eq!(1, region.version().ssts.levels()[0].files.len());
+    assert_eq!(0, manager.checkpointer().last_checkpoint_version());
+    assert!(!manager.checkpointer().is_doing_checkpoint());
+    assert!(stored_entry_ids(&log_store, region_id).await.is_empty());
+    drop(manager);
+
+    reopen_region(&engine, region_id, table_dir, false, wal_options()).await;
+    assert_eq!(3, count_rows(&engine, region_id).await);
 }

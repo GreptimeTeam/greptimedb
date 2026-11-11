@@ -203,6 +203,7 @@ macro_rules! http_tests {
                 test_pipeline_context,
                 test_pipeline_with_vrl,
                 test_pipeline_vrl_host_access,
+                test_pipeline_ignore_errors_config,
                 test_pipeline_with_hint_vrl,
                 test_pipeline_one_to_many_vrl,
                 test_pipeline_2,
@@ -3657,6 +3658,7 @@ enable_heap_profiling = true
 [pipeline]
 cache_ttl = "10s"
 allow_vrl_host_access = false
+ignore_errors = false
 
 [event_recorder]
 ttl = "2months 29days 2h 52m 48s"
@@ -7265,6 +7267,7 @@ transform:
             // Force named dry-runs to reload and compile the stored definition.
             cache_ttl: Duration::ZERO,
             allow_vrl_host_access,
+            ..Default::default()
         })
         .build()
         .await;
@@ -7306,6 +7309,132 @@ transform:
                 .await;
             assert_eq!(response.status(), StatusCode::OK);
         }
+        instance.guard.remove_all().await;
+    }
+}
+
+pub async fn test_pipeline_ignore_errors_config(storage_type: StorageType) {
+    let pipeline = "transform:\n  - field: value\n    type: int32\n";
+    let data = "{\"value\":1}\ninvalid JSON\n{\"value\":2}\n";
+
+    for ignore_errors in [false, true] {
+        let mut instance = tests_integration::standalone::GreptimeDbStandaloneBuilder::new(
+            "test_pipeline_ignore_errors_config",
+        )
+        .with_default_store_type(storage_type)
+        .with_pipeline_options(pipeline::PipelineOptions {
+            ignore_errors,
+            ..Default::default()
+        })
+        .build()
+        .await;
+        let server = HttpServerBuilder::new(HttpOptions::default())
+            .with_log_ingest_handler(instance.fe_instance().clone(), None, None)
+            .build();
+        let client = TestClient::new(server.build(server.make_app()).unwrap()).await;
+        let response = client
+            .post("/v1/pipelines/ignore_errors")
+            .header("Content-Type", "application/x-yaml")
+            .body(pipeline)
+            .send()
+            .await;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        for request_override in [None, Some(false), Some(true)] {
+            let effective = request_override.unwrap_or(ignore_errors);
+            let query = request_override
+                .map(|value| format!("&ignore_errors={value}"))
+                .unwrap_or_default();
+            let expected_status = if effective {
+                StatusCode::OK
+            } else {
+                StatusCode::BAD_REQUEST
+            };
+
+            for path in ["/v1/ingest", "/v1/events/logs"] {
+                let response = client
+                    .post(&format!(
+                        "{path}?table=logs&pipeline_name=ignore_errors{query}"
+                    ))
+                    .header("Content-Type", "application/x-ndjson")
+                    .body(data)
+                    .send()
+                    .await;
+                assert_eq!(response.status(), expected_status);
+                if effective {
+                    let body: Value = response.json().await;
+                    assert_eq!(body["output"][0]["affectedrows"], 2);
+                }
+            }
+
+            for (content_type, body) in [
+                ("application/x-ndjson", data.to_string()),
+                (
+                    "application/json",
+                    json!({
+                        "pipeline_name": "ignore_errors",
+                        "data_type": "application/x-ndjson",
+                        "data": data,
+                    })
+                    .to_string(),
+                ),
+                (
+                    "application/json",
+                    json!({
+                        "pipeline": pipeline,
+                        "data_type": "application/x-ndjson",
+                        "data": data,
+                    })
+                    .to_string(),
+                ),
+            ] {
+                let response = client
+                    .post(&format!(
+                        "/v1/pipelines/_dryrun?pipeline_name=ignore_errors{query}"
+                    ))
+                    .header("Content-Type", content_type)
+                    .body(body)
+                    .send()
+                    .await;
+                assert_eq!(response.status(), expected_status);
+                if effective {
+                    let body: Value = response.json().await;
+                    assert_eq!(body[0]["rows"].as_array().unwrap().len(), 2);
+                }
+            }
+
+            let response = client
+                .post(&format!(
+                    "/v1/ingest?table=timestamps&pipeline_name=greptime_identity\
+                     &custom_time_index=ts;epoch;s{query}"
+                ))
+                .header("Content-Type", "application/json")
+                .body(r#"{"ts":"invalid","value":1}"#)
+                .send()
+                .await;
+            assert_eq!(
+                response.status(),
+                if effective {
+                    StatusCode::OK
+                } else {
+                    StatusCode::INTERNAL_SERVER_ERROR
+                }
+            );
+            if effective {
+                let body: Value = response.json().await;
+                assert_eq!(body["output"][0]["affectedrows"], 1);
+            }
+        }
+
+        // Parsing tolerance does not enable skipping pipeline execution errors.
+        let response = client
+            .post("/v1/ingest?table=logs&pipeline_name=ignore_errors&ignore_errors=true")
+            .header("Content-Type", "application/json")
+            .body(r#"{"value":"not an integer"}"#)
+            .send()
+            .await;
+        assert!(!response.status().is_success());
+
         instance.guard.remove_all().await;
     }
 }
@@ -11151,7 +11280,7 @@ pub async fn test_otlp_logs(store_type: StorageType) {
         )
         .await;
         assert_eq!(StatusCode::OK, res.status());
-        let expected = "[[1736413568497632000,\"f665100a612542b69cc362fe2ae9d3bf\",\"e58f01c4c69f4488\",\"Info\",9,\"the message line one\",{\"app\":\"server1\"},0,\"\",\"\",{\"instance_num\":\"10\"},\"\",{},\"https://opentelemetry.io/schemas/1.4.0\"],[1736413568538897000,\"f665100a612542b69cc362fe2ae9d3bf\",\"e58f01c4c69f4488\",\"Info\",9,\"the message line two\",{\"app\":\"server2\"},0,\"\",\"\",{},\"\",{},\"https://opentelemetry.io/schemas/1.4.0\"]]";
+        let expected = "[[1736413568497632000,\"f665100a612542b69cc362fe2ae9d3bf\",\"e58f01c4c69f4488\",\"Info\",9,\"the message line one\",{\"app\":\"server1\"},0,null,\"\",\"\",{\"instance_num\":\"10\"},\"\",{},\"https://opentelemetry.io/schemas/1.4.0\",null,null],[1736413568538897000,\"f665100a612542b69cc362fe2ae9d3bf\",\"e58f01c4c69f4488\",\"Info\",9,\"the message line two\",{\"app\":\"server2\"},0,null,\"\",\"\",{},\"\",{},\"https://opentelemetry.io/schemas/1.4.0\",null,null]]";
         validate_data(
             "otlp_logs",
             &client,
@@ -11177,8 +11306,26 @@ pub async fn test_otlp_logs(store_type: StorageType) {
             &client,
             "select count(*) from information_schema.tables where table_name = 'opentelemetry_logs' \
              and create_options like '%greptime.semantic.signal_type=log%' \
-             and create_options like '%greptime.semantic.source=opentelemetry%';",
+             and create_options like '%greptime.semantic.source=opentelemetry%' \
+             and create_options like '%table_data_model=greptime_log_v1%' \
+             and create_options like '%greptime.semantic.pipeline=greptime_log_v1%';",
             "[[1]]",
+        )
+        .await;
+        validate_data(
+            "otlp_logs_v1_keys_and_indexes",
+            &client,
+            "select column_name, constraint_name, ordinal_position from information_schema.key_column_usage \
+             where table_name = 'opentelemetry_logs' order by constraint_name, ordinal_position, column_name;",
+            r#"[["service_name","PRIMARY",1],["scope_name","PRIMARY",2],["timestamp","TIME INDEX",1]]"#,
+        )
+        .await;
+        validate_data(
+            "otlp_logs_v1_column_indexes",
+            &client,
+            "select index_name, column_name from information_schema.statistics \
+             where table_name = 'opentelemetry_logs' and index_name like '%INDEX_%' order by index_name;",
+            r#"[["FULLTEXT_INDEX_body","body"],["SKIPPING_INDEX_trace_id","trace_id"]]"#,
         )
         .await;
 
@@ -11230,7 +11377,7 @@ pub async fn test_otlp_logs(store_type: StorageType) {
         .await;
         assert_eq!(StatusCode::OK, res.status());
 
-        let expected = "[[1736413568538897000,\"f665100a612542b69cc362fe2ae9d3bf\",\"e58f01c4c69f4488\",\"Info\",9,\"the message line two\",{\"app\":\"server2\"},0,\"\",\"\",{},\"\",{},\"https://opentelemetry.io/schemas/1.4.0\",null,\"server2\"],[1736413568497632000,\"f665100a612542b69cc362fe2ae9d3bf\",\"e58f01c4c69f4488\",\"Info\",9,\"the message line one\",{\"app\":\"server1\"},0,\"\",\"\",{\"instance_num\":\"10\"},\"\",{},\"https://opentelemetry.io/schemas/1.4.0\",\"10\",\"server1\"]]";
+        let expected = "[[1736413568538897000,\"f665100a612542b69cc362fe2ae9d3bf\",\"e58f01c4c69f4488\",\"Info\",9,\"the message line two\",{\"app\":\"server2\"},0,null,\"\",\"\",{},\"\",{},\"https://opentelemetry.io/schemas/1.4.0\",null,null,null,\"server2\"],[1736413568497632000,\"f665100a612542b69cc362fe2ae9d3bf\",\"e58f01c4c69f4488\",\"Info\",9,\"the message line one\",{\"app\":\"server1\"},0,null,\"\",\"\",{\"instance_num\":\"10\"},\"\",{},\"https://opentelemetry.io/schemas/1.4.0\",null,null,\"10\",\"server1\"]]";
         validate_data(
             "otlp_logs_with_selector",
             &client,
@@ -11270,12 +11417,57 @@ pub async fn test_otlp_logs(store_type: StorageType) {
         .await;
         assert_eq!(StatusCode::OK, res.status());
 
-        let expected = "[[1736413568497632000,\"f665100a612542b69cc362fe2ae9d3bf\",\"e58f01c4c69f4488\",\"Info\",9,\"the message line one\",{\"app\":\"server\",\"fromwhere\":\"log_attr\"},0,\"\",\"\",{\"fromwhere\":\"scope\"},\"\",{\"fromwhere\":\"resource\"},\"https://opentelemetry.io/schemas/1.4.0\",\"log_attr\"]]";
+        let expected = "[[1736413568497632000,\"f665100a612542b69cc362fe2ae9d3bf\",\"e58f01c4c69f4488\",\"Info\",9,\"the message line one\",{\"app\":\"server\",\"fromwhere\":\"log_attr\"},0,null,\"\",\"\",{\"fromwhere\":\"scope\"},\"\",{\"fromwhere\":\"resource\"},\"https://opentelemetry.io/schemas/1.4.0\",null,null,\"log_attr\"]]";
         validate_data(
             "otlp_logs_with_selector_overlapping",
             &client,
             "select * from logs2;",
             expected,
+        )
+        .await;
+    }
+
+    {
+        // The built-in `service_name` comes from the resource `service.name`, and log
+        // tables declare no entity.
+        let table_name = "otlp_logs_semantic";
+        let now_nanos = common_time::util::current_time_millis() * 1_000_000;
+        let mut record = make_log_record(
+            "00000000000000000000000000000005",
+            "0000000000000005",
+            now_nanos,
+            "semantic layer",
+            vec![],
+        );
+        record["eventName"] = json!("checkout.completed");
+        record["observedTimeUnixNano"] = json!((now_nanos + 1).to_string());
+        let mut req = make_log_request(vec![record]);
+        req.resource_logs[0].resource.as_mut().unwrap().attributes =
+            serde_json::from_value(json!([
+                {"key": "service.name", "value": {"stringValue": "checkout"}}
+            ]))
+            .unwrap();
+        // The first write creates the v1 table; the second reads its marker back.
+        for _ in 0..2 {
+            let res = send_log_req(&client, table_name, None, req.clone(), false).await;
+            assert_eq!(res.status(), StatusCode::OK, "{:?}", res.text().await);
+        }
+
+        validate_data(
+            "otlp_logs_semantic_table_semantics",
+            &client,
+            &format!(
+                "select signal_type, source, pipeline, entity_declarations from information_schema.table_semantics where table_name = '{table_name}';"
+            ),
+            r#"[["log","opentelemetry","greptime_log_v1",null]]"#,
+        )
+        .await;
+        let row = format!(r#"["checkout","checkout.completed",{}]"#, now_nanos + 1);
+        validate_data(
+            "otlp_logs_semantic_v1_columns",
+            &client,
+            &format!("select service_name, event_name, observed_timestamp from {table_name};"),
+            &format!("[{row},{row}]"),
         )
         .await;
     }
@@ -11315,6 +11507,14 @@ pub async fn test_otlp_logs(store_type: StorageType) {
             &client,
             "select column_name, semantic_type from information_schema.columns where table_name = 'otlp_logs_existing_schema' and column_name in ('timestamp', 'trace_id', 'host', 'scope_name') order by column_name;",
             r#"[["host","TAG"],["scope_name","FIELD"],["timestamp","TIMESTAMP"],["trace_id","TAG"]]"#,
+        )
+        .await;
+        // Tables without the v1 marker keep the legacy built-in columns.
+        validate_data(
+            "otlp_logs_existing_schema_no_v1_columns",
+            &client,
+            "select count(*) from information_schema.columns where table_name = 'otlp_logs_existing_schema' and column_name in ('service_name', 'event_name', 'observed_timestamp');",
+            "[[0]]",
         )
         .await;
     }

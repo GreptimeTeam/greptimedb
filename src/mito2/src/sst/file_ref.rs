@@ -34,7 +34,8 @@ struct RegionFileRefs {
 /// Tracks reader references to SST metadata views in one datanode for object-store GC.
 #[derive(Debug)]
 pub struct FileReferenceManager {
-    /// Datanode id. used to determine tmp ref file name.
+    /// Id of this datanode. Names the tmp ref files and identifies the WAL ranges of
+    /// this node in region manifests.
     node_id: Option<u64>,
     files_per_region: DashMap<RegionId, RegionFileRefs>,
     /// Whether global GC is enabled.

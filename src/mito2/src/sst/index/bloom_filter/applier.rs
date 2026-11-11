@@ -29,6 +29,7 @@ use index::bloom_filter::reader::{
 use index::target::IndexTarget;
 use object_store::ObjectStore;
 use puffin::puffin_manager::cache::PuffinMetadataCacheRef;
+use puffin::puffin_manager::file_key::PuffinFileKey;
 use puffin::puffin_manager::{PuffinManager, PuffinReader};
 use snafu::ResultExt;
 use store_api::metadata::RegionMetadataRef;
@@ -47,7 +48,8 @@ use crate::metrics::INDEX_APPLY_ELAPSED;
 use crate::sst::file::RegionIndexId;
 use crate::sst::index::bloom_filter::INDEX_BLOB_TYPE;
 pub use crate::sst::index::bloom_filter::applier::builder::BloomFilterIndexApplierBuilder;
-use crate::sst::index::puffin_manager::{BlobReader, PuffinManagerFactory};
+use crate::sst::index::column::skipping_target_data_type;
+use crate::sst::index::puffin_manager::{BlobReader, PuffinManagerFactory, SstPuffinManager};
 use crate::sst::index::{TYPE_BLOOM_FILTER_INDEX, trigger_index_background_download};
 
 /// Metrics for tracking bloom filter index apply operations.
@@ -125,6 +127,10 @@ pub struct BloomFilterIndexApplier {
     /// Factory to create puffin manager.
     puffin_manager_factory: PuffinManagerFactory,
 
+    /// Managers keep backend identity resolution out of per-blob reads.
+    remote_puffin_manager: SstPuffinManager,
+    cached_puffin_manager: Option<SstPuffinManager>,
+
     /// Cache for puffin metadata.
     puffin_metadata_cache: Option<PuffinMetadataCacheRef>,
 
@@ -151,6 +157,10 @@ impl BloomFilterIndexApplier {
         predicates: BTreeMap<IndexTarget, Vec<InListPredicate>>,
         expected_predicate_target_types: BTreeMap<IndexTarget, ConcreteDataType>,
     ) -> Self {
+        let remote_puffin_manager = puffin_manager_factory.build(
+            object_store.clone(),
+            RegionFilePathFactory::new(table_dir.clone(), path_type),
+        );
         let default_predicates = Arc::new(predicates);
         Self {
             table_dir,
@@ -158,6 +168,8 @@ impl BloomFilterIndexApplier {
             object_store,
             file_cache: None,
             puffin_manager_factory,
+            remote_puffin_manager,
+            cached_puffin_manager: None,
             puffin_metadata_cache: None,
             bloom_filter_index_cache: None,
             default_predicates,
@@ -166,6 +178,13 @@ impl BloomFilterIndexApplier {
     }
 
     pub fn with_file_cache(mut self, file_cache: Option<FileCacheRef>) -> Self {
+        self.cached_puffin_manager = file_cache.as_ref().map(|cache| {
+            self.puffin_manager_factory.build_cached(
+                &self.remote_puffin_manager,
+                cache.local_store(),
+                WriteCachePathProvider::new(cache.clone()),
+            )
+        });
         self.file_cache = file_cache;
         self
     }
@@ -232,9 +251,9 @@ impl BloomFilterIndexApplier {
             .map(|(i, range)| (*i, vec![range.clone()]))
             .collect::<Vec<_>>();
 
-        for (column_id, predicates) in predicates {
-            let blob = match self
-                .blob_reader(file_id, column_id, file_size_hint, metrics.as_deref_mut())
+        for (target, predicates) in predicates {
+            let (file_key, blob) = match self
+                .blob_reader(file_id, target, file_size_hint, metrics.as_deref_mut())
                 .await?
             {
                 Some(blob) => blob,
@@ -248,9 +267,8 @@ impl BloomFilterIndexApplier {
                     m.blob_read_bytes += blob_size;
                 }
                 let reader = CachedBloomFilterIndexBlobReader::new(
-                    file_id.file_id(),
-                    file_id.version,
-                    column_id.clone(),
+                    file_key,
+                    target.clone(),
                     Tag::Skipping,
                     blob_size,
                     BloomFilterReaderImpl::new(blob),
@@ -291,16 +309,16 @@ impl BloomFilterIndexApplier {
 
     /// Creates a blob reader from the cached or remote index file.
     ///
-    /// Returus `None` if the column does not have an index.
+    /// Returns `None` if the target does not have an index.
     async fn blob_reader(
         &self,
         file_id: RegionIndexId,
-        column_id: &IndexTarget,
+        target: &IndexTarget,
         file_size_hint: Option<u64>,
         metrics: Option<&mut BloomFilterIndexApplyMetrics>,
-    ) -> Result<Option<BlobReader>> {
+    ) -> Result<Option<(PuffinFileKey<RegionIndexId>, BlobReader)>> {
         let reader = match self
-            .cached_blob_reader(file_id, column_id, file_size_hint)
+            .cached_blob_reader(file_id, target, file_size_hint)
             .await
         {
             Ok(Some(puffin_reader)) => puffin_reader,
@@ -309,17 +327,17 @@ impl BloomFilterIndexApplier {
                     m.blob_cache_miss += 1;
                 }
                 if let Err(err) = other {
-                    // Blob not found means no index for this column
+                    // Blob not found means no index for this target.
                     if is_blob_not_found(&err) {
                         return Ok(None);
                     }
                     warn!(err; "An unexpected error occurred while reading the cached index file. Fallback to remote index file.")
                 }
                 let res = self
-                    .remote_blob_reader(file_id, column_id, file_size_hint)
+                    .remote_blob_reader(file_id, target, file_size_hint)
                     .await;
                 if let Err(err) = res {
-                    // Blob not found means no index for this column
+                    // Blob not found means no index for this target.
                     if is_blob_not_found(&err) {
                         return Ok(None);
                     }
@@ -337,10 +355,12 @@ impl BloomFilterIndexApplier {
     async fn cached_blob_reader(
         &self,
         file_id: RegionIndexId,
-        column_id: &IndexTarget,
+        target: &IndexTarget,
         file_size_hint: Option<u64>,
-    ) -> Result<Option<BlobReader>> {
-        let Some(file_cache) = &self.file_cache else {
+    ) -> Result<Option<(PuffinFileKey<RegionIndexId>, BlobReader)>> {
+        let (Some(file_cache), Some(puffin_manager)) =
+            (&self.file_cache, &self.cached_puffin_manager)
+        else {
             return Ok(None);
         };
 
@@ -353,11 +373,7 @@ impl BloomFilterIndexApplier {
             return Ok(None);
         };
 
-        let puffin_manager = self.puffin_manager_factory.build(
-            file_cache.local_store(),
-            WriteCachePathProvider::new(file_cache.clone()),
-        );
-        let blob_name = Self::target_blob_name(column_id);
+        let blob_name = Self::target_blob_name(target);
 
         let reader = puffin_manager
             .reader(&file_id)
@@ -370,12 +386,12 @@ impl BloomFilterIndexApplier {
             .reader()
             .await
             .context(PuffinBuildReaderSnafu)?;
-        Ok(Some(reader))
+        Ok(Some((puffin_manager.file_key(&file_id), reader)))
     }
 
     // TODO(ruihang): use the same util with the code in creator
-    fn target_blob_name(column_id: &IndexTarget) -> String {
-        let target_key = column_id.encode();
+    fn target_blob_name(target: &IndexTarget) -> String {
+        let target_key = target.encode();
         format!("{INDEX_BLOB_TYPE}-{target_key}")
     }
 
@@ -383,9 +399,9 @@ impl BloomFilterIndexApplier {
     async fn remote_blob_reader(
         &self,
         file_id: RegionIndexId,
-        column_id: &IndexTarget,
+        target: &IndexTarget,
         file_size_hint: Option<u64>,
-    ) -> Result<BlobReader> {
+    ) -> Result<(PuffinFileKey<RegionIndexId>, BlobReader)> {
         let path_factory = RegionFilePathFactory::new(self.table_dir.clone(), self.path_type);
 
         // Trigger background download if file cache and file size are available
@@ -398,13 +414,13 @@ impl BloomFilterIndexApplier {
         );
 
         let puffin_manager = self
-            .puffin_manager_factory
-            .build(self.object_store.clone(), path_factory)
+            .remote_puffin_manager
+            .clone()
             .with_puffin_metadata_cache(self.puffin_metadata_cache.clone());
 
-        let blob_name = Self::target_blob_name(column_id);
+        let blob_name = Self::target_blob_name(target);
 
-        puffin_manager
+        let reader = puffin_manager
             .reader(&file_id)
             .await
             .context(PuffinBuildReaderSnafu)?
@@ -414,7 +430,8 @@ impl BloomFilterIndexApplier {
             .context(PuffinReadBlobSnafu)?
             .reader()
             .await
-            .context(PuffinBuildReaderSnafu)
+            .context(PuffinBuildReaderSnafu)?;
+        Ok((puffin_manager.file_key(&file_id), reader))
     }
 
     async fn apply_predicates<R: BloomFilterReader + Send + 'static>(
@@ -440,19 +457,17 @@ impl BloomFilterIndexApplier {
         sst_metadata: &RegionMetadataRef,
     ) -> Option<Arc<BTreeMap<IndexTarget, Vec<InListPredicate>>>> {
         let mut has_type_mismatch = false;
-        let mut compatible_col_ids = Vec::new();
+        let mut compatible_targets = Vec::new();
 
-        for (col_id, expected) in &self.expected_predicate_target_types {
-            if crate::sst::index::column::skipping_target_data_type(sst_metadata, col_id).as_ref()
-                != Some(expected)
-            {
+        for (target, expected) in &self.expected_predicate_target_types {
+            if skipping_target_data_type(sst_metadata, target).as_ref() != Some(expected) {
                 has_type_mismatch = true;
                 continue;
             }
-            compatible_col_ids.push(col_id.clone());
+            compatible_targets.push(target.clone());
         }
 
-        if compatible_col_ids.is_empty() {
+        if compatible_targets.is_empty() {
             return None;
         }
 
@@ -461,9 +476,9 @@ impl BloomFilterIndexApplier {
         }
 
         let mut compatible_predicates = BTreeMap::new();
-        for col_id in compatible_col_ids {
-            if let Some(predicates) = self.default_predicates.get(&col_id) {
-                compatible_predicates.insert(col_id, predicates.clone());
+        for target in compatible_targets {
+            if let Some(predicates) = self.default_predicates.get(&target) {
+                compatible_predicates.insert(target, predicates.clone());
             }
         }
 
@@ -531,6 +546,7 @@ mod tests {
                             path: vec!["value".into()],
                             data_type: ConcreteDataType::int64_datatype(),
                             inverted_index: false,
+                            fulltext_index: None,
                             skipping_index: Some(
                                 SkippingIndexOptions::new(2, 0.01, Default::default()).unwrap(),
                             ),

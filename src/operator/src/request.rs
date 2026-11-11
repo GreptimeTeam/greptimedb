@@ -17,8 +17,8 @@ use std::sync::Arc;
 use api::helper::to_pb_time_unit;
 use api::v1::region::region_request::Body as RegionRequestBody;
 use api::v1::region::{
-    BuildIndexRequest, CompactRequest, CompactionTimeRange, FlushRequest, RegionRequestHeader,
-    TruncateRequest, Unflushed, build_index_request, truncate_request,
+    BuildIndexRequest, CancelCompactionRequest, CompactRequest, CompactionTimeRange, FlushRequest,
+    RegionRequestHeader, TruncateRequest, Unflushed, build_index_request, truncate_request,
 };
 use catalog::CatalogManagerRef;
 use common_catalog::build_db_string;
@@ -34,6 +34,7 @@ use partition::cache::PhysicalPartitionInfo;
 use partition::manager::PartitionRuleManagerRef;
 use session::context::QueryContextRef;
 use snafu::prelude::*;
+use store_api::metric_engine_consts;
 use store_api::storage::RegionId;
 use table::requests::{BuildIndexTableRequest, CompactTableRequest, FlushTableRequest};
 use table::table_name::TableName;
@@ -236,6 +237,27 @@ impl Requester {
         self.do_request(vec![request], None, &ctx).await
     }
 
+    /// Cancels one identified compaction task through the region leader.
+    pub async fn handle_cancel_region_compaction(
+        &self,
+        region_id: RegionId,
+        task_id: String,
+        ctx: QueryContextRef,
+    ) -> Result<AffectedRows> {
+        ensure!(
+            region_id.region_group() != metric_engine_consts::METRIC_METADATA_REGION_GROUP,
+            NotSupportedSnafu {
+                feat: "cancelling compaction for an internal metric metadata region",
+            }
+        );
+
+        let request = RegionRequestBody::CancelCompaction(CancelCompactionRequest {
+            region_id: region_id.into(),
+            task_id,
+        });
+        self.do_request(vec![request], None, &ctx).await
+    }
+
     /// Discard all unflushed data from the region.
     pub async fn handle_discard_unflushed_data(
         &self,
@@ -389,6 +411,7 @@ impl Requester {
         let region_id = match req {
             RegionRequestBody::Flush(req) => req.region_id,
             RegionRequestBody::Compact(req) => req.region_id,
+            RegionRequestBody::CancelCompaction(req) => req.region_id,
             RegionRequestBody::BuildIndex(req) => req.region_id,
             RegionRequestBody::Truncate(req) => req.region_id,
             _ => {
@@ -451,11 +474,83 @@ fn ensure_discard_unflushed_supported(engine: &str, is_physical_table: bool) -> 
 
 #[cfg(test)]
 mod tests {
+    use api::region::RegionResponse;
     use api::v1::TimeUnit;
+    use common_error::ext::ErrorExt;
+    use common_error::status_code::StatusCode;
+    use common_meta::ddl::test_util::datanode_handler::DatanodeWatcher;
+    use common_meta::test_util::MockDatanodeManager;
     use common_time::Timestamp;
     use common_time::range::TimestampRange;
+    use session::context::QueryContext;
 
     use super::*;
+    use crate::test_util;
+
+    #[tokio::test]
+    async fn test_cancel_region_compaction_routes_to_region_leader() {
+        let backend = test_util::prepare_mocked_backend().await;
+        let partition_manager = test_util::create_partition_rule_manager(backend).await;
+        let (sender, mut requests) = tokio::sync::mpsc::channel(4);
+        let watcher = DatanodeWatcher::new(sender).with_handler(|_, request| {
+            let Some(RegionRequestBody::CancelCompaction(request)) = request.body else {
+                panic!("expected cancellation through Handle");
+            };
+            Ok(RegionResponse::new(usize::from(
+                request.task_id == "live-cycle",
+            )))
+        });
+        let requester = Requester::new(
+            catalog::memory::MemoryCatalogManager::new(),
+            partition_manager,
+            Arc::new(MockDatanodeManager::new(watcher)),
+        );
+        let ctx = Arc::new(QueryContext::with("greptime", "cancel_test"));
+        for (region_number, task_id, affected_rows) in
+            [(1, "live-cycle", 1), (3, "absent-cycle", 0)]
+        {
+            let region_id = RegionId::new(1, region_number);
+            assert_eq!(
+                requester
+                    .handle_cancel_region_compaction(region_id, task_id.into(), ctx.clone())
+                    .await
+                    .unwrap(),
+                affected_rows
+            );
+            let (peer, request) = requests.try_recv().unwrap();
+            assert_eq!(peer.id, u64::from(region_number));
+            assert_eq!(request.header.unwrap().dbname, ctx.get_db_string());
+            assert_eq!(
+                request.body,
+                Some(RegionRequestBody::CancelCompaction(
+                    CancelCompactionRequest {
+                        region_id: region_id.as_u64(),
+                        task_id: task_id.into(),
+                    }
+                ))
+            );
+        }
+        // Metadata regions are rejected before routing, even without a table route.
+        for table_id in [1, u32::MAX] {
+            let region_id = RegionId::with_group_and_seq(
+                table_id,
+                metric_engine_consts::METRIC_METADATA_REGION_GROUP,
+                1,
+            );
+            let error = requester
+                .handle_cancel_region_compaction(region_id, "live-cycle".into(), ctx.clone())
+                .await
+                .unwrap_err();
+            assert_eq!(error.status_code(), StatusCode::Unsupported);
+            assert!(matches!(error, crate::error::Error::NotSupported { .. }));
+            assert!(
+                error
+                    .to_string()
+                    .contains("internal metric metadata region")
+            );
+        }
+        assert!(requests.try_recv().is_err());
+    }
 
     #[test]
     fn test_build_series_index_requires_physical_metric_table() {

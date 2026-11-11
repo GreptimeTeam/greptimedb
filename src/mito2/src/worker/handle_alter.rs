@@ -45,8 +45,43 @@ use crate::request::{DdlRequest, OptionOutputTx, SenderDdlRequest};
 use crate::sst::FormatType;
 use crate::worker::RegionWorkerLoop;
 
+pub(crate) type PendingAlters = std::collections::HashMap<
+    RegionId,
+    std::collections::VecDeque<(RegionAlterRequest, OptionOutputTx)>,
+>;
+
 impl<S: LogStore> RegionWorkerLoop<S> {
     pub(crate) async fn handle_alter_request(
+        &mut self,
+        region_id: RegionId,
+        request: RegionAlterRequest,
+        sender: OptionOutputTx,
+    ) {
+        if self.flush_scheduler.has_pending_alter(region_id)
+            || self.pending_alters.contains_key(&region_id)
+            || self.regions.get_region(region_id).is_some_and(|region| {
+                matches!(
+                    region.state(),
+                    crate::region::RegionRoleState::Leader(
+                        crate::region::RegionLeaderState::Editing
+                            | crate::region::RegionLeaderState::Altering
+                    )
+                )
+            })
+        {
+            let queue = self.pending_alters.entry(region_id).or_default();
+            if queue.len() >= 128 {
+                sender.send(crate::error::RegionBusySnafu { region_id }.fail());
+            } else {
+                queue.push_back((request, sender));
+            }
+            self.dispatch_pending_region_requests(region_id).await;
+            return;
+        }
+        self.execute_alter_request(region_id, request, sender).await;
+    }
+
+    pub(crate) async fn execute_alter_request(
         &mut self,
         region_id: RegionId,
         request: RegionAlterRequest,
@@ -129,6 +164,13 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         if let Err(e) = request.validate(&version.metadata) {
             // Invalid request.
             sender.send(Err(e).context(InvalidRegionRequestSnafu));
+            return;
+        }
+
+        if !is_allowed_with_pending_tails(&request.kind)
+            && let Err(e) = version.ensure_no_pending_tails()
+        {
+            sender.send(Err(e));
             return;
         }
 
@@ -387,6 +429,19 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             // sst_format, or max_row_group_row_count).
             Ok(Some(candidate))
         }
+    }
+}
+
+/// Returns true if `kind` only changes region options or only adds nullable columns
+/// without a default value, which rows replayed from a pending tail can lack.
+fn is_allowed_with_pending_tails(kind: &AlterKind) -> bool {
+    match kind {
+        AlterKind::AddColumns { columns } => columns.iter().all(|column| {
+            let schema = &column.column_metadata.column_schema;
+            schema.is_nullable() && schema.default_constraint().is_none()
+        }),
+        AlterKind::SetRegionOptions { .. } | AlterKind::UnsetRegionOptions { .. } => true,
+        _ => false,
     }
 }
 

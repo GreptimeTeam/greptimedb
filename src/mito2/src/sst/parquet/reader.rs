@@ -61,10 +61,7 @@ use crate::error::{
     ParquetToArrowSchemaSnafu, ReadDataPartSnafu, Result, SerializePartitionExprSnafu,
     UnexpectedSnafu,
 };
-use crate::metrics::{
-    PRECISE_FILTER_ROWS_TOTAL, READ_ROW_GROUPS_TOTAL, READ_ROWS_IN_ROW_GROUP_TOTAL,
-    READ_ROWS_TOTAL, READ_STAGE_ELAPSED,
-};
+use crate::metrics::{READ_ROWS_TOTAL, READ_STAGE_ELAPSED};
 use crate::read::flat_projection::CompactionProjectionMapper;
 use crate::read::prune::FlatPruneReader;
 use crate::read::read_columns::ReadColumns;
@@ -977,6 +974,7 @@ impl ParquetReaderBuilder {
 
         let fulltext_filtered = self
             .prune_row_groups_by_fulltext_index(
+                read_format.metadata(),
                 row_group_size,
                 num_row_groups,
                 &mut output,
@@ -1016,6 +1014,7 @@ impl ParquetReaderBuilder {
 
         if !fulltext_filtered {
             self.prune_row_groups_by_fulltext_bloom(
+                read_format.metadata(),
                 row_group_size,
                 parquet_meta,
                 &mut output,
@@ -1030,6 +1029,7 @@ impl ParquetReaderBuilder {
     /// Prunes row groups by fulltext index. Returns `true` if the row groups are pruned.
     async fn prune_row_groups_by_fulltext_index(
         &self,
+        sst_metadata: &RegionMetadataRef,
         row_group_size: usize,
         num_row_groups: usize,
         output: &mut RowGroupSelection,
@@ -1048,12 +1048,16 @@ impl ParquetReaderBuilder {
             &self.fulltext_index_appliers[..]
         };
         for index_applier in appliers.iter().flatten() {
-            let predicate_key = index_applier.predicate_key();
+            // Filter out index requests incompatible with this SST.
+            let Some(requests) = index_applier.compatible_requests_for_sst(sst_metadata) else {
+                continue;
+            };
+            let predicate_key = PredicateKey::new_fulltext(requests.clone());
             // Fast path: return early if the result is in the cache.
             let cached = self
                 .cache_strategy
                 .index_result_cache()
-                .and_then(|cache| cache.get(predicate_key, self.file_handle.file_id().file_id()));
+                .and_then(|cache| cache.get(&predicate_key, self.file_handle.file_id().file_id()));
             if let Some(result) = cached.as_ref()
                 && all_required_row_groups_searched(output, result)
             {
@@ -1070,6 +1074,7 @@ impl ParquetReaderBuilder {
                 .apply_fine(
                     self.file_handle.index_id(),
                     Some(file_size_hint),
+                    &requests,
                     metrics.fulltext_index_apply_metrics.as_mut(),
                 )
                 .await;
@@ -1085,7 +1090,7 @@ impl ParquetReaderBuilder {
             };
 
             self.apply_index_result_and_update_cache(
-                predicate_key,
+                &predicate_key,
                 self.file_handle.file_id().file_id(),
                 selection,
                 output,
@@ -1291,6 +1296,7 @@ impl ParquetReaderBuilder {
 
     async fn prune_row_groups_by_fulltext_bloom(
         &self,
+        sst_metadata: &RegionMetadataRef,
         row_group_size: usize,
         parquet_meta: &ParquetMetaData,
         output: &mut RowGroupSelection,
@@ -1309,12 +1315,16 @@ impl ParquetReaderBuilder {
             &self.fulltext_index_appliers[..]
         };
         for index_applier in appliers.iter().flatten() {
-            let predicate_key = index_applier.predicate_key();
+            // Filter out index requests incompatible with this SST.
+            let Some(requests) = index_applier.compatible_requests_for_sst(sst_metadata) else {
+                continue;
+            };
+            let predicate_key = PredicateKey::new_fulltext(requests.clone());
             // Fast path: return early if the result is in the cache.
             let cached = self
                 .cache_strategy
                 .index_result_cache()
-                .and_then(|cache| cache.get(predicate_key, self.file_handle.file_id().file_id()));
+                .and_then(|cache| cache.get(&predicate_key, self.file_handle.file_id().file_id()));
             if let Some(result) = cached.as_ref()
                 && all_required_row_groups_searched(output, result)
             {
@@ -1343,6 +1353,7 @@ impl ParquetReaderBuilder {
                     self.file_handle.index_id(),
                     Some(file_size_hint),
                     rgs,
+                    &requests,
                     metrics.fulltext_index_apply_metrics.as_mut(),
                 )
                 .await;
@@ -1363,7 +1374,7 @@ impl ParquetReaderBuilder {
             }
 
             self.apply_index_result_and_update_cache(
-                predicate_key,
+                &predicate_key,
                 self.file_handle.file_id().file_id(),
                 selection,
                 output,
@@ -1628,41 +1639,6 @@ impl ReaderFilterMetrics {
                 .get_or_insert_with(Default::default)
                 .merge_from(other_metrics);
         }
-    }
-
-    /// Reports metrics.
-    pub(crate) fn observe(&self) {
-        READ_ROW_GROUPS_TOTAL
-            .with_label_values(&["before_filtering"])
-            .inc_by(self.rg_total as u64);
-        READ_ROW_GROUPS_TOTAL
-            .with_label_values(&["fulltext_index_filtered"])
-            .inc_by(self.rg_fulltext_filtered as u64);
-        READ_ROW_GROUPS_TOTAL
-            .with_label_values(&["inverted_index_filtered"])
-            .inc_by(self.rg_inverted_filtered as u64);
-        READ_ROW_GROUPS_TOTAL
-            .with_label_values(&["minmax_index_filtered"])
-            .inc_by(self.rg_minmax_filtered as u64);
-        READ_ROW_GROUPS_TOTAL
-            .with_label_values(&["bloom_filter_index_filtered"])
-            .inc_by(self.rg_bloom_filtered as u64);
-
-        PRECISE_FILTER_ROWS_TOTAL
-            .with_label_values(&["parquet"])
-            .inc_by(self.rows_precise_filtered as u64);
-        READ_ROWS_IN_ROW_GROUP_TOTAL
-            .with_label_values(&["before_filtering"])
-            .inc_by(self.rows_total as u64);
-        READ_ROWS_IN_ROW_GROUP_TOTAL
-            .with_label_values(&["fulltext_index_filtered"])
-            .inc_by(self.rows_fulltext_filtered as u64);
-        READ_ROWS_IN_ROW_GROUP_TOTAL
-            .with_label_values(&["inverted_index_filtered"])
-            .inc_by(self.rows_inverted_filtered as u64);
-        READ_ROWS_IN_ROW_GROUP_TOTAL
-            .with_label_values(&["bloom_filter_index_filtered"])
-            .inc_by(self.rows_bloom_filtered as u64);
     }
 
     fn update_index_metrics(&mut self, index_type: &str, row_group_count: usize, row_count: usize) {
@@ -2452,6 +2428,20 @@ impl ParquetReader {
 
     pub fn parquet_metadata(&self) -> Arc<ParquetMetaData> {
         self.context.reader_builder().parquet_meta.clone()
+    }
+
+    #[cfg(feature = "enterprise")]
+    pub(crate) fn fetched_store_page_bytes(&self) -> Result<u64> {
+        self.fetch_metrics
+            .data
+            .lock()
+            .map(|metrics| metrics.page_size_to_fetch_store)
+            .map_err(|_| {
+                crate::error::UnexpectedSnafu {
+                    reason: "Source fetch metrics lock poisoned",
+                }
+                .build()
+            })
     }
 }
 

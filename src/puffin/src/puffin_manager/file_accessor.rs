@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::sync::Arc;
+
 use async_trait::async_trait;
 use common_base::range_read::{FileReader, SizeAwareRangeReader};
 use common_test_util::temp_dir::{TempDir, create_temp_dir};
@@ -20,6 +22,7 @@ use tokio::fs::File;
 use tokio_util::compat::{Compat, TokioAsyncReadCompatExt};
 
 use crate::error::Result;
+use crate::puffin_manager::file_key::{PuffinFileKey, PuffinStorageScope};
 
 /// `PuffinFileAccessor` is for opening readers and writers for puffin files.
 #[async_trait]
@@ -28,6 +31,10 @@ pub trait PuffinFileAccessor: Send + Sync + 'static {
     type Reader: SizeAwareRangeReader + Sync;
     type Writer: AsyncWrite + Unpin + Send;
     type FileHandle: ToString + Clone + Send + Sync;
+
+    /// Returns stable identity using the same resolved path as reader and writer.
+    /// Keys include the physical file version; this operation performs no I/O.
+    fn file_key(&self, handle: &Self::FileHandle) -> PuffinFileKey<Self::FileHandle>;
 
     /// Opens a reader for the given puffin file handle.
     async fn reader(&self, handle: &Self::FileHandle) -> Result<Self::Reader>;
@@ -38,12 +45,18 @@ pub trait PuffinFileAccessor: Send + Sync + 'static {
 
 pub struct MockFileAccessor {
     tempdir: TempDir,
+    scope: Arc<PuffinStorageScope>,
 }
 
 impl MockFileAccessor {
     pub fn new(prefix: &str) -> Self {
         let tempdir = create_temp_dir(prefix);
-        Self { tempdir }
+        let scope = Arc::new(PuffinStorageScope::new(
+            "file".to_string(),
+            String::new(),
+            tempdir.path().to_string_lossy().into_owned(),
+        ));
+        Self { tempdir, scope }
     }
 }
 
@@ -52,6 +65,10 @@ impl PuffinFileAccessor for MockFileAccessor {
     type Reader = FileReader;
     type Writer = Compat<File>;
     type FileHandle = String;
+
+    fn file_key(&self, handle: &Self::FileHandle) -> PuffinFileKey<Self::FileHandle> {
+        PuffinFileKey::new(self.scope.clone(), handle.clone(), handle.clone())
+    }
 
     async fn reader(&self, handle: &String) -> Result<Self::Reader> {
         Ok(FileReader::new(self.tempdir.path().join(handle))
