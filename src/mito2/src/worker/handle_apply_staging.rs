@@ -17,6 +17,7 @@ use common_telemetry::{debug, info};
 use store_api::logstore::LogStore;
 use store_api::region_request::ApplyStagingManifestRequest;
 use store_api::storage::RegionId;
+use tokio::sync::mpsc::Sender;
 use tokio::sync::oneshot;
 
 use crate::error::{RegionStateSnafu, Result, StagingPartitionExprMismatchSnafu, UnexpectedSnafu};
@@ -24,7 +25,9 @@ use crate::manifest::action::{RegionEdit, RegionManifest};
 use crate::manifest::storage::manifest_dir;
 use crate::manifest::storage::staging::{StagingBlobStorage, staging_blob_path};
 use crate::region::{MitoRegionRef, RegionLeaderState, RegionRoleState};
-use crate::request::{OptionOutputTx, RegionEditRequest, WorkerRequest, WorkerRequestWithTime};
+use crate::request::{
+    BackgroundNotify, OptionOutputTx, RegionEditRequest, WorkerRequest, WorkerRequestWithTime,
+};
 use crate::sst::location::region_dir_from_table_dir;
 use crate::worker::RegionWorkerLoop;
 use crate::worker::handle_reload::notify_if_fenced;
@@ -152,7 +155,8 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                     return;
                 };
                 let manager = region.manifest_ctx.manifest_manager.write().await;
-                let hook_payload = match region.end_staging(manager, &worker_sender).await {
+                let drain = drain_ended_staging(&worker_sender, region_id);
+                let hook_payload = match region.end_staging(manager, drain).await {
                     Ok(payload) => payload,
                     Err(e) => {
                         notify_if_fenced(&worker_sender, &region).await;
@@ -195,4 +199,20 @@ impl<S: LogStore> RegionWorkerLoop<S> {
 
         RegionManifest::decode(&staging_manifest)
     }
+}
+
+/// Has the worker handle the writes it stalled while the region was ending staging, and waits
+/// until it has. The caller must not hold the region's manifest lock, which the worker may wait
+/// for.
+pub(crate) async fn drain_ended_staging(
+    sender: &Sender<WorkerRequestWithTime>,
+    region_id: RegionId,
+) {
+    let (drained, wait) = oneshot::channel();
+    let notify = WorkerRequest::Background {
+        region_id,
+        notify: BackgroundNotify::StagingEnded(drained),
+    };
+    let _ = sender.send(WorkerRequestWithTime::new(notify)).await;
+    let _ = wait.await;
 }

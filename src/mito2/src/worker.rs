@@ -96,6 +96,7 @@ use crate::sst::index::puffin_manager::PuffinManagerFactory;
 use crate::temp_file_sweeper;
 use crate::time_provider::{StdTimeProvider, TimeProviderRef};
 use crate::wal::Wal;
+use crate::worker::handle_apply_staging::drain_ended_staging;
 use crate::worker::handle_flush::StagingRegionsRef;
 use crate::worker::handle_manifest::RegionEditQueues;
 
@@ -1644,8 +1645,9 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             let request_sender = self.sender.clone();
             // We need to do this in background as we need the manifest lock.
             common_runtime::spawn_global(async move {
+                let drain = drain_ended_staging(&request_sender, region_id);
                 match region
-                    .set_role_state_gracefully(region_role_state, &request_sender)
+                    .set_role_state_gracefully(region_role_state, drain)
                     .await
                 {
                     Ok(()) => {

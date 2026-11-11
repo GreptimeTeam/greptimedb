@@ -498,9 +498,8 @@ async fn test_retried_downgrade_waits_after_first_request_is_cancelled() {
     // a detached worker task, so aborting its caller only drops the reply receiver.
     let first_region = region.clone();
     let first_downgrade = tokio::spawn(async move {
-        let (worker_sender, _worker_receiver) = tokio::sync::mpsc::channel(1);
         first_region
-            .set_role_state_gracefully(SettableRegionRoleState::DowngradingLeader, &worker_sender)
+            .set_role_state_gracefully(SettableRegionRoleState::DowngradingLeader, async {})
             .await
     });
     tokio::time::timeout(Duration::from_secs(5), first_wait_started)
@@ -536,9 +535,8 @@ async fn test_retried_downgrade_waits_after_first_request_is_cancelled() {
     let second_wait_started = second_wait_started.notified();
     let retry_region = region.clone();
     let retry_downgrade = tokio::spawn(async move {
-        let (worker_sender, _worker_receiver) = tokio::sync::mpsc::channel(1);
         retry_region
-            .set_role_state_gracefully(SettableRegionRoleState::DowngradingLeader, &worker_sender)
+            .set_role_state_gracefully(SettableRegionRoleState::DowngradingLeader, async {})
             .await
     });
     tokio::time::timeout(Duration::from_secs(5), second_wait_started)

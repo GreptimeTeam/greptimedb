@@ -33,6 +33,7 @@ use crate::request::OptionOutputTx;
 use crate::temp_file_sweeper;
 use crate::wal::entry_distributor::WalEntryReceiver;
 use crate::worker::RegionWorkerLoop;
+use crate::worker::handle_apply_staging::drain_ended_staging;
 
 impl<S: LogStore> RegionWorkerLoop<S> {
     pub(crate) async fn handle_catchup_request(
@@ -94,11 +95,9 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                         node_lease.seed(&region.manifest_ctx.leader_deadline);
                         if region.manifest_ctx.promote_after_catchup(region_id) {
                             // Finalize leadership: persist backfilled metadata.
+                            let drain = drain_ended_staging(&worker_sender, region_id);
                             match region
-                                .set_role_state_gracefully(
-                                    SettableRegionRoleState::Leader,
-                                    &worker_sender,
-                                )
+                                .set_role_state_gracefully(SettableRegionRoleState::Leader, drain)
                                 .await
                             {
                                 Ok(()) => {

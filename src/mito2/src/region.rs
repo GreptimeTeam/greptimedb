@@ -51,7 +51,6 @@ use store_api::region_request::{PathType, StagingPartitionDirective};
 use store_api::sst_entry::{self, ManifestSstEntry};
 use store_api::storage::{FileId, RegionId, SequenceNumber};
 use tokio::sync::RwLockWriteGuard;
-use tokio::sync::mpsc::Sender;
 pub use utils::*;
 
 use crate::access_layer::AccessLayerRef;
@@ -69,9 +68,7 @@ use crate::manifest::action::{
 use crate::manifest::manager::RegionManifestManager;
 use crate::metrics::manifest_size::RegionManifestSizeMetric;
 use crate::region::version::{VersionControlRef, VersionRef};
-use crate::request::{
-    BackgroundNotify, OnFailure, OptionOutputTx, WorkerRequest, WorkerRequestWithTime,
-};
+use crate::request::{OnFailure, OptionOutputTx};
 use crate::series_index::{SeriesIndexVersion, SeriesIndexVersionControl};
 use crate::sst::file::{self, FileMeta};
 use crate::sst::file_purger::FilePurgerRef;
@@ -577,11 +574,12 @@ impl MitoRegion {
 
     /// Sets the region role state gracefully. This acquires the manifest write lock.
     ///
-    /// Ending staging notifies the worker through `worker_sender` (see [Self::end_staging]).
+    /// Ending staging awaits `drain_stalled_writes` (see [Self::end_staging]); other changes
+    /// drop it.
     pub(crate) async fn set_role_state_gracefully(
         &self,
         state: SettableRegionRoleState,
-        worker_sender: &Sender<WorkerRequestWithTime>,
+        drain_stalled_writes: impl Future<Output = ()>,
     ) -> Result<()> {
         let mut manager: RwLockWriteGuard<'_, RegionManifestManager> =
             self.manifest_ctx.manifest_manager.write().await;
@@ -607,7 +605,7 @@ impl MitoRegion {
                 match current_state {
                     RegionRoleState::Leader(RegionLeaderState::Staging) => {
                         info!("Exiting staging mode for region {}", self.region_id);
-                        let pending = self.end_staging(manager, worker_sender).await?;
+                        let pending = self.end_staging(manager, drain_stalled_writes).await?;
                         manager = self.manifest_ctx.manifest_manager.write().await;
                         pending
                     }
@@ -1098,25 +1096,20 @@ impl MitoRegion {
 
     /// Commits the staged edits as one manifest version and ends staging (see
     /// [Self::end_staging_locked]) under the manifest write lock `manager`. After dropping the
-    /// lock it waits for the worker to resume the writes stalled meanwhile, then clears the
-    /// staging directory. Returns the receipt of the commit, as [Self::end_staging_locked] does.
+    /// lock it awaits `drain_stalled_writes`, which has the worker handle the writes it stalled
+    /// meanwhile, then clears the staging directory. Returns the receipt of the commit, as
+    /// [Self::end_staging_locked] does.
     pub(crate) async fn end_staging(
         &self,
         mut manager: RwLockWriteGuard<'_, RegionManifestManager>,
-        worker_sender: &Sender<WorkerRequestWithTime>,
+        drain_stalled_writes: impl Future<Output = ()>,
     ) -> Result<Option<PendingManifestHook>> {
         let result = self.end_staging_locked(&mut manager).await;
         drop(manager);
 
         // The worker cannot be awaited under the lock, and its writes need not wait for the
         // slower clear of the staging directory.
-        let (drained, wait) = tokio::sync::oneshot::channel();
-        let notify = WorkerRequest::Background {
-            region_id: self.region_id,
-            notify: BackgroundNotify::StagingEnded(drained),
-        };
-        let _ = worker_sender.send(WorkerRequestWithTime::new(notify)).await;
-        let _ = wait.await;
+        drain_stalled_writes.await;
         let pending = result?;
         self.clear_ended_staging().await;
         Ok(pending)
