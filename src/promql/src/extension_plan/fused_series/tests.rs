@@ -4334,6 +4334,28 @@ fn a_frame_with_an_evaluation_grid_is_rejected_when_the_plan_is_built() {
     );
 }
 
+/// The other content direction: an input compiled to read evaluated values refuses a raw frame.
+///
+/// A frame says what its rows are and the tree's input node says what it was compiled to read, and
+/// the two decoders refuse a frame that declares the other content. Reading raw samples as grid
+/// positions would address values that are not there, so the plan is refused when it is built
+/// rather than run with a child decoded as something it is not. The frame here declares raw
+/// samples and the tree's input is bound to the grid, which is the mirror of
+/// [`a_frame_with_an_evaluation_grid_is_rejected_when_the_plan_is_built`].
+#[test]
+fn a_raw_frame_is_rejected_by_an_input_compiled_to_read_evaluated_values() {
+    let error = plan(
+        summed_window_tree(),
+        memory_exec_with(frame_schema(), Vec::new()),
+    )
+    .expect_err("a grid-bound input cannot read raw samples");
+    let message = error_chain(&error);
+    assert!(
+        message.contains("frame content does not match its compiled input"),
+        "refused for another reason: {message}"
+    );
+}
+
 /// A frame of another series schema is refused when the plan is built.
 ///
 /// The tree's input node was compiled against one schema, and a frame for a different one names
@@ -7774,4 +7796,489 @@ async fn histogram_split_colocates_metadata_distinct_results_before_their_merge(
             .is_err(),
         "overlapping metadata-distinct histograms must collide, not mix buckets"
     );
+}
+
+/// The sample time of the piece that fills the start of the statement's grid.
+///
+/// `count_over_time(x[5m])` reads the window `(g - 5m, g]` at grid point `g`, so one sample at
+/// 180s is inside the windows ending at 300s, 360s and 420s and outside the two whose start is at
+/// or after it.
+const EARLY_PIECE_MS: [i64; 1] = [180_000];
+
+/// The sample times of the piece that fills the end of the grid: both are inside the windows
+/// ending at 480s and 540s and outside the one ending at 420s, which starts at 120s.
+const LATE_PIECE_MS: [i64; 2] = [450_000, 480_000];
+
+/// The host `label_replace` rewrites the aliased pieces onto, so two raw identities leave the
+/// window as one canonical label set.
+const ALIASED: &str = "same";
+
+/// A host the rewrite does not match, so the answer holds a second canonical label set and one of
+/// the three owners is left with nothing.
+const PLAIN: &str = "plain";
+
+/// The tree `label_replace(count_over_time(x[5m]), "host", "same", "host", "web-.*")` compiles to:
+/// a window that drops the metric name, then a rewrite that folds the matched hosts onto one value.
+///
+/// This is the alias the planner produces for that query - `label_replace` writing a label its
+/// input already carries is what makes two distinct raw series one canonical label set - narrowed
+/// to the hosts this test aliases so that [`PLAIN`] stays a label set of its own. The two pieces
+/// sit on disjoint grid positions, so they only form one series once they reach one owner.
+fn aliased_count_tree() -> NativeTree {
+    let grid = grid();
+    let raw = NativeType::Samples(raw_schema());
+    let evaluated = evaluated_of(&raw_schema(), &grid);
+    let window = NativeNode {
+        expr: NativeExpr::Window {
+            input: Box::new(NativeNode {
+                expr: NativeExpr::Input(BoundInput {
+                    output: raw.clone(),
+                    source_index: 0,
+                    ordering: SeriesOrdering::Contiguous,
+                }),
+                output: raw,
+            }),
+            op: BoundWindow {
+                function: RangeFunction::CountOverTime,
+                window: RangeWindow {
+                    range_ms: RANGE_MS,
+                    offset_ms: 0,
+                    anchor_ms: None,
+                    modifier: None,
+                },
+                // The input is raw samples, so it has no grid of its own.
+                input_grid: None,
+                output_grid: Arc::clone(&grid),
+            },
+        },
+        output: evaluated.clone(),
+    };
+    NativeTree::try_new(NativeNode {
+        expr: NativeExpr::Map {
+            input: Box::new(window),
+            op: BoundMap {
+                ops: Arc::from([MapOp::Label(Arc::new(
+                    LabelRewrite::replace(HOST, ALIASED, HOST, "web-.*")
+                        .expect("the rewrite compiles"),
+                ))]),
+            },
+        },
+        output: evaluated,
+    })
+    .expect("a rewrite over a window is a legal tree")
+}
+
+/// The tree `sum_over_time(x[5m])` compiles to over an evaluated child: a window over the values the
+/// frame already carries.
+///
+/// There is no canonical merge in it on purpose. A merge reads across series, so this node would
+/// gather the owners back into one execution; the router below has already merged each label set
+/// into one chain, which is exactly what leaves the window one series per owner to fold.
+fn summed_window_tree() -> NativeTree {
+    let grid = grid();
+    let evaluated = evaluated_of(&raw_schema(), &grid);
+    let input = NativeNode {
+        expr: NativeExpr::Input(BoundInput {
+            source_index: 0,
+            output: evaluated.clone(),
+            ordering: SeriesOrdering::Contiguous,
+        }),
+        output: evaluated.clone(),
+    };
+    NativeTree::try_new(NativeNode {
+        expr: NativeExpr::Window {
+            input: Box::new(input),
+            op: BoundWindow {
+                function: RangeFunction::SumOverTime,
+                window: RangeWindow {
+                    range_ms: RANGE_MS,
+                    offset_ms: 0,
+                    anchor_ms: None,
+                    modifier: None,
+                },
+                // The window reads the series its child declares, on the grid it declares.
+                input_grid: Some(Arc::clone(&grid)),
+                output_grid: grid,
+            },
+        },
+        output: evaluated,
+    })
+    .expect("a window over an evaluated input is a legal tree")
+}
+
+/// One raw chunk of `{__name__ = METRIC, host}`, holding one sample of 1.0 at each of `times` and
+/// closing it: `count_over_time` counts the samples, so what they hold never reaches the answer.
+fn piece_chunk(host: &str, times: &[i64]) -> RawSeriesChunk {
+    chunk_of(
+        &raw_schema(),
+        host,
+        metric(&[(HOST, host)], Some(METRIC)),
+        times,
+        vec![times.iter().map(|_| Some(1.0)).collect()],
+        true,
+    )
+}
+
+/// A real `FusedSeriesExec` running [`aliased_count_tree`] over `input`, exporting one evaluated
+/// frame per partition: `A` of the composition below.
+fn aliasing_producer_over(input: Arc<dyn ExecutionPlan>) -> Arc<dyn ExecutionPlan> {
+    let tree = aliased_count_tree();
+    let node = FusedSeries::try_new_with_format(
+        Arc::from(
+            "label_replace(count_over_time(x[5m]), \"host\", \"same\", \"host\", \"web-.*\")",
+        ),
+        tree.clone(),
+        binding(&tree),
+        vec![input_plan(frame_schema())],
+        canonical_frame_schema(&tree),
+        FusedOutputFormat::SeriesFrame,
+    )
+    .expect("the binding matches the tree");
+    plan_of(node, input).expect("the runtime executes the counting tree")
+}
+
+/// The same over one memory source partition per entry of `partitions`.
+fn aliasing_producer(partitions: Vec<Vec<RecordBatch>>) -> Arc<dyn ExecutionPlan> {
+    aliasing_producer_over(memory_exec_partitioned(partitions))
+}
+
+/// A real `FusedSeriesExec` running [`summed_window_tree`] over `input`: `B`.
+fn summed_window_over(input: Arc<dyn ExecutionPlan>) -> Arc<dyn ExecutionPlan> {
+    plan_of(fused(summed_window_tree()), input).expect("the runtime executes the folding tree")
+}
+
+/// Every owner `plan` publishes, read at once, with the chunks each of them handed over.
+///
+/// Reading them together states the partitioned shape this node is part of: the routing decides
+/// which owner an identity belongs to, so a caller claims every owner's stream and reads them as
+/// one composition. The owners' queues are unbounded, so this is the shape being tested rather than
+/// a requirement the read has to meet - draining one owner to its end before starting the next
+/// would still see the same chunks.
+async fn owner_chunks(plan: &Arc<dyn ExecutionPlan>) -> Vec<Vec<(Series, bool)>> {
+    let context = SessionContext::default().task_ctx();
+    let reads = (0..plan.properties().partitioning.partition_count())
+        .map(|owner| {
+            let plan = Arc::clone(plan);
+            let context = Arc::clone(&context);
+            async move {
+                let frames = plan.execute(owner, context).expect("the owner executes");
+                unpack_evaluated_series(frames, None)
+                    .expect("an owner declares an evaluated frame")
+                    .try_collect::<Vec<_>>()
+                    .await
+            }
+        })
+        .collect::<Vec<_>>();
+    futures::future::try_join_all(reads)
+        .await
+        .expect("every owner is read")
+}
+
+/// The `(grid position, value)` pairs `series` carries, in position order.
+fn carried_positions(series: &Series) -> Vec<(usize, f64)> {
+    let mut carried = series
+        .time
+        .positions()
+        .map(|(position, row)| {
+            let value = match series.fields.as_slice()[0].sample(row) {
+                datatypes::series::samples::SampleRef::Float(value) => value,
+                _ => panic!("every fixture here holds float samples"),
+            };
+            (position, value)
+        })
+        .collect::<Vec<_>>();
+    carried.sort_unstable_by_key(|(position, _)| *position);
+    carried
+}
+
+/// One canonical chain: the label set it belongs to, whether it closed, and the `(grid position,
+/// value)` pairs it carries in position order.
+type Chain = (String, bool, Vec<(usize, f64)>);
+
+/// The chains `chunks` hands over.
+///
+/// A chain is a run of rows of one label set closed by its last row: a frame encodes a merged series
+/// as one row per dense sample segment, so one chain can be several rows, and two rows of one label
+/// set that are not adjacent in the stream are two chains rather than one.
+fn chains_of(chunks: &[(Series, bool)]) -> Vec<Chain> {
+    let mut chains: Vec<Chain> = Vec::new();
+    for (series, is_last) in chunks {
+        let host = series
+            .metric
+            .get(HOST)
+            .expect("`A`'s window keeps the host label")
+            .to_string();
+        match chains.last_mut() {
+            Some((last, closed, carried)) if *last == host && !*closed => {
+                carried.extend(carried_positions(series));
+                *closed = *is_last;
+            }
+            _ => chains.push((host, *is_last, carried_positions(series))),
+        }
+    }
+    chains
+}
+
+/// The rows each partition of `plan` answers, all of them read at once, with whether each partition
+/// reported its end and reported it again on the poll after.
+async fn polled_partition_rows(plan: &Arc<dyn ExecutionPlan>) -> Vec<(Vec<Row>, bool)> {
+    let context = SessionContext::default().task_ctx();
+    let reads = (0..plan.properties().partitioning.partition_count())
+        .map(|partition| {
+            let plan = Arc::clone(plan);
+            let context = Arc::clone(&context);
+            async move {
+                let mut stream = plan
+                    .execute(partition, context)
+                    .expect("the partition executes");
+                let mut batches = Vec::new();
+                while let Some(batch) = stream.next().await {
+                    batches.push(batch.expect("the partition answers instead of failing"));
+                }
+                // The end above is the input's own: a chain the producer abandoned arrives as an
+                // error rather than as an end, so what is left to check is that the end is final.
+                (rows(&batches), stream.next().await.is_none())
+            }
+        })
+        .collect::<Vec<_>>();
+    futures::future::join_all(reads).await
+}
+
+/// A real `Fused A` with two partitions, a three-owner `SeriesRepartitionExec` and a real `Fused B`
+/// folding what each owner was handed: the composition this router's merge is for, with N != M.
+///
+/// The stages are stated separately (2, 3, 3) so no count stands for another: two owners over two
+/// upstream partitions would hide an implementation that assumed owner `i` were `A`'s partition `i`,
+/// and three over two has no such index to carry. The nodes are wired by hand here, which makes the
+/// width of three this test's choice rather than something the planner produced.
+///
+/// The input is the aliasing this composition exists for: `http_requests_total{host="web-1"}` and
+/// `http_requests_total{host="web-2"}` are two raw identities that both leave `count_over_time`'s
+/// window as the one canonical label set `{host="same"}`. They are placed on *different* `A`
+/// partitions - which is what keeps them from being refused as two raw keys closing on one label
+/// set inside a single execution - so the same label set reaches the router twice, from two
+/// partitions. The pieces hold disjoint grid positions, so they only form one series (`1, 1, 1, 2,
+/// 2`) once they reach one owner, and `sum_over_time` folds that series to `1, 2, 3, 5, 7`; a merge
+/// that skipped a piece, or put it on another owner, could answer neither.
+///
+/// The router is read on its own first, so that what it hands over is checked where it decides it:
+/// the new contract is that an identity's pieces are merged *into one canonical chain* before they
+/// are published, so each label set leaves as one run of rows closed by its last row - a frame
+/// encodes a merged series as one row per dense sample segment, so that run can be several rows -
+/// and the Fused above has nothing left to collect. Then the whole composition runs on the same
+/// fixtures with all three owners read at once, which is the partitioned shape it exists for, and
+/// with the reads of `A` counted: three owners over two upstream partitions have to be one read of
+/// each partition, fanned out, rather than a re-read per owner or a gather.
+#[tokio::test]
+async fn a_real_three_owner_repartition_between_two_real_fuseds_merges_every_piece() {
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        // Two partitions: the early piece of the aliased label set on one, its late piece beside
+        // the plain series on the other, so two canonical label sets go in over two partitions and
+        // one of them arrives as two pieces.
+        let partitions = vec![
+            vec![frame(&piece_chunk("web-1", &EARLY_PIECE_MS))],
+            vec![
+                frame(&piece_chunk("web-2", &LATE_PIECE_MS)),
+                frame(&piece_chunk(PLAIN, &EARLY_PIECE_MS)),
+            ],
+        ];
+
+        // First the router's own stage, and what it hands over.
+        let a = aliasing_producer(partitions.clone());
+        assert_eq!(
+            2,
+            a.properties().partitioning.partition_count(),
+            "A runs its window once per scan partition, so two partitions go in"
+        );
+        let probe: Arc<dyn ExecutionPlan> = Arc::new(
+            SeriesRepartitionExec::try_new(a, 3)
+                .expect("the router is built over A's evaluated frames"),
+        );
+        assert_eq!(
+            3,
+            probe.properties().partitioning.partition_count(),
+            "the router publishes the three owners it was asked for, and not A's two"
+        );
+
+        let routed = owner_chunks(&probe).await;
+        assert_eq!(3, routed.len(), "one read per owner, all of them at once");
+        let handed = routed
+            .iter()
+            .flatten()
+            .cloned()
+            .collect::<Vec<(Series, bool)>>();
+        for (series, _) in &handed {
+            assert_eq!(
+                None,
+                series.metric.name(),
+                "`count_over_time` drops the metric name"
+            );
+        }
+        // The contract this test is about: the pieces of one identity are merged by the owner that
+        // receives them, so each canonical label set leaves as ONE chain - a run of rows that only
+        // its last row closes - and not as one chain per input partition for the Fused above to
+        // collect.
+        let chains = chains_of(&handed);
+        assert_eq!(
+            2,
+            chains.len(),
+            "one canonical chain per label set, and not one per input partition: {chains:?}"
+        );
+        assert_eq!(
+            2,
+            handed.iter().filter(|(_, is_last)| *is_last).count(),
+            "each canonical chain closes exactly once: {handed:?}"
+        );
+        for (host, closed, _) in &chains {
+            assert!(*closed, "the owner closes the chain it merged: `{host}`");
+        }
+        let mut hosts = chains.iter().map(|(host, ..)| host.clone()).collect::<Vec<_>>();
+        hosts.sort();
+        let mut went_in = vec![ALIASED.to_string(), PLAIN.to_string()];
+        went_in.sort();
+        assert_eq!(
+            went_in, hosts,
+            "the two canonical label sets that went in are the two that came out"
+        );
+        let carried_by = |host: &str| {
+            chains
+                .iter()
+                .find(|(found, ..)| found == host)
+                .map(|(_, _, carried)| carried.clone())
+                .unwrap_or_else(|| panic!("`{host}` is handed over: {chains:?}"))
+        };
+        // Both pieces are in the one chain: the early one counts 1 at the first three grid points
+        // and the late one 2 at the last two, and only a merge of the two carries both.
+        assert_eq!(
+            vec![(0, 1.0), (1, 1.0), (2, 1.0), (3, 2.0), (4, 2.0)],
+            carried_by(ALIASED),
+            "`{{host=\"{ALIASED}\"}}` is one chain over the whole grid, carrying both A partitions' \
+             pieces"
+        );
+        assert_eq!(
+            vec![(0, 1.0), (1, 1.0), (2, 1.0)],
+            carried_by(PLAIN),
+            "`{{host=\"{PLAIN}\"}}` is its own chain, and its piece covers only the start"
+        );
+
+        // Then the whole composition, on the same fixtures: three owners over one read of A.
+        let reads = Arc::new(
+            (0..partitions.len())
+                .map(|_| AtomicUsize::new(0))
+                .collect::<Vec<_>>(),
+        );
+        let router: Arc<dyn ExecutionPlan> = Arc::new(
+            SeriesRepartitionExec::try_new(
+                aliasing_producer_over(Arc::new(CountedExec {
+                    input: memory_exec_partitioned(partitions),
+                    calls: Arc::clone(&reads),
+                })),
+                3,
+            )
+            .expect("the router is built over A's evaluated frames"),
+        );
+        let b = summed_window_over(Arc::clone(&router));
+        assert_eq!(
+            3,
+            b.properties().partitioning.partition_count(),
+            "the router's merge leaves each canonical label set whole in the owner that holds it, so \
+             B runs one execution per owner instead of gathering them into one or following A's two"
+        );
+
+        // Every owner is read at once, which is the partitioned composition this test is about: one
+        // stream per owner, all of them claimed together, rather than one execution answering for
+        // all of them.
+        let answered = polled_partition_rows(&b).await;
+        assert_eq!(3, answered.len(), "B runs once per owner of the router");
+        for (owner, (_, ended)) in answered.iter().enumerate() {
+            assert!(
+                *ended,
+                "owner {owner} of B reports its end, and the poll after it reported `None` again"
+            );
+        }
+        // Draining the three owners together is one read of A's two partitions, not one read per
+        // owner and not one owner gathering what the others were routed: the router fans one read
+        // out to its owners.
+        assert_eq!(
+            vec![1, 1],
+            reads
+                .iter()
+                .map(|calls| calls.load(Ordering::SeqCst))
+                .collect::<Vec<_>>(),
+            "the three owners read each of A's partitions once"
+        );
+
+        // Each owner answers the label set the router put on it, and an owner the router left with
+        // nothing answers nothing: the fold above keeps the placement instead of re-deciding it.
+        let expected = |host: &str, sums: [f64; GRID_LEN as usize]| -> Vec<Row> {
+            grid_timestamps()
+                .into_iter()
+                .zip(sums)
+                .map(|(time, value)| (time, Some(value), Some(host.to_string()), None))
+                .collect()
+        };
+        let aliased_rows = expected(ALIASED, [1.0, 2.0, 3.0, 5.0, 7.0]);
+        let plain_rows = expected(PLAIN, [1.0, 2.0, 3.0, 3.0, 3.0]);
+        for (owner, (rows, _)) in answered.iter().enumerate() {
+            let mut routed_here = routed[owner]
+                .iter()
+                .map(|(series, _)| {
+                    series
+                        .metric
+                        .get(HOST)
+                        .expect("`A`'s window keeps the host label")
+                })
+                .collect::<Vec<_>>();
+            // One chain can be several rows, so what an owner carried is the set of label sets it
+            // was routed, not the rows they arrived in.
+            routed_here.sort_unstable();
+            routed_here.dedup();
+            let mut answered_here = rows
+                .iter()
+                .map(|(_, _, host, _)| {
+                    host.as_deref()
+                        .expect("`B`'s window keeps the host label")
+                })
+                .collect::<Vec<_>>();
+            answered_here.sort_unstable();
+            answered_here.dedup();
+            assert_eq!(
+                routed_here, answered_here,
+                "owner {owner} answers the label sets the router put on it and no other: {rows:?}"
+            );
+            // Each of those label sets is answered as one series over the whole grid: the pieces
+            // of the aliased one were merged below, and the fold above reads the whole of each.
+            let mut wanted = answered_here
+                .iter()
+                .flat_map(|host| match *host {
+                    ALIASED => aliased_rows.clone(),
+                    PLAIN => plain_rows.clone(),
+                    other => panic!("owner {owner} answered a label set that went in: {other}"),
+                })
+                .collect::<Vec<Row>>();
+            wanted.sort_by(|left, right| left.partial_cmp(right).expect("rows of a grid compare"));
+            let mut got = rows.clone();
+            got.sort_by(|left, right| left.partial_cmp(right).expect("rows of a grid compare"));
+            assert_eq!(
+                wanted, got,
+                "owner {owner} answers every label set it was routed, one series over the whole \
+                 grid each"
+            );
+        }
+        // The router routes by a hash of the label set, so two identities can land on one owner:
+        // how many owners answer is not fixed. Two label sets cannot fill three owners, though, so
+        // at least one is empty - and an empty owner answers nothing rather than inventing a series
+        // for it.
+        assert!(
+            answered.iter().any(|(rows, _)| rows.is_empty()),
+            "an owner that was routed nothing answers nothing: {answered:?}"
+        );
+        assert_eq!(
+            2 * GRID_LEN as usize,
+            answered.iter().map(|(rows, _)| rows.len()).sum::<usize>(),
+            "two canonical label sets in, two series out, one row per grid point"
+        );
+    })
+    .await
+    .expect("the composition finishes instead of waiting for an owner nobody reads");
 }
