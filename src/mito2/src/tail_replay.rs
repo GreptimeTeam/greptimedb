@@ -70,7 +70,7 @@ fn is_replaying_leader(region: &MitoRegion) -> bool {
 /// Replays the pending tails of a region into SSTs and publishes them in one manifest edit.
 ///
 /// Each round reads the tails in order and writes the rows of each into its own chunks of
-/// SSTs, since an SST gives its rows its largest sequence. The edit adds the SSTs, clears
+/// SSTs, since an SST can give all its rows its largest sequence. The edit adds the SSTs, clears
 /// the tails and advances the flushed entry id and sequence. Another node's listed tail is
 /// only a bound, so until the region receives a Leader lease after a catchup made it
 /// writable, the edit keeps its unread part, which a second edit clears once a lease

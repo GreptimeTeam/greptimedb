@@ -138,7 +138,7 @@ Tests live next to the code as `*_test.rs` (e.g. `src/mito2/src/engine/flush_tes
 - A leader that is writable, altering or editing replays its pending tails in one
   background task (`tail_replay.rs`), started by the worker when a lease, catchup or
   role change makes the region writable. Each tail goes into its own SSTs, since an
-  SST gives its rows its largest sequence. The task commits outside the edit queue
+  SST can give all its rows its largest sequence. The task commits outside the edit queue
   (`ManifestContext::update_manifest_for_tails`) and always reports its end, which
   lets the worker start the next replay or reload a fenced region.
 - Lock ordering: take the manifest lock before updating `version_control`; the

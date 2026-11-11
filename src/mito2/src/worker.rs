@@ -1739,6 +1739,9 @@ impl<S: LogStore> RegionWorkerLoop<S> {
 impl<S> RegionWorkerLoop<S> {
     /// Cleans up the worker.
     async fn clean(&self) {
+        for state in self.tail_replays.values() {
+            let _ = state.request_cancel();
+        }
         // Closes remaining regions.
         let regions = self.regions.list_regions();
         for region in regions {

@@ -900,8 +900,11 @@ impl List for StalledLister {
     }
 }
 
+#[rstest]
+#[case::close(false)]
+#[case::engine_stop(true)]
 #[tokio::test]
-async fn test_close_cancels_stalled_remote_read() {
+async fn test_stalled_remote_read_ends_when_region_stops(#[case] stop_engine: bool) {
     let stall = Arc::new(AtomicBool::new(false));
     let stalled = Arc::new(AtomicUsize::new(0));
     let layer = stall_remote_listings(stall.clone(), stalled.clone());
@@ -914,15 +917,20 @@ async fn test_close_cancels_stalled_remote_read() {
     stall.store(true, Ordering::Relaxed);
     region.catchup().await;
     wait_until(|| stalled.load(Ordering::Relaxed) > 0).await;
+    let replaying = Arc::downgrade(&region.engine.get_region(region.region_id).unwrap());
 
-    let close = RegionRequest::Close(RegionCloseRequest::default());
-    region
-        .engine
-        .handle_request(region.region_id, close)
-        .await
-        .unwrap();
+    if stop_engine {
+        region.engine.stop().await.unwrap();
+    } else {
+        let close = RegionRequest::Close(RegionCloseRequest::default());
+        region
+            .engine
+            .handle_request(region.region_id, close)
+            .await
+            .unwrap();
+    }
 
-    wait_until(|| region.listener.ended() == 1).await;
+    wait_until(|| replaying.strong_count() == 0).await;
 }
 
 #[tokio::test]
