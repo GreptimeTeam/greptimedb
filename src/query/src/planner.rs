@@ -248,7 +248,14 @@ fn unwrap_dictionary(data_type: &DataType) -> &DataType {
 /// names each value column after the expression it planned and publishes the labels first - so a CTE
 /// answered natively would make one statement mean different things depending on which route planned
 /// it. This wraps the native plan in the projection that publishes the existing planner's answer for
-/// the same statement instead, so what a CTE exposes does not depend on the route.
+/// the same statement instead.
+///
+/// One column follows the answer rather than the existing planner: a native rows answer declares the
+/// per-row metric name, which the existing planner never publishes, and that column is part of what
+/// the statement answers. It is appended after the existing planner's columns, so those keep their
+/// names, order, types and metadata, while a column list the CTE declares needs one more name - and a
+/// statement whose answer declares no name column (a scalar-typed answer) publishes none here. A CTE
+/// answered by the existing planner publishes exactly the columns it always has.
 ///
 /// The projection is made of expressions - an alias per column, and a cast where the two routes carry
 /// the same values in different Arrow types - because that is what survives analysis: the analyzer
@@ -322,6 +329,11 @@ fn publish_legacy_schema(native: LogicalPlan, legacy: &LogicalPlan) -> Option<Lo
                     && unwrap_dictionary(native_field.data_type())
                         == unwrap_dictionary(legacy_field.data_type())
                     && native_field.is_nullable() == legacy_field.is_nullable()
+                    // A cast reproduces the field it rebuilds, and the native rows layout marks its
+                    // metric-name column with metadata a cast would drop. Such a column is never a
+                    // candidate for a legacy column: the name is the native answer's own and this
+                    // boundary publishes the existing planner's columns.
+                    && native_field.metadata().is_empty()
             })
             .map(|(native_index, _)| native_index)
             .collect::<Vec<_>>();
@@ -352,14 +364,54 @@ fn publish_legacy_schema(native: LogicalPlan, legacy: &LogicalPlan) -> Option<Lo
         };
         exprs.push(value.alias(legacy_field.name().clone()));
     }
+    // A native rows answer declares the per-row name column, and that is part of what the statement
+    // answers, so the CTE publishes it too - after the columns above, which keep their names and
+    // order. A statement whose answer has no such column (a scalar-typed answer, for one) publishes
+    // none here either: what the CTE exposes is the answer, not a schema chosen for it.
+    let name_source = native_fields
+        .iter()
+        .position(|(_, native_field)| datatypes::schema::is_metric_name_field(native_field));
+    if let Some(native_index) = name_source {
+        let (native_qualifier, native_field) = &native_fields[native_index];
+        exprs.push(
+            DfExpr::Column(datafusion_common::Column::new(
+                native_qualifier.clone(),
+                native_field.name().clone(),
+            ))
+            .alias(native_field.name().clone()),
+        );
+    }
     let plan = LogicalPlanBuilder::from(native)
         .project(exprs)
         .ok()?
         .build()
         .ok()?;
     // The published columns are the ones this set out to publish, or the native plan is not used at
-    // all: what a CTE exposes may not change for a reason this did not predict.
-    publishes_columns(plan.schema().as_ref(), legacy_schema.as_ref()).then_some(plan)
+    // all: what a CTE exposes may not change for a reason this did not predict. The legacy columns
+    // come first and in their order; the name column, when the answer declared one, is last.
+    let published = plan.schema();
+    let legacy_len = legacy_schema.fields().len();
+    let expected_len = legacy_len + usize::from(name_source.is_some());
+    (published.fields().len() == expected_len
+        && published.metadata() == legacy_schema.metadata()
+        && legacy_schema.iter().zip(published.iter()).all(
+            |((_, legacy_field), (_, published_field))| {
+                legacy_field.name() == published_field.name()
+                    && legacy_field.data_type() == published_field.data_type()
+                    && legacy_field.is_nullable() == published_field.is_nullable()
+                    && legacy_field.metadata() == published_field.metadata()
+            },
+        )
+        && name_source.is_none_or(|native_index| {
+            let wanted = &native_schema.fields()[native_index];
+            let published = &published.fields()[legacy_len];
+            published.name() == wanted.name()
+                && published.data_type() == wanted.data_type()
+                && published.is_nullable() == wanted.is_nullable()
+                && published.metadata() == wanted.metadata()
+                && datatypes::schema::is_metric_name_field(published.as_ref())
+        }))
+    .then_some(plan)
 }
 
 pub struct DfLogicalPlanner {
@@ -1770,15 +1822,17 @@ mod tests {
                 &[0.0, 5.0, 10.0][..],
                 &[][..],
             ),
+            // `vector(1)` is a samples root: its rows layout declares the per-row name column,
+            // which names no row because the vector carries no series identity.
             (
                 "vector(1)",
-                &["time", "value"][..],
+                &["time", "value", "__name__"][..],
                 &[1.0, 1.0, 1.0][..],
                 &[][..],
             ),
             (
                 r#"label_replace(vector(1), "host", "host1", "", "")"#,
-                &["time", "value", "host"][..],
+                &["time", "value", "host", "__name__"][..],
                 &[1.0, 1.0, 1.0][..],
                 &[("host", "host1")][..],
             ),
@@ -1786,7 +1840,7 @@ mod tests {
             // projection above the node is read through rather than mistaken for a remote plan.
             (
                 r#"label_replace(vector(1), "__tsid", "x", "", "")"#,
-                &["time", "value"][..],
+                &["time", "value", "__name__"][..],
                 &[1.0, 1.0, 1.0][..],
                 &[][..],
             ),
@@ -2293,6 +2347,14 @@ mod tests {
                                 "true".to_string(),
                             )]),
                         ))
+                    } else if field.name() == "__name__" {
+                        // The native rows layout marks the column that names each row.
+                        Arc::new(field.as_ref().clone().with_metadata(
+                            std::collections::HashMap::from([(
+                                datatypes::schema::METRIC_NAME_KEY.to_string(),
+                                "true".to_string(),
+                            )]),
+                        ))
                     } else {
                         Arc::clone(field)
                     };
@@ -2410,6 +2472,50 @@ mod tests {
         );
     }
 
+    /// A native answer that declares the per-row name column publishes it after the existing
+    /// planner's columns.
+    ///
+    /// The name column is text like a label, so pairing by type alone would leave `host` with two
+    /// candidates and no answer at all; the metadata it carries is what tells the two apart, and
+    /// what keeps it from standing in for a label. The CTE publishes the existing planner's columns
+    /// first and in its order, then the name the answer carries: the column is part of what the
+    /// statement answers.
+    #[test]
+    fn a_cte_publishes_the_name_an_answer_carries_after_the_existing_columns() {
+        let native = plan_publishing_marked(
+            &[
+                ("ts", time_value()),
+                ("val", ScalarValue::Float64(Some(2.0))),
+                ("host", ScalarValue::Utf8(Some("a".to_string()))),
+                (
+                    "__name__",
+                    ScalarValue::Utf8(Some("cte_native".to_string())),
+                ),
+            ],
+            "ts",
+        );
+        let existing = existing_answer();
+
+        let published = publish_legacy_schema(native, &existing)
+            .expect("the declared name column does not compete with a label");
+
+        assert_eq!(
+            column_names(&published),
+            vec!["host", "ts", "lhs.val + rhs.val", "__name__"],
+            "the CTE publishes the existing planner's columns, then the name the answer carries"
+        );
+        assert!(
+            datatypes::schema::is_metric_name_field(
+                published
+                    .schema()
+                    .field_with_name(None, "__name__")
+                    .unwrap()
+            ),
+            "the name column is marked as one: {}",
+            published.schema()
+        );
+    }
+
     /// What the CTE publishes survives the analyzer, which rebuilds every projection from its
     /// expressions.
     ///
@@ -2439,6 +2545,44 @@ mod tests {
             rebuilt.to_string(),
             published.to_string(),
             "and the same expressions"
+        );
+    }
+
+    /// The declared name column survives the analyzer rebuilding the projection as well.
+    #[test]
+    fn the_declared_name_column_survives_the_analyzer_rebuilding_the_projection() {
+        let existing = existing_answer();
+        let native = plan_publishing_marked(
+            &[
+                ("ts", time_value()),
+                ("val", ScalarValue::Float64(Some(2.0))),
+                ("host", ScalarValue::Utf8(Some("a".to_string()))),
+                (
+                    "__name__",
+                    ScalarValue::Utf8(Some("cte_native".to_string())),
+                ),
+            ],
+            "ts",
+        );
+        let published = publish_legacy_schema(native, &existing)
+            .expect("the name column does not compete with a label");
+
+        // The rebuild `DistPlannerAnalyzer` performs on every projection it visits.
+        let rebuilt = published
+            .with_new_exprs(
+                published.expressions(),
+                published.inputs().into_iter().cloned().collect(),
+            )
+            .expect("the analyzer rebuilds a projection from its expressions");
+
+        let field = rebuilt
+            .schema()
+            .field_with_name(None, "__name__")
+            .expect("the name column is still published");
+        assert!(
+            datatypes::schema::is_metric_name_field(field),
+            "and is still marked as one: {}",
+            rebuilt.schema()
         );
     }
 

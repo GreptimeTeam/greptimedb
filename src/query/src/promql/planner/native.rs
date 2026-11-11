@@ -752,6 +752,7 @@ impl PromPlanner {
             let Some(output_tags) = fused_output_tags(tree.root(), &[]) else {
                 return Ok(None);
             };
+
             let Some(values) = native_root_fields(tree.root()) else {
                 return Ok(None);
             };
@@ -782,9 +783,12 @@ impl PromPlanner {
             };
             // A data-free tree reads no input, so every field it answers is a float.
             let output_schema = match format {
-                FusedOutputFormat::PlainRows => {
-                    fused_output_schema(&values, &output_tags, &time_index, FieldKind::Float)?
-                }
+                FusedOutputFormat::PlainRows => fused_output_schema(
+                    &values,
+                    &with_row_name_column(tree.root(), output_tags.clone()),
+                    &time_index,
+                    FieldKind::Float,
+                )?,
                 FusedOutputFormat::SeriesFrame => {
                     let frame =
                         FusedSeries::series_frame_schema(&tree).context(DataFusionPlanningSnafu)?;
@@ -975,7 +979,9 @@ impl PromPlanner {
                             return Ok(None);
                         };
                         // The expression names no metric, so each source reports its own: the tag is
-                        // what tells two metrics with equal ordinary labels apart.
+                        // what tells two metrics with equal ordinary labels apart, and it is what a
+                        // grouping by the name groups on. It is part of the series' identity rather
+                        // than of how a result is displayed, so every plan declares it.
                         if !tags.iter().any(|tag| tag == METRIC_NAME) {
                             tags.push(METRIC_NAME.to_string());
                         }
@@ -1501,6 +1507,7 @@ impl PromPlanner {
             if schema.eval_grid.is_none() {
                 return Ok(None);
             }
+            // A segment publishes frames, so it reports no name column of its own.
             let Some(output_tags) = fused_output_tags(root, &source_tags) else {
                 return Ok(None);
             };
@@ -1699,7 +1706,7 @@ impl PromPlanner {
             // A scalar has no labels, and its value is named as a bare literal's is.
             NativeType::Scalar(_) => Vec::new(),
             NativeType::Samples(_) => match fused_output_tags(tree.root(), &source_tags) {
-                Some(output_tags) => output_tags,
+                Some(output_tags) => with_row_name_column(tree.root(), output_tags),
                 None => return Ok(None),
             },
             NativeType::AggregateState(_) => return Ok(None),
@@ -1785,7 +1792,9 @@ impl PromPlanner {
     ) -> Option<DFSchemaRef> {
         let output_tags = match &tree.root().output {
             NativeType::Scalar(_) => Vec::new(),
-            NativeType::Samples(_) => fused_output_tags(tree.root(), source_tags)?,
+            NativeType::Samples(_) => {
+                with_row_name_column(tree.root(), fused_output_tags(tree.root(), source_tags)?)
+            }
             NativeType::AggregateState(_) => return None,
         };
         let root_fields = native_root_fields(tree.root())?;
@@ -2269,7 +2278,11 @@ fn canonical_boundary_stages(
         .map(|field| field.name.to_string())
         .collect::<Vec<_>>();
     let output_tags = fused_output_tags(tree.root(), source_tags)?;
-    let output_schema = fused_output_schema(&fields, &output_tags, time_index, root_kind).ok()?;
+    // The terminal rows of this boundary report the name of each row they publish, so the schema
+    // declares it exactly as the other rows layouts do. The tags stay the walk's own: they name the
+    // labels the frames carry, and the binding below is built from them.
+    let row_tags = with_row_name_column(tree.root(), output_tags.clone());
+    let output_schema = fused_output_schema(&fields, &row_tags, time_index, root_kind).ok()?;
 
     // The producer: the statement's own tree, run per partition, exporting a frame.
     let producer = FusedSeries::try_new_canonical_producer(
@@ -3148,6 +3161,35 @@ pub fn discovers_metric_name(selector: &VectorSelector) -> bool {
             }))
 }
 
+/// The tag columns a samples rows layout declares.
+///
+/// A row's name is part of what the statement answers rather than of how a result is displayed: the
+/// rows of one result can carry different names, and a caller that groups by the name groups on the
+/// identity of the series it reads. The column is therefore declared even when the operator dropped
+/// the name - a range function, a math kernel and a folding aggregate report a value of their own -
+/// and those rows carry a null name.
+///
+/// A scalar root declares no name column: it publishes one value and no series, so the row it
+/// answers has no name to report. The column is appended, so the layout keeps its order - the time
+/// index, then the value fields, then the tags - and a label set that already reports the name keeps
+/// the one column it has.
+fn with_row_name_column(node: &NativeNode, mut tags: Vec<String>) -> Vec<String> {
+    if !matches!(&node.output, NativeType::Samples(_)) {
+        return tags;
+    }
+    // A layout can already report the name: a set operation takes it from its sides, and a
+    // discovered source sorts its tags for the union. Neither leaves that column last - `or` keeps
+    // the left operand's order and only appends the right side's unseen tags, and sorting puts the
+    // name wherever its bytes fall - so the existing one is removed and appended instead: every rows
+    // layout then answers one order, the time index, the value fields, the labels, and the name
+    // last.
+    if let Some(index) = tags.iter().position(|tag| tag == METRIC_NAME) {
+        tags.remove(index);
+    }
+    tags.push(METRIC_NAME.to_string());
+    tags
+}
+
 /// Whether `node` holds an operation whose answer depends on the order its input arrives in.
 ///
 /// `limitk` keeps the first `k` series of each group *in input order* ([`promql::select::limitk`]).
@@ -3609,8 +3651,8 @@ mod tests {
 
     use super::{
         ArrowDataType, ArrowTimeUnit, FieldKind, METRIC_NAME, NATIVE_PROMQL_EXTENSION_KEY,
-        NativeType, aggregate_reads_histogram, collect_selectors_with_set_operations, cut_segments,
-        fused_output_schema, independent_scan_pair, native_promql_requested,
+        NativeType, PromPlanner, aggregate_reads_histogram, collect_selectors_with_set_operations,
+        cut_segments, fused_output_schema, independent_scan_pair, native_promql_requested,
         native_raw_plan_bounds_region_reads, plans_over_remote_regions, reads_across_series,
         region_local_segment, scan_time_filter,
     };
@@ -4074,7 +4116,7 @@ mod tests {
             Some(vec!["hostname".to_string()]),
             fused_output_tags(
                 compiled_test_tree("topk(scalar(x), sum by (hostname) (rate(x[5m])))").root(),
-                &[vec!["hostname".to_string()], vec!["hostname".to_string()]]
+                &[vec!["hostname".to_string()], vec!["hostname".to_string()]],
             ),
             "a per-point k reports its input's labels"
         );
@@ -4195,6 +4237,87 @@ mod tests {
         assert_eq!(
             Some(vec!["job".to_string()]),
             fused_output_tags(count_values.root(), &sources)
+        );
+    }
+
+    /// A rows layout declares the per-row name column, and only a rows layout does.
+    ///
+    /// The walk is the authority on the name's values - it keeps it exactly where the operator keeps
+    /// it - so the column it is read from has to exist whether the walk kept the name or dropped it.
+    #[test]
+    fn rows_layouts_declare_the_name_column() {
+        let one = || vec![vec!["host".to_string()]];
+        let two = || vec![vec!["host".to_string()], vec!["host".to_string()]];
+        for (query, sources) in [
+            ("x", one()),
+            ("abs(x)", one()),
+            ("rate(x[5m])", one()),
+            ("sum(x)", one()),
+            // A set operation binds one source per occurrence.
+            ("x or y", two()),
+        ] {
+            let tree = compiled_test_tree(query);
+            let schema = PromPlanner::fused_root_schema(&tree, &sources, "ts", FieldKind::Float)
+                .unwrap_or_else(|| panic!("{query}: a samples root declares a rows layout"));
+            let names = schema
+                .fields()
+                .iter()
+                .map(|field| field.name().as_str())
+                .collect::<Vec<_>>();
+            assert_eq!(Some(&METRIC_NAME), names.last(), "{query}: {names:?}");
+            assert_eq!(
+                1,
+                names.iter().filter(|name| **name == METRIC_NAME).count(),
+                "{query}: one name column: {names:?}"
+            );
+            let name = schema.field_with_unqualified_name(METRIC_NAME).unwrap();
+            assert!(
+                datatypes::schema::is_metric_name_field(name),
+                "{query}: the column is the layout's name column"
+            );
+            assert_eq!(ArrowDataType::Utf8, *name.data_type(), "{query}");
+        }
+        let scalar = compiled_test_tree("1 + 2");
+        let schema = PromPlanner::fused_root_schema(&scalar, &[], "ts", FieldKind::Float).unwrap();
+        assert_eq!(
+            vec!["ts", "value"],
+            schema
+                .fields()
+                .iter()
+                .map(|field| field.name().as_str())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    /// A label set that already names the metric keeps the one column it has.
+    #[test]
+    fn a_present_name_tag_is_not_declared_twice() {
+        let sources = [vec!["host".to_string(), METRIC_NAME.to_string()]];
+        let tree = compiled_test_tree("x");
+        let schema =
+            PromPlanner::fused_root_schema(&tree, &sources, "ts", FieldKind::Float).unwrap();
+        assert_eq!(
+            vec!["ts", "v0", "host", METRIC_NAME],
+            schema
+                .fields()
+                .iter()
+                .map(|field| field.name().as_str())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    /// A value column that is itself named `__name__` is a column of the result, not the name of a
+    /// row: the layout names each column once, so such a statement keeps the existing plan.
+    #[test]
+    fn a_column_named_after_the_metric_name_declines_the_rows_layout() {
+        let sources = [vec!["host".to_string()]];
+        let tree = compiled_test_tree_with_fields("x", &[METRIC_NAME]);
+        assert!(PromPlanner::fused_root_schema(&tree, &sources, "ts", FieldKind::Float).is_none());
+        // A time index of that name collides the same way.
+        let tree = compiled_test_tree("x");
+        assert!(
+            PromPlanner::fused_root_schema(&tree, &sources, METRIC_NAME, FieldKind::Float)
+                .is_none()
         );
     }
 
