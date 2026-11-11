@@ -693,6 +693,7 @@ impl MetasrvBuilder {
 
         Ok(Metasrv {
             node_expiry_listener,
+            node_manager,
             state,
             started: Arc::new(AtomicBool::new(false)),
             start_time_ms: common_time::util::current_time_millis() as u64,
