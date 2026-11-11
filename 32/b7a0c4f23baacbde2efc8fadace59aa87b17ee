@@ -1,0 +1,25 @@
+src/operator/src/bulk_insert.rs
+  s_17057bba187655::t_084054d96c0a87 17,181,184,196,205,260,323
+src/operator/src/req_convert/common/partitioner.rs
+  s_17057bba187655::t_97d7e1feb3d737 35-37,53,145,220,275,331-336,390-391,405-406,424,538,645-700,703-704,751,1080-1233
+src/operator/src/write_dispatcher.rs
+  s_17057bba187655::t_6a0c674bab85a5 363,448
+src/partition/src/manager.rs
+  s_17057bba187655::t_93d63cd00a5f3b 15,25-27,198,222-241
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "32b7a0c4f23baacbde2efc8fadace59aa87b17ee",
+  "prompts": {},
+  "sessions": {
+    "s_17057bba187655": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1c56d-fbcd-75c2-86d2-c4b3f17c03dc",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}
