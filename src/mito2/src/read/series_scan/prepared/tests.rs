@@ -2359,8 +2359,6 @@ async fn overlapping_buckets_retain_only_new_label_rows() {
     build(&engine, &region).await;
     assert!(region.series_index_version().series_indexes.len() >= 2);
     let scan = scanner(&region, region.series_index_store.clone().unwrap());
-    let unique_before = prepared_count("prepare_unique_series");
-    let retained_before = prepared_count("prepare_retained_rows");
     scan.prepare_series(
         &QueryScanContext::default(),
         &ExecutionPlanMetricsSet::new(),
@@ -2371,14 +2369,26 @@ async fn overlapping_buckets_retain_only_new_label_rows() {
     .unwrap();
     let prepared = scan.prepared.source.get().unwrap().as_ref().unwrap();
     assert_eq!(34, prepared.candidates.len());
-    // Duplicate rows from the overlapping bucket are dropped before labels are retained:
-    // 66 written rows retain one row per series. The counters are process-global, so the
-    // preparation's own contribution is the pair of deltas: concurrent preparations can add
-    // to both, but only a preparation that keeps duplicates makes them diverge.
-    assert_eq!(
-        prepared_count("prepare_unique_series") - unique_before,
-        prepared_count("prepare_retained_rows") - retained_before,
-    );
+    // Duplicate rows from the overlapping bucket are dropped before labels are retained, so no
+    // series keeps the same timestamp twice. Asserted on this preparation's own rows instead of
+    // on the process-global counters: concurrent preparations in the same process move those
+    // counters too, which made a delta comparison fail under parallel test runs.
+    let chunks = prepared
+        .read_series(0..prepared.num_series())
+        .unwrap()
+        .try_collect::<Vec<_>>()
+        .await
+        .unwrap();
+    for chunk in &chunks {
+        let mut seen = std::collections::BTreeSet::new();
+        for i in 0..chunk.time.len() {
+            let timestamp = chunk.time.timestamp(i).unwrap();
+            assert!(
+                seen.insert(timestamp),
+                "series retained two rows at the same timestamp {timestamp}"
+            );
+        }
+    }
     for candidate in prepared.candidates.iter() {
         let expected = if candidate.id.tsid == 0 {
             "x".to_string()
