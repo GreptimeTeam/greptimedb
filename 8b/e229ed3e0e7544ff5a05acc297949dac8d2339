@@ -1,0 +1,39 @@
+src/common/meta/src/rpc/router.rs
+  s_17057bba187655::t_ccba92f0fb2604 231-233,235-252,465-505
+src/meta-srv/src/procedure/repartition.rs
+  s_17057bba187655::t_fe7c82ab2fae98 1213,1217,1224,2169-2176,2554-2561
+src/meta-srv/src/procedure/repartition/allocate_region.rs
+  s_17057bba187655::t_ee5be56f7e89f2 319-323,638-667
+src/meta-srv/src/procedure/repartition/group.rs
+  s_17057bba187655::t_f5e0e97fed34b5 474,476-482
+src/meta-srv/src/procedure/repartition/group/update_metadata.rs
+  s_17057bba187655::t_64589dae6d3820 56-57,79-149
+src/meta-srv/src/procedure/repartition/group/update_metadata/apply_staging_region.rs
+  s_17057bba187655::t_b602e29ff863f1 60-61,143,172-173,191-193
+src/partition/src/manager.rs
+  s_17057bba187655::t_36b0e4d0d2eeb9 122-145
+src/query/src/dist_plan/planner.rs
+  s_17057bba187655::t_ea8a5758449742 17,276,279-296,351-362,567-569,572,690-703,757,792,796-851
+tests/compatibility/README.md
+  s_17057bba187655::t_4214583d057320 26-31
+tests/compatibility/metadata/repartition_readiness/README.md
+  s_17057bba187655::t_72b9b44ce000d3 1-15
+tests/compatibility/metadata/repartition_readiness/route.json
+  s_17057bba187655::t_c1dadf7113dd59 1
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "8be229ed3e0e7544ff5a05acc297949dac8d2339",
+  "prompts": {},
+  "sessions": {
+    "s_17057bba187655": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1c56d-fbcd-75c2-86d2-c4b3f17c03dc",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}
