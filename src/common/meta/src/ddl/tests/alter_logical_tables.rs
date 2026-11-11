@@ -713,21 +713,27 @@ async fn test_on_prepare_rejects_table_outside_locked_set() {
     let phy_id = create_physical_table(&ddl_context, "phy").await;
     create_logical_table(ddl_context.clone(), phy_id, "table1").await;
 
-    let tasks = vec![make_alter_logical_table_add_column_task(
-        None,
-        "table1",
-        vec!["column1".to_string()],
-    )];
-
     // The table resolved at prepare time is not in the locked set, as if it
     // had been dropped and recreated after submission.
     let stale_locked_id = phy_id + 1000;
-    let mut procedure =
-        AlterLogicalTablesProcedure::new(tasks, phy_id, vec![stale_locked_id], ddl_context);
-    let err = procedure.on_prepare().await.unwrap_err();
-    assert!(
-        err.to_string()
-            .contains("not covered by the procedure locks"),
-        "{err}"
-    );
+    // A completed ADD must also reject rebinding, even when no schema changes are needed.
+    for column in ["column1", "host"] {
+        let tasks = vec![make_alter_logical_table_add_column_task(
+            None,
+            "table1",
+            vec![column.into()],
+        )];
+        let mut procedure = AlterLogicalTablesProcedure::new(
+            tasks,
+            phy_id,
+            vec![stale_locked_id],
+            ddl_context.clone(),
+        );
+        let err = procedure.on_prepare().await.unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("not covered by the procedure locks"),
+            "{err}"
+        );
+    }
 }

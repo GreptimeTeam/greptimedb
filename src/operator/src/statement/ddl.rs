@@ -55,8 +55,8 @@ use common_meta::rpc::ddl::trigger::CreateTriggerTask;
 #[cfg(feature = "enterprise")]
 use common_meta::rpc::ddl::trigger::DropTriggerTask;
 use common_meta::rpc::ddl::{
-    CreateFlowTask, CreatorGrantIntent, DdlTask, DropFlowTask, DropViewTask, SubmitDdlTaskRequest,
-    SubmitDdlTaskResponse, TriggerReason,
+    ALTER_LOGICAL_TABLE_IDS_EXTENSION_KEY, CreateFlowTask, CreatorGrantIntent, DdlTask,
+    DropFlowTask, DropViewTask, SubmitDdlTaskRequest, SubmitDdlTaskResponse, TriggerReason,
 };
 use common_query::Output;
 use common_recordbatch::{RecordBatch, RecordBatches};
@@ -1558,16 +1558,7 @@ impl StatementExecutor {
         query_context: QueryContextRef,
         trigger_reason: TriggerReason,
     ) -> Result<Output> {
-        let _timer = crate::metrics::DIST_ALTER_TABLES.start_timer();
-        ensure!(
-            !alter_table_exprs.is_empty(),
-            EmptyDdlExprSnafu {
-                name: "alter logical tables"
-            }
-        );
-
-        // group by physical table id
-        let mut groups: HashMap<TableId, Vec<AlterTableExpr>> = HashMap::new();
+        let mut tables = Vec::with_capacity(alter_table_exprs.len());
         for expr in alter_table_exprs {
             // Get table_id from catalog_manager
             let catalog = if expr.catalog_name.is_empty() {
@@ -1590,20 +1581,49 @@ impl StatementExecutor {
                     table_name: format_full_table_name(catalog, &schema, table_name),
                 })?;
             let table_id = table.table_info().ident.table_id;
+            tables.push((table_id, expr));
+        }
+        self.alter_logical_tables_with_ids(tables, query_context, trigger_reason)
+            .await
+    }
+
+    /// Alters the captured table generations, rejecting concurrent drop/recreate under DDL locks.
+    pub(crate) async fn alter_logical_tables_with_ids(
+        &self,
+        tables: Vec<(TableId, AlterTableExpr)>,
+        query_context: QueryContextRef,
+        trigger_reason: TriggerReason,
+    ) -> Result<Output> {
+        let _timer = crate::metrics::DIST_ALTER_TABLES.start_timer();
+        ensure!(
+            !tables.is_empty(),
+            EmptyDdlExprSnafu {
+                name: "alter logical tables"
+            }
+        );
+        let mut groups: HashMap<TableId, Vec<(TableId, AlterTableExpr)>> = HashMap::new();
+        for (table_id, expr) in tables {
             let physical_table_id = self
                 .table_metadata_manager
                 .table_route_manager()
                 .get_physical_table_id(table_id)
                 .await
                 .context(TableMetadataManagerSnafu)?;
-            groups.entry(physical_table_id).or_default().push(expr);
+            groups
+                .entry(physical_table_id)
+                .or_default()
+                .push((table_id, expr));
         }
 
         // Submit procedure for each physical table
         let mut handles = Vec::with_capacity(groups.len());
-        for (_physical_table_id, exprs) in groups {
-            let fut =
-                self.alter_logical_tables_procedure(exprs, query_context.clone(), trigger_reason);
+        for (physical_table_id, exprs) in groups {
+            let fut = self.alter_logical_tables_procedure(
+                physical_table_id,
+                exprs,
+                query_context.clone(),
+                trigger_reason,
+            );
             handles.push(fut);
         }
         let _results = futures::future::try_join_all(handles).await?;
@@ -2330,17 +2350,54 @@ impl StatementExecutor {
 
     async fn alter_logical_tables_procedure(
         &self,
-        tables_data: Vec<AlterTableExpr>,
+        physical_table_id: TableId,
+        tables_data: Vec<(TableId, AlterTableExpr)>,
         query_context: QueryContextRef,
         trigger_reason: TriggerReason,
     ) -> Result<SubmitDdlTaskResponse> {
-        let executor_context = to_executor_context(query_context, trigger_reason);
-        let request = SubmitDdlTaskRequest::new(DdlTask::new_alter_logical_tables(tables_data));
+        let mut invalidate_keys = vec![CacheIdent::TableId(physical_table_id)];
+        if let Some(physical) = self
+            .table_metadata_manager
+            .table_info_manager()
+            .get(physical_table_id)
+            .await
+            .context(TableMetadataManagerSnafu)?
+        {
+            invalidate_keys.push(CacheIdent::TableName(physical.table_name()));
+        }
+        for (id, expr) in &tables_data {
+            invalidate_keys.push(CacheIdent::TableId(*id));
+            invalidate_keys.push(CacheIdent::TableName(TableName::new(
+                &expr.catalog_name,
+                &expr.schema_name,
+                &expr.table_name,
+            )));
+        }
+        let mut executor_context = to_executor_context(query_context, trigger_reason);
+        let (table_ids, exprs): (Vec<_>, Vec<_>) = tables_data.into_iter().unzip();
+        if let Some(context) = &mut executor_context.query_context {
+            context.extensions.insert(
+                ALTER_LOGICAL_TABLE_IDS_EXTENSION_KEY.to_string(),
+                table_ids
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(","),
+            );
+        }
+        let request = SubmitDdlTaskRequest::new(DdlTask::new_alter_logical_tables(exprs));
 
-        self.procedure_executor
+        let response = self
+            .procedure_executor
             .submit_ddl_task(executor_context, request)
             .await
-            .context(error::ExecuteDdlSnafu)
+            .context(error::ExecuteDdlSnafu)?;
+        // Metasrv notifications are asynchronous; callers need the updated local schema now.
+        self.cache_invalidator
+            .invalidate(&Context::default(), &invalidate_keys)
+            .await
+            .context(error::InvalidateTableCacheSnafu)?;
+        Ok(response)
     }
 
     async fn drop_table_procedure(

@@ -625,13 +625,22 @@ impl DdlManager {
         &self,
         alter_table_tasks: Vec<AlterTableTask>,
         physical_table_id: TableId,
+        expected_table_ids: Option<Vec<TableId>>,
         procedure_context: ProcedureContext,
     ) -> Result<(ProcedureId, Option<Output>)> {
         let context = self.create_context();
 
         // Resolve the logical table ids up front: procedure locks are fixed
         // at submission, so `lock_key` cannot derive them during `Prepare`.
-        let logical_table_ids = {
+        let logical_table_ids = if let Some(ids) = expected_table_ids {
+            ensure!(
+                ids.len() == alter_table_tasks.len(),
+                error::AlterLogicalTablesInvalidArgumentsSnafu {
+                    err_msg: "Expected one pinned table ID per logical ALTER task",
+                }
+            );
+            ids
+        } else {
             let table_refs = alter_table_tasks
                 .iter()
                 .map(|task| task.table_ref())
@@ -1043,8 +1052,13 @@ impl DdlManager {
                         .await
                 }
                 AlterLogicalTables(alter_table_tasks) => {
-                    handle_alter_logical_table_tasks(self, alter_table_tasks, procedure_context)
-                        .await
+                    handle_alter_logical_table_tasks(
+                        self,
+                        alter_table_tasks,
+                        query_context,
+                        procedure_context,
+                    )
+                    .await
                 }
                 DropLogicalTables(_) => todo!(),
                 CreateDatabase(create_database_task) => {
@@ -1598,6 +1612,7 @@ async fn handle_create_trigger_task(
 async fn handle_alter_logical_table_tasks(
     ddl_manager: &DdlManager,
     alter_table_tasks: Vec<AlterTableTask>,
+    query_context: QueryContext,
     procedure_context: ProcedureContext,
 ) -> Result<SubmitDdlTaskResponse> {
     ensure!(
@@ -1616,9 +1631,15 @@ async fn handle_alter_logical_table_tasks(
     let physical_table_id =
         utils::get_physical_table_id(ddl_manager.table_metadata_manager(), first_table).await?;
     let num_logical_tables = alter_table_tasks.len();
+    let expected_table_ids = query_context.pinned_logical_table_ids()?;
 
     let (id, _) = ddl_manager
-        .submit_alter_logical_table_tasks(alter_table_tasks, physical_table_id, procedure_context)
+        .submit_alter_logical_table_tasks(
+            alter_table_tasks,
+            physical_table_id,
+            expected_table_ids,
+            procedure_context,
+        )
         .await?;
 
     info!(
@@ -2059,6 +2080,59 @@ mod tests {
             procedure_manager,
             Arc::new(DummyRepartitionProcedureFactory),
         )
+    }
+
+    #[tokio::test]
+    async fn test_alter_logical_tables_preserves_caller_pinned_ids() {
+        use crate::ddl::test_util::alter_table::TestAlterTableExprBuilder;
+        use crate::ddl::test_util::{create_logical_table, create_physical_table};
+        use crate::rpc::ddl::ALTER_LOGICAL_TABLE_IDS_EXTENSION_KEY;
+
+        let manager = build_soft_drop_test_ddl_manager();
+        manager.register_loaders().unwrap();
+        manager.procedure_manager.start().await.unwrap();
+        let context = manager.create_context();
+        let physical_id = create_physical_table(&context, "physical").await;
+        let logical_id = create_logical_table(context, physical_id, "logical").await;
+        let expr: api::v1::AlterTableExpr = TestAlterTableExprBuilder::default()
+            .table_name("logical")
+            .add_columns(vec![api::v1::ColumnDef {
+                name: "host".into(),
+                data_type: api::v1::ColumnDataType::String as i32,
+                semantic_type: api::v1::SemanticType::Tag as i32,
+                is_nullable: true,
+                ..Default::default()
+            }])
+            .add_if_not_exists(true)
+            .build()
+            .unwrap()
+            .into();
+        for (ids, succeeds) in [
+            (Some((logical_id + 1000).to_string()), false),
+            (Some(format!("{logical_id},{logical_id}")), false),
+            (Some(logical_id.to_string()), true),
+            (None, true),
+        ] {
+            let mut context = QueryContext::default();
+            if let Some(ids) = ids {
+                context
+                    .extensions
+                    .insert(ALTER_LOGICAL_TABLE_IDS_EXTENSION_KEY.into(), ids);
+            }
+            let result = manager
+                .submit_ddl_task(
+                    ExecutorContext {
+                        query_context: Some(context),
+                        ..Default::default()
+                    },
+                    SubmitDdlTaskRequest::new(DdlTask::new_alter_logical_tables(vec![
+                        expr.clone(),
+                    ])),
+                )
+                .await;
+            assert_eq!(result.is_ok(), succeeds, "{result:?}");
+        }
+        manager.procedure_manager.stop().await.unwrap();
     }
 
     #[cfg(feature = "enterprise")]

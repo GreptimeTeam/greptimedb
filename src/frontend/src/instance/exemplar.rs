@@ -144,6 +144,7 @@ impl Instance {
                     .map_err(BoxedError::new)
                     .context(error::ExecuteQuerySnafu)?;
                 let filter = filter(&info, &selectors, query.bounds)?;
+                let (projection, tags) = exemplar_projection(&info);
                 let frame = self
                     .query_engine
                     .read_table(table)
@@ -151,6 +152,8 @@ impl Instance {
                     .context(error::ExecuteQuerySnafu)?;
                 let plan = frame
                     .filter(filter)
+                    .context(error::DataFusionSnafu)?
+                    .select(projection)
                     .context(error::DataFusionSnafu)?
                     .into_unoptimized_plan();
                 interceptor.pre_execute_exemplars(&query, info.table_ref(), local.clone())?;
@@ -165,7 +168,7 @@ impl Instance {
                         while let Some(batch) = stream.next().await {
                             skipped += collect(
                                 batch.context(error::CollectRecordbatchSnafu)?,
-                                &info,
+                                &tags,
                                 &mut observations,
                                 &mut reservation,
                             )?;
@@ -174,7 +177,7 @@ impl Instance {
                     }
                     OutputData::RecordBatches(batches) => {
                         for batch in batches.take() {
-                            skipped += collect(batch, &info, &mut observations, &mut reservation)?;
+                            skipped += collect(batch, &tags, &mut observations, &mut reservation)?;
                             tokio::task::yield_now().await;
                         }
                     }
@@ -310,9 +313,38 @@ fn matcher_filter(matcher: &Matcher, tags: &BTreeSet<&str>) -> Expr {
     }
 }
 
+fn exemplar_projection(info: &TableInfo) -> (Vec<Expr>, Vec<&str>) {
+    // Keep historical tags even when the current source schema no longer contains them.
+    let tags = info
+        .meta
+        .primary_key_indices
+        .iter()
+        .map(|&index| info.meta.schema.column_schemas()[index].name.as_str())
+        .filter(|name| {
+            ![
+                EXEMPLAR_METRIC_COLUMN,
+                DATA_SCHEMA_TABLE_ID_COLUMN_NAME,
+                DATA_SCHEMA_TSID_COLUMN_NAME,
+            ]
+            .contains(name)
+        })
+        .collect::<Vec<_>>();
+    let projection = [
+        EXEMPLAR_METRIC_COLUMN,
+        greptime_timestamp(),
+        greptime_value(),
+        greptime_exemplar_labels(),
+    ]
+    .into_iter()
+    .chain(tags.iter().copied())
+    .map(column)
+    .collect();
+    (projection, tags)
+}
+
 fn collect(
     batch: RecordBatch,
-    info: &TableInfo,
+    tag_names: &[&str],
     observations: &mut Observations,
     reservation: &mut MemoryReservation,
 ) -> Result<usize> {
@@ -353,26 +385,17 @@ fn collect(
         .map_err(BoxedError::new)
         .context(error::ExecuteQuerySnafu)?;
     let mut tags = Vec::<(&str, VectorRef)>::new();
-    for tag in &info.meta.primary_key_indices {
-        let name = info.meta.schema.column_schemas()[*tag].name.as_str();
-        if ![
-            EXEMPLAR_METRIC_COLUMN,
-            DATA_SCHEMA_TABLE_ID_COLUMN_NAME,
-            DATA_SCHEMA_TSID_COLUMN_NAME,
-        ]
-        .contains(&name)
-        {
-            let values = Helper::try_into_vector(batch.column(index(name)?))
-                .map_err(BoxedError::new)
-                .context(error::ExecuteQuerySnafu)?;
-            ensure!(
-                value_type(&values).is_string(),
-                error::UnexpectedResultSnafu {
-                    reason: "exemplar scan returned a non-string tag",
-                }
-            );
-            tags.push((name, values));
-        }
+    for &name in tag_names {
+        let values = Helper::try_into_vector(batch.column(index(name)?))
+            .map_err(BoxedError::new)
+            .context(error::ExecuteQuerySnafu)?;
+        ensure!(
+            value_type(&values).is_string(),
+            error::UnexpectedResultSnafu {
+                reason: "exemplar scan returned a non-string tag",
+            }
+        );
+        tags.push((name, values));
     }
     let mut skipped = 0;
     'rows: for row in 0..batch.num_rows() {
@@ -449,12 +472,119 @@ fn collect(
 #[cfg(test)]
 mod tests {
     use datafusion::execution::memory_pool::{GreedyMemoryPool, MemoryPool};
+    use datatypes::arrow::array::{
+        ArrayRef, Float64Array, StringArray, StructArray, TimestampNanosecondArray, UInt32Array,
+        UInt64Array,
+    };
+    use datatypes::arrow::datatypes::Field;
+    use datatypes::extension::json::Json2ExtensionType;
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::{ColumnSchema, Schema};
     use datatypes::vectors::Float64Vector;
-    use table::metadata::{TableInfoBuilder, TableMeta};
+    use table::metadata::{TableInfoBuilder, TableMetaBuilder};
 
     use super::*;
+
+    #[test]
+    fn test_exemplar_projection_preserves_series_and_deduplication() {
+        let labels = StructArray::from(vec![(
+            Arc::new(Field::new("trace_id", DataType::Utf8, false)),
+            Arc::new(StringArray::from(vec!["trace"; 3])) as ArrayRef,
+        )]);
+        let columns = vec![
+            (
+                DATA_SCHEMA_TABLE_ID_COLUMN_NAME,
+                Arc::new(UInt32Array::from(vec![1, 2, 2])) as ArrayRef,
+            ),
+            (
+                DATA_SCHEMA_TSID_COLUMN_NAME,
+                Arc::new(UInt64Array::from(vec![1, 1, 2])) as ArrayRef,
+            ),
+            (
+                EXEMPLAR_METRIC_COLUMN,
+                Arc::new(StringArray::from(vec!["metric"; 3])) as ArrayRef,
+            ),
+            (
+                "historical_tag",
+                Arc::new(StringArray::from(vec![Some(""), Some(""), None])) as ArrayRef,
+            ),
+            (
+                greptime_timestamp(),
+                Arc::new(TimestampNanosecondArray::from(vec![1; 3])) as ArrayRef,
+            ),
+            (
+                greptime_value(),
+                Arc::new(Float64Array::from(vec![1.0; 3])) as ArrayRef,
+            ),
+            (greptime_exemplar_labels(), Arc::new(labels) as ArrayRef),
+        ];
+        let schema = Arc::new(Schema::new(
+            columns
+                .iter()
+                .map(|(name, values)| {
+                    let mut column = ColumnSchema::new(
+                        *name,
+                        ConcreteDataType::from_arrow_type(values.data_type()),
+                        true,
+                    );
+                    if *name == greptime_exemplar_labels() {
+                        column.with_extension_type(&Json2ExtensionType::default());
+                    }
+                    column
+                })
+                .collect::<Vec<_>>(),
+        ));
+        let batch = RecordBatch::new(
+            schema.clone(),
+            columns
+                .into_iter()
+                .map(|(_, array)| Helper::try_into_vector(&array).unwrap()),
+        )
+        .unwrap();
+        let info = TableInfoBuilder::new(
+            METRICS_EXEMPLARS_TABLE,
+            TableMetaBuilder::empty()
+                .schema(schema)
+                .primary_key_indices(vec![0, 1, 2, 3])
+                .next_column_id(7)
+                .build()
+                .unwrap(),
+        )
+        .build()
+        .unwrap();
+        let (projection, tags) = exemplar_projection(&info);
+        assert_eq!(tags, ["historical_tag"]);
+        let indices = projection
+            .into_iter()
+            .map(|expr| {
+                let Expr::Column(column) = expr else {
+                    panic!("expected projected column")
+                };
+                batch
+                    .df_record_batch()
+                    .schema()
+                    .index_of(&column.name)
+                    .unwrap()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(indices, [2, 4, 5, 6, 3]);
+        let projected = batch.try_project(&indices).unwrap();
+        let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(1 << 20));
+        let mut reservation = MemoryConsumer::new("projection test").register(&pool);
+        let mut full = Observations::new();
+        let mut narrow = Observations::new();
+        assert_eq!(
+            collect(batch, &tags, &mut full, &mut reservation).unwrap(),
+            0
+        );
+        assert_eq!(
+            collect(projected, &tags, &mut narrow, &mut reservation).unwrap(),
+            0
+        );
+        assert_eq!(full.len(), 2);
+        assert_eq!(full.values().map(BTreeMap::len).sum::<usize>(), 2);
+        assert_eq!(full, narrow);
+    }
 
     #[test]
     fn test_exemplar_scan_batch_respects_query_memory_budget() {
@@ -468,13 +598,10 @@ mod tests {
             vec![Arc::new(Float64Vector::from_vec(vec![1.0; 128])) as VectorRef],
         )
         .unwrap();
-        let info = TableInfoBuilder::new(METRICS_EXEMPLARS_TABLE, TableMeta::empty())
-            .build()
-            .unwrap();
         let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(1));
         let mut reservation = MemoryConsumer::new("exemplar test").register(&pool);
         let mut observations = Observations::new();
-        let error = collect(batch, &info, &mut observations, &mut reservation).unwrap_err();
+        let error = collect(batch, &[], &mut observations, &mut reservation).unwrap_err();
         assert!(matches!(
             error,
             error::Error::DataFusion {

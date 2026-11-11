@@ -16,7 +16,7 @@ mod otlp;
 
 pub use otlp::MetricInsertPreflight;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock};
 use std::time::{Duration, Instant};
@@ -105,7 +105,7 @@ use crate::region_req_factory::RegionRequestFactory;
 use crate::req_convert::common::preprocess_row_insert_requests;
 use crate::req_convert::insert::{
     ColumnToRow, ImpureDefaultFiller, RowToRegion, StatementToRegion, TableToRegion,
-    fill_reqs_with_impure_default, rows_to_record_batch,
+    fill_reqs_with_impure_default, rows_to_record_batch, value_matches_type,
 };
 use crate::statement::StatementExecutor;
 use crate::write_dispatcher::{WriteDispatcher, WriteDispatcherRef};
@@ -411,9 +411,10 @@ impl Inserter {
                 reason: "invalid exemplar destination"
             }
         );
-        self.bind_exemplar_table_ids(&mut requests, &ctx, sources)
-            .await?;
+        validate_column_count_match(&requests)?;
         preprocess_row_insert_requests(&mut requests.inserts)?;
+        self.bind_exemplar_table_ids(&mut requests, &ctx, sources, statement_executor)
+            .await?;
         self.handle_row_inserts_with_create_type(
             requests,
             ctx,
@@ -430,9 +431,10 @@ impl Inserter {
         requests: &mut RowInsertRequests,
         ctx: &QueryContextRef,
         sources: &[TableInfoRef],
+        statement_executor: &StatementExecutor,
     ) -> Result<()> {
-        validate_column_count_match(requests)?;
         let mut tables = HashMap::new();
+        let mut required_tags = BTreeMap::<String, BTreeSet<String>>::new();
         for info in sources.iter().filter(|info| {
             info.catalog_name == ctx.current_catalog() && info.schema_name == ctx.current_schema()
         }) {
@@ -452,6 +454,7 @@ impl Inserter {
             let Some(rows) = request.rows.as_mut() else {
                 continue;
             };
+            validate_exemplar_rows(rows)?;
             ensure!(
                 !rows
                     .schema
@@ -497,12 +500,99 @@ impl Inserter {
                         ),
                     }
                 );
+                let tags = required_tags.entry(name.clone()).or_default();
+                for (column, value) in rows.schema.iter().zip(&row.values) {
+                    if column.semantic_type == SemanticType::Tag as i32
+                        && column.column_name != EXEMPLAR_METRIC_COLUMN
+                        && column.column_name != DATA_SCHEMA_TSID_COLUMN_NAME
+                        && value.value_data.is_some()
+                    {
+                        tags.insert(column.column_name.clone());
+                    }
+                }
                 row.values.push(ValueData::U32Value(info.table_id()).into());
             }
             rows.schema.push(api::v1::helper::tag_column_schema(
                 DATA_SCHEMA_TABLE_ID_COLUMN_NAME,
                 ColumnDataType::Uint32,
             ));
+        }
+
+        let mut alters = Vec::new();
+        let mut refresh = Vec::new();
+        for (name, tags) in required_tags {
+            let info = &tables[&name];
+            let tags = tags
+                .into_iter()
+                .map(|name| api::v1::helper::tag_column_schema(&name, ColumnDataType::String))
+                .collect::<Vec<_>>();
+            if let Some(add_columns) = exemplar_source_add_columns(info, &tags)? {
+                ensure!(
+                    self.auto_create_disabled_reason(ctx)?.is_none(),
+                    InvalidInsertRequestSnafu {
+                        reason: format!(
+                            "exemplar source {name} requires new tags, but automatic DDL is disabled"
+                        ),
+                    }
+                );
+                alters.push((
+                    info.table_id(),
+                    AlterTableExpr {
+                        catalog_name: info.catalog_name.clone(),
+                        schema_name: info.schema_name.clone(),
+                        table_name: name,
+                        kind: Some(Kind::AddColumns(add_columns)),
+                    },
+                ));
+                refresh.push((info, tags));
+            }
+        }
+        if !alters.is_empty() {
+            if let Some(table) = self
+                .get_table(
+                    ctx.current_catalog(),
+                    &ctx.current_schema(),
+                    METRICS_EXEMPLARS_TABLE,
+                )
+                .await?
+            {
+                // Reject an incompatible destination before changing any source schema.
+                validate_exemplar_table(&table.table_info())?;
+            }
+            statement_executor
+                .alter_logical_tables_with_ids(alters, ctx.clone(), TriggerReason::AutoAlter)
+                .await?;
+            for (pinned, tags) in refresh {
+                let table = self
+                    .get_table(&pinned.catalog_name, &pinned.schema_name, &pinned.name)
+                    .await?
+                    .with_context(|| InvalidInsertRequestSnafu {
+                        reason: format!(
+                            "exemplar source {} disappeared during reconciliation",
+                            pinned.name
+                        ),
+                    })?;
+                let info = table.table_info();
+                ensure!(
+                    info.table_id() == pinned.table_id(),
+                    InvalidInsertRequestSnafu {
+                        reason: format!(
+                            "exemplar source {} changed during reconciliation",
+                            pinned.name
+                        ),
+                    }
+                );
+                // Concurrent ADD IF NOT EXISTS can succeed on names alone; verify their definitions.
+                ensure!(
+                    exemplar_source_add_columns(&info, &tags)?.is_none(),
+                    InvalidInsertRequestSnafu {
+                        reason: format!(
+                            "exemplar source {} is still missing inherited tags",
+                            pinned.name
+                        ),
+                    }
+                );
+            }
         }
         Ok(())
     }
@@ -2215,6 +2305,95 @@ fn validate_column_count_match(requests: &RowInsertRequests) -> Result<()> {
         })?;
     }
     Ok(())
+}
+
+fn validate_exemplar_rows(rows: &Rows) -> Result<()> {
+    let mut names = HashSet::new();
+    for (index, column) in rows.schema.iter().enumerate() {
+        let data_type: datatypes::prelude::ConcreteDataType =
+            api::helper::ColumnDataTypeWrapper::try_new(
+                column.datatype,
+                column.datatype_extension.clone(),
+            )
+            .context(crate::error::ColumnDataTypeSnafu)?
+            .into();
+        let valid = match column.column_name.as_str() {
+            DATA_SCHEMA_TSID_COLUMN_NAME => {
+                data_type == datatypes::prelude::ConcreteDataType::uint64_datatype()
+                    && column.semantic_type == SemanticType::Tag as i32
+            }
+            EXEMPLAR_METRIC_COLUMN => {
+                data_type.is_string() && column.semantic_type == SemanticType::Tag as i32
+            }
+            name if name == greptime_timestamp() => {
+                data_type.is_timestamp() && column.semantic_type == SemanticType::Timestamp as i32
+            }
+            name if name == greptime_value() => {
+                data_type == datatypes::prelude::ConcreteDataType::float64_datatype()
+                    && column.semantic_type == SemanticType::Field as i32
+            }
+            name if name == greptime_exemplar_labels() => {
+                data_type.is_json2() && column.semantic_type == SemanticType::Field as i32
+            }
+            _ => data_type.is_string() && column.semantic_type == SemanticType::Tag as i32,
+        };
+        ensure!(
+            valid && names.insert(column.column_name.as_str()),
+            InvalidInsertRequestSnafu {
+                reason: format!(
+                    "invalid or duplicate exemplar column {}",
+                    column.column_name
+                ),
+            }
+        );
+        ensure!(
+            rows.rows.iter().all(|row| value_matches_type(
+                &row.values[index],
+                column.datatype,
+                column.datatype_extension.as_ref(),
+            )),
+            InvalidInsertRequestSnafu {
+                reason: format!("invalid value for exemplar column {}", column.column_name),
+            }
+        );
+    }
+    ensure!(
+        [
+            DATA_SCHEMA_TSID_COLUMN_NAME,
+            EXEMPLAR_METRIC_COLUMN,
+            greptime_timestamp(),
+            greptime_value(),
+            greptime_exemplar_labels(),
+        ]
+        .iter()
+        .all(|name| names.contains(name)),
+        InvalidInsertRequestSnafu {
+            reason: "missing required exemplar columns",
+        }
+    );
+    Ok(())
+}
+
+fn exemplar_source_add_columns(
+    info: &TableInfo,
+    tags: &[ColumnSchema],
+) -> Result<Option<api::v1::AddColumns>> {
+    for tag in tags {
+        if let Some(index) = info.meta.schema.column_index_by_name(&tag.column_name) {
+            let column = &info.meta.schema.column_schemas()[index];
+            // Existing source defaults may already be part of the normalized series identity.
+            ensure!(
+                info.meta.primary_key_indices.contains(&index) && column.data_type.is_string(),
+                InvalidInsertRequestSnafu {
+                    reason: format!(
+                        "exemplar source {} column {} must be a string tag",
+                        info.name, tag.column_name
+                    ),
+                }
+            );
+        }
+    }
+    expr_helper::extract_add_columns_expr(&info.meta.schema, ColumnExpr::from_column_schemas(tags))
 }
 
 /// Validates the fixed exemplar contract before writing or scanning a shared table.
