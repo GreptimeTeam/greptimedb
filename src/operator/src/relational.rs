@@ -380,7 +380,7 @@ pub fn map_mysql_columns(
     selected: Option<&HashSet<&str>>,
 ) -> Result<Vec<RelationalColumn>> {
     raw.iter()
-        .filter(|column| selected.map_or(true, |names| names.contains(column.name.as_str())))
+        .filter(|column| selected.is_none_or(|names| names.contains(column.name.as_str())))
         .map(|column| {
             Ok(RelationalColumn {
                 name: column.name.clone(),
