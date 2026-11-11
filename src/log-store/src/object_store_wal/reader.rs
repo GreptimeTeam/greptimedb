@@ -231,11 +231,12 @@ impl ObjectStoreWalReader {
     /// that LIST. Previously indexed, still-listed immutable objects are reused.
     ///
     /// The store writing the prefix may collect listed objects before their
-    /// indexes are read. An object gone below the sequence at which the chain
-    /// of the read stops (a reclaim boundary, or the object of `after` when it
-    /// is higher in the `LastEntry` mode) is skipped, as startup recovery skips
-    /// it. One gone at or above it, on the chain or not, fails the read; a
-    /// retry lists the prefix again.
+    /// indexes are read. An object gone below the sequence where the read stops
+    /// following links to predecessors (a reclaim boundary, or the object of
+    /// `after` when it is higher in the `LastEntry` mode) is skipped, as
+    /// startup recovery skips it, unless it holds the reported entry. One gone
+    /// at or above it, on the chain or not, fails the read; a retry lists the
+    /// prefix again.
     ///
     /// Errors can occur after entries have been yielded. The caller must finish
     /// the stream successfully before publishing recovery progress. In the

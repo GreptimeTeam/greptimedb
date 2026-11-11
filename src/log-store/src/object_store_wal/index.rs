@@ -176,10 +176,11 @@ where
 }
 
 /// Fails with the error its fetch met if an object vanished at or above
-/// `boundary`, below which the chain a caller reads does not reach. An object
-/// below it is not on that chain and is left out. An object at or above it, on
-/// that chain or off it, may belong to that chain or decide which chain is
-/// read or where it stops.
+/// `boundary`, below which a caller follows no link to a predecessor. A
+/// vanished object below it is left out: the only object there a chain can
+/// hold is its tip, whose absence the caller reports. An object at or above
+/// it, on the chain or off it, may belong to the chain or decide which chain
+/// is read or where it stops.
 pub(crate) fn ensure_vanished_below(vanished: Vec<(u64, Error)>, boundary: u64) -> Result<()> {
     match vanished
         .into_iter()
