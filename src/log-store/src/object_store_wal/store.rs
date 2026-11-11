@@ -1071,8 +1071,9 @@ impl LogStore for ObjectStoreLogStore {
     /// ids under the next sequence the floor cannot move, and the call fails
     /// with [`Error::WalObjectSequenceUnsettled`] and records neither. The
     /// watermark is kept in memory; the caller re-establishes it after a
-    /// restart unless it released the region, see
-    /// [`release_region`](LogStore::release_region). In the `enqueued` mode
+    /// restart unless it queued a bounded release on close, see
+    /// [`release_entries`](LogStore::release_entries), or permanently released
+    /// the region, see [`release_region`](LogStore::release_region). In the `enqueued` mode
     /// an `entry_id` this store handed out
     /// needs no floor: it is never handed out again while the store runs.
     async fn obsolete(
@@ -2458,10 +2459,27 @@ impl Actor {
     fn handle_release_entries(&mut self, region_id: RegionId, entry_id: EntryId) -> Result<()> {
         ensure!(!self.is_stopped(), ObjectStoreWalStoppedSnafu);
         self.raise_sequence_floor(region_id, entry_id)?;
-        record_obsolete(&self.obsolete_entry_ids, &self.catalog, region_id, entry_id);
+        // Like obsolete, preserve entries that are not durable at admission.
+        // Keep the original sequence floor so a reopen cannot reuse their ids.
+        let watermark = match self.ack_mode {
+            AckMode::Durable => entry_id,
+            AckMode::Enqueued => entry_id.min(
+                self.catalog
+                    .read()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .region_max_entry_id(region_id)
+                    .unwrap_or(0),
+            ),
+        };
+        record_obsolete(
+            &self.obsolete_entry_ids,
+            &self.catalog,
+            region_id,
+            watermark,
+        );
         self.keep_release(Release {
             region_id,
-            entry_id,
+            entry_id: watermark,
         });
         self.update_reclaim_boundary();
         self.collect();
@@ -9224,6 +9242,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_bounded_release_preserves_entries_not_durable_at_admission() {
+        let _serialized = SERIALIZED.lock().await;
+        let object_store = memory_store();
+        let config = enqueued(manual());
+        let store = open(object_store.clone(), &config).await;
+        let region_id = region(1);
+        let admitted = append(&store, region_id, "keep")
+            .await
+            .unwrap()
+            .last_entry_ids[&region_id];
+        assert_eq!(id(1, 1), admitted);
+        assert_eq!(0, latest(&store, region_id));
+        store
+            .release_entries(&provider(region_id), region_id, admitted)
+            .await
+            .unwrap();
+        store.seal_open_batch().await.unwrap();
+        store.crash().await;
+        let reopened = open(object_store, &config).await;
+        assert_eq!(
+            expected_entries(region_id, &[(admitted, "keep")]),
+            read_entries(&reopened, region_id, 0).await
+        );
+        reopened.stop().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn test_bounded_release_timer_seals_without_appends() {
         let _serialized = SERIALIZED.lock().await;
         let store = open(
@@ -9262,32 +9307,35 @@ mod tests {
     #[tokio::test]
     async fn test_bounded_release_fences_future_appends_and_rejects_after_stop() {
         let _serialized = SERIALIZED.lock().await;
-        let store = open(memory_store(), &eager()).await;
-        let region_id = region(1);
-        store
-            .release_entries(&provider(region_id), region_id, id(10, 1))
-            .await
-            .unwrap();
-        store
-            .append_batch(vec![entry(&store, region_id, "new")])
-            .await
-            .unwrap();
-        assert_eq!(id(11, 1), latest(&store, region_id));
-        assert_eq!(
-            vec![release(region_id, id(10, 1))],
-            releases_of(store.io.as_ref(), 11).await
-        );
-        assert_eq!(
-            expected_entries(region_id, &[(id(11, 1), "new")]),
-            read_entries(&store, region_id, 0).await
-        );
-        store.stop().await.unwrap();
-        assert!(
+        for (config, released) in [(eager(), id(10, 1)), (enqueued(eager()), 0)] {
+            let store = open(memory_store(), &config).await;
+            let region_id = region(1);
             store
-                .release_entries(&provider(region_id), region_id, 0)
+                .release_entries(&provider(region_id), region_id, id(10, 1))
                 .await
-                .is_err()
-        );
+                .unwrap();
+            store
+                .append_batch(vec![entry(&store, region_id, "new")])
+                .await
+                .unwrap();
+            store.seal_open_batch().await.unwrap();
+            assert_eq!(id(11, 1), latest(&store, region_id));
+            assert_eq!(
+                vec![release(region_id, released)],
+                releases_of(store.io.as_ref(), 11).await
+            );
+            assert_eq!(
+                expected_entries(region_id, &[(id(11, 1), "new")]),
+                read_entries(&store, region_id, 0).await
+            );
+            store.stop().await.unwrap();
+            assert!(
+                store
+                    .release_entries(&provider(region_id), region_id, 0)
+                    .await
+                    .is_err()
+            );
+        }
     }
 
     #[tokio::test]
