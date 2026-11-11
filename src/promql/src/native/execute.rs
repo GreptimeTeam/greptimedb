@@ -2970,11 +2970,20 @@ struct LiveExecution {
 }
 
 impl NodeState {
+    /// Names the node whose evaluation failed.
+    ///
+    /// A failure that carries its own message - the Prometheus errors the runtime raises for a
+    /// duplicate label set, a truncated input - keeps it: `DataFusionError::Context` displays only
+    /// the context, so wrapping one of those would answer a client with the node's name instead of
+    /// what went wrong. Every other failure, including the pool's, is wrapped as before.
     fn context(&self, error: DataFusionError) -> DataFusionError {
-        DataFusionError::Context(
-            self.buffer.reservation.consumer().name().to_string(),
-            Box::new(error),
-        )
+        let name = self.buffer.reservation.consumer().name();
+        match error {
+            DataFusionError::Execution(message) => {
+                DataFusionError::Execution(format!("{name}: {message}"))
+            }
+            other => DataFusionError::Context(name.to_string(), Box::new(other)),
+        }
     }
 
     fn new(name: impl Into<String>, metrics: Arc<NodeMetrics>, pool: &Arc<dyn MemoryPool>) -> Self {

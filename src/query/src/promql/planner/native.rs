@@ -1476,7 +1476,12 @@ impl PromPlanner {
         // consumer has no region-local placement. Such a tree runs above the regions, and then each
         // occurrence reads through its own raw source. An empty frame likewise requires sourced
         // scans: physical planning accepts either all frames or all bare scans, not a mixture.
+        // A read that spans regions is planned above them, so each occurrence reads through its
+        // own source. A read one region holds entire needs none: the region runs the tree over its
+        // own scans, at the widths it would use anyway.
+        let spans_regions = plans_over_region_sources(query_engine_state, !single_region_read);
         let per_source_inputs = cross_table
+            || spans_regions
             || canonical_boundary_over_sources
             || (multi_input
                 && (any_partitioned
