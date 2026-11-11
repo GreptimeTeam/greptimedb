@@ -4155,7 +4155,7 @@ mod tests {
         NativeType, aggregate_reads_histogram, collect_selectors_with_set_operations, cut_segments,
         fused_output_schema, independent_scan_pair, native_output_tags, native_promql_requested,
         native_raw_plan_bounds_region_reads, node_children, plans_over_remote_regions,
-        scan_time_filter,
+        reads_across_series, region_local_segment, scan_time_filter,
     };
 
     #[test]
@@ -4668,6 +4668,24 @@ mod tests {
                 "{query}"
             );
         }
+    }
+
+    /// Pins the placement flip the name-preserving window unification caused. The inner window of a
+    /// subquery over an evaluated selector now answers `Some(true)`, so the outer window does not
+    /// read across series and both are region-local. While the inner window answered `Some(false)`
+    /// the outer one crossed series and was placed on the frontend above the `MergeScan`; a
+    /// regression in that unification shows up here as a frontend placement.
+    #[test]
+    fn nested_name_keeping_windows_are_region_local() {
+        let tree = compiled_test_tree("max_over_time(last_over_time(some_metric[5m:1m])[10m:1m])");
+        assert!(
+            !reads_across_series(tree.root()),
+            "nested name-keeping windows answer one series per label set"
+        );
+        assert!(
+            region_local_segment(tree.root()),
+            "the dist analyzer must place the nested windows region-side"
+        );
     }
 
     #[test]
