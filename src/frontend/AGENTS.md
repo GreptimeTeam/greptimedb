@@ -99,6 +99,8 @@ including caches owned by pipeline and protocol handlers.
   for `servers::batcher::table::TablePendingRowsBatcher`. A separate execution-only
   inserter, with no batcher attached, sends the prepared bulk writes to datanodes,
   avoiding recursive batching. The batcher handles successful-write Flow notifications.
+  `FrontendBuilder` creates the write memory limiter shared by conversion admission
+  and the protocol servers wired by `Services`.
 
 ## Public surface
 

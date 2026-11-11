@@ -654,7 +654,7 @@ impl Inserter {
             .values()
             .map(|info| (info.name.as_str(), info))
             .collect::<HashMap<_, _>>();
-        let mut prepared = Vec::with_capacity(requests.inserts.len());
+        let mut estimated_bytes = Some(0usize);
         for request in &mut requests.inserts {
             let table_info =
                 by_name
@@ -666,8 +666,31 @@ impl Inserter {
                 continue;
             };
             ImpureDefaultFiller::new((*table_info).clone())?.fill_rows(rows);
-            let batch = rows_to_record_batch(rows, table_info)?;
-            prepared.push(((*table_info).clone(), batch));
+            if batcher.memory_limit_bytes() != 0 {
+                estimated_bytes = estimated_bytes.and_then(|bytes| {
+                    bytes.checked_add(crate::req_convert::insert::estimated_record_batch_bytes(
+                        rows, table_info,
+                    )?)
+                });
+            }
+        }
+        // Reserve once for the whole request before constructing any Arrow arrays.
+        // PB rows and the converted batches coexist, so this is additional memory.
+        let permit = if requests.inserts.is_empty() {
+            None
+        } else {
+            Some(
+                batcher
+                    .acquire(estimated_bytes.unwrap_or(usize::MAX))
+                    .await?,
+            )
+        };
+        let mut prepared = Vec::with_capacity(requests.inserts.len());
+        for request in &requests.inserts {
+            let table_info = by_name[request.table_name.as_str()];
+            if let Some(rows) = &request.rows {
+                prepared.push((table_info.clone(), rows_to_record_batch(rows, table_info)?));
+            }
         }
         // Preserve the existing meter input and original request boundary. These
         // envelopes are only for accounting; routing happens after batching.
@@ -698,11 +721,8 @@ impl Inserter {
         .await
         .context(WriteRejectedSnafu)?;
         prepared.retain(|(_, batch)| batch.num_rows() != 0);
-        let results = if prepared.is_empty() {
-            Vec::new()
-        } else {
+        let results = if let Some(permit) = permit {
             // One original request shares admission across all table submissions.
-            let permit = batcher.acquire().await?;
             let submissions = prepared.into_iter().map(|(info, batch)| {
                 // Route to the same target database used for admission above.
                 let mut target_ctx = ctx.fork();
@@ -712,6 +732,8 @@ impl Inserter {
             });
             // Observe every table completion even when another table fails.
             future::join_all(submissions).await
+        } else {
+            Vec::new()
         };
         let mut affected_rows = 0;
         let mut meta = OutputMeta::new_with_cost(write_cost as _);
@@ -4103,7 +4125,7 @@ mod tests {
 
     #[async_trait::async_trait]
     impl PendingRowsBatcher for UnexpectedBatcher {
-        async fn acquire(&self) -> Result<Arc<tokio::sync::OwnedSemaphorePermit>> {
+        async fn acquire(&self, _: usize) -> Result<crate::batcher::PendingRowsPermit> {
             panic!("empty writes must not acquire batch admission")
         }
 
@@ -4112,7 +4134,7 @@ mod tests {
             _table_info: TableInfoRef,
             _batch: arrow::record_batch::RecordBatch,
             _ctx: QueryContextRef,
-            _permit: Arc<tokio::sync::OwnedSemaphorePermit>,
+            _permit: crate::batcher::PendingRowsPermit,
         ) -> Result<Output> {
             panic!("empty writes must not submit a batch")
         }
