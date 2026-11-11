@@ -26,13 +26,14 @@ use datatypes::arrow::array::{
 use datatypes::arrow::datatypes::SchemaRef;
 use datatypes::arrow::record_batch::{RecordBatch, RecordBatchOptions};
 use futures::stream::BoxStream;
-use object_store::{ObjectStore, Reader};
+use object_store::ObjectStore;
 use snafu::ResultExt;
 use tokio::sync::OnceCell;
 
 use crate::cache::columnar::{
     self as metadata_cache, MetadataCache, PayloadCache, PayloadPartCache,
 };
+use crate::cache::series_index::{IndexReader, SeriesIndexFileCache};
 use crate::error::{NewRecordBatchSnafu, OpenDalSnafu, Result, SerdeJsonSnafu};
 use crate::metrics::ColumnarReadMetrics;
 use crate::series_index::artifact::{ArtifactFormat, SamplesFileHandle};
@@ -48,14 +49,20 @@ use crate::sst::parquet::helper::fetch_byte_ranges;
 
 pub(crate) struct SamplesReader {
     store: ObjectStore,
+    file_cache: Option<Arc<SeriesIndexFileCache>>,
     manifest: Arc<Manifest>,
     schema: SchemaRef,
     cache: Option<MetadataCache>,
     payload_cache: Option<PayloadCache>,
     handle: SamplesFileHandle,
-    parts: Arc<Vec<OnceCell<Reader>>>,
+    parts: Arc<Vec<OnceCell<IndexReader>>>,
 }
 impl SamplesReader {
+    pub(crate) fn with_file_cache(mut self, cache: Option<Arc<SeriesIndexFileCache>>) -> Self {
+        self.file_cache = cache;
+        self
+    }
+
     pub(crate) async fn open_cached(
         store: ObjectStore,
         handle: SamplesFileHandle,
@@ -82,6 +89,7 @@ impl SamplesReader {
         )
         .await?;
         Ok(Self {
+            file_cache: None,
             store,
             handle,
             parts: Arc::new(
@@ -181,6 +189,7 @@ impl SamplesReader {
             "sample artifact objects/size mismatch",
         )?;
         Ok(Self {
+            file_cache: None,
             store,
             parts: Arc::new((0..manifest.files.len()).map(|_| OnceCell::new()).collect()),
             schema: manifest.schema(),
@@ -233,6 +242,7 @@ impl SamplesFormatReader for SamplesReader {
         let cache = self.cache.clone();
         let manifest = self.manifest.clone();
         let store = self.store.clone();
+        let file_cache = self.file_cache.clone();
         let handle = self.handle.clone();
         let parts = self.parts.clone();
         let payload_cache = self.payload_cache.clone();
@@ -248,7 +258,7 @@ impl SamplesFormatReader for SamplesReader {
                 let path = manifest.part_path(part.part_id);
                 // One lazy reader per accessed part, shared across this query's streams.
                 let reader = parts[part.part_id as usize].get_or_try_init(|| async {
-                    store.reader_with(&path).concurrent(8).gap(0).await.context(OpenDalSnafu)
+                    IndexReader::open(&store, &path, part.file_size, file_cache.as_ref()).await.context(OpenDalSnafu)
                 }).await?;
                 let size = part.file_size;
                 let metadata_started = Instant::now();
@@ -351,7 +361,7 @@ async fn read_range(store: &ObjectStore, path: &str, start: u64, end: u64) -> Re
 /// Reuses validated immutable metadata; traversal remains local to each stream.
 async fn load_metadata_page(
     cache: Option<&MetadataCache>,
-    reader: &Reader,
+    reader: &IndexReader,
     object: (&str, u64),
     reference: &PageReference,
     depth: u32,
@@ -618,7 +628,7 @@ async fn read_block(
     Ok(Some((batch, reservation)))
 }
 
-async fn read_part_range(reader: &Reader, start: u64, end: u64) -> Result<bytes::Bytes> {
+async fn read_part_range(reader: &IndexReader, start: u64, end: u64) -> Result<bytes::Bytes> {
     require(start <= end, "reversed sample byte range")?;
     let bytes = reader
         .read(start..end)
@@ -706,7 +716,7 @@ async fn fetch_columns(
 const PAYLOAD_BLOCK_BYTES: u64 = 16 * 1024;
 
 struct PayloadReader<'a> {
-    reader: &'a Reader,
+    reader: &'a IndexReader,
     cache: Option<PayloadPartCache>,
     end: u64,
 }

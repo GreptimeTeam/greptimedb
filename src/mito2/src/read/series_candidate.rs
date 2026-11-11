@@ -322,6 +322,7 @@ fn index_primary_key_stream(
                 index,
                 stream_ctx.input.predicate_group().predicate(),
                 stream_ctx.input.time_range,
+                context.file_cache.as_ref(),
             ).await?.search()?
         };
         loop {
@@ -837,6 +838,7 @@ mod tests {
             cache_namespace: store_api::storage::FileId::random(),
             format: crate::config::SeriesIndexFormat::Legacy,
             store,
+            file_cache: None,
             version: Arc::new(SeriesIndexVersion {
                 series_indexes: [(entry.index_uuid, handle)].into(),
                 ..Default::default()
@@ -1014,7 +1016,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn index_read_failure_after_output_is_propagated() {
+    async fn pinned_index_reader_survives_unlink_but_new_open_fails() {
         let (_env, scanner, _pruner) = indexed_scanner().await;
         let context = scanner.stream_ctx.input.series_index.clone().unwrap();
         let index = scanner.coverage.indexes[0].clone();
@@ -1030,7 +1032,15 @@ mod tests {
         );
         assert_eq!(500, stream.try_next().await.unwrap().unwrap().num_rows());
         context.store.delete(&path).await.unwrap();
-        assert!(stream.try_collect::<Vec<_>>().await.is_err());
+        // The filesystem reader pins the opened file even after unlink.
+        let remaining = stream.try_collect::<Vec<_>>().await.unwrap();
+        assert_eq!(
+            501,
+            remaining
+                .iter()
+                .map(|batch| batch.num_rows())
+                .sum::<usize>()
+        );
         // Opening the missing selected index must also fail, rather than emit
         // an incomplete candidate set or fall back to the absent SSTs.
         assert!(

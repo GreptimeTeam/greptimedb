@@ -443,6 +443,7 @@ impl ColumnarPreparedSource {
                 cache.clone(),
             )
             .await?
+            .with_file_cache(index.file_cache.clone())
             .with_payload_cache(input.cache_strategy.columnar_payload(index.cache_namespace));
             format::validate_sample_schema(&reader.schema(), metadata)?;
             samples.push(Arc::new(reader));
@@ -471,7 +472,8 @@ impl ColumnarPreparedSource {
                 index.version.series_indexes[&id].clone(),
                 cache.clone(),
             )
-            .await?;
+            .await?
+            .with_file_cache(index.file_cache.clone());
             drop(timer);
             let started = Instant::now();
             let schema = reader.schema();

@@ -41,6 +41,7 @@ use table::predicate::Predicate;
 use tokio::sync::OnceCell;
 
 use crate::cache::CacheStrategy;
+use crate::cache::series_index::SeriesIndexFileCache;
 use crate::error::{
     ComputeArrowSnafu, DecodeStatsSnafu, EvalPartitionFilterSnafu, InvalidRecordBatchSnafu,
     NewRecordBatchSnafu, RecordBatchSnafu, Result, StatsNotPresentSnafu, UnexpectedSnafu,
@@ -456,10 +457,13 @@ fn refine_primary_key_selection(
     (selected.row_count() > 0).then_some(selected)
 }
 
+/// Remote range-index store and its optional local file cache.
+pub(crate) type RangeIndexStore = (ObjectStore, Option<Arc<SeriesIndexFileCache>>);
+
 /// Context shared by ranges of the same parquet SST.
 pub struct FileRangeContext {
     /// Store for a range index registered in the scan's index snapshot.
-    range_index_store: Option<ObjectStore>,
+    range_index_store: Option<RangeIndexStore>,
     /// Lazily opened range index shared by all ranges of this file.
     range_index_searcher: OnceCell<SstRangeIndexSearcher>,
     /// Row group reader builder for the file.
@@ -475,7 +479,7 @@ impl FileRangeContext {
     pub(crate) fn new(
         reader_builder: RowGroupReaderBuilder,
         base: RangeBase,
-        range_index_store: Option<ObjectStore>,
+        range_index_store: Option<RangeIndexStore>,
     ) -> Self {
         Self {
             reader_builder,
@@ -487,14 +491,14 @@ impl FileRangeContext {
 
     /// Opens the range index once, retaining the SST handle throughout its use.
     async fn range_index_searcher(&self) -> Result<Option<&SstRangeIndexSearcher>> {
-        let Some(store) = &self.range_index_store else {
+        let Some((store, cache)) = &self.range_index_store else {
             return Ok(None);
         };
         self.range_index_searcher
             .get_or_try_init(|| async {
                 let file = self.reader_builder.file_handle();
                 let path = range_index_path(file.region_id(), file.file_id().file_id());
-                SstRangeIndexSearcher::open(store.clone(), &path).await
+                SstRangeIndexSearcher::open_cached(store.clone(), &path, cache.as_ref()).await
             })
             .await
             .map(Some)

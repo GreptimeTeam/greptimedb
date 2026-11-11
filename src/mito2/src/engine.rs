@@ -1083,6 +1083,7 @@ impl EngineInner {
                     crate::config::SeriesIndexFormat::Legacy
                 },
                 store: store.clone(),
+                file_cache: region.series_index_cache.clone(),
                 version: region.series_index_version(),
             }
         });

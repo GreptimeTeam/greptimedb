@@ -401,3 +401,10 @@ local files to be reset. Cached copies are disposable and are discarded on resta
 Artifacts and catalogs remain in the region's configured object store; opening a region
 loads its remote catalog without requiring local files. Catalog reads and maintenance
 existence checks bypass the disk cache. Missing remote artifacts are rebuilt from SSTs.
+
+Immutable data-file reads consult mito2's shared Moka-backed file cache. A cache
+miss downloads the object before returning a filesystem reader; oversized objects
+and local-cache failures use remote readers. Readers pin cached files until they
+finish. Active readers and in-flight downloads can temporarily leave disk usage
+above the cache budget.
+Writes and mutable catalog operations use the remote object store directly.

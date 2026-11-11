@@ -59,6 +59,7 @@ use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::sync::{Mutex, Semaphore, mpsc, oneshot, watch};
 
 use crate::access_layer::new_fs_cache_store;
+use crate::cache::series_index::SeriesIndexFileCache;
 use crate::cache::write_cache::{WriteCache, WriteCacheRef};
 use crate::cache::{CacheManager, CacheManagerRef, WriteCacheUploadStoreWrapperRef};
 use crate::compaction::CompactionScheduler;
@@ -520,7 +521,7 @@ fn region_id_to_index(id: RegionId, num_workers: usize) -> usize {
 async fn series_index_cache_from_config(
     config: &MitoConfig,
     data_home: &str,
-) -> Result<Option<Arc<object_store::layers::DiskCache>>> {
+) -> Result<Option<Arc<SeriesIndexFileCache>>> {
     if !config.experimental_enable_series_index {
         return Ok(None);
     }
@@ -534,7 +535,7 @@ async fn series_index_cache_from_config(
         .recursive(true)
         .await
         .context(crate::error::OpenDalSnafu)?;
-    Ok(Some(object_store::layers::DiskCache::new(
+    Ok(Some(SeriesIndexFileCache::new(
         store,
         config.experimental_series_index_max_size.as_bytes(),
     )))
@@ -621,7 +622,7 @@ struct WorkerStarter<S> {
     write_buffer_manager: WriteBufferManagerRef,
     compact_job_pool: SchedulerRef,
     index_build_job_pool: SchedulerRef,
-    series_index_cache: Option<Arc<object_store::layers::DiskCache>>,
+    series_index_cache: Option<Arc<SeriesIndexFileCache>>,
     series_index_disk_usage: Arc<AtomicU64>,
     flush_job_pool: SchedulerRef,
     purge_scheduler: SchedulerRef,
@@ -660,17 +661,11 @@ impl<S: LogStore> WorkerStarter<S> {
             (None, None)
         };
         let mut series_index_purger = None;
-        let series_index_handle = self
-            .series_index_cache
+        let series_index_handle = series_index_task_state
             .clone()
-            .zip(series_index_task_state.clone())
             .zip(series_index_receiver)
-            .map(|((cache, state), receiver)| {
-                let store = crate::series_index::cached_store(
-                    &cache,
-                    self.object_store_manager.default_object_store().clone(),
-                    None,
-                );
+            .map(|(state, receiver)| {
+                let store = self.object_store_manager.default_object_store().clone();
                 let (purger, purge_receiver) = series_index_channel(store.clone());
                 series_index_purger = Some(purger.clone());
                 spawn_series_index_tasks(
@@ -1015,7 +1010,7 @@ struct RegionWorkerLoop<S> {
     /// Controls the worker-owned series-index task.
     series_index_task_state: Option<Arc<SeriesIndexTaskState>>,
     /// Shared disk cache for remote series and range indexes.
-    series_index_cache: Option<Arc<object_store::layers::DiskCache>>,
+    series_index_cache: Option<Arc<SeriesIndexFileCache>>,
     series_index_purger: Option<IndexFilePurger>,
     /// Schedules background flush requests.
     flush_scheduler: FlushScheduler,

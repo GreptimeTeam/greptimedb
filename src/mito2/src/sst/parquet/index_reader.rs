@@ -33,26 +33,39 @@ use parquet::file::metadata::RowGroupMetaData;
 use snafu::{OptionExt, ResultExt};
 use table::predicate::Predicate;
 
+use crate::cache::series_index::{IndexReader, SeriesIndexFileCache};
 use crate::error::{InvalidRecordBatchSnafu, OpenDalSnafu, ReadParquetSnafu, Result};
 use crate::sst::parquet::format::{column_null_counts, column_values_by_type};
-use crate::sst::parquet::helper::fetch_byte_ranges;
-use crate::sst::parquet::metadata::MetadataLoader;
-use crate::sst::parquet::reader::MetadataCacheMetrics;
 
 /// Reads a standalone index file stored in Parquet format.
 pub(crate) struct ParquetIndexReader {
-    object_store: ObjectStore,
+    reader: IndexReader,
     path: String,
     arrow_metadata: ArrowReaderMetadata,
 }
 
 impl ParquetIndexReader {
     /// Opens `path` and loads its Parquet metadata.
-    pub(crate) async fn open(object_store: ObjectStore, path: &str) -> Result<Self> {
-        let mut metrics = MetadataCacheMetrics::default();
-        let parquet_metadata = MetadataLoader::new(object_store.clone(), path, 0)
-            .load(&mut metrics)
-            .await?;
+    pub(crate) async fn open(
+        object_store: ObjectStore,
+        path: &str,
+        cache: Option<&Arc<SeriesIndexFileCache>>,
+    ) -> Result<Self> {
+        let size = object_store
+            .stat(path)
+            .await
+            .context(OpenDalSnafu)?
+            .content_length();
+        let reader = IndexReader::open(&object_store, path, size, cache)
+            .await
+            .context(OpenDalSnafu)?;
+        let parquet_metadata = parquet::file::metadata::ParquetMetaDataReader::new()
+            .with_prefetch_hint(Some(64 * 1024))
+            .load_and_finish(&reader, size)
+            .await
+            .with_context(|_| ReadParquetSnafu {
+                path: path.to_string(),
+            })?;
         let arrow_metadata =
             ArrowReaderMetadata::try_new(Arc::new(parquet_metadata), ArrowReaderOptions::new())
                 .with_context(|_| ReadParquetSnafu {
@@ -60,7 +73,7 @@ impl ParquetIndexReader {
                 })?;
 
         Ok(Self {
-            object_store,
+            reader,
             path: path.to_string(),
             arrow_metadata,
         })
@@ -105,7 +118,7 @@ impl ParquetIndexReader {
                 path: self.path.clone(),
             })?;
         let path = self.path.clone();
-        let object_store = self.object_store.clone();
+        let reader = self.reader.clone();
 
         Ok(async_stream::try_stream! {
             loop {
@@ -114,11 +127,11 @@ impl ParquetIndexReader {
                     .with_context(|_| ReadParquetSnafu { path: path.clone() })?
                 {
                     DecodeResult::NeedsData(ranges) => {
-                        let data = fetch_byte_ranges(&path, object_store.clone(), &ranges)
+                        let data = reader.fetch(ranges.clone())
                             .await
                             .context(OpenDalSnafu)?;
                         decoder
-                            .push_ranges(ranges, data)
+                            .push_ranges(ranges, data.into_iter().map(|buf| buf.to_bytes()).collect())
                             .with_context(|_| ReadParquetSnafu { path: path.clone() })?;
                     }
                     DecodeResult::Data(batch) => yield batch,
@@ -195,5 +208,19 @@ impl IndexRowGroupPruningStats<'_> {
             // row group (conservative).
             datatypes::arrow::compute::cast(&values, data_type).ok()
         }
+    }
+}
+
+impl parquet::arrow::async_reader::MetadataFetch for &IndexReader {
+    fn fetch(
+        &mut self,
+        range: std::ops::Range<u64>,
+    ) -> futures::future::BoxFuture<'_, parquet::errors::Result<bytes::Bytes>> {
+        Box::pin(async move {
+            self.read(range)
+                .await
+                .map(|buf| buf.to_bytes())
+                .map_err(|error| parquet::errors::ParquetError::External(Box::new(error)))
+        })
     }
 }

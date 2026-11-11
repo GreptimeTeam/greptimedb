@@ -295,6 +295,7 @@ fn scan_input(
             cache_namespace: store_api::storage::FileId::random(),
             format,
             store,
+            file_cache: None,
             version: region.series_index_version(),
         }))
         .with_predicate(

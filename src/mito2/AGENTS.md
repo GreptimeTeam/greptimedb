@@ -63,8 +63,8 @@ filtered `RecordBatch` stream.
   follower replay. Keep it backward compatible.
 - **SST/Parquet layout** (`sst/`): readers must stay compatible with existing files.
 - **Series-index storage**: artifacts and catalogs live under `series_index/<region-id>/`
-  in the region's configured object store. A shared `object_store::layers::DiskCache`
-  caches artifact objects locally; the size setting bounds cached copies, never builds.
+  in the region's configured object store. A shared Moka-backed `cache::series_index::SeriesIndexFileCache`
+  supplies pinned filesystem readers for immutable objects; the size setting bounds cached copies, never builds.
   Catalogs and stat/existence checks bypass the cache. Leaders maintain remote artifacts;
   followers refresh catalogs. Purge requests carry their owning store and region context.
 - **Series format PoC**: samples are rebuildable SST sidecars in object storage. Optional writer interfaces (`format.rs`) integrate with reconciliation, catalog publication, and deferred purge. Defaults retain the original Parquet writer and disable samples. The opt-in columnar backend (`series_index/columnar.rs`) implements streaming OpenDAL writes and pinned format reads; its wire contract is in `docs/formats/mito-series.md`. Artifact objects record paths and sizes, including the manifest, so reads need no stat. Codecs currently run inline pending scheduling benchmarks. Sample payload reads coalesce nearby selected ranges in bounded, memory-accounted windows; boundary blocks keep timestamp-first pruning. Aligned native payload blocks share the page-cache budget with Parquet, with generation/namespace isolation and no shared lock held across I/O. Columnar stage timings and read counters are exported through Mito metrics. Columnar `SeriesScan` raw reads use scanner-wide preparation in `read/series_scan/prepared.rs`; ordinary record-batch scans retain their SST path. Native reader metadata shares the decoded SST cache reservation; maintenance readers bypass this cache. The paired `experimental_series_index_format` setting selects legacy or columnar artifacts.

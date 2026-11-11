@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::sync::Arc;
+
 use async_stream::try_stream;
 use common_recordbatch::filter::SimpleFilterEvaluator;
 use common_time::range::TimestampRange;
@@ -28,6 +30,7 @@ use snafu::{OptionExt, ResultExt, ensure};
 use store_api::metadata::RegionMetadataRef;
 use table::predicate::Predicate;
 
+use crate::cache::series_index::SeriesIndexFileCache;
 use crate::error::{InvalidRecordBatchSnafu, RecordBatchSnafu, Result, UnexpectedSnafu};
 use crate::series_index::{
     MAX_TS_COLUMN, METRIC_SERIES_ID_BATCH_SIZE, MIN_TS_COLUMN, MetricSeriesId,
@@ -60,6 +63,7 @@ impl SeriesIndexSearcher {
         file_handle: SeriesIndexFileHandle,
         predicate: Option<&Predicate>,
         time_range: Option<TimestampRange>,
+        cache: Option<&Arc<SeriesIndexFileCache>>,
     ) -> Result<Self> {
         // Keep search-time metadata validation identical to the writer.
         series_index_schema(&metadata)?;
@@ -74,7 +78,7 @@ impl SeriesIndexSearcher {
 
         let file_id = file_handle.file_id();
         let path = series_index_path(file_id.region_id(), file_id.file_id());
-        let reader = ParquetIndexReader::open(object_store, &path).await?;
+        let reader = ParquetIndexReader::open(object_store, &path, cache).await?;
         let unit = validate_index_schema(reader.schema())?;
 
         let mut filters = simple_tag_filters(&metadata, None, predicate);
@@ -463,6 +467,7 @@ mod tests {
             index.clone(),
             Some(&predicate),
             Some(time_range),
+            None,
         )
         .await
         .unwrap();
@@ -488,6 +493,7 @@ mod tests {
             index.clone(),
             None,
             Some(time_range),
+            None,
         )
         .await
         .unwrap();
@@ -507,10 +513,16 @@ mod tests {
             common_time::Timestamp::new_millisecond(30),
         )
         .unwrap();
-        let searcher =
-            SeriesIndexSearcher::try_new(metadata, object_store, index, None, Some(time_range))
-                .await
-                .unwrap();
+        let searcher = SeriesIndexSearcher::try_new(
+            metadata,
+            object_store,
+            index,
+            None,
+            Some(time_range),
+            None,
+        )
+        .await
+        .unwrap();
         let ids = collect_ids(searcher.search().unwrap()).await;
         assert_eq!(
             ids,
@@ -557,6 +569,7 @@ mod tests {
             object_store,
             index,
             Some(&predicate),
+            None,
             None,
         )
         .await
@@ -620,6 +633,7 @@ mod tests {
             index.clone(),
             None,
             Some(time_range),
+            None,
         )
         .await
         .unwrap();
@@ -639,10 +653,16 @@ mod tests {
             common_time::Timestamp::new_millisecond(30),
         )
         .unwrap();
-        let searcher =
-            SeriesIndexSearcher::try_new(metadata, object_store, index, None, Some(time_range))
-                .await
-                .unwrap();
+        let searcher = SeriesIndexSearcher::try_new(
+            metadata,
+            object_store,
+            index,
+            None,
+            Some(time_range),
+            None,
+        )
+        .await
+        .unwrap();
         let ids = collect_ids(searcher.search().unwrap()).await;
         assert_eq!(
             ids,
@@ -704,6 +724,7 @@ mod tests {
             index,
             None,
             Some(time_range),
+            None,
         )
         .await
         .unwrap();
@@ -715,10 +736,16 @@ mod tests {
                 tsid: 20
             }]
         );
-        let searcher =
-            SeriesIndexSearcher::try_new(widened, object_store, new_index, None, Some(time_range))
-                .await
-                .unwrap();
+        let searcher = SeriesIndexSearcher::try_new(
+            widened,
+            object_store,
+            new_index,
+            None,
+            Some(time_range),
+            None,
+        )
+        .await
+        .unwrap();
         let ids = collect_ids(searcher.search().unwrap()).await;
         assert_eq!(
             ids,
@@ -789,9 +816,10 @@ mod tests {
         let (index, _receiver) =
             write_index(metadata.clone(), object_store.clone(), &rows, 100).await;
 
-        let searcher = SeriesIndexSearcher::try_new(metadata, object_store, index, None, None)
-            .await
-            .unwrap();
+        let searcher =
+            SeriesIndexSearcher::try_new(metadata, object_store, index, None, None, None)
+                .await
+                .unwrap();
         let batches = searcher
             .search()
             .unwrap()
@@ -826,9 +854,10 @@ mod tests {
             .collect::<Vec<_>>();
         let (index, mut receiver) = write_index(metadata.clone(), store.clone(), &rows, 100).await;
         let file_id = index.file_id();
-        let searcher = SeriesIndexSearcher::try_new(metadata, store, index.clone(), None, None)
-            .await
-            .unwrap();
+        let searcher =
+            SeriesIndexSearcher::try_new(metadata, store, index.clone(), None, None, None)
+                .await
+                .unwrap();
         index.mark_deleted();
         drop(index);
         assert!(receiver.try_recv().is_err());
@@ -877,7 +906,7 @@ mod tests {
 
         let file_id = index.file_id();
         let path = series_index_path(file_id.region_id(), file_id.file_id());
-        let reader = ParquetIndexReader::open(object_store.clone(), &path)
+        let reader = ParquetIndexReader::open(object_store.clone(), &path, None)
             .await
             .unwrap();
         let unit = validate_index_schema(reader.schema()).unwrap();
@@ -914,6 +943,7 @@ mod tests {
             missing_index,
             None,
             Some(TimestampRange::empty()),
+            None,
         )
         .await
         .unwrap();

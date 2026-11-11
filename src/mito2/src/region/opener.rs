@@ -47,6 +47,7 @@ use tokio::sync::Semaphore;
 
 use crate::access_layer::AccessLayer;
 use crate::cache::file_cache::{FileCache, FileType, IndexKey};
+use crate::cache::series_index::SeriesIndexFileCache;
 use crate::cache::{CacheManagerRef, SstMetaPreparation, prepare_sst_meta};
 use crate::config::MitoConfig;
 use crate::engine::region_hook::RegionHookRef;
@@ -166,7 +167,7 @@ pub(crate) struct RegionOpener {
     file_ref_manager: FileReferenceManagerRef,
     partition_expr_fetcher: PartitionExprFetcherRef,
     hook: Option<RegionHookRef>,
-    series_index_cache: Option<Arc<object_store::layers::DiskCache>>,
+    series_index_cache: Option<Arc<SeriesIndexFileCache>>,
     series_index_purger: Option<IndexFilePurger>,
 }
 
@@ -213,10 +214,7 @@ impl RegionOpener {
     }
 
     /// Sets the store for companion range indexes.
-    pub(crate) fn series_index_cache(
-        mut self,
-        cache: Option<Arc<object_store::layers::DiskCache>>,
-    ) -> Self {
+    pub(crate) fn series_index_cache(mut self, cache: Option<Arc<SeriesIndexFileCache>>) -> Self {
         self.series_index_cache = cache;
         self
     }
@@ -432,13 +430,10 @@ impl RegionOpener {
             RegionRoleState::Leader(RegionLeaderState::Writable),
             self.hook.clone(),
         ));
-        let series_index_store = self.series_index_cache.as_ref().map(|cache| {
-            crate::series_index::cached_store(
-                cache,
-                object_store.clone(),
-                version_control.current().version.options.storage.as_deref(),
-            )
+        let series_index_cache = self.series_index_cache.as_ref().map(|cache| {
+            cache.for_storage(version_control.current().version.options.storage.as_deref())
         });
+        let series_index_store = series_index_cache.as_ref().map(|_| object_store.clone());
         let access_layer = Arc::new(AccessLayer::new(
             self.table_dir.clone(),
             self.path_type,
@@ -454,6 +449,7 @@ impl RegionOpener {
             series_index_version_control: crate::series_index::SeriesIndexVersionControl::default()
                 .with_format(config.experimental_series_index_format),
             series_index_store: series_index_store.clone(),
+            series_index_cache,
             access_layer: access_layer.clone(),
             // Region is writable after it is created.
             manifest_ctx: manifest_ctx.clone(),
@@ -574,13 +570,11 @@ impl RegionOpener {
             RegionRoleState::Follower,
             self.hook.clone(),
         ));
-        let series_index_store = self.series_index_cache.as_ref().map(|cache| {
-            crate::series_index::cached_store(
-                cache,
-                object_store.clone(),
-                region_options.storage.as_deref(),
-            )
-        });
+        let series_index_cache = self
+            .series_index_cache
+            .as_ref()
+            .map(|cache| cache.for_storage(region_options.storage.as_deref()));
+        let series_index_store = series_index_cache.as_ref().map(|_| object_store.clone());
         let series_index_purger = self
             .series_index_purger
             .as_ref()
@@ -712,6 +706,7 @@ impl RegionOpener {
             series_index_version_control: series_index_version_control
                 .with_format(config.experimental_series_index_format),
             series_index_store: series_index_store.clone(),
+            series_index_cache,
             access_layer: access_layer.clone(),
             // Region is always opened in read only mode.
             manifest_ctx,

@@ -684,7 +684,7 @@ impl ParquetReaderBuilder {
                     .version
                     .range_indexes
                     .contains_key(&self.file_handle.file_id().file_id()))
-            .then(|| context.store.clone())
+            .then(|| (context.store.clone(), context.file_cache.clone()))
         });
         let context = FileRangeContext::new(
             reader_builder,

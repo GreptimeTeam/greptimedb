@@ -720,11 +720,11 @@ async fn selective_io_and_pinned_stream_retirement() {
     let result = stream.try_collect::<Vec<_>>().await.unwrap();
     assert_eq!(result.len(), 1);
     assert!(purges.try_recv().is_ok());
-    // Framing, root, one leaf, and one tag payload. No TSID/count chunks or other leaf.
+    // Header, trailer, root, one leaf, and one tag payload. No TSID/count chunks or other leaf.
     let reads = reads.lock().unwrap();
     assert_eq!(
         reads.iter().filter(|(p, _)| p.ends_with(".series")).count(),
-        4
+        5
     );
 }
 

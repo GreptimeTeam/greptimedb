@@ -20,6 +20,7 @@ pub(crate) mod columnar;
 pub(crate) mod file_cache;
 pub(crate) mod index;
 pub(crate) mod manifest_cache;
+pub(crate) mod series_index;
 #[cfg(test)]
 pub(crate) mod test_util;
 pub(crate) mod write_cache;

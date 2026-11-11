@@ -1086,24 +1086,22 @@ async fn test_build_series_index_region_request(
         let local = crate::access_layer::new_fs_cache_store(empty.path().to_str().unwrap())
             .await
             .unwrap();
-        let cache = object_store::layers::DiskCache::new(local, 1024);
-        let cold = super::cached_store(&cache, remote.clone(), None);
+        let cache = crate::cache::series_index::SeriesIndexFileCache::new(local, 1024);
+        let cold = remote.clone();
         let (purger, _receiver) = series_index_channel(cold.clone());
         let restored = load_version_control(&cold, region.region_id, &purger)
             .await
             .current();
         assert_eq!(version.index_buckets, restored.index_buckets);
         assert_eq!(version.disk_usage(), restored.disk_usage());
-        let backend = region
-            .series_index_version_control
-            .formats
-            .read()
-            .unwrap()
-            .index
-            .clone();
         for handle in restored.series_indexes.values() {
-            if let Some(backend) = &backend {
-                let reader = backend.reader(cold.clone(), handle.clone()).await.unwrap();
+            if format == crate::config::SeriesIndexFormat::Columnar {
+                use crate::series_index::format::FormatReader;
+                let reader =
+                    super::columnar::reader::ColumnarReader::open(cold.clone(), handle.clone())
+                        .await
+                        .unwrap()
+                        .with_file_cache(Some(cache.clone()));
                 let batches = reader
                     .read(Default::default())
                     .unwrap()
@@ -1115,7 +1113,18 @@ async fn test_build_series_index_region_request(
                 let path = series_index_path(region.region_id, handle.entry().index_uuid);
                 assert_eq!(
                     remote.read(&path).await.unwrap().to_bytes(),
-                    cold.read(&path).await.unwrap().to_bytes()
+                    crate::cache::series_index::IndexReader::open(
+                        &cold,
+                        &path,
+                        handle.entry().file_size,
+                        Some(&cache)
+                    )
+                    .await
+                    .unwrap()
+                    .read(0..handle.entry().file_size)
+                    .await
+                    .unwrap()
+                    .to_bytes()
                 );
             }
         }
@@ -1123,7 +1132,18 @@ async fn test_build_series_index_region_request(
             for object in &handle.entry().artifact.objects {
                 assert_eq!(
                     remote.read(&object.path).await.unwrap().to_bytes(),
-                    cold.read(&object.path).await.unwrap().to_bytes()
+                    crate::cache::series_index::IndexReader::open(
+                        &cold,
+                        &object.path,
+                        object.file_size,
+                        Some(&cache)
+                    )
+                    .await
+                    .unwrap()
+                    .read(0..object.file_size)
+                    .await
+                    .unwrap()
+                    .to_bytes()
                 );
             }
         }

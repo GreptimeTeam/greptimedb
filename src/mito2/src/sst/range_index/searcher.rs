@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::sync::Arc;
+
 use std::cmp::Ordering;
 use std::ops::Range;
 
@@ -23,6 +25,7 @@ use object_store::ObjectStore;
 use snafu::{OptionExt, ensure};
 use table::predicate::Predicate;
 
+use crate::cache::series_index::SeriesIndexFileCache;
 use crate::error::{InvalidRecordBatchSnafu, Result, UnexpectedSnafu};
 use crate::series_index::MetricSeriesId;
 use crate::sst::parquet::index_reader::ParquetIndexReader;
@@ -38,7 +41,15 @@ pub struct SstRangeIndexSearcher {
 impl SstRangeIndexSearcher {
     /// Opens the range-index file at `path` and loads its Parquet metadata.
     pub async fn open(object_store: ObjectStore, path: &str) -> Result<Self> {
-        let reader = ParquetIndexReader::open(object_store, path).await?;
+        Self::open_cached(object_store, path, None).await
+    }
+
+    pub(crate) async fn open_cached(
+        object_store: ObjectStore,
+        path: &str,
+        cache: Option<&Arc<SeriesIndexFileCache>>,
+    ) -> Result<Self> {
+        let reader = ParquetIndexReader::open(object_store, path, cache).await?;
         validate_index_schema(reader.schema())?;
         Ok(Self { reader })
     }
@@ -448,7 +459,7 @@ mod tests {
         let store = object_store();
         let path = "range-pruning.parquet";
         write_index(&store, path).await;
-        let reader = ParquetIndexReader::open(store, path).await.unwrap();
+        let reader = ParquetIndexReader::open(store, path, None).await.unwrap();
         let predicate = search_predicate(0, &[series(1, 999), series(2, 999)]).unwrap();
 
         assert_eq!(reader.row_groups_to_read(&predicate), vec![0, 1]);

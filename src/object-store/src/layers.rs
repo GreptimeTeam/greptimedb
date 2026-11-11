@@ -22,9 +22,6 @@ pub use hdfs::HdfsCompatibilityLayer;
 pub use opendal::layers::*;
 pub use prometheus::build_prometheus_metrics_layer;
 
-mod disk_cache;
-pub use disk_cache::DiskCache;
-
 mod prometheus {
     use std::sync::{Mutex, OnceLock};
 

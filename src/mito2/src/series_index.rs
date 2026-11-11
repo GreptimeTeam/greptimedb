@@ -49,6 +49,7 @@ use store_api::metric_engine_consts::{
     DATA_SCHEMA_TSID_COLUMN_NAME as TSID_COLUMN,
 };
 
+use crate::cache::series_index::SeriesIndexFileCache;
 use crate::error::Result;
 #[cfg(test)]
 pub(crate) use crate::series_index::catalog::{RangeIndexEntry, SeriesIndexEntry};
@@ -71,6 +72,7 @@ pub(crate) struct SeriesIndexReadContext {
     pub(crate) cache_namespace: store_api::storage::FileId,
     pub(crate) format: crate::config::SeriesIndexFormat,
     pub(crate) store: ObjectStore,
+    pub(crate) file_cache: Option<Arc<SeriesIndexFileCache>>,
     pub(crate) version: Arc<SeriesIndexVersion>,
 }
 
@@ -92,27 +94,3 @@ pub struct MetricSeriesId {
 
 /// Stream of bounded batches of matching metric-series IDs.
 pub type MetricSeriesIdStream = BoxStream<'static, Result<Vec<MetricSeriesId>>>;
-
-/// Wraps a region's configured store while sharing the node's disk budget.
-pub(crate) fn cached_store(
-    cache: &Arc<object_store::layers::DiskCache>,
-    store: ObjectStore,
-    storage: Option<&str>,
-) -> ObjectStore {
-    let info = store.info();
-    let storage = storage.map_or_else(
-        || "default".to_string(),
-        |name| format!("named:{}", name.to_lowercase()),
-    );
-    let namespace = format!(
-        "{storage}:{}:{}:{}",
-        info.scheme(),
-        info.name(),
-        info.root()
-    );
-    store.layer(cache.layer(namespace, |path| {
-        !path.ends_with("/series-index.json")
-            && !path.ends_with("/range-index.json")
-            && !path.ends_with("/samples.json")
-    }))
-}

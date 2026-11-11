@@ -48,6 +48,7 @@ use tokio::sync::RwLockWriteGuard;
 pub use utils::*;
 
 use crate::access_layer::AccessLayerRef;
+use crate::cache::series_index::SeriesIndexFileCache;
 use crate::engine::region_hook::{PendingManifestHook, RegionHookRef};
 use crate::error::{
     FlushableRegionStateSnafu, InvalidPartitionExprSnafu, RegionNotFoundSnafu, RegionStateSnafu,
@@ -156,6 +157,8 @@ pub struct MitoRegion {
     pub(crate) series_index_version_control: SeriesIndexVersionControl,
     /// Store containing the region's series indexes.
     pub(crate) series_index_store: Option<ObjectStore>,
+    /// Shared disposable artifact file cache.
+    pub(crate) series_index_cache: Option<Arc<SeriesIndexFileCache>>,
     /// SSTs accessor for this region.
     pub(crate) access_layer: AccessLayerRef,
     /// Context to maintain manifest for this region.
@@ -2067,6 +2070,7 @@ mod tests {
             version_control,
             series_index_version_control: Default::default(),
             series_index_store: None,
+            series_index_cache: None,
             access_layer: env.access_layer.clone(),
             manifest_ctx,
             file_purger: crate::test_util::new_noop_file_purger(),
@@ -2572,6 +2576,7 @@ mod tests {
             version_control,
             series_index_version_control: Default::default(),
             series_index_store: None,
+            series_index_cache: None,
             access_layer,
             manifest_ctx: manifest_ctx.clone(),
             file_purger: crate::test_util::new_noop_file_purger(),
