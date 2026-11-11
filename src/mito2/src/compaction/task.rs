@@ -242,7 +242,7 @@ mod tests {
         let mut task = CompactionTask {
             state: CancellableTaskState::new(),
             execution: CompactionExecution::for_test(7),
-            compaction_context: CompactionContext::from(&region),
+            compaction_context: CompactionContext::try_from(&region).unwrap(),
             request_sender,
             listener: WorkerListener::new(Some(Arc::new(PanicOnUnitMergeBegin))),
             unit: CompactionUnit {

@@ -64,7 +64,7 @@ use crate::cache::{CacheManager, CacheManagerRef, WriteCacheUploadStoreWrapperRe
 use crate::compaction::memory_manager::{CompactionMemoryManager, new_compaction_memory_manager};
 use crate::compaction::{CancelCompactionResult, CompactionCoordinator, CompactionScheduler};
 use crate::config::MitoConfig;
-use crate::error::{self, CreateDirSnafu, ExternalSnafu, JoinSnafu, Result, WorkerStoppedSnafu};
+use crate::error::{self, CreateDirSnafu, JoinSnafu, Result, WorkerStoppedSnafu};
 use crate::flush::{FlushScheduler, WriteBufferManagerImpl, WriteBufferManagerRef};
 use crate::gc::{GcLimiter, GcLimiterRef};
 use crate::lease::NodeLease;
@@ -655,16 +655,7 @@ fn index_registry(
     config: &MitoConfig,
     provider: Option<IndexKindProviderRef>,
 ) -> Result<IndexRegistryRef> {
-    IndexRegistry::new(
-        config.inverted_index.clone(),
-        config.fulltext_index.clone(),
-        config.bloom_filter_index.clone(),
-    )
-    .with_provider(provider)
-    .map(Arc::new)
-    .with_context(|_| ExternalSnafu {
-        context: "registering index handlers".to_string(),
-    })
+    IndexRegistry::from_config(config, provider).map(Arc::new)
 }
 
 /// Worker start config.

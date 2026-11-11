@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashSet;
 use std::num::NonZeroU64;
 use std::sync::Arc;
 use std::time::Duration;
@@ -53,10 +54,14 @@ use crate::region::version::VersionRef;
 use crate::region::{ManifestContext, RegionLeaderState, RegionRoleState};
 use crate::schedule::scheduler::LocalScheduler;
 use crate::sst::FormatType;
-use crate::sst::file::{self, FileHandle, FileMeta, UncommittedSsts};
+use crate::sst::file::{self, FileHandle, FileMeta, RegionFileId, UncommittedSsts};
 use crate::sst::file_purger::LocalFilePurger;
+use crate::sst::index::IndexBuildType;
+use crate::sst::index::build::IndexBuildInputs;
+use crate::sst::index::handler::{IndexKindProviderRef, PlanContext};
 use crate::sst::index::intermediate::IntermediateManager;
 use crate::sst::index::puffin_manager::PuffinManagerFactory;
+use crate::sst::index::registry::{IndexBuildPlan, IndexRegistry};
 use crate::sst::location::region_dir_from_table_dir;
 use crate::sst::parquet::metadata::extract_primary_key_range;
 use crate::sst::parquet::parallel_writer::EncodeRuntime;
@@ -143,11 +148,26 @@ pub struct CompactionContext {
     pub(crate) access_layer: AccessLayerRef,
     manifest_ctx: Arc<ManifestContext>,
     plugins: Plugins,
+    index_plan: Arc<IndexBuildPlan>,
+    index_registry: Arc<IndexRegistry>,
+    existing_index_inputs: Option<Arc<HashSet<RegionFileId>>>,
 }
 
-impl From<&CompactionRegion> for CompactionContext {
-    fn from(region: &CompactionRegion) -> Self {
-        Self {
+impl TryFrom<&CompactionRegion> for CompactionContext {
+    type Error = error::Error;
+
+    fn try_from(region: &CompactionRegion) -> Result<Self> {
+        let registry = IndexRegistry::from_config(
+            &region.engine_config,
+            region.plugins.get::<IndexKindProviderRef>(),
+        )?;
+        let index_plan = Arc::new(registry.plan(&PlanContext {
+            metadata: &region.region_metadata,
+            index_options: &region.current_version.options.index_options,
+            build_type: IndexBuildType::Compact,
+            existing_indexes: &[],
+        }));
+        Ok(Self {
             region_id: region.region_id,
             region_options: region.region_options.clone(),
             version_options: region.current_version.options.clone(),
@@ -157,7 +177,10 @@ impl From<&CompactionRegion> for CompactionContext {
             access_layer: region.access_layer.clone(),
             manifest_ctx: region.manifest_ctx.clone(),
             plugins: region.plugins.clone(),
-        }
+            index_plan,
+            index_registry: Arc::new(registry),
+            existing_index_inputs: None,
+        })
     }
 }
 
@@ -384,57 +407,121 @@ impl CompactionRegion {
     /// before this unit's [`Compactor::update_manifest`] so its committed edit
     /// can be associated with the SST metadata reported here.
     pub async fn invoke_sst_hook(&self, merge_output: &MergeOutput) {
-        CompactionContext::from(self)
-            .invoke_sst_hook(merge_output)
-            .await;
+        invoke_sst_hook(
+            &self.plugins,
+            self.region_id,
+            &self.region_metadata,
+            merge_output,
+        )
+        .await;
     }
 }
 
-impl CompactionContext {
-    /// Reports this unit's output metadata before publishing its manifest edit.
-    pub(crate) async fn invoke_sst_hook(&self, merge_output: &MergeOutput) {
-        let Some(hook) = self.plugins.get::<RegionHookRef>() else {
-            return;
-        };
+async fn invoke_sst_hook(
+    plugins: &Plugins,
+    region_id: RegionId,
+    metadata: &RegionMetadataRef,
+    merge_output: &MergeOutput,
+) {
+    let Some(hook) = plugins.get::<RegionHookRef>() else {
+        return;
+    };
 
-        // Remote compaction deserializes `MergeOutput` over gRPC, where
-        // `sst_infos` is `#[serde(skip)]`. Rebuild each `SstInfo` from the
-        // matching `FileMeta` so the hook observes real ids/rows/sizes rather
-        // than zeros — see [`sst_info_from_file_meta`] for what stays default.
-        let synthesized: Vec<SstInfo>;
-        let infos: &[SstInfo] = if merge_output.sst_infos.is_empty() {
-            synthesized = merge_output
-                .files_to_add
-                .iter()
-                .map(sst_info_from_file_meta)
-                .collect();
-            &synthesized
-        } else {
-            // `sst_infos` and `files_to_add` are documented as 1:1. If they
-            // ever diverge, `zip` below would silently truncate; warn so the
-            // mismatch is observable rather than dropping files from the hook.
-            if merge_output.sst_infos.len() != merge_output.files_to_add.len() {
-                warn!(
-                    "sst_infos length ({}) does not match files_to_add length ({}) for region {}",
-                    merge_output.sst_infos.len(),
-                    merge_output.files_to_add.len(),
-                    self.region_id
-                );
-            }
-            &merge_output.sst_infos
-        };
-
-        let files: Vec<SstFileInfo<'_>> = merge_output
+    // Remote compaction deserializes `MergeOutput` over gRPC, where
+    // `sst_infos` is `#[serde(skip)]`. Rebuild each `SstInfo` from the
+    // matching `FileMeta` so the hook observes real ids/rows/sizes rather
+    // than zeros — see [`sst_info_from_file_meta`] for what stays default.
+    let synthesized: Vec<SstInfo>;
+    let infos: &[SstInfo] = if merge_output.sst_infos.is_empty() {
+        synthesized = merge_output
             .files_to_add
             .iter()
-            .zip(infos)
-            .map(|(meta, info)| SstFileInfo {
-                sst_info_ref: info,
-                file_meta: meta,
-            })
+            .map(sst_info_from_file_meta)
             .collect();
-        hook.on_sst_files_written(self.region_id, &self.region_metadata, &files)
-            .await;
+        &synthesized
+    } else {
+        // `sst_infos` and `files_to_add` are documented as 1:1. If they
+        // ever diverge, `zip` below would silently truncate; warn so the
+        // mismatch is observable rather than dropping files from the hook.
+        if merge_output.sst_infos.len() != merge_output.files_to_add.len() {
+            warn!(
+                "sst_infos length ({}) does not match files_to_add length ({}) for region {}",
+                merge_output.sst_infos.len(),
+                merge_output.files_to_add.len(),
+                region_id
+            );
+        }
+        &merge_output.sst_infos
+    };
+
+    let files: Vec<SstFileInfo<'_>> = merge_output
+        .files_to_add
+        .iter()
+        .zip(infos)
+        .map(|(meta, info)| SstFileInfo {
+            sst_info_ref: info,
+            file_meta: meta,
+        })
+        .collect();
+    hook.on_sst_files_written(region_id, metadata, &files).await;
+}
+
+impl CompactionContext {
+    /// Rejects missing configured or persisted index handlers before file I/O.
+    /// This check is independent of plan failures: an absent handler produces no plan.
+    fn validate_index_plan<'a>(&self, inputs: impl Iterator<Item = &'a FileHandle>) -> Result<()> {
+        self.index_registry
+            .validate_required_kinds(&self.region_metadata, inputs.map(FileHandle::meta_ref))
+            .with_context(|_| error::ExternalSnafu {
+                context: "compaction index planning".to_string(),
+            })?;
+        Ok(())
+    }
+
+    /// Checks each physical input once before output tasks begin. Missing inputs
+    /// disable imported summaries without changing the reader's tolerant behavior.
+    async fn prepare_index_inputs<'a>(&mut self, inputs: impl Iterator<Item = &'a FileHandle>) {
+        if !self.index_plan.needs_input_reuse()
+            || self
+                .region_metadata
+                .partition_expr
+                .as_deref()
+                .is_some_and(|expr| !expr.is_empty())
+        {
+            return;
+        }
+        let mut seen = HashSet::new();
+        let mut existing = HashSet::new();
+        for input in inputs {
+            let id = input.file_id();
+            if !seen.insert(id) {
+                continue;
+            }
+            let path = crate::sst::location::sst_file_path(
+                self.access_layer.table_dir(),
+                id,
+                self.access_layer.path_type(),
+            );
+            if matches!(
+                self.access_layer.object_store().exists(&path).await,
+                Ok(true)
+            ) {
+                existing.insert(id);
+            }
+        }
+        // FileHandles protect ordinary purge; external object-store deletion can race.
+        self.existing_index_inputs = Some(Arc::new(existing));
+    }
+
+    /// Reports this unit's output metadata before publishing its manifest edit.
+    pub(crate) async fn invoke_sst_hook(&self, merge_output: &MergeOutput) {
+        invoke_sst_hook(
+            &self.plugins,
+            self.region_id,
+            &self.region_metadata,
+            merge_output,
+        )
+        .await;
     }
 
     /// Publishes outputs through the existing manifest validation and hook path.
@@ -589,6 +676,21 @@ fn known_max_input_sequence(inputs: &[FileHandle]) -> Option<NonZeroU64> {
     crate::sst::file::known_max_input_sequence(inputs.iter().map(FileHandle::meta_ref))
 }
 
+/// Whole-input summaries require a complete output without file rollover.
+fn can_reuse_output_inputs(output: &CompactionOutput, has_rollover: bool) -> bool {
+    !has_rollover && output.output_time_range.is_none()
+}
+
+fn reusable_index_inputs(
+    outputs: &[CompactionOutput],
+    has_rollover: bool,
+) -> impl Iterator<Item = &FileHandle> {
+    outputs
+        .iter()
+        .filter(move |output| can_reuse_output_inputs(output, has_rollover))
+        .flat_map(|output| output.inputs.iter())
+}
+
 fn validate_region_compaction_output(region_id: RegionId, output: &CompactionOutput) -> Result<()> {
     ensure!(
         output.output_level < file::LEVEL_SHARED
@@ -645,6 +747,38 @@ impl SstMerger for DefaultSstMerger {
             merge_mode,
             read_parallelism: write_opts.encode_parallelism,
         };
+        // A region filter, rollover or time slice requires output-scoped accumulation.
+        let no_region_filter = context
+            .region_metadata
+            .partition_expr
+            .as_deref()
+            .is_none_or(str::is_empty);
+        let can_merge_inputs = can_reuse_output_inputs(&output, write_opts.max_file_size.is_some())
+            && no_region_filter
+            && context
+                .existing_index_inputs
+                .as_ref()
+                .is_some_and(|existing| {
+                    output
+                        .inputs
+                        .iter()
+                        .all(|input| existing.contains(&input.file_id()))
+                });
+        let index_build_inputs = Some(IndexBuildInputs {
+            output_rows: None,
+            plan: context.index_plan.clone(),
+            memory_limit: None,
+            inputs: if context.index_plan.needs_input_reuse() {
+                output.inputs.clone().into()
+            } else {
+                Arc::from([])
+            },
+            input_puffin_manager: context
+                .access_layer
+                .build_puffin_manager()
+                .with_puffin_metadata_cache(context.cache_manager.puffin_metadata_cache().cloned()),
+            can_merge_inputs,
+        });
         let source = spawn_merge(builder.build_flat_sst_reader().await?);
 
         let mut metrics = Metrics::new(WriteType::Compaction);
@@ -653,7 +787,7 @@ impl SstMerger for DefaultSstMerger {
             .access_layer
             .write_sst(
                 SstWriteRequest {
-                    index_build_inputs: None,
+                    index_build_inputs,
                     op_type: OperationType::Compact,
                     metadata: region_metadata.clone(),
                     source,
@@ -791,6 +925,14 @@ impl<M: SstMerger> DefaultCompactor<M> {
         context: &CompactionContext,
         unit: &CompactionUnit,
     ) -> Result<MergeOutput> {
+        context.validate_index_plan(unit.inputs.iter())?;
+        let mut context = context.clone();
+        context
+            .prepare_index_inputs(reusable_index_inputs(
+                &unit.outputs,
+                unit.max_file_size.is_some(),
+            ))
+            .await;
         let mut result = MergeOutput {
             files_to_remove: unit.inputs.iter().map(|f| f.meta_ref().clone()).collect(),
             compaction_time_window: Some(unit.time_window_size),
@@ -862,7 +1004,19 @@ where
         let internal_parallelism = compaction_region.max_parallelism.max(1);
         let compaction_time_window = picker_output.time_window_size;
         let region_id = compaction_region.region_id;
-        let context = CompactionContext::from(compaction_region);
+        let mut context = CompactionContext::try_from(compaction_region)?;
+        context.validate_index_plan(
+            picker_output
+                .outputs
+                .iter()
+                .flat_map(|output| output.inputs.iter()),
+        )?;
+        context
+            .prepare_index_inputs(reusable_index_inputs(
+                &picker_output.outputs,
+                picker_output.max_file_size.is_some(),
+            ))
+            .await;
 
         // Build tasks along with their input file metas so we can track which
         // inputs correspond to each task.
@@ -986,7 +1140,7 @@ where
         compaction_region: &CompactionRegion,
         merge_output: MergeOutput,
     ) -> Result<(RegionEdit, ManifestVersion)> {
-        CompactionContext::from(compaction_region)
+        CompactionContext::try_from(compaction_region)?
             .update_manifest(merge_output)
             .await
     }
@@ -998,6 +1152,9 @@ mod tests {
     use std::sync::{Arc, Mutex, Weak};
     use std::time::Duration;
 
+    use common_error::ext::BoxedError;
+    use common_time::Timestamp;
+    use common_time::range::TimestampRange;
     use datatypes::arrow::record_batch::RecordBatch;
     use parquet::arrow::ArrowWriter;
     use store_api::storage::{FileId, RegionId};
@@ -1010,6 +1167,10 @@ mod tests {
     use crate::error::Result;
     use crate::sst::file::FileHandle;
     use crate::sst::file_purger::NoopFilePurger;
+    use crate::sst::index::handler::{
+        BuildContext, IndexCreator, IndexKindHandler, IndexKindProvider, PlanEntry, PlannedIndex,
+    };
+    use crate::sst::index::kind::{ExtensionIndexKind, IndexKind};
     use crate::test_util::sst_util::new_record_batch_by_range;
 
     fn dummy_file_meta() -> FileMeta {
@@ -1023,6 +1184,146 @@ mod tests {
 
     fn new_file_handle(meta: FileMeta) -> FileHandle {
         FileHandle::new(meta, Arc::new(NoopFilePurger))
+    }
+
+    #[derive(Debug)]
+    struct InputReusePlan;
+
+    impl IndexKindHandler for InputReusePlan {
+        fn kinds(&self) -> &[IndexKind] {
+            &[IndexKind::Extension(ExtensionIndexKind::Hll)]
+        }
+
+        fn plan(
+            &self,
+            _context: &PlanContext<'_>,
+        ) -> std::result::Result<Option<Arc<dyn PlannedIndex>>, BoxedError> {
+            Ok(Some(Arc::new(Self)))
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl PlannedIndex for InputReusePlan {
+        fn kinds(&self) -> &[IndexKind] {
+            IndexKindHandler::kinds(self)
+        }
+
+        fn entries(&self) -> &[PlanEntry] {
+            &[]
+        }
+
+        fn needs_input_reuse(&self) -> bool {
+            true
+        }
+
+        async fn build(
+            &self,
+            _context: &BuildContext<'_>,
+        ) -> std::result::Result<Option<Box<dyn IndexCreator>>, BoxedError> {
+            Ok(None)
+        }
+
+        fn is_current(&self, _file: &FileMeta, _context: &PlanContext<'_>) -> bool {
+            true
+        }
+    }
+
+    #[derive(Debug)]
+    struct DuplicateIndexProvider;
+
+    impl IndexKindProvider for DuplicateIndexProvider {
+        fn handlers(&self) -> Vec<Arc<dyn IndexKindHandler>> {
+            vec![Arc::new(InputReusePlan), Arc::new(InputReusePlan)]
+        }
+    }
+
+    #[tokio::test]
+    async fn test_context_rejects_duplicate_provider_before_merge() {
+        let region = new_test_compaction_region().await;
+        region
+            .plugins
+            .insert::<IndexKindProviderRef>(Arc::new(DuplicateIndexProvider));
+        assert!(CompactionContext::try_from(&region).is_err());
+    }
+
+    #[test]
+    fn test_reusable_inputs_exclude_sliced_outputs_and_rollover() {
+        let whole = new_file_handle(dummy_file_meta());
+        let sliced = new_file_handle(dummy_file_meta());
+        let outputs = vec![
+            CompactionOutput {
+                output_level: 1,
+                inputs: vec![whole.clone()],
+                filter_deleted: true,
+                output_time_range: None,
+            },
+            CompactionOutput {
+                output_level: 1,
+                inputs: vec![sliced],
+                filter_deleted: false,
+                output_time_range: TimestampRange::new(
+                    Timestamp::new_second(0),
+                    Timestamp::new_second(1),
+                ),
+            },
+        ];
+        assert_eq!(
+            reusable_index_inputs(&outputs, false)
+                .map(FileHandle::file_id)
+                .collect::<Vec<_>>(),
+            vec![whole.file_id()],
+        );
+        assert_eq!(reusable_index_inputs(&outputs, true).count(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_index_input_preparation_tracks_physical_files() {
+        let mut region = new_test_compaction_region().await;
+        Arc::make_mut(&mut region.region_metadata).column_metadatas[0]
+            .column_schema
+            .set_inverted_index(true);
+        let mut context = CompactionContext::try_from(&region).unwrap();
+        assert!(context.existing_index_inputs.is_none());
+        // Builtin plans do not probe physical inputs solely for optional reuse.
+        context.prepare_index_inputs(std::iter::empty()).await;
+        assert!(context.existing_index_inputs.is_none());
+        let mut registry =
+            IndexRegistry::new(Default::default(), Default::default(), Default::default());
+        registry.register(Arc::new(InputReusePlan)).unwrap();
+        context.index_plan = Arc::new(registry.plan(&PlanContext {
+            metadata: &context.region_metadata,
+            index_options: &context.version_options.index_options,
+            build_type: IndexBuildType::Compact,
+            existing_indexes: &[],
+        }));
+        let present = new_file_handle(dummy_file_meta());
+        let missing = new_file_handle(dummy_file_meta());
+        let path = crate::sst::location::sst_file_path(
+            context.access_layer.table_dir(),
+            present.file_id(),
+            context.access_layer.path_type(),
+        );
+        context
+            .access_layer
+            .object_store()
+            .write(&path, vec![1])
+            .await
+            .unwrap();
+        // Duplicate references are checked as one physical input. Only successfully
+        // probed files can contribute imported summaries to an output.
+        context
+            .prepare_index_inputs([&present, &missing, &present].into_iter())
+            .await;
+        assert_eq!(
+            context.existing_index_inputs.as_deref(),
+            Some(&HashSet::from([present.file_id()]))
+        );
+        let prepared = context.clone();
+        assert!(Arc::ptr_eq(
+            context.existing_index_inputs.as_ref().unwrap(),
+            prepared.existing_index_inputs.as_ref().unwrap()
+        ));
+        assert!(Arc::ptr_eq(&context.index_plan, &prepared.index_plan));
     }
 
     #[test]
@@ -1155,8 +1456,10 @@ mod tests {
             for preserve in [false, true] {
                 region.region_options.preserve_row_sequence = preserve;
                 for (inputs, known_bound, inputs_trusted) in &cases {
-                    let metadata =
-                        output_sequence_metadata(&CompactionContext::from(&region), inputs);
+                    let metadata = output_sequence_metadata(
+                        &CompactionContext::try_from(&region).unwrap(),
+                        inputs,
+                    );
                     let trusted = preserve && *inputs_trusted;
                     assert_eq!(trusted, metadata.exact_sequence_trusted);
                     assert_eq!(
@@ -1402,6 +1705,13 @@ mod tests {
             access_layer: region.access_layer.clone(),
             manifest_ctx: region.manifest_ctx.clone(),
             plugins: Plugins::new(),
+            index_plan: Arc::default(),
+            index_registry: Arc::new(IndexRegistry::new(
+                Default::default(),
+                Default::default(),
+                Default::default(),
+            )),
+            existing_index_inputs: None,
         };
         region
             .access_layer
@@ -1489,7 +1799,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_compaction_unit_group_failure_is_atomic() {
-        let context = CompactionContext::from(&new_test_compaction_region().await);
+        let context = CompactionContext::try_from(&new_test_compaction_region().await).unwrap();
         let input = new_file_handle(dummy_file_meta());
         let unit = CompactionUnit::from_picker(PickerOutput {
             outputs: (0..2)
@@ -1532,6 +1842,118 @@ mod tests {
                         .iter()
                         .map(|f| f.file_id)
                         .collect::<Vec<_>>()
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_missing_index_handler_blocks_configured_and_persisted_kinds() {
+        use api::v1::SemanticType;
+        use datatypes::prelude::ConcreteDataType;
+        use datatypes::schema::{
+            ColumnSchema, FulltextOptions, SkippingIndexOptions, SkippingIndexType,
+        };
+        use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder};
+
+        use crate::sst::file::{ColumnIndexMetadata, IndexType};
+
+        #[derive(Debug, PartialEq, Eq)]
+        enum RequiredBy {
+            None,
+            Schema,
+            File,
+            Column,
+        }
+        for required_by in [
+            RequiredBy::None,
+            RequiredBy::Schema,
+            RequiredBy::File,
+            RequiredBy::Column,
+        ] {
+            let mut region = new_test_compaction_region().await;
+            Arc::make_mut(&mut region.region_metadata).column_metadatas[0]
+                .column_schema
+                .set_inverted_index(true);
+            let mut metadata =
+                RegionMetadataBuilder::from_existing((*region.region_metadata).clone());
+            metadata.push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new("text", ConcreteDataType::string_datatype(), true)
+                    .with_fulltext_options(FulltextOptions {
+                        enable: true,
+                        ..Default::default()
+                    })
+                    .unwrap()
+                    .with_skipping_options(SkippingIndexOptions::new_unchecked(
+                        42,
+                        0.01,
+                        SkippingIndexType::BloomFilter,
+                    ))
+                    .unwrap(),
+                semantic_type: SemanticType::Field,
+                column_id: 5,
+            });
+            region.region_metadata = Arc::new(metadata.build().unwrap());
+            let context = CompactionContext::try_from(&region).unwrap();
+            assert_eq!(
+                context
+                    .index_plan
+                    .planned()
+                    .iter()
+                    .flat_map(|plan| plan.kinds().iter().copied())
+                    .collect::<Vec<_>>(),
+                [IndexKind::Inverted, IndexKind::Fulltext, IndexKind::Bloom]
+            );
+            let mut input = dummy_file_meta();
+            match required_by {
+                RequiredBy::Schema => {
+                    Arc::make_mut(&mut region.region_metadata).column_metadatas[0]
+                        .column_schema
+                        .mut_metadata()
+                        .insert(
+                            datatypes::schema::HLL_KEY.into(),
+                            r#"{"precision":10}"#.into(),
+                        );
+                }
+                RequiredBy::File => input.available_indexes.push(IndexType::HllIndex),
+                RequiredBy::Column => input.indexes.push(ColumnIndexMetadata {
+                    column_id: 0,
+                    created_indexes: [IndexType::HllIndex].into_iter().collect(),
+                    ..Default::default()
+                }),
+                _ => {}
+            }
+            let output = PickerOutput {
+                outputs: vec![CompactionOutput {
+                    output_level: 1,
+                    inputs: vec![new_file_handle(input)],
+                    filter_deleted: false,
+                    output_time_range: None,
+                }],
+                ..Default::default()
+            };
+            for local in [false, true] {
+                let merger = MockMerger::new(vec![Ok(Vec::new())]);
+                let calls = merger.call_idx.clone();
+                let compactor = DefaultCompactor::with_merger(merger);
+                let result = if local {
+                    let context = CompactionContext::try_from(&region).unwrap();
+                    let unit = CompactionUnit::from_picker(output.clone())
+                        .unwrap()
+                        .pop()
+                        .unwrap();
+                    compactor.merge_unit(&context, &unit).await
+                } else {
+                    compactor.merge_ssts(&region, output.clone()).await
+                };
+                assert_eq!(
+                    result.is_err(),
+                    required_by != RequiredBy::None,
+                    "{required_by:?}, local={local}"
+                );
+                assert_eq!(
+                    calls.load(Ordering::SeqCst),
+                    usize::from(required_by == RequiredBy::None)
                 );
             }
         }

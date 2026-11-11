@@ -2670,6 +2670,9 @@ mod tests {
         );
         assert!(!first.is_empty());
         assert!(!second.is_empty());
+        // Deferring the built-in indexes must retain the sketch creator.
+        first.abort_builtin_creators().await;
+        assert!(!first.creators.is_empty());
         assert_eq!(first.creators[0].creator.memory_usage(), 17);
         first.abort().await;
         assert!(first.creators.is_empty());

@@ -31,7 +31,7 @@ use crate::compaction::scheduler::{
 };
 use crate::compaction::task::CompactionTask;
 use crate::compaction::unit::CompactionUnit;
-use crate::error::{self, Error};
+use crate::error::{self, Error, Result};
 use crate::metrics::INFLIGHT_COMPACTION_COUNT;
 use crate::region::ManifestContextRef;
 use crate::request::{
@@ -260,7 +260,7 @@ impl CompactionScheduler {
         region: CompactionRegion,
         units: Vec<CompactionUnit>,
         reserved: CompactingFiles,
-    ) -> CompactionPhase {
+    ) -> Result<CompactionPhase> {
         // Memory admission may have removed oversized units from the picker output.
         // Report only the inputs that this local cycle will actually execute.
         if let Some(info) = self
@@ -286,7 +286,7 @@ impl CompactionScheduler {
             made_progress: false,
             cancellation_requested: false,
         };
-        let context = CompactionContext::from(&region);
+        let context = CompactionContext::try_from(&region)?;
         // Planning is complete; unit tasks must not pin the other units' inputs.
         drop(region);
         for unit in units {
@@ -320,7 +320,7 @@ impl CompactionScheduler {
             });
         }
         local.unit_states = local.units.values().cloned().collect();
-        CompactionPhase::Units(local)
+        Ok(CompactionPhase::Units(local))
     }
 
     /// Returns local unit state only while the region is in a local execution phase.

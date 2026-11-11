@@ -629,7 +629,7 @@ impl CompactionScheduler {
             compaction_region,
             units,
             files,
-        )))
+        )?))
     }
 
     fn exceeds_compaction_memory_limit(&self, estimated_bytes: u64) -> Option<u64> {

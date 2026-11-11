@@ -19,6 +19,20 @@ use crate::sst::file::{RegionFileId, RegionIndexId};
 use crate::sst::index::Indexer;
 
 impl Indexer {
+    /// Aborts builtin creators while retaining synchronous extension creators.
+    pub(crate) async fn abort_builtin_creators(&mut self) {
+        self.dense_pk_decoder = None;
+        let mut position = 0;
+        while position < self.creators.len() {
+            if self.creators[position].is_builtin() {
+                self.abort_creator(position).await;
+            } else {
+                position += 1;
+            }
+        }
+        self.flush_mem_metrics();
+    }
+
     pub(crate) async fn abort_creator(&mut self, position: usize) {
         let mut active = self.creators.remove(position);
         if let Err(err) = active.creator.abort().await {

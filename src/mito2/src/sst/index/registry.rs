@@ -19,11 +19,11 @@ use std::sync::Arc;
 
 use common_error::ext::BoxedError;
 use common_telemetry::warn;
-use snafu::IntoError;
+use snafu::{IntoError, ResultExt};
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::RegionId;
 
-use crate::config::{BloomFilterConfig, FulltextIndexConfig, InvertedIndexConfig};
+use crate::config::{BloomFilterConfig, FulltextIndexConfig, InvertedIndexConfig, MitoConfig};
 use crate::error::{Error, ExternalSnafu, InvalidConfigSnafu};
 use crate::metrics::{INDEX_CREATE_DISCARDED_TOTAL, INDEX_DISCARD_ADMISSION_REJECTED};
 use crate::sst::file::{FileMeta, IndexType};
@@ -57,6 +57,22 @@ impl IndexRegistry {
                 Arc::new(BuiltinIndexHandler::Bloom(bloom)),
             ],
         }
+    }
+
+    /// Assembles the configured built-ins and the injected provider.
+    pub(crate) fn from_config(
+        config: &MitoConfig,
+        provider: Option<IndexKindProviderRef>,
+    ) -> crate::error::Result<Self> {
+        Self::new(
+            config.inverted_index.clone(),
+            config.fulltext_index.clone(),
+            config.bloom_filter_index.clone(),
+        )
+        .with_provider(provider)
+        .with_context(|_| ExternalSnafu {
+            context: "registering index handlers".to_string(),
+        })
     }
 
     /// Adds the embedding application's handlers after the built-in configuration.
