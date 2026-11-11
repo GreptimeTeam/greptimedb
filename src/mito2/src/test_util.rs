@@ -540,6 +540,17 @@ impl TestEnv {
         config: MitoConfig,
         log_store: Arc<S>,
     ) -> MitoEngine {
+        self.create_engine_with_log_store_and_plugins(config, log_store, Plugins::new())
+            .await
+    }
+
+    /// Creates a new engine with specific config and plugins on `log_store` under this env.
+    pub(crate) async fn create_engine_with_log_store_and_plugins<S: LogStore>(
+        &mut self,
+        config: MitoConfig,
+        log_store: Arc<S>,
+        plugins: Plugins,
+    ) -> MitoEngine {
         let object_store_manager = Arc::new(self.create_object_store_manager());
         self.object_store_manager = Some(object_store_manager.clone());
 
@@ -552,7 +563,7 @@ impl TestEnv {
             self.schema_metadata_manager.clone(),
             self.file_ref_manager.clone(),
             self.partition_expr_fetcher.clone(),
-            Plugins::new(),
+            plugins,
         )
         .await
         .unwrap()

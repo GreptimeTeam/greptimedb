@@ -1307,7 +1307,8 @@ impl EngineInner {
         scan_region
     }
 
-    /// Converts the [`RegionRole`].
+    /// Converts the [`RegionRole`]. Unlike lease and catchup promotions, a conversion to Leader
+    /// does not check whether the region waits for a reload.
     fn set_region_role(&self, region_id: RegionId, role: RegionRole) -> Result<()> {
         let region = self.find_region(region_id)?;
         region.set_role(role);

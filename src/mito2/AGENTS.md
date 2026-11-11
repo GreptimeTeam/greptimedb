@@ -116,6 +116,10 @@ Tests live next to the code as `*_test.rs` (e.g. `src/mito2/src/engine/flush_tes
   each manifest version has one fixed object name, created conditionally. A late
   create can succeed again once checkpoint cleanup frees the name, so a commit
   checks its result (`ensure_version_not_checkpointed` in `manifest/storage.rs`).
+- In those regions a commit after the region's Leader deadline sends nothing, and a version
+  conflict fences the region (`ManifestContext::fence_for_reload`): no lease or catchup promotes
+  it until the worker swaps in an instance reloaded from the new manifest
+  (`worker/handle_reload.rs`). Never await a worker sender while holding a manifest guard.
 - Pending tails (`RegionManifest::pending_tails`) are WAL ranges a region still has
   to recover; the flushed entry id never prunes them. Opening a region replays its
   WAL after `RegionManifest::wal_replay_start`. The WAL releases at open and after

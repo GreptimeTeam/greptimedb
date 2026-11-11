@@ -486,13 +486,12 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             });
             return;
         }
-        let requires_reopen = edit_result.result.is_err()
-            && region
-                .manifest_ctx
-                .manifest_manager
-                .read()
-                .await
-                .is_stopped();
+        // A region waiting for a reload recovers its files when the reload replaces it. A fence
+        // stops the manager and sets the mark under the manifest lock, so read both under it.
+        let requires_reopen = edit_result.result.is_err() && {
+            let manager = region.manifest_ctx.manifest_manager.read().await;
+            manager.is_stopped() && !region.manifest_ctx.is_reload_pending()
+        };
         if let Err(error) = &edit_result.result
             && requires_reopen
         {
