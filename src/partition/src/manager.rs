@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use api::v1::Rows;
@@ -22,6 +22,9 @@ use common_meta::kv_backend::KvBackendRef;
 use common_meta::peer::Peer;
 use common_meta::rpc::router::{self, RegionRoute};
 use snafu::{OptionExt, ResultExt};
+use store_api::metric_engine_consts::{
+    DATA_SCHEMA_TABLE_ID_COLUMN_NAME, LOGICAL_TABLE_METADATA_KEY, METRIC_ENGINE_NAME,
+};
 use store_api::storage::{RegionId, RegionNumber};
 use table::metadata::{TableId, TableInfo};
 
@@ -192,7 +195,7 @@ impl PartitionRuleManager {
         &self,
         table_info: &TableInfo,
     ) -> Result<(PartitionRuleRef, HashMap<RegionNumber, Option<u64>>)> {
-        let partition_columns = table_info
+        let mut partition_columns = table_info
             .meta
             .partition_column_names()
             .cloned()
@@ -216,6 +219,26 @@ impl PartitionRuleManager {
                     .map(|expr| (partition.id.region_number(), expr.clone()))
             })
             .unzip();
+        // The internal identity is absent from logical schemas created before repartitioning.
+        // Other missing columns must still fail rather than route with an invented NULL.
+        if table_info.meta.engine == METRIC_ENGINE_NAME
+            && table_info
+                .meta
+                .options
+                .extra_options
+                .contains_key(LOGICAL_TABLE_METADATA_KEY)
+            && !partition_columns
+                .iter()
+                .any(|column| column == DATA_SCHEMA_TABLE_ID_COLUMN_NAME)
+        {
+            let mut referenced_columns = HashSet::new();
+            for expr in &exprs {
+                expr.collect_column_names(&mut referenced_columns);
+            }
+            if referenced_columns.contains(DATA_SCHEMA_TABLE_ID_COLUMN_NAME) {
+                partition_columns.push(DATA_SCHEMA_TABLE_ID_COLUMN_NAME.into());
+            }
+        }
         // Empty expressions belong to the default region. Keep it after the
         // explicit regions so expression indices still identify the right region.
         regions.extend(
