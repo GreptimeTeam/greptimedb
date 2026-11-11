@@ -176,7 +176,7 @@ hyper-util = "0.1"
 icu_properties = "2.0.1"
 indicatif = "0.17"
 itertools = "0.14"
-jsonb = { git = "https://github.com/GreptimeTeam/jsonb", rev = "c423d2cccc2c5790b094da77e5289d99f8b12e16", default-features = false, features = [
+jsonb = { git = "https://github.com/GreptimeTeam/jsonb", rev = "5a6472858d860ac034075c17253f41617bdfa956", default-features = false, features = [
     "databend",
 ] }
 lazy_static = "1.4"
