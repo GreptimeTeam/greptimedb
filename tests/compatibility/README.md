@@ -57,6 +57,12 @@ region statistic without pending tails decodes and encodes as before the flag ex
 cargo nextest run -p common-meta -E 'test(test_has_pending_tails_wire)'
 ```
 
+## Metadata fixtures
+
+The [repartition route fixture](metadata/repartition_readiness/README.md) checks
+allocation-time read readiness, old-route defaults, and attribute preservation.
+It is exercised by `common-meta` and query route-cache tests.
+
 ## Object store WAL fixtures
 
 Frozen objects of the object store WAL are checked byte for byte by the format tests of
