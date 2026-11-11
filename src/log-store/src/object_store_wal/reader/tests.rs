@@ -930,6 +930,21 @@ async fn test_chain_object_vanished_at_reclaim_boundary_fails() {
 }
 
 #[tokio::test]
+async fn test_unreadable_object_below_reclaim_boundary_fails() {
+    for upper in both_bounds() {
+        let (store, io, _, reader) = fixture();
+        put_reclaimed_chain(&io).await;
+        // Object 1 is listed in both modes and lies below boundary 2, but a
+        // corrupted header is not a vanished object.
+        let mut bytes = io.get(1).await.unwrap().to_vec();
+        bytes[0] ^= 1;
+        store.write(&io.object_path(1), bytes).await.unwrap();
+        let error = collect(&reader, entry_id(1, 1), upper).await.unwrap_err();
+        assert!(!index::is_not_found(&error), "{upper:?}: {error:?}");
+    }
+}
+
+#[tokio::test]
 async fn test_listed_range_fails_when_later_epoch_object_vanishes() {
     let (_, io, observed, reader) = fixture();
     put(&io, 0, 1, None, 0, &[]).await;
