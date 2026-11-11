@@ -527,8 +527,12 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             .obsolete(region_id, obsolete_entry_id, &region.provider)
             .await
         {
-            error!(e; "Failed to write wal, region: {}", region_id);
-            request.on_failure(e);
+            let err = Arc::new(e);
+            error!(err; "Failed to write wal, region: {}", region_id);
+            request.on_shared_failure(err.clone());
+            // The flush scheduler still tracks the flush, so release it as a failed flush does.
+            self.handle_flush_failed(region_id, FlushFailed { err })
+                .await;
             return;
         }
 

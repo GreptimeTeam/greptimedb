@@ -1182,16 +1182,20 @@ impl FlushFinished {
             sender.send(Ok(0));
         }
     }
-}
 
-impl OnFailure for FlushFinished {
-    fn on_failure(&mut self, err: Error) {
-        let err = Arc::new(err);
+    /// Marks the flush job as failed with an error that other waiters share.
+    pub(crate) fn on_shared_failure(&mut self, err: Arc<Error>) {
         for sender in self.senders.drain(..) {
             sender.send(Err(err.clone()).context(FlushRegionSnafu {
                 region_id: self.region_id,
             }));
         }
+    }
+}
+
+impl OnFailure for FlushFinished {
+    fn on_failure(&mut self, err: Error) {
+        self.on_shared_failure(Arc::new(err));
     }
 }
 
