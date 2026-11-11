@@ -28,7 +28,7 @@ use store_api::storage::ColumnId;
 
 use crate::read::Batch;
 use crate::region::options::IndexOptions;
-use crate::sst::file::{ColumnIndexMetadata, FileHandle, RegionIndexId};
+use crate::sst::file::{ColumnIndexMetadata, FileHandle, FileMeta, RegionIndexId};
 use crate::sst::index::intermediate::IntermediateManager;
 use crate::sst::index::kind::IndexKind;
 use crate::sst::index::puffin_manager::{SstPuffinManager, SstPuffinWriter};
@@ -129,6 +129,10 @@ pub trait PlannedIndex: Send + Sync + Debug {
         &self,
         context: &BuildContext<'_>,
     ) -> Result<Option<Box<dyn IndexCreator>>, BoxedError>;
+
+    /// Whether persisted entries satisfy this plan.
+    /// The context uses the same file's indexes as the planning input.
+    fn is_current(&self, file: &FileMeta, context: &PlanContext<'_>) -> bool;
 
     /// Whether building this plan can reuse persisted input summaries.
     /// Row-only plans do not require checking input object existence.
