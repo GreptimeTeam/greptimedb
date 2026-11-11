@@ -1,0 +1,34 @@
+src/mito2/src/engine/index_build_test.rs
+  h_623774b620da8e 2580-2916
+src/mito2/src/sst/file.rs
+  h_623774b620da8e 425-439
+src/mito2/src/sst/index.rs
+  h_623774b620da8e 66-67,515-528,547,803,964-966,970-977,1003,1006,1009,1022,1028-1049,1056,1058,1061-1068,1070,1072,1075,1083,1100-1105,1107-1109,1113,1115,1118-1123,1126,1128,1133-1140,1143-1179,1277-1279,2213-2219,2343-2349,2584-2618,3298-3302,3359-3370,3504-3654,3657-3721,3735,3745-3754,3759,3761-3785,3798,3801,3811-3888
+src/mito2/src/sst/index/handler.rs
+  h_623774b620da8e 31,92-101,143-145
+src/mito2/src/sst/index/handler/builtin.rs
+  h_623774b620da8e 27,31-33,95-99
+src/mito2/src/sst/index/handler/builtin/bloom.rs
+  h_623774b620da8e 27,29-31,33,111-114
+src/mito2/src/sst/index/handler/builtin/fulltext.rs
+  h_623774b620da8e 27,30-32,34,124-127
+src/mito2/src/sst/index/handler/builtin/inverted.rs
+  h_623774b620da8e 30-33,35,137-140
+src/mito2/src/sst/index/registry.rs
+  h_623774b620da8e 33,281-285,317-325,365-368
+src/mito2/src/test_util.rs
+  h_623774b620da8e 402,440,456-462,836-839,842,844
+src/mito2/src/worker/handle_rebuild_index.rs
+  h_623774b620da8e 22,30-31,39-41,62-63,67,82-100,102,105,247-273,282-286,345-346,503-835
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "1fbee9c81b3cf76f8a0edb5ca9242004d5d3e50d",
+  "prompts": {},
+  "humans": {
+    "h_623774b620da8e": {
+      "author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}
