@@ -325,11 +325,9 @@ impl<S: LogStore> TailReplayTask<S> {
                         "Published the replayed WAL tails of region {region_id} in manifest version {manifest_version}"
                     );
                     self.release_wal().await;
-                    self.notify(BackgroundNotify::TailsCommitted {
-                        region: self.region.clone(),
-                        edit,
-                    })
-                    .await;
+                    let region = self.region.clone();
+                    let notify = BackgroundNotify::TailsCommitted { region, edit };
+                    notify_worker(&self.flush_task.request_sender, region_id, notify).await;
                     return Ok(true);
                 }
                 Ok(TailPublication::Busy) => {}
@@ -399,15 +397,6 @@ impl<S: LogStore> TailReplayTask<S> {
         CancellableFuture::new(tokio::time::sleep(delay), self.state.cancel_handle())
             .await
             .is_ok()
-    }
-
-    async fn notify(&self, notify: BackgroundNotify) {
-        notify_worker(
-            &self.flush_task.request_sender,
-            self.region.region_id,
-            notify,
-        )
-        .await;
     }
 }
 
