@@ -45,8 +45,8 @@ use crate::region::version::VersionControlRef;
 use crate::region::{MitoRegionRef, RegionLeaderState, RegionRoleState};
 use crate::request::{
     BackgroundNotify, BuildIndexRequest, DiscardUnflushedResult, OptionOutputTx,
-    RegionChangeResult, RegionEditRequest, RegionEditResult, RegionSyncRequest, TruncateResult,
-    WorkerRequest, WorkerRequestWithTime,
+    RegionChangeResult, RegionEditKind, RegionEditRequest, RegionEditResult, RegionSyncRequest,
+    TruncateResult, WorkerRequest, WorkerRequestWithTime,
 };
 use crate::sst::index::IndexBuildType;
 use crate::sst::{file, location};
@@ -99,7 +99,11 @@ impl RegionEditQueue {
     }
 
     fn dequeue(&mut self) -> Option<RegionEditRequest> {
-        fn can_merge(edit: &RegionEdit) -> bool {
+        fn can_merge(request: &RegionEditRequest) -> bool {
+            if !matches!(request.kind, RegionEditKind::Import) {
+                return false;
+            }
+            let edit = &request.edit;
             // Only the `RegionEdit`:
             // 1. contains the "raw" (file without a sequence) files to add,
             // 2. and no `committed_sequence`,
@@ -120,14 +124,11 @@ impl RegionEditQueue {
         }
 
         let mut merged = self.requests.pop_front()?;
-        if !can_merge(&merged.edit) {
+        if !can_merge(&merged) {
             return Some(merged);
         }
 
-        while let Some(request) = self
-            .requests
-            .pop_front_if(|request| can_merge(&request.edit))
-        {
+        while let Some(request) = self.requests.pop_front_if(|request| can_merge(request)) {
             merged.edit.files_to_add.extend(request.edit.files_to_add);
             merged.waiters.merge(request.waiters);
         }
@@ -365,12 +366,20 @@ impl<S: LogStore> RegionWorkerLoop<S> {
 
         let RegionEditRequest {
             region_id: _,
+            kind,
             mut edit,
             waiters,
             preload_sst_cache,
             staging_partition_expr: _,
         } = request;
-        if let Err(error) = prepare_region_edit(&region, &mut edit) {
+        #[cfg(feature = "enterprise")]
+        if matches!(kind, RegionEditKind::Compaction(_)) && region.is_staging() {
+            waiters.reply_with(|| RegionBusySnafu { region_id }.fail());
+            return RegionEditDispatch::Rejected;
+        }
+        if matches!(kind, RegionEditKind::Import)
+            && let Err(error) = prepare_region_edit(&region, &mut edit)
+        {
             let error = Arc::new(error);
             waiters.reply_with(|| Err(error.clone()).context(EditRegionSnafu { region_id }));
             return RegionEditDispatch::Rejected;
@@ -399,15 +408,24 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         // Now the region is in editing state.
         // Updates manifest in background.
         common_runtime::spawn_global(async move {
-            let result = edit_region(
-                &region,
-                edit.clone(),
-                cache_manager,
-                listener,
-                is_staging,
-                preload_sst_cache,
-            )
-            .await
+            let result = match kind {
+                RegionEditKind::Import => {
+                    edit_region(
+                        &region,
+                        edit.clone(),
+                        cache_manager,
+                        listener,
+                        is_staging,
+                        preload_sst_cache,
+                    )
+                    .await
+                }
+                #[cfg(feature = "enterprise")]
+                RegionEditKind::Compaction(context) => {
+                    crate::worker::handle_table_compaction::publish(&region, &context, edit.clone())
+                        .await
+                }
+            }
             .map_err(Arc::new);
             let notify = WorkerRequest::Background {
                 region_id,

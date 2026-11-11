@@ -1373,10 +1373,19 @@ impl Waiters {
     }
 }
 
+/// Transient execution semantics; this is never serialized into the manifest.
+#[derive(Debug)]
+pub(crate) enum RegionEditKind {
+    Import,
+    #[cfg(feature = "enterprise")]
+    Compaction(Box<crate::engine::table_compaction::PublicationContext>),
+}
+
 /// Request to edit a region directly.
 #[derive(Debug)]
 pub(crate) struct RegionEditRequest {
     pub(crate) region_id: RegionId,
+    pub(crate) kind: RegionEditKind,
     pub(crate) edit: RegionEdit,
     /// Whether to preload SST files into the write cache.
     pub(crate) preload_sst_cache: bool,
@@ -1398,6 +1407,7 @@ impl RegionEditRequest {
             region_id,
             edit,
             preload_sst_cache,
+            kind: RegionEditKind::Import,
             waiters: Waiters::one(waiter),
             staging_partition_expr: None,
         }

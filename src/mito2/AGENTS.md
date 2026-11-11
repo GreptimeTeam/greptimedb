@@ -25,6 +25,7 @@ snapshot isolation). It implements the `RegionEngine` trait from `store-api`.
 | `flush` | `src/mito2/src/flush.rs` | `FlushScheduler`, `WriteBufferManager`, memtable → SST |
 | `compaction` | `src/mito2/src/compaction/` | Compaction scheduler (`scheduler.rs` + `scheduler/`), TWCS picker, strict-window manual picker, compactor, memory control |
 | `compaction/multi_region` | `src/mito2/src/compaction/multi_region.rs` | Enterprise lossless routing by a captured table partition rule; selected SSTs to per-region outputs, without manifest publication |
+| `engine/table_compaction` | `src/mito2/src/engine/table_compaction.rs` | Enterprise conditional publication of table-compaction results: shared-input snapshot, verified-output checks, and the manifest-locked swap of shared inputs for L0 outputs |
 | `access_layer` | `src/mito2/src/access_layer.rs` | SST read/write over the object store |
 | `sst` | `src/mito2/src/sst/` | Parquet format, file metadata, index layout |
 | `series_index` | `src/mito2/src/series_index/` | Series index writer/searcher, bucket planning, catalogs, worker-owned reconciliation (`maintenance.rs`), shared approximate usage (`task.rs`), catalogs, and index lifecycle |
