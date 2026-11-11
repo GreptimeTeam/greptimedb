@@ -574,16 +574,22 @@ pub fn binary_output_field_kind(
 }
 
 impl NativeNode {
-    /// The kind this node's output field carries, given the kind its input carries.
+    /// The kind this node's output field carries, given the kind its sources carry.
     ///
-    /// `None` means this walk cannot name it: a shape whose samples the model does not describe
-    /// keeps the existing plan rather than declaring a column the first batch might not fill.
-    pub fn output_field_kind(&self, input: FieldKind) -> Option<FieldKind> {
+    /// `None` means this walk cannot name it: either the caller has no kind for the statement's
+    /// sources and this tree reads one, or the shape's samples are ones the model does not describe.
+    /// Both keep the existing plan rather than declaring a column the first batch might not fill.
+    pub fn output_field_kind(&self, input: Option<FieldKind>) -> Option<FieldKind> {
         let kind_of = |node: &NativeNode| node.output_field_kind(input);
         match &self.expr {
-            NativeExpr::Input(_) => Some(input),
-            // `timestamp()` replaces each input sample with its evaluation timestamp as a float.
-            NativeExpr::Timestamp { .. } => Some(FieldKind::Float),
+            NativeExpr::Input(_) => input,
+            // A tree that reads no source answers floats: a constant, the evaluation time, `vector()`
+            // over one of them, and a date function of the evaluation time. None of them carries a
+            // sample kind of its own, so none of them needs the source kind either.
+            NativeExpr::Scalar(_)
+            | NativeExpr::EvalTime { .. }
+            | NativeExpr::VectorOf { .. }
+            | NativeExpr::Timestamp { .. } => Some(FieldKind::Float),
             // The window functions that answer with a histogram are the ones the range kernel says
             // yield one; every other range function reduces its window to a float.
             NativeExpr::Window { input, op } => {
@@ -668,15 +674,27 @@ impl NativeNode {
             // `histogram_quantile` and `histogram_fraction` reduce a histogram to one float per
             // sample whatever their arguments are, constant or per point.
             NativeExpr::ParameterizedHistogram { .. } => Some(FieldKind::Float),
-            // Every aggregate answers floats: `count`/`group` answer a count or a `1` whatever the
-            // samples they counted, `min`/`max`/`stddev`/`stdvar` fold the float samples and skip
-            // the histogram ones, and `sum`/`avg` - the only two that would fold the payload - keep
-            // a histogram out at admission. Naming it here is what lets `sum(count_over_time(h[5m]))`
-            // - a float built from histograms - declare a float column instead of keeping the
-            // existing plan.
-            NativeExpr::Aggregate { .. } => Some(FieldKind::Float),
+            // An aggregate answers the kind its own state carries: `count`/`group` answer a count
+            // or a `1` whatever the samples they counted, `min`/`max`/`stddev`/`stdvar` fold the
+            // float samples and skip the histogram ones, and `sum`/`avg` answer the payload they
+            // folded - a native histogram when their binding is a histogram state, a float
+            // otherwise. Naming it here is what lets `sum(count_over_time(h[5m]))` - a float built
+            // from histograms - declare a float column, and `sum(h)` declare a histogram one.
+            NativeExpr::Aggregate { op, .. } => Some(aggregate_output_kind(op)),
             _ => None,
         }
+    }
+}
+
+/// The kind an aggregate's own output column carries.
+///
+/// It follows the state the aggregate keeps rather than the samples it read, because the two can
+/// differ in both directions: `count` over a histogram answers a float, and so does every aggregate
+/// that skips histogram samples, while `sum`/`avg` over a histogram answer the histogram they folded.
+pub fn aggregate_output_kind(op: &BoundAggregate) -> FieldKind {
+    match aggregate_state_binding(op.kind, op.field_kind) {
+        Some((kind, _)) if kind.is_histogram() => FieldKind::Histogram,
+        _ => FieldKind::Float,
     }
 }
 
@@ -698,14 +716,36 @@ pub struct AggregateStateSchema {
     pub grid: Arc<EvalGrid>,
 }
 
-/// Returns the state type implied by an aggregate, if its kernel has a mergeable state.
+/// Returns the state type implied by an aggregate over an input of `field_kind`, if that state can
+/// be merged across a partition boundary.
 ///
-/// The component list comes from the accumulator implementation rather than a second mapping:
-/// changing a kernel's state fields therefore changes the native binding in lockstep. A quantile
-/// has no partial kernel and cannot be represented by this state family.
-pub(crate) fn aggregate_state_binding(
+/// Two families share this table. A numeric input keeps the components the accumulator kernel
+/// declares, and the component list comes from that kernel rather than a second mapping, so changing
+/// a kernel's state fields changes the native binding in lockstep. A native-histogram input binds
+/// the histogram state of the same aggregate: it carries the payload and the compensation that
+/// belongs to it, plus the evidence a merge of two partitions has to report. A quantile has no
+/// partial kernel at all, whatever it reads.
+pub fn aggregate_state_binding(
     kind: AggregateKind,
+    field_kind: FieldKind,
 ) -> Option<(AggregateStateKind, Vec<StateComponent>)> {
+    if field_kind == FieldKind::Histogram {
+        let state_kind = match kind {
+            AggregateKind::Sum => AggregateStateKind::HistogramSum,
+            AggregateKind::Avg => AggregateStateKind::HistogramAvg,
+            // Every other aggregate folds a float answer out of the samples it reads - a count is a
+            // count whatever it counted, and the extreme and deviation kinds skip a histogram
+            // sample - so a histogram input keeps their numeric state.
+            _ => return float_state_binding(kind),
+        };
+        // The layout is the kind's own canonical list, which is the list its frame accepts.
+        return Some((state_kind, state_kind.components().to_vec()));
+    }
+    float_state_binding(kind)
+}
+
+/// The numeric state one aggregate keeps, from the components its kernel declares.
+fn float_state_binding(kind: AggregateKind) -> Option<(AggregateStateKind, Vec<StateComponent>)> {
     use crate::aggregate::{AggregateOp, StateField};
 
     let (state_kind, op) = match kind {
@@ -924,6 +964,13 @@ pub struct BoundAggregate {
     pub group: Grouping,
     /// Where this aggregate sits in the execution.
     pub stage: AggregateStage,
+    /// The kind the aggregate's direct input answers with, decided where this node was bound.
+    ///
+    /// It is what its state carries: a `sum` or `avg` over native histograms keeps histogram state,
+    /// while the same aggregate over floats keeps numeric components. It is decided from the input's
+    /// own output kind rather than from the source, because an operator between the two can change
+    /// it -- `sum(count_over_time(h[5m]))` aggregates a float built from histograms.
+    pub field_kind: FieldKind,
 }
 
 /// An operator over the whole input vector at each grid point: one that keeps some of the input's
@@ -1674,7 +1721,7 @@ impl NativeNode {
                             "a partial aggregate",
                         )?;
                         let Some((expected_kind, expected_components)) =
-                            aggregate_state_binding(op.kind)
+                            aggregate_state_binding(op.kind, op.field_kind)
                         else {
                             return Err(DataFusionError::NotImplemented(format!(
                                 "aggregate state is not defined for {:?}",
@@ -1715,7 +1762,7 @@ impl NativeNode {
                             )));
                         };
                         let Some((expected_kind, expected_components)) =
-                            aggregate_state_binding(op.kind)
+                            aggregate_state_binding(op.kind, op.field_kind)
                         else {
                             return Err(DataFusionError::NotImplemented(format!(
                                 "aggregate state is not defined for {:?}",

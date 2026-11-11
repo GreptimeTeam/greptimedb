@@ -146,6 +146,7 @@ use datafusion::error::{DataFusionError, Result};
 use datatypes::series::samples::{FieldSpec, SeriesSchema};
 use datatypes::series::time::{EvalGrid, GridSpec};
 use datatypes::series::{SeriesLabels, SeriesOrdering};
+use promql::extension_plan::FieldKind;
 use promql::histogram_eval::{HistogramFunction, NativeHistogramFunction};
 use promql::info::InfoSelector;
 use promql::map::{ArithmeticOp, ComparisonOp, MathOp};
@@ -300,7 +301,16 @@ pub fn compile(
     input: Arc<SeriesSchema>,
     ordering: SeriesOrdering,
 ) -> Result<NativeTree> {
-    let compiled = compile_selectors(stmt, &|_| Ok(Arc::clone(&input)), ordering)?;
+    // This entry describes one float input: it has no way to be told that a field carries native
+    // histograms, so an aggregate whose state would depend on that is bound as the float aggregate it
+    // would be. A caller that does know - the planner, from the table's own fields - binds through
+    // [`compile_selectors`] and passes the kind with it.
+    let compiled = compile_selectors(
+        stmt,
+        &|_| Ok(Arc::clone(&input)),
+        ordering,
+        Some(FieldKind::Float),
+    )?;
     if compiled.inputs.len() != 1 {
         return Err(not_implemented(&format!(
             "`compile` with {} selector inputs; use `compile_selectors` to bind each input",
@@ -387,6 +397,9 @@ pub fn compile_statement(stmt: &EvalStmt) -> Result<NativeTree> {
         },
         SeriesOrdering::Contiguous,
         output_field,
+        // A statement that reads no data has no source to take a kind from. An aggregate over it
+        // still binds: the walk only reads the source kind at an input node, and there is none.
+        None,
     )?;
     Ok(compiled.tree)
 }
@@ -411,6 +424,7 @@ pub(crate) fn compile_statement_with_grid(
         SeriesOrdering::Contiguous,
         output_field,
         Some(grid),
+        None,
     )?;
     Ok(compiled.tree)
 }
@@ -423,8 +437,15 @@ pub fn compile_selectors(
     stmt: &EvalStmt,
     bindings: &dyn Fn(&SelectorRequirement) -> Result<Arc<SeriesSchema>>,
     ordering: SeriesOrdering,
+    source_kind: Option<FieldKind>,
 ) -> Result<CompiledTree> {
-    compile_selectors_with_value_field(stmt, bindings, ordering, Arc::from(VECTOR_FIELD))
+    compile_selectors_with_value_field(
+        stmt,
+        bindings,
+        ordering,
+        Arc::from(VECTOR_FIELD),
+        source_kind,
+    )
 }
 
 /// Compiles `stmt` with an explicit evaluation grid. See [`compile_statement_with_grid`].
@@ -433,6 +454,7 @@ pub(crate) fn compile_selectors_with_grid(
     bindings: &dyn Fn(&SelectorRequirement) -> Result<Arc<SeriesSchema>>,
     ordering: SeriesOrdering,
     grid: Arc<EvalGrid>,
+    source_kind: Option<FieldKind>,
 ) -> Result<CompiledTree> {
     compile_selectors_with_grid_and_value_field(
         stmt,
@@ -440,6 +462,7 @@ pub(crate) fn compile_selectors_with_grid(
         ordering,
         Arc::from(VECTOR_FIELD),
         Some(grid),
+        source_kind,
     )
 }
 
@@ -448,8 +471,16 @@ fn compile_selectors_with_value_field(
     bindings: &dyn Fn(&SelectorRequirement) -> Result<Arc<SeriesSchema>>,
     ordering: SeriesOrdering,
     value_field: Arc<str>,
+    source_kind: Option<FieldKind>,
 ) -> Result<CompiledTree> {
-    compile_selectors_with_grid_and_value_field(stmt, bindings, ordering, value_field, None)
+    compile_selectors_with_grid_and_value_field(
+        stmt,
+        bindings,
+        ordering,
+        value_field,
+        None,
+        source_kind,
+    )
 }
 
 fn compile_selectors_with_grid_and_value_field(
@@ -458,6 +489,7 @@ fn compile_selectors_with_grid_and_value_field(
     ordering: SeriesOrdering,
     value_field: Arc<str>,
     grid: Option<Arc<EvalGrid>>,
+    source_kind: Option<FieldKind>,
 ) -> Result<CompiledTree> {
     if ordering == SeriesOrdering::Interleaved {
         return Err(not_implemented(
@@ -492,6 +524,7 @@ fn compile_selectors_with_grid_and_value_field(
             None => statement_grid(stmt)?,
         },
         value_field,
+        source_kind,
     };
     let tree = NativeTree::try_new(compile_expr(&context, &stmt.expr)?)?;
     let inputs = inputs.into_inner();
@@ -575,6 +608,12 @@ struct Context<'a> {
     inputs: &'a RefCell<Vec<CompiledInput>>,
     grid: Arc<EvalGrid>,
     value_field: Arc<str>,
+    /// The kind the statement's sources carry, when the caller knows it.
+    ///
+    /// A binding whose state depends on it is refused rather than bound from a guess when it is
+    /// unknown: `source_kind` is `None` only for a statement the caller could not describe, and a
+    /// tree with no source never needs it.
+    source_kind: Option<FieldKind>,
 }
 
 /// Compiles `expr` into the node it denotes, recursing into whatever it is made of.
@@ -990,6 +1029,33 @@ fn aggregate_expr(context: &Context, aggregate: &AggregateExpr) -> Result<Native
         }
     };
     let input = compile_expr(context, expr)?;
+    // What the aggregate's state carries is what its direct input answers with, so the binding is
+    // decided here, from the input's own walk, rather than from the statement's sources: an
+    // operator between the two can change the kind (`sum(count_over_time(h[5m]))` folds a float
+    // built from histograms).
+    //
+    // A kind this walk cannot name is not a float by default: the state a `sum` or `avg` keeps over
+    // a histogram is a different layout, so binding one from a guess would compute the wrong thing
+    // for a statement whose sources carry histograms. Such a shape keeps the existing plan (the
+    // refusal is `NotImplemented`).
+    //
+    // With float sources - or with no source at all - an unnameable input is still a float, and the
+    // aggregate binds the numeric state it always did. What makes that a proof rather than a default
+    // is that a native histogram sample can only enter a tree from a source that carries one: every
+    // operator here passes a histogram through, reduces it to a float, or declines the shape. A
+    // shape whose samples this walk does not describe (`clamp`, `topk`, `vector()` of a scalar) can
+    // therefore not be holding one.
+    let field_kind = match input.output_field_kind(context.source_kind) {
+        Some(kind) => kind,
+        None if context.source_kind == Some(FieldKind::Histogram) => {
+            return Err(not_implemented(&format!(
+                "the aggregate `{op}` in `{aggregate}`, whose input's field kind this compile cannot \
+                 name while its sources carry native histograms: the aggregate's state depends on \
+                 whether the input carries floats or histograms"
+            )));
+        }
+        None => FieldKind::Float,
+    };
     // A complete aggregate folds each group's values and reports them on its input's grid, one value
     // per input field, so its layout is its input's.
     let output = input.output.clone();
@@ -1000,6 +1066,7 @@ fn aggregate_expr(context: &Context, aggregate: &AggregateExpr) -> Result<Native
                 kind,
                 group: grouping(modifier.as_ref()),
                 stage: AggregateStage::Complete,
+                field_kind,
             },
         },
         output,
@@ -2094,6 +2161,7 @@ fn subquery_window(
             ordering: context.ordering,
             grid: Arc::clone(&child_grid),
             value_field: Arc::clone(&context.value_field),
+            source_kind: context.source_kind,
         },
         expr,
     )?;
