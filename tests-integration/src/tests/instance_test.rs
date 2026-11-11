@@ -4917,6 +4917,36 @@ async fn test_exemplar_source_identity_policy() {
         .unwrap()
         .table_info();
     assert_ne!(source.table_id(), replacement.table_id());
+    let mut missing_tag_request = request("metric_source");
+    let rows = missing_tag_request.inserts[0].rows.as_mut().unwrap();
+    rows.schema.push(api::v1::helper::tag_column_schema(
+        "new_tag",
+        api::v1::ColumnDataType::String,
+    ));
+    rows.rows[0]
+        .values
+        .push(api::v1::value::ValueData::StringValue("present".into()).into());
+    assert!(
+        frontend
+            .write_exemplars_with_sources(
+                missing_tag_request,
+                QueryContext::arc(),
+                std::slice::from_ref(&source),
+            )
+            .await
+            .is_err()
+    );
+    let after = frontend
+        .catalog_manager()
+        .table(DEFAULT_CATALOG_NAME, "public", "metric_source", None)
+        .await
+        .unwrap()
+        .unwrap()
+        .table_info();
+    assert_eq!(
+        replacement, after,
+        "reconciliation must not alter a replacement table"
+    );
     frontend
         .write_exemplars_with_sources(
             request("metric_source"),
@@ -5363,6 +5393,148 @@ async fn create_exemplar_source(frontend: &Arc<Instance>, schema: &str, name: &s
     )).await;
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn test_exemplar_source_tag_reconciliation() {
+    use std::collections::BTreeMap;
+
+    use servers::exemplar::query::Query;
+    use servers::exemplar::{Exemplar, into_rows};
+    use servers::prometheus_handler::PrometheusHandler;
+    use servers::query_handler::PromStoreProtocolHandler;
+    use table::requests::AUTO_CREATE_TABLE_KEY;
+
+    use crate::standalone::GreptimeDbStandaloneBuilder;
+
+    let instance = GreptimeDbStandaloneBuilder::new("exemplar_source_tags")
+        .build()
+        .await;
+    let frontend = instance.fe_instance();
+    for name in ["first", "second"] {
+        create_exemplar_source(frontend, "public", name).await;
+    }
+    let exemplar = |metric: &str, tag: &str, value: &str| Exemplar {
+        metric: metric.into(),
+        series_labels: BTreeMap::from([(tag.into(), value.into())]).into(),
+        timestamp: 1,
+        value: 1.0,
+        labels: BTreeMap::from([("trace_id".into(), "trace".into())]),
+    };
+    let exemplars = vec![
+        exemplar("first", "first_only", ""),
+        exemplar("second", "second_only", "present"),
+        exemplar("first", "later", "present"),
+    ];
+    frontend
+        .write_exemplars_prepared(into_rows(exemplars.clone()).unwrap().0, QueryContext::arc())
+        .await
+        .unwrap();
+    for (name, expected) in [
+        ("first", vec!["first_only", "later"]),
+        ("second", vec!["second_only"]),
+    ] {
+        let info = frontend
+            .catalog_manager()
+            .table("greptime", "public", name, None)
+            .await
+            .unwrap()
+            .unwrap()
+            .table_info();
+        let tags = info
+            .meta
+            .primary_key_indices
+            .iter()
+            .map(|&index| info.meta.schema.column_schemas()[index].name.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(tags, expected);
+        assert!(info.meta.schema.column_schema_by_name("trace_id").is_none());
+        let output = execute_sql(frontend, &format!("SELECT COUNT(*) FROM {name}")).await;
+        check_output_stream(
+            output.data,
+            "+----------+\n| count(*) |\n+----------+\n| 0        |\n+----------+",
+        )
+        .await;
+    }
+    let query = || Query::parse("first + second".into(), "0", "1", "public").unwrap();
+    let before = frontend
+        .query_exemplars(query(), QueryContext::arc())
+        .await
+        .unwrap();
+    assert_eq!(before.len(), 3);
+    for exemplar in &exemplars {
+        let mut expected = (*exemplar.series_labels).clone();
+        expected.insert("__name__".into(), exemplar.metric.to_string());
+        assert!(before.iter().any(|series| series.series_labels == expected));
+    }
+
+    // Disabled automatic DDL and malformed values must not add source tags.
+    let source = frontend
+        .catalog_manager()
+        .table("greptime", "public", "first", None)
+        .await
+        .unwrap()
+        .unwrap()
+        .table_info();
+    let mut ctx = QueryContext::arc().fork();
+    ctx.set_extension(AUTO_CREATE_TABLE_KEY, "false");
+    let blocked = into_rows(vec![exemplar("first", "blocked", "present")])
+        .unwrap()
+        .0;
+    assert!(
+        frontend
+            .write_exemplars_prepared(blocked.clone(), Arc::new(ctx))
+            .await
+            .is_err()
+    );
+    let mut malformed = blocked;
+    let rows = malformed.inserts[0].rows.as_mut().unwrap();
+    let index = rows
+        .schema
+        .iter()
+        .position(|c| c.column_name == "blocked")
+        .unwrap();
+    rows.rows[0].values[index] = api::v1::value::ValueData::F64Value(1.0).into();
+    assert!(
+        frontend
+            .write_exemplars_prepared(malformed, QueryContext::arc())
+            .await
+            .is_err()
+    );
+    let after = frontend
+        .catalog_manager()
+        .table("greptime", "public", "first", None)
+        .await
+        .unwrap()
+        .unwrap()
+        .table_info();
+    assert_eq!(source, after);
+
+    execute_sql(frontend, "CREATE TABLE conflict_physical (ts TIMESTAMP TIME INDEX, occupied_field DOUBLE) ENGINE=metric WITH ('physical_metric_table'='')").await;
+    execute_sql(frontend, "CREATE TABLE conflicting_source (ts TIMESTAMP TIME INDEX, occupied_field DOUBLE) ENGINE=metric WITH ('on_physical_table'='conflict_physical')").await;
+    let request = into_rows(vec![exemplar(
+        "conflicting_source",
+        "occupied_field",
+        "present",
+    )])
+    .unwrap()
+    .0;
+    let error = frontend
+        .write_exemplars_prepared(request, QueryContext::arc())
+        .await
+        .unwrap_err();
+    assert!(
+        error.output_msg().contains("must be a string tag"),
+        "{error}"
+    );
+    // Current logical schemas cannot establish coverage of historical exemplar tags.
+    execute_sql(frontend, "DROP TABLE first").await;
+    create_exemplar_source(frontend, "public", "first").await;
+    let after = frontend
+        .query_exemplars(query(), QueryContext::arc())
+        .await
+        .unwrap();
+    assert_eq!(before, after);
+}
+
 #[rstest]
 #[case::standalone(false, false, false, false)]
 #[case::standalone_batched(false, true, false, false)]
@@ -5566,31 +5738,96 @@ async fn exemplar_protocol_storage_lifecycle(distributed: bool, batching: bool, 
         .await
         .unwrap();
     let status = response.status();
-    assert_eq!(
-        response
-            .headers()
-            .get("x-prometheus-remote-write-exemplars-written")
-            .unwrap(),
-        "1"
-    );
-    assert_eq!(
-        response
-            .headers()
-            .get("x-prometheus-remote-write-samples-written")
-            .unwrap(),
-        "0"
-    );
+    let headers = response.headers().clone();
     assert_eq!(
         status,
         204,
         "{:?}",
         to_bytes(response.into_body(), usize::MAX).await.unwrap()
     );
+    assert_eq!(
+        headers
+            .get("x-prometheus-remote-write-exemplars-written")
+            .unwrap(),
+        "1"
+    );
+    assert_eq!(
+        headers
+            .get("x-prometheus-remote-write-samples-written")
+            .unwrap(),
+        "0"
+    );
     let output = execute_sql(
         &context.frontend(),
         "SELECT COUNT(*) FROM retained_exemplar",
     )
     .await;
+    check_output_stream(
+        output.data,
+        "+----------+\n| count(*) |\n+----------+\n| 0        |\n+----------+",
+    )
+    .await;
+
+    let source = context
+        .frontend()
+        .catalog_manager()
+        .table("greptime", "public", "retained_exemplar", None)
+        .await
+        .unwrap()
+        .unwrap()
+        .table_info();
+    assert!(source.meta.schema.column_schema_by_name("zone").is_some());
+    create_exemplar_source(&context.frontend(), "public", "v1_exemplar_only").await;
+    let request = WriteRequest {
+        timeseries: vec![TimeSeries {
+            labels: vec![
+                Label {
+                    name: "__name__".into(),
+                    value: "v1_exemplar_only".into(),
+                },
+                Label {
+                    name: "v1_tag".into(),
+                    value: "present".into(),
+                },
+            ],
+            exemplars: vec![Exemplar {
+                timestamp: 1720000000124,
+                value: 2.0,
+                ..Default::default()
+            }],
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    let response = app
+        .clone()
+        .oneshot(
+            Request::post("/v1/prometheus/write")
+                .header("Content-Encoding", "snappy")
+                .header("Content-Type", "application/x-protobuf")
+                .body(Body::from(
+                    snappy_compress(&request.encode_to_vec()).unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        response.status(),
+        204,
+        "{:?}",
+        to_bytes(response.into_body(), usize::MAX).await.unwrap()
+    );
+    let source = context
+        .frontend()
+        .catalog_manager()
+        .table("greptime", "public", "v1_exemplar_only", None)
+        .await
+        .unwrap()
+        .unwrap()
+        .table_info();
+    assert!(source.meta.schema.column_schema_by_name("v1_tag").is_some());
+    let output = execute_sql(&context.frontend(), "SELECT COUNT(*) FROM v1_exemplar_only").await;
     check_output_stream(
         output.data,
         "+----------+\n| count(*) |\n+----------+\n| 0        |\n+----------+",
@@ -5966,6 +6203,14 @@ async fn test_exemplar_concurrent_ddl_and_precreated_contract() {
         .table_info();
     assert_eq!(info.meta.primary_key_indices.len(), 12);
     operator::insert::validate_exemplar_table(&info).unwrap();
+    let source = frontend
+        .catalog_manager()
+        .table("greptime", "public", "concurrent", None)
+        .await
+        .unwrap()
+        .unwrap()
+        .table_info();
+    assert_eq!(source.meta.primary_key_indices.len(), 9);
     let response = frontend
         .query_exemplars(
             Query::parse("concurrent".into(), "0", "1", "public").unwrap(),
@@ -6012,6 +6257,17 @@ async fn test_exemplar_concurrent_ddl_and_precreated_contract() {
             .unwrap()
             .table_info();
         assert_eq!(before, after, "incompatible table must not be altered");
+        let source_after = frontend
+            .catalog_manager()
+            .table("greptime", "public", "concurrent", None)
+            .await
+            .unwrap()
+            .unwrap()
+            .table_info();
+        assert_eq!(
+            source, source_after,
+            "incompatible destination must not alter sources"
+        );
     }
 
     let disabled = GreptimeDbStandaloneBuilder::new("exemplar_disabled_ddl")
@@ -6034,6 +6290,14 @@ async fn test_exemplar_concurrent_ddl_and_precreated_contract() {
             .unwrap()
             .is_none()
     );
+    let source = frontend
+        .catalog_manager()
+        .table("greptime", "public", "concurrent", None)
+        .await
+        .unwrap()
+        .unwrap()
+        .table_info();
+    assert!(source.meta.primary_key_indices.is_empty());
 }
 
 #[rstest]

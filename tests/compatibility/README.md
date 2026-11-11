@@ -15,6 +15,18 @@ read-preference defaulting and unrelated metadata preservation:
 cargo nextest run -p session -E 'test(test_legacy_query_context_wire_defaults_to_leader)'
 ```
 
+The same legacy fixture also checks that logical ALTER requests without pinned
+table IDs retain their original behavior, and that new pinned IDs survive the
+query-context protobuf conversion:
+
+```shell
+cargo nextest run -p common-meta -E 'test(test_pinned_logical_table_ids_wire_compatibility)'
+```
+
+The ID guard requires an updated metasrv; older metasrvs ignore the new internal
+extension. Update metasrv before enabling exemplar source-schema reconciliation
+on frontends. No procedure-state or protobuf fields are added.
+
 The [native histogram Remote Read fixture](wire/native_histogram_remote_read/README.md)
 checks the sampled encoder against independent Prometheus protobuf values,
 including exact integer counts, custom bounds, and NaN payloads:
