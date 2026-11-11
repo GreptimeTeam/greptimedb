@@ -228,7 +228,28 @@ pub enum WriteRoutePolicy {
     IgnoreAllWrites,
 }
 
+// Presence, rather than the value, hides a newly allocated repartition target.
+const REPARTITION_PENDING_READ: &str = "greptime:repartition-pending-read";
+
 impl RegionRoute {
+    /// Whether allocation has published this target before its logical regions are ready.
+    /// Old routes without this attribute remain readable. Unknown values also remain hidden.
+    pub fn is_repartition_pending_read(&self) -> bool {
+        self.region.attrs.contains_key(REPARTITION_PENDING_READ)
+    }
+
+    /// Hides a newly allocated target until its logical regions have been synchronized.
+    pub fn set_repartition_pending_read(&mut self) {
+        self.region
+            .attrs
+            .insert(REPARTITION_PENDING_READ.to_string(), "true".to_string());
+    }
+
+    /// Makes a prepared target available to query planning.
+    pub fn clear_repartition_pending_read(&mut self) {
+        self.region.attrs.remove(REPARTITION_PENDING_READ);
+    }
+
     /// Returns true if the region should ignore all writes.
     pub fn is_ignore_all_writes(&self) -> bool {
         matches!(
@@ -440,6 +461,47 @@ where
 mod tests {
     use super::*;
     use crate::key::RegionRoleSet;
+
+    #[test]
+    fn test_repartition_pending_read_route_roundtrip() {
+        let fixture = include_bytes!(
+            "../../../../../tests/compatibility/metadata/repartition_readiness/route.json"
+        );
+        let frozen: RegionRoute = serde_json::from_slice(fixture).unwrap();
+        assert!(frozen.is_repartition_pending_read());
+        assert_eq!(frozen.region.id, RegionId::new(1, 2));
+        assert_eq!(frozen.region.attrs.get("unrelated").unwrap(), "retained");
+        assert_eq!(
+            serde_json::from_slice::<RegionRoute>(&serde_json::to_vec(&frozen).unwrap()).unwrap(),
+            frozen
+        );
+        let mut route = new_test_region_route(RegionId::new(1, 2));
+        assert!(!route.is_repartition_pending_read());
+        let legacy = serde_json::to_vec(&route).unwrap();
+        assert!(
+            !serde_json::from_slice::<RegionRoute>(&legacy)
+                .unwrap()
+                .is_repartition_pending_read()
+        );
+        route.set_repartition_pending_read();
+        route
+            .region
+            .attrs
+            .insert("other".into(), "preserved".into());
+        let encoded = serde_json::to_vec(&route).unwrap();
+        let mut decoded: RegionRoute = serde_json::from_slice(&encoded).unwrap();
+        assert_eq!(decoded, route);
+        assert!(decoded.is_repartition_pending_read());
+        decoded
+            .region
+            .attrs
+            .insert(REPARTITION_PENDING_READ.into(), "future-value".into());
+        assert!(decoded.is_repartition_pending_read());
+        decoded.clear_repartition_pending_read();
+        decoded.clear_repartition_pending_read();
+        assert!(!decoded.is_repartition_pending_read());
+        assert_eq!(decoded.region.attrs.get("other").unwrap(), "preserved");
+    }
 
     fn new_test_region_route(region_id: RegionId) -> RegionRoute {
         RegionRoute {

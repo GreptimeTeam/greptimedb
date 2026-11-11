@@ -120,6 +120,30 @@ impl PartitionRuleManager {
         }
     }
 
+    /// Resolves a query route, refreshing allocation-time snapshots from metadata.
+    /// Cache invalidation is broadcast without a processing acknowledgment, so a
+    /// cached pending target must not stay hidden after synchronization completes.
+    pub async fn find_physical_read_route_with_id(
+        &self,
+        table_id: TableId,
+    ) -> Result<(TableId, Arc<PhysicalTableRouteValue>)> {
+        let (physical_id, route) = self.find_physical_table_route_with_id(table_id).await?;
+        if route
+            .region_routes
+            .iter()
+            .any(|route| route.is_repartition_pending_read())
+        {
+            let (physical_id, route) = self
+                .table_route_manager
+                .get_physical_table_route(physical_id)
+                .await
+                .context(error::TableRouteManagerSnafu)?;
+            Ok((physical_id, Arc::new(route)))
+        } else {
+            Ok((physical_id, route))
+        }
+    }
+
     pub async fn batch_find_region_routes(
         &self,
         table_ids: &[TableId],

@@ -316,7 +316,11 @@ impl AllocateRegion {
         let mut new_region_routes = region_routes.to_vec();
         for new_allocated_region_id in new_allocated_region_ids {
             if !region_ids.contains(&new_allocated_region_id.region.id) {
-                new_region_routes.push(new_allocated_region_id.clone());
+                // Physical allocation precedes metric logical-region synchronization.
+                // Keep the old sources readable until the group has prepared its targets.
+                let mut route = new_allocated_region_id.clone();
+                route.set_repartition_pending_read();
+                new_region_routes.push(route);
             }
         }
         new_region_routes
@@ -630,6 +634,36 @@ mod tests {
         TestingEnv, current_parent_region_routes, new_parent_context, range_expr,
         test_region_wal_options,
     };
+
+    #[test]
+    fn test_allocate_routes_hide_only_new_targets_and_resume_preserves_state() {
+        let source = RegionRoute {
+            region: common_meta::rpc::router::Region::new_test(RegionId::new(1, 0)),
+            ..Default::default()
+        };
+        let target = RegionRoute {
+            region: common_meta::rpc::router::Region::new_test(RegionId::new(1, 1)),
+            ..Default::default()
+        };
+        let allocated = AllocateRegion::generate_region_routes(
+            std::slice::from_ref(&source),
+            std::slice::from_ref(&target),
+        );
+        assert_eq!(allocated[0], source);
+        assert!(allocated[1].is_repartition_pending_read());
+        let restored: Vec<RegionRoute> =
+            serde_json::from_slice(&serde_json::to_vec(&allocated).unwrap()).unwrap();
+        assert_eq!(
+            AllocateRegion::generate_region_routes(&restored, std::slice::from_ref(&target)),
+            allocated
+        );
+        let mut prepared = restored;
+        prepared[1].clear_repartition_pending_read();
+        assert_eq!(
+            AllocateRegion::generate_region_routes(&prepared, &[target]),
+            prepared
+        );
+    }
 
     fn create_region_descriptor(
         table_id: TableId,
