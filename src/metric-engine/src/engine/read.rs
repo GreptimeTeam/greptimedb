@@ -15,6 +15,8 @@
 use std::sync::Arc;
 
 use api::v1::SemanticType;
+use common_error::ext::{BoxedError, PlainError};
+use common_error::status_code::StatusCode;
 use common_telemetry::{debug, error, tracing};
 use datafusion::common::ScalarValue;
 use datafusion::logical_expr::{self, Expr, Operator};
@@ -22,15 +24,59 @@ use snafu::{OptionExt, ResultExt};
 use store_api::metadata::{RegionMetadataBuilder, RegionMetadataRef};
 use store_api::metric_engine_consts::DATA_SCHEMA_TABLE_ID_COLUMN_NAME;
 use store_api::region_engine::{RegionEngine, RegionScannerRef};
+use store_api::sketch::{SketchReader, SketchRequest, SketchResponse};
 use store_api::storage::{RegionId, ScanRequest, SequenceNumber};
 
-use crate::engine::MetricEngineInner;
+use crate::engine::{MetricEngine, MetricEngineInner};
 use crate::error::{
     InvalidMetadataSnafu, InvalidRequestSnafu, LogicalRegionNotFoundSnafu, MitoReadOperationSnafu,
     Result,
 };
 use crate::metrics::MITO_OPERATION_ELAPSED;
 use crate::utils;
+
+#[async_trait::async_trait]
+impl SketchReader for MetricEngine {
+    async fn stat(
+        &self,
+        region_id: RegionId,
+        request: SketchRequest,
+    ) -> std::result::Result<SketchResponse, BoxedError> {
+        self.physical_sketch_reader(region_id)?
+            .stat(utils::to_data_region_id(region_id), request)
+            .await
+    }
+
+    async fn query(
+        &self,
+        region_id: RegionId,
+        request: SketchRequest,
+    ) -> std::result::Result<SketchResponse, BoxedError> {
+        self.physical_sketch_reader(region_id)?
+            .query(utils::to_data_region_id(region_id), request)
+            .await
+    }
+}
+
+impl MetricEngine {
+    fn physical_sketch_reader(
+        &self,
+        region_id: RegionId,
+    ) -> std::result::Result<&dyn SketchReader, BoxedError> {
+        if !self.inner.is_physical_region(region_id) {
+            return Err(BoxedError::new(PlainError::new(
+                "sketch reads require a physical metric region".to_string(),
+                StatusCode::Unsupported,
+            )));
+        }
+        self.inner.mito.sketch_reader().ok_or_else(|| {
+            BoxedError::new(PlainError::new(
+                "sketch reader is unavailable".to_string(),
+                StatusCode::Unsupported,
+            ))
+        })
+    }
+}
 
 impl MetricEngineInner {
     #[tracing::instrument(skip_all)]
