@@ -46,6 +46,26 @@ pub enum SketchQuery {
     Rank { value: Value },
 }
 
+/// Uniform sampling of physical files, without replacement, before index I/O.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SketchSampling {
+    pub max_files: u32,
+    /// Stable seed shared by coverage and value requests.
+    pub seed: u64,
+}
+
+/// File sample identity and unscaled row diagnostics for the requested window.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SketchSample {
+    pub candidate_files: u64,
+    pub sampled_files: u64,
+    /// Identifies the selected immutable index generations.
+    pub fingerprint: u64,
+    /// Sum of squared per-file represented row counts, including zero contributions.
+    pub rows_squared_sum: f64,
+    pub max_file_rows: u64,
+}
+
 /// Selects whole time buckets inside a required range. The implementation validates request limits.
 /// A whole bucket may still have missing file statistics, reported separately in its coverage.
 #[derive(Debug, Clone, PartialEq)]
@@ -55,6 +75,8 @@ pub struct SketchRequest {
     pub columns: Vec<String>,
     /// Operations applied to each selected column.
     pub queries: Vec<SketchQuery>,
+    /// Absent means inspect all candidate files. Missing sampled files are never replaced.
+    pub sampling: Option<SketchSampling>,
 }
 
 impl SketchRequest {
@@ -63,6 +85,8 @@ impl SketchRequest {
     pub fn validate(&self) -> Result<(), BoxedError> {
         let reason = if self.time_range.start >= self.time_range.end {
             Some("sketch time range must have start before end")
+        } else if self.sampling.is_some_and(|sampling| !(1..=100_000).contains(&sampling.max_files)) {
+            Some("sketch sample file limit must be in 1..=100000")
         } else if self.columns.is_empty() {
             Some("sketch request must select at least one column")
         } else if self.queries.is_empty() {
@@ -171,6 +195,8 @@ pub struct SketchResponse {
     /// One result per requested column and operation.
     /// In request column order, then query order within each column.
     pub results: Vec<ColumnSketchResult>,
+    /// Present when sampling was requested; estimates and represented rows remain unscaled.
+    pub sample: Option<SketchSample>,
 }
 
 /// Optional engine capability for reading persisted sketches. Each call takes its own snapshot.
@@ -205,6 +231,19 @@ mod tests {
             },
             columns: vec!["value".to_string()],
             queries: vec![SketchQuery::DistinctCount],
+            sampling: None,
+        }
+    }
+
+    #[test]
+    fn test_validate_sampling_limit() {
+        for (max_files, valid) in [(0, false), (1, true), (100_000, true), (100_001, false)] {
+            let mut request = request();
+            request.sampling = Some(SketchSampling {
+                max_files,
+                seed: 42,
+            });
+            assert_eq!(request.validate().is_ok(), valid, "{max_files}");
         }
     }
 
