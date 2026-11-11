@@ -1,0 +1,51 @@
+src/mito2/src/sst/index/handler/builtin.rs
+  h_623774b620da8e 27,93-94
+  s_c06578f466c2ea::t_9b0293fa044b90 95-97
+src/mito2/src/test_util.rs
+  h_623774b620da8e 402,440,456-462,836-839,842,844
+src/mito2/src/worker/handle_rebuild_index.rs
+  h_623774b620da8e 22,30-31,39-41,62-63,67,82-90,92-100,102,105,259-277,515-814
+  s_c06578f466c2ea::t_99be5c0103234d 46,131-142,286-290,349-350,508-514
+src/mito2/src/sst/index/handler.rs
+  h_623774b620da8e 31,133
+  s_c06578f466c2ea::t_d211545c9cdcd0 134-136
+src/mito2/src/sst/index/handler/builtin/fulltext.rs
+  h_623774b620da8e 27,30-32,124-125
+  s_c06578f466c2ea::t_e900f38642b546 126-127
+src/mito2/src/sst/index/registry.rs
+  h_623774b620da8e 297-300,333-339,381-382
+  s_c06578f466c2ea::t_1faebb0650e5dc 301,340-341,383-384
+src/mito2/src/sst/index.rs
+  h_623774b620da8e 66-67,515-528,547,803,965-966,971-977,1030-1041,1043-1047,1058-1059,1061-1064,1078,1081-1089,1109-1110,1127,1130,1135,1142,1149-1156,1159-1180,1182-1192,2354,2589,3307-3310,3368-3378,3601-3687,3707-3856,3861-3924,3949-3957,3965-3988,4015-4091
+  s_c06578f466c2ea::t_b881cd8786dd53 804,967,978,1004,1007,1010,1023,1029,1053,1055,1065,1067,1069,1080,1106,1108,1133,1140-1141,1145-1148,1157-1158,1181,1290-1292,2226-2228,2352-2353,2590-2623,3306,3367,3857,3860,3938,3948,3962,3964,4001,4004,4014
+  s_c06578f466c2ea::t_a48c5569f1be4f 1072,1090-1092,1114-1126,3688-3706
+src/mito2/src/sst/index/handler/builtin/bloom.rs
+  h_623774b620da8e 27,29-31,111-112
+  s_c06578f466c2ea::t_3b13c80138d9cf 113-114
+src/mito2/src/sst/index/handler/builtin/inverted.rs
+  h_623774b620da8e 30-33,137-138
+  s_c06578f466c2ea::t_c969f05b68ddd8 139-140
+src/mito2/src/engine/index_build_test.rs
+  s_c06578f466c2ea::t_dfe27540052b44 19,25,27,34,37,54,56-63,2591-2594,2598-2628,2634-2645,2650-2664,2675-2710,2715-2720,2722-2748,2752-2763,2856,3116-3263
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "8da15a13ab70b6a2f0437f178b0c7307dcafe470",
+  "prompts": {},
+  "humans": {
+    "h_623774b620da8e": {
+      "author": "WenyXu <wenymedia@gmail.com>"
+    }
+  },
+  "sessions": {
+    "s_c06578f466c2ea": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1c374-3547-7b31-9c5c-4ab96c5f5115",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}
