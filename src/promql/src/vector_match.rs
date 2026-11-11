@@ -1524,6 +1524,9 @@ fn group_presence(
 /// The merge is one phase, entered from the results the fields filed: the triples it groups, the
 /// table it groups them in and the builder's own buffers. Its columns are reserved once per result
 /// series, before the series pushes its first row, rather than once per row.
+///
+/// The phase figure is entered here, before either merge runs, so both are charged the same bytes
+/// and neither can allocate before it is admitted.
 fn merge_fields(
     fields: Vec<Results>,
     schema: Arc<SeriesSchema>,
@@ -1545,6 +1548,24 @@ fn merge_fields(
         }
         budget.phase(merge_bytes(merge.0, sets, width, merge.1, merge.2))?;
     }
+    // One field of one result table is the whole merge, so its rows are written out as they are
+    // read; every other shape keeps the merge that groups, sorts and fills rows.
+    if width == 1 && fields.len() == 1 {
+        return merge_single_field(fields, schema, budget);
+    }
+    merge_multi_field(fields, schema, budget)
+}
+
+/// The merge of every field's results into one series per label set: the `(point, field, value)`
+/// triples of a label set, sorted and filled into a row the builder writes one value per point.
+///
+/// The phase the two merges share is entered by [`merge_fields`], before this runs.
+fn merge_multi_field(
+    fields: Vec<Results>,
+    schema: Arc<SeriesSchema>,
+    mut budget: Option<&mut Budget<'_>>,
+) -> Result<Vec<Series>> {
+    let width = schema.fields.len();
     // Per label set: the metric and its `(point, field, value)` samples.
     type Merged = (SeriesLabels, Vec<(usize, usize, GridSample)>);
     let mut merged: HashMap<GroupKey, Merged> = HashMap::new();
@@ -1587,22 +1608,79 @@ fn merge_fields(
     Ok(output)
 }
 
+/// The one-field shape's merge: the label set's rows written out as they are read.
+///
+/// A merge of one field has nothing to merge. The field filed each label set's rows already sorted
+/// by point and already proven to hold one row per point -- the field's own sort reports two rows at
+/// one point as an error, which is reported before the merge runs -- so the series is its rows: no
+/// triples table, no sort and no row buffer, one single-value row per kept sample. A sample the
+/// operator filtered (`None`) writes no row, exactly as in [`merge_multi_field`], and a label set
+/// whose samples were all filtered finishes as no series at all.
+///
+/// The rows it keeps are charged the figure [`merge_multi_field`] charges for the same samples, so
+/// the two merges bill a one-field result the same. The order the series are handed out in is not
+/// guaranteed -- label sets are read from a hash map, as in [`merge_multi_field`] -- so no result is
+/// defined by it.
+fn merge_single_field(
+    fields: Vec<Results>,
+    schema: Arc<SeriesSchema>,
+    mut budget: Option<&mut Budget<'_>>,
+) -> Result<Vec<Series>> {
+    let mut builder = GridSeriesBuilder::try_new(schema)?;
+    let series = fields.iter().map(|results| results.series.len()).sum();
+    let mut output = Vec::with_capacity(series);
+    for results in fields {
+        for (_, rows) in results.series {
+            // One builder serves every label set, so each result series starts explicitly.
+            builder.begin_series();
+            // This series' columns, in one reservation before it writes the first row of them: the
+            // points of the samples it keeps, which are the rows the builder writes, counted in the
+            // one walk it already takes over them.
+            if let Some(budget) = budget.as_deref_mut() {
+                budget.grow(merge_series_columns_of(
+                    rows.points
+                        .iter()
+                        .zip(&rows.values)
+                        .filter(|(_, value)| value.is_some())
+                        .map(|(point, _)| *point),
+                    1,
+                ))?;
+            }
+            for (&point, value) in rows.points.iter().zip(&rows.values) {
+                if value.is_some() {
+                    // A one-field row is the sample itself, borrowed rather than built.
+                    builder.push_samples(point, std::slice::from_ref(value))?;
+                }
+            }
+            output.extend(builder.finish(rows.metric)?);
+        }
+    }
+    Ok(output)
+}
+
+/// The bytes one result series' columns take, read from the triples the multi-field merge sorts:
+/// the points they sit at, one row per point.
+fn merge_series_columns(samples: &[(usize, usize, GridSample)], fields: usize) -> usize {
+    merge_series_columns_of(samples.iter().map(|(point, ..)| *point), fields)
+}
+
 /// The bytes one result series' columns take: the rows it writes -- one per distinct point of its
-/// samples, which is what the builder writes a row for -- times a row's columns.
+/// samples, which is what the builder writes a row for -- times a row's columns. The points arrive
+/// sorted, so a distinct point is a point that differs from the one before it.
 ///
 /// A row is the value and validity column of every field, charged twice for the capacity each column
 /// grows to, and the histogram index column of every field. The index columns are counted for every
 /// field rather than only the ones that happen to carry a histogram, so the figure over-reserves
 /// rather than missing a column, and nothing here follows how a column grows.
-fn merge_series_columns(samples: &[(usize, usize, GridSample)], fields: usize) -> usize {
+fn merge_series_columns_of(points: impl Iterator<Item = usize>, fields: usize) -> usize {
     let row = 2 * fields.saturating_mul(std::mem::size_of::<f64>() + 1)
         + fields.saturating_mul(std::mem::size_of::<Option<u32>>());
     let mut rows = 0usize;
     let mut consumed: Option<usize> = None;
-    for (point, ..) in samples {
-        if consumed != Some(*point) {
+    for point in points {
+        if consumed != Some(point) {
             rows = rows.saturating_add(1);
-            consumed = Some(*point);
+            consumed = Some(point);
         }
     }
     rows.saturating_mul(row)
@@ -2487,5 +2565,372 @@ impl Results {
             key: key.clone(),
             within_group,
         })
+    }
+}
+
+// The one-field shape's merge against the merge every other shape keeps, on the same results.
+//
+// Inline rather than in `tests.rs` so the two merges and their comparison live in one file: the fast
+// path is shown to write what the grouped, sorted merge writes, on the results both are given.
+#[cfg(test)]
+mod merge_shape_tests {
+    type LabelPairs = Vec<(String, String)>;
+    type RowValues = Vec<(usize, u64)>;
+    type HistogramValues = Vec<(usize, [u64; 3])>;
+    type SeriesRows = (LabelPairs, RowValues);
+    type SeriesHistograms = (LabelPairs, HistogramValues);
+    type MergeFn =
+        fn(Vec<Results>, Arc<SeriesSchema>, Option<&mut Budget<'_>>) -> Result<Vec<Series>>;
+
+    use datatypes::series::time::GridSpec;
+
+    use super::*;
+    use crate::grid_series::reference::OwnedHistogram;
+
+    /// A grid of twelve points, wide enough for every point the results file.
+    fn grid() -> Arc<EvalGrid> {
+        Arc::new(
+            EvalGrid::try_new(GridSpec::try_new(0, 1_000, 12).expect("valid grid"))
+                .expect("valid grid"),
+        )
+    }
+
+    /// The output schema of the one-field shape.
+    fn schema() -> Arc<SeriesSchema> {
+        Arc::new(SeriesSchema {
+            fields: vec![FieldSpec {
+                name: Arc::from("value"),
+            }]
+            .into(),
+            eval_grid: Some(grid()),
+        })
+    }
+
+    fn metric(name: &str, host: &str) -> SeriesLabels {
+        SeriesLabels::try_new(
+            Some(Arc::from(name)),
+            vec![Label {
+                name: Arc::from("host"),
+                value: Arc::from(host),
+            }],
+        )
+        .expect("valid labels")
+    }
+
+    /// One label set's rows as the field files them: `None` is a sample the operator filtered.
+    fn result_rows(metric: SeriesLabels, rows: &[(usize, Option<f64>)]) -> ResultRows {
+        ResultRows {
+            metric,
+            points: rows.iter().map(|(point, _)| *point).collect(),
+            // The merge reads a row's point and value; the match group it came from is the field's
+            // duplicate evidence, which the field's own sort has already reported.
+            groups: vec![0; rows.len()],
+            values: rows
+                .iter()
+                .map(|(_, value)| value.map(GridSample::Float))
+                .collect(),
+        }
+    }
+
+    /// One label set's histogram rows: `Some` is a histogram in [`OwnedHistogram::parse`]'s format,
+    /// `None` a sample the operator filtered.
+    fn histogram_rows(metric: SeriesLabels, rows: &[(usize, Option<&str>)]) -> ResultRows {
+        ResultRows {
+            metric,
+            points: rows.iter().map(|(point, _)| *point).collect(),
+            groups: vec![0; rows.len()],
+            values: rows
+                .iter()
+                .map(|(_, text)| {
+                    text.map(|text| {
+                        GridSample::Histogram(Box::new(
+                            FloatHistogram::try_from_view(&OwnedHistogram::parse(text).view())
+                                .expect("the histogram is readable"),
+                        ))
+                    })
+                })
+                .collect(),
+        }
+    }
+
+    /// The result table of one field, with the totals its filing advances.
+    fn field_of(filed: Vec<ResultRows>) -> Results {
+        let mut results = Results::default();
+        for rows in filed {
+            results.totals.rows = results.totals.rows.saturating_add(rows.points.len());
+            results.totals.kept = results
+                .totals
+                .kept
+                .saturating_add(rows.values.iter().filter(|value| value.is_some()).count());
+            for value in rows.values.iter().flatten() {
+                if let GridSample::Histogram(histogram) = value {
+                    results.totals.histograms = results.totals.histograms.saturating_add(1);
+                    results.totals.histogram_heap = results
+                        .totals
+                        .histogram_heap
+                        .saturating_add(histogram.heap_bytes());
+                }
+            }
+            results.series.insert(key_of(&rows.metric), rows);
+        }
+        results
+    }
+
+    /// The one field's result table: one label set with holes in its points, one starting late, and
+    /// one whose every sample was filtered.
+    fn field_results() -> Results {
+        field_of(vec![
+            result_rows(
+                metric("m1", "a"),
+                &[
+                    (0, Some(1.5)),
+                    (1, None),
+                    (3, Some(3.5)),
+                    (4, Some(4.5)),
+                    (7, Some(7.5)),
+                ],
+            ),
+            result_rows(
+                metric("m2", "b"),
+                &[(2, Some(2.5)), (5, Some(5.5)), (6, None)],
+            ),
+            result_rows(metric("m3", "c"), &[(0, None), (2, None)]),
+        ])
+    }
+
+    /// Five observations summing to twelve, one of them in the zero bucket.
+    const FIRST_HISTOGRAM: &str = "0/0/3ff0000000000000/4014000000000000/4028000000000000/0/////";
+    /// Seven observations summing to twenty, with an empty zero bucket.
+    const SECOND_HISTOGRAM: &str = "0/0/0/401c000000000000/4034000000000000/0/////";
+
+    /// The one field's histogram table: one label set at two points with a hole between them, and
+    /// one whose every sample was filtered.
+    fn histogram_results() -> Results {
+        field_of(vec![
+            histogram_rows(
+                metric("h1", "a"),
+                &[
+                    (1, Some(FIRST_HISTOGRAM)),
+                    (2, None),
+                    (4, Some(SECOND_HISTOGRAM)),
+                ],
+            ),
+            histogram_rows(metric("h2", "b"), &[(0, None), (3, None)]),
+        ])
+    }
+
+    /// A label set as sorted `(name, value)` pairs.
+    fn labels(name: &str, host: &str) -> Vec<(String, String)> {
+        vec![
+            ("__name__".to_string(), name.to_string()),
+            ("host".to_string(), host.to_string()),
+        ]
+    }
+
+    /// The label set of one series, as [`labels`] builds one.
+    fn series_labels(series: &Series) -> Vec<(String, String)> {
+        let mut labels: Vec<(String, String)> = series
+            .metric
+            .tags()
+            .iter()
+            .map(|tag| (tag.name.to_string(), tag.value.to_string()))
+            .collect();
+        if let Some(name) = series.metric.name() {
+            labels.push(("__name__".to_string(), name.to_string()));
+        }
+        labels.sort();
+        labels
+    }
+
+    /// One series as its label set and its rows: the absolute grid position of each row and the bits
+    /// of the float it holds. A row holding no value is a row neither merge writes.
+    fn rows_of_series(series: &Series) -> SeriesRows {
+        let mut cursor = series.fields.as_slice()[0].cursor();
+        let rows = series
+            .time
+            .positions()
+            .map(|(position, row)| {
+                match cursor.at(row).expect("the axis and the fields are aligned") {
+                    SampleRef::Float(value) => (position, value.to_bits()),
+                    _ => panic!("expected a float sample"),
+                }
+            })
+            .collect();
+        (series_labels(series), rows)
+    }
+
+    /// The same for a series holding native histograms: the bits of the `(zero_count, count, sum)`
+    /// each row carries, which is what these fixtures differ in.
+    fn histograms_of_series(series: &Series) -> SeriesHistograms {
+        let mut cursor = series.fields.as_slice()[0].cursor();
+        let rows = series
+            .time
+            .positions()
+            .map(|(position, row)| {
+                match cursor.at(row).expect("the axis and the fields are aligned") {
+                    SampleRef::Histogram(view) => {
+                        let histogram = FloatHistogram::try_from_view(&view)
+                            .expect("the histogram is readable");
+                        (
+                            position,
+                            [
+                                histogram.zero_count.to_bits(),
+                                histogram.count.to_bits(),
+                                histogram.sum.to_bits(),
+                            ],
+                        )
+                    }
+                    _ => panic!("expected a histogram sample"),
+                }
+            })
+            .collect();
+        (series_labels(series), rows)
+    }
+
+    /// Every series, sorted: neither merge promises an order, as both read a label set map.
+    fn rows_of(series: &[Series]) -> Vec<SeriesRows> {
+        let mut rows: Vec<_> = series.iter().map(rows_of_series).collect();
+        rows.sort();
+        rows
+    }
+
+    /// Every histogram series, sorted the same way.
+    fn histograms_of(series: &[Series]) -> Vec<SeriesHistograms> {
+        let mut rows: Vec<_> = series.iter().map(histograms_of_series).collect();
+        rows.sort();
+        rows
+    }
+
+    /// The bytes a merge reserved through a budget: the last figure it handed it.
+    fn reserved_bytes(merge: MergeFn) -> usize {
+        let reserved = std::cell::Cell::new(0usize);
+        let mut reserve = |bytes: usize| {
+            reserved.set(bytes);
+            Ok(())
+        };
+        let mut budget = Budget::new(&mut reserve);
+        merge(vec![field_results()], schema(), Some(&mut budget)).expect("the merge of one field");
+        reserved.get()
+    }
+
+    #[test]
+    fn the_one_field_merge_writes_the_rows_the_multi_field_merge_writes() {
+        let multi = merge_multi_field(vec![field_results()], schema(), None)
+            .expect("the multi-field merge of one field");
+        let single =
+            merge_single_field(vec![field_results()], schema(), None).expect("the one-field merge");
+        // A filtered sample writes no row and a label set with no value writes no series, so every
+        // row here is a sample the field kept, at the point it kept it:
+        let expected = vec![
+            (
+                labels("m1", "a"),
+                vec![
+                    (0, 1.5f64.to_bits()),
+                    (3, 3.5f64.to_bits()),
+                    (4, 4.5f64.to_bits()),
+                    (7, 7.5f64.to_bits()),
+                ],
+            ),
+            (
+                labels("m2", "b"),
+                vec![(2, 2.5f64.to_bits()), (5, 5.5f64.to_bits())],
+            ),
+        ];
+        assert_eq!(rows_of(&multi), expected);
+        assert_eq!(rows_of(&single), expected);
+    }
+
+    /// A histogram field is one field: the entry hands it to the fast path, and its histograms come
+    /// out row by row as the field filed them, boxed payload and hole included.
+    #[test]
+    fn a_histogram_field_keeps_its_rows_and_histograms_through_the_one_field_merge() {
+        let expected = vec![(
+            labels("h1", "a"),
+            vec![
+                (1, [1.0f64.to_bits(), 5.0f64.to_bits(), 12.0f64.to_bits()]),
+                (4, [0.0f64.to_bits(), 7.0f64.to_bits(), 20.0f64.to_bits()]),
+            ],
+        )];
+        let fast =
+            merge_fields(vec![histogram_results()], schema(), None).expect("the one field's merge");
+        let multi = merge_multi_field(vec![histogram_results()], schema(), None)
+            .expect("the grouped, sorted merge of the same field");
+        assert_eq!(histograms_of(&multi), expected);
+        assert_eq!(histograms_of(&fast), expected);
+    }
+
+    /// A label set whose every sample was filtered holds no row, so the merge writes no series for
+    /// it -- read through the entry, which is what hands a one-field table to the fast path.
+    #[test]
+    fn a_fully_filtered_label_set_writes_no_series() {
+        let filtered = field_of(vec![result_rows(
+            metric("m9", "z"),
+            &[(0, None), (1, None)],
+        )]);
+        assert_eq!(1, filtered.series.len(), "the field filed the label set");
+        let merged = merge_fields(vec![filtered], schema(), None).expect("the merge of one field");
+        assert!(merged.is_empty(), "{merged:?}");
+    }
+
+    /// The two merges bill a one-field result the same: the rows of the samples it keeps. A filtered
+    /// sample holds no column bytes in either.
+    #[test]
+    fn the_one_field_merge_bills_the_rows_the_multi_field_merge_bills() {
+        let multi = reserved_bytes(merge_multi_field);
+        let single = reserved_bytes(merge_single_field);
+        assert!(single > 0, "the one-field merge reserved nothing");
+        assert_eq!(
+            multi, single,
+            "the one-field merge reserved {single} bytes, the multi-field merge {multi}"
+        );
+    }
+
+    /// The entry admits the merge's phase figure; a column reservation past that limit is refused
+    /// and the refusal reaches the caller, so no series are handed over.
+    #[test]
+    fn a_column_reservation_over_the_limit_reaches_the_caller() {
+        // The first figure the merge asks for is its phase, entered before it allocates.
+        let entry = std::cell::Cell::new(None);
+        let mut record = |total: usize| {
+            if entry.get().is_none() {
+                entry.set(Some(total));
+            }
+            Ok(())
+        };
+        let merged = merge_fields(
+            vec![field_results()],
+            schema(),
+            Some(&mut Budget::new(&mut record)),
+        )
+        .expect("the merge of one field under an unbounded budget");
+        assert!(!merged.is_empty(), "the fixture writes series");
+        let limit = entry.get().expect("the merge enters its phase figure");
+        assert!(limit > 0, "the phase figure is what the fixture holds");
+
+        // A limit at the phase figure admits the entry and refuses the columns reserved after it.
+        let mut refused = Vec::new();
+        let mut reserve = |total: usize| {
+            if total > limit {
+                refused.push(total);
+                return Err(DataFusionError::ResourcesExhausted(format!(
+                    "the one-field merge needs {total} bytes, more than the {limit} admitted"
+                )));
+            }
+            Ok(())
+        };
+        let error = merge_fields(
+            vec![field_results()],
+            schema(),
+            Some(&mut Budget::new(&mut reserve)),
+        )
+        .expect_err("a column reservation over the limit is refused");
+        assert!(
+            matches!(error, DataFusionError::ResourcesExhausted(_)),
+            "{error}"
+        );
+        assert!(
+            !refused.is_empty(),
+            "the refusal is a reservation past the phase figure"
+        );
     }
 }
