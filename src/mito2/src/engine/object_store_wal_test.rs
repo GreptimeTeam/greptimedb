@@ -175,7 +175,10 @@ pub(crate) async fn count_rows(engine: &MitoEngine, region_id: RegionId) -> usiz
 }
 
 /// Returns the ids of the entries the store still hands out for `region_id`.
-async fn stored_entry_ids(log_store: &ObjectStoreLogStore, region_id: RegionId) -> Vec<EntryId> {
+pub(crate) async fn stored_entry_ids(
+    log_store: &ObjectStoreLogStore,
+    region_id: RegionId,
+) -> Vec<EntryId> {
     log_store
         .read(&object_store_provider(region_id), 0)
         .await

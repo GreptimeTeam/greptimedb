@@ -49,7 +49,8 @@ use crate::engine::MitoEngine;
 use crate::engine::listener::EventListener;
 use crate::engine::object_store_wal_test::{
     count_rows, count_ssts, create_leased_region_on, create_region, encode_delta, is_replaced,
-    next_manifest_version, publish_delta, put_range, wait_until, wal_config, wal_options,
+    next_manifest_version, publish_delta, put_range, stored_entry_ids, wait_until, wal_config,
+    wal_options,
 };
 use crate::engine::pending_tail_test::{
     add_field, commit_edit, pending_tails_edit, set_pending_tails,
@@ -127,6 +128,7 @@ struct TestRegion {
     env: TestEnv,
     /// The storage of the WAL of every node.
     wal_store: ObjectStore,
+    log_store: Arc<ObjectStoreLogStore>,
     engine: MitoEngine,
     listener: Arc<TailReplayListener>,
     region_id: RegionId,
@@ -169,7 +171,7 @@ impl TestRegion {
         let engine = env
             .create_engine_with_log_store_and_time(
                 MitoConfig::default(),
-                log_store,
+                log_store.clone(),
                 Arc::new(StdTimeProvider),
                 Some(listener.clone()),
             )
@@ -194,6 +196,7 @@ impl TestRegion {
         Self {
             env,
             wal_store,
+            log_store,
             engine,
             listener,
             region_id,
@@ -343,6 +346,16 @@ impl TestRegion {
     async fn stored_ssts(&self) -> usize {
         count_ssts(&self.env.get_object_store().unwrap(), &self.region_dir()).await
     }
+
+    async fn stored_sst_names(&self) -> Vec<String> {
+        let store = self.env.get_object_store().unwrap();
+        let entries = store.list(&self.region_dir()).await.unwrap();
+        entries
+            .iter()
+            .map(|entry| entry.name().to_string())
+            .filter(|name| name.ends_with(".parquet"))
+            .collect()
+    }
 }
 
 fn own_tail(after: EntryId, upto: EntryId, upto_kind: UptoKind) -> PendingTail {
@@ -381,6 +394,12 @@ async fn test_replays_own_tail_after_reopen() {
     assert_eq!(1, version.ssts.levels()[0].files.len());
     assert_eq!(region.entries[1], version.flushed_entry_id);
     assert_eq!(6, count_rows(&region.engine, region.region_id).await);
+    // The commit released the replayed WAL.
+    assert!(
+        stored_entry_ids(&region.log_store, region.region_id)
+            .await
+            .is_empty()
+    );
 }
 
 #[tokio::test]
@@ -570,6 +589,8 @@ async fn test_unread_remote_listed_tail_waits_for_leader_lease() {
     tokio::time::sleep(Duration::from_secs(1)).await;
     assert!(region.has_pending_tails());
     assert_eq!(version, next_manifest_version(&mito_region).await);
+    // The replay waits for the lease instead of ending and starting again.
+    assert_eq!(0, region.listener.ended());
     region.promote_with_lease();
     region.wait_until_replayed().await;
 
@@ -948,6 +969,35 @@ async fn test_cancelled_replay_does_not_publish_after_promotion() {
     assert_eq!(2, region.listener.commits());
 }
 
+#[rstest]
+#[case::demoted(true)]
+#[case::tails_changed(false)]
+#[tokio::test]
+async fn test_tail_commit_checks_role_and_tails_under_lock(#[case] demote: bool) {
+    let region = TestRegion::new("tail-replay-locked-check", false, None).await;
+    region
+        .reopen_with_tails(vec![own_tail(0, region.entries[1], UptoKind::Reported)])
+        .await;
+    region.listener.hold_from(1);
+    region.promote();
+    wait_until(|| region.listener.commits() == 1).await;
+
+    if demote {
+        region
+            .engine
+            .set_region_role(region.region_id, RegionRole::Follower)
+            .unwrap();
+    } else {
+        set_pending_tails(&region.engine, region.region_id, vec![]).await;
+    }
+    region.listener.hold_from(0);
+    wait_until(|| region.listener.ended() == 1).await;
+
+    assert_eq!(1, region.listener.commits());
+    assert_eq!(demote, region.has_pending_tails());
+    assert_eq!(0, region.stored_ssts().await);
+}
+
 /// Parks every listing of the WAL of [REMOTE_NODE_ID] once `stall` is set, and counts them.
 fn stall_remote_listings(stall: Arc<AtomicBool>, stalled: Arc<AtomicUsize>) -> MockLayer {
     MockLayerBuilder::default()
@@ -1013,6 +1063,7 @@ async fn test_replay_backs_off_while_altering() {
     region.listener.hold_from(1);
     region.promote();
     wait_until(|| region.listener.commits() == 1).await;
+    let chunks = region.stored_sst_names().await;
     let mito_region = region.engine.get_region(region.region_id).unwrap();
     mito_region.set_altering().unwrap();
 
@@ -1023,6 +1074,9 @@ async fn test_replay_backs_off_while_altering() {
     region.wait_until_replayed().await;
 
     assert_eq!(6, count_rows(&region.engine, region.region_id).await);
+    assert!(!region.listener.failed());
+    // The retries commit the chunks written before the ALTER.
+    assert_eq!(chunks, region.stored_sst_names().await);
 }
 
 #[tokio::test]
