@@ -708,6 +708,10 @@ mod tests {
         let server = RegionTestServer::start().await;
         let requester = server.create_requester(ChannelConfig::default(), false, false);
         let request = api::v1::region::SketchRequest {
+            sampling: Some(api::v1::region::SketchSampling {
+                max_files: 512,
+                seed: 42,
+            }),
             region_id: 42,
             time_range: Some(api::v1::region::SketchTimeRange {
                 start: 1001,
@@ -722,6 +726,13 @@ mod tests {
             }],
         };
         let expected = api::v1::region::SketchResponse {
+            sample: Some(api::v1::region::SketchSample {
+                candidate_files: 1000,
+                sampled_files: 512,
+                fingerprint: 42,
+                rows_squared_sum: 512.0,
+                max_file_rows: 1,
+            }),
             results: vec![api::v1::region::ColumnSketchResult {
                 column_name: "__table_id".into(),
                 column_id: 42,

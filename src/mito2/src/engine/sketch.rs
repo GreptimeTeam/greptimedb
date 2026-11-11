@@ -120,6 +120,7 @@ mod tests {
         let mut env = TestEnv::new().await;
         let engine = env.create_engine(Default::default()).await;
         let request = SketchRequest {
+            sampling: None,
             time_range: SketchTimeRange {
                 start: Timestamp::new_microsecond(1001),
                 end: Timestamp::new_microsecond(1000),
