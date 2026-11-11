@@ -1,0 +1,69 @@
+Cargo.lock
+  s_c06578f466c2ea::t_4fbb6bc37784d4 1660,2288,6161,6773,9337,11610,11658,11671,13227,14149,14720,15345,17115
+Cargo.toml
+  s_17057bba187655::t_6c9078d6c825ba 167
+src/api/src/region.rs
+  s_17057bba187655::t_462a865dd5052a 38-39,63,73,83
+src/client/src/region.rs
+  s_17057bba187655::t_a2b664a331ed2f 154-187,701-755
+src/common/meta/src/ddl/test_util/datanode_handler.rs
+  s_17057bba187655::t_ad68cc5ebccfbf 42
+src/datanode/src/region_server.rs
+  s_17057bba187655::t_15d73611b4eb0a 522-523,527,649,1116-1130,1161,1311,1904,1998
+src/datanode/src/region_server/sketch.rs
+  s_17057bba187655::t_4d644d48565b23 18,23,32-34,62-106
+src/meta-srv/src/metasrv.rs
+  s_17057bba187655::t_3ee48d72b01ee7 582,911-915
+src/meta-srv/src/metasrv/builder.rs
+  s_17057bba187655::t_628ab1e7e0b427 670
+src/meta-srv/src/procedure/utils.rs
+  s_17057bba187655::t_e5a0a37ac38635 365
+src/metric-engine/Cargo.toml
+  s_99bcc3815ddbc2::t_1254fb35b602bf 10-12
+src/metric-engine/src/engine.rs
+  s_17057bba187655::t_1f240464f05b99 183,198,328,517-520,613
+src/metric-engine/src/engine/create.rs
+  s_17057bba187655::t_77fb08180f59ab 132-158,600-622,1065-1099
+src/metric-engine/src/engine/read.rs
+  s_17057bba187655::t_5475ba670fe9df 18-19,27,30,38-80
+src/store-api/src/region_engine.rs
+  s_17057bba187655::t_bc7f26dea22ee1 1127
+src/store-api/src/region_request.rs
+  s_17057bba187655::t_585195d9ccf87e 203-208
+src/store-api/src/sketch.rs
+  s_17057bba187655::t_7fd8958af4c9d1 15-17,45-46,70-71,142-145
+src/store-api/src/sketch/proto.rs
+  s_17057bba187655::t_8c46c2287ecf08 1-632
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "8c03096a72a0702863e12b2fda51b11d1e94c4d2",
+  "prompts": {},
+  "sessions": {
+    "s_17057bba187655": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1c56d-fbcd-75c2-86d2-c4b3f17c03dc",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    },
+    "s_99bcc3815ddbc2": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1c43c-f005-78b3-b4ad-42b2a432c17b",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    },
+    "s_c06578f466c2ea": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1c374-3547-7b31-9c5c-4ab96c5f5115",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}
