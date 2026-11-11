@@ -43,7 +43,8 @@ use servers::prometheus_handler::PrometheusHandler;
 use session::context::QueryContextRef;
 use snafu::{OptionExt, ResultExt, ensure};
 use store_api::metric_engine_consts::{
-    DATA_SCHEMA_TABLE_ID_COLUMN_NAME, DATA_SCHEMA_TSID_COLUMN_NAME,
+    DATA_SCHEMA_TABLE_ID_COLUMN_NAME, DATA_SCHEMA_TSID_COLUMN_NAME, LOGICAL_TABLE_METADATA_KEY,
+    METRIC_ENGINE_NAME,
 };
 use table::metadata::TableInfo;
 
@@ -144,7 +145,8 @@ impl Instance {
                     .map_err(BoxedError::new)
                     .context(error::ExecuteQuerySnafu)?;
                 let filter = filter(&info, &selectors, query.bounds)?;
-                let (projection, tags) = exemplar_projection(&info);
+                let source_tags = self.exemplar_source_tags(&selectors, &local).await?;
+                let (projection, tags) = exemplar_projection(&info, source_tags.as_ref());
                 let frame = self
                     .query_engine
                     .read_table(table)
@@ -209,6 +211,61 @@ impl Instance {
             .map_err(|_| error::CancelledSnafu.build())?;
         drop(ticket);
         result
+    }
+
+    async fn exemplar_source_tags(
+        &self,
+        selectors: &[&Selector],
+        ctx: &QueryContextRef,
+    ) -> Result<Option<BTreeSet<String>>> {
+        let Some(metrics) = selectors
+            .iter()
+            .map(|selector| {
+                selector.matchers.iter().find_map(|matcher| {
+                    (matcher.name == METRIC_NAME
+                        && matches!(matcher.op, MatchOp::Equal)
+                        && !matcher.value.is_empty())
+                    .then_some(matcher.value.as_str())
+                })
+            })
+            .collect::<Option<BTreeSet<_>>>()
+        else {
+            return Ok(None);
+        };
+        let mut tags = BTreeSet::new();
+        for metric in metrics {
+            let Some(table) = self
+                .catalog_manager
+                .table(
+                    ctx.current_catalog(),
+                    &ctx.current_schema(),
+                    metric,
+                    Some(ctx),
+                )
+                .await
+                .map_err(BoxedError::new)
+                .context(error::ExecuteQuerySnafu)?
+            else {
+                return Ok(None);
+            };
+            let info = table.table_info();
+            if info.meta.engine != METRIC_ENGINE_NAME
+                || !info
+                    .meta
+                    .options
+                    .extra_options
+                    .contains_key(LOGICAL_TABLE_METADATA_KEY)
+            {
+                return Ok(None);
+            }
+            tags.extend(
+                info.meta
+                    .primary_key_indices
+                    .iter()
+                    .map(|&index| info.meta.schema.column_schemas()[index].name.clone()),
+            );
+        }
+        Ok(Some(tags))
     }
 }
 
@@ -313,8 +370,11 @@ fn matcher_filter(matcher: &Matcher, tags: &BTreeSet<&str>) -> Expr {
     }
 }
 
-fn exemplar_projection(info: &TableInfo) -> (Vec<Expr>, Vec<&str>) {
-    // Keep historical tags even when the current source schema no longer contains them.
+fn exemplar_projection<'a>(
+    info: &'a TableInfo,
+    source_tags: Option<&BTreeSet<String>>,
+) -> (Vec<Expr>, Vec<&'a str>) {
+    // Exact metric queries use current logical schemas, including for historical rows.
     let tags = info
         .meta
         .primary_key_indices
@@ -327,6 +387,7 @@ fn exemplar_projection(info: &TableInfo) -> (Vec<Expr>, Vec<&str>) {
                 DATA_SCHEMA_TSID_COLUMN_NAME,
             ]
             .contains(name)
+                && source_tags.is_none_or(|tags| tags.contains(*name))
         })
         .collect::<Vec<_>>();
     let projection = [
@@ -334,6 +395,8 @@ fn exemplar_projection(info: &TableInfo) -> (Vec<Expr>, Vec<&str>) {
         greptime_timestamp(),
         greptime_value(),
         greptime_exemplar_labels(),
+        DATA_SCHEMA_TABLE_ID_COLUMN_NAME,
+        DATA_SCHEMA_TSID_COLUMN_NAME,
     ]
     .into_iter()
     .chain(tags.iter().copied())
@@ -363,6 +426,12 @@ fn collect(
     let value = Helper::try_into_vector(batch.column(index(greptime_value())?))
         .map_err(BoxedError::new)
         .context(error::ExecuteQuerySnafu)?;
+    let table_id = Helper::try_into_vector(batch.column(index(DATA_SCHEMA_TABLE_ID_COLUMN_NAME)?))
+        .map_err(BoxedError::new)
+        .context(error::ExecuteQuerySnafu)?;
+    let tsid = Helper::try_into_vector(batch.column(index(DATA_SCHEMA_TSID_COLUMN_NAME)?))
+        .map_err(BoxedError::new)
+        .context(error::ExecuteQuerySnafu)?;
     let value_type = |vector: &VectorRef| {
         let mut data_type = vector.data_type();
         // Storage may dictionary-encode tags; Vector::get returns their decoded values.
@@ -374,7 +443,9 @@ fn collect(
     ensure!(
         value_type(&metric).is_string()
             && value_type(&time).is_timestamp()
-            && value_type(&value) == ConcreteDataType::float64_datatype(),
+            && value_type(&value) == ConcreteDataType::float64_datatype()
+            && value_type(&table_id) == ConcreteDataType::uint32_datatype()
+            && value_type(&tsid) == ConcreteDataType::uint64_datatype(),
         error::UnexpectedResultSnafu {
             reason: "exemplar scan returned incompatible column types",
         }
@@ -416,7 +487,19 @@ fn collect(
             skipped += 1;
             continue;
         };
-        let mut series = BTreeMap::from([(METRIC_NAME.to_string(), metric.into_string())]);
+        let (Value::UInt32(table_id), Value::UInt64(tsid)) = (table_id.get(row), tsid.get(row))
+        else {
+            skipped += 1;
+            continue;
+        };
+        let mut series = BTreeMap::from([
+            (METRIC_NAME.to_string(), metric.into_string()),
+            (
+                DATA_SCHEMA_TABLE_ID_COLUMN_NAME.to_string(),
+                table_id.to_string(),
+            ),
+            (DATA_SCHEMA_TSID_COLUMN_NAME.to_string(), tsid.to_string()),
+        ]);
         for (name, values) in &tags {
             if let Value::String(value) = values.get(row) {
                 series.insert((*name).to_string(), value.into_string());
@@ -486,37 +569,41 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_exemplar_projection_preserves_series_and_deduplication() {
+    fn test_exemplar_projection_prunes_tags_and_preserves_source_ids() {
         let labels = StructArray::from(vec![(
             Arc::new(Field::new("trace_id", DataType::Utf8, false)),
-            Arc::new(StringArray::from(vec!["trace"; 3])) as ArrayRef,
+            Arc::new(StringArray::from(vec!["trace"; 4])) as ArrayRef,
         )]);
         let columns = vec![
             (
                 DATA_SCHEMA_TABLE_ID_COLUMN_NAME,
-                Arc::new(UInt32Array::from(vec![1, 2, 2])) as ArrayRef,
+                Arc::new(UInt32Array::from(vec![1, 1, 2, 2])) as ArrayRef,
             ),
             (
                 DATA_SCHEMA_TSID_COLUMN_NAME,
-                Arc::new(UInt64Array::from(vec![1, 1, 2])) as ArrayRef,
+                Arc::new(UInt64Array::from(vec![u64::MAX, u64::MAX, u64::MAX, 2])) as ArrayRef,
             ),
             (
                 EXEMPLAR_METRIC_COLUMN,
-                Arc::new(StringArray::from(vec!["metric"; 3])) as ArrayRef,
+                Arc::new(StringArray::from(vec!["metric"; 4])) as ArrayRef,
             ),
             (
-                "historical_tag",
-                Arc::new(StringArray::from(vec![Some(""), Some(""), None])) as ArrayRef,
+                "job",
+                Arc::new(StringArray::from(vec![Some(""), Some(""), Some(""), None])) as ArrayRef,
             ),
             (
                 greptime_timestamp(),
-                Arc::new(TimestampNanosecondArray::from(vec![1; 3])) as ArrayRef,
+                Arc::new(TimestampNanosecondArray::from(vec![1; 4])) as ArrayRef,
             ),
             (
                 greptime_value(),
-                Arc::new(Float64Array::from(vec![1.0; 3])) as ArrayRef,
+                Arc::new(Float64Array::from(vec![1.0; 4])) as ArrayRef,
             ),
             (greptime_exemplar_labels(), Arc::new(labels) as ArrayRef),
+            (
+                "unrelated_tag",
+                Arc::new(StringArray::from(vec!["other"; 4])) as ArrayRef,
+            ),
         ];
         let schema = Arc::new(Schema::new(
             columns
@@ -545,15 +632,22 @@ mod tests {
             METRICS_EXEMPLARS_TABLE,
             TableMetaBuilder::empty()
                 .schema(schema)
-                .primary_key_indices(vec![0, 1, 2, 3])
-                .next_column_id(7)
+                .primary_key_indices(vec![0, 1, 2, 3, 7])
+                .next_column_id(8)
                 .build()
                 .unwrap(),
         )
         .build()
         .unwrap();
-        let (projection, tags) = exemplar_projection(&info);
-        assert_eq!(tags, ["historical_tag"]);
+        let source_tags = BTreeSet::from(["job".into(), "sample_only_tag".into()]);
+        let (projection, tags) = exemplar_projection(&info, Some(&source_tags));
+        assert_eq!(tags, ["job"]);
+        let (full_projection, full_tags) = exemplar_projection(&info, None);
+        assert_eq!(full_projection.len(), 8);
+        assert_eq!(full_tags, ["job", "unrelated_tag"]);
+        let (no_tag_projection, no_tags) = exemplar_projection(&info, Some(&BTreeSet::new()));
+        assert_eq!(no_tag_projection.len(), 6);
+        assert!(no_tags.is_empty());
         let indices = projection
             .into_iter()
             .map(|expr| {
@@ -567,7 +661,7 @@ mod tests {
                     .unwrap()
             })
             .collect::<Vec<_>>();
-        assert_eq!(indices, [2, 4, 5, 6, 3]);
+        assert_eq!(indices, [2, 4, 5, 6, 0, 1, 3]);
         let projected = batch.try_project(&indices).unwrap();
         let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(1 << 20));
         let mut reservation = MemoryConsumer::new("projection test").register(&pool);
@@ -581,9 +675,20 @@ mod tests {
             collect(projected, &tags, &mut narrow, &mut reservation).unwrap(),
             0
         );
-        assert_eq!(full.len(), 2);
-        assert_eq!(full.values().map(BTreeMap::len).sum::<usize>(), 2);
+        assert_eq!(full.len(), 3);
+        assert_eq!(full.values().map(BTreeMap::len).sum::<usize>(), 3);
         assert_eq!(full, narrow);
+        for table_id in ["1", "2"] {
+            assert!(narrow.keys().any(|labels| {
+                labels[DATA_SCHEMA_TABLE_ID_COLUMN_NAME] == table_id
+                    && labels[DATA_SCHEMA_TSID_COLUMN_NAME] == u64::MAX.to_string()
+            }));
+        }
+        assert!(
+            narrow
+                .keys()
+                .all(|labels| !labels.contains_key("unrelated_tag"))
+        );
     }
 
     #[test]

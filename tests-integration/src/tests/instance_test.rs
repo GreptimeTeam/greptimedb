@@ -5424,10 +5424,30 @@ async fn test_exemplar_source_tag_reconciliation() {
         exemplar("second", "second_only", "present"),
         exemplar("first", "later", "present"),
     ];
+    let requests = into_rows(exemplars.clone()).unwrap().0;
+    let rows = requests.inserts[0].rows.as_ref().unwrap();
+    let tsid_index = rows
+        .schema
+        .iter()
+        .position(|c| c.column_name == "__tsid")
+        .unwrap();
+    let tsids = rows
+        .rows
+        .iter()
+        .map(|row| {
+            let Some(api::v1::value::ValueData::U64Value(tsid)) =
+                &row.values[tsid_index].value_data
+            else {
+                panic!("expected a source TSID")
+            };
+            tsid.to_string()
+        })
+        .collect::<Vec<_>>();
     frontend
-        .write_exemplars_prepared(into_rows(exemplars.clone()).unwrap().0, QueryContext::arc())
+        .write_exemplars_prepared(requests, QueryContext::arc())
         .await
         .unwrap();
+    let mut source_ids = BTreeMap::new();
     for (name, expected) in [
         ("first", vec!["first_only", "later"]),
         ("second", vec!["second_only"]),
@@ -5439,6 +5459,7 @@ async fn test_exemplar_source_tag_reconciliation() {
             .unwrap()
             .unwrap()
             .table_info();
+        source_ids.insert(name, info.table_id());
         let tags = info
             .meta
             .primary_key_indices
@@ -5460,9 +5481,14 @@ async fn test_exemplar_source_tag_reconciliation() {
         .await
         .unwrap();
     assert_eq!(before.len(), 3);
-    for exemplar in &exemplars {
+    for (exemplar, tsid) in exemplars.iter().zip(tsids) {
         let mut expected = (*exemplar.series_labels).clone();
         expected.insert("__name__".into(), exemplar.metric.to_string());
+        expected.insert(
+            "__table_id".into(),
+            source_ids[exemplar.metric.as_ref()].to_string(),
+        );
+        expected.insert("__tsid".into(), tsid);
         assert!(before.iter().any(|series| series.series_labels == expected));
     }
 
@@ -5525,14 +5551,56 @@ async fn test_exemplar_source_tag_reconciliation() {
         error.output_msg().contains("must be a string tag"),
         "{error}"
     );
-    // Current logical schemas cannot establish coverage of historical exemplar tags.
+    // Missing sources retain all tags; recreated sources define the exact query's tag projection.
     execute_sql(frontend, "DROP TABLE first").await;
+    let missing = frontend
+        .query_exemplars(query(), QueryContext::arc())
+        .await
+        .unwrap();
+    assert_eq!(before, missing);
     create_exemplar_source(frontend, "public", "first").await;
     let after = frontend
         .query_exemplars(query(), QueryContext::arc())
         .await
         .unwrap();
-    assert_eq!(before, after);
+    let mut pruned = before.clone();
+    for series in &mut pruned {
+        series.series_labels.remove("first_only");
+        series.series_labels.remove("later");
+    }
+    assert_eq!(pruned, after);
+    assert_eq!(
+        after.len(),
+        3,
+        "stored IDs must keep pruned series distinct"
+    );
+    let filtered = frontend
+        .query_exemplars(
+            Query::parse("first{later=\"present\"}".into(), "0", "1", "public").unwrap(),
+            QueryContext::arc(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(filtered.len(), 1);
+    assert!(!filtered[0].series_labels.contains_key("later"));
+    assert_eq!(
+        filtered[0].series_labels["__table_id"],
+        source_ids["first"].to_string()
+    );
+    for expression in [
+        "{__name__=~\"first|second\"}",
+        "first + {__name__=~\"second\"}",
+        "first + second + missing",
+    ] {
+        let broad = frontend
+            .query_exemplars(
+                Query::parse(expression.into(), "0", "1", "public").unwrap(),
+                QueryContext::arc(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(before, broad, "{expression}");
+    }
 }
 
 #[rstest]
@@ -5922,8 +5990,22 @@ async fn exemplar_protocol_storage_lifecycle(distributed: bool, batching: bool, 
         let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(value["status"], "success", "{phase}: {value}");
         for series in value["data"].as_array().unwrap() {
-            assert!(series["seriesLabels"].get("__table_id").is_none());
-            assert!(series["seriesLabels"].get("__tsid").is_none());
+            let labels = &series["seriesLabels"];
+            let source = context
+                .frontend()
+                .catalog_manager()
+                .table(
+                    "greptime",
+                    "public",
+                    labels["__name__"].as_str().unwrap(),
+                    None,
+                )
+                .await
+                .unwrap()
+                .unwrap()
+                .table_info();
+            assert_eq!(labels["__table_id"], source.table_id().to_string());
+            assert!(labels["__tsid"].as_str().unwrap().parse::<u64>().is_ok());
         }
         assert_eq!(
             value["data"].as_array().unwrap().len(),
@@ -6120,6 +6202,8 @@ async fn test_exemplar_query_bounds_and_malformed_rows(
             assert!(response.get("warnings").is_none(), "{response}");
         }
         if series > 0 {
+            assert_eq!(response["data"][0]["seriesLabels"]["__table_id"], "42");
+            assert_eq!(response["data"][0]["seriesLabels"]["__tsid"], "7");
             assert_eq!(
                 response["data"][0]["exemplars"].as_array().unwrap().len(),
                 2,
@@ -6458,14 +6542,24 @@ async fn test_exemplar_cross_schema_exact_identity() {
         .query_exemplars(query, QueryContext::arc())
         .await
         .unwrap();
-    assert_eq!(response.len(), 1);
-    assert_eq!(response[0].exemplars.len(), values.len());
+    assert_eq!(response.len(), 2);
+    assert_ne!(
+        response[0].series_labels["__table_id"],
+        response[1].series_labels["__table_id"]
+    );
+    assert_eq!(
+        response[0].series_labels["__tsid"],
+        response[1].series_labels["__tsid"]
+    );
     let encoded = serde_json::to_string(&response).unwrap();
-    for value in ["0", "-0", "NaN", "+Inf", "-Inf"] {
-        assert!(
-            response[0].exemplars.iter().any(|e| e.value == value),
-            "{encoded}"
-        );
+    for series in &response {
+        assert_eq!(series.exemplars.len(), values.len());
+        for value in ["0", "-0", "NaN", "+Inf", "-Inf"] {
+            assert!(
+                series.exemplars.iter().any(|e| e.value == value),
+                "{encoded}"
+            );
+        }
     }
     assert!(encoded.contains("\"timestamp\":-0.001"), "{encoded}");
 }
