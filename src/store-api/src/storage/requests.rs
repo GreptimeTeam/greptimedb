@@ -47,6 +47,9 @@ pub enum TimeSeriesDistribution {
 
 #[derive(Default, Clone, Debug, PartialEq)]
 pub struct ScanRequest {
+    /// Partition scope captured by distributed query planning. The engine validates
+    /// it against the same immutable metadata snapshot used by the scan.
+    pub expected_partition_expr_version: Option<u64>,
     /// Optional projection information for the scan. `None` reads all root
     /// columns.
     pub projection: Option<Vec<usize>>,
@@ -117,6 +120,14 @@ impl Display for ScanRequest {
         let mut delimiter = Delimiter::None;
 
         write!(f, "ScanRequest {{ ")?;
+        if let Some(version) = self.expected_partition_expr_version {
+            write!(
+                f,
+                "{}expected_partition_expr_version: {}",
+                delimiter.as_str(),
+                version
+            )?;
+        }
         if let Some(projection) = &self.projection {
             write!(f, "{}projection: {:?}", delimiter.as_str(), projection)?;
         }

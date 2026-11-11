@@ -14,13 +14,13 @@
 
 //! [ExtensionPlanner] implementation for distributed planner
 
-use std::borrow::Cow;
 use std::sync::Arc;
 
 use ahash::HashMap;
 use arrow_schema::SortOptions;
 use async_trait::async_trait;
 use catalog::CatalogManagerRef;
+use common_base::hash::partition_expr_version;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_telemetry::debug;
 use datafusion::catalog::Session;
@@ -150,6 +150,12 @@ pub struct DistExtensionPlanner {
     enable_per_region_metrics: bool,
 }
 
+struct RegionReadPlan {
+    series_disjoint: bool,
+    regions: Vec<RegionId>,
+    partition_versions: HashMap<RegionId, u64>,
+}
+
 impl DistExtensionPlanner {
     pub fn new(
         catalog_manager: CatalogManagerRef,
@@ -208,14 +214,9 @@ impl ExtensionPlanner for DistExtensionPlanner {
             return fallback(optimized_plan).await;
         };
 
-        let (regions, series_disjoint) = match self.get_regions(&table_name, input_plan).await {
-            Ok(regions) => regions,
-            Err(error) if direct_raw => {
-                return Err(error);
-            }
-            // Existing non-raw plans may still execute locally when no peers are found.
-            Err(_) => return fallback(optimized_plan).await,
-        };
+        // A resolved table must not fall back to an unfenced local scan when its
+        // authoritative route cannot be read or is in transition.
+        let region_plan = self.get_region_plan(&table_name, input_plan).await?;
 
         // TODO(ruihang): generate different execution plans for different variant merge operation
         let schema = merge_scan.schema().as_arrow();
@@ -234,7 +235,7 @@ impl ExtensionPlanner for DistExtensionPlanner {
         let merge_scan_plan = MergeScanExec::new(
             session_state,
             table_name,
-            regions,
+            region_plan.regions,
             input_plan.clone(),
             schema,
             self.region_query_handler.clone(),
@@ -243,7 +244,8 @@ impl ExtensionPlanner for DistExtensionPlanner {
             merge_scan.remote_dyn_filter_producer_id(),
             self.enable_per_region_metrics,
         )?
-        .with_raw_series_disjoint(series_disjoint)?;
+        .with_raw_series_disjoint(region_plan.series_disjoint)?
+        .with_partition_versions(region_plan.partition_versions);
         Ok(Some(Arc::new(merge_scan_plan) as _))
     }
 }
@@ -256,12 +258,22 @@ impl DistExtensionPlanner {
         Ok(extractor.table_name)
     }
 
-    /// Selects the regions of the ordinary distributed plan.
+    #[cfg(test)]
     async fn get_regions(
         &self,
         table_name: &TableName,
-        logical_plan: &LogicalPlan,
+        plan: &LogicalPlan,
     ) -> Result<(Vec<RegionId>, bool)> {
+        self.get_region_plan(table_name, plan)
+            .await
+            .map(|plan| (plan.regions, plan.series_disjoint))
+    }
+
+    async fn get_region_plan(
+        &self,
+        table_name: &TableName,
+        logical_plan: &LogicalPlan,
+    ) -> Result<RegionReadPlan> {
         let mut extractor = TableScanExtractor::default();
         let _ = logical_plan.visit(&mut extractor)?;
         // Resolving by name again could bind an authorized scan to a replacement table.
@@ -289,26 +301,42 @@ impl DistExtensionPlanner {
             .find_physical_read_route_with_id(table_info.table_id())
             .await
             .context(PartitionRuleManagerSnafu)?;
-        // New repartition targets may be routed before their logical regions exist.
-        // Use the same visible routes for fallback scans and partition pruning.
         let routes = &physical_table_route.region_routes;
-        let read_routes = if routes
+        if routes
             .iter()
-            .any(|route| route.is_repartition_pending_read())
+            .any(|route| route.is_repartition_pending_read() || route.is_leader_staging())
         {
-            Cow::Owned(
-                routes
-                    .iter()
-                    .filter(|route| !route.is_repartition_pending_read())
-                    .cloned()
-                    .collect::<Vec<_>>(),
-            )
-        } else {
-            Cow::Borrowed(routes.as_slice())
-        };
+            return Err(DataFusionError::External(Box::new(
+                crate::error::RepartitionInProgressSnafu {
+                    table_id: table_info.table_id(),
+                }
+                .build(),
+            )));
+        }
+        // IgnoreAllWrites is set on merge sources scheduled for deallocation. Their
+        // files can remain open after the new owner has become readable.
+        let read_routes = routes
+            .iter()
+            .filter(|route| !route.is_ignore_all_writes())
+            .cloned()
+            .collect::<Vec<_>>();
+        let partition_versions: HashMap<_, _> = read_routes
+            .iter()
+            .map(|route| {
+                let expr = route.region.partition_expr();
+                (
+                    RegionId::new(table_info.table_id(), route.region.id.region_number()),
+                    partition_expr_version(if expr.is_empty() {
+                        None
+                    } else {
+                        Some(expr.as_str())
+                    }),
+                )
+            })
+            .collect();
         let all_regions = read_routes
             .iter()
-            .map(|r| RegionId::new(table_info.table_id(), r.region.id.region_number()))
+            .map(|route| RegionId::new(table_info.table_id(), route.region.id.region_number()))
             .collect::<Vec<_>>();
         let logical_partition_columns = partition_column_types(&table_info);
         let partition_columns = logical_partition_columns
@@ -426,11 +454,14 @@ impl DistExtensionPlanner {
                     .ok()
                     .flatten()
             };
-            physical_info.is_some_and(|info| {
-                physical_regions_disjoint(&info, &read_routes, &regions)
-            })
+            physical_info
+                .is_some_and(|info| physical_regions_disjoint(&info, &read_routes, &regions))
         };
-        Ok((regions, series_disjoint))
+        Ok(RegionReadPlan {
+            regions,
+            partition_versions,
+            series_disjoint,
+        })
     }
 
     /// Resolves the partition-column types that are safe to use for region pruning.
@@ -688,8 +719,13 @@ mod tests {
     use table::table_name::TableName;
     use table::test_util::EmptyTable;
 
-    use super::{DistExtensionPlanner, physical_regions_disjoint};
+    use super::{
+        DistExtensionPlanner, ExtensionPlanner, MergeScanLogicalPlan, PhysicalPlanningContext,
+        physical_regions_disjoint,
+    };
     use crate::region_query::{RegionQueryHandler, RegionQueryTarget};
+    use common_base::hash::partition_expr_version;
+    use datafusion_common::DataFusionError;
 
     const LOGICAL_TABLE_ID: u32 = 1024;
     const PHYSICAL_TABLE_ID: u32 = 2048;
@@ -894,7 +930,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_pending_repartition_targets_excluded_from_reads() {
+    async fn test_repartition_transition_rejects_reads_until_handoff_complete() {
         let expression = Some(partition_col("host").lt(Value::String("z".into())));
         let mut source = region_route(1, expression.clone());
         source.set_leader_staging();
@@ -903,19 +939,27 @@ mod tests {
         // The metadata backend and route cache must preserve the pending marker.
         let (planner, plan, name, backend) =
             planner_and_plan_with_routes(vec![0], vec![source.clone(), target.clone()]).await;
+        let error = planner.get_regions(&name, &plan).await.unwrap_err();
+        let DataFusionError::External(error) = error else {
+            panic!("expected retryable error")
+        };
+        let error = error.downcast_ref::<crate::error::Error>().unwrap();
+        use common_error::ext::ErrorExt;
         assert_eq!(
-            planner.get_regions(&name, &plan).await.unwrap(),
-            vec![RegionId::new(LOGICAL_TABLE_ID, 1)]
+            error.status_code(),
+            common_error::status_code::StatusCode::RegionNotReady
+        );
+        assert_eq!(
+            error.retry_hint(),
+            common_error::ext::RetryHint::RetryAfterRouteRefresh
         );
         let LogicalPlan::Filter(filter) = &plan else {
             panic!("expected filtered test plan")
         };
-        assert_eq!(
-            planner.get_regions(&name, &filter.input).await.unwrap(),
-            vec![RegionId::new(LOGICAL_TABLE_ID, 1)]
-        );
-        // Synchronization makes the target readable; a staging source remains readable throughout.
+        assert!(planner.get_regions(&name, &filter.input).await.is_err());
+        // Only the completed handoff makes both scopes available.
         target.clear_repartition_pending_read();
+        source.clear_leader_staging();
         // Deliberately do not invalidate the cached pending snapshot.
         backend
             .put(
@@ -947,6 +991,74 @@ mod tests {
             .unwrap();
         // A failed authoritative refresh must not fall back to silently hiding targets.
         assert!(planner.get_regions(&name, &plan).await.is_err());
+        let session = datafusion::execution::SessionStateBuilder::new()
+            .with_default_features()
+            .build();
+        let error = planner
+            .plan_extension(
+                &datafusion::physical_planner::DefaultPhysicalPlanner::default(),
+                &MergeScanLogicalPlan::new(plan, false),
+                &[],
+                &[],
+                &session,
+                &PhysicalPlanningContext::default(),
+            )
+            .await
+            .unwrap_err();
+        let DataFusionError::External(error) = error else {
+            panic!("route refresh failure must be preserved")
+        };
+        assert!(matches!(
+            error.downcast_ref::<crate::error::Error>(),
+            Some(crate::error::Error::PartitionRuleManager { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_repartition_merge_refresh_excludes_retired_source_and_locks_versions() {
+        let mut source = region_route(1, Some(partition_col("host").lt(Value::String("m".into()))));
+        source.set_ignore_all_writes();
+        source.set_leader_staging();
+        let mut target = region_route(2, Some(partition_col("host").lt(Value::String("z".into()))));
+        target.set_leader_staging();
+        let (planner, plan, name, backend) =
+            planner_and_plan_with_routes(vec![0], vec![source.clone(), target.clone()]).await;
+        // Pure merges do not allocate pending targets, but are still unsafe during staging.
+        assert!(planner.get_regions(&name, &plan).await.is_err());
+        source.clear_leader_staging();
+        target.clear_leader_staging();
+        let expected = partition_expr_version(Some(&target.region.partition_expr));
+        backend
+            .put(
+                PutRequest::new()
+                    .with_key(TableRouteKey::new(PHYSICAL_TABLE_ID).to_bytes())
+                    .with_value(
+                        TableRouteValue::physical(vec![source, target])
+                            .try_as_raw_value()
+                            .unwrap(),
+                    ),
+            )
+            .await
+            .unwrap();
+        let planned = planner.get_region_plan(&name, &plan).await.unwrap();
+        assert_eq!(planned.regions, vec![RegionId::new(LOGICAL_TABLE_ID, 2)]);
+        assert_eq!(planned.partition_versions.len(), 1);
+        assert_eq!(
+            planned.partition_versions[&RegionId::new(LOGICAL_TABLE_ID, 2)],
+            expected
+        );
+        // A later route change cannot silently give this old candidate set new versions.
+        backend
+            .delete_range(
+                DeleteRangeRequest::new()
+                    .with_key(TableRouteKey::new(PHYSICAL_TABLE_ID).to_bytes()),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            planned.partition_versions[&RegionId::new(LOGICAL_TABLE_ID, 2)],
+            expected
+        );
     }
 
     fn physical_partition_expressions() -> Vec<Option<PartitionExpr>> {

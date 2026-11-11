@@ -337,12 +337,30 @@ impl DummyTableProviderFactory {
     }
 }
 
+/// Internal FE-to-DN fence for the partition scope selected during planning.
+pub(crate) const EXPECTED_PARTITION_EXPR_VERSION_KEY: &str =
+    "greptime:expected-partition-expr-version";
+
 fn scan_request_from_query_context(
     region_id: RegionId,
     query_ctx: &QueryContext,
 ) -> Result<ScanRequest> {
     let decision = decide_flow_scan(query_ctx, region_id)?;
-    Ok(build_scan_request(query_ctx, region_id, &decision))
+    let mut request = build_scan_request(query_ctx, region_id, &decision);
+    request.expected_partition_expr_version = query_ctx
+        .extension(EXPECTED_PARTITION_EXPR_VERSION_KEY)
+        .map(|value| {
+            value.parse::<u64>().map_err(|_| {
+                crate::error::InvalidQueryContextExtensionSnafu {
+                    reason: format!(
+                        "{EXPECTED_PARTITION_EXPR_VERSION_KEY} must be an unsigned integer"
+                    ),
+                }
+                .build()
+            })
+        })
+        .transpose()?;
+    Ok(request)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -682,6 +700,31 @@ mod tests {
                 TableProviderFilterPushDown::Inexact,
             ]
         );
+    }
+
+    #[test]
+    fn test_partition_scope_fence_query_context_wire_roundtrip() {
+        let region_id = test_region_id();
+        let mut context = QueryContextBuilder::default().build();
+        assert_eq!(
+            scan_request_from_query_context(region_id, &context)
+                .unwrap()
+                .expected_partition_expr_version,
+            None
+        );
+        context.set_extension(super::EXPECTED_PARTITION_EXPR_VERSION_KEY, "42");
+        let wire: api::v1::QueryContext = (&context).into();
+        let restored = QueryContext::try_from(wire).unwrap();
+        assert_eq!(
+            scan_request_from_query_context(region_id, &restored)
+                .unwrap()
+                .expected_partition_expr_version,
+            Some(42)
+        );
+        for invalid in ["", "-1", "not-a-version", "18446744073709551616"] {
+            context.set_extension(super::EXPECTED_PARTITION_EXPR_VERSION_KEY, invalid);
+            assert!(scan_request_from_query_context(region_id, &context).is_err());
+        }
     }
 
     fn test_region_id() -> RegionId {
