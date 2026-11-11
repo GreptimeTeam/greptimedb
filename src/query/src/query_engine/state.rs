@@ -110,6 +110,11 @@ pub struct QueryEngineState {
     experimental_native_promql: bool,
     /// Whether this engine plans distributed statements.
     with_dist_planner: bool,
+    /// The partition rule this engine plans regions with, when it has one.
+    ///
+    /// It is the only source of "how many regions serve this table's read", and a planner that has
+    /// to place a node which cannot be placed in more than one region asks it before choosing.
+    partition_rule_manager: Option<PartitionRuleManagerRef>,
 }
 
 impl fmt::Debug for QueryEngineState {
@@ -304,7 +309,7 @@ impl QueryEngineState {
             .with_serializer_registry(Arc::new(DefaultSerializer))
             .with_query_planner(Arc::new(DfQueryPlanner::new(
                 catalog_list.clone(),
-                partition_rule_manager,
+                partition_rule_manager.clone(),
                 region_query_handler.clone(),
                 options.enable_per_region_metrics,
             )))
@@ -331,6 +336,7 @@ impl QueryEngineState {
             plugins,
             experimental_native_promql: options.experimental_native_promql,
             with_dist_planner,
+            partition_rule_manager,
             scalar_functions: Arc::new(RwLock::new(HashMap::new())),
         })
     }
@@ -539,6 +545,14 @@ impl QueryEngineState {
     /// Whether this engine plans distributed statements.
     pub(crate) fn with_dist_planner(&self) -> bool {
         self.with_dist_planner
+    }
+
+    /// The partition rule this engine plans regions with, when it has one.
+    ///
+    /// Read by a planner that has to know how many regions hold a table's rows before it can say
+    /// whether one region holds everything its plan reads.
+    pub(crate) fn partition_rule_manager(&self) -> Option<&PartitionRuleManagerRef> {
+        self.partition_rule_manager.as_ref()
     }
 
     pub fn catalog_manager(&self) -> &CatalogManagerRef {
