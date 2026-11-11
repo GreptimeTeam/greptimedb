@@ -665,13 +665,16 @@ async fn rewrite_entries(
     store.write(&manifest.part_path(0), bytes).await.unwrap();
 }
 
-/// One query's key-area reads and row count, run through a recording layer.
+/// One query's key-area reads - `(reads, bytes)` - and row count, run through a recording layer.
+///
+/// A read counts when it *intersects* the key area, not only when it lies inside it: an aligned
+/// read is clipped at the area end but may start before the area, and it still fetches key bytes.
 async fn recorded_key_area_reads(
     store: &ObjectStore,
     format: &ColumnarSamplesFormat,
     handle: &SamplesFileHandle,
     query: SamplesReadRequest,
-) -> (usize, crate::error::Result<usize>) {
+) -> (usize, u64, crate::error::Result<usize>) {
     use object_store::layers::mock::{MockLayerBuilder, oio};
 
     let reads = Arc::new(Mutex::new(Vec::new()));
@@ -700,15 +703,16 @@ async fn recorded_key_area_reads(
     let (_, trailer, _, _) = root_page(store, handle).await;
     let area = trailer.keys();
     let reads = reads.lock().unwrap();
-    let count = reads
-        .iter()
-        .filter(|(_, range)| {
-            let start = range.offset();
-            let end = start + range.size().unwrap();
-            start < end && start >= area.start && end <= area.end
-        })
-        .count();
-    (count, result)
+    let (mut count, mut bytes) = (0usize, 0u64);
+    for (_, range) in reads.iter() {
+        let start = range.offset();
+        let end = start + range.size().unwrap();
+        if start < end && start < area.end && end > area.start {
+            count += 1;
+            bytes += end - start;
+        }
+    }
+    (count, bytes, result)
 }
 
 /// One exact series may span parts, and every part lays out its own key area.
@@ -1009,7 +1013,7 @@ async fn unpayable_key_prefetch_issues_no_key_read() {
     let pool = Arc::new(GreedyMemoryPool::new(4 * 1024));
     let mut query = super::full_request();
     query.memory_pool = Some(pool.clone());
-    let (reads, result) = recorded_key_area_reads(&store, &format, &handle, query).await;
+    let (reads, _, result) = recorded_key_area_reads(&store, &format, &handle, query).await;
     let error = result.expect_err("an unpayable key must fail the read");
     assert_eq!(
         common_error::status_code::StatusCode::RuntimeResourcesExhausted,
@@ -1026,6 +1030,11 @@ async fn unpayable_key_prefetch_issues_no_key_read() {
 ///
 /// Keys use the same aligned blocks as column chunks, so a part that is already cached must not
 /// pay a key-area read - including when the scan pool shapes how the read is issued.
+///
+/// This is a cache-behaviour guard, not a proof of the key-fetch budget: it passes without the
+/// peak reservation too, because a warm part issues no read either way. The budget itself is
+/// pinned by `unpayable_key_prefetch_issues_no_key_read` and
+/// `per_key_fallback_reserves_the_aligned_peak`.
 #[tokio::test]
 async fn cached_parts_need_no_key_read() {
     use crate::cache::{CacheManager, CacheStrategy};
@@ -1100,6 +1109,8 @@ async fn cached_parts_need_no_key_read() {
         .await
         .unwrap();
     assert_eq!(vec![(1, 2, 100)], collect_times(&batches));
+    // Counting any read that intersects the key area, so an aligned read starting before it is
+    // counted too: a warm part must answer the key from the payload cache either way.
     let (_, trailer, _, _) = root_page(&store, &handle).await;
     let area = trailer.keys();
     let reads = reads.lock().unwrap();
@@ -1108,7 +1119,7 @@ async fn cached_parts_need_no_key_read() {
         .filter(|(_, range)| {
             let start = range.offset();
             let end = start + range.size().unwrap();
-            start < end && start >= area.start && end <= area.end
+            start < end && start < area.end && end > area.start
         })
         .count();
     assert_eq!(
@@ -1194,5 +1205,486 @@ async fn series_across_a_metadata_rollover_counts_its_key_copy() {
     assert_eq!(
         0, blocks_again,
         "the part target rolls the new part at once"
+    );
+}
+
+/// A memory pool that remembers the highest reservation it ever held and how much each named
+/// consumer held, so a test can see that a scan charged for something while it was alive.
+#[derive(Debug)]
+struct WatchingPool {
+    inner: datafusion::execution::memory_pool::GreedyMemoryPool,
+    high: std::sync::atomic::AtomicUsize,
+    consumers: Mutex<std::collections::HashMap<String, usize>>,
+}
+
+impl std::fmt::Display for WatchingPool {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(&self.inner, f)
+    }
+}
+
+impl WatchingPool {
+    fn new(limit: usize) -> Self {
+        Self {
+            inner: datafusion::execution::memory_pool::GreedyMemoryPool::new(limit),
+            high: std::sync::atomic::AtomicUsize::new(0),
+            consumers: Mutex::new(std::collections::HashMap::new()),
+        }
+    }
+
+    /// The most bytes any scan using this pool ever had reserved at once.
+    fn high_water(&self) -> usize {
+        self.high.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Bytes currently reserved by one named consumer.
+    fn consumer(&self, name: &str) -> usize {
+        self.consumers
+            .lock()
+            .unwrap()
+            .get(name)
+            .copied()
+            .unwrap_or(0)
+    }
+
+    fn record(&self, name: &str, bytes: usize, grow: bool) {
+        {
+            let mut consumers = self.consumers.lock().unwrap();
+            let slot = consumers.entry(name.to_string()).or_default();
+            if grow {
+                *slot += bytes;
+            } else {
+                *slot = slot.saturating_sub(bytes);
+            }
+        }
+        self.high.fetch_max(
+            datafusion::execution::memory_pool::MemoryPool::reserved(&self.inner),
+            std::sync::atomic::Ordering::Relaxed,
+        );
+    }
+}
+
+impl datafusion::execution::memory_pool::MemoryPool for WatchingPool {
+    fn name(&self) -> &str {
+        datafusion::execution::memory_pool::MemoryPool::name(&self.inner)
+    }
+
+    fn register(&self, consumer: &datafusion::execution::memory_pool::MemoryConsumer) {
+        datafusion::execution::memory_pool::MemoryPool::register(&self.inner, consumer)
+    }
+
+    fn unregister(&self, consumer: &datafusion::execution::memory_pool::MemoryConsumer) {
+        datafusion::execution::memory_pool::MemoryPool::unregister(&self.inner, consumer)
+    }
+
+    fn grow(
+        &self,
+        reservation: &datafusion::execution::memory_pool::MemoryReservation,
+        additional: usize,
+    ) {
+        datafusion::execution::memory_pool::MemoryPool::grow(&self.inner, reservation, additional);
+        self.record(reservation.consumer().name(), additional, true);
+    }
+
+    fn shrink(
+        &self,
+        reservation: &datafusion::execution::memory_pool::MemoryReservation,
+        shrink: usize,
+    ) {
+        datafusion::execution::memory_pool::MemoryPool::shrink(&self.inner, reservation, shrink);
+        self.record(reservation.consumer().name(), shrink, false);
+    }
+
+    fn try_grow(
+        &self,
+        reservation: &datafusion::execution::memory_pool::MemoryReservation,
+        additional: usize,
+    ) -> std::result::Result<(), datafusion::error::DataFusionError> {
+        datafusion::execution::memory_pool::MemoryPool::try_grow(
+            &self.inner,
+            reservation,
+            additional,
+        )?;
+        self.record(reservation.consumer().name(), additional, true);
+        Ok(())
+    }
+
+    fn reserved(&self) -> usize {
+        datafusion::execution::memory_pool::MemoryPool::reserved(&self.inner)
+    }
+}
+
+/// One recorded read: its path, offset, length, and the key reservation held before it.
+type PeekedRead = (String, u64, u64, usize);
+
+/// A reader that records each read together with the key reservation held when it is issued.
+struct PeekingRead {
+    inner: object_store::layers::mock::oio::Reader,
+    path: String,
+    reads: Arc<Mutex<Vec<PeekedRead>>>,
+    pool: Arc<WatchingPool>,
+}
+
+impl object_store::layers::mock::Read for PeekingRead {
+    async fn open(
+        &self,
+        range: object_store::layers::mock::BytesRange,
+    ) -> object_store::layers::mock::Result<(
+        object_store::layers::mock::RpRead,
+        Box<dyn object_store::layers::mock::oio::ReadStreamDyn>,
+    )> {
+        let start = range.offset();
+        let length = range.size().unwrap();
+        self.reads.lock().unwrap().push((
+            self.path.clone(),
+            start,
+            length,
+            self.pool.consumer("ColumnarSamplesKeys"),
+        ));
+        self.inner.open(range).await
+    }
+
+    async fn read(
+        &self,
+        range: object_store::layers::mock::BytesRange,
+    ) -> object_store::layers::mock::Result<(
+        object_store::layers::mock::RpRead,
+        object_store::layers::mock::Buffer,
+    )> {
+        let start = range.offset();
+        let length = range.size().unwrap();
+        self.reads.lock().unwrap().push((
+            self.path.clone(),
+            start,
+            length,
+            self.pool.consumer("ColumnarSamplesKeys"),
+        ));
+        self.inner.read(range).await
+    }
+}
+
+/// A key the page-level window leaves over is read one at a time, and that path must charge the
+/// same peak as the page-level one.
+///
+/// The aligned payload cache turns one key into a whole aligned block plus whatever assembling it
+/// needs. Reserving only the key entry and then reading through the cache over-commits the pool by
+/// more than an order of magnitude: every key-area read must be covered by what the key
+/// reservation already holds when the read is issued, whichever path serves it.
+#[tokio::test]
+async fn per_key_fallback_reserves_the_aligned_peak() {
+    use crate::cache::{CacheManager, CacheStrategy};
+    use crate::series_index::format::SamplesFormatReader;
+    use crate::series_index::samples::reader;
+    use datafusion::execution::memory_pool::MemoryPool;
+    use object_store::layers::mock::MockLayerBuilder;
+    use store_api::storage::FileId;
+
+    let store = store();
+    let meta = super::metadata();
+    let format = ColumnarSamplesFormat::default();
+    // Long keys keep the window's peak well above the pool while a single key still fits it, so
+    // the window is halved and the leftover keys take the per-key path.
+    let label = "x".repeat(1000);
+    let rows = 20u64;
+    let keys = (0..rows)
+        .map(|tsid| new_sparse_primary_key(&[label.as_str(), "z"], &meta, 1, tsid))
+        .collect::<Vec<_>>();
+    let key_len = keys[0].len();
+    let times = vec![100; keys.len()];
+    let handle = build(
+        &format,
+        &store,
+        meta.clone(),
+        &[keyed_batch(&meta, &keys, &times, false)],
+    )
+    .await;
+    let (_, trailer, _, _) = root_page(&store, &handle).await;
+    let area = trailer.keys();
+    let strategy = CacheStrategy::EnableAll(Arc::new(
+        CacheManager::builder()
+            .page_cache_size(16 * 1024 * 1024)
+            .build(),
+    ));
+    let cache = strategy.columnar_payload(FileId::random());
+    // What the reader charges for one retained key, plus room for one block's payload buffers.
+    let entry = std::mem::size_of::<ExactSeriesKey>() + 64;
+    let limit = rows as usize * (key_len + entry) + 8 * 1024;
+    let pool = Arc::new(WatchingPool::new(limit));
+    let reads = Arc::new(Mutex::new(Vec::new()));
+    let observed = reads.clone();
+    let watching = pool.clone();
+    let layer = MockLayerBuilder::default()
+        .reader_factory(Arc::new(move |path, _, inner| {
+            Box::new(PeekingRead {
+                inner,
+                path: path.into(),
+                reads: observed.clone(),
+                pool: watching.clone(),
+            })
+        }))
+        .build()
+        .unwrap();
+    let reader = reader::SamplesReader::open(store.clone().layer(layer), handle.clone())
+        .await
+        .unwrap()
+        .with_payload_cache(cache);
+    let mut query = super::full_request();
+    query.memory_pool = Some(pool.clone());
+    reads.lock().unwrap().clear();
+    let batches = reader
+        .read(query)
+        .unwrap()
+        .try_collect::<Vec<_>>()
+        .await
+        .unwrap();
+    assert_eq!(
+        rows as usize,
+        batches.iter().map(|b| b.num_rows()).sum::<usize>()
+    );
+    // Every key-area read was paid for before it was issued: the key reservation already held at
+    // least the bytes the read fetches.
+    let key_reads = reads
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(path, start, length, _)| {
+            path.ends_with(".samples") && *start < area.end && *start + *length > area.start
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    assert!(
+        key_reads.len() > 1,
+        "{} key-area reads means the leftover keys never took the per-key path",
+        key_reads.len()
+    );
+    for (_, start, length, reserved) in &key_reads {
+        assert!(
+            *reserved >= *length as usize,
+            "a {length} byte key-area read at {start} was issued while the key reservation held \
+             only {reserved} bytes"
+        );
+    }
+    // The pool has to hold every retained key, and the scan never asks for more than it has.
+    assert!(
+        pool.high_water() >= rows as usize * (key_len + entry),
+        "high water {} is below the {} bytes of retained keys",
+        pool.high_water(),
+        rows as usize * (key_len + entry)
+    );
+    assert_eq!(0, pool.reserved());
+
+    // A pool that cannot pay for one key's peak must fail before any key-area read, even with the
+    // aligned cache enabled.
+    let pool = Arc::new(WatchingPool::new(key_len));
+    let mut query = super::full_request();
+    query.memory_pool = Some(pool.clone());
+    reads.lock().unwrap().clear();
+    let error = reader
+        .read(query)
+        .unwrap()
+        .try_collect::<Vec<_>>()
+        .await
+        .expect_err("a pool below one key's peak must refuse the read");
+    assert_eq!(
+        common_error::status_code::StatusCode::RuntimeResourcesExhausted,
+        common_error::ext::ErrorExt::status_code(&error)
+    );
+    let key_reads = reads
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(path, start, length, _)| {
+            path.ends_with(".samples") && *start < area.end && *start + *length > area.start
+        })
+        .count();
+    assert_eq!(
+        0, key_reads,
+        "{key_reads} key-area reads while the pool cannot pay"
+    );
+    assert_eq!(0, pool.reserved());
+}
+
+/// A series that spans two parts is recognised by the last loaded key of the first part.
+///
+/// That copy outlives every per-part reservation, so it has a consumer of its own: charged while
+/// the boundary key is alive and given back once the boundary is behind the scan. Copying it from
+/// a block's key would retain bytes no reservation pays for.
+#[tokio::test]
+async fn boundary_key_is_charged_while_it_is_alive() {
+    use crate::series_index::format::SamplesFormatReader;
+    use crate::series_index::samples::reader;
+    use datafusion::execution::memory_pool::MemoryPool;
+
+    let store = store();
+    let meta = super::metadata();
+    let format = ColumnarSamplesFormat {
+        block_rows: 1,
+        part_bytes: 1,
+        ..Default::default()
+    };
+    let label = "x".repeat(1024);
+    let key = new_sparse_primary_key(&[label.as_str(), "z"], &meta, 1, 7);
+    // One series, two blocks, one block per part: the series continues across the boundary.
+    let handle = build(
+        &format,
+        &store,
+        meta.clone(),
+        &[keyed_batch(&meta, &vec![key.clone(); 2], &[10, 20], false)],
+    )
+    .await;
+    assert_eq!(2, super::manifest(&store, &handle).await.files.len());
+    let pool = Arc::new(WatchingPool::new(8 * 1024 * 1024));
+    let reader = reader::SamplesReader::open(store, handle).await.unwrap();
+    let mut query = request(&[TABLE_ID_COLUMN, TSID_COLUMN, "ts"]);
+    query.memory_pool = Some(pool.clone());
+    let mut stream = reader.read(query).unwrap();
+    // The first part is not finished yet: nothing has been carried across a boundary.
+    assert!(
+        stream.try_next().await.unwrap().is_some(),
+        "the first part holds one block"
+    );
+    assert_eq!(
+        0,
+        pool.consumer("ColumnarSamplesBoundaryKey"),
+        "the boundary key must not be charged before the part ends"
+    );
+    // The second batch is only produced after the first part handed its last loaded key over.
+    assert!(
+        stream.try_next().await.unwrap().is_some(),
+        "the series continues in the second part"
+    );
+    let charged = pool.consumer("ColumnarSamplesBoundaryKey");
+    assert!(
+        charged >= key.len(),
+        "the boundary key's {charged} charged bytes do not cover its {} bytes",
+        key.len()
+    );
+    // Past the last part the boundary key is no longer needed, so its charge goes back.
+    assert!(stream.try_next().await.unwrap().is_none());
+    assert_eq!(0, pool.consumer("ColumnarSamplesBoundaryKey"));
+    drop(stream);
+    assert_eq!(0, pool.reserved());
+}
+
+/// A selection that prunes a block must not cut the order check between the keys around it.
+///
+/// The pruned block's key is never read, so the check has to chain over the last *loaded* key.
+/// Comparing against the last visited block instead silently drops the comparison, and two
+/// reversed exact keys under one `(table_id, tsid)` pass as ordered.
+#[tokio::test]
+async fn skipped_block_does_not_hide_reversed_keys() {
+    let store = store();
+    let meta = super::metadata();
+    let format = ColumnarSamplesFormat::default();
+    let first = new_sparse_primary_key(&["host-000001", "z"], &meta, 1, 7);
+    let middle = new_sparse_primary_key(&["host-000002", "z"], &meta, 1, 7);
+    let last = new_sparse_primary_key(&["host-000003", "z"], &meta, 1, 7);
+    let handle = build(
+        &format,
+        &store,
+        meta.clone(),
+        &[keyed_batch(
+            &meta,
+            &[first, middle, last],
+            &[100, 5_000, 110],
+            false,
+        )],
+    )
+    .await;
+    // Swapping the first and last series' stored entries keeps both checksums and identifiers
+    // valid; only the order of the two keys the request loads is wrong. The middle block is
+    // outside the requested time range, so its key is never read.
+    let (manifest, _, page, mut bytes) = root_page(&store, &handle).await;
+    let Page::Leaf(blocks) = page else {
+        panic!("one leaf page holds the fixture")
+    };
+    assert_eq!(3, blocks.len());
+    let entries = [&blocks[0].key, &blocks[2].key]
+        .map(|reference| reference.offset as usize..reference.checksum_end().unwrap() as usize);
+    let first_entry = bytes[entries[0].clone()].to_vec();
+    bytes.copy_within(entries[1].clone(), entries[0].start);
+    bytes[entries[1].clone()].copy_from_slice(&first_entry);
+    store.write(&manifest.part_path(0), bytes).await.unwrap();
+    let reader = format.reader(store, handle).await.unwrap();
+    let mut query = request(&[TABLE_ID_COLUMN, TSID_COLUMN, "ts"]);
+    query.end = Some(1_000);
+    let error = reader
+        .read(query)
+        .unwrap()
+        .try_collect::<Vec<_>>()
+        .await
+        .expect_err("a skipped block must not hide reversed keys");
+    assert!(
+        error
+            .to_string()
+            .contains("unordered sample exact series keys"),
+        "unexpected error: {error}"
+    );
+}
+
+/// The same gap across a part boundary: a part whose last block was pruned must still hand its
+/// last *loaded* key to the next part.
+///
+/// The skipped block ends the first part, so a boundary key taken from "the last visited block"
+/// is missing and the check would silently compare nothing across the parts.
+#[tokio::test]
+async fn pruned_block_does_not_hide_the_boundary_key() {
+    let store = store();
+    let meta = super::metadata();
+    // One leaf holds two descriptors and the root holds one leaf, so the first two blocks share a
+    // page in the first part and the third block starts the second part. The pruned block is
+    // therefore traversed without being loaded, which is what used to lose the boundary key.
+    let format = ColumnarSamplesFormat {
+        block_rows: 1,
+        page_bytes: 476,
+        root_capacity: 1,
+        ..Default::default()
+    };
+    let first = new_sparse_primary_key(&["host-000001", "z"], &meta, 1, 7);
+    let middle = new_sparse_primary_key(&["host-000002", "z"], &meta, 1, 7);
+    let last = new_sparse_primary_key(&["host-000003", "z"], &meta, 1, 7);
+    let handle = build(
+        &format,
+        &store,
+        meta.clone(),
+        &[keyed_batch(
+            &meta,
+            &[first, middle, last.clone()],
+            &[100, 5_000, 110],
+            false,
+        )],
+    )
+    .await;
+    assert_eq!(2, super::manifest(&store, &handle).await.files.len());
+    // Rewrite the second part's key with a smaller key of the same length and identifier, so the
+    // two loaded keys are reversed while everything else about the part stays valid.
+    let smaller = new_sparse_primary_key(&["host-000000", "z"], &meta, 1, 7);
+    assert_eq!(last.len(), smaller.len());
+    let (_, page, mut bytes) = part_root(&store, &handle, 1).await;
+    let manifest = super::manifest(&store, &handle).await;
+    let Page::Leaf(blocks) = page else {
+        panic!("one leaf page holds the second part")
+    };
+    let reference = blocks[0].key;
+    let start = reference.offset as usize;
+    bytes[start..start + smaller.len()].copy_from_slice(&smaller);
+    let sum = codec::checksum(&smaller);
+    bytes[start + smaller.len()..reference.checksum_end().unwrap() as usize]
+        .copy_from_slice(&sum.to_le_bytes());
+    store.write(&manifest.part_path(1), bytes).await.unwrap();
+    let reader = format.reader(store, handle).await.unwrap();
+    let mut query = request(&[TABLE_ID_COLUMN, TSID_COLUMN, "ts"]);
+    query.end = Some(1_000);
+    let error = reader
+        .read(query)
+        .unwrap()
+        .try_collect::<Vec<_>>()
+        .await
+        .expect_err("a pruned block must not hide the boundary key");
+    assert!(
+        error
+            .to_string()
+            .contains("unordered sample exact series keys"),
+        "unexpected error: {error}"
     );
 }

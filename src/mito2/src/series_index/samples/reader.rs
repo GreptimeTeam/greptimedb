@@ -270,16 +270,23 @@ impl SamplesFormatReader for SamplesReader {
             let _handle = &handle;
             let mut metrics = ColumnarReadMetrics::default();
             if empty { return; }
-            // The last block this stream visited, its key reference scoped to its part, and the
-            // exact key of that block when it is still at hand. A reference is a location inside
-            // one part: the exact bytes are what decides whether a series continues into another
-            // part.
+            // Traversal state: the last block this stream visited, whatever it selected, and
+            // whether it is the block immediately before the next one in the artifact.
             let mut previous: Option<BlockOrder> = None;
-            // The last visited block's exact key when it belongs to another part. References are
-            // part-relative, so the previous part's key has to be carried out of its own map. At
-            // most one key is retained this way, matching the per-block identity allowance.
-            let mut spanning_key: Option<ExactSeriesKey> = None;
             let mut adjacent = true;
+            // Content state: the last block whose exact key this stream loaded. Selection can
+            // skip a block inside a page, a whole page, or a whole part, so this state is not
+            // advanced by a block whose key was pruned: the two loaded keys on either side of a
+            // gap are still compared with each other.
+            let mut loaded_key: Option<BlockOrder> = None;
+            // The last loaded key of the previous part, with the pool bytes it is charged. A
+            // reference is a location inside one part, so the exact bytes are what decides
+            // whether a series continues into another; this copy outlives every per-part
+            // reservation, so it has a consumer of its own.
+            let boundary_reservation = request.memory_pool.as_ref()
+                .map(|pool| MemoryConsumer::new("ColumnarSamplesBoundaryKey").register(pool));
+            let mut spanning_key: Option<ExactSeriesKey> = None;
+            let mut spanning_bytes = 0usize;
             for part in &manifest.files {
                 let bounds = Bounds { first: part.first, last: part.last, min: part.min_timestamp, max: part.max_timestamp };
                 if !matches(bounds, &request, ids.as_ref()) { adjacent = false; continue; }
@@ -397,12 +404,14 @@ impl SamplesFormatReader for SamplesReader {
                             )?;
                             // Only the keys this stream loaded can be checked here: a reference
                             // is a location, and selection prunes blocks without reading theirs,
-                            // so unvisited ranges are not content-validated. Loaded keys must be
-                            // nondecreasing in visit order, and a repeated key must continue its
-                            // series instead of restarting it. That is also the only way a series
-                            // that spans a part boundary is recognised: its two references name
-                            // unrelated key areas.
-                            if let Some(prior) = &previous {
+                            // so unvisited ranges are validated structurally only. The check is
+                            // chained across such gaps - it compares the last *loaded* key, not
+                            // the last visited block - so skipping a block cannot hide the keys
+                            // on either side of it. Loaded keys must be nondecreasing, and a
+                            // repeated key must continue its series instead of restarting it.
+                            // That is also the only way a series that spans a part boundary is
+                            // recognised: its two references name unrelated key areas.
+                            if let Some(prior) = &loaded_key {
                                 let prior_key = if prior.part() == order.part() {
                                     let reference = prior.key();
                                     part_keys.get(&(reference.offset, reference.length))
@@ -410,16 +419,22 @@ impl SamplesFormatReader for SamplesReader {
                                     spanning_key.as_ref()
                                 };
                                 if let Some(prior_key) = prior_key {
+                                    // The exact-next-block rules only hold when nothing was
+                                    // traversed in between; a gap still requires the order and
+                                    // the ordinal to keep increasing.
+                                    let consecutive =
+                                        adjacent && previous.as_ref() == Some(prior);
                                     require(key >= prior_key, "unordered sample exact series keys")?;
                                     if key == prior_key {
-                                        prior.continues(&order, adjacent)?;
-                                    } else if adjacent {
+                                        prior.continues(&order, consecutive)?;
+                                    } else if consecutive {
                                         // A new series starts at ordinal zero, which the
                                         // structural check above only covers inside one part.
                                         require(block.ordinal == 0, "first sample block has nonzero ordinal")?;
                                     }
                                 }
                             }
+                            loaded_key = Some(order);
                             owner = owns(key.bytes(), &request);
                         }
                         let batch = if owner {
@@ -448,13 +463,24 @@ impl SamplesFormatReader for SamplesReader {
                         previous = Some(order); adjacent = true;
                     }
                 }
-                // The next part's references name its own key area, so the last visited block's
-                // exact key is the only thing that can prove a series continues there.
-                if let Some(prior) = previous.filter(|prior| prior.part() == part.part_id) {
-                    let reference = prior.key();
-                    spanning_key = part_keys
-                        .get(&(reference.offset, reference.length))
-                        .cloned();
+                // The next part's references name its own key area, so the last loaded block's
+                // exact key is the only thing that can prove a series continues there. It is
+                // kept, with its own pool charge, only while another part remains to be read. A
+                // part that loaded nothing leaves the carried key alone: it is still the last
+                // key this stream read.
+                if let Some(loaded) = loaded_key.filter(|loaded| loaded.part() == part.part_id) {
+                    let retain = ((part.part_id as usize) + 1 < manifest.files.len())
+                        .then(|| {
+                            let reference = loaded.key();
+                            part_keys.get(&(reference.offset, reference.length))
+                        })
+                        .flatten();
+                    retain_boundary_key(
+                        boundary_reservation.as_ref(),
+                        &mut spanning_bytes,
+                        &mut spanning_key,
+                        retain,
+                    )?;
                 }
                 if complete { require(row_count == part.num_rows && block_count == part.num_blocks, "sample part totals mismatch")?; }
             }
@@ -480,9 +506,29 @@ fn retained_key_bytes(length: u32) -> usize {
     length as usize + KEY_ENTRY_BYTES
 }
 
-/// One key's stored entry: its bytes and the checksum that follows them.
-fn stored_key_bytes(length: u32) -> usize {
-    length as usize + KEY_CHECKSUM_BYTES
+/// Replaces the exact key that carries one series across a part boundary.
+///
+/// Unlike the keys of a part's blocks, this copy outlives every per-part reservation, so it has a
+/// consumer of its own: a replacement is charged before it is made, and the previous charge goes
+/// back as soon as it is replaced or no longer needed.
+fn retain_boundary_key(
+    reservation: Option<&MemoryReservation>,
+    charged: &mut usize,
+    slot: &mut Option<ExactSeriesKey>,
+    key: Option<&ExactSeriesKey>,
+) -> Result<()> {
+    *slot = None;
+    if let Some(reservation) = reservation {
+        let _ = reservation.try_shrink(*charged);
+    }
+    *charged = 0;
+    if let Some(key) = key {
+        let bytes = retained_key_bytes(key.bytes().len() as u32);
+        reserve_keys(reservation, bytes)?;
+        *slot = Some(key.clone());
+        *charged = bytes;
+    }
+    Ok(())
 }
 
 /// Reserves `bytes` for a key fetch, or reports scan-memory exhaustion.
@@ -551,8 +597,9 @@ fn verified_key(entry: &[u8], length: u32) -> Result<&[u8]> {
 ///
 /// The page-level prefetch serves a whole page in one read, but it is charged up front. When the
 /// scan pool cannot take that, this path reads one key at a time, so a block that fits the pool
-/// stays readable. Either way the pool is charged the coexisting peak before any I/O: the fetched
-/// key entry and the owned key built from it.
+/// stays readable. Either way the pool is charged the same coexisting peak before any I/O: the
+/// fetched entry, whatever alignment or assembly that fetch costs, and the owned key built from
+/// it. Reading first and refusing the key afterwards would leave the bytes already fetched.
 async fn load_block_key(
     reader: &PayloadReader<'_>,
     areas: Areas,
@@ -563,21 +610,33 @@ async fn load_block_key(
 ) -> Result<ExactSeriesKey> {
     block.key.validate(areas.keys)?;
     let retained = retained_key_bytes(block.key.length);
-    // The fetched entry and the owned key are live at the same time.
-    let peak = retained + stored_key_bytes(block.key.length);
-    reserve_keys(reservation, peak)?;
+    let range = block.key.offset..block.key.checksum_end()?;
+    let ranges = std::slice::from_ref(&range);
+    // The aligned cache turns one key into a whole aligned block plus whatever assembling it
+    // needs, so a warm part is asked for that peak first. A pool that cannot cover it gets an
+    // explicitly cache-less reader instead, whose peak is the key entry alone; only then does the
+    // read run.
+    let mut aligned = reader.cache.is_some();
+    let mut peak = fetch_peak(reader, ranges, areas.keys.end, aligned) + retained;
+    if !try_reserve_keys(reservation, peak) {
+        // Alignment is optional. Retrying on the smaller budget also reports exhaustion when even
+        // one key entry does not fit.
+        aligned = false;
+        peak = fetch_peak(reader, ranges, areas.keys.end, false) + retained;
+        reserve_keys(reservation, peak)?;
+    }
     let _peak = KeyPeak {
         reservation,
         transient: peak - retained,
     };
-    let range = block.key.offset..block.key.checksum_end()?;
-    let mut fetched = fetch_ranges(
-        reader,
-        areas.keys.end,
-        std::slice::from_ref(&range),
-        metrics,
-    )
-    .await?;
+    let uncached = PayloadReader {
+        reader: reader.reader,
+        cache: None,
+        end: reader.end,
+        key_end: reader.key_end,
+    };
+    let target = if aligned { reader } else { &uncached };
+    let mut fetched = fetch_ranges(target, areas.keys.end, ranges, metrics).await?;
     let entry = fetched
         .pop()
         .ok_or_else(|| invalid("missing sample key response"))?;

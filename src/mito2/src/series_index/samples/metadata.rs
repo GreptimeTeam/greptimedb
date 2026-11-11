@@ -328,7 +328,7 @@ pub(super) struct Block {
 /// caller can compare references across a part boundary by accident. Two parts hold unrelated
 /// key areas, which is why a series that spans parts is recognised by [`BlockOrder::continues`]
 /// on the exact key bytes instead.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct BlockOrder {
     part: u32,
     id: MetricSeriesId,

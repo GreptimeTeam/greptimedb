@@ -260,8 +260,15 @@ are unrelated numbers and are never compared. Whether one exact series continues
 another part is decided on the exact key bytes: the last key a request loaded from one
 part is compared with the first it loads from the next, and an equal key must continue
 timestamps and ordinals, while a greater key starts a new series at ordinal zero.
+
 Because keys are only read for blocks a request selects, this content check covers the
-keys actually loaded: unvisited ranges are validated structurally, not by content.
+keys actually loaded: unvisited ranges are validated structurally, not by content. It
+is chained, though, so a selection that skips a block, a page, or a whole part cannot
+hide the two keys around the gap: the check compares each loaded key with the previous
+loaded key, not with the previous traversed block. When the two are not consecutive
+blocks, the order must still increase and the ordinal must still grow, but the ordinal
+need not be exactly one greater; only immediately adjacent blocks require that, along
+with an unchanged series.
 
 ### Metadata pages
 
