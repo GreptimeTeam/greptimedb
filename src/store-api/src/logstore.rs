@@ -159,6 +159,39 @@ pub trait LogStore: Send + Sync + 'static + std::fmt::Debug {
     fn start_region_history(&self, _provider: &Provider) -> Result<(), Self::Error> {
         Ok(())
     }
+
+    /// Streams the entries of `region_id` in `(after, upper]` from the WAL of node `node_id`,
+    /// which shares this log store's storage, without writing to that WAL.
+    ///
+    /// The default returns `None`: the log store cannot read the WAL of another node.
+    async fn read_node(
+        &self,
+        _node_id: u64,
+        _region_id: RegionId,
+        _after: EntryId,
+        _upper: WalReadUpperBound,
+    ) -> Result<Option<SendableEntryStream<'static, Entry, Self::Error>>, Self::Error> {
+        Ok(None)
+    }
+}
+
+/// Upper bound of a WAL range read from another node. A reported final entry must be
+/// present, whereas a LIST boundary need not contain entries of the region.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WalReadUpperBound {
+    /// The durable last entry reported by the source on downgrade.
+    LastEntry(EntryId),
+    /// A conservative bound obtained by listing the source prefix.
+    Listed(EntryId),
+}
+
+impl WalReadUpperBound {
+    /// Returns the bound.
+    pub fn entry_id(self) -> EntryId {
+        match self {
+            Self::LastEntry(id) | Self::Listed(id) => id,
+        }
+    }
 }
 
 /// The response of an `append` operation.
