@@ -23,6 +23,12 @@ including exact integer counts, custom bounds, and NaN payloads:
 cargo nextest run -p servers -E 'test(native_histogram_remote_read_wire_fixture)'
 ```
 
+## Metadata fixtures
+
+The [repartition route fixture](metadata/repartition_readiness/README.md) checks
+allocation-time read readiness, old-route defaults, and attribute preservation.
+It is exercised by `common-meta` and query route-cache tests.
+
 ## Object store WAL fixtures
 
 Frozen objects of the object store WAL are checked byte for byte by the format tests of

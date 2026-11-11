@@ -1210,16 +1210,18 @@ mod tests {
     #[test]
     fn test_filter_allocated_region_routes() {
         let table_id = 1024;
-        let region_routes = vec![
+        let mut region_routes = vec![
             test_region_route(RegionId::new(table_id, 1), "a"),
             test_region_route(RegionId::new(table_id, 2), "b"),
         ];
+        region_routes[1].set_repartition_pending_read();
         let allocated_region_ids = HashSet::from([RegionId::new(table_id, 2)]);
 
         let new_region_routes =
             DeallocateRegion::generate_region_routes(&region_routes, &allocated_region_ids);
 
         assert_eq!(new_region_routes.len(), 1);
+        assert!(!new_region_routes[0].is_repartition_pending_read());
         assert_eq!(new_region_routes[0].region.id, RegionId::new(table_id, 1));
     }
 
@@ -2164,14 +2166,14 @@ mod tests {
                     RegionId::new(table_id, 2),
                     &range_expr("x", 100, 200).as_json_str().unwrap(),
                 ),
-                RegionRoute {
-                    region: Region {
-                        id: RegionId::new(table_id, 3),
-                        partition_expr: range_expr("x", 50, 100).as_json_str().unwrap(),
-                        ..Default::default()
-                    },
-                    leader_peer: Some(Peer::empty(0)),
-                    ..Default::default()
+                {
+                    let mut target = test_region_route(
+                        RegionId::new(table_id, 3),
+                        &range_expr("x", 50, 100).as_json_str().unwrap(),
+                    );
+                    target.leader_peer = Some(Peer::empty(0));
+                    target.set_repartition_pending_read();
+                    target
                 },
             ]
         );
@@ -2549,14 +2551,14 @@ mod tests {
                     RegionId::new(table_id, 2),
                     &range_expr("x", 100, 200).as_json_str().unwrap(),
                 ),
-                RegionRoute {
-                    region: Region {
-                        id: RegionId::new(table_id, 3),
-                        partition_expr: range_expr("x", 50, 100).as_json_str().unwrap(),
-                        ..Default::default()
-                    },
-                    leader_peer: Some(Peer::empty(0)),
-                    ..Default::default()
+                {
+                    let mut target = test_region_route(
+                        RegionId::new(table_id, 3),
+                        &range_expr("x", 50, 100).as_json_str().unwrap(),
+                    );
+                    target.leader_peer = Some(Peer::empty(0));
+                    target.set_repartition_pending_read();
+                    target
                 },
             ]
         );
