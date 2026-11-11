@@ -115,14 +115,18 @@ impl<S: LogStore> TailReplayTask<S> {
 
     /// Replays the current tails and publishes the result. An error asks for another round.
     async fn replay_round(&self) -> Result<()> {
-        let version = self.region.version();
-        let tails = &version.pending_tails;
+        // Keeps no version past this point: it would hold the region's memtables, and their
+        // write buffer memory, after a flush released them.
+        let (tails, flushed_entry_id) = {
+            let version = self.region.version();
+            (version.pending_tails.clone(), version.flushed_entry_id)
+        };
         let uncommitted = UncommittedSsts::new(
             self.region.region_id,
             self.region.access_layer.clone(),
             Some(self.flush_task.cache_manager.clone()),
         );
-        let (files, last_entry_ids) = match self.replay_tails(tails, &uncommitted).await {
+        let (files, last_entry_ids) = match self.replay_tails(&tails, &uncommitted).await {
             Ok(replayed) => replayed,
             Err(e) => {
                 uncommitted.cleanup().await;
@@ -137,7 +141,7 @@ impl<S: LogStore> TailReplayTask<S> {
                 self.remaining(tail, *last_entry_id, lease_received)
             })
             .collect::<Vec<_>>();
-        if !files.is_empty() || remaining != *tails {
+        if !files.is_empty() || remaining != tails {
             let last_entry_id = last_entry_ids.into_iter().flatten().max().unwrap_or(0);
             let flushed_sequence = files
                 .iter()
@@ -150,8 +154,7 @@ impl<S: LogStore> TailReplayTask<S> {
                 files_to_remove: Vec::new(),
                 timestamp_ms: Some(chrono::Utc::now().timestamp_millis()),
                 compaction_time_window: None,
-                flushed_entry_id: (last_entry_id > version.flushed_entry_id)
-                    .then_some(last_entry_id),
+                flushed_entry_id: (last_entry_id > flushed_entry_id).then_some(last_entry_id),
                 // Later writes of the region take sequences above the replayed rows.
                 committed_sequence: flushed_sequence,
                 wal_recovery: WalRecoveryEdit {
@@ -159,7 +162,7 @@ impl<S: LogStore> TailReplayTask<S> {
                     handoff_floor: None,
                 },
             };
-            if !self.publish(tails, edit, &uncommitted).await? {
+            if !self.publish(&tails, edit, &uncommitted).await? {
                 return Ok(());
             }
         }

@@ -1080,6 +1080,24 @@ async fn test_replay_backs_off_while_altering() {
 }
 
 #[tokio::test]
+async fn test_replay_round_keeps_no_flushed_memtables() {
+    let region = TestRegion::new("tail-replay-memtables", false, None).await;
+    region
+        .reopen_with_tails(vec![own_tail(0, region.entries[1], UptoKind::Reported)])
+        .await;
+    region.listener.hold_from(1);
+    region.promote();
+    wait_until(|| region.listener.commits() == 1).await;
+    let memtables = Arc::downgrade(&region.version().memtables);
+
+    region.overwrite_remote_row().await;
+    flush_region(&region.engine, region.region_id, None).await;
+    wait_until(|| memtables.strong_count() == 0).await;
+    region.listener.hold_from(0);
+    region.wait_until_replayed().await;
+}
+
+#[tokio::test]
 async fn test_promotion_replays_tails_of_region_altered_meanwhile() {
     let region = TestRegion::new("tail-replay-promote-altering", false, None).await;
     region
