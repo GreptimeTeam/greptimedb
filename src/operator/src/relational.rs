@@ -29,7 +29,6 @@ use datatypes::prelude::ConcreteDataType;
 use mysql_async::prelude::Queryable;
 use snafu::{ResultExt, ensure};
 use table::requests::redact_connection;
-use url::Url;
 
 use crate::error::{
     ConnectRemoteSnafu, FetchMetadataSnafu, InvalidRemoteTableSnafu, MissingRemoteSchemaSnafu,
@@ -251,6 +250,33 @@ async fn resolve_host_ips(connection: &str, host: &str) -> Result<Vec<IpAddr>> {
     Ok(ips)
 }
 
+/// Parses the connection DSN and, for TCP connections, resolves the host to
+/// candidate IP addresses. When an explicit Unix socket is configured
+/// (`?socket=/path`), mysql_async dials the socket path directly, so the host
+/// is a placeholder and DNS resolution is skipped entirely.
+async fn build_mysql_opts(connection: &str) -> Result<mysql_async::Opts> {
+    let opts = mysql_async::Opts::from_url(connection)
+        .map_err(|e| box_foreign_error(e, connection))
+        .with_context(|_| ConnectRemoteSnafu {
+            connection: redact_connection(connection),
+        })?;
+
+    // A Unix-socket connection has no TCP host to resolve; an unresolvable
+    // placeholder hostname must not prevent connecting via the socket path.
+    if opts.socket().is_some() {
+        return Ok(opts);
+    }
+
+    let host = opts.ip_or_hostname().to_owned();
+    let ips = resolve_host_ips(connection, &host).await?;
+    // Keep the original hostname in the URL: TLS uses it for SNI and
+    // certificate (SAN) validation, so it must not be replaced by an IP. The
+    // resolved IPs are handed to the TCP layer separately via `resolved_ips`.
+    Ok(mysql_async::Opts::from(
+        mysql_async::OptsBuilder::from_opts(opts).resolved_ips(Some(ips)),
+    ))
+}
+
 /// A raw `INFORMATION_SCHEMA.COLUMNS` row decoded by the driver:
 /// (`name`, `data_type`, `column_type`, `precision`, `scale`, `fsp`).
 type RawColumnRow = (
@@ -267,24 +293,7 @@ type RawColumnRow = (
 /// driver-reported type, so callers decide which columns to map to a
 /// GreptimeDB [`ConcreteDataType`].
 pub async fn fetch_mysql_columns(connection: &str, remote_table: &str) -> Result<Vec<MySqlColumn>> {
-    let url = Url::parse(connection)
-        .map_err(|e| box_foreign_error(e, connection))
-        .with_context(|_| ConnectRemoteSnafu {
-            connection: redact_connection(connection),
-        })?;
-    let host = url.host_str().unwrap_or_default();
-    let ips = resolve_host_ips(connection, host).await?;
-
-    // Keep the original hostname in the URL: TLS uses it for SNI and
-    // certificate (SAN) validation, so it must not be replaced by an IP. The
-    // resolved IPs are handed to the TCP layer separately via `resolved_ips`.
-    let opts = mysql_async::Opts::from_url(url.as_str())
-        .map_err(|e| box_foreign_error(e, connection))
-        .with_context(|_| ConnectRemoteSnafu {
-            connection: redact_connection(connection),
-        })?;
-    let opts =
-        mysql_async::Opts::from(mysql_async::OptsBuilder::from_opts(opts).resolved_ips(Some(ips)));
+    let opts = build_mysql_opts(connection).await?;
     let default_schema = opts.db_name().map(str::to_string);
     let mut conn = tokio::time::timeout(CONNECT_TIMEOUT, mysql_async::Conn::new(opts))
         .await
@@ -606,5 +615,18 @@ mod tests {
         // Inferred form: every column is mapped, so the unsupported column
         // still fails.
         assert!(map_mysql_columns(&raw, None).is_err());
+    }
+
+    #[tokio::test]
+    async fn test_build_mysql_opts_skips_dns_for_socket() {
+        // `unresolvable.invalid` (RFC 2606) has no DNS record; if the socket
+        // branch did not short-circuit, `resolve_host_ips` would fail here.
+        let opts = build_mysql_opts(
+            "mysql://root:secret@unresolvable.invalid/db?socket=%2Ftmp%2Fmysql.sock",
+        )
+        .await
+        .unwrap();
+        assert_eq!(opts.socket(), Some("/tmp/mysql.sock"));
+        assert!(opts.resolved_ips().is_none());
     }
 }
