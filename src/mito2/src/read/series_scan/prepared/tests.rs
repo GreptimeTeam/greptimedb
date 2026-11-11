@@ -3600,6 +3600,164 @@ async fn replaced_source_invalidates_the_grouped_artifact() {
     engine.stop().await.unwrap();
 }
 
+/// Compaction publishes SSTs that no artifact covers and removes the sources the published
+/// artifacts were built from, so it must trigger the series-index rebuild that ingestion and flush
+/// already trigger. Periodic maintenance is an hour away, so only that trigger can answer here.
+#[tokio::test]
+async fn compaction_triggers_series_index_build() {
+    use api::v1::region::{StrictWindow, compact_request};
+    use store_api::region_request::RegionCompactRequest;
+
+    let (_env, engine, region) = fixture().await;
+    build(&engine, &region).await;
+    let ctx = QueryScanContext::default();
+    let metrics = ExecutionPlanMetricsSet::new();
+    let request = ScanRequest {
+        distribution: Some(TimeSeriesDistribution::PerSeries),
+        ..Default::default()
+    };
+
+    // The three flushed SSTs are covered, so the native entry point serves their rows.
+    let before = {
+        let raw_scanner = engine
+            .handle_query(region.region_id, request.clone())
+            .await
+            .unwrap();
+        let binding = labels(raw_scanner.metadata());
+        let source = raw_scanner
+            .prepare_series(&ctx, &metrics, &binding)
+            .await
+            .unwrap()
+            .expect("a covered region prepares a source");
+        prepared_samples(&source).await
+    };
+    assert_eq!(vec![(1000, 1.0), (2000, 1.0)], before);
+
+    // The published coverage names the three SSTs the compaction is about to replace.
+    let stale = region.series_index_version();
+    let stale_sources = stale
+        .samples
+        .values()
+        .flat_map(|handle| handle.entry().source_file_ids.iter().copied())
+        .collect::<HashSet<_>>();
+    assert_eq!(3, stale_sources.len());
+    let stale_artifacts = stale
+        .samples
+        .values()
+        .map(|handle| handle.file_id().file_id())
+        .collect::<HashSet<_>>();
+    let stale_paths = stale
+        .samples
+        .values()
+        .flat_map(|handle| {
+            handle
+                .entry()
+                .artifact
+                .objects
+                .iter()
+                .map(|object| object.path.clone())
+        })
+        .collect::<Vec<_>>();
+
+    // A real in-process compaction rewrites all three SSTs into one output file.
+    engine
+        .handle_request(
+            region.region_id,
+            RegionRequest::Compact(RegionCompactRequest {
+                options: compact_request::Options::StrictWindow(StrictWindow {
+                    window_seconds: 3600,
+                }),
+                ..Default::default()
+            }),
+        )
+        .await
+        .unwrap();
+    let compacted = region
+        .version()
+        .ssts
+        .levels()
+        .iter()
+        .flat_map(|level| level.files())
+        .map(|file| file.file_id().file_id())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        1,
+        compacted.len(),
+        "the compaction must rewrite the three SSTs"
+    );
+    assert!(compacted.iter().all(|id| !stale_sources.contains(id)));
+
+    // Before the hourly maintenance pass, only the compaction trigger can publish, so waiting for
+    // coverage of the output file proves the trigger ran instead of a periodic reconcile.
+    tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            let covered = {
+                let version = region.series_index_version();
+                compacted.iter().all(|id| {
+                    version
+                        .samples
+                        .values()
+                        .any(|handle| handle.entry().covers(*id))
+                })
+            };
+            if covered {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("compaction must trigger a series-index build instead of waiting for maintenance");
+
+    // Without waiting any longer, the native entry point serves the rows of the output file.
+    let raw_scanner = engine
+        .handle_query(region.region_id, request)
+        .await
+        .unwrap();
+    let binding = labels(raw_scanner.metadata());
+    let served = raw_scanner
+        .prepare_series(&ctx, &metrics, &binding)
+        .await
+        .unwrap()
+        .expect("the compaction output must be prepared");
+    assert_eq!(before, prepared_samples(&served).await);
+
+    // The answer never comes from the stale pre-compaction artifact: the rebuilt coverage replaces
+    // that generation, and no read of this scan opens its objects.
+    let (store, reads) = recording_store(&region);
+    let mut scan = scanner(&region, store);
+    scan.prepare(
+        PrepareRequest::default().with_ranges(vec![scan.properties.partitions[0].clone()]),
+    )
+    .unwrap();
+    let selected = selection(&scan);
+    assert_eq!(vec![0], selected.ready_files);
+    assert!(selected.all_ready);
+    assert!(
+        selected
+            .sample_artifacts
+            .iter()
+            .all(|id| !stale_artifacts.contains(id)),
+        "the stale pre-compaction artifact must not be selected"
+    );
+    let binding = labels(scan.metadata());
+    let source = scan
+        .prepare_series(&ctx, &metrics, &binding)
+        .await
+        .unwrap()
+        .expect("the post-compaction coverage prepares a source");
+    assert_eq!(before, prepared_samples(&source).await);
+    assert!(
+        reads
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|(path, _)| !stale_paths.contains(path)),
+        "the stale pre-compaction artifact must not be read"
+    );
+    engine.stop().await.unwrap();
+}
+
 #[tokio::test]
 async fn time_pruned_group_source_stays_eligible() {
     let (_env, engine, region) = fixture().await;
