@@ -1,0 +1,18 @@
+src/mito2/src/engine/index_build_test.rs
+  h_623774b620da8e 18,2595-2597,2629-2633,2646-2649,2665-2674,2711-2714,2721,2749-2751,2764,2914-2977
+src/mito2/src/sst/index.rs
+  h_623774b620da8e 1060,1741,1771,3615-3703
+src/mito2/src/worker/handle_rebuild_index.rs
+  h_623774b620da8e 91,393-394,397
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "47a2b061ea2531508755503a57659c5d1b6ddbb5",
+  "prompts": {},
+  "humans": {
+    "h_623774b620da8e": {
+      "author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}
