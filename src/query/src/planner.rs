@@ -80,9 +80,10 @@ pub trait LogicalPlanner: Send + Sync {
     fn as_any(&self) -> &dyn Any;
 }
 
-/// A remote native plan may place fused evaluation only above independent raw sources.
-/// In particular, a bare scan under FusedSeries would require shipping the process-local
-/// fused plan to a region, which this gate must not admit.
+/// A native plan a distributed planner splits over regions may place fused evaluation only above
+/// independent raw sources. In particular, a bare scan under FusedSeries would place a fused node
+/// that expects to run where it was planned below a region boundary, which this gate must not
+/// admit.
 ///
 /// A fused node that reads no region is the one exception: it has nothing to place in a region, so
 /// the frontend evaluates it and the transport this gate protects is never used.
@@ -694,11 +695,13 @@ impl DfLogicalPlanner {
         .map_err(BoxedError::new)
         .context(QueryPlanSnafu)?;
 
-        // Only per-selector raw sources have a supported remote transport, and a statement that
-        // reads no table needs none. Decide while the original statement is still available:
-        // physical planning cannot fall back safely.
+        // A distributed planner plans a native statement over per-selector raw sources, and a
+        // statement that reads no table needs none. Anything else keeps the existing plan. Decide
+        // while the original statement is still available: physical planning cannot fall back
+        // safely. An engine with no distributed planner plans no region, so there is nothing to
+        // admit its plan against.
         let plan = if native_requested
-            && !self.engine_state.in_process_region_transport()
+            && self.engine_state.with_dist_planner()
             && !remote_native_raw_plan_supported(&plan)
         {
             PromPlanner::stmt_to_plan_with_annotations(
@@ -1215,10 +1218,11 @@ mod tests {
         create_promql_test_engine_with(crate::options::QueryOptions::default(), false)
     }
 
-    /// The PromQL fixture, additionally stating the engine options and how its regions are reached.
+    /// The PromQL fixture, additionally stating the engine options and whether it plans distributed
+    /// statements.
     fn create_promql_test_engine_with(
         query_options: crate::options::QueryOptions,
-        in_process_region_transport: bool,
+        with_dist_planner: bool,
     ) -> QueryEngineRef {
         let catalog_manager = MemoryCatalogManager::with_default_setup();
         let physical_table_name = "phy";
@@ -1322,15 +1326,14 @@ mod tests {
             })
             .unwrap();
 
-        QueryEngineFactory::try_new_with_plugins_and_region_transport(
+        QueryEngineFactory::try_new_with_plugins(
             catalog_manager,
             None,
             None,
             None,
             None,
             None,
-            false,
-            in_process_region_transport,
+            with_dist_planner,
             Default::default(),
             query_options,
         )
@@ -1377,7 +1380,7 @@ mod tests {
     ) -> crate::error::Result<String> {
         let engine = create_promql_test_engine_with(
             engine_options,
-            // The native route plans a region input the region server in this process accepts.
+            // The route a deployed frontend plans: a distributed planner over its regions.
             true,
         );
         let mut builder = QueryContextBuilder::default()
@@ -1484,13 +1487,19 @@ mod tests {
         assert!(message.contains("Expected true or false"), "{message}");
     }
 
-    /// Remote native planning accepts independent raw sources only. Unsupported shapes are
-    /// replanned through the legacy route, while the in-process route remains unchanged.
+    /// One deployment, one topology: a distributed planner plans every native statement over
+    /// per-selector raw sources, so the raw-topology admission gate admits the same shapes wherever
+    /// its regions are, and an engine with no distributed planner plans no region for the gate to
+    /// judge.
     #[tokio::test]
-    async fn test_remote_native_promql_admission_replans_unsupported_shapes() {
-        for (in_process, query, native) in [
+    async fn test_native_promql_admission_is_the_same_for_both_deployments() {
+        for (with_dist_planner, query, sourced) in [
+            // Two tables are cross-table work, which needs one source per table whether or not a
+            // distributed planner is installed; a single selector reads its table directly unless
+            // the distributed planner asks for the source-backed topology.
             (false, "some_metric + other_metric", true),
             (false, "rate(some_metric[5m])", false),
+            (true, "some_metric + other_metric", true),
             (true, "rate(some_metric[5m])", true),
         ] {
             let engine = create_promql_test_engine_with(
@@ -1498,7 +1507,7 @@ mod tests {
                     experimental_native_promql: true,
                     ..Default::default()
                 },
-                in_process,
+                with_dist_planner,
             );
             let query_ctx = Arc::new(
                 QueryContextBuilder::default()
@@ -1519,20 +1528,25 @@ mod tests {
             .unwrap();
             let plan = engine.planner().plan(&stmt, query_ctx).await.unwrap();
             let display = plan.display_indent().to_string();
-            assert_eq!(
+            assert!(
                 display.contains("FusedSeries"),
-                native,
-                "in_process={in_process}, query={query}: {display}"
+                "with_dist_planner={with_dist_planner}, query={query}: {display}"
             );
-            if native && !in_process {
+            if with_dist_planner {
+                // Every native plan a distributed planner produces is the raw topology, so the
+                // admission gate admits it instead of replanning it through the legacy route.
                 assert!(remote_native_raw_plan_supported(&plan), "{display}");
-                assert!(display.contains("RawSeriesSource"), "{display}");
             }
+            assert_eq!(
+                display.contains("RawSeriesSource"),
+                sourced,
+                "with_dist_planner={with_dist_planner}, query={query}: {display}"
+            );
         }
     }
 
-    /// Plans `query` on the fixture engine with the native route requested. The engine reaches its
-    /// regions over the wire, which is the route the admission gate guards.
+    /// Plans `query` on the fixture engine with the native route requested. The engine is one with
+    /// no distributed planner, so its plans keep the shapes a region runs itself.
     async fn plan_remote_native_promql(
         engine: &QueryEngineRef,
         query_ctx: &QueryContextRef,
@@ -1749,9 +1763,9 @@ mod tests {
         );
     }
 
-    /// A statement that reads no table plans natively over the wire, where there is no region to
-    /// place anything in: the frontend evaluates the fused node under the native column names
-    /// rather than the ones the existing planner derives from an expression.
+    /// A statement that reads no table plans natively, and there is no region to place anything in:
+    /// the frontend evaluates the fused node under the native column names rather than the ones the
+    /// existing planner derives from an expression.
     #[tokio::test]
     async fn test_remote_native_promql_plans_a_data_free_statement_natively() {
         let engine = create_promql_test_engine_with(
@@ -1831,9 +1845,8 @@ mod tests {
     }
 
     /// A nameless selector that matches no metric table has no region to read either, so the typed
-    /// empty input it is planned as stays that input on both routes and the node above it is
-    /// evaluated on the frontend. Binding a metric to it is what used to turn this statement into
-    /// an internal error over the wire.
+    /// empty input it is planned as stays that input and the node above it is evaluated on the
+    /// frontend. Binding a metric to it is what used to turn this statement into an internal error.
     #[tokio::test]
     async fn test_remote_native_promql_plans_a_zero_match_selector_natively() {
         let engine = create_promql_test_engine_with(
