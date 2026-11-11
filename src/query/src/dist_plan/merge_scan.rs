@@ -522,6 +522,7 @@ impl MergeScanLogicalPlan {
 pub struct MergeScanExec {
     table: TableName,
     regions: Vec<RegionId>,
+    partition_versions: Arc<HashMap<RegionId, u64>>,
     plan: LogicalPlan,
     arrow_schema: ArrowSchemaRef,
     remote_schema: ArrowSchemaRef,
@@ -613,6 +614,7 @@ impl MergeScanExec {
         Ok(Self {
             table,
             regions,
+            partition_versions: Arc::default(),
             plan,
             arrow_schema,
             remote_schema,
@@ -658,6 +660,12 @@ impl MergeScanExec {
         Ok(self)
     }
 
+    /// Locks each scan to the partition scope selected by the planning snapshot.
+    pub(crate) fn with_partition_versions(mut self, versions: HashMap<RegionId, u64>) -> Self {
+        self.partition_versions = Arc::new(versions);
+        self
+    }
+
     /// Conservative row-count upper bound for all selected regions.
     ///
     /// This is not an expected cardinality: DataFusion receives it as an
@@ -687,6 +695,7 @@ impl MergeScanExec {
     ) -> Result<SendableRecordBatchStream> {
         // prepare states to move
         let regions = self.regions.clone();
+        let partition_versions = self.partition_versions.clone();
         let region_query_handler = self.region_query_handler.clone();
         let metric = MergeScanMetric::new(&self.metric);
         let arrow_schema = self.arrow_schema.clone();
@@ -780,6 +789,12 @@ impl MergeScanExec {
                     region_id,
                     &captured_remote_dyn_filters,
                 );
+                if let Some(version) = partition_versions.get(&region_id) {
+                    region_query_ctx.set_extension(
+                        crate::dummy_catalog::EXPECTED_PARTITION_EXPR_VERSION_KEY,
+                        version.to_string(),
+                    );
+                }
                 if live_analyze_metrics {
                     let remote_query_id = region_query_ctx.remote_query_id().map(str::to_string);
                     if let Some(remote_query_id) = remote_query_id {
@@ -2166,6 +2181,7 @@ mod tests {
         select_target_calls: AtomicUsize,
         read_preferences: Mutex<Vec<ReadPreference>>,
         do_get_targets: Mutex<Vec<u64>>,
+        versions: Mutex<Vec<(RegionId, Option<String>)>>,
     }
 
     impl TestRegionQueryHandler {
@@ -2610,6 +2626,19 @@ mod tests {
             request: common_query::request::QueryRequest,
         ) -> crate::error::Result<common_recordbatch::SendableRecordBatchStream> {
             self.do_get_targets.lock().unwrap().push(target.peer().id);
+            self.versions.lock().unwrap().push((
+                request.region_id,
+                request
+                    .header
+                    .as_ref()
+                    .and_then(|header| header.query_context.as_ref())
+                    .and_then(|context| {
+                        context
+                            .extensions
+                            .get(crate::dummy_catalog::EXPECTED_PARTITION_EXPR_VERSION_KEY)
+                    })
+                    .cloned(),
+            ));
             let response = self
                 .responses
                 .get(&request.region_id)
@@ -2725,6 +2754,29 @@ mod tests {
             .downcast_ref::<Int64Array>()
             .unwrap();
         assert_eq!((a.value(0), b.value(0)), values);
+    }
+
+    #[tokio::test]
+    async fn test_merge_scan_sends_planned_partition_versions() {
+        let ids = [RegionId::new(1024, 1), RegionId::new(1024, 2)];
+        let batch = record_batch(
+            int64_schema(&["a", "b"]),
+            vec![
+                Arc::new(Int64Vector::from_slice([11])) as _,
+                Arc::new(Int64Vector::from_slice([12])) as _,
+            ],
+        );
+        let handler = Arc::new(TestRegionQueryHandler::new(
+            ids.map(|id| (id, batch.clone())),
+        ));
+        let exec =
+            merge_scan_exec_with_handler(ids.to_vec(), expected_int64_schema(), handler.clone(), 1)
+                .with_partition_versions(HashMap::from_iter([(ids[0], 41), (ids[1], 42)]));
+        collect_merge_scan(exec).await.unwrap();
+        assert_eq!(
+            *handler.versions.lock().unwrap(),
+            vec![(ids[0], Some("41".into())), (ids[1], Some("42".into()))]
+        );
     }
 
     #[tokio::test]
