@@ -238,10 +238,20 @@ impl RemoteDynFilterReceiverExtensionPlanner {
 mod tests {
     use std::sync::Arc;
 
-    use datafusion::arrow::datatypes::{DataType, Field, Schema};
+    use datafusion::arrow::array::{
+        BooleanArray, Float64Array, StringArray, TimestampMillisecondArray,
+    };
+    use datafusion::arrow::datatypes::{DataType, Field, Schema, TimeUnit};
+    use datafusion::arrow::record_batch::RecordBatch;
+    use datafusion::execution::TaskContext;
     use datafusion::physical_plan::expressions::{Column, DynamicFilterPhysicalExpr, lit};
     use datafusion_common::DFSchema;
     use datafusion_expr::{EmptyRelation, UserDefinedLogicalNodeCore};
+
+    use common_query::request::{
+        DynFilterPayload, REMOTE_DYN_FILTER_PAYLOAD_MAX_BYTES,
+        remote_membership_test_support::{key, one_column_schema, run_real_hash_join, utf8},
+    };
 
     use super::*;
 
@@ -317,5 +327,119 @@ mod tests {
         let column = columns.iter().next().unwrap();
         assert_eq!(column.name(), "instance");
         assert_eq!(column.index(), 1);
+    }
+
+    /// The receiver keeps the recovered payload's columns as the filter's children, so
+    /// a name-based remap must also remap the recovered `InList` operand when the input
+    /// is pruned to a different column order.
+    fn pruned_input_with_trace_id() -> LogicalPlan {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new(
+                "ts",
+                DataType::Timestamp(TimeUnit::Millisecond, None),
+                false,
+            ),
+            Field::new("value", DataType::Float64, true),
+            Field::new("trace_id", DataType::Utf8, true),
+        ]));
+        LogicalPlan::EmptyRelation(EmptyRelation {
+            produce_one_row: false,
+            schema: Arc::new(DFSchema::try_from(schema).unwrap()),
+        })
+    }
+
+    #[tokio::test]
+    async fn recovered_membership_payload_survives_receiver_remap() {
+        // Coordinator side: a real hash join over the trace id publishes a runtime
+        // lookup that the GT encoder recovers as exact build membership.
+        let producer_schema = one_column_schema("trace_id", DataType::Utf8);
+        let trace_id = key("trace_id", 0);
+        let members = ["trace-a", "trace-b"];
+        let member_batch =
+            RecordBatch::try_new(Arc::clone(&producer_schema), vec![utf8(&members)]).unwrap();
+        let filter = run_real_hash_join(
+            1,
+            Arc::clone(&producer_schema),
+            Arc::clone(&producer_schema),
+            vec![vec![member_batch.clone()]],
+            vec![vec![member_batch]],
+            vec![(Arc::clone(&trace_id), Arc::clone(&trace_id))],
+        )
+        .await;
+        let payload = DynFilterPayload::from_datafusion_expr(
+            &filter.expr,
+            REMOTE_DYN_FILTER_PAYLOAD_MAX_BYTES,
+        )
+        .unwrap();
+        let decoded = payload
+            .decode_datafusion_expr(
+                &TaskContext::default(),
+                &producer_schema,
+                REMOTE_DYN_FILTER_PAYLOAD_MAX_BYTES,
+            )
+            .unwrap();
+
+        // Receiver side: the payload's columns become the filter's children.
+        let payload_columns = collect_columns(&decoded)
+            .into_iter()
+            .map(|column| Arc::new(column) as Arc<dyn PhysicalExpr>)
+            .collect::<Vec<_>>();
+        assert_eq!(payload_columns.len(), 1);
+        let dyn_filter = Arc::new(DynamicFilterPhysicalExpr::new(
+            payload_columns,
+            Arc::clone(&decoded),
+        ));
+
+        let plan =
+            RemoteDynFilterReceiverLogicalPlan::new(pruned_input_with_trace_id(), vec![dyn_filter]);
+        let remapped = UserDefinedLogicalNodeCore::with_exprs_and_inputs(
+            &plan,
+            vec![],
+            vec![pruned_input_with_trace_id()],
+        )
+        .unwrap();
+
+        // The recovered membership is remapped by name to the pruned input ordinal.
+        let receiver_filter = remapped.dyn_filters()[0]
+            .downcast_ref::<DynamicFilterPhysicalExpr>()
+            .expect("receiver keeps the dynamic filter");
+        let current = receiver_filter.current().unwrap();
+        let remapped_columns = collect_columns(&current);
+        assert_eq!(remapped_columns.len(), 1);
+        let remapped_column = remapped_columns.iter().next().unwrap();
+        assert_eq!(remapped_column.name(), "trace_id");
+        assert_eq!(remapped_column.index(), 2);
+
+        // ...and still selects exactly the build keys on the pruned schema.
+        let pruned_schema = Arc::new(Schema::new(vec![
+            Field::new(
+                "ts",
+                DataType::Timestamp(TimeUnit::Millisecond, None),
+                false,
+            ),
+            Field::new("value", DataType::Float64, true),
+            Field::new("trace_id", DataType::Utf8, true),
+        ]));
+        let batch = RecordBatch::try_new(
+            pruned_schema,
+            vec![
+                Arc::new(TimestampMillisecondArray::from(vec![0i64, 1, 2])),
+                Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0])),
+                Arc::new(StringArray::from(vec!["trace-a", "trace-b", "miss"])),
+            ],
+        )
+        .unwrap();
+        let selected = current
+            .evaluate(&batch)
+            .unwrap()
+            .into_array(batch.num_rows())
+            .unwrap();
+        let selected = selected.as_any().downcast_ref::<BooleanArray>().unwrap();
+        assert_eq!(
+            (0..batch.num_rows())
+                .map(|row| selected.value(row))
+                .collect::<Vec<_>>(),
+            vec![true, true, false]
+        );
     }
 }
