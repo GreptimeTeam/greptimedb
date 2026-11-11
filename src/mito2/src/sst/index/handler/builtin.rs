@@ -24,6 +24,7 @@ use common_error::ext::BoxedError;
 use index::target::IndexTarget;
 
 use crate::config::{BloomFilterConfig, FulltextIndexConfig, InvertedIndexConfig};
+use crate::sst::file::FileMeta;
 use crate::sst::index::handler::builtin::bloom::BloomPlan;
 use crate::sst::index::handler::builtin::fulltext::FulltextPlan;
 use crate::sst::index::handler::builtin::inverted::InvertedPlan;
@@ -87,6 +88,11 @@ fn normalize_entries(entries: &mut Vec<PlanEntry>) {
             false
         }
     });
+}
+
+fn builtin_is_current(file: &FileMeta, context: &PlanContext<'_>) -> bool {
+    // Preserve the established schema/version policy, including its JSON rebuild scope.
+    file.is_index_consistent_with_region(&context.metadata.column_metadatas, context.index_options)
 }
 
 #[cfg(test)]

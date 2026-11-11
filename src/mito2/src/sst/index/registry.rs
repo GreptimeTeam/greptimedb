@@ -278,6 +278,11 @@ impl IndexBuildPlan {
         &self.planned
     }
 
+    /// Whether no handler requested work, including metadata-only maintenance.
+    pub fn is_empty(&self) -> bool {
+        self.planned.is_empty()
+    }
+
     /// All requested column formats.
     pub fn entries(&self) -> impl Iterator<Item = &PlanEntry> {
         self.planned.iter().flat_map(|plan| plan.entries())
@@ -308,6 +313,15 @@ impl IndexBuildPlan {
         }
         self.planned
             .retain(|plan| plan.kinds().iter().all(|kind| kind.is_builtin()));
+    }
+
+    /// Whether every handler considers the published file current.
+    pub fn is_current(&self, file: &FileMeta, context: &PlanContext<'_>) -> bool {
+        self.failure.is_none()
+            && self
+                .planned
+                .iter()
+                .all(|plan| plan.is_current(file, context))
     }
 }
 
@@ -347,6 +361,10 @@ mod tests {
             _: &crate::sst::index::handler::BuildContext<'_>,
         ) -> Result<Option<Box<dyn crate::sst::index::handler::IndexCreator>>, BoxedError> {
             unreachable!("admission must not construct creators")
+        }
+
+        fn is_current(&self, _: &FileMeta, _: &PlanContext<'_>) -> bool {
+            false
         }
     }
 

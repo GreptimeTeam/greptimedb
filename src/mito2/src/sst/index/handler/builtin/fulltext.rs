@@ -24,9 +24,12 @@ use index::target::IndexTarget;
 
 use crate::config::FulltextIndexConfig;
 use crate::read::Batch;
+use crate::sst::file::FileMeta;
 use crate::sst::index::fulltext_index;
 use crate::sst::index::fulltext_index::creator::{FulltextIndexer, FulltextTarget};
-use crate::sst::index::handler::builtin::{column_target_id, normalize_entries, target_column_id};
+use crate::sst::index::handler::builtin::{
+    builtin_is_current, column_target_id, normalize_entries, target_column_id,
+};
 use crate::sst::index::handler::{
     BuildContext, IndexCreator, PlanContext, PlanEntry, PlannedIndex,
 };
@@ -117,6 +120,10 @@ impl PlannedIndex for FulltextPlan {
         .await
         .map(|creator| creator.map(|c| Box::new(c) as Box<dyn IndexCreator>))
         .map_err(BoxedError::new)
+    }
+
+    fn is_current(&self, file: &FileMeta, context: &PlanContext<'_>) -> bool {
+        builtin_is_current(file, context)
     }
 }
 

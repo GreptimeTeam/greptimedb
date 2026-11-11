@@ -24,8 +24,11 @@ use index::target::IndexTarget;
 
 use crate::config::BloomFilterConfig;
 use crate::read::Batch;
+use crate::sst::file::FileMeta;
 use crate::sst::index::bloom_filter::creator::BloomFilterIndexer;
-use crate::sst::index::handler::builtin::{column_target_id, normalize_entries, target_column_id};
+use crate::sst::index::handler::builtin::{
+    builtin_is_current, column_target_id, normalize_entries, target_column_id,
+};
 use crate::sst::index::handler::{
     BuildContext, IndexCreator, PlanContext, PlanEntry, PlannedIndex,
 };
@@ -104,6 +107,10 @@ impl PlannedIndex for BloomPlan {
         )
         .map(|creator| creator.map(|c| Box::new(c) as Box<dyn IndexCreator>))
         .map_err(BoxedError::new)
+    }
+
+    fn is_current(&self, file: &FileMeta, context: &PlanContext<'_>) -> bool {
+        builtin_is_current(file, context)
     }
 }
 

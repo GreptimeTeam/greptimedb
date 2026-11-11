@@ -63,8 +63,8 @@ use crate::cache::{CacheManagerRef, CacheStrategy};
 #[cfg(test)]
 use crate::config::{BloomFilterConfig, InvertedIndexConfig};
 use crate::error::{
-    BuildIndexAsyncSnafu, Error, ExternalSnafu, InvalidConfigSnafu, JoinSnafu, RegionClosedSnafu,
-    RegionDroppedSnafu, RegionTruncatedSnafu, Result,
+    BuildIndexAsyncSnafu, Error, ExternalSnafu, InvalidConfigSnafu, JoinSnafu,
+    OperateAbortedIndexSnafu, RegionClosedSnafu, RegionDroppedSnafu, RegionTruncatedSnafu, Result,
 };
 use crate::metrics::{
     INDEX_ARTIFACT_CLEANUP_FAILURE_TOTAL, INDEX_CREATE_DISCARDED_TOTAL, INDEX_CREATE_MEMORY_USAGE,
@@ -512,6 +512,20 @@ pub(crate) struct IndexerBuilderImpl {
     pub(crate) index_options: IndexOptions,
 }
 
+impl IndexerBuilderImpl {
+    fn plan(&self) -> Arc<registry::IndexBuildPlan> {
+        if let Some(inputs) = &self.index_build_inputs {
+            return inputs.plan.clone();
+        }
+        Arc::new(self.registry.plan(&handler::PlanContext {
+            metadata: &self.metadata,
+            index_options: &self.index_options,
+            build_type: self.build_type.clone(),
+            existing_indexes: &[],
+        }))
+    }
+}
+
 #[async_trait::async_trait]
 impl IndexerBuilder for IndexerBuilderImpl {
     /// Sanity check for arguments and create a new [Indexer] if arguments are valid.
@@ -530,17 +544,7 @@ impl IndexerBuilder for IndexerBuilderImpl {
             ..Default::default()
         };
 
-        let plan = if let Some(inputs) = &self.index_build_inputs {
-            inputs.plan.clone()
-        } else {
-            let context = handler::PlanContext {
-                metadata: &self.metadata,
-                index_options: &self.index_options,
-                build_type: self.build_type.clone(),
-                existing_indexes: &[],
-            };
-            Arc::new(self.registry.plan(&context))
-        };
+        let plan = self.plan();
         indexer.failure = plan.check_success().err();
         let mut context = handler::BuildContext {
             metadata: &self.metadata,
@@ -796,7 +800,8 @@ pub struct IndexBuildTask {
     pub file_purger: FilePurgerRef,
     /// When write cache is enabled, the indexer builder should be built from the write cache.
     /// Otherwise, it should be built from the access layer.
-    pub indexer_builder: Arc<dyn IndexerBuilder + Send + Sync>,
+    /// Rebuild owns plan assembly; external implementations enter through the registry.
+    pub(crate) indexer_builder: Arc<IndexerBuilderImpl>,
     /// Request sender to notify the region worker.
     pub(crate) request_sender: Sender<WorkerRequestWithTime>,
     /// Senders of callers waiting for this build. Coalesced tasks and
@@ -957,16 +962,20 @@ impl IndexBuildTask {
         // Taken before `prepare_source` replaces the source, and used for the
         // index files and listener events of this build.
         let region_file_id = self.region_file_id();
-        if let ControlFlow::Break(report) =
-            self.prepare_source(region_file_id, &version_control).await
+        if let ControlFlow::Break(report) = self
+            .prepare_source(region_file_id, &version_control)
+            .await?
         {
             return Ok(report);
         }
-        let new_index_version = self
-            .source
-            .file_meta
-            .index_version()
-            .map_or(0, |version| version + 1);
+        // Metadata-only removal leaves no current index, but its version still reserves
+        // every older path until GC finishes. Never reuse those paths on a later build.
+        let file_meta = &self.source.file_meta;
+        let new_index_version = if file_meta.index_version > 0 || file_meta.exists_index() {
+            file_meta.index_version + 1
+        } else {
+            0
+        };
         let (mut indexer, index_output) =
             match self.create_index(region_file_id, new_index_version).await? {
                 ControlFlow::Continue(created) => created,
@@ -992,13 +1001,13 @@ impl IndexBuildTask {
         &mut self,
         region_file_id: RegionFileId,
         version_control: &VersionControlRef,
-    ) -> ControlFlow<IndexBuildReport> {
+    ) -> Result<ControlFlow<IndexBuildReport>> {
         // Check SST file existence before building index to avoid failure of parquet reader.
         if !self.check_sst_file_exists(version_control).await {
-            return ControlFlow::Break(
+            return Ok(ControlFlow::Break(
                 self.abort_and_notify(region_file_id, "SST file not found during index build")
                     .await,
-            );
+            ));
         }
 
         // A task may have waited behind another build of the same SST. Build on
@@ -1011,30 +1020,56 @@ impl IndexBuildTask {
             .get(&self.source.file_meta.file_id)
             .cloned();
         let Some(current_file_meta) = current_file_meta else {
-            return ControlFlow::Break(
+            return Ok(ControlFlow::Break(
                 self.abort_and_notify(
                     region_file_id,
                     "SST file not found in manifest during index build",
                 )
                 .await,
-            );
+            ));
         };
+        self.indexer_builder
+            .registry
+            .validate_required_kinds(&self.target_region_metadata, [&current_file_meta])
+            .with_context(|_| ExternalSnafu {
+                context: "validating index handlers for rebuild".to_string(),
+            })?;
+        let context = handler::PlanContext {
+            metadata: &self.target_region_metadata,
+            index_options: &self.index_options,
+            build_type: self.reason.clone(),
+            existing_indexes: &current_file_meta.indexes,
+        };
+        let plan = Arc::new(self.indexer_builder.registry.plan(&context));
+        plan.check_success().context(BuildIndexAsyncSnafu {
+            region_id: self.region_id,
+        })?;
+        // Manual requests skip current indexes; schema changes must run their maintenance plans.
         if self.reason == IndexBuildType::Manual
             && current_file_meta.is_index_consistent_with_region(
                 &self.target_region_metadata.column_metadatas,
                 &self.index_options,
             )
+            && plan.is_current(&current_file_meta, &context)
         {
-            return ControlFlow::Break(
+            return Ok(ControlFlow::Break(
                 self.abort_and_notify(region_file_id, "Index is already up to date")
                     .await,
-            );
+            ));
         }
+        let current_file = self.file.with_updated_index(current_file_meta.clone());
+        let builder = Arc::make_mut(&mut self.indexer_builder);
+        if let Some(inputs) = &mut builder.index_build_inputs {
+            inputs.plan = plan;
+            inputs.inputs = vec![current_file.clone()].into();
+            inputs.output_rows = Some(current_file_meta.num_rows);
+        }
+        self.file = current_file;
         self.source.file_meta = current_file_meta;
-        ControlFlow::Continue(())
+        Ok(ControlFlow::Continue(()))
     }
 
-    /// Reads the SST and creates the index files.
+    /// Reads the SST and builds a replacement index file.
     async fn create_index(
         &self,
         region_file_id: RegionFileId,
@@ -1042,7 +1077,7 @@ impl IndexBuildTask {
     ) -> Result<ControlFlow<IndexBuildReport, (Indexer, IndexOutput)>> {
         let mut parquet_reader = self
             .access_layer
-            .read_sst(self.file.clone()) // use the latest file handle instead of creating a new one
+            .read_sst(self.file.clone())
             .expected_metadata(Some(self.target_region_metadata.clone()))
             .build()
             .await?;
@@ -1055,39 +1090,86 @@ impl IndexBuildTask {
                 .map(|row_group| row_group.num_rows() as usize)
                 .filter(|size| *size > 0)
         });
-
         let mut indexer = self
             .indexer_builder
             .build(region_file_id, new_index_version, row_group_size)
             .await;
-        // The build type or index options may leave nothing to build. Return before reading
-        // any row; an empty indexer finishes with no output, which publishes nothing.
+        self.check_rebuild_indexer_or_abort(&mut indexer).await?;
         if indexer.is_empty() {
+            if self.can_remove_all_indexes() {
+                return Ok(ControlFlow::Continue((indexer, IndexOutput::default())));
+            }
             return Ok(ControlFlow::Break(self.aborted("No index to build")));
         }
 
-        if let Some(mut parquet_reader) = parquet_reader.take() {
-            // TODO(SNC123): optimize index batch
+        if let Some(mut reader) = parquet_reader.take() {
             loop {
-                match parquet_reader.next_record_batch().await {
+                match reader.next_record_batch().await {
                     Ok(Some(batch)) => {
                         indexer.update_flat(&batch).await;
+                        self.check_rebuild_indexer_or_abort(&mut indexer).await?;
                     }
                     Ok(None) => break,
-                    Err(e) => {
+                    Err(err) => {
                         indexer.abort().await;
-                        return Err(e);
+                        return Err(err);
                     }
                 }
             }
         }
-        let index_output = indexer.finish().await;
-
-        if index_output.file_size == 0 {
-            // The indexer logs and drops index creation failures.
+        let output = indexer.finish().await;
+        self.check_rebuild_indexer_or_abort(&mut indexer).await?;
+        if output.file_size == 0 {
             return Ok(ControlFlow::Break(self.aborted("No index was created")));
         }
-        Ok(ControlFlow::Continue((indexer, index_output)))
+        Ok(ControlFlow::Continue((indexer, output)))
+    }
+
+    /// Aborts a failed replacement before propagating the rebuild error.
+    async fn check_rebuild_indexer_or_abort(&self, indexer: &mut Indexer) -> Result<()> {
+        if let Err(err) = self.check_rebuild_indexer(indexer) {
+            indexer.abort().await;
+            return Err(err).context(BuildIndexAsyncSnafu {
+                region_id: self.region_id,
+            });
+        }
+        Ok(())
+    }
+
+    /// A budget skip may omit a new kind, but must not erase an existing one.
+    fn check_rebuild_indexer(&self, indexer: &Indexer) -> Result<(), Arc<Error>> {
+        indexer.check_success()?;
+        let source = &self.source.file_meta;
+        if indexer.discarded().iter().any(|kind| {
+            let index_type = kind.index_type();
+            source.available_indexes.contains(&index_type)
+                || source
+                    .indexes
+                    .iter()
+                    .any(|column| column.created_indexes.contains(&index_type))
+        }) {
+            warn!(
+                "Preserving previous index generation after budget discard, region_id: {}, file_id: {}, discarded: {:?}",
+                self.region_id,
+                source.file_id,
+                indexer.discarded()
+            );
+            return Err(Arc::new(OperateAbortedIndexSnafu.build()));
+        }
+        Ok(())
+    }
+
+    /// Disabled options may remove old indexes after handler validation.
+    /// A failed plan is not an empty removal plan and must retain the old file.
+    fn can_remove_all_indexes(&self) -> bool {
+        self.source.file_meta.exists_index()
+            && self
+                .indexer_builder
+                .index_build_inputs
+                .as_ref()
+                .is_some_and(|inputs| {
+                    inputs.plan.check_success().is_ok() && inputs.plan.entries().next().is_none()
+                })
     }
 
     /// Uploads the index files and commits them to the manifest.
@@ -1185,6 +1267,9 @@ impl IndexBuildTask {
         index_file_id: FileId,
         index_version: u64,
     ) -> Result<()> {
+        if output.file_size == 0 {
+            return Ok(());
+        }
         if let Some(write_cache) = &self.write_cache {
             let file_id = self.source.file_meta.file_id;
             let region_id = self.source.file_meta.region_id;
@@ -1633,7 +1718,7 @@ impl IndexBuildScheduler {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
 
     use api::v1::SemanticType;
     use common_base::readable_size::ReadableSize;
@@ -1663,7 +1748,7 @@ mod tests {
     use crate::region::version::{VersionBuilder, VersionControl};
     use crate::schedule::scheduler::{LocalScheduler, Scheduler};
     use crate::sst::file::{FileMeta, RegionFileId};
-    use crate::sst::file_purger::NoopFilePurger;
+    use crate::sst::file_purger::{FilePurger, NoopFilePurger};
     use crate::sst::location;
     use crate::sst::parquet::WriteOptions;
     use crate::test_util::memtable_util::EmptyMemtableBuilder;
@@ -2118,6 +2203,9 @@ mod tests {
                 }],
             }
         }
+        fn is_current(&self, _: &crate::sst::file::FileMeta, _: &handler::PlanContext<'_>) -> bool {
+            false
+        }
 
         fn memory_limit(&self) -> Option<usize> {
             self.hard_limit
@@ -2240,6 +2328,9 @@ mod tests {
                 kind: kind::IndexKind::Extension(kind::ExtensionIndexKind::Hll),
                 format_version: 2,
             }]
+        }
+        fn is_current(&self, _: &crate::sst::file::FileMeta, _: &handler::PlanContext<'_>) -> bool {
+            false
         }
 
         fn memory_limit(&self) -> Option<usize> {
@@ -2472,6 +2563,41 @@ mod tests {
                 close_attempts.load(std::sync::atomic::Ordering::Relaxed),
                 usize::from(failure == ProviderFailure::Close)
             );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_extension_finish_failure_discards_completed_builtin_output() {
+        for failure in [ProviderFailure::None, ProviderFailure::Finish] {
+            let env = SchedulerEnv::new().await;
+            let mut builder = mock_indexer_builder(Arc::new(sst_region_metadata()), &env).await;
+            let builder = Arc::make_mut(&mut builder);
+            builder.build_type = IndexBuildType::Compact;
+            Arc::make_mut(&mut builder.registry)
+                .register(Arc::new(FailingProvider(failure)))
+                .unwrap();
+            let mut indexer = builder.build(random_region_file_id(), 0, Some(1024)).await;
+            // Registry order puts real built-in creators before the failing extension.
+            assert!(indexer.creators.first().unwrap().is_builtin());
+            assert!(!indexer.creators.last().unwrap().is_builtin());
+            indexer
+                .update_flat(&new_record_batch_by_range(&["a", "b"], 0, 10))
+                .await;
+            assert!(indexer.check_success().is_ok());
+            let output = indexer.finish().await;
+            if failure == ProviderFailure::None {
+                assert!(output.entries.iter().any(|entry| entry.kind.is_builtin()));
+                assert!(output.entries.iter().any(|entry| !entry.kind.is_builtin()));
+                assert!(output.file_size > 0);
+                assert!(indexer.check_success().is_ok());
+            } else {
+                // A shared writer cannot publish the preceding successful index alone.
+                assert!(output.entries.is_empty());
+                assert!(output.build_indexes().unwrap().is_empty());
+                assert_eq!(output.file_size, 0);
+                assert!(indexer.check_success().is_err());
+            }
+            assert!(indexer.creators.is_empty());
         }
     }
 
@@ -3154,6 +3280,11 @@ mod tests {
             file_size: sst_info.file_size,
             max_row_group_uncompressed_size: sst_info.max_row_group_uncompressed_size,
             available_indexes: smallvec![IndexType::InvertedIndex],
+            indexes: vec![ColumnIndexMetadata {
+                column_id: 2,
+                created_indexes: smallvec::smallvec![IndexType::InvertedIndex],
+                ..Default::default()
+            }],
             // Old manifests may publish an index without recording its size.
             index_file_size: 0,
             index_version: 0,
@@ -3210,6 +3341,18 @@ mod tests {
                 assert!(updated_meta.index_file_size > 0);
                 assert_eq!(updated_meta.file_id, file_meta.file_id);
                 assert_eq!(updated_meta.index_version, 1);
+                // This built-in-only rebuild must not advertise extension indexes.
+                assert!(
+                    updated_meta
+                        .indexes
+                        .iter()
+                        .all(|index| index.created_indexes.iter().all(|kind| !matches!(
+                            kind,
+                            crate::sst::file::IndexType::HllIndex
+                                | crate::sst::file::IndexType::KllIndex
+                                | crate::sst::file::IndexType::MgIndex
+                        )))
+                );
                 let field_0_index = updated_meta
                     .indexes
                     .iter()
@@ -3343,8 +3486,313 @@ mod tests {
         schedule_index_build_task_with_mode(IndexBuildMode::Sync).await;
     }
 
+    #[derive(Debug, Default)]
+    struct RecordingRebuildPurger(Mutex<Vec<FileMeta>>);
+
+    impl FilePurger for RecordingRebuildPurger {
+        fn purge_file(&self, meta: FileMeta) {
+            self.0.lock().unwrap().push(meta);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_rebuild_metadata_refresh_retains_sst_lifetime() {
+        let env = SchedulerEnv::new().await;
+        let metadata = Arc::new(sst_region_metadata());
+        let manifest_ctx = env.mock_manifest_context(metadata.clone()).await;
+        let purger = Arc::new(RecordingRebuildPurger::default());
+        let info = mock_sst_file(metadata.clone(), &env, IndexBuildMode::Async).await;
+        let meta = FileMeta {
+            region_id: metadata.region_id,
+            file_id: info.file_id,
+            file_size: info.file_size,
+            num_rows: info.num_rows as u64,
+            num_row_groups: info.num_row_groups,
+            ..Default::default()
+        };
+        let mut refreshed = meta.clone();
+        refreshed.index_version = 1;
+        seed_manifest_file(&manifest_ctx, &refreshed).await;
+        let version = mock_version_control(
+            metadata.clone(),
+            Arc::new(NoopFilePurger),
+            HashMap::from([(meta.file_id, refreshed.clone())]),
+        )
+        .await;
+        let original = FileHandle::new(meta.clone(), purger.clone());
+        let mut builder = mock_indexer_builder(metadata.clone(), &env).await;
+        let plan = Arc::new(builder.registry.plan(&handler::PlanContext {
+            metadata: &metadata,
+            index_options: &IndexOptions::default(),
+            build_type: IndexBuildType::SchemaChange,
+            existing_indexes: &[],
+        }));
+        Arc::make_mut(&mut builder).index_build_inputs = Some(build::IndexBuildInputs {
+            plan,
+            inputs: vec![original.clone()].into(),
+            input_puffin_manager: env.access_layer.build_puffin_manager(),
+            output_rows: Some(meta.num_rows),
+            can_merge_inputs: true,
+            memory_limit: None,
+        });
+        let (tx, _rx) = mpsc::channel(4);
+        let mut task = IndexBuildTask {
+            region_id: metadata.region_id,
+            file: original.clone(),
+            target_region_metadata: metadata.clone(),
+            source: IndexBuildSource::new(meta.clone(), metadata.schema_version),
+            reason: IndexBuildType::SchemaChange,
+            access_layer: env.access_layer.clone(),
+            listener: WorkerListener::default(),
+            manifest_ctx,
+            write_cache: None,
+            cache_manager: None,
+            file_purger: purger.clone(),
+            indexer_builder: builder,
+            request_sender: tx,
+            index_options: IndexOptions::default(),
+            result_senders: Vec::new(),
+        };
+        assert!(matches!(
+            task.prepare_source(meta.file_id(), &version).await.unwrap(),
+            ControlFlow::Continue(())
+        ));
+        assert_eq!(task.file.meta_ref().index_version, 1);
+        let reader = task
+            .indexer_builder
+            .index_build_inputs
+            .as_ref()
+            .unwrap()
+            .inputs[0]
+            .clone();
+        // Removal after preparation must wait for the task and its plugin readers.
+        original.mark_deleted();
+        drop(original);
+        assert!(purger.0.lock().unwrap().is_empty());
+        drop(task);
+        assert!(purger.0.lock().unwrap().is_empty());
+        drop(reader);
+        assert_eq!(*purger.0.lock().unwrap(), vec![refreshed]);
+    }
+
+    #[tokio::test]
+    async fn test_rebuild_failure_preserves_published_indexes() {
+        for (failure, old_hll) in [
+            (Some(ProviderFailure::Plan), true),
+            (Some(ProviderFailure::Create), true),
+            (Some(ProviderFailure::UpdateFlat), true),
+            (Some(ProviderFailure::Finish), true),
+            (Some(ProviderFailure::Budget), true),
+            (Some(ProviderFailure::Budget), false),
+            (None, true),
+            (None, false),
+        ] {
+            let env = SchedulerEnv::new().await;
+            let metadata = Arc::new(sst_region_metadata());
+            let region_id = metadata.region_id;
+            let manifest_ctx = env.mock_manifest_context(metadata.clone()).await;
+            let file_purger = Arc::new(NoopFilePurger {});
+            let info = mock_sst_file(metadata.clone(), &env, IndexBuildMode::Async).await;
+            let initial = FileMeta {
+                region_id,
+                file_id: info.file_id,
+                file_size: info.file_size,
+                max_row_group_uncompressed_size: info.max_row_group_uncompressed_size,
+                num_rows: info.num_rows as u64,
+                num_row_groups: info.num_row_groups,
+                ..Default::default()
+            };
+            seed_manifest_file(&manifest_ctx, &initial).await;
+            let version = mock_version_control(
+                metadata.clone(),
+                file_purger.clone(),
+                HashMap::from([(initial.file_id, initial.clone())]),
+            )
+            .await;
+            let mut builder = mock_indexer_builder(metadata.clone(), &env).await;
+            Arc::make_mut(&mut builder).build_type = IndexBuildType::Manual;
+            if old_hll {
+                Arc::make_mut(&mut Arc::make_mut(&mut builder).registry)
+                    .register(Arc::new(FailingProvider(ProviderFailure::None)))
+                    .unwrap();
+            }
+            let (tx, _rx) = mpsc::channel(4);
+            let mut task = IndexBuildTask {
+                region_id,
+                file: FileHandle::new(initial.clone(), file_purger.clone()),
+                target_region_metadata: metadata.clone(),
+                source: IndexBuildSource::new(initial.clone(), metadata.schema_version),
+                reason: IndexBuildType::Manual,
+                access_layer: env.access_layer.clone(),
+                listener: WorkerListener::default(),
+                manifest_ctx: manifest_ctx.clone(),
+                write_cache: None,
+                cache_manager: None,
+                file_purger: file_purger.clone(),
+                indexer_builder: builder,
+                request_sender: tx,
+                index_options: IndexOptions::default(),
+                result_senders: Vec::new(),
+            };
+            // First publish real built-in blobs and the test provider's HLL blob.
+            task.index_build(version).await.unwrap();
+            let old = manifest_ctx.manifest().await.files[&initial.file_id].clone();
+            assert_eq!(
+                old.available_indexes.contains(&IndexType::HllIndex),
+                old_hll
+            );
+            assert!(
+                old.available_indexes
+                    .iter()
+                    .any(|kind| *kind != IndexType::HllIndex)
+            );
+            let old_path = location::index_file_path(
+                env.access_layer.table_dir(),
+                RegionIndexId::new(RegionFileId::new(region_id, old.file_id), old.index_version),
+                env.access_layer.path_type(),
+            );
+            let old_bytes = env
+                .access_layer
+                .object_store()
+                .read(&old_path)
+                .await
+                .unwrap()
+                .to_bytes();
+            assert!(!old_bytes.is_empty());
+            let version = mock_version_control(
+                metadata.clone(),
+                file_purger.clone(),
+                HashMap::from([(old.file_id, old.clone())]),
+            )
+            .await;
+            let mut builder = mock_indexer_builder(metadata.clone(), &env).await;
+            Arc::make_mut(&mut builder).build_type = IndexBuildType::Manual;
+            if let Some(failure) = failure {
+                Arc::make_mut(&mut Arc::make_mut(&mut builder).registry)
+                    .register(Arc::new(FailingProvider(failure)))
+                    .unwrap();
+            }
+            if failure.is_none() && !old_hll {
+                // Newly configured sketches must also fail before replacing the
+                // built-in indexes when their provider is unavailable.
+                Arc::make_mut(&mut task.target_region_metadata).column_metadatas[0]
+                    .column_schema
+                    .mut_metadata()
+                    .insert(
+                        datatypes::schema::HLL_KEY.into(),
+                        r#"{"precision":10}"#.into(),
+                    );
+            }
+            task.file = FileHandle::new(old.clone(), file_purger);
+            task.source = IndexBuildSource::new(old.clone(), metadata.schema_version);
+            task.indexer_builder = builder;
+            let result = task.index_build(version).await;
+            let published = manifest_ctx.manifest().await.files[&old.file_id].clone();
+            if old_hll || failure.is_none() {
+                assert!(result.is_err(), "maintenance must fail for {failure:?}");
+                assert_eq!(
+                    old, published,
+                    "failed {failure:?} must not change manifest"
+                );
+            } else {
+                result.unwrap();
+                assert_eq!(published.index_version, old.index_version + 1);
+                assert!(!published.available_indexes.contains(&IndexType::HllIndex));
+                assert!(
+                    published
+                        .indexes
+                        .iter()
+                        .all(|column| !column.created_indexes.contains(&IndexType::HllIndex))
+                );
+                let expected: Vec<_> = old
+                    .available_indexes
+                    .iter()
+                    .copied()
+                    .filter(|kind| *kind != IndexType::HllIndex)
+                    .collect();
+                assert_eq!(published.available_indexes.as_slice(), expected.as_slice());
+                assert!(published.index_file_size > 0);
+            }
+            // NoopFilePurger keeps the historical generation available for byte comparison.
+            assert_eq!(
+                old_bytes,
+                env.access_layer
+                    .object_store()
+                    .read(&old_path)
+                    .await
+                    .unwrap()
+                    .to_bytes()
+            );
+        }
+    }
+
     #[tokio::test]
     async fn test_index_build_task_no_index() {
+        for remove_sketches in [false, true] {
+            check_empty_index_build(remove_sketches, true).await;
+            if remove_sketches {
+                check_empty_index_build(true, false).await;
+            }
+        }
+    }
+
+    #[derive(Debug)]
+    struct RemoveTestIndex;
+
+    impl handler::IndexKindHandler for RemoveTestIndex {
+        fn kinds(&self) -> &[kind::IndexKind] {
+            &[kind::IndexKind::Extension(kind::ExtensionIndexKind::Hll)]
+        }
+
+        fn plan(
+            &self,
+            context: &handler::PlanContext<'_>,
+        ) -> std::result::Result<
+            Option<Arc<dyn handler::PlannedIndex>>,
+            common_error::ext::BoxedError,
+        > {
+            Ok(context
+                .existing_indexes
+                .iter()
+                .any(|column| {
+                    column
+                        .created_indexes
+                        .contains(&crate::sst::file::IndexType::HllIndex)
+                })
+                .then(|| Arc::new(Self) as Arc<dyn handler::PlannedIndex>))
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl handler::PlannedIndex for RemoveTestIndex {
+        fn kinds(&self) -> &[kind::IndexKind] {
+            handler::IndexKindHandler::kinds(self)
+        }
+
+        fn entries(&self) -> &[handler::PlanEntry] {
+            &[]
+        }
+
+        async fn build(
+            &self,
+            _: &handler::BuildContext<'_>,
+        ) -> std::result::Result<
+            Option<Box<dyn handler::IndexCreator>>,
+            common_error::ext::BoxedError,
+        > {
+            Ok(None)
+        }
+
+        fn is_current(&self, file: &FileMeta, _: &handler::PlanContext<'_>) -> bool {
+            !file.indexes.iter().any(|column| {
+                column
+                    .created_indexes
+                    .contains(&crate::sst::file::IndexType::HllIndex)
+            })
+        }
+    }
+
+    async fn check_empty_index_build(remove_sketches: bool, registered: bool) {
         let env = SchedulerEnv::new().await;
         let mut scheduler = env.mock_index_build_scheduler(4);
         let mut metadata = sst_region_metadata();
@@ -3358,7 +3806,7 @@ mod tests {
         let manifest_ctx = env.mock_manifest_context(metadata.clone()).await;
         let file_purger = Arc::new(NoopFilePurger {});
         let sst_info = mock_sst_file(metadata.clone(), &env, IndexBuildMode::Async).await;
-        let file_meta = FileMeta {
+        let mut file_meta = FileMeta {
             region_id,
             file_id: sst_info.file_id,
             file_size: sst_info.file_size,
@@ -3368,13 +3816,47 @@ mod tests {
             num_row_groups: sst_info.num_row_groups,
             ..Default::default()
         };
+        if remove_sketches {
+            file_meta
+                .indexes
+                .push(crate::sst::file::ColumnIndexMetadata {
+                    column_id: metadata.column_metadatas[0].column_id,
+                    created_indexes: smallvec::smallvec![crate::sst::file::IndexType::HllIndex],
+                    fulltext_bloom_version: 0,
+                });
+            file_meta.index_file_size = 123;
+        }
         seed_manifest_file(&manifest_ctx, &file_meta).await;
         let files = HashMap::from([(file_meta.file_id, file_meta.clone())]);
         let version_control =
             mock_version_control(metadata.clone(), file_purger.clone(), files).await;
-        let indexer_builder = mock_indexer_builder(metadata.clone(), &env).await;
-
+        let mut indexer_builder = mock_indexer_builder(metadata.clone(), &env).await;
         let file = FileHandle::new(file_meta.clone(), file_purger.clone());
+        if remove_sketches {
+            // A registered owner can remove its index after options are disabled.
+            let builder = Arc::make_mut(&mut indexer_builder);
+            if registered {
+                Arc::make_mut(&mut builder.registry)
+                    .register(Arc::new(RemoveTestIndex))
+                    .unwrap();
+            }
+            let plan = builder.registry.plan(&handler::PlanContext {
+                metadata: &metadata,
+                index_options: &builder.index_options,
+                build_type: IndexBuildType::SchemaChange,
+                existing_indexes: &file_meta.indexes,
+            });
+            assert_eq!(!plan.is_empty(), registered);
+            assert!(plan.entries().next().is_none());
+            builder.index_build_inputs = Some(build::IndexBuildInputs {
+                output_rows: None,
+                plan: Arc::new(plan),
+                inputs: vec![file.clone()].into(),
+                input_puffin_manager: builder.puffin_manager.clone(),
+                can_merge_inputs: false,
+                memory_limit: None,
+            });
+        }
 
         // Create mock task.
         let (tx, mut rx) = mpsc::channel(4);
@@ -3387,10 +3869,10 @@ mod tests {
                 file_meta.clone(),
                 version_control.current().version.metadata.schema_version,
             ),
-            reason: IndexBuildType::Flush,
+            reason: IndexBuildType::SchemaChange,
             access_layer: env.access_layer.clone(),
             listener: WorkerListener::default(),
-            manifest_ctx,
+            manifest_ctx: manifest_ctx.clone(),
             write_cache: None,
             cache_manager: None,
             file_purger,
@@ -3400,7 +3882,84 @@ mod tests {
             result_senders: vec![result_tx],
         };
 
-        scheduler.schedule_build(&version_control, task).await;
+        if remove_sketches && !registered {
+            let mut task = task;
+            assert!(task.index_build(version_control.clone()).await.is_err());
+            assert_eq!(
+                manifest_ctx.manifest().await.files[&file_meta.file_id],
+                file_meta
+            );
+            return;
+        }
+
+        if remove_sketches {
+            assert!(task.can_remove_all_indexes());
+            for column_level in [false, true] {
+                let mut mixed = task.clone();
+                if column_level {
+                    mixed.source.file_meta.indexes[0]
+                        .created_indexes
+                        .push(IndexType::InvertedIndex);
+                } else {
+                    mixed
+                        .source
+                        .file_meta
+                        .available_indexes
+                        .push(IndexType::InvertedIndex);
+                }
+                assert!(mixed.can_remove_all_indexes());
+            }
+        }
+
+        scheduler
+            .schedule_build(&version_control, task.clone())
+            .await;
+
+        if remove_sketches {
+            let finished = recv_index_build_finished(&mut rx).await;
+            assert!(finished.file_meta.indexes.is_empty());
+            assert!(finished.file_meta.available_indexes.is_empty());
+            assert_eq!(finished.file_meta.index_file_size, 0);
+            assert_eq!(finished.file_meta.index_version, 1);
+            assert!(
+                manifest_ctx.manifest().await.files[&file_meta.file_id]
+                    .indexes
+                    .is_empty()
+            );
+            // Reconstruct the file from persisted metadata as reopening does, then enable
+            // an ordinary index. Its new Puffin must not reuse the historical version 0.
+            let persisted = serde_json::to_vec(&finished.file_meta).unwrap();
+            let reopened: FileMeta = serde_json::from_slice(&persisted).unwrap();
+            assert!(!reopened.exists_index());
+            let target_metadata = Arc::new(sst_region_metadata());
+            let reopened_version = mock_version_control(
+                target_metadata.clone(),
+                task.file_purger.clone(),
+                HashMap::from([(reopened.file_id, reopened.clone())]),
+            )
+            .await;
+            let (tx, mut rx) = mpsc::channel(4);
+            let mut rebuild = task;
+            rebuild.file = FileHandle::new(reopened.clone(), rebuild.file_purger.clone());
+            rebuild.source.file_meta = reopened;
+            rebuild.target_region_metadata = target_metadata.clone();
+            rebuild.indexer_builder = mock_indexer_builder(target_metadata, &env).await;
+            rebuild.request_sender = tx;
+            let mut reopened_scheduler = env.mock_index_build_scheduler(4);
+            reopened_scheduler
+                .schedule_build(&reopened_version, rebuild)
+                .await;
+            let rebuilt = recv_index_build_finished(&mut rx).await;
+            assert!(rebuilt.file_meta.exists_index());
+            assert_eq!(rebuilt.file_meta.index_version, 2);
+            let path = location::index_file_path(
+                env.access_layer.table_dir(),
+                RegionIndexId::new(RegionFileId::new(region_id, file_meta.file_id), 2),
+                env.access_layer.path_type(),
+            );
+            assert!(env.access_layer.object_store().exists(&path).await.unwrap());
+            return;
+        }
 
         // No index needs to be built, so the SST is not read.
         assert!(matches!(
