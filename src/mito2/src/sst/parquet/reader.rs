@@ -2664,11 +2664,16 @@ mod tests {
     use common_error::ext::WhateverResult;
     use common_function::scalars::json::json_get::JsonGetWithType;
     use common_function::scalars::udf::create_udf;
+    use common_query::request::remote_membership_test_support::{
+        key as wire_key, one_column_schema, partitions, run_real_hash_join, utf8,
+    };
+    use common_query::request::{DynFilterPayload, REMOTE_DYN_FILTER_PAYLOAD_MAX_BYTES};
     use common_recordbatch::ext::RecordBatchExt;
     use common_recordbatch::filter::batch_filter;
     use datafusion::arrow::datatypes::DataType;
+    use datafusion::execution::TaskContext;
     use datafusion::physical_plan::expressions::{
-        BinaryExpr, CaseExpr, Column, lit as physical_lit,
+        BinaryExpr, CaseExpr, Column, InListExpr, Literal, lit as physical_lit,
     };
     use datafusion::physical_plan::joins::join_hash_map::{JoinHashMapType, JoinHashMapU32};
     use datafusion::physical_plan::joins::{HashExpr, HashTableLookupExpr, Map, SeededRandomState};
@@ -2681,8 +2686,8 @@ mod tests {
         Volatility, col, lit,
     };
     use datatypes::arrow::array::{
-        ArrayRef, BinaryDictionaryBuilder, Int64Array, StringArray, StructArray,
-        TimestampMillisecondArray, UInt8Array, UInt64Array,
+        ArrayRef, BinaryDictionaryBuilder, Int64Array, StringArray, StringDictionaryBuilder,
+        StructArray, TimestampMillisecondArray, UInt8Array, UInt64Array,
     };
     use datatypes::arrow::datatypes::{Fields, Schema, UInt32Type};
     use datatypes::arrow::record_batch::RecordBatch;
@@ -2994,6 +2999,15 @@ mod tests {
         .await
     }
 
+    /// A flat SST written by a prefilter test: `num_row_groups` row groups of
+    /// `rows_per_group` rows, materialized by `batch(start, end)`.
+    struct PrefilterTestSst<F> {
+        metadata: RegionMetadataRef,
+        rows_per_group: i64,
+        num_row_groups: i64,
+        batch: F,
+    }
+
     /// Builds a reader over one SST with `num_row_groups` row groups of
     /// `rows_per_group` rows. `writer_props` lets a test write several pages per row
     /// group.
@@ -3011,41 +3025,77 @@ mod tests {
                 PrimaryKeyEncoding::Sparse,
             ),
         );
-        let batch = |start: i64, end: i64| {
-            let mut primary_key = BinaryDictionaryBuilder::<UInt32Type>::new();
-            let mut fields = Vec::new();
-            let mut timestamps = Vec::new();
-            for value in start..end {
-                let tag = if value == 4 { "b" } else { "a" };
-                primary_key
-                    .append(crate::test_util::sst_util::new_sparse_primary_key(
-                        &[tag, "x"],
-                        &metadata,
-                        1,
-                        100,
-                    ))
-                    .unwrap();
-                fields.push(value as u64);
-                timestamps.push(value);
-            }
-            RecordBatch::try_new(
-                crate::sst::to_flat_sst_arrow_schema(
-                    &metadata,
-                    &crate::sst::FlatSchemaOptions::from_encoding(PrimaryKeyEncoding::Sparse),
-                ),
-                vec![
-                    Arc::new(UInt64Array::from(fields)) as ArrayRef,
-                    Arc::new(TimestampMillisecondArray::from(timestamps)) as ArrayRef,
-                    Arc::new(primary_key.finish()) as ArrayRef,
-                    Arc::new(UInt64Array::from_value(1, (end - start) as usize)) as ArrayRef,
-                    Arc::new(UInt8Array::from_value(
-                        OpType::Put as u8,
-                        (end - start) as usize,
-                    )) as ArrayRef,
-                ],
-            )
-            .unwrap()
+        let batch_metadata = Arc::clone(&metadata);
+        let sst = PrefilterTestSst {
+            metadata,
+            rows_per_group,
+            num_row_groups,
+            batch: move |start: i64, end: i64| {
+                let mut primary_key = BinaryDictionaryBuilder::<UInt32Type>::new();
+                let mut fields = Vec::new();
+                let mut timestamps = Vec::new();
+                for value in start..end {
+                    let tag = if value == 4 { "b" } else { "a" };
+                    primary_key
+                        .append(crate::test_util::sst_util::new_sparse_primary_key(
+                            &[tag, "x"],
+                            &batch_metadata,
+                            1,
+                            100,
+                        ))
+                        .unwrap();
+                    fields.push(value as u64);
+                    timestamps.push(value);
+                }
+                RecordBatch::try_new(
+                    crate::sst::to_flat_sst_arrow_schema(
+                        &batch_metadata,
+                        &crate::sst::FlatSchemaOptions::from_encoding(PrimaryKeyEncoding::Sparse),
+                    ),
+                    vec![
+                        Arc::new(UInt64Array::from(fields)) as ArrayRef,
+                        Arc::new(TimestampMillisecondArray::from(timestamps)) as ArrayRef,
+                        Arc::new(primary_key.finish()) as ArrayRef,
+                        Arc::new(UInt64Array::from_value(1, (end - start) as usize)) as ArrayRef,
+                        Arc::new(UInt8Array::from_value(
+                            OpType::Put as u8,
+                            (end - start) as usize,
+                        )) as ArrayRef,
+                    ],
+                )
+                .unwrap()
+            },
         };
+        prefilter_test_builder_from_sst(
+            object_store,
+            sst,
+            page_index_policy,
+            writer_props,
+            predicate,
+            cache_strategy,
+        )
+        .await
+    }
+
+    /// Builds a reader over `sst`, whose batches come from the caller so a test can write
+    /// columns the shared sparse fixture does not have.
+    async fn prefilter_test_builder_from_sst<F>(
+        object_store: ObjectStore,
+        sst: PrefilterTestSst<F>,
+        page_index_policy: PageIndexPolicy,
+        writer_props: Option<WriterProperties>,
+        predicate: Predicate,
+        cache_strategy: CacheStrategy,
+    ) -> (RowGroupReaderBuilder, Arc<RegionMetadata>)
+    where
+        F: Fn(i64, i64) -> RecordBatch,
+    {
+        let PrefilterTestSst {
+            metadata,
+            rows_per_group,
+            num_row_groups,
+            batch,
+        } = sst;
         let first_batch = batch(0, rows_per_group);
         let mut bytes = Vec::new();
         let mut writer =
@@ -3600,6 +3650,414 @@ mod tests {
                     .to_vec()
             })
             .collect()
+    }
+
+    /// Size of the wire build side, how many rows of the trace SST each build key
+    /// matches, and the resulting number of leading member rows.
+    const STACK_BUILD_KEYS: usize = 642;
+    const STACK_MATCHES_PER_KEY: usize = 3;
+    const STACK_MATCHED_ROWS: usize = STACK_BUILD_KEYS * STACK_MATCHES_PER_KEY;
+
+    /// Region metadata whose `trace_id` is a plain (non-dictionary) UTF-8 *field* column,
+    /// i.e. the column type the join key has on the wire, not a dictionary-encoded tag.
+    fn stack_prefilter_metadata() -> RegionMetadataRef {
+        let mut builder = RegionMetadataBuilder::new(RegionId::new(0, 0));
+        builder
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "tag_0".to_string(),
+                    ConcreteDataType::string_datatype(),
+                    true,
+                ),
+                semantic_type: SemanticType::Tag,
+                column_id: 0,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "tag_1".to_string(),
+                    ConcreteDataType::string_datatype(),
+                    true,
+                ),
+                semantic_type: SemanticType::Tag,
+                column_id: 1,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "trace_id".to_string(),
+                    ConcreteDataType::string_datatype(),
+                    true,
+                ),
+                semantic_type: SemanticType::Field,
+                column_id: 2,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "field_0".to_string(),
+                    ConcreteDataType::uint64_datatype(),
+                    true,
+                ),
+                semantic_type: SemanticType::Field,
+                column_id: 3,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "ts".to_string(),
+                    ConcreteDataType::timestamp_millisecond_datatype(),
+                    false,
+                ),
+                semantic_type: SemanticType::Timestamp,
+                column_id: 4,
+            })
+            .primary_key(vec![0, 1]);
+        Arc::new(builder.build().unwrap())
+    }
+
+    /// Writes one flat batch of the trace SST. The first `STACK_MATCHED_ROWS` rows carry
+    /// the build keys (each key `STACK_MATCHES_PER_KEY` times, contiguously, so they fill
+    /// a prefix of the first page), every other row is a non-member.
+    fn stack_prefilter_batch(
+        metadata: &RegionMetadataRef,
+        build_keys: &[String],
+        start: i64,
+        end: i64,
+    ) -> RecordBatch {
+        let num_rows = (end - start) as usize;
+        let mut tag_0 = StringDictionaryBuilder::<UInt32Type>::new();
+        let mut tag_1 = StringDictionaryBuilder::<UInt32Type>::new();
+        let mut primary_key = BinaryDictionaryBuilder::<UInt32Type>::new();
+        let pk = crate::test_util::sst_util::new_primary_key(&["a", "x"]);
+        let mut trace_ids = Vec::with_capacity(num_rows);
+        let mut fields = Vec::with_capacity(num_rows);
+        let mut timestamps = Vec::with_capacity(num_rows);
+        for row in start..end {
+            let row = row as usize;
+            tag_0.append_value("a");
+            tag_1.append_value("x");
+            primary_key.append(&pk).unwrap();
+            trace_ids.push(if row < STACK_MATCHED_ROWS {
+                build_keys[row % build_keys.len()].clone()
+            } else {
+                format!("trace-noise-{row:06}")
+            });
+            fields.push(row as u64);
+            timestamps.push(row as i64);
+        }
+
+        RecordBatch::try_new(
+            crate::sst::to_flat_sst_arrow_schema(
+                metadata,
+                &crate::sst::FlatSchemaOptions::default(),
+            ),
+            vec![
+                Arc::new(tag_0.finish()) as ArrayRef,
+                Arc::new(tag_1.finish()) as ArrayRef,
+                Arc::new(StringArray::from_iter_values(trace_ids)) as ArrayRef,
+                Arc::new(UInt64Array::from(fields)) as ArrayRef,
+                Arc::new(TimestampMillisecondArray::from(timestamps)) as ArrayRef,
+                Arc::new(primary_key.finish()) as ArrayRef,
+                Arc::new(UInt64Array::from_value(1, num_rows)) as ArrayRef,
+                Arc::new(UInt8Array::from_value(OpType::Put as u8, num_rows)) as ArrayRef,
+            ],
+        )
+        .unwrap()
+    }
+
+    /// Collects every node of `expr` that matches `needle`.
+    fn collect_expr_nodes(
+        expr: &Arc<dyn PhysicalExpr>,
+        needle: &dyn Fn(&Arc<dyn PhysicalExpr>) -> bool,
+        found: &mut Vec<Arc<dyn PhysicalExpr>>,
+    ) {
+        if needle(expr) {
+            found.push(Arc::clone(expr));
+        }
+
+        for child in expr.children() {
+            collect_expr_nodes(child, needle, found);
+        }
+    }
+
+    /// Returns the nodes of `expr` of type `T`.
+    fn expr_nodes_of<T: PhysicalExpr>(expr: &Arc<dyn PhysicalExpr>) -> Vec<Arc<dyn PhysicalExpr>> {
+        let mut found = Vec::new();
+        collect_expr_nodes(expr, &|node| node.is::<T>(), &mut found);
+        found
+    }
+
+    /// Returns true if `expr` holds a boolean `true` literal.
+    fn has_true_literal(expr: &Arc<dyn PhysicalExpr>) -> bool {
+        expr_nodes_of::<Literal>(expr).iter().any(|node| {
+            node.downcast_ref::<Literal>()
+                .is_some_and(|literal| literal.value() == &ScalarValue::Boolean(Some(true)))
+        })
+    }
+
+    /// Returns the `trace_id` values of the projected batches, in row order.
+    fn test_trace_ids(batches: &[RecordBatch]) -> Vec<String> {
+        batches
+            .iter()
+            .flat_map(|batch| {
+                batch
+                    .column_by_name("trace_id")
+                    .expect("the projected read keeps trace_id")
+                    .as_any()
+                    .downcast_ref::<StringArray>()
+                    .unwrap()
+                    .iter()
+                    .map(|value| value.unwrap().to_string())
+                    .collect::<Vec<_>>()
+            })
+            .collect()
+    }
+
+    /// Returns the `field_0` values of the projected batches, in row order.
+    fn test_stack_field_values(batches: &[RecordBatch]) -> Vec<u64> {
+        batches
+            .iter()
+            .flat_map(|batch| {
+                batch
+                    .column_by_name("field_0")
+                    .expect("the projected read keeps field_0")
+                    .as_any()
+                    .downcast_ref::<UInt64Array>()
+                    .unwrap()
+                    .values()
+                    .to_vec()
+            })
+            .collect()
+    }
+
+    /// The membership a real `HashJoin` publishes, as recovered by the wire, drives the
+    /// Mito2 row-selection prefilter, so both halves are exercised in one scan.
+    ///
+    /// The producer half: a 642-key UTF-8 build side makes DataFusion publish a runtime
+    /// `HashTableLookupExpr`, which has no wire form. The payload must recover it as the
+    /// exact 642-literal `InListExpr` — if the recovery degrades to `true`, the decoded
+    /// shape assertion below fails before the scan even starts.
+    ///
+    /// The consumer half: the decoded expression becomes the scan's dynamic filter, and
+    /// the prefilter must select exactly the 1,926 member rows of a 100,000-row SST and
+    /// let the projected read fetch at most 60% of the store bytes the unfiltered read
+    /// fetches. If the prefilter stops pruning, the byte ratio fails.
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_wire_recovered_membership_dyn_filter_prunes_prefilter_pages() {
+        const ROWS: i64 = 100_000;
+        const PAGE_ROWS: usize = 20_000;
+
+        // The producer side: a real hash join over 642 UTF-8 build keys.
+        let wire_schema = one_column_schema("trace_id", DataType::Utf8);
+        let build_keys = (0..STACK_BUILD_KEYS)
+            .map(|key| format!("trace-member-{key:04}"))
+            .collect::<Vec<_>>();
+        let borrowed_keys = build_keys.iter().map(String::as_str).collect::<Vec<_>>();
+        let misses = (0..STACK_BUILD_KEYS)
+            .map(|key| format!("trace-miss-{key:04}"))
+            .collect::<Vec<_>>();
+        let mut probe_values = borrowed_keys.clone();
+        probe_values.extend(misses.iter().map(String::as_str));
+        let build = partitions(&wire_schema, vec![vec![utf8(&borrowed_keys)]]);
+        let probe = partitions(&wire_schema, vec![vec![utf8(&probe_values)]]);
+        let trace_id_key = wire_key("trace_id", 0);
+        let filter = run_real_hash_join(
+            1,
+            Arc::clone(&wire_schema),
+            Arc::clone(&wire_schema),
+            build,
+            probe,
+            vec![(Arc::clone(&trace_id_key), Arc::clone(&trace_id_key))],
+        )
+        .await;
+        // The producer wraps the lookup in the build-side bounds, so it is not the root.
+        assert_eq!(
+            1,
+            expr_nodes_of::<HashTableLookupExpr>(&filter.expr).len(),
+            "a real build lease must publish a runtime lookup: {}",
+            filter.expr
+        );
+
+        // The wire: encode the producer predicate and decode it against the probe schema.
+        let payload = DynFilterPayload::from_datafusion_expr(
+            &filter.expr,
+            REMOTE_DYN_FILTER_PAYLOAD_MAX_BYTES,
+        )
+        .unwrap();
+        let decoded = payload
+            .decode_datafusion_expr(
+                &TaskContext::default(),
+                filter.probe_schema.as_ref(),
+                REMOTE_DYN_FILTER_PAYLOAD_MAX_BYTES,
+            )
+            .unwrap();
+
+        // The decoded predicate is the exact build membership, not the `true` fallback.
+        // The producer publishes the lookup with the build-side bounds around it, so the
+        // membership is the single `IN` list of the decoded tree.
+        assert!(
+            expr_nodes_of::<HashTableLookupExpr>(&decoded).is_empty(),
+            "the wire must not carry a runtime lookup: {decoded}"
+        );
+        assert!(
+            !has_true_literal(&decoded),
+            "the wire must not degrade the membership to a `true` fallback: {decoded}"
+        );
+        let memberships = expr_nodes_of::<InListExpr>(&decoded);
+        assert_eq!(
+            1,
+            memberships.len(),
+            "the decoded predicate must carry one recovered membership: {decoded}"
+        );
+        let membership = memberships[0].downcast_ref::<InListExpr>().unwrap();
+        assert!(!membership.negated(), "build membership is not negated");
+        assert_eq!(
+            STACK_BUILD_KEYS,
+            membership.list().len(),
+            "every build key must be recovered: {decoded}"
+        );
+        let membership_key = membership
+            .expr()
+            .downcast_ref::<Column>()
+            .unwrap_or_else(|| panic!("the membership operand must be the probe key: {decoded}"));
+        assert_eq!("trace_id", membership_key.name());
+        let decoded_keys = membership
+            .list()
+            .iter()
+            .map(
+                |literal| match literal.downcast_ref::<Literal>().map(Literal::value) {
+                    Some(ScalarValue::Utf8(Some(key))) => key.clone(),
+                    other => panic!("unexpected membership literal {other:?}"),
+                },
+            )
+            .collect::<Vec<_>>();
+        let mut decoded_keys_sorted = decoded_keys.clone();
+        decoded_keys_sorted.sort();
+        let mut build_keys_sorted = build_keys.clone();
+        build_keys_sorted.sort();
+        assert_eq!(build_keys_sorted, decoded_keys_sorted);
+
+        // The consumer side: install the decoded predicate as the scan's dynamic filter.
+        let handle = Arc::new(DynamicFilterPhysicalExpr::new(
+            vec![Arc::new(Column::new("trace_id", 0)) as Arc<dyn PhysicalExpr>],
+            Arc::clone(&decoded),
+        ));
+        let metadata = stack_prefilter_metadata();
+        let batch_metadata = Arc::clone(&metadata);
+        let batch_keys = build_keys.clone();
+        let props = WriterProperties::builder()
+            .set_data_page_row_count_limit(PAGE_ROWS)
+            .set_write_batch_size(8192)
+            // The claim is about pages, not about how well a column compresses.
+            .set_dictionary_enabled(false)
+            .build();
+        let (reader_builder, _) = prefilter_test_builder_from_sst(
+            ObjectStore::new(Memory::default()).unwrap(),
+            PrefilterTestSst {
+                metadata,
+                rows_per_group: ROWS,
+                num_row_groups: 1,
+                batch: move |start, end| {
+                    stack_prefilter_batch(&batch_metadata, &batch_keys, start, end)
+                },
+            },
+            // Translating a row selection into byte ranges needs the offset index.
+            PageIndexPolicy::Optional,
+            Some(props),
+            Predicate::with_dyn_filters(vec![], vec![Arc::clone(&handle)]),
+            CacheStrategy::Disabled,
+        )
+        .await;
+        assert!(
+            reader_builder.parquet_meta.offset_index().is_some(),
+            "the row selection can only skip pages with the offset index"
+        );
+        assert!(
+            reader_builder
+                .parquet_meta
+                .row_group(0)
+                .columns()
+                .iter()
+                .all(|column| column.num_values() as usize > PAGE_ROWS),
+            "the row group must span several pages in every column"
+        );
+
+        // The prefilter selects exactly the member rows.
+        let result = execute_test_prefilter(&reader_builder, 0).await;
+        assert_eq!(
+            RowSelection::from(vec![
+                RowSelector::select(STACK_MATCHED_ROWS),
+                RowSelector::skip(ROWS as usize - STACK_MATCHED_ROWS),
+            ]),
+            result.refined_selection,
+            "the prefilter must select the member rows and skip the noise"
+        );
+        assert_eq!(ROWS as usize - STACK_MATCHED_ROWS, result.filtered_rows);
+
+        // Control: the full projection without the refined selection. Candidate: the same
+        // read with it, which is what a scan above the prefilter does.
+        let (control_batches, control_metrics) =
+            read_test_row_group(&reader_builder, 0, None).await;
+        let (candidate_batches, candidate_metrics) =
+            read_test_row_group(&reader_builder, 0, Some(result.refined_selection)).await;
+        assert_eq!(
+            ROWS as usize,
+            control_batches
+                .iter()
+                .map(RecordBatch::num_rows)
+                .sum::<usize>()
+        );
+        assert_eq!(
+            STACK_MATCHED_ROWS,
+            candidate_batches
+                .iter()
+                .map(RecordBatch::num_rows)
+                .sum::<usize>()
+        );
+
+        // The rows and values of both arms are the same ones the live filter above the
+        // scan keeps, evaluated on the projected batch.
+        let control_schema = control_batches[0].schema();
+        let live_filter = reassign_expr_columns(
+            Arc::clone(&handle.current().unwrap()),
+            control_schema.as_ref(),
+        )
+        .unwrap();
+        let expected_batches = control_batches
+            .iter()
+            .map(|batch| batch_filter(batch, &live_filter).unwrap())
+            .collect::<Vec<_>>();
+        let expected_ids = test_trace_ids(&expected_batches);
+        assert_eq!(
+            STACK_MATCHED_ROWS,
+            expected_ids.len(),
+            "the decoded membership must keep exactly the member rows"
+        );
+        assert_eq!(expected_ids, test_trace_ids(&candidate_batches));
+        assert_eq!(
+            test_stack_field_values(&expected_batches),
+            test_stack_field_values(&candidate_batches)
+        );
+        let distinct_ids = expected_ids.iter().cloned().collect::<HashSet<String>>();
+        assert_eq!(STACK_BUILD_KEYS, distinct_ids.len());
+        assert!(
+            distinct_ids.iter().all(|key| build_keys.contains(key)),
+            "the selected rows must be the build keys"
+        );
+
+        // The prefilter must turn the pruning into fewer projected store bytes, in this
+        // direction and by this margin.
+        let control = control_metrics.data.lock().unwrap().clone();
+        let candidate = candidate_metrics.data.lock().unwrap().clone();
+        assert!(
+            control.page_size_to_fetch_store > 0,
+            "the control read must fetch projected bytes from the store"
+        );
+        assert!(
+            (candidate.page_size_to_fetch_store as f64)
+                <= 0.6 * (control.page_size_to_fetch_store as f64),
+            "the prefilter must let the projected read fetch at most 60% of the control's \
+             {} store bytes, fetched {}",
+            control.page_size_to_fetch_store,
+            candidate.page_size_to_fetch_store
+        );
     }
 
     #[test]
