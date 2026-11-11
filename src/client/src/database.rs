@@ -1307,22 +1307,35 @@ mod tests {
 
     #[test]
     fn test_from_tonic_status_with_retry_hint() {
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            GREPTIME_DB_HEADER_ERROR_CODE,
-            HeaderValue::from(StatusCode::Internal as u32),
-        );
-        headers.insert(
-            GREPTIME_DB_HEADER_ERROR_RETRY_HINT,
-            HeaderValue::from_static(RetryHint::Retryable.as_str()),
-        );
-        let status =
-            Status::with_metadata(Code::Internal, "blabla", MetadataMap::from_headers(headers));
-
-        let actual: Error = status.into();
-
-        assert_eq!(actual.retry_hint(), RetryHint::Retryable);
-        assert!(actual.should_retry());
+        for (code, hint) in [
+            (StatusCode::Internal, RetryHint::Retryable),
+            (
+                StatusCode::RegionNotReady,
+                RetryHint::RetryAfterRouteRefresh,
+            ),
+        ] {
+            let mut headers = HeaderMap::new();
+            headers.insert(
+                GREPTIME_DB_HEADER_ERROR_CODE,
+                HeaderValue::from(code as u32),
+            );
+            headers.insert(
+                GREPTIME_DB_HEADER_ERROR_RETRY_HINT,
+                HeaderValue::from_static(hint.as_str()),
+            );
+            let status = Status::with_metadata(
+                common_error::status_code::status_to_tonic_code(code),
+                "blabla",
+                MetadataMap::from_headers(headers),
+            );
+            let actual: Error = status.into();
+            assert_eq!(actual.status_code(), code);
+            assert_eq!(actual.retry_hint(), hint);
+            assert!(actual.should_retry());
+            let stream_error = flight_stream_error("127.0.0.1:4001", actual);
+            assert_eq!(stream_error.status_code(), code);
+            assert_eq!(stream_error.retry_hint(), hint);
+        }
     }
 
     #[test]

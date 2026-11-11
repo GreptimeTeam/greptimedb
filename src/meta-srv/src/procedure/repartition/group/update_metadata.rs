@@ -141,7 +141,7 @@ mod tests {
             source_expr.as_json_str().unwrap()
         );
         assert!(!routes[0].is_repartition_pending_read());
-        assert!(!routes[1].is_repartition_pending_read());
+        assert!(routes[1].is_repartition_pending_read());
         // Retrying the same persisted phase cannot advance while notification still fails.
         assert!(state.next(&mut ctx, &procedure_ctx).await.is_err());
         assert_eq!(invalidator.attempts(), 2);

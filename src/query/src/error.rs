@@ -361,6 +361,13 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Repartition is in progress for table {}; retry the query", table_id))]
+    RepartitionInProgress {
+        table_id: u32,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Invalid query context extension: {}", reason))]
     InvalidQueryContextExtension {
         reason: String,
@@ -443,7 +450,7 @@ impl ErrorExt for Error {
             RegionQuery { source, .. } => source.status_code(),
             TableMutation { source, .. } => source.status_code(),
             MissingTableMutationHandler { .. } => StatusCode::Unexpected,
-            GetRegionMetadata { .. } => StatusCode::RegionNotReady,
+            GetRegionMetadata { .. } | RepartitionInProgress { .. } => StatusCode::RegionNotReady,
             TableReadOnly { .. } => StatusCode::Unsupported,
 
             GetFulltextOptions { source, .. }
@@ -462,6 +469,7 @@ impl ErrorExt for Error {
         match self {
             BuildBackend { source, .. } | ListObjects { source, .. } => source.retry_hint(),
             GetRegionMetadata { .. } => RetryHint::Retryable,
+            RepartitionInProgress { .. } => RetryHint::RetryAfterRouteRefresh,
             ParseFileFormat { source, .. } | InferSchema { source, .. } => source.retry_hint(),
             Catalog { source, .. } => source.retry_hint(),
             CreateRecordBatch { source, .. } => source.retry_hint(),
@@ -495,15 +503,26 @@ mod tests {
 
     #[test]
     fn test_datafusion_external_boxed_error_status_code() {
+        for status in [StatusCode::RequestOutdated, StatusCode::RegionNotReady] {
+            let error = Error::DataFusion {
+                error: DataFusionError::External(Box::new(BoxedError::new(PlainError::new(
+                    "neutral error".to_string(),
+                    status,
+                )))),
+                location: Location::default(),
+            };
+            assert_eq!(error.status_code(), status);
+        }
+    }
+
+    #[test]
+    fn test_repartition_error_preserves_datafusion_status() {
+        let source = RepartitionInProgressSnafu { table_id: 42_u32 }.build();
         let error = Error::DataFusion {
-            error: DataFusionError::External(Box::new(BoxedError::new(PlainError::new(
-                "neutral error".to_string(),
-                StatusCode::RequestOutdated,
-            )))),
+            error: source.into(),
             location: Location::default(),
         };
-
-        assert_eq!(error.status_code(), StatusCode::RequestOutdated);
+        assert_eq!(error.status_code(), StatusCode::RegionNotReady);
     }
 
     #[test]

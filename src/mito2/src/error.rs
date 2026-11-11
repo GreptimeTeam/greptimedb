@@ -816,6 +816,14 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Region {} is not ready for the planned read: {}", region_id, reason))]
+    ReadRegionNotReady {
+        region_id: RegionId,
+        reason: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display(
         "Partition expr version mismatch for region {}: request {}, expected {}",
         region_id,
@@ -1752,6 +1760,7 @@ impl ErrorExt for Error {
             | InvalidPrimaryKeyRange { .. }
             | DecodePrimaryKeyRange { .. } => StatusCode::Internal,
             RegionBusy { .. } => StatusCode::RegionBusy,
+            ReadRegionNotReady { .. } => StatusCode::RegionNotReady,
             GetSchemaMetadata { source, .. } => source.status_code(),
             Timeout { .. } => StatusCode::Cancelled,
 
@@ -1803,6 +1812,7 @@ impl ErrorExt for Error {
 
         match self {
             PartitionExprVersionMismatch { .. }
+            | ReadRegionNotReady { .. }
             | RegionNotFound { .. }
             | RegionClosed { .. }
             | RejectWriteInStaging { .. }

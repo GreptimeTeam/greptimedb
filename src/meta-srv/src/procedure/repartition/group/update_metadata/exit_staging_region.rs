@@ -45,6 +45,8 @@ impl UpdateMetadata {
                 },
             )?;
             region_route.clear_leader_staging();
+            // Every target manifest and the retained source have completed their handoff.
+            region_route.clear_repartition_pending_read();
         }
 
         for source in sources {
@@ -153,6 +155,7 @@ mod tests {
             ..Default::default()
         };
         target_route.set_ignore_all_writes();
+        target_route.set_repartition_pending_read();
 
         let new_region_routes = UpdateMetadata::exit_staging_region_routes(
             group_id,
@@ -165,6 +168,7 @@ mod tests {
         assert!(!new_region_routes[0].is_leader_staging());
         assert!(new_region_routes[0].is_ignore_all_writes());
         assert!(!new_region_routes[1].is_leader_staging());
+        assert!(!new_region_routes[1].is_repartition_pending_read());
         assert!(new_region_routes[1].is_ignore_all_writes());
     }
 

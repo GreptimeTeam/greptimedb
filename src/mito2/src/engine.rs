@@ -1198,6 +1198,28 @@ impl EngineInner {
         });
         let version_data = region.version_control.current();
         let version = version_data.version;
+        if let Some(planned_version) = request.expected_partition_expr_version {
+            // A retiring merge source can keep its old scope. Scope comparison alone
+            // cannot fence it, so reject reads during staging as well.
+            ensure!(
+                !region.is_staging_or_staged_edit() && !region.is_enter_staging(),
+                crate::error::ReadRegionNotReadySnafu {
+                    region_id,
+                    reason: "repartition is in progress".to_string(),
+                }
+            );
+            // Validate the pinned snapshot, not a separately loaded region metadata.
+            ensure!(
+                planned_version == version.metadata.partition_expr_version,
+                crate::error::ReadRegionNotReadySnafu {
+                    region_id,
+                    reason: format!(
+                        "planned partition version {planned_version}, snapshot version {}",
+                        version.metadata.partition_expr_version
+                    ),
+                }
+            );
+        }
         version.ensure_no_pending_tails()?;
 
         if request.snapshot_on_scan && request.memtable_max_sequence.is_none() {
