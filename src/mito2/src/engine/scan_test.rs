@@ -5390,3 +5390,131 @@ fn scan_field_values(batches: &[common_recordbatch::RecordBatch]) -> Vec<f64> {
         })
         .collect()
 }
+
+#[tokio::test]
+async fn test_planned_read_uses_pinned_partition_scope() {
+    let mut env = TestEnv::new().await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+    let region_id = RegionId::new(1024, 0);
+    let create = CreateRequestBuilder::new().build();
+    let schema = test_util::rows_schema(&create);
+    engine
+        .handle_request(region_id, RegionRequest::Create(create))
+        .await
+        .unwrap();
+    test_util::put_rows(
+        &engine,
+        region_id,
+        Rows {
+            schema,
+            rows: test_util::build_rows(0, 3),
+        },
+    )
+    .await;
+    test_util::flush_region(&engine, region_id, None).await;
+    let region = engine.get_region(region_id).unwrap();
+    let old_version = region.metadata().partition_expr_version;
+    let planned = ScanRequest {
+        expected_partition_expr_version: Some(old_version),
+        ..Default::default()
+    };
+    let pinned = engine.scan_region(region_id, planned.clone()).unwrap();
+    let mut metadata = region.metadata().as_ref().clone();
+    let expr = partition::expr::col("field_0").lt(datatypes::value::Value::Float64(1.0.into()));
+    metadata.set_partition_expr(Some(expr.as_json_str().unwrap()));
+    let new_version = metadata.partition_expr_version;
+    assert_ne!(old_version, new_version);
+    region.version_control.alter_metadata(Arc::new(metadata));
+    let error = match engine.scan_region(region_id, planned) {
+        Err(error) => error,
+        Ok(_) => panic!("stale planned scope must fail"),
+    };
+    assert!(matches!(error, Error::ReadRegionNotReady { .. }));
+    assert_eq!(error.status_code(), StatusCode::RegionNotReady);
+    assert_eq!(
+        error.retry_hint(),
+        common_error::ext::RetryHint::RetryAfterRouteRefresh
+    );
+    // Opening the scanner later must retain the already validated old snapshot.
+    let old_batches =
+        RecordBatches::try_collect(pinned.scanner().await.unwrap().scan().await.unwrap())
+            .await
+            .unwrap();
+    assert_eq!(old_batches.iter().map(|b| b.num_rows()).sum::<usize>(), 3);
+    let current = engine
+        .scanner(
+            region_id,
+            ScanRequest {
+                expected_partition_expr_version: Some(new_version),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let current_batches = RecordBatches::try_collect(current.scan().await.unwrap())
+        .await
+        .unwrap();
+    assert_eq!(
+        current_batches.iter().map(|b| b.num_rows()).sum::<usize>(),
+        1
+    );
+    assert!(
+        engine
+            .scan_region(region_id, ScanRequest::default())
+            .is_ok()
+    );
+}
+
+#[tokio::test]
+async fn test_planned_read_rejects_retiring_merge_source() {
+    let mut env = TestEnv::new().await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+    let region_id = RegionId::new(1024, 0);
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::Create(CreateRequestBuilder::new().build()),
+        )
+        .await
+        .unwrap();
+    let version = engine
+        .get_region(region_id)
+        .unwrap()
+        .metadata()
+        .partition_expr_version;
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::EnterStaging(store_api::region_request::EnterStagingRequest {
+                partition_directive:
+                    store_api::region_request::StagingPartitionDirective::RejectAllWrites,
+            }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        engine
+            .get_region(region_id)
+            .unwrap()
+            .metadata()
+            .partition_expr_version,
+        version
+    );
+    let error = match engine.scan_region(
+        region_id,
+        ScanRequest {
+            expected_partition_expr_version: Some(version),
+            ..Default::default()
+        },
+    ) {
+        Err(error) => error,
+        Ok(_) => panic!("retiring source must reject a newly opened planned scan"),
+    };
+    assert!(matches!(error, Error::ReadRegionNotReady { .. }));
+    assert_eq!(error.status_code(), StatusCode::RegionNotReady);
+    assert!(
+        engine
+            .scan_region(region_id, ScanRequest::default())
+            .is_ok()
+    );
+}

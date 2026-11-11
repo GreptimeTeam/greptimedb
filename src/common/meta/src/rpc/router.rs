@@ -228,17 +228,17 @@ pub enum WriteRoutePolicy {
     IgnoreAllWrites,
 }
 
-// Presence, rather than the value, hides a newly allocated repartition target.
+// Presence, rather than the value, marks an incomplete repartition read handoff.
 const REPARTITION_PENDING_READ: &str = "greptime:repartition-pending-read";
 
 impl RegionRoute {
-    /// Whether allocation has published this target before its logical regions are ready.
-    /// Old routes without this attribute remain readable. Unknown values also remain hidden.
+    /// Whether allocation has published this target before the read handoff completes.
+    /// Old routes without this attribute remain readable. Unknown values also mark a pending handoff.
     pub fn is_repartition_pending_read(&self) -> bool {
         self.region.attrs.contains_key(REPARTITION_PENDING_READ)
     }
 
-    /// Hides a newly allocated target until its logical regions have been synchronized.
+    /// Marks a newly allocated target until the repartition read handoff completes.
     pub fn set_repartition_pending_read(&mut self) {
         self.region
             .attrs

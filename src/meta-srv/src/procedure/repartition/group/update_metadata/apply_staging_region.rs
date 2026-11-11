@@ -57,8 +57,6 @@ impl UpdateMetadata {
                 .context(error::SerializePartitionExprSnafu)?;
             // Set leader staging state and write route policy for the target region route.
             region_route.set_leader_staging();
-            // Metric targets have completed SyncRegion before this transition.
-            region_route.clear_repartition_pending_read();
             region_route.clear_ignore_all_writes();
         }
 
@@ -189,7 +187,7 @@ mod tests {
         )
         .unwrap();
         assert!(!new_region_routes[0].is_repartition_pending_read());
-        assert!(!new_region_routes[1].is_repartition_pending_read());
+        assert!(new_region_routes[1].is_repartition_pending_read());
         assert!(new_region_routes[2].is_repartition_pending_read());
         assert!(new_region_routes[0].is_leader_staging());
         assert_eq!(
