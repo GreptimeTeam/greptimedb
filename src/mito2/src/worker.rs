@@ -1726,6 +1726,14 @@ impl WorkerListener {
         }
     }
 
+    /// A catchup is about to reopen the region.
+    pub(crate) async fn on_catchup_reopen_begin(&self, _region_id: RegionId) {
+        #[cfg(any(test, feature = "test"))]
+        if let Some(listener) = &self.listener {
+            listener.on_catchup_reopen_begin(_region_id).await;
+        }
+    }
+
     /// Flush is finished successfully.
     pub(crate) fn on_flush_success(&self, region_id: RegionId) {
         #[cfg(any(test, feature = "test"))]

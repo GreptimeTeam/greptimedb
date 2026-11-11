@@ -209,6 +209,9 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                     region.version_control.current().last_entry_id
                 );
             }
+            self.listener
+                .on_catchup_reopen_begin(region.region_id)
+                .await;
             self.reopen_region(&region).await?
         } else {
             region

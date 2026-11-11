@@ -641,6 +641,21 @@ impl EventListener for ReloadSwapBlocker {
     }
 }
 
+/// Holds a catchup before it reopens the region until released.
+#[derive(Default)]
+struct CatchupReopenBlocker {
+    entered: Notify,
+    release: Notify,
+}
+
+#[async_trait]
+impl EventListener for CatchupReopenBlocker {
+    async fn on_catchup_reopen_begin(&self, _region_id: RegionId) {
+        self.entered.notify_one();
+        self.release.notified().await;
+    }
+}
+
 async fn put_range(
     engine: &MitoEngine,
     region_id: RegionId,
@@ -697,6 +712,18 @@ async fn encode_delta(action_list: RegionMetaActionList) -> Vec<u8> {
         .encode(&action_list.encode().unwrap()[..])
         .await
         .unwrap()
+}
+
+/// Enters staging with a new partition expression, which saves a staging manifest.
+fn enter_staging_request() -> RegionRequest {
+    let partition_expr = col("field_0")
+        .gt_eq(Value::Float64(0.0.into()))
+        .and(col("field_0").lt(Value::Float64(100.0.into())))
+        .as_json_str()
+        .unwrap();
+    RegionRequest::EnterStaging(EnterStagingRequest {
+        partition_directive: StagingPartitionDirective::UpdatePartitionExpr(partition_expr),
+    })
 }
 
 /// Fences the region as a version conflict does, without notifying its worker.
@@ -794,6 +821,32 @@ async fn test_commit_after_deadline_sends_nothing(
 }
 
 #[tokio::test]
+async fn test_staging_save_after_deadline_sends_nothing() {
+    let mut env = TestEnv::with_prefix("staging-after-deadline").await;
+    let region_id = RegionId::new(1, 1);
+    let (engine, _log_store, _, _, deadline) = create_leased_region(&mut env, region_id).await;
+    let region = engine.get_region(region_id).unwrap();
+    let version = next_manifest_version(&region).await;
+
+    // The memtable is empty, so entering staging saves its manifest without a flush.
+    engine.freeze_lease_clock(deadline);
+    let error = engine
+        .handle_request(region_id, enter_staging_request())
+        .await
+        .unwrap_err();
+
+    assert!(
+        format!("{error:?}").contains("does not hold a valid leader lease"),
+        "{error:?}"
+    );
+    assert_eq!(version, next_manifest_version(&region).await);
+    let store = region.manifest_ctx.manifest_manager.read().await.store();
+    assert!(store.fetch_staging_manifests().await.unwrap().is_empty());
+    assert!(!region.manifest_ctx.is_reload_pending());
+    assert!(region.is_writable());
+}
+
+#[tokio::test]
 async fn test_default_mode_commit_ignores_leader_deadline() {
     let mut env = TestEnv::with_prefix("default-mode-deadline").await;
     let (engine, _log_store) = new_engine(&mut env).await;
@@ -865,6 +918,45 @@ async fn test_fenced_region_refuses_upgrade() {
     assert!(error.retry_hint().is_retryable(), "{error:?}");
     assert!(Arc::ptr_eq(&region, &engine.get_region(region_id).unwrap()));
     assert!(region.is_follower());
+}
+
+#[tokio::test]
+async fn test_fence_during_catchup_refuses_reopen() {
+    let mut env = TestEnv::with_prefix("fence-during-catchup").await;
+    let listener = Arc::new(CatchupReopenBlocker::default());
+    let engine = env
+        .create_engine_with_log_store_and_time(
+            MitoConfig::default(),
+            new_log_store().await,
+            Arc::new(StdTimeProvider),
+            Some(listener.clone()),
+        )
+        .await;
+    let region_id = RegionId::new(1, 1);
+    let (_, schema, _) = create_leased_region_on(&engine, region_id).await;
+    // Rows left in the memtable make the catchup reopen the region.
+    put_range(&engine, region_id, &schema, 0, 3).await;
+    engine
+        .set_region_role(region_id, RegionRole::Follower)
+        .unwrap();
+    let region = engine.get_region(region_id).unwrap();
+    let catchup = {
+        let engine = engine.clone();
+        let request = RegionRequest::Catchup(RegionCatchupRequest {
+            set_writable: true,
+            ..Default::default()
+        });
+        tokio::spawn(async move { engine.handle_request(region_id, request).await })
+    };
+
+    // The catchup passed its entry check; a commit fences the region before the reopen.
+    listener.entered.notified().await;
+    fence(&region).await;
+    listener.release.notify_one();
+
+    let error = catchup.await.unwrap().unwrap_err();
+    assert!(error.retry_hint().is_retryable(), "{error:?}");
+    assert!(Arc::ptr_eq(&region, &engine.get_region(region_id).unwrap()));
 }
 
 #[tokio::test]
@@ -1251,16 +1343,8 @@ async fn test_end_of_staging_conflict_reloads_region() {
         .next()
         .unwrap()
         .clone();
-    let partition_expr = col("field_0")
-        .gt_eq(Value::Float64(0.0.into()))
-        .and(col("field_0").lt(Value::Float64(100.0.into())))
-        .as_json_str()
-        .unwrap();
-    let enter_staging = RegionRequest::EnterStaging(EnterStagingRequest {
-        partition_directive: StagingPartitionDirective::UpdatePartitionExpr(partition_expr),
-    });
     engine
-        .handle_request(region_id, enter_staging)
+        .handle_request(region_id, enter_staging_request())
         .await
         .unwrap();
     engine
