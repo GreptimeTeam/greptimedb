@@ -1154,7 +1154,7 @@ impl MitoRegion {
 
         let Some(staged_actions) = manager.staged_actions() else {
             info!(
-                "No staged manifests to merge for region {}, exiting staging mode without changes",
+                "No staged actions for region {}, exiting staging mode without changes",
                 self.region_id
             );
             self.exit_staging()?;
@@ -1169,25 +1169,25 @@ impl MitoRegion {
         ensure!(
             !(expect_change && expect_partition_expr_change),
             UnexpectedSnafu {
-                reason: "unexpected both change and partition expr change actions in merged actions"
+                reason: "unexpected both change and partition expr change actions in staged actions"
             }
         );
         ensure!(
             expect_change || expect_partition_expr_change,
             UnexpectedSnafu {
-                reason: "expect a change or partition expr change action in merged actions"
+                reason: "expect a change or partition expr change action in staged actions"
             }
         );
         ensure!(
             expect_edit,
             UnexpectedSnafu {
-                reason: "expect an edit action in merged actions"
+                reason: "expect an edit action in staged actions"
             }
         );
 
-        let (merged_partition_expr_change, merged_change, merged_edit) =
+        let (staged_partition_expr_change, staged_change, staged_edit) =
             staged_actions.clone().split_region_change_and_edit();
-        if let Some(change) = &merged_change {
+        if let Some(change) = &staged_change {
             // In staging exit we only allow metadata-only updates. A `Change`
             // action is accepted only when column definitions are unchanged;
             // otherwise it is treated as a schema change and rejected.
@@ -1208,17 +1208,17 @@ impl MitoRegion {
                 self.region_id,
                 pending.version()
             );
-            // Apply the merged changes to in-memory version control
-            if let Some(change) = merged_partition_expr_change {
+            // Apply the committed changes to in-memory version control
+            if let Some(change) = staged_partition_expr_change {
                 let mut new_metadata = self.version().metadata.as_ref().clone();
                 new_metadata.set_partition_expr(change.partition_expr);
                 self.version_control.alter_metadata(new_metadata.into());
             }
-            if let Some(change) = merged_change {
+            if let Some(change) = staged_change {
                 self.version_control.alter_metadata(change.metadata);
             }
             self.version_control
-                .apply_edit(Some(merged_edit), &[], self.file_purger.clone());
+                .apply_edit(Some(staged_edit), &[], self.file_purger.clone());
         }
         let next_state =
             self.manifest_ctx

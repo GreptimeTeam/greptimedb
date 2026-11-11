@@ -144,6 +144,16 @@ fn assert_conflict(error: &Error) {
     );
 }
 
+fn import(file_id: FileId) -> RegionMetaActionList {
+    RegionMetaActionList::with_action(RegionMetaAction::Edit(RegionEdit {
+        files_to_add: vec![FileMeta {
+            file_id,
+            ..Default::default()
+        }],
+        ..Default::default()
+    }))
+}
+
 #[rstest]
 #[case::conditional(true)]
 #[case::legacy(false)]
@@ -372,16 +382,6 @@ async fn test_deltas_are_readable_across_modes(
 
     assert_eq!(1, reader.last_version());
     assert_eq!(2, commit(&mut reader).await.unwrap());
-}
-
-fn import(file_id: FileId) -> RegionMetaActionList {
-    RegionMetaActionList::with_action(RegionMetaAction::Edit(RegionEdit {
-        files_to_add: vec![FileMeta {
-            file_id,
-            ..Default::default()
-        }],
-        ..Default::default()
-    }))
 }
 
 #[tokio::test]

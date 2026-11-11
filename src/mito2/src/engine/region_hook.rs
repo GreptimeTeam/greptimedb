@@ -58,8 +58,8 @@
 //! | Apply staging (promote)      | ❌ (delegates to edit)  | ✅ Yes ²               |
 //! | Alter (schema change)        | ❌ (no SST files)       | ✅ Yes                |
 //! | Truncate                     | ❌ (removes files)      | ✅ Yes                |
-//! | Enter staging                | ❌ (no SST files)       | ❌ (staged in memory) |
-//! | Operations during staging    | N/A                    | ❌ (staged in memory) |
+//! | Enter staging                | ❌ (no SST files)       | ❌ (in memory)        |
+//! | Operations during staging    | N/A                    | ❌ (in memory)        |
 //! | Async index build            | ❌ (index files only)   | ✅ Yes                |
 //!
 //! ¹ Remote compaction runs on a dedicated compactor node via `CompactionRegionOpener::open()`;
@@ -216,7 +216,7 @@ impl PendingManifestHook {
 
     /// Fires the hook if one is registered, **unless** the actions were staged in
     /// memory (`is_staging = true`). Safe to call unconditionally:
-    /// it is a no-op when no hook is registered or when the write is staging-only.
+    /// it is a no-op when no hook is registered or when the actions were staged in memory.
     pub(crate) async fn fire(self) {
         if self.is_staging {
             return;
