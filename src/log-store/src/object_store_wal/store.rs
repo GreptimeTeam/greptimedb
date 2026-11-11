@@ -9307,7 +9307,7 @@ mod tests {
     #[tokio::test]
     async fn test_bounded_release_fences_future_appends_and_rejects_after_stop() {
         let _serialized = SERIALIZED.lock().await;
-        for (config, released) in [(eager(), id(10, 1)), (enqueued(eager()), 0)] {
+        for (config, released) in [(eager(), id(10, 1)), (enqueued(manual()), 0)] {
             let store = open(memory_store(), &config).await;
             let region_id = region(1);
             store
