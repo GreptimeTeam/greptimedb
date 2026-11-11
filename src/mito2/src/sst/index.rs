@@ -23,7 +23,7 @@ mod indexer;
 pub mod intermediate;
 pub(crate) mod inverted_index;
 pub mod kind;
-mod primary_key;
+pub mod primary_key;
 pub mod puffin_manager;
 pub mod registry;
 pub mod sketch_reader;

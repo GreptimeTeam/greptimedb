@@ -21,13 +21,14 @@ use crate::sst::parquet::flat_format::primary_key_column_index;
 use crate::sst::parquet::format::PrimaryKeyArray;
 
 /// Iterates consecutive dictionary-key runs, preserving their row order without decoding.
-pub(crate) struct PrimaryKeyRuns<'a> {
+pub struct PrimaryKeyRuns<'a> {
     keys: &'a [u32],
     values: &'a BinaryArray,
 }
 
 impl<'a> PrimaryKeyRuns<'a> {
-    pub(crate) fn try_new(batch: &'a RecordBatch) -> Result<Self> {
+    /// Borrows the encoded primary keys of a flat batch without decoding values.
+    pub fn try_new(batch: &'a RecordBatch) -> Result<Self> {
         let pk = batch
             .column(primary_key_column_index(batch.num_columns()))
             .as_any()
