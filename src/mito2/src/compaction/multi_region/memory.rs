@@ -43,6 +43,8 @@ pub(crate) struct MemoryLimits {
     pub(crate) batch: usize,
     pub(crate) group: usize,
     pub(crate) index: usize,
+    /// Reuses index allocation only when the optional working set fits admission.
+    pub(crate) extension_index_memory_limit: Option<usize>,
     pub(crate) writer: SstWriteLimits,
     pub(crate) estimated: u64,
 }
@@ -60,6 +62,7 @@ impl MemoryLimits {
             batch,
             group: plan.memory_limit / 16,
             index: plan.memory_limit / (64 * plan.targets.len()),
+            extension_index_memory_limit: None,
             writer: SstWriteLimits {
                 // Parquet 59 preallocates a 1 MiB bit writer for each of the
                 // timestamp/sequence delta encoders. Dictionary interner tables
@@ -78,6 +81,7 @@ impl MemoryLimits {
         plan: &MultiRegionCompactionPlan,
         context: &MultiRegionCompactionContext,
         footers: &[Arc<ParquetMetaData>],
+        extension_targets: usize,
     ) -> Result<()> {
         self.check_upload_minimum(context)?;
         let mut extra_delta = 0;
@@ -105,7 +109,12 @@ impl MemoryLimits {
                 ),
             }
         );
-        self.estimated = bytes;
+        // Optional indexes must not turn an admitted data compaction into a
+        // resource failure. Reserve all resident target states together or skip.
+        let admission =
+            admit_extension_indexes(bytes, plan.memory_limit, self.index, extension_targets);
+        self.extension_index_memory_limit = admission.limit;
+        self.estimated = admission.estimated;
         Ok(())
     }
 
@@ -212,10 +221,83 @@ fn reader_bytes(footer: &ParquetMetaData) -> u64 {
         .iter()
         .map(|group| {
             (group.total_byte_size().max(0) as u64)
-                .saturating_mul(2)
+                .saturating_mul(RETAINED_AND_FINISH_SCRATCH_FACTOR)
                 .saturating_add(group.compressed_size().max(0) as u64)
         })
         .max()
         .unwrap_or(0);
     pages.saturating_add(footer.memory_size() as u64)
+}
+
+/// Retained state and temporary finish allocations share the admission budget.
+const RETAINED_AND_FINISH_SCRATCH_FACTOR: u64 = 2;
+
+#[derive(Debug, PartialEq, Eq)]
+struct ExtensionIndexAdmission {
+    limit: Option<usize>,
+    estimated: u64,
+}
+
+/// Reserves all target states together, or preserves the admitted data budget.
+fn admit_extension_indexes(
+    base: u64,
+    budget: usize,
+    index: usize,
+    targets: usize,
+) -> ExtensionIndexAdmission {
+    let with_extension_indexes = base.saturating_add(
+        (index as u64)
+            .saturating_mul(RETAINED_AND_FINISH_SCRATCH_FACTOR)
+            .saturating_mul(targets as u64),
+    );
+    if targets > 0 && index > 0 && with_extension_indexes <= budget as u64 {
+        ExtensionIndexAdmission {
+            limit: Some(index),
+            estimated: with_extension_indexes,
+        }
+    } else {
+        ExtensionIndexAdmission {
+            limit: None,
+            estimated: base,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ExtensionIndexAdmission, admit_extension_indexes};
+
+    #[test]
+    fn test_extension_indexes_do_not_reject_admitted_data() {
+        // Both target writers are resident. Insufficient extra room leaves the
+        // already-admitted data budget unchanged and explicitly disables optional indexes.
+        assert_eq!(
+            admit_extension_indexes(900, 1000, 30, 2),
+            ExtensionIndexAdmission {
+                limit: None,
+                estimated: 900
+            }
+        );
+        assert_eq!(
+            admit_extension_indexes(880, 1000, 30, 2),
+            ExtensionIndexAdmission {
+                limit: Some(30),
+                estimated: 1000
+            }
+        );
+        assert_eq!(
+            admit_extension_indexes(900, 1000, 30, 0),
+            ExtensionIndexAdmission {
+                limit: None,
+                estimated: 900
+            }
+        );
+        assert_eq!(
+            admit_extension_indexes(900, 1000, 0, 2),
+            ExtensionIndexAdmission {
+                limit: None,
+                estimated: 900
+            }
+        );
+    }
 }
