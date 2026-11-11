@@ -35,7 +35,7 @@ mod handle_table_compaction;
 mod handle_truncate;
 mod handle_write;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -774,6 +774,7 @@ impl<S: LogStore> WorkerStarter<S> {
                 self.config.experimental_compaction_on_exhausted,
             ),
             stalled_requests: StalledRequests::default(),
+            staging_drains: HashSet::new(),
             listener: self.listener,
             cache_manager: self.cache_manager,
             puffin_manager_factory: self.puffin_manager_factory,
@@ -1097,6 +1098,10 @@ struct RegionWorkerLoop<S> {
     compaction_scheduler: CompactionScheduler,
     /// Stalled write requests.
     stalled_requests: StalledRequests,
+    /// Regions with writes stalled while they were ending staging. Later writes of these regions
+    /// stall behind them until [BackgroundNotify::StagingEnded] handles them, so they keep their
+    /// order.
+    staging_drains: HashSet<RegionId>,
     /// Event listener for tests.
     listener: WorkerListener,
     /// Cache.
@@ -1602,6 +1607,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             }
             BackgroundNotify::EnterStaging(req) => self.handle_enter_staging_result(req).await,
             BackgroundNotify::StagingEnded(drained) => {
+                self.staging_drains.remove(&region_id);
                 self.handle_region_stalled_requests(&region_id, true).await;
                 let _ = drained.send(());
             }

@@ -63,8 +63,9 @@ use crate::request::{BackgroundNotify, RegionEditRequest, WorkerRequest};
 use crate::sst::FormatType;
 use crate::sst::file::FileMeta;
 use crate::test_util::{
-    CheckpointTaskBlocker, CreateRequestBuilder, MockWriteBufferManager, TestEnv, build_rows,
-    flush_region, put_rows, reopen_region, rows_schema,
+    CheckpointTaskBlocker, CreateRequestBuilder, MockWriteBufferManager, TestEnv,
+    build_delete_rows, build_rows, delete_rows, delete_rows_schema, flush_region, put_rows,
+    reopen_region, rows_schema,
 };
 use crate::time_provider::mock::MockTimeProvider;
 use crate::worker::MAX_INITIAL_CHECK_DELAY_SECS;
@@ -2440,4 +2441,60 @@ async fn test_writes_wait_while_staging_ends(#[case] downgrade: bool) {
     let result = put.await.unwrap();
     assert_eq!(downgrade, result.is_err());
     assert_eq!(downgrade, region.version().memtables.is_empty());
+}
+
+#[tokio::test]
+async fn test_writes_after_staging_ends_wait_for_stalled_writes() {
+    let mut env = TestEnv::new().await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+    let region_id = RegionId::new(1024, 0);
+    let (schema, _) = create_staging_region(&engine, region_id).await;
+    let region = engine.get_region(region_id).unwrap();
+    let started = region.manifest_ctx.begin_ending_staging(region_id).unwrap();
+    let stalls = WRITE_STALL_TOTAL.get();
+    let wait_for_stalls = |n| {
+        tokio::time::timeout(Duration::from_secs(5), async move {
+            while WRITE_STALL_TOTAL.get() < stalls + n {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+    };
+    let put_engine = engine.clone();
+    let rows = Rows {
+        schema,
+        rows: build_rows(0, 3),
+    };
+    let put = tokio::spawn(async move { put_rows(&put_engine, region_id, rows).await });
+    wait_for_stalls(1).await.unwrap();
+
+    // A delete of the same rows that arrives after staging ended, before the worker drains the
+    // stalled put, waits behind it.
+    region
+        .manifest_ctx
+        .finish_ending_staging(region_id, started, &Ok::<(), Error>(()));
+    let delete_engine = engine.clone();
+    let rows = Rows {
+        schema: delete_rows_schema(&CreateRequestBuilder::new().build()),
+        rows: build_delete_rows(0, 3),
+    };
+    let delete = tokio::spawn(async move { delete_rows(&delete_engine, region_id, rows).await });
+    wait_for_stalls(2).await.unwrap();
+    let (drained, wait) = tokio::sync::oneshot::channel();
+    engine
+        .inner
+        .workers
+        .submit_to_worker(
+            region_id,
+            WorkerRequest::Background {
+                region_id,
+                notify: BackgroundNotify::StagingEnded(drained),
+            },
+        )
+        .await
+        .unwrap();
+    wait.await.unwrap();
+    put.await.unwrap();
+    delete.await.unwrap();
+
+    assert_eq!(0, count_rows(&engine, region_id).await);
 }

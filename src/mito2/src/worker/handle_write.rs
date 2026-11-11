@@ -321,6 +321,12 @@ impl<S> RegionWorkerLoop<S> {
                     .add_write_request_to_pending(sender_req);
                 continue;
             }
+            if self.staging_drains.contains(&region_id) {
+                self.stalling_count.add(1);
+                WRITE_STALL_TOTAL.inc();
+                self.stalled_requests.push(sender_req);
+                continue;
+            }
 
             // Checks whether the region exists and is it stalling.
             if let hash_map::Entry::Vacant(e) = region_ctxs.entry(region_id) {
@@ -365,9 +371,9 @@ impl<S> RegionWorkerLoop<S> {
 
                         e.insert(region_ctx);
                     }
-                    RegionRoleState::Leader(RegionLeaderState::Altering)
+                    state @ (RegionRoleState::Leader(RegionLeaderState::Altering)
                     | RegionRoleState::Leader(RegionLeaderState::Editing)
-                    | RegionRoleState::Leader(RegionLeaderState::EndingStaging) => {
+                    | RegionRoleState::Leader(RegionLeaderState::EndingStaging)) => {
                         // Editing is transient: queue the write so edit completion can drain it
                         // before starting the next queued edit.
                         debug!(
@@ -375,6 +381,9 @@ impl<S> RegionWorkerLoop<S> {
                             region.region_id,
                             region.state()
                         );
+                        if state == RegionRoleState::Leader(RegionLeaderState::EndingStaging) {
+                            self.staging_drains.insert(region_id);
+                        }
                         self.stalling_count.add(1);
                         WRITE_STALL_TOTAL.inc();
                         self.stalled_requests.push(sender_req);
@@ -488,6 +497,12 @@ impl<S> RegionWorkerLoop<S> {
                 self.flush_scheduler.add_bulk_request_to_pending(bulk_req);
                 continue;
             }
+            if self.staging_drains.contains(&region_id) {
+                self.stalling_count.add(1);
+                WRITE_STALL_TOTAL.inc();
+                self.stalled_requests.push_bulk(bulk_req);
+                continue;
+            }
 
             // Checks whether the region exists and is it stalling.
             if let hash_map::Entry::Vacant(e) = region_ctxs.entry(region_id) {
@@ -522,9 +537,9 @@ impl<S> RegionWorkerLoop<S> {
 
                         e.insert(region_ctx);
                     }
-                    RegionRoleState::Leader(RegionLeaderState::Altering)
+                    state @ (RegionRoleState::Leader(RegionLeaderState::Altering)
                     | RegionRoleState::Leader(RegionLeaderState::Editing)
-                    | RegionRoleState::Leader(RegionLeaderState::EndingStaging) => {
+                    | RegionRoleState::Leader(RegionLeaderState::EndingStaging)) => {
                         // Editing is transient: queue the bulk write so edit completion can drain
                         // it before starting the next queued edit.
                         debug!(
@@ -532,6 +547,9 @@ impl<S> RegionWorkerLoop<S> {
                             region.region_id,
                             region.state()
                         );
+                        if state == RegionRoleState::Leader(RegionLeaderState::EndingStaging) {
+                            self.staging_drains.insert(region_id);
+                        }
                         self.stalling_count.add(1);
                         WRITE_STALL_TOTAL.inc();
                         self.stalled_requests.push_bulk(bulk_req);
