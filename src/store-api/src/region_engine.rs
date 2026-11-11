@@ -1124,6 +1124,7 @@ pub trait RegionEngine: Send + Sync {
             affected_rows,
             extensions,
             metadata: Vec::new(),
+            sketch: None,
         })
     }
 

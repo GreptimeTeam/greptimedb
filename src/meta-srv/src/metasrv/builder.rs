@@ -667,6 +667,7 @@ impl MetasrvBuilder {
         resource_stat.start_collect_cpu_usage();
 
         Ok(Metasrv {
+            node_manager,
             state,
             started: Arc::new(AtomicBool::new(false)),
             start_time_ms: common_time::util::current_time_millis() as u64,

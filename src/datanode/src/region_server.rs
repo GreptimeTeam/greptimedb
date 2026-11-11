@@ -547,12 +547,12 @@ impl RegionServer {
     }
 
     /// Returns a Region-bound sketch reader without reading files or taking a snapshot.
-    /// Fails if the Region is unavailable or its engine has no sketch-reading capability.
-    pub fn sketch_reader(&self, region_id: RegionId) -> Result<RegionSketchReader> {
+    /// Returns `None` if the engine does not support sketch reading; Region lookup failures remain errors.
+    pub fn sketch_reader(&self, region_id: RegionId) -> Result<Option<RegionSketchReader>> {
         let engine = self
             .find_engine(region_id)?
             .context(RegionNotFoundSnafu { region_id })?;
-        RegionSketchReader::new(engine, region_id)
+        Ok(RegionSketchReader::new(engine, region_id))
     }
 
     pub fn region_statistic(&self, region_id: RegionId) -> Option<RegionStatistic> {
@@ -674,6 +674,7 @@ impl RegionServer {
             affected_rows,
             extensions,
             metadata: Vec::new(),
+            sketch: None,
         })
     }
 
@@ -1140,6 +1141,21 @@ impl RegionServer {
         }
         let failed_requests_cnt = crate::metrics::REGION_SERVER_REQUEST_FAILURE_COUNT
             .with_label_values(&[request.as_ref()]);
+        let request = match request {
+            region_request::Body::SketchStat(request) => {
+                return self
+                    .handle_sketch_rpc(request, false)
+                    .await
+                    .inspect_err(|_| failed_requests_cnt.inc());
+            }
+            region_request::Body::SketchQuery(request) => {
+                return self
+                    .handle_sketch_rpc(request, true)
+                    .await
+                    .inspect_err(|_| failed_requests_cnt.inc());
+            }
+            request => request,
+        };
         let response = match &request {
             region_request::Body::Creates(_)
             | region_request::Body::Drops(_)
@@ -1170,6 +1186,7 @@ impl RegionServer {
             affected_rows: response.affected_rows as _,
             extensions: response.extensions,
             metadata: response.metadata,
+            sketch: None,
             failures: Vec::new(),
         })
     }
@@ -1319,6 +1336,7 @@ fn encode_batch_write_response(result: BatchRegionResponse<error::Error>) -> Reg
             }),
         }),
         metadata: Vec::new(),
+        sketch: None,
         affected_rows: result.affected_rows as _,
         extensions: result.extensions,
         failures: result
@@ -1924,6 +1942,7 @@ impl RegionServerInner {
                     affected_rows: result.affected_rows,
                     extensions: result.extensions,
                     metadata: Vec::new(),
+                    sketch: None,
                 })
             }
             Err(err) => {
@@ -2017,6 +2036,7 @@ impl RegionServerInner {
                     affected_rows: result.affected_rows,
                     extensions: result.extensions,
                     metadata: Vec::new(),
+                    sketch: None,
                 })
             }
             Err(err) => {

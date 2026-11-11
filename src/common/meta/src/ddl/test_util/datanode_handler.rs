@@ -39,6 +39,7 @@ impl MockDatanodeHandler for () {
             affected_rows: 0,
             extensions: Default::default(),
             metadata: Vec::new(),
+            sketch: None,
         })
     }
 
