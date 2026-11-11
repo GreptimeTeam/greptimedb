@@ -1,0 +1,75 @@
+src/mito2/AGENTS.md
+  s_c06578f466c2ea::t_c107fef1df3256 88-95
+src/mito2/src/access_layer.rs
+  s_17057bba187655::t_37787f07534ff7 403-406
+src/mito2/src/compaction/compactor.rs
+  s_c06578f466c2ea::t_18b6a49a44564d 15,30,57,59-61,64,151-155,160-183,194-197,432-483,738-770,779,917-926,998-1015,1178-1281,1659-1666,1802-1902
+src/mito2/src/compaction/multi_region.rs
+  s_17057bba187655::t_8020d8c9d9c491 34,44,82-83,133-153
+src/mito2/src/compaction/multi_region/memory.rs
+  s_17057bba187655::t_100340a8c61409 46-47,65,84,112-115,229-262
+src/mito2/src/compaction/multi_region/source.rs
+  s_17057bba187655::t_526bd7a4342b72 17,19,54-56,116,214-256,284
+src/mito2/src/compaction/multi_region/tests.rs
+  s_17057bba187655::t_47f4917cda659c 276,2331,2460-2608
+src/mito2/src/compaction/multi_region/worker.rs
+  s_17057bba187655::t_3403e1b0567099 58,80
+src/mito2/src/compaction/multi_region/writer.rs
+  s_17057bba187655::t_c95a5e5d3988c5 27-28,37,49,61,103,105-113,115,131-133
+src/mito2/src/engine/create_test.rs
+  s_17057bba187655::t_69a4ddfc981cf9 52-139
+src/mito2/src/engine/index_build_test.rs
+  s_17057bba187655::t_fcc13d4cd45c1b 2580-3268
+src/mito2/src/region/opener.rs
+  s_c06578f466c2ea::t_1101381762072a 80-81,84,154,198,224-229,397-413
+src/mito2/src/sst/file.rs
+  s_17057bba187655::t_5b010d9983d875 425-439
+src/mito2/src/sst/index.rs
+  s_c06578f466c2ea::t_fe7ea3311bf647 66-67,515-528,547,803,964-966,970-977,1003,1006,1009,1022,1028-1049,1056,1058,1061,1063-1070,1072,1075,1081,1083-1095,1109-1114,1116-1118,1122-1135,1138-1143,1146,1148,1153-1160,1163-1199,1297-1299,2233-2239,2363-2369,2604-2638,2688-2690,3321-3325,3382-3393,3527-3783,3786-3850,3864,3874-3883,3888,3890-3914,3927,3930,3940-4017
+src/mito2/src/sst/index/handler.rs
+  s_17057bba187655::t_0f18f2c82dc380 31,92-101,117-122,143-145
+src/mito2/src/sst/index/handler/builtin.rs
+  s_17057bba187655::t_21f0d9337df9e3 27,31-33,53-58,95-99,107-145
+src/mito2/src/sst/index/handler/builtin/bloom.rs
+  s_17057bba187655::t_3bbf04f1bedfe8 27,29-31,33,111-114
+src/mito2/src/sst/index/handler/builtin/fulltext.rs
+  s_17057bba187655::t_81129aec02733e 27,30-32,34,124-127
+src/mito2/src/sst/index/handler/builtin/inverted.rs
+  s_17057bba187655::t_177112b7756bdc 30-33,35,137-140
+src/mito2/src/sst/index/indexer/abort.rs
+  s_17057bba187655::t_e8b27c86d36863 22-35
+src/mito2/src/sst/index/registry.rs
+  s_17057bba187655::t_4c9062a5dbbbc1 33,75-82,281-285,317-325,365-368
+src/mito2/src/sst/parquet/writer.rs
+  s_17057bba187655::t_ca1b8a8d41777b 58,427,624-632,737,745-747
+src/mito2/src/test_util.rs
+  s_c06578f466c2ea::t_bdd9d05052de20 402,440,456-462,836-839,842,844
+src/mito2/src/worker/handle_create.rs
+  s_17057bba187655::t_9df9c8145d9c2e 17-18,25,27-28,64-75,95-96
+src/mito2/src/worker/handle_rebuild_index.rs
+  s_c06578f466c2ea::t_ecb1ff5993349e 22,30-31,39-41,62-63,67,82-100,102,105,247-273,282-286,345-346,503-835
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "32e9198eac44bcc9c89a94d125e1d5098921d7a5",
+  "prompts": {},
+  "sessions": {
+    "s_17057bba187655": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1c56d-fbcd-75c2-86d2-c4b3f17c03dc",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    },
+    "s_c06578f466c2ea": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1c374-3547-7b31-9c5c-4ab96c5f5115",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}
