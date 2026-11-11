@@ -161,7 +161,7 @@ mod tests {
             for sql in [
                 "CREATE TABLE probe_physical (greptime_timestamp TIMESTAMP(3) TIME INDEX, greptime_value DOUBLE) ENGINE=metric WITH ('physical_metric_table'='')".to_string(),
                 "CREATE TABLE probe_metric (greptime_timestamp TIMESTAMP(3) TIME INDEX, greptime_value DOUBLE, job STRING, PRIMARY KEY(job)) ENGINE=metric WITH ('on_physical_table'='probe_physical')".to_string(),
-                format!("CREATE TABLE greptime_metrics_exemplars (__table_id INT UNSIGNED NOT NULL, __tsid BIGINT UNSIGNED NOT NULL, greptime_metric STRING, greptime_timestamp TIMESTAMP(9) TIME INDEX, greptime_value DOUBLE, exemplar_labels JSON2, job STRING, {}, PRIMARY KEY (__table_id, __tsid, greptime_metric, job, {})) ENGINE=mito WITH ('append_mode'='true', 'primary_key_encoding'='sparse')",
+                format!("CREATE TABLE greptime_metrics_exemplars (__table_id INT UNSIGNED NOT NULL, __tsid BIGINT UNSIGNED NOT NULL, greptime_metric STRING, greptime_timestamp TIMESTAMP(9) TIME INDEX, greptime_value DOUBLE, greptime_exemplar_labels JSON2, job STRING, {}, PRIMARY KEY (__table_id, __tsid, greptime_metric, job, {})) ENGINE=mito WITH ('append_mode'='true', 'primary_key_encoding'='sparse')",
                     names.iter().map(|n| format!("{n} STRING")).collect::<Vec<_>>().join(","), names.join(",")),
             ] {
                 instance.do_query(&sql, QueryContext::arc()).await.remove(0).unwrap();

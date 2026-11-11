@@ -4782,7 +4782,7 @@ async fn test_exemplar_precreated_table_options(
     execute_sql(frontend, "CREATE TABLE source_physical (ts TIMESTAMP TIME INDEX, val DOUBLE) ENGINE=metric WITH ('physical_metric_table'='')").await;
     execute_sql(frontend, "CREATE TABLE metric_source (job STRING PRIMARY KEY, ts TIMESTAMP TIME INDEX, val DOUBLE) ENGINE=metric WITH ('on_physical_table'='source_physical')").await;
     execute_sql(frontend, &format!(
-        "CREATE TABLE {METRICS_EXEMPLARS_TABLE} (__table_id INT UNSIGNED NOT NULL, __tsid BIGINT UNSIGNED NOT NULL, greptime_metric STRING, greptime_timestamp TIMESTAMP({precision}) TIME INDEX, greptime_value DOUBLE, exemplar_labels JSON2, PRIMARY KEY (__table_id, __tsid, greptime_metric)) ENGINE=mito WITH ('append_mode'='{append_mode}', 'primary_key_encoding'='{encoding}', 'compaction.type'='twcs')"
+        "CREATE TABLE {METRICS_EXEMPLARS_TABLE} (__table_id INT UNSIGNED NOT NULL, __tsid BIGINT UNSIGNED NOT NULL, greptime_metric STRING, greptime_timestamp TIMESTAMP({precision}) TIME INDEX, greptime_value DOUBLE, greptime_exemplar_labels JSON2, PRIMARY KEY (__table_id, __tsid, greptime_metric)) ENGINE=mito WITH ('append_mode'='{append_mode}', 'primary_key_encoding'='{encoding}', 'compaction.type'='twcs')"
     )).await;
     let (request, _) = into_rows(vec![Exemplar {
         metric: "metric_source".into(),
@@ -4955,7 +4955,7 @@ async fn test_exemplar_source_identity_policy() {
             "job",
             "greptime_value",
             "greptime_timestamp",
-            "exemplar_labels",
+            "greptime_exemplar_labels",
         ]
     );
     assert_eq!(info.meta.primary_key_indices, [0, 1, 2, 3]);
@@ -5446,7 +5446,7 @@ async fn exemplar_protocol_storage_lifecycle(distributed: bool, batching: bool, 
             greptime_timestamp TIMESTAMP(6) TIME INDEX,
             greptime_metric STRING,
             greptime_value DOUBLE,
-            exemplar_labels JSON2(max_auto_expanded_paths = 0, trace_id STRING),
+            greptime_exemplar_labels JSON2(max_auto_expanded_paths = 0, trace_id STRING),
             PRIMARY KEY (__table_id, __tsid, greptime_metric)
         ) WITH ('append_mode'='true', 'primary_key_encoding'='sparse', 'sst_format'='primary_key')"
             ),
@@ -5813,7 +5813,7 @@ async fn test_exemplar_query_bounds_and_malformed_rows(
         .build()
         .await;
     let frontend = instance.fe_instance();
-    execute_sql(frontend, &format!("CREATE TABLE {METRICS_EXEMPLARS_TABLE} (__table_id INT UNSIGNED NOT NULL, __tsid BIGINT UNSIGNED NOT NULL, greptime_timestamp TIMESTAMP(9) TIME INDEX, greptime_metric STRING, job STRING, greptime_value DOUBLE, exemplar_labels JSON2, PRIMARY KEY (__table_id, __tsid, greptime_metric, job)) WITH ('append_mode'='true', 'primary_key_encoding'='sparse')")).await;
+    execute_sql(frontend, &format!("CREATE TABLE {METRICS_EXEMPLARS_TABLE} (__table_id INT UNSIGNED NOT NULL, __tsid BIGINT UNSIGNED NOT NULL, greptime_timestamp TIMESTAMP(9) TIME INDEX, greptime_metric STRING, job STRING, greptime_value DOUBLE, greptime_exemplar_labels JSON2, PRIMARY KEY (__table_id, __tsid, greptime_metric, job)) WITH ('append_mode'='true', 'primary_key_encoding'='sparse')")).await;
     execute_sql(
         frontend,
         &format!(
@@ -5980,7 +5980,7 @@ async fn test_exemplar_concurrent_ddl_and_precreated_contract() {
 
     // Incompatible pre-created tables must be rejected before adding inherited tags.
     let definition = format!(
-        "CREATE TABLE {METRICS_EXEMPLARS_TABLE} (__table_id INT UNSIGNED NOT NULL, __tsid BIGINT UNSIGNED NOT NULL, greptime_timestamp TIMESTAMP(6) TIME INDEX, greptime_metric STRING, greptime_value DOUBLE, exemplar_labels JSON2(max_auto_expanded_paths=0, trace_id STRING), PRIMARY KEY (__table_id, __tsid, greptime_metric)) WITH ('append_mode'='true', 'primary_key_encoding'='sparse')"
+        "CREATE TABLE {METRICS_EXEMPLARS_TABLE} (__table_id INT UNSIGNED NOT NULL, __tsid BIGINT UNSIGNED NOT NULL, greptime_timestamp TIMESTAMP(6) TIME INDEX, greptime_metric STRING, greptime_value DOUBLE, greptime_exemplar_labels JSON2(max_auto_expanded_paths=0, trace_id STRING), PRIMARY KEY (__table_id, __tsid, greptime_metric)) WITH ('append_mode'='true', 'primary_key_encoding'='sparse')"
     );
     for definition in [
         definition.replace("greptime_value DOUBLE", "greptime_value BIGINT"),
@@ -6088,7 +6088,7 @@ async fn test_exemplar_precreated_precision_and_label_defaults(
                     __tsid BIGINT UNSIGNED NOT NULL,
                     greptime_timestamp TIMESTAMP(6) TIME INDEX,
                     greptime_metric STRING, site STRING {default},
-                    greptime_value DOUBLE, exemplar_labels JSON2,
+                    greptime_value DOUBLE, greptime_exemplar_labels JSON2,
                     PRIMARY KEY (__table_id, __tsid, greptime_metric, site)
                 ) WITH ('append_mode'='true', 'primary_key_encoding'='sparse')"
             ),

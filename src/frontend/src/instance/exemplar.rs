@@ -21,7 +21,7 @@ use common_catalog::consts::METRICS_EXEMPLARS_TABLE;
 use common_error::ext::BoxedError;
 use common_query::OutputData;
 use common_query::prelude::{
-    EXEMPLAR_LABELS_COLUMN, EXEMPLAR_METRIC_COLUMN, greptime_timestamp, greptime_value,
+    EXEMPLAR_METRIC_COLUMN, greptime_exemplar_labels, greptime_timestamp, greptime_value,
 };
 use common_query::prometheus::format_prometheus_float;
 use common_recordbatch::RecordBatch;
@@ -347,7 +347,7 @@ fn collect(
             reason: "exemplar scan returned incompatible column types",
         }
     );
-    let label_index = index(EXEMPLAR_LABELS_COLUMN)?;
+    let label_index = index(greptime_exemplar_labels())?;
     let labels = JsonArray::from(batch.column(label_index))
         .project_to_v2(schema.field(label_index), &DataType::Binary)
         .map_err(BoxedError::new)
