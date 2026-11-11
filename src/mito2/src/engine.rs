@@ -57,7 +57,7 @@ mod merge_mode_test;
 #[cfg(test)]
 mod object_store_wal_recovery_test;
 #[cfg(test)]
-mod object_store_wal_test;
+pub(crate) mod object_store_wal_test;
 #[cfg(test)]
 mod open_test;
 #[cfg(test)]
@@ -89,6 +89,8 @@ mod staging_test;
 mod sync_test;
 #[cfg(feature = "enterprise")]
 pub mod table_compaction;
+#[cfg(test)]
+mod tail_replay_test;
 #[cfg(test)]
 mod truncate_test;
 
@@ -171,9 +173,9 @@ use crate::metrics::{
 };
 use crate::read::scan_region::{ScanRegion, Scanner, exact_sequence_range};
 use crate::read::stream::ScanBatchStream;
-use crate::region::MitoRegionRef;
 use crate::region::opener::PartitionExprFetcherRef;
 use crate::region::options::parse_wal_options;
+use crate::region::{MitoRegion, MitoRegionRef};
 use crate::request::{RegionEditRequest, WorkerRequest};
 use crate::sst::file::{FileMeta, RegionFileId, RegionIndexId};
 use crate::sst::file_ref::FileReferenceManagerRef;
@@ -1324,8 +1326,18 @@ impl EngineInner {
     /// does not check whether the region waits for a reload.
     fn set_region_role(&self, region_id: RegionId, role: RegionRole) -> Result<()> {
         let region = self.find_region(region_id)?;
+        let was_writable = region.is_writable();
         region.set_role(role);
+        self.notify_if_became_writable(&region, was_writable);
         Ok(())
+    }
+
+    /// Asks the worker to replay the pending tails of `region` if a role change made it
+    /// writable.
+    fn notify_if_became_writable(&self, region: &MitoRegion, was_writable: bool) {
+        if !was_writable && region.is_writable() {
+            self.workers.notify_writable(region);
+        }
     }
 
     /// Sets read-only for a region and ensures no more writes in the region after it returns.
@@ -1673,9 +1685,12 @@ impl RegionEngine for MitoEngine {
             region.manifest_ctx.leader_deadline.extend(deadline);
         }
         if role == RegionRole::Leader {
-            return Ok(region
+            let was_writable = region.is_writable();
+            let promoted = region
                 .manifest_ctx
-                .promote_unless_downgrade_started_after(sent_at, region_id));
+                .promote_unless_downgrade_started_after(sent_at, region_id);
+            self.inner.notify_if_became_writable(&region, was_writable);
+            return Ok(promoted);
         }
         region.set_role(role);
         Ok(true)

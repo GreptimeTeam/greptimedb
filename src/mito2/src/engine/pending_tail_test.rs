@@ -120,7 +120,7 @@ pub(crate) async fn set_pending_tails(
 }
 
 async fn reopen(engine: &MitoEngine, region_id: RegionId, request: RegionCreateRequest) {
-    reopen_region(engine, region_id, request.table_dir, true, request.options).await;
+    reopen_region(engine, region_id, request.table_dir, false, request.options).await;
 }
 
 fn wal_span(env: &TestEnv, region_id: RegionId) -> (Option<EntryId>, Option<EntryId>) {
@@ -252,7 +252,7 @@ fn assert_pending_tails_error(err: &BoxedError) {
     );
 }
 
-fn add_field(default_constraint: Option<ColumnDefaultConstraint>) -> AlterKind {
+pub(crate) fn add_field(default_constraint: Option<ColumnDefaultConstraint>) -> AlterKind {
     let column_schema = ColumnSchema::new("field_1", ConcreteDataType::float64_datatype(), true)
         .with_default_constraint(default_constraint)
         .unwrap();

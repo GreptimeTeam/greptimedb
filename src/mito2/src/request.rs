@@ -1157,6 +1157,17 @@ pub(crate) enum BackgroundNotify {
         /// The reloaded instance.
         result: Result<MitoRegionRef>,
     },
+    /// The region became writable and may have pending tails to replay.
+    RegionWritable,
+    /// A tail replay published its result in the manifest.
+    TailsCommitted {
+        /// The instance the replay ran for.
+        region: MitoRegionRef,
+        /// The published edit.
+        edit: RegionEdit,
+    },
+    /// A tail replay ended.
+    TailReplayEnded,
 }
 
 /// Notifies a flush job is finished.

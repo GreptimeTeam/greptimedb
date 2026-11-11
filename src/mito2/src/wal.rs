@@ -31,18 +31,20 @@ use encoder::WalEntryEncoder;
 use entry_reader::NoopEntryReader;
 use futures::future::BoxFuture;
 use futures::stream::BoxStream;
-use snafu::ResultExt;
+use futures::{StreamExt, TryStreamExt};
+use snafu::{OptionExt, ResultExt};
 use store_api::logstore::entry::Entry;
 use store_api::logstore::provider::Provider;
-use store_api::logstore::{AppendBatchResponse, LogStore};
+use store_api::logstore::{AppendBatchResponse, LogStore, WalReadUpperBound};
 use store_api::storage::RegionId;
 use tokio::sync::watch;
 
 use crate::error::{
-    BuildEntrySnafu, CheckWalHistorySnafu, DeleteWalSnafu, Result, WaitWalDurableSnafu,
-    WriteWalSnafu,
+    BuildEntrySnafu, CheckWalHistorySnafu, DeleteWalSnafu, ReadNodeWalSnafu,
+    RemoteWalUnsupportedSnafu, Result, WaitWalDurableSnafu, WriteWalSnafu,
 };
-use crate::wal::entry_reader::{LogStoreEntryReader, WalEntryReader};
+use crate::manifest::action::{PendingTail, UptoKind};
+use crate::wal::entry_reader::{LogStoreEntryReader, WalEntryReader, decode_raw_entry};
 use crate::wal::raw_entry_reader::{LogStoreRawEntryReader, RegionRawEntryReader};
 
 /// WAL entry id.
@@ -241,6 +243,44 @@ impl<S: LogStore> Wal<S> {
             }
             Provider::Noop => Box::new(NoopEntryReader),
         }
+    }
+
+    /// Streams the region's entries of `tail` from the WAL of its node, from this log store's
+    /// own WAL when that is node `node_id`, starting after `tail.after`. A stream of this
+    /// node's WAL may go past `tail.upto`.
+    pub(crate) async fn read_tail(
+        &self,
+        provider: &Provider,
+        region_id: RegionId,
+        node_id: Option<u64>,
+        tail: &PendingTail,
+    ) -> Result<WalEntryStream<'static>> {
+        if Some(tail.node_id) == node_id {
+            return self
+                .wal_entry_reader(provider, region_id)
+                .read(provider, tail.after + 1);
+        }
+        let node_id = tail.node_id;
+        let upper = match tail.upto_kind {
+            UptoKind::Reported => WalReadUpperBound::LastEntry(tail.upto),
+            UptoKind::Listed => WalReadUpperBound::Listed(tail.upto),
+        };
+        let entries = self
+            .store
+            .read_node(node_id, region_id, tail.after, upper)
+            .await
+            .map_err(BoxedError::new)
+            .context(ReadNodeWalSnafu { region_id, node_id })?
+            .context(RemoteWalUnsupportedSnafu { region_id, node_id })?;
+        Ok(entries
+            .map(move |entries| {
+                entries
+                    .map_err(BoxedError::new)
+                    .context(ReadNodeWalSnafu { region_id, node_id })
+            })
+            .map_ok(|entries| futures::stream::iter(entries.into_iter().map(decode_raw_entry)))
+            .try_flatten()
+            .boxed())
     }
 
     /// Scan entries of specific region starting from `start_id` (inclusive).

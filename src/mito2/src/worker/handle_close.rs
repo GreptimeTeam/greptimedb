@@ -94,6 +94,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             return;
         };
         region.deactivate_region_manifest_size_metric();
+        self.cancel_tail_replay(region_id);
         region.stop().await;
         self.fail_region_stalled_requests_as_not_found(&region_id);
         self.reject_region_edit_queue_as_not_found(region_id);
