@@ -3219,24 +3219,40 @@ impl FusedSeriesStream {
                 feed.source
             ))
         })?;
-        // One source feeding several runtime inputs hands each the same value. Raw and evaluated
-        // chunks are cloned for every input, which is what the base route does; a state row read
-        // from a frame is copied the same way. A producer's state batch carries the charge for its
-        // whole payload, and no tree binds one of those to several inputs.
-        let chunk = Some(feed.chunk);
-        for input_id in input_ids {
-            match chunk.as_ref().expect("the feed is read at most twice") {
-                FusedChunk::Raw(value) => executor.push_raw(*input_id, value.clone())?,
-                FusedChunk::Evaluated(value) => {
-                    executor.push_evaluated(*input_id, value.clone())?
-                }
+        // One source feeding several runtime inputs hands each the same value, cloned per input,
+        // which is what the base route does. One runtime input is the common shape and needs no
+        // copy: the chunk moves into it. A producer's state batch carries the charge for its whole
+        // payload, so it is never bound to several inputs -- and it stays refused either way.
+        if let [input_id] = input_ids.as_slice() {
+            match feed.chunk {
+                FusedChunk::Raw(value) => executor.push_raw(*input_id, value)?,
+                FusedChunk::Evaluated(value) => executor.push_evaluated(*input_id, value)?,
                 FusedChunk::State(StateChunk::Row(row)) => {
-                    executor.push_state(*input_id, StateChunk::Row(row.clone()))?
+                    executor.push_state(*input_id, StateChunk::Row(row))?
                 }
                 FusedChunk::State(StateChunk::Series { .. }) => {
                     return Err(DataFusionError::Execution(
                         "one producer state batch cannot feed several runtime inputs".to_string(),
                     ));
+                }
+            }
+        } else {
+            let chunk = Some(feed.chunk);
+            for input_id in input_ids {
+                match chunk.as_ref().expect("the feed is read at most twice") {
+                    FusedChunk::Raw(value) => executor.push_raw(*input_id, value.clone())?,
+                    FusedChunk::Evaluated(value) => {
+                        executor.push_evaluated(*input_id, value.clone())?
+                    }
+                    FusedChunk::State(StateChunk::Row(row)) => {
+                        executor.push_state(*input_id, StateChunk::Row(row.clone()))?
+                    }
+                    FusedChunk::State(StateChunk::Series { .. }) => {
+                        return Err(DataFusionError::Execution(
+                            "one producer state batch cannot feed several runtime inputs"
+                                .to_string(),
+                        ));
+                    }
                 }
             }
         }
