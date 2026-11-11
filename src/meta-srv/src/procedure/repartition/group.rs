@@ -471,11 +471,15 @@ impl Context {
         let ctx = common_meta::cache_invalidator::Context {
             subject: Some(subject),
         };
-        let _ = self
-            .cache_invalidator
+        self.cache_invalidator
             .invalidate(&ctx, &[CacheIdent::TableId(table_id)])
-            .await;
-        Ok(())
+            .await
+            .map_err(BoxedError::new)
+            .context(error::RetryLaterWithSourceSnafu {
+                reason: format!(
+                    "Failed to invalidate repartition routes for table {table_id}, group {group_id}"
+                ),
+            })
     }
 
     /// Updates the table route.
