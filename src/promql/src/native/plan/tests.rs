@@ -24,6 +24,7 @@ use super::{
     AggregateKind, AggregateStage, BoundAggregate, BoundInput, BoundInstant, BoundMap, BoundScalar,
     BoundVectorOp, BoundWindow, Grouping, InstantValue, MapOp, NativeExpr, NativeNode, NativeTree,
     NativeType, duplicates_canonical_labels, fused_output_tags, reads_across_series,
+    unifies_its_own_contributions,
 };
 use crate::extension_plan::{FusedSeries, FusedSeriesBinding};
 use crate::histogram_eval::NativeHistogramFunction;
@@ -2412,6 +2413,73 @@ fn a_merge_answers_one_series_per_set() {
         &merge_over(aliasing),
         &scan_tags()
     ));
+}
+
+/// A window answers for the labels it keeps. A function that keeps the metric name hands over one
+/// series per label set once its child answers either `Some(true)` (already one per set) or
+/// `Some(false)` (fragments the window's `MergeInput` collects); only a boundary child (`None`)
+/// leaves the answer aliasing. A function that drops the metric name can always alias, whatever
+/// the child answered.
+#[test]
+fn a_window_unifies_its_own_contributions() {
+    let out = grid(0, 60_000, 4);
+    let window_of = |inner: NativeNode, function: RangeFunction| NativeNode {
+        expr: NativeExpr::Window {
+            input: Box::new(inner),
+            op: BoundWindow {
+                function,
+                window: RangeWindow {
+                    range_ms: 300_000,
+                    offset_ms: 0,
+                    anchor_ms: None,
+                    modifier: None,
+                },
+                input_grid: Some(Arc::clone(&out)),
+                output_grid: Arc::clone(&out),
+            },
+        },
+        output: evaluated(Arc::new([]), Arc::clone(&out)),
+    };
+    let boundary = || input_on(Arc::clone(&out));
+    let collected = || merge_over(input_on(Arc::clone(&out)));
+    let fragments = || map_over(input_on(Arc::clone(&out)));
+
+    for (name, child, child_answer, window_answer) in [
+        (
+            "an already-unified child",
+            collected(),
+            Some(true),
+            Some(true),
+        ),
+        (
+            "fragments the window collects",
+            fragments(),
+            Some(false),
+            Some(true),
+        ),
+        ("a boundary", boundary(), None, Some(false)),
+    ] {
+        assert_eq!(
+            child_answer,
+            unifies_its_own_contributions(&child),
+            "{name}: the child's own answer"
+        );
+        assert_eq!(
+            window_answer,
+            unifies_its_own_contributions(&window_of(child, RangeFunction::LastOverTime)),
+            "{name}: a name-keeping window unifies whatever its child reported, and only a \
+             boundary leaves it aliasing"
+        );
+    }
+    // A function that drops the metric name can give two series one label set whatever its child
+    // answered, so the window reports it whatever the child said.
+    for child in [collected(), fragments(), boundary()] {
+        assert_eq!(
+            Some(false),
+            unifies_its_own_contributions(&window_of(child, RangeFunction::Rate)),
+            "a name-dropping window may alias"
+        );
+    }
 }
 
 /// `info` reads its info side through a canonical merge: the merge only collects the pieces of one

@@ -1864,7 +1864,29 @@ fn series_pushdown_preserves_predicate_semantics() {
             &Predicate::to_physical_expr(&expr, &schema).unwrap(),
         )
         .unwrap();
-        let request = series_read_request(&schema, Some(&Predicate::new(vec![expr])));
+        let predicate = Predicate::new(vec![expr]);
+        let conjuncts = predicate_conjuncts(Some(&predicate));
+        let (request, accepted) = series_read_request(&schema, &conjuncts);
+        // Accepted flags stay aligned with the conjuncts and describe `request.filters`.
+        assert_eq!(conjuncts.len(), accepted.len());
+        let pushed: Vec<_> = accepted
+            .iter()
+            .zip(&conjuncts)
+            .filter(|(accepted, _)| **accepted)
+            .map(|(_, expr)| {
+                let columns = expr.column_refs();
+                assert_eq!(1, columns.len());
+                columns.into_iter().next().unwrap().name.clone()
+            })
+            .collect();
+        assert_eq!(
+            pushed,
+            request
+                .filters
+                .iter()
+                .map(|filter| filter.column_name().to_owned())
+                .collect::<Vec<_>>()
+        );
         assert!(
             !request
                 .projection
@@ -1882,16 +1904,48 @@ fn series_pushdown_preserves_predicate_semantics() {
     }
     // A field-dependent OR cannot contribute either branch as an index restriction.
     let mixed = table.clone().eq(lit(10u32)).or(col("field_0").gt(lit(0.0)));
-    let request = series_read_request(&schema, Some(&Predicate::new(vec![mixed])));
+    let predicate = Predicate::new(vec![mixed]);
+    let conjuncts = predicate_conjuncts(Some(&predicate));
+    let (request, accepted) = series_read_request(&schema, &conjuncts);
+    assert_eq!(vec![false], accepted);
     assert!(request.filters.is_empty());
     assert_eq!(None, request.table_id);
+    // A conjunct the reader cannot apply exactly is kept for the residual filters.
     let unsupported = Expr::Not(Box::new(col("tag").eq(lit("alpha"))));
-    assert!(
-        series_read_request(&schema, Some(&Predicate::new(vec![unsupported])))
+    let predicate = Predicate::new(vec![unsupported]);
+    let conjuncts = predicate_conjuncts(Some(&predicate));
+    let (request, accepted) = series_read_request(&schema, &conjuncts);
+    assert_eq!(vec![false], accepted);
+    assert!(request.filters.is_empty());
+    // A pushed conjunct and a visible rejected conjunct: only the latter needs the residual.
+    let visible_mixed = table
+        .clone()
+        .eq(lit(10u32))
+        .and(Expr::Not(Box::new(col("tag").eq(lit("alpha")))));
+    let predicate = Predicate::new(vec![visible_mixed]);
+    let conjuncts = predicate_conjuncts(Some(&predicate));
+    assert_eq!(2, conjuncts.len());
+    let (request, accepted) = series_read_request(&schema, &conjuncts);
+    assert_eq!(vec![true, false], accepted);
+    assert_eq!(
+        vec![DATA_SCHEMA_TABLE_ID_COLUMN_NAME.to_owned()],
+        request
             .filters
-            .is_empty()
+            .iter()
+            .map(|filter| filter.column_name().to_owned())
+            .collect::<Vec<_>>()
     );
-    let request = series_read_request(&schema, Some(&Predicate::new(vec![lit(20u32).eq(table)])));
+    assert!(matches!(conjuncts[1], Expr::Not(_)));
+    let projection: Vec<_> = request
+        .projection
+        .iter()
+        .map(|name| schema.index_of(name).unwrap())
+        .collect();
+    let projected = Arc::new(schema.project(&projection).unwrap());
+    assert!(Predicate::to_physical_expr(conjuncts[1], &projected).is_ok());
+    let predicate = Predicate::new(vec![lit(20u32).eq(table)]);
+    let conjuncts = predicate_conjuncts(Some(&predicate));
+    let request = series_read_request(&schema, &conjuncts).0;
     assert_eq!(Some(20), request.table_id);
 }
 
@@ -1937,7 +1991,7 @@ async fn series_pushdown_skips_unrelated_table_payloads() {
     let reads_with_count = reads.lock().unwrap().len();
     reads.lock().unwrap().clear();
     let all = reader
-        .read(series_read_request(&schema, None))
+        .read(series_read_request(&schema, &predicate_conjuncts(None)).0)
         .unwrap()
         .try_collect::<Vec<_>>()
         .await
@@ -1950,12 +2004,10 @@ async fn series_pushdown_skips_unrelated_table_payloads() {
         unprojected.iter().map(RecordBatch::num_rows).sum::<usize>()
     );
     reads.lock().unwrap().clear();
-    let request = series_read_request(
-        &schema,
-        Some(&Predicate::new(vec![
-            col(DATA_SCHEMA_TABLE_ID_COLUMN_NAME).eq(lit(u32::MAX)),
-        ])),
-    );
+    let predicate = Predicate::new(vec![
+        col(DATA_SCHEMA_TABLE_ID_COLUMN_NAME).eq(lit(u32::MAX)),
+    ]);
+    let request = series_read_request(&schema, &predicate_conjuncts(Some(&predicate))).0;
     let selected = reader
         .read(request)
         .unwrap()
@@ -1964,6 +2016,53 @@ async fn series_pushdown_skips_unrelated_table_payloads() {
         .unwrap();
     assert!(selected.is_empty());
     assert!(reads.lock().unwrap().len() < full_reads);
+    engine.stop().await.unwrap();
+}
+
+/// Pushed conjuncts are already exact, so only the rejected ones may filter discovery.
+#[tokio::test]
+async fn residual_conjuncts_still_filter_discovered_series() {
+    let (_env, engine, region) = fixture().await;
+    // The first series has `tag_1 = "x"` and fails the residual; the second (`"y"`) survives.
+    write_with_tags(&engine, &region, 2, 3000, Some(2.0), &["a", "y"]).await;
+    flush_region(&engine, region.region_id, None).await;
+    build(&engine, &region).await;
+    let predicate = col("tag_0")
+        .eq(lit("a"))
+        .and(Expr::Not(Box::new(col("tag_1").eq(lit("x")))));
+    let mut results = Vec::new();
+    for format in [SelectedFormat::Legacy, SelectedFormat::Columnar] {
+        let mut input = scan_input(
+            &region,
+            region.series_index_store.clone().unwrap(),
+            format,
+            (0..region.version().metadata.column_metadatas.len()).collect(),
+        );
+        input.predicate =
+            PredicateGroup::new(&region.version().metadata, std::slice::from_ref(&predicate))
+                .unwrap();
+        let scanner = SeriesScan::new(input, false);
+        let binding = labels(scanner.metadata());
+        let stream = scanner
+            .scan_series_partition(
+                &QueryScanContext::default(),
+                &ExecutionPlanMetricsSet::new(),
+                0,
+                &binding,
+            )
+            .unwrap()
+            .unwrap();
+        let chunks = stream.try_collect::<Vec<_>>().await.unwrap();
+        if format == SelectedFormat::Columnar {
+            let prepared = scanner.prepared.source.get().unwrap().as_ref().unwrap();
+            // `tag_0 = 'a'` matches both series; only the residual drops `tag_1 = 'x'`.
+            assert_eq!(1, prepared.candidates.len());
+            assert_eq!(2, prepared.candidates[0].id.tsid);
+        }
+        results.push(samples(&chunks));
+    }
+    assert_eq!(vec![(3000, 2.0)], results[0]);
+    assert_eq!(results[0], results[1]);
     engine.stop().await.unwrap();
 }
 

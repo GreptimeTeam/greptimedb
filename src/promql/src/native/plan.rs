@@ -1968,28 +1968,22 @@ pub fn unifies_its_own_contributions(node: &NativeNode) -> Option<bool> {
         // The merge is the collection: whatever its input handed over, it groups the fragments by
         // canonical label set and emits one series per set, so what it emits shares none.
         NativeExpr::Merge { .. } => Some(true),
-        // The runtime's rule for a window is `drops_metric_name() || !child_shared`, so a window is
-        // *not* shared - and this arm answers `Some(true)` - exactly when both hold: the function
-        // keeps the metric name, and the child reports its own fragments. The window then collects
-        // them (`MergeInput`) and emits one series per label set.
-        //
-        // Every other window answers `Some(false)`, and for two different reasons that the runtime's
-        // formula does not separate:
+        // A window answers three ways, and what the function does to labels decides the first:
         //
         // - the function drops the metric name, so what it emits can coincide with another series'
-        //   label set whatever its input held (this is a real report, and the case `Map`, `Timestamp`
-        //   and a label-dropping broadcast are in);
-        // - or the child does not report fragments at all - `None` for a boundary, or `Some(true)`
-        //   for a child that has already unified. With a `None` child the window folds each
-        //   contribution on its own, so what it emits does alias its input's fragments and answering
-        //   `Some(false)` is exact. With an already-unified child there is only one series per label
-        //   set to begin with, so `Some(false)` is conservative rather than exact - it makes a
-        //   consumer above collect a stream that needs no collecting, which is what the runtime does
-        //   too, and is the safe direction: nothing is left uncollected.
-        NativeExpr::Window { input, op } => Some(
-            !op.function.drops_metric_name()
-                && matches!(unifies_its_own_contributions(input), Some(false)),
-        ),
+        //   label set whatever its input held: `Some(false)` (this is a real report, and the case
+        //   `Map`, `Timestamp` and a label-dropping broadcast are in);
+        // - the function keeps the metric name, and the child answers one series per label set -
+        //   `Some(true)` - or reports fragments the window's `MergeInput` collects - `Some(false)`.
+        //   Either way the window emits one series per label set and answers `Some(true)`: an
+        //   already-unified child keeps that property through the labels the window retains, and
+        //   fragments are collected before the window folds them;
+        // - the function keeps the metric name, but the child is a boundary - `None`. The window
+        //   folds each contribution on its own, so what it emits does alias its input's fragments,
+        //   and `Some(false)` is exact.
+        NativeExpr::Window { input, op } => {
+            Some(!op.function.drops_metric_name() && unifies_its_own_contributions(input).is_some())
+        }
         // A map can rewrite labels, so two series can end under one label set and the runtime
         // records what it wrote in an `Emitted` table.
         NativeExpr::Map { .. } | NativeExpr::ParameterizedMap { .. } => Some(false),

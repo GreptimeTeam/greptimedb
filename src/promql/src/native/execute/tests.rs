@@ -347,7 +347,6 @@ fn window_and_limitk_collect_only_unified_contributions() {
             None,
         )
         .unwrap()
-        .0
     };
 
     let raw_window = build(window_with(
@@ -443,6 +442,25 @@ fn window_and_limitk_collect_only_unified_contributions() {
     assert!(
         !vector.merge_input,
         "limitk must not re-merge unified input"
+    );
+
+    // A name-keeping window over an already collected child emits one series per label set, so a
+    // `limitk` above the window has nothing to merge: it must not read the window's child as the
+    // answer for the window.
+    let windowed = window_with(
+        merge(evaluated_input(Arc::clone(&grid))),
+        RangeFunction::LastOverTime,
+        300_000,
+        Some(Arc::clone(&grid)),
+        Arc::clone(&grid),
+    );
+    let windowed_limitk = build(vector_op(windowed, limitk()));
+    let RuntimeOp::Vector { vector, .. } = windowed_limitk.op else {
+        panic!("expected vector runtime node");
+    };
+    assert!(
+        !vector.merge_input,
+        "limitk must not re-merge a window that already unifies its contributions"
     );
 }
 
@@ -10071,8 +10089,7 @@ fn emitted_tables(node: NativeNode) -> (bool, bool) {
         "root".to_string(),
         None,
     )
-    .unwrap()
-    .0;
+    .unwrap();
     let RuntimeOp::Broadcast {
         left, right, state, ..
     } = root.op
