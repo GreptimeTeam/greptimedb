@@ -2169,8 +2169,8 @@ impl StatementExecutor {
         } else {
             // This is logical table. Annotation alters only rewrite its own
             // metadata; `AlterLogicalTablesProcedure` only handles column adds.
-            // Retention TTL `SET` is rejected here; other ttl alters use existing
-            // procedure validation.
+            // Reject retention TTL SET here; UNSET and other ttl alters are
+            // handled by `AlterLogicalTablesProcedure`.
             let alters_retention_ttl = expr.kind.as_ref().is_some_and(|kind| match kind {
                 Kind::SetTableOptions(options) => options
                     .table_options
