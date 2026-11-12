@@ -48,6 +48,8 @@ including caches owned by pipeline and protocol handlers.
   `PromQueryInterceptor::pre_execute_exemplars`. Exact metric selectors project
   the union of current logical-table tags; broad or unresolved selectors retain
   all tags. Responses include the stored `__table_id` and `__tsid` as string labels.
+  The process ticket retains the configured slow-query timer through collection;
+  its query text includes the expression and inclusive nanosecond scan bounds.
 - **Logical-table batch DDL** (`instance.rs`): dedicated SQL handler → bounded
   parse/interception → all-member permissions → operator CREATE preparation →
   one logical-table batch procedure. Keep pre-submission validation side-effect free.

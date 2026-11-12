@@ -3904,6 +3904,58 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_exemplar_slow_query() -> TestResult<()> {
+        use common_catalog::consts::METRICS_EXEMPLARS_TABLE;
+        use servers::exemplar::query::Query as ExemplarQuery;
+
+        for invalid_destination in [false, true] {
+            let table_name = if invalid_destination {
+                METRICS_EXEMPLARS_TABLE
+            } else {
+                "source"
+            };
+            let mut instance = test_instance_with_tables(
+                test_table(1024, table_name)?,
+                test_table(1025, "target")?,
+            )
+            .await?;
+            let recorder = Arc::new(RecordingSlowQueryEventRecorder::default());
+            instance.slow_query_recorder = recorder.clone();
+            instance.slow_query_options.sample_ratio = 1.0;
+            instance.slow_query_options.record_type = SlowQueriesRecordType::SystemTable;
+
+            for (enabled, threshold, should_record) in [
+                (true, Duration::ZERO, true),
+                (false, Duration::ZERO, false),
+                (true, Duration::from_secs(3600), false),
+            ] {
+                instance.slow_query_options.enable = enabled;
+                instance.slow_query_options.threshold = threshold;
+                let query =
+                    ExemplarQuery::parse("source".into(), "-0.001", "0.001", "public").unwrap();
+                let result = instance.query_exemplars(query, QueryContext::arc()).await;
+                if invalid_destination {
+                    assert!(result.is_err());
+                } else {
+                    assert!(result.unwrap().is_empty());
+                }
+
+                let queries = std::mem::take(&mut *recorder.queries.lock().unwrap());
+                let expected = if should_record {
+                    vec!["query_exemplars(source, start_ns=-1000000, end_ns=1999999)"]
+                } else {
+                    vec![]
+                };
+                assert_eq!(
+                    queries, expected,
+                    "invalid_destination={invalid_destination}, enabled={enabled}, threshold={threshold:?}"
+                );
+            }
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn test_insert_select_slow_query() -> TestResult<()> {
         let mut instance =
             test_instance_with_tables(test_table(1024, "source")?, test_table(1025, "target")?)
