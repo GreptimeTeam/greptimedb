@@ -749,20 +749,7 @@ async fn test_staging_exit_success_with_manifests_with_format(flat_format: bool)
 
     let region = engine.get_region(region_id).unwrap();
     for (file, expected) in source_files.into_iter().zip([11, 12]) {
-        engine
-            .edit_region(
-                region_id,
-                RegionEdit {
-                    files_to_add: vec![file.as_ref().clone()],
-                    files_to_remove: vec![],
-                    timestamp_ms: None,
-                    compaction_time_window: None,
-                    flushed_entry_id: None,
-                    flushed_sequence: None,
-                    committed_sequence: None,
-                    wal_recovery: Default::default(),
-                },
-            )
+        submit_staging_edit(&engine, region_id, file.as_ref().clone(), partition_expr.clone())
             .await
             .unwrap();
         let current = region.version_control.current();
@@ -1560,14 +1547,26 @@ fn edit_adding(file: FileMeta) -> RegionEdit {
     }
 }
 
-/// Spawns an edit importing `file`.
+/// Spawns an edit importing `file`, retaining the current staging binding when present.
 fn spawn_edit(
     engine: &MitoEngine,
     region_id: RegionId,
     file: FileMeta,
 ) -> tokio::task::JoinHandle<crate::error::Result<()>> {
     let edit_engine = engine.clone();
-    tokio::spawn(async move { edit_engine.edit_region(region_id, edit_adding(file)).await })
+    let partition_expr = engine
+        .get_region(region_id)
+        .unwrap()
+        .manifest_ctx
+        .staging_partition_info()
+        .and_then(|info| info.partition_expr().map(ToOwned::to_owned));
+    tokio::spawn(async move {
+        if let Some(partition_expr) = partition_expr {
+            submit_staging_edit(&edit_engine, region_id, file, partition_expr).await
+        } else {
+            edit_engine.edit_region(region_id, edit_adding(file)).await
+        }
+    })
 }
 
 /// Starts an edit importing `file` and waits until the region is `Editing`.
@@ -1905,22 +1904,14 @@ async fn test_successful_staging_end_keeps_rows_of_rejected_flush() {
         .unwrap_err();
 
     let imported_file = first_file(&engine.get_region(region_id).unwrap()).await;
-    engine
-        .edit_region(
-            region_id,
-            RegionEdit {
-                files_to_add: vec![imported_file],
-                files_to_remove: vec![],
-                timestamp_ms: None,
-                compaction_time_window: None,
-                flushed_entry_id: None,
-                flushed_sequence: None,
-                committed_sequence: None,
-                wal_recovery: Default::default(),
-            },
-        )
-        .await
-        .unwrap();
+    submit_staging_edit(
+        &engine,
+        region_id,
+        imported_file,
+        float_range_expr("field_0", 0., 100.).as_json_str().unwrap(),
+    )
+    .await
+    .unwrap();
     engine
         .set_region_role_state_gracefully(region_id, SettableRegionRoleState::Leader)
         .await
@@ -2010,7 +2001,7 @@ impl EventListener for RequestCountListener {
 }
 
 #[tokio::test]
-async fn test_edit_returns_to_staging_after_staging_leader_role() {
+async fn test_unbound_edit_rejected_after_staging_leader_role() {
     let mut env = TestEnv::new().await;
     let engine = env.create_engine(MitoConfig::default()).await;
     let region_id = RegionId::new(1024, 0);
@@ -2029,8 +2020,11 @@ async fn test_edit_returns_to_staging_after_staging_leader_role() {
 
     let region = engine.get_region(region_id).unwrap();
     let file = first_file(&region).await;
-    spawn_edit(&engine, region_id, file).await.unwrap().unwrap();
-
+    let err = spawn_edit(&engine, region_id, file)
+        .await
+        .unwrap()
+        .unwrap_err();
+    assert_matches!(err, Error::RejectWriteInStaging { .. });
     assert!(region.is_staging());
 }
 
@@ -2360,22 +2354,14 @@ async fn test_close_after_end_of_staging_is_queued_keeps_committed_result() {
     put_range(&engine, region_id, &schema, (3, 5)).await;
     let region = engine.get_region(region_id).unwrap();
     let file = first_file(&region).await;
-    engine
-        .edit_region(
-            region_id,
-            RegionEdit {
-                files_to_add: vec![file],
-                files_to_remove: vec![],
-                timestamp_ms: None,
-                compaction_time_window: None,
-                flushed_entry_id: None,
-                flushed_sequence: None,
-                committed_sequence: None,
-                wal_recovery: Default::default(),
-            },
-        )
-        .await
-        .unwrap();
+    submit_staging_edit(
+        &engine,
+        region_id,
+        file,
+        float_range_expr("field_0", 0., 100.).as_json_str().unwrap(),
+    )
+    .await
+    .unwrap();
 
     let manager = region.manifest_ctx.manifest_manager.read().await;
     let end_engine = engine.clone();
@@ -2582,4 +2568,155 @@ async fn test_migration_flush_retries_while_staging_ends() {
         .manifest_ctx
         .leave_ending_staging(region_id, started, &Ok::<(), Error>(()));
     assert_eq!(0, migration_flush().await.unwrap().affected_rows);
+}
+
+#[tokio::test]
+async fn test_apply_staging_manifest_revalidates_after_close_during_read() {
+    use object_store::layers::mock;
+    use tokio::sync::Notify;
+
+    #[derive(Default)]
+    struct ReadGate {
+        armed: AtomicBool,
+        entered: Notify,
+        release: Notify,
+    }
+
+    struct ManifestReader {
+        inner: mock::Reader,
+        is_staging_blob: bool,
+        gate: Arc<ReadGate>,
+    }
+
+    impl ManifestReader {
+        async fn pause(&self) {
+            if self.is_staging_blob && self.gate.armed.swap(false, Ordering::Relaxed) {
+                self.gate.entered.notify_one();
+                self.gate.release.notified().await;
+            }
+        }
+    }
+
+    impl mock::Read for ManifestReader {
+        async fn open(
+            &self,
+            range: mock::BytesRange,
+        ) -> mock::Result<(mock::RpRead, Box<dyn mock::ReadStreamDyn>)> {
+            let result = self.inner.open_dyn(range).await?;
+            self.pause().await;
+            Ok(result)
+        }
+
+        async fn read(&self, range: mock::BytesRange) -> mock::Result<(mock::RpRead, Buffer)> {
+            // Retain a successful read across Close. A missing blob must not mask the worker's
+            // late state/binding check by making the object-store read fail first.
+            let result = self.inner.read_dyn(range).await?;
+            self.pause().await;
+            Ok(result)
+        }
+    }
+
+    for reopen in [false, true] {
+        let gate = Arc::new(ReadGate::default());
+        let reader_gate = gate.clone();
+        let layer = MockLayerBuilder::default()
+            .reader_factory(Arc::new(move |path, _, inner| {
+                Box::new(ManifestReader {
+                    inner,
+                    is_staging_blob: path.contains("/staging/blob/"),
+                    gate: reader_gate.clone(),
+                }) as mock::Reader
+            }))
+            .build()
+            .unwrap();
+        let mut env = TestEnv::new().await.with_mock_layer(layer);
+        let engine = env
+            .create_engine(MitoConfig {
+                num_workers: 1,
+                schedule_compaction_after_edit: false,
+                ..Default::default()
+            })
+            .await;
+        let region_id = RegionId::new(1024, 0);
+        let create = CreateRequestBuilder::new().build();
+        let schema = rows_schema(&create);
+        let table_dir = create.table_dir.clone();
+        engine
+            .handle_request(region_id, RegionRequest::Create(create))
+            .await
+            .unwrap();
+        put_range(&engine, region_id, &schema, (0, 3)).await;
+        enter_staging(&engine, region_id).await;
+        let old = engine.get_region(region_id).unwrap();
+        let partition_expr = float_range_expr("field_0", 0., 100.).as_json_str().unwrap();
+        let manifests = engine
+            .remap_manifests(RemapManifestsRequest {
+                region_id,
+                input_regions: vec![region_id],
+                region_mapping: [(region_id, vec![region_id])].into_iter().collect(),
+                new_partition_exprs: [(region_id, partition_expr.clone())].into_iter().collect(),
+            })
+            .await
+            .unwrap();
+        gate.armed.store(true, Ordering::Relaxed);
+        let apply_engine = engine.clone();
+        let apply = tokio::spawn(async move {
+            apply_engine
+                .handle_request(
+                    region_id,
+                    RegionRequest::ApplyStagingManifest(ApplyStagingManifestRequest {
+                        partition_expr,
+                        central_region_id: region_id,
+                        manifest_path: manifests.manifest_paths[&region_id].clone(),
+                    }),
+                )
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(5), gate.entered.notified())
+            .await
+            .unwrap();
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            engine.handle_request(
+                region_id,
+                RegionRequest::Close(RegionCloseRequest::default()),
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(!apply.is_finished());
+        let observed = if reopen {
+            reopen_region(&engine, region_id, table_dir.clone(), true, HashMap::new()).await;
+            let replacement = engine.get_region(region_id).unwrap();
+            assert!(!Arc::ptr_eq(&old, &replacement));
+            replacement
+        } else {
+            old.clone()
+        };
+        let before = observed.manifest_ctx.manifest().await;
+        gate.release.notify_one();
+        let error = tokio::time::timeout(Duration::from_secs(5), apply)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(
+            if reopen {
+                StatusCode::RegionNotReady
+            } else {
+                StatusCode::RegionNotFound
+            },
+            error.status_code()
+        );
+        let after = observed.manifest_ctx.manifest().await;
+        assert_eq!(before.manifest_version, after.manifest_version);
+        assert_eq!(before.files, after.files);
+        if !reopen {
+            assert!(!engine.is_region_exists(region_id));
+            reopen_region(&engine, region_id, table_dir, true, HashMap::new()).await;
+        }
+        assert_eq!(3, count_rows(&engine, region_id).await);
+        engine.stop().await.unwrap();
+    }
 }

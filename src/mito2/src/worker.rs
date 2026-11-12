@@ -36,7 +36,7 @@ mod handle_tail_replay;
 mod handle_truncate;
 mod handle_write;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -47,7 +47,7 @@ use common_error::ext::BoxedError;
 use common_meta::key::SchemaMetadataManagerRef;
 use common_runtime::JoinHandle;
 use common_stat::get_total_memory_bytes;
-use common_telemetry::{error, info, warn};
+use common_telemetry::{debug, error, info, warn};
 use futures::future::{join_all, try_join_all};
 use object_store::ObjectStore;
 use object_store::manager::ObjectStoreManagerRef;
@@ -792,7 +792,7 @@ impl<S: LogStore> WorkerStarter<S> {
             region_count: REGION_COUNT.with_label_values(&[&id_string]),
             request_wait_time: REQUEST_WAIT_TIME.with_label_values(&[&id_string]),
             region_edit_queues: RegionEditQueues::default(),
-            pending_alters: Default::default(),
+            pending_ddls: PendingDdls::default(),
             schema_metadata_manager: self.schema_metadata_manager,
             file_ref_manager: self.file_ref_manager.clone(),
             partition_expr_fetcher: self.partition_expr_fetcher,
@@ -1093,6 +1093,81 @@ async fn drain_ended_staging(sender: &Sender<WorkerRequestWithTime>, region_id: 
     let _ = wait.await;
 }
 
+/// Maximum number of pending DDL requests per region.
+pub(crate) const MAX_PENDING_DDLS_PER_REGION: usize = 128;
+
+/// Lifecycle requests waiting for a region manifest operation to finish.
+#[derive(Default)]
+struct PendingDdls(HashMap<RegionId, VecDeque<SenderDdlRequest>>);
+
+impl PendingDdls {
+    fn enqueue(&mut self, ddl: SenderDdlRequest) -> std::result::Result<(), SenderDdlRequest> {
+        let queue = self.0.entry(ddl.region_id).or_default();
+        if queue.len() >= MAX_PENDING_DDLS_PER_REGION {
+            return Err(ddl);
+        }
+        debug!(
+            region_id = %ddl.region_id,
+            request = ?ddl.request,
+            queue_len = queue.len() + 1,
+            "Deferring DDL behind region manifest work"
+        );
+        queue.push_back(ddl);
+        Ok(())
+    }
+
+    fn pop_front(&mut self, region_id: RegionId) -> Option<SenderDdlRequest> {
+        let queue = self.0.get_mut(&region_id)?;
+        let ddl = queue.pop_front();
+        if queue.is_empty() {
+            self.0.remove(&region_id);
+        }
+        ddl
+    }
+
+    fn remove(&mut self, region_id: RegionId) -> Option<VecDeque<SenderDdlRequest>> {
+        self.0.remove(&region_id)
+    }
+
+    fn contains_region(&self, region_id: RegionId) -> bool {
+        self.0.contains_key(&region_id)
+    }
+
+    fn has_enter_staging(&self, region_id: RegionId) -> bool {
+        self.0.get(&region_id).is_some_and(|queue| {
+            queue
+                .iter()
+                .any(|ddl| matches!(ddl.request, DdlRequest::EnterStaging(_)))
+        })
+    }
+
+    fn front_is_enter_staging(&self, region_id: RegionId) -> bool {
+        self.0
+            .get(&region_id)
+            .and_then(VecDeque::front)
+            .is_some_and(|ddl| matches!(ddl.request, DdlRequest::EnterStaging(_)))
+    }
+
+    fn take_closes(&mut self, region_id: RegionId) -> Vec<SenderDdlRequest> {
+        let Some(mut queue) = self.0.remove(&region_id) else {
+            return Vec::new();
+        };
+        let mut matching = Vec::new();
+        let mut remaining = VecDeque::new();
+        while let Some(ddl) = queue.pop_front() {
+            if matches!(ddl.request, DdlRequest::Close(_)) {
+                matching.push(ddl);
+            } else {
+                remaining.push_back(ddl);
+            }
+        }
+        if !remaining.is_empty() {
+            self.0.insert(region_id, remaining);
+        }
+        matching
+    }
+}
+
 /// Background worker loop to handle requests.
 struct RegionWorkerLoop<S> {
     /// Id of the worker.
@@ -1162,8 +1237,8 @@ struct RegionWorkerLoop<S> {
     request_wait_time: Histogram,
     /// Queues for region edit requests.
     region_edit_queues: RegionEditQueues,
-    /// ALTER requests waiting for the current edit or ALTER to finish.
-    pending_alters: handle_alter::PendingAlters,
+    /// DDL requests waiting for the current manifest operation to finish.
+    pending_ddls: PendingDdls,
     /// Database level metadata manager.
     schema_metadata_manager: SchemaMetadataManagerRef,
     /// Datanode level file references manager.
@@ -1437,7 +1512,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                         .await;
                 }
                 WorkerRequest::EditRegion(request) => {
-                    self.handle_region_edit(request);
+                    self.admit_region_edit(request);
                 }
                 WorkerRequest::CancelCompaction {
                     region_id,
@@ -1484,84 +1559,93 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         self.handle_write_requests(write_requests, bulk_requests, true)
             .await;
 
-        self.handle_ddl_requests(ddl_requests).await;
+        for ddl in ddl_requests.drain(..) {
+            let region_id = ddl.region_id;
+            if self.should_defer_region_ddl(&ddl) {
+                self.enqueue_region_ddl(ddl);
+            } else {
+                self.execute_ddl_request(ddl).await;
+            }
+            self.dispatch_pending_region_requests(region_id).await;
+        }
     }
 
     /// Takes and handles all ddl requests.
     async fn handle_ddl_requests(&mut self, ddl_requests: &mut Vec<SenderDdlRequest>) {
-        if ddl_requests.is_empty() {
-            return;
-        }
-
         for ddl in ddl_requests.drain(..) {
-            let res = match ddl.request {
-                DdlRequest::Create(req) => self.handle_create_request(ddl.region_id, req).await,
-                DdlRequest::Drop(req) => {
-                    self.handle_drop_request(ddl.region_id, req, ddl.sender)
-                        .await;
-                    continue;
-                }
-                DdlRequest::Open((req, wal_entry_receiver)) => {
-                    self.handle_open_request(ddl.region_id, req, wal_entry_receiver, ddl.sender)
-                        .await;
-                    continue;
-                }
-                DdlRequest::OfflineCleanup(req) => {
-                    self.handle_offline_cleanup_request(ddl.region_id, req)
-                        .await
-                }
-                DdlRequest::Close(req) => {
-                    self.handle_close_request(ddl.region_id, req, ddl.sender)
-                        .await;
-                    continue;
-                }
-                DdlRequest::Alter(req) => {
-                    self.handle_alter_request(ddl.region_id, req, ddl.sender)
-                        .await;
-                    continue;
-                }
-                DdlRequest::Flush(req) => {
-                    self.handle_flush_request(ddl.region_id, req, ddl.sender);
-                    continue;
-                }
-                DdlRequest::Compact(req) => {
-                    self.handle_compaction_request(ddl.region_id, req, ddl.sender)
-                        .await;
-                    continue;
-                }
-                DdlRequest::BuildIndex(req) => {
-                    self.handle_build_index_request(ddl.region_id, req, ddl.sender)
-                        .await;
-                    continue;
-                }
-                DdlRequest::Truncate(req) => {
-                    self.handle_truncate_request(ddl.region_id, req, ddl.sender)
-                        .await;
-                    continue;
-                }
-                DdlRequest::Catchup((req, wal_entry_receiver)) => {
-                    self.handle_catchup_request(ddl.region_id, req, wal_entry_receiver, ddl.sender)
-                        .await;
-                    continue;
-                }
-                DdlRequest::EnterStaging(req) => {
-                    self.handle_enter_staging_request(
-                        ddl.region_id,
-                        req.partition_directive,
-                        ddl.sender,
-                    )
-                    .await;
-                    continue;
-                }
-                DdlRequest::ApplyStagingManifest(req) => {
-                    self.handle_apply_staging_manifest_request(ddl.region_id, req, ddl.sender)
-                        .await;
-                    continue;
-                }
-            };
-
-            ddl.sender.send(res);
+            self.execute_ddl_request(ddl).await;
         }
+    }
+
+    /// Executes an admitted request, including requests handed back by a scheduler.
+    async fn execute_ddl_request(&mut self, ddl: SenderDdlRequest) {
+        let res = match ddl.request {
+            DdlRequest::Create(req) => self.handle_create_request(ddl.region_id, req).await,
+            DdlRequest::Drop(req) => {
+                self.handle_drop_request(ddl.region_id, req, ddl.sender)
+                    .await;
+                return;
+            }
+            DdlRequest::Open((req, wal_entry_receiver)) => {
+                self.handle_open_request(ddl.region_id, req, wal_entry_receiver, ddl.sender)
+                    .await;
+                return;
+            }
+            DdlRequest::OfflineCleanup(req) => {
+                self.handle_offline_cleanup_request(ddl.region_id, req)
+                    .await
+            }
+            DdlRequest::Close(req) => {
+                self.handle_close_request(ddl.region_id, req, ddl.sender)
+                    .await;
+                return;
+            }
+            DdlRequest::Alter(req) => {
+                self.execute_alter_request(ddl.region_id, req, ddl.sender)
+                    .await;
+                return;
+            }
+            DdlRequest::Flush(req) => {
+                self.handle_flush_request(ddl.region_id, req, ddl.sender);
+                return;
+            }
+            DdlRequest::Compact(req) => {
+                self.handle_compaction_request(ddl.region_id, req, ddl.sender)
+                    .await;
+                return;
+            }
+            DdlRequest::BuildIndex(req) => {
+                self.handle_build_index_request(ddl.region_id, req, ddl.sender)
+                    .await;
+                return;
+            }
+            DdlRequest::Truncate(req) => {
+                self.handle_truncate_request(ddl.region_id, req, ddl.sender)
+                    .await;
+                return;
+            }
+            DdlRequest::Catchup((req, wal_entry_receiver)) => {
+                self.handle_catchup_request(ddl.region_id, req, wal_entry_receiver, ddl.sender)
+                    .await;
+                return;
+            }
+            DdlRequest::EnterStaging(req) => {
+                self.handle_enter_staging_request(
+                    ddl.region_id,
+                    req.partition_directive,
+                    ddl.sender,
+                )
+                .await;
+                return;
+            }
+            DdlRequest::ApplyStagingManifest(req) => {
+                self.handle_apply_staging_manifest_request(ddl.region_id, req, ddl.sender)
+                    .await;
+                return;
+            }
+        };
+
+        ddl.sender.send(res);
     }
 
     /// Handle periodical tasks such as region auto flush.
@@ -1592,6 +1676,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
     async fn handle_background_notify(&mut self, region_id: RegionId, notify: BackgroundNotify) {
         // A reload that fails for good would otherwise restart itself forever.
         let is_reload_result = matches!(notify, BackgroundNotify::RegionReloaded { .. });
+        let should_dispatch_pending = notify.should_dispatch_pending();
         match notify {
             BackgroundNotify::RegionOpened { region, registered } => {
                 self.register_region(region);
@@ -1670,6 +1755,9 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                     .await
             }
             BackgroundNotify::TailReplayEnded => self.handle_tail_replay_ended(region_id),
+        }
+        if should_dispatch_pending {
+            self.dispatch_pending_region_requests(region_id).await;
         }
         // A commit that found a newer manifest fenced the region before its job reported here.
         if !is_reload_result {

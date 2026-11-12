@@ -187,6 +187,9 @@ Tests live next to the code as `*_test.rs` (e.g. `src/mito2/src/engine/flush_tes
   and `is_staging()`, a flush request `is_flushable()` and `is_staging()` (`is_writable()` and
   `is_flushable()` are false while ending staging). `handle_close` leaves staging first.
   Tail replays never run for them: entering staging fails while tails are pending.
+- Direct SST imports without a staging binding cannot publish into staging.
+  `worker/handle_manifest.rs` seals edit admission while EnterStaging drains accepted
+  edits. Scheduler-owned DDLs resume through execution, bypassing initial admission.
 
 ## Maintenance contract
 
