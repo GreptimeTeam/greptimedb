@@ -278,6 +278,7 @@ async fn test_schema_validation() -> Result<()> {
     let _ = create_connection_default_db_name(server_port, false)
         .await
         .unwrap();
+    let _ = create_connection(server_port, None, false).await.unwrap();
     mysql_server.shutdown().await.unwrap();
 
     // change to another username
@@ -289,6 +290,8 @@ async fn test_schema_validation() -> Result<()> {
     .await?;
 
     let fail = create_connection_default_db_name(server_port, false).await;
+    assert!(fail.is_err());
+    let fail = create_connection(server_port, None, false).await;
     assert!(fail.is_err());
     mysql_server.shutdown().await.unwrap();
 
@@ -460,10 +463,7 @@ async fn test_bearer_token_auth_over_clear_password() -> Result<()> {
             let value: u32 = connection.query_first("SELECT 1").await.unwrap().unwrap();
             assert_eq!(1, value);
             assert_eq!(1, provider.authentications.load(Ordering::Relaxed));
-            assert_eq!(
-                usize::from(database.is_some()),
-                provider.authorizations.load(Ordering::Relaxed)
-            );
+            assert_eq!(1, provider.authorizations.load(Ordering::Relaxed));
             connection.disconnect().await.unwrap();
             server.shutdown().await?;
         }

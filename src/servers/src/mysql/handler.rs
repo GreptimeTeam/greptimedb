@@ -432,6 +432,13 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
         auth_data: &[u8],
         database: Option<&[u8]>,
     ) -> bool {
+        let database = match database.map(std::str::from_utf8).transpose() {
+            Ok(database) => database,
+            Err(_) => {
+                warn!("MySQL database is not valid UTF-8");
+                return false;
+            }
+        };
         // if not specified then **greptime** will be used
         let username = String::from_utf8_lossy(username);
 
@@ -453,10 +460,6 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
                     return false;
                 };
                 let catalog = if let Some(database) = database {
-                    let Ok(database) = std::str::from_utf8(database) else {
-                        warn!("MySQL database is not valid UTF-8");
-                        return false;
-                    };
                     parse_optional_catalog_and_schema_from_db_string(database)
                         .0
                         .unwrap_or_else(|| self.session.catalog())
@@ -487,6 +490,19 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
             };
             match result {
                 Ok(userinfo) => {
+                    // An explicit handshake database is authorized by on_init. Without
+                    // one, the session already exposes its default catalog and schema.
+                    if database.is_none()
+                        && let Err(e) = user_provider
+                            .authorize(&self.session.catalog(), &self.session.schema(), &userinfo)
+                            .await
+                    {
+                        METRIC_AUTH_FAILURE
+                            .with_label_values(&[e.status_code().as_ref()])
+                            .inc();
+                        warn!(e; "Failed to authorize the default MySQL database");
+                        return false;
+                    }
                     user_info = Some(userinfo);
                 }
                 Err(e) => {
@@ -1053,6 +1069,22 @@ mod tests {
             1,
             1024,
         )
+    }
+
+    #[tokio::test]
+    async fn test_reject_invalid_handshake_database() {
+        let shim = create_shim();
+        assert!(
+            !<MysqlInstanceShim as AsyncMysqlShim<tokio::io::Sink>>::authenticate_with_database(
+                &shim,
+                MysqlAuthMethod::NATIVE_PASSWORD_PLUGIN,
+                b"greptime",
+                &[],
+                &[],
+                Some(&[0xff]),
+            )
+            .await
+        );
     }
 
     #[test]
