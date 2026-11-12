@@ -20,6 +20,7 @@ use mito2::manifest::action::{RegionEdit, RegionMetaAction, RegionMetaActionList
 use mito2::manifest::manager::{RegionManifestManager, RegionManifestOptions};
 use mito2::region::ManifestStats;
 use mito2::sst::file::RegionFileId;
+use mito2::sst::file_ref::FileReferenceManager;
 use mito2::sst::location::{region_dir_from_table_dir, sst_file_path};
 use object_store::ObjectStore;
 use parquet::file::FOOTER_SIZE;
@@ -94,11 +95,16 @@ impl SstReplaceCommand {
             .unwrap_or_else(|| vec![PathType::Bare, PathType::Data, PathType::Metadata]);
         let mut found = None;
         let mut existing_manifests = Vec::new();
+        let file_ref_manager = FileReferenceManager::new(None);
         for candidate in candidates {
             let stats = ManifestStats::default();
             let region_dir = region_dir_from_table_dir(&self.table_dir, region_id, candidate);
-            let manifest_opts =
-                RegionManifestOptions::new(&mito_config, &region_dir, &object_store);
+            let manifest_opts = RegionManifestOptions::new(
+                &mito_config,
+                &region_dir,
+                &object_store,
+                &file_ref_manager,
+            );
             let Some(manifest_manager) = RegionManifestManager::open(manifest_opts, &stats)
                 .await
                 .map_err(|e| {

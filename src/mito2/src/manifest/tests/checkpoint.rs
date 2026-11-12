@@ -1008,7 +1008,7 @@ async fn manifest_size_warm_cache_matches_recovery_bytes(
                 .unwrap();
         let cache = ManifestCache::new(local_store, ReadableSize::mb(10), None, true).await;
         let options = RegionManifestOptions {
-            file_metadata: Default::default(),
+            file_metadata_interner: Default::default(),
             manifest_dir: "/".to_string(),
             object_store,
             compress_type,
@@ -1111,7 +1111,7 @@ async fn manifest_cache_write_through_survives_reopen(#[case] compression: Compr
     let cache = ManifestCache::new(local.clone(), ReadableSize::mb(32), None, true).await;
     // Use a relative prefix, matching production keys and the recovered index.
     let mut options = RegionManifestOptions {
-        file_metadata: Default::default(),
+        file_metadata_interner: Default::default(),
         manifest_dir: "region/".to_string(),
         object_store: remote,
         compress_type: compression,

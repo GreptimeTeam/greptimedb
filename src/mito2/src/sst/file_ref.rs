@@ -23,7 +23,7 @@ use crate::error::Result;
 use crate::metrics::GC_REF_FILE_CNT;
 use crate::region::MitoRegionRef;
 use crate::sst::file::FileMeta;
-use crate::sst::file_metadata::FileMetadataPoolRef;
+use crate::sst::file_metadata::FileMetadataInternerRef;
 
 /// File references grouped by their physical source region.
 #[derive(Debug, Clone, Default)]
@@ -39,7 +39,7 @@ pub struct FileReferenceManager {
     /// this node in region manifests.
     node_id: Option<u64>,
     files_per_region: DashMap<RegionId, RegionFileRefs>,
-    pub(crate) file_metadata: FileMetadataPoolRef,
+    pub(crate) file_metadata_interner: FileMetadataInternerRef,
     /// Whether global GC is enabled.
     /// This is only meaningful when using object store (not local filesystem).
     gc_enabled: bool,
@@ -52,7 +52,7 @@ impl FileReferenceManager {
         Self {
             node_id,
             files_per_region: Default::default(),
-            file_metadata: Default::default(),
+            file_metadata_interner: Default::default(),
             gc_enabled: false,
         }
     }
@@ -62,7 +62,7 @@ impl FileReferenceManager {
         Self {
             node_id,
             files_per_region: Default::default(),
-            file_metadata: Default::default(),
+            file_metadata_interner: Default::default(),
             gc_enabled,
         }
     }
@@ -188,7 +188,6 @@ impl FileReferenceManager {
                 *file.get_mut() -= 1;
                 if *file.get() == 0 {
                     file.remove();
-                    self.file_metadata.remove_file(file_meta);
                     GC_REF_FILE_CNT.dec();
                 }
             }

@@ -40,14 +40,15 @@ use crate::manifest::storage::{
 };
 use crate::metrics::MANIFEST_OP_ELAPSED;
 use crate::region::{ManifestStats, RegionLeaderState, RegionRoleState};
-use crate::sst::file_metadata::FileMetadataPoolRef;
+use crate::sst::file_metadata::FileMetadataInternerRef;
+use crate::sst::file_ref::FileReferenceManager;
 use crate::sst::{FormatType, file};
 
 /// Options for [RegionManifestManager].
 #[derive(Debug, Clone)]
 pub struct RegionManifestOptions {
     /// Shares immutable file metadata with runtime readers in this engine.
-    pub(crate) file_metadata: FileMetadataPoolRef,
+    pub(crate) file_metadata_interner: FileMetadataInternerRef,
     /// Directory to store manifest.
     pub manifest_dir: String,
     pub object_store: ObjectStore,
@@ -64,10 +65,15 @@ pub struct RegionManifestOptions {
 }
 
 impl RegionManifestOptions {
-    /// Creates a new [RegionManifestOptions] with the given region directory, object store, and configuration.
-    pub fn new(config: &MitoConfig, region_dir: &str, object_store: &ObjectStore) -> Self {
+    /// Creates options using the same metadata interner as the owner's runtime file views.
+    pub fn new(
+        config: &MitoConfig,
+        region_dir: &str,
+        object_store: &ObjectStore,
+        file_ref_manager: &FileReferenceManager,
+    ) -> Self {
         RegionManifestOptions {
-            file_metadata: Default::default(),
+            file_metadata_interner: file_ref_manager.file_metadata_interner.clone(),
             manifest_dir: manifest_dir(region_dir),
             object_store: object_store.clone(),
             // We don't allow users to set the compression algorithm as we use it as a file suffix.
@@ -166,7 +172,7 @@ pub struct RemoveFileOptions {
 /// ```
 #[derive(Debug)]
 pub struct RegionManifestManager {
-    file_metadata: FileMetadataPoolRef,
+    file_metadata_interner: FileMetadataInternerRef,
     store: ManifestObjectStore,
     last_version: Arc<AtomicU64>,
     checkpointer: Checkpointer,
@@ -200,7 +206,7 @@ impl RegionManifestManager {
         )
         .with_conditional_publication(options.conditional_publication)?;
         let manifest_version = stats.manifest_version.clone();
-        let file_metadata = options.file_metadata.clone();
+        let file_metadata_interner = options.file_metadata_interner.clone();
 
         info!(
             "Creating region manifest in {} with metadata {:?}, flushed_entry_id: {}",
@@ -208,8 +214,7 @@ impl RegionManifestManager {
         );
 
         let version = MIN_VERSION;
-        let mut manifest_builder =
-            RegionManifestBuilder::default().with_file_metadata(file_metadata.clone());
+        let mut manifest_builder = RegionManifestBuilder::new(file_metadata_interner.clone());
         // set the initial metadata.
         manifest_builder.apply_change(
             version,
@@ -258,7 +263,7 @@ impl RegionManifestManager {
             .removed_files
             .update_file_removed_cnt_to_stats(stats);
         let manager = Self {
-            file_metadata,
+            file_metadata_interner,
             store,
             last_version: manifest_version,
             checkpointer,
@@ -293,7 +298,7 @@ impl RegionManifestManager {
         )
         .with_conditional_publication(options.conditional_publication)?;
         let manifest_version = stats.manifest_version.clone();
-        let file_metadata = options.file_metadata.clone();
+        let file_metadata_interner = options.file_metadata_interner.clone();
 
         // recover from storage
         // construct manifest builder
@@ -310,17 +315,17 @@ impl RegionManifestManager {
                 options.manifest_dir, checkpoint.last_version
             );
             version = version.max(checkpoint.last_version + 1);
-            RegionManifestBuilder::with_checkpoint(checkpoint.checkpoint)
+            RegionManifestBuilder::with_checkpoint(
+                checkpoint.checkpoint,
+                file_metadata_interner.clone(),
+            )
         } else {
             info!(
                 "Checkpoint not found in {}, build manifest from scratch",
                 options.manifest_dir
             );
-            RegionManifestBuilder::default()
+            RegionManifestBuilder::new(file_metadata_interner.clone())
         };
-
-        manifest_builder = manifest_builder.with_file_metadata(file_metadata.clone());
-        manifest_builder.intern_files();
 
         let replay_start_version = version;
         info!(
@@ -393,7 +398,7 @@ impl RegionManifestManager {
             open_start.elapsed(),
         );
         let manager = Self {
-            file_metadata,
+            file_metadata_interner,
             store,
             last_version: manifest_version,
             checkpointer,
@@ -508,9 +513,10 @@ impl RegionManifestManager {
         }
 
         debug_assert_eq!(manifests.first().unwrap().0, last_version + 1);
-        let mut manifest_builder =
-            RegionManifestBuilder::with_checkpoint(Some(self.manifest.as_ref().clone()))
-                .with_file_metadata(self.file_metadata.clone());
+        let mut manifest_builder = RegionManifestBuilder::from_shared_manifest(
+            Some(self.manifest.as_ref().clone()),
+            self.file_metadata_interner.clone(),
+        );
 
         for (manifest_version, raw_action_list) in manifests {
             let action_list = RegionMetaActionList::decode(&raw_action_list)?;
@@ -573,9 +579,10 @@ impl RegionManifestManager {
             }
             .fail();
         };
-        let mut builder = RegionManifestBuilder::with_checkpoint(checkpoint.checkpoint)
-            .with_file_metadata(self.file_metadata.clone());
-        builder.intern_files();
+        let builder = RegionManifestBuilder::with_checkpoint(
+            checkpoint.checkpoint,
+            self.file_metadata_interner.clone(),
+        );
         let manifest = builder.try_build()?;
         let last_version = self.set_version(manifest.manifest_version);
         manifest
@@ -661,12 +668,16 @@ impl RegionManifestManager {
         // When the staging manifest becomes available, it will be used to construct the new manifest.
         let mut manifest_builder =
             if is_staging && let Some(staging_manifest) = self.staging_manifest.as_ref() {
-                RegionManifestBuilder::with_checkpoint(Some(staging_manifest.as_ref().clone()))
+                RegionManifestBuilder::from_shared_manifest(
+                    Some(staging_manifest.as_ref().clone()),
+                    self.file_metadata_interner.clone(),
+                )
             } else {
-                RegionManifestBuilder::with_checkpoint(Some(self.manifest.as_ref().clone()))
+                RegionManifestBuilder::from_shared_manifest(
+                    Some(self.manifest.as_ref().clone()),
+                    self.file_metadata_interner.clone(),
+                )
             };
-
-        manifest_builder = manifest_builder.with_file_metadata(self.file_metadata.clone());
 
         for action in action_list.actions {
             match action {

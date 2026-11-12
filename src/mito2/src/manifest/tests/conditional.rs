@@ -53,7 +53,7 @@ fn options(
     conditional_publication: bool,
 ) -> RegionManifestOptions {
     RegionManifestOptions {
-        file_metadata: Default::default(),
+        file_metadata_interner: Default::default(),
         manifest_dir: "/".to_string(),
         object_store: store.clone(),
         compress_type,

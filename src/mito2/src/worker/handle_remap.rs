@@ -62,6 +62,7 @@ impl<S> RegionWorkerLoop<S> {
             self.config.clone(),
             self.object_store_manager.clone(),
             self.node_lease.is_enabled(),
+            self.file_ref_manager.clone(),
         );
         common_runtime::spawn_global(async move {
             let result = Self::fetch_and_remap_manifests(

@@ -69,6 +69,7 @@ impl<S> RegionWorkerLoop<S> {
             self.config.clone(),
             self.object_store_manager.clone(),
             self.node_lease.is_enabled(),
+            self.file_ref_manager.clone(),
         );
         let worker_sender = self.sender.clone();
 

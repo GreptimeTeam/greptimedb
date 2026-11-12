@@ -2330,7 +2330,7 @@ async fn test_compaction_bypass_in_staging_mode() {
             version_control.current().version.metadata.clone(),
             0,
             RegionManifestOptions {
-                file_metadata: Default::default(),
+                file_metadata_interner: Default::default(),
                 manifest_dir: "".to_string(),
                 object_store: env.access_layer.object_store().clone(),
                 compress_type: CompressionType::Uncompressed,

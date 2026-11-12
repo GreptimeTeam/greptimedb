@@ -14,114 +14,46 @@
 
 //! Sharing of immutable SST metadata across manifests and runtime readers.
 
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::Arc;
 
+use common_cache::WeakInterner;
 use partition::expr::PartitionExpr;
-use smallvec::SmallVec;
 use store_api::storage::TableId;
 
 use crate::sst::file::{FileMeta, FileMetaRef, RegionFileId};
 
-/// Engine-local pool. Weak references do not keep metadata payloads alive.
+/// Engine-local sharing. File and expression operations never hold nested locks.
 #[derive(Debug, Default)]
-pub(crate) struct FileMetadataPool {
-    entries: Mutex<MetadataEntries>,
+pub(crate) struct FileMetadataInterner {
+    files: WeakInterner<RegionFileId, FileMeta>,
+    expressions: WeakInterner<TableId, PartitionExpr>,
 }
 
-pub(crate) type FileMetadataPoolRef = Arc<FileMetadataPool>;
+pub(crate) type FileMetadataInternerRef = Arc<FileMetadataInterner>;
 
-impl FileMetadataPool {
-    /// Evicts a metadata generation after its last registered reader leaves.
-    /// Manifest-only copies may remain alive; eviction affects sharing, not ownership.
-    pub(crate) fn remove_file(&self, meta: &FileMeta) {
-        let mut entries = self.entries.lock().unwrap_or_else(|err| err.into_inner());
-        let key = RegionFileId::new(meta.region_id, meta.file_id);
-        if let std::collections::hash_map::Entry::Occupied(mut entry) = entries.files.entry(key) {
-            entry.get_mut().retain(|version| {
-                version
-                    .upgrade()
-                    .is_some_and(|version| version.index_version != meta.index_version)
-            });
-            if entry.get().is_empty() {
-                entry.remove();
+impl FileMetadataInterner {
+    /// Normalizes exclusively owned metadata before publishing it to readers.
+    /// Shared inputs remain immutable: expression deduplication must not deep-clone
+    /// indexes merely to replace an equivalent expression.
+    pub(crate) fn intern_in_place(&self, meta: &mut FileMetaRef) {
+        if let Some(expr) = &meta.partition_expr {
+            let shared = self
+                .expressions
+                .intern(meta.region_id.table_id(), expr.clone());
+            if let Some(owned) = Arc::get_mut(meta) {
+                owned.partition_expr = Some(shared);
             }
         }
-        if entries.files.is_empty() {
-            entries.expressions.clear();
-            entries.expressions.shrink_to_fit();
-        }
-        // Shrink geometrically rather than rehashing on every file removal.
-        if entries.files.capacity() > entries.files.len().saturating_mul(4).max(1024) {
-            entries.files.shrink_to_fit();
-            entries.next_prune = entries.files.len().saturating_mul(2).max(1024);
-        }
+        *meta = self.files.intern(
+            RegionFileId::new(meta.region_id, meta.file_id),
+            meta.clone(),
+        );
     }
 
     /// Shares only fully equal metadata; file identity alone is insufficient.
     pub(crate) fn intern(&self, mut meta: FileMetaRef) -> FileMetaRef {
-        let mut entries = self.entries.lock().unwrap_or_else(|err| err.into_inner());
-        entries.prune_if_needed();
-        let key = RegionFileId::new(meta.region_id, meta.file_id);
-        if let Some(versions) = entries.files.get_mut(&key) {
-            versions.retain(|version| version.strong_count() > 0);
-            if let Some(existing) = versions
-                .iter()
-                .filter_map(Weak::upgrade)
-                .find(|existing| Arc::ptr_eq(existing, &meta) || **existing == *meta)
-            {
-                return existing;
-            }
-        }
-        if let Some(expr) = &meta.partition_expr {
-            let expressions = entries
-                .expressions
-                .entry(meta.region_id.table_id())
-                .or_default();
-            expressions.retain(|expr| expr.strong_count() > 0);
-            if let Some(existing) = expressions
-                .iter()
-                .filter_map(Weak::upgrade)
-                .find(|existing| Arc::ptr_eq(existing, expr) || **existing == **expr)
-            {
-                if !Arc::ptr_eq(&existing, expr) {
-                    Arc::make_mut(&mut meta).partition_expr = Some(existing);
-                }
-            } else {
-                expressions.push(Arc::downgrade(expr));
-            }
-        }
-        entries
-            .files
-            .entry(key)
-            .or_default()
-            .push(Arc::downgrade(&meta));
+        self.intern_in_place(&mut meta);
         meta
-    }
-}
-
-#[derive(Debug, Default)]
-struct MetadataEntries {
-    files: HashMap<RegionFileId, SmallVec<[Weak<FileMeta>; 1]>>,
-    expressions: HashMap<TableId, Vec<Weak<PartitionExpr>>>,
-    next_prune: usize,
-}
-
-impl MetadataEntries {
-    /// Geometric thresholds amortize scans during large manifest loads.
-    fn prune_if_needed(&mut self) {
-        if self.files.len() < self.next_prune.max(1024) {
-            return;
-        }
-        self.files.retain(|_, versions| {
-            versions.retain(|version| version.strong_count() > 0);
-            !versions.is_empty()
-        });
-        self.expressions.retain(|_, expressions| {
-            expressions.retain(|expr| expr.strong_count() > 0);
-            !expressions.is_empty()
-        });
-        self.next_prune = self.files.len().saturating_mul(2).max(1024);
     }
 }
 
@@ -130,10 +62,11 @@ mod tests {
     use store_api::storage::{FileId, RegionId};
 
     use super::*;
+    use crate::sst::file::FileMeta;
 
     #[test]
     fn test_metadata_views_and_recovered_copies() {
-        let pool = FileMetadataPool::default();
+        let pool = FileMetadataInterner::default();
         let original = Arc::new(FileMeta {
             region_id: RegionId::new(1, 1),
             file_id: FileId::random(),
@@ -171,7 +104,7 @@ mod tests {
 
     #[test]
     fn test_table_pool_keeps_historical_expressions_distinct() {
-        let pool = FileMetadataPool::default();
+        let pool = FileMetadataInterner::default();
         let old_expr = partition::expr::col("tag").lt(datatypes::value::Value::UInt32(10));
         let new_expr = partition::expr::col("tag").lt(datatypes::value::Value::UInt32(5));
         let old = pool.intern(Arc::new(FileMeta {
@@ -198,36 +131,21 @@ mod tests {
     }
 
     #[test]
-    fn test_evicting_old_generation_preserves_new_metadata() {
-        let pool = FileMetadataPool::default();
-        let old = pool.intern(Arc::new(FileMeta::default()));
-        let current = pool.intern(Arc::new(FileMeta {
-            index_version: 1,
-            ..old.as_ref().clone()
+    fn test_same_index_different_contents_remain_shared() {
+        let pool = FileMetadataInterner::default();
+        let first = pool.intern(Arc::new(FileMeta::default()));
+        let second = pool.intern(Arc::new(FileMeta {
+            file_size: 123,
+            ..first.as_ref().clone()
         }));
-        pool.remove_file(&old);
-        let recovered = pool.intern(Arc::new(current.as_ref().clone()));
-        assert!(Arc::ptr_eq(&current, &recovered));
-        pool.remove_file(&current);
-        assert!(pool.entries.lock().unwrap().files.is_empty());
-        assert_eq!(old.index_version, 0);
-        assert_eq!(current.index_version, 1);
-    }
-
-    #[test]
-    fn test_dead_metadata_is_reclaimed() {
-        let pool = FileMetadataPool::default();
-        let meta = pool.intern(Arc::new(FileMeta::default()));
-        let weak = Arc::downgrade(&meta);
-        drop(meta);
-        assert!(weak.upgrade().is_none());
-        for _ in 0..2048 {
-            pool.intern(Arc::new(FileMeta {
-                file_id: FileId::random(),
-                ..Default::default()
-            }));
-        }
-        let entries = pool.entries.lock().unwrap();
-        assert!(entries.files.len() <= 1024);
+        assert!(!Arc::ptr_eq(&first, &second));
+        assert!(Arc::ptr_eq(
+            &first,
+            &pool.intern(Arc::new(first.as_ref().clone()))
+        ));
+        assert!(Arc::ptr_eq(
+            &second,
+            &pool.intern(Arc::new(second.as_ref().clone()))
+        ));
     }
 }

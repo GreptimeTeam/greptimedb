@@ -296,7 +296,7 @@ pub struct FileMeta {
     pub sequence: Option<NonZeroU64>,
     /// Partition expression from the region metadata when the file is created.
     ///
-    /// This is stored as a PartitionExpr object in memory for convenience,
+    /// Immutable expressions are shared by table and content where canonicalized,
     /// but serialized as JSON string for manifest compatibility.
     /// Compatibility behavior:
     /// - None: no partition expr was set when the file was created (legacy files).
@@ -643,10 +643,6 @@ impl FileHandle {
     /// Creates a new logical SST reference. Index replacements must reuse its lifetime.
     pub fn new(meta: impl Into<FileMetaRef>, file_purger: FilePurgerRef) -> FileHandle {
         let meta = meta.into();
-        let meta = match file_purger.file_ref_manager() {
-            Some(manager) => manager.file_metadata.intern(meta),
-            None => meta,
-        };
         let pk_range = meta.primary_key_range();
         FileHandle {
             inner: Arc::new(FileHandleInner::new(meta, file_purger, pk_range)),
@@ -671,16 +667,11 @@ impl FileHandle {
     /// Replaces an index metadata view without splitting the underlying SST lifetime.
     pub(crate) fn with_updated_index(&self, meta: impl Into<FileMetaRef>) -> Self {
         let meta = meta.into();
-        let meta = match &self.inner.lifetime.file_ref_manager {
-            Some(manager) => manager.file_metadata.intern(meta),
-            None => meta,
-        };
         debug_assert_eq!(self.file_id(), meta.file_id());
         let primary_key_range = meta
             .primary_key_range()
             .or_else(|| self.raw_primary_key_range());
         let lifetime = self.inner.lifetime.clone();
-        *lifetime.meta.lock().unwrap() = meta.clone();
         Self {
             inner: Arc::new(FileHandleInner::with_lifetime(
                 meta,
@@ -891,6 +882,7 @@ impl PrimaryKeyRange {
 struct FileHandleInner {
     meta: FileMetaRef,
     compacting: AtomicBool,
+    /// Allocated only for derived bounds; boxing keeps handles without a cache small.
     primary_key_range: RwLock<Option<Box<PrimaryKeyRange>>>,
     lifetime: Arc<SstLifetime>,
 }
@@ -924,9 +916,14 @@ impl FileHandleInner {
         lifetime: Arc<SstLifetime>,
         primary_key_range: Option<(Bytes, Bytes)>,
     ) -> Self {
-        if let Some(manager) = &lifetime.file_ref_manager {
+        let meta = if let Some(manager) = &lifetime.file_ref_manager {
+            let meta = manager.file_metadata_interner.intern(meta);
             manager.register_file(&meta);
-        }
+            meta
+        } else {
+            meta
+        };
+        *lifetime.meta.lock().unwrap() = meta.clone();
         // Raw bounds already in metadata need no per-handle cache until alignment.
         let primary_key_range = primary_key_range
             .filter(|range| meta.primary_key_range().as_ref() != Some(range))
