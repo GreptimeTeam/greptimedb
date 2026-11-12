@@ -94,7 +94,7 @@ pub async fn run_real_hash_join(
         MemorySourceConfig::try_new_exec(&probe_partitions, Arc::clone(&right_schema), None)
             .unwrap();
 
-    let (left_scan, right_scan) = if partition_count > 1 {
+    let (left, right_scan) = if partition_count > 1 {
         // Hash on the complete join-key vector on both sides, like the real plan does.
         let left_partitioning = Partitioning::Hash(
             on.iter().map(|(build, _)| Arc::clone(build)).collect(),
@@ -113,7 +113,6 @@ pub async fn run_real_hash_join(
     } else {
         (left_scan, right_scan)
     };
-    let left = left_scan;
 
     let probe_filter = Arc::new(DynamicFilterPhysicalExpr::new(
         on.iter().map(|(_, probe)| Arc::clone(probe)).collect(),

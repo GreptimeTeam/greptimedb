@@ -5,6 +5,8 @@ edition.workspace = true
 license.workspace = true
 
 [features]
+# The only two optional dependencies, `datafusion-datasource` and `futures-util`,
+# are needed by `testing` alone: they build the real hash-join fixtures.
 testing = ["dep:datafusion-datasource", "dep:futures-util"]
 
 [lints]
@@ -26,6 +28,7 @@ datafusion-datasource = { workspace = true, optional = true }
 datafusion-expr.workspace = true
 datafusion-proto.workspace = true
 datatypes.workspace = true
+futures-util = { workspace = true, optional = true }
 once_cell.workspace = true
 prost.workspace = true
 serde.workspace = true
@@ -34,9 +37,6 @@ snafu.workspace = true
 sqlparser.workspace = true
 sqlparser_derive = "0.1"
 store-api.workspace = true
-
-# Only the `testing` feature (real hash-join fixtures) needs these.
-futures-util = { workspace = true, optional = true }
 
 [dev-dependencies]
 common-base.workspace = true
