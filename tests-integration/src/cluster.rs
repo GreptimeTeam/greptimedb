@@ -274,6 +274,7 @@ pub struct GreptimeDbClusterBuilder {
     real_datanode_grpc_addr: bool,
     frontend_real_datanode_grpc: bool,
     query_options: query::options::QueryOptions,
+    datanode_max_concurrent_queries: Option<usize>,
 }
 
 impl GreptimeDbClusterBuilder {
@@ -316,6 +317,7 @@ impl GreptimeDbClusterBuilder {
             real_datanode_grpc_addr: false,
             frontend_real_datanode_grpc: false,
             query_options: query::options::QueryOptions::default(),
+            datanode_max_concurrent_queries: None,
         }
     }
 
@@ -423,6 +425,7 @@ impl GreptimeDbClusterBuilder {
         self
     }
 
+<<<<<<< HEAD
     /// Routes frontend-to-datanode RPCs through real TCP clients instead of duplex clients.
     /// This only has an effect when `with_real_datanode_grpc_addr(true)` is also set.
     #[must_use]
@@ -435,6 +438,13 @@ impl GreptimeDbClusterBuilder {
     #[must_use]
     pub fn with_query_options(mut self, options: query::options::QueryOptions) -> Self {
         self.query_options = options;
+=======
+    /// Enables the datanode concurrent read limiter with `max_concurrent_queries`
+    /// permits per admission lane (ordinary and nested reads each get their own lane).
+    #[must_use]
+    pub fn with_datanode_max_concurrent_queries(mut self, max_concurrent_queries: usize) -> Self {
+        self.datanode_max_concurrent_queries = Some(max_concurrent_queries);
+>>>>>>> 1f7343cbf5f (fix(datanode): give nested MergeScan reads a bounded admission lane)
         self
     }
 
@@ -638,6 +648,9 @@ impl GreptimeDbClusterBuilder {
                         .unwrap()
                         .to_string(),
                 );
+            }
+            if let Some(max_concurrent_queries) = self.datanode_max_concurrent_queries {
+                opts.max_concurrent_queries = max_concurrent_queries;
             }
             opts.node_id = Some(datanode_id);
             if self.real_datanode_grpc_addr {
