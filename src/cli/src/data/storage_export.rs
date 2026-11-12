@@ -315,6 +315,7 @@ impl StorageExport for AzblobBackend {
             &[
                 expose_optional_secret(&self.config.azblob_account_name),
                 expose_optional_secret(&self.config.azblob_account_key),
+                expose_optional_secret(&self.config.azblob_sas_token),
             ],
         )
     }
@@ -365,5 +366,25 @@ impl StorageType {
     /// Returns true if the storage backend is remote (not local filesystem).
     pub fn is_remote_storage(&self) -> bool {
         !matches!(self, StorageType::Fs(_))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_azblob_export_masks_sas_token() {
+        let backend = AzblobBackend {
+            config: PrefixedAzblobConnection {
+                azblob_sas_token: Some("sig=secret-token".to_string().into()),
+                ..Default::default()
+            },
+        };
+        let (_, connection) = backend.get_storage_path("greptime", "public");
+        assert!(connection.contains("SAS_TOKEN='sig=secret-token'"));
+        let masked = backend.mask_sensitive_info(&connection);
+        assert!(masked.contains("SAS_TOKEN='[REDACTED]'"));
+        assert!(!masked.contains("sig=secret-token"));
     }
 }

@@ -90,7 +90,7 @@ fn serialize_password<S>(_: &str, serializer: S) -> std::result::Result<S::Ok, S
 where
     S: serde::Serializer,
 {
-    serializer.serialize_str("[REDACTED]")
+    serializer.serialize_str("<REDACTED>")
 }
 
 impl fmt::Debug for KafkaClientSaslConfig {

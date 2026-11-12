@@ -388,7 +388,7 @@ mod tests {
             }
             let serialized = toml::to_string(&config).unwrap();
             assert!(!serialized.contains("kafka-secret"));
-            assert!(serialized.contains("[REDACTED]"));
+            assert!(serialized.contains("<REDACTED>"));
             assert!(serialized.contains("alice"));
         }
     }
