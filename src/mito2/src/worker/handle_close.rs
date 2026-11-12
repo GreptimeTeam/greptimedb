@@ -43,7 +43,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             return;
         }
 
-        if region.is_staging_or_staged_edit() {
+        if region.in_staging_session() {
             // A staging region cannot flush, so it leaves staging before the close-time flush
             // below. The manifest lock lets a successful end of staging in progress finish first,
             // after which the region is already out of staging.
