@@ -211,6 +211,9 @@ impl DatafusionQueryEngine {
             // once on the frontend, so every region sees the same values.
             if let DfLogicalPlan::Join(join) = plan
                 && join.join_type == datafusion_expr::JoinType::Inner
+                // The pinned Substrait producer rejects `JoinConstraint::Using`, so a
+                // materialized payload containing such a join could not be encoded.
+                && join.join_constraint == datafusion_expr::JoinConstraint::On
                 && !join.on.is_empty()
                 && let Some((large_plan, large)) = strip_merge_scan(&join.left)
                 && let Some((small_plan, small)) = strip_merge_scan(&join.right)
