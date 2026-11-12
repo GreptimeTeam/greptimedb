@@ -18,6 +18,7 @@ use std::sync::Arc;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, Schema};
 use snafu::OptionExt;
+use store_api::metric_engine_consts::is_metric_engine_internal_column;
 
 use crate::ddl::create_logical_tables::CreateLogicalTablesProcedure;
 use crate::error::Result;
@@ -82,6 +83,14 @@ impl CreateLogicalTablesProcedure {
 
             // Add missing partition columns
             for partition_column in partition_columns {
+                // The engine owns its identity columns: they are derived from the logical
+                // table at write time, so a logical schema must never declare them. Older
+                // procedures may have persisted an unfiltered partition column list, hence
+                // filtering here rather than only while collecting it.
+                if is_metric_engine_internal_column(partition_column) {
+                    continue;
+                }
+
                 if !existing_column_names.contains(partition_column) {
                     let new_column_index = column_schemas.len() + new_columns.len();
 
