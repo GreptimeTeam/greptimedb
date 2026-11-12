@@ -126,8 +126,9 @@ const RECOVERY_CONCURRENCY: usize = 64;
 /// error that requires intervention. A segment that a read cannot
 /// decode is handled as `on_corrupted_segment` says. Objects below the reclaim
 /// boundary of the last indexed object are deleted in the background. A
-/// release of a region seals an object with a release record of the region at
+/// permanent release (`release_region` or `obsolete_all`) seals an object at
 /// once and returns, in both modes, once that object is durable and indexed.
+/// Bounded releases acknowledge admission and coalesce until a batch is sealed.
 pub struct ObjectStoreLogStore {
     prefix: String,
     /// The configuration and generation the prefix comes from. The prefix of every node
@@ -1137,17 +1138,29 @@ impl LogStore for ObjectStoreLogStore {
         entry_id: EntryId,
     ) -> Result<()> {
         self.check_region(provider, region_id)?;
+        // Shutdown stops the WAL before closing regions. These later hints
+        // cannot be persisted and safely retain extra history instead.
+        if self.stopped.load(Ordering::Acquire) {
+            return Ok(());
+        }
         let (response, receiver) = oneshot::channel();
-        self.command_tx
+        let answered = match self
+            .command_tx
             .send(Command::ReleaseEntries {
                 region_id,
                 entry_id,
                 response,
             })
             .await
-            .ok()
-            .context(ObjectStoreWalStoppedSnafu)?;
-        receiver.await.ok().context(ObjectStoreWalStoppedSnafu)?
+        {
+            Ok(()) => receiver.await.ok(),
+            Err(_) => None,
+        };
+        match answered {
+            Some(result) => result,
+            None if self.stopped.load(Ordering::Acquire) => Ok(()),
+            None => ObjectStoreWalStoppedSnafu.fail(),
+        }
     }
 
     fn entry(
@@ -1393,8 +1406,9 @@ enum Withdrawal {
 /// flight, after a delay that doubles from [`CREATE_RETRY_DELAY`] up to
 /// [`MAX_FAILING_RETRY_DELAY`]. Appends are rejected at once with a retryable
 /// error that carries the last error: they take no entry id and never wait
-/// behind the backlog. Releases fail with it too, and their records wait for
-/// a create. The first create that succeeds ends the state.
+/// behind the backlog. Permanent releases fail with it too, and their records
+/// wait for a create. Bounded releases still acknowledge admission and coalesce.
+/// The first create that succeeds ends the state.
 struct Failing {
     /// The last error a create met, which rejected appends carry.
     error: Arc<Error>,
@@ -1440,9 +1454,9 @@ impl Failing {
 /// | --- | --- | --- | --- |
 /// | created, or identical retry | advances | acknowledged in order | healthy |
 /// | transient error, `durable` mode | never reused: a create that reported an error may have written its object | every batch that is not indexed fails, created ones included; retries are assigned new ids | healthy: the next batch links to the last indexed object, so no chain reaches a failed batch |
-/// | transient error, `enqueued` mode | unchanged | already acknowledged, except a release, which waits for the repeat | healthy: the create is repeated with the same bytes after [`CREATE_RETRY_DELAY`], which an identical retry accepts |
-/// | error that requires intervention, `enqueued` mode | unchanged | already acknowledged, except a release, which fails while its record stays in the backlog; later appends and releases are rejected with a retryable error | failing, see [`Failing`]: the lowest pending create is repeated alone with backoff, and the first create that succeeds ends it |
-/// | object store error, `enqueued` mode after `stop` began | never reused | already acknowledged, except a release, which fails with the stopped error | the backlog is dropped and `stop` reports the error |
+/// | transient error, `enqueued` mode | unchanged | already acknowledged, except a permanent release, which waits for the repeat | healthy: the create is repeated with the same bytes after [`CREATE_RETRY_DELAY`], which an identical retry accepts |
+/// | error that requires intervention, `enqueued` mode | unchanged | already acknowledged, except a permanent release, which fails while its record stays in the backlog; later appends and permanent releases are rejected with a retryable error | failing, see [`Failing`]: the lowest pending create is repeated alone with backoff, and the first create that succeeds ends it |
+/// | object store error, `enqueued` mode after `stop` began | never reused | already acknowledged, except a permanent release, which fails with the stopped error | the backlog is dropped and `stop` reports the error |
 /// | an object of an earlier epoch holds the sequence, `durable` mode | never reused | as for a transient error | healthy: that object can never be on the chain |
 /// | an object of the same or a later epoch holds the sequence, any conflicting object in the `enqueued` mode, encoding or catalog error | unchanged | every batch that is not indexed fails | poisoned |
 /// | created at the last representable sequence | cannot advance | acknowledged | poisoned: no later batch can be allocated a sequence |
@@ -1451,8 +1465,8 @@ impl Failing {
 /// outcome is ignored: whatever it stored is off the chain. After `stop` began
 /// nothing is admitted and no create starts, except that the `enqueued` mode
 /// uploads its backlog and the `durable` mode creates one object with the
-/// release records of failed batches; creates in flight run to completion and
-/// acknowledge if they succeed.
+/// pending bounded releases and release records of failed batches. Creates in
+/// flight run to completion and acknowledge if they succeed.
 ///
 /// Appends arrive on their own channel. The actor holds one back while the
 /// sealed batches leave no room for the two an admission can seal, or at a
@@ -1776,14 +1790,18 @@ impl Actor {
     /// batch holds no entry, and starts its create when a slot is free.
     /// Returns whether a batch was sealed.
     ///
-    /// A failing store keeps pending release records coalesced instead
-    /// of sealing them alone behind its backlog on every tick, until `stop`
-    /// seals them for its last attempt of the backlog.
+    /// A failing store or one at a backlog threshold keeps pending releases
+    /// coalesced instead of sealing them alone on every tick. Stop seals them
+    /// for its last attempt even when the backlog is full. Explicit permanent
+    /// releases still seal immediately, as their callers wait for persistence.
     fn seal(&mut self, releases: Vec<Release>) -> bool {
         if self.open_batch.is_empty()
             && releases.is_empty()
             && (self.pending_releases.is_empty()
-                || (self.failing.is_some() && self.stop.is_empty()))
+                || (self.stop.is_empty()
+                    && (self.failing.is_some()
+                        || self.sealed.len() >= MAX_SEALED_BATCHES
+                        || self.backlog_at_threshold())))
         {
             return false;
         }
@@ -2457,7 +2475,9 @@ impl Actor {
     /// covered by this record. Physical collection still uses the durable
     /// reclaim boundary, so an unpersisted record only loses reclamation progress.
     fn handle_release_entries(&mut self, region_id: RegionId, entry_id: EntryId) -> Result<()> {
-        ensure!(!self.is_stopped(), ObjectStoreWalStoppedSnafu);
+        if self.is_stopped() {
+            return Ok(());
+        }
         self.raise_sequence_floor(region_id, entry_id)?;
         // Like obsolete, preserve entries that are not durable at admission.
         // Keep the original sequence floor so a reopen cannot reuse their ids.
@@ -2716,8 +2736,9 @@ impl Actor {
     /// Begins stopping. Nothing is admitted from now on and the append held
     /// back is refused; the `durable` mode drops the open batch and the
     /// batches whose create has not started, and seals the release records of
-    /// failed and dropped batches once more; the `enqueued` mode seals its
-    /// backlog and uploads it, a failing store included. Stop is answered by
+    /// failed and dropped batches together with pending bounded releases once
+    /// more; the `enqueued` mode seals its backlog and uploads it, a failing
+    /// store included. Stop is answered by
     /// [`finish_stop`](Self::finish_stop) once nothing is in flight.
     fn handle_stop(&mut self, response: oneshot::Sender<Result<()>>) {
         self.stop.push(response);
@@ -9305,7 +9326,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_bounded_release_fences_future_appends_and_rejects_after_stop() {
+    async fn test_bounded_release_fences_future_appends_and_ignores_after_stop() {
         let _serialized = SERIALIZED.lock().await;
         for (config, released) in [(eager(), id(10, 1)), (enqueued(manual()), 0)] {
             let store = open(memory_store(), &config).await;
@@ -9329,12 +9350,129 @@ mod tests {
                 read_entries(&store, region_id, 0).await
             );
             store.stop().await.unwrap();
-            assert!(
+            let before = object_seqs(store.io.as_ref()).await;
+            store
+                .release_entries(&provider(region_id), region_id, EntryId::MAX)
+                .await
+                .unwrap();
+            assert_eq!(before, object_seqs(store.io.as_ref()).await);
+            assert_eq!(Some(released), watermark(&store, region_id));
+        }
+    }
+
+    #[tokio::test]
+    async fn test_bounded_release_coalesces_behind_full_backlog() {
+        let _serialized = SERIALIZED.lock().await;
+        for ack_mode in [AckMode::Durable, AckMode::Enqueued] {
+            for byte_limit in [1, u64::MAX] {
+                let config = ObjectStoreWalConfig {
+                    ack_mode,
+                    max_unpersisted_bytes: ReadableSize(byte_limit),
+                    ..manual()
+                };
+                let (store, io, mut parked) = open_parking_creates(memory_store(), &config).await;
+                let before = METRIC_OBJECT_STORE_WAL_OBJECT_BYTES.get_sample_count();
+                for _ in 0..2 * MAX_SEALED_BATCHES {
+                    store
+                        .release_entries(&provider(region(1)), region(1), 0)
+                        .await
+                        .unwrap();
+                    // Drive the timer's sealing path without waiting for parked I/O.
+                    let (response, _) = oneshot::channel();
+                    store
+                        .command_tx
+                        .send(Command::Seal { response })
+                        .await
+                        .unwrap();
+                }
+                // Same-channel admission is a barrier after the final Seal and
+                // leaves a different region pending for the shutdown drain.
                 store
-                    .release_entries(&provider(region_id), region_id, 0)
+                    .release_entries(&provider(region(2)), region(2), 0)
                     .await
-                    .is_err()
+                    .unwrap();
+                let expected = if byte_limit == 1 {
+                    1
+                } else {
+                    MAX_SEALED_BATCHES as u64
+                };
+                assert_eq!(
+                    expected,
+                    METRIC_OBJECT_STORE_WAL_OBJECT_BYTES.get_sample_count() - before
+                );
+                assert_eq!(vec![0], object_seqs(io.as_ref()).await);
+                let mut stop = begin_spawned_stop(&store).await;
+                io.creates_parked.store(false, Ordering::SeqCst);
+                // Only already issued PUTs remain parked; later creates run normally.
+                timeout(WAIT, async {
+                    loop {
+                        tokio::select! {
+                            operation = parked.recv() => {
+                                let (_, release) = operation.unwrap();
+                                release.send(true).unwrap();
+                            }
+                            result = &mut stop => break result.unwrap().unwrap(),
+                        }
+                    }
+                })
+                .await
+                .unwrap();
+                let recovered = recover(io.as_ref()).await.unwrap();
+                assert_eq!(Some(&0), recovered.released_entry_ids.get(&region(2)));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_bounded_release_recovery_uses_maximum_across_objects() {
+        let _serialized = SERIALIZED.lock().await;
+        for config in [eager(), enqueued(eager())] {
+            let object_store = memory_store();
+            let store = open(object_store.clone(), &config).await;
+            let (one, pin) = (region(1), region(2));
+            store
+                .append_batch(vec![entry(&store, one, "old"), entry(&store, pin, "pin")])
+                .await
+                .unwrap();
+            store.wait_durable(&provider(one), id(1, 1)).await.unwrap();
+            store
+                .release_entries(&provider(one), one, id(1, 1))
+                .await
+                .unwrap();
+            store.seal_open_batch().await.unwrap();
+            store
+                .append_batch(vec![entry(&store, one, "new")])
+                .await
+                .unwrap();
+            store.wait_durable(&provider(one), id(3, 1)).await.unwrap();
+            // Higher, then lower, records across objects distinguish max from
+            // both minimum and last-record-wins recovery.
+            for watermark in [id(3, 1), id(1, 1)] {
+                store
+                    .release_entries(&provider(one), one, watermark)
+                    .await
+                    .unwrap();
+                store.seal_open_batch().await.unwrap();
+            }
+            store.stop().await.unwrap();
+            let store = open(object_store.clone(), &config).await;
+            assert_eq!(Some(id(3, 1)), watermark(&store, one));
+            assert!(read_entries(&store, one, 0).await.is_empty());
+            store.obsolete_all(&provider(one), one).await.unwrap();
+            // A later stale bounded hint must not undo a permanent release.
+            store
+                .release_entries(&provider(one), one, id(1, 1))
+                .await
+                .unwrap();
+            store.seal_open_batch().await.unwrap();
+            store.stop().await.unwrap();
+            let store = open(object_store, &config).await;
+            assert_eq!(Some(EntryId::MAX), watermark(&store, one));
+            assert_eq!(
+                expected_entries(pin, &[(id(1, 1), "pin")]),
+                read_entries(&store, pin, 0).await
             );
+            store.stop().await.unwrap();
         }
     }
 

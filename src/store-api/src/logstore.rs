@@ -138,6 +138,7 @@ pub trait LogStore: Send + Sync + 'static + std::fmt::Debug {
     ///
     /// The caller must ensure these entries are no longer needed for recovery.
     /// Success means the store accepted the release, not that it is durable.
+    /// A stopped store may ignore the hint successfully, retaining extra history.
     /// Implementations may batch records and retry failed writes; a crash before
     /// persistence may retain extra history. Later entries remain readable.
     /// The default does nothing, preserving other stores' reclamation policies.
