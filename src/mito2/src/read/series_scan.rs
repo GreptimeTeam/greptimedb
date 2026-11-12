@@ -144,9 +144,11 @@ enum SeriesInputMode {
     /// Regions outside the columnar series gate keep the all-or-nothing answer, so the raw
     /// partition adapter reads every assigned source (including memtables) with the ordinary scan.
     Raw,
-    /// Regions whose columnar series gate is on serve the ready subset of the assignment, both to
-    /// the native ordinal-range entry and to the raw partition adapter. An empty subset is served
-    /// too, as an empty stream, so these regions never read the ordinary scan.
+    /// Regions whose columnar series gate is on answer with the whole assignment, both to the
+    /// native ordinal-range entry and to the raw partition adapter: rows a selected artifact
+    /// carries come from that artifact, and every other assigned source is read as raw rows and
+    /// merged with them. Artifact readiness is an optimisation here, never a visibility decision,
+    /// so these regions never fall back to the ordinary scan.
     Native,
 }
 
@@ -159,6 +161,11 @@ struct SeriesPreflight {
     columnar_fields_supported: bool,
     /// Inputs a columnar read may serve, captured from this scanner's pinned snapshot.
     selection: prepared::SelectedInputs,
+    /// Builds the file ranges of the sources no selected artifact covers.
+    ///
+    /// The prepared reader reads those sources itself, so it needs the same range builders the
+    /// ordinary scan uses; they are pinned here, once per preflight.
+    raw_pruner: Arc<PartitionPruner>,
 }
 
 /// Whether a capture lets `mode` serve this scan from columnar artifacts.
@@ -484,14 +491,14 @@ impl SeriesScan {
         }
         // Structural eligibility errors still reject the raw path; ordinary scans cover sources
         // without columnar artifacts, so missing coverage is not an error here.
+        let ranges = self
+            .properties
+            .partitions
+            .iter()
+            .flatten()
+            .copied()
+            .collect::<Vec<_>>();
         let selection = if self.uses_columnar() {
-            let ranges = self
-                .properties
-                .partitions
-                .iter()
-                .flatten()
-                .copied()
-                .collect::<Vec<_>>();
             // Selecting walks the assignment and the published catalogs, so time it here: the
             // preparation no longer re-derives coverage.
             let _coverage_timer = crate::metrics::READ_STAGE_ELAPSED
@@ -499,17 +506,24 @@ impl SeriesScan {
                 .start_timer();
             let selection =
                 prepared::select_inputs(&self.stream_ctx, &ranges).map_err(BoxedError::new)?;
+            // The prepared reader reads the sources no selected artifact covers itself, through the
+            // same range builders the ordinary scan uses, so this pruner needs reference counts for
+            // the assignment. Repeated preflights of one scanner accumulate them, which only ever
+            // delays releasing a cached range builder the scan owns.
+            self.pruner.add_partition_ranges(&ranges);
             match mode {
                 // The raw entrypoint keeps today's all-or-nothing answer: without complete
                 // coverage `prepare_series_with_raw` declines the capture and the caller keeps
                 // the ordinary scan.
                 SeriesInputMode::Raw if !selection.all_ready => prepared::SelectedInputs::default(),
-                // The native entrypoint serves whatever subset is ready.
+                // The native entrypoint serves the whole assignment: artifacts where they apply
+                // and raw rows for the sources no selected artifact covers.
                 _ => selection,
             }
         } else {
             prepared::SelectedInputs::default()
         };
+        let raw_pruner = Arc::new(PartitionPruner::new(self.pruner.clone(), &ranges));
         let prepared_columnar = selection_serves(mode, &selection, columnar_fields_supported);
         let schema = Arc::new(SeriesSchema {
             fields: specs.into(),
@@ -578,6 +592,7 @@ impl SeriesScan {
             },
             columnar_fields_supported,
             selection,
+            raw_pruner,
         }))
     }
 
@@ -615,8 +630,8 @@ impl SeriesScan {
                 preflight.columnar_fields_supported,
             ) {
                 // Unsupported field types, or a region outside the gate: the caller keeps the
-                // ordinary scan. Readiness never causes this, because an unready native
-                // assignment prepares an empty source.
+                // ordinary scan. Readiness never causes this, because the native entry reads the
+                // sources no artifact covers instead of narrowing the answer.
                 return Ok(None);
             }
             state
@@ -625,6 +640,7 @@ impl SeriesScan {
                     preflight.selection,
                     labels,
                     preflight.raw,
+                    preflight.raw_pruner,
                     metrics,
                     mode,
                 )

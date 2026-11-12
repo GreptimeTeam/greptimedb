@@ -73,6 +73,18 @@ async fn fixture_with_format(
     format: SelectedFormat,
     experimental_series_scan_v2: bool,
 ) -> (TestEnv, MitoEngine, MitoRegionRef) {
+    fixture_with_timestamps(format, experimental_series_scan_v2, &[1000, 1000, 2000]).await
+}
+
+/// A columnar fixture whose flushed rows carry the given timestamps.
+///
+/// Distinct timestamps keep a frame read valid without dedup, which a test that reads the prepared
+/// source in append mode needs.
+async fn fixture_with_timestamps(
+    format: SelectedFormat,
+    experimental_series_scan_v2: bool,
+    timestamps: &[i64],
+) -> (TestEnv, MitoEngine, MitoRegionRef) {
     let mut env = TestEnv::with_prefix("prepared-columnar").await;
     let mut metadata = sst_region_metadata_with_encoding(PrimaryKeyEncoding::Sparse);
     metadata
@@ -84,7 +96,7 @@ async fn fixture_with_format(
         .data_type = ConcreteDataType::float64_datatype();
     let (engine, region) = crate::series_index::prepare_region_with_metadata(
         &mut env,
-        &[1000, 1000, 2000],
+        timestamps,
         MitoConfig {
             experimental_enable_series_index: true,
             experimental_series_index_format: format,
@@ -318,6 +330,16 @@ fn scan_input(
     format: SelectedFormat,
     projection: Vec<usize>,
 ) -> ScanInput {
+    scan_input_with_append(region, store, format, projection, false)
+}
+
+fn scan_input_with_append(
+    region: &MitoRegionRef,
+    store: ObjectStore,
+    format: SelectedFormat,
+    projection: Vec<usize>,
+    append_mode: bool,
+) -> ScanInput {
     let version = region.version();
     let mapper = FlatProjectionMapper::new(&version.metadata, projection).unwrap();
     ScanInput::builder(region.access_layer.clone(), mapper)
@@ -343,7 +365,30 @@ fn scan_input(
             )
             .unwrap(),
         )
+        .with_append_mode(append_mode)
         .build()
+}
+
+/// A series scan over the region's live state, so the assignment includes its memtables.
+async fn region_scan(region: &MitoRegionRef) -> SeriesScan {
+    let scan_region = crate::read::scan_region::ScanRegion::new(
+        region.version_control.current().version,
+        region.access_layer.clone(),
+        per_series_request(),
+        crate::cache::CacheStrategy::Disabled,
+    )
+    .with_series_index(Some(SeriesIndexReadContext {
+        cache_namespace: store_api::storage::FileId::random(),
+        format: SelectedFormat::Columnar,
+        store: region.series_index_store.clone().unwrap(),
+        version: region.series_index_version(),
+    }));
+    let mut scan = scan_region.series_scan().await.unwrap();
+    scan.prepare(
+        PrepareRequest::default().with_ranges(vec![scan.properties.partitions[0].clone()]),
+    )
+    .unwrap();
+    scan
 }
 
 fn rows(chunks: &[RawSeriesChunk]) -> Vec<(Vec<u8>, i64, f64)> {
@@ -1231,6 +1276,7 @@ async fn ordinal_range_batches_sample_requests_and_pushes_time_bounds() {
         raw: source.raw.clone(),
         sample_schema: source.sample_schema.clone(),
         candidates: source.candidates.clone(),
+        pruner: source.pruner.clone(),
         metrics: source.metrics.clone(),
         reservation: source.reservation.clone(),
         samples: Arc::new(
@@ -2866,6 +2912,59 @@ fn selection(scan: &SeriesScan) -> SelectedInputs {
     select_inputs(&scan.stream_ctx, &ranges).unwrap()
 }
 
+/// Asserts that the only sources no artifact covers are memtable ranges.
+fn assert_only_memtable_raw(selected: &SelectedInputs) {
+    assert!(
+        !selected.raw_sources.is_empty(),
+        "an assigned memtable is read as raw rows"
+    );
+    assert!(
+        selected
+            .raw_sources
+            .iter()
+            .all(|source| matches!(source, RawSource::Mem { .. })),
+        "a ready SST is carried by its artifact: {:?}",
+        selected.raw_sources
+    );
+}
+
+/// Reads every prepared ordinal of `source` as raw chunks.
+async fn prepared_chunks(source: &Arc<dyn PreparedSeriesSource>) -> Vec<RawSeriesChunk> {
+    source
+        .read_series(0..source.num_series())
+        .unwrap()
+        .try_collect::<Vec<_>>()
+        .await
+        .unwrap()
+}
+
+/// `(labels, time, value)` triples of the chunks, ordered by labels and then time, so a check can
+/// tell two series apart even when they share one `(table_id, tsid)`.
+fn labelled_rows(chunks: &[RawSeriesChunk]) -> Vec<(Vec<String>, i64, f64)> {
+    let mut rows = Vec::new();
+    for chunk in chunks {
+        let labels = chunk
+            .metric
+            .as_ref()
+            .map(|metric| {
+                metric
+                    .tags()
+                    .iter()
+                    .map(|tag| format!("{}={}", tag.name, tag.value))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        for index in 0..chunk.time.len() {
+            let SampleRef::Float(value) = chunk.fields.get(0).unwrap().sample(index) else {
+                panic!("expected float");
+            };
+            rows.push((labels.clone(), chunk.time.timestamp(index).unwrap(), value));
+        }
+    }
+    rows.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+    rows
+}
+
 /// Reads every prepared ordinal of `source` and returns its samples ordered by time.
 async fn prepared_samples(source: &Arc<dyn PreparedSeriesSource>) -> Vec<(i64, f64)> {
     let mut samples = samples(
@@ -3059,6 +3158,291 @@ async fn native_preparation_skips_an_assigned_memtable() {
             SeriesOrdering::KeyThenTime
         )
         .await
+    );
+    engine.stop().await.unwrap();
+}
+
+/// Nothing is published here, so the native entry has no artifact at all; it still answers with
+/// every assigned source, including the memtable-only series.
+#[tokio::test]
+async fn native_scan_serves_a_series_that_exists_only_in_the_memtable() {
+    let (_env, engine, region) = fixture().await;
+    // A second series lives in the memtable only: no SST holds it, so no artifact can.
+    write_with_tags(&engine, &region, 1, 3000, Some(4.0), &["a", "y"]).await;
+    let scan = region_scan(&region).await;
+    let selected = selection(&scan);
+    assert!(selected.ready_files.is_empty());
+    assert!(selected.series_indexes.is_empty());
+    // The three flushed SSTs and the assigned memtable are all read as raw sources.
+    assert_eq!(
+        3,
+        selected
+            .raw_sources
+            .iter()
+            .filter(|source| matches!(source, RawSource::File { .. }))
+            .count()
+    );
+    assert!(
+        selected
+            .raw_sources
+            .iter()
+            .any(|source| matches!(source, RawSource::Mem { .. })),
+        "an assigned memtable is part of the answer, not a reason to narrow it"
+    );
+
+    let binding = labels(scan.metadata());
+    let ctx = QueryScanContext::default();
+    let metrics = ExecutionPlanMetricsSet::new();
+    let source = scan
+        .prepare_series(&ctx, &metrics, &binding)
+        .await
+        .unwrap()
+        .expect("the native entry serves the whole assignment");
+    assert_eq!(2, source.num_series());
+    assert_eq!(
+        vec![
+            (
+                vec!["tag_0=a".to_string(), "tag_1=x".to_string()],
+                1000,
+                1.0
+            ),
+            (
+                vec!["tag_0=a".to_string(), "tag_1=x".to_string()],
+                2000,
+                1.0
+            ),
+            (
+                vec!["tag_0=a".to_string(), "tag_1=y".to_string()],
+                3000,
+                4.0
+            ),
+        ],
+        labelled_rows(&prepared_chunks(&source).await)
+    );
+    engine.stop().await.unwrap();
+}
+
+/// A memtable row at a new timestamp belongs to a series an artifact already serves, so the
+/// artifact is read for its own rows and the memtable supplies the rest.
+#[tokio::test]
+async fn native_scan_serves_a_memtable_row_of_an_artifact_series() {
+    let (_env, engine, region) = fixture().await;
+    build(&engine, &region).await;
+    // This row is newer than the published artifacts and only exists in the memtable.
+    write(&engine, &region, 0, 3000, Some(4.0)).await;
+    let scan = region_scan(&region).await;
+    let selected = selection(&scan);
+    assert_eq!(3, selected.ready_files.len());
+    assert_eq!(1, selected.series_indexes.len());
+    // Every assigned SST is covered by the selected artifact, so only the memtable is raw.
+    assert_only_memtable_raw(&selected);
+
+    let binding = labels(scan.metadata());
+    let ctx = QueryScanContext::default();
+    let metrics = ExecutionPlanMetricsSet::new();
+    let source = scan
+        .prepare_series(&ctx, &metrics, &binding)
+        .await
+        .unwrap()
+        .expect("the native entry serves the whole assignment");
+    assert_eq!(1, source.num_series());
+    assert_eq!(
+        vec![(1000, 1.0), (2000, 1.0), (3000, 4.0)],
+        prepared_samples(&source).await
+    );
+    engine.stop().await.unwrap();
+}
+
+/// A delete in the memtable removes a row a published artifact contains, and an overwrite at
+/// another timestamp returns the new value: artifact rows are not final.
+#[tokio::test]
+async fn native_scan_applies_memtable_deletes_and_overwrites_to_artifact_rows() {
+    let (_env, engine, region) = fixture().await;
+    build(&engine, &region).await;
+    // The artifacts carry (1000, 1.0) and (2000, 1.0) for this series.
+    write(&engine, &region, 0, 1000, None).await;
+    write(&engine, &region, 0, 2000, Some(9.0)).await;
+    let scan = region_scan(&region).await;
+    let selected = selection(&scan);
+    assert_only_memtable_raw(&selected);
+
+    let binding = labels(scan.metadata());
+    let ctx = QueryScanContext::default();
+    let metrics = ExecutionPlanMetricsSet::new();
+    let source = scan
+        .prepare_series(&ctx, &metrics, &binding)
+        .await
+        .unwrap()
+        .expect("the native entry serves the whole assignment");
+    assert_eq!(
+        vec![(2000, 9.0)],
+        prepared_samples(&source).await,
+        "the memtable delete must remove the artifact row and the overwrite must win"
+    );
+    engine.stop().await.unwrap();
+}
+
+/// A selected grouped artifact already carries the rows of every source it lists, including a
+/// source with no covering series index. That source must not also be read as raw rows, in query
+/// or append mode.
+#[tokio::test]
+async fn native_scan_reads_a_source_a_grouped_artifact_already_carries_once() {
+    // Distinct flushed timestamps keep the append-mode frame read valid: that mode has no dedup,
+    // so two artifact rows at one timestamp would break the strictly increasing timestamp contract
+    // for reasons unrelated to source coverage.
+    let (_env, engine, region) =
+        fixture_with_timestamps(SelectedFormat::Columnar, false, &[1000, 2000]).await;
+    // A later bucket in the same UTC day shares the day's grouped sample artifact with the older
+    // sources.
+    write(&engine, &region, 0, 200_000, Some(2.0)).await;
+    flush_region(&engine, region.region_id, None).await;
+    build(&engine, &region).await;
+    region.series_index_version_control.publish(Arc::default());
+    build(&engine, &region).await;
+    let unindexed = file_id_at(&region, 200_000);
+
+    let mut input = scan_input(
+        &region,
+        region.series_index_store.clone().unwrap(),
+        SelectedFormat::Columnar,
+        (0..region.version().metadata.column_metadatas.len()).collect(),
+    );
+    // A source whose sequence the published bucket cannot prove is not covered by it, so this
+    // source has no covering series index while the grouped artifact still lists it.
+    let mut files = input.files.clone();
+    for file in &mut files {
+        if file.file_id().file_id() == unindexed {
+            let mut meta = file.meta_ref().clone();
+            meta.sequence = None;
+            *file = crate::sst::file::FileHandle::new(meta, region.file_purger.clone());
+        }
+    }
+    input.files = files;
+    let mut scan = SeriesScan::new(input, false);
+    scan.prepare(
+        PrepareRequest::default().with_ranges(vec![scan.properties.partitions[0].clone()]),
+    )
+    .unwrap();
+    let selected = selection(&scan);
+    assert_eq!(2, selected.ready_files.len());
+    assert_eq!(1, selected.sample_artifacts.len());
+    // The partition is by artifact source coverage, never by readiness: the unready source is
+    // already carried, so reading it again would duplicate every one of its rows.
+    assert!(
+        !selected.raw_sources.iter().any(|source| match source {
+            RawSource::File { index } => {
+                scan.stream_ctx.input.files[*index].file_id().file_id() == unindexed
+            }
+            RawSource::Mem { .. } => false,
+        }),
+        "a selected grouped artifact already carries this source"
+    );
+    assert!(selected.raw_sources.is_empty());
+
+    let binding = labels(scan.metadata());
+    let ctx = QueryScanContext::default();
+    let metrics = ExecutionPlanMetricsSet::new();
+    let source = scan
+        .prepare_series(&ctx, &metrics, &binding)
+        .await
+        .unwrap()
+        .expect("the covering source keeps the grouped artifact eligible");
+    let query = prepared_samples(&source).await;
+    assert_eq!(vec![(1000, 1.0), (2000, 1.0), (200_000, 2.0)], query);
+
+    // Append mode has no dedup to repair a duplicated source, so the same partition must hold
+    // there too. The native entry declines append mode at planning, so the test drives the
+    // prepared source itself.
+    let append_ctx = Arc::new(StreamContext::seq_scan_ctx(scan_input_with_append(
+        &region,
+        region.series_index_store.clone().unwrap(),
+        SelectedFormat::Columnar,
+        (0..region.version().metadata.column_metadatas.len()).collect(),
+        true,
+    )));
+    let append_ranges = append_ctx.partition_ranges();
+    let append_selection = select_inputs(&append_ctx, &append_ranges).unwrap();
+    assert_eq!(selected.raw_sources, append_selection.raw_sources);
+    let metrics = crate::read::series_scan::new_partition_metrics(
+        &append_ctx,
+        false,
+        &ExecutionPlanMetricsSet::new(),
+        0,
+        &crate::read::scan_util::PartitionMetricsList::default(),
+    );
+    let preflight = scan
+        .prepare_raw_scan(&binding, SeriesInputMode::Native)
+        .unwrap()
+        .expect("a gated native scan has a preflight");
+    let append_source = ColumnarPreparedSource::prepare(
+        append_ctx,
+        append_selection,
+        binding.clone(),
+        preflight.raw,
+        preflight.raw_pruner,
+        metrics,
+    )
+    .await
+    .unwrap();
+    let append_source: Arc<dyn PreparedSeriesSource> = Arc::new(append_source);
+    assert_eq!(
+        query,
+        prepared_samples(&append_source).await,
+        "append mode has no dedup to repair a source that is read twice"
+    );
+    engine.stop().await.unwrap();
+}
+
+/// Two series can share one `(table_id, tsid)` because `tsid` is a hash. Keeping them apart must
+/// not depend on which source each comes from.
+#[tokio::test]
+async fn native_scan_keeps_tsid_collisions_distinct_across_artifact_and_memtable() {
+    let (_env, engine, region) = fixture().await;
+    build(&engine, &region).await;
+    let metadata = region.version().metadata.clone();
+    // A second series with the same table id and tsid as the artifact series, told apart only by
+    // its labels, and written so that it exists in the memtable alone.
+    write_primary_key(
+        &engine,
+        &region,
+        new_sparse_primary_key(&["a", "y"], &metadata, 10, 0),
+        3000,
+        Some(5.0),
+    )
+    .await;
+    let scan = region_scan(&region).await;
+    let selected = selection(&scan);
+    assert_eq!(3, selected.ready_files.len());
+    assert_only_memtable_raw(&selected);
+
+    let binding = labels(scan.metadata());
+    let ctx = QueryScanContext::default();
+    let metrics = ExecutionPlanMetricsSet::new();
+    let source = scan
+        .prepare_series(&ctx, &metrics, &binding)
+        .await
+        .unwrap()
+        .expect("the native entry serves the whole assignment");
+    assert_eq!(2, source.num_series());
+    assert_eq!(
+        vec![
+            (
+                vec!["tag_0=a".to_string(), "tag_1=x".to_string()],
+                1000,
+                1.0
+            ),
+            (
+                vec!["tag_0=a".to_string(), "tag_1=x".to_string()],
+                2000,
+                1.0
+            ),
+            (
+                vec!["tag_0=a".to_string(), "tag_1=y".to_string()],
+                3000,
+                5.0
+            ),
+        ],
+        labelled_rows(&prepared_chunks(&source).await)
     );
     engine.stop().await.unwrap();
 }

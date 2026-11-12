@@ -56,6 +56,7 @@ use crate::series_index::{
     METRIC_SERIES_ID_BATCH_SIZE, MetricSeriesId, MetricSeriesIdStream, SeriesIndexFileHandle,
     SeriesIndexReadContext, SeriesIndexSearcher,
 };
+use crate::sst::file::FileTimeRange;
 use crate::sst::parquet::DEFAULT_READ_BATCH_SIZE;
 use crate::sst::parquet::format::PrimaryKeyArray;
 use crate::sst::parquet::prefilter::{
@@ -420,20 +421,13 @@ impl SeriesCandidateRangeBuilder {
         index: RowGroupIndex,
         time_range: crate::sst::file::FileTimeRange,
     ) -> Result<Option<BoxedRecordBatchStream>> {
-        let metadata = self.stream_ctx.input.region_metadata().clone();
         if self.stream_ctx.is_mem_range_index(index) {
-            let raw = scan_flat_mem_ranges(
-                self.stream_ctx.clone(),
-                self.part_metrics.clone(),
+            return Ok(Some(mem_primary_key_stream(
+                &self.stream_ctx,
+                &self.part_metrics,
                 index,
                 time_range,
-            );
-            let filter = build_primary_key_filter(
-                &metadata,
-                None,
-                self.stream_ctx.input.predicate_group().predicate(),
-            );
-            return Ok(Some(candidate_primary_key_stream(Box::pin(raw), filter)));
+            )));
         }
 
         if self.stream_ctx.is_file_range_index(index) {
@@ -443,67 +437,19 @@ impl SeriesCandidateRangeBuilder {
                 // eviction; it does not allow caching at zero references.
                 return Ok(None);
             }
-            let file = self.stream_ctx.input.file_from_index(index);
-            let predicate = self.stream_ctx.input.predicate_for_file(file);
             if self
                 .partition_pruner
                 .try_skip_manifest_pruned_file_range(index, &self.part_metrics)
             {
                 return Ok(None);
             }
-            let mut reader_metrics = ReaderMetrics {
-                filter_metrics: new_filter_metrics(self.part_metrics.explain_verbose()),
-                ..Default::default()
-            };
-            let ranges = self
-                .partition_pruner
-                .build_file_ranges(index, &self.part_metrics, &mut reader_metrics)
-                .await?;
-            self.part_metrics.inc_num_file_ranges(ranges.len());
-            self.part_metrics
-                .merge_reader_metrics(&reader_metrics, None);
-
-            // Build a fresh encoded-PK filter from this SST's metadata so schema
-            // compatibility is evaluated independently for each file.
-            let filter = ranges.first().and_then(|range| {
-                build_primary_key_filter(
-                    range.region_metadata(),
-                    Some(metadata.as_ref()),
-                    predicate.as_ref(),
-                )
-            });
-            let part_metrics = self.part_metrics.clone();
-            let raw = Box::pin(try_stream! {
-                let fetch_metrics = part_metrics
-                    .explain_verbose()
-                    .then(|| Arc::new(ParquetFetchMetrics::default()));
-                let mut reader_metrics = ReaderMetrics {
-                    fetch_metrics: fetch_metrics.clone(),
-                    ..Default::default()
-                };
-                for range in ranges {
-                    let build_start = Instant::now();
-                    let Some(mut reader) = range
-                        .primary_key_reader(fetch_metrics.as_deref())
-                        .await?
-                    else {
-                        continue;
-                    };
-                    reader_metrics.build_cost += build_start.elapsed();
-
-                    let scan_start = Instant::now();
-                    while let Some(batch) = reader.try_next().await? {
-                        reader_metrics.num_record_batches += 1;
-                        reader_metrics.num_batches += 1;
-                        reader_metrics.num_rows += batch.num_rows();
-                        yield batch;
-                    }
-                    reader_metrics.scan_cost += scan_start.elapsed();
-                }
-                reader_metrics.observe_rows("candidate_series");
-                part_metrics.merge_reader_metrics(&reader_metrics, None);
-            });
-            return Ok(Some(candidate_primary_key_stream(raw, filter)));
+            return file_primary_key_stream(
+                &self.stream_ctx,
+                &self.part_metrics,
+                index,
+                &self.partition_pruner,
+            )
+            .await;
         }
 
         UnexpectedSnafu {
@@ -514,6 +460,90 @@ impl SeriesCandidateRangeBuilder {
         }
         .fail()
     }
+}
+
+/// Reads only the encoded primary keys of one assigned memtable range.
+///
+/// The memtable reader yields ordinary flat batches, and the payload is projected away
+/// immediately: the stream carries one binary key column, so a caller can discover series without
+/// retaining any sample data.
+pub(crate) fn mem_primary_key_stream(
+    stream_ctx: &Arc<StreamContext>,
+    part_metrics: &PartitionMetrics,
+    index: RowGroupIndex,
+    time_range: FileTimeRange,
+) -> BoxedRecordBatchStream {
+    let metadata = stream_ctx.input.region_metadata().clone();
+    let raw = scan_flat_mem_ranges(stream_ctx.clone(), part_metrics.clone(), index, time_range);
+    let filter = build_primary_key_filter(
+        &metadata,
+        None,
+        stream_ctx.input.predicate_group().predicate(),
+    );
+    candidate_primary_key_stream(Box::pin(raw), filter)
+}
+
+/// Reads only the encoded primary keys of one assigned SST.
+pub(crate) async fn file_primary_key_stream(
+    stream_ctx: &Arc<StreamContext>,
+    part_metrics: &PartitionMetrics,
+    index: RowGroupIndex,
+    partition_pruner: &PartitionPruner,
+) -> Result<Option<BoxedRecordBatchStream>> {
+    let metadata = stream_ctx.input.region_metadata().clone();
+    let file = stream_ctx.input.file_from_index(index);
+    let predicate = stream_ctx.input.predicate_for_file(file);
+    let mut reader_metrics = ReaderMetrics {
+        filter_metrics: new_filter_metrics(part_metrics.explain_verbose()),
+        ..Default::default()
+    };
+    let ranges = partition_pruner
+        .build_file_ranges(index, part_metrics, &mut reader_metrics)
+        .await?;
+    part_metrics.inc_num_file_ranges(ranges.len());
+    part_metrics.merge_reader_metrics(&reader_metrics, None);
+
+    // Build a fresh encoded-PK filter from this SST's metadata so schema
+    // compatibility is evaluated independently for each file.
+    let filter = ranges.first().and_then(|range| {
+        build_primary_key_filter(
+            range.region_metadata(),
+            Some(metadata.as_ref()),
+            predicate.as_ref(),
+        )
+    });
+    let part_metrics = part_metrics.clone();
+    let raw = Box::pin(try_stream! {
+        let fetch_metrics = part_metrics
+            .explain_verbose()
+            .then(|| Arc::new(ParquetFetchMetrics::default()));
+        let mut reader_metrics = ReaderMetrics {
+            fetch_metrics: fetch_metrics.clone(),
+            ..Default::default()
+        };
+        for range in ranges {
+            let build_start = Instant::now();
+            let Some(mut reader) = range
+                .primary_key_reader(fetch_metrics.as_deref())
+                .await?
+            else {
+                continue;
+            };
+            reader_metrics.build_cost += build_start.elapsed();
+
+            let scan_start = Instant::now();
+            while let Some(batch) = reader.try_next().await? {
+                reader_metrics.num_record_batches += 1;
+                reader_metrics.num_batches += 1;
+                reader_metrics.num_rows += batch.num_rows();
+                yield batch;
+            }
+            reader_metrics.scan_cost += scan_start.elapsed();
+        }
+        reader_metrics.observe_rows("candidate_series");
+        part_metrics.merge_reader_metrics(&reader_metrics, None);
+    });
+    Ok(Some(candidate_primary_key_stream(raw, filter)))
 }
 
 pub(crate) fn is_sparse_metric_metadata(metadata: &store_api::metadata::RegionMetadataRef) -> bool {
@@ -552,7 +582,7 @@ fn primary_key_schema() -> SchemaRef {
 }
 
 /// Filters a source by encoded-primary-key predicates and emits one binary row per local key.
-fn candidate_primary_key_stream(
+pub(crate) fn candidate_primary_key_stream(
     mut input: BoxedRecordBatchStream,
     mut filter: Option<CachedPrimaryKeyFilter>,
 ) -> BoxedRecordBatchStream {

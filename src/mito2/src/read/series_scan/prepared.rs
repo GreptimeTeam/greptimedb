@@ -56,6 +56,8 @@ use crate::error::{
     ComputeArrowSnafu, Error, InvalidRecordBatchSnafu, NewRecordBatchSnafu, Result,
 };
 use crate::read::BoxedRecordBatchStream;
+use crate::read::pruner::PartitionPruner;
+use crate::read::range::RowGroupIndex;
 use crate::read::scan_region::StreamContext;
 use crate::read::scan_util::PartitionMetrics;
 use crate::read::seq_scan::SeqScan;
@@ -67,6 +69,7 @@ use crate::series_index::format::{
 };
 use crate::series_index::identity::ExactSeriesKey;
 use crate::series_index::{MetricSeriesId, ROW_COUNT_COLUMN};
+use crate::sst::file::FileTimeRange;
 
 fn invalid(reason: impl Into<String>) -> Error {
     InvalidRecordBatchSnafu {
@@ -88,12 +91,14 @@ impl Preparation {
     /// caller may only reuse it when its label binding and its selection are identical: a raw
     /// all-ready capture and a native ready-subset capture describe the same inputs exactly when
     /// `all_ready` holds, and a different capture means a different assignment.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn prepare(
         &self,
         context: Arc<StreamContext>,
         selection: SelectedInputs,
         labels: RawLabelSource,
         raw: RawScanPreparation,
+        pruner: Arc<PartitionPruner>,
         metrics: PartitionMetrics,
         mode: SeriesInputMode,
     ) -> std::result::Result<Arc<dyn PreparedSeriesSource>, BoxedError> {
@@ -107,7 +112,7 @@ impl Preparation {
         let result = self
             .source
             .get_or_init(|| async {
-                ColumnarPreparedSource::prepare(context, selection, labels, raw, metrics)
+                ColumnarPreparedSource::prepare(context, selection, labels, raw, pruner, metrics)
                     .await
                     .map(Arc::new)
                     .map_err(Arc::new)
@@ -166,8 +171,9 @@ fn same_labels(left: &RawLabelSource, right: &RawLabelSource) -> bool {
 ///
 /// Selection only decides which assigned sources and which artifacts participate. It never filters
 /// rows: every live row of a selected series is returned, including rows of an eligible grouped
-/// sample artifact whose own source SST has no covering series index. Readiness governs source
-/// selection and series discovery, never row-level filtering.
+/// sample artifact whose own source SST has no covering series index. Readiness governs which
+/// artifacts are used, never which rows are visible: whatever no selected artifact covers is read
+/// as raw rows and merged with the artifact rows.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct SelectedInputs {
     /// Indices into the scanner's assigned SST list whose columnar artifacts are complete.
@@ -176,9 +182,36 @@ pub(crate) struct SelectedInputs {
     pub(crate) series_indexes: HashSet<FileId>,
     /// Eligible sample artifacts covering at least one ready SST.
     pub(crate) sample_artifacts: HashSet<FileId>,
+    /// Assigned sources no selected artifact carries rows for, in assignment order.
+    ///
+    /// Their rows are read by the ordinary flat readers and merged with the artifact rows, so an
+    /// assigned memtable or an unbuilt SST narrows which artifacts are used, never the answer.
+    pub(crate) raw_sources: Vec<RawSource>,
     /// Whether every assigned source is columnar-ready, which is the raw path's all-or-nothing
     /// answer. Vacuously `true` for an empty assignment.
     pub(crate) all_ready: bool,
+}
+
+/// One assigned source whose rows no selected artifact carries.
+///
+/// The prepared reader reads these as raw flat batches, so they keep their own sequence and op
+/// type and take part in the final merge and dedup exactly like an ordinary scan.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RawSource {
+    /// An assigned memtable range with the inclusive time bound of its assignment.
+    Mem {
+        /// Index into the pinned memtable list.
+        index: usize,
+        /// Row group of the memtable, or a negative value for all of them.
+        row_group_index: i64,
+        /// Inclusive time bound of the partition range that assigned this source.
+        time_range: FileTimeRange,
+    },
+    /// An assigned SST file. Every assignment covers all of the file's row groups.
+    File {
+        /// Index into the pinned SST list.
+        index: usize,
+    },
 }
 
 /// Validates the pinned assignments and coverage without opening artifacts.
@@ -210,6 +243,7 @@ pub(crate) fn select_inputs(
         .as_ref()
         .ok_or_else(|| invalid("missing columnar index context"))?;
     let mut assigned_memtable = false;
+    let mut mem_ranges = Vec::<(RowGroupIndex, FileTimeRange)>::new();
     let mut files = BTreeMap::<usize, HashSet<i64>>::new();
     for range in ranges {
         let range = context
@@ -219,7 +253,18 @@ pub(crate) fn select_inputs(
         for row_group in &range.row_group_indices {
             if context.is_mem_range_index(*row_group) {
                 // Artifacts exist for flushed SSTs only, and a memtable is never converted here.
+                // The assigned range is still read: no artifact carries its rows.
                 assigned_memtable = true;
+                match mem_ranges.iter_mut().find(|(index, _)| index == row_group) {
+                    // One memtable row group may be assigned to more than one partition range.
+                    // Widening the remembered bound keeps every assigned row reachable, and the
+                    // merge visibility filter still applies the scan's own time range.
+                    Some((_, bound)) => {
+                        bound.0 = bound.0.min(range.time_range.0);
+                        bound.1 = bound.1.max(range.time_range.1);
+                    }
+                    None => mem_ranges.push((*row_group, range.time_range)),
+                }
                 continue;
             }
             if !context.is_file_range_index(*row_group) {
@@ -307,6 +352,34 @@ pub(crate) fn select_inputs(
             }
         }
     }
+    // Partition the assignment by artifact *source* coverage, never by readiness: a selected
+    // grouped artifact already carries the rows of every source it lists, and a source it lists
+    // need not have a covering series index of its own. Reading such a source again would emit
+    // each of its rows twice, which append mode cannot deduplicate. Everything no selected
+    // artifact covers is read as raw rows instead.
+    let carried: Vec<_> = index
+        .version
+        .samples
+        .iter()
+        .filter(|(id, _)| selected.sample_artifacts.contains(id))
+        .map(|(_, handle)| handle.entry().clone())
+        .collect();
+    selected.raw_sources = mem_ranges
+        .into_iter()
+        .map(|(index, time_range)| RawSource::Mem {
+            index: index.index,
+            row_group_index: index.row_group_index,
+            time_range,
+        })
+        .collect();
+    for file_idx in files.keys() {
+        let id = input.files[*file_idx].file_id().file_id();
+        if !carried.iter().any(|entry| entry.covers(id)) {
+            selected
+                .raw_sources
+                .push(RawSource::File { index: *file_idx });
+        }
+    }
     Ok(selected)
 }
 
@@ -378,6 +451,197 @@ struct Candidate {
     metric: Option<SeriesLabels>,
 }
 
+impl Candidate {
+    /// Builds a candidate from an exact key alone, without reading any sample payload.
+    ///
+    /// Labels come from the key itself: the sparse key encodes every non-null label, so a source
+    /// whose series are known only by their keys still yields the same identity, the same
+    /// region-qualified output key, and the same labels an artifact row would carry.
+    fn from_key(
+        exact: &ExactSeriesKey,
+        metadata: &store_api::metadata::RegionMetadataRef,
+        labels: &RawLabelSource,
+        direct_labels: bool,
+        reservation: &MemoryReservation,
+    ) -> Result<Self> {
+        let mut offsets = mito_codec::row_converter::SparseOffsetsCache::new();
+        let mut view = mito_codec::row_converter::sparse::SparsePrimaryKeyView::new(
+            exact.bytes(),
+            &mut offsets,
+        )
+        .map_err(|e| invalid(e.to_string()))?;
+        let mut buffer = Vec::new();
+        let mut tags = HashMap::new();
+        for column in &metadata.column_metadatas {
+            if column.semantic_type != SemanticType::Tag
+                || ReservedColumnId::is_reserved(column.column_id)
+            {
+                continue;
+            }
+            let value = view
+                .label(column.column_id, &mut buffer)
+                .map_err(|e| invalid(e.to_string()))?;
+            tags.insert(column.column_id, value.map(str::to_owned));
+        }
+        // `merge_key` is always the exact key bytes. Explicit-label chunks keep the
+        // region-qualified form as their `key`, exactly like a discovered artifact row.
+        let (key, merge_key) = if direct_labels {
+            let mut qualified = Vec::with_capacity(8 + exact.bytes().len());
+            qualified.extend_from_slice(&metadata.region_id.as_u64().to_be_bytes());
+            qualified.extend_from_slice(exact.bytes());
+            let key = Buffer::from(qualified);
+            let merge_key = key.slice_with_length(8, exact.bytes().len());
+            (key, merge_key)
+        } else {
+            let key = Buffer::from(exact.bytes().to_vec());
+            (key.clone(), key)
+        };
+        let metric = if direct_labels {
+            let RawLabelSource::PrimaryKey {
+                metric_name,
+                logical_tags,
+                ..
+            } = labels
+            else {
+                return Err(invalid("expected bound labels"));
+            };
+            let mut values = Vec::with_capacity(logical_tags.len());
+            for tag in logical_tags.iter() {
+                if let Some(Some(value)) = tags.get(&tag.column_id) {
+                    values.push(datatypes::series::Label {
+                        name: tag.name.clone(),
+                        value: Arc::from(value.as_str()),
+                    });
+                }
+            }
+            Some(
+                SeriesLabels::try_new(Some(metric_name.clone()), values)
+                    .map_err(|e| invalid(e.to_string()))?,
+            )
+        } else {
+            None
+        };
+        let bytes = key.len()
+            + values_size(&tags)
+            + std::mem::size_of::<Candidate>()
+            + metric
+                .as_ref()
+                .map(|metric| {
+                    metric
+                        .tags()
+                        .iter()
+                        .map(|tag| tag.name.len() + tag.value.len())
+                        .sum::<usize>()
+                })
+                .unwrap_or(0)
+            + 64;
+        reservation
+            .try_grow(bytes)
+            .context(crate::error::ScanMemoryExhaustedSnafu)?;
+        Ok(Self {
+            id: exact.id(),
+            key,
+            merge_key,
+            tags,
+            metric,
+        })
+    }
+}
+
+/// Estimates the memory a tag map retains, matching the charge the artifact path pays.
+fn values_size(values: &HashMap<u32, Option<String>>) -> usize {
+    values.values().flatten().map(String::len).sum::<usize>()
+        + values.capacity() * (std::mem::size_of::<(u32, Option<String>)>() + 16)
+}
+
+/// The pinned index of one raw source, with every row group of its assignment.
+fn raw_source_index(context: &StreamContext, source: &RawSource) -> RowGroupIndex {
+    match source {
+        // Memtable indices are already indices into the pinned source list.
+        RawSource::Mem {
+            index,
+            row_group_index,
+            ..
+        } => RowGroupIndex {
+            index: *index,
+            row_group_index: *row_group_index,
+        },
+        // A validated assignment always covers every row group of an SST.
+        RawSource::File { index } => RowGroupIndex {
+            index: context.input.num_memtables() + *index,
+            row_group_index: -1,
+        },
+    }
+}
+
+/// Discovers the exact keys that exist only in the sources no selected artifact covers.
+///
+/// Discovery reads key columns only: the payload of these sources is read later, inside
+/// [`ColumnarPreparedSource::read_series`], so preparation never retains sample data and every
+/// ordinal read stays independent. The keys are the SST's own sparse encoding, so a series found
+/// here has the same identity, ordering, and labels an artifact discovery would give it, and one
+/// found by both is still a single candidate.
+#[allow(clippy::too_many_arguments)]
+async fn discover_raw_series(
+    context: &Arc<StreamContext>,
+    selection: &SelectedInputs,
+    pruner: &Arc<PartitionPruner>,
+    metrics: &PartitionMetrics,
+    labels: &RawLabelSource,
+    direct_labels: bool,
+    reservation: &MemoryReservation,
+    candidates: &mut BTreeMap<ExactSeriesKey, Candidate>,
+    preparation_metrics: &mut crate::metrics::ColumnarReadMetrics,
+) -> Result<()> {
+    let metadata = context.input.region_metadata();
+    let mut offsets = mito_codec::row_converter::SparseOffsetsCache::new();
+    for source in &selection.raw_sources {
+        let index = raw_source_index(context, source);
+        let keys: Option<BoxedRecordBatchStream> = match source {
+            RawSource::Mem { time_range, .. } => {
+                Some(crate::read::series_candidate::mem_primary_key_stream(
+                    context,
+                    metrics,
+                    index,
+                    *time_range,
+                ))
+            }
+            RawSource::File { .. } => {
+                crate::read::series_candidate::file_primary_key_stream(
+                    context, metrics, index, pruner,
+                )
+                .await?
+            }
+        };
+        let Some(mut keys) = keys else {
+            continue;
+        };
+        let mut discovered = 0_u64;
+        while let Some(batch) = keys.try_next().await? {
+            let array = batch
+                .column(0)
+                .as_any()
+                .downcast_ref::<BinaryArray>()
+                .ok_or_else(|| invalid("raw series discovery is not a binary key stream"))?;
+            for key in array.iter().flatten() {
+                if candidates.contains_key(key) {
+                    continue;
+                }
+                let exact = ExactSeriesKey::from_sparse_key(key, &mut offsets)?;
+                let candidate =
+                    Candidate::from_key(&exact, metadata, labels, direct_labels, reservation)?;
+                candidates.insert(exact, candidate);
+                discovered += 1;
+            }
+        }
+        *preparation_metrics
+            .counts
+            .entry("prepare_raw_discovered_series")
+            .or_default() += discovered;
+    }
+    Ok(())
+}
+
 struct ColumnarPreparedSource {
     context: Arc<StreamContext>,
     /// Inputs this source was built from; a shared cache is only reusable for an equal selection.
@@ -387,6 +651,8 @@ struct ColumnarPreparedSource {
     sample_schema: Option<SchemaRef>,
     candidates: Arc<Vec<Candidate>>,
     samples: Arc<Vec<Arc<dyn SamplesFormatReader>>>,
+    /// Builds the file ranges of the sources no selected artifact covers.
+    pruner: Arc<PartitionPruner>,
     metrics: PartitionMetrics,
     // Readers retain this reservation with the candidate set.
     reservation: Arc<MemoryReservation>,
@@ -403,6 +669,7 @@ impl ColumnarPreparedSource {
         selection: SelectedInputs,
         labels: RawLabelSource,
         raw: RawScanPreparation,
+        pruner: Arc<PartitionPruner>,
         metrics: PartitionMetrics,
     ) -> Result<Self> {
         let _prepare_timer = crate::metrics::READ_STAGE_ELAPSED
@@ -692,11 +959,8 @@ impl ColumnarPreparedSource {
                     };
                     // The exact key is stored once: `merge_key` is a view of `key`, so the
                     // reservation charges the single key allocation the candidate retains.
-                    let bytes = key.len()
-                        + values.values().flatten().map(String::len).sum::<usize>()
-                        + values.capacity() * (std::mem::size_of::<(u32, Option<String>)>() + 16)
-                        + std::mem::size_of::<Candidate>()
-                        + 64;
+                    let bytes =
+                        key.len() + values_size(&values) + std::mem::size_of::<Candidate>() + 64;
                     reservation
                         .try_grow(bytes)
                         .map_err(|e| invalid(e.to_string()))?;
@@ -747,6 +1011,26 @@ impl ColumnarPreparedSource {
                 preparation_metrics.add_elapsed("columnar_prepare_candidates", started.elapsed());
             }
         }
+        // Series that exist only in a source no artifact covers have no series index to be
+        // discovered from, so their keys are read from the uncovered sources themselves. This is
+        // key-only discovery: the payload of those sources is read inside `read_series`, so the
+        // ordinal set stays complete and stable while the source retains no sample data.
+        if !selection.raw_sources.is_empty() {
+            let started = Instant::now();
+            discover_raw_series(
+                &context,
+                &selection,
+                &pruner,
+                &metrics,
+                &labels,
+                direct_labels,
+                &reservation,
+                &mut candidates,
+                &mut preparation_metrics,
+            )
+            .await?;
+            preparation_metrics.add_elapsed("columnar_prepare_raw_series", started.elapsed());
+        }
         let started = Instant::now();
         preparation_metrics
             .counts
@@ -765,6 +1049,7 @@ impl ColumnarPreparedSource {
             sample_schema,
             candidates: Arc::new(candidates),
             samples: Arc::new(samples),
+            pruner,
             metrics,
             reservation: Arc::new(reservation),
         })
@@ -801,6 +1086,8 @@ impl PreparedSeriesSource for ColumnarPreparedSource {
         let samples = self.samples.clone();
         let metrics = self.metrics.clone();
         let reservation = self.reservation.clone();
+        let raw_sources = self.selection.raw_sources.clone();
+        let pruner = self.pruner.clone();
         let stream = async_stream::try_stream! {
             let _reservation = reservation;
             if range.is_empty() { return; }
@@ -869,6 +1156,54 @@ impl PreparedSeriesSource for ColumnarPreparedSource {
                         let bytes = flat.get_array_memory_size();
                         reservation.try_grow(bytes).context(crate::error::ScanMemoryExhaustedSnafu)?;
                         yield flat;
+                        reservation.shrink(bytes);
+                    }
+                }));
+            }
+            // Rows of the sources no artifact covers join the same merge as the artifact samples.
+            // They keep their own sequence and op type, so a memtable update or delete still
+            // applies to an artifact row and the final dedup decides visibility.
+            for source in raw_sources.iter() {
+                let candidates = candidates.clone();
+                let range = range.clone();
+                let context = context.clone();
+                let sample_schema = sample_schema.clone();
+                let pruner = pruner.clone();
+                let metrics = metrics.clone();
+                let source = *source;
+                sources.push(Box::pin(async_stream::try_stream! {
+                    let reservation = MemoryConsumer::new("ColumnarRawSource").register(&context.input.scan_memory_pool);
+                    let index = raw_source_index(&context, &source);
+                    let mut raw: BoxedRecordBatchStream = match source {
+                        RawSource::Mem { time_range, .. } => Box::pin(
+                            crate::read::scan_util::scan_flat_mem_ranges(
+                                context.clone(),
+                                metrics.clone(),
+                                index,
+                                time_range,
+                            ),
+                        ),
+                        RawSource::File { .. } => Box::pin(
+                            crate::read::scan_util::scan_flat_file_ranges(
+                                context.clone(),
+                                metrics.clone(),
+                                index,
+                                "columnar_raw_source",
+                                pruner,
+                            )
+                            .await?,
+                        ),
+                    };
+                    while let Some(batch) = raw.try_next().await? {
+                        // One raw batch carries several series, and only the ordinals this read
+                        // serves belong to this stream.
+                        let Some(batch) = retain_candidate_rows(batch, &candidates[range.clone()])? else { continue };
+                        let batch = merge_shape(batch, sample_schema.as_ref())?;
+                        let batch = filter_visibility(batch, &context)?;
+                        if batch.num_rows() == 0 { continue; }
+                        let bytes = batch.get_array_memory_size();
+                        reservation.try_grow(bytes).context(crate::error::ScanMemoryExhaustedSnafu)?;
+                        yield batch;
                         reservation.shrink(bytes);
                     }
                 }));
@@ -1050,6 +1385,74 @@ fn sample_to_flat(
         });
     }
     RecordBatch::try_new(schema, arrays).context(NewRecordBatchSnafu)
+}
+
+/// Keeps only the rows whose exact key belongs to the ordinals this read serves.
+///
+/// A raw source carries many series in one batch, so the batch is filtered before the merge: the
+/// ordinals of one `read_series` call are exactly its candidate keys, and `tsid` alone is a hash
+/// that two distinct series can share. Returns `None` when no row survives.
+fn retain_candidate_rows(
+    batch: RecordBatch,
+    candidates: &[Candidate],
+) -> Result<Option<RecordBatch>> {
+    let primary_key = batch
+        .column(crate::sst::parquet::flat_format::primary_key_column_index(
+            batch.num_columns(),
+        ))
+        .as_any()
+        .downcast_ref::<crate::sst::parquet::format::PrimaryKeyArray>()
+        .ok_or_else(|| invalid("raw source is missing a dictionary primary key"))?;
+    let values = primary_key
+        .values()
+        .as_any()
+        .downcast_ref::<BinaryArray>()
+        .ok_or_else(|| invalid("raw source primary key values are not binary"))?;
+    // The batch is dictionary encoded, so membership is decided once per distinct key.
+    let mut retained_values = vec![false; values.len()];
+    for (index, retained) in retained_values.iter_mut().enumerate() {
+        *retained = candidates
+            .binary_search_by(|candidate| candidate.merge_key.as_slice().cmp(values.value(index)))
+            .is_ok();
+    }
+    if retained_values.iter().all(|retained| *retained) {
+        return Ok(Some(batch));
+    }
+    let keys = primary_key.keys();
+    let mask = BooleanArray::from(
+        (0..batch.num_rows())
+            .map(|row| keys.is_valid(row) && retained_values[keys.value(row) as usize])
+            .collect::<Vec<_>>(),
+    );
+    if mask.true_count() == 0 {
+        return Ok(None);
+    }
+    filter_record_batch(&batch, &mask)
+        .map(Some)
+        .context(ComputeArrowSnafu)
+}
+
+/// Reshapes a raw flat batch into the schema the merge expects.
+///
+/// The artifact source emits the tagless sample schema when the predicate allows labels to be
+/// resolved after the merge; a raw batch keeps its own tag columns, so it is projected onto the
+/// same columns in the same order. Without that schema both sides already share the mapper schema.
+fn merge_shape(batch: RecordBatch, schema: Option<&SchemaRef>) -> Result<RecordBatch> {
+    let Some(schema) = schema else {
+        return Ok(batch);
+    };
+    let mut columns = Vec::with_capacity(schema.fields().len());
+    for field in schema.fields() {
+        let column = batch
+            .column_by_name(field.name())
+            .ok_or_else(|| invalid(format!("raw source is missing column {}", field.name())))?;
+        columns.push(if column.data_type() == field.data_type() {
+            column.clone()
+        } else {
+            cast(column, field.data_type()).context(ComputeArrowSnafu)?
+        });
+    }
+    RecordBatch::try_new(schema.clone(), columns).context(NewRecordBatchSnafu)
 }
 
 fn filter_visibility(batch: RecordBatch, context: &StreamContext) -> Result<RecordBatch> {
