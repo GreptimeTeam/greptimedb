@@ -158,9 +158,11 @@ class ProviderConfigTest(unittest.TestCase):
 
 
 
-class BenchmarkSetupTest(unittest.TestCase):
-    def run_setup(self, missing_tools="", docker_installed=True, docker_ready=True):
-        action = (SCRIPTS.parent / "actions/setup-benchmark/action.yml").read_text()
+class LinuxRunnerSetupTest(unittest.TestCase):
+    def run_setup(self, missing_tools="", docker_installed=True, docker_ready=True,
+                  tools="curl jq python3 rsync", architecture="x86_64",
+                  expected_arch="x86_64", docker_access=True, expect_success=True):
+        action = (SCRIPTS.parent / "actions/setup-linux-runner/action.yml").read_text()
         steps = re.findall(r"      run: \|\n((?:        .*\n|\n)+)", action)
         self.assertEqual(len(steps), 2)
         script = "\n".join(textwrap.dedent(step) for step in steps)
@@ -168,9 +170,9 @@ class BenchmarkSetupTest(unittest.TestCase):
         # changes availability, so the second pass must perform no mutations.
         prelude = r"""
 function . { ID=ubuntu; VERSION_CODENAME=noble; }
-uname() { echo x86_64; }
+uname() { echo "$TEST_ARCH"; }
 dpkg() { echo amd64; }
-curl() { echo fixture-key; }
+curl() { printf 'curl %s\n' "$*" >> "$CALLS"; echo fixture-key; }
 command() {
   if [[ "$1" == -v ]]; then
     if [[ "$2" == docker ]]; then [[ "$DOCKER_INSTALLED" == true ]]; return; fi
@@ -179,7 +181,7 @@ command() {
   fi
   builtin command "$@"
 }
-docker() { [[ "$DOCKER_READY" == true ]]; }
+docker() { [[ "$DOCKER_READY" == true && "$DOCKER_ACCESS" == true ]]; }
 sudo() {
   printf '%s\n' "$*" >> "$CALLS"
   if [[ "$*" == *' apt-get install '* ]]; then
@@ -196,10 +198,17 @@ sudo() {
             calls.touch()
             env = os.environ | {"CALLS": str(calls), "MISSING_TOOLS": missing_tools,
                                 "DOCKER_INSTALLED": str(docker_installed).lower(),
-                                "DOCKER_READY": str(docker_ready).lower()}
+                                "DOCKER_READY": str(docker_ready).lower(),
+                                "DOCKER_ACCESS": str(docker_access).lower(),
+                                "REQUIRED_TOOLS": tools, "TEST_ARCH": architecture,
+                                "EXPECTED_ARCH": expected_arch}
             result = subprocess.run(["bash", "-c", prelude + script +
                                      '\nprintf "SECOND PASS\\n" >> "$CALLS"\n' + script],
                                     env=env, capture_output=True, text=True)
+            if not expect_success:
+                self.assertNotEqual(result.returncode, 0)
+                self.assertNotIn("SECOND PASS", calls.read_text())
+                return calls.read_text()
             self.assertEqual(result.returncode, 0, result.stderr)
             first, second = calls.read_text().split("SECOND PASS\n")
             self.assertEqual(second, "", "Second setup must reuse installed dependencies")
@@ -218,10 +227,31 @@ sudo() {
         calls = self.run_setup(docker_installed=False, docker_ready=False)
         self.assertIn("NEEDRESTART_MODE=l", calls)
         self.assertIn("docker-ce docker-ce-cli containerd.io docker-buildx-plugin", calls)
+        self.assertLess(calls.index("--no-install-recommends curl ca-certificates"),
+                        calls.index("curl -fsSL https://download.docker.com/linux/ubuntu/gpg"))
         self.assertIn("systemctl enable --now docker", calls)
 
     def test_existing_stopped_docker_is_started_without_installation(self):
         self.assertEqual(self.run_setup(docker_ready=False), "-n systemctl enable --now docker\n")
+
+    def test_release_tools_on_both_architectures(self):
+        for architecture in ("x86_64", "aarch64"):
+            with self.subTest(architecture=architecture):
+                calls = self.run_setup(missing_tools="make shasum", tools="make shasum",
+                                       architecture=architecture, expected_arch="")
+                self.assertEqual(calls.splitlines(), [
+                    "-n apt-get update",
+                    "-n env DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=l "
+                    "apt-get install -y --no-install-recommends make libdigest-sha-perl",
+                ])
+
+    def test_benchmark_rejects_arm_before_installing(self):
+        self.assertEqual(self.run_setup(missing_tools="jq", architecture="aarch64",
+                                        expect_success=False), "")
+
+    def test_inaccessible_docker_fails_even_after_starting_service(self):
+        calls = self.run_setup(docker_access=False, expect_success=False)
+        self.assertEqual(calls, "-n systemctl enable --now docker\n")
 
 
 class AwsProvisionTest(unittest.TestCase):
@@ -595,7 +625,7 @@ class BenchmarkImagePullTest(unittest.TestCase):
         for reference in ("RUNTIME_IMAGE", "RESOLVED_RUNTIME_IMAGE", "reference"):
             self.assertIn(f'pull-benchmark-image.sh "${reference}"', long_range)
         self.assertLess(long_range.index('pull-benchmark-image.sh "$reference"'),
-                        long_range.index('- name: Warm serial and concurrent benchmarks'))
+                        long_range.index('- name: Generate shared dataset and split target plans'))
         self.assertIn('pull-benchmark-image.sh "$reference"', agent)
         self.assertLess(agent.index('resolve_image runtime'), agent.index('- name: Generate dataset once'))
         self.assertIn('pull-benchmark-image.sh "$RUNTIME_IMAGE"', traces)

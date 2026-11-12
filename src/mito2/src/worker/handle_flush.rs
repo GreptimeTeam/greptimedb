@@ -14,9 +14,9 @@
 
 //! Handling flush related requests.
 
-use std::collections::HashSet;
-use std::sync::Arc;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::Ordering;
+use std::sync::{Arc, Mutex, Weak};
 
 use common_base::readable_size::ReadableSize;
 use common_telemetry::{debug, error, info};
@@ -25,10 +25,11 @@ use store_api::region_request::{RegionFlushReason, RegionFlushRequest};
 use store_api::storage::RegionId;
 
 use crate::config::{IndexBuildMode, MitoConfig};
-use crate::error::{RegionNotFoundSnafu, Result};
+use crate::error::{RegionBusySnafu, RegionNotFoundSnafu, Result};
 use crate::flush::{FlushReason, RegionFlushTask};
-use crate::region::MitoRegionRef;
+use crate::manifest::action::cap_wal_release;
 use crate::region::version::VersionRef;
+use crate::region::{MitoRegion, MitoRegionRef};
 use crate::request::{BuildIndexRequest, FlushFailed, FlushFinished, OnFailure, OptionOutputTx};
 use crate::sst::index::IndexBuildType;
 use crate::worker::RegionWorkerLoop;
@@ -37,6 +38,33 @@ use crate::worker::RegionWorkerLoop;
 pub(crate) struct RegionWriteBufferPressure {
     pub(crate) stalled_region_ids: HashSet<RegionId>,
     pub(crate) rejected_region_ids: HashSet<RegionId>,
+}
+
+/// Staging regions of a node that have received writes.
+///
+/// Workers share it to bound the memtables that stay unflushed until staging ends.
+#[derive(Debug, Default)]
+pub(crate) struct StagingRegions {
+    regions: Mutex<HashMap<RegionId, Weak<MitoRegion>>>,
+}
+
+pub(crate) type StagingRegionsRef = Arc<StagingRegions>;
+
+impl StagingRegions {
+    /// Records `region` and returns the memtable usage of the regions still in staging.
+    fn record_and_memtable_usage(&self, region: &MitoRegionRef) -> usize {
+        let mut regions = self.regions.lock().unwrap();
+        regions.insert(region.region_id, Arc::downgrade(region));
+        let mut usage = 0;
+        regions.retain(|_, region| match region.upgrade() {
+            Some(region) if region.is_staging_or_staged_edit() => {
+                usage += region_memtable_usage(&region.version());
+                true
+            }
+            _ => false,
+        });
+        usage
+    }
 }
 
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -74,6 +102,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
 
         // Handle stalled requests.
         self.handle_stalled_requests().await;
+        self.dispatch_pending_region_requests(region_id).await;
     }
 
     /// Checks whether the engine reaches flush threshold. If so, finds regions in this
@@ -99,8 +128,11 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         let mut pending_regions = vec![];
 
         for region in &regions {
-            if self.flush_scheduler.is_flush_requested(region.region_id) || !region.is_writable() {
-                // Already flushing or not writable.
+            if self.flush_scheduler.is_flush_requested(region.region_id)
+                || !region.is_writable()
+                || region.is_staging()
+            {
+                // Already flushing, not writable, or in staging, whose rows must stay in the WAL.
                 continue;
             }
 
@@ -192,6 +224,19 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 self.stalled_requests.estimated_size(&region_id),
             );
 
+            if region.is_staging() {
+                // Staging regions don't flush, so waiting would not release their memory. Writes
+                // are rejected at twice the region limit or at half of the engine's flush limit,
+                // which reserves memory headroom for other regions.
+                let staging_usage = self.staging_regions.record_and_memtable_usage(&region);
+                if status.should_reject
+                    || staging_usage >= self.write_buffer_manager.flush_limit() / 2
+                {
+                    pressure.rejected_region_ids.insert(region_id);
+                }
+                continue;
+            }
+
             if status.should_flush && !self.flush_scheduler.is_flush_requested(region.region_id) {
                 let task = self.new_flush_task(
                     &region,
@@ -241,8 +286,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             manifest_ctx: region.manifest_ctx.clone(),
             index_options: region.version().options.index_options.clone(),
             flush_semaphore: self.flush_semaphore.clone(),
-            is_staging: region.is_staging(),
-            partition_expr: region.maybe_staging_partition_expr_str(),
+            partition_expr: region.metadata().partition_expr.clone(),
             durability_barrier: self
                 .wal
                 .durability_barrier(region.region_id, &region.provider),
@@ -321,10 +365,29 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             }
         };
 
+        if request.reason == Some(RegionFlushReason::Repartition)
+            && let Err(e) = region.version().ensure_no_pending_tails()
+        {
+            sender.send(Err(e));
+            return;
+        }
+
         // `update_topic_latest_entry_id` updates `topic_latest_entry_id` when memtables are empty.
         // But the flush is skipped if memtables are empty. Thus should update the `topic_latest_entry_id`
         // when handling flush request instead of in `schedule_flush` or `flush_finished`.
         self.update_topic_latest_entry_id(&region);
+
+        // A staging region must keep its WAL until staging ends, so it flushes nothing.
+        if region.is_staging() && !region.version().memtables.is_empty() {
+            sender.send(match request.reason {
+                // These only ask to advance the flushed position, which can wait.
+                Some(RegionFlushReason::RegionMigration | RegionFlushReason::RemoteWalPrune) => {
+                    Ok(0)
+                }
+                _ => RegionBusySnafu { region_id }.fail(),
+            });
+            return;
+        }
 
         let reason = resolve_flush_reason(request.reason, region.is_downgrading());
         let mut task =
@@ -338,6 +401,27 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         }
     }
 
+    /// Flushes locally writable candidates selected by the WAL.
+    pub(crate) fn flush_for_wal_pressure(&mut self, candidates: &[RegionId]) -> Result<()> {
+        for &region_id in candidates.iter() {
+            let Some(region) = self.regions.get_region(region_id) else {
+                continue;
+            };
+            if !region.is_writable()
+                || region.is_staging()
+                || self.flush_scheduler.is_flush_requested(region_id)
+                || region_memtable_usage(&region.version()) == 0
+            {
+                continue;
+            }
+            let task =
+                self.new_flush_task(&region, FlushReason::WalPressure, None, self.config.clone());
+            self.flush_scheduler
+                .schedule_flush(region_id, &region.version_control, task)?;
+        }
+        Ok(())
+    }
+
     /// Flushes regions periodically.
     pub(crate) fn flush_periodically(&mut self) -> Result<()> {
         let regions = self.regions.list_regions();
@@ -349,6 +433,12 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 continue;
             }
             self.update_topic_latest_entry_id(region);
+            // The rows of a staging region must stay in the WAL until staging ends, so a staging
+            // region with rows pins its topic's prune point: the update above only keeps the id
+            // fresh while the memtable is empty.
+            if region.is_staging() {
+                continue;
+            }
 
             let auto_flush_interval = region
                 .version()
@@ -398,24 +488,24 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             }
         };
 
-        if request.is_staging {
-            // Skip the region metadata update.
-            info!(
-                "Skipping region metadata update for region {} in staging mode",
-                region_id
-            );
-            region.version_control.apply_edit(
-                None,
-                &request.memtables_to_remove,
-                region.file_purger.clone(),
-            );
-        } else {
-            region.version_control.apply_edit(
-                Some(request.edit.clone()),
-                &request.memtables_to_remove,
-                region.file_purger.clone(),
-            );
-        }
+        region.version_control.apply_edit(
+            Some(request.edit.clone()),
+            &request.memtables_to_remove,
+            region.file_purger.clone(),
+        );
+
+        // The flush has committed its manifest. Count only its Parquet output, before
+        // WAL cleanup (which can fail after the commit).
+        let ingested_parquet_bytes = request
+            .edit
+            .files_to_add
+            .iter()
+            .map(|file| file.file_size)
+            .sum();
+        region
+            .region_stats
+            .ingested_parquet_bytes
+            .fetch_add(ingested_parquet_bytes, Ordering::Relaxed);
 
         region.update_flush_millis();
         // Update topic latest entry id as soon as possible after flush to make sure the prunable entry id is updated timely,
@@ -423,17 +513,26 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         self.update_topic_latest_entry_id(&region);
 
         // Delete wal.
+        let obsolete_entry_id = cap_wal_release(
+            &region.version().pending_tails,
+            self.file_ref_manager.node_id(),
+            request.flushed_entry_id,
+        );
         info!(
             "Region {} flush finished, tries to bump wal to {}",
-            region_id, request.flushed_entry_id
+            region_id, obsolete_entry_id
         );
         if let Err(e) = self
             .wal
-            .obsolete(region_id, request.flushed_entry_id, &region.provider)
+            .obsolete(region_id, obsolete_entry_id, &region.provider)
             .await
         {
-            error!(e; "Failed to write wal, region: {}", region_id);
-            request.on_failure(e);
+            let err = Arc::new(e);
+            error!(err; "Failed to write wal, region: {}", region_id);
+            request.on_shared_failure(err.clone());
+            // The flush scheduler still tracks the flush, so release it as a failed flush does.
+            self.handle_flush_failed(region_id, FlushFailed { err })
+                .await;
             return;
         }
 
@@ -448,6 +547,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                     region_id,
                     build_type: IndexBuildType::Flush,
                     file_metas: index_build_file_metas,
+                    result_senders: Vec::new(),
                 },
                 OptionOutputTx::new(None),
             )
@@ -469,7 +569,15 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             self.flush_scheduler.on_flush_success(region_id)
         {
             // Perform DDLs first because they require empty memtables.
-            self.handle_ddl_requests(&mut ddl_requests).await;
+            // These ALTERs already own the flush turn; bypass initial admission.
+            for ddl in ddl_requests.drain(..) {
+                if let crate::request::DdlRequest::Alter(request) = ddl.request {
+                    self.execute_alter_request(ddl.region_id, request, ddl.sender)
+                        .await;
+                } else {
+                    self.handle_ddl_requests(&mut vec![ddl]).await;
+                }
+            }
             if self.flush_scheduler.is_flush_requested(region_id) {
                 // The DDL may schedule another flush, e.g. a close-time flush after writes
                 // arrived in the mutable memtable during the previous flush. Keep pending
@@ -504,6 +612,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         // Schedules compaction.
         self.schedule_compaction(&region).await;
 
+        self.dispatch_pending_region_requests(region_id).await;
         self.listener.on_flush_success(region_id);
     }
 

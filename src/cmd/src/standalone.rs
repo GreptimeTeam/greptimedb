@@ -26,6 +26,7 @@ use catalog::kvbackend::{CatalogManagerConfiguratorRef, KvBackendCatalogManagerB
 use catalog::process_manager::ProcessManager;
 use clap::Parser;
 use common_base::Plugins;
+use common_base::secrets::SecretString;
 use common_catalog::consts::{MIN_USER_FLOW_ID, MIN_USER_TABLE_ID};
 use common_config::{Configurable, metadata_store_dir};
 use common_datasource::object_store::{LocalFileAccess, configured_local_path};
@@ -38,7 +39,7 @@ use common_meta::ddl::{DdlContext, NoopRegionFailureDetectorControl};
 use common_meta::ddl_manager::{DdlManager, DdlManagerConfiguratorRef, DdlManagerRef};
 use common_meta::key::flow::FlowMetadataManager;
 use common_meta::key::{TableMetadataManager, TableMetadataManagerRef};
-use common_meta::kv_backend::KvBackendRef;
+use common_meta::kv_backend::{ClosableKvBackendRef, KvBackendRef};
 use common_meta::node_manager::{FlownodeRef, NodeManagerRef};
 use common_meta::procedure_executor::{LocalProcedureExecutor, ProcedureExecutorRef};
 use common_meta::region_keeper::MemoryRegionKeeper;
@@ -224,6 +225,8 @@ pub struct Instance {
     procedure_manager: ProcedureManagerRef,
     leader_services_controller: Box<dyn StandaloneLeaderServicesController>,
     leader_services_context: LeaderServicesContext,
+    /// Closed last on shutdown, see [ClosableKvBackend](common_meta::kv_backend::ClosableKvBackend).
+    metadata_kv_backend: ClosableKvBackendRef,
     // Keep the logging guard to prevent the worker from being dropped.
     _guard: Vec<WorkerGuard>,
 }
@@ -278,7 +281,7 @@ impl App for Instance {
     /// ones; the first error is returned and the rest are logged.
     async fn stop(&mut self) -> Result<()> {
         let mut first_error = None;
-        let mut record = |result: Result<()>| {
+        let mut record_shutdown_error = |result: Result<()>| {
             if let Err(err) = result {
                 if first_error.is_none() {
                     first_error = Some(err);
@@ -288,14 +291,14 @@ impl App for Instance {
             }
         };
 
-        record(
+        record_shutdown_error(
             self.frontend
                 .shutdown()
                 .await
                 .context(error::ShutdownFrontendSnafu),
         );
 
-        record(
+        record_shutdown_error(
             self.leader_services_controller
                 .stop(
                     self.procedure_manager.clone(),
@@ -304,18 +307,26 @@ impl App for Instance {
                 .await,
         );
 
-        record(
+        record_shutdown_error(
             self.datanode
                 .shutdown()
                 .await
                 .context(error::ShutdownDatanodeSnafu),
         );
 
-        record(
+        record_shutdown_error(
             self.flownode
                 .shutdown()
                 .await
                 .context(error::ShutdownFlownodeSnafu),
+        );
+
+        // Close the metadata after attempting to stop all components.
+        record_shutdown_error(
+            self.metadata_kv_backend
+                .close()
+                .await
+                .context(error::CloseMetadataKvBackendSnafu),
         );
 
         info!("Datanode instance stopped.");
@@ -351,7 +362,7 @@ pub struct StartCommand {
     #[clap(long)]
     tls_watch: bool,
     #[clap(long)]
-    user_provider: Option<String>,
+    user_provider: Option<SecretString>,
     #[clap(long, default_value = "GREPTIMEDB_STANDALONE")]
     pub env_prefix: String,
     /// The working home directory of this standalone instance.
@@ -542,10 +553,11 @@ impl StartCommand {
             .context(OtherSnafu)?;
 
         let metadata_dir = metadata_store_dir(data_home);
-        let kv_backend = creator
+        let metadata_kv_backend = creator
             .metadata_kv_backend_creator
             .create(metadata_dir, &opts)
             .await?;
+        let kv_backend: KvBackendRef = metadata_kv_backend.clone();
         let (procedure_manager, event_recorder_handle) =
             standalone::build_procedure_manager(kv_backend.clone(), opts.procedure);
 
@@ -681,6 +693,9 @@ impl StartCommand {
         ));
 
         let ddl_context = DdlContext {
+            affinity_resolver: None,
+            affinity_fallback: Default::default(),
+            peer_alloc_context_provider: None,
             node_manager: node_manager.clone(),
             cache_invalidator: layered_cache_registry.clone(),
             memory_region_keeper: Arc::new(MemoryRegionKeeper::default()),
@@ -789,6 +804,7 @@ impl StartCommand {
             procedure_manager,
             leader_services_controller: creator.leader_services_controller,
             leader_services_context,
+            metadata_kv_backend,
             _guard: vec![],
         };
         let result = InstanceCreatorResult {
@@ -847,15 +863,25 @@ impl NodeManagerCreator for DefaultNodeManagerCreator {
 /// configuration types.
 #[async_trait]
 pub trait MetadataKvBackendCreator: Send + Sync {
-    async fn create(&self, metadata_dir: String, opts: &StandaloneOptions) -> Result<KvBackendRef>;
+    /// Standalone closes the backend on shutdown, so wrappers must forward
+    /// [close](common_meta::kv_backend::ClosableKvBackend::close) to the backend they wrap.
+    async fn create(
+        &self,
+        metadata_dir: String,
+        opts: &StandaloneOptions,
+    ) -> Result<ClosableKvBackendRef>;
 }
 
 pub struct DefaultMetadataKvBackendCreator;
 
 #[async_trait]
 impl MetadataKvBackendCreator for DefaultMetadataKvBackendCreator {
-    async fn create(&self, metadata_dir: String, opts: &StandaloneOptions) -> Result<KvBackendRef> {
-        standalone::build_metadata_kvbackend(metadata_dir, opts.metadata_store)
+    async fn create(
+        &self,
+        metadata_dir: String,
+        opts: &StandaloneOptions,
+    ) -> Result<ClosableKvBackendRef> {
+        standalone::open_metadata_kvbackend(metadata_dir, opts.metadata_store)
             .context(error::BuildMetadataKvbackendSnafu)
     }
 }
@@ -1097,7 +1123,6 @@ mod tests {
     use common_test_util::temp_dir::{create_named_temp_file, create_temp_dir};
     use common_wal::config::object_store::ObjectStoreWalConfig;
     use common_wal::options::{ObjectStoreWalOptions, WalOptions};
-    use frontend::frontend::FrontendOptions;
     use object_store::config::{FileConfig, GcsConfig};
     use servers::grpc::GrpcOptions;
     use servers::server::ServerHandlers;
@@ -1161,6 +1186,7 @@ mod tests {
         opts.storage.data_home = data_home.path().to_str().unwrap().to_string();
         let creator = InstanceCreator::default()
             .with_leader_services_controller(Box::new(FailingLeaderServices));
+        let metadata_dir = metadata_store_dir(&opts.storage.data_home);
         let (mut instance, _) = StartCommand::build_with(opts, vec![], creator)
             .await
             .unwrap();
@@ -1181,6 +1207,11 @@ mod tests {
             log_store.append_batch(vec![]).await,
             Err(log_store::error::Error::ObjectStoreWalStopped { .. })
         ));
+        // The metadata backend was closed although earlier steps failed: raft-engine locks its
+        // directory while open, so reopening it only succeeds once it was released.
+        let metadata =
+            standalone::open_metadata_kvbackend(metadata_dir, Default::default()).unwrap();
+        metadata.close().await.unwrap();
     }
 
     #[tokio::test]
@@ -1289,11 +1320,22 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_try_from_start_command_to_anymap() {
-        let fe_opts = FrontendOptions {
-            user_provider: Some("static_user_provider:cmd:test=test".to_string()),
-            ..Default::default()
-        };
+    async fn test_user_provider_cli_redacts_passwords() {
+        let command = StartCommand::try_parse_from([
+            "standalone",
+            "--user-provider",
+            "static_user_provider:cmd:test=cli-secret",
+        ])
+        .unwrap();
+        let debug = format!("{command:#?}");
+        assert!(!debug.contains("cli-secret"));
+        assert!(debug.contains("[REDACTED]"));
+
+        let fe_opts = command
+            .load_options(&Default::default())
+            .unwrap()
+            .component
+            .frontend_options();
 
         let mut plugins = Plugins::new();
         plugins.insert(StandaloneFlag);
@@ -1305,7 +1347,7 @@ mod tests {
         let result = provider
             .authenticate(
                 Identity::UserId("test", None),
-                Password::PlainText("test".to_string().into()),
+                Password::PlainText("cli-secret".to_string().into()),
             )
             .await;
         let _ = result.unwrap();
@@ -1324,6 +1366,8 @@ mod tests {
         let mut file = create_named_temp_file();
         let toml_str = r#"
             enable_memory_catalog = true
+            max_concurrent_queries = 8
+            concurrent_query_limiter_timeout = "250ms"
 
             [wal]
             provider = "raft_engine"
@@ -1372,7 +1416,7 @@ mod tests {
         write!(file, "{}", toml_str).unwrap();
         let cmd = StartCommand {
             config_file: Some(file.path().to_str().unwrap().to_string()),
-            user_provider: Some("static_user_provider:cmd:test=test".to_string()),
+            user_provider: Some("static_user_provider:cmd:test=test".to_string().into()),
             ..Default::default()
         };
 
@@ -1382,6 +1426,11 @@ mod tests {
             .component;
         let fe_opts = options.frontend_options();
         let dn_opts = options.datanode_options();
+        assert_eq!(dn_opts.max_concurrent_queries, 8);
+        assert_eq!(
+            dn_opts.concurrent_query_limiter_timeout,
+            Duration::from_millis(250)
+        );
         let logging_opts = options.logging;
         assert_eq!("127.0.0.1:4000".to_string(), fe_opts.http.addr);
         assert_eq!(Duration::from_secs(33), fe_opts.http.timeout);
@@ -1430,7 +1479,7 @@ mod tests {
     #[test]
     fn test_load_log_options_from_cli() {
         let cmd = StartCommand {
-            user_provider: Some("static_user_provider:cmd:test=test".to_string()),
+            user_provider: Some("static_user_provider:cmd:test=test".to_string().into()),
             mysql_addr: Some("127.0.0.1:4002".to_string()),
             postgres_addr: Some("127.0.0.1:4003".to_string()),
             ..Default::default()

@@ -16,6 +16,7 @@ use std::any::Any;
 use std::sync::Arc;
 
 use derive_builder::Builder;
+use futures::future::BoxFuture;
 
 use crate::error::Result;
 use crate::kv_backend::txn::{Txn, TxnResponse};
@@ -27,11 +28,18 @@ use crate::kv_backend::{
 
 pub type MockFn<Req, Resp> = Arc<dyn Fn(Req) -> Result<Resp> + Send + Sync>;
 
+/// An asynchronous callback for mock backend operations.
+pub type AsyncMockFn<Req, Resp> =
+    Arc<dyn Fn(Req) -> BoxFuture<'static, Result<Resp>> + Send + Sync>;
+
 /// A mock kv backend for testing.
 #[derive(Builder)]
 pub struct MockKvBackend {
     #[builder(setter(strip_option), default)]
     pub range_fn: Option<MockFn<RangeRequest, RangeResponse>>,
+    /// Takes precedence over the synchronous range callback when set.
+    #[builder(setter(strip_option), default)]
+    pub range_async_fn: Option<AsyncMockFn<RangeRequest, RangeResponse>>,
     #[builder(setter(strip_option), default)]
     pub put_fn: Option<MockFn<PutRequest, PutResponse>>,
     #[builder(setter(strip_option), default)]
@@ -76,7 +84,9 @@ impl KvBackend for MockKvBackend {
     }
 
     async fn range(&self, req: RangeRequest) -> Result<RangeResponse> {
-        if let Some(f) = &self.range_fn {
+        if let Some(f) = &self.range_async_fn {
+            f(req).await
+        } else if let Some(f) = &self.range_fn {
             f(req)
         } else {
             unimplemented!()

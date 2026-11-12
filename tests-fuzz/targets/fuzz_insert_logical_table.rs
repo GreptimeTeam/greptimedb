@@ -141,7 +141,7 @@ async fn create_physical_table<R: Rng + 'static>(
     let create_physical_table_expr = generate_create_physical_table_expr(rng).unwrap();
     let translator = CreateTableExprTranslator;
     let sql = translator.translate(&create_physical_table_expr)?;
-    let result = sqlx::query(&sql)
+    let result = sqlx::query(sqlx::AssertSqlSafe(sql.as_str()))
         .execute(&ctx.greptime)
         .await
         .context(error::ExecuteQuerySnafu { sql: &sql })?;
@@ -211,7 +211,7 @@ async fn insert_values<R: Rng + 'static>(
     let result = ctx
         .greptime
         // unprepared query, see <https://github.com/GreptimeTeam/greptimedb/issues/3500>
-        .execute(sql.as_str())
+        .execute(sqlx::AssertSqlSafe(sql.as_str()))
         .await
         .context(error::ExecuteQuerySnafu { sql: &sql })?;
 
@@ -248,7 +248,7 @@ async fn execute_insert(ctx: FuzzContext, input: FuzzInput) -> Result<()> {
             continue;
         }
         let sql = translator.translate(&create_logical_table_expr)?;
-        let result = sqlx::query(&sql)
+        let result = sqlx::query(sqlx::AssertSqlSafe(sql.as_str()))
             .execute(&ctx.greptime)
             .await
             .context(error::ExecuteQuerySnafu { sql: &sql })?;
@@ -272,7 +272,7 @@ async fn execute_insert(ctx: FuzzContext, input: FuzzInput) -> Result<()> {
     // Clean up logical table
     for (table_name, _) in tables {
         let sql = format!("DROP TABLE {}", table_name);
-        let result = sqlx::query(&sql)
+        let result = sqlx::query(sqlx::AssertSqlSafe(sql.as_str()))
             .execute(&ctx.greptime)
             .await
             .context(error::ExecuteQuerySnafu { sql: &sql })?;
@@ -281,7 +281,7 @@ async fn execute_insert(ctx: FuzzContext, input: FuzzInput) -> Result<()> {
 
     // Clean up physical table
     let sql = format!("DROP TABLE {}", physical_table_ctx.name);
-    let result = sqlx::query(&sql)
+    let result = sqlx::query(sqlx::AssertSqlSafe(sql.as_str()))
         .execute(&ctx.greptime)
         .await
         .context(error::ExecuteQuerySnafu { sql })?;

@@ -114,6 +114,7 @@ where
         region.stop().await;
         // Removes this region from region map to prevent other requests from accessing this region
         self.regions.remove_region(region_id);
+        region.deactivate_region_manifest_size_metric();
         self.dropping_regions.insert_region(region.clone());
         // The region is no longer served once it leaves the map, so unregister its
         // runtime state before the fallible WAL cleanup below. Otherwise a WAL
@@ -121,14 +122,30 @@ where
         // this cleanup and close/drop remove.
         self.cleanup_dropped_region_runtime_state(region_id).await;
 
-        // Delete region data in WAL.
-        self.wal
+        // Deletes region data in WAL, and releases it so that this outlives a restart, which
+        // never opens the region again. A failure of the object store WAL does not fail the
+        // drop: the region has left the map, a drop request for it is not sent again, and a
+        // caller that drops several regions on one store, such as the metric engine, would
+        // leave the others undone, for instance once the release of one poisoned the store.
+        // The store keeps a failed release and writes it with its next object unless it is
+        // stopped or poisoned.
+        if let Err(e) = self
+            .wal
             .obsolete(
                 region_id,
                 region.version_control.current().last_entry_id,
                 &region.provider,
             )
-            .await?;
+            .await
+        {
+            if region.provider.as_object_store_provider().is_none() {
+                return Err(e);
+            }
+            error!(e; "Failed to obsolete the WAL of dropped region {}", region_id);
+        }
+        if let Err(e) = self.wal.release_region(region_id, &region.provider).await {
+            error!(e; "Failed to release the WAL of dropped region {}", region_id);
+        }
 
         if let Some(store) = &self.series_index_store {
             crate::series_index::delete_catalogs(store, region_id).await;
@@ -206,6 +223,9 @@ where
 
     /// Cleans runtime state for a region that is no longer available to serve requests.
     pub(crate) async fn cleanup_dropped_region_runtime_state(&mut self, region_id: RegionId) {
+        // A successful flush may hand off DROP before queued ALTERs and edits resume.
+        // Reject their waiters here because the removed region has no next turn.
+        self.reject_region_edit_queue_as_not_found(region_id);
         // Notifies flush scheduler.
         self.flush_scheduler.on_region_dropped(region_id);
         // Notifies compaction scheduler.

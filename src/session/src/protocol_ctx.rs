@@ -42,18 +42,14 @@ impl ProtocolCtx {
 ///     If true, all scope attributes will be promoted to the final table schema.
 ///     Along with the scope name, scope version and scope schema URL.
 /// - `with_metric_engine`
-/// - `is_legacy`
-///     If the user uses OTLP metrics ingestion before v0.16, it uses the old path.
-///     So we call this path 'legacy'.
-///     After v0.16, we store the OTLP metrics using prometheus compatible format, the new path.
-///     The difference is how we convert the input data into the final table schema.
+///     Use Metric Engine for auto-created tables and retain timestamp precision
+///     until alignment with the destination table's time index.
 #[derive(Debug, Clone, Default)]
 pub struct OtlpMetricCtx {
     pub promote_all_resource_attrs: bool,
     pub resource_attrs: HashSet<String>,
     pub promote_scope_attrs: bool,
     pub with_metric_engine: bool,
-    pub is_legacy: bool,
     /// Set from the server's `otlp.experimental_enable_resource_info`; off
     /// means the resource descriptor is not synthesized at all.
     pub resource_info: bool,

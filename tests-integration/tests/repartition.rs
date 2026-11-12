@@ -16,27 +16,33 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::time::Duration;
 
-use client::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+use client::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, OutputData};
 use common_error::root_source;
 use common_event_recorder::{PersistentEventContext, TriggerReason};
 use common_meta::key::table_name::TableNameKey;
-use common_procedure::{ProcedureContext, ProcedureWithId, watcher};
+use common_procedure::{ProcedureContext, ProcedureId, ProcedureWithId, watcher};
 use common_query::Output;
 use common_telemetry::info;
 use common_test_util::recordbatch::check_output_stream;
 use common_test_util::temp_dir::{TempDir, create_temp_dir};
 use common_wal::config::DatanodeWalConfig;
+use datatypes::arrow::array::AsArray;
 use frontend::instance::Instance;
 use meta_srv::gc::{self, BatchGcProcedure, GcSchedulerOptions, GcTickerRef};
 use meta_srv::metasrv::Metasrv;
 use mito2::gc::GcConfig;
 use servers::error::Result as ServerResult;
 use servers::query_handler::sql::SqlQueryHandler;
-use session::context::{QueryContext, QueryContextRef};
+use session::Session;
+use session::context::{Channel, QueryContext, QueryContextRef};
+use sqlx::Row;
 use store_api::codec::PrimaryKeyEncoding;
 use store_api::storage::{RegionId, TableId};
 use tests_integration::cluster::{GreptimeDbCluster, GreptimeDbClusterBuilder};
-use tests_integration::test_util::{StorageType, get_test_store_config};
+use tests_integration::test_util::{
+    StorageType, get_test_store_config, setup_mysql_server_for_frontend_instance,
+    setup_pg_server_for_frontend_instance,
+};
 use tokio::sync::oneshot;
 
 #[macro_export]
@@ -150,6 +156,48 @@ macro_rules! repartition_tests {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn test_repartition_procedure_id_session() {
+    let (cluster, _home_guard) = repartition_cluster("repartition_procedure_id_session").await;
+    let instance = cluster.fe_instance();
+    let session = Session::new(None, Channel::Postgres, Default::default(), 0);
+    let query_ctx = session.new_query_context();
+    run_sql(
+        instance,
+        r#"CREATE TABLE repartition_session_test ("id" INT PRIMARY KEY, ts TIMESTAMP TIME INDEX)
+           PARTITION ON COLUMNS ("id") ("id" < 10, "id" >= 10)"#,
+        session.new_query_context(),
+    )
+    .await
+    .unwrap();
+    query_ctx.set_last_procedure_id("previous-id".to_string());
+    let sql = r#"ALTER TABLE repartition_session_test REPARTITION ("id" < 10)
+                 INTO ("id" < 5, "id" >= 5 AND "id" < 10) WITH (wait=false)"#;
+    let OutputData::RecordBatches(batches) = run_sql(instance, sql, session.new_query_context())
+        .await
+        .unwrap()
+        .data
+    else {
+        panic!("expected Procedure ID result");
+    };
+    let batch = batches.iter().next().unwrap();
+    let id = batch
+        .column_by_name("Procedure ID")
+        .unwrap()
+        .as_string::<i32>()
+        .value(0);
+    assert_eq!(query_ctx.last_procedure_id().as_deref(), Some(id));
+    let mut watcher = cluster
+        .metasrv
+        .procedure_manager()
+        .procedure_watcher(ProcedureId::parse_str(id).unwrap())
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(60), watcher::wait(&mut watcher))
+        .await
+        .unwrap()
+        .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn test_repartition_physical_metric_without_logical_table() {
     common_telemetry::init_default_ut_logging();
     let (store_config, _guard) = get_test_store_config(&StorageType::File);
@@ -247,7 +295,7 @@ async fn test_repartition_physical_metric_without_logical_table() {
 /// COUNT must use visible rows rather than the full row counts of shared SSTs.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_repartition_append_count_file() {
-    let (cluster, _home_guard) = append_count_cluster("repartition_append_count").await;
+    let (cluster, _home_guard) = repartition_cluster("repartition_append_count").await;
     let instance = cluster.fe_instance();
     let table = "count_repartition";
     prepare_append_count_table(instance, table, "").await;
@@ -265,7 +313,7 @@ async fn test_repartition_append_count_file() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_split_append_count_file() {
-    let (cluster, _home_guard) = append_count_cluster("split_append_count").await;
+    let (cluster, _home_guard) = repartition_cluster("split_append_count").await;
     let instance = cluster.fe_instance();
     let table = "count_split";
     prepare_append_count_table(
@@ -288,7 +336,7 @@ async fn test_split_append_count_file() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_repartition_append_count_memtable_file() {
-    let (cluster, home_guard) = append_count_cluster("repartition_append_count_memtable").await;
+    let (cluster, home_guard) = repartition_cluster("repartition_append_count_memtable").await;
     assert!(home_guard.path().is_dir());
     let instance = cluster.fe_instance();
     let table = "count_repartition_memtable";
@@ -305,7 +353,7 @@ async fn test_repartition_append_count_memtable_file() {
     assert!(home_guard.path().is_dir());
 }
 
-async fn append_count_cluster(name: &str) -> (GreptimeDbCluster, Arc<TempDir>) {
+async fn repartition_cluster(name: &str) -> (GreptimeDbCluster, Arc<TempDir>) {
     common_telemetry::init_default_ut_logging();
     let (store_config, _guard) = get_test_store_config(&StorageType::File);
     let home_dir = Arc::new(create_temp_dir(name));
@@ -425,6 +473,81 @@ async fn assert_append_count(
         statistics_regions,
         "{plan}"
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_exemplar_sparse_repartition_compaction() {
+    let (cluster, _home_guard) = repartition_cluster("exemplar_sparse_repartition").await;
+    let instance = cluster.fe_instance();
+    let ctx = QueryContext::arc();
+    for sql in [
+        "CREATE TABLE exemplar_sparse_repartition (
+            __table_id INT UNSIGNED NOT NULL, __tsid BIGINT UNSIGNED NOT NULL,
+            host STRING, ts TIMESTAMP TIME INDEX, val DOUBLE, PRIMARY KEY (__table_id, __tsid, host)
+         ) PARTITION ON COLUMNS(host) (host < 'm', host >= 'm')
+         WITH ('primary_key_encoding'='sparse', 'append_mode'='true')",
+        "INSERT INTO exemplar_sparse_repartition VALUES (42, 7, 'a', 1, 1), (42, 7, 'h', 1, 2), (43, 7, 'z', 1, 3)",
+        "ADMIN FLUSH_TABLE('exemplar_sparse_repartition')",
+        "INSERT INTO exemplar_sparse_repartition VALUES (42, 7, 'a', 1, 4), (42, 7, 'h', 1, 5), (43, 7, 'z', 1, 6)",
+        "ADMIN FLUSH_TABLE('exemplar_sparse_repartition')",
+        "ALTER TABLE exemplar_sparse_repartition SPLIT PARTITION (host < 'm')
+         INTO (host < 'g', host >= 'g' AND host < 'm')",
+    ] {
+        run_sql(instance, sql, ctx.clone()).await.unwrap();
+    }
+    // Refresh routes synchronously instead of depending on heartbeat timing.
+    instance.cache_invalidator().invalidate_all().unwrap();
+    let mut inherited_ssts = 0;
+    for datanode in cluster.datanode_instances.values() {
+        inherited_ssts += datanode
+            .region_server()
+            .mito_engine()
+            .unwrap()
+            .all_ssts_from_manifest()
+            .await
+            .into_iter()
+            .filter(|entry| entry.origin_region_id != entry.region_id)
+            .count();
+    }
+    assert!(inherited_ssts > 0);
+    run_sql(
+        instance,
+        "ADMIN COMPACT_TABLE('exemplar_sparse_repartition', 'swcs', '3600')",
+        ctx.clone(),
+    )
+    .await
+    .unwrap();
+    let output = run_sql(
+        instance,
+        "SELECT host, COUNT(*) AS n, SUM(val) AS total
+         FROM exemplar_sparse_repartition GROUP BY host ORDER BY host",
+        ctx.clone(),
+    )
+    .await
+    .unwrap();
+    check_output_stream(
+        output.data,
+        "+------+---+-------+\n\
+         | host | n | total |\n\
+         +------+---+-------+\n\
+         | a    | 2 | 5.0   |\n\
+         | h    | 2 | 7.0   |\n\
+         | z    | 2 | 9.0   |\n\
+         +------+---+-------+",
+    )
+    .await;
+    let output = run_sql(
+        instance,
+        "SELECT COUNT(*) FROM exemplar_sparse_repartition WHERE __table_id=42 AND __tsid=7",
+        ctx,
+    )
+    .await
+    .unwrap();
+    check_output_stream(
+        output.data,
+        "+----------+\n| count(*) |\n+----------+\n| 4        |\n+----------+",
+    )
+    .await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -636,6 +759,300 @@ async fn test_repartition_multi_hop_fulltext_index_gc() {
             .difference(&storage_paths)
             .collect::<Vec<_>>()
     );
+}
+
+const DEVICES: &str = "CREATE TABLE {t} (ts TIMESTAMP TIME INDEX, city STRING, device_id BIGINT, \
+     PRIMARY KEY(city, device_id))";
+const DEVICES_ON_DEVICE_ID: &str = "CREATE TABLE {t} (ts TIMESTAMP TIME INDEX, city STRING, device_id BIGINT, \
+     PRIMARY KEY(city, device_id)) PARTITION ON COLUMNS (device_id) (device_id < 10, device_id >= 10)";
+const DEVICE_ROWS: &str = "INSERT INTO {t} VALUES (1000, 'Aachen', 1), (1000, 'Zurich', 1), \
+     (1000, 'Paris', 2), (1000, 'Aachen', 10), (1000, 'Zurich', 10), (1000, 'Beijing', 20)";
+const PARTITION_DEVICES: &str = "ALTER TABLE {t} PARTITION ON COLUMNS (device_id) \
+     (device_id < 10, device_id >= 10 AND device_id < 20, device_id >= 20)";
+const METRIC_PHYSICAL: &str = r#"CREATE TABLE {t}_phy (ts TIMESTAMP TIME INDEX, val DOUBLE, host STRING PRIMARY KEY) ENGINE = metric WITH ("physical_metric_table" = "true")"#;
+const METRIC_LOGICAL: &str = r#"CREATE TABLE {t} (ts TIMESTAMP TIME INDEX, val DOUBLE, host STRING PRIMARY KEY) ENGINE = metric WITH ("on_physical_table" = "{t}_phy")"#;
+const METRIC_LOGICAL_NO_HOST: &str = r#"CREATE TABLE {t}_job (ts TIMESTAMP TIME INDEX, val DOUBLE, job STRING PRIMARY KEY) ENGINE = metric WITH ("on_physical_table" = "{t}_phy")"#;
+const METRIC_ROWS: &str = "INSERT INTO {t} (host, ts, val) VALUES ('a_host', 1000, 1), \
+     ('b_host', 1000, 2), ('n_host', 1000, 2), ('z_host', 1000, 2)";
+const METRIC_NO_HOST_ROWS: &str =
+    "INSERT INTO {t}_job (job, ts, val) VALUES ('a', 1000, 1), ('b', 1000, 2)";
+const PARTITION_METRIC_PHYSICAL: &str = "ALTER TABLE {t}_phy PARTITION ON COLUMNS (host) \
+     (host < 'g', host >= 'g' AND host < 'p', host >= 'p')";
+const COUNT: &str = "SELECT COUNT(1) FROM {t}";
+const COUNT_BY_CITY: &str = "SELECT COUNT(1) FROM {t} GROUP BY city ORDER BY city";
+const COUNT_BY_DEVICE: &str = "SELECT COUNT(1) FROM {t} GROUP BY device_id ORDER BY device_id";
+const COUNT_BY_VAL: &str = "SELECT COUNT(1) FROM {t} GROUP BY val ORDER BY val";
+const FIRST_DEVICES: &str = "SELECT device_id FROM {t} ORDER BY device_id LIMIT 2";
+const FIRST_DEVICES_ALL_COLUMNS: &str = "SELECT * FROM {t} ORDER BY device_id LIMIT 2";
+
+/// What a statement prepared before a case's DDL returns after it.
+enum Expected {
+    /// The same as the same text prepared on a new connection.
+    NewStatement,
+    /// These values of the last column.
+    Rows(&'static [i64]),
+    Error,
+}
+
+/// `{t}` in the statements stands for a table name unique to the case.
+struct PreparedStatementCase {
+    name: &'static str,
+    setup: &'static [&'static str],
+    queries: &'static [(&'static str, Expected)],
+    ddl: &'static [&'static str],
+}
+
+const PREPARED_STATEMENT_CASES: &[PreparedStatementCase] = &[
+    PreparedStatementCase {
+        name: "first partitioning",
+        setup: &[
+            DEVICES,
+            DEVICE_ROWS,
+            "CREATE VIEW {t}_view AS SELECT city, COUNT(1) AS c FROM {t} GROUP BY city",
+            "CREATE TABLE {t}_sink (city STRING PRIMARY KEY, c BIGINT, ts TIMESTAMP TIME INDEX)",
+        ],
+        queries: &[
+            (COUNT, Expected::NewStatement),
+            (COUNT_BY_CITY, Expected::NewStatement),
+            (FIRST_DEVICES, Expected::NewStatement),
+            (
+                "SELECT COUNT(1) FROM {t} WHERE device_id >= ?",
+                Expected::NewStatement,
+            ),
+            ("SELECT (SELECT COUNT(1) FROM {t})", Expected::NewStatement),
+            (
+                "SELECT c FROM {t}_view ORDER BY city",
+                Expected::NewStatement,
+            ),
+            (
+                "INSERT INTO {t}_sink SELECT city, COUNT(1), MAX(ts) FROM {t} GROUP BY city",
+                Expected::NewStatement,
+            ),
+            (
+                "SELECT c FROM {t}_sink ORDER BY city",
+                Expected::Rows(&[2, 1, 1, 2]),
+            ),
+        ],
+        ddl: &[PARTITION_DEVICES],
+    },
+    PreparedStatementCase {
+        name: "split adding a partition column",
+        setup: &[DEVICES_ON_DEVICE_ID, DEVICE_ROWS],
+        queries: &[(COUNT_BY_DEVICE, Expected::NewStatement)],
+        ddl: &[
+            "ALTER TABLE {t} SPLIT PARTITION (device_id >= 10) ON COLUMNS (device_id, city) \
+             INTO (device_id >= 10 AND city < 'M', device_id >= 10 AND city >= 'M')",
+        ],
+    },
+    PreparedStatementCase {
+        name: "repartition replacing the partition column",
+        setup: &[DEVICES_ON_DEVICE_ID, DEVICE_ROWS],
+        queries: &[(COUNT_BY_DEVICE, Expected::NewStatement)],
+        ddl: &[
+            "ALTER TABLE {t} REPARTITION (device_id < 10, device_id >= 10) ON COLUMNS (city) \
+             INTO (city < 'M', city >= 'M')",
+        ],
+    },
+    PreparedStatementCase {
+        name: "metric logical tables with and without the physical partition column",
+        setup: &[
+            METRIC_PHYSICAL,
+            METRIC_LOGICAL,
+            METRIC_LOGICAL_NO_HOST,
+            METRIC_ROWS,
+            METRIC_NO_HOST_ROWS,
+        ],
+        queries: &[
+            (COUNT, Expected::NewStatement),
+            (COUNT_BY_VAL, Expected::NewStatement),
+            ("TQL EVAL (0, 10, '5s') sum({t})", Expected::NewStatement),
+            ("SELECT COUNT(1) FROM {t}_job", Expected::NewStatement),
+        ],
+        ddl: &[PARTITION_METRIC_PHYSICAL],
+    },
+    PreparedStatementCase {
+        name: "metric logical table gains the physical partition column",
+        setup: &[
+            METRIC_PHYSICAL,
+            METRIC_LOGICAL_NO_HOST,
+            METRIC_NO_HOST_ROWS,
+            PARTITION_METRIC_PHYSICAL,
+        ],
+        queries: &[("SELECT COUNT(1) FROM {t}_job", Expected::NewStatement)],
+        ddl: &["ALTER TABLE {t}_job ADD COLUMN host STRING PRIMARY KEY"],
+    },
+    PreparedStatementCase {
+        name: "schema and partition columns change",
+        setup: &[DEVICES, DEVICE_ROWS],
+        queries: &[
+            (COUNT, Expected::NewStatement),
+            (COUNT_BY_CITY, Expected::NewStatement),
+            (FIRST_DEVICES, Expected::NewStatement),
+            (FIRST_DEVICES_ALL_COLUMNS, Expected::Rows(&[1, 1])),
+        ],
+        ddl: &["ALTER TABLE {t} ADD COLUMN zone STRING", PARTITION_DEVICES],
+    },
+    PreparedStatementCase {
+        name: "metric logical table schema and physical partition columns change",
+        setup: &[METRIC_PHYSICAL, METRIC_LOGICAL, METRIC_ROWS],
+        queries: &[
+            (COUNT, Expected::NewStatement),
+            (COUNT_BY_VAL, Expected::NewStatement),
+        ],
+        ddl: &[
+            "ALTER TABLE {t} ADD COLUMN job STRING PRIMARY KEY",
+            PARTITION_METRIC_PHYSICAL,
+        ],
+    },
+    PreparedStatementCase {
+        name: "column comment and partition columns change",
+        setup: &[DEVICES, DEVICE_ROWS],
+        queries: &[
+            (COUNT, Expected::NewStatement),
+            (COUNT_BY_CITY, Expected::NewStatement),
+        ],
+        ddl: &["COMMENT ON COLUMN {t}.city IS 'x'", PARTITION_DEVICES],
+    },
+    PreparedStatementCase {
+        name: "rename and partition columns change",
+        setup: &[DEVICES, DEVICE_ROWS],
+        queries: &[(COUNT, Expected::Rows(&[6]))],
+        ddl: &[
+            "ALTER TABLE {t} RENAME {t}_renamed",
+            "ALTER TABLE {t}_renamed PARTITION ON COLUMNS (device_id) \
+             (device_id < 10, device_id >= 10 AND device_id < 20, device_id >= 20)",
+        ],
+    },
+    PreparedStatementCase {
+        name: "schema change alone",
+        setup: &[DEVICES_ON_DEVICE_ID, DEVICE_ROWS],
+        queries: &[
+            (COUNT, Expected::NewStatement),
+            (FIRST_DEVICES_ALL_COLUMNS, Expected::Rows(&[1, 1])),
+        ],
+        ddl: &["ALTER TABLE {t} ADD COLUMN zone STRING"],
+    },
+    PreparedStatementCase {
+        name: "dropped and recreated",
+        setup: &[DEVICES, DEVICE_ROWS],
+        queries: &[(COUNT, Expected::Error)],
+        ddl: &["DROP TABLE {t}", DEVICES],
+    },
+];
+
+macro_rules! fetch_last_column {
+    ($pool:expr, $sql:expr, $param:expr) => {{
+        let mut query = sqlx::query(sqlx::AssertSqlSafe($sql));
+        if let Some(param) = $param {
+            query = query.bind(param);
+        }
+        let rows = query.fetch_all($pool).await.map_err(|e| e.to_string())?;
+        rows.iter()
+            .map(|row| {
+                let last = row.len() - 1;
+                row.try_get::<i64, _>(last)
+                    .or_else(|_| row.try_get::<f64, _>(last).map(|v| v as i64))
+                    .map_err(|e| e.to_string())
+            })
+            .collect()
+    }};
+}
+
+/// A connection that keeps the statements it prepares.
+enum PreparedClient {
+    Mysql(sqlx::MySqlPool),
+    Postgres(sqlx::PgPool),
+}
+
+impl PreparedClient {
+    async fn connect_each(mysql_addr: &str, pg_addr: &str) -> [Self; 2] {
+        [
+            Self::Mysql(
+                sqlx::mysql::MySqlPoolOptions::new()
+                    .max_connections(1)
+                    .connect(&format!("mysql://{mysql_addr}/public"))
+                    .await
+                    .unwrap(),
+            ),
+            Self::Postgres(
+                sqlx::postgres::PgPoolOptions::new()
+                    .max_connections(1)
+                    .connect(&format!("postgres://{pg_addr}/public"))
+                    .await
+                    .unwrap(),
+            ),
+        ]
+    }
+
+    fn protocol(&self) -> &'static str {
+        match self {
+            Self::Mysql(_) => "mysql",
+            Self::Postgres(_) => "postgres",
+        }
+    }
+
+    /// Returns the last column of each row, binding 2 to a `?` in `sql`.
+    async fn fetch(&self, sql: &str) -> Result<Vec<i64>, String> {
+        let param = sql.contains('?').then_some(2i64);
+        match self {
+            Self::Mysql(pool) => fetch_last_column!(pool, sql, param),
+            Self::Postgres(pool) => fetch_last_column!(pool, sql.replace('?', "$1"), param),
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_prepared_statement_across_partition_column_change() {
+    let (cluster, _home_guard) = repartition_cluster("prepared_statement_partition").await;
+    let instance = cluster.fe_instance();
+    let mysql = setup_mysql_server_for_frontend_instance(instance.clone(), None).await;
+    let pg = setup_pg_server_for_frontend_instance(instance.clone(), None).await;
+    let mysql_addr = mysql.bind_addr().unwrap().to_string();
+    let pg_addr = pg.bind_addr().unwrap().to_string();
+
+    let mut failures = Vec::new();
+    for (index, case) in PREPARED_STATEMENT_CASES.iter().enumerate() {
+        let table = format!("prepared_{index}");
+        let sql = |template: &str| template.replace("{t}", &table);
+        for setup in case.setup {
+            run_sql(instance, &sql(setup), QueryContext::arc())
+                .await
+                .unwrap();
+        }
+        let held = PreparedClient::connect_each(&mysql_addr, &pg_addr).await;
+        for client in &held {
+            for (query, _) in case.queries {
+                client.fetch(&sql(query)).await.unwrap();
+            }
+        }
+        for ddl in case.ddl {
+            run_sql(instance, &sql(ddl), QueryContext::arc())
+                .await
+                .unwrap();
+        }
+
+        let new = PreparedClient::connect_each(&mysql_addr, &pg_addr).await;
+        for (held, new) in held.iter().zip(&new) {
+            for (query, expected) in case.queries {
+                let query = sql(query);
+                let expected = match expected {
+                    // Runs first, so that the held statement of an `INSERT` writes last.
+                    Expected::NewStatement => Some(new.fetch(&query).await.unwrap()),
+                    Expected::Rows(rows) => Some(rows.to_vec()),
+                    Expected::Error => None,
+                };
+                let actual = held.fetch(&query).await;
+                if actual.as_ref().ok() != expected.as_ref() {
+                    failures.push(format!(
+                        "{}, {}, {query}: got {actual:?}, expected {expected:?}",
+                        case.name,
+                        held.protocol(),
+                    ));
+                }
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{failures:#?}");
 }
 
 pub async fn test_partition_unpartitioned_mito(store_type: StorageType) {

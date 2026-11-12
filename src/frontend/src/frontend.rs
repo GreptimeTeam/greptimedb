@@ -14,14 +14,16 @@
 
 use std::sync::Arc;
 
+use catalog::process_manager::{ProcessManager, ProcessManagerRef};
 use common_base::readable_size::ReadableSize;
+use common_base::secrets::SecretString;
 use common_config::config::Configurable;
 use common_event_recorder::EventRecorderOptions;
 use common_memory_manager::OnExhaustedPolicy;
 use common_options::datanode::DatanodeClientOptions;
 use common_options::memory::MemoryOptions;
 use common_telemetry::logging::{LoggingOptions, SlowQueryOptions, TracingOptions};
-use meta_client::MetaClientOptions;
+use meta_client::{MetaClientOptions, MetaClientRef};
 use pipeline::PipelineOptions;
 use query::options::QueryOptions;
 use serde::{Deserialize, Serialize};
@@ -77,7 +79,13 @@ pub struct FrontendOptions {
     pub datanode: DatanodeClientOptions,
     /// Retry policy for retryable distributed write failures.
     pub write_retry: WriteRetryOptions,
-    pub user_provider: Option<String>,
+    /// The user provider for authentication.
+    ///
+    /// The inline `static_user_provider:cmd:` form carries plaintext
+    /// passwords, so the value is held as a [`SecretString`] and serialized
+    /// with those passwords redacted.
+    #[serde(serialize_with = "auth::serialize_user_provider_option")]
+    pub user_provider: Option<SecretString>,
     pub tracing: TracingOptions,
     pub query: QueryOptions,
     pub slow_query: SlowQueryOptions,
@@ -123,6 +131,33 @@ impl Default for FrontendOptions {
             event_recorder: EventRecorderOptions::default(),
             heartbeat_env_vars: vec![],
         }
+    }
+}
+
+impl FrontendOptions {
+    /// Returns the address this frontend advertises to the rest of the cluster.
+    ///
+    /// It is used as the heartbeat peer address and as the identity of the
+    /// frontend in the process list. When a dedicated internal gRPC server is
+    /// configured, it is that server's address, because the internal server is
+    /// the one that serves the frontend management service and peers connect to
+    /// it. Otherwise the public gRPC address is used: the peer address only
+    /// promises to be reachable by other components.
+    pub fn peer_addr(&self) -> String {
+        let grpc = self.internal_grpc.as_ref().unwrap_or(&self.grpc);
+        servers::addrs::resolve_addr(&grpc.bind_addr, Some(&grpc.server_addr))
+    }
+
+    /// Creates the process manager that tracks this frontend's running queries.
+    ///
+    /// The manager identifies this frontend by [`Self::peer_addr`], the same
+    /// address other frontends discover from metasrv. It must not use the public
+    /// gRPC address: a frontend with a dedicated internal gRPC server would fail
+    /// to recognize itself among the discovered peers, list its own queries
+    /// twice, and send `KILL` requests to an address that does not serve the
+    /// frontend management service.
+    pub fn create_process_manager(&self, meta_client: Option<MetaClientRef>) -> ProcessManagerRef {
+        Arc::new(ProcessManager::new(self.peer_addr(), meta_client))
     }
 }
 
@@ -196,6 +231,7 @@ mod tests {
     use async_trait::async_trait;
     use client::{Client, Database};
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+    use common_config::Configurable;
     use common_error::ext::ErrorExt;
     use common_error::from_header_to_err_code_msg;
     use common_error::status_code::StatusCode;
@@ -209,7 +245,7 @@ mod tests {
     use meta_client::MetaClientRef;
     use meta_client::client::MetaClientBuilder;
     use servers::batcher::BatchingProtocol;
-    use servers::grpc::{FlightCompression, GRPC_SERVER};
+    use servers::grpc::{FlightCompression, GRPC_SERVER, GrpcOptions};
     use servers::http::HTTP_SERVER;
     use servers::http::result::greptime_result_v1::GreptimedbV1Response;
     use servers::server::Server;
@@ -228,6 +264,90 @@ mod tests {
 
     type GrpcStream<T> =
         Pin<Box<dyn Stream<Item = std::result::Result<T, Status>> + Send + Sync + 'static>>;
+
+    #[test]
+    fn test_user_provider_redacts_cmd_passwords_in_config() {
+        use common_base::secrets::ExposeSecret;
+
+        let options = FrontendOptions {
+            user_provider: Some(
+                "static_user_provider:cmd:alice=secret,bob=pbkdf2_sha256:4096:aa:bb"
+                    .to_string()
+                    .into(),
+            ),
+            ..Default::default()
+        };
+
+        let serialized = options.to_toml().unwrap();
+        assert!(serialized.contains("user_provider = \"[REDACTED]\""));
+        assert!(!serialized.contains("secret"));
+        assert!(!serialized.contains("pbkdf2_sha256"));
+
+        assert_eq!(
+            options
+                .user_provider
+                .as_ref()
+                .map(|value| value.expose_secret().as_str()),
+            Some("static_user_provider:cmd:alice=secret,bob=pbkdf2_sha256:4096:aa:bb")
+        );
+
+        let debug = format!("{options:?}");
+        assert!(!debug.contains("secret"));
+        assert!(!debug.contains("pbkdf2_sha256"));
+    }
+
+    #[test]
+    fn test_user_provider_file_path_is_not_redacted_in_config() {
+        let options = FrontendOptions {
+            user_provider: Some(
+                "static_user_provider:file:/etc/greptimedb/users"
+                    .to_string()
+                    .into(),
+            ),
+            ..Default::default()
+        };
+
+        assert!(
+            options
+                .to_toml()
+                .unwrap()
+                .contains("static_user_provider:file:/etc/greptimedb/users")
+        );
+    }
+
+    #[test]
+    fn test_peer_addr_prefers_internal_grpc_server() {
+        let mut options = FrontendOptions::default();
+        options.grpc.bind_addr = "127.0.0.1:4001".to_string();
+        options.grpc.server_addr = "10.0.0.1:4001".to_string();
+
+        assert_eq!("10.0.0.1:4001", options.peer_addr());
+
+        options.internal_grpc = Some(GrpcOptions {
+            bind_addr: "127.0.0.1:4010".to_string(),
+            server_addr: "10.0.0.1".to_string(),
+            ..Default::default()
+        });
+
+        // The port falls back to the internal bind address when the advertised
+        // address does not carry one.
+        assert_eq!("10.0.0.1:4010", options.peer_addr());
+    }
+
+    #[test]
+    fn test_pipeline_config() {
+        let defaults: FrontendOptions = toml::from_str("").unwrap();
+        assert!(!defaults.pipeline.allow_vrl_host_access);
+        assert!(!defaults.pipeline.ignore_errors);
+        let options: FrontendOptions =
+            toml::from_str("[pipeline]\nallow_vrl_host_access = true\nignore_errors = true")
+                .unwrap();
+        assert!(options.pipeline.allow_vrl_host_access);
+        assert!(options.pipeline.ignore_errors);
+        let serialized = toml::to_string(&options).unwrap();
+        let restored: FrontendOptions = toml::from_str(&serialized).unwrap();
+        assert_eq!(options.pipeline, restored.pipeline);
+    }
 
     #[test]
     fn test_write_retry_config() {

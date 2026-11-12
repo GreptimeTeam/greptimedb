@@ -21,7 +21,8 @@ pub(crate) mod raw_entry_reader;
 
 use std::collections::HashMap;
 use std::mem;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
+use std::time::Duration;
 
 use api::v1::WalEntry;
 use common_error::ext::BoxedError;
@@ -35,8 +36,12 @@ use store_api::logstore::entry::Entry;
 use store_api::logstore::provider::Provider;
 use store_api::logstore::{AppendBatchResponse, LogStore};
 use store_api::storage::RegionId;
+use tokio::sync::watch;
 
-use crate::error::{BuildEntrySnafu, DeleteWalSnafu, Result, WaitWalDurableSnafu, WriteWalSnafu};
+use crate::error::{
+    BuildEntrySnafu, CheckWalHistorySnafu, DeleteWalSnafu, Result, WaitWalDurableSnafu,
+    WriteWalSnafu,
+};
 use crate::wal::entry_reader::{LogStoreEntryReader, WalEntryReader};
 use crate::wal::raw_entry_reader::{LogStoreRawEntryReader, RegionRawEntryReader};
 
@@ -82,12 +87,17 @@ impl std::fmt::Debug for DurabilityBarrier {
 pub struct Wal<S> {
     /// The underlying log store.
     store: Arc<S>,
+    /// One pressure snapshot shared by all workers using this WAL.
+    flush_candidates: Arc<Mutex<FlushCandidates>>,
 }
 
 impl<S> Wal<S> {
     /// Creates a new [Wal] from the log store.
     pub fn new(store: Arc<S>) -> Self {
-        Self { store }
+        Self {
+            store,
+            flush_candidates: Arc::default(),
+        }
     }
 
     pub fn store(&self) -> &Arc<S> {
@@ -99,11 +109,30 @@ impl<S> Clone for Wal<S> {
     fn clone(&self) -> Self {
         Self {
             store: Arc::clone(&self.store),
+            flush_candidates: self.flush_candidates.clone(),
         }
     }
 }
 
 impl<S: LogStore> Wal<S> {
+    /// Subscribes to shared WAL pressure snapshots. Notifications only advise
+    /// workers to check their current region state, and never wait for flush.
+    pub(crate) fn subscribe_flush_candidates(&self) -> watch::Receiver<Arc<[RegionId]>> {
+        self.flush_candidates
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .sender
+            .subscribe()
+    }
+
+    /// Refreshes and publishes candidates at most once per interval for all workers.
+    pub(crate) fn refresh_flush_candidates(&self, now: i64, interval: Duration) {
+        self.flush_candidates
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .refresh(now, interval, || self.store.flush_candidates());
+    }
+
     /// Returns a writer to write to the WAL.
     pub fn writer(&self) -> WalWriter<S> {
         WalWriter {
@@ -156,6 +185,41 @@ impl<S: LogStore> Wal<S> {
                     .context(WaitWalDurableSnafu { region_id })
             })
         }))
+    }
+
+    /// Checks that the log store holds the WAL history of the region through
+    /// `entry_id`, the largest replay watermark the region persisted, before
+    /// the region is replayed from its persisted state.
+    pub(crate) async fn check_region_history(
+        &self,
+        region_id: RegionId,
+        provider: &Provider,
+        entry_id: EntryId,
+    ) -> Result<()> {
+        if let Provider::Noop = provider {
+            return Ok(());
+        }
+        self.store
+            .check_region_history(provider, entry_id)
+            .await
+            .map_err(BoxedError::new)
+            .context(CheckWalHistorySnafu { region_id })
+    }
+
+    /// Records that the WAL history of the region starts in the log store,
+    /// as it does for a region created on it.
+    pub(crate) fn start_region_history(
+        &self,
+        region_id: RegionId,
+        provider: &Provider,
+    ) -> Result<()> {
+        if let Provider::Noop = provider {
+            return Ok(());
+        }
+        self.store
+            .start_region_history(provider)
+            .map_err(BoxedError::new)
+            .context(CheckWalHistorySnafu { region_id })
     }
 
     /// Returns a [WalEntryReader]
@@ -215,6 +279,18 @@ impl<S: LogStore> Wal<S> {
         }
         self.store
             .delete_namespace(provider)
+            .await
+            .map_err(BoxedError::new)
+            .context(DeleteWalSnafu { region_id })
+    }
+
+    /// Releases every WAL entry of a dropped region, see [LogStore::release_region].
+    pub async fn release_region(&self, region_id: RegionId, provider: &Provider) -> Result<()> {
+        if let Provider::Noop = provider {
+            return Ok(());
+        }
+        self.store
+            .release_region(provider, region_id)
             .await
             .map_err(BoxedError::new)
             .context(DeleteWalSnafu { region_id })
@@ -283,6 +359,38 @@ impl<S: LogStore> WalWriter<S> {
     }
 }
 
+/// A periodically refreshed advisory snapshot. Publishing wakes every worker,
+/// so a worker whose periodic timer just ran does not wait another interval.
+#[derive(Debug)]
+struct FlushCandidates {
+    /// Wall-clock milliseconds of the last refresh, using the worker clock.
+    refreshed_at: Option<i64>,
+    /// Latest candidates; intermediate snapshots can be coalesced safely.
+    sender: watch::Sender<Arc<[RegionId]>>,
+}
+
+impl Default for FlushCandidates {
+    fn default() -> Self {
+        let (sender, _) = watch::channel(Arc::default());
+        Self {
+            refreshed_at: None,
+            sender,
+        }
+    }
+}
+
+impl FlushCandidates {
+    fn refresh(&mut self, now: i64, interval: Duration, load: impl FnOnce() -> Vec<RegionId>) {
+        if self
+            .refreshed_at
+            .is_none_or(|last| now.saturating_sub(last) >= interval.as_millis() as i64)
+        {
+            self.sender.send_replace(load().into());
+            self.refreshed_at = Some(now);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use api::v1::helper::{tag_column_schema, time_index_column_schema};
@@ -303,6 +411,32 @@ mod tests {
     use store_api::storage::SequenceNumber;
 
     use super::*;
+
+    #[test]
+    fn test_flush_candidates_share_refresh_and_retry_without_progress() {
+        let a = RegionId::new(1, 1);
+        let interval = Duration::from_millis(60);
+        let mut candidates = FlushCandidates::default();
+        let mut first = candidates.sender.subscribe();
+        let mut second = candidates.sender.subscribe();
+        candidates.refresh(0, interval, || vec![a]);
+        assert!(first.has_changed().unwrap());
+        assert!(second.has_changed().unwrap());
+        let first_snapshot = first.borrow_and_update().clone();
+        let second_snapshot = second.borrow_and_update().clone();
+        assert!(Arc::ptr_eq(&first_snapshot, &second_snapshot));
+        assert_eq!(&[a], first_snapshot.as_ref());
+        candidates.refresh(59, interval, || panic!("must share the snapshot"));
+        candidates.refresh(-1, interval, || panic!("clock rolled back"));
+        assert!(!first.has_changed().unwrap());
+        // A failed or skipped flush must still be retried with the same candidates.
+        candidates.refresh(60, interval, || vec![a]);
+        assert!(first.has_changed().unwrap());
+        assert_eq!(&[a], first.borrow_and_update().as_ref());
+        candidates.refresh(120, interval, Vec::new);
+        assert!(first.borrow_and_update().is_empty());
+        assert!(second.borrow_and_update().is_empty());
+    }
 
     struct WalEnv {
         _wal_dir: TempDir,

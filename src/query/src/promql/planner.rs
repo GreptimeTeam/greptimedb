@@ -615,7 +615,7 @@ impl PromPlanner {
             range,
             step,
             offset,
-            ..
+            at,
         } = subquery_expr;
 
         // Shift the child window back; `RangeManipulate` restores the outer timeline.
@@ -641,10 +641,18 @@ impl PromPlanner {
                 end: current_end,
             }
         );
+        // `@` makes the subquery step-invariant: like Prometheus (`setOffsetForAtModifier`), fold
+        // the anchor into the offset and evaluate once at `current_start`, then replay the result
+        // over the outer grid. See [`Self::at_modifier_offset`].
+        let at_offset = self.at_modifier_offset(at, offset)?;
+        let (eval_end, offset_ms) = match at_offset {
+            Some(at_offset) => (current_start, at_offset),
+            None => (current_end, offset_ms),
+        };
         // An empty child needs only its schema; plan it over the valid caller window.
         let child_window = Self::subquery_child_window(
             current_start,
-            current_end,
+            eval_end,
             current_interval,
             offset_ms,
             range.as_millis() as Millisecond,
@@ -749,23 +757,31 @@ impl PromPlanner {
         };
 
         let manipulate = RangeManipulate::new(
-            self.ctx.start,
-            self.ctx.end,
+            current_start,
+            eval_end,
             self.ctx.interval,
             offset_ms,
             range_ms,
-            time_index_column,
+            time_index_column.clone(),
             self.ctx.field_columns.clone(),
             divide_plan,
         )
         .context(DataFusionPlanningSnafu)?;
-        // The payload timestamps are shifted by the subquery offset; see
-        // [`Self::create_range_eval_ts_expr`].
+        // The payload timestamps are shifted by the subquery offset (the rewritten one under `@`);
+        // see [`Self::create_range_eval_ts_expr`].
         self.ctx.range_fold_offset = Some(offset_ms);
-
-        Ok(LogicalPlan::Extension(Extension {
+        let manipulate = LogicalPlan::Extension(Extension {
             node: Arc::new(manipulate),
-        }))
+        });
+
+        // An anchored subquery was folded once, at `current_start`; report that window at every
+        // step of the outer grid, like an anchored range selector.
+        Ok(match at_offset {
+            Some(_) => {
+                self.replay_over_grid(manipulate, current_start, current_end, time_index_column)
+            }
+            None => manipulate,
+        })
     }
 
     async fn prom_aggr_expr_to_plan(
@@ -3100,6 +3116,14 @@ impl PromPlanner {
             let (_, upper) = bounds(end);
             return Ok(filter(lower, upper));
         }
+        // Overlapping or touching windows form one continuous range. Use the last
+        // evaluation point, since the requested end need not lie on the step grid.
+        if window >= self.ctx.interval {
+            let (lower, _) = bounds(start);
+            let last = i128::from(start) + num_points * i128::from(self.ctx.interval);
+            let upper = last - i128::from(offset_duration);
+            return Ok(filter(lower, upper));
+        }
         let mut filters = Vec::new();
         for timestamp in (start..=end).step_by(self.ctx.interval as usize) {
             let (lower, upper) = bounds(timestamp);
@@ -3110,7 +3134,20 @@ impl PromPlanner {
             };
             filters.push(filter);
         }
-        Ok(filters.into_iter().reduce(DfExpr::or))
+        // Pair adjacent windows to keep generated expression depth logarithmic.
+        // A left fold can exceed the expression-depth guard for ordinary queries.
+        while filters.len() > 1 {
+            let mut next = Vec::with_capacity(filters.len().div_ceil(2));
+            let mut iter = filters.into_iter();
+            while let Some(left) = iter.next() {
+                next.push(match iter.next() {
+                    Some(right) => left.or(right),
+                    None => left,
+                });
+            }
+            filters = next;
+        }
+        Ok(filters.pop())
     }
 
     /// Create a table scan plan and a filter plan with given filter.

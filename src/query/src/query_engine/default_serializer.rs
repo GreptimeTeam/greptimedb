@@ -433,6 +433,7 @@ mod tests {
 
         let plan_decoder = engine
             .engine_context(QueryContext::arc())
+            .unwrap()
             .new_plan_decoder()
             .unwrap();
         let catalog_list = Arc::new(DummyCatalogList::with_table_provider(table_provider));
@@ -525,6 +526,7 @@ mod tests {
         let table_provider = Arc::new(MemTable::try_new(schema, vec![vec![]]).unwrap());
         let plan_decoder = engine
             .engine_context(QueryContext::arc())
+            .unwrap()
             .new_plan_decoder()
             .unwrap();
 
@@ -831,6 +833,7 @@ mod tests {
                 .unwrap();
             let plan_decoder = engine
                 .engine_context(query_ctx.clone())
+                .unwrap()
                 .new_plan_decoder()
                 .unwrap();
             let decoded = plan_decoder
@@ -898,6 +901,7 @@ mod tests {
                 .unwrap();
             let plan_decoder = engine
                 .engine_context(query_ctx.clone())
+                .unwrap()
                 .new_plan_decoder()
                 .unwrap();
             let catalog_list = Arc::new(DummyCatalogList::with_table_provider(Arc::new(
@@ -964,6 +968,7 @@ mod tests {
     fn plan_decoder(engine: &dyn crate::QueryEngine) -> SubstraitPlanDecoderRef {
         engine
             .engine_context(QueryContext::arc())
+            .unwrap()
             .new_plan_decoder()
             .unwrap()
     }
@@ -997,7 +1002,11 @@ mod tests {
             QueryOptions::default(),
         )
         .query_engine();
-        let mut state = engine.engine_context(resolver_ctx.clone()).state().clone();
+        let mut state = engine
+            .engine_context(resolver_ctx.clone())
+            .unwrap()
+            .state()
+            .clone();
         state.config_mut().set_extension(resolver_ctx);
         let extensions = Extensions::default();
         let consumer = MergeScanSubstraitConsumer {
@@ -1470,7 +1479,11 @@ mod tests {
         )
         .query_engine();
         let mut state = SessionStateBuilder::new_from_existing(
-            engine.engine_context(QueryContext::arc()).state().clone(),
+            engine
+                .engine_context(QueryContext::arc())
+                .unwrap()
+                .state()
+                .clone(),
         )
         .with_serializer_registry(Arc::new(DefaultSerializer))
         .build();

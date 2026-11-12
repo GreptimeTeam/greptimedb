@@ -81,6 +81,11 @@ pub struct ObjectStoreWalConfig {
     /// second fetch, because its checksum does not match or its content
     /// disagrees with its footer entry, defaults to `skip`.
     pub on_corrupted_segment: CorruptedSegmentAction,
+    /// Whether a region whose WAL history the configured location does not
+    /// hold opens anyway, with its writes that were not flushed lost, instead
+    /// of failing to open, defaults to false. Meant for one start after the
+    /// old WAL location is lost.
+    pub accept_missing_history: bool,
 }
 
 impl Default for ObjectStoreWalConfig {
@@ -94,6 +99,7 @@ impl Default for ObjectStoreWalConfig {
             max_unpersisted_bytes: ReadableSize::mb(64),
             max_unpersisted_age: Duration::from_secs(8),
             on_corrupted_segment: CorruptedSegmentAction::Skip,
+            accept_missing_history: false,
         }
     }
 }

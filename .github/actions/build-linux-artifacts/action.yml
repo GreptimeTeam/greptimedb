@@ -50,6 +50,11 @@ inputs:
 runs:
   using: composite
   steps:
+    - name: Set up Linux runner
+      uses: ./.github/actions/setup-linux-runner
+      with:
+        tools: make shasum
+
     - name: Run integration test
       if: ${{ inputs.disable-run-tests == 'false' }}
       shell: bash

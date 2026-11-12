@@ -32,6 +32,8 @@ use crate::error::{
 use crate::extension::json::Json2ExtensionType;
 use crate::schema::TYPE_KEY;
 use crate::schema::constraint::ColumnDefaultConstraint;
+#[cfg(feature = "enterprise")]
+use crate::schema::sketch::{HllOptions, KllOptions, MgOptions};
 use crate::value::Value;
 use crate::vectors::json::builder::JsonVectorBuilder;
 use crate::vectors::{MutableVector, VectorRef};
@@ -61,6 +63,12 @@ pub const INVERTED_INDEX_KEY: &str = "greptime:inverted_index";
 pub const SKIPPING_INDEX_KEY: &str = "greptime:skipping_index";
 /// Key used to store SST compression options in arrow field's metadata.
 pub const COMPRESSION_KEY: &str = "greptime:compression";
+/// Key used to store HLL options in arrow field's metadata.
+pub const HLL_KEY: &str = "greptime:hll";
+/// Key used to store KLL options in arrow field's metadata.
+pub const KLL_KEY: &str = "greptime:kll";
+/// Key used to store MG options in arrow field's metadata.
+pub const MG_KEY: &str = "greptime:mg";
 
 /// Keys used in fulltext options
 pub const COLUMN_FULLTEXT_CHANGE_OPT_KEY_ENABLE: &str = "enable";
@@ -79,6 +87,7 @@ pub const COLUMN_SKIPPING_INDEX_OPT_KEY_TYPE: &str = "type";
 pub const COLUMN_COMPRESSION_OPT_KEY_TYPE: &str = "type";
 pub const COLUMN_COMPRESSION_OPT_KEY_LEVEL: &str = "level";
 pub const COLUMN_COMPRESSION_OPT_KEY_PAGE_SIZE: &str = "page_size";
+pub const COLUMN_COMPRESSION_OPT_KEY_ENCODING: &str = "encoding";
 
 pub const DEFAULT_GRANULARITY: u32 = 10240;
 
@@ -467,6 +476,99 @@ impl ColumnSchema {
         Ok(())
     }
 
+    /// Retrieves independently enabled HLL options, validating stored parameters.
+    #[cfg(feature = "enterprise")]
+    pub fn hll_options(&self) -> Result<Option<HllOptions>> {
+        self.metadata
+            .get(HLL_KEY)
+            .map(|json| serde_json::from_str(json).context(error::DeserializeSnafu { json }))
+            .transpose()
+    }
+
+    /// Enables HLL with validated options.
+    #[cfg(feature = "enterprise")]
+    pub fn with_hll_options(mut self, options: HllOptions) -> Result<Self> {
+        self.set_hll_options(&options)?;
+        Ok(self)
+    }
+
+    /// Sets HLL options without modifying other algorithm metadata.
+    #[cfg(feature = "enterprise")]
+    pub fn set_hll_options(&mut self, options: &HllOptions) -> Result<()> {
+        options.validate()?;
+        let json = serde_json::to_string(options).context(error::SerializeSnafu)?;
+        self.metadata.insert(HLL_KEY.to_string(), json);
+        Ok(())
+    }
+
+    /// Removes only HLL options.
+    #[cfg(feature = "enterprise")]
+    pub fn unset_hll_options(&mut self) {
+        self.metadata.remove(HLL_KEY);
+    }
+
+    /// Retrieves independently enabled KLL options, validating stored parameters.
+    #[cfg(feature = "enterprise")]
+    pub fn kll_options(&self) -> Result<Option<KllOptions>> {
+        self.metadata
+            .get(KLL_KEY)
+            .map(|json| serde_json::from_str(json).context(error::DeserializeSnafu { json }))
+            .transpose()
+    }
+
+    /// Enables KLL with validated options.
+    #[cfg(feature = "enterprise")]
+    pub fn with_kll_options(mut self, options: KllOptions) -> Result<Self> {
+        self.set_kll_options(&options)?;
+        Ok(self)
+    }
+
+    /// Sets KLL options without modifying other algorithm metadata.
+    #[cfg(feature = "enterprise")]
+    pub fn set_kll_options(&mut self, options: &KllOptions) -> Result<()> {
+        options.validate()?;
+        let json = serde_json::to_string(options).context(error::SerializeSnafu)?;
+        self.metadata.insert(KLL_KEY.to_string(), json);
+        Ok(())
+    }
+
+    /// Removes only KLL options.
+    #[cfg(feature = "enterprise")]
+    pub fn unset_kll_options(&mut self) {
+        self.metadata.remove(KLL_KEY);
+    }
+
+    /// Retrieves independently enabled MG options, validating stored parameters.
+    #[cfg(feature = "enterprise")]
+    pub fn mg_options(&self) -> Result<Option<MgOptions>> {
+        self.metadata
+            .get(MG_KEY)
+            .map(|json| serde_json::from_str(json).context(error::DeserializeSnafu { json }))
+            .transpose()
+    }
+
+    /// Enables MG with validated options.
+    #[cfg(feature = "enterprise")]
+    pub fn with_mg_options(mut self, options: MgOptions) -> Result<Self> {
+        self.set_mg_options(&options)?;
+        Ok(self)
+    }
+
+    /// Sets MG options without modifying other algorithm metadata.
+    #[cfg(feature = "enterprise")]
+    pub fn set_mg_options(&mut self, options: &MgOptions) -> Result<()> {
+        options.validate()?;
+        let json = serde_json::to_string(options).context(error::SerializeSnafu)?;
+        self.metadata.insert(MG_KEY.to_string(), json);
+        Ok(())
+    }
+
+    /// Removes only MG options.
+    #[cfg(feature = "enterprise")]
+    pub fn unset_mg_options(&mut self) {
+        self.metadata.remove(MG_KEY);
+    }
+
     /// Retrieves the SST compression options for the column.
     pub fn compression_options(&self) -> Result<Option<CompressionOptions>> {
         match self.metadata.get(COMPRESSION_KEY) {
@@ -506,6 +608,17 @@ impl ColumnSchema {
                 ),
             }
         );
+        if options.encoding == Some(ColumnEncoding::DeltaBinaryPacked) {
+            ensure!(
+                self.data_type.is_timestamp() || self.data_type.as_arrow_type().is_integer(),
+                error::InvalidCompressionOptionSnafu {
+                    msg: format!(
+                        "encoding delta_binary_packed requires an integer or timestamp column, but column {} is {}",
+                        self.name, self.data_type
+                    ),
+                }
+            );
+        }
         Ok(())
     }
 
@@ -1069,6 +1182,24 @@ impl fmt::Display for CompressionType {
     }
 }
 
+/// Parquet value encodings for SST columns. Both replace the default dictionary encoding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ColumnEncoding {
+    Plain,
+    /// Only valid for integer and timestamp columns.
+    DeltaBinaryPacked,
+}
+
+impl fmt::Display for ColumnEncoding {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ColumnEncoding::Plain => write!(f, "plain"),
+            ColumnEncoding::DeltaBinaryPacked => write!(f, "delta_binary_packed"),
+        }
+    }
+}
+
 /// Parquet compression settings for a column in SSTs. Unset fields keep the SST defaults.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CompressionOptions {
@@ -1078,6 +1209,8 @@ pub struct CompressionOptions {
     pub level: Option<i32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub page_size: Option<ReadableSize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encoding: Option<ColumnEncoding>,
 }
 
 impl CompressionOptions {
@@ -1120,6 +1253,12 @@ impl CompressionOptions {
                 _ => page_size.as_bytes().to_string(),
             };
             map.insert(COLUMN_COMPRESSION_OPT_KEY_PAGE_SIZE.to_string(), page_size);
+        }
+        if let Some(encoding) = self.encoding {
+            map.insert(
+                COLUMN_COMPRESSION_OPT_KEY_ENCODING.to_string(),
+                encoding.to_string(),
+            );
         }
         map
     }
@@ -1180,10 +1319,25 @@ impl TryFrom<HashMap<String, String>> for CompressionOptions {
             })
             .transpose()?;
 
+        let encoding = options
+            .get(COLUMN_COMPRESSION_OPT_KEY_ENCODING)
+            .map(|value| match value.to_ascii_lowercase().as_str() {
+                "plain" => Ok(ColumnEncoding::Plain),
+                "delta_binary_packed" => Ok(ColumnEncoding::DeltaBinaryPacked),
+                _ => error::InvalidCompressionOptionSnafu {
+                    msg: format!(
+                        "invalid encoding: {value}, expected: 'plain' or 'delta_binary_packed'"
+                    ),
+                }
+                .fail(),
+            })
+            .transpose()?;
+
         Ok(CompressionOptions {
             compression_type,
             level,
             page_size,
+            encoding,
         })
     }
 }
@@ -1346,6 +1500,30 @@ mod tests {
 
         let new_column_schema = ColumnSchema::try_from(&field).unwrap();
         assert_eq!(column_schema, new_column_schema);
+    }
+
+    #[test]
+    fn test_column_schema_preserves_sketch_metadata() {
+        let metadata = Metadata::from([
+            (
+                "greptime:hll".to_string(),
+                r#"{"precision":10}"#.to_string(),
+            ),
+            ("greptime:kll".to_string(), r#"{"capacity":64}"#.to_string()),
+            (
+                "greptime:mg".to_string(),
+                r#"{"max-counters":64}"#.to_string(),
+            ),
+        ]);
+        let column = ColumnSchema::new("v", ConcreteDataType::int64_datatype(), true)
+            .with_metadata(metadata.clone());
+        let field = Field::try_from(&column).unwrap();
+        assert_eq!(&metadata, field.metadata());
+        assert_eq!(column, ColumnSchema::try_from(&field).unwrap());
+        assert_eq!(
+            column,
+            serde_json::from_str::<ColumnSchema>(&serde_json::to_string(&column).unwrap()).unwrap()
+        );
     }
 
     #[test]
@@ -1576,6 +1754,7 @@ mod tests {
                 compression_type: CompressionType::Zstd,
                 level: Some(3),
                 page_size: Some(ReadableSize::mb(8)),
+                encoding: None,
             },
             options
         );
@@ -1609,6 +1788,17 @@ mod tests {
             serde_json::to_string(&page_only).unwrap()
         );
 
+        let delta = parse(&[("encoding", "DELTA_BINARY_PACKED")]).unwrap();
+        assert_eq!(Some(ColumnEncoding::DeltaBinaryPacked), delta.encoding);
+        assert_eq!(
+            r#"{"type":"zstd","encoding":"delta_binary_packed"}"#,
+            serde_json::to_string(&delta).unwrap()
+        );
+        assert_eq!(
+            delta,
+            parse(&[("encoding", delta.to_options_map()["encoding"].as_str())]).unwrap()
+        );
+
         for invalid in [
             &[("type", "lz4")][..],
             &[("level", "0")],
@@ -1616,6 +1806,7 @@ mod tests {
             &[("level", "high")],
             &[("page_size", "0")],
             &[("page_size", "large")],
+            &[("encoding", "dictionary")],
         ] {
             assert!(parse(invalid).is_err(), "{invalid:?}");
         }
@@ -1643,6 +1834,35 @@ mod tests {
         for data_type in [struct_type, list_type] {
             assert!(
                 ColumnSchema::new("n", data_type, true)
+                    .with_compression_options(options)
+                    .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn test_delta_encoding_requires_integer_or_timestamp() {
+        let options = CompressionOptions {
+            encoding: Some(ColumnEncoding::DeltaBinaryPacked),
+            ..Default::default()
+        };
+        for data_type in [
+            ConcreteDataType::int32_datatype(),
+            ConcreteDataType::uint64_datatype(),
+            ConcreteDataType::timestamp_nanosecond_datatype(),
+        ] {
+            assert!(
+                ColumnSchema::new("c", data_type, true)
+                    .with_compression_options(options)
+                    .is_ok()
+            );
+        }
+        for data_type in [
+            ConcreteDataType::string_datatype(),
+            ConcreteDataType::float64_datatype(),
+        ] {
+            assert!(
+                ColumnSchema::new("c", data_type, true)
                     .with_compression_options(options)
                     .is_err()
             );

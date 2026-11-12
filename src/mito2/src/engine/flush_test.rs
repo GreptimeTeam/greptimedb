@@ -17,7 +17,7 @@
 use std::assert_matches;
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use api::v1::Rows;
@@ -59,6 +59,7 @@ use crate::test_util::{
     prepare_test_for_kafka_log_store, put_rows, raft_engine_log_store_factory, reopen_region,
     rows_schema, single_kafka_log_store_factory,
 };
+use crate::time_provider::TimeProvider;
 use crate::time_provider::mock::MockTimeProvider;
 use crate::worker::MAX_INITIAL_CHECK_DELAY_SECS;
 
@@ -349,6 +350,110 @@ async fn test_manual_flush_with_format(flat_format: bool) {
 | 2     | 2.0     | 1970-01-01T00:00:02 |
 +-------+---------+---------------------+";
     assert_eq!(expected, batches.pretty_print().unwrap());
+}
+
+#[tokio::test]
+async fn test_ingested_parquet_bytes() {
+    for flat_format in [false, true] {
+        let mut env = TestEnv::with_prefix("flushed-parquet-bytes").await;
+        let engine = env
+            .create_engine(MitoConfig {
+                default_flat_format: flat_format,
+                schedule_compaction_after_edit: false,
+                ..Default::default()
+            })
+            .await;
+        let region_id = RegionId::new(1, 1);
+        let request = CreateRequestBuilder::new()
+            .insert_option("compaction.type", "twcs")
+            .insert_option("compaction.twcs.trigger_file_num", "100")
+            .build();
+        let table_dir = request.table_dir.clone();
+        let schema = rows_schema(&request);
+        engine
+            .handle_request(region_id, RegionRequest::Create(request))
+            .await
+            .unwrap();
+        let statistic = || engine.get_region_statistic(region_id).unwrap();
+        assert_eq!(statistic().ingested_parquet_bytes, 0);
+
+        let mut previous_bytes = 0;
+        for start in [0, 10] {
+            put_rows(
+                &engine,
+                region_id,
+                Rows {
+                    schema: schema.clone(),
+                    rows: build_rows(start, start + 3),
+                },
+            )
+            .await;
+            assert_eq!(statistic().ingested_parquet_bytes, previous_bytes);
+            flush_region(&engine, region_id, None).await;
+            let manifest = engine
+                .get_region(region_id)
+                .unwrap()
+                .manifest_ctx
+                .manifest()
+                .await;
+            let parquet_bytes: u64 = manifest.files.values().map(|file| file.file_size).sum();
+            assert!(parquet_bytes > previous_bytes);
+            assert_eq!(statistic().ingested_parquet_bytes, parquet_bytes);
+            previous_bytes = parquet_bytes;
+        }
+        flush_region(&engine, region_id, None).await;
+        assert_eq!(statistic().ingested_parquet_bytes, previous_bytes);
+
+        // A generic edit can add the same file metadata without producing a flush.
+        let file = engine
+            .get_region(region_id)
+            .unwrap()
+            .manifest_ctx
+            .manifest()
+            .await
+            .files
+            .values()
+            .next()
+            .unwrap()
+            .clone();
+        engine
+            .edit_region(
+                region_id,
+                crate::manifest::action::RegionEdit {
+                    files_to_add: vec![file],
+                    files_to_remove: vec![],
+                    timestamp_ms: None,
+                    compaction_time_window: None,
+                    flushed_entry_id: None,
+                    flushed_sequence: None,
+                    committed_sequence: None,
+                    wal_recovery: Default::default(),
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(statistic().ingested_parquet_bytes, previous_bytes);
+
+        engine
+            .handle_request(
+                region_id,
+                RegionRequest::Compact(RegionCompactRequest {
+                    options: api::v1::region::compact_request::Options::StrictWindow(
+                        api::v1::region::StrictWindow {
+                            window_seconds: 3600,
+                        },
+                    ),
+                    ..Default::default()
+                }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(statistic().ingested_parquet_bytes, previous_bytes);
+        assert_eq!(statistic().sst_num, 1);
+        reopen_region(&engine, region_id, table_dir, true, HashMap::new()).await;
+        assert!(statistic().sst_size > 0);
+        assert_eq!(statistic().ingested_parquet_bytes, 0);
+    }
 }
 
 #[tokio::test]
@@ -2122,4 +2227,99 @@ async fn test_bulk_last_non_null_merge_and_flush(#[values(false, true)] encoded:
     )
     .await;
     assert_eq!(expected, scan_bulk_test_keys(&engine, region_id).await);
+}
+
+/// Controls elapsed time while preserving the production worker sleep duration.
+/// Shortening that sleep would hide starvation by another worker's notifications.
+#[derive(Debug)]
+struct PeriodicFlushClock {
+    now: AtomicI64,
+}
+
+impl TimeProvider for PeriodicFlushClock {
+    fn current_time_millis(&self) -> i64 {
+        self.now.load(Ordering::Relaxed)
+    }
+
+    fn elapsed_since(&self, since: i64) -> i64 {
+        self.current_time_millis() - since
+    }
+}
+
+#[tokio::test]
+async fn test_empty_wal_notifications_do_not_defer_auto_flush() {
+    let mut env = TestEnv::new().await;
+    let now = current_time_millis();
+    let clock = Arc::new(PeriodicFlushClock {
+        now: AtomicI64::new(now),
+    });
+    // The default Raft WAL publishes empty pressure snapshots. A and B map to
+    // different workers; only B receives requests after both have written.
+    let engine = env
+        .create_engine_with_time(
+            MitoConfig {
+                num_workers: 2,
+                auto_flush_interval: Duration::from_secs(60),
+                ..Default::default()
+            },
+            None,
+            None,
+            clock.clone(),
+        )
+        .await;
+    let idle_id = RegionId::new(1, 1);
+    let active_id = RegionId::new(1, 2);
+    let mut active_schema = Vec::new();
+    for region_id in [idle_id, active_id] {
+        let request = CreateRequestBuilder::new().build();
+        let schema = rows_schema(&request);
+        engine
+            .handle_request(region_id, RegionRequest::Create(request))
+            .await
+            .unwrap();
+        put_rows(
+            &engine,
+            region_id,
+            Rows {
+                schema: schema.clone(),
+                rows: build_rows_for_key("a", 0, 2, 0),
+            },
+        )
+        .await;
+        if region_id == active_id {
+            active_schema = schema;
+        }
+    }
+    let idle = engine.get_region(idle_id).unwrap();
+    assert_eq!(0, idle.version().flushed_entry_id);
+    // Each request lets the active worker refresh and publish an empty snapshot.
+    // Wall time stays well below the idle worker's real 60-second timeout.
+    for tick in 0..3 {
+        clock
+            .now
+            .store(now + 600_000 + tick * 60_000, Ordering::Relaxed);
+        put_rows(
+            &engine,
+            active_id,
+            Rows {
+                schema: active_schema.clone(),
+                rows: build_rows_for_key("b", 0, 1, 0),
+            },
+        )
+        .await;
+    }
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while idle.version().flushed_entry_id == 0 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("empty WAL notifications must also check ordinary periodic flushing");
+    let scanner = engine
+        .scanner(idle_id, ScanRequest::default())
+        .await
+        .unwrap();
+    assert_eq!(0, scanner.num_memtables());
+    assert_eq!(1, scanner.num_files());
+    engine.stop().await.unwrap();
 }

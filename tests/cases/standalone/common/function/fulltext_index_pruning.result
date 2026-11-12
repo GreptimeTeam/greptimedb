@@ -219,6 +219,27 @@ SELECT ts, msg FROM ft_en_bloom WHERE msg LIKE '%user-123%' ORDER BY ts;
 | 1970-01-01T00:00:00.007 | 用户user-123登录 |
 +-------------------------+------------------+
 
+-- The `LIKE` filter runs on the datanode, after the index prunes the row group.
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE SeqScan:.*("filters":\s\[[^\]]*\]).*("rg_fulltext_filtered":\d+,\s"rows_fulltext_filtered":\d+).* SeqScan:_${1}_${2}
+-- SQLNESS REPLACE (metrics=.*) REDACTED
+EXPLAIN ANALYZE VERBOSE SELECT ts, msg FROM ft_en_bloom WHERE msg LIKE 'nomatch %';
+
++-+-+-+
+| stage | node | plan_|
++-+-+-+
+| 0_| 0_|_CooperativeExec REDACTED
+|_|_|_MergeScanExec: REDACTED
+|_|_|_|
+| 1_| 0_|_FilterExec: msg@1 LIKE nomatch % REDACTED
+|_|_|_CooperativeExec REDACTED
+|_|_|_SeqScan:_"filters": ["msg LIKE Utf8(\"nomatch %\")"]_"rg_fulltext_filtered":1, "rows_fulltext_filtered":8
+|_|_|_|
+|_|_| Total rows: 0_|
++-+-+-+
+
 SELECT ts, matches_term(lower(msg), 'quota') AS "matches_term(lower(msg), 'quota')", matches_term(lower(msg), 'vol') AS "matches_term(lower(msg), 'vol')", lower(msg) LIKE '%disk quota exceeded%' AS "lower(msg) LIKE '%disk quota exceeded%'", lower(msg) LIKE 'disk quota%' AS "lower(msg) LIKE 'disk quota%'" FROM ft_en_bloom ORDER BY ts;
 
 +-------------------------+-----------------------------------+---------------------------------+-----------------------------------------+-------------------------------+

@@ -154,7 +154,7 @@ impl InstrumentedStore {
 
 /// A wrapper around [`AsyncRead`] that adds instrumentation for monitoring
 #[pin_project]
-pub(crate) struct InstrumentedAsyncRead<'a, R> {
+pub struct InstrumentedAsyncRead<'a, R> {
     #[pin]
     inner: R,
     read_byte_count: CounterGuard<'a>,
@@ -210,7 +210,7 @@ impl<R: AsyncSeek + Unpin + Send> AsyncSeek for InstrumentedAsyncRead<'_, R> {
 
 /// A wrapper around [`AsyncWrite`] that adds instrumentation for monitoring
 #[pin_project]
-pub(crate) struct InstrumentedAsyncWrite<'a, W> {
+pub struct InstrumentedAsyncWrite<'a, W> {
     #[pin]
     inner: W,
     write_byte_count: CounterGuard<'a>,
@@ -266,7 +266,7 @@ impl<W: AsyncWrite + Unpin + Send> AsyncWrite for InstrumentedAsyncWrite<'_, W> 
 const FETCH_CONCURRENCY: usize = 8;
 
 /// Implements `RangeReader` for `ObjectStore` and record metrics.
-pub(crate) struct InstrumentedRangeReader<'a> {
+pub struct InstrumentedRangeReader<'a> {
     store: ObjectStore,
     path: String,
     read_byte_count: &'a IntCounter,

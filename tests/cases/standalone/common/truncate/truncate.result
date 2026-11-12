@@ -126,7 +126,7 @@ SELECT ts, host, cpu, memory FROM monitor ORDER BY ts;
 | 2023-09-20T13:47:44 | host3 | 88.8 | 4096.0 |
 +---------------------+-------+------+--------+
 
-TRUNCATE monitor;
+TRUNCATE monitor WITH (wait = true, timeout = '30s');
 
 Affected Rows: 0
 
@@ -136,6 +136,32 @@ SELECT ts, host, cpu, memory FROM monitor ORDER BY ts;
 | ts | host | cpu | memory |
 +----+------+-----+--------+
 +----+------+-----+--------+
+
+TRUNCATE monitor WITH (wait = 'invalid');
+
+Error: 1004(InvalidArguments), Invalid SQL, error: invalid DDL option 'wait': 'invalid'
+
+TRUNCATE monitor WITH (timeout = 'invalid');
+
+Error: 1004(InvalidArguments), Invalid SQL, error: invalid DDL option 'timeout': 'invalid': expected number at 0
+
+TRUNCATE monitor WITH (ttl = '1d');
+
+Error: 2000(InvalidSyntax), Invalid SQL, error: invalid DDL option 'ttl': ''1d''
+
+-- SQLNESS REPLACE ([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-4[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}) PROC_ID
+TRUNCATE monitor WITH (wait = false, timeout = '30s');
+
++--------------------------------------+
+| Procedure ID                         |
++--------------------------------------+
+| PROC_ID |
++--------------------------------------+
+
+-- Keep a synchronous truncate in the same case to check the original result.
+TRUNCATE monitor;
+
+Affected Rows: 0
 
 DROP TABLE monitor;
 

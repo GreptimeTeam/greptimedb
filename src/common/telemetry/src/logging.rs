@@ -35,7 +35,7 @@ use opentelemetry_semantic_conventions::resource;
 use serde::{Deserialize, Serialize};
 use tracing::callsite;
 use tracing::metadata::LevelFilter;
-use tracing_appender::non_blocking::WorkerGuard;
+use tracing_appender::non_blocking::{NonBlocking, WorkerGuard};
 use tracing_log::LogTracer;
 use tracing_subscriber::filter::{FilterFn, Targets};
 use tracing_subscriber::fmt::Layer;
@@ -57,6 +57,10 @@ pub const DEFAULT_LOGGING_DIR: &str = "logs";
 /// Handle for reloading log level
 pub static LOG_RELOAD_HANDLE: OnceCell<tracing_subscriber::reload::Handle<Targets, Registry>> =
     OnceCell::new();
+
+/// The independent dispatcher used by the `slow!` macro.
+#[doc(hidden)]
+pub static SLOW_QUERY_LOGGER: OnceCell<tracing::Dispatch> = OnceCell::new();
 
 type DynSubscriber = Layered<tracing_subscriber::reload::Layer<Targets, Registry>, Registry>;
 type OtelTraceLayer = tracing_opentelemetry::OpenTelemetryLayer<DynSubscriber, Tracer>;
@@ -324,7 +328,8 @@ pub struct SlowQueryOptions {
     /// Whether to enable slow query log.
     pub enable: bool,
 
-    /// The record type of slow queries.
+    /// The record type of slow queries. Log records ignore the global log level and use
+    /// the configured stdout and file destinations, format, and retention settings.
     #[serde(deserialize_with = "empty_string_as_default")]
     pub record_type: SlowQueriesRecordType,
 
@@ -359,7 +364,7 @@ pub enum SlowQueriesRecordType {
     /// Record the slow query in the system table.
     #[default]
     SystemTable,
-    /// Record the slow query in a specific logs file.
+    /// Record the slow query to the configured stdout and file destinations.
     Log,
 }
 
@@ -462,32 +467,20 @@ pub fn init_global_logging(
         // Enable log compatible layer to convert log record to tracing span.
         LogTracer::init().expect("log tracer must be valid");
 
-        // Configure the stdout logging layer.
-        let stdout_logging_layer = if opts.append_stdout {
+        let stdout_writer = if opts.append_stdout {
             let (writer, guard) = tracing_appender::non_blocking(std::io::stdout());
             guards.push(guard);
-
-            if opts.log_format == LogFormat::Json {
-                Some(
-                    Layer::new()
-                        .json()
-                        .with_writer(writer)
-                        .with_ansi(std::io::stdout().is_terminal())
-                        .boxed(),
-                )
-            } else {
-                Some(
-                    Layer::new()
-                        .with_writer(writer)
-                        .with_ansi(std::io::stdout().is_terminal())
-                        .boxed(),
-                )
-            }
+            Some(writer)
         } else {
             None
         };
+        let stdout_logging_layer = stdout_writer.clone().map(|writer| {
+            build_logging_layer(writer, opts.log_format, std::io::stdout().is_terminal())
+        });
 
         let file_logging_enabled = opts.enable_file_logging && !opts.dir.is_empty();
+        let slow_query_logging_enabled = slow_query_opts
+            .is_some_and(|opts| opts.enable && opts.record_type == SlowQueriesRecordType::Log);
 
         let retention = file_logging_enabled
             .then(|| {
@@ -502,17 +495,7 @@ pub fn init_global_logging(
             let (writer, guard) = tracing_appender::non_blocking(rolling_appender);
             guards.push(guard);
 
-            if opts.log_format == LogFormat::Json {
-                Some(
-                    Layer::new()
-                        .json()
-                        .with_writer(writer)
-                        .with_ansi(false)
-                        .boxed(),
-                )
-            } else {
-                Some(Layer::new().with_writer(writer).with_ansi(false).boxed())
-            }
+            Some(build_logging_layer(writer, opts.log_format, false))
         } else {
             None
         };
@@ -524,30 +507,24 @@ pub fn init_global_logging(
             let (writer, guard) = tracing_appender::non_blocking(rolling_appender);
             guards.push(guard);
 
-            if opts.log_format == LogFormat::Json {
-                Some(
-                    Layer::new()
-                        .json()
-                        .with_writer(writer)
-                        .with_ansi(false)
-                        .with_filter(filter::LevelFilter::ERROR)
-                        .boxed(),
-                )
-            } else {
-                Some(
-                    Layer::new()
-                        .with_writer(writer)
-                        .with_ansi(false)
-                        .with_filter(filter::LevelFilter::ERROR)
-                        .boxed(),
-                )
-            }
+            Some(
+                build_logging_layer(writer, opts.log_format, false)
+                    .with_filter(filter::LevelFilter::ERROR),
+            )
         } else {
             None
         };
 
-        let slow_query_logging_layer =
-            build_slow_query_logger(opts, slow_query_opts, retention.as_ref(), &mut guards);
+        if slow_query_logging_enabled {
+            SLOW_QUERY_LOGGER
+                .set(build_slow_query_logger(
+                    opts,
+                    stdout_writer,
+                    retention.as_ref(),
+                    &mut guards,
+                ))
+                .expect("slow query logger already initialized");
+        }
 
         if let Some(retention) = &retention {
             retention.initialize();
@@ -625,7 +602,6 @@ pub fn init_global_logging(
                 .with(stdout_logging_layer)
                 .with(file_logging_layer)
                 .with(err_file_logging_layer)
-                .with(slow_query_logging_layer)
         };
 
         // consume the `tracing_opts` to avoid "unused" warnings.
@@ -637,8 +613,7 @@ pub fn init_global_logging(
             .with(dyn_trace_layer)
             .with(stdout_logging_layer)
             .with(file_logging_layer)
-            .with(err_file_logging_layer)
-            .with(slow_query_logging_layer);
+            .with(err_file_logging_layer);
 
         global::set_text_map_propagator(TraceContextPropagator::new());
 
@@ -727,59 +702,52 @@ fn build_otlp_exporter(opts: &LoggingOptions) -> SpanExporter {
     }
 }
 
-fn build_slow_query_logger<S>(
+fn build_slow_query_logger(
     opts: &LoggingOptions,
-    slow_query_opts: Option<&SlowQueryOptions>,
+    stdout_writer: Option<NonBlocking>,
     retention: Option<&DirectoryRetention>,
     guards: &mut Vec<WorkerGuard>,
-) -> Option<Box<dyn tracing_subscriber::Layer<S> + Send + Sync + 'static>>
-where
-    S: tracing::Subscriber
-        + Send
-        + 'static
-        + for<'span> tracing_subscriber::registry::LookupSpan<'span>,
-{
-    if let Some(slow_query_opts) = slow_query_opts {
-        if opts.enable_file_logging
-            && !opts.dir.is_empty()
-            && slow_query_opts.enable
-            && slow_query_opts.record_type == SlowQueriesRecordType::Log
-        {
-            let rolling_appender = build_file_appender(opts, LogFileKind::SlowQuery, retention);
-            let (writer, guard) = tracing_appender::non_blocking(rolling_appender);
-            guards.push(guard);
-
-            // Only logs if the field contains "slow".
-            let slow_query_filter = FilterFn::new(|metadata| {
-                metadata
-                    .fields()
-                    .iter()
-                    .any(|field| field.name().contains("slow"))
-            });
-
-            if opts.log_format == LogFormat::Json {
-                Some(
-                    Layer::new()
-                        .json()
-                        .with_writer(writer)
-                        .with_ansi(false)
-                        .with_filter(slow_query_filter)
-                        .boxed(),
-                )
-            } else {
-                Some(
-                    Layer::new()
-                        .with_writer(writer)
-                        .with_ansi(false)
-                        .with_filter(slow_query_filter)
-                        .boxed(),
-                )
-            }
-        } else {
-            None
-        }
+) -> tracing::Dispatch {
+    let stdout_layer = stdout_writer.map(|writer| {
+        build_logging_layer(writer, opts.log_format, std::io::stdout().is_terminal())
+    });
+    let file_layer = if opts.enable_file_logging && !opts.dir.is_empty() {
+        let rolling_appender = build_file_appender(opts, LogFileKind::SlowQuery, retention);
+        let (writer, guard) = tracing_appender::non_blocking(rolling_appender);
+        guards.push(guard);
+        Some(build_logging_layer(writer, opts.log_format, false))
     } else {
         None
+    };
+    // Avoid enabling unrelated callsites through this independently registered dispatcher.
+    let filter = FilterFn::new(|metadata| {
+        *metadata.level() == tracing::Level::INFO && metadata.fields().field("slow").is_some()
+    })
+    .with_max_level_hint(LevelFilter::INFO);
+    tracing::Dispatch::new(
+        Registry::default()
+            .with(filter)
+            .with(stdout_layer)
+            .with(file_layer),
+    )
+}
+
+fn build_logging_layer<S>(
+    writer: NonBlocking,
+    log_format: LogFormat,
+    ansi: bool,
+) -> Box<dyn tracing_subscriber::Layer<S> + Send + Sync>
+where
+    S: tracing::Subscriber + for<'span> tracing_subscriber::registry::LookupSpan<'span>,
+{
+    if log_format == LogFormat::Json {
+        Layer::new()
+            .json()
+            .with_writer(writer)
+            .with_ansi(ansi)
+            .boxed()
+    } else {
+        Layer::new().with_writer(writer).with_ansi(ansi).boxed()
     }
 }
 
@@ -793,6 +761,176 @@ mod tests {
     use tracing_opentelemetry::OpenTelemetrySpanExt;
 
     use super::*;
+
+    #[test]
+    fn test_slow_query_logging() {
+        const CASE_ENV: &str = "GREPTIME_TEST_SLOW_QUERY_LOGGING";
+        let Ok(case) = env::var(CASE_ENV) else {
+            // Each configuration needs a fresh process because logging initializes only once.
+            for case in [
+                "text",
+                "json",
+                "disabled",
+                "system_table",
+                "file_disabled",
+                "stdout_only_json",
+                "stdout_disabled",
+                "no_directory",
+                "no_options",
+            ] {
+                let output = std::process::Command::new(env::current_exe().unwrap())
+                    .args([
+                        "--exact",
+                        "logging::tests::test_slow_query_logging",
+                        "--nocapture",
+                    ])
+                    .env(CASE_ENV, case)
+                    .output()
+                    .unwrap();
+                assert!(
+                    output.status.success(),
+                    "case {case} failed:\n{}\n{}",
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr),
+                );
+                let stdout = String::from_utf8(output.stdout).unwrap();
+                let expected_slow_queries = if matches!(
+                    case,
+                    "text" | "json" | "file_disabled" | "stdout_only_json" | "no_directory"
+                ) {
+                    4
+                } else {
+                    0
+                };
+                assert_eq!(
+                    stdout.matches("SELECT 1").count(),
+                    expected_slow_queries,
+                    "{case}: {stdout}"
+                );
+                assert_eq!(
+                    stdout.matches("SELECT 2").count(),
+                    expected_slow_queries,
+                    "{case}: {stdout}"
+                );
+                assert_eq!(
+                    stdout.matches("custom_slow_target").count(),
+                    expected_slow_queries,
+                    "{case}: {stdout}"
+                );
+                if case != "stdout_disabled" {
+                    assert_eq!(
+                        stdout.matches("ordinary-info").count(),
+                        1,
+                        "{case}: {stdout}"
+                    );
+                    assert_eq!(
+                        stdout.matches("ordinary-warning").count(),
+                        2,
+                        "{case}: {stdout}"
+                    );
+                } else {
+                    assert!(!stdout.contains("ordinary-"), "{stdout}");
+                }
+                if matches!(case, "json" | "stdout_only_json") {
+                    for line in stdout.lines().filter(|line| line.contains("SELECT")) {
+                        let event: serde_json::Value = serde_json::from_str(line).unwrap();
+                        assert_eq!(event["fields"]["slow"], true);
+                        assert_eq!(event["level"], "INFO");
+                    }
+                }
+            }
+            return;
+        };
+
+        let dir = tempfile::tempdir().unwrap();
+        let opts = LoggingOptions {
+            dir: if case == "no_directory" {
+                String::new()
+            } else {
+                dir.path().to_str().unwrap().to_string()
+            },
+            level: Some("warn".to_string()),
+            log_format: if matches!(case.as_str(), "json" | "stdout_only_json") {
+                LogFormat::Json
+            } else {
+                LogFormat::Text
+            },
+            append_stdout: case != "stdout_disabled",
+            enable_file_logging: !matches!(case.as_str(), "file_disabled" | "stdout_only_json"),
+            max_log_dir_size: ReadableSize::mb(1),
+            ..Default::default()
+        };
+        let slow_opts = SlowQueryOptions {
+            enable: case != "disabled",
+            record_type: if case == "system_table" {
+                SlowQueriesRecordType::SystemTable
+            } else {
+                SlowQueriesRecordType::Log
+            },
+            ..Default::default()
+        };
+        let guards = init_global_logging(
+            "slow-query-test",
+            &opts,
+            &TracingOptions::default(),
+            None,
+            (case != "no_options").then_some(&slow_opts),
+        );
+
+        for level in ["warn", "error", "off", "info"] {
+            LOG_RELOAD_HANDLE
+                .get()
+                .unwrap()
+                .reload(level.parse::<Targets>().unwrap())
+                .unwrap();
+            crate::info!(slow_operation = true, "ordinary-info");
+            crate::warn!("ordinary-warning");
+            crate::slow!(query = "SELECT 1", cost = 31, threshold = 30);
+            crate::slow!(target: "custom_slow_target", query = "SELECT 2");
+        }
+        // Dropping the guards flushes the asynchronous writers before reading the files.
+        drop(guards);
+
+        let mut slow_logs = String::new();
+        let mut regular_logs = String::new();
+        for entry in std::fs::read_dir(dir.path()).unwrap() {
+            let entry = entry.unwrap();
+            let name = entry.file_name();
+            let name = name.to_str().unwrap();
+            if name.starts_with("greptimedb-slow-queries.") {
+                slow_logs.push_str(&std::fs::read_to_string(entry.path()).unwrap());
+            } else if name.starts_with("greptimedb.") {
+                regular_logs.push_str(&std::fs::read_to_string(entry.path()).unwrap());
+            }
+        }
+
+        if matches!(case.as_str(), "text" | "json" | "stdout_disabled") {
+            assert_eq!(slow_logs.lines().count(), 8, "{slow_logs}");
+            assert_eq!(slow_logs.matches("SELECT 1").count(), 4);
+            assert_eq!(slow_logs.matches("SELECT 2").count(), 4);
+            assert_eq!(slow_logs.matches("custom_slow_target").count(), 4);
+            assert!(!slow_logs.contains("ordinary-"));
+            if case == "json" {
+                for line in slow_logs.lines() {
+                    let event: serde_json::Value = serde_json::from_str(line).unwrap();
+                    assert_eq!(event["fields"]["slow"], true);
+                    assert_eq!(event["level"], "INFO");
+                }
+            }
+        } else {
+            assert!(slow_logs.is_empty(), "{slow_logs}");
+        }
+        if matches!(
+            case.as_str(),
+            "file_disabled" | "stdout_only_json" | "no_directory"
+        ) {
+            assert!(regular_logs.is_empty(), "{regular_logs}");
+        } else {
+            assert_eq!(regular_logs.matches("ordinary-info").count(), 1);
+            assert_eq!(regular_logs.matches("ordinary-warning").count(), 2);
+            assert!(!regular_logs.contains("SELECT"), "{regular_logs}");
+        }
+    }
 
     #[test]
     fn test_trace_switch_preserves_active_spans() {

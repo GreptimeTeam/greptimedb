@@ -97,6 +97,7 @@ select tag from t where num > 6 order by ts;
 -- SQLNESS REPLACE num_ranges=\d+ num_ranges=REDACTED
 -- SQLNESS REPLACE ,\sfilter=\[[^]]+\] 
 -- SQLNESS REPLACE DynamicFilter\s\[[^\]]*\] DynamicFilter [ REDACTED ]
+-- SQLNESS REPLACE \\?"(dyn_filters|time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
 explain analyze select tag from t where num > 6 order by ts desc limit 2;
 
 drop table t;

@@ -62,7 +62,7 @@
 //! | Operations during staging    | N/A                    | ❌ (staging dir)      |
 //! | Async index build            | ❌ (index files only)   | ✅ Yes                |
 //!
-//! ¹ Remote compaction runs on a dedicated compactor node via `open_compaction_region()`;
+//! ¹ Remote compaction runs on a dedicated compactor node via `CompactionRegionOpener::open()`;
 //!   pass plugins via `OpenCompactionRegionRequest` to enable hooks there. `sst_infos` is
 //!   `#[serde(skip)]` over the wire, so each [`SstInfo`] is rebuilt from [`FileMeta`] with
 //!   empty footer/index — see [`SstFileInfo`] for field-level detail.
@@ -120,8 +120,8 @@
 //! immediately after SST files are written but **before** the manifest is committed.
 //!
 //! `on_manifest_updated` is funneled through [`ManifestContext::update_locked`],
-//! the sole caller of the low-level [`RegionManifestManager::update`], which
-//! packages each successful write into a [`PendingManifestHook`]. The caller
+//! which calls the low-level [`RegionManifestManager::update_with_verification`]
+//! and packages each successful write into a [`PendingManifestHook`]. The caller
 //! owns the write lock, drops it, and *then* fires the receipt — the hook must
 //! never run under the lock. [`ManifestContext::update_manifest`] is the common
 //! case: it acquires the lock, delegates to `update_locked`, and fires the
@@ -148,22 +148,24 @@
 //! [`on_region_dropped`]: RegionHook::on_region_dropped
 //! [`on_region_files_removed`]: RegionHook::on_region_files_removed
 //! [`on_region_gc`]: RegionHook::on_region_gc
-//! [`RegionManifestManager::update`]: crate::manifest::manager::RegionManifestManager::update
+//! [`RegionManifestManager::update_with_verification`]: crate::manifest::manager::RegionManifestManager::update_with_verification
 //! [`ManifestContext::update_locked`]: crate::region::ManifestContext::update_locked
 //! [`ManifestContext::update_manifest`]: crate::region::ManifestContext::update_manifest
 
+use std::collections::HashSet;
 use std::fmt::Debug;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use parquet::file::metadata::ParquetMetaData;
 use store_api::ManifestVersion;
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::RegionId;
 
-use crate::access_layer::AccessLayerRef;
+use crate::access_layer::{AccessLayer, AccessLayerRef};
 use crate::error::Result;
 use crate::manifest::action::{RegionMetaActionList, RemovedFile};
-use crate::sst::file::FileMeta;
+use crate::sst::file::{FileMeta, RegionFileId};
 use crate::sst::parquet::SstInfo;
 
 /// A deferred [`RegionHook::on_manifest_updated`] notification produced by a
@@ -268,6 +270,13 @@ pub struct SstFileInfo<'a> {
     pub file_meta: &'a FileMeta,
 }
 
+/// Externally produced SST with its verified footer. Index-builder statistics
+/// are deliberately absent: they cannot be reconstructed from FileMeta.
+pub struct VerifiedSstFileInfo<'a> {
+    pub file_meta: &'a FileMeta,
+    pub footer: &'a Arc<ParquetMetaData>,
+}
+
 /// Hook for observing region mutations in mito2.
 ///
 /// Implementations can be registered via the `Plugins` system:
@@ -295,6 +304,36 @@ pub trait RegionHook: Send + Sync + Debug {
         region_id: RegionId,
         region_metadata: &RegionMetadataRef,
         files: &[SstFileInfo<'_>],
+    ) {
+        let _ = (region_id, region_metadata, files);
+    }
+
+    /// Queries durable file protections immediately before deletion. Implementations
+    /// must include pending uploads, inputs and undecided outputs, and fail on
+    /// unavailable/uncertain state. File identities are scoped by the access layer's
+    /// storage, table directory and PathType; protection covers all index generations.
+    /// GC rechecks the manifest after this await. This is not `on_region_gc`, which
+    /// is too late to protect anything. Calls must not retain a manifest lock.
+    async fn protected_sst_files(
+        &self,
+        access: &AccessLayer,
+        files: &[RegionFileId],
+    ) -> Result<HashSet<RegionFileId>> {
+        let _ = (access, files);
+        Ok(HashSet::new())
+    }
+
+    /// Called for verified table-compaction outputs before manifest publication.
+    /// Unlike `on_sst_files_written`, this carries actual remote footers without
+    /// fabricating unavailable index-builder statistics. Retries may repeat it;
+    /// no manifest lock is held and implementations must be idempotent. Publication
+    /// may still fail after this callback; it is not a publication acknowledgement.
+    /// Use `on_manifest_updated` to observe a successful manifest commit.
+    async fn on_sst_files_verified(
+        &self,
+        region_id: RegionId,
+        region_metadata: &RegionMetadataRef,
+        files: &[VerifiedSstFileInfo<'_>],
     ) {
         let _ = (region_id, region_metadata, files);
     }
@@ -328,7 +367,7 @@ pub trait RegionHook: Send + Sync + Debug {
     /// Fires once when a region becomes active via a create or open request —
     /// the natural counterpart to [`on_region_closed`] / [`on_region_dropped`].
     /// It does **not** fire for the compactor's transient compaction regions
-    /// (`open_compaction_region`), nor for the internal reopen performed during
+    /// (`CompactionRegionOpener::open`), nor for the internal reopen performed during
     /// follower catch-up / leadership promotion.
     ///
     /// On the **create** path it runs inline in the region worker loop; on the

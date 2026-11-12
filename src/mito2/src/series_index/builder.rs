@@ -21,6 +21,7 @@ use common_telemetry::warn;
 use futures::TryStreamExt;
 use object_store::ObjectStore;
 use snafu::{OptionExt, ensure};
+use store_api::metadata::RegionMetadataRef;
 
 use crate::error::{Result, UnexpectedSnafu};
 use crate::read::BoxedRecordBatchStream;
@@ -30,7 +31,6 @@ use crate::read::flat_projection::FlatProjectionMapper;
 use crate::read::prune::FlatPruneReader;
 use crate::read::read_columns::ReadColumns;
 use crate::region::MitoRegionRef;
-use crate::region::version::VersionRef;
 use crate::series_index::bucket::SeriesBucket;
 use crate::series_index::catalog::{
     RangeIndexEntry, SeriesIndexEntry, range_index_path, series_index_path, series_metadata,
@@ -66,18 +66,18 @@ async fn reader_input(
 pub(crate) async fn build_range_index(
     store: &ObjectStore,
     region: &MitoRegionRef,
-    version: &VersionRef,
+    metadata: &RegionMetadataRef,
     file: FileHandle,
 ) -> Result<Option<RangeIndexEntry>> {
     let file_id = file.file_id().file_id();
     let Some((context, mut selection)) = reader_input(region, file).await? else {
         return Ok(None);
     };
-    let mapper = FlatProjectionMapper::new(&version.metadata, [])?;
+    let mapper = FlatProjectionMapper::new(metadata, [])?;
     let compat = FlatCompatBatch::try_new(&mapper, context.read_format(), false)?;
     let path = range_index_path(region.region_id, file_id);
     let mut writer = SstRangeIndexWriter::try_new(
-        version.metadata.clone(),
+        metadata.clone(),
         store.clone(),
         &path,
         SstRangeIndexWriterOptions::default(),
@@ -128,14 +128,14 @@ pub(crate) async fn build_range_index(
 pub(crate) async fn build_series_index(
     store: &ObjectStore,
     region: &MitoRegionRef,
-    version: &VersionRef,
+    metadata: &RegionMetadataRef,
     bucket: &SeriesBucket,
     entry: &SeriesIndexEntry,
     backend: Option<&dyn SeriesIndexFormat>,
     purger: &IndexFilePurger,
 ) -> Result<SeriesIndexFileHandle> {
     let mut sources = Vec::<BoxedRecordBatchStream>::new();
-    let mapper = FlatProjectionMapper::new(&version.metadata, [])?;
+    let mapper = FlatProjectionMapper::new(metadata, [])?;
     let schema = mapper.input_arrow_schema(false);
     for file in &bucket.files {
         let Some((context, mut selection)) = reader_input(region, file.clone()).await? else {
@@ -190,7 +190,7 @@ pub(crate) async fn build_series_index(
     // TODO(yingwen): Deduplicate update-mode rows before series indexes are used by queries.
     if let Some(backend) = backend {
         let mut writer = backend
-            .writer(version.metadata.clone(), store.clone(), entry)
+            .writer(metadata.clone(), store.clone(), entry)
             .await?;
         let result: Result<()> = async {
             while let Some(batch) = visible.try_next().await? {
@@ -219,7 +219,7 @@ pub(crate) async fn build_series_index(
     }
     let path = series_index_path(region.region_id, entry.index_uuid);
     let mut writer = SeriesIndexWriter::try_new(
-        version.metadata.clone(),
+        metadata.clone(),
         store.clone(),
         &path,
         SeriesIndexWriterOptions::default(),
@@ -255,7 +255,7 @@ pub(crate) async fn build_series_index(
 pub(crate) async fn build_samples(
     store: &ObjectStore,
     region: &MitoRegionRef,
-    version: &VersionRef,
+    metadata: &RegionMetadataRef,
     file: FileHandle,
     backend: &dyn crate::series_index::format::SamplesFormat,
     purger: &IndexFilePurger,
@@ -271,17 +271,14 @@ pub(crate) async fn build_samples(
         return Ok(None);
     };
     let context = Arc::new(context);
-    let mapper = FlatProjectionMapper::new(
-        &version.metadata,
-        0..version.metadata.column_metadatas.len(),
-    )?;
+    let mapper = FlatProjectionMapper::new(metadata, 0..metadata.column_metadatas.len())?;
     let compat = FlatCompatBatch::try_new(&mapper, context.read_format(), false)?;
     let generation = store_api::storage::FileId::random();
     let prefix =
         crate::series_index::samples::samples_prefix(region.region_id.as_u64(), generation);
     let mut writer = backend
         .writer(
-            version.metadata.clone(),
+            metadata.clone(),
             store.clone(),
             &prefix,
             file_id.file_id(),
@@ -361,7 +358,7 @@ impl Drop for UnpublishedSamples {
 pub(crate) async fn build_sample_windows(
     store: &ObjectStore,
     region: &MitoRegionRef,
-    version: &VersionRef,
+    metadata: &RegionMetadataRef,
     files: &[FileHandle],
     backend: &dyn crate::series_index::format::SamplesFormat,
     purger: &IndexFilePurger,
@@ -372,17 +369,9 @@ pub(crate) async fn build_sample_windows(
     use datatypes::arrow::compute::filter_record_batch;
     use datatypes::timestamp::timestamp_array_to_primitive;
 
-    let mapper = FlatProjectionMapper::new(
-        &version.metadata,
-        0..version.metadata.column_metadatas.len(),
-    )?;
+    let mapper = FlatProjectionMapper::new(metadata, 0..metadata.column_metadatas.len())?;
     let schema = mapper.input_arrow_schema(false);
-    let timestamp_name = version
-        .metadata
-        .time_index_column()
-        .column_schema
-        .name
-        .clone();
+    let timestamp_name = metadata.time_index_column().column_schema.name.clone();
     let coverage = Arc::new(std::sync::Mutex::new(std::collections::HashMap::<
         store_api::storage::FileId,
         std::collections::BTreeSet<i64>,
@@ -466,7 +455,7 @@ pub(crate) async fn build_sample_windows(
                     );
                     let writer = backend
                         .writer(
-                            version.metadata.clone(),
+                            metadata.clone(),
                             store.clone(),
                             &prefix,
                             generation,
@@ -540,6 +529,7 @@ mod tests {
     use store_api::region_engine::RegionEngine;
 
     use super::*;
+    use crate::region::version::VersionRef;
     use crate::series_index::bucket::{group_files_into_series_buckets, plan_series_indexes};
     use crate::series_index::catalog::{
         SeriesIndexCatalog, load_version_control, series_catalog_path, series_index_path,
@@ -617,7 +607,7 @@ mod tests {
         let mut range_bytes = HashMap::new();
         if build_ranges {
             for file in files {
-                let completed = build_range_index(&store, &region, &version, file.clone())
+                let completed = build_range_index(&store, &region, &version.metadata, file.clone())
                     .await
                     .unwrap()
                     .unwrap();
@@ -655,7 +645,7 @@ mod tests {
         let result = build_series_index(
             &store.clone().layer(layer),
             &region,
-            &version,
+            &version.metadata,
             &bucket,
             &entry,
             None,
@@ -804,14 +794,22 @@ mod tests {
         let store = ObjectStore::new(Memory::default()).unwrap();
         let (purger, _receiver) = series_index_channel(store.clone());
         for file in &bucket.files {
-            build_range_index(&store, &region, &version, file.clone())
+            build_range_index(&store, &region, &version.metadata, file.clone())
                 .await
                 .unwrap()
                 .unwrap();
         }
-        let _handle = build_series_index(&store, &region, &version, &bucket, &entry, None, &purger)
-            .await
-            .unwrap();
+        let _handle = build_series_index(
+            &store,
+            &region,
+            &version.metadata,
+            &bucket,
+            &entry,
+            None,
+            &purger,
+        )
+        .await
+        .unwrap();
         let bytes = store
             .read(&series_index_path(region.region_id, entry.index_uuid))
             .await
@@ -871,16 +869,24 @@ mod tests {
         let result: Result<Option<SeriesIndexFileHandle>> = async {
             for file in files {
                 let Some(entry) =
-                    build_range_index(&store, &region, &version, file.clone()).await?
+                    build_range_index(&store, &region, &version.metadata, file.clone()).await?
                 else {
                     // Defer series construction if a needed range is not ready.
                     return Ok(None);
                 };
                 completed.push(entry.file_id);
             }
-            build_series_index(&store, &region, &version, &bucket, &entry, None, &purger)
-                .await
-                .map(Some)
+            build_series_index(
+                &store,
+                &region,
+                &version.metadata,
+                &bucket,
+                &entry,
+                None,
+                &purger,
+            )
+            .await
+            .map(Some)
         }
         .await;
         assert!(format!("{:?}", result.unwrap_err()).contains("injected index finish failure"));
@@ -1079,14 +1085,22 @@ mod tests {
             .layer(write_layer);
         fail.store(fail_before_open, Ordering::Relaxed);
         let result = if !series {
-            build_range_index(&store, &region, &version, bucket.files[0].clone())
+            build_range_index(&store, &region, &version.metadata, bucket.files[0].clone())
                 .await
                 .map(|_| ())
         } else {
             let (purger, _receiver) = series_index_channel(store.clone());
-            build_series_index(&store, &region, &version, &bucket, &entry, None, &purger)
-                .await
-                .map(|_| ())
+            build_series_index(
+                &store,
+                &region,
+                &version.metadata,
+                &bucket,
+                &entry,
+                None,
+                &purger,
+            )
+            .await
+            .map(|_| ())
         };
         fail.store(false, Ordering::Relaxed);
         let error = result.unwrap_err();

@@ -282,11 +282,9 @@ mod tests {
                                 }
                                 .build());
                             }
-                            Ok(Arc::new(
-                                crate::manager::table::PipelineTable::compile_pipeline(
-                                    "transform:\n  - fields: [message]\n    type: string",
-                                )?,
-                            ))
+                            Ok(Arc::new(crate::parse(&crate::Content::Yaml(
+                                "transform:\n  - fields: [message]\n    type: string",
+                            ))?))
                         })
                         .await
                         .map(|_| ())

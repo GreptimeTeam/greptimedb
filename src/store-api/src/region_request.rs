@@ -23,7 +23,7 @@ use api::v1::column_def::{
 };
 use api::v1::region::bulk_insert_request::Body;
 use api::v1::region::{
-    AlterRequest, AlterRequests, BuildIndexRequest, BulkInsertRequest,
+    AlterRequest, AlterRequests, BuildIndexRequest, BulkInsertRequest, CancelCompactionRequest,
     CleanUpRequest as PbCleanUpRequest, CloseRequest, CompactRequest, CreateRequest,
     CreateRequests, DeleteRequests, DropRequest, DropRequests, FlushRequest, InsertRequests,
     OpenRequest, TruncateRequest, alter_request, build_index_request, compact_request,
@@ -60,11 +60,12 @@ use crate::metadata::{
 use crate::metric_engine_consts::PHYSICAL_TABLE_METADATA_KEY;
 use crate::metrics;
 use crate::mito_engine_options::{
-    APPEND_MODE_KEY, AUTO_FLUSH_INTERVAL_KEY, MAX_ROW_GROUP_ROW_COUNT,
-    MAX_ROW_GROUP_ROW_COUNT_LIMIT, PRESERVE_ROW_SEQUENCE, SKIP_WAL_KEY, SST_FORMAT_KEY, TTL_KEY,
-    TWCS_ACTIVE_WINDOW_L1_MERGE_TRIGGER, TWCS_ACTIVE_WINDOW_TRIGGER_FILE_NUM,
-    TWCS_INACTIVE_WINDOW_L1_MERGE_TRIGGER, TWCS_INACTIVE_WINDOW_TRIGGER_FILE_NUM,
-    TWCS_MAX_OUTPUT_FILE_SIZE, TWCS_TIME_WINDOW, TWCS_TRIGGER_FILE_NUM, WRITE_BUFFER_SIZE_KEY,
+    APPEND_MODE_KEY, AUTO_FLUSH_INTERVAL_KEY, COMPACTION_EXPERIMENTAL_OUTPUT_PARALLELISM,
+    MAX_ROW_GROUP_ROW_COUNT, MAX_ROW_GROUP_ROW_COUNT_LIMIT, PRESERVE_ROW_SEQUENCE, SKIP_WAL_KEY,
+    SST_FORMAT_KEY, TTL_KEY, TWCS_ACTIVE_WINDOW_L1_MERGE_TRIGGER,
+    TWCS_ACTIVE_WINDOW_TRIGGER_FILE_NUM, TWCS_INACTIVE_WINDOW_L1_MERGE_TRIGGER,
+    TWCS_INACTIVE_WINDOW_TRIGGER_FILE_NUM, TWCS_MAX_OUTPUT_FILE_SIZE, TWCS_TIME_WINDOW,
+    TWCS_TRIGGER_FILE_NUM, WRITE_BUFFER_SIZE_KEY,
 };
 use crate::path_utils::table_dir;
 use crate::storage::{ColumnId, RegionId};
@@ -160,6 +161,7 @@ pub enum RegionRequest {
     Alter(RegionAlterRequest),
     Flush(RegionFlushRequest),
     Compact(RegionCompactRequest),
+    CancelCompaction(RegionCancelCompactionRequest),
     BuildIndex(RegionBuildIndexRequest),
     Truncate(RegionTruncateRequest),
     Catchup(RegionCatchupRequest),
@@ -183,6 +185,7 @@ impl RegionRequest {
             region_request::Body::Alter(alter) => make_region_alter(alter),
             region_request::Body::Flush(flush) => make_region_flush(flush),
             region_request::Body::Compact(compact) => make_region_compact(compact),
+            region_request::Body::CancelCompaction(cancel) => make_region_cancel_compaction(cancel),
             region_request::Body::BuildIndex(index) => make_region_build_index(index),
             region_request::Body::Truncate(truncate) => make_region_truncate(truncate),
             region_request::Body::Creates(creates) => make_region_creates(creates),
@@ -213,47 +216,55 @@ impl RegionRequest {
     }
 }
 
+/// Converts one insert, treating absent rows as a no-op like vector inserts.
+pub fn make_region_put(
+    request: api::v1::region::InsertRequest,
+) -> Option<(RegionId, RegionPutRequest)> {
+    request.rows.map(|rows| {
+        (
+            request.region_id.into(),
+            RegionPutRequest {
+                rows,
+                hint: None,
+                skip_wal: request.skip_wal,
+                partition_expr_version: request.partition_expr_version.map(|version| version.value),
+            },
+        )
+    })
+}
+
 fn make_region_puts(inserts: InsertRequests) -> Result<Vec<(RegionId, RegionRequest)>> {
-    let requests = inserts
+    Ok(inserts
         .requests
         .into_iter()
-        .filter_map(|r| {
-            let region_id = r.region_id.into();
-            r.rows.map(|rows| {
-                (
-                    region_id,
-                    RegionRequest::Put(RegionPutRequest {
-                        rows,
-                        hint: None,
-                        skip_wal: r.skip_wal,
-                        partition_expr_version: r.partition_expr_version.map(|v| v.value),
-                    }),
-                )
-            })
-        })
-        .collect();
-    Ok(requests)
+        .filter_map(make_region_put)
+        .map(|(region_id, request)| (region_id, RegionRequest::Put(request)))
+        .collect())
+}
+
+/// Converts one delete, treating absent rows as a no-op like vector deletes.
+pub fn make_region_delete(
+    request: api::v1::region::DeleteRequest,
+) -> Option<(RegionId, RegionDeleteRequest)> {
+    request.rows.map(|rows| {
+        (
+            request.region_id.into(),
+            RegionDeleteRequest {
+                rows,
+                hint: None,
+                partition_expr_version: request.partition_expr_version.map(|version| version.value),
+            },
+        )
+    })
 }
 
 fn make_region_deletes(deletes: DeleteRequests) -> Result<Vec<(RegionId, RegionRequest)>> {
-    let requests = deletes
+    Ok(deletes
         .requests
         .into_iter()
-        .filter_map(|r| {
-            let region_id = r.region_id.into();
-            r.rows.map(|rows| {
-                (
-                    region_id,
-                    RegionRequest::Delete(RegionDeleteRequest {
-                        rows,
-                        hint: None,
-                        partition_expr_version: r.partition_expr_version.map(|v| v.value),
-                    }),
-                )
-            })
-        })
-        .collect();
-    Ok(requests)
+        .filter_map(make_region_delete)
+        .map(|(region_id, request)| (region_id, RegionRequest::Delete(request)))
+        .collect())
 }
 
 fn parse_region_create(create: CreateRequest) -> Result<(RegionId, RegionCreateRequest)> {
@@ -435,6 +446,25 @@ fn make_region_compact(compact: CompactRequest) -> Result<Vec<(RegionId, RegionR
             options,
             parallelism,
             time_range,
+        }),
+    )])
+}
+
+fn make_region_cancel_compaction(
+    cancel: CancelCompactionRequest,
+) -> Result<Vec<(RegionId, RegionRequest)>> {
+    let region_id = cancel.region_id.into();
+    ensure!(
+        !cancel.task_id.trim().is_empty(),
+        InvalidRegionRequestSnafu {
+            region_id,
+            err: "compaction task_id must not be empty".to_string(),
+        }
+    );
+    Ok(vec![(
+        region_id,
+        RegionRequest::CancelCompaction(RegionCancelCompactionRequest {
+            task_id: cancel.task_id,
         }),
     )])
 }
@@ -1561,7 +1591,27 @@ fn json_settings_from_proto(settings: v1::JsonSettings) -> Result<JsonSettings> 
             Ok(JsonTypeHint {
                 path: hint.path,
                 data_type,
-                inverted_index: false,
+                inverted_index: hint.inverted_index,
+                fulltext_index: hint
+                    .fulltext_index
+                    .map(api::v1::column_def::json_fulltext_options_from_proto)
+                    .transpose()
+                    .map_err(|err| {
+                        InvalidRawRegionRequestSnafu {
+                            err: err.to_string(),
+                        }
+                        .build()
+                    })?,
+                skipping_index: hint
+                    .skipping_index
+                    .map(api::v1::column_def::json_skipping_options_from_proto)
+                    .transpose()
+                    .map_err(|err| {
+                        InvalidRawRegionRequestSnafu {
+                            err: err.to_string(),
+                        }
+                        .build()
+                    })?,
             })
         })
         .collect::<Result<Vec<_>>>()?;
@@ -1595,6 +1645,8 @@ pub enum SetRegionOption {
     PreserveRowSequence(bool),
     // Whether to skip writing new WAL entries.
     SkipWal(bool),
+    /// Overrides per-output compaction parallelism; None restores the engine default.
+    CompactionOutputParallelism(Option<usize>),
 }
 
 #[derive(Serialize, Deserialize)]
@@ -1608,6 +1660,7 @@ enum SetRegionOptionSerde {
     MaxRowGroupRowCount(Option<usize>),
     PreserveRowSequence(bool),
     SkipWal(bool),
+    CompactionOutputParallelism(Option<usize>),
 }
 
 impl Serialize for SetRegionOption {
@@ -1630,6 +1683,9 @@ impl Serialize for SetRegionOption {
             Self::MaxRowGroupRowCount(value) => SetRegionOptionSerde::MaxRowGroupRowCount(*value),
             Self::PreserveRowSequence(value) => SetRegionOptionSerde::PreserveRowSequence(*value),
             Self::SkipWal(value) => SetRegionOptionSerde::SkipWal(*value),
+            Self::CompactionOutputParallelism(value) => {
+                SetRegionOptionSerde::CompactionOutputParallelism(*value)
+            }
         };
         option.serialize(serializer)
     }
@@ -1659,6 +1715,9 @@ impl From<SetRegionOptionSerde> for SetRegionOption {
             SetRegionOptionSerde::MaxRowGroupRowCount(value) => Self::MaxRowGroupRowCount(value),
             SetRegionOptionSerde::PreserveRowSequence(value) => Self::PreserveRowSequence(value),
             SetRegionOptionSerde::SkipWal(value) => Self::SkipWal(value),
+            SetRegionOptionSerde::CompactionOutputParallelism(value) => {
+                Self::CompactionOutputParallelism(value)
+            }
         }
     }
 }
@@ -1725,6 +1784,17 @@ impl TryFrom<&PbOption> for SetRegionOption {
                 }
                 Ok(Self::AutoFlushInterval(Some(interval)))
             }
+            COMPACTION_EXPERIMENTAL_OUTPUT_PARALLELISM => {
+                if value.is_empty() {
+                    return Ok(Self::CompactionOutputParallelism(None));
+                }
+                let parallelism = value
+                    .parse::<usize>()
+                    .ok()
+                    .filter(|parallelism| *parallelism > 0)
+                    .ok_or_else(|| InvalidSetRegionOptionRequestSnafu { key, value }.build())?;
+                Ok(Self::CompactionOutputParallelism(Some(parallelism)))
+            }
             MAX_ROW_GROUP_ROW_COUNT => {
                 if value.is_empty() {
                     return Ok(Self::MaxRowGroupRowCount(None));
@@ -1783,6 +1853,9 @@ impl From<&UnsetRegionOption> for SetRegionOption {
             UnsetRegionOption::MaxRowGroupRowCount => SetRegionOption::MaxRowGroupRowCount(None),
             UnsetRegionOption::WriteBufferSize => SetRegionOption::WriteBufferSize(None),
             UnsetRegionOption::PreserveRowSequence => SetRegionOption::PreserveRowSequence(false),
+            UnsetRegionOption::CompactionOutputParallelism => {
+                SetRegionOption::CompactionOutputParallelism(None)
+            }
         }
     }
 }
@@ -1803,6 +1876,7 @@ impl TryFrom<&str> for UnsetRegionOption {
             TWCS_TIME_WINDOW => Ok(Self::TwcsTimeWindow),
             MAX_ROW_GROUP_ROW_COUNT => Ok(Self::MaxRowGroupRowCount),
             PRESERVE_ROW_SEQUENCE => Ok(Self::PreserveRowSequence),
+            COMPACTION_EXPERIMENTAL_OUTPUT_PARALLELISM => Ok(Self::CompactionOutputParallelism),
             _ => InvalidUnsetRegionOptionRequestSnafu { key }.fail(),
         }
     }
@@ -1821,6 +1895,7 @@ pub enum UnsetRegionOption {
     WriteBufferSize,
     PreserveRowSequence,
     TwcsActiveWindowL1MergeTrigger,
+    CompactionOutputParallelism,
 }
 
 impl UnsetRegionOption {
@@ -1837,6 +1912,7 @@ impl UnsetRegionOption {
             Self::TwcsTimeWindow => TWCS_TIME_WINDOW,
             Self::MaxRowGroupRowCount => MAX_ROW_GROUP_ROW_COUNT,
             Self::PreserveRowSequence => PRESERVE_ROW_SEQUENCE,
+            Self::CompactionOutputParallelism => COMPACTION_EXPERIMENTAL_OUTPUT_PARALLELISM,
         }
     }
 }
@@ -1867,6 +1943,12 @@ pub struct RegionFlushRequest {
     pub reason: Option<RegionFlushReason>,
 }
 
+/// Cancels one exact live compaction identity without pausing future compactions.
+#[derive(Debug)]
+pub struct RegionCancelCompactionRequest {
+    pub task_id: String,
+}
+
 #[derive(Debug)]
 pub struct RegionCompactRequest {
     pub options: compact_request::Options,
@@ -1895,6 +1977,9 @@ pub struct RegionBuildIndexRequest {
 #[derive(Debug)]
 pub enum RegionTruncateRequest {
     /// Truncate all data in the region.
+    ///
+    /// Mito2 also retires this region's shared SST references. Other regions and
+    /// existing readers may still retain the physical objects.
     All,
     /// Discard all unflushed data while preserving persisted SST files.
     ///
@@ -1906,6 +1991,8 @@ pub enum RegionTruncateRequest {
     /// WAL is obsoleted last. Retrying is safe: a request against a region with nothing
     /// left to discard only re-attempts the WAL obsoletion.
     Unflushed,
+    /// Retires fully contained SST references, including shared SSTs in Mito2.
+    /// Physical reclamation still waits for other references and readers.
     ByTimeRanges {
         /// Time ranges to truncate. Both bound are inclusive.
         /// only files that are fully contained in the time range will be truncated.
@@ -2028,6 +2115,7 @@ impl fmt::Display for RegionRequest {
             RegionRequest::Alter(_) => write!(f, "Alter"),
             RegionRequest::Flush(_) => write!(f, "Flush"),
             RegionRequest::Compact(_) => write!(f, "Compact"),
+            RegionRequest::CancelCompaction(_) => write!(f, "CancelCompaction"),
             RegionRequest::BuildIndex(_) => write!(f, "BuildIndex"),
             RegionRequest::Truncate(_) => write!(f, "Truncate"),
             RegionRequest::Catchup(_) => write!(f, "Catchup"),
@@ -2052,6 +2140,35 @@ mod tests {
 
     use super::*;
     use crate::metadata::RegionMetadataBuilder;
+
+    #[test]
+    fn test_cancel_compaction_request_conversion() {
+        let region_id = RegionId::new(7, 3);
+        let requests = RegionRequest::try_from_request_body(
+            region_request::Body::CancelCompaction(CancelCompactionRequest {
+                region_id: region_id.as_u64(),
+                task_id: "task-1".to_string(),
+            }),
+        )
+        .unwrap();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].0, region_id);
+        let RegionRequest::CancelCompaction(request) = &requests[0].1 else {
+            panic!("expected cancellation")
+        };
+        assert_eq!(request.task_id, "task-1");
+        for task_id in ["", " ", "\t\n"] {
+            assert!(
+                RegionRequest::try_from_request_body(region_request::Body::CancelCompaction(
+                    CancelCompactionRequest {
+                        region_id: region_id.as_u64(),
+                        task_id: task_id.to_string()
+                    }
+                ))
+                .is_err()
+            );
+        }
+    }
 
     #[test]
     fn test_build_index_options_round_trip() {
@@ -2208,6 +2325,42 @@ mod tests {
             location: None,
         })
         .unwrap_err();
+    }
+
+    #[test]
+    fn test_compaction_output_parallelism_set_unset_and_serde() {
+        for (raw, expected) in [("", None), ("1", Some(1)), ("4", Some(4))] {
+            let option = SetRegionOption::try_from(&PbOption {
+                key: COMPACTION_EXPERIMENTAL_OUTPUT_PARALLELISM.to_string(),
+                value: raw.to_string(),
+            })
+            .unwrap();
+            assert_eq!(
+                SetRegionOption::CompactionOutputParallelism(expected),
+                option
+            );
+            let json = serde_json::to_string(&option).unwrap();
+            assert_eq!(
+                option,
+                serde_json::from_str::<SetRegionOption>(&json).unwrap()
+            );
+        }
+        for raw in ["0", "-1", "1.5", "invalid", "18446744073709551616"] {
+            assert!(
+                SetRegionOption::try_from(&PbOption {
+                    key: COMPACTION_EXPERIMENTAL_OUTPUT_PARALLELISM.to_string(),
+                    value: raw.to_string(),
+                })
+                .is_err()
+            );
+        }
+        let unset =
+            UnsetRegionOption::try_from(COMPACTION_EXPERIMENTAL_OUTPUT_PARALLELISM).unwrap();
+        assert_eq!(COMPACTION_EXPERIMENTAL_OUTPUT_PARALLELISM, unset.as_str());
+        assert_eq!(
+            SetRegionOption::CompactionOutputParallelism(None),
+            (&unset).into()
+        );
     }
 
     #[test]
@@ -2432,6 +2585,46 @@ mod tests {
     }
 
     #[test]
+    fn test_json_settings_path_validation_from_proto() {
+        for (path, valid_path) in [
+            (vec!["nested", "leaf"], true),
+            (vec![""], false),
+            (vec!["nested", ""], false),
+            (
+                vec!["nested", datatypes::json::JSON2_REMAINDER_FIELD_NAME],
+                false,
+            ),
+        ] {
+            for inverted_index in [false, true] {
+                let settings = api::v1::SetJsonSettings {
+                    column_name: "payload".into(),
+                    settings: Some(api::v1::JsonSettings {
+                        type_hints: vec![api::v1::JsonTypeHint {
+                            path: path.iter().map(|part| (*part).to_string()).collect(),
+                            data_type: ColumnDataType::String as i32,
+                            inverted_index,
+                            skipping_index: None,
+                            fulltext_index: None,
+                            ..Default::default()
+                        }],
+                        max_auto_expanded_paths: Some(0),
+                    }),
+                };
+                let result = RegionAlterRequest::try_from(AlterRequest {
+                    region_id: 0,
+                    schema_version: 1,
+                    kind: Some(alter_request::Kind::SetJsonSettings(settings)),
+                });
+                assert_eq!(
+                    result.is_ok(),
+                    valid_path,
+                    "path: {path:?}, inverted_index: {inverted_index}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn test_from_proto_alter_request() {
         RegionAlterRequest::try_from(AlterRequest {
             region_id: 0,
@@ -2496,6 +2689,13 @@ mod tests {
                         path: vec!["service".to_string()],
                         data_type: ColumnDataType::String as i32,
                         datatype_extension: None,
+                        inverted_index: true,
+                        fulltext_index: None,
+                        skipping_index: Some(v1::JsonSkippingIndexOptions {
+                            granularity: 8,
+                            index_type: 0,
+                            false_positive_rate: 0.05,
+                        }),
                     }],
                     max_auto_expanded_paths: Some(10),
                 }),
@@ -2513,6 +2713,15 @@ mod tests {
         assert_eq!("payload", column_name);
         assert_eq!(Some(10), settings.max_auto_expanded_paths());
         assert_eq!(1, settings.type_hints().len());
+        assert!(settings.type_hints()[0].inverted_index);
+        assert_eq!(
+            settings.type_hints()[0]
+                .skipping_index
+                .as_ref()
+                .unwrap()
+                .granularity,
+            8
+        );
     }
 
     #[test]

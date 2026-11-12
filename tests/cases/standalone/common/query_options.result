@@ -1,0 +1,164 @@
+-- Query options persist on each protocol's connection. SQLness pins N=4.
+-- SQLNESS PROTOCOL MYSQL
+SHOW VARIABLES query.parallelism;
+
++-------------------+
+| query.parallelism |
++-------------------+
+| 4                 |
++-------------------+
+
+-- SQLNESS PROTOCOL MYSQL
+SET query_parallelism = 2;
+
+affected_rows: 0
+
+-- SQLNESS PROTOCOL MYSQL
+SHOW VARIABLES query.parallelism;
+
++-------------------+
+| query.parallelism |
++-------------------+
+| 2                 |
++-------------------+
+
+-- Invalid SET preserves the preceding value.
+-- SQLNESS PROTOCOL MYSQL
+SET query.parallelism = 0;
+
+Failed to execute query, err: MySqlError { ERROR 1210 (HY000): (InvalidArguments): Invalid value for parameter "query.parallelism": 0
+Hint: query.parallelism must be between 1 and 1024 }
+
+-- SQLNESS PROTOCOL MYSQL
+SHOW VARIABLES query.parallelism;
+
++-------------------+
+| query.parallelism |
++-------------------+
+| 2                 |
++-------------------+
+
+-- SQLNESS PROTOCOL MYSQL
+SET query.enable_remote_dynamic_filter_pushdown = false;
+
+affected_rows: 0
+
+-- SQLNESS PROTOCOL MYSQL
+SHOW VARIABLES query.enable_remote_dynamic_filter_pushdown;
+
++---------------------------------------------+
+| query.enable_remote_dynamic_filter_pushdown |
++---------------------------------------------+
+| false                                       |
++---------------------------------------------+
+
+-- Restore the shared MySQL connection before another case uses it.
+-- SQLNESS PROTOCOL MYSQL
+SET query.parallelism = 4;
+
+affected_rows: 0
+
+-- SQLNESS PROTOCOL MYSQL
+SET query.enable_remote_dynamic_filter_pushdown = true;
+
+affected_rows: 0
+
+-- SQLNESS PROTOCOL MYSQL
+SHOW VARIABLES query.parallelism;
+
++-------------------+
+| query.parallelism |
++-------------------+
+| 4                 |
++-------------------+
+
+-- SQLNESS PROTOCOL MYSQL
+SHOW VARIABLES query.enable_remote_dynamic_filter_pushdown;
+
++---------------------------------------------+
+| query.enable_remote_dynamic_filter_pushdown |
++---------------------------------------------+
+| true                                        |
++---------------------------------------------+
+
+-- PostgreSQL owns a separate session and accepts the same query options.
+-- SQLNESS PROTOCOL POSTGRES
+SHOW VARIABLES query.parallelism;
+
++-------------------+
+| query.parallelism |
++-------------------+
+| 4                 |
++-------------------+
+
+-- SQLNESS PROTOCOL POSTGRES
+SET query.parallelism TO 2;
+
+Affected Rows: 0
+
+-- SQLNESS PROTOCOL POSTGRES
+SHOW VARIABLES query.parallelism;
+
++-------------------+
+| query.parallelism |
++-------------------+
+| 2                 |
++-------------------+
+
+-- SQLNESS PROTOCOL POSTGRES
+SET query.parallelism = 0;
+
+Failed to execute query, encountered: Error { kind: Db, cause: Some(DbError { severity: "ERROR", parsed_severity: None, code: SqlState(E22023), message: "Invalid value for parameter \"query.parallelism\": 0\nHint: query.parallelism must be between 1 and 1024", detail: None, hint: None, position: None, where_: None, schema: None, table: None, column: None, datatype: None, constraint: None, file: None, line: None, routine: None }) }
+
+-- SQLNESS PROTOCOL POSTGRES
+SHOW VARIABLES query.parallelism;
+
++-------------------+
+| query.parallelism |
++-------------------+
+| 2                 |
++-------------------+
+
+-- SQLNESS PROTOCOL POSTGRES
+SET query.enable_remote_dynamic_filter_pushdown = false;
+
+Affected Rows: 0
+
+-- SQLNESS PROTOCOL POSTGRES
+SHOW VARIABLES query.enable_remote_dynamic_filter_pushdown;
+
++---------------------------------------------+
+| query.enable_remote_dynamic_filter_pushdown |
++---------------------------------------------+
+| false                                       |
++---------------------------------------------+
+
+-- Restore the shared PostgreSQL connection as well.
+-- SQLNESS PROTOCOL POSTGRES
+SET query.parallelism = 4;
+
+Affected Rows: 0
+
+-- SQLNESS PROTOCOL POSTGRES
+SET query.enable_remote_dynamic_filter_pushdown = true;
+
+Affected Rows: 0
+
+-- SQLNESS PROTOCOL POSTGRES
+SHOW VARIABLES query.parallelism;
+
++-------------------+
+| query.parallelism |
++-------------------+
+| 4                 |
++-------------------+
+
+-- SQLNESS PROTOCOL POSTGRES
+SHOW VARIABLES query.enable_remote_dynamic_filter_pushdown;
+
++---------------------------------------------+
+| query.enable_remote_dynamic_filter_pushdown |
++---------------------------------------------+
+| true                                        |
++---------------------------------------------+
+

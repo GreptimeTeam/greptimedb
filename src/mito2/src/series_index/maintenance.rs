@@ -19,14 +19,15 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use common_telemetry::{debug, info};
+use common_time::TimeToLive;
 use object_store::ObjectStore;
 use snafu::ResultExt;
+use store_api::metadata::RegionMetadataRef;
 use store_api::storage::{FileId, RegionId};
 
 use crate::error::Result;
 use crate::metrics::{SERIES_INDEX_RECONCILE_ELAPSED, SERIES_INDEX_RECONCILE_TOTAL};
 use crate::read::series_candidate::is_sparse_metric_metadata;
-use crate::region::version::VersionRef;
 use crate::region::{MitoRegionRef, RegionLeaderState, RegionRoleState};
 use crate::series_index::artifact::ArtifactFormat;
 use crate::series_index::bucket::{
@@ -40,6 +41,15 @@ use crate::series_index::catalog::{
 use crate::series_index::format;
 use crate::series_index::purger::IndexFilePurger;
 use crate::series_index::version::{SeriesIndexFileHandle, SeriesIndexVersion};
+use crate::sst::file::FileHandle;
+
+/// Captured index-build inputs that retain SSTs without retaining memtables.
+struct ReconcileSnapshot {
+    metadata: RegionMetadataRef,
+    files: Vec<FileHandle>,
+    compaction_time_window: Option<Duration>,
+    ttl: Option<TimeToLive>,
+}
 
 /// Retires newly completed series files unless their snapshot is published.
 #[derive(Default)]
@@ -132,21 +142,36 @@ pub(crate) async fn reconcile_series_indexes_with_mode(
     manual: bool,
 ) -> Result<ReconcileStats> {
     let total_start = Instant::now();
-    // Use this snapshot throughout reconciliation, even if the region version advances.
-    let version = region.version_control.current().version;
-    if !is_sparse_metric_metadata(&version.metadata) {
-        SERIES_INDEX_RECONCILE_TOTAL
-            .with_label_values(&["noop"])
-            .inc();
-        return Ok(ReconcileStats::default());
-    }
+    // Retaining the full version during I/O would pin flushed memtables and delay
+    // write-buffer reclamation. Capture consistent build inputs without the memtables.
+    let snapshot = {
+        let version = region.version_control.current().version;
+        if !is_sparse_metric_metadata(&version.metadata) {
+            SERIES_INDEX_RECONCILE_TOTAL
+                .with_label_values(&["noop"])
+                .inc();
+            return Ok(ReconcileStats::default());
+        }
+        ReconcileSnapshot {
+            metadata: version.metadata.clone(),
+            files: version
+                .ssts
+                .levels()
+                .iter()
+                .flat_map(|level| level.files())
+                .cloned()
+                .collect(),
+            compaction_time_window: version.compaction_time_window,
+            ttl: version.options.ttl,
+        }
+    };
     let build_start = Instant::now();
     let mut unpublished = UnpublishedSeriesFiles::default();
     let (next, mut stats) = build_index_version(
         worker_id,
         &store,
         &region,
-        &version,
+        &snapshot,
         requested_bucket_width,
         now_ms,
         &purger,
@@ -208,7 +233,7 @@ async fn build_index_version(
     worker_id: u32,
     store: &ObjectStore,
     region: &MitoRegionRef,
-    version: &VersionRef,
+    snapshot: &ReconcileSnapshot,
     requested_bucket_width: Duration,
     now_ms: i64,
     purger: &IndexFilePurger,
@@ -218,13 +243,12 @@ async fn build_index_version(
     manual: bool,
 ) -> Result<(Option<SeriesIndexVersion>, ReconcileStats)> {
     let mut stats = ReconcileStats::default();
-    let files = version
-        .ssts
-        .levels()
-        .iter()
-        .flat_map(|level| level.files())
-        .cloned()
-        .collect::<Vec<_>>();
+    let ReconcileSnapshot {
+        metadata,
+        files,
+        compaction_time_window,
+        ttl,
+    } = snapshot;
     stats.source_files = files.len();
     let visible = files
         .iter()
@@ -232,12 +256,12 @@ async fn build_index_version(
         .collect::<HashSet<_>>();
     let current = region.series_index_version();
     // Empty build inputs still let the planner expire established bucket coverage.
-    let buckets = match (allow_builds, version.compaction_time_window) {
+    let buckets = match (allow_builds, *compaction_time_window) {
         (true, Some(window)) => rounded_bucket_width(requested_bucket_width, window)
             // Successful rounding guarantees the window fits in i64; subsecond windows
             // use the same one-second minimum as rounded_bucket_width.
             .map(|width| {
-                group_files_into_series_buckets(&files, width, (window.as_secs() as i64).max(1))
+                group_files_into_series_buckets(files, width, (window.as_secs() as i64).max(1))
             })
             .unwrap_or_default(),
         (true, None) if manual => {
@@ -299,9 +323,7 @@ async fn build_index_version(
             // schema, is structurally valid and ordered, so only opening it tells them
             // apart. An unreadable artifact is rebuilt, never reused and never an error.
             reusable = match backend.reader(store.clone(), handle.clone()).await {
-                Ok(reader) => {
-                    format::validate_series_schema(&reader.schema(), &version.metadata).is_ok()
-                }
+                Ok(reader) => format::validate_series_schema(&reader.schema(), metadata).is_ok(),
                 Err(_) => false,
             };
         }
@@ -329,7 +351,7 @@ async fn build_index_version(
             if reusable && backend.format() == ArtifactFormat::ColumnarSamples {
                 reusable = match backend.reader(store.clone(), handle.clone()).await {
                     Ok(reader) => {
-                        format::validate_sample_schema(&reader.schema(), &version.metadata).is_ok()
+                        format::validate_sample_schema(&reader.schema(), metadata).is_ok()
                     }
                     Err(_) => false,
                 };
@@ -348,8 +370,7 @@ async fn build_index_version(
             bucket.window_sequences.clear();
         }
     }
-    let plan =
-        plan_series_indexes_with_mode(buckets, index_buckets, version.options.ttl, now_ms, manual);
+    let plan = plan_series_indexes_with_mode(buckets, index_buckets, *ttl, now_ms, manual);
     stats.computed_buckets = plan.computed_buckets;
     stats.skipped_buckets = plan.skipped_buckets;
     let mut next = prune_index_version(&current, &visible, &plan.expired_index_ids, &mut stats);
@@ -439,7 +460,7 @@ async fn build_index_version(
                 let handles = crate::series_index::builder::build_sample_windows(
                     store,
                     region,
-                    version,
+                    metadata,
                     sources,
                     backend.as_ref(),
                     purger,
@@ -454,7 +475,7 @@ async fn build_index_version(
             stats.removed_samples += samples.keys().filter(|id| !daily.contains_key(id)).count();
             samples = daily;
         } else {
-            for file in &files {
+            for file in files {
                 let id = file.file_id().file_id();
                 let reusable = reusable_samples.contains(&id);
                 if reusable {
@@ -463,7 +484,7 @@ async fn build_index_version(
                 if let Some(handle) = crate::series_index::builder::build_samples(
                     store,
                     region,
-                    version,
+                    metadata,
                     file.clone(),
                     backend.as_ref(),
                     purger,
@@ -491,7 +512,8 @@ async fn build_index_version(
         for file in &bucket.files {
             if enable_range_index
                 && !range_indexes.contains_key(&file.file_id().file_id())
-                && let Some(entry) = build_range_index(store, region, version, file.clone()).await?
+                && let Some(entry) =
+                    build_range_index(store, region, metadata, file.clone()).await?
             {
                 stats.built_range += 1;
                 range_indexes.insert(entry.file_id, entry);
@@ -500,7 +522,7 @@ async fn build_index_version(
         let series_handle = build_series_index(
             store,
             region,
-            version,
+            metadata,
             &bucket,
             &expected,
             formats.index.as_deref(),
@@ -513,12 +535,12 @@ async fn build_index_version(
     }
     // Cover SSTs outside planned aggregate builds, including skipped buckets.
     if enable_range_index {
-        for file in &files {
+        for file in files {
             let file_id = file.file_id().file_id();
             if range_indexes.contains_key(&file_id) {
                 continue;
             }
-            if let Some(entry) = build_range_index(store, region, version, file.clone()).await? {
+            if let Some(entry) = build_range_index(store, region, metadata, file.clone()).await? {
                 stats.built_range += 1;
                 range_indexes.insert(entry.file_id, entry);
             }

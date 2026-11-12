@@ -306,6 +306,17 @@ fn args_to_vector(
     let tz = query_ctx.timezone();
 
     match type_signature {
+        TypeSignature::Nullary => {
+            ensure!(
+                args.is_empty(),
+                error::FunctionArityMismatchSnafu {
+                    actual: args.len(),
+                    expected: 0_usize,
+                }
+            );
+            Ok(vec![])
+        }
+
         TypeSignature::Variadic(valid_types) => {
             values_to_vectors_by_valid_types(valid_types, args, Some(&tz))
         }
@@ -323,6 +334,13 @@ fn args_to_vector(
         }
 
         TypeSignature::Exact(data_types) => {
+            ensure!(
+                args.len() == data_types.len(),
+                error::FunctionArityMismatchSnafu {
+                    actual: args.len(),
+                    expected: data_types.len(),
+                }
+            );
             values_to_vectors_by_exact_types(data_types, args, Some(&tz))
         }
 
@@ -450,9 +468,61 @@ fn try_get_data_type_for_sql_value(value: &SqlValue) -> Result<ArrowDataType> {
 mod tests {
     use std::sync::Arc;
 
+    use datafusion_expr::TypeSignature;
+    use datatypes::arrow::datatypes::DataType as ArrowDataType;
+    use datatypes::value::Value;
     use datatypes::vectors::{Int32Vector, VectorRef};
+    use session::context::QueryContext;
+    use sql::ast::Value as SqlValue;
+    use sql::dialect::GreptimeDbDialect;
+    use sql::parser::{ParseOptions, ParserContext};
+    use sql::statements::statement::Statement;
 
-    use crate::statement::admin::immediate_result;
+    use crate::error::Error;
+    use crate::statement::admin::{admin_output_schema, args_to_vector, immediate_result};
+
+    #[test]
+    fn test_args_to_vector_arity() {
+        let query_ctx = QueryContext::arc();
+        let value = SqlValue::SingleQuotedString("explicit-id".to_string());
+        for (signature, expected) in [
+            (TypeSignature::Nullary, 0),
+            (TypeSignature::Exact(vec![]), 0),
+            (TypeSignature::Exact(vec![ArrowDataType::Utf8]), 1),
+            (TypeSignature::Exact(vec![ArrowDataType::Utf8; 2]), 2),
+        ] {
+            for actual in 0..=3 {
+                let result = args_to_vector(&signature, &vec![&value; actual], &query_ctx);
+                if actual == expected {
+                    let vectors = result.unwrap();
+                    assert_eq!(vectors.len(), expected);
+                    for vector in vectors {
+                        assert_eq!(vector.get(0), Value::from("explicit-id"));
+                    }
+                } else {
+                    assert!(matches!(
+                        result,
+                        Err(Error::FunctionArityMismatch { actual: a, expected: e })
+                            if a == actual && e == expected
+                    ));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_admin_reconcile_catalog_nullary() {
+        let Statement::Admin(statement) = ParserContext::create_with_dialect(
+            "ADMIN reconcile_catalog()",
+            &GreptimeDbDialect {},
+            ParseOptions::default(),
+        )
+        .unwrap()
+        .remove(0) else {
+            panic!("expected ADMIN statement");
+        };
+        assert!(admin_output_schema(&statement, &QueryContext::arc()).is_some());
+    }
 
     #[test]
     fn empty_admin_function_result_has_no_immediate_value() {

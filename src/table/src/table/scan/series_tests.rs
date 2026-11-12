@@ -1275,8 +1275,7 @@ async fn invalid_partition_and_nonempty_children_are_rejected() {
 async fn tracked_native_frame_holds_and_releases_quota_on_cancel() {
     let schema = series_schema();
     let (scan, state) = fixture(Some(schema), vec![chunk(&series_schema())]);
-    let policy = serde_json::from_str("\"fail\"").unwrap();
-    let tracker = QueryMemoryTracker::builder(1024 * 1024, policy).build();
+    let tracker = QueryMemoryTracker::builder(1024 * 1024).build();
     let tracker_for_assertion = tracker.clone();
     let mut scan = scan;
     Arc::get_mut(&mut scan).unwrap().query_memory_tracker = Some(tracker);
@@ -1313,8 +1312,7 @@ async fn memory_quota_failure_does_not_replay_raw_scan() {
     let mut oversized = chunk(&schema);
     oversized.primary_key = Buffer::from(vec![0; 2048]);
     let (scan, state) = fixture(Some(schema.clone()), vec![oversized]);
-    let policy = serde_json::from_str("\"fail\"").unwrap();
-    let tracker = QueryMemoryTracker::builder(1, policy).build();
+    let tracker = QueryMemoryTracker::builder(1).build();
     let tracker_for_assertion = tracker.clone();
     let mut scan = scan;
     Arc::get_mut(&mut scan).unwrap().query_memory_tracker = Some(tracker);

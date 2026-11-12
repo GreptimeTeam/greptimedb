@@ -18,9 +18,11 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Instant;
 
+use arrow_schema::extension::ExtensionType;
 use common_base::range_read::RangeReader;
 use common_telemetry::warn;
 use datatypes::data_type::ConcreteDataType;
+use datatypes::extension::json::Json2ExtensionType;
 use index::inverted_index::format::reader::{InvertedIndexBlobReader, InvertedIndexReadMetrics};
 use index::inverted_index::search::index_apply::{
     ApplyOutput, IndexApplier, IndexNotFoundStrategy, PredicatesIndexApplier, SearchContext,
@@ -29,11 +31,11 @@ use index::inverted_index::search::predicate::Predicate;
 use index::target::IndexTarget;
 use object_store::ObjectStore;
 use puffin::puffin_manager::cache::PuffinMetadataCacheRef;
+use puffin::puffin_manager::file_key::PuffinFileKey;
 use puffin::puffin_manager::{PuffinManager, PuffinReader};
 use snafu::ResultExt;
-use store_api::metadata::RegionMetadataRef;
+use store_api::metadata::{RegionMetadata, RegionMetadataRef};
 use store_api::region_request::PathType;
-use store_api::storage::ColumnId;
 
 use crate::access_layer::{RegionFilePathFactory, WriteCachePathProvider};
 use crate::cache::file_cache::{FileCacheRef, FileType, IndexKey};
@@ -46,7 +48,7 @@ use crate::error::{
 use crate::metrics::{INDEX_APPLY_ELAPSED, INDEX_APPLY_MEMORY_USAGE};
 use crate::sst::file::RegionIndexId;
 use crate::sst::index::inverted_index::INDEX_BLOB_TYPE;
-use crate::sst::index::puffin_manager::{BlobReader, PuffinManagerFactory};
+use crate::sst::index::puffin_manager::{BlobReader, PuffinManagerFactory, SstPuffinManager};
 use crate::sst::index::{TYPE_INVERTED_INDEX, trigger_index_background_download};
 
 /// Metrics for tracking inverted index apply operations.
@@ -128,6 +130,10 @@ pub(crate) struct InvertedIndexApplier {
     /// The puffin manager factory.
     puffin_manager_factory: PuffinManagerFactory,
 
+    /// Managers keep backend identity resolution out of per-blob reads.
+    remote_puffin_manager: SstPuffinManager,
+    cached_puffin_manager: Option<SstPuffinManager>,
+
     /// In-memory cache for inverted index.
     inverted_index_cache: Option<InvertedIndexCacheRef>,
 
@@ -135,13 +141,13 @@ pub(crate) struct InvertedIndexApplier {
     puffin_metadata_cache: Option<PuffinMetadataCacheRef>,
 
     /// All collected predicates.
-    predicates: BTreeMap<ColumnId, Vec<Predicate>>,
+    predicates: BTreeMap<IndexTarget, Vec<Predicate>>,
 
     /// Default apply plan built from all collected predicates.
     default_plan: SstApplyPlan,
 
-    /// Expected predicate column types from the latest region metadata.
-    expected_predicate_col_types: BTreeMap<ColumnId, ConcreteDataType>,
+    /// Expected predicate target types from the latest region metadata.
+    expected_predicate_target_types: BTreeMap<IndexTarget, ConcreteDataType>,
 }
 
 pub(crate) type InvertedIndexApplierRef = Arc<InvertedIndexApplier>;
@@ -159,9 +165,13 @@ impl InvertedIndexApplier {
         path_type: PathType,
         store: ObjectStore,
         puffin_manager_factory: PuffinManagerFactory,
-        predicates: BTreeMap<ColumnId, Vec<Predicate>>,
-        expected_predicate_col_types: BTreeMap<ColumnId, ConcreteDataType>,
+        predicates: BTreeMap<IndexTarget, Vec<Predicate>>,
+        expected_predicate_target_types: BTreeMap<IndexTarget, ConcreteDataType>,
     ) -> Result<Self> {
+        let remote_puffin_manager = puffin_manager_factory.build(
+            store.clone(),
+            RegionFilePathFactory::new(table_dir.clone(), path_type),
+        );
         let default_plan = Self::build_apply_plan(&predicates)?;
         INDEX_APPLY_MEMORY_USAGE.add(default_plan.index_applier.memory_usage() as i64);
 
@@ -171,16 +181,25 @@ impl InvertedIndexApplier {
             store,
             file_cache: None,
             puffin_manager_factory,
+            remote_puffin_manager,
+            cached_puffin_manager: None,
             inverted_index_cache: None,
             puffin_metadata_cache: None,
             predicates,
             default_plan,
-            expected_predicate_col_types,
+            expected_predicate_target_types,
         })
     }
 
     /// Sets the file cache.
     pub fn with_file_cache(mut self, file_cache: Option<FileCacheRef>) -> Self {
+        self.cached_puffin_manager = file_cache.as_ref().map(|cache| {
+            self.puffin_manager_factory.build_cached(
+                &self.remote_puffin_manager,
+                cache.local_store(),
+                WriteCachePathProvider::new(cache.clone()),
+            )
+        });
         self.file_cache = file_cache;
         self
     }
@@ -227,7 +246,7 @@ impl InvertedIndexApplier {
         };
 
         let mut cache_miss = 0;
-        let blob = match self.cached_blob_reader(file_id, file_size_hint).await {
+        let (file_key, blob) = match self.cached_blob_reader(file_id, file_size_hint).await {
             Ok(Some(puffin_reader)) => puffin_reader,
             other => {
                 cache_miss += 1;
@@ -242,8 +261,7 @@ impl InvertedIndexApplier {
 
         let result = if let Some(index_cache) = &self.inverted_index_cache {
             let mut index_reader = CachedInvertedIndexBlobReader::new(
-                file_id.file_id(),
-                file_id.version,
+                file_key,
                 blob_size,
                 InvertedIndexBlobReader::new(blob),
                 index_cache.clone(),
@@ -292,8 +310,10 @@ impl InvertedIndexApplier {
         &self,
         file_id: RegionIndexId,
         file_size_hint: Option<u64>,
-    ) -> Result<Option<BlobReader>> {
-        let Some(file_cache) = &self.file_cache else {
+    ) -> Result<Option<(PuffinFileKey<RegionIndexId>, BlobReader)>> {
+        let (Some(file_cache), Some(puffin_manager)) =
+            (&self.file_cache, &self.cached_puffin_manager)
+        else {
             return Ok(None);
         };
 
@@ -305,11 +325,6 @@ impl InvertedIndexApplier {
         if file_cache.get(index_key).await.is_none() {
             return Ok(None);
         };
-
-        let puffin_manager = self.puffin_manager_factory.build(
-            file_cache.local_store(),
-            WriteCachePathProvider::new(file_cache.clone()),
-        );
 
         // Adds file size hint to the puffin reader to avoid extra metadata read.
         let reader = puffin_manager
@@ -323,7 +338,7 @@ impl InvertedIndexApplier {
             .reader()
             .await
             .context(PuffinBuildReaderSnafu)?;
-        Ok(Some(reader))
+        Ok(Some((puffin_manager.file_key(&file_id), reader)))
     }
 
     /// Creates a blob reader from the remote index file.
@@ -331,7 +346,7 @@ impl InvertedIndexApplier {
         &self,
         file_id: RegionIndexId,
         file_size_hint: Option<u64>,
-    ) -> Result<BlobReader> {
+    ) -> Result<(PuffinFileKey<RegionIndexId>, BlobReader)> {
         let path_factory = RegionFilePathFactory::new(self.table_dir.clone(), self.path_type);
 
         // Trigger background download if file cache and file size are available
@@ -344,11 +359,11 @@ impl InvertedIndexApplier {
         );
 
         let puffin_manager = self
-            .puffin_manager_factory
-            .build(self.store.clone(), path_factory)
+            .remote_puffin_manager
+            .clone()
             .with_puffin_metadata_cache(self.puffin_metadata_cache.clone());
 
-        puffin_manager
+        let reader = puffin_manager
             .reader(&file_id)
             .await
             .context(PuffinBuildReaderSnafu)?
@@ -358,7 +373,8 @@ impl InvertedIndexApplier {
             .context(PuffinReadBlobSnafu)?
             .reader()
             .await
-            .context(PuffinBuildReaderSnafu)
+            .context(PuffinBuildReaderSnafu)?;
+        Ok((puffin_manager.file_key(&file_id), reader))
     }
 
     /// Builds a per-SST apply plan.
@@ -368,17 +384,24 @@ impl InvertedIndexApplier {
         let mut compatible_predicates = BTreeMap::new();
         let mut has_type_mismatch = false;
 
-        for (col_id, expected) in &self.expected_predicate_col_types {
-            if let Some(sst_col) = sst_metadata.column_by_id(*col_id)
-                && sst_col.column_schema.data_type != *expected
-            {
+        for (target, predicates) in &self.predicates {
+            let Some(expected) = self.expected_predicate_target_types.get(target) else {
+                has_type_mismatch = true;
+                continue;
+            };
+            let actual = index_target_data_type(sst_metadata, target);
+            // JSON paths require a matching type hint in this SST. Ordinary missing
+            // columns retain the missing-index fallback for added columns with defaults.
+            let compatible = match target {
+                IndexTarget::ColumnId(_) => actual.as_ref().is_none_or(|ty| ty == expected),
+                IndexTarget::JsonPath(_) => actual.as_ref() == Some(expected),
+            };
+            if !compatible {
                 has_type_mismatch = true;
                 continue;
             }
 
-            if let Some(predicates) = self.predicates.get(col_id) {
-                compatible_predicates.insert(*col_id, predicates.clone());
-            }
+            compatible_predicates.insert(target.clone(), predicates.clone());
         }
 
         if compatible_predicates.is_empty() {
@@ -394,17 +417,17 @@ impl InvertedIndexApplier {
     }
 
     fn build_apply_plan(
-        predicates_by_col: &BTreeMap<ColumnId, Vec<Predicate>>,
+        predicates_by_target: &BTreeMap<IndexTarget, Vec<Predicate>>,
     ) -> Result<SstApplyPlan> {
-        let predicates = predicates_by_col
-            .iter()
-            .map(|(col_id, preds)| (format!("{}", IndexTarget::ColumnId(*col_id)), preds.clone()))
-            .collect();
-
+        let mut predicates = Vec::with_capacity(predicates_by_target.len());
+        for (target, preds) in predicates_by_target {
+            let name = target.encode();
+            predicates.push((name, preds.clone()));
+        }
         let index_applier =
             PredicatesIndexApplier::try_from(predicates).context(BuildIndexApplierSnafu)?;
 
-        let predicate_key = PredicateKey::new_inverted(Arc::new(predicates_by_col.clone()));
+        let predicate_key = PredicateKey::new_inverted(Arc::new(predicates_by_target.clone()));
         Ok(SstApplyPlan {
             predicate_key,
             index_applier: Arc::new(index_applier),
@@ -416,6 +439,34 @@ impl Drop for InvertedIndexApplier {
     fn drop(&mut self) {
         INDEX_APPLY_MEMORY_USAGE.sub(self.default_plan.index_applier.memory_usage() as i64);
     }
+}
+
+/// Resolves the value type used to encode an index predicate.
+/// JSON paths must have an enabled inverted-index type hint.
+fn index_target_data_type(
+    metadata: &RegionMetadata,
+    target: &IndexTarget,
+) -> Option<ConcreteDataType> {
+    let target = match target {
+        IndexTarget::ColumnId(id) => {
+            return metadata
+                .column_by_id(*id)
+                .map(|col| col.column_schema.data_type.clone());
+        }
+        IndexTarget::JsonPath(target) => target,
+    };
+    let col = metadata.column_by_id(target.column_id())?;
+    let extension = col
+        .column_schema
+        .extension_type::<Json2ExtensionType>()
+        .ok()??;
+    extension
+        .metadata()
+        .json_settings()
+        .type_hints()
+        .iter()
+        .find(|hint| hint.path == target.path() && hint.inverted_index)
+        .map(|hint| hint.data_type.clone())
 }
 
 #[cfg(test)]
@@ -442,13 +493,15 @@ mod tests {
 
         let mut predicates = BTreeMap::new();
         predicates.insert(
-            1,
+            IndexTarget::ColumnId(1),
             vec![Predicate::RegexMatch(RegexMatchPredicate {
                 pattern: "foo".to_string(),
             })],
         );
-        let expected_predicate_col_types =
-            BTreeMap::from_iter([(1, ConcreteDataType::string_datatype())]);
+        let expected_predicate_target_types = BTreeMap::from_iter([(
+            IndexTarget::ColumnId(1),
+            ConcreteDataType::string_datatype(),
+        )]);
 
         let sst_index_applier = InvertedIndexApplier::new(
             table_dir,
@@ -456,7 +509,7 @@ mod tests {
             object_store,
             puffin_manager_factory,
             predicates,
-            expected_predicate_col_types,
+            expected_predicate_target_types,
         )
         .unwrap();
         let plan = sst_index_applier
@@ -474,14 +527,14 @@ mod tests {
 
         let mut predicates = BTreeMap::new();
         predicates.insert(
-            1,
+            IndexTarget::ColumnId(1),
             vec![Predicate::RegexMatch(RegexMatchPredicate {
                 pattern: "foo".to_string(),
             })],
         );
         // Column id 1 is String in `mock_region_metadata`, set expected type to Int64.
-        let expected_predicate_col_types =
-            BTreeMap::from_iter([(1, ConcreteDataType::int64_datatype())]);
+        let expected_predicate_target_types =
+            BTreeMap::from_iter([(IndexTarget::ColumnId(1), ConcreteDataType::int64_datatype())]);
 
         let sst_index_applier = InvertedIndexApplier::new(
             table_dir,
@@ -489,7 +542,7 @@ mod tests {
             object_store,
             puffin_manager_factory,
             predicates,
-            expected_predicate_col_types,
+            expected_predicate_target_types,
         )
         .unwrap();
         let plan = sst_index_applier
@@ -526,20 +579,22 @@ mod tests {
 
         let mut predicates = BTreeMap::new();
         predicates.insert(
-            1,
+            IndexTarget::ColumnId(1),
             vec![Predicate::RegexMatch(RegexMatchPredicate {
                 pattern: "foo".to_string(),
             })],
         );
-        let expected_predicate_col_types =
-            BTreeMap::from_iter([(1, ConcreteDataType::string_datatype())]);
+        let expected_predicate_target_types = BTreeMap::from_iter([(
+            IndexTarget::ColumnId(1),
+            ConcreteDataType::string_datatype(),
+        )]);
         let sst_index_applier = InvertedIndexApplier::new(
             table_dir.clone(),
             PathType::Bare,
             object_store,
             puffin_manager_factory,
             predicates,
-            expected_predicate_col_types,
+            expected_predicate_target_types,
         )
         .unwrap();
         let plan = sst_index_applier

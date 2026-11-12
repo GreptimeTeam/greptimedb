@@ -1,0 +1,26 @@
+{
+  "metadata": {
+    "column_metadatas": [{
+      "column_schema": {
+        "name": "ts",
+        "data_type": {"Timestamp": {"Millisecond": null}},
+        "is_nullable": false,
+        "is_time_index": true,
+        "default_constraint": null,
+        "metadata": {}
+      },
+      "semantic_type": "Timestamp",
+      "column_id": 0
+    }],
+    "primary_key": [],
+    "region_id": 4294967297,
+    "schema_version": 0
+  },
+  "files": {},
+  "flushed_entry_id": 5,
+  "flushed_sequence": 8,
+  "committed_sequence": 8,
+  "manifest_version": 12,
+  "truncated_entry_id": null,
+  "compaction_time_window": "1h"
+}

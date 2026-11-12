@@ -49,6 +49,7 @@ common-function = { workspace = true }
 common-meta = { workspace = true, features = ["testing"] }
 common-wal = { workspace = true }
 criterion = { workspace = true, features = ["async", "async_tokio"] }
+log-store = { workspace = true, features = ["testing"] }
 mito2 = { workspace = true, features = ["test"] }
 mur3 = "0.1"
 partition = { workspace = true }

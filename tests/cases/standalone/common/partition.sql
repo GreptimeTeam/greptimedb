@@ -128,6 +128,7 @@ PARTITION ON COLUMNS (a, b) (
 -- SQLNESS REPLACE (\s\s+) _
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE \\?"(dyn_filters|time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
 EXPLAIN ANALYZE SELECT * FROM valid_rule;
 
 -- SQLNESS REPLACE (metrics.*) REDACTED
@@ -137,6 +138,7 @@ EXPLAIN ANALYZE SELECT * FROM valid_rule;
 -- SQLNESS REPLACE (\s\s+) _
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE \\?"(dyn_filters|time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
 EXPLAIN ANALYZE SELECT * FROM valid_rule
 WHERE a < 10;
 
@@ -147,6 +149,7 @@ WHERE a < 10;
 -- SQLNESS REPLACE (\s\s+) _
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE \\?"(dyn_filters|time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
 EXPLAIN ANALYZE SELECT * FROM valid_rule
 WHERE a = 10 AND b= 'z';
 
@@ -157,6 +160,7 @@ WHERE a = 10 AND b= 'z';
 -- SQLNESS REPLACE (\s\s+) _
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE \\?"(dyn_filters|time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
 EXPLAIN ANALYZE SELECT * FROM valid_rule
 WHERE a = 10 OR b= 'z';
 
@@ -167,6 +171,7 @@ WHERE a = 10 OR b= 'z';
 -- SQLNESS REPLACE (\s\s+) _
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE \\?"(dyn_filters|time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
 EXPLAIN ANALYZE SELECT * FROM valid_rule
 WHERE a = 10 OR ts > 1;
 
@@ -177,6 +182,7 @@ WHERE a = 10 OR ts > 1;
 -- SQLNESS REPLACE (\s\s+) _
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE \\?"(dyn_filters|time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
 EXPLAIN ANALYZE SELECT * FROM valid_rule
 WHERE a = 10 OR (ts > 1 AND b ='h');
 
@@ -204,3 +210,19 @@ INSERT INTO `molestiAe` VALUES
 SELECT * FROM `molestiAe`;
 
 DROP TABLE `molestiAe`;
+
+-- The minimum of a signed type is a valid bound.
+CREATE TABLE int_min_bound (
+  a INT PRIMARY KEY,
+  ts TIMESTAMP TIME INDEX,
+) PARTITION ON COLUMNS (a) (
+  a < -2147483648,
+  a >= -2147483648 AND a < 0,
+  a >= 0
+);
+
+INSERT INTO int_min_bound VALUES (-2147483648, 1), (NULL, 2), (0, 3);
+
+SELECT * FROM int_min_bound ORDER BY ts;
+
+DROP TABLE int_min_bound;

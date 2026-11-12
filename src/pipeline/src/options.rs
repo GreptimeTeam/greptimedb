@@ -24,12 +24,24 @@ pub struct PipelineOptions {
     /// duration. Default: "10s".
     #[serde(with = "humantime_serde")]
     pub cache_ttl: Duration,
+    /// Allows VRL programs to access the server environment, filesystem, hostname,
+    /// local timezone, network, and logs. Enable only for trusted pipeline authors.
+    /// Defaults to false. Changes require a restart.
+    pub allow_vrl_host_access: bool,
+    /// Default for the HTTP log ingestion and pipeline dry-run `ignore_errors` parameter.
+    /// Explicit request values override this setting. Malformed input may be discarded,
+    /// and invalid custom timestamps in identity ingestion fall back to server time.
+    /// Pipeline execution errors are controlled separately by `skip_error`.
+    /// Defaults to false. Changes require a restart.
+    pub ignore_errors: bool,
 }
 
 impl Default for PipelineOptions {
     fn default() -> Self {
         Self {
             cache_ttl: Duration::from_secs(10),
+            allow_vrl_host_access: false,
+            ignore_errors: false,
         }
     }
 }

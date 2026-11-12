@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+pub(crate) mod manifest_size;
+
 use std::time::{Duration, Instant};
 
 use lazy_static::lazy_static;
@@ -35,6 +37,11 @@ pub const PARTITION_LABEL: &str = "partition";
 pub const STAGING_TYPE: &str = "index_staging";
 /// Recycle bin type label.
 pub const RECYCLE_TYPE: &str = "recycle_bin";
+
+/// Discard reason when an operation cannot admit extension index work.
+pub(crate) const INDEX_DISCARD_ADMISSION_REJECTED: &str = "admission_rejected";
+/// Discard reason when a creator exceeds its retained-memory allowance.
+pub(crate) const INDEX_DISCARD_MEMORY_BUDGET_EXCEEDED: &str = "memory_budget_exceeded";
 
 // Write metrics.
 lazy_static! {
@@ -136,6 +143,31 @@ lazy_static! {
         exponential_buckets(1.0, 10.0, 6).unwrap(),
     )
     .unwrap();
+    /// TWCS candidate planning wall time, including blocking-pool waits and
+    /// empty/error attempts. `mode` is fair or stateless, never a region ID.
+    pub static ref TWCS_PICK_ELAPSED: HistogramVec = register_histogram_vec!(
+        "greptime_mito_twcs_pick_elapsed_seconds",
+        "twcs candidate planning wall time including blocking-pool waits",
+        &["mode"],
+        // 100us ~ 105s, so sub-second planning regressions are visible too.
+        exponential_buckets(0.0001, 4.0, 11).unwrap(),
+    ).unwrap();
+    /// Windows whose candidate discovery actually started, including windows
+    /// with no eligible candidates; excludes windows skipped by early exit.
+    pub static ref TWCS_SCANNED_WINDOWS: IntCounterVec = register_int_counter_vec!(
+        "greptime_mito_twcs_scanned_windows_total",
+        "twcs windows evaluated during candidate discovery",
+        &["mode"],
+    ).unwrap();
+    /// Automatic seeds attempted within the output budget, including seeds
+    /// absorbed by or rejected with a LastNonNull closure. Excludes work left
+    /// behind by the budget; counts attempts, not admission or completion.
+    /// Promoted means the seed reached the waiting threshold at selection time.
+    pub static ref TWCS_SELECTED_CANDIDATES: IntCounterVec = register_int_counter_vec!(
+        "greptime_mito_twcs_selected_candidates_total",
+        "automatic twcs seeds selected by class and normal or promoted priority",
+        &["class", "priority"],
+    ).unwrap();
     /// Elapsed time of each successfully published compaction unit, labeled by `type`.
     /// - local: one dependency unit, from task start through worker apply acknowledgement
     /// - remote: one remote job, from request start through publication
@@ -154,6 +186,18 @@ lazy_static! {
     pub static ref COMPACTION_FAILURE_COUNT: IntCounter =
         register_int_counter!("greptime_mito_compaction_failure_total", "mito compaction failure total").unwrap();
 
+    /// Prepared compaction units waiting for global admission.
+    pub static ref COMPACTION_READY_UNITS: IntGauge = register_int_gauge!(
+        "greptime_mito_compaction_ready_units", "prepared units waiting for global admission"
+    ).unwrap();
+    /// Includes authorized work not yet polled, through task exit and lease release.
+    pub static ref COMPACTION_ADMITTED_UNITS: IntGauge = register_int_gauge!(
+        "greptime_mito_compaction_admitted_units", "compaction units holding global execution capacity"
+    ).unwrap();
+    pub static ref COMPACTION_ADMISSION_WAIT: Histogram = register_histogram!(
+        "greptime_mito_compaction_admission_wait_seconds", "time prepared units wait for admission",
+        exponential_buckets(0.001, 4.0, 10).unwrap()
+    ).unwrap();
     /// Gauge for inflight compaction tasks: local units and remote jobs.
     pub static ref INFLIGHT_COMPACTION_COUNT: IntGauge =
         register_int_gauge!(
@@ -238,6 +282,14 @@ lazy_static! {
         "Number of SSTs to scan in a scan task",
         vec![1.0, 4.0, 8.0, 16.0, 32.0, 64.0, 256.0, 1024.0],
     ).unwrap();
+    /// Planned maximum concurrent sources per query scan limit evaluation or compaction reader.
+    /// Includes memtables counted by the file limit, rejected scans, and memory-budgeted scans.
+    pub static ref SCAN_MAX_CONCURRENT_FILES: HistogramVec = register_histogram_vec!(
+        "greptime_mito_scan_max_concurrent_files",
+        "Estimated maximum concurrent files (including memtable sources) per query scan limit evaluation or compaction reader",
+        &[TYPE_LABEL],
+        vec![0.0, 1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0, 256.0, 384.0, 512.0, 1024.0, 2048.0, 4096.0, 8192.0],
+    ).unwrap();
     /// Histogram for the number of rows returned per query.
     pub static ref READ_ROWS_RETURN: Histogram = register_histogram!(
         "greptime_mito_read_rows_return",
@@ -272,8 +324,56 @@ lazy_static! {
     ).unwrap();
 }
 
+pub(crate) fn cache_loading_metrics(
+    cache_type: &'static str,
+) -> std::sync::Arc<common_cache::metrics::CacheMetrics> {
+    use common_cache::metrics::{CacheMetrics, OperationMetrics};
+
+    let operation = |stage| OperationMetrics {
+        started: CACHE_NATIVE_LOAD_EVENTS.with_label_values(&[cache_type, stage, "started"]),
+        succeeded: CACHE_NATIVE_LOAD_EVENTS.with_label_values(&[cache_type, stage, "success"]),
+        failed: CACHE_NATIVE_LOAD_EVENTS.with_label_values(&[cache_type, stage, "error"]),
+        cancelled: CACHE_NATIVE_LOAD_EVENTS.with_label_values(&[cache_type, stage, "cancelled"]),
+        active: CACHE_NATIVE_LOAD_ACTIVE.with_label_values(&[cache_type, stage]),
+        elapsed: CACHE_NATIVE_LOAD_ELAPSED.with_label_values(&[cache_type, stage]),
+    };
+    std::sync::Arc::new(CacheMetrics {
+        requests: operation("request"),
+        loads: operation("loader"),
+    })
+}
+
 // Cache metrics.
 lazy_static! {
+    pub static ref RANGE_CACHE_STAGING_BYTES: IntGauge = register_int_gauge!(
+        "greptime_mito_range_cache_staging_bytes",
+        "Referenced batch bytes retained by active shared range buffers, including unread streaming batches"
+    )
+    .unwrap();
+    pub static ref RANGE_CACHE_STREAMING_BYTES: IntGauge = register_int_gauge!(
+        "greptime_mito_range_cache_streaming_bytes",
+        "Referenced bytes retained for active readers after full-result cache admission stops"
+    ).unwrap();
+}
+
+lazy_static! {
+    /// Native cache request and actual loader lifecycle; request is not a waiter count.
+    pub static ref CACHE_NATIVE_LOAD_EVENTS: IntCounterVec = register_int_counter_vec!(
+        "greptime_mito_cache_native_load_events_total",
+        "Native cache request and executed loader outcomes; requests include hits and shared loads",
+        &[TYPE_LABEL, STAGE_LABEL, "event"]
+    ).unwrap();
+    pub static ref CACHE_NATIVE_LOAD_ACTIVE: IntGaugeVec = register_int_gauge_vec!(
+        "greptime_mito_cache_native_load_active",
+        "Active native cache requests or executed loaders, not waiting requests",
+        &[TYPE_LABEL, STAGE_LABEL]
+    ).unwrap();
+    pub static ref CACHE_NATIVE_LOAD_ELAPSED: HistogramVec = register_histogram_vec!(
+        "greptime_mito_cache_native_load_seconds",
+        "Native cache request or executed loader wall time including suspension and cancellation, not CPU time",
+        &[TYPE_LABEL, STAGE_LABEL], exponential_buckets(0.0001, 10.0, 6).unwrap()
+    ).unwrap();
+
     /// Cache hit counter.
     pub static ref CACHE_HIT: IntCounterVec = register_int_counter_vec!(
         "greptime_mito_cache_hit",
@@ -281,6 +381,7 @@ lazy_static! {
         &[TYPE_LABEL]
     )
     .unwrap();
+    // TODO(narthex-merge): overlaps main's cache_loading_metrics(); pick one once the loader accounting is unified
     /// Counts cache loaders that actually ran.
     pub static ref CACHE_LOAD: IntCounterVec = register_int_counter_vec!(
         "greptime_mito_cache_load", "Cache loaders that actually ran", &["type"]
@@ -293,12 +394,14 @@ lazy_static! {
     )
     .unwrap();
     /// Cache size in bytes.
-    pub static ref CACHE_BYTES: IntGaugeVec = register_int_gauge_vec!(
-        "greptime_mito_cache_bytes",
-        "mito cache bytes",
-        &[TYPE_LABEL]
-    )
-    .unwrap();
+    pub static ref CACHE_BYTES: common_cache::metrics::CacheSizeMetrics = {
+        let metrics = common_cache::metrics::CacheSizeMetrics::new(
+            prometheus::Opts::new("greptime_mito_cache_bytes", "mito cache bytes; backend cache weights are approximate"),
+            &[TYPE_LABEL],
+        ).unwrap();
+        prometheus::register(Box::new(metrics.clone())).unwrap();
+        metrics
+    };
     /// Download bytes counter in the write cache.
     pub static ref WRITE_CACHE_DOWNLOAD_BYTES_TOTAL: IntCounter = register_int_counter!(
         "mito_write_cache_download_bytes_total",
@@ -323,6 +426,14 @@ lazy_static! {
         "mito upload bytes total",
     )
     .unwrap();
+    /// Bounded event labels distinguish lookup misses from actual shared loads.
+    pub static ref RANGE_CACHE_WORKER_EVENTS: IntCounterVec = register_int_counter_vec!(
+        "greptime_mito_range_cache_worker_events_total",
+        "Range cache load coordination and SST retirement events",
+        &["event"]
+    )
+    .unwrap();
+
     /// Cache eviction counter, labeled with cache type and eviction reason.
     pub static ref CACHE_EVICTION: IntCounterVec = register_int_counter_vec!(
         "greptime_mito_cache_eviction",
@@ -412,7 +523,15 @@ lazy_static! {
         &[TYPE_LABEL],
     )
     .unwrap();
-    /// Gauge of index create memory usage.
+    /// Optional index kinds discarded by a resource policy, not a build error.
+    pub static ref INDEX_CREATE_DISCARDED_TOTAL: IntCounterVec = register_int_counter_vec!(
+        "greptime_index_create_discarded_total",
+        "index kinds omitted or discarded by resource policy",
+        &[TYPE_LABEL, "reason"],
+    ).unwrap();
+    /// Gauge of index create memory usage. The `extension` type aggregates retained
+    /// memory across optional creators, not individual algorithms: one creator may
+    /// share state across several algorithms.
     pub static ref INDEX_CREATE_MEMORY_USAGE: IntGaugeVec = register_int_gauge_vec!(
         "greptime_index_create_memory_usage",
         "index create memory usage",
@@ -611,6 +730,27 @@ lazy_static! {
         register_int_counter!("greptime_mito_flush_file_total", "mito flushed file count").unwrap();
 }
 
+#[cfg(feature = "hdfs-object-store")]
+lazy_static! {
+    /// Counter for the number of temporary files deleted by the sweeper.
+    pub static ref SWEEP_FILES_DELETED_TOTAL: IntCounter = register_int_counter!(
+        "greptime_mito_sweep_files_deleted_total",
+        "Total temporary files deleted by the sweeper",
+    ).unwrap();
+
+    /// Counter for the number of failures while sweeping temporary files.
+    pub static ref SWEEP_ERRORS_TOTAL: IntCounter = register_int_counter!(
+        "greptime_mito_sweep_errors_total",
+        "Total failures while sweeping temporary files",
+    ).unwrap();
+
+    /// Counter for the number of temporary file sweeps run.
+    pub static ref SWEEP_RUNS_TOTAL: IntCounter = register_int_counter!(
+        "greptime_mito_sweep_runs_total",
+        "Total temporary file sweeps run",
+    ).unwrap();
+}
+
 /// Stager notifier to collect metrics.
 pub struct StagerMetrics {
     cache_hit: IntCounter,
@@ -739,9 +879,85 @@ impl Drop for ColumnarReadMetrics {
     }
 }
 
+lazy_static! {
+    pub static ref CACHE_PAGE_LOADED_BYTES: IntCounterVec = register_int_counter_vec!(
+        "greptime_mito_cache_page_loaded_bytes_total",
+        "Bytes produced by successful page loaders, excluding waiters",
+        &[TYPE_LABEL]
+    )
+    .unwrap();
+    /// Configured capacity summed across live page caches in each category.
+    pub static ref CACHE_CAPACITY_BYTES: common_cache::metrics::CacheSizeMetrics = {
+        let metrics = common_cache::metrics::CacheSizeMetrics::new(
+            prometheus::Opts::new("greptime_mito_cache_capacity_bytes", "Configured capacity of live page caches in bytes"),
+            &[TYPE_LABEL],
+        ).unwrap();
+        prometheus::register(Box::new(metrics.clone())).unwrap();
+        metrics
+    };
+}
+
+/// Binds shared page/cache I/O metrics while retaining the business hit/miss labels.
+pub(crate) fn cache_page_observer(
+    cache_name_label: &'static str,
+    cache_category_label: &'static str,
+    lookup_counts: fn(usize, usize) -> (usize, usize),
+) -> common_cache::paged::PageCacheObserver {
+    use common_cache::paged::PageEvent;
+    let hits = CACHE_HIT.with_label_values(&[cache_category_label]);
+    let misses = CACHE_MISS.with_label_values(&[cache_category_label]);
+    let loaded = CACHE_PAGE_LOADED_BYTES.with_label_values(&[cache_name_label]);
+    common_cache::paged::PageCacheObserver {
+        bytes: CACHE_BYTES.bind(&[cache_category_label]),
+        capacity: CACHE_CAPACITY_BYTES.bind(&[cache_category_label]),
+        loads: Some(cache_loading_metrics(cache_name_label)),
+        events: std::sync::Arc::new(move |event| match event {
+            PageEvent::Lookup {
+                hits: count,
+                misses: missing,
+            } => {
+                let (count, missing) = lookup_counts(count, missing);
+                hits.inc_by(count as u64);
+                misses.inc_by(missing as u64);
+            }
+            PageEvent::Loaded { bytes } => loaded.inc_by(bytes),
+            PageEvent::Evicted { cause } => CACHE_EVICTION
+                .with_label_values(&[cache_category_label, cause.as_str()])
+                .inc(),
+        }),
+    }
+}
+
+lazy_static! {
+    pub static ref CACHE_PAGE_BYTES: IntCounterVec = register_int_counter_vec!(
+        "greptime_mito_cache_page_bytes_total",
+        "Logical page fetch bytes by kind; not physical backend bytes",
+        &[TYPE_LABEL, "kind"]
+    )
+    .unwrap();
+}
+
+/// Records logical byte amplification independently of physical batch reads.
+pub(crate) fn cache_page_fetch_metrics(
+    cache_type: &'static str,
+    stats: &common_cache::paged::PageFetchStats,
+) {
+    for (kind, value) in [
+        ("requested", stats.requested_bytes),
+        ("aligned", stats.aligned_bytes),
+        ("unique_requested", stats.unique_requested_bytes),
+        ("cached", stats.cached_bytes),
+    ] {
+        CACHE_PAGE_BYTES
+            .with_label_values(&[cache_type, kind])
+            .inc_by(value);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use common_cache::paged::{PageEvent, PageFetchStats};
 
     #[tokio::test]
     async fn stage_timer_retains_failed_and_cancelled_waits() {
@@ -767,5 +983,92 @@ mod tests {
         drop(wait);
         // Dropping the suspended future must add to, rather than replace, earlier work.
         assert!(metrics.elapsed["columnar_series_fetch_wall"] >= failed + Duration::from_secs(1));
+    }
+
+    #[test]
+    fn page_cache_capacity_sums_live_instances_by_category() {
+        use bytes::Bytes;
+        use common_cache::paged::PagedCache;
+        use prometheus::core::Collector;
+
+        let category = "test_shared_page_category";
+        let sample = || {
+            CACHE_CAPACITY_BYTES
+                .collect()
+                .into_iter()
+                .flat_map(|family| family.get_metric().to_vec())
+                .find(|metric| {
+                    metric
+                        .get_label()
+                        .iter()
+                        .any(|label| label.value() == category)
+                })
+                .unwrap()
+                .get_gauge()
+                .as_ref()
+                .unwrap()
+                .value()
+        };
+        let make_cache = |name, capacity| {
+            PagedCache::<u64>::new(
+                name,
+                capacity,
+                64,
+                |_, bytes: &Bytes| bytes.len() as u32,
+                cache_page_observer(name, category, |hits, misses| (hits, misses)),
+            )
+        };
+        let first = make_cache("test_first_pages", 128);
+        let second = make_cache("test_second_pages", 256);
+        assert_eq!(sample(), 384.0);
+        drop(first);
+        assert_eq!(sample(), 256.0);
+        drop(second);
+        assert_eq!(sample(), 0.0);
+    }
+
+    #[test]
+    fn test_page_observer_retains_business_lookup_units() {
+        let page = cache_page_observer("test_page_unit", "test_page_unit", |hits, misses| {
+            (hits, misses)
+        });
+        let request =
+            cache_page_observer("test_request_unit", "test_request_unit", |hits, misses| {
+                (usize::from(hits > 0), usize::from(misses > 0))
+            });
+        for observer in [&page, &request] {
+            (observer.events)(PageEvent::Lookup { hits: 3, misses: 2 });
+            (observer.events)(PageEvent::Loaded { bytes: 4096 });
+        }
+        assert_eq!(CACHE_HIT.with_label_values(&["test_page_unit"]).get(), 3);
+        assert_eq!(CACHE_MISS.with_label_values(&["test_page_unit"]).get(), 2);
+        assert_eq!(CACHE_HIT.with_label_values(&["test_request_unit"]).get(), 1);
+        assert_eq!(
+            CACHE_MISS.with_label_values(&["test_request_unit"]).get(),
+            1
+        );
+        cache_page_fetch_metrics(
+            "test_page_unit",
+            &PageFetchStats {
+                requested_bytes: 7,
+                aligned_bytes: 12,
+                unique_requested_bytes: 6,
+                cached_bytes: 3,
+                ..Default::default()
+            },
+        );
+        for (kind, expected) in [
+            ("requested", 7),
+            ("aligned", 12),
+            ("unique_requested", 6),
+            ("cached", 3),
+        ] {
+            assert_eq!(
+                CACHE_PAGE_BYTES
+                    .with_label_values(&["test_page_unit", kind])
+                    .get(),
+                expected
+            );
+        }
     }
 }

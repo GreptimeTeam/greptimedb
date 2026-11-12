@@ -221,7 +221,7 @@ pub async fn valid_marker_value(
     let sql = format!("SELECT * FROM {table_name}");
     // cache is useless and buggy anyway since alter happens all the time
     // TODO(discord9): invalid prepared sql after alter
-    let res = sqlx::query(&sql)
+    let res = sqlx::query(sqlx::AssertSqlSafe(sql.as_str()))
         .persistent(false)
         .fetch_all(db)
         .await

@@ -89,6 +89,7 @@ impl InformationExtension for StandaloneInformationExtension {
                 .to_string_lossy()
                 .to_string(),
             env_vars: Default::default(),
+            schedulable: None,
         };
         Ok(vec![node_info])
     }
@@ -137,6 +138,7 @@ impl InformationExtension for StandaloneInformationExtension {
                     data_topic_latest_entry_id: region_stat.data_topic_latest_entry_id,
                     metadata_topic_latest_entry_id: region_stat.metadata_topic_latest_entry_id,
                     written_bytes: region_stat.written_bytes,
+                    ingested_parquet_bytes: region_stat.ingested_parquet_bytes,
                     query_cpu_time: region_stat.query_cpu_time,
                     query_scanned_bytes: region_stat.query_scanned_bytes,
                     min_timestamp: region_stat.min_timestamp,

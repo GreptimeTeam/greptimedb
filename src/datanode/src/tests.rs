@@ -90,7 +90,10 @@ impl QueryEngine for MockQueryEngine {
         unimplemented!()
     }
 
-    fn engine_context(&self, _query_ctx: QueryContextRef) -> QueryEngineContext {
+    fn engine_context(
+        &self,
+        _query_ctx: QueryContextRef,
+    ) -> query::error::Result<QueryEngineContext> {
         unimplemented!()
     }
     fn engine_state(&self) -> &QueryEngineState {
@@ -284,6 +287,17 @@ impl RegionEngine for MockRegionEngine {
 
     fn set_region_role(&self, _region_id: RegionId, _role: RegionRole) -> Result<(), BoxedError> {
         Ok(())
+    }
+
+    fn set_region_role_with_lease(
+        &self,
+        _region_id: RegionId,
+        role: RegionRole,
+        _sent_at: std::time::Instant,
+        _deadline: std::time::Instant,
+    ) -> Result<bool, BoxedError> {
+        // A mocked role stays, so a grant of another role is not applied.
+        Ok(self.mock_role.flatten().is_none_or(|mocked| mocked == role))
     }
 
     async fn set_region_role_state_gracefully(

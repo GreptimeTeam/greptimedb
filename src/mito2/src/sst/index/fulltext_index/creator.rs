@@ -17,11 +17,14 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
 
 use api::v1::SemanticType;
+use arrow_schema::extension::ExtensionType;
 use common_telemetry::warn;
 use datatypes::arrow::array::{Array, LargeStringArray, StringArray};
 use datatypes::arrow::datatypes::DataType;
 use datatypes::arrow::record_batch::RecordBatch;
+use datatypes::extension::json::Json2ExtensionType;
 use datatypes::schema::{FulltextAnalyzer, FulltextBackend};
+use datatypes::vectors::VectorRef;
 use index::fulltext_index::create::{
     BloomFilterFulltextIndexCreator, FulltextIndexCreator, TantivyFulltextIndexCreator,
 };
@@ -29,28 +32,37 @@ use index::fulltext_index::{Analyzer, Config};
 use index::target::IndexTarget;
 use puffin::blob_metadata::CompressionCodec;
 use puffin::puffin_manager::PutOptions;
-use snafu::{ResultExt, ensure};
+use snafu::{OptionExt, ResultExt, ensure};
 use store_api::metadata::RegionMetadataRef;
-use store_api::storage::{ColumnId, ConcreteDataType, FileId, RegionId};
+use store_api::storage::{ConcreteDataType, FileId, RegionId};
 
 use crate::error::{
     CastVectorSnafu, ComputeArrowSnafu, CreateFulltextCreatorSnafu, DataTypeMismatchSnafu,
-    FulltextFinishSnafu, FulltextPushTextSnafu, IndexOptionsSnafu, OperateAbortedIndexSnafu,
-    Result,
+    FulltextFinishSnafu, FulltextPushTextSnafu, IndexOptionsSnafu, InvalidRecordBatchSnafu,
+    OperateAbortedIndexSnafu, Result,
 };
 use crate::read::Batch;
-use crate::sst::index::TYPE_FULLTEXT_INDEX;
+use crate::sst::index::column::extract_json_type_hint_values;
 use crate::sst::index::fulltext_index::{INDEX_BLOB_TYPE_BLOOM, INDEX_BLOB_TYPE_TANTIVY};
 use crate::sst::index::intermediate::{
     IntermediateLocation, IntermediateManager, TempFileProvider,
 };
 use crate::sst::index::puffin_manager::SstPuffinWriter;
 use crate::sst::index::statistics::{ByteCount, RowCount, Statistics};
+use crate::sst::index::{IndexBuildType, TYPE_FULLTEXT_INDEX};
+
+/// Resolved column identity, name, target and options retained by a build plan.
+pub(crate) type FulltextTarget = (
+    store_api::storage::ColumnId,
+    String,
+    IndexTarget,
+    datatypes::schema::FulltextOptions,
+);
 
 /// `FulltextIndexer` is responsible for creating fulltext indexes for SST files.
 pub struct FulltextIndexer {
     /// Creators for each column.
-    creators: HashMap<ColumnId, SingleCreator>,
+    creators: HashMap<IndexTarget, SingleCreator>,
     /// Whether the index creation was aborted.
     aborted: bool,
     /// Statistics of index creation.
@@ -59,6 +71,7 @@ pub struct FulltextIndexer {
 
 impl FulltextIndexer {
     /// Creates a new `FulltextIndexer`.
+    #[cfg(test)]
     pub async fn new(
         region_id: &RegionId,
         sst_file_id: &FileId,
@@ -66,36 +79,47 @@ impl FulltextIndexer {
         metadata: &RegionMetadataRef,
         compress: bool,
         mem_limit: usize,
+        build_type: IndexBuildType,
+    ) -> Result<Option<Self>> {
+        let mut targets = Vec::new();
+        for column in &metadata.column_metadatas {
+            for (target, options) in Self::targets(column, &build_type)? {
+                targets.push((
+                    column.column_id,
+                    column.column_schema.name.clone(),
+                    target,
+                    options,
+                ));
+            }
+        }
+        Self::new_with_targets(
+            region_id,
+            sst_file_id,
+            intermediate_manager,
+            metadata,
+            compress,
+            mem_limit,
+            targets,
+        )
+        .await
+    }
+
+    /// Creates one file-level creator from already resolved targets.
+    pub(crate) async fn new_with_targets(
+        region_id: &RegionId,
+        sst_file_id: &FileId,
+        intermediate_manager: &IntermediateManager,
+        metadata: &RegionMetadataRef,
+        compress: bool,
+        mem_limit: usize,
+        targets: Vec<FulltextTarget>,
     ) -> Result<Option<Self>> {
         let mut creators = HashMap::new();
+        let global_memory_usage = Arc::new(AtomicUsize::new(0));
 
-        for column in &metadata.column_metadatas {
-            // Tag columns don't support fulltext index now.
-            // If we need to support fulltext index for tag columns, we also need to parse
-            // the codec and handle sparse encoding for flat format specially.
-            if column.semantic_type == SemanticType::Tag {
-                common_telemetry::debug!(
-                    "Skip creating fulltext index for tag column {}",
-                    column.column_schema.name
-                );
-                continue;
-            }
-
-            let options = column
-                .column_schema
-                .fulltext_options()
-                .context(IndexOptionsSnafu {
-                    column_name: &column.column_schema.name,
-                })?;
-
-            // Relax the type constraint here as many types can be casted to string.
-
-            let options = match options {
-                Some(options) if options.enable => options,
-                _ => continue,
-            };
-
-            let column_id = column.column_id;
+        for (column_id, column_name, target, options) in targets {
+            // fulltext_path generates a fresh UUID for each target, so JSON paths
+            // in the same column use separate intermediate directories.
             let intm_path = intermediate_manager.fulltext_path(region_id, sst_file_id, column_id);
 
             let config = Config {
@@ -118,13 +142,12 @@ impl FulltextIndexer {
                         IntermediateLocation::new(&metadata.region_id, sst_file_id),
                         intermediate_manager.clone(),
                     ));
-                    let global_memory_usage = Arc::new(AtomicUsize::new(0));
                     let creator = BloomFilterFulltextIndexCreator::new(
                         config,
                         options.granularity as _,
                         options.false_positive_rate(),
                         temp_file_provider,
-                        global_memory_usage,
+                        global_memory_usage.clone(),
                         Some(mem_limit),
                     );
                     AltFulltextCreator::Bloom(creator)
@@ -132,21 +155,79 @@ impl FulltextIndexer {
             };
 
             creators.insert(
-                column_id,
+                target.clone(),
                 SingleCreator {
-                    column_id,
-                    column_name: column.column_schema.name.clone(),
+                    target,
+                    column_name,
                     inner,
                     compress,
                 },
             );
         }
-
         Ok((!creators.is_empty()).then(move || Self {
             creators,
             aborted: false,
             stats: Statistics::new(TYPE_FULLTEXT_INDEX),
         }))
+    }
+
+    /// Resolves all targets of one column without creating index state.
+    pub(crate) fn targets(
+        column: &store_api::metadata::ColumnMetadata,
+        build_type: &IndexBuildType,
+    ) -> Result<Vec<(IndexTarget, datatypes::schema::FulltextOptions)>> {
+        // Tag columns don't support fulltext index now.
+        // If we need to support fulltext index for tag columns, we also need to parse
+        // the codec and handle sparse encoding for flat format specially.
+        if column.semantic_type == SemanticType::Tag {
+            common_telemetry::debug!(
+                "Skip creating fulltext index for tag column {}",
+                column.column_schema.name
+            );
+            return Ok(Vec::new());
+        }
+
+        let options = column
+            .column_schema
+            .fulltext_options()
+            .context(IndexOptionsSnafu {
+                column_name: &column.column_schema.name,
+            })?;
+
+        let mut targets = Vec::new();
+        if let Some(options) = options.filter(|options| options.enable) {
+            targets.push((IndexTarget::ColumnId(column.column_id), options));
+        }
+        // Only flush and compaction builds collect JSON targets; manual and schema-change
+        // rebuilds skip them because existing SSTs may not materialize the current hints.
+        // FIXME: Rebuilds replace the whole Puffin file and can drop existing JSON path indexes.
+        if matches!(build_type, IndexBuildType::Flush | IndexBuildType::Compact)
+            && column.column_schema.data_type.is_json2()
+            && let Some(extension) = column
+                .column_schema
+                .extension_type::<Json2ExtensionType>()
+                .context(IndexOptionsSnafu {
+                    column_name: &column.column_schema.name,
+                })?
+        {
+            for hint in extension.metadata().json_settings().type_hints() {
+                let Some(options) = hint.fulltext_index.as_ref().filter(|o| o.enable) else {
+                    continue;
+                };
+                match IndexTarget::new_json_path(column.column_id, hint.path.clone()) {
+                    Ok(target) => targets.push((target, options.clone())),
+                    Err(err) => {
+                        warn!(
+                            err;
+                            "Skip invalid JSON fulltext index target, column_id: {}, path: {:?}",
+                            column.column_id,
+                            hint.path
+                        );
+                    }
+                }
+            }
+        }
+        Ok(targets)
     }
 
     /// Updates the index with the given batch.
@@ -225,17 +306,17 @@ impl FulltextIndexer {
         self.creators.values().map(|c| c.inner.memory_usage()).sum()
     }
 
-    /// Returns IDs of columns that the creator is responsible for.
-    pub fn column_ids(&self) -> impl Iterator<Item = ColumnId> + '_ {
-        self.creators.keys().copied()
+    /// Returns the targets indexed by this creator.
+    pub fn indexed_targets(&self) -> impl Iterator<Item = &IndexTarget> {
+        self.creators.keys()
     }
 
-    /// Returns IDs of columns indexed with the bloom backend.
-    pub fn bloom_column_ids(&self) -> impl Iterator<Item = ColumnId> + '_ {
+    /// Returns the targets indexed with the bloom backend.
+    pub fn bloom_indexed_targets(&self) -> impl Iterator<Item = &IndexTarget> {
         self.creators
             .values()
             .filter(|c| matches!(c.inner, AltFulltextCreator::Bloom(_)))
-            .map(|c| c.column_id)
+            .map(|c| &c.target)
     }
 }
 
@@ -289,8 +370,8 @@ impl FulltextIndexer {
 
 /// `SingleCreator` is a creator for a single column.
 struct SingleCreator {
-    /// Column ID.
-    column_id: ColumnId,
+    /// Column or JSON path to index.
+    target: IndexTarget,
     /// Column name.
     column_name: String,
     /// Inner creator.
@@ -301,10 +382,21 @@ struct SingleCreator {
 
 impl SingleCreator {
     async fn update(&mut self, batch: &mut Batch) -> Result<()> {
-        let text_column = batch
-            .fields()
-            .iter()
-            .find(|c| c.column_id == self.column_id);
+        let column_id = match &self.target {
+            IndexTarget::ColumnId(id) => *id,
+            IndexTarget::JsonPath(path) => {
+                let root = batch
+                    .field_col_value(path.column_id())
+                    .with_context(|| InvalidRecordBatchSnafu {
+                        reason: format!("Missing JSON fulltext column {}", path.column_id()),
+                    })?
+                    .data
+                    .to_arrow_array();
+                let values = extract_json_type_hint_values(&root, path.path())?;
+                return self.push_json_values(values).await;
+            }
+        };
+        let text_column = batch.fields().iter().find(|c| c.column_id == column_id);
         match text_column {
             Some(column) => {
                 let data = column
@@ -338,6 +430,15 @@ impl SingleCreator {
     }
 
     async fn update_flat(&mut self, batch: &RecordBatch) -> Result<()> {
+        if let IndexTarget::JsonPath(path) = &self.target {
+            let root = batch.column_by_name(&self.column_name).with_context(|| {
+                InvalidRecordBatchSnafu {
+                    reason: format!("Missing JSON fulltext column {}", self.column_name),
+                }
+            })?;
+            let values = extract_json_type_hint_values(root, path.path())?;
+            return self.push_json_values(values).await;
+        }
         // Find the column in the RecordBatch by name
         if let Some(column_array) = batch.column_by_name(&self.column_name) {
             // Convert Arrow array to string array.
@@ -383,17 +484,29 @@ impl SingleCreator {
         Ok(())
     }
 
+    async fn push_json_values(&mut self, values: VectorRef) -> Result<()> {
+        for row in 0..values.len() {
+            let text = values
+                .get_ref(row)
+                .try_into_string()
+                .context(DataTypeMismatchSnafu)?
+                .unwrap_or_default();
+            self.inner.push_text(text).await?;
+        }
+        Ok(())
+    }
+
     async fn finish(&mut self, puffin_writer: &mut SstPuffinWriter) -> Result<ByteCount> {
         let options = PutOptions {
             compression: self.compress.then_some(CompressionCodec::Zstd),
         };
         self.inner
-            .finish(puffin_writer, &self.column_id, options)
+            .finish(puffin_writer, &self.target, options)
             .await
     }
 
     async fn abort(&mut self) -> Result<()> {
-        self.inner.abort(&self.column_id).await;
+        self.inner.abort(&self.target).await;
         Ok(())
     }
 }
@@ -423,25 +536,20 @@ impl AltFulltextCreator {
     async fn finish(
         &mut self,
         puffin_writer: &mut SstPuffinWriter,
-        column_id: &ColumnId,
+        target: &IndexTarget,
         put_options: PutOptions,
     ) -> Result<ByteCount> {
+        let target_key = target.encode();
         match self {
             Self::Tantivy(creator) => {
-                let blob_key = format!(
-                    "{INDEX_BLOB_TYPE_TANTIVY}-{}",
-                    IndexTarget::ColumnId(*column_id)
-                );
+                let blob_key = format!("{INDEX_BLOB_TYPE_TANTIVY}-{target_key}");
                 creator
                     .finish(puffin_writer, &blob_key, put_options)
                     .await
                     .context(FulltextFinishSnafu)
             }
             Self::Bloom(creator) => {
-                let blob_key = format!(
-                    "{INDEX_BLOB_TYPE_BLOOM}-{}",
-                    IndexTarget::ColumnId(*column_id)
-                );
+                let blob_key = format!("{INDEX_BLOB_TYPE_BLOOM}-{target_key}");
                 creator
                     .finish(puffin_writer, &blob_key, put_options)
                     .await
@@ -450,16 +558,16 @@ impl AltFulltextCreator {
         }
     }
 
-    async fn abort(&mut self, column_id: &ColumnId) {
+    async fn abort(&mut self, target: &IndexTarget) {
         match self {
             Self::Tantivy(creator) => {
                 if let Err(err) = creator.abort().await {
-                    warn!(err; "Failed to abort the fulltext index creator in the Tantivy flavor, col_id: {:?}", column_id);
+                    warn!(err; "Failed to abort the fulltext index creator in the Tantivy flavor, target: {:?}", target);
                 }
             }
             Self::Bloom(creator) => {
                 if let Err(err) = creator.abort().await {
-                    warn!(err; "Failed to abort the fulltext index creator in the Bloom Filter flavor, col_id: {:?}", column_id);
+                    warn!(err; "Failed to abort the fulltext index creator in the Bloom Filter flavor, target: {:?}", target);
                 }
             }
         }
@@ -473,9 +581,15 @@ mod tests {
 
     use api::v1::SemanticType;
     use common_base::BitVec;
+    use datatypes::arrow::array::{ArrayRef, StructArray};
+    use datatypes::arrow::buffer::NullBuffer;
+    use datatypes::arrow::datatypes::{Field, Schema};
     use datatypes::data_type::DataType;
+    use datatypes::extension::json::{Json2ExtensionType, JsonMetadata};
+    use datatypes::json::{JsonSettings, JsonTypeHint};
     use datatypes::schema::{ColumnSchema, FulltextAnalyzer, FulltextOptions};
-    use datatypes::vectors::{UInt8Vector, UInt64Vector};
+    use datatypes::types::json_type::{JsonNativeType, JsonObjectType};
+    use datatypes::vectors::{Helper, UInt8Vector, UInt64Vector};
     use futures::FutureExt;
     use futures::future::BoxFuture;
     use index::fulltext_index::search::RowId;
@@ -484,7 +598,7 @@ mod tests {
     use puffin::puffin_manager::{PuffinManager, PuffinWriter};
     use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder, RegionMetadataRef};
     use store_api::region_request::PathType;
-    use store_api::storage::{ConcreteDataType, FileId, RegionId};
+    use store_api::storage::{ColumnId, ConcreteDataType, FileId, RegionId};
 
     use super::*;
     use crate::access_layer::RegionFilePathFactory;
@@ -495,6 +609,279 @@ mod tests {
         FulltextQuery, FulltextRequest, FulltextTerm,
     };
     use crate::sst::index::puffin_manager::PuffinManagerFactory;
+
+    #[tokio::test]
+    async fn test_json_fulltext_build_and_prune_both_formats() {
+        for backend in [FulltextBackend::Bloom, FulltextBackend::Tantivy] {
+            for (flat, build_type) in [
+                (false, IndexBuildType::Flush),
+                (false, IndexBuildType::Compact),
+                (true, IndexBuildType::Flush),
+                (true, IndexBuildType::Compact),
+            ] {
+                let (dir, factory) =
+                    PuffinManagerFactory::new_for_test_async("json_fulltext").await;
+                let options = FulltextOptions::new(
+                    true,
+                    FulltextAnalyzer::English,
+                    false,
+                    backend.clone(),
+                    1,
+                    0.01,
+                )
+                .unwrap();
+                let hints = ["message", "other/\".field"].map(|name| JsonTypeHint {
+                    path: vec![name.into()],
+                    data_type: ConcreteDataType::string_datatype(),
+                    inverted_index: false,
+                    skipping_index: None,
+                    fulltext_index: Some(options.clone()),
+                });
+                let mut column = ColumnSchema::new(
+                    "attrs",
+                    ConcreteDataType::json2(JsonNativeType::Object(JsonObjectType::new())),
+                    true,
+                );
+                column.with_extension_type(&Json2ExtensionType::new(Arc::new(JsonMetadata::new(
+                    JsonSettings::try_new(hints.to_vec(), Some(0)).unwrap(),
+                ))));
+                let mut builder = RegionMetadataBuilder::new(RegionId::new(1, 2));
+                builder.push_column_metadata(ColumnMetadata {
+                    column_schema: column,
+                    semantic_type: SemanticType::Field,
+                    column_id: 1,
+                });
+                builder.push_column_metadata(ColumnMetadata {
+                    column_schema: ColumnSchema::new(
+                        "ts",
+                        ConcreteDataType::timestamp_millisecond_datatype(),
+                        false,
+                    ),
+                    semantic_type: SemanticType::Timestamp,
+                    column_id: 2,
+                });
+                let metadata = Arc::new(builder.build().unwrap());
+                let file_id = FileId::random();
+                let manager = new_intm_mgr(dir.path().to_string_lossy()).await;
+                for rebuild_type in [IndexBuildType::Manual, IndexBuildType::SchemaChange] {
+                    assert!(
+                        FulltextIndexer::new(
+                            &metadata.region_id,
+                            &file_id,
+                            &manager,
+                            &metadata,
+                            false,
+                            1024,
+                            rebuild_type,
+                        )
+                        .await
+                        .unwrap()
+                        .is_none()
+                    );
+                }
+                let mut creator = FulltextIndexer::new(
+                    &metadata.region_id,
+                    &file_id,
+                    &manager,
+                    &metadata,
+                    false,
+                    1024,
+                    build_type,
+                )
+                .await
+                .unwrap()
+                .unwrap();
+                let messages: ArrayRef = Arc::new(StringArray::from(vec![
+                    Some("alpha"),
+                    None,
+                    Some("beta"),
+                    Some("alpha"),
+                ]));
+                let other: ArrayRef = Arc::new(StringArray::from(vec![
+                    Some("beta"),
+                    None,
+                    Some("alpha"),
+                    Some(""),
+                ]));
+                let root: ArrayRef = Arc::new(StructArray::new(
+                    vec![
+                        Field::new("message", messages.data_type().clone(), true),
+                        Field::new("other/\".field", other.data_type().clone(), true),
+                    ]
+                    .into(),
+                    vec![messages, other],
+                    Some(NullBuffer::from(vec![true, false, true, true])),
+                ));
+                for start in [0, 2] {
+                    let array = root.slice(start, 2);
+                    if flat {
+                        let batch = RecordBatch::try_new(
+                            Arc::new(Schema::new(vec![Field::new(
+                                "attrs",
+                                array.data_type().clone(),
+                                true,
+                            )])),
+                            vec![array],
+                        )
+                        .unwrap();
+                        creator.update_flat(&batch).await.unwrap();
+                    } else {
+                        let mut batch = Batch::new(
+                            vec![],
+                            Arc::new(UInt64Vector::from_vec(vec![0, 1])),
+                            Arc::new(UInt64Vector::from_vec(vec![0, 0])),
+                            Arc::new(UInt8Vector::from_vec(vec![1, 1])),
+                            vec![BatchColumn {
+                                column_id: 1,
+                                data: Helper::try_into_vector(array).unwrap(),
+                            }],
+                        )
+                        .unwrap();
+                        creator.update(&mut batch).await.unwrap();
+                    }
+                }
+                assert_eq!(creator.indexed_targets().count(), hints.len());
+                assert!(
+                    creator
+                        .indexed_targets()
+                        .all(|target| matches!(target, IndexTarget::JsonPath(_)))
+                );
+                let bloom_targets: BTreeSet<_> = creator.bloom_indexed_targets().collect();
+                if backend == FulltextBackend::Bloom {
+                    assert_eq!(bloom_targets, creator.indexed_targets().collect());
+                } else {
+                    assert!(bloom_targets.is_empty());
+                }
+                let store = mock_object_store();
+                let puffin = factory.build(
+                    store.clone(),
+                    RegionFilePathFactory::new("json_test".into(), PathType::Bare),
+                );
+                let index_id =
+                    RegionIndexId::new(RegionFileId::new(metadata.region_id, file_id), 0);
+                let mut writer = puffin.writer(&index_id).await.unwrap();
+                let (rows, bytes) = creator.finish(&mut writer).await.unwrap();
+                assert_eq!(rows, 4);
+                assert!(bytes > 0);
+                writer.finish().await.unwrap();
+                let cache = Arc::new(
+                    crate::cache::index::bloom_filter_index::BloomFilterIndexCache::new(
+                        1024 * 1024,
+                        1024 * 1024,
+                        1024,
+                    ),
+                );
+                for (path, term, expected) in [
+                    ("message", "alpha", vec![0, 3]),
+                    ("other/\".field", "alpha", vec![2]),
+                    ("message", "hidden", vec![]),
+                    ("message", "absent", vec![]),
+                ] {
+                    let target = IndexTarget::new_json_path(1, vec![path.into()]).unwrap();
+                    let request = match backend {
+                        FulltextBackend::Tantivy => FulltextRequest {
+                            queries: vec![FulltextQuery(term.into())],
+                            ..Default::default()
+                        },
+                        FulltextBackend::Bloom => FulltextRequest {
+                            terms: vec![FulltextTerm {
+                                col_lowered: false,
+                                term: term.into(),
+                            }],
+                            ..Default::default()
+                        },
+                    };
+                    let applier = FulltextIndexApplier::new(
+                        "json_test".into(),
+                        PathType::Bare,
+                        store.clone(),
+                        BTreeMap::from([
+                            (target, request.clone()),
+                            (
+                                IndexTarget::new_json_path(1, vec!["missing".into()]).unwrap(),
+                                request,
+                            ),
+                        ]),
+                        factory.clone(),
+                        &metadata,
+                    )
+                    .with_bloom_filter_cache(Some(cache.clone()));
+                    let requests = applier.compatible_requests_for_sst(&metadata).unwrap();
+                    assert_eq!(requests.len(), 1);
+                    for change in 0..3 {
+                        let mut changed_hints = hints.to_vec();
+                        for hint in &mut changed_hints {
+                            let options = hint.fulltext_index.as_mut().unwrap();
+                            match change {
+                                0 => options.analyzer = FulltextAnalyzer::Chinese,
+                                1 => options.case_sensitive = true,
+                                _ => {
+                                    options.backend = match backend {
+                                        FulltextBackend::Bloom => FulltextBackend::Tantivy,
+                                        FulltextBackend::Tantivy => FulltextBackend::Bloom,
+                                    }
+                                }
+                            }
+                        }
+                        let mut changed = (*metadata).clone();
+                        changed.column_metadatas[0]
+                            .column_schema
+                            .with_extension_type(&Json2ExtensionType::new(Arc::new(
+                                JsonMetadata::new(
+                                    JsonSettings::try_new(changed_hints, Some(0)).unwrap(),
+                                ),
+                            )));
+                        assert_eq!(
+                            applier.compatible_requests_for_sst(&changed).is_some(),
+                            change == 0 && backend == FulltextBackend::Bloom,
+                        );
+                    }
+                    assert!(
+                        applier
+                            .compatible_requests_for_sst(&mock_region_metadata(backend.clone()))
+                            .is_none()
+                    );
+                    for _ in 0..2 {
+                        match backend {
+                            FulltextBackend::Tantivy => {
+                                let rows = applier
+                                    .apply_fine(index_id, None, &requests, None)
+                                    .await
+                                    .unwrap()
+                                    .unwrap();
+                                assert_eq!(
+                                    rows.into_iter().collect::<Vec<_>>(),
+                                    expected.iter().map(|v| *v as RowId).collect::<Vec<_>>()
+                                );
+                            }
+                            FulltextBackend::Bloom => {
+                                let ranges = applier
+                                    .apply_coarse(
+                                        index_id,
+                                        None,
+                                        [(4, true)].into_iter(),
+                                        &requests,
+                                        None,
+                                    )
+                                    .await
+                                    .unwrap()
+                                    .unwrap();
+                                let rows: Vec<_> = ranges[0].1.iter().cloned().flatten().collect();
+                                // A Bloom filter may retain extra rows, but must retain every match.
+                                assert!(expected.iter().all(|row| rows.contains(row)));
+                                if expected.is_empty() {
+                                    assert!(
+                                        rows.len() < 4,
+                                        "path={path}, term={term}, flat={flat}, rows={rows:?}"
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     fn mock_object_store() -> ObjectStore {
         ObjectStore::new(Memory::default()).unwrap()
@@ -667,6 +1054,7 @@ mod tests {
             &region_metadata,
             true,
             1024,
+            IndexBuildType::Flush,
         )
         .await
         .unwrap()
@@ -693,12 +1081,12 @@ mod tests {
             let object_store = object_store.clone();
             let factory = factory.clone();
 
-            let mut requests: BTreeMap<ColumnId, FulltextRequest> = BTreeMap::new();
+            let mut requests: BTreeMap<IndexTarget, FulltextRequest> = BTreeMap::new();
 
             // Add queries
             for (column_id, query) in queries {
                 requests
-                    .entry(column_id)
+                    .entry(IndexTarget::ColumnId(column_id))
                     .or_default()
                     .queries
                     .push(FulltextQuery(query.to_string()));
@@ -715,7 +1103,7 @@ mod tests {
                     .collect::<Vec<_>>();
 
                 requests
-                    .entry(column_id)
+                    .entry(IndexTarget::ColumnId(column_id))
                     .or_default()
                     .terms
                     .extend(fulltext_terms);
@@ -727,20 +1115,25 @@ mod tests {
                 object_store,
                 requests,
                 factory,
+                &region_metadata,
             );
 
+            let requests = applier
+                .compatible_requests_for_sst(&region_metadata)
+                .unwrap();
             let backend = backend.clone();
             async move {
                 match backend {
-                    FulltextBackend::Tantivy => {
-                        applier.apply_fine(index_id, None, None).await.unwrap()
-                    }
+                    FulltextBackend::Tantivy => applier
+                        .apply_fine(index_id, None, &requests, None)
+                        .await
+                        .unwrap(),
                     FulltextBackend::Bloom => {
                         let coarse_mask = coarse_mask.unwrap_or_default();
                         let row_groups = (0..coarse_mask.len()).map(|i| (1, coarse_mask[i]));
                         // row group id == row id
                         let resp = applier
-                            .apply_coarse(index_id, None, row_groups, None)
+                            .apply_coarse(index_id, None, row_groups, &requests, None)
                             .await
                             .unwrap();
                         resp.map(|r| {
@@ -758,6 +1151,46 @@ mod tests {
 
     fn rows(row_ids: impl IntoIterator<Item = RowId>) -> BTreeSet<RowId> {
         row_ids.into_iter().collect()
+    }
+
+    #[tokio::test]
+    async fn test_fulltext_bloom_shared_memory_spills() {
+        let dir = common_test_util::temp_dir::create_temp_dir("shared_fulltext_memory");
+        let metadata = mock_region_metadata(FulltextBackend::Bloom);
+        let manager = new_intm_mgr(dir.path().to_string_lossy()).await;
+        let mut indexer = FulltextIndexer::new(
+            &metadata.region_id,
+            &FileId::random(),
+            &manager,
+            &metadata,
+            false,
+            2 * 1024 * 1024,
+            IndexBuildType::Flush,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        // Each target stays below 2 MB on its own; together they exceed the
+        // shared threshold and must spill finalized Bloom filters to disk.
+        for creator in indexer.creators.values_mut() {
+            for row in 0..20_000 {
+                creator.inner.push_text(&format!("row{row}")).await.unwrap();
+            }
+        }
+        let mut directories = vec![dir.path().join("__intm")];
+        let mut spilled = false;
+        while let Some(directory) = directories.pop() {
+            for entry in std::fs::read_dir(directory).unwrap() {
+                let entry = entry.unwrap();
+                if entry.file_type().unwrap().is_dir() {
+                    directories.push(entry.path());
+                } else {
+                    spilled = true;
+                }
+            }
+        }
+        assert!(spilled, "combined memory usage must trigger spilling");
+        indexer.abort().await.unwrap();
     }
 
     #[tokio::test]

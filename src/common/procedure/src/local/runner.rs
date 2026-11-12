@@ -35,7 +35,7 @@ use crate::rwlock::OwnedKeyRwLockGuard;
 use crate::store::{ProcedureMessage, ProcedureStore};
 use crate::{
     BoxedProcedure, ChildSubmissionOutcome, Context, Error, EventContext, EventTrigger, Procedure,
-    ProcedureId, ProcedureState, ProcedureWithId, RetryPhase, Status,
+    ProcedureId, ProcedureState, ProcedureWithId, RetryPhase, Status, SubprocedureRecovery,
 };
 
 /// A guard to cleanup procedure state.
@@ -390,7 +390,11 @@ impl Runner {
                                     self.meta.set_state(ProcedureState::Running);
                                 }
                             }
-                            Status::Suspended { subprocedures, .. } => {
+                            Status::Suspended {
+                                subprocedures,
+                                recovery,
+                                ..
+                            } => {
                                 let prev_state = self.meta.state();
                                 if !matches!(prev_state, ProcedureState::Running) {
                                     info!(
@@ -401,7 +405,7 @@ impl Runner {
                                     );
                                     self.meta.set_state(ProcedureState::Running);
                                 }
-                                self.on_suspended(subprocedures).await;
+                                self.on_suspended(subprocedures, recovery).await;
                             }
                             Status::Done { output } => {
                                 if let Err(e) = self.commit_procedure().await {
@@ -488,6 +492,7 @@ impl Runner {
         procedure_id: ProcedureId,
         procedure_state: ProcedureState,
         procedure: BoxedProcedure,
+        recovery: SubprocedureRecovery,
     ) -> (ChildSubmissionOutcome, Option<ProcedureEvent>) {
         if !self.running() {
             warn!(
@@ -505,7 +510,7 @@ impl Runner {
 
         let step = 0;
 
-        let meta = Arc::new(ProcedureMeta::new(
+        let meta = ProcedureMeta::new(
             procedure_id,
             procedure_state,
             Some(self.meta.id),
@@ -513,7 +518,9 @@ impl Runner {
             procedure.lock_key(),
             procedure.poison_keys(),
             procedure.type_name(),
-        ));
+        )
+        .with_subprocedure_recovery(recovery);
+        let meta = Arc::new(meta);
         let runner = Runner {
             meta: meta.clone(),
             procedure,
@@ -578,7 +585,11 @@ impl Runner {
         time::sleep(d).await;
     }
 
-    async fn on_suspended(&mut self, subprocedures: Vec<ProcedureWithId>) {
+    async fn on_suspended(
+        &mut self,
+        subprocedures: Vec<ProcedureWithId>,
+        recovery: SubprocedureRecovery,
+    ) {
         let has_child = !subprocedures.is_empty();
 
         // Pre-check: detect potential deadlocks BEFORE submitting any subprocedure.
@@ -629,6 +640,7 @@ impl Runner {
                 subprocedure.id,
                 ProcedureState::Running,
                 subprocedure.procedure,
+                recovery,
             );
             if let Some(event) = submitted_event
                 && let Some(recorder) = self.event_recorder.as_ref()
@@ -664,13 +676,17 @@ impl Runner {
         let data = self.procedure.dump()?;
 
         self.store
-            .store_procedure_with_context(
+            .store_procedure_message(
                 self.meta.id,
-                self.step,
-                type_name,
-                data,
-                self.meta.parent_id,
-                self.meta.context.clone(),
+                &ProcedureMessage {
+                    type_name,
+                    data,
+                    parent_id: self.meta.parent_id,
+                    subprocedure_recovery: self.meta.subprocedure_recovery,
+                    step: self.step,
+                    error: None,
+                    context: self.meta.context.clone(),
+                },
             )
             .await
             .map_err(|e| {
@@ -709,6 +725,7 @@ impl Runner {
             type_name,
             data,
             parent_id: self.meta.parent_id,
+            subprocedure_recovery: self.meta.subprocedure_recovery,
             step: self.step,
             error: Some(error),
             context: self.meta.context.clone(),
@@ -1061,6 +1078,7 @@ mod tests {
         let exec_fn = move |_| {
             async move {
                 Ok(Status::Suspended {
+                    recovery: SubprocedureRecovery::Discard,
                     subprocedures: Vec::new(),
                     persist: false,
                 })
@@ -1138,6 +1156,7 @@ mod tests {
                 if times == 1 {
                     // Submit subprocedures.
                     Ok(Status::Suspended {
+                        recovery: SubprocedureRecovery::Discard,
                         subprocedures: children_ids
                             .into_iter()
                             .zip(keys)
@@ -1165,6 +1184,7 @@ mod tests {
                     } else {
                         // Return suspended to wait for notify.
                         Ok(Status::Suspended {
+                            recovery: SubprocedureRecovery::Discard,
                             subprocedures: Vec::new(),
                             persist: false,
                         })
@@ -1491,6 +1511,7 @@ mod tests {
                     };
 
                     Ok(Status::Suspended {
+                        recovery: SubprocedureRecovery::Discard,
                         subprocedures: vec![ProcedureWithId {
                             id: child_id,
                             procedure: Box::new(fail),
@@ -1684,6 +1705,7 @@ mod tests {
                     };
 
                     Ok(Status::Suspended {
+                        recovery: SubprocedureRecovery::Discard,
                         subprocedures: vec![ProcedureWithId {
                             id: child_id,
                             procedure: Box::new(fail),
@@ -1704,6 +1726,7 @@ mod tests {
                     } else {
                         // Return suspended to wait for notify.
                         Ok(Status::Suspended {
+                            recovery: SubprocedureRecovery::Discard,
                             subprocedures: Vec::new(),
                             persist: false,
                         })
@@ -2205,6 +2228,7 @@ mod tests {
                     rollback_fn: None,
                 };
                 Ok(Status::Suspended {
+                    recovery: SubprocedureRecovery::Discard,
                     subprocedures: vec![ProcedureWithId {
                         id: child_id,
                         procedure: Box::new(child),
@@ -2262,6 +2286,7 @@ mod tests {
                     rollback_fn: None,
                 };
                 Ok(Status::Suspended {
+                    recovery: SubprocedureRecovery::Discard,
                     subprocedures: vec![ProcedureWithId {
                         id: child_id,
                         procedure: Box::new(child),

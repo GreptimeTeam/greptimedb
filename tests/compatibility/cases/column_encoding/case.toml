@@ -1,0 +1,8 @@
+name = "column_encoding"
+reason = "Persist COMPRESSION WITH (encoding = ...) column options and read plain and delta encoded SSTs across restart, after upgrading from a version without the option."
+introduced_by = "PR #9629"
+topologies = ["distributed", "standalone"]
+from_range = ["*"]
+to_range = [">=v1.4.0-alpha.0"]
+features = ["table", "compression", "encoding", "write", "read"]
+owner = "storage"

@@ -85,6 +85,14 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Failed to join a blocking task of the log store"))]
+    Join {
+        #[snafu(source)]
+        error: tokio::task::JoinError,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Log store not started yet"))]
     IllegalState {
         #[snafu(implicit)]
@@ -424,6 +432,50 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display(
+        "Object store WAL prefix {} on {} does not hold the history of region {}: {}. \
+         If the WAL was moved, stop the instance, copy every object under the prefix from the \
+         old location to this one and start again. If the old WAL is lost, start once with \
+         `[wal].accept_missing_history = true`, which opens the region without its writes that \
+         were not flushed, and turn the option off again once the instance has written to the WAL",
+        prefix,
+        storage,
+        region_id,
+        reason
+    ))]
+    MissingWalHistory {
+        region_id: RegionId,
+        prefix: String,
+        /// The storage the prefix is read from, as configured.
+        storage: String,
+        reason: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display(
+        "Source WAL prefix {prefix} on {storage} does not hold the history of region {region_id}: {reason}. \
+         Check the source node prefix and whether its WAL objects were reclaimed or moved"
+    ))]
+    MissingSourceWalHistory {
+        region_id: RegionId,
+        prefix: String,
+        storage: String,
+        reason: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display(
+        "Object store WAL gave up its start object {} after refusing a region without its history, and accepts nothing more until it opens again",
+        path
+    ))]
+    WalStartWithdrawn {
+        path: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Object store WAL log store is stopped"))]
     ObjectStoreWalStopped {
         #[snafu(implicit)]
@@ -478,11 +530,14 @@ impl ErrorExt for Error {
             | OverrideCompactedEntry { .. }
             | InvalidWalObjectStore { .. }
             | MismatchedWalPrefix { .. }
+            | MissingWalHistory { .. }
+            | MissingSourceWalHistory { .. }
             | MismatchedWalRegion { .. }
             | IncompleteWalEntry { .. }
             | InvalidWalEntryRange { .. } => StatusCode::InvalidArguments,
             StartWalTask { .. }
             | StopWalTask { .. }
+            | Join { .. }
             | IllegalState { .. }
             | NoMaxValue { .. }
             | Cast { .. }
@@ -494,6 +549,7 @@ impl ErrorExt for Error {
             | WaitProduceResultReceiver { .. }
             | MetaLengthExceededLimit { .. }
             | ObjectStoreWalStopped { .. }
+            | WalStartWithdrawn { .. }
             | WalSegmentFetch { .. } => StatusCode::Internal,
 
             CorruptedWalObject { .. }

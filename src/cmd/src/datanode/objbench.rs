@@ -27,7 +27,7 @@ use mito2::config::{FulltextIndexConfig, MitoConfig, Mode};
 use mito2::read::FlatSource;
 use mito2::sst::FormatType;
 use mito2::sst::file::{FileHandle, FileMeta};
-use mito2::sst::file_purger::{FilePurger, FilePurgerRef};
+use mito2::sst::file_purger::{FilePurgerRef, NoopFilePurger};
 use mito2::sst::index::intermediate::IntermediateManager;
 use mito2::sst::index::puffin_manager::PuffinManagerFactory;
 use mito2::sst::parquet::WriteOptions;
@@ -203,6 +203,7 @@ impl ObjbenchCommand {
             max_sequence: None,
             sst_write_format: FormatType::PrimaryKey,
             index_options: Default::default(),
+            index_build_inputs: None,
             index_config: mito_engine_config.index.clone(),
             inverted_index_config: MitoConfig::default().inverted_index,
             fulltext_index_config,
@@ -508,12 +509,7 @@ async fn build_cache_manager(
 }
 
 fn new_noop_file_purger() -> FilePurgerRef {
-    #[derive(Debug)]
-    struct Noop;
-    impl FilePurger for Noop {
-        fn remove_file(&self, _file_meta: FileMeta, _is_delete: bool, _index_outdated: bool) {}
-    }
-    Arc::new(Noop)
+    Arc::new(NoopFilePurger)
 }
 
 async fn load_parquet_metadata(

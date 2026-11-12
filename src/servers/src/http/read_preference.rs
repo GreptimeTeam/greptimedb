@@ -25,14 +25,13 @@ use crate::http::header::GREPTIME_DB_HEADER_READ_PREFERENCE;
 
 /// Extract read preference from the request headers.
 pub async fn extract_read_preference(mut request: Request<Body>, next: Next) -> Response {
-    let read_preference = request
+    if let Some(read_preference) = request
         .headers()
         .get(&GREPTIME_DB_HEADER_READ_PREFERENCE)
         .and_then(|header| header.to_str().ok())
         .and_then(|s| ReadPreference::from_str(s).ok())
-        .unwrap_or_default();
-
-    if let Some(query_ctx) = request.extensions_mut().get_mut::<QueryContext>() {
+        && let Some(query_ctx) = request.extensions_mut().get_mut::<QueryContext>()
+    {
         common_telemetry::debug!("Setting read preference to {}", read_preference);
         query_ctx.set_read_preference(read_preference);
     }

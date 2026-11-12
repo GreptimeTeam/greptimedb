@@ -21,6 +21,7 @@ use crate::row_converter::encoded_string_len;
 use crate::row_converter::sparse::{
     COLUMN_ID_ENCODE_SIZE, RESERVED_COLUMN_ID_TABLE_ID, RESERVED_COLUMN_ID_TSID,
     SparseOffsetsCache, TABLE_ID_VALUE_OFFSET, TAGS_START_OFFSET, TSID_VALUE_OFFSET,
+    validate_prefix,
 };
 
 /// A borrowing view of one sparse primary key, with checked, lazy field lookup.
@@ -35,17 +36,7 @@ pub struct SparsePrimaryKeyView<'a, 'b> {
 impl<'a, 'b> SparsePrimaryKeyView<'a, 'b> {
     /// Validates the fixed prefix and binds fresh offset discovery to this key.
     pub fn new(pk: &'a [u8], cache: &'b mut SparseOffsetsCache) -> Result<Self> {
-        ensure!(
-            pk.len() >= TAGS_START_OFFSET
-                && pk[..COLUMN_ID_ENCODE_SIZE] == RESERVED_COLUMN_ID_TABLE_ID.to_be_bytes()
-                && pk[TSID_VALUE_OFFSET - COLUMN_ID_ENCODE_SIZE..TSID_VALUE_OFFSET]
-                    == RESERVED_COLUMN_ID_TSID.to_be_bytes()
-                && pk[TABLE_ID_VALUE_OFFSET] == 1
-                && pk[TSID_VALUE_OFFSET] == 1,
-            InvalidSparsePrimaryKeySnafu {
-                reason: "invalid table_id/tsid prefix"
-            }
-        );
+        validate_prefix(pk)?;
         cache.clear();
         Ok(Self { pk, cache })
     }

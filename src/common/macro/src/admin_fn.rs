@@ -311,12 +311,13 @@ fn build_struct(
                 // Safety check: Ensure under the `greptime` catalog for security
                 #user_path::ensure_greptime!(self.func_ctx);
 
-                let columns_num = columns.len();
-                let rows_num = if columns.is_empty() {
-                    1
-                } else {
-                    columns[0].len()
-                };
+                #user_path::ensure_admin_privilege(
+                    &self.func_ctx,
+                    #display_name,
+                )?;
+
+                // Zero-argument functions also execute once per input row.
+                let rows_num = columns.first().map_or(args.number_rows, |column| column.len());
                 #validate_rows
 
                 use snafu::{OptionExt, ResultExt};
@@ -333,22 +334,15 @@ fn build_struct(
                 let mut builder = store_api::storage::ConcreteDataType::#ret()
                     .create_mutable_vector(rows_num);
 
-                if columns_num == 0 {
-                    let result = #fn_name(handler, query_ctx, &[]).await
+                for i in 0..rows_num {
+                    let args: Vec<_> = columns.iter()
+                        .map(|vector| vector.get_ref(i))
+                        .collect();
+
+                    let result = #fn_name(handler, query_ctx, &args).await
                         .map_err(|e| datafusion_common::DataFusionError::Execution(e.output_msg()))?;
 
                     builder.push_value_ref(&result.as_value_ref());
-                } else {
-                    for i in 0..rows_num {
-                        let args: Vec<_> = columns.iter()
-                            .map(|vector| vector.get_ref(i))
-                            .collect();
-
-                        let result = #fn_name(handler, query_ctx, &args).await
-                            .map_err(|e| datafusion_common::DataFusionError::Execution(e.output_msg()))?;
-
-                        builder.push_value_ref(&result.as_value_ref());
-                    }
                 }
 
                 let result_vector = builder.to_vector();

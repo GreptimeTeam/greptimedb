@@ -1,0 +1,184 @@
+CREATE TABLE hash_routes (
+  host STRING,
+  tenant BIGINT UNSIGNED,
+  ts TIMESTAMP TIME INDEX,
+  v INT,
+  PRIMARY KEY (host, tenant)
+)
+PARTITION ON COLUMNS (host, tenant) (
+  iceberg_hash(host) < 0 AND tenant < 100,
+  iceberg_hash(host) < 0 AND tenant >= 100,
+  ICEBERG_HASH(host) >= 0 AND iceberg_hash(tenant) < 0,
+  0 <= iceberg_hash(host) AND iceberg_hash(tenant) >= 0
+);
+
+Affected Rows: 0
+
+SHOW CREATE TABLE hash_routes;
+
++-------------+-------------------------------------------------------------+
+| Table       | Create Table                                                |
++-------------+-------------------------------------------------------------+
+| hash_routes | CREATE TABLE IF NOT EXISTS "hash_routes" (                  |
+|             |   "host" STRING NULL,                                       |
+|             |   "tenant" BIGINT UNSIGNED NULL,                            |
+|             |   "ts" TIMESTAMP(3) NOT NULL,                               |
+|             |   "v" INT NULL,                                             |
+|             |   TIME INDEX ("ts"),                                        |
+|             |   PRIMARY KEY ("host", "tenant")                            |
+|             | )                                                           |
+|             | PARTITION ON COLUMNS ("host", "tenant") (                   |
+|             |   iceberg_hash("host") < 0 AND "tenant" < 100,              |
+|             |   iceberg_hash("host") < 0 AND "tenant" >= 100,             |
+|             |   iceberg_hash("host") >= 0 AND iceberg_hash("tenant") < 0, |
+|             |   iceberg_hash("host") >= 0 AND iceberg_hash("tenant") >= 0 |
+|             | )                                                           |
+|             | ENGINE=mito                                                 |
+|             |                                                             |
++-------------+-------------------------------------------------------------+
+
+SELECT partition_name, partition_description FROM information_schema.partitions WHERE table_name = 'hash_routes' ORDER BY partition_name;
+
++----------------+-------------------------------------------------------+
+| partition_name | partition_description                                 |
++----------------+-------------------------------------------------------+
+| p0             | iceberg_hash(host) < 0 AND tenant < 100               |
+| p1             | iceberg_hash(host) < 0 AND tenant >= 100              |
+| p2             | iceberg_hash(host) >= 0 AND iceberg_hash(tenant) < 0  |
+| p3             | iceberg_hash(host) >= 0 AND iceberg_hash(tenant) >= 0 |
++----------------+-------------------------------------------------------+
+
+INSERT INTO hash_routes VALUES
+  ('a', 1, 1, 1),
+  ('b', 100, 2, 2),
+  ('server42', 18446744073709551615, 3, 3),
+  ('中🙂', 0, 4, 4),
+  ('', 7, 5, 5),
+  (NULL, 7, 6, 6),
+  ('a', NULL, 7, 7);
+
+Affected Rows: 7
+
+SELECT * FROM hash_routes ORDER BY ts;
+
++----------+----------------------+-------------------------+---+
+| host     | tenant               | ts                      | v |
++----------+----------------------+-------------------------+---+
+| a        | 1                    | 1970-01-01T00:00:00.001 | 1 |
+| b        | 100                  | 1970-01-01T00:00:00.002 | 2 |
+| server42 | 18446744073709551615 | 1970-01-01T00:00:00.003 | 3 |
+| 中🙂     | 0                    | 1970-01-01T00:00:00.004 | 4 |
+|          | 7                    | 1970-01-01T00:00:00.005 | 5 |
+|          | 7                    | 1970-01-01T00:00:00.006 | 6 |
+| a        |                      | 1970-01-01T00:00:00.007 | 7 |
++----------+----------------------+-------------------------+---+
+
+-- A filter on the hashed column must not prune the region holding the row.
+SELECT * FROM hash_routes WHERE host = 'server42';
+
++----------+----------------------+-------------------------+---+
+| host     | tenant               | ts                      | v |
++----------+----------------------+-------------------------+---+
+| server42 | 18446744073709551615 | 1970-01-01T00:00:00.003 | 3 |
++----------+----------------------+-------------------------+---+
+
+SELECT * FROM hash_routes WHERE host IS NULL;
+
++------+--------+-------------------------+---+
+| host | tenant | ts                      | v |
++------+--------+-------------------------+---+
+|      | 7      | 1970-01-01T00:00:00.006 | 6 |
++------+--------+-------------------------+---+
+
+DELETE FROM hash_routes WHERE host = 'a';
+
+Affected Rows: 2
+
+SELECT * FROM hash_routes ORDER BY ts;
+
++----------+----------------------+-------------------------+---+
+| host     | tenant               | ts                      | v |
++----------+----------------------+-------------------------+---+
+| b        | 100                  | 1970-01-01T00:00:00.002 | 2 |
+| server42 | 18446744073709551615 | 1970-01-01T00:00:00.003 | 3 |
+| 中🙂     | 0                    | 1970-01-01T00:00:00.004 | 4 |
+|          | 7                    | 1970-01-01T00:00:00.005 | 5 |
+|          | 7                    | 1970-01-01T00:00:00.006 | 6 |
++----------+----------------------+-------------------------+---+
+
+DROP TABLE hash_routes;
+
+Affected Rows: 0
+
+CREATE TABLE hash_float (f DOUBLE, ts TIMESTAMP TIME INDEX, PRIMARY KEY (f))
+PARTITION ON COLUMNS (f) (
+  iceberg_hash(f) < 0,
+  iceberg_hash(f) >= 0
+);
+
+Error: 1004(InvalidArguments), Invalid partition rule: partition function iceberg_hash does not support column type Float64
+
+CREATE TABLE hash_two_args (a STRING, b STRING, ts TIMESTAMP TIME INDEX, PRIMARY KEY (a, b))
+PARTITION ON COLUMNS (a, b) (
+  iceberg_hash(a, b) < 0,
+  iceberg_hash(a, b) >= 0
+);
+
+Error: 1004(InvalidArguments), Invalid partition rule: unsupported partition function call iceberg_hash(a, b)
+
+CREATE TABLE hash_gap (a STRING, ts TIMESTAMP TIME INDEX, PRIMARY KEY (a))
+PARTITION ON COLUMNS (a) (
+  iceberg_hash(a) < 0,
+  iceberg_hash(a) > 0
+);
+
+Error: 1004(InvalidArguments), Checkpoint `iceberg_hash(a)=0` is not covered
+
+CREATE TABLE quoted_hash (
+  "host-name" STRING,
+  uid BIGINT,
+  ts TIMESTAMP TIME INDEX,
+  PRIMARY KEY ("host-name")
+)
+PARTITION ON COLUMNS ("host-name", uid) (
+  iceberg_hash("host-name") < 0,
+  iceberg_hash("host-name") >= 0 AND iceberg_hash(uid) < 0,
+  iceberg_hash("host-name") >= 0 AND iceberg_hash(uid) >= 0
+);
+
+Affected Rows: 0
+
+SHOW CREATE TABLE quoted_hash;
+
++-------------+---------------------------------------------------------------+
+| Table       | Create Table                                                  |
++-------------+---------------------------------------------------------------+
+| quoted_hash | CREATE TABLE IF NOT EXISTS "quoted_hash" (                    |
+|             |   "host-name" STRING NULL,                                    |
+|             |   "uid" BIGINT NULL,                                          |
+|             |   "ts" TIMESTAMP(3) NOT NULL,                                 |
+|             |   TIME INDEX ("ts"),                                          |
+|             |   PRIMARY KEY ("host-name")                                   |
+|             | )                                                             |
+|             | PARTITION ON COLUMNS ("host-name", "uid") (                   |
+|             |   iceberg_hash("host-name") < 0,                              |
+|             |   iceberg_hash("host-name") >= 0 AND iceberg_hash("uid") < 0, |
+|             |   iceberg_hash("host-name") >= 0 AND iceberg_hash("uid") >= 0 |
+|             | )                                                             |
+|             | ENGINE=mito                                                   |
+|             |                                                               |
++-------------+---------------------------------------------------------------+
+
+-- A partition column keeps its type, even when nullable and outside the primary key.
+ALTER TABLE quoted_hash MODIFY COLUMN uid DOUBLE;
+
+Error: 1004(InvalidArguments), Invalid alter table(quoted_hash) request: Not allowed to change partition column 'uid'
+
+ALTER TABLE quoted_hash MODIFY COLUMN uid STRING;
+
+Error: 1004(InvalidArguments), Invalid alter table(quoted_hash) request: Not allowed to change partition column 'uid'
+
+DROP TABLE quoted_hash;
+
+Affected Rows: 0
+

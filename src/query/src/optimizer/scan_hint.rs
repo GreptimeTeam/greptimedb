@@ -22,7 +22,7 @@ use common_recordbatch::filter::SimpleFilterEvaluator;
 use datafusion::datasource::DefaultTableSource;
 use datafusion_common::tree_node::{Transformed, TreeNodeRewriter};
 use datafusion_common::{Column, Result};
-use datafusion_expr::expr::Sort;
+use datafusion_expr::expr::{NullTreatment, Sort};
 use datafusion_expr::{Expr, LogicalPlan, utils};
 use datafusion_optimizer::{OptimizerConfig, OptimizerRule};
 use datatypes::arrow::datatypes::{DataType, TimeUnit as ArrowTimeUnit};
@@ -447,6 +447,8 @@ impl ScanHintRewriter {
                 && func.func.name() != aggr_state_func_name("last_value"))
                 || func.params.filter.is_some()
                 || func.params.distinct
+                // A shared final-row selector would discard earlier nonnull values.
+                || func.params.null_treatment == Some(NullTreatment::IgnoreNulls)
             {
                 return None;
             }
@@ -491,7 +493,7 @@ mod test {
     use datafusion_common::tree_node::TreeNodeRecursion;
     use datafusion_common::{DFSchema, DFSchemaRef};
     use datafusion_expr::expr::{
-        AggregateFunction, AggregateFunctionParams, Cast, WindowFunctionParams,
+        AggregateFunction, AggregateFunctionParams, Cast, NullTreatment, WindowFunctionParams,
     };
     use datafusion_expr::expr_fn::scalar_subquery;
     use datafusion_expr::{Extension, LogicalPlan, LogicalPlanBuilder, col, lit};
@@ -601,6 +603,13 @@ mod test {
     }
 
     fn last_value_aggregate(input: LogicalPlan) -> LogicalPlan {
+        last_value_aggregate_with_null_treatments(input, [None, None])
+    }
+
+    fn last_value_aggregate_with_null_treatments(
+        input: LogicalPlan,
+        null_treatments: [Option<NullTreatment>; 2],
+    ) -> LogicalPlan {
         let aggregate = LogicalPlanBuilder::from(input)
             .aggregate(
                 vec![col("k0")],
@@ -616,7 +625,7 @@ mod test {
                                 asc: true,
                                 nulls_first: true,
                             }],
-                            null_treatment: None,
+                            null_treatment: null_treatments[0],
                         },
                     }),
                     Expr::AggregateFunction(AggregateFunction {
@@ -630,7 +639,7 @@ mod test {
                                 asc: true,
                                 nulls_first: true,
                             }],
-                            null_treatment: None,
+                            null_treatment: null_treatments[1],
                         },
                     }),
                 ],
@@ -939,6 +948,43 @@ mod test {
                 vec![None; scan_count]
             );
         }
+    }
+
+    #[test]
+    fn last_value_null_treatment_controls_selector() {
+        let provider = Arc::new(mock_table_provider(RegionId::new(1, 1)));
+        let context = OptimizerContext::default();
+
+        for treatment in [None, Some(NullTreatment::RespectNulls)] {
+            let rewritten = ScanHintRule
+                .rewrite(
+                    last_value_aggregate_with_null_treatments(
+                        scan_plan(provider.clone(), "t"),
+                        [treatment, treatment],
+                    ),
+                    &context,
+                )
+                .unwrap()
+                .data;
+            assert_eq!(
+                scan_requests(&rewritten)[0].series_row_selector,
+                Some(TimeSeriesRowSelector::LastRow { after_merge: false })
+            );
+        }
+
+        // One IGNORE NULLS member prevents the shared scan selector for every
+        // aggregate in the group, including the member that respects nulls.
+        let rewritten = ScanHintRule
+            .rewrite(
+                last_value_aggregate_with_null_treatments(
+                    scan_plan(provider, "t"),
+                    [None, Some(NullTreatment::IgnoreNulls)],
+                ),
+                &context,
+            )
+            .unwrap()
+            .data;
+        assert_eq!(scan_requests(&rewritten)[0].series_row_selector, None);
     }
 
     #[test]

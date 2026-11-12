@@ -19,54 +19,40 @@ use std::sync::Arc;
 
 use store_api::storage::FileId;
 
-use crate::cache::{
-    CacheStrategy, CachedSstMeta, SST_META_DECODED_TYPE, SstDecodedMetaCache, SstMetaKey,
-    decoded_meta_cache_weight,
-};
+use crate::cache::{CacheStrategy, ColumnarMetaCache};
 use crate::error::Result;
 use crate::metrics::{CACHE_BYTES, CACHE_HIT, CACHE_LOAD, CACHE_MISS};
 
 const COLUMNAR_META: &str = "columnar_metadata";
 
+/// Identity of one immutable native-reader structure.
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
-pub(crate) enum DecodedKey {
-    Sst(SstMetaKey),
-    Columnar {
-        namespace: FileId,
-        identity: String,
-        representation: TypeId,
-    },
+pub(crate) struct DecodedKey {
+    namespace: FileId,
+    identity: String,
+    representation: TypeId,
 }
 
 #[derive(Clone)]
-pub(crate) enum DecodedValue {
-    Sst(Arc<CachedSstMeta>),
-    Columnar {
-        value: Arc<dyn Any + Send + Sync>,
-        weight: u32,
-    },
+pub(crate) struct DecodedValue {
+    value: Arc<dyn Any + Send + Sync>,
+    weight: u32,
 }
 impl DecodedValue {
     pub(crate) fn label(&self) -> &'static str {
-        match self {
-            Self::Sst(_) => SST_META_DECODED_TYPE,
-            Self::Columnar { .. } => COLUMNAR_META,
-        }
+        COLUMNAR_META
     }
 }
-pub(crate) fn shared_weight(key: &DecodedKey, value: &DecodedValue) -> u32 {
-    match (key, value) {
-        (DecodedKey::Sst(key), DecodedValue::Sst(value)) => decoded_meta_cache_weight(key, value),
-        (_, DecodedValue::Columnar { weight, .. }) => *weight,
-        _ => unreachable!("decoded metadata key/value mismatch"),
-    }
+/// Weigher for the native-reader metadata tier; the value carries its own admitted weight.
+pub(crate) fn columnar_meta_weight(_key: &DecodedKey, value: &DecodedValue) -> u32 {
+    value.weight
 }
 
 /// Contains no artifact handle or live object-store reader. Loads run independently;
 /// admission uses a synchronous, atomic cache entry after loading.
 #[derive(Clone)]
 pub(crate) struct MetadataCache {
-    cache: SstDecodedMetaCache,
+    cache: ColumnarMetaCache,
     namespace: FileId,
 }
 impl CacheStrategy {
@@ -75,85 +61,58 @@ impl CacheStrategy {
             return None;
         };
         Some(MetadataCache {
-            cache: manager.sst_decoded_meta_cache.clone()?,
+            cache: manager.columnar_meta_cache.clone()?,
             namespace,
         })
     }
 }
 
-/// Native payload blocks share the page-cache budget with Parquet. Keys never
-/// retain a file handle, so cached bytes do not delay artifact purging.
+// Native payload blocks used to share the page-cache budget through the shared
+// `PageRangeCache`, which main replaced with `ParquetPageCache`. That cache serves
+// uniform-size blocks fetched through a reader, so it cannot hold these aligned blocks
+// clipped to the payload area.
+// TODO(narthex-merge): re-attach native payload byte caching to a dedicated page-cache
+// budget in `CacheManager`; until then payload reads stay uncached.
+/// Placeholder for the disabled native payload byte cache.
+#[allow(dead_code)]
 #[derive(Clone)]
 pub(crate) struct PayloadCache {
-    cache: Arc<crate::cache::PageRangeCache>,
     namespace: FileId,
 }
 
 impl CacheStrategy {
-    pub(crate) fn columnar_payload(&self, namespace: FileId) -> Option<PayloadCache> {
-        let Self::EnableAll(manager) = self else {
-            return None;
-        };
-        Some(PayloadCache {
-            cache: manager.page_cache.clone()?,
-            namespace,
-        })
+    pub(crate) fn columnar_payload(&self, _namespace: FileId) -> Option<PayloadCache> {
+        None
     }
+}
+
+/// Placeholder for one cached payload block; lookups always miss.
+#[allow(dead_code)]
+pub(crate) struct PayloadPartCache {
+    namespace: FileId,
+    generation: FileId,
+    part: u32,
+    file_size: u64,
 }
 
 impl PayloadCache {
     pub(crate) fn part(&self, generation: FileId, part: u32, file_size: u64) -> PayloadPartCache {
         PayloadPartCache {
-            cache: self.cache.clone(),
-            group: crate::cache::PageFragmentGroupKey::Columnar {
-                namespace: self.namespace,
-                generation,
-                part,
-                file_size,
-            },
+            namespace: self.namespace,
+            generation,
+            part,
+            file_size,
         }
     }
-}
-
-/// Exact aligned-block lookup avoids scanning the Parquet range index.
-pub(crate) struct PayloadPartCache {
-    cache: Arc<crate::cache::PageRangeCache>,
-    group: crate::cache::PageFragmentGroupKey,
 }
 
 impl PayloadPartCache {
-    fn key(&self, range: &std::ops::Range<u64>) -> crate::cache::PageFragmentKey {
-        crate::cache::PageFragmentKey {
-            group: self.group,
-            start: range.start,
-            end: range.end,
-        }
+    pub(crate) fn get(&self, _range: &std::ops::Range<u64>) -> Option<bytes::Bytes> {
+        CACHE_MISS.with_label_values(&["columnar_payload"]).inc();
+        None
     }
 
-    pub(crate) fn get(&self, range: &std::ops::Range<u64>) -> Option<bytes::Bytes> {
-        let value = self.cache.cache.get(&self.key(range));
-        if value.is_some() {
-            CACHE_HIT.with_label_values(&["columnar_payload"]).inc();
-        } else {
-            CACHE_MISS.with_label_values(&["columnar_payload"]).inc();
-        }
-        value
-    }
-
-    pub(crate) fn insert(&self, range: &std::ops::Range<u64>, bytes: &bytes::Bytes) {
-        let key = self.key(range);
-        let weight = crate::cache::page_cache_weight(&key, bytes);
-        if u64::from(weight) > self.cache.cache.policy().max_capacity().unwrap_or(0) {
-            return;
-        }
-        // Detach from the merged read allocation: eviction of one block must
-        // release its bytes even while another block from that read is cached.
-        let bytes = bytes::Bytes::copy_from_slice(bytes);
-        CACHE_BYTES
-            .with_label_values(&[crate::cache::PAGE_TYPE])
-            .add(i64::from(weight));
-        self.cache.cache.insert(key, bytes);
-    }
+    pub(crate) fn insert(&self, _range: &std::ops::Range<u64>, _bytes: &bytes::Bytes) {}
 }
 
 /// Loads only validated immutable structures. Identities include the generation path,
@@ -168,14 +127,16 @@ pub(crate) async fn load<T: Send + Sync + 'static>(
     let Some(context) = cache else {
         return loader.await.map(Arc::new);
     };
-    let key = DecodedKey::Columnar {
+    let key = DecodedKey {
         namespace: context.namespace,
         identity,
         representation: TypeId::of::<T>(),
     };
-    let get = || match context.cache.get(&key) {
-        Some(DecodedValue::Columnar { value, .. }) => value.downcast::<T>().ok(),
-        _ => None,
+    let get = || {
+        context
+            .cache
+            .get(&key)
+            .and_then(|value| value.value.downcast::<T>().ok())
     };
     if let Some(value) = get() {
         CACHE_HIT.with_label_values(&[COLUMNAR_META]).inc();
@@ -187,10 +148,7 @@ pub(crate) async fn load<T: Send + Sync + 'static>(
     // A caller may flush buffered output while its loader is Pending, then stop
     // polling it under downstream backpressure. Never hold a shared lock across
     // that await: another stream may need the lock to finish the current series.
-    let identity_size = match &key {
-        DecodedKey::Columnar { identity, .. } => identity.capacity(),
-        _ => 0,
-    };
+    let identity_size = key.identity.capacity();
     let retained = weight(&value).saturating_add(identity_size).saturating_add(
         std::mem::size_of::<DecodedKey>()
             + std::mem::size_of::<DecodedValue>()
@@ -199,23 +157,17 @@ pub(crate) async fn load<T: Send + Sync + 'static>(
     if let Ok(weight) = u32::try_from(retained)
         && u64::from(weight) <= context.cache.policy().max_capacity().unwrap_or(0)
     {
-        let entry = context
-            .cache
-            .entry(key)
-            .or_insert_with(|| DecodedValue::Columnar {
-                value: value.clone(),
-                weight,
-            });
+        let entry = context.cache.entry(key).or_insert_with(|| DecodedValue {
+            value: value.clone(),
+            weight,
+        });
         if entry.is_fresh() {
             CACHE_BYTES
                 .with_label_values(&[COLUMNAR_META])
                 .add(i64::from(weight));
         }
-        if let DecodedValue::Columnar {
-            value: admitted, ..
-        } = entry.into_value()
-            && let Ok(admitted) = admitted.downcast::<T>()
-        {
+        let admitted = entry.into_value().value;
+        if let Ok(admitted) = admitted.downcast::<T>() {
             return Ok(admitted);
         }
     }
@@ -228,46 +180,20 @@ mod tests {
     use crate::cache::CacheManager;
     use std::hash::{DefaultHasher, Hash, Hasher};
 
+    // TODO(narthex-merge): restore payload-block assertions once the byte cache gets a budget.
     #[test]
-    fn payload_cache_isolates_objects_and_bounds_memory() {
+    fn payload_cache_stays_disabled_without_a_page_budget() {
         let manager = Arc::new(CacheManager::builder().page_cache_size(4096).build());
-        let strategy = CacheStrategy::EnableAll(manager.clone());
-        let namespace = FileId::random();
-        let generation = FileId::random();
-        let cache = strategy.columnar_payload(namespace).unwrap();
-        let part = cache.part(generation, 0, 100);
-        let range = 0..10;
-        part.insert(&range, &bytes::Bytes::from_static(b"0123456789"));
-        assert_eq!(&part.get(&range).unwrap()[..], b"0123456789");
-        assert!(cache.part(FileId::random(), 0, 100).get(&range).is_none());
-        assert!(cache.part(generation, 1, 100).get(&range).is_none());
-        assert!(cache.part(generation, 0, 101).get(&range).is_none());
+        let strategy = CacheStrategy::EnableAll(manager);
+        assert!(strategy.columnar_payload(FileId::random()).is_none());
         assert!(
-            strategy
+            CacheStrategy::EnableAll(Arc::new(CacheManager::default()))
                 .columnar_payload(FileId::random())
-                .unwrap()
-                .part(generation, 0, 100)
-                .get(&range)
                 .is_none()
         );
         assert!(
-            !manager
-                .get_page_ranges(generation, 0, std::slice::from_ref(&range))
-                .unwrap()
-                .is_fully_cached()
-        );
-        // A slice is detached from the much larger source allocation.
-        let source = bytes::Bytes::from(vec![7; 8192]);
-        part.insert(&range, &source.slice(..10));
-        assert_ne!(source.as_ptr(), part.get(&range).unwrap().as_ptr());
-        part.insert(&(0..8192), &source);
-        assert!(part.get(&(0..8192)).is_none());
-        part.cache.cache.invalidate(&part.key(&range));
-        part.cache.cache.run_pending_tasks();
-        assert!(part.get(&range).is_none());
-        assert!(
-            CacheStrategy::EnableAll(Arc::new(CacheManager::default()))
-                .columnar_payload(namespace)
+            CacheStrategy::Disabled
+                .columnar_payload(FileId::random())
                 .is_none()
         );
     }
@@ -283,7 +209,7 @@ mod tests {
         let identity = "generation/part/page";
         // Keep the former stripe collision as a regression case for the old loader.
         let stripe = |identity: &str| {
-            let key = DecodedKey::Columnar {
+            let key = DecodedKey {
                 namespace: cache.namespace,
                 identity: identity.to_string(),
                 representation: TypeId::of::<Vec<u8>>(),

@@ -31,9 +31,9 @@ use common_batcher::flush_policy::timing::TimingFlushPolicy;
 use common_batcher::request_limiter::RequestLimiter;
 use common_batcher::worker_registry::WorkerRegistry;
 use common_error::ext::BoxedError;
-use common_query::{Output, WriteCompletion};
+use common_query::{Output, WriteCompletion, WriteProgress};
 use operator::batcher::PendingRowsBatcher;
-use operator::error::{BatchFlushSnafu, Result, UnexpectedSnafu};
+use operator::error::{ExternalSnafu, Result, UnexpectedSnafu};
 use operator::insert::Inserter;
 use session::context::QueryContextRef;
 use snafu::ResultExt;
@@ -175,6 +175,7 @@ impl PendingRowsBatcher for TablePendingRowsBatcher {
         permit: Arc<OwnedSemaphorePermit>,
     ) -> Result<Output> {
         let total_rows = batch.num_rows();
+        let confirmed = ctx.confirmed_writes();
         if total_rows == 0 {
             return Ok(Output::new_with_affected_rows(0));
         }
@@ -188,7 +189,9 @@ impl PendingRowsBatcher for TablePendingRowsBatcher {
         }
         let key = batch_key_from_ctx(&table_info.name, &ctx);
         let (response_tx, response_rx) = oneshot::channel();
+        let progress = ctx.write_progress().cloned();
         let pending = PendingBatch {
+            _completion: progress.as_ref().map(|progress| progress.start()),
             table_info,
             batch,
             ctx,
@@ -216,27 +219,21 @@ impl PendingRowsBatcher for TablePendingRowsBatcher {
             .fail();
         }
         let completion = async move {
-            response_rx
-                .await
-                .map_err(|_| {
-                    UnexpectedSnafu {
-                        violated: "batch worker stopped before reporting its write result"
-                            .to_string(),
-                    }
-                    .build()
-                })?
-                .context(BatchFlushSnafu)
+            response_rx.await.unwrap_or_else(|_| WriteProgress::failed(BoxedError::new(
+                UnexpectedSnafu { violated: "batch worker stopped before acknowledging its write; storage outcome unknown".to_string() }.build()
+            )))
         };
         let mut output = Output::new_with_affected_rows(total_rows);
-        if self.pending_rows_batch_sync {
-            completion.await?;
+        if self.pending_rows_batch_sync && !confirmed {
+            completion.await.into_result().context(ExternalSnafu)?;
         } else {
+            if let Some(progress) = progress {
+                progress.mark_accepted();
+            }
             output
                 .meta
                 .write_completions
-                .push(WriteCompletion::new(async move {
-                    completion.await.map_err(BoxedError::new)
-                }));
+                .push(WriteCompletion::with_progress(completion));
         }
         Ok(output)
     }
@@ -276,7 +273,6 @@ mod tests {
     use datatypes::value::Value as DtValue;
     use datatypes::vectors::{Int32Vector, TimestampMillisecondVector, VectorRef};
     use operator::batcher::PendingRowsBatcher;
-    use operator::error::Error;
     use operator::insert::Inserter;
     use operator::metrics::DIST_INGEST_ROW_COUNT;
     use operator::req_convert::insert::rows_to_record_batch;
@@ -379,7 +375,10 @@ mod tests {
                 );
                 Arc::get_mut(&mut batcher).unwrap().pending_rows_batch_sync = sync;
                 let table = Arc::new(new_test_table_info(1, "ack", [0].into_iter()));
-                let ctx = QueryContext::arc();
+                let progress = Arc::new(session::write_progress::WriteProgress::default());
+                let mut ctx = QueryContext::with("greptime", "public");
+                ctx.set_write_progress(progress.clone());
+                let ctx = Arc::new(ctx);
                 let key = batch_key_from_ctx(&table.name, &ctx);
                 // Hold the worker command to control completion independently of scheduling.
                 let (_, receiver) = batcher.workers.get_or_create(key, 1).await;
@@ -414,6 +413,8 @@ mod tests {
                     assert!(futures::poll!(pending.as_mut()).is_pending());
                     completion = Some(pending);
                 }
+                assert_eq!(progress.accepted(), !sync);
+                assert_eq!(progress.written(), 0);
                 // Early acknowledgement must not release capacity before completion.
                 let acquire = batcher.acquire();
                 tokio::pin!(acquire);
@@ -685,6 +686,99 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn test_exemplar_coalesced_table_flush_retains_each_requests_progress() {
+        #[derive(Clone)]
+        struct PartialHandler;
+        #[async_trait::async_trait]
+        impl MockDatanodeHandler for PartialHandler {
+            async fn handle(&self, _: &Peer, request: RegionRequest) -> MetaResult<RegionResponse> {
+                let Some(region_request::Body::BulkInsert(request)) = request.body else {
+                    panic!("expected bulk")
+                };
+                let Some(bulk_insert_request::Body::ArrowIpc(ipc)) = request.body else {
+                    panic!("expected Arrow")
+                };
+                let batch = FlightDecoder::try_from_schema_bytes(&ipc.schema)
+                    .unwrap()
+                    .try_decode_record_batch(&ipc.data_header, &ipc.payload)
+                    .unwrap();
+                let values = batch
+                    .column(0)
+                    .as_any()
+                    .downcast_ref::<Int32Array>()
+                    .unwrap();
+                if values.values().contains(&20) {
+                    return common_meta::error::UnexpectedSnafu {
+                        err_msg: "lost acknowledgement",
+                    }
+                    .fail();
+                }
+                Ok(RegionResponse::new(batch.num_rows()))
+            }
+            async fn handle_query(
+                &self,
+                _: &Peer,
+                _: QueryRequest,
+            ) -> MetaResult<SendableRecordBatchStream> {
+                unreachable!()
+            }
+        }
+        for sync in [false, true] {
+            let partitions = create_partition_rule_manager(prepare_mocked_backend().await).await;
+            let inserter = Arc::new(Inserter::new(
+                MemoryCatalogManager::new(),
+                partitions,
+                Arc::new(MockDatanodeManager::new(PartialHandler)),
+                mock_table_flownode_cache(1, vec![]).await,
+                true,
+            ));
+            let mut batcher = TablePendingRowsBatcher::try_new(
+                Duration::from_secs(3600),
+                3,
+                1,
+                4,
+                4,
+                NonZeroUsize::new(16).unwrap(),
+                inserter,
+            )
+            .unwrap();
+            Arc::get_mut(&mut batcher).unwrap().pending_rows_batch_sync = sync;
+            let table = Arc::new(new_test_table_info(1, "table_1", [1, 2, 3].into_iter()));
+            let mut first = rows(1);
+            first.rows.extend(rows(20).rows);
+            let first = rows_to_record_batch(&first, &table).unwrap();
+            let second = rows_to_record_batch(&rows(2), &table).unwrap();
+            let counters =
+                [0, 1].map(|_| Arc::new(session::write_progress::WriteProgress::default()));
+            let contexts = counters.each_ref().map(|counter| {
+                let mut ctx = QueryContext::arc().with_confirmed_writes();
+                ctx.set_write_progress(counter.clone());
+                Arc::new(ctx)
+            });
+            let first_permit = batcher.acquire().await.unwrap();
+            let second_permit = batcher.acquire().await.unwrap();
+            let (first, second) = tokio::join!(
+                batcher.submit(table.clone(), first, contexts[0].clone(), first_permit),
+                batcher.submit(table, second, contexts[1].clone(), second_permit),
+            );
+            let first = timeout(Duration::from_secs(5), first.unwrap().write_progress())
+                .await
+                .unwrap();
+            let second = timeout(Duration::from_secs(5), second.unwrap().write_progress())
+                .await
+                .unwrap();
+            assert_eq!(first.affected_rows, 1);
+            assert!(first.error.is_some());
+            assert_eq!(second.affected_rows, 1);
+            assert!(second.error.is_none());
+            for counter in counters {
+                counter.wait().await;
+                assert_eq!(counter.written(), 1);
+            }
+        }
+    }
+
     #[test]
     fn test_batch_key_uses_name_and_wal_policy() {
         let ctx = QueryContext::arc();
@@ -800,7 +894,7 @@ mod tests {
             &self,
             count: usize,
             changed_schema: bool,
-        ) -> oneshot::Receiver<Result<(), Arc<Error>>> {
+        ) -> oneshot::Receiver<common_query::WriteProgress> {
             self.submit_with_table(count, changed_schema, self.table.clone())
                 .await
         }
@@ -810,7 +904,7 @@ mod tests {
             count: usize,
             changed_schema: bool,
             table_info: TableInfoRef,
-        ) -> oneshot::Receiver<Result<(), Arc<Error>>> {
+        ) -> oneshot::Receiver<common_query::WriteProgress> {
             let mut input = rows(1);
             input.rows = vec![input.rows[0].clone(); count];
             let mut batch = rows_to_record_batch(&input, &self.table).unwrap();
@@ -827,6 +921,7 @@ mod tests {
             let (response_tx, response_rx) = oneshot::channel();
             self.tx
                 .send(WorkerCommand::Submit(PendingBatch {
+                    _completion: None,
                     table_info,
                     batch,
                     ctx: QueryContext::arc(),
@@ -877,11 +972,13 @@ mod tests {
             .await
             .unwrap()
             .unwrap()
+            .into_result()
             .unwrap();
         timeout(WORKER_TIMEOUT, second)
             .await
             .unwrap()
             .unwrap()
+            .into_result()
             .unwrap();
         worker.shutdown.send(()).unwrap();
         worker.stopped().await;
@@ -906,11 +1003,13 @@ mod tests {
             .await
             .unwrap()
             .unwrap()
+            .into_result()
             .unwrap();
         timeout(WORKER_TIMEOUT, second)
             .await
             .unwrap()
             .unwrap()
+            .into_result()
             .unwrap();
         worker.shutdown.send(()).unwrap();
         worker.stopped().await;
@@ -945,6 +1044,7 @@ mod tests {
                 .await
                 .unwrap()
                 .unwrap()
+                .into_result()
                 .unwrap();
             if recreated {
                 // The recreated table has no route in this fixture; its error belongs only to it.
@@ -953,6 +1053,7 @@ mod tests {
                         .await
                         .unwrap()
                         .unwrap()
+                        .into_result()
                         .is_err()
                 );
             } else {
@@ -962,6 +1063,7 @@ mod tests {
                     .await
                     .unwrap()
                     .unwrap()
+                    .into_result()
                     .unwrap();
             }
             worker.shutdown.send(()).unwrap();
@@ -983,6 +1085,7 @@ mod tests {
             .await
             .unwrap()
             .unwrap()
+            .into_result()
             .unwrap();
         worker.stopped().await;
         assert!(matches!(
@@ -994,6 +1097,7 @@ mod tests {
             .await
             .unwrap()
             .unwrap()
+            .into_result()
             .unwrap();
     }
 }

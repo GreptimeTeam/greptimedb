@@ -12,10 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::hash::BuildHasher;
 use std::io::ErrorKind;
 use std::path::PathBuf;
 
 use async_trait::async_trait;
+use common_base::hash::FixedRandomState;
 use common_error::ext::BoxedError;
 use common_telemetry::{debug, warn};
 use futures::{AsyncRead, AsyncWrite};
@@ -153,14 +155,19 @@ impl IntermediateLocation {
         &self.files_dir
     }
 
-    /// Returns the path of the directory for intermediate files associated with the `file_group`:
-    /// `__intm/{region_id}/{sst_file_id}/{uuid}/{file_group}/`
+    /// Returns the directory path for intermediate files associated with `file_group`:
+    /// `__intm/{region_id}/{sst_file_id}/{uuid}/{hash(file_group)}/`.
+    ///
+    /// Index names may contain JSON paths with filesystem-unsafe characters or exceed
+    /// directory name length limits. Fixed-seed aHash maps them to 16-character hexadecimal
+    /// directory names.
     pub fn file_group_path(&self, file_group: &str) -> String {
-        util::join_path(&self.files_dir, &format!("{file_group}/"))
+        let hash = FixedRandomState::new().hash_one(file_group);
+        util::join_path(&self.files_dir, &format!("{hash:016x}/"))
     }
 
     /// Returns the path of the intermediate file with the given `file_group` and `im_file_id`:
-    /// `__intm/{region_id}/{sst_file_id}/{uuid}/{file_group}/{im_file_id}.im`
+    /// `__intm/{region_id}/{sst_file_id}/{uuid}/{hash(file_group)}/{im_file_id}.im`
     pub fn file_path(&self, file_group: &str, im_file_id: &str) -> String {
         util::join_path(
             &self.file_group_path(file_group),
@@ -370,16 +377,21 @@ mod tests {
         let uuid = location.files_dir.split('/').nth(3).unwrap();
 
         let file_group = "1";
+        let group_path = location.file_group_path(file_group);
+        assert_eq!(group_path, location.file_group_path(file_group));
+        let group_dir = group_path.trim_end_matches('/').rsplit('/').next().unwrap();
+        assert_eq!(group_dir.len(), 16);
+        assert!(group_dir.bytes().all(|byte| byte.is_ascii_hexdigit()));
         assert_eq!(
             location.file_group_path(file_group),
-            format!("{INTERMEDIATE_DIR}/0/{sst_file_id}/{uuid}/{file_group}/")
+            format!("{INTERMEDIATE_DIR}/0/{sst_file_id}/{uuid}/{group_dir}/")
         );
 
         let im_file_id = "000000000010";
         let file_path = location.file_path(file_group, im_file_id);
         assert_eq!(
             file_path,
-            format!("{INTERMEDIATE_DIR}/0/{sst_file_id}/{uuid}/{file_group}/{im_file_id}.im")
+            format!("{INTERMEDIATE_DIR}/0/{sst_file_id}/{uuid}/{group_dir}/{im_file_id}.im")
         );
 
         assert_eq!(location.im_file_id_from_path(&file_path), im_file_id);
@@ -421,7 +433,14 @@ mod tests {
         let store = IntermediateManager::init_fs(path).await.unwrap();
         let provider = TempFileProvider::new(location.clone(), store);
 
-        let file_group = "tag0";
+        let group0 = index::target::IndexTarget::new_json_path(1, vec!["a/\":\\".repeat(100)])
+            .unwrap()
+            .encode();
+        let group1 = index::target::IndexTarget::new_json_path(1, vec!["b/\":\\".repeat(100)])
+            .unwrap()
+            .encode();
+        assert!(group0.len() > 255 && group1.len() > 255);
+        let file_group = group0.as_str();
         let file_id = "0000000010";
         let mut writer = provider.create(file_group, file_id).await.unwrap();
         writer.write_all(b"hello").await.unwrap();
@@ -434,21 +453,21 @@ mod tests {
         writer.flush().await.unwrap();
         writer.close().await.unwrap();
 
-        let file_group = "tag1";
+        let file_group = group1.as_str();
         let file_id = "0000000010";
         let mut writer = provider.create(file_group, file_id).await.unwrap();
         writer.write_all(b"foo").await.unwrap();
         writer.flush().await.unwrap();
         writer.close().await.unwrap();
 
-        let readers = provider.read_all("tag0").await.unwrap();
+        let readers = provider.read_all(&group0).await.unwrap();
         assert_eq!(readers.len(), 2);
         for (_, mut reader) in readers {
             let mut buf = Vec::new();
             reader.read_to_end(&mut buf).await.unwrap();
             assert!(matches!(buf.as_slice(), b"hello" | b"world"));
         }
-        let readers = provider.read_all("tag1").await.unwrap();
+        let readers = provider.read_all(&group1).await.unwrap();
         assert_eq!(readers.len(), 1);
         let mut reader = readers.into_iter().map(|x| x.1).next().unwrap();
         let mut buf = Vec::new();

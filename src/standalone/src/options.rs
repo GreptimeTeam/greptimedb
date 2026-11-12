@@ -12,7 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::time::Duration;
+
 use common_base::readable_size::ReadableSize;
+use common_base::secrets::SecretString;
 use common_config::{Configurable, KvBackendConfig};
 use common_event_recorder::EventRecorderOptions;
 use common_memory_manager::OnExhaustedPolicy;
@@ -67,12 +70,25 @@ pub struct StandaloneOptions {
     pub procedure: ProcedureConfig,
     pub flow: FlowConfig,
     pub logging: LoggingOptions,
-    pub user_provider: Option<String>,
+    /// The user provider for authentication.
+    ///
+    /// The inline `static_user_provider:cmd:` form carries plaintext
+    /// passwords, so the value is held as a [`SecretString`] and serialized
+    /// with those passwords redacted.
+    #[serde(serialize_with = "auth::serialize_user_provider_option")]
+    pub user_provider: Option<SecretString>,
     /// Options for different store engines.
     pub region_engine: Vec<RegionEngineConfig>,
     pub tracing: TracingOptions,
     pub init_regions_in_background: bool,
     pub init_regions_parallelism: usize,
+    /// Maximum concurrent region-read streams. Zero means unlimited.
+    /// A single query can consume multiple permits.
+    pub max_concurrent_queries: usize,
+    /// Timeout to acquire a permit when `max_concurrent_queries` is reached.
+    /// Only effective when the limiter is enabled.
+    #[serde(with = "humantime_serde")]
+    pub concurrent_query_limiter_timeout: Duration,
     pub slow_query: SlowQueryOptions,
     pub query: QueryOptions,
     pub memory: MemoryOptions,
@@ -117,6 +133,8 @@ impl Default for StandaloneOptions {
             tracing: TracingOptions::default(),
             init_regions_in_background: false,
             init_regions_parallelism: 16,
+            max_concurrent_queries: 0,
+            concurrent_query_limiter_timeout: Duration::from_millis(100),
             slow_query: SlowQueryOptions::default(),
             query: QueryOptions::default(),
             memory: MemoryOptions::default(),
@@ -136,6 +154,10 @@ impl Configurable for StandaloneOptions {
             "pending_rows_batcher.protocols",
             "pending_rows_batcher.logical_table.protocols",
         ])
+    }
+
+    fn env_tagged_seq_keys() -> Option<&'static [&'static str]> {
+        Some(&["region_engine"])
     }
 }
 
@@ -195,6 +217,8 @@ impl StandaloneOptions {
             grpc: cloned_opts.grpc,
             init_regions_in_background: cloned_opts.init_regions_in_background,
             init_regions_parallelism: cloned_opts.init_regions_parallelism,
+            max_concurrent_queries: cloned_opts.max_concurrent_queries,
+            concurrent_query_limiter_timeout: cloned_opts.concurrent_query_limiter_timeout,
             query: cloned_opts.query,
             heartbeat_env_vars: cloned_opts.heartbeat_env_vars,
             ..Default::default()
@@ -217,10 +241,108 @@ impl StandaloneOptions {
 mod tests {
     use std::sync::Arc;
 
+    use common_config::Configurable;
     use common_event_recorder::EventTypeFilter;
     use servers::batcher::BatchingProtocol;
 
     use crate::options::*;
+
+    #[test]
+    fn test_user_provider_redacts_cmd_passwords_in_config() {
+        let options = StandaloneOptions {
+            user_provider: Some("static_user_provider:cmd:alice=secret".to_string().into()),
+            ..Default::default()
+        };
+
+        let serialized = options.to_toml().unwrap();
+        assert!(serialized.contains("user_provider = \"[REDACTED]\""));
+        assert!(!serialized.contains("secret"));
+    }
+
+    #[test]
+    fn test_concurrent_query_limiter_options() {
+        let defaults: StandaloneOptions = toml::from_str("").unwrap();
+        let datanode_defaults = DatanodeOptions::default();
+        assert_eq!(defaults.max_concurrent_queries, 0);
+        assert_eq!(
+            defaults.concurrent_query_limiter_timeout,
+            Duration::from_millis(100)
+        );
+        assert_eq!(
+            defaults.max_concurrent_queries,
+            datanode_defaults.max_concurrent_queries
+        );
+        assert_eq!(
+            defaults.concurrent_query_limiter_timeout,
+            datanode_defaults.concurrent_query_limiter_timeout
+        );
+
+        let options: StandaloneOptions = toml::from_str(
+            r#"max_concurrent_queries = 8
+concurrent_query_limiter_timeout = "250ms""#,
+        )
+        .unwrap();
+        let restored: StandaloneOptions =
+            toml::from_str(&toml::to_string(&options).unwrap()).unwrap();
+        for options in [options, restored] {
+            assert_eq!(options.max_concurrent_queries, 8);
+            assert_eq!(
+                options.concurrent_query_limiter_timeout,
+                Duration::from_millis(250)
+            );
+            let datanode = options.datanode_options();
+            assert_eq!(datanode.max_concurrent_queries, 8);
+            assert_eq!(
+                datanode.concurrent_query_limiter_timeout,
+                Duration::from_millis(250)
+            );
+        }
+        assert!(
+            toml::from_str::<StandaloneOptions>("concurrent_query_limiter_timeout = 'invalid'")
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn test_concurrent_query_limiter_options_from_env() {
+        temp_env::with_vars(
+            [
+                ("STANDALONE_LIMITER_TEST__MAX_CONCURRENT_QUERIES", Some("4")),
+                (
+                    "STANDALONE_LIMITER_TEST__CONCURRENT_QUERY_LIMITER_TIMEOUT",
+                    Some("2s"),
+                ),
+            ],
+            || {
+                let options =
+                    StandaloneOptions::load_layered_options(None, "STANDALONE_LIMITER_TEST")
+                        .unwrap();
+                let datanode = options.datanode_options();
+                assert_eq!(datanode.max_concurrent_queries, 4);
+                assert_eq!(
+                    datanode.concurrent_query_limiter_timeout,
+                    Duration::from_secs(2)
+                );
+            },
+        );
+    }
+
+    #[test]
+    fn test_pipeline_config_forwarding() {
+        let defaults: StandaloneOptions = toml::from_str("").unwrap();
+        assert!(!defaults.pipeline.allow_vrl_host_access);
+        assert!(!defaults.frontend_options().pipeline.allow_vrl_host_access);
+        assert!(!defaults.pipeline.ignore_errors);
+        assert!(!defaults.frontend_options().pipeline.ignore_errors);
+        let options: StandaloneOptions =
+            toml::from_str("[pipeline]\nallow_vrl_host_access = true\nignore_errors = true")
+                .unwrap();
+        assert!(options.frontend_options().pipeline.allow_vrl_host_access);
+        assert!(options.frontend_options().pipeline.ignore_errors);
+        let serialized = toml::to_string(&options).unwrap();
+        let restored: StandaloneOptions = toml::from_str(&serialized).unwrap();
+        assert_eq!(options.pipeline, restored.pipeline);
+    }
 
     #[test]
     fn test_frontend_write_retries_disabled() {

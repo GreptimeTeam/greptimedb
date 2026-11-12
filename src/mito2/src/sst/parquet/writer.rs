@@ -36,14 +36,13 @@ use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::extension::json::is_json2_extension_type;
 use object_store::{FuturesAsyncWriter, ObjectStore};
 use parquet::arrow::AsyncArrowWriter;
+use parquet::arrow::async_writer::AsyncFileWriter;
 use parquet::basic::{Compression, Encoding, ZstdLevel};
-use parquet::file::metadata::KeyValue;
+use parquet::file::metadata::{FileMetaData, KeyValue, ParquetMetaData};
 use parquet::file::properties::WriterProperties;
-use parquet::schema::types::ColumnPath;
 use smallvec::smallvec;
-use snafu::{OptionExt, ResultExt};
+use snafu::{OptionExt, ResultExt, ensure};
 use store_api::metadata::RegionMetadataRef;
-use store_api::storage::consts::{OP_TYPE_COLUMN_NAME, SEQUENCE_COLUMN_NAME};
 use store_api::storage::{FileId, SequenceNumber};
 use tokio::io::AsyncWrite;
 use tokio_util::compat::{Compat, FuturesAsyncWriteCompatExt};
@@ -61,9 +60,10 @@ use crate::sst::parquet::flat_format::{
     FlatWriteFormat, primary_key_column_index, time_index_column_index,
 };
 use crate::sst::parquet::format::{PrimaryKeyArray, PrimaryKeyWriteFormat};
+use crate::sst::parquet::parallel_writer::ParallelArrowWriter;
 use crate::sst::parquet::{
     COLUMN_INDEX_TRUNCATE_LENGTH, PARQUET_METADATA_KEY, SstInfo, WriteOptions,
-    apply_column_compression, apply_float_field_encoding,
+    apply_column_compression, apply_float_field_encoding, apply_internal_column_encoding,
 };
 use crate::sst::{
     DEFAULT_WRITE_CONCURRENCY, FlatSchemaOptions, SeriesEstimator, maybe_wrap_schema,
@@ -156,11 +156,81 @@ fn split_at_next_series(
     })
 }
 
+/// Arrow writer of the current SST file.
+enum SstArrowWriter<W> {
+    /// Encodes on the writing task.
+    Serial(AsyncArrowWriter<W>),
+    /// Encodes the columns of each row group on blocking tasks.
+    Parallel(ParallelArrowWriter<W>),
+}
+
+impl<W: AsyncFileWriter> SstArrowWriter<W> {
+    async fn write(&mut self, batch: &RecordBatch) -> parquet::errors::Result<()> {
+        match self {
+            SstArrowWriter::Serial(writer) => writer.write(batch).await,
+            SstArrowWriter::Parallel(writer) => writer.write(batch).await,
+        }
+    }
+
+    async fn flush(&mut self) -> parquet::errors::Result<()> {
+        match self {
+            SstArrowWriter::Serial(writer) => writer.flush().await,
+            SstArrowWriter::Parallel(writer) => writer.flush().await,
+        }
+    }
+
+    async fn close(self) -> parquet::errors::Result<ParquetMetaData> {
+        match self {
+            SstArrowWriter::Serial(writer) => writer.close().await,
+            SstArrowWriter::Parallel(writer) => writer.close().await,
+        }
+    }
+
+    async fn abort(self) {
+        if let SstArrowWriter::Parallel(writer) = self {
+            writer.abort().await;
+        }
+    }
+}
+
+/// Optional limits used by multi-output compaction. A batch may temporarily
+/// exceed the working threshold before its check; callers reserve that workspace.
+#[derive(Clone, Copy)]
+pub(crate) struct SstWriteLimits {
+    pub(crate) working_bytes: usize,
+    pub(crate) metadata_bytes: usize,
+}
+
+/// Tracks retained footer memory across rolled files as well as the current file.
+#[derive(Default)]
+struct WriteMemory {
+    limits: Option<SstWriteLimits>,
+    completed: usize,
+    current: usize,
+    row_groups: usize,
+}
+
+impl WriteMemory {
+    fn check(&self, bytes: usize) -> Result<()> {
+        if let Some(limits) = self.limits {
+            ensure!(
+                bytes <= limits.metadata_bytes,
+                crate::error::SstWriteMemoryExceededSnafu {
+                    kind: "metadata",
+                    bytes,
+                    limit: limits.metadata_bytes,
+                }
+            );
+        }
+        Ok(())
+    }
+}
+
 /// Parquet SST writer.
 pub struct ParquetWriter<'a, F: WriterFactory, I: IndexerBuilder, P: FilePathProvider> {
     /// Path provider that creates SST and index file paths according to file id.
     path_provider: P,
-    writer: Option<AsyncArrowWriter<SizeAwareWriter<F::Writer>>>,
+    writer: Option<SstArrowWriter<SizeAwareWriter<F::Writer>>>,
     /// Current active file id.
     current_file: FileId,
     writer_factory: F,
@@ -177,6 +247,20 @@ pub struct ParquetWriter<'a, F: WriterFactory, I: IndexerBuilder, P: FilePathPro
     file_cleaner: Option<TempFileCleaner>,
     /// Write metrics
     metrics: &'a mut Metrics,
+    write_guard: Option<Arc<dyn SstWriteGuard>>,
+    memory: WriteMemory,
+}
+
+/// Registers durable ownership before either an SST or its index is published to storage.
+#[async_trait::async_trait]
+pub trait SstWriteGuard: Send + Sync {
+    async fn before_create(&self, file_id: RegionFileId) -> Result<()>;
+}
+
+/// Protection and resource limits travel together for table-compaction output.
+pub(crate) struct SstWriteContext {
+    pub(crate) guard: Arc<dyn SstWriteGuard>,
+    pub(crate) limits: SstWriteLimits,
 }
 
 pub trait WriterFactory {
@@ -190,6 +274,7 @@ pub trait WriterFactory {
 
 pub struct ObjectStoreWriterFactory {
     object_store: ObjectStore,
+    concurrency: usize,
 }
 
 impl WriterFactory for ObjectStoreWriterFactory {
@@ -199,7 +284,7 @@ impl WriterFactory for ObjectStoreWriterFactory {
         self.object_store
             .writer_with(file_path)
             .chunk(write_buffer_size)
-            .concurrent(DEFAULT_WRITE_CONCURRENCY)
+            .concurrent(self.concurrency)
             .await
             .map(|v| v.into_futures_async_write().compat_write())
             .context(OpenDalSnafu)
@@ -211,6 +296,11 @@ where
     P: FilePathProvider,
     I: IndexerBuilder,
 {
+    pub(crate) fn with_write_concurrency(mut self, concurrency: usize) -> Self {
+        self.writer_factory.concurrency = concurrency;
+        self
+    }
+
     pub async fn new_with_object_store(
         object_store: ObjectStore,
         metadata: RegionMetadataRef,
@@ -220,7 +310,10 @@ where
         metrics: &'a mut Metrics,
     ) -> ParquetWriter<'a, ObjectStoreWriterFactory, I, P> {
         ParquetWriter::new(
-            ObjectStoreWriterFactory { object_store },
+            ObjectStoreWriterFactory {
+                object_store,
+                concurrency: DEFAULT_WRITE_CONCURRENCY,
+            },
             metadata,
             index_config,
             indexer_builder,
@@ -252,9 +345,6 @@ where
         metrics: &'a mut Metrics,
     ) -> ParquetWriter<'a, F, I, P> {
         let init_file = FileId::random();
-        let indexer = indexer_builder
-            .build(RegionFileId::new(metadata.region_id, init_file), 0, None)
-            .await;
 
         ParquetWriter {
             path_provider,
@@ -264,11 +354,53 @@ where
             metadata,
             index_config,
             indexer_builder,
-            current_indexer: Some(indexer),
+            // Build lazily with the actual row-group size, after the write guard.
+            current_indexer: None,
+            memory: WriteMemory::default(),
             bytes_written: Arc::new(AtomicUsize::new(0)),
             file_cleaner: None,
             metrics,
+            write_guard: None,
         }
+    }
+
+    pub(crate) fn with_write_guard(mut self, guard: Option<Arc<dyn SstWriteGuard>>) -> Self {
+        self.write_guard = guard;
+        self
+    }
+
+    pub(crate) fn with_memory_limits(mut self, limits: Option<SstWriteLimits>) -> Self {
+        self.memory.limits = limits;
+        self
+    }
+
+    /// Checks encoding state without flushing a partial row group: readers and
+    /// index row IDs require uniform row-group lengths except for the final one.
+    /// Only new footer entries are measured, avoiding quadratic footer walks.
+    async fn check_memory(&mut self) -> Result<()> {
+        let Some(limits) = self.memory.limits else {
+            return Ok(());
+        };
+        if let Some(SstArrowWriter::Serial(writer)) = &mut self.writer {
+            ensure!(
+                writer.memory_size() <= limits.working_bytes,
+                crate::error::SstWriteMemoryExceededSnafu {
+                    kind: "encoder",
+                    bytes: writer.memory_size(),
+                    limit: limits.working_bytes,
+                }
+            );
+            for group in &writer.flushed_row_groups()[self.memory.row_groups..] {
+                let file = FileMetaData::new(1, 0, None, None, group.schema_descr_ptr(), None);
+                // Reuse Parquet's heap estimator; counting the schema per group
+                // is conservative, including variable-length min/max statistics.
+                let metadata = ParquetMetaData::new(file, vec![group.clone()]);
+                self.memory.current = self.memory.current.saturating_add(metadata.memory_size());
+            }
+            self.memory.row_groups = writer.flushed_row_groups().len();
+        }
+        self.memory
+            .check(self.memory.completed.saturating_add(self.memory.current))
     }
 
     /// Finishes current SST file and index file.
@@ -308,6 +440,15 @@ where
 
             let parquet_metadata = current_writer.close().await.context(WriteParquetSnafu)?;
             let file_size = self.bytes_written.load(Ordering::Relaxed) as u64;
+            if self.memory.limits.is_some() {
+                self.memory.completed = self.memory.completed.saturating_add(
+                    parquet_metadata.memory_size().saturating_mul(2)
+                        + std::mem::size_of::<SstInfo>(),
+                );
+                self.memory.check(self.memory.completed)?;
+                self.memory.current = 0;
+                self.memory.row_groups = 0;
+            }
 
             // Safety: num rows > 0 so we must have min/max.
             let time_range = stats.time_range.unwrap();
@@ -376,10 +517,7 @@ where
         );
         let res = self.write_all_flat_inner(source, &converter, opts).await;
         if res.is_err() {
-            let file_id = self.current_file;
-            if let Some(cleaner) = &self.file_cleaner {
-                cleaner.clean_by_file_id(file_id).await;
-            }
+            self.abort_current_file().await;
         }
         res
     }
@@ -404,10 +542,7 @@ where
         };
         let res = self.write_all_flat_inner(source, &converter, opts).await;
         if res.is_err() {
-            let file_id = self.current_file;
-            if let Some(cleaner) = &self.file_cleaner {
-                cleaner.clean_by_file_id(file_id).await;
-            }
+            self.abort_current_file().await;
         }
         res
     }
@@ -511,6 +646,10 @@ where
         }
         .await;
 
+        let result = match result {
+            Ok(()) => self.check_memory().await,
+            Err(error) => Err(error),
+        };
         if result.is_err() {
             self.abort_current_indexer().await;
         }
@@ -520,6 +659,16 @@ where
     fn exceeds_max_file_size(&self, opts: &WriteOptions) -> bool {
         opts.max_file_size
             .is_some_and(|max_size| self.bytes_written.load(Ordering::Relaxed) >= max_size)
+    }
+
+    /// Joins encoders before dropping the writer and deleting its failed output.
+    async fn abort_current_file(&mut self) {
+        if let Some(writer) = self.writer.take() {
+            writer.abort().await;
+        }
+        if let Some(cleaner) = &self.file_cleaner {
+            cleaner.clean_by_file_id(self.current_file).await;
+        }
     }
 
     async fn abort_current_indexer(&mut self) {
@@ -532,7 +681,7 @@ where
         &mut self,
         schema: &SchemaRef,
         opts: &WriteOptions,
-    ) -> Result<&mut AsyncArrowWriter<SizeAwareWriter<F::Writer>>> {
+    ) -> Result<&mut SstArrowWriter<SizeAwareWriter<F::Writer>>> {
         if let Some(ref mut w) = self.writer {
             Ok(w)
         } else {
@@ -547,17 +696,7 @@ where
                 .set_max_row_group_row_count(Some(opts.row_group_size))
                 .set_column_index_truncate_length(COLUMN_INDEX_TRUNCATE_LENGTH)
                 .set_statistics_truncate_length(None);
-            let ts_col = ColumnPath::new(vec![
-                self.metadata.time_index_column().column_schema.name.clone(),
-            ]);
-            let seq_col = ColumnPath::new(vec![SEQUENCE_COLUMN_NAME.to_string()]);
-            let op_type_col = ColumnPath::new(vec![OP_TYPE_COLUMN_NAME.to_string()]);
-            let props_builder = props_builder
-                .set_column_encoding(seq_col.clone(), Encoding::DELTA_BINARY_PACKED)
-                .set_column_dictionary_enabled(seq_col, false)
-                .set_column_encoding(ts_col.clone(), Encoding::DELTA_BINARY_PACKED)
-                .set_column_dictionary_enabled(ts_col, false)
-                .set_column_compression(op_type_col, Compression::UNCOMPRESSED);
+            let props_builder = apply_internal_column_encoding(props_builder, &self.metadata);
             let props_builder = apply_float_field_encoding(
                 props_builder,
                 &self.metadata,
@@ -570,15 +709,41 @@ where
                 self.metadata.region_id,
                 self.current_file,
             ));
+            if let Some(guard) = &self.write_guard {
+                guard
+                    .before_create(RegionFileId::new(
+                        self.metadata.region_id,
+                        self.current_file,
+                    ))
+                    .await?;
+            }
             let writer = SizeAwareWriter::new(
                 self.writer_factory
                     .create(&sst_file_path, opts.write_buffer_size.as_bytes() as usize)
                     .await?,
                 self.bytes_written.clone(),
             );
-            let arrow_writer =
-                AsyncArrowWriter::try_new(writer, maybe_wrap_schema(schema)?, Some(writer_props))
-                    .context(WriteParquetSnafu)?;
+            let schema = maybe_wrap_schema(schema)?;
+            let arrow_writer = if self.memory.limits.is_none()
+                && opts.encode_parallelism > 1
+                && ParallelArrowWriter::<SizeAwareWriter<F::Writer>>::supports(&writer_props)
+            {
+                SstArrowWriter::Parallel(
+                    ParallelArrowWriter::try_new(
+                        writer,
+                        schema,
+                        writer_props,
+                        opts.encode_parallelism,
+                        opts.encode_runtime,
+                    )
+                    .context(WriteParquetSnafu)?,
+                )
+            } else {
+                SstArrowWriter::Serial(
+                    AsyncArrowWriter::try_new(writer, schema, Some(writer_props))
+                        .context(WriteParquetSnafu)?,
+                )
+            };
             self.writer = Some(arrow_writer);
 
             let indexer = self
@@ -742,5 +907,147 @@ where
         cx: &mut Context<'_>,
     ) -> Poll<std::result::Result<(), std::io::Error>> {
         Pin::new(&mut self.inner).poll_shutdown(cx)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::AtomicBool;
+    use std::time::Duration;
+
+    use common_runtime::runtime::{BuilderBuild, RuntimeTrait};
+    use parquet::arrow::ArrowWriter;
+    use parquet::errors::ParquetError;
+    use store_api::region_request::PathType;
+    use tokio::sync::oneshot;
+    use tokio::time::timeout;
+
+    use super::*;
+    use crate::access_layer::{RegionFilePathFactory, WriteType};
+    use crate::compaction::memory_manager::new_compaction_memory_manager;
+    use crate::error::Error;
+    use crate::sst::FormatType;
+    use crate::sst::parquet::tests::NoopIndexBuilder;
+    use crate::test_util::TestEnv;
+    use crate::test_util::sst_util::{new_record_batch_by_range, sst_region_metadata};
+
+    #[rstest::rstest]
+    #[case::flat(FormatType::Flat)]
+    #[case::primary_key(FormatType::PrimaryKey)]
+    #[tokio::test]
+    async fn test_source_error_waits_for_encoding_cleanup(#[case] format: FormatType) {
+        let mut env = TestEnv::new().await;
+        let metadata = Arc::new(sst_region_metadata());
+        let mut metrics = Metrics::new(WriteType::Compaction);
+        let mut writer = ParquetWriter::new_with_object_store(
+            env.init_object_store_manager(),
+            metadata.clone(),
+            IndexConfig::default(),
+            NoopIndexBuilder,
+            RegionFilePathFactory::new("".to_string(), PathType::Bare),
+            &mut metrics,
+        )
+        .await;
+        let opts = WriteOptions {
+            row_group_size: 8,
+            encode_parallelism: 2,
+            ..Default::default()
+        };
+        let batch = new_record_batch_by_range(&["a", "b"], 0, 4);
+        let retained_field = Arc::downgrade(batch.column(2));
+        let converter = match format {
+            FormatType::Flat => FlatBatchConverter::Flat(FlatWriteFormat::new(
+                metadata.clone(),
+                &FlatSchemaOptions::default(),
+            )),
+            FormatType::PrimaryKey => FlatBatchConverter::PrimaryKey {
+                format: PrimaryKeyWriteFormat::new(metadata.clone()),
+                num_fields: metadata.field_columns().count(),
+            },
+        };
+        let encoding_batch = converter.convert_batch(&batch).unwrap();
+        let encoding_schema = encoding_batch.schema();
+        let (_, factory) = ArrowWriter::try_new(Vec::new(), encoding_schema.clone(), None)
+            .unwrap()
+            .into_serialized_writer()
+            .unwrap();
+        let columns = factory.create_column_writers(0).unwrap();
+        let runtime: common_runtime::Runtime = common_runtime::Builder::default()
+            .worker_threads(1)
+            .max_blocking_threads(1)
+            .build()
+            .unwrap();
+        let (started_tx, started_rx) = oneshot::channel();
+        let (release_tx, release_rx) = oneshot::channel();
+        let queued_batch = encoding_batch.clone();
+        let running = runtime.spawn_blocking(move || {
+            started_tx.send(()).unwrap();
+            release_rx.blocking_recv().unwrap();
+            drop((encoding_batch, columns));
+            Err(ParquetError::General(
+                "cleanup encoding failure".to_string(),
+            ))
+        });
+        timeout(Duration::from_secs(10), started_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        let queued_started = Arc::new(AtomicBool::new(false));
+        let queued_started_task = queued_started.clone();
+        let queued = runtime.spawn_blocking(move || {
+            queued_started_task.store(true, Ordering::SeqCst);
+            drop(queued_batch);
+            Ok((Vec::new(), Vec::new()))
+        });
+        let SstArrowWriter::Parallel(parallel) = writer
+            .maybe_init_writer(&encoding_schema, &opts)
+            .await
+            .unwrap()
+        else {
+            panic!("expected parallel encoding");
+        };
+        // Controlled real tasks represent the previous row group in flight.
+        parallel.set_encoding_tasks_for_test(vec![running, queued]);
+        let source = FlatSource::new_stream(
+            batch.schema(),
+            Box::pin(futures::stream::iter(vec![
+                Ok(batch),
+                InvalidRecordBatchSnafu {
+                    reason: "source read failed",
+                }
+                .fail(),
+            ])),
+        );
+        let memory = new_compaction_memory_manager(1024 * 1024);
+        let budget = memory.try_acquire(memory.limit_bytes()).unwrap();
+        let mut write = Box::pin(async {
+            let _budget = budget;
+            match format {
+                FormatType::Flat => writer.write_all_flat(source, None, &opts).await,
+                FormatType::PrimaryKey => {
+                    writer
+                        .write_all_flat_as_primary_key(source, None, &opts)
+                        .await
+                }
+            }
+        });
+        // The next row group is buffered, then the source fails. No codec timing
+        // or I/O wait can make the old indexer-only cleanup pass this assertion.
+        assert!(futures::poll!(write.as_mut()).is_pending());
+        assert!(memory.try_acquire(memory.limit_bytes()).is_none());
+        assert!(retained_field.upgrade().is_some());
+        release_tx.send(()).unwrap();
+        let error = timeout(Duration::from_secs(10), write)
+            .await
+            .unwrap()
+            .unwrap_err();
+        assert!(
+            matches!(error, Error::InvalidRecordBatch { reason, .. } if reason == "source read failed")
+        );
+        assert!(!queued_started.load(Ordering::SeqCst));
+        assert!(retained_field.upgrade().is_none());
+        assert!(memory.try_acquire(memory.limit_bytes()).is_some());
+        assert!(writer.writer.is_none());
+        assert_eq!(0, writer.bytes_written.load(Ordering::Relaxed));
     }
 }

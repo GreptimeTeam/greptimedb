@@ -18,10 +18,11 @@ use sqlparser::tokenizer::Token;
 
 use crate::error::{self, InvalidSqlSnafu, InvalidTableNameSnafu, Result, UnexpectedTokenSnafu};
 use crate::parser::ParserContext;
+use crate::parsers::utils;
 use crate::statements::statement::Statement;
 use crate::statements::truncate::TruncateTable;
 
-/// `TRUNCATE [TABLE] table_name;`
+/// `TRUNCATE [TABLE] table_name [FILE RANGE ...] [WITH (wait = ..., timeout = ...)];`
 impl ParserContext<'_> {
     pub(crate) fn parse_truncate(&mut self) -> Result<Statement> {
         let _ = self.parser.next_token();
@@ -46,7 +47,10 @@ impl ParserContext<'_> {
 
         // if no range is specified, we just truncate the table
         if !have_range {
-            return Ok(Statement::TruncateTable(TruncateTable::new(table_ident)));
+            let options = utils::parse_ddl_options(&mut self.parser)?;
+            return Ok(Statement::TruncateTable(
+                TruncateTable::new(table_ident).with_options(options),
+            ));
         }
 
         // parse a list of time ranges consist of (Timestamp, Timestamp),?
@@ -100,6 +104,7 @@ impl ParserContext<'_> {
             let peek = self.parser.peek_token().token;
 
             match peek {
+                Token::Word(word) if word.keyword == Keyword::WITH => break,
                 sqlparser::tokenizer::Token::EOF | Token::SemiColon => {
                     if time_ranges.is_empty() {
                         return Err(InvalidSqlSnafu {
@@ -112,24 +117,26 @@ impl ParserContext<'_> {
                 Token::Comma => {
                     self.parser.next_token(); // Consume the comma
                     let next_peek = self.parser.peek_token().token; // Peek the token after the comma
-                    if matches!(next_peek, Token::EOF | Token::SemiColon) {
+                    if matches!(next_peek, Token::EOF | Token::SemiColon)
+                        || matches!(next_peek, Token::Word(word) if word.keyword == Keyword::WITH)
+                    {
                         break; // Trailing comma, end of statement
                     }
                     // Otherwise, continue to parse next range
                     continue;
                 }
                 _ => UnexpectedTokenSnafu {
-                    expected: "a comma or end of statement",
+                    expected: "a comma, WITH or end of statement",
                     actual: self.peek_token_as_string(),
                 }
                 .fail()?,
             }
         }
 
-        Ok(Statement::TruncateTable(TruncateTable::new_with_ranges(
-            table_ident,
-            time_ranges,
-        )))
+        let options = utils::parse_ddl_options(&mut self.parser)?;
+        Ok(Statement::TruncateTable(
+            TruncateTable::new_with_ranges(table_ident, time_ranges).with_options(options),
+        ))
     }
 }
 
@@ -140,6 +147,64 @@ mod tests {
     use super::*;
     use crate::dialect::GreptimeDbDialect;
     use crate::parser::ParseOptions;
+
+    #[test]
+    fn test_parse_truncate_ddl_options() {
+        for prefix in [
+            "TRUNCATE foo",
+            "TRUNCATE TABLE foo",
+            "TRUNCATE TABLE foo FILE RANGE (0, 20)",
+            "TRUNCATE TABLE foo FILE RANGE (0, 20), (30, 40),",
+        ] {
+            let sql = format!("{prefix} WITH (WAIT = false, TIMEOUT = '30s');");
+            let statements = ParserContext::create_with_dialect(
+                &sql,
+                &GreptimeDbDialect {},
+                ParseOptions::default(),
+            )
+            .unwrap();
+            let Statement::TruncateTable(truncate) = &statements[0] else {
+                unreachable!()
+            };
+            assert_eq!(truncate.options().get("wait"), Some("false"));
+            assert_eq!(truncate.options().get("timeout"), Some("30s"));
+
+            let formatted = truncate.to_string();
+            let reparsed = ParserContext::create_with_dialect(
+                &formatted,
+                &GreptimeDbDialect {},
+                ParseOptions::default(),
+            )
+            .unwrap();
+            let Statement::TruncateTable(reparsed) = &reparsed[0] else {
+                unreachable!()
+            };
+            assert_eq!(truncate.table_name(), reparsed.table_name());
+            assert_eq!(truncate.time_ranges(), reparsed.time_ranges());
+            assert_eq!(
+                truncate.options().to_str_map(),
+                reparsed.options().to_str_map()
+            );
+        }
+
+        for options in [
+            "ttl = '1d'",
+            "unknown = true",
+            "wait = NULL",
+            "timeout = ['30s']",
+        ] {
+            let sql = format!("TRUNCATE TABLE foo WITH ({options})");
+            assert!(
+                ParserContext::create_with_dialect(
+                    &sql,
+                    &GreptimeDbDialect {},
+                    ParseOptions::default(),
+                )
+                .is_err(),
+                "{sql}"
+            );
+        }
+    }
 
     #[test]
     pub fn test_parse_truncate_with_ranges() {
@@ -451,7 +516,7 @@ mod tests {
         assert!(
             result.is_err()
                 && format!("{result:?}")
-                    .contains("expected: 'a comma or end of statement', found: ("),
+                    .contains("expected: 'a comma, WITH or end of statement', found: ("),
             "result is: {result:?}"
         );
 

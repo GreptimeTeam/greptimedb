@@ -14,6 +14,7 @@
 
 mod cluster_info;
 pub mod columns;
+mod compaction_tasks;
 pub mod flow_statistics;
 pub mod flows;
 mod information_memory_table;
@@ -58,6 +59,7 @@ use lazy_static::lazy_static;
 use paste::paste;
 use process_list::InformationSchemaProcessList;
 use region_info::InformationSchemaRegionInfo;
+use store_api::compaction_task::CompactionTaskEntry;
 use store_api::metric_engine_consts::{
     MEMTABLE_PARTITION_TREE_PRIMARY_KEY_ENCODING, PRIMARY_KEY_ENCODING,
 };
@@ -74,6 +76,7 @@ use crate::CatalogManager;
 use crate::error::Error;
 use crate::process_manager::ProcessManagerRef;
 use crate::system_schema::information_schema::cluster_info::InformationSchemaClusterInfo;
+use crate::system_schema::information_schema::compaction_tasks::InformationSchemaCompactionTasks;
 use crate::system_schema::information_schema::flow_statistics::InformationSchemaFlowStatistics;
 use crate::system_schema::information_schema::flows::InformationSchemaFlows;
 use crate::system_schema::information_schema::information_memory_table::get_schema_columns;
@@ -139,7 +142,7 @@ lazy_static! {
 }
 
 macro_rules! setup_memory_table {
-    ($name: expr) => {
+    ($name: expr, $scope: ident) => {
         paste! {
             {
                 let (schema, columns) = get_schema_columns($name);
@@ -147,7 +150,8 @@ macro_rules! setup_memory_table {
                     consts::[<INFORMATION_SCHEMA_ $name  _TABLE_ID>],
                     $name,
                     schema,
-                    columns
+                    columns,
+                    InformationSchemaTableScope::$scope
                 )) as _)
             }
         }
@@ -165,7 +169,9 @@ pub struct MakeInformationTableRequest {
 pub enum InformationSchemaTableScope {
     /// Every query is filtered to the catalog supplied when constructing the provider.
     Catalog,
-    /// The table contains catalog-independent or shared data, including compatibility stubs.
+    /// Catalog-independent data that is safe for authenticated non-admin users to read.
+    PublicGlobal,
+    /// Shared data without a non-admin visibility guarantee, including compatibility stubs.
     Global,
 }
 
@@ -173,6 +179,7 @@ impl InformationSchemaTableScope {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Catalog => "catalog",
+            Self::PublicGlobal => "public_global",
             Self::Global => "global",
         }
     }
@@ -228,30 +235,30 @@ impl InformationSchemaProvider {
                 self.catalog_name.clone(),
                 self.catalog_manager.clone(),
             )) as _),
-            ENGINES => setup_memory_table!(ENGINES),
-            COLUMN_PRIVILEGES => setup_memory_table!(COLUMN_PRIVILEGES),
-            COLUMN_STATISTICS => setup_memory_table!(COLUMN_STATISTICS),
-            BUILD_INFO => setup_memory_table!(BUILD_INFO),
-            CHARACTER_SETS => setup_memory_table!(CHARACTER_SETS),
-            COLLATIONS => setup_memory_table!(COLLATIONS),
+            ENGINES => setup_memory_table!(ENGINES, PublicGlobal),
+            COLUMN_PRIVILEGES => setup_memory_table!(COLUMN_PRIVILEGES, Global),
+            COLUMN_STATISTICS => setup_memory_table!(COLUMN_STATISTICS, Global),
+            BUILD_INFO => setup_memory_table!(BUILD_INFO, PublicGlobal),
+            CHARACTER_SETS => setup_memory_table!(CHARACTER_SETS, PublicGlobal),
+            COLLATIONS => setup_memory_table!(COLLATIONS, PublicGlobal),
             COLLATION_CHARACTER_SET_APPLICABILITY => {
-                setup_memory_table!(COLLATION_CHARACTER_SET_APPLICABILITY)
+                setup_memory_table!(COLLATION_CHARACTER_SET_APPLICABILITY, PublicGlobal)
             }
-            CHECK_CONSTRAINTS => setup_memory_table!(CHECK_CONSTRAINTS),
-            EVENTS => setup_memory_table!(EVENTS),
-            FILES => setup_memory_table!(FILES),
-            OPTIMIZER_TRACE => setup_memory_table!(OPTIMIZER_TRACE),
-            PARAMETERS => setup_memory_table!(PARAMETERS),
-            PROFILING => setup_memory_table!(PROFILING),
-            REFERENTIAL_CONSTRAINTS => setup_memory_table!(REFERENTIAL_CONSTRAINTS),
-            ROUTINES => setup_memory_table!(ROUTINES),
-            SCHEMA_PRIVILEGES => setup_memory_table!(SCHEMA_PRIVILEGES),
-            TABLE_PRIVILEGES => setup_memory_table!(TABLE_PRIVILEGES),
-            GLOBAL_STATUS => setup_memory_table!(GLOBAL_STATUS),
-            SESSION_STATUS => setup_memory_table!(SESSION_STATUS),
-            PLUGINS => setup_memory_table!(PLUGINS),
-            USER_PRIVILEGES => setup_memory_table!(USER_PRIVILEGES),
-            PROCESSLIST => setup_memory_table!(PROCESSLIST),
+            CHECK_CONSTRAINTS => setup_memory_table!(CHECK_CONSTRAINTS, Global),
+            EVENTS => setup_memory_table!(EVENTS, Global),
+            FILES => setup_memory_table!(FILES, Global),
+            OPTIMIZER_TRACE => setup_memory_table!(OPTIMIZER_TRACE, Global),
+            PARAMETERS => setup_memory_table!(PARAMETERS, Global),
+            PROFILING => setup_memory_table!(PROFILING, Global),
+            REFERENTIAL_CONSTRAINTS => setup_memory_table!(REFERENTIAL_CONSTRAINTS, Global),
+            ROUTINES => setup_memory_table!(ROUTINES, Global),
+            SCHEMA_PRIVILEGES => setup_memory_table!(SCHEMA_PRIVILEGES, Global),
+            TABLE_PRIVILEGES => setup_memory_table!(TABLE_PRIVILEGES, Global),
+            GLOBAL_STATUS => setup_memory_table!(GLOBAL_STATUS, Global),
+            SESSION_STATUS => setup_memory_table!(SESSION_STATUS, Global),
+            PLUGINS => setup_memory_table!(PLUGINS, Global),
+            USER_PRIVILEGES => setup_memory_table!(USER_PRIVILEGES, Global),
+            PROCESSLIST => setup_memory_table!(PROCESSLIST, Global),
             KEY_COLUMN_USAGE => Some(Arc::new(InformationSchemaKeyColumnUsage::new(
                 self.catalog_name.clone(),
                 self.catalog_manager.clone(),
@@ -308,6 +315,9 @@ impl InformationSchemaProvider {
                     self.catalog_manager.clone(),
                 ),
             ) as _),
+            COMPACTION_TASKS => Some(Arc::new(InformationSchemaCompactionTasks::new(
+                self.catalog_manager.clone(),
+            )) as _),
             REGION_INFO => Some(Arc::new(InformationSchemaRegionInfo::new(
                 self.catalog_manager.clone(),
             )) as _),
@@ -374,11 +384,11 @@ impl InformationSchemaProvider {
         // Only put these tables under `greptime` catalog to prevent info leak.
         if self.catalog_name == DEFAULT_CATALOG_NAME {
             table_names.extend([
-                BUILD_INFO,
                 REGION_PEERS,
                 CLUSTER_INFO,
                 PROCEDURE_INFO,
                 REGION_STATISTICS,
+                COMPACTION_TASKS,
                 REGION_INFO,
                 SSTS_MANIFEST,
                 SSTS_STORAGE,
@@ -387,6 +397,7 @@ impl InformationSchemaProvider {
         }
 
         table_names.extend([
+            BUILD_INFO,
             TABLES,
             VIEWS,
             SCHEMATA,
@@ -462,6 +473,21 @@ pub trait InformationExtension {
         request: DatanodeInspectRequest,
     ) -> std::result::Result<SendableRecordBatchStream, Self::Error>;
 
+    /// Whether this extension can execute an inspection query on every datanode.
+    fn supports_inspect_query_plan(&self) -> bool {
+        false
+    }
+
+    /// Builds a plan that executes an inspection query independently on each datanode.
+    /// The caller supplies a plan over reserved inspection tables and retains any
+    /// required global aggregation. The returned schema is the query output schema.
+    fn inspect_datanode_query_plan(
+        &self,
+        _plan: LogicalPlan,
+    ) -> std::result::Result<Option<Arc<dyn ExecutionPlan>>, Self::Error> {
+        Ok(None)
+    }
+
     /// Builds a physical plan for datanode inspect if the extension can expose
     /// the distributed fan-in semantics to DataFusion.
     fn inspect_datanode_plan(
@@ -487,6 +513,8 @@ pub struct DatanodeInspectRequest {
 /// The kind of the datanode inspect request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DatanodeInspectKind {
+    /// Live compaction cycles.
+    CompactionTasks,
     /// List SST entries recorded in manifest
     SstManifest,
     /// List SST entries discovered in storage layer
@@ -501,6 +529,7 @@ impl DatanodeInspectRequest {
     /// Builds a logical plan for the datanode inspect request.
     pub fn build_plan(self) -> std::result::Result<LogicalPlan, DataFusionError> {
         match self.kind {
+            DatanodeInspectKind::CompactionTasks => CompactionTaskEntry::build_plan(self.scan),
             DatanodeInspectKind::SstManifest => ManifestSstEntry::build_plan(self.scan),
             DatanodeInspectKind::SstStorage => StorageSstEntry::build_plan(self.scan),
             DatanodeInspectKind::SstIndexMeta => PuffinIndexMetaEntry::build_plan(self.scan),
@@ -605,14 +634,15 @@ mod tests {
 
     #[test]
     fn every_registered_information_schema_table_has_scope() {
-        use InformationSchemaTableScope::{Catalog, Global};
+        use InformationSchemaTableScope::{Catalog, Global, PublicGlobal};
 
         let manager: Arc<dyn CatalogManager> = MemoryCatalogManager::new();
         let backend = Arc::new(MemoryKvBackend::default());
         let factories: HashMap<_, InformationSchemaTableFactoryRef> = [
             ("future_catalog_table", Catalog),
             ("future_global_table", Global),
-            (ENGINES, Catalog),
+            ("future_public_table", PublicGlobal),
+            (BUILD_INFO, Global),
         ]
         .into_iter()
         .map(|(name, scope)| {
@@ -638,7 +668,13 @@ mod tests {
             #[cfg(feature = "enterprise")]
             RECYCLE_BIN,
             "future_catalog_table",
+        ];
+        let public_global_tables = [
             ENGINES,
+            CHARACTER_SETS,
+            COLLATIONS,
+            COLLATION_CHARACTER_SET_APPLICABILITY,
+            "future_public_table",
         ];
 
         for (catalog, with_process_manager) in [
@@ -654,22 +690,31 @@ mod tests {
                 with_process_manager.then(|| Arc::new(ProcessManager::new(String::new(), None))),
                 backend.clone(),
             );
-            assert_eq!(
-                provider
-                    .table(ENGINES)
-                    .unwrap()
-                    .table_info()
-                    .meta
-                    .options
-                    .extra_options
-                    .get(SEMANTIC_TABLE_SCOPE)
-                    .map(String::as_str),
-                Some(Global.as_str()),
-            );
+            for name in [
+                BUILD_INFO,
+                ENGINES,
+                CHARACTER_SETS,
+                COLLATIONS,
+                COLLATION_CHARACTER_SET_APPLICABILITY,
+            ] {
+                assert_eq!(
+                    provider
+                        .table(name)
+                        .unwrap()
+                        .table_info()
+                        .meta
+                        .options
+                        .extra_options
+                        .get(SEMANTIC_TABLE_SCOPE)
+                        .map(String::as_str),
+                    Some(PublicGlobal.as_str()),
+                    "{catalog}.{name}"
+                );
+            }
             // An extension replacing a built-in supplies the replacement table's scope.
             let provider = provider.with_extra_table_factories(factories.clone());
             let expected_count =
-                43 + usize::from(with_process_manager) + usize::from(cfg!(feature = "enterprise"))
+                45 + usize::from(with_process_manager) + usize::from(cfg!(feature = "enterprise"))
                     - if catalog == DEFAULT_CATALOG_NAME {
                         0
                     } else {
@@ -679,6 +724,8 @@ mod tests {
             for (name, table) in provider.tables() {
                 let scope = if catalog_tables.contains(&name.as_str()) {
                     Catalog
+                } else if public_global_tables.contains(&name.as_str()) {
+                    PublicGlobal
                 } else {
                     Global
                 };
@@ -784,6 +831,29 @@ mod tests {
                 .information_schema_provider()
                 .tables()
                 .contains_key("visible_a")
+        );
+    }
+
+    #[test]
+    fn test_compaction_tasks_build_plan() {
+        let request = DatanodeInspectRequest {
+            kind: DatanodeInspectKind::CompactionTasks,
+            scan: ScanRequest {
+                projection: Some(vec![0]),
+                filters: vec![
+                    datafusion::logical_expr::col("state")
+                        .eq(datafusion::logical_expr::lit("running")),
+                ],
+                limit: Some(1),
+                ..Default::default()
+            },
+        };
+        let plan = request.build_plan().unwrap();
+        assert_eq!(plan.schema().fields().len(), 1);
+        assert!(
+            plan.display_indent()
+                .to_string()
+                .contains("__compaction_tasks")
         );
     }
 

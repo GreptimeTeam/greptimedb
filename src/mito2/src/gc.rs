@@ -66,7 +66,6 @@ fn should_delete_file(
     is_in_tmp_ref: bool,
     is_linger: bool,
     is_eligible_for_delete: bool,
-    is_region_dropped: bool,
     entry: &Entry,
     unknown_file_may_linger_until: chrono::DateTime<chrono::Utc>,
 ) -> bool {
@@ -79,17 +78,12 @@ fn should_delete_file(
         return is_eligible_for_delete;
     }
 
-    // Unknown file: not in manifest, tmp_ref, or known removed records.
-    // For dropped regions, unknown files not protected by manifest/tmp refs/cross-region refs
-    // are deleted immediately. This relies on meta collecting FileRefsManifest from related
-    // active regions before issuing dropped-region GC; preserving young unknown files would
-    // also require keeping the table_repart tombstone for retry.
-    // For active/open regions, only delete if the object's last-modified time exceeds the
-    // unknown_file_lingering_time TTL.
-    if is_region_dropped {
-        return true;
-    }
-
+    // Unknown file: not in manifest, tmp refs, or known removed records. This also
+    // covers a directory whose manifest is gone (region dropped or not hosted here):
+    // there is no version to fence against, so a young object may still belong to an
+    // unpublished table-compaction attempt. Always require the object to be older
+    // than `unknown_file_lingering_time`; deleting immediately would race with an
+    // attempt that has not published yet.
     entry
         .metadata()
         .last_modified()
@@ -97,6 +91,29 @@ fn should_delete_file(
             ts.into_inner().as_millisecond() < unknown_file_may_linger_until.timestamp_millis()
         })
         .unwrap_or(false)
+}
+
+/// Whether an unknown (untracked) entry is withheld only by the young-object
+/// rule. Such objects must be revisited later; a dropped region depends on its
+/// meta tombstone to be discovered by a later GC pass at all.
+fn is_deferred_unknown_file(
+    is_in_manifest: bool,
+    is_in_tmp_ref: bool,
+    is_linger: bool,
+    is_eligible_for_delete: bool,
+    entry: &Entry,
+    unknown_file_may_linger_until: chrono::DateTime<chrono::Utc>,
+) -> bool {
+    let unknown = !is_in_manifest && !is_in_tmp_ref && !is_linger && !is_eligible_for_delete;
+    unknown
+        && !should_delete_file(
+            is_in_manifest,
+            is_in_tmp_ref,
+            is_linger,
+            is_eligible_for_delete,
+            entry,
+            unknown_file_may_linger_until,
+        )
 }
 
 /// Limit the amount of concurrent GC jobs on the datanode
@@ -159,6 +176,12 @@ pub struct GcConfig {
     /// expel time is the time when the file is considered as removed, as in removed from the manifest.
     /// This should only occur rarely, as manifest keep tracks in `removed_files` field
     /// unless something goes wrong.
+    ///
+    /// It is also the age threshold of the sweep that reclaims temporary files left behind
+    /// by a crashed HDFS writer, and that sweep runs even if `enable` is false. HDFS advances
+    /// the modification time of a file under construction only as its blocks complete, so
+    /// lowering this value also shrinks the margin between the sweep and files that are
+    /// still being written.
     #[serde(with = "humantime_serde")]
     pub unknown_file_lingering_time: Duration,
     /// Maximum concurrent list operations per GC job.
@@ -167,6 +190,8 @@ pub struct GcConfig {
     /// Maximum concurrent GC jobs.
     /// This is used to limit the number of concurrent GC jobs running on the datanode
     /// to prevent too many concurrent GC jobs from overwhelming the datanode.
+    /// Setting it to 0 disables GC jobs and the temporary file sweep, which is limited
+    /// to the same number of concurrent tasks.
     pub max_concurrent_gc_job: usize,
 }
 
@@ -177,8 +202,9 @@ impl Default for GcConfig {
             // expect long running queries to be finished(or at least be able to notify it's using a deleted file) within a reasonable time
             lingering_time: Some(Duration::from_secs(60 * 60)),
             // 1 day, for unknown expel time, which is when this file get removed from manifest.
-            // Only applies to full-listing GC for active/open regions. A long default avoids
-            // accidentally deleting pre-manifest files (e.g. compaction/flush still in progress).
+            // A long default avoids accidentally deleting pre-manifest files (e.g.
+            // compaction/flush still in progress) or temporary files of a writer that is
+            // still alive; the temporary file sweep uses this value as well.
             unknown_file_lingering_time: Duration::from_secs(24 * 60 * 60),
             max_concurrent_lister_per_gc_job: 32,
             max_concurrent_gc_job: 4,
@@ -334,7 +360,7 @@ impl LocalGcWorker {
                 .await?;
             let RegionGcOutcome {
                 removed_files,
-                extension_cleanup_failed,
+                needs_retry,
             } = outcome;
             let index_files = removed_files
                 .iter()
@@ -347,9 +373,9 @@ impl LocalGcWorker {
                     RemovedFile::Index(_, _) => None,
                 })
                 .collect();
-            // Don't acknowledge the region as processed until extension cleanup
-            // succeeds; retry it next pass instead.
-            if extension_cleanup_failed {
+            // A deferred deletion batch or failed extension cleanup must not
+            // acknowledge the region as fully processed.
+            if needs_retry {
                 need_retry_regions.insert(*region_id);
             } else {
                 deleted_files.insert(*region_id, data_files);
@@ -378,15 +404,12 @@ impl LocalGcWorker {
 
 /// Per-region outcome of [`LocalGcWorker::do_region_gc`].
 ///
-/// `extension_cleanup_failed` records whether a registered extension's
-/// [`RegionHook::on_region_gc`] could not finish; the caller must then keep the
-/// region un-acknowledged (retry set) so the next GC pass replays the callback.
+/// Unfinished deletion or extension cleanup keeps the region in the retry set.
 pub(crate) struct RegionGcOutcome {
     /// Files physically deleted this pass.
     pub removed_files: Vec<RemovedFile>,
-    /// `true` if a registered extension's `on_region_gc` returned `Err`; the
-    /// caller retries the region next pass.
-    pub extension_cleanup_failed: bool,
+    /// The snapshot changed while the protection lookup ran, or extension cleanup failed.
+    pub needs_retry: bool,
 }
 
 impl LocalGcWorker {
@@ -441,7 +464,8 @@ impl LocalGcWorker {
         );
 
         let manifest = if let Some(region) = &region {
-            let manifest = region.manifest_ctx.manifest().await;
+            let manager = region.manifest_ctx.manifest_manager.read().await;
+            let manifest = manager.manifest();
             // If the manifest version does not match, skip GC for this region to avoid deleting files that are still in use.
             let file_ref_manifest_version = self
                 .file_ref_manifest
@@ -461,7 +485,25 @@ impl LocalGcWorker {
                     .inc();
                 return Ok(RegionGcOutcome {
                     removed_files: vec![],
-                    extension_cleanup_failed: false,
+                    needs_retry: false,
+                });
+            }
+            // SSTs written for pending tails but not committed yet, and SSTs of a newer
+            // manifest, are not in this snapshot, so a full listing would take them for orphans.
+            if self.full_file_listing
+                && (!manifest.pending_tails.is_empty()
+                    || manager.has_update().await.unwrap_or_else(|e| {
+                        warn!(e; "Failed to check manifest updates of region {}", region_id);
+                        true
+                    }))
+            {
+                info!(
+                    "Skip full listing GC for region {}: it has pending WAL tails or a newer manifest may exist",
+                    region_id
+                );
+                return Ok(RegionGcOutcome {
+                    removed_files: vec![],
+                    needs_retry: false,
                 });
             }
             Some(manifest)
@@ -520,10 +562,9 @@ impl LocalGcWorker {
             .map(|file_ref| (file_ref.file_id, file_ref.index_version))
             .collect::<HashSet<_>>();
 
-        let deletable_files = self
+        let (mut deletable_files, deferred_unknown_files) = self
             .list_to_be_deleted_files(
                 region_id,
-                is_region_dropped,
                 &in_manifest,
                 &in_tmp_ref,
                 recently_removed_files,
@@ -531,8 +572,20 @@ impl LocalGcWorker {
             )
             .await?;
 
-        let unused_file_cnt = deletable_files.len();
-
+        let mut hook_deferred_files = false;
+        if let Some(hook) = &self.hook {
+            let candidates = deletable_files
+                .iter()
+                .map(|file| RegionFileId::new(region_id, file.file_id()))
+                .collect::<Vec<_>>();
+            let protected = hook
+                .protected_sst_files(&self.access_layer, &candidates)
+                .await?;
+            let before_filtering = deletable_files.len();
+            deletable_files
+                .retain(|file| !protected.contains(&RegionFileId::new(region_id, file.file_id())));
+            hook_deferred_files = deletable_files.len() < before_filtering;
+        }
         info!(
             "gc: for region{}{region_id}: In manifest file cnt: {}, Tmp ref file cnt: {}, recently removed files: {}, Unused files to delete count: {}",
             if region.is_none() {
@@ -559,12 +612,33 @@ impl LocalGcWorker {
         let _delete_timer = GC_DURATION_SECONDS
             .with_label_values(&["delete_files"])
             .start_timer();
-        self.delete_files(region_id, &deletable_files).await?;
-
-        debug!(
-            "Successfully deleted {} unused files for region {}",
-            unused_file_cnt, region_id
-        );
+        // The protection lookup above awaits, so a queued publication may have
+        // changed the region since the candidate set was computed. Recheck once
+        // without holding the manifest lock across remote deletion. An empty
+        // candidate set takes neither the lock nor the recheck.
+        let publication_changed = !deletable_files.is_empty()
+            && if let (Some(region), Some(snapshot)) = (&region, &manifest) {
+                let manifest_guard = region.manifest_ctx.manifest_manager.read().await;
+                manifest_guard.is_stopped()
+                    || manifest_guard.manifest().manifest_version != snapshot.manifest_version
+                    || !matches!(region.state(), RegionRoleState::Leader(_))
+            } else {
+                false
+            };
+        if publication_changed {
+            debug!(
+                "gc: region {} changed during the protection lookup, deferring deletion",
+                region_id
+            );
+            deletable_files.clear();
+        } else {
+            self.delete_files(region_id, &deletable_files).await?;
+            debug!(
+                "Successfully deleted {} unused files for region {}",
+                deletable_files.len(),
+                region_id
+            );
+        }
 
         // Notify extensions so they can clean up sidecar files. Fire when there
         // are removed files, or on a full-listing pass (lets extensions reconcile
@@ -611,9 +685,16 @@ impl LocalGcWorker {
                 .await?;
         }
 
+        // A dropped region is rediscovered only through its meta-srv tombstone.
+        // Young unknown objects and hook-protected candidates must keep that
+        // tombstone (needs_retry) until they are actually reclaimed; reporting
+        // success here would let the procedure drop the tombstone and leak them.
+        let dropped_files_deferred =
+            region.is_none() && (deferred_unknown_files || hook_deferred_files);
+
         Ok(RegionGcOutcome {
             removed_files: deletable_files,
-            extension_cleanup_failed,
+            needs_retry: extension_cleanup_failed || publication_changed || dropped_files_deferred,
         })
     }
 
@@ -806,7 +887,7 @@ impl LocalGcWorker {
     /// Only `.puffin` files (not subdirectories) are included.
     async fn list_region_index_files(&self, region_id: RegionId) -> Result<Vec<Entry>> {
         let region_dir = self.access_layer.build_region_dir(region_id);
-        let index_dir = object_store::util::join_dir(&region_dir, "index");
+        let index_dir = location::index_dir(&region_dir);
 
         let mut lister = match self
             .access_layer
@@ -911,26 +992,17 @@ impl LocalGcWorker {
     #[allow(clippy::too_many_arguments)]
     fn filter_deletable_files(
         &self,
-        is_region_dropped: bool,
         entries: Vec<Entry>,
         in_manifest: &HashMap<FileId, Option<IndexVersion>>,
         in_tmp_ref: &HashSet<(FileId, Option<IndexVersion>)>,
         may_linger_files: &HashSet<&RemovedFile>,
         eligible_for_delete: &HashSet<&RemovedFile>,
         unknown_file_may_linger_until: chrono::DateTime<chrono::Utc>,
-    ) -> Vec<RemovedFile> {
+    ) -> (Vec<RemovedFile>, bool) {
         let mut ready_for_delete = vec![];
-        // all group by file id for easier checking
-        let in_tmp_ref: HashMap<FileId, HashSet<IndexVersion>> =
-            in_tmp_ref
-                .iter()
-                .fold(HashMap::new(), |mut acc, (file, version)| {
-                    let indices = acc.entry(*file).or_default();
-                    if let Some(version) = version {
-                        indices.insert(*version);
-                    }
-                    acc
-                });
+        let mut deferred_unknown = false;
+        // Every index-version reader needs the same Parquet file.
+        let referenced_ssts: HashSet<_> = in_tmp_ref.iter().map(|(file_id, _)| *file_id).collect();
 
         let may_linger_files: HashMap<FileId, HashSet<&RemovedFile>> = may_linger_files
             .iter()
@@ -967,30 +1039,30 @@ impl LocalGcWorker {
             let should_delete = match file_type {
                 FileType::Parquet => {
                     let is_in_manifest = in_manifest.contains_key(&file_id);
-                    let is_in_tmp_ref = in_tmp_ref.contains_key(&file_id);
+                    let is_in_tmp_ref = referenced_ssts.contains(&file_id);
                     let is_linger = may_linger_files.contains_key(&file_id);
                     let is_eligible_for_delete = eligible_for_delete.contains_key(&file_id);
 
+                    deferred_unknown |= is_deferred_unknown_file(
+                        is_in_manifest,
+                        is_in_tmp_ref,
+                        is_linger,
+                        is_eligible_for_delete,
+                        &entry,
+                        unknown_file_may_linger_until,
+                    );
                     should_delete_file(
                         is_in_manifest,
                         is_in_tmp_ref,
                         is_linger,
                         is_eligible_for_delete,
-                        is_region_dropped,
                         &entry,
                         unknown_file_may_linger_until,
                     )
                 }
                 FileType::Puffin(version) => {
-                    // notice need to check both file id and version
-                    let is_in_manifest = in_manifest
-                        .get(&file_id)
-                        .map(|opt_ver| *opt_ver == Some(version))
-                        .unwrap_or(false);
-                    let is_in_tmp_ref = in_tmp_ref
-                        .get(&file_id)
-                        .map(|versions| versions.contains(&version))
-                        .unwrap_or(false);
+                    let is_in_manifest = in_manifest.get(&file_id) == Some(&Some(version));
+                    let is_in_tmp_ref = in_tmp_ref.contains(&(file_id, Some(version)));
                     let is_linger = may_linger_files
                         .get(&file_id)
                         .map(|files| files.contains(&&RemovedFile::Index(file_id, version)))
@@ -1000,12 +1072,19 @@ impl LocalGcWorker {
                         .map(|files| files.contains(&&RemovedFile::Index(file_id, version)))
                         .unwrap_or(false);
 
+                    deferred_unknown |= is_deferred_unknown_file(
+                        is_in_manifest,
+                        is_in_tmp_ref,
+                        is_linger,
+                        is_eligible_for_delete,
+                        &entry,
+                        unknown_file_may_linger_until,
+                    );
                     should_delete_file(
                         is_in_manifest,
                         is_in_tmp_ref,
                         is_linger,
                         is_eligible_for_delete,
-                        is_region_dropped,
                         &entry,
                         unknown_file_may_linger_until,
                     )
@@ -1027,11 +1106,12 @@ impl LocalGcWorker {
                 ready_for_delete.push(removed_file);
             }
         }
-        ready_for_delete
+        (ready_for_delete, deferred_unknown)
     }
 
     /// List files to be deleted based on their presence in the manifest, temporary references, and recently removed files.
-    /// Returns a vector of `RemovedFile` that are eligible for deletion.
+    /// Returns the `RemovedFile`s that are eligible for deletion and whether any
+    /// unknown object was withheld by the young-object rule and needs a later pass.
     ///
     /// When `full_file_listing` is false, this method will only delete (subset of) files tracked in
     /// `recently_removed_files`, which significantly
@@ -1041,12 +1121,11 @@ impl LocalGcWorker {
     pub async fn list_to_be_deleted_files(
         &self,
         region_id: RegionId,
-        is_region_dropped: bool,
         in_manifest: &HashMap<FileId, Option<IndexVersion>>,
         in_tmp_ref: &HashSet<(FileId, Option<IndexVersion>)>,
         recently_removed_files: BTreeMap<Timestamp, HashSet<RemovedFile>>,
         all_entries: Vec<Entry>,
-    ) -> Result<Vec<RemovedFile>> {
+    ) -> Result<(Vec<RemovedFile>, bool)> {
         let now = chrono::Utc::now();
         let may_linger_until = self
             .opt
@@ -1091,21 +1170,22 @@ impl LocalGcWorker {
         // When full_file_listing is false, skip expensive list operations and only delete
         // files that are tracked in recently_removed_files
         if !self.full_file_listing {
+            let referenced_ssts: HashSet<_> =
+                in_tmp_ref.iter().map(|(file_id, _)| *file_id).collect();
             // Only delete files that:
             // 1. Are in recently_removed_files (tracked in manifest)
             // 2. Are not in use(in manifest or tmp ref)
             // 3. Have passed the lingering time
             let files_to_delete: Vec<RemovedFile> = eligible_for_removal
                 .iter()
-                .filter(|file_id| {
-                    let in_use = match file_id {
-                        RemovedFile::File(file_id, index_version) => {
-                            in_manifest.get(file_id) == Some(index_version)
-                                || in_tmp_ref.contains(&(*file_id, *index_version))
+                .filter(|file| {
+                    let in_use = match file {
+                        RemovedFile::File(file_id, _) => {
+                            in_manifest.contains_key(file_id) || referenced_ssts.contains(file_id)
                         }
-                        RemovedFile::Index(file_id, index_version) => {
-                            in_manifest.get(file_id) == Some(&Some(*index_version))
-                                || in_tmp_ref.contains(&(*file_id, Some(*index_version)))
+                        RemovedFile::Index(file_id, version) => {
+                            in_manifest.get(file_id) == Some(&Some(*version))
+                                || in_tmp_ref.contains(&(*file_id, Some(*version)))
                         }
                     };
                     !in_use
@@ -1119,14 +1199,13 @@ impl LocalGcWorker {
                 files_to_delete.len()
             );
 
-            return Ok(files_to_delete);
+            return Ok((files_to_delete, false));
         }
 
         // Full file listing mode: get the full list of files from object store
 
         // Step 3: Filter files to determine which ones can be deleted
         let all_unused_files_ready_for_delete = self.filter_deletable_files(
-            is_region_dropped,
             all_entries,
             in_manifest,
             in_tmp_ref,

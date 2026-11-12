@@ -169,6 +169,7 @@ impl MultiProtocolClient {
                         result = ServerSnafu {
                             code: status_code,
                             msg,
+                            retry_hint: e.retry_hint(),
                         }
                         .fail();
                     }

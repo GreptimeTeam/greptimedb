@@ -538,6 +538,8 @@ fn parse_json2_type_hint(value: &yaml_rust::Yaml) -> Result<JsonTypeHint> {
         path,
         data_type,
         inverted_index,
+        skipping_index: None,
+        fulltext_index: None,
     })
 }
 

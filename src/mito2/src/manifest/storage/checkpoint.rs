@@ -16,18 +16,19 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use common_datasource::compression::CompressionType;
-use common_telemetry::debug;
+use common_telemetry::{debug, warn};
 use object_store::{ErrorKind, ObjectStore};
 use serde::{Deserialize, Serialize};
-use snafu::ResultExt;
+use snafu::{OptionExt, ResultExt};
 use store_api::ManifestVersion;
 
 use crate::cache::manifest_cache::ManifestCache;
 use crate::error::{
-    CompressObjectSnafu, DecompressObjectSnafu, OpenDalSnafu, Result, SerdeJsonSnafu, Utf8Snafu,
+    CompressObjectSnafu, DecompressObjectSnafu, ManifestCheckpointVanishedSnafu, OpenDalSnafu,
+    Result, SerdeJsonSnafu, Utf8Snafu,
 };
 use crate::manifest::storage::size_tracker::Tracker;
-use crate::manifest::storage::utils::{get_from_cache, put_to_cache, write_and_put_cache};
+use crate::manifest::storage::utils::{get_from_cache_decoded, write_and_put_cache};
 use crate::manifest::storage::{
     FALL_BACK_COMPRESS_TYPE, LAST_CHECKPOINT_FILE, checkpoint_checksum, checkpoint_file, gen_path,
     verify_checksum,
@@ -102,8 +103,11 @@ impl<T: Tracker> CheckpointStorage<T> {
         let path = self.checkpoint_file_path(version);
 
         // Try to get from cache first
-        if let Some(data) = get_from_cache(self.manifest_cache.as_ref(), &path).await {
+        if let Some(data) =
+            get_from_cache_decoded(self.manifest_cache.as_ref(), &path, self.compress_type).await
+        {
             verify_checksum(&data, metadata.checksum)?;
+            self.record_cached_checkpoint_size(version, &path).await;
             return Ok(Some((version, data)));
         }
 
@@ -112,19 +116,21 @@ impl<T: Tracker> CheckpointStorage<T> {
         let checkpoint_data = match self.object_store.read(&path).await {
             Ok(checkpoint) => {
                 let checkpoint_size = checkpoint.len();
-                let decompress_data =
-                    self.compress_type
-                        .decode(checkpoint)
-                        .await
-                        .with_context(|_| DecompressObjectSnafu {
-                            compress_type: self.compress_type,
-                            path: path.clone(),
-                        })?;
+                let decompress_data = self
+                    .compress_type
+                    .decode(checkpoint.clone())
+                    .await
+                    .with_context(|_| DecompressObjectSnafu {
+                        compress_type: self.compress_type,
+                        path: path.clone(),
+                    })?;
                 verify_checksum(&decompress_data, metadata.checksum)?;
                 // set the checkpoint size
                 self.size_tracker.record(version, checkpoint_size as u64);
                 // Add to cache
-                put_to_cache(self.manifest_cache.as_ref(), path, &decompress_data).await;
+                if let Some(cache) = &self.manifest_cache {
+                    cache.put_file(path, checkpoint.to_vec()).await;
+                }
                 Ok(Some(decompress_data))
             }
             Err(e) => {
@@ -141,10 +147,16 @@ impl<T: Tracker> CheckpointStorage<T> {
                         );
 
                         // Try to get fallback from cache first
-                        if let Some(data) =
-                            get_from_cache(self.manifest_cache.as_ref(), &fall_back_path).await
+                        if let Some(data) = get_from_cache_decoded(
+                            self.manifest_cache.as_ref(),
+                            &fall_back_path,
+                            FALL_BACK_COMPRESS_TYPE,
+                        )
+                        .await
                         {
                             verify_checksum(&data, metadata.checksum)?;
+                            self.record_cached_checkpoint_size(version, &fall_back_path)
+                                .await;
                             return Ok(Some((version, data)));
                         }
 
@@ -152,7 +164,7 @@ impl<T: Tracker> CheckpointStorage<T> {
                             Ok(checkpoint) => {
                                 let checkpoint_size = checkpoint.len();
                                 let decompress_data = FALL_BACK_COMPRESS_TYPE
-                                    .decode(checkpoint)
+                                    .decode(checkpoint.clone())
                                     .await
                                     .with_context(|_| DecompressObjectSnafu {
                                         compress_type: FALL_BACK_COMPRESS_TYPE,
@@ -161,12 +173,9 @@ impl<T: Tracker> CheckpointStorage<T> {
                                 verify_checksum(&decompress_data, metadata.checksum)?;
                                 self.size_tracker.record(version, checkpoint_size as u64);
                                 // Add fallback to cache
-                                put_to_cache(
-                                    self.manifest_cache.as_ref(),
-                                    fall_back_path,
-                                    &decompress_data,
-                                )
-                                .await;
+                                if let Some(cache) = &self.manifest_cache {
+                                    cache.put_file(fall_back_path, checkpoint.to_vec()).await;
+                                }
                                 Ok(Some(decompress_data))
                             }
                             Err(e) if e.kind() == ErrorKind::NotFound => Ok(None),
@@ -186,6 +195,52 @@ impl<T: Tracker> CheckpointStorage<T> {
     /// Load the latest checkpoint.
     /// Return manifest version and the raw [RegionCheckpoint](crate::manifest::action::RegionCheckpoint) content if any
     pub async fn load_last_checkpoint(&mut self) -> Result<Option<(ManifestVersion, Vec<u8>)>> {
+        let Some(metadata) = self.read_last_checkpoint_metadata().await? else {
+            return Ok(None);
+        };
+        self.load_checkpoint(metadata).await
+    }
+
+    /// Loads the checkpoint that LIST found at `version` with `compress_type`.
+    ///
+    /// The checkpoint pointer only provides the checksum, when it points at the same version: the
+    /// checkpoint task of a stale writer can leave it at an older one.
+    ///
+    /// Fails if cleanup removed the checkpoint after the LIST, because the deltas it covered can
+    /// be gone too.
+    pub(crate) async fn load_listed_checkpoint(
+        &self,
+        version: ManifestVersion,
+        compress_type: CompressionType,
+    ) -> Result<(ManifestVersion, Vec<u8>)> {
+        let checksum = self
+            .read_last_checkpoint_metadata()
+            .await?
+            .filter(|metadata| metadata.version == version)
+            .and_then(|metadata| metadata.checksum);
+        let mut storage = Self::new(
+            self.path.clone(),
+            self.object_store.clone(),
+            compress_type,
+            self.manifest_cache.clone(),
+            self.size_tracker.clone(),
+        );
+        storage
+            .load_checkpoint(CheckpointMetadata {
+                size: 0,
+                version,
+                checksum,
+                extend_metadata: HashMap::new(),
+            })
+            .await?
+            .context(ManifestCheckpointVanishedSnafu {
+                version,
+                manifest_dir: &self.path,
+            })
+    }
+
+    /// Reads the small checkpoint pointer without loading its payload.
+    pub(crate) async fn read_last_checkpoint_metadata(&self) -> Result<Option<CheckpointMetadata>> {
         let last_checkpoint_path = self.last_checkpoint_path();
 
         // Fetch from remote object store without cache
@@ -206,7 +261,37 @@ impl<T: Tracker> CheckpointStorage<T> {
             last_checkpoint_path, checkpoint_metadata
         );
 
-        self.load_checkpoint(checkpoint_metadata).await
+        Ok(Some(checkpoint_metadata))
+    }
+
+    /// Records the remote object size; accounting failures must not prevent recovery.
+    async fn record_cached_checkpoint_size(&self, version: ManifestVersion, path: &str) {
+        match self.object_store.stat(path).await {
+            Ok(metadata) => self.size_tracker.record(version, metadata.content_length()),
+            Err(error) => warn!(error; "Failed to account for cached checkpoint {}", path),
+        }
+    }
+
+    /// Records stored checkpoint bytes, including the legacy uncompressed path.
+    pub(crate) async fn record_checkpoint_size(&self, version: ManifestVersion) -> Result<()> {
+        let path = self.checkpoint_file_path(version);
+        let metadata = match self.object_store.stat(&path).await {
+            Ok(metadata) => metadata,
+            Err(error)
+                if error.kind() == ErrorKind::NotFound
+                    && self.compress_type != FALL_BACK_COMPRESS_TYPE =>
+            {
+                let path = gen_path(
+                    &self.path,
+                    &checkpoint_file(version),
+                    FALL_BACK_COMPRESS_TYPE,
+                );
+                self.object_store.stat(&path).await.context(OpenDalSnafu)?
+            }
+            Err(error) => return Err(error).context(OpenDalSnafu),
+        };
+        self.size_tracker.record(version, metadata.content_length());
+        Ok(())
     }
 
     /// Save the checkpoint manifest file.
@@ -234,7 +319,6 @@ impl<T: Tracker> CheckpointStorage<T> {
             data,
         )
         .await?;
-        self.size_tracker.record(version, checkpoint_size as u64);
 
         // Because last checkpoint file only contain size and version, which is tiny, so we don't compress it.
         let last_checkpoint_path = self.last_checkpoint_path();
@@ -257,6 +341,7 @@ impl<T: Tracker> CheckpointStorage<T> {
             .await
             .context(OpenDalSnafu)?;
 
+        self.size_tracker.record(version, checkpoint_size as u64);
         Ok(())
     }
 }

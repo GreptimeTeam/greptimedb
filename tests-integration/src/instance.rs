@@ -292,6 +292,138 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn test_select_admin_function_requires_admin_privilege() {
+        use auth::{
+            DefaultPermissionChecker, Identity, Password, PermissionCheckerRef, UserProvider,
+            static_user_provider_from_option,
+        };
+
+        let plugins = Plugins::new();
+        plugins.insert::<PermissionCheckerRef>(DefaultPermissionChecker::arc());
+        let standalone =
+            GreptimeDbStandaloneBuilder::new("test_select_admin_function_requires_admin_privilege")
+                .with_plugin(plugins)
+                .build()
+                .await;
+        let instance = standalone.fe_instance();
+
+        create_table(
+            instance,
+            "CREATE TABLE admin_fn_demo(host STRING, ts TIMESTAMP TIME INDEX)",
+        )
+        .await;
+
+        async fn user_ctx(username: &str, mode: &str) -> QueryContextRef {
+            let provider = static_user_provider_from_option(&format!(
+                "static_user_provider:cmd:{username}:{mode}={username}_pwd"
+            ))
+            .unwrap();
+            let user = provider
+                .authenticate(
+                    Identity::UserId(username, None),
+                    Password::PlainText(format!("{username}_pwd").into()),
+                )
+                .await
+                .unwrap();
+            let ctx = QueryContext::arc();
+            ctx.set_current_user(user);
+            ctx
+        }
+
+        async fn assert_select_admin_denied(instance: &Instance, ctx: &QueryContextRef) {
+            for sql in [
+                "SELECT flush_table('admin_fn_demo')",
+                "SELECT compact_table('admin_fn_demo')",
+                "SELECT flush_region(0)",
+                "SELECT compact_region(0)",
+                "SELECT cancel_region_compaction(0, 'x')",
+                "SELECT migrate_region(1, 2, 3)",
+                "SELECT gc_regions(0)",
+                "SELECT gc_table('admin_fn_demo')",
+                "SELECT build_index('admin_fn_demo')",
+                "SELECT build_series_index('admin_fn_demo')",
+                "SELECT flush_flow('admin_fn_demo')",
+                "SELECT reconcile_catalog()",
+                "SELECT reconcile_database('public')",
+                "SELECT reconcile_table('admin_fn_demo')",
+            ] {
+                let mut results = SqlQueryHandler::do_query(instance, sql, ctx.clone()).await;
+                let output = results
+                    .remove(0)
+                    .unwrap_or_else(|e| panic!("unexpected error for {sql}: {e}"));
+                let OutputData::Stream(stream) = output.data else {
+                    panic!("{sql} must return a stream, got {:?}", output.data)
+                };
+                let err = common_recordbatch::util::collect_batches(stream)
+                    .await
+                    .expect_err("read-only user must be denied");
+                assert_eq!(
+                    StatusCode::PermissionDenied,
+                    err.status_code(),
+                    "unexpected error for {sql}: {err}"
+                );
+            }
+        }
+
+        let readonly_ctx = user_ctx("ro_user", "ro").await;
+        let readwrite_ctx = user_ctx("rw_user", "rw").await;
+
+        assert_select_admin_denied(instance, &readonly_ctx).await;
+
+        let mut results = SqlQueryHandler::do_query(
+            instance.as_ref(),
+            "ADMIN FLUSH_TABLE('admin_fn_demo')",
+            readwrite_ctx.clone(),
+        )
+        .await;
+        assert!(
+            results.remove(0).is_ok(),
+            "ADMIN FLUSH_TABLE must keep working for read-write users"
+        );
+
+        for sql in [
+            "SELECT flush_table('admin_fn_demo')",
+            "SELECT compact_table('admin_fn_demo')",
+        ] {
+            let mut results =
+                SqlQueryHandler::do_query(instance.as_ref(), sql, readwrite_ctx.clone()).await;
+            let output = results
+                .remove(0)
+                .unwrap_or_else(|e| panic!("unexpected error for {sql}: {e}"));
+            let OutputData::Stream(stream) = output.data else {
+                panic!("{sql} must return a stream");
+            };
+            let batches = common_recordbatch::util::collect_batches(stream)
+                .await
+                .unwrap_or_else(|e| panic!("unexpected error for {sql}: {e}"));
+            assert_eq!(
+                1,
+                batches.iter().count(),
+                "{sql} must return one record batch"
+            );
+        }
+
+        let mut results = SqlQueryHandler::do_query(
+            instance.as_ref(),
+            "ADMIN FLUSH_TABLE('admin_fn_demo')",
+            readonly_ctx.clone(),
+        )
+        .await;
+        let err = results.remove(0).unwrap_err();
+        assert_eq!(
+            StatusCode::PermissionDenied,
+            err.status_code(),
+            "unexpected error: {err}"
+        );
+
+        let output = query(instance, "DROP TABLE admin_fn_demo").await;
+        let OutputData::AffectedRows(x) = output.data else {
+            unreachable!()
+        };
+        assert_eq!(x, 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_sql_interceptor_plugin() {
         #[derive(Default)]
         struct AssertionHook {
@@ -537,6 +669,173 @@ mod tests {
         }
     }
 
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_exemplar_authorization_and_interception() {
+        use common_catalog::consts::METRICS_EXEMPLARS_TABLE;
+        use servers::exemplar::query::Query;
+        use servers::interceptor::{PromQueryInterceptor, PromQueryInterceptorRef};
+        use servers::prometheus_handler::PrometheusHandler;
+        use std::sync::Mutex;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use table::table_reference::TableReference;
+
+        #[derive(Default)]
+        struct Hook {
+            tables: Mutex<Vec<String>>,
+            reject: AtomicBool,
+        }
+        impl PromQueryInterceptor for Hook {
+            type Error = servers::error::Error;
+
+            fn pre_execute_exemplars(
+                &self,
+                query: &Query,
+                table: TableReference<'_>,
+                ctx: QueryContextRef,
+            ) -> servers::error::Result<()> {
+                assert_eq!(query.bounds, (0, 1_000_999_999));
+                assert!(query.expression.starts_with("metric"));
+                assert_eq!(table.catalog, ctx.current_catalog());
+                assert_eq!(table.schema, ctx.current_schema());
+                assert_eq!(table.table, METRICS_EXEMPLARS_TABLE);
+                self.tables.lock().unwrap().push(table.to_string());
+                if self.reject.load(Ordering::Relaxed) {
+                    return servers::error::NotSupportedSnafu {
+                        feat: "intercepted exemplar query",
+                    }
+                    .fail();
+                }
+                Ok(())
+            }
+        }
+
+        struct Checker(Mutex<Vec<auth::PermissionTableTargets>>);
+        impl auth::PermissionChecker for Checker {
+            fn check_permission(
+                &self,
+                _: auth::UserInfoRef,
+                _: auth::PermissionReq,
+            ) -> auth::error::Result<auth::PermissionResp> {
+                Ok(auth::PermissionResp::Allow)
+            }
+            fn check_permission_with_table_targets(
+                &self,
+                _: auth::UserInfoRef,
+                req: auth::PermissionReq,
+                targets: auth::PermissionTableTargets,
+            ) -> auth::error::Result<auth::PermissionResp> {
+                if !matches!(req, auth::PermissionReq::Action(auth::PROMQL_QUERY)) {
+                    return Ok(auth::PermissionResp::Allow);
+                }
+                self.0.lock().unwrap().push(targets.clone());
+                let denied = match targets {
+                    auth::PermissionTableTargets::Unresolved => true,
+                    auth::PermissionTableTargets::Resolved(targets) => targets.iter().any(|t| {
+                        t.schema == "secret" && t.table == "metric"
+                            || t.schema == "shared_denied" && t.table == METRICS_EXEMPLARS_TABLE
+                    }),
+                };
+                Ok(if denied {
+                    auth::PermissionResp::Reject
+                } else {
+                    auth::PermissionResp::Allow
+                })
+            }
+        }
+        let checker = Arc::new(Checker(Mutex::new(Vec::new())));
+        let hook = Arc::new(Hook::default());
+        let plugins = Plugins::new();
+        plugins.insert::<auth::PermissionCheckerRef>(checker.clone());
+        plugins.insert::<PromQueryInterceptorRef<servers::error::Error>>(hook.clone());
+        let standalone = GreptimeDbStandaloneBuilder::new("exemplar_query_auth")
+            .with_plugin(plugins)
+            .build()
+            .await;
+        let instance = standalone.fe_instance();
+        query(instance, "CREATE DATABASE other").await;
+        for schema in ["public", "other"] {
+            create_table(instance, &format!("CREATE TABLE {schema}.{METRICS_EXEMPLARS_TABLE} (__table_id INT UNSIGNED NOT NULL, __tsid BIGINT UNSIGNED NOT NULL, greptime_timestamp TIMESTAMP(9) TIME INDEX, greptime_metric STRING, greptime_value DOUBLE, exemplar_labels JSON2, PRIMARY KEY (__table_id, __tsid, greptime_metric)) WITH ('append_mode'='true', 'primary_key_encoding'='sparse')")).await;
+        }
+        for expression in [
+            "rate(metric{__schema__=\"public\"}[5m]) + metric{__database__=\"secret\"}",
+            "metric{__schema__=\"public\" or __schema__=\"secret\"}",
+            "metric{__database__=\"shared_denied\"}",
+            "{__name__=~\"metric.*\",__schema__=\"secret\"}",
+            "topk(scalar(metric{__schema__=\"secret\"}), metric)",
+        ] {
+            checker.0.lock().unwrap().clear();
+            let query = Query::parse(expression.into(), "0", "1", "public").unwrap();
+            let error = instance
+                .query_exemplars(query, QueryContext::arc())
+                .await
+                .unwrap_err();
+            assert_eq!(
+                error.status_code(),
+                StatusCode::PermissionDenied,
+                "{expression}: {error:?}"
+            );
+            assert!(!checker.0.lock().unwrap().is_empty());
+            assert!(hook.tables.lock().unwrap().is_empty());
+        }
+        let query = Query::parse(
+            "metric{__schema__=\"public\" or __database__=\"other\"}".into(),
+            "0",
+            "1",
+            "public",
+        )
+        .unwrap();
+        checker.0.lock().unwrap().clear();
+        assert!(
+            instance
+                .query_exemplars(query, QueryContext::arc())
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        let checks = checker.0.lock().unwrap().clone();
+        for schema in ["public", "other"] {
+            for table in ["metric", METRICS_EXEMPLARS_TABLE] {
+                assert!(checks.iter().any(|c| matches!(c, auth::PermissionTableTargets::Resolved(t) if t.iter().any(|t| t.schema == schema && t.table == table))));
+            }
+        }
+        assert_eq!(
+            *hook.tables.lock().unwrap(),
+            [
+                format!("greptime.other.{METRICS_EXEMPLARS_TABLE}"),
+                format!("greptime.public.{METRICS_EXEMPLARS_TABLE}"),
+            ],
+        );
+        hook.tables.lock().unwrap().clear();
+        hook.reject.store(true, Ordering::Relaxed);
+        let error = instance
+            .query_exemplars(
+                Query::parse("metric".into(), "0", "1", "public").unwrap(),
+                QueryContext::arc(),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            servers::error::Error::NotSupported { feat, .. }
+                if feat == "intercepted exemplar query"
+        ));
+        assert_eq!(hook.tables.lock().unwrap().len(), 1);
+
+        hook.tables.lock().unwrap().clear();
+        assert!(
+            instance
+                .query_exemplars(
+                    Query::parse("metric{__schema__=\"missing\"}".into(), "0", "1", "public")
+                        .unwrap(),
+                    QueryContext::arc(),
+                )
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert!(hook.tables.lock().unwrap().is_empty());
+    }
+
     /// The entity-graph derivation must run as the caller: a source table the
     /// caller cannot read contributes neither entities nor edges.
     #[tokio::test(flavor = "multi_thread")]
@@ -776,10 +1075,16 @@ mod tests {
             }],
         };
 
+        let errors = frontend::OTLP_RESOURCE_INFO_WRITE_ERRORS.get();
         let outcome =
-            OpenTelemetryProtocolHandler::metrics(&*instance, request, QueryContext::arc())
+            OpenTelemetryProtocolHandler::metrics(&*instance, request, QueryContext::arc(), None)
                 .await
                 .unwrap();
+        assert_eq!(
+            (outcome.accepted_data_points, outcome.rejected_data_points),
+            (1, 0)
+        );
+        assert_eq!(frontend::OTLP_RESOURCE_INFO_WRITE_ERRORS.get(), errors + 1);
         let warning = outcome
             .error_message
             .expect("denial must surface as a warning");

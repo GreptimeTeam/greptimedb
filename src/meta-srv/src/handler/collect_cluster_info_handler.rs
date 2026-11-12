@@ -196,6 +196,7 @@ impl NodeInfoUpdate {
             memory_usage_bytes: info.memory_usage_bytes,
             hostname: info.hostname,
             env_vars: self.env_vars,
+            schedulable: None,
         };
         let value = value.try_into().context(InvalidClusterInfoFormatSnafu)?;
         ctx.in_memory

@@ -55,15 +55,16 @@ use crate::error::{
     DataTypeMismatchSnafu, EmptyRegionDirSnafu, InvalidMetadataSnafu, InvalidRegionOptionsSnafu,
     ObjectStoreNotFoundSnafu, RegionCorruptedSnafu, Result, StaleLogEntrySnafu,
 };
-use crate::manifest::action::RegionManifest;
+use crate::lease::NodeLease;
+use crate::manifest::action::{RegionManifest, cap_wal_release};
 use crate::manifest::manager::{RegionManifestManager, RegionManifestOptions};
 use crate::memtable::bulk::part::BulkPart;
 use crate::memtable::time_partition::TimePartitions;
-use crate::memtable::{MemtableBuilderProvider, ensure_json2_not_use_time_series_memtable};
+use crate::memtable::{MemtableBuilderProvider, ensure_json2_uses_flat_format};
 use crate::metrics::{CACHE_FILL_DOWNLOADED_FILES, CACHE_FILL_PENDING_FILES};
 use crate::read::series_candidate::is_sparse_metric_metadata;
 use crate::region::options::RegionOptions;
-use crate::region::version::{VersionBuilder, VersionControl, VersionControlRef};
+use crate::region::version::{Version, VersionBuilder, VersionControl, VersionControlRef};
 use crate::region::{
     ManifestContext, ManifestStats, MitoRegion, MitoRegionRef, RegionLeaderState, RegionRoleState,
     RegionStats,
@@ -157,6 +158,7 @@ pub(crate) struct RegionOpener {
     options: Option<RegionOptions>,
     cache_manager: Option<CacheManagerRef>,
     skip_wal_replay: bool,
+    node_lease: Arc<NodeLease>,
     puffin_manager_factory: PuffinManagerFactory,
     intermediate_manager: IntermediateManager,
     time_provider: TimeProviderRef,
@@ -178,6 +180,7 @@ impl RegionOpener {
         region_id: RegionId,
         table_dir: &str,
         path_type: PathType,
+        node_lease: Arc<NodeLease>,
         memtable_builder_provider: MemtableBuilderProvider,
         object_store_manager: ObjectStoreManagerRef,
         purge_scheduler: SchedulerRef,
@@ -198,10 +201,11 @@ impl RegionOpener {
             options: None,
             cache_manager: None,
             skip_wal_replay: false,
+            node_lease,
             puffin_manager_factory,
             intermediate_manager,
             time_provider,
-            stats: Default::default(),
+            stats: ManifestStats::with_region_metrics(region_id),
             wal_entry_reader: None,
             replay_checkpoint: None,
             file_ref_manager,
@@ -337,9 +341,9 @@ impl RegionOpener {
         let region_id = self.region_id;
         let region_dir = self.region_dir();
         let metadata = self.build_metadata()?;
-        // Tries to open the region.
-        match self.maybe_open(config, wal).await {
-            Ok(Some(region)) => {
+        // Only an absent region may be created; an open error must not replace its manifest.
+        match self.maybe_open(config, wal).await? {
+            Some(region) => {
                 let recovered = region.metadata();
                 // Checks the schema of the region.
                 let expect = &metadata;
@@ -354,16 +358,10 @@ impl RegionOpener {
 
                 return Ok(region);
             }
-            Ok(None) => {
+            None => {
                 debug!(
                     "No data under directory {}, region_id: {}",
                     region_dir, self.region_id
-                );
-            }
-            Err(e) => {
-                warn!(e;
-                    "Failed to open region {} before creating it, region_dir: {}",
-                    self.region_id, region_dir
                 );
             }
         }
@@ -383,11 +381,19 @@ impl RegionOpener {
             options.sst_format = Some(FormatType::PrimaryKey);
             FormatType::PrimaryKey
         };
-        ensure_json2_not_use_time_series_memtable(&metadata, &options)?;
+        ensure_json2_uses_flat_format(&metadata, &options)?;
         options.validate_column_compression(&metadata)?;
+        // The region's WAL history starts in this log store, so reopening
+        // the region on it passes the history check without any entry. It is
+        // recorded before the manifest exists: a log store that gave up its
+        // history meanwhile fails the create before it leaves a manifest.
+        wal.start_region_history(region_id, &provider)?;
         // Create a manifest manager for this region and writes regions to the manifest file.
         let mut region_manifest_options =
-            RegionManifestOptions::new(config, &region_dir, &object_store);
+            RegionManifestOptions::new(config, &region_dir, &object_store)
+                .with_conditional_publication(
+                    options.requires_conditional_manifest_publication(self.node_lease.is_enabled()),
+                );
         // Set manifest cache if available
         region_manifest_options.manifest_cache = self
             .cache_manager
@@ -404,6 +410,7 @@ impl RegionOpener {
             flushed_entry_id,
             region_manifest_options,
             sst_format,
+            options.append_mode,
             &self.stats,
         )
         .await?;
@@ -424,17 +431,21 @@ impl RegionOpener {
             .flushed_entry_id(flushed_entry_id)
             .build();
         let version_control = Arc::new(VersionControl::new(version));
-        let access_layer = Arc::new(AccessLayer::new(
-            self.table_dir.clone(),
-            self.path_type,
-            object_store,
-            self.puffin_manager_factory,
-            self.intermediate_manager,
-        ));
+        let access_layer = Arc::new(
+            AccessLayer::new(
+                self.table_dir.clone(),
+                self.path_type,
+                object_store,
+                self.puffin_manager_factory,
+                self.intermediate_manager,
+            )
+            .with_file_protection(self.hook.clone()),
+        );
         let now = self.time_provider.current_time_millis();
 
         Ok(Arc::new(MitoRegion {
             region_id,
+            compaction_state: Default::default(),
             version_control,
             series_index_version_control: crate::series_index::SeriesIndexVersionControl::default()
                 .with_format(config.experimental_series_index_format),
@@ -445,6 +456,7 @@ impl RegionOpener {
                 manifest_manager,
                 RegionRoleState::Leader(RegionLeaderState::Writable),
                 self.hook.clone(),
+                self.node_lease.clone(),
             )),
             file_purger: create_file_purger(
                 config.gc.enable,
@@ -503,6 +515,8 @@ impl RegionOpener {
     }
 
     /// Tries to open the region and returns `None` if the region directory is empty.
+    /// A region it replays must find its WAL history in the log store, see
+    /// [`check_wal_history`].
     async fn maybe_open<S: LogStore>(
         &mut self,
         config: &MitoConfig,
@@ -512,7 +526,11 @@ impl RegionOpener {
         let mut region_options = self.options.as_ref().unwrap().clone();
         let object_storage = get_object_store(&region_options.storage, &self.object_store_manager)?;
         let mut region_manifest_options =
-            RegionManifestOptions::new(config, &self.region_dir(), &object_storage);
+            RegionManifestOptions::new(config, &self.region_dir(), &object_storage)
+                .with_conditional_publication(
+                    region_options
+                        .requires_conditional_manifest_publication(self.node_lease.is_enabled()),
+                );
         // Set manifest cache if available
         region_manifest_options.manifest_cache = self
             .cache_manager
@@ -540,7 +558,7 @@ impl RegionOpener {
         let metadata = maybe_upgrade_json2_layout(metadata)?;
         // Updates the region options with the manifest.
         sanitize_region_options(&manifest, &mut region_options);
-        ensure_json2_not_use_time_series_memtable(&metadata, &region_options)?;
+        ensure_json2_uses_flat_format(&metadata, &region_options)?;
         region_options.validate_column_compression(&metadata)?;
 
         let region_id = self.region_id;
@@ -557,13 +575,16 @@ impl RegionOpener {
             region_id, self.table_dir, self.options
         );
 
-        let access_layer = Arc::new(AccessLayer::new(
-            self.table_dir.clone(),
-            self.path_type,
-            object_store,
-            self.puffin_manager_factory.clone(),
-            self.intermediate_manager.clone(),
-        ));
+        let access_layer = Arc::new(
+            AccessLayer::new(
+                self.table_dir.clone(),
+                self.path_type,
+                object_store,
+                self.puffin_manager_factory.clone(),
+                self.intermediate_manager.clone(),
+            )
+            .with_file_protection(self.hook.clone()),
+        );
         let file_purger = create_file_purger(
             config.gc.enable,
             self.path_type,
@@ -606,10 +627,14 @@ impl RegionOpener {
             .unwrap_or_default()
             .max(flushed_entry_id);
         let topic_latest_entry_id = if !self.skip_wal_replay {
+            check_wal_history(wal, &provider, &version_control.current().version).await?;
+            let node_id = self.file_ref_manager.node_id();
+            let replay_start = replay_from_entry_id.max(manifest.wal_replay_start(node_id));
             info!(
-                "Start replaying memtable at replay_from_entry_id: {} for region {}, manifest version: {}, flushed entry id: {}, elapsed: {:?}",
-                replay_from_entry_id,
+                "Start replaying memtable at replay_start: {} for region {}, replay_from_entry_id: {}, manifest version: {}, flushed entry id: {}, elapsed: {:?}",
+                replay_start,
                 region_id,
+                replay_from_entry_id,
                 manifest.manifest_version,
                 flushed_entry_id,
                 now.elapsed()
@@ -618,7 +643,8 @@ impl RegionOpener {
                 &provider,
                 wal_entry_reader,
                 region_id,
-                replay_from_entry_id,
+                replay_start,
+                cap_wal_release(&manifest.pending_tails, node_id, replay_start),
                 &version_control,
                 config.allow_stale_entries,
                 on_region_opened,
@@ -680,6 +706,7 @@ impl RegionOpener {
 
         let region = MitoRegion {
             region_id: self.region_id,
+            compaction_state: Default::default(),
             version_control: version_control.clone(),
             series_index_version_control: series_index_version_control
                 .with_format(config.experimental_series_index_format),
@@ -690,6 +717,7 @@ impl RegionOpener {
                 manifest_manager,
                 RegionRoleState::Follower,
                 self.hook.clone(),
+                self.node_lease.clone(),
             )),
             file_purger,
             provider: provider.clone(),
@@ -791,27 +819,48 @@ pub(crate) fn version_builder_from_manifest(
         .truncated_entry_id(manifest.truncated_entry_id)
         .compaction_time_window(manifest.compaction_time_window)
         .options(region_options)
+        .pending_tails(manifest.pending_tails.clone())
 }
 
 /// Updates region options by persistent options.
 pub(crate) fn sanitize_region_options(manifest: &RegionManifest, options: &mut RegionOptions) {
-    // The caller-supplied options win when they specify an explicit `sst_format`,
-    // so re-parsed options (e.g. bulk memtable forcing flat format) take effect on
-    // the running region instead of being clobbered by the persisted manifest value.
-    // Fall back to the manifest only when the caller did not provide a value.
-    match options.sst_format {
-        Some(format) if format != manifest.sst_format => {
-            common_telemetry::warn!(
+    if let Some(encoding) = options.primary_key_encoding
+        && encoding != manifest.metadata.primary_key_encoding
+    {
+        common_telemetry::warn!(
+            "Overriding primary key encoding from {:?} to {:?} for region {}",
+            encoding,
+            manifest.metadata.primary_key_encoding,
+            manifest.metadata.region_id,
+        );
+    }
+    options.primary_key_encoding = Some(manifest.metadata.primary_key_encoding);
+    if manifest.metadata.primary_key_encoding == PrimaryKeyEncoding::Sparse {
+        options.sst_format = Some(FormatType::Flat);
+    }
+    // Caller options take precedence over the manifest, except JSON2 always requires flat output.
+    let format = options.sst_format.unwrap_or(manifest.sst_format);
+    // Older versions allowed JSON2 with primary-key output; recover without rewriting its history.
+    if format != FormatType::Flat
+        && manifest
+            .metadata
+            .column_metadatas
+            .iter()
+            .any(|column| column.column_schema.data_type.is_json2())
+    {
+        warn!(
+            "Overriding SST format from {:?} to flat for existing JSON2 region {}",
+            format, manifest.metadata.region_id,
+        );
+        options.sst_format = Some(FormatType::Flat);
+    } else {
+        if format != manifest.sst_format {
+            warn!(
                 "Overriding SST format from {:?} (manifest) to {:?} (options) for region {}",
-                manifest.sst_format,
-                format,
-                manifest.metadata.region_id,
+                manifest.sst_format, format, manifest.metadata.region_id,
             );
         }
-        Some(_) => {}
-        None => {
-            options.sst_format = Some(manifest.sst_format);
-        }
+        options.sst_format = Some(format);
     }
     if let Some(manifest_append_mode) = manifest.append_mode
         && options.append_mode != manifest_append_mode
@@ -911,12 +960,34 @@ pub(crate) fn check_recovered_region(
     Ok(())
 }
 
-/// Replays the mutations from WAL and inserts mutations to memtable of given region.
+/// Checks that the log store holds the WAL history of a region that writes
+/// to the WAL through the largest replay watermark `version` persisted,
+/// before the region is replayed. A region that skips the WAL keeps no
+/// history there.
+pub(crate) async fn check_wal_history<S: LogStore>(
+    wal: &Wal<S>,
+    provider: &Provider,
+    version: &Version,
+) -> Result<()> {
+    if version.options.skip_wal {
+        return Ok(());
+    }
+    let watermark = version
+        .flushed_entry_id
+        .max(version.truncated_entry_id.unwrap_or_default());
+    wal.check_region_history(version.metadata.region_id, provider, watermark)
+        .await
+}
+
+/// Replays the mutations from WAL and inserts mutations to memtable of given region,
+/// then releases the WAL up to `release_entry_id`.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn replay_memtable<F>(
     provider: &Provider,
     mut wal_entry_reader: Box<dyn WalEntryReader>,
     region_id: RegionId,
     flushed_entry_id: EntryId,
+    release_entry_id: EntryId,
     version_control: &VersionControlRef,
     allow_stale_entries: bool,
     on_region_opened: F,
@@ -984,9 +1055,7 @@ where
             // columns like the write path, otherwise the memtable rejects the
             // batch. Skips sparse batches as they don't carry tag columns by
             // design.
-            if region_metadata.primary_key_encoding != PrimaryKeyEncoding::Sparse {
-                part.fill_missing_columns(&region_metadata)?;
-            }
+            part.fill_missing_columns(&region_metadata)?;
             rows_replayed += part.num_rows();
             // During replay, we should adopt the sequence from WAL.
             let bulk_sequence_from_wal = part.sequence;
@@ -1013,7 +1082,7 @@ where
 
     // TODO(weny): We need to update `flushed_entry_id` in the region manifest
     // to avoid reading potentially incomplete entries in the future.
-    (on_region_opened)(region_id, flushed_entry_id, provider).await?;
+    (on_region_opened)(region_id, release_entry_id, provider).await?;
 
     let series_count = version_control.current().series_count();
     info!(
@@ -1056,7 +1125,7 @@ impl RegionLoadCacheTask {
             for level in version.ssts.levels() {
                 for file_handle in level.files.values() {
                     let file_meta = file_handle.meta_ref();
-                    if file_meta.exists_index() {
+                    if file_meta.has_downloadable_index() {
                         let puffin_key = IndexKey::new(
                             file_meta.region_id,
                             file_meta.file_id,
@@ -1261,7 +1330,7 @@ async fn preload_parquet_meta_cache_for_files(
                 }
                 match metadata {
                     SstMetaPreparation::Prepared(metadata) => {
-                        cache_manager.put_prepared_sst_meta(file_id, metadata, false);
+                        cache_manager.put_compact_sst_meta(file_id, metadata.compact);
                         loaded += 1;
                     }
                     SstMetaPreparation::DecodedOnly { encoding_error, .. } => warn!(
@@ -1304,7 +1373,7 @@ async fn preload_parquet_meta_cache_for_files(
                     Ok(SstMetaPreparation::Prepared(metadata)) => {
                         // Preload the compact canonical entry only. Query traffic promotes decoded
                         // entries into the separate acceleration tier according to actual demand.
-                        cache_manager.put_prepared_sst_meta(file_id, metadata, false);
+                        cache_manager.put_compact_sst_meta(file_id, metadata.compact);
                         loaded += 1;
                     }
                     Ok(SstMetaPreparation::DecodedOnly { encoding_error, .. }) => warn!(
@@ -1422,6 +1491,7 @@ fn can_load_cache(state: RegionRoleState) -> bool {
 mod tests {
     use std::collections::HashMap;
     use std::sync::Arc;
+    use store_api::codec::PrimaryKeyEncoding;
 
     use arrow_schema::extension::ExtensionType;
     use common_base::readable_size::ReadableSize;
@@ -1479,6 +1549,8 @@ mod tests {
             compaction_time_window: None,
             sst_format,
             append_mode: None,
+            pending_tails: Default::default(),
+            handoff_floors: Default::default(),
         }
     }
 
@@ -1603,6 +1675,22 @@ mod tests {
     }
 
     #[test]
+    fn test_sparse_reopen_uses_persisted_encoding_and_flat_sst() {
+        for supplied in [None, Some(PrimaryKeyEncoding::Dense)] {
+            let mut manifest = build_test_manifest(FormatType::PrimaryKey);
+            Arc::make_mut(&mut manifest.metadata).primary_key_encoding = PrimaryKeyEncoding::Sparse;
+            let mut options = RegionOptions {
+                primary_key_encoding: supplied,
+                sst_format: Some(FormatType::PrimaryKey),
+                ..Default::default()
+            };
+            sanitize_region_options(&manifest, &mut options);
+            assert_eq!(options.primary_key_encoding(), PrimaryKeyEncoding::Sparse);
+            assert_eq!(options.sst_format, Some(FormatType::Flat));
+        }
+    }
+
+    #[test]
     fn test_sanitize_region_options_options_format_wins() {
         // Manifest persisted PrimaryKey, but the re-parsed options now request Flat
         // (e.g., bulk memtable). The options' value must win.
@@ -1628,6 +1716,31 @@ mod tests {
         assert_eq!(options.sst_format, Some(FormatType::Flat));
     }
 
+    #[rstest::rstest]
+    fn test_sanitize_region_options_recovers_json2(
+        #[values(FormatType::PrimaryKey, FormatType::Flat)] persisted: FormatType,
+        #[values(None, Some(FormatType::PrimaryKey), Some(FormatType::Flat))] requested: Option<
+            FormatType,
+        >,
+    ) {
+        let mut manifest = build_test_manifest(persisted);
+        let mut metadata = manifest.metadata.as_ref().clone();
+        metadata.column_metadatas[2].column_schema.data_type =
+            ConcreteDataType::json2(JsonNativeType::Object(JsonObjectType::new()));
+        manifest.metadata = Arc::new(
+            RegionMetadataBuilder::from_existing(metadata)
+                .build()
+                .unwrap(),
+        );
+        let mut options = RegionOptions {
+            sst_format: requested,
+            ..Default::default()
+        };
+        sanitize_region_options(&manifest, &mut options);
+        assert_eq!(Some(FormatType::Flat), options.sst_format);
+        assert_eq!(persisted, manifest.sst_format);
+    }
+
     fn sst_parquet_bytes(batch: &RecordBatch) -> Vec<u8> {
         let key_value_meta = KeyValue::new(
             PARQUET_METADATA_KEY.to_string(),
@@ -1644,6 +1757,95 @@ mod tests {
         writer.close().unwrap();
 
         parquet_bytes
+    }
+
+    #[rstest::rstest]
+    #[case::known_size(7, true)]
+    #[case::unknown_size(0, false)]
+    #[tokio::test]
+    async fn test_preload_column_only_index(
+        #[case] index_file_size: u64,
+        #[case] expected_cached: bool,
+    ) {
+        use store_api::region_engine::RegionEngine;
+        use store_api::region_request::RegionRequest;
+
+        use crate::manifest::action::RegionEdit;
+        use crate::sst::file::{ColumnIndexMetadata, IndexType};
+        use crate::test_util::CreateRequestBuilder;
+
+        let mut env = TestEnv::new().await;
+        let engine = env.create_engine(Default::default()).await;
+        let region_id = RegionId::new(1, 1);
+        engine
+            .handle_request(
+                region_id,
+                RegionRequest::Create(CreateRequestBuilder::new().build()),
+            )
+            .await
+            .unwrap();
+        let region = engine.get_region(region_id).unwrap();
+        let write_cache = env
+            .create_write_cache(
+                ObjectStore::new(Memory::default()).unwrap(),
+                ReadableSize::mb(1),
+            )
+            .await;
+        let meta = FileMeta {
+            region_id,
+            file_id: FileId::random(),
+            index_file_size,
+            index_version: 3,
+            indexes: vec![ColumnIndexMetadata {
+                column_id: 0,
+                created_indexes: smallvec::smallvec![IndexType::HllIndex],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        assert!(meta.available_indexes.is_empty());
+        assert!(meta.exists_index());
+        assert_eq!(meta.index_version(), Some(3));
+        let key = IndexKey::new(region_id, meta.file_id, FileType::Puffin(3));
+        let path = crate::sst::location::index_file_path(
+            region.access_layer.table_dir(),
+            meta.index_id(),
+            region.access_layer.path_type(),
+        );
+        region
+            .access_layer
+            .object_store()
+            .write(&path, b"payload".as_slice())
+            .await
+            .unwrap();
+        region.version_control.apply_edit(
+            Some(RegionEdit {
+                files_to_add: vec![meta],
+                ..Default::default()
+            }),
+            &[],
+            region.file_purger.clone(),
+        );
+
+        super::RegionLoadCacheTask::new(region)
+            .fill_cache(&write_cache.file_cache())
+            .await;
+        let file_cache = write_cache.file_cache();
+        assert_eq!(file_cache.contains_key(&key), expected_cached);
+        let cached_path = file_cache.cache_file_path(key);
+        if expected_cached {
+            assert_eq!(
+                file_cache
+                    .local_store()
+                    .read(&cached_path)
+                    .await
+                    .unwrap()
+                    .to_vec(),
+                b"payload"
+            );
+        } else {
+            assert!(!file_cache.local_store().exists(&cached_path).await.unwrap());
+        }
     }
 
     #[tokio::test]
@@ -1721,6 +1923,7 @@ mod tests {
         assert!(
             cache_manager
                 .get_parquet_meta_data_from_mem_cache(region_file_id)
+                .await
                 .is_none()
         );
 
@@ -1797,6 +2000,7 @@ mod tests {
         assert!(
             cache_manager
                 .get_parquet_meta_data_from_mem_cache(region_file_id)
+                .await
                 .is_none()
         );
 
@@ -1816,6 +2020,7 @@ mod tests {
         assert!(
             cache_manager
                 .get_parquet_meta_data_from_mem_cache(region_file_id)
+                .await
                 .is_none()
         );
     }
@@ -1870,6 +2075,7 @@ mod tests {
         assert!(
             cache_manager
                 .get_parquet_meta_data_from_mem_cache(region_file_id)
+                .await
                 .is_none()
         );
 

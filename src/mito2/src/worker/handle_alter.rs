@@ -36,6 +36,7 @@ use store_api::storage::RegionId;
 use crate::error::{InvalidMetadataSnafu, InvalidRegionRequestSnafu, Result};
 use crate::flush::FlushReason;
 use crate::manifest::action::RegionChange;
+use crate::memtable::ensure_json2_uses_flat_format;
 use crate::region::MitoRegionRef;
 use crate::region::options::CompactionOptions::Twcs;
 use crate::region::options::{RegionOptions, TwcsOptions};
@@ -44,8 +45,43 @@ use crate::request::{DdlRequest, OptionOutputTx, SenderDdlRequest};
 use crate::sst::FormatType;
 use crate::worker::RegionWorkerLoop;
 
+pub(crate) type PendingAlters = std::collections::HashMap<
+    RegionId,
+    std::collections::VecDeque<(RegionAlterRequest, OptionOutputTx)>,
+>;
+
 impl<S: LogStore> RegionWorkerLoop<S> {
     pub(crate) async fn handle_alter_request(
+        &mut self,
+        region_id: RegionId,
+        request: RegionAlterRequest,
+        sender: OptionOutputTx,
+    ) {
+        if self.flush_scheduler.has_pending_alter(region_id)
+            || self.pending_alters.contains_key(&region_id)
+            || self.regions.get_region(region_id).is_some_and(|region| {
+                matches!(
+                    region.state(),
+                    crate::region::RegionRoleState::Leader(
+                        crate::region::RegionLeaderState::Editing
+                            | crate::region::RegionLeaderState::Altering
+                    )
+                )
+            })
+        {
+            let queue = self.pending_alters.entry(region_id).or_default();
+            if queue.len() >= 128 {
+                sender.send(crate::error::RegionBusySnafu { region_id }.fail());
+            } else {
+                queue.push_back((request, sender));
+            }
+            self.dispatch_pending_region_requests(region_id).await;
+            return;
+        }
+        self.execute_alter_request(region_id, request, sender).await;
+    }
+
+    pub(crate) async fn execute_alter_request(
         &mut self,
         region_id: RegionId,
         request: RegionAlterRequest,
@@ -131,6 +167,13 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             return;
         }
 
+        if !is_allowed_with_pending_tails(&request.kind)
+            && let Err(e) = version.ensure_no_pending_tails()
+        {
+            sender.send(Err(e));
+            return;
+        }
+
         // Checks whether we need to alter the region.
         if !request.need_alter(&version.metadata) {
             warn!(
@@ -195,12 +238,16 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 return;
             }
         };
-        // Persist the metadata to region's manifest.
         let options = new_options.as_ref().unwrap_or(&version.options);
+        if let Err(e) = ensure_json2_uses_flat_format(&new_meta, options) {
+            sender.send(Err(e));
+            return;
+        }
         if let Err(e) = options.validate_column_compression(&new_meta) {
             sender.send(Err(e));
             return;
         }
+        // Persist the metadata to region's manifest.
         let change = RegionChange {
             metadata: new_meta,
             sst_format: options.sst_format.unwrap_or_default(),
@@ -306,6 +353,11 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                         current_options.auto_flush_interval = new_interval;
                     }
                 }
+                SetRegionOption::CompactionOutputParallelism(parallelism) => {
+                    // New compactions use the updated options; running ones retain
+                    // their snapshot. No memtable flush is needed.
+                    current_options.compaction_output_parallelism = parallelism;
+                }
                 SetRegionOption::MaxRowGroupRowCount(new_row_count) => {
                     if let Some(row_count) = new_row_count {
                         ensure!(
@@ -380,6 +432,19 @@ impl<S: LogStore> RegionWorkerLoop<S> {
     }
 }
 
+/// Returns true if `kind` only changes region options or only adds nullable columns
+/// without a default value, which rows replayed from a pending tail can lack.
+fn is_allowed_with_pending_tails(kind: &AlterKind) -> bool {
+    match kind {
+        AlterKind::AddColumns { columns } => columns.iter().all(|column| {
+            let schema = &column.column_metadata.column_schema;
+            schema.is_nullable() && schema.default_constraint().is_none()
+        }),
+        AlterKind::SetRegionOptions { .. } | AlterKind::UnsetRegionOptions { .. } => true,
+        _ => false,
+    }
+}
+
 fn skip_wal_value(kind: &AlterKind) -> Option<bool> {
     let AlterKind::SetRegionOptions { options } = kind else {
         return None;
@@ -426,6 +491,7 @@ fn new_region_options_on_empty_memtable(
             | SetRegionOption::Ttl(_)
             | SetRegionOption::Twsc(_, _)
             | SetRegionOption::AutoFlushInterval(_)
+            | SetRegionOption::CompactionOutputParallelism(_)
             | SetRegionOption::SkipWal(_) => (),
             SetRegionOption::Format(format_str) => {
                 // Safety: handle_alter_region_options_fast() has validated this.

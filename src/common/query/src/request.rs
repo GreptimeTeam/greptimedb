@@ -525,6 +525,7 @@ mod tests {
             SeededRandomState::with_seed(0),
             Arc::new(Map::HashMap(Box::new(JoinHashMapU32::with_capacity(0)))),
             "hash_lookup".to_string(),
+            None,
         )) as Arc<dyn PhysicalExpr>;
         let expr =
             Arc::new(BinaryExpr::new(lower_bound, Operator::And, lookup)) as Arc<dyn PhysicalExpr>;

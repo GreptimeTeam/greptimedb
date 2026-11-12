@@ -25,7 +25,8 @@ use api::v1::RowInsertRequests;
 // in `common_catalog::consts` (shared with the read-time graph derivation).
 pub use common_catalog::consts::{
     DURATION_NANO_COLUMN, SERVICE_NAME_COLUMN, SPAN_KIND_COLUMN,
-    SPAN_STATUS_CODE_COLUMN as SPAN_STATUS_CODE, TRACE_TIMESTAMP_COLUMN as TIMESTAMP_COLUMN,
+    SPAN_STATUS_CODE_COLUMN as SPAN_STATUS_CODE, TIMESTAMP_END_COLUMN,
+    TRACE_TIMESTAMP_COLUMN as TIMESTAMP_COLUMN,
 };
 pub use common_catalog::consts::{
     PARENT_SPAN_ID_COLUMN, RESOURCE_ATTRIBUTES_COLUMN, SCOPE_ATTRIBUTES_COLUMN,
@@ -36,7 +37,6 @@ use pipeline::PipelineWay;
 use crate::error::{NotSupportedSnafu, Result};
 use crate::otlp::trace::span::TraceSpan;
 
-pub const TIMESTAMP_END_COLUMN: &str = "timestamp_end";
 pub const SPAN_STATUS_MESSAGE_COLUMN: &str = "span_status_message";
 pub const SPAN_EVENTS_COLUMN: &str = "span_events";
 pub const SPAN_LINKS_COLUMN: &str = "span_links";
