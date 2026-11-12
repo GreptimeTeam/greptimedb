@@ -818,7 +818,7 @@ impl StatementExecutor {
             })?;
 
         let physical_table_info = physical_table.table_info();
-        let (partition_rule, _) = self
+        let partition = self
             .partition_manager
             .find_table_partition_rule(&physical_table_info)
             .await
@@ -826,7 +826,8 @@ impl StatementExecutor {
                 table_name: physical_table_name.clone(),
             })?;
 
-        let multi_dim_rule = partition_rule
+        let multi_dim_rule = partition
+            .rule
             .as_ref()
             .as_any()
             .downcast_ref::<MultiDimPartitionRule>()

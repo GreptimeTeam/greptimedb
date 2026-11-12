@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use api::v1::Rows;
@@ -21,7 +21,13 @@ use common_meta::key::table_route::{PhysicalTableRouteValue, TableRouteManager};
 use common_meta::kv_backend::KvBackendRef;
 use common_meta::peer::Peer;
 use common_meta::rpc::router::{self, RegionRoute};
-use snafu::{OptionExt, ResultExt};
+use datatypes::arrow::array::UInt32Array;
+use datatypes::arrow::datatypes::{DataType, Field, Schema};
+use datatypes::arrow::record_batch::RecordBatch;
+use snafu::{OptionExt, ResultExt, ensure};
+use store_api::metric_engine_consts::{
+    DATA_SCHEMA_TABLE_ID_COLUMN_NAME, LOGICAL_TABLE_METADATA_KEY, METRIC_ENGINE_NAME,
+};
 use store_api::storage::{RegionId, RegionNumber};
 use table::metadata::{TableId, TableInfo};
 
@@ -30,7 +36,7 @@ use crate::error::{FindLeaderSnafu, Result};
 use crate::expr::PartitionExpr;
 use crate::multi_dim::MultiDimPartitionRule;
 use crate::splitter::RowSplitter;
-use crate::{PartitionRuleRef, error};
+use crate::{PartitionRule, PartitionRuleRef, error};
 
 pub type PartitionRuleManagerRef = Arc<PartitionRuleManager>;
 
@@ -55,6 +61,19 @@ pub struct PartitionInfoWithVersion {
     pub id: RegionId,
     pub partition_expr: Option<PartitionExpr>,
     pub partition_expr_version: Option<u64>,
+}
+
+/// A single captured routing snapshot of one table.
+///
+/// The rule, the expression versions and the identity route all come from the
+/// same route metadata, so a request built from one snapshot stays consistent
+/// while the table is repartitioned.
+pub struct TablePartitionRule {
+    pub rule: PartitionRuleRef,
+    pub versions: HashMap<RegionNumber, Option<u64>>,
+    /// Region that receives every row of this table, when its partition rule
+    /// routes by the table's own identity instead of by the payload.
+    pub identity_region: Option<RegionNumber>,
 }
 
 impl PartitionRuleManager {
@@ -191,8 +210,8 @@ impl PartitionRuleManager {
     pub async fn find_table_partition_rule(
         &self,
         table_info: &TableInfo,
-    ) -> Result<(PartitionRuleRef, HashMap<RegionNumber, Option<u64>>)> {
-        let partition_columns = table_info
+    ) -> Result<TablePartitionRule> {
+        let mut partition_columns = table_info
             .meta
             .partition_column_names()
             .cloned()
@@ -201,7 +220,7 @@ impl PartitionRuleManager {
         let partition_info = self
             .find_physical_partition_info(table_info.table_id())
             .await?;
-        let partition_versions = partition_info
+        let versions = partition_info
             .partitions
             .iter()
             .map(|r| (r.id.region_number(), r.partition_expr_version))
@@ -225,13 +244,38 @@ impl PartitionRuleManager {
                 .filter(|partition| partition.partition_expr.is_none())
                 .map(|partition| partition.id.region_number()),
         );
-        let partition_rule = Arc::new(MultiDimPartitionRule::try_new(
+
+        // A logical table's rows never carry the physical schema's internal
+        // columns, so the rule has to learn the identity column from the table.
+        let identity = routes_by_identity(table_info, &exprs)?;
+        if identity
+            && !partition_columns
+                .iter()
+                .any(|c| c == DATA_SCHEMA_TABLE_ID_COLUMN_NAME)
+        {
+            partition_columns.push(DATA_SCHEMA_TABLE_ID_COLUMN_NAME.into());
+        }
+        let rule: PartitionRuleRef = Arc::new(MultiDimPartitionRule::try_new(
             partition_columns,
             regions,
             exprs,
             false,
-        )?) as _;
-        Ok((partition_rule, partition_versions))
+        )?);
+        let identity_region = if identity {
+            Some(find_identity_region(
+                rule.as_ref(),
+                table_info.table_id(),
+                &partition_info,
+            )?)
+        } else {
+            None
+        };
+
+        Ok(TablePartitionRule {
+            rule,
+            versions,
+            identity_region,
+        })
     }
 
     /// Find the leader of the region.
@@ -254,10 +298,16 @@ impl PartitionRuleManager {
         table_info: &TableInfo,
         rows: Rows,
     ) -> Result<HashMap<RegionNumber, (Rows, Option<u64>)>> {
-        let (partition_rule, partition_versions) =
-            self.find_table_partition_rule(table_info).await?;
+        let partition = self.find_table_partition_rule(table_info).await?;
+        if let Some(region) = partition.identity_region {
+            if rows.rows.is_empty() {
+                return Ok(HashMap::new());
+            }
+            let version = partition.versions.get(&region).copied().unwrap_or_default();
+            return Ok(HashMap::from([(region, (rows, version))]));
+        }
 
-        let result = RowSplitter::new(partition_rule)
+        let result = RowSplitter::new(partition.rule)
             .split(rows)?
             .into_iter()
             .map(|(region_number, rows)| {
@@ -265,7 +315,8 @@ impl PartitionRuleManager {
                     region_number,
                     (
                         rows,
-                        partition_versions
+                        partition
+                            .versions
                             .get(&region_number)
                             .copied()
                             .unwrap_or_default(),
@@ -276,6 +327,100 @@ impl PartitionRuleManager {
 
         Ok(result)
     }
+}
+
+/// Whether the table's own identity is the only way to evaluate its rule.
+///
+/// A logical metric table stores its rows under a physical table whose internal
+/// [`DATA_SCHEMA_TABLE_ID_COLUMN_NAME`] column records the owning logical table,
+/// while the logical schema and its write payloads have no such column. Once the
+/// physical table is partitioned on that column, the rule can only be evaluated
+/// against the identity itself.
+///
+/// Mixed rules are rejected here rather than routed with a guessed value, and
+/// the value is never taken from a payload column that happens to share the name.
+fn routes_by_identity(table_info: &TableInfo, exprs: &[PartitionExpr]) -> Result<bool> {
+    let logical_metric = table_info.meta.engine == METRIC_ENGINE_NAME
+        && table_info
+            .meta
+            .options
+            .extra_options
+            .contains_key(LOGICAL_TABLE_METADATA_KEY);
+    if !logical_metric {
+        return Ok(false);
+    }
+
+    let mut referenced = HashSet::new();
+    for expr in exprs {
+        expr.collect_column_names(&mut referenced);
+    }
+    if !referenced.contains(DATA_SCHEMA_TABLE_ID_COLUMN_NAME) {
+        return Ok(false);
+    }
+    ensure!(
+        referenced.len() == 1,
+        error::UnsupportedTablePartitionSnafu {
+            reason: format!(
+                "logical table {} is partitioned on {} together with other columns: {:?}",
+                table_info.table_id(),
+                DATA_SCHEMA_TABLE_ID_COLUMN_NAME,
+                referenced
+            ),
+        }
+    );
+
+    Ok(true)
+}
+
+/// Resolves the identity row to the single region that owns the whole table.
+///
+/// The row is evaluated by the rule itself so the expression keeps the same type
+/// coordination, hash support and default handling as any other write.
+///
+/// Repartitioning validates the new expressions with `PartitionChecker`, which
+/// rejects gaps and overlaps, so a rule built by it selects exactly one region for
+/// any identity. The checks below therefore only reject corrupt route metadata: the
+/// rule sends rows no expression matched to a fallback region, which must not be
+/// mistaken for the region that owns the table.
+fn find_identity_region(
+    rule: &dyn PartitionRule,
+    table_id: TableId,
+    partition_info: &PhysicalPartitionInfo,
+) -> Result<RegionNumber> {
+    let schema = Arc::new(Schema::new(vec![Field::new(
+        DATA_SCHEMA_TABLE_ID_COLUMN_NAME,
+        DataType::UInt32,
+        false,
+    )]));
+    let batch = RecordBatch::try_new(schema, vec![Arc::new(UInt32Array::from(vec![table_id]))])
+        .context(error::ComputeArrowKernelSnafu)?;
+    let masks = rule.split_record_batch(&batch)?;
+
+    let mut selected = masks
+        .iter()
+        .filter(|(_, mask)| mask.selected_rows() > 0)
+        .map(|(region, _)| region);
+    let region = selected.next().copied().context(error::UnexpectedSnafu {
+        err_msg: format!("no partition selected the identity of table {table_id}"),
+    })?;
+    ensure!(
+        selected.next().is_none(),
+        error::UnsupportedTablePartitionSnafu {
+            reason: format!("multiple partitions select the identity of table {table_id}"),
+        }
+    );
+    // Only a region with its own expression can own the table. Otherwise the rule
+    // had no match and routed the row to its fallback region instead.
+    ensure!(
+        partition_info.partitions.iter().any(|partition| {
+            partition.id.region_number() == region && partition.partition_expr.is_some()
+        }),
+        error::UnsupportedTablePartitionSnafu {
+            reason: format!("no partition expression owns region {region} of table {table_id}"),
+        }
+    );
+
+    Ok(region)
 }
 
 /// Creates partitions from region routes.

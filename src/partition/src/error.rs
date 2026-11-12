@@ -249,6 +249,13 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Unsupported partition routing: {}", reason))]
+    UnsupportedTablePartition {
+        reason: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 impl ErrorExt for Error {
@@ -286,6 +293,7 @@ impl ErrorExt for Error {
             Error::CoercePartitionExpr { .. } => StatusCode::Internal,
             Error::UnsupportedPartitionExprValue { .. } => StatusCode::InvalidArguments,
             Error::ConvertPartitionExprValue { .. } => StatusCode::InvalidArguments,
+            Error::UnsupportedTablePartition { .. } => StatusCode::Unsupported,
         }
     }
 

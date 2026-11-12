@@ -22,7 +22,7 @@ use api::v1::region::{
 use api::v1::{ArrowIpc, PartitionExprVersion, Rows};
 use common_error::ext::BoxedError;
 use common_grpc::flight::{self, FlightDecoder};
-use datatypes::arrow::array::{Array, BinaryArray, StringBuilder};
+use datatypes::arrow::array::{Array, BinaryArray, BooleanArray, StringBuilder};
 use datatypes::arrow::compute;
 use datatypes::arrow::datatypes::{DataType, Field, Schema};
 use datatypes::arrow::record_batch::RecordBatch;
@@ -49,6 +49,9 @@ pub(crate) struct TablePartitioner {
     table_id: TableId,
     rule: PartitionRuleRef,
     versions: HashMap<RegionNumber, Option<PartitionExprVersion>>,
+    /// Region that receives every row of this table when its partition rule routes
+    /// by the table's own identity instead of by the payload.
+    identity_region: Option<RegionNumber>,
 }
 
 impl<'a> Partitioner<'a> {
@@ -138,10 +141,7 @@ impl TablePartitioner {
                 .map(|request| (request, WriteAttribution::default()))
                 .collect());
         }
-        let masks = self
-            .rule
-            .split_record_batch(&batch)
-            .context(SplitInsertSnafu)?;
+        let masks = self.split_record_batch(&batch)?;
         self.build_attributed_bulk_requests(batch, masks, None, skip_wal, attribution)
     }
 
@@ -216,10 +216,7 @@ impl TablePartitioner {
                 .map_err(BoxedError::new)
                 .context(error::ExternalSnafu)?;
             let routing = self.restore_partition_tags(&batch, table_info)?;
-            let masks = self
-                .rule
-                .split_record_batch(routing.as_ref().unwrap_or(&batch))
-                .context(SplitInsertSnafu)?;
+            let masks = self.split_record_batch(routing.as_ref().unwrap_or(&batch))?;
             return self
                 .build_tracked_bulk_insert_requests(batch, masks, owners, Some(ipc), bulk.skip_wal)
                 .map(|requests| {
@@ -274,10 +271,7 @@ impl TablePartitioner {
         owners: Vec<usize>,
         skip_wal: bool,
     ) -> Result<Vec<(BulkInsertRequest, Vec<usize>)>> {
-        let masks = self
-            .rule
-            .split_record_batch(&batch)
-            .context(SplitInsertSnafu)?;
+        let masks = self.split_record_batch(&batch)?;
         self.build_tracked_bulk_insert_requests(batch, masks, owners, None, skip_wal)
     }
 
@@ -328,18 +322,20 @@ impl TablePartitioner {
         partition_manager: &PartitionRuleManager,
         table_info: &TableInfo,
     ) -> partition::error::Result<Self> {
-        let (rule, versions) = partition_manager
+        let snapshot = partition_manager
             .find_table_partition_rule(table_info)
             .await?;
         Ok(Self {
             table_id: table_info.table_id(),
-            rule,
-            versions: versions
+            rule: snapshot.rule,
+            versions: snapshot
+                .versions
                 .into_iter()
                 .map(|(region, version)| {
                     (region, version.map(|value| PartitionExprVersion { value }))
                 })
                 .collect(),
+            identity_region: snapshot.identity_region,
         })
     }
 
@@ -386,8 +382,8 @@ impl TablePartitioner {
         rows: Rows,
         skip_wal: bool,
     ) -> Result<Vec<InsertRequest>> {
-        Ok(RowSplitter::new(self.rule.clone())
-            .split(rows)
+        Ok(self
+            .split_rows(rows)
             .context(SplitInsertSnafu)?
             .into_iter()
             .map(|(region, rows)| InsertRequest {
@@ -401,8 +397,8 @@ impl TablePartitioner {
 
     /// Moves delete rows into requests for this snapshot's destination regions.
     pub fn partition_delete_requests(&self, rows: Rows) -> Result<Vec<DeleteRequest>> {
-        Ok(RowSplitter::new(self.rule.clone())
-            .split(rows)
+        Ok(self
+            .split_rows(rows)
             .context(SplitDeleteSnafu)?
             .into_iter()
             .map(|(region, rows)| DeleteRequest {
@@ -420,10 +416,7 @@ impl TablePartitioner {
         original_ipc: Option<ArrowIpc>,
         skip_wal: bool,
     ) -> Result<Vec<BulkInsertRequest>> {
-        let masks = self
-            .rule
-            .split_record_batch(&batch)
-            .context(SplitInsertSnafu)?;
+        let masks = self.split_record_batch(&batch)?;
         self.build_bulk_insert_requests(batch, masks, original_ipc, skip_wal)
     }
 
@@ -537,10 +530,7 @@ impl TablePartitioner {
             .map_err(BoxedError::new)
             .context(error::ExternalSnafu)?;
         let routing_batch = self.restore_partition_tags(&batch, table_info)?;
-        let masks = self
-            .rule
-            .split_record_batch(routing_batch.as_ref().unwrap_or(&batch))
-            .context(SplitInsertSnafu)?;
+        let masks = self.split_record_batch(routing_batch.as_ref().unwrap_or(&batch))?;
         let writes = if attribution.is_tracked() {
             self.build_attributed_bulk_requests(
                 batch,
@@ -639,7 +629,9 @@ impl TablePartitioner {
     ///
     /// A leader change leaves the partition unchanged, so the original payload can be
     /// sent to the new peer. A removed region or changed partition expression version
-    /// requires rebuilding the request using this snapshot's partition rule.
+    /// requires rebuilding the request using this snapshot's partition rule. A table
+    /// routed by its identity also drops a request whose region is no longer the one
+    /// the identity selects.
     fn is_partition_expr_unchanged(
         &self,
         region_id: RegionId,
@@ -647,9 +639,43 @@ impl TablePartitioner {
     ) -> bool {
         region_id.table_id() == self.table_id
             && self.versions.get(&region_id.region_number()) == Some(&version)
+            && self
+                .identity_region
+                .is_none_or(|region| region == region_id.region_number())
     }
 
-    fn version(&self, region: RegionNumber) -> Option<PartitionExprVersion> {
+    /// Splits rows for this snapshot, pinning a table fully determined by its identity.
+    fn split_rows(&self, rows: Rows) -> partition::error::Result<HashMap<RegionNumber, Rows>> {
+        if let Some(region) = self.identity_region {
+            return Ok(if rows.rows.is_empty() {
+                HashMap::new()
+            } else {
+                HashMap::from([(region, rows)])
+            });
+        }
+
+        RowSplitter::new(self.rule.clone()).split(rows)
+    }
+
+    /// Splits a batch for this snapshot, pinning a table fully determined by its identity.
+    pub(crate) fn split_record_batch(
+        &self,
+        batch: &RecordBatch,
+    ) -> Result<HashMap<RegionNumber, RegionMask>> {
+        if let Some(region) = self.identity_region {
+            return Ok(HashMap::from([(
+                region,
+                RegionMask::from(BooleanArray::from(vec![true; batch.num_rows()])),
+            )]));
+        }
+
+        self.rule
+            .split_record_batch(batch)
+            .context(SplitInsertSnafu)
+    }
+
+    /// Returns the expression version captured with this snapshot.
+    pub(crate) fn version(&self, region: RegionNumber) -> Option<PartitionExprVersion> {
         self.versions.get(&region).copied().flatten()
     }
 }
@@ -696,6 +722,7 @@ mod tests {
     fn build_sparse_partitioner() -> TablePartitioner {
         TablePartitioner {
             table_id: 1,
+            identity_region: None,
             rule: Arc::new(
                 MultiDimPartitionRule::try_new(
                     vec!["zone".to_string()],
@@ -1024,6 +1051,340 @@ mod tests {
         }
     }
 
+    const IDENTITY_PHYSICAL_ID: TableId = 1025;
+
+    /// Physical routes of a table repartitioned by the internal table id.
+    fn identity_regions() -> Vec<(RegionNumber, Option<expr::PartitionExpr>)> {
+        let column = || expr::col(metric_engine_consts::DATA_SCHEMA_TABLE_ID_COLUMN_NAME);
+        vec![
+            (0, Some(column().lt(DataValue::UInt32(1029)))),
+            (
+                1,
+                Some(
+                    column()
+                        .gt_eq(DataValue::UInt32(1029))
+                        .and(column().lt(DataValue::UInt32(1031))),
+                ),
+            ),
+            (2, Some(column().gt_eq(DataValue::UInt32(1031)))),
+        ]
+    }
+
+    /// A logical table created before its physical table was repartitioned: its own
+    /// schema and partition metadata know nothing about the internal table id.
+    fn logical_metric_table_info(table_id: TableId) -> TableInfo {
+        let mut table_info = test_util::new_test_table_info(
+            table_id,
+            &format!("logical_{table_id}"),
+            [0].into_iter(),
+        );
+        table_info.meta.engine = metric_engine_consts::METRIC_ENGINE_NAME.to_string();
+        table_info.meta.partition_key_indices.clear();
+        table_info.meta.options.extra_options.insert(
+            metric_engine_consts::LOGICAL_TABLE_METADATA_KEY.to_string(),
+            IDENTITY_PHYSICAL_ID.to_string(),
+        );
+        table_info
+    }
+
+    async fn create_identity_fixture(
+        regions: Vec<(RegionNumber, Option<expr::PartitionExpr>)>,
+        logical_table_ids: &[TableId],
+    ) -> PartitionRuleManagerRef {
+        let backend = Arc::new(MemoryKvBackend::new());
+        let routes = test_new_table_route_cache(backend.clone());
+        let partitions = test_new_partition_info_cache(routes.clone());
+        let manager = Arc::new(PartitionRuleManager::new(
+            backend.clone(),
+            routes,
+            partitions,
+        ));
+        let metadata = TableMetadataManager::new(backend);
+
+        let routes = regions
+            .into_iter()
+            .map(|(region, expression)| RegionRoute {
+                region: Region {
+                    id: RegionId::new(IDENTITY_PHYSICAL_ID, region),
+                    partition_expr: expression
+                        .map(|expr| expr.as_json_str().unwrap())
+                        .unwrap_or_default(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            })
+            .collect();
+        metadata
+            .create_table_metadata(
+                test_util::new_test_table_info(
+                    IDENTITY_PHYSICAL_ID,
+                    "physical_identity",
+                    [0].into_iter(),
+                ),
+                TableRouteValue::physical(routes),
+                Default::default(),
+            )
+            .await
+            .unwrap();
+        for table_id in logical_table_ids {
+            metadata
+                .create_table_metadata(
+                    logical_metric_table_info(*table_id),
+                    TableRouteValue::logical(IDENTITY_PHYSICAL_ID),
+                    Default::default(),
+                )
+                .await
+                .unwrap();
+        }
+
+        manager
+    }
+
+    #[tokio::test]
+    async fn test_logical_identity_routes_rows_deletes_bulk_and_retries() {
+        let logical_ids = [1028u32, 1029, 1030, 1031, 4_000_000_000];
+        let manager = create_identity_fixture(identity_regions(), &logical_ids).await;
+        for (table_id, expected_region) in [
+            (1028, 0u32),
+            (1029, 1),
+            (1030, 1),
+            (1031, 2),
+            (4_000_000_000, 2),
+        ] {
+            let table_info = logical_metric_table_info(table_id);
+            let partitioner = TablePartitioner::try_new(&manager, &table_info)
+                .await
+                .unwrap();
+            assert_eq!(
+                partitioner.rule.partition_columns(),
+                &[metric_engine_consts::DATA_SCHEMA_TABLE_ID_COLUMN_NAME]
+            );
+            assert_eq!(partitioner.identity_region, Some(expected_region));
+            let version = partitioner.version(expected_region);
+
+            let rows = build_rows(&[1, 20, 70]);
+            let expected_rows = rows.clone();
+            let pointer = rows.rows.as_ptr();
+            let inserts = partitioner.partition_insert_requests(rows, true).unwrap();
+            assert_eq!(inserts.len(), 1);
+            assert_eq!(
+                inserts[0].region_id,
+                RegionId::new(table_id, expected_region).as_u64()
+            );
+            assert_eq!(inserts[0].partition_expr_version, version);
+            let inserted = inserts[0].rows.as_ref().unwrap();
+            assert_eq!(inserted, &expected_rows);
+            assert_eq!(inserted.rows.as_ptr(), pointer);
+
+            let deletes = partitioner
+                .partition_delete_requests(expected_rows.clone())
+                .unwrap();
+            assert_eq!(deletes.len(), 1);
+            assert_eq!(deletes[0].region_id, inserts[0].region_id);
+            assert_eq!(deletes[0].partition_expr_version, version);
+            assert_eq!(deletes[0].rows.as_ref().unwrap(), &expected_rows);
+
+            // The manager route and the operator route come from the same snapshot.
+            let split_input = expected_rows.clone();
+            let split_pointer = split_input.rows.as_ptr();
+            let splits = manager.split_rows(&table_info, split_input).await.unwrap();
+            assert_eq!(splits.len(), 1);
+            let (region, (split_rows, split_version)) = splits.iter().next().unwrap();
+            assert_eq!(*region, expected_region);
+            assert_eq!(split_rows.rows.as_ptr(), split_pointer);
+            assert_eq!(split_version, &version.map(|version| version.value));
+
+            // A stale target is rerouted even though its region still exists.
+            for insert in [true, false] {
+                for stale_version in [None, partitioner.version(0).map(|v| v.value)] {
+                    let mut stale =
+                        build_row_request(expected_rows.clone(), insert, 0, stale_version);
+                    let stale_rows = match stale.body.as_ref().unwrap() {
+                        Body::Inserts(inserts) => inserts.requests[0].rows.as_ref().unwrap(),
+                        Body::Deletes(deletes) => deletes.requests[0].rows.as_ref().unwrap(),
+                        _ => unreachable!(),
+                    };
+                    let stale_pointer = stale_rows.rows.as_ptr();
+                    match stale.body.as_mut().unwrap() {
+                        Body::Inserts(inserts) => {
+                            inserts.requests[0].region_id = RegionId::new(table_id, 0).as_u64()
+                        }
+                        Body::Deletes(deletes) => {
+                            deletes.requests[0].region_id = RegionId::new(table_id, 0).as_u64()
+                        }
+                        _ => unreachable!(),
+                    }
+                    let rebuilt = partitioner
+                        .rebuild_write_requests(stale, &table_info)
+                        .unwrap();
+                    assert_eq!(rebuilt.len(), 1);
+                    let (region_id, rebuilt_version, rebuilt_rows) = row_request_parts(&rebuilt[0]);
+                    assert_eq!(region_id, RegionId::new(table_id, expected_region).as_u64());
+                    assert_eq!(rebuilt_version, version.map(|version| version.value));
+                    assert_eq!(rebuilt_rows, &expected_rows);
+                    if expected_region == 0 && stale_version == version.map(|v| v.value) {
+                        // The target was already correct, so the payload is kept as is.
+                        assert_eq!(rebuilt_rows.rows.as_ptr(), stale_pointer);
+                    }
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_logical_identity_routes_whole_batch() {
+        let manager = create_identity_fixture(identity_regions(), &[1029]).await;
+        let table_info = logical_metric_table_info(1029);
+        let partitioner = TablePartitioner::try_new(&manager, &table_info)
+            .await
+            .unwrap();
+        let batch = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![Field::new("a", DataType::Int32, false)])),
+            vec![Arc::new(Int32Array::from(vec![1, 20, 70]))],
+        )
+        .unwrap();
+        let (schema, data_header, payload) = flight::record_batch_to_ipc(batch.clone()).unwrap();
+        let original = ArrowIpc {
+            schema,
+            data_header,
+            payload,
+        };
+
+        let requests = partitioner
+            .partition_bulk_insert_requests(batch.clone(), Some(original.clone()), true)
+            .unwrap();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].region_id, RegionId::new(1029, 1).as_u64());
+        assert_eq!(requests[0].partition_expr_version, partitioner.version(1));
+        // The whole batch belongs to one region, so the caller's IPC is reused.
+        let Some(bulk_insert_request::Body::ArrowIpc(ipc)) = requests[0].body.as_ref() else {
+            unreachable!()
+        };
+        assert_eq!(ipc.schema, original.schema);
+        assert_eq!(ipc.data_header, original.data_header);
+        assert_eq!(ipc.payload, original.payload);
+
+        let tracked = partitioner
+            .partition_tracked_bulk_insert_requests(batch, vec![0, 1, 2], true)
+            .unwrap();
+        assert_eq!(tracked.len(), 1);
+        assert_eq!(tracked[0].0.region_id, RegionId::new(1029, 1).as_u64());
+        assert_eq!(tracked[0].1, vec![0, 1, 2]);
+    }
+
+    #[tokio::test]
+    async fn test_logical_identity_mixed_partition_is_rejected() {
+        let column = || expr::col(metric_engine_consts::DATA_SCHEMA_TABLE_ID_COLUMN_NAME);
+        let manager = create_identity_fixture(
+            vec![
+                (
+                    0,
+                    Some(
+                        column()
+                            .lt(DataValue::UInt32(1029))
+                            .and(expr::col("a").lt(DataValue::Int32(5))),
+                    ),
+                ),
+                (1, Some(column().gt_eq(DataValue::UInt32(1029)))),
+            ],
+            &[1029],
+        )
+        .await;
+        let table_info = logical_metric_table_info(1029);
+
+        // Rejected while building the snapshot, before any request exists.
+        let Err(error) = TablePartitioner::try_new(&manager, &table_info).await else {
+            panic!("a mixed partition must be rejected");
+        };
+        assert_eq!(error.status_code(), StatusCode::Unsupported);
+
+        let error = Partitioner::new(&manager)
+            .partition_insert_requests(&table_info, build_rows(&[1]), true)
+            .await
+            .unwrap_err();
+        assert_eq!(error.status_code(), StatusCode::Unsupported);
+    }
+
+    #[tokio::test]
+    async fn test_logical_identity_rejects_ambiguous_or_unowned_targets() {
+        let column = || expr::col(metric_engine_consts::DATA_SCHEMA_TABLE_ID_COLUMN_NAME);
+
+        // Repartition rejects overlaps, so this only guards corrupt route metadata.
+        let manager = create_identity_fixture(
+            vec![
+                (0, Some(column().lt(DataValue::UInt32(1031)))),
+                (1, Some(column().lt(DataValue::UInt32(1040)))),
+            ],
+            &[1029],
+        )
+        .await;
+        let Err(error) =
+            TablePartitioner::try_new(&manager, &logical_metric_table_info(1029)).await
+        else {
+            panic!("overlapping expressions must be rejected");
+        };
+        assert_eq!(error.status_code(), StatusCode::Unsupported);
+
+        // 1029 falls into the gap and the rule sends it to the default region, which
+        // has no expression and therefore does not own the table.
+        let manager = create_identity_fixture(
+            vec![
+                (1, Some(column().lt(DataValue::UInt32(1029)))),
+                (2, Some(column().gt_eq(DataValue::UInt32(1031)))),
+                (0, None),
+            ],
+            &[1029],
+        )
+        .await;
+        let Err(error) =
+            TablePartitioner::try_new(&manager, &logical_metric_table_info(1029)).await
+        else {
+            panic!("a fallback destination must be rejected");
+        };
+        assert_eq!(error.status_code(), StatusCode::Unsupported);
+    }
+
+    #[tokio::test]
+    async fn test_identity_routing_leaves_other_rules_alone() {
+        // An unpartitioned physical table: nothing references the internal table id.
+        let manager = create_identity_fixture(vec![(0, None)], &[1029]).await;
+        let table_info = logical_metric_table_info(1029);
+        let partitioner = TablePartitioner::try_new(&manager, &table_info)
+            .await
+            .unwrap();
+        assert_eq!(partitioner.identity_region, None);
+        let inserts = partitioner
+            .partition_insert_requests(build_rows(&[1, 20]), true)
+            .unwrap();
+        assert_eq!(inserts.len(), 1);
+        assert_eq!(inserts[0].region_id, RegionId::new(1029, 0).as_u64());
+
+        // A logical table partitioned on one of its own columns keeps row routing.
+        let manager = create_identity_fixture(
+            vec![
+                (0, Some(expr::col("a").lt(DataValue::Int32(5)))),
+                (1, Some(expr::col("a").gt_eq(DataValue::Int32(5)))),
+            ],
+            &[1029],
+        )
+        .await;
+        let mut table_info = logical_metric_table_info(1029);
+        table_info.meta.partition_key_indices = vec![0];
+        let partitioner = TablePartitioner::try_new(&manager, &table_info)
+            .await
+            .unwrap();
+        assert_eq!(partitioner.identity_region, None);
+        let inserts = partitioner
+            .partition_insert_requests(build_rows(&[1, 20]), true)
+            .unwrap();
+        let mut regions = inserts
+            .iter()
+            .map(|insert| RegionId::from_u64(insert.region_id).region_number())
+            .collect::<Vec<_>>();
+        regions.sort_unstable();
+        assert_eq!(regions, vec![0, 1]);
+    }
+
     async fn create_fixture() -> (PartitionRuleManagerRef, TableInfoCache) {
         let backend = Arc::new(MemoryKvBackend::new());
         let manager = test_util::create_partition_rule_manager(backend.clone()).await;
@@ -1129,10 +1490,11 @@ mod tests {
     async fn test_rebuild_rows_updates_partitions_without_losing_rows() {
         let (manager, cache) = create_fixture().await;
         let table_info = cache.get(1).await.unwrap().unwrap();
-        let (_, versions) = manager
+        let versions = manager
             .find_table_partition_rule(&table_info)
             .await
-            .unwrap();
+            .unwrap()
+            .versions;
         for insert in [true, false] {
             let request = build_row_request(build_rows(&[1, 20, 70]), insert, 99, Some(0));
             let header = request.header.clone();
@@ -1167,10 +1529,11 @@ mod tests {
     async fn test_unchanged_row_routes_preserve_allocations() {
         let (manager, cache) = create_fixture().await;
         let table_info = cache.get(1).await.unwrap().unwrap();
-        let (_, versions) = manager
+        let versions = manager
             .find_table_partition_rule(&table_info)
             .await
-            .unwrap();
+            .unwrap()
+            .versions;
         for insert in [true, false] {
             let request = build_row_request(build_rows(&[1]), insert, 3, versions[&3]);
             let original_rows = row_request_parts(&request).2;
@@ -1213,10 +1576,11 @@ mod tests {
     async fn test_rebuild_bulk_reencodes_only_changed_partitions() {
         let (manager, cache) = create_fixture().await;
         let table_info = cache.get(1).await.unwrap().unwrap();
-        let (_, versions) = manager
+        let versions = manager
             .find_table_partition_rule(&table_info)
             .await
-            .unwrap();
+            .unwrap()
+            .versions;
         let partitioner = TablePartitioner::try_new(&manager, &table_info)
             .await
             .unwrap();

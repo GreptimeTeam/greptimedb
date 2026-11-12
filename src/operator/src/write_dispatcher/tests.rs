@@ -938,10 +938,11 @@ async fn test_finish_retries_initial_failures_in_one_round() {
     let (partition_manager, table_info_cache, registry, catalog_manager) =
         create_routing_caches(backend);
     let table_info = table_info_cache.get(1).await.unwrap().unwrap();
-    let (_, versions) = partition_manager
+    let versions = partition_manager
         .find_table_partition_rule(&table_info)
         .await
-        .unwrap();
+        .unwrap()
+        .versions;
     let invalidator = Arc::new(RecordingCacheInvalidator {
         inner: Some(registry),
         ..Default::default()
@@ -1014,10 +1015,11 @@ async fn test_write_retry_refreshes_stale_route_and_sends_only_failed_region_to_
             old_server.peer
         );
         let table_info = table_info_cache.get(1).await.unwrap().unwrap();
-        let (_, versions) = partition_manager
+        let versions = partition_manager
             .find_table_partition_rule(&table_info)
             .await
-            .unwrap();
+            .unwrap()
+            .versions;
 
         // Metadata has migrated while the frontend still holds the old route.
         update_table_leader(&backend, &new_server.peer).await;
@@ -1217,10 +1219,11 @@ async fn test_write_retry_rebuilds_only_failed_rows_after_route_refresh() {
         let (partition_manager, table_info_cache, registry, catalog_manager) =
             create_routing_caches(backend.clone());
         let table_info = table_info_cache.get(1).await.unwrap().unwrap();
-        let (_, old_versions) = partition_manager
+        let old_versions = partition_manager
             .find_table_partition_rule(&table_info)
             .await
-            .unwrap();
+            .unwrap()
+            .versions;
         let manager = TableRouteManager::new(backend.clone());
         let current = manager
             .table_route_storage()
@@ -1326,10 +1329,11 @@ async fn test_write_retry_rebuilds_only_failed_rows_after_route_refresh() {
             ]),
             "{kind:?}"
         );
-        let (_, versions) = partition_manager
+        let versions = partition_manager
             .find_table_partition_rule(&table_info)
             .await
-            .unwrap();
+            .unwrap()
+            .versions;
         let mut writes = new_server
             .service
             .requests
@@ -1375,10 +1379,11 @@ async fn test_write_retry_rebuilds_only_failed_rows_after_route_refresh_attribut
         let (partition_manager, table_info_cache, registry, catalog_manager) =
             create_routing_caches(backend.clone());
         let table_info = table_info_cache.get(1).await.unwrap().unwrap();
-        let (_, old_versions) = partition_manager
+        let old_versions = partition_manager
             .find_table_partition_rule(&table_info)
             .await
-            .unwrap();
+            .unwrap()
+            .versions;
         let manager = TableRouteManager::new(backend.clone());
         let current = manager
             .table_route_storage()
@@ -1461,10 +1466,11 @@ async fn test_write_retry_rebuilds_only_failed_rows_after_route_refresh_attribut
             ]),
             "{kind:?}"
         );
-        let (_, versions) = partition_manager
+        let versions = partition_manager
             .find_table_partition_rule(&table_info)
             .await
-            .unwrap();
+            .unwrap()
+            .versions;
         let mut writes = new_server
             .service
             .requests
@@ -1601,10 +1607,11 @@ async fn test_write_retry_restores_changed_partition_tags_for_failed_regions() {
         .unwrap()
         .unwrap();
     let cached_info = cached_table.table_info();
-    let (_, old_versions) = partition_manager
+    let old_versions = partition_manager
         .find_table_partition_rule(&cached_info)
         .await
-        .unwrap();
+        .unwrap()
+        .versions;
     let current_info = metadata.table_info_manager().get(1).await.unwrap().unwrap();
     let mut updated_info = current_info.table_info.clone();
     updated_info.meta.partition_key_indices = vec![1];
@@ -1661,10 +1668,11 @@ async fn test_write_retry_restores_changed_partition_tags_for_failed_regions() {
     );
     let refreshed_info = table_info_cache.get(1).await.unwrap().unwrap();
     assert_eq!(refreshed_info.meta.partition_key_indices, vec![1]);
-    let (_, versions) = partition_manager
+    let versions = partition_manager
         .find_table_partition_rule(&refreshed_info)
         .await
-        .unwrap();
+        .unwrap()
+        .versions;
     for request in new_server.service.requests.lock().unwrap().iter() {
         let Some(Body::BulkInsert(bulk)) = &request.body else {
             unreachable!()
@@ -2083,10 +2091,11 @@ async fn check_write_retry_rebuilds_logical_rows_in_mixed_table_envelope(kind: W
             .partition_key_indices
             .is_empty()
     );
-    let (_, versions) = partition_manager
+    let versions = partition_manager
         .find_table_partition_rule(&table_info)
         .await
-        .unwrap();
+        .unwrap()
+        .versions;
     let invalidator = Arc::new(RecordingCacheInvalidator {
         inner: Some(registry),
         ..Default::default()
