@@ -26,23 +26,29 @@ pub struct SetVariables {
 }
 
 impl SetVariables {
-    /// Returns the first supported `search_path` value.
-    pub fn search_path(&self) -> Option<&str> {
+    /// Returns the schema candidates for a supported `search_path` assignment.
+    pub fn search_path(&self) -> Option<Vec<String>> {
         let [ObjectNamePart::Identifier(variable)] = self.variable.0.as_slice() else {
             return None;
         };
-        if variable.quote_style.is_some() || !variable.value.eq_ignore_ascii_case("search_path") {
+        if !variable.value.eq_ignore_ascii_case("search_path") {
             return None;
         }
 
-        match self.value.first()? {
-            Expr::Value(ValueWithSpan {
-                value: Value::SingleQuotedString(value) | Value::DoubleQuotedString(value),
-                ..
-            }) => Some(value),
-            Expr::Identifier(value) => Some(&value.value),
-            _ => None,
-        }
+        self.value
+            .iter()
+            .map(|value| match value {
+                Expr::Value(ValueWithSpan {
+                    value: Value::SingleQuotedString(value) | Value::DoubleQuotedString(value),
+                    ..
+                }) => Some(value.clone()),
+                Expr::Identifier(value) if value.quote_style.is_none() => {
+                    Some(value.value.to_lowercase())
+                }
+                Expr::Identifier(value) => Some(value.value.clone()),
+                _ => None,
+            })
+            .collect()
     }
 }
 
@@ -95,11 +101,17 @@ SET delayed_insert_timeout = 300"#,
     #[test]
     fn test_search_path() {
         for (sql, expected) in [
-            ("SET search_path TO public", Some("public")),
-            ("SET SEARCH_PATH TO 'private'", Some("private")),
-            ("SET search_path TO \"quoted\"", Some("quoted")),
-            ("SET \"search_path\" TO private", None),
+            ("SET search_path TO public", Some(vec!["public"])),
+            ("SET SEARCH_PATH TO 'private'", Some(vec!["private"])),
+            ("SET search_path TO \"quoted\"", Some(vec!["quoted"])),
+            ("SET \"search_path\" TO private", Some(vec!["private"])),
             ("SET timezone TO 'UTC'", None),
+            (
+                r#"SET search_path TO "$user", MISSING, "Mixed", 'a,b'"#,
+                Some(vec!["$user", "missing", "Mixed", "a,b"]),
+            ),
+            ("SET search_path TO ''", Some(vec![""])),
+            ("SET search_path TO public, 42", None),
         ] {
             let statements = ParserContext::create_with_dialect(
                 sql,
@@ -110,7 +122,10 @@ SET delayed_insert_timeout = 300"#,
             let [Statement::SetVariables(set)] = statements.as_slice() else {
                 unreachable!()
             };
-            assert_eq!(expected, set.search_path());
+            assert_eq!(
+                expected.map(|v| v.into_iter().map(str::to_owned).collect::<Vec<_>>()),
+                set.search_path()
+            );
         }
     }
 }

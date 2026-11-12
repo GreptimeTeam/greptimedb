@@ -396,14 +396,49 @@ impl Instance {
             }
             _ => {
                 query_interceptor.pre_execute(Some(&stmt), None, query_ctx.clone())?;
-                let selected_schema = match &stmt {
-                    Statement::Use(schema) => Some(schema.as_str()),
-                    Statement::SetVariables(set) if query_ctx.channel() == Channel::Postgres => {
-                        set.search_path()
+                if let Statement::SetVariables(set) = &stmt
+                    && query_ctx.channel() == Channel::Postgres
+                    && let Some(schemas) = set.search_path()
+                {
+                    let mut authorized = Vec::with_capacity(schemas.len());
+                    let provider = self.plugins.get::<auth::UserProviderRef>();
+                    let user = query_ctx.current_user();
+                    for schema in schemas {
+                        let schema = if schema == "$user" {
+                            user.username().to_string()
+                        } else {
+                            schema
+                        };
+                        if schema.is_empty() {
+                            continue;
+                        }
+                        if let Some(provider) = &provider {
+                            match provider
+                                .authorize(query_ctx.current_catalog(), &schema, &user)
+                                .await
+                            {
+                                Ok(()) => {}
+                                Err(error)
+                                    if matches!(
+                                        error.status_code(),
+                                        common_error::status_code::StatusCode::PermissionDenied
+                                            | common_error::status_code::StatusCode::AccessDenied
+                                    ) =>
+                                {
+                                    continue;
+                                }
+                                Err(error) => return Err(error).context(PermissionSnafu),
+                            }
+                        }
+                        authorized.push(schema);
                     }
-                    _ => None,
-                };
-                if let Some(schema) = selected_schema
+                    return self
+                        .statement_executor
+                        .set_search_path(authorized, query_ctx)
+                        .await
+                        .context(TableOperationSnafu);
+                }
+                if let Statement::Use(schema) = &stmt
                     && let Some(provider) = self.plugins.get::<auth::UserProviderRef>()
                 {
                     provider
@@ -3516,7 +3551,13 @@ mod tests {
                 schema: &str,
                 _: &UserInfoRef,
             ) -> auth::error::Result<()> {
-                if matches!(schema, "public" | "allowed" | "allowed_missing") {
+                if schema == "backend_error" {
+                    return auth::error::InternalStateSnafu {
+                        msg: "backend unavailable",
+                    }
+                    .fail();
+                }
+                if matches!(schema, "public" | "allowed" | "allowed_missing" | "admin") {
                     Ok(())
                 } else {
                     auth::error::PermissionDeniedSnafu.fail()
@@ -3527,7 +3568,7 @@ mod tests {
         plugins.insert::<auth::UserProviderRef>(Arc::new(SchemaProvider));
         let catalog =
             catalog::memory::MemoryCatalogManager::new_with_table(test_table(1024, "source")?);
-        for schema in ["denied", "allowed"] {
+        for schema in ["denied", "allowed", "admin"] {
             catalog
                 .register_schema_sync(catalog::RegisterSchemaRequest {
                     catalog: "greptime".to_string(),
@@ -3549,11 +3590,6 @@ mod tests {
             "/* switch */ USE denied",
             "USE public; Use denied",
             "USE missing",
-            "SET search_path TO denied",
-            "SET SEARCH_PATH TO 'denied'",
-            "SET search_path TO denied, public",
-            "SET search_path TO public; SET search_path TO denied",
-            "SET search_path TO missing",
         ] {
             let ctx = Arc::new(QueryContext::with_channel(
                 "greptime",
@@ -3583,20 +3619,114 @@ mod tests {
             );
             assert_eq!("allowed", ctx.current_schema());
         }
-        for sql in ["USE allowed_missing", "SET search_path TO allowed_missing"] {
+        let ctx = Arc::new(QueryContext::with_channel(
+            "greptime",
+            "public",
+            Channel::Postgres,
+        ));
+        let error = instance
+            .do_query_inner("USE allowed_missing", ctx.clone())
+            .await
+            .remove(0)
+            .unwrap_err();
+        assert_eq!(StatusCode::InvalidArguments, error.status_code());
+        assert_eq!("public", ctx.current_schema());
+        for (sql, expected) in [
+            ("SET search_path TO denied, public", "public"),
+            ("SET search_path TO allowed_missing, allowed", "allowed"),
+            (
+                "SET search_path TO denied, allowed_missing, public",
+                "public",
+            ),
+            (r#"SET search_path TO "$user", public"#, "admin"),
+            (r#"SET "search_path" TO denied, allowed"#, "allowed"),
+            ("SET SEARCH_PATH TO 'denied'", ""),
+            ("SET search_path TO allowed_missing", ""),
+            ("SET search_path TO ''", ""),
+            ("SET search_path TO allowed; SET search_path TO denied", ""),
+        ] {
             let ctx = Arc::new(QueryContext::with_channel(
                 "greptime",
                 "public",
                 Channel::Postgres,
             ));
-            let error = instance
-                .do_query_inner(sql, ctx.clone())
+            ctx.set_current_user(Arc::new(AdminUserInfo));
+            let results = instance.do_query_inner(sql, ctx.clone()).await;
+            assert!(results.iter().all(Result::is_ok), "{sql}: {results:?}");
+            assert_eq!(expected, ctx.current_schema(), "{sql}");
+            if expected.is_empty() {
+                // The old public schema contains source; an empty path cannot resolve it.
+                assert!(
+                    instance
+                        .do_query_inner("SELECT * FROM source", ctx.clone())
+                        .await
+                        .remove(0)
+                        .is_err()
+                );
+                assert!(
+                    instance
+                        .do_query_inner("SELECT 1", ctx.clone())
+                        .await
+                        .remove(0)
+                        .is_ok()
+                );
+                let output = instance.do_query_inner("SELECT current_schema() IS NULL AS empty, current_schemas(false) AS schemas", ctx.clone()).await.remove(0).unwrap();
+                let printed = output.data.pretty_print().await;
+                assert!(
+                    printed.contains("true") && printed.contains("[]"),
+                    "{printed}"
+                );
+                let error = instance
+                    .do_query_inner(
+                        "CREATE TABLE no_schema (ts TIMESTAMP TIME INDEX)",
+                        ctx.clone(),
+                    )
+                    .await
+                    .remove(0)
+                    .unwrap_err();
+                assert!(
+                    matches!(error, Error::TableOperation {
+                    source: operator::error::Error::SchemaNotFound { ref schema_info, .. }, ..
+                } if schema_info.is_empty()),
+                    "{error:?}"
+                );
+                assert!(
+                    instance
+                        .do_query_inner("USE public", ctx.clone())
+                        .await
+                        .remove(0)
+                        .is_ok()
+                );
+                assert!(
+                    instance
+                        .do_query_inner("SELECT * FROM source", ctx)
+                        .await
+                        .remove(0)
+                        .is_ok()
+                );
+            }
+        }
+        let ctx = Arc::new(QueryContext::with_channel(
+            "greptime",
+            "public",
+            Channel::Postgres,
+        ));
+        // The default user's schema is absent or unauthorized, so public remains usable.
+        assert!(
+            instance
+                .do_query_inner(r#"SET search_path TO "$user", public"#, ctx.clone())
                 .await
                 .remove(0)
-                .unwrap_err();
-            assert_eq!(StatusCode::InvalidArguments, error.status_code(), "{sql}");
-            assert_eq!("public", ctx.current_schema());
-        }
+                .is_ok()
+        );
+        assert_eq!("public", ctx.current_schema());
+        let error = instance
+            .do_query_inner("SET search_path TO backend_error, allowed", ctx.clone())
+            .await
+            .remove(0)
+            .unwrap_err();
+        assert_eq!(StatusCode::Unexpected, error.status_code());
+        assert_eq!("public", ctx.current_schema());
         Ok(())
     }
 

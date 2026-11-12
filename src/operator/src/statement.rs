@@ -527,6 +527,35 @@ impl StatementExecutor {
         Ok(Output::new_with_record_batches(RecordBatches::empty()))
     }
 
+    /// Selects the first existing schema from candidates authorized by the caller.
+    pub async fn set_search_path(
+        &self,
+        schemas: Vec<String>,
+        query_ctx: QueryContextRef,
+    ) -> Result<Output> {
+        let mut selected = String::new();
+        for schema in schemas {
+            let schema = if schema == "$user" {
+                query_ctx.current_user().username().to_string()
+            } else {
+                schema
+            };
+            if !schema.is_empty()
+                && self
+                    .catalog_manager
+                    .schema_exists(query_ctx.current_catalog(), &schema, Some(&query_ctx))
+                    .await
+                    .context(CatalogSnafu)?
+            {
+                selected = schema;
+                break;
+            }
+        }
+        // An empty effective path must not retain access to the previous schema.
+        query_ctx.set_current_schema(&selected);
+        Ok(Output::new_with_record_batches(RecordBatches::empty()))
+    }
+
     async fn set_variables(
         &self,
         set_var: SetVariables,
@@ -602,8 +631,7 @@ impl StatementExecutor {
                     let search_path = set_var.search_path().context(NotSupportedSnafu {
                         feat: "Unsupported search path in set variable statement",
                     })?;
-                    self.use_database(search_path.to_string(), query_ctx)
-                        .await?;
+                    self.set_search_path(search_path, query_ctx).await?;
                 } else {
                     return NotSupportedSnafu {
                         feat: format!("Unsupported set variable {}", var_name),
