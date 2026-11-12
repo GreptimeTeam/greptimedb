@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
@@ -189,16 +190,21 @@ impl StagedActions {
     /// Returns whether `action_list` only adds files that are already staged, as a retried
     /// import does.
     fn contains_import(&self, action_list: &RegionMetaActionList) -> bool {
-        let is_staged = |meta: &file::FileMeta| {
-            self.list.actions.iter().any(|action| {
-                matches!(action, RegionMetaAction::Edit(edit)
-                    if edit.files_to_add.iter().any(|staged| staged.file_id == meta.file_id))
+        let staged: HashSet<_> = self
+            .list
+            .actions
+            .iter()
+            .flat_map(|action| match action {
+                RegionMetaAction::Edit(edit) => edit.files_to_add.as_slice(),
+                _ => &[],
             })
-        };
+            .map(|meta| meta.file_id)
+            .collect();
         !action_list.actions.is_empty()
             && action_list.actions.iter().all(|action| {
                 matches!(action, RegionMetaAction::Edit(edit)
-                    if edit.files_to_remove.is_empty() && edit.files_to_add.iter().all(is_staged))
+                    if edit.files_to_remove.is_empty()
+                        && edit.files_to_add.iter().all(|meta| staged.contains(&meta.file_id)))
             })
     }
 }
