@@ -38,6 +38,11 @@ The conversion step produces sample and histogram `ContextReq`s plus validated
 - exemplars are grouped by database and written through `exemplar::write`, which
   prepares their source metric tables and tracks progress for each kind of write.
 
+Accompanying source sample and histogram writes must succeed before exemplars
+are written. A source write failure skips the request's exemplars while unrelated
+metric writes proceed independently. Exemplar-only inputs remain supported for
+existing logical metric tables.
+
 Exemplar persistence requires metric-engine ingestion and logical metric-engine
 source tables. Exemplars are stored in the target database's
 `greptime_metrics_exemplars` table using ordinary Mito storage with sparse primary
