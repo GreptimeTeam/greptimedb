@@ -396,7 +396,14 @@ impl Instance {
             }
             _ => {
                 query_interceptor.pre_execute(Some(&stmt), None, query_ctx.clone())?;
-                if let Statement::Use(schema) = &stmt
+                let selected_schema = match &stmt {
+                    Statement::Use(schema) => Some(schema.as_str()),
+                    Statement::SetVariables(set) if query_ctx.channel() == Channel::Postgres => {
+                        set.search_path()
+                    }
+                    _ => None,
+                };
+                if let Some(schema) = selected_schema
                     && let Some(provider) = self.plugins.get::<auth::UserProviderRef>()
                 {
                     provider
@@ -3489,7 +3496,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_sql_use_authorizes_before_changing_schema() -> TestResult<()> {
+    async fn test_sql_schema_selection_authorizes_before_mutation() -> TestResult<()> {
         struct SchemaProvider;
         #[async_trait::async_trait]
         impl auth::UserProvider for SchemaProvider {
@@ -3509,7 +3516,7 @@ mod tests {
                 schema: &str,
                 _: &UserInfoRef,
             ) -> auth::error::Result<()> {
-                if schema == "public" {
+                if matches!(schema, "public" | "allowed" | "allowed_missing") {
                     Ok(())
                 } else {
                     auth::error::PermissionDeniedSnafu.fail()
@@ -3520,12 +3527,14 @@ mod tests {
         plugins.insert::<auth::UserProviderRef>(Arc::new(SchemaProvider));
         let catalog =
             catalog::memory::MemoryCatalogManager::new_with_table(test_table(1024, "source")?);
-        catalog
-            .register_schema_sync(catalog::RegisterSchemaRequest {
-                catalog: "greptime".to_string(),
-                schema: "denied".to_string(),
-            })
-            .unwrap();
+        for schema in ["denied", "allowed"] {
+            catalog
+                .register_schema_sync(catalog::RegisterSchemaRequest {
+                    catalog: "greptime".to_string(),
+                    schema: schema.to_string(),
+                })
+                .unwrap();
+        }
         let instance = test_instance_with_catalog_manager(
             catalog,
             test_table(1025, "target")?,
@@ -3539,8 +3548,18 @@ mod tests {
             " USE denied",
             "/* switch */ USE denied",
             "USE public; Use denied",
+            "USE missing",
+            "SET search_path TO denied",
+            "SET SEARCH_PATH TO 'denied'",
+            "SET search_path TO denied, public",
+            "SET search_path TO public; SET search_path TO denied",
+            "SET search_path TO missing",
         ] {
-            let ctx = QueryContext::arc();
+            let ctx = Arc::new(QueryContext::with_channel(
+                "greptime",
+                "public",
+                Channel::Postgres,
+            ));
             let results = instance.do_query_inner(sql, ctx.clone()).await;
             assert_eq!(
                 StatusCode::PermissionDenied,
@@ -3549,13 +3568,35 @@ mod tests {
             );
             assert_eq!("public", ctx.current_schema());
         }
-        assert!(
-            instance
-                .do_query_inner("USE public", QueryContext::arc())
+        for sql in ["USE allowed", "SET search_path TO allowed"] {
+            let ctx = Arc::new(QueryContext::with_channel(
+                "greptime",
+                "public",
+                Channel::Postgres,
+            ));
+            assert!(
+                instance
+                    .do_query_inner(sql, ctx.clone())
+                    .await
+                    .remove(0)
+                    .is_ok()
+            );
+            assert_eq!("allowed", ctx.current_schema());
+        }
+        for sql in ["USE allowed_missing", "SET search_path TO allowed_missing"] {
+            let ctx = Arc::new(QueryContext::with_channel(
+                "greptime",
+                "public",
+                Channel::Postgres,
+            ));
+            let error = instance
+                .do_query_inner(sql, ctx.clone())
                 .await
                 .remove(0)
-                .is_ok()
-        );
+                .unwrap_err();
+            assert_eq!(StatusCode::InvalidArguments, error.status_code(), "{sql}");
+            assert_eq!("public", ctx.current_schema());
+        }
         Ok(())
     }
 

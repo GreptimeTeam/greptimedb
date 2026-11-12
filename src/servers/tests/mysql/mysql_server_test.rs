@@ -278,7 +278,13 @@ async fn test_schema_validation() -> Result<()> {
     let _ = create_connection_default_db_name(server_port, false)
         .await
         .unwrap();
-    let _ = create_connection(server_port, None, false).await.unwrap();
+    let mut connection = create_connection(server_port, None, false).await.unwrap();
+    for schema in ["information_schema", "missing"] {
+        match connection.query_drop(format!("USE {schema}")).await {
+            Err(mysql_async::Error::Server(error)) => assert_eq!(1044, error.code),
+            result => panic!("expected database access denied for {schema}, got {result:?}"),
+        }
+    }
     mysql_server.shutdown().await.unwrap();
 
     // change to another username

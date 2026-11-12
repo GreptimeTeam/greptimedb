@@ -495,7 +495,7 @@ impl StatementExecutor {
             Statement::ShowCreateView(show) => self.show_create_view(show, query_ctx).await,
             #[cfg(feature = "enterprise")]
             Statement::ShowCreateTrigger(show) => self.show_create_trigger(show, query_ctx).await,
-            Statement::SetVariables(set_var) => self.set_variables(set_var, query_ctx),
+            Statement::SetVariables(set_var) => self.set_variables(set_var, query_ctx).await,
             Statement::ShowVariables(show_variable) => self.show_variable(show_variable, query_ctx),
             Statement::Comment(stmt) => self.comment(stmt, query_ctx).await,
             Statement::ShowColumns(show_columns) => {
@@ -527,7 +527,11 @@ impl StatementExecutor {
         Ok(Output::new_with_record_batches(RecordBatches::empty()))
     }
 
-    fn set_variables(&self, set_var: SetVariables, query_ctx: QueryContextRef) -> Result<Output> {
+    async fn set_variables(
+        &self,
+        set_var: SetVariables,
+        query_ctx: QueryContextRef,
+    ) -> Result<Output> {
         let variable = sql::ast::object_name_to_string_unquoted(&set_var.variable);
         let var_name = variable.to_uppercase();
 
@@ -598,7 +602,8 @@ impl StatementExecutor {
                     let search_path = set_var.search_path().context(NotSupportedSnafu {
                         feat: "Unsupported search path in set variable statement",
                     })?;
-                    query_ctx.set_current_schema(search_path);
+                    self.use_database(search_path.to_string(), query_ctx)
+                        .await?;
                 } else {
                     return NotSupportedSnafu {
                         feat: format!("Unsupported set variable {}", var_name),

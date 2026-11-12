@@ -495,7 +495,7 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
                         METRIC_AUTH_FAILURE
                             .with_label_values(&[e.status_code().as_ref()])
                             .inc();
-                        warn!(e; "Failed to authorize the MySQL handshake database");
+                        warn!(e; "Failed to authorize MySQL handshake for user {} in {}.{}", username, catalog, schema);
                         return false;
                     }
                     user_info = Some(userinfo);
@@ -515,11 +515,14 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
         match self.query_handler.is_valid_schema(&catalog, &schema).await {
             Ok(true) => {}
             Ok(false) => {
-                warn!("Unknown MySQL handshake database");
+                warn!(
+                    "Unknown MySQL handshake database {}.{} for user {}",
+                    catalog, schema, username
+                );
                 return false;
             }
             Err(error) => {
-                warn!(error; "Failed to validate the MySQL handshake database");
+                warn!(error; "Failed to validate MySQL handshake database {}.{} for user {}", catalog, schema, username);
                 return false;
             }
         }
@@ -708,20 +711,6 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
             self.session.catalog()
         };
 
-        if !self
-            .query_handler
-            .is_valid_schema(&catalog, &schema)
-            .await?
-        {
-            return w
-                .error(
-                    ErrorKind::ER_WRONG_DB_NAME,
-                    format!("Unknown database '{}'", database).as_bytes(),
-                )
-                .await
-                .map_err(|e| e.into());
-        }
-
         let user_info = &self.session.user_info();
 
         if let Some(schema_validator) = &self.user_provider
@@ -736,6 +725,20 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
                 .error(
                     ErrorKind::ER_DBACCESS_DENIED_ERROR,
                     e.output_msg().as_bytes(),
+                )
+                .await
+                .map_err(|e| e.into());
+        }
+
+        if !self
+            .query_handler
+            .is_valid_schema(&catalog, &schema)
+            .await?
+        {
+            return w
+                .error(
+                    ErrorKind::ER_WRONG_DB_NAME,
+                    format!("Unknown database '{}'", database).as_bytes(),
                 )
                 .await
                 .map_err(|e| e.into());
