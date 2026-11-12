@@ -14,7 +14,7 @@
 
 //! Table and TableEngine requests
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
 use std::str::FromStr;
 
@@ -316,6 +316,23 @@ impl TableOptions {
     }
 }
 
+/// Object store credential keys accepted by [`validate_table_option`].
+const CREDENTIAL_OPTION_KEYS: [&str; 4] = [
+    "access_key_id",
+    "secret_access_key",
+    "session_token",
+    "access_key_secret",
+];
+
+/// Placeholder rendered instead of a credential value.
+pub const REDACTED_OPTION_VALUE: &str = "******";
+
+pub fn is_credential_option(key: &str) -> bool {
+    CREDENTIAL_OPTION_KEYS.contains(&key)
+}
+
+/// Renders the options for users, e.g. `information_schema.tables.create_options`,
+/// so credential values are masked.
 impl fmt::Display for TableOptions {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         let mut key_vals = vec![];
@@ -331,7 +348,14 @@ impl fmt::Display for TableOptions {
             key_vals.push(format!("{}={}", SKIP_WAL_KEY, self.skip_wal));
         }
 
-        for (k, v) in &self.extra_options {
+        // Sort by key so `create_options` is stable across queries; `HashMap` order is not.
+        let extra_options: BTreeMap<_, _> = self.extra_options.iter().collect();
+        for (k, v) in extra_options {
+            let v = if is_credential_option(k) {
+                REDACTED_OPTION_VALUE
+            } else {
+                v
+            };
             key_vals.push(format!("{}={}", k, v));
         }
 
