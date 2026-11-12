@@ -17,7 +17,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use arrow_schema::DataType;
-use async_recursion::async_recursion;
 use catalog::table_source::DfTableSourceProvider;
 use chrono::{DateTime, Utc};
 use common_function::aggrs::aggr_wrapper::get_aggr_func;
@@ -406,13 +405,35 @@ impl RangePlanRewriter {
         }
     }
 
-    #[async_recursion]
+    /// Rewrites `plan` bottom-up and returns `None` if nothing changed.
+    ///
+    /// The walk uses explicit stacks rather than recursion because plans such as long
+    /// `UNION ALL` chains can be deep enough to overflow the thread stack.
     async fn rewrite_logical_plan(&mut self, plan: &LogicalPlan) -> Result<Option<LogicalPlan>> {
-        let inputs = plan.inputs();
-        let mut new_inputs = Vec::with_capacity(inputs.len());
-        for input in &inputs {
-            new_inputs.push(self.rewrite_logical_plan(input).await?)
+        let mut pending = vec![plan];
+        let mut nodes = vec![];
+        while let Some(node) = pending.pop() {
+            let inputs = node.inputs();
+            pending.extend(inputs.iter().copied());
+            nodes.push((node, inputs));
         }
+        // In reverse, `nodes` lists every node after all of its inputs, which come in order,
+        // so the results of a node's inputs are the last entries of `rewritten`.
+        let mut rewritten = vec![];
+        for (node, inputs) in nodes.into_iter().rev() {
+            let new_inputs = rewritten.split_off(rewritten.len() - inputs.len());
+            rewritten.push(self.rewrite_plan_node(node, inputs, new_inputs).await?);
+        }
+        Ok(rewritten.pop().flatten())
+    }
+
+    /// Rewrites a single node, given the rewrite results of its `inputs`.
+    async fn rewrite_plan_node(
+        &mut self,
+        plan: &LogicalPlan,
+        inputs: Vec<&LogicalPlan>,
+        new_inputs: Vec<Option<LogicalPlan>>,
+    ) -> Result<Option<LogicalPlan>> {
         match plan {
             LogicalPlan::Projection(Projection { expr, input, .. })
                 if have_range_in_exprs(expr) =>
