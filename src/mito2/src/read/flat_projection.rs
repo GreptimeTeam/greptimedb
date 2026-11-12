@@ -36,7 +36,7 @@ use crate::read::projection::{read_column_ids_from_projection, repeated_vector_w
 use crate::read::read_columns::{JsonTargetTypes, ReadColumns};
 use crate::sst::parquet::Json2RewriteTargets;
 use crate::sst::parquet::flat_format::sst_column_id_indices;
-use crate::sst::parquet::format::FormatProjection;
+use crate::sst::parquet::format::{FormatProjection, INTERNAL_COLUMN_NUM};
 use crate::sst::{
     FlatSchemaOptions, internal_fields, tag_maybe_to_dictionary_field, to_flat_sst_arrow_schema,
     with_field_id,
@@ -478,41 +478,51 @@ pub(crate) fn compute_input_arrow_schema(
 }
 
 /// Helper to project compaction batches into flat format columns
-/// (fields + time index + __primary_key + __sequence + __op_type).
+/// (fields + time index + `__primary_key` + `__sequence` + `__op_type`).
+///
+/// Compaction must write this tag-free layout because sparse primary keys don't
+/// store raw tag columns. The input batch keeps the columns the reader actually
+/// projected, which may include tags and may omit columns the target region no
+/// longer has, so the mapping comes from the reader's own [`FormatProjection`]
+/// rather than from a projection recomputed over the source metadata. This is
+/// the same projection `FlatCompatBatch` indexes the batch with.
 pub(crate) struct CompactionProjectionMapper {
+    /// Index in the input flat batch of each field and time index column, in
+    /// the order the reader projects them.
     projection: Vec<usize>,
 }
 
 impl CompactionProjectionMapper {
-    pub(crate) fn try_new(metadata: &RegionMetadataRef) -> Result<Self> {
-        let projection = metadata
-            .column_metadatas
+    /// Creates a mapper from the `format_projection` of the reader producing the batches.
+    pub(crate) fn new(metadata: &RegionMetadata, format_projection: &FormatProjection) -> Self {
+        let mut projection: Vec<_> = format_projection
+            .column_id_to_projected_index
             .iter()
-            .enumerate()
-            .filter_map(|(idx, col)| {
-                if matches!(col.semantic_type, SemanticType::Field) {
-                    Some(idx)
-                } else {
-                    None
-                }
+            .filter_map(|(column_id, index)| {
+                let column = metadata.column_by_id(*column_id)?;
+                matches!(
+                    column.semantic_type,
+                    SemanticType::Field | SemanticType::Timestamp
+                )
+                .then_some(*index)
             })
-            .chain([metadata.time_index_column_pos()])
-            .collect::<Vec<_>>();
-
-        let read_col_ids = metadata.column_metadatas.iter().map(|col| col.column_id);
-        let read_cols = ReadColumns::new(read_col_ids);
-        let mapper = FlatProjectionMapper::new_with_read_columns(metadata, projection, read_cols)?;
-        Ok(Self {
-            projection: mapper.batch_indices,
-        })
+            .collect();
+        projection.sort_unstable();
+        Self { projection }
     }
 
     /// Projects columns and appends internal columns for compaction output.
     ///
     /// The input batch is expected to be in flat format with internal columns appended.
     pub(crate) fn project(&self, batch: DfRecordBatch) -> Result<DfRecordBatch> {
-        let mut projection = self.projection.clone();
-        projection.extend(batch.num_columns() - 3..batch.num_columns());
+        let num_columns = batch.num_columns();
+        let mut projection = Vec::with_capacity(self.projection.len() + INTERNAL_COLUMN_NUM);
+        projection.extend_from_slice(&self.projection);
+        projection.extend(num_columns - INTERNAL_COLUMN_NUM..num_columns);
+        if projection.iter().copied().eq(0..num_columns) {
+            // The batch already has the compaction output layout.
+            return Ok(batch);
+        }
         // Projection must preserve the Arrow layouts already produced by compaction Rewrite.
         batch.project(&projection).context(NewRecordBatchSnafu)
     }

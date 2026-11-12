@@ -481,23 +481,6 @@ impl ParquetReaderBuilder {
         // - region partition expr is same with file partition expr (no need to auto convert)
         let skip_auto_convert = self.compaction && is_same_region_partition;
 
-        // Build a compaction projection helper when:
-        // - compaction is enabled
-        // - region partition expr differs from file partition expr
-        // - flat format is enabled
-        // - primary key encoding is sparse
-        //
-        // This is applied after row-group filtering to align batches with flat output schema
-        // before compat handling.
-        let compaction_projection_mapper = if self.compaction
-            && !is_same_region_partition
-            && region_meta.primary_key_encoding == PrimaryKeyEncoding::Sparse
-        {
-            Some(CompactionProjectionMapper::try_new(&region_meta)?)
-        } else {
-            None
-        };
-
         let read_cols = if let Some(read_cols) = &self.read_cols {
             read_cols.clone()
         } else {
@@ -524,6 +507,29 @@ impl ParquetReaderBuilder {
             &file_path,
             skip_auto_convert,
         )?;
+        // Build a compaction projection helper when:
+        // - compaction is enabled
+        // - region partition expr differs from file partition expr
+        // - flat format is enabled
+        // - primary key encoding is sparse
+        //
+        // Sparse compaction must write the tag-free flat layout, but the reader still
+        // projects tag columns, so the helper drops them after row-group filtering and
+        // before compat handling. It takes the indices from the read format's own
+        // projection: the batch only keeps what `read_cols` requested, which can differ
+        // from the source metadata (e.g. after a split or a dropped column), and
+        // `FlatCompatBatch` indexes the same batch with the same projection.
+        let compaction_projection_mapper = if self.compaction
+            && !is_same_region_partition
+            && region_meta.primary_key_encoding == PrimaryKeyEncoding::Sparse
+        {
+            Some(CompactionProjectionMapper::new(
+                &region_meta,
+                read_format.format_projection(),
+            ))
+        } else {
+            None
+        };
         // `region_meta` comes from the Parquet/source file and must not be used as the
         // target identity. When the caller has no current metadata, the handle is the
         // only local identity available and therefore denotes a local read.

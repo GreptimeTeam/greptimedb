@@ -277,14 +277,38 @@ fn ts_to_lit(ts: Timestamp, ts_col_unit: TimeUnit) -> Result<Expr> {
 
 #[cfg(test)]
 mod tests {
-    use api::v1::Rows;
+    use api::v1::{OpType, Rows, SemanticType};
+    use common_time::Timestamp;
+    use datatypes::arrow::array::{
+        ArrayRef, BinaryDictionaryBuilder, Float64Array, RecordBatch, TimestampMillisecondArray,
+        UInt8Array, UInt64Array,
+    };
+    use datatypes::arrow::datatypes::UInt32Type;
+    use datatypes::prelude::ConcreteDataType;
+    use datatypes::schema::ColumnSchema;
+    use datatypes::value::{Value, ValueRef};
+    use mito_codec::row_converter::{PrimaryKeyCodec, SparsePrimaryKeyCodec};
+    use partition::expr::col as partition_col;
+    use store_api::codec::PrimaryKeyEncoding;
+    use store_api::metadata::{
+        ColumnMetadata, RegionMetadata, RegionMetadataBuilder, RegionMetadataRef,
+    };
     use store_api::region_engine::RegionEngine;
     use store_api::region_request::{RegionFlushRequest, RegionRequest};
     use store_api::storage::RegionId;
+    use store_api::storage::consts::ReservedColumnId;
 
     use super::*;
+    use crate::access_layer::{Metrics, OperationType, SstWriteRequest, WriteType};
+    use crate::cache::CacheManager;
+    use crate::sst::file::{FileHandle, FileMeta};
+    use crate::sst::parquet::WriteOptions;
+    use crate::sst::{FlatSchemaOptions, FormatType, to_flat_sst_arrow_schema};
+    use crate::test_util::scheduler_util::SchedulerEnv;
+    use crate::test_util::sst_util::new_flat_source_from_record_batches;
     use crate::test_util::{
-        CreateRequestBuilder, TestEnv, build_rows_for_key, put_rows, rows_schema,
+        CreateRequestBuilder, TestEnv, build_rows_for_key, new_noop_file_purger, put_rows,
+        rows_schema,
     };
 
     #[tokio::test]
@@ -351,5 +375,259 @@ mod tests {
         // Splitting by series would yield a batch per series and file, 200 in total.
         assert_eq!(2000, num_rows);
         assert!(num_batches < 20, "got {num_batches} batches");
+    }
+
+    /// Builds sparse region metadata for compaction projection tests.
+    ///
+    /// Columns: `__table_id`, `__tsid`, `host`[, `rack`], `value`, `weight`, `ts`.
+    fn sparse_metadata(with_rack: bool, partition_expr: Option<String>) -> Arc<RegionMetadata> {
+        let mut builder = RegionMetadataBuilder::new(RegionId::new(1024, 1));
+        builder
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "__table_id".to_string(),
+                    ConcreteDataType::uint32_datatype(),
+                    false,
+                ),
+                semantic_type: SemanticType::Tag,
+                column_id: ReservedColumnId::table_id(),
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "__tsid".to_string(),
+                    ConcreteDataType::uint64_datatype(),
+                    false,
+                ),
+                semantic_type: SemanticType::Tag,
+                column_id: ReservedColumnId::tsid(),
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "host".to_string(),
+                    ConcreteDataType::string_datatype(),
+                    true,
+                ),
+                semantic_type: SemanticType::Tag,
+                column_id: 0,
+            });
+        if with_rack {
+            builder.push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "rack".to_string(),
+                    ConcreteDataType::string_datatype(),
+                    true,
+                ),
+                semantic_type: SemanticType::Tag,
+                column_id: 1,
+            });
+        }
+        builder
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "value".to_string(),
+                    ConcreteDataType::float64_datatype(),
+                    true,
+                ),
+                semantic_type: SemanticType::Field,
+                column_id: 2,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "weight".to_string(),
+                    ConcreteDataType::float64_datatype(),
+                    true,
+                ),
+                semantic_type: SemanticType::Field,
+                column_id: 3,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "ts".to_string(),
+                    ConcreteDataType::timestamp_millisecond_datatype(),
+                    false,
+                ),
+                semantic_type: SemanticType::Timestamp,
+                column_id: 4,
+            });
+        let mut primary_key = vec![ReservedColumnId::table_id(), ReservedColumnId::tsid(), 0];
+        if with_rack {
+            primary_key.push(1);
+        }
+        builder.primary_key(primary_key);
+        builder.primary_key_encoding(PrimaryKeyEncoding::Sparse);
+        if let Some(expr) = partition_expr {
+            builder.partition_expr_json(Some(expr));
+        }
+        Arc::new(builder.build().unwrap())
+    }
+
+    /// Writes one flat batch for [`sparse_metadata`] with `4` rows in one series.
+    fn sparse_flat_batch(metadata: &RegionMetadataRef) -> RecordBatch {
+        let schema = to_flat_sst_arrow_schema(
+            metadata,
+            &FlatSchemaOptions::from_encoding(metadata.primary_key_encoding),
+        );
+        let codec = SparsePrimaryKeyCodec::new(metadata);
+        let mut pk = Vec::new();
+        codec
+            .encode_value_refs(
+                &[
+                    (ReservedColumnId::table_id(), ValueRef::UInt32(1024)),
+                    (ReservedColumnId::tsid(), ValueRef::UInt64(0)),
+                    (0, ValueRef::String("host-0")),
+                    (1, ValueRef::String("rack-0")),
+                ],
+                &mut pk,
+            )
+            .unwrap();
+
+        let num_rows = 4;
+        let mut pk_builder = BinaryDictionaryBuilder::<UInt32Type>::new();
+        for _ in 0..num_rows {
+            pk_builder.append(&pk).unwrap();
+        }
+        RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Float64Array::from(vec![0.5, 1.5, 2.5, 3.5])) as ArrayRef,
+                Arc::new(Float64Array::from(vec![10.0, 20.0, 30.0, 40.0])),
+                Arc::new(TimestampMillisecondArray::from(vec![1, 2, 3, 4])),
+                Arc::new(pk_builder.finish()),
+                Arc::new(UInt64Array::from_value(1, num_rows)),
+                Arc::new(UInt8Array::from_value(OpType::Put as u8, num_rows)),
+            ],
+        )
+        .unwrap()
+    }
+
+    /// A sparse compaction read must project the batch with the projection of the
+    /// reader that produced it. The target region can have fewer columns than the
+    /// source file, so indices computed over all source columns address the wrong
+    /// batch columns and compat reports a type mismatch on the wrong column.
+    #[tokio::test]
+    async fn test_sparse_compaction_projects_batch_of_region_with_fewer_columns() {
+        let env = SchedulerEnv::new().await;
+        let source_metadata = sparse_metadata(true, None);
+        let infos = env
+            .access_layer
+            .write_sst(
+                SstWriteRequest {
+                    index_build_inputs: None,
+                    op_type: OperationType::Flush,
+                    metadata: source_metadata.clone(),
+                    source: new_flat_source_from_record_batches(vec![sparse_flat_batch(
+                        &source_metadata,
+                    )]),
+                    cache_manager: Arc::new(CacheManager::default()),
+                    max_sequence: None,
+                    sst_write_format: FormatType::Flat,
+                    preserve_row_sequence: false,
+                    index_options: Default::default(),
+                    index_config: Default::default(),
+                    inverted_index_config: Default::default(),
+                    fulltext_index_config: Default::default(),
+                    bloom_filter_index_config: Default::default(),
+                },
+                &WriteOptions::default(),
+                &mut Metrics::new(WriteType::Flush),
+            )
+            .await
+            .unwrap();
+        assert_eq!(1, infos.len());
+        let info = &infos[0];
+        let file = FileHandle::new(
+            FileMeta {
+                region_id: source_metadata.region_id,
+                file_id: info.file_id,
+                file_size: info.file_size,
+                time_range: info.time_range,
+                num_rows: info.num_rows as u64,
+                num_row_groups: info.num_row_groups,
+                level: 0,
+                ..Default::default()
+            },
+            new_noop_file_purger(),
+        );
+
+        // The target region dropped the `rack` tag and partitions the data
+        // differently, so the read has to convert the source batches before compat.
+        let target_metadata = sparse_metadata(
+            false,
+            Some(
+                partition_col("ts")
+                    .gt_eq(Value::Timestamp(Timestamp::new_millisecond(0)))
+                    .as_json_str()
+                    .unwrap(),
+            ),
+        );
+        let mut source = CompactionSstReaderBuilder {
+            metadata: target_metadata,
+            sst_layer: env.access_layer.clone(),
+            cache: Arc::new(CacheManager::default()),
+            inputs: &[file],
+            append_mode: false,
+            filter_deleted: true,
+            time_range: None,
+            merge_mode: MergeMode::LastRow,
+            read_parallelism: 1,
+        }
+        .build_flat_sst_reader()
+        .await
+        .unwrap();
+
+        let mut batches = Vec::new();
+        while let Some(batch) = source.next_batch().await.unwrap() {
+            batches.push(batch);
+        }
+        assert_eq!(1, batches.len());
+        let batch = &batches[0];
+        let schema = batch.schema();
+        let names: Vec<_> = schema
+            .fields()
+            .iter()
+            .map(|field| field.name().as_str())
+            .collect();
+        assert_eq!(
+            [
+                "value",
+                "weight",
+                "ts",
+                "__primary_key",
+                "__sequence",
+                "__op_type"
+            ],
+            names.as_slice()
+        );
+
+        let value = batch
+            .column_by_name("value")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .unwrap();
+        let weight = batch
+            .column_by_name("weight")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .unwrap();
+        let ts = batch
+            .column_by_name("ts")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<TimestampMillisecondArray>()
+            .unwrap();
+        let values: Vec<_> = (0..batch.num_rows())
+            .map(|idx| (value.value(idx), weight.value(idx), ts.value(idx)))
+            .collect();
+        assert_eq!(
+            vec![
+                (0.5, 10.0, 1),
+                (1.5, 20.0, 2),
+                (2.5, 30.0, 3),
+                (3.5, 40.0, 4)
+            ],
+            values
+        );
     }
 }
