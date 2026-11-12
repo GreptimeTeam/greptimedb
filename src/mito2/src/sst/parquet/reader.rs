@@ -25,9 +25,7 @@ use arrow_schema::extension::{
 use common_recordbatch::QueryMemoryTracker;
 use common_recordbatch::filter::{SimpleFilterEvaluator, TimestampUnitCast};
 use common_telemetry::{debug, error, tracing, warn};
-use datafusion::physical_expr::utils::{collect_columns, reassign_expr_columns};
 use datafusion::physical_plan::PhysicalExpr;
-use datafusion::physical_plan::expressions::DynamicFilterPhysicalExpr;
 use datafusion_common::tree_node::{TreeNode, TreeNodeRecursion};
 use datafusion_expr::utils::expr_to_columns;
 use datafusion_expr::{Expr, Volatility};
@@ -2161,12 +2159,7 @@ impl SimpleFilterContext {
 #[derive(Clone)]
 pub(crate) struct PhysicalFilterContext {
     /// Filter to evaluate.
-    ///
-    /// `None` for a producer-owned dynamic filter, whose expression changes while the
-    /// scan runs and is therefore captured per prefilter pass.
-    filter: Option<Arc<dyn PhysicalExpr>>,
-    /// Producer-owned dynamic filter to snapshot for each prefilter pass.
-    dynamic: Option<Arc<DynamicFilterPhysicalExpr>>,
+    filter: Arc<dyn PhysicalExpr>,
     /// Debug string of the original logical expression.
     expr_str: String,
     /// Id of the column to evaluate.
@@ -2177,22 +2170,8 @@ pub(crate) struct PhysicalFilterContext {
     semantic_type: SemanticType,
     /// Schema containing only the referenced column.
     schema: SchemaRef,
-    /// Whether the filter is immutable across queries.
+    /// Whether the original logical expression is immutable across queries.
     immutable: bool,
-}
-
-/// A stable snapshot of the expression a producer published for a dynamic filter.
-///
-/// The expression is rebound to the single-column prefilter schema and is only
-/// trustworthy while the producer stays at `generation`. See
-/// [`PhysicalFilterContext::capture_dynamic_snapshot`] for the producer contract this
-/// snapshot depends on.
-#[derive(Clone)]
-pub(crate) struct DynamicFilterSnapshot {
-    /// Captured expression, rebound to the prefilter schema.
-    pub(crate) expr: Arc<dyn PhysicalExpr>,
-    /// Producer generation the expression was captured at.
-    generation: u64,
 }
 
 impl PhysicalFilterContext {
@@ -2211,7 +2190,27 @@ impl PhysicalFilterContext {
         }
         let expr_str = format!("{expr:?}");
         let column_name = Self::single_column_name(expr)?;
-        let column_metadata = Self::validated_column(sst_meta, expected_meta, &column_name)?;
+        let column_metadata = match expected_meta {
+            Some(meta) => {
+                let column = meta.column_by_name(&column_name)?;
+                let sst_column = sst_meta.column_by_id(column.column_id)?;
+                // Physical expr requires the column name to match the SST column name.
+                if sst_column.column_schema.name != column_name {
+                    return None;
+                }
+                // Schema evolution (an altered field column, or a widened time
+                // index unit) can make the column's file type differ from the
+                // expected type; evaluating the original expr against the
+                // file's column would raise a cross-type comparison error
+                // (e.g. Timestamp(ms) >= Timestamp(µs)). Drop the prefilter;
+                // the query layer re-applies the predicate above the scan.
+                if sst_column.column_schema.data_type != column.column_schema.data_type {
+                    return None;
+                }
+                column
+            }
+            None => sst_meta.column_by_name(&column_name)?,
+        };
 
         // The column must be present in the projected arrow schema for the
         // prefilter to be able to read it.
@@ -2226,8 +2225,7 @@ impl PhysicalFilterContext {
         let immutable = expr_is_immutable(expr);
 
         Some(Self {
-            filter: Some(physical_expr),
-            dynamic: None,
+            filter: physical_expr,
             expr_str,
             column_id: column_metadata.column_id,
             column_name,
@@ -2235,167 +2233,6 @@ impl PhysicalFilterContext {
             schema,
             immutable,
         })
-    }
-
-    /// Creates a context for a producer-owned dynamic filter.
-    ///
-    /// Unlike [`Self::new_opt`], the expression is built by the producer (for example a
-    /// single-key `HashJoin`) against its own input schema, so this constructor admits only
-    /// filters whose declared dependencies are the filter column itself, and rebinds that
-    /// column to the single-column prefilter schema. It does not restrict the shape of the
-    /// published expression: the whole expression is evaluated as-is.
-    ///
-    /// Returns `None` when the dependencies are not exactly the filter column, or when
-    /// the SST and the expected metadata disagree on the column's identity or type. The
-    /// prefilter then keeps every row.
-    pub(crate) fn new_dynamic(
-        sst_meta: &RegionMetadataRef,
-        expected_meta: Option<&RegionMetadata>,
-        read_format: &FlatReadFormat,
-        handle: &Arc<DynamicFilterPhysicalExpr>,
-    ) -> Option<Self> {
-        // The columns a dynamic filter may reference are fixed when it is created, so
-        // they decide admission before any expression is published.
-        let column_name = Self::single_dynamic_column(handle)?;
-        let column_metadata = Self::validated_column(sst_meta, expected_meta, &column_name)?;
-        let (_, field) = read_format.arrow_schema().column_with_name(&column_name)?;
-        // The prefilter batch must carry the type the producer built its expression
-        // against. A changed type (an altered column, or a tag column that the flat
-        // format dictionary-encodes) would fail the comparison or silently compare
-        // across types.
-        if *field.data_type() != column_metadata.column_schema.data_type.as_arrow_type() {
-            return None;
-        }
-        let schema = Arc::new(ArrowSchema::new(vec![field.clone()]));
-
-        Some(Self {
-            filter: None,
-            dynamic: Some(Arc::clone(handle)),
-            // A stable debug string: the published expression changes between generations.
-            expr_str: format!(
-                "dynamic filter {:?} on {}",
-                handle.expression_id(),
-                column_name
-            ),
-            column_id: column_metadata.column_id,
-            column_name,
-            semantic_type: column_metadata.semantic_type,
-            schema,
-            // The producer republishes the expression while the scan runs.
-            immutable: false,
-        })
-    }
-
-    /// Captures the current expression of a producer-owned dynamic filter.
-    ///
-    /// Returns `None` for a static filter, and whenever no trustworthy snapshot exists:
-    /// the producer updated the filter while the snapshot was taken (the generation read
-    /// before and after [`DynamicFilterPhysicalExpr::current`] differs), or the published
-    /// expression cannot be rebound to the single-column prefilter schema, which includes
-    /// every reference outside this filter's column. Callers must keep every row then.
-    ///
-    /// # Producer contract
-    ///
-    /// The snapshot is evaluated as-is for a whole row-group prefilter pass, so the
-    /// published expression has to be usable on its own:
-    ///
-    /// * **A publication is a stable snapshot.** It is a value the producer hands over,
-    ///   not a view of state the producer keeps mutating: one expression is captured per
-    ///   pass and evaluated against every batch of that pass.
-    /// * **A publication is a necessary condition for the same execution.** The prefilter
-    ///   only ever drops rows its snapshot rejects, so a publication that accepts every
-    ///   row the enclosing join or limit keeps can never change the query result, however
-    ///   loose it is. A publication must therefore never reject a row the execution's own
-    ///   semantics keeps.
-    /// * **Only this handle's generation is observed.** A
-    ///   [`DynamicFilterPhysicalExpr`] nested inside the published expression that
-    ///   republishes on its own is invisible to
-    ///   [`Self::dynamic_snapshot_is_current`]; such an expression is not promised to be
-    ///   snapshotted at all.
-    ///
-    /// The supported producers publish completed, self-contained state: a `HashJoin`
-    /// publishes its immutable, completed build-side map (the build side does not change
-    /// once the filter is published), and `TopK` publishes its monotone (only ever
-    /// tightening) threshold as a fresh comparison expression. Arbitrary independently
-    /// mutable nested expressions are not promised: the snapshot is then either rejected
-    /// here and the pass keeps every row, or the producer's own generation keeps it
-    /// honest. The live filter above the scan stays authoritative either way.
-    pub(crate) fn capture_dynamic_snapshot(&self) -> Option<DynamicFilterSnapshot> {
-        let handle = self.dynamic.as_ref()?;
-        let generation = handle.snapshot_generation();
-        let expr = handle.current().ok()?;
-        if handle.snapshot_generation() != generation {
-            return None;
-        }
-        let expr = reassign_expr_columns(expr, &self.schema).ok()?;
-
-        Some(DynamicFilterSnapshot { expr, generation })
-    }
-
-    /// Returns true when the producer has not published a newer expression since
-    /// `snapshot` was captured.
-    pub(crate) fn dynamic_snapshot_is_current(&self, snapshot: &DynamicFilterSnapshot) -> bool {
-        self.dynamic
-            .as_ref()
-            .is_some_and(|handle| handle.snapshot_generation() == snapshot.generation)
-    }
-
-    /// Returns true for a producer-owned dynamic filter.
-    pub(crate) fn is_dynamic(&self) -> bool {
-        self.dynamic.is_some()
-    }
-
-    /// Resolves the column a filter reads after checking that the SST and the expected
-    /// metadata agree on its identity (id and name) and type.
-    fn validated_column<'a>(
-        sst_meta: &'a RegionMetadataRef,
-        expected_meta: Option<&'a RegionMetadata>,
-        column_name: &str,
-    ) -> Option<&'a ColumnMetadata> {
-        match expected_meta {
-            Some(meta) => {
-                // Gets the column metadata from the expected metadata.
-                let column = meta.column_by_name(column_name)?;
-                // Checks if the column is present in the SST metadata. We still uses the
-                // column from the expected metadata.
-                let sst_column = sst_meta.column_by_id(column.column_id)?;
-                debug_assert_eq!(column.semantic_type, sst_column.semantic_type);
-                // Physical exprs reference the column by the expected name; a renamed
-                // column keeps its old name in the SST.
-                if sst_column.column_schema.name != column_name {
-                    return None;
-                }
-                // Schema evolution (an altered field column, or a widened time index
-                // unit) can make columns with the same id have different types across
-                // SSTs; evaluating the expression against the file's column would raise
-                // a cross-type comparison error. Drop the prefilter; the query layer
-                // re-applies the predicate above the scan.
-                if sst_column.column_schema.data_type != column.column_schema.data_type {
-                    return None;
-                }
-                Some(column)
-            }
-            None => sst_meta.column_by_name(column_name),
-        }
-    }
-
-    /// Returns the single column all declared dependencies of a dynamic filter read.
-    ///
-    /// A multi-key producer publishes one filter over several key columns; such a filter
-    /// cannot be evaluated on a single-column prefilter batch, so it is rejected.
-    fn single_dynamic_column(handle: &DynamicFilterPhysicalExpr) -> Option<String> {
-        let mut column_name = None;
-        for child in handle.children() {
-            for column in collect_columns(child) {
-                match &column_name {
-                    Some(name) if *name != column.name() => return None,
-                    Some(_) => {}
-                    None => column_name = Some(column.name().to_string()),
-                }
-            }
-        }
-
-        column_name
     }
 
     /// Returns true if the expression is a variant we want to evaluate as a
@@ -2429,12 +2266,8 @@ impl PhysicalFilterContext {
     }
 
     /// Returns the filter to evaluate.
-    ///
-    /// `None` for a producer-owned dynamic filter: its expression changes while the scan
-    /// runs, so callers capture a snapshot with [`Self::capture_dynamic_snapshot`]
-    /// instead of evaluating this field.
-    pub(crate) fn filter(&self) -> Option<&Arc<dyn PhysicalExpr>> {
-        self.filter.as_ref()
+    pub(crate) fn filter(&self) -> &Arc<dyn PhysicalExpr> {
+        &self.filter
     }
 
     /// Returns the original logical expression string.
@@ -2664,30 +2497,17 @@ mod tests {
     use common_error::ext::WhateverResult;
     use common_function::scalars::json::json_get::JsonGetWithType;
     use common_function::scalars::udf::create_udf;
-    use common_query::request::remote_membership_test_support::{
-        key as wire_key, one_column_schema, partitions, run_real_hash_join, utf8,
-    };
-    use common_query::request::{DynFilterPayload, REMOTE_DYN_FILTER_PAYLOAD_MAX_BYTES};
     use common_recordbatch::ext::RecordBatchExt;
-    use common_recordbatch::filter::batch_filter;
     use datafusion::arrow::datatypes::DataType;
-    use datafusion::execution::TaskContext;
-    use datafusion::physical_plan::expressions::{
-        BinaryExpr, CaseExpr, Column, InListExpr, Literal, lit as physical_lit,
-    };
-    use datafusion::physical_plan::joins::join_hash_map::{JoinHashMapType, JoinHashMapU32};
-    use datafusion::physical_plan::joins::{HashExpr, HashTableLookupExpr, Map, SeededRandomState};
-    use datafusion::physical_plan::repartition::REPARTITION_RANDOM_STATE;
     use datafusion_common::ScalarValue;
-    use datafusion_common::hash_utils::create_hashes;
     use datafusion_expr::expr::ScalarFunction;
     use datafusion_expr::{
-        ColumnarValue, Expr, Operator, ScalarFunctionArgs, ScalarUDF, ScalarUDFImpl, Signature,
-        Volatility, col, lit,
+        ColumnarValue, Expr, ScalarFunctionArgs, ScalarUDF, ScalarUDFImpl, Signature, Volatility,
+        col, lit,
     };
     use datatypes::arrow::array::{
-        ArrayRef, BinaryDictionaryBuilder, Int64Array, StringArray, StringDictionaryBuilder,
-        StructArray, TimestampMillisecondArray, UInt8Array, UInt64Array,
+        ArrayRef, BinaryDictionaryBuilder, Int64Array, StringArray, StructArray,
+        TimestampMillisecondArray, UInt8Array, UInt64Array,
     };
     use datatypes::arrow::datatypes::{Fields, Schema, UInt32Type};
     use datatypes::arrow::record_batch::RecordBatch;
@@ -2710,14 +2530,10 @@ mod tests {
     use crate::cache::CacheManager;
     use crate::cache::test_util::{GatedStorageReader, parquet_file_data_with_region_metadata};
     use crate::sst::parquet::metadata::MetadataLoader;
-    use crate::sst::parquet::prefilter::{
-        build_reader_filter_plan, evaluate_physical_mask, execute_prefilter,
-    };
+    use crate::sst::parquet::prefilter::{build_reader_filter_plan, execute_prefilter};
     use crate::sst::parquet::read_columns::{ParquetReadColumn, ParquetReadColumns};
     use crate::sst::parquet::row_group::ParquetFetchMetrics;
-    use crate::test_util::sst_util::{
-        new_record_batch_with_custom_sequence, sst_file_handle, sst_region_metadata,
-    };
+    use crate::test_util::sst_util::{sst_file_handle, sst_region_metadata};
 
     #[tokio::test]
     async fn test_shared_file_metadata_resolution_counts_without_duplicate_io() {
@@ -2987,135 +2803,67 @@ mod tests {
         predicate: Predicate,
         cache_strategy: CacheStrategy,
     ) -> (RowGroupReaderBuilder, Arc<RegionMetadata>) {
-        prefilter_test_builder_with(
-            object_store,
-            3,
-            2,
-            PageIndexPolicy::Skip,
-            None,
-            predicate,
-            cache_strategy,
-        )
-        .await
-    }
-
-    /// A flat SST written by a prefilter test: `num_row_groups` row groups of
-    /// `rows_per_group` rows, materialized by `batch(start, end)`.
-    struct PrefilterTestSst<F> {
-        metadata: RegionMetadataRef,
-        rows_per_group: i64,
-        num_row_groups: i64,
-        batch: F,
-    }
-
-    /// Builds a reader over one SST with `num_row_groups` row groups of
-    /// `rows_per_group` rows. `writer_props` lets a test write several pages per row
-    /// group.
-    async fn prefilter_test_builder_with(
-        object_store: ObjectStore,
-        rows_per_group: i64,
-        num_row_groups: i64,
-        page_index_policy: PageIndexPolicy,
-        writer_props: Option<WriterProperties>,
-        predicate: Predicate,
-        cache_strategy: CacheStrategy,
-    ) -> (RowGroupReaderBuilder, Arc<RegionMetadata>) {
         let metadata = Arc::new(
             crate::test_util::sst_util::sst_region_metadata_with_encoding(
                 PrimaryKeyEncoding::Sparse,
             ),
         );
-        let batch_metadata = Arc::clone(&metadata);
-        let sst = PrefilterTestSst {
-            metadata,
-            rows_per_group,
-            num_row_groups,
-            batch: move |start: i64, end: i64| {
-                let mut primary_key = BinaryDictionaryBuilder::<UInt32Type>::new();
-                let mut fields = Vec::new();
-                let mut timestamps = Vec::new();
-                for value in start..end {
-                    let tag = if value == 4 { "b" } else { "a" };
-                    primary_key
-                        .append(crate::test_util::sst_util::new_sparse_primary_key(
-                            &[tag, "x"],
-                            &batch_metadata,
-                            1,
-                            100,
-                        ))
-                        .unwrap();
-                    fields.push(value as u64);
-                    timestamps.push(value);
-                }
-                RecordBatch::try_new(
-                    crate::sst::to_flat_sst_arrow_schema(
-                        &batch_metadata,
-                        &crate::sst::FlatSchemaOptions::from_encoding(PrimaryKeyEncoding::Sparse),
-                    ),
-                    vec![
-                        Arc::new(UInt64Array::from(fields)) as ArrayRef,
-                        Arc::new(TimestampMillisecondArray::from(timestamps)) as ArrayRef,
-                        Arc::new(primary_key.finish()) as ArrayRef,
-                        Arc::new(UInt64Array::from_value(1, (end - start) as usize)) as ArrayRef,
-                        Arc::new(UInt8Array::from_value(
-                            OpType::Put as u8,
-                            (end - start) as usize,
-                        )) as ArrayRef,
-                    ],
-                )
-                .unwrap()
-            },
+        let batch = |start: i64, end: i64| {
+            let mut primary_key = BinaryDictionaryBuilder::<UInt32Type>::new();
+            let mut fields = Vec::new();
+            let mut timestamps = Vec::new();
+            for value in start..end {
+                let tag = if value == 4 { "b" } else { "a" };
+                primary_key
+                    .append(crate::test_util::sst_util::new_sparse_primary_key(
+                        &[tag, "x"],
+                        &metadata,
+                        1,
+                        100,
+                    ))
+                    .unwrap();
+                fields.push(value as u64);
+                timestamps.push(value);
+            }
+            RecordBatch::try_new(
+                crate::sst::to_flat_sst_arrow_schema(
+                    &metadata,
+                    &crate::sst::FlatSchemaOptions::from_encoding(PrimaryKeyEncoding::Sparse),
+                ),
+                vec![
+                    Arc::new(UInt64Array::from(fields)) as ArrayRef,
+                    Arc::new(TimestampMillisecondArray::from(timestamps)) as ArrayRef,
+                    Arc::new(primary_key.finish()) as ArrayRef,
+                    Arc::new(UInt64Array::from_value(1, (end - start) as usize)) as ArrayRef,
+                    Arc::new(UInt8Array::from_value(
+                        OpType::Put as u8,
+                        (end - start) as usize,
+                    )) as ArrayRef,
+                ],
+            )
+            .unwrap()
         };
-        prefilter_test_builder_from_sst(
-            object_store,
-            sst,
-            page_index_policy,
-            writer_props,
-            predicate,
-            cache_strategy,
-        )
-        .await
-    }
-
-    /// Builds a reader over `sst`, whose batches come from the caller so a test can write
-    /// columns the shared sparse fixture does not have.
-    async fn prefilter_test_builder_from_sst<F>(
-        object_store: ObjectStore,
-        sst: PrefilterTestSst<F>,
-        page_index_policy: PageIndexPolicy,
-        writer_props: Option<WriterProperties>,
-        predicate: Predicate,
-        cache_strategy: CacheStrategy,
-    ) -> (RowGroupReaderBuilder, Arc<RegionMetadata>)
-    where
-        F: Fn(i64, i64) -> RecordBatch,
-    {
-        let PrefilterTestSst {
-            metadata,
-            rows_per_group,
-            num_row_groups,
-            batch,
-        } = sst;
-        let first_batch = batch(0, rows_per_group);
+        let first_batch = batch(0, 3);
+        let second_batch = batch(3, 6);
         let mut bytes = Vec::new();
-        let mut writer =
-            ArrowWriter::try_new(&mut bytes, first_batch.schema(), writer_props).unwrap();
-        for row_group in 0..num_row_groups {
-            let start = row_group * rows_per_group;
-            writer.write(&batch(start, start + rows_per_group)).unwrap();
-            writer.flush().unwrap();
-        }
+        let mut writer = ArrowWriter::try_new(&mut bytes, first_batch.schema(), None).unwrap();
+        writer.write(&first_batch).unwrap();
+        writer.flush().unwrap();
+        writer.write(&second_batch).unwrap();
         writer.close().unwrap();
 
-        let file_handle = sst_file_handle(0, num_row_groups * rows_per_group);
+        let file_handle = sst_file_handle(0, 6);
         let file_path = file_handle.file_path("prefilter_test", PathType::Bare);
         let file_size = bytes.len() as u64;
         object_store.write(&file_path, bytes).await.unwrap();
 
         let mut cache_metrics = MetadataCacheMetrics::default();
-        let mut loader = MetadataLoader::new(object_store.clone(), &file_path, file_size);
-        loader.with_page_index_policy(page_index_policy);
-        let parquet_meta = Arc::new(loader.load(&mut cache_metrics).await.unwrap());
+        let parquet_meta = Arc::new(
+            MetadataLoader::new(object_store.clone(), &file_path, file_size)
+                .load(&mut cache_metrics)
+                .await
+                .unwrap(),
+        );
         let read_format = FlatReadFormat::new(
             metadata.clone(),
             ReadColumns::new(
@@ -3178,9 +2926,6 @@ mod tests {
         )
     }
 
-    /// A row group whose filters are already proven by its statistics keeps the incoming
-    /// selection, and the prefilter pass requests no pages or ranges for it: every fetch
-    /// counter stays at zero.
     #[tokio::test(flavor = "current_thread")]
     async fn test_execute_prefilter_proven_filters_preserve_selection_without_fetching() {
         let object_store = ObjectStore::new(Memory::default()).unwrap();
@@ -3220,8 +2965,6 @@ mod tests {
             assert_eq!(result.refined_selection, expected);
             assert_eq!(result.filtered_rows, 0);
             let metrics = fetch_metrics.data.lock().unwrap();
-            // `pages_to_fetch_*` count the page ranges requested per source, so these
-            // are store, mem-cache and write-cache range counts rather than pages.
             assert_eq!(metrics.pages_to_fetch_store, 0);
             assert_eq!(metrics.pages_to_fetch_mem, 0);
             assert_eq!(metrics.pages_to_fetch_write_cache, 0);
@@ -3270,8 +3013,6 @@ mod tests {
                 RowSelection::from(vec![RowSelector::select(1), RowSelector::skip(2),])
             );
             if pass == 1 {
-                // The cached pass adds no store range count: the second pass reuses the
-                // cached masks instead of reading the row group again.
                 assert_eq!(fetch_metrics.data.lock().unwrap().pages_to_fetch_store, 0);
             }
         }
@@ -3303,760 +3044,6 @@ mod tests {
         assert_eq!(
             result.refined_selection,
             RowSelection::from(vec![RowSelector::select(1), RowSelector::skip(2)])
-        );
-    }
-
-    /// Builds a dynamic filter over `field_0` that a `HashJoin` starts as `true` and
-    /// republishes with the membership of its build side.
-    fn new_test_dynamic_filter() -> Arc<DynamicFilterPhysicalExpr> {
-        let key = Arc::new(Column::new("field_0", 0)) as Arc<dyn PhysicalExpr>;
-        Arc::new(DynamicFilterPhysicalExpr::new(
-            vec![key],
-            physical_lit(true),
-        ))
-    }
-
-    fn publish_membership(
-        handle: &Arc<DynamicFilterPhysicalExpr>,
-        producer_schema: &SchemaRef,
-        members: Vec<u64>,
-    ) {
-        let expr = col("field_0").in_list(members.into_iter().map(lit).collect(), false);
-        let published = Predicate::to_physical_expr(&expr, producer_schema).unwrap();
-        handle.update(published).unwrap();
-    }
-
-    async fn execute_test_prefilter(
-        reader_builder: &RowGroupReaderBuilder,
-        row_group_idx: usize,
-    ) -> crate::sst::parquet::prefilter::PrefilterResult {
-        let prefilter_builder = reader_builder.prefilter_builder.as_ref().unwrap();
-        let mut prefilter_ctx = prefilter_builder.build(row_group_idx);
-        execute_prefilter(
-            &mut prefilter_ctx,
-            reader_builder,
-            &RowGroupBuildContext {
-                row_group_idx,
-                row_selection: None,
-                fetch_metrics: None,
-            },
-        )
-        .await
-        .unwrap()
-    }
-
-    /// A dynamic filter starts as `true` and is published after the plan and the reader
-    /// are constructed. Each row group snapshots the current generation when its prefilter
-    /// starts, so a later publication still prunes.
-    #[tokio::test(flavor = "current_thread")]
-    async fn test_execute_prefilter_dynamic_filter_published_after_reader_construction() {
-        let producer_schema = dynamic_producer_schema();
-        let handle = new_test_dynamic_filter();
-        let (reader_builder, _) = prefilter_test_builder_with(
-            ObjectStore::new(Memory::default()).unwrap(),
-            3,
-            3,
-            PageIndexPolicy::Skip,
-            None,
-            Predicate::with_dyn_filters(vec![], vec![handle.clone()]),
-            CacheStrategy::Disabled,
-        )
-        .await;
-
-        // Nothing is published yet: the placeholder keeps every row.
-        let result = execute_test_prefilter(&reader_builder, 0).await;
-        assert_eq!(3, result.refined_selection.row_count());
-        assert_eq!(0, result.filtered_rows);
-
-        // The build side finishes and the producer publishes its membership.
-        publish_membership(&handle, &producer_schema, vec![1]);
-        let result = execute_test_prefilter(&reader_builder, 0).await;
-        assert_eq!(
-            RowSelection::from(vec![
-                RowSelector::skip(1),
-                RowSelector::select(1),
-                RowSelector::skip(1),
-            ]),
-            result.refined_selection
-        );
-        assert_eq!(2, result.filtered_rows);
-
-        // The mask is never cached across generations: the next publication is evaluated
-        // instead of replaying the previous result.
-        publish_membership(&handle, &producer_schema, vec![2]);
-        let result = execute_test_prefilter(&reader_builder, 0).await;
-        assert_eq!(
-            RowSelection::from(vec![RowSelector::skip(2), RowSelector::select(1)]),
-            result.refined_selection
-        );
-        assert_eq!(2, result.filtered_rows);
-    }
-
-    /// A producer may republish while a row group's prefilter runs. Nothing proves the
-    /// new expression keeps the rows the stale snapshot kept, so the mask is discarded and
-    /// the incoming selection is kept: the upper filter stays authoritative.
-    #[tokio::test(flavor = "current_thread")]
-    async fn test_execute_prefilter_discards_dynamic_mask_after_republish() {
-        let producer_schema = dynamic_producer_schema();
-        let handle = new_test_dynamic_filter();
-        publish_membership(&handle, &producer_schema, vec![1]);
-        let (reader_builder, _) = prefilter_test_builder_with(
-            ObjectStore::new(Memory::default()).unwrap(),
-            3,
-            3,
-            PageIndexPolicy::Skip,
-            None,
-            Predicate::with_dyn_filters(vec![], vec![handle.clone()]),
-            CacheStrategy::Disabled,
-        )
-        .await;
-
-        // The row group's prefilter starts and snapshots the current generation.
-        let prefilter_builder = reader_builder.prefilter_builder.as_ref().unwrap();
-        let mut prefilter_ctx = prefilter_builder.build(0);
-        // The producer publishes a new expression while the pass is in flight.
-        publish_membership(&handle, &producer_schema, vec![2]);
-        let incoming = RowSelection::from(vec![RowSelector::select(2), RowSelector::skip(1)]);
-        let result = execute_prefilter(
-            &mut prefilter_ctx,
-            &reader_builder,
-            &RowGroupBuildContext {
-                row_group_idx: 0,
-                row_selection: Some(incoming.clone()),
-                fetch_metrics: None,
-            },
-        )
-        .await
-        .unwrap();
-
-        assert_eq!(incoming, result.refined_selection);
-        assert_eq!(0, result.filtered_rows);
-    }
-
-    /// The prefilter of the expression a real `HashJoin` publishes keeps exactly the rows
-    /// the live `batch_filter` above the same scan keeps.
-    ///
-    /// The published shape is what a partitioned join builds for a large build side: a
-    /// hash-table lookup over the probe key per build partition, routed by
-    /// `hash_repartition(key) % 2` inside a `CASE` — not a logical `IN` list. The
-    /// prefilter evaluates it on the reduced projection; the filter above the scan
-    /// evaluates the same expression on the projected read. Both must select the same
-    /// rows of the same row group.
-    #[tokio::test(flavor = "current_thread")]
-    async fn test_execute_prefilter_hash_lookup_matches_upper_filter() {
-        // The build side holds 1, 3 and 5; rows 0, 2 and 4 are not members.
-        let build_keys = [1_u64, 3, 5];
-        let handle = Arc::new(DynamicFilterPhysicalExpr::new(
-            vec![Arc::new(Column::new("field_0", 3)) as Arc<dyn PhysicalExpr>],
-            physical_lit(true),
-        ));
-        handle
-            .update(partitioned_hash_join_lookup(
-                &dynamic_producer_schema(),
-                &build_keys,
-            ))
-            .unwrap();
-        let published = handle.current().unwrap();
-        assert!(
-            published.is::<CaseExpr>(),
-            "a partitioned join routes its lookups: {published}"
-        );
-        assert!(
-            published.to_string().contains("hash_lookup")
-                && published.to_string().contains("hash_repartition"),
-            "the published shape must be the hash lookup a producer builds: {published}"
-        );
-
-        let (reader_builder, _) = prefilter_test_builder_with(
-            ObjectStore::new(Memory::default()).unwrap(),
-            6,
-            1,
-            PageIndexPolicy::Skip,
-            None,
-            Predicate::with_dyn_filters(vec![], vec![handle.clone()]),
-            CacheStrategy::Disabled,
-        )
-        .await;
-
-        let result = execute_test_prefilter(&reader_builder, 0).await;
-        assert_eq!(
-            3, result.filtered_rows,
-            "the lookup must prune the rows outside the build side"
-        );
-
-        let (all_batches, _) = read_test_row_group(&reader_builder, 0, None).await;
-        let (selected_batches, _) =
-            read_test_row_group(&reader_builder, 0, Some(result.refined_selection)).await;
-
-        // The upper filter evaluates the same published expression, but on the wide
-        // projected batch it guards instead of the single prefilter column.
-        let schema = all_batches[0].schema();
-        let upper_expr = reassign_expr_columns(Arc::clone(&published), schema.as_ref()).unwrap();
-        let upper_batches = all_batches
-            .iter()
-            .map(|batch| batch_filter(batch, &upper_expr).unwrap())
-            .collect::<Vec<_>>();
-        let upper_values = test_field_values(&upper_batches);
-        assert_eq!(
-            build_keys.to_vec(),
-            upper_values,
-            "the upper filter keeps exactly the build-side members"
-        );
-        assert_eq!(
-            upper_values,
-            test_field_values(&selected_batches),
-            "the prefilter must keep exactly the rows the upper filter keeps"
-        );
-    }
-
-    /// A multi-page row group returns the same rows for the rows a dynamic prefilter
-    /// selects, and the projected reader fetches fewer bytes for them.
-    ///
-    /// The metrics below belong to the projected read only: `page_size_to_fetch_store` is
-    /// the number of bytes of the projected columns that read covers, and
-    /// `pages_to_fetch_store` the number of store ranges it requests. The saving is a
-    /// projection-byte saving, not a net scan saving: this row group's filter column was
-    /// already read by the prefilter pass, and store range count is not part of the claim —
-    /// a partial selection can split a column into more ranges than a full read. The row
-    /// counts asserted here are the rows the projected reader returns, not the rows of the
-    /// filter column the prefilter decoded.
-    ///
-    /// The row group is large enough that the pages a partial selection skips span more
-    /// than the store's fetch merge gap; below that the fetched byte ranges merge back
-    /// into the whole row group whatever the selection is.
-    #[tokio::test(flavor = "current_thread")]
-    async fn test_execute_prefilter_dynamic_selection_saves_projected_store_bytes() {
-        const ROWS: i64 = 100_000;
-        const PAGE_ROWS: usize = 20_000;
-
-        let props = WriterProperties::builder()
-            .set_data_page_row_count_limit(PAGE_ROWS)
-            .set_write_batch_size(8192)
-            .build();
-        let producer_schema = dynamic_producer_schema();
-        let handle = new_test_dynamic_filter();
-        // Only the first row of the row group survives the producer's membership.
-        publish_membership(&handle, &producer_schema, vec![0]);
-        let (reader_builder, _) = prefilter_test_builder_with(
-            ObjectStore::new(Memory::default()).unwrap(),
-            ROWS,
-            1,
-            // Translating a row selection into byte ranges needs the offset index.
-            PageIndexPolicy::Optional,
-            Some(props),
-            Predicate::with_dyn_filters(vec![], vec![handle.clone()]),
-            CacheStrategy::Disabled,
-        )
-        .await;
-        assert_eq!(
-            ROWS as usize,
-            reader_builder.parquet_meta.row_group(0).num_rows() as usize
-        );
-        assert!(
-            reader_builder.parquet_meta.offset_index().is_some(),
-            "the row selection can only skip pages with the offset index"
-        );
-        assert!(
-            reader_builder
-                .parquet_meta
-                .row_group(0)
-                .columns()
-                .iter()
-                .any(|column| column.num_values() as usize > PAGE_ROWS),
-            "the row group must span several pages"
-        );
-
-        let result = execute_test_prefilter(&reader_builder, 0).await;
-        assert_eq!(
-            RowSelection::from(vec![
-                RowSelector::select(1),
-                RowSelector::skip(ROWS as usize - 1),
-            ]),
-            result.refined_selection
-        );
-
-        let (all_batches, all_metrics) = read_test_row_group(&reader_builder, 0, None).await;
-        let (selected_batches, selected_metrics) =
-            read_test_row_group(&reader_builder, 0, Some(result.refined_selection)).await;
-
-        // The selected read returns exactly the rows of the full read that the producer
-        // keeps.
-        let all_values = test_field_values(&all_batches);
-        assert_eq!(
-            (0..ROWS).map(|value| value as u64).collect::<Vec<_>>(),
-            all_values
-        );
-        assert_eq!(
-            vec![0],
-            test_field_values(&selected_batches),
-            "the row selection must not change the rows the projected reader returns"
-        );
-
-        let all = all_metrics.data.lock().unwrap().clone();
-        let selected = selected_metrics.data.lock().unwrap().clone();
-        assert!(
-            all.page_size_to_fetch_store > 0,
-            "the control read must fetch projected bytes from the store"
-        );
-        // Store range count (`pages_to_fetch_store`) is deliberately not asserted: a
-        // partial selection can request more ranges than a full read, because one range
-        // per column can become one range per page.
-        //
-        // Projection-byte savings: the projected read covers fewer bytes, because the
-        // selection drops the pages of the rows the producer rejects.
-        assert!(
-            selected.page_size_to_fetch_store < all.page_size_to_fetch_store,
-            "selected {} bytes vs all {} bytes",
-            selected.page_size_to_fetch_store,
-            all.page_size_to_fetch_store
-        );
-    }
-
-    /// Reads one row group of the projected columns through the projected reader and
-    /// returns its batches with the fetch metrics of exactly that read.
-    async fn read_test_row_group(
-        reader_builder: &RowGroupReaderBuilder,
-        row_group_idx: usize,
-        row_selection: Option<RowSelection>,
-    ) -> (Vec<RecordBatch>, ParquetFetchMetrics) {
-        let fetch_metrics = ParquetFetchMetrics::default();
-        let mut stream = reader_builder
-            .build_with_projection(
-                row_group_idx,
-                row_selection,
-                reader_builder.projection.mask.clone(),
-                Some(&fetch_metrics),
-            )
-            .await
-            .unwrap();
-        let mut batches = Vec::new();
-        while let Some(batch) = stream.next().await {
-            batches.push(batch.unwrap());
-        }
-
-        (batches, fetch_metrics)
-    }
-
-    fn test_field_values(batches: &[RecordBatch]) -> Vec<u64> {
-        batches
-            .iter()
-            .flat_map(|batch| {
-                batch
-                    .column(0)
-                    .as_any()
-                    .downcast_ref::<UInt64Array>()
-                    .unwrap()
-                    .values()
-                    .to_vec()
-            })
-            .collect()
-    }
-
-    /// Size of the wire build side, how many rows of the trace SST each build key
-    /// matches, and the resulting number of leading member rows.
-    const STACK_BUILD_KEYS: usize = 642;
-    const STACK_MATCHES_PER_KEY: usize = 3;
-    const STACK_MATCHED_ROWS: usize = STACK_BUILD_KEYS * STACK_MATCHES_PER_KEY;
-
-    /// Region metadata whose `trace_id` is a plain (non-dictionary) UTF-8 *field* column,
-    /// i.e. the column type the join key has on the wire, not a dictionary-encoded tag.
-    fn stack_prefilter_metadata() -> RegionMetadataRef {
-        let mut builder = RegionMetadataBuilder::new(RegionId::new(0, 0));
-        builder
-            .push_column_metadata(ColumnMetadata {
-                column_schema: ColumnSchema::new(
-                    "tag_0".to_string(),
-                    ConcreteDataType::string_datatype(),
-                    true,
-                ),
-                semantic_type: SemanticType::Tag,
-                column_id: 0,
-            })
-            .push_column_metadata(ColumnMetadata {
-                column_schema: ColumnSchema::new(
-                    "tag_1".to_string(),
-                    ConcreteDataType::string_datatype(),
-                    true,
-                ),
-                semantic_type: SemanticType::Tag,
-                column_id: 1,
-            })
-            .push_column_metadata(ColumnMetadata {
-                column_schema: ColumnSchema::new(
-                    "trace_id".to_string(),
-                    ConcreteDataType::string_datatype(),
-                    true,
-                ),
-                semantic_type: SemanticType::Field,
-                column_id: 2,
-            })
-            .push_column_metadata(ColumnMetadata {
-                column_schema: ColumnSchema::new(
-                    "field_0".to_string(),
-                    ConcreteDataType::uint64_datatype(),
-                    true,
-                ),
-                semantic_type: SemanticType::Field,
-                column_id: 3,
-            })
-            .push_column_metadata(ColumnMetadata {
-                column_schema: ColumnSchema::new(
-                    "ts".to_string(),
-                    ConcreteDataType::timestamp_millisecond_datatype(),
-                    false,
-                ),
-                semantic_type: SemanticType::Timestamp,
-                column_id: 4,
-            })
-            .primary_key(vec![0, 1]);
-        Arc::new(builder.build().unwrap())
-    }
-
-    /// Writes one flat batch of the trace SST. The first `STACK_MATCHED_ROWS` rows carry
-    /// the build keys (each key `STACK_MATCHES_PER_KEY` times, contiguously, so they fill
-    /// a prefix of the first page), every other row is a non-member.
-    fn stack_prefilter_batch(
-        metadata: &RegionMetadataRef,
-        build_keys: &[String],
-        start: i64,
-        end: i64,
-    ) -> RecordBatch {
-        let num_rows = (end - start) as usize;
-        let mut tag_0 = StringDictionaryBuilder::<UInt32Type>::new();
-        let mut tag_1 = StringDictionaryBuilder::<UInt32Type>::new();
-        let mut primary_key = BinaryDictionaryBuilder::<UInt32Type>::new();
-        let pk = crate::test_util::sst_util::new_primary_key(&["a", "x"]);
-        let mut trace_ids = Vec::with_capacity(num_rows);
-        let mut fields = Vec::with_capacity(num_rows);
-        let mut timestamps = Vec::with_capacity(num_rows);
-        for row in start..end {
-            let row = row as usize;
-            tag_0.append_value("a");
-            tag_1.append_value("x");
-            primary_key.append(&pk).unwrap();
-            trace_ids.push(if row < STACK_MATCHED_ROWS {
-                build_keys[row % build_keys.len()].clone()
-            } else {
-                format!("trace-noise-{row:06}")
-            });
-            fields.push(row as u64);
-            timestamps.push(row as i64);
-        }
-
-        RecordBatch::try_new(
-            crate::sst::to_flat_sst_arrow_schema(
-                metadata,
-                &crate::sst::FlatSchemaOptions::default(),
-            ),
-            vec![
-                Arc::new(tag_0.finish()) as ArrayRef,
-                Arc::new(tag_1.finish()) as ArrayRef,
-                Arc::new(StringArray::from_iter_values(trace_ids)) as ArrayRef,
-                Arc::new(UInt64Array::from(fields)) as ArrayRef,
-                Arc::new(TimestampMillisecondArray::from(timestamps)) as ArrayRef,
-                Arc::new(primary_key.finish()) as ArrayRef,
-                Arc::new(UInt64Array::from_value(1, num_rows)) as ArrayRef,
-                Arc::new(UInt8Array::from_value(OpType::Put as u8, num_rows)) as ArrayRef,
-            ],
-        )
-        .unwrap()
-    }
-
-    /// Collects every node of `expr` that matches `needle`.
-    fn collect_expr_nodes(
-        expr: &Arc<dyn PhysicalExpr>,
-        needle: &dyn Fn(&Arc<dyn PhysicalExpr>) -> bool,
-        found: &mut Vec<Arc<dyn PhysicalExpr>>,
-    ) {
-        if needle(expr) {
-            found.push(Arc::clone(expr));
-        }
-
-        for child in expr.children() {
-            collect_expr_nodes(child, needle, found);
-        }
-    }
-
-    /// Returns the nodes of `expr` of type `T`.
-    fn expr_nodes_of<T: PhysicalExpr>(expr: &Arc<dyn PhysicalExpr>) -> Vec<Arc<dyn PhysicalExpr>> {
-        let mut found = Vec::new();
-        collect_expr_nodes(expr, &|node| node.is::<T>(), &mut found);
-        found
-    }
-
-    /// Returns true if `expr` holds a boolean `true` literal.
-    fn has_true_literal(expr: &Arc<dyn PhysicalExpr>) -> bool {
-        expr_nodes_of::<Literal>(expr).iter().any(|node| {
-            node.downcast_ref::<Literal>()
-                .is_some_and(|literal| literal.value() == &ScalarValue::Boolean(Some(true)))
-        })
-    }
-
-    /// Returns the `trace_id` values of the projected batches, in row order.
-    fn test_trace_ids(batches: &[RecordBatch]) -> Vec<String> {
-        batches
-            .iter()
-            .flat_map(|batch| {
-                batch
-                    .column_by_name("trace_id")
-                    .expect("the projected read keeps trace_id")
-                    .as_any()
-                    .downcast_ref::<StringArray>()
-                    .unwrap()
-                    .iter()
-                    .map(|value| value.unwrap().to_string())
-                    .collect::<Vec<_>>()
-            })
-            .collect()
-    }
-
-    /// Returns the `field_0` values of the projected batches, in row order.
-    fn test_stack_field_values(batches: &[RecordBatch]) -> Vec<u64> {
-        batches
-            .iter()
-            .flat_map(|batch| {
-                batch
-                    .column_by_name("field_0")
-                    .expect("the projected read keeps field_0")
-                    .as_any()
-                    .downcast_ref::<UInt64Array>()
-                    .unwrap()
-                    .values()
-                    .to_vec()
-            })
-            .collect()
-    }
-
-    /// The membership a real `HashJoin` publishes, as recovered by the wire, drives the
-    /// Mito2 row-selection prefilter, so both halves are exercised in one scan.
-    ///
-    /// The producer half: a 642-key UTF-8 build side makes DataFusion publish a runtime
-    /// `HashTableLookupExpr`, which has no wire form. The payload must recover it as the
-    /// exact 642-literal `InListExpr` — if the recovery degrades to `true`, the decoded
-    /// shape assertion below fails before the scan even starts.
-    ///
-    /// The consumer half: the decoded expression becomes the scan's dynamic filter, and
-    /// the prefilter must select exactly the 1,926 member rows of a 100,000-row SST and
-    /// let the projected read fetch at most 60% of the store bytes the unfiltered read
-    /// fetches. If the prefilter stops pruning, the byte ratio fails.
-    #[tokio::test(flavor = "current_thread")]
-    async fn test_wire_recovered_membership_dyn_filter_prunes_prefilter_pages() {
-        const ROWS: i64 = 100_000;
-        const PAGE_ROWS: usize = 20_000;
-
-        // The producer side: a real hash join over 642 UTF-8 build keys.
-        let wire_schema = one_column_schema("trace_id", DataType::Utf8);
-        let build_keys = (0..STACK_BUILD_KEYS)
-            .map(|key| format!("trace-member-{key:04}"))
-            .collect::<Vec<_>>();
-        let borrowed_keys = build_keys.iter().map(String::as_str).collect::<Vec<_>>();
-        let misses = (0..STACK_BUILD_KEYS)
-            .map(|key| format!("trace-miss-{key:04}"))
-            .collect::<Vec<_>>();
-        let mut probe_values = borrowed_keys.clone();
-        probe_values.extend(misses.iter().map(String::as_str));
-        let build = partitions(&wire_schema, vec![vec![utf8(&borrowed_keys)]]);
-        let probe = partitions(&wire_schema, vec![vec![utf8(&probe_values)]]);
-        let trace_id_key = wire_key("trace_id", 0);
-        let filter = run_real_hash_join(
-            1,
-            Arc::clone(&wire_schema),
-            Arc::clone(&wire_schema),
-            build,
-            probe,
-            vec![(Arc::clone(&trace_id_key), Arc::clone(&trace_id_key))],
-        )
-        .await;
-        // The producer wraps the lookup in the build-side bounds, so it is not the root.
-        assert_eq!(
-            1,
-            expr_nodes_of::<HashTableLookupExpr>(&filter.expr).len(),
-            "a real build lease must publish a runtime lookup: {}",
-            filter.expr
-        );
-
-        // The wire: encode the producer predicate and decode it against the probe schema.
-        let payload = DynFilterPayload::from_datafusion_expr(
-            &filter.expr,
-            REMOTE_DYN_FILTER_PAYLOAD_MAX_BYTES,
-        )
-        .unwrap();
-        let decoded = payload
-            .decode_datafusion_expr(
-                &TaskContext::default(),
-                filter.probe_schema.as_ref(),
-                REMOTE_DYN_FILTER_PAYLOAD_MAX_BYTES,
-            )
-            .unwrap();
-
-        // The decoded predicate is the exact build membership, not the `true` fallback.
-        // The producer publishes the lookup with the build-side bounds around it, so the
-        // membership is the single `IN` list of the decoded tree.
-        assert!(
-            expr_nodes_of::<HashTableLookupExpr>(&decoded).is_empty(),
-            "the wire must not carry a runtime lookup: {decoded}"
-        );
-        assert!(
-            !has_true_literal(&decoded),
-            "the wire must not degrade the membership to a `true` fallback: {decoded}"
-        );
-        let memberships = expr_nodes_of::<InListExpr>(&decoded);
-        assert_eq!(
-            1,
-            memberships.len(),
-            "the decoded predicate must carry one recovered membership: {decoded}"
-        );
-        let membership = memberships[0].downcast_ref::<InListExpr>().unwrap();
-        assert!(!membership.negated(), "build membership is not negated");
-        assert_eq!(
-            STACK_BUILD_KEYS,
-            membership.list().len(),
-            "every build key must be recovered: {decoded}"
-        );
-        let membership_key = membership
-            .expr()
-            .downcast_ref::<Column>()
-            .unwrap_or_else(|| panic!("the membership operand must be the probe key: {decoded}"));
-        assert_eq!("trace_id", membership_key.name());
-        let decoded_keys = membership
-            .list()
-            .iter()
-            .map(
-                |literal| match literal.downcast_ref::<Literal>().map(Literal::value) {
-                    Some(ScalarValue::Utf8(Some(key))) => key.clone(),
-                    other => panic!("unexpected membership literal {other:?}"),
-                },
-            )
-            .collect::<Vec<_>>();
-        let mut decoded_keys_sorted = decoded_keys.clone();
-        decoded_keys_sorted.sort();
-        let mut build_keys_sorted = build_keys.clone();
-        build_keys_sorted.sort();
-        assert_eq!(build_keys_sorted, decoded_keys_sorted);
-
-        // The consumer side: install the decoded predicate as the scan's dynamic filter.
-        let handle = Arc::new(DynamicFilterPhysicalExpr::new(
-            vec![Arc::new(Column::new("trace_id", 0)) as Arc<dyn PhysicalExpr>],
-            Arc::clone(&decoded),
-        ));
-        let metadata = stack_prefilter_metadata();
-        let batch_metadata = Arc::clone(&metadata);
-        let batch_keys = build_keys.clone();
-        let props = WriterProperties::builder()
-            .set_data_page_row_count_limit(PAGE_ROWS)
-            .set_write_batch_size(8192)
-            // The claim is about pages, not about how well a column compresses.
-            .set_dictionary_enabled(false)
-            .build();
-        let (reader_builder, _) = prefilter_test_builder_from_sst(
-            ObjectStore::new(Memory::default()).unwrap(),
-            PrefilterTestSst {
-                metadata,
-                rows_per_group: ROWS,
-                num_row_groups: 1,
-                batch: move |start, end| {
-                    stack_prefilter_batch(&batch_metadata, &batch_keys, start, end)
-                },
-            },
-            // Translating a row selection into byte ranges needs the offset index.
-            PageIndexPolicy::Optional,
-            Some(props),
-            Predicate::with_dyn_filters(vec![], vec![Arc::clone(&handle)]),
-            CacheStrategy::Disabled,
-        )
-        .await;
-        assert!(
-            reader_builder.parquet_meta.offset_index().is_some(),
-            "the row selection can only skip pages with the offset index"
-        );
-        assert!(
-            reader_builder
-                .parquet_meta
-                .row_group(0)
-                .columns()
-                .iter()
-                .all(|column| column.num_values() as usize > PAGE_ROWS),
-            "the row group must span several pages in every column"
-        );
-
-        // The prefilter selects exactly the member rows.
-        let result = execute_test_prefilter(&reader_builder, 0).await;
-        assert_eq!(
-            RowSelection::from(vec![
-                RowSelector::select(STACK_MATCHED_ROWS),
-                RowSelector::skip(ROWS as usize - STACK_MATCHED_ROWS),
-            ]),
-            result.refined_selection,
-            "the prefilter must select the member rows and skip the noise"
-        );
-        assert_eq!(ROWS as usize - STACK_MATCHED_ROWS, result.filtered_rows);
-
-        // Control: the full projection without the refined selection. Candidate: the same
-        // read with it, which is what a scan above the prefilter does.
-        let (control_batches, control_metrics) =
-            read_test_row_group(&reader_builder, 0, None).await;
-        let (candidate_batches, candidate_metrics) =
-            read_test_row_group(&reader_builder, 0, Some(result.refined_selection)).await;
-        assert_eq!(
-            ROWS as usize,
-            control_batches
-                .iter()
-                .map(RecordBatch::num_rows)
-                .sum::<usize>()
-        );
-        assert_eq!(
-            STACK_MATCHED_ROWS,
-            candidate_batches
-                .iter()
-                .map(RecordBatch::num_rows)
-                .sum::<usize>()
-        );
-
-        // The rows and values of both arms are the same ones the live filter above the
-        // scan keeps, evaluated on the projected batch.
-        let control_schema = control_batches[0].schema();
-        let live_filter = reassign_expr_columns(
-            Arc::clone(&handle.current().unwrap()),
-            control_schema.as_ref(),
-        )
-        .unwrap();
-        let expected_batches = control_batches
-            .iter()
-            .map(|batch| batch_filter(batch, &live_filter).unwrap())
-            .collect::<Vec<_>>();
-        let expected_ids = test_trace_ids(&expected_batches);
-        assert_eq!(
-            STACK_MATCHED_ROWS,
-            expected_ids.len(),
-            "the decoded membership must keep exactly the member rows"
-        );
-        assert_eq!(expected_ids, test_trace_ids(&candidate_batches));
-        assert_eq!(
-            test_stack_field_values(&expected_batches),
-            test_stack_field_values(&candidate_batches)
-        );
-        let distinct_ids = expected_ids.iter().cloned().collect::<HashSet<String>>();
-        assert_eq!(STACK_BUILD_KEYS, distinct_ids.len());
-        assert!(
-            distinct_ids.iter().all(|key| build_keys.contains(key)),
-            "the selected rows must be the build keys"
-        );
-
-        // The prefilter must turn the pruning into fewer projected store bytes, in this
-        // direction and by this margin.
-        let control = control_metrics.data.lock().unwrap().clone();
-        let candidate = candidate_metrics.data.lock().unwrap().clone();
-        assert!(
-            control.page_size_to_fetch_store > 0,
-            "the control read must fetch projected bytes from the store"
-        );
-        assert!(
-            (candidate.page_size_to_fetch_store as f64)
-                <= 0.6 * (control.page_size_to_fetch_store as f64),
-            "the prefilter must let the projected read fetch at most 60% of the control's \
-             {} store bytes, fetched {}",
-            control.page_size_to_fetch_store,
-            candidate.page_size_to_fetch_store
         );
     }
 
@@ -4634,306 +3621,6 @@ mod tests {
         // Binary expr is handled by SimpleFilterEvaluator — rejected here.
         let binary = col("tag_0").eq(lit("a"));
         assert!(PhysicalFilterContext::new_opt(&metadata, None, &read_format, &binary).is_none());
-    }
-
-    /// The producer's input schema, where `field_0` is its fourth column.
-    fn dynamic_producer_schema() -> SchemaRef {
-        Arc::new(Schema::new(vec![
-            Field::new("tag_0", DataType::Utf8, true),
-            Field::new("tag_1", DataType::Utf8, true),
-            Field::new("ts", DataType::UInt64, true),
-            Field::new("field_0", DataType::UInt64, true),
-        ]))
-    }
-
-    fn full_read_format(metadata: &RegionMetadataRef) -> FlatReadFormat {
-        FlatReadFormat::new(
-            metadata.clone(),
-            ReadColumns::new(metadata.column_metadatas.iter().map(|c| c.column_id)),
-            None,
-            "test",
-            true,
-        )
-        .unwrap()
-    }
-
-    /// Creates the dynamic filter a single-key `HashJoin` produces: the probe key is
-    /// declared as the filter's only child at the producer's column index, the
-    /// placeholder is `true`, and `published` is what the build side sends once known.
-    fn new_hash_join_dynamic_filter(
-        producer_schema: &SchemaRef,
-        published: &Expr,
-    ) -> Arc<DynamicFilterPhysicalExpr> {
-        let key = Arc::new(Column::new("field_0", 3)) as Arc<dyn PhysicalExpr>;
-        let handle = Arc::new(DynamicFilterPhysicalExpr::new(
-            vec![key],
-            physical_lit(true),
-        ));
-        let published = Predicate::to_physical_expr(published, producer_schema).unwrap();
-        handle.update(published).unwrap();
-        handle
-    }
-
-    /// Returns a hash-table lookup over the probe key that contains `keys`, i.e. one
-    /// build partition of a `HashJoin` that picked the hash-map pushdown strategy.
-    fn hash_lookup_expr(keys: &[u64], seed: &SeededRandomState) -> Arc<dyn PhysicalExpr> {
-        // The lookup compares hashes computed with the seed the producer built its map
-        // with, so the map is filled with the same `create_hashes` output.
-        let keys: ArrayRef = Arc::new(UInt64Array::from(keys.to_vec()));
-        let mut hashes = vec![0_u64; keys.len()];
-        create_hashes([keys], seed.random_state(), &mut hashes).unwrap();
-        let mut map = JoinHashMapU32::with_capacity(hashes.len().max(1));
-        map.update_from_iter(Box::new(hashes.iter().enumerate()), 0);
-
-        Arc::new(HashTableLookupExpr::new(
-            vec![Arc::new(Column::new("field_0", 3)) as Arc<dyn PhysicalExpr>],
-            seed.clone(),
-            Arc::new(Map::HashMap(Box::new(map))),
-            "hash_lookup".to_string(),
-            None,
-        ))
-    }
-
-    /// The dynamic filter a partitioned `HashJoin` publishes once every build partition
-    /// reported: one hash-table lookup per build partition, selected by
-    /// `hash_repartition(key) % partitions` in a `CASE`.
-    ///
-    /// `build_keys` is the whole build side. Each key is routed like the join routes a
-    /// probe row, so the branch that owns a key is the branch whose map contains it.
-    fn partitioned_hash_join_lookup(
-        producer_schema: &SchemaRef,
-        build_keys: &[u64],
-    ) -> Arc<dyn PhysicalExpr> {
-        const PARTITIONS: usize = 2;
-        let seed = SeededRandomState::with_seed(0);
-        let probe_key = || Arc::new(Column::new("field_0", 3)) as Arc<dyn PhysicalExpr>;
-        let route = Arc::new(BinaryExpr::new(
-            Arc::new(HashExpr::new(
-                vec![probe_key()],
-                REPARTITION_RANDOM_STATE,
-                "hash_repartition".to_string(),
-            )),
-            Operator::Modulo,
-            physical_lit(ScalarValue::UInt64(Some(PARTITIONS as u64))),
-        )) as Arc<dyn PhysicalExpr>;
-
-        // Route the build keys exactly like probe rows, with the producer schema so the
-        // routing expression reads `field_0` at the producer's column index.
-        let build_batch = RecordBatch::try_new(
-            Arc::clone(producer_schema),
-            vec![
-                Arc::new(StringArray::from(vec![""; build_keys.len()])) as ArrayRef,
-                Arc::new(StringArray::from(vec![""; build_keys.len()])) as ArrayRef,
-                Arc::new(UInt64Array::from(vec![0_u64; build_keys.len()])) as ArrayRef,
-                Arc::new(UInt64Array::from(build_keys.to_vec())) as ArrayRef,
-            ],
-        )
-        .unwrap();
-        let routes = route
-            .evaluate(&build_batch)
-            .unwrap()
-            .into_array(build_keys.len())
-            .unwrap();
-        let routes = routes.as_any().downcast_ref::<UInt64Array>().unwrap();
-        let mut partition_keys = vec![Vec::new(); PARTITIONS];
-        for (key, partition) in build_keys.iter().zip(routes.values()) {
-            partition_keys[*partition as usize].push(*key);
-        }
-
-        // The last partition is the `ELSE` branch, as the producer emits it.
-        let when_then_expr = partition_keys[..PARTITIONS - 1]
-            .iter()
-            .enumerate()
-            .map(|(partition, keys)| {
-                (
-                    physical_lit(ScalarValue::UInt64(Some(partition as u64))),
-                    hash_lookup_expr(keys, &seed),
-                )
-            })
-            .collect::<Vec<_>>();
-        let else_expr = hash_lookup_expr(&partition_keys[PARTITIONS - 1], &seed);
-
-        Arc::new(CaseExpr::try_new(Some(route), when_then_expr, Some(else_expr)).unwrap())
-    }
-
-    #[test]
-    fn test_dynamic_filter_context_rebinds_published_column_to_prefilter_schema() {
-        let metadata: RegionMetadataRef = Arc::new(sst_region_metadata());
-        let read_format = full_read_format(&metadata);
-        let handle = new_hash_join_dynamic_filter(
-            &dynamic_producer_schema(),
-            &col("field_0").in_list(vec![lit(1_u64), lit(2_u64)], false),
-        );
-
-        let ctx =
-            PhysicalFilterContext::new_dynamic(&metadata, None, &read_format, &handle).unwrap();
-        assert!(ctx.is_dynamic());
-        assert!(
-            !ctx.is_immutable(),
-            "a producer-owned mask must never enter the result cache"
-        );
-        assert!(ctx.filter().is_none());
-        assert_eq!("field_0", ctx.column_name());
-
-        let snapshot = ctx.capture_dynamic_snapshot().unwrap();
-        assert!(ctx.dynamic_snapshot_is_current(&snapshot));
-        // The producer published `field_0` as its fourth column; the prefilter batch
-        // carries that column alone, so the snapshot must use index 0.
-        let columns = collect_columns(&snapshot.expr);
-        assert_eq!(1, columns.len());
-        assert_eq!(0, columns.iter().next().unwrap().index());
-
-        // `new_record_batch_with_custom_sequence` sets field_0 to 0, 1, 2, 3.
-        let batch = new_record_batch_with_custom_sequence(&["a", "x"], 0, 4, 1);
-        let mask = evaluate_physical_mask(&batch, &ctx, &snapshot.expr, "test").unwrap();
-        assert_eq!(
-            vec![false, true, true, false],
-            mask.iter().collect::<Vec<_>>()
-        );
-    }
-
-    /// The published expression is evaluated whole: a producer that routes NULL keys
-    /// itself keeps them, so the prefilter must not narrow the expression to its `IN`
-    /// leaf.
-    #[test]
-    fn test_dynamic_filter_prefilter_keeps_producer_null_semantics() {
-        let metadata: RegionMetadataRef = Arc::new(sst_region_metadata());
-        let read_format = full_read_format(&metadata);
-        let producer_schema = dynamic_producer_schema();
-        let key = || col("field_0");
-        // Duplicate members are the producer's list verbatim.
-        let members = || vec![lit(1_u64), lit(1_u64), lit(3_u64)];
-
-        // Both shapes a single-key `HashJoin` publishes for a nullable probe key: the
-        // membership filter ORed with the producer-owned null guard, and the same choice
-        // routed through `CASE`.
-        let guarded = key().is_null().or(key().in_list(members(), false));
-        let case_routed = Expr::Case(datafusion_expr::expr::Case::new(
-            None,
-            vec![(Box::new(key().is_null()), Box::new(lit(true)))],
-            Some(Box::new(key().in_list(members(), false))),
-        ));
-
-        let batch = RecordBatch::try_new(
-            Arc::new(Schema::new(vec![Field::new(
-                "field_0",
-                DataType::UInt64,
-                true,
-            )])),
-            vec![Arc::new(UInt64Array::from(vec![Some(1), None, Some(2), Some(3)])) as ArrayRef],
-        )
-        .unwrap();
-
-        for published in [guarded, case_routed] {
-            let handle = new_hash_join_dynamic_filter(&producer_schema, &published);
-            let ctx =
-                PhysicalFilterContext::new_dynamic(&metadata, None, &read_format, &handle).unwrap();
-            let snapshot = ctx.capture_dynamic_snapshot().unwrap();
-            let mask = evaluate_physical_mask(&batch, &ctx, &snapshot.expr, "test").unwrap();
-            // The NULL key and both members survive, only `2` is dropped. Evaluating the
-            // bare `IN` leaf would have dropped the NULL row.
-            assert_eq!(
-                vec![true, true, false, true],
-                mask.iter().collect::<Vec<_>>(),
-                "{published}"
-            );
-        }
-    }
-
-    #[test]
-    fn test_dynamic_filter_context_keeps_all_without_a_single_filter_column() {
-        let metadata: RegionMetadataRef = Arc::new(sst_region_metadata());
-        let read_format = full_read_format(&metadata);
-        let producer_schema = dynamic_producer_schema();
-
-        // A two-key producer declares both keys, so the filter cannot be evaluated on a
-        // single-column prefilter batch.
-        let multi_key = Arc::new(DynamicFilterPhysicalExpr::new(
-            vec![
-                Arc::new(Column::new("field_0", 3)) as Arc<dyn PhysicalExpr>,
-                Arc::new(Column::new("ts", 2)) as Arc<dyn PhysicalExpr>,
-            ],
-            physical_lit(true),
-        ));
-        assert!(
-            PhysicalFilterContext::new_dynamic(&metadata, None, &read_format, &multi_key).is_none()
-        );
-
-        let published = col("field_0").in_list(vec![lit(1_u64)], false);
-        let handle = new_hash_join_dynamic_filter(&producer_schema, &published);
-
-        // The expected metadata points the filter column at an id the SST does not have.
-        let mut missing = (*metadata).clone();
-        for column in missing.column_metadatas.iter_mut() {
-            if column.column_schema.name == "field_0" {
-                column.column_id = 20;
-            }
-        }
-        let missing = Arc::new(missing);
-        assert!(
-            PhysicalFilterContext::new_dynamic(
-                &metadata,
-                Some(missing.as_ref()),
-                &read_format,
-                &handle
-            )
-            .is_none()
-        );
-
-        // A producer that publishes a wider expression after admission keeps every row:
-        // the snapshot is rejected instead of evaluated against the wrong columns.
-        let ctx =
-            PhysicalFilterContext::new_dynamic(&metadata, None, &read_format, &handle).unwrap();
-        let widened =
-            Predicate::to_physical_expr(&published.and(col("ts").gt(lit(0_u64))), &producer_schema)
-                .unwrap();
-        handle.update(widened).unwrap();
-        assert!(ctx.capture_dynamic_snapshot().is_none());
-    }
-
-    #[test]
-    fn test_dynamic_filter_context_skips_renamed_and_type_changed_columns() {
-        let metadata: RegionMetadataRef = Arc::new(sst_region_metadata());
-        let read_format = full_read_format(&metadata);
-        let producer_schema = dynamic_producer_schema();
-        let handle = new_hash_join_dynamic_filter(
-            &producer_schema,
-            &col("field_0").in_list(vec![lit(1_u64)], false),
-        );
-
-        // The SST keeps the pre-rename name for the filter column's id.
-        let mut sst_metadata = (*metadata).clone();
-        for column in sst_metadata.column_metadatas.iter_mut() {
-            if column.column_schema.name == "field_0" {
-                column.column_schema.name = "field_old".to_string();
-            }
-        }
-        assert!(
-            PhysicalFilterContext::validated_column(
-                &Arc::new(sst_metadata),
-                Some(metadata.as_ref()),
-                "field_0"
-            )
-            .is_none()
-        );
-
-        // An altered column type between the file and the expected metadata.
-        let mut type_changed = (*metadata).clone();
-        for column in type_changed.column_metadatas.iter_mut() {
-            if column.column_schema.name == "field_0" {
-                column.column_schema.data_type = ConcreteDataType::int64_datatype();
-            }
-        }
-        let type_changed = Arc::new(type_changed);
-        assert!(
-            PhysicalFilterContext::new_dynamic(
-                &metadata,
-                Some(type_changed.as_ref()),
-                &read_format,
-                &handle
-            )
-            .is_none()
-        );
     }
 
     fn write_test_parquet_with_pk_column(values: &[&[u8]]) -> bytes::Bytes {

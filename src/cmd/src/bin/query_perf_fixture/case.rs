@@ -42,6 +42,29 @@ pub(super) struct DirectReadableSstScenario {
     pub(super) queries: Vec<serde_json::Value>,
     pub(super) tables: Vec<TableConfig>,
     pub(super) layout: LayoutConfig,
+    /// Frontend query engine parallelism (`[query] parallelism`) used by the
+    /// outer runner when it launches the base/candidate frontends. Serialized
+    /// into the normalized plan so process lifecycle stays in the Python
+    /// runner instead of the case schema.
+    #[serde(default, deserialize_with = "deserialize_query_parallelism")]
+    pub(super) query_parallelism: Option<usize>,
+}
+
+/// Rejects `query_parallelism = 0` so a case cannot silently fall back to the
+/// engine default ("use all cores") while claiming an explicit parallelism.
+fn deserialize_query_parallelism<'de, D>(deserializer: D) -> Result<Option<usize>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let parallelism = Option::<usize>::deserialize(deserializer)?;
+    if let Some(parallelism) = parallelism
+        && parallelism == 0
+    {
+        return Err(serde::de::Error::custom(
+            "scenario.query_parallelism must be greater than zero",
+        ));
+    }
+    Ok(parallelism)
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -496,6 +519,131 @@ candidate_setup_sql = ["CREATE TABLE candidate_table", "ALTER TABLE candidate_ta
             ]
         );
     }
+
+    #[test]
+    fn direct_sst_query_parallelism_defaults_to_none() {
+        let case: CaseFile = toml::from_str(DIRECT_SST_WITHOUT_PARALLELISM).unwrap();
+        let scenario = case.scenario.direct_readable_sst();
+        assert_eq!(None, scenario.query_parallelism);
+    }
+
+    #[test]
+    fn direct_sst_query_parallelism_roundtrips_through_plan_json() {
+        let case: CaseFile = toml::from_str(
+            &DIRECT_SST_WITHOUT_PARALLELISM
+                .replace("seed = 42", "seed = 42\nquery_parallelism = 3"),
+        )
+        .unwrap();
+        // `query_perf_fixture plan` serializes the scenario through serde_json,
+        // so the normalized plan must carry query_parallelism for the outer
+        // runner to render the frontend config.
+        let plan = serde_json::to_value(&case.scenario).unwrap();
+        assert_eq!(
+            Some(3),
+            plan.get("query_parallelism").and_then(|v| v.as_u64())
+        );
+        let roundtrip: CaseFile = serde_json::from_value(serde_json::json!({
+            "scenario": plan,
+        }))
+        .unwrap();
+        assert_eq!(
+            Some(3),
+            roundtrip.scenario.direct_readable_sst().query_parallelism
+        );
+    }
+
+    #[test]
+    fn direct_sst_query_parallelism_rejects_zero() {
+        let err = toml::from_str::<CaseFile>(
+            &DIRECT_SST_WITHOUT_PARALLELISM
+                .replace("seed = 42", "seed = 42\nquery_parallelism = 0"),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            err.contains("scenario.query_parallelism must be greater than zero"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn dense_string_distribution_roundtrips() {
+        let case: CaseFile = toml::from_str(
+            &DIRECT_SST_WITHOUT_PARALLELISM.replace(
+                r#"distribution = { kind = "deterministic_wave", min = 0.0, max = 10.0 }"#,
+                r#"distribution = { kind = "dense_string", values = 642, matching_rows = 1926, prefix = "trace", noise_prefix = "noise" }"#,
+            ),
+        )
+        .unwrap();
+        let table = &case.scenario.direct_readable_sst().tables[0];
+        let distribution = table.columns[1]
+            .distribution
+            .as_ref()
+            .expect("value column has a distribution");
+        let Distribution::DenseString {
+            values,
+            matching_rows,
+            prefix,
+            noise_prefix,
+        } = distribution
+        else {
+            panic!("expected dense_string distribution, got {distribution:?}");
+        };
+        assert_eq!(642, values.get());
+        assert_eq!(1926, matching_rows.get());
+        assert_eq!("trace", prefix);
+        assert_eq!("noise", noise_prefix);
+
+        let roundtrip: CaseFile =
+            serde_json::from_value(serde_json::to_value(&case).unwrap()).unwrap();
+        assert!(matches!(
+            roundtrip.scenario.direct_readable_sst().tables[0].columns[1].distribution,
+            Some(Distribution::DenseString { .. })
+        ));
+    }
+
+    const DIRECT_SST_WITHOUT_PARALLELISM: &str = r#"
+[scenario]
+kind = "direct_readable_sst"
+seed = 42
+
+[[scenario.tables]]
+database = "public"
+name = "t"
+engine = "mito"
+append_mode = true
+sst_format = "flat"
+primary_key = ["scope"]
+time_index = "ts"
+
+[[scenario.tables.columns]]
+name = "scope"
+type = "STRING"
+semantic = "tag"
+distribution = { kind = "cardinality", values = 1, prefix = "scope" }
+
+[[scenario.tables.columns]]
+name = "value"
+type = "DOUBLE"
+semantic = "field"
+distribution = { kind = "deterministic_wave", min = 0.0, max = 10.0 }
+
+[[scenario.tables.columns]]
+name = "ts"
+type = "TIMESTAMP(9)"
+semantic = "timestamp"
+
+[scenario.layout]
+regions = 1
+sst_count = 1
+rows_per_sst = 8
+row_group_size = 4
+series_count = 1
+start_unix_nanos = 1704067200000000000
+step_nanos = 1000000000
+time_range_layout = "non_overlapping_per_sst"
+series_layout = "timestamp_major"
+"#;
 }
 
 impl Scenario {
@@ -548,6 +696,17 @@ pub(super) enum Distribution {
     },
     #[serde(rename = "deterministic_wave")]
     DeterministicWave { min: f64, max: f64 },
+    /// Dense STRING field values: the first `matching_rows` logical rows repeat
+    /// `prefix + (r % values)` and every later row is `noise_prefix + r`. This
+    /// builds controlled JOIN membership (a small key set on one side, a large
+    /// non-matching population on the other) without extra generators.
+    #[serde(rename = "dense_string")]
+    DenseString {
+        values: NonZeroUsize,
+        matching_rows: NonZeroUsize,
+        prefix: String,
+        noise_prefix: String,
+    },
 }
 
 #[derive(Debug, Deserialize, Serialize)]

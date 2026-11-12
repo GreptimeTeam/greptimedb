@@ -1,0 +1,143 @@
+# Dynamic-membership JOIN latency non-regression case (logs probe x traces build).
+#
+# This is latency regression coverage only, using the default main behavior as
+# the base. It cannot assert page or region pruning bytes: the harness compares
+# base/candidate median latency and reports EXPLAIN ANALYZE text, not scan-page
+# counters. The candidate build therefore has to include the dynamic-membership
+# prefilter features for those features to be exercised at all; a candidate
+# without them passes this case trivially, so the case protects the framework
+# path from latency regressions rather than proving the optimization fired.
+#
+# Shape (single region, one SST, timestamp-major: one row per second):
+# - dyn_filter_traces (build side, aliased b): 642 in-window rows carrying the
+#   membership keys trace0..trace641; every later row is unique noise.
+# - dyn_filter_logs (probe side, aliased p): 1,000,000 rows, of which 1,926
+#   (3 x 642) carry a build key and the remaining 998,074 rows are unique
+#   noise that can never match. The 13-day probe window covers every probe row,
+#   so the trace_id membership check is the only selective predicate and a
+#   build/candidate latency difference comes from JOIN-side membership work.
+# - The projection reads six DOUBLE fields plus the JOIN key on the probe side,
+#   so page-level filtering that drops non-matching pages also drops real
+#   projection work instead of only row counts.
+# - query_parallelism = 3 pins the frontend query engine parallelism so the
+#   comparison is not dominated by core-autoscaled scan parallelism.
+
+[case]
+name = "dyn_filter_join"
+description = "Dynamic-membership JOIN latency non-regression over 642 build keys and 1M probe rows"
+
+[scenario]
+kind = "direct_readable_sst"
+seed = 10340
+query_parallelism = 3
+
+# Probe side: logs with a dense STRING field used as the JOIN key.
+[[scenario.tables]]
+database = "public"
+name = "dyn_filter_logs"
+engine = "mito"
+append_mode = true
+sst_format = "flat"
+primary_key = ["scope"]
+time_index = "ts"
+
+[[scenario.tables.columns]]
+name = "scope"
+type = "STRING"
+semantic = "tag"
+distribution = { kind = "cardinality", values = 1, prefix = "scope" }
+
+[[scenario.tables.columns]]
+name = "trace_id"
+type = "STRING"
+semantic = "field"
+distribution = { kind = "dense_string", values = 642, matching_rows = 1926, prefix = "trace", noise_prefix = "noise" }
+
+[[scenario.tables.columns]]
+name = "f1"
+type = "DOUBLE"
+semantic = "field"
+distribution = { kind = "deterministic_wave", min = 0.0, max = 100.0 }
+
+[[scenario.tables.columns]]
+name = "f2"
+type = "DOUBLE"
+semantic = "field"
+distribution = { kind = "deterministic_wave", min = 100.0, max = 200.0 }
+
+[[scenario.tables.columns]]
+name = "f3"
+type = "DOUBLE"
+semantic = "field"
+distribution = { kind = "deterministic_wave", min = 200.0, max = 300.0 }
+
+[[scenario.tables.columns]]
+name = "f4"
+type = "DOUBLE"
+semantic = "field"
+distribution = { kind = "deterministic_wave", min = 300.0, max = 400.0 }
+
+[[scenario.tables.columns]]
+name = "f5"
+type = "DOUBLE"
+semantic = "field"
+distribution = { kind = "deterministic_wave", min = 400.0, max = 500.0 }
+
+[[scenario.tables.columns]]
+name = "f6"
+type = "DOUBLE"
+semantic = "field"
+distribution = { kind = "deterministic_wave", min = 500.0, max = 600.0 }
+
+[[scenario.tables.columns]]
+name = "ts"
+type = "TIMESTAMP(9)"
+semantic = "timestamp"
+
+# Build side: traces that own the 642-key membership set.
+[[scenario.tables]]
+database = "public"
+name = "dyn_filter_traces"
+engine = "mito"
+append_mode = true
+sst_format = "flat"
+primary_key = ["scope"]
+time_index = "ts"
+
+[[scenario.tables.columns]]
+name = "scope"
+type = "STRING"
+semantic = "tag"
+distribution = { kind = "cardinality", values = 1, prefix = "scope" }
+
+[[scenario.tables.columns]]
+name = "trace_id"
+type = "STRING"
+semantic = "field"
+distribution = { kind = "dense_string", values = 642, matching_rows = 642, prefix = "trace", noise_prefix = "trace_noise" }
+
+[[scenario.tables.columns]]
+name = "ts"
+type = "TIMESTAMP(9)"
+semantic = "timestamp"
+
+[scenario.layout]
+regions = 1
+sst_count = 1
+rows_per_sst = 1000000
+row_group_size = 20000
+series_count = 1
+start_unix_nanos = 1704067200000000000 # 2024-01-01T00:00:00Z
+step_nanos = 1000000000
+time_range_layout = "non_overlapping_per_sst"
+series_layout = "timestamp_major"
+
+[[scenario.queries]]
+name = "dyn_membership_join_explain_analyze"
+kind = "sql"
+query = "EXPLAIN ANALYZE VERBOSE SELECT count(*), sum(p.f1 + p.f2 + p.f3 + p.f4 + p.f5 + p.f6) FROM dyn_filter_logs p JOIN dyn_filter_traces b ON p.trace_id = b.trace_id WHERE p.ts >= '2024-01-01 00:00:00+0000'::TIMESTAMP AND p.ts < '2024-01-14 00:00:00+0000'::TIMESTAMP AND b.ts >= '2024-01-01 00:00:00+0000'::TIMESTAMP AND b.ts < '2024-01-01 00:10:42+0000'::TIMESTAMP"
+warmup = 2
+iterations = 7
+
+[scenario.queries.thresholds]
+max_candidate_latency_regression_pct = 30

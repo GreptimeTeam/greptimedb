@@ -113,6 +113,74 @@ class RemoteWriteLifecycleTest(unittest.TestCase):
         self.assertIn("stop:candidate:frontend", events)
 
 
+class DirectQueryParallelismTest(unittest.TestCase):
+    """Direct-SST cases may pin the frontend `[query] parallelism`."""
+
+    def setUp(self) -> None:
+        self.args = SimpleNamespace(http_timeout="1", allow_large_fixture="false")
+        self.ports = list(range(10000, 10016))
+
+    def test_query_parallelism_is_read_from_the_normalized_plan(self) -> None:
+        self.assertIsNone(runner.direct_query_parallelism({}))
+        self.assertIsNone(runner.direct_query_parallelism({"scenario": {"kind": "direct_readable_sst"}}))
+        self.assertIsNone(runner.direct_query_parallelism({"scenario": {"query_parallelism": None}}))
+        self.assertEqual(runner.direct_query_parallelism({"scenario": {"query_parallelism": 3}}), 3)
+        for value in (0, -1, "3", True, 2.5):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                runner.direct_query_parallelism({"scenario": {"query_parallelism": value}})
+
+    def run_direct(self, tmpdir: str, query_parallelism: int | None) -> tuple[list[str], dict[str, list[str]]]:
+        events: list[str] = []
+        frontends: dict[str, list[str]] = {}
+
+        def run(command, **_kwargs):
+            phase = command[1]
+            events.append(phase)
+            if phase == "prepare-direct":
+                output = Path(command[command.index("--output") + 1])
+                output.write_text(json.dumps({"fixtures": [{"fixture_dir": "fixture/0"}]}))
+            return SimpleNamespace(returncode=0)
+
+        def start(target, component, _procs):
+            events.append(f"start:{target.name}:{component}")
+            if component == "frontend":
+                frontends[target.name] = runner.component_command(target, "frontend")
+
+        plan = {"scenario": {"kind": "direct_readable_sst"}}
+        if query_parallelism is not None:
+            plan["scenario"]["query_parallelism"] = query_parallelism
+        with (
+            patch.object(runner, "allocate_ports", return_value=self.ports),
+            patch.object(runner, "start_component", side_effect=start),
+            patch.object(runner, "stop_component"),
+            patch.object(runner.subprocess, "run", side_effect=run),
+        ):
+            self.assertEqual(
+                runner.run_direct_case(
+                    self.args, Path("case.toml"), Path(tmpdir), Path("base"),
+                    Path("candidate"), Path("fixture"), Path("runner"), plan,
+                ),
+                0,
+            )
+        return events, frontends
+
+    def test_query_parallelism_renders_a_per_target_frontend_config(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            _events, frontends = self.run_direct(tmpdir, 3)
+            for name in ("base", "candidate"):
+                config = Path(tmpdir) / name / "frontend-query.toml"
+                self.assertEqual(config.read_text(), "[query]\nparallelism = 3\n")
+                command = frontends[name]
+                self.assertEqual(command[command.index("--config-file") + 1], str(config))
+
+    def test_missing_query_parallelism_keeps_the_default_frontend_config(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            _events, frontends = self.run_direct(tmpdir, None)
+            for name in ("base", "candidate"):
+                self.assertFalse((Path(tmpdir) / name / "frontend-query.toml").exists())
+                self.assertNotIn("--config-file", frontends[name])
+
+
 class DockerTargetTest(unittest.TestCase):
     image_id = "sha256:" + "a" * 64
 

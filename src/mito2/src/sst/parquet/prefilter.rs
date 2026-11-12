@@ -24,9 +24,6 @@ use std::sync::Arc;
 
 use api::v1::SemanticType;
 use common_recordbatch::filter::SimpleFilterEvaluator;
-use common_telemetry::debug;
-use datafusion::physical_expr::utils::collect_columns;
-use datafusion::physical_plan::PhysicalExpr;
 use datafusion_common::ScalarValue;
 use datafusion_expr::Expr;
 use datatypes::arrow::array::{Array, BinaryArray, BooleanArray, BooleanBufferBuilder};
@@ -56,8 +53,8 @@ use crate::sst::parquet::file_range::PreFilterMode;
 use crate::sst::parquet::flat_format::FlatReadFormat;
 use crate::sst::parquet::format::{PrimaryKeyArray, StatValues};
 use crate::sst::parquet::reader::{
-    DynamicFilterSnapshot, MaybeFilter, PhysicalFilterContext, RowGroupBuildContext,
-    RowGroupReaderBuilder, SimpleFilterContext,
+    MaybeFilter, PhysicalFilterContext, RowGroupBuildContext, RowGroupReaderBuilder,
+    SimpleFilterContext,
 };
 
 pub(crate) fn matching_row_ranges_by_primary_key(
@@ -404,12 +401,6 @@ pub(crate) fn build_bulk_filter_plan(
 /// the prefilter pass. A caller can postpone simple timestamp filters to the normal
 /// precise-filter path when the scan time range covers the SST. When predicate
 /// prefiltering is disabled, all simple filters remain on the normal path instead.
-///
-/// Producer-owned dynamic filters, such as the membership filter a single-key `HashJoin`
-/// publishes, are admitted the same best-effort way, from their published physical
-/// expression instead of a logical [`Expr`]: see [`PhysicalFilterContext::new_dynamic`].
-/// Their masks are never cached, because the producer may republish the expression
-/// between row groups.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn build_reader_filter_plan(
     predicate: Option<&Predicate>,
@@ -526,20 +517,6 @@ pub(crate) fn build_reader_filter_plan(
         };
     }
 
-    // Producer-owned dynamic filters are physical expressions the producer republishes
-    // while the scan runs. Evaluate their current snapshot as a prefilter pass so the row
-    // selection shrinks before the full projection is read. A dynamic filter never
-    // replaces the live filter above the scan, and its mask is never cached.
-    let dyn_filters = predicate.dyn_filters();
-    for handle in dyn_filters.iter() {
-        if let Some(filter) =
-            PhysicalFilterContext::new_dynamic(metadata, expected_metadata, read_format, handle)
-            && can_direct_prefilter(filter.semantic_type())
-        {
-            prefilter_physical_filters.push(filter);
-        }
-    }
-
     let pk_filter_expr_strs = (!pk_filter_contexts.is_empty()).then(|| {
         let mut expr_strs = pk_filter_contexts
             .iter()
@@ -590,12 +567,6 @@ pub(crate) struct PrefilterContext {
     /// Physical filters that can be evaluated directly from the prefilter batch.
     /// Physical expressions are only applied in the prefilter phase.
     physical_filters: Vec<PhysicalFilterContext>,
-    /// Producer-owned dynamic filter snapshots, aligned with `physical_filters`.
-    ///
-    /// Captured when this row group's prefilter starts and evaluated for the whole pass.
-    /// `None` for static filters and for dynamic filters this pass cannot use, which
-    /// keeps every row instead.
-    dynamic_snapshots: Vec<Option<DynamicFilterSnapshot>>,
     /// Region schema version used in per-filter cache keys.
     schema_version: u64,
     /// Sorted expression strings for the encoded-PK filter group.
@@ -604,41 +575,6 @@ pub(crate) struct PrefilterContext {
     arrow_schema: SchemaRef,
     /// Simple filters already proven SQL-true by this row group's statistics.
     proven_simple_filters: Vec<bool>,
-}
-
-impl PrefilterContext {
-    /// Returns true when the dynamic filter at `physical_filters[idx]` contributes no mask
-    /// for this row group: no snapshot was captured, or the snapshot references no column.
-    ///
-    /// A producer that has not published yet still holds its `true` placeholder, and
-    /// reading the column for this row group would only cost I/O. A constant that rejects
-    /// every row is left to the row-group statistics pruning, which skips the whole row
-    /// group before any read.
-    fn dynamic_filter_is_noop(&self, idx: usize) -> bool {
-        let Some(filter) = self.physical_filters.get(idx) else {
-            return false;
-        };
-        if !filter.is_dynamic() {
-            return false;
-        }
-        match self.dynamic_snapshots.get(idx) {
-            Some(Some(snapshot)) => collect_columns(&snapshot.expr).is_empty(),
-            _ => true,
-        }
-    }
-
-    /// Returns true when the producer has not republished the dynamic filter at
-    /// `physical_filters[idx]` since this pass captured its snapshot.
-    fn dynamic_snapshot_is_current(&self, idx: usize) -> bool {
-        let (Some(filter), Some(Some(snapshot))) = (
-            self.physical_filters.get(idx),
-            self.dynamic_snapshots.get(idx),
-        ) else {
-            return false;
-        };
-
-        filter.dynamic_snapshot_is_current(snapshot)
-    }
 }
 
 /// Pre-built state for constructing [PrefilterContext] per row group.
@@ -739,10 +675,6 @@ impl PrefilterContextBuilder {
     }
 
     /// Builds a [PrefilterContext] for a specific row group.
-    ///
-    /// This is where a row group's prefilter starts, so producer-owned dynamic filters
-    /// are snapshotted here: one stable expression per filter, evaluated for the whole
-    /// pass and rechecked against the producer before its mask is committed.
     pub(crate) fn build(&self, row_group_idx: usize) -> PrefilterContext {
         let pk_filter = self
             .build_primary_key_filter()
@@ -751,11 +683,6 @@ impl PrefilterContextBuilder {
             pk_filter,
             filters: self.filters.clone(),
             physical_filters: self.physical_filters.clone(),
-            dynamic_snapshots: self
-                .physical_filters
-                .iter()
-                .map(|filter| filter.capture_dynamic_snapshot())
-                .collect(),
             schema_version: self.schema_version,
             pk_filter_expr_strs: self.pk_filter_expr_strs.clone(),
             arrow_schema: self.arrow_schema.clone(),
@@ -1008,10 +935,8 @@ async fn execute_prefilter_with_result_cache(
             .copied()
             .map(|idx| PrefilterEntry::without_cache(PrefilterEntryKind::Physical(idx))),
     );
-    let masks =
+    let (uncached_mask, read_rows) =
         build_prefilter_masks(prefilter_ctx, reader_builder, build_ctx, &uncached_entries).await?;
-    let read_rows = masks.rows;
-    let uncached_mask = masks.commit(prefilter_ctx);
 
     let final_mask = match (hit_mask, uncached_mask) {
         (Some(hit_mask), Some(uncached_mask)) => hit_mask.bitand(&uncached_mask),
@@ -1035,66 +960,8 @@ fn non_cacheable_physical_filters(prefilter_ctx: &PrefilterContext) -> Vec<usize
         .physical_filters
         .iter()
         .enumerate()
-        .filter_map(|(idx, filter)| {
-            if filter.is_immutable() || prefilter_ctx.dynamic_filter_is_noop(idx) {
-                return None;
-            }
-            Some(idx)
-        })
+        .filter_map(|(idx, filter)| (!filter.is_immutable()).then_some(idx))
         .collect()
-}
-
-/// Masks produced by one prefilter pass over a row group.
-struct PrefilterMasks {
-    /// Mask over the entries whose result may be committed as it is, or `None` when the
-    /// pass evaluated no such entry.
-    static_mask: Option<BooleanBuffer>,
-    /// Masks of producer-owned dynamic filters, keyed by their `physical_filters` index.
-    /// Only commit them while the producer stays at the generation they were snapshotted
-    /// at.
-    dynamic_masks: Vec<(usize, BooleanBuffer)>,
-    /// Number of rows this pass read.
-    rows: usize,
-}
-
-impl PrefilterMasks {
-    /// ANDs the masks that may be committed for this row group.
-    ///
-    /// A producer may publish a new expression while this pass runs. The committed mask
-    /// must never be tighter than the live filter, and nothing here orders one generation
-    /// against another, so a dynamic mask whose generation moved on is discarded and the
-    /// incoming selection of the row group is kept as it was. Only the live filter above
-    /// the scan decides which rows a query returns.
-    ///
-    /// # Producer contract
-    ///
-    /// Committing a dynamic mask takes two properties from the producer:
-    ///
-    /// * **Stable snapshot.** The mask was computed from the single expression captured
-    ///   at `generation` and is only committed while the handle is still at that
-    ///   generation (see [`PhysicalFilterContext::capture_dynamic_snapshot`]).
-    /// * **A publication is a necessary condition for the same execution.** A committed
-    ///   mask removes every row that generation rejects, so a publication is only allowed
-    ///   to reject rows the enclosing join or limit rejects too. The supported producers
-    ///   publish completed state: a `HashJoin` publishes its immutable, completed
-    ///   build-side map, and `TopK` publishes a monotone (only ever tightening) threshold.
-    ///   Arbitrary independently mutable nested expressions are not promised, and nothing
-    ///   here compares two generations: a newer publication is simply re-evaluated by the
-    ///   next pass, while the live filter above the scan stays authoritative.
-    fn commit(self, prefilter_ctx: &PrefilterContext) -> Option<BooleanBuffer> {
-        let mut mask = self.static_mask;
-        for (idx, dynamic_mask) in self.dynamic_masks {
-            if !prefilter_ctx.dynamic_snapshot_is_current(idx) {
-                continue;
-            }
-            mask = Some(match mask {
-                Some(mask) => mask.bitand(&dynamic_mask),
-                None => dynamic_mask,
-            });
-        }
-
-        mask
-    }
 }
 
 async fn build_prefilter_masks(
@@ -1102,7 +969,7 @@ async fn build_prefilter_masks(
     reader_builder: &RowGroupReaderBuilder,
     build_ctx: &RowGroupBuildContext<'_>,
     entries: &[PrefilterEntry],
-) -> Result<PrefilterMasks> {
+) -> Result<(Option<BooleanBuffer>, usize)> {
     let prefilter_column_names = prefilter_column_names_for_entries(prefilter_ctx, entries);
     let parquet_schema = reader_builder
         .parquet_metadata()
@@ -1127,14 +994,7 @@ async fn build_prefilter_masks(
         .iter()
         .map(|entry| entry.key.is_some().then(|| BooleanBufferBuilder::new(0)))
         .collect::<Vec<_>>();
-    // Dynamic filter masks are kept per filter, so the commit step can still drop one
-    // whose generation moved on without discarding the others.
-    let mut dynamic_builders = prefilter_ctx
-        .dynamic_snapshots
-        .iter()
-        .map(|snapshot| snapshot.is_some().then(|| BooleanBufferBuilder::new(0)))
-        .collect::<Vec<_>>();
-    let mut combined_builder = BooleanBufferBuilder::new(0);
+    let mut combined_builder = (!entries.is_empty()).then(|| BooleanBufferBuilder::new(0));
     let mut rows_before_filter = 0usize;
 
     while let Some(batch_result) = stream.next().await {
@@ -1153,21 +1013,14 @@ async fn build_prefilter_masks(
                 entry.kind,
                 reader_builder.file_path(),
             )?;
-            let dynamic_builder = match entry.kind {
-                PrefilterEntryKind::Physical(physical_idx) => dynamic_builders
-                    .get_mut(physical_idx)
-                    .and_then(Option::as_mut),
-                PrefilterEntryKind::Simple(_) | PrefilterEntryKind::PkGroup => None,
-            };
-            match dynamic_builder {
-                Some(builder) => builder.append_buffer(&mask),
-                None => batch_mask = batch_mask.bitand(&mask),
-            }
+            batch_mask = batch_mask.bitand(&mask);
             if let Some(Some(builder)) = cache_builders.get_mut(idx) {
                 builder.append_buffer(&mask);
             }
         }
-        combined_builder.append_buffer(&batch_mask);
+        if let Some(builder) = &mut combined_builder {
+            builder.append_buffer(&batch_mask);
+        }
     }
 
     for (entry, builder) in entries.iter().zip(cache_builders) {
@@ -1178,18 +1031,10 @@ async fn build_prefilter_masks(
         }
     }
 
-    Ok(PrefilterMasks {
-        static_mask: Some(combined_builder.finish())
-            .filter(|mask: &BooleanBuffer| !mask.is_empty()),
-        dynamic_masks: dynamic_builders
-            .into_iter()
-            .enumerate()
-            .filter_map(|(idx, builder)| builder.map(|mut builder| (idx, builder.finish())))
-            // A dynamic filter without a usable snapshot reads no row for this pass.
-            .filter(|(_, mask)| !mask.is_empty())
-            .collect(),
-        rows: rows_before_filter,
-    })
+    Ok((
+        combined_builder.map(|mut builder| builder.finish()),
+        rows_before_filter,
+    ))
 }
 
 fn prefilter_column_names_for_entries(
@@ -1228,9 +1073,8 @@ async fn execute_prefilter_by_reading_columns(
     if entries.is_empty() {
         return Ok(identity_prefilter_result(reader_builder, build_ctx));
     }
-    let masks = build_prefilter_masks(prefilter_ctx, reader_builder, build_ctx, &entries).await?;
-    let rows_before_filter = masks.rows;
-    let mask = masks.commit(prefilter_ctx);
+    let (mask, rows_before_filter) =
+        build_prefilter_masks(prefilter_ctx, reader_builder, build_ctx, &entries).await?;
 
     let final_mask = mask.unwrap_or_else(|| BooleanBuffer::new_set(rows_before_filter));
     let rows_selected = final_mask.count_set_bits();
@@ -1267,7 +1111,6 @@ fn all_prefilter_entries(prefilter_ctx: &PrefilterContext) -> Vec<PrefilterEntry
             .physical_filters
             .iter()
             .enumerate()
-            .filter(|(idx, _)| !prefilter_ctx.dynamic_filter_is_noop(*idx))
             .map(|(idx, _)| PrefilterEntry::without_cache(PrefilterEntryKind::Physical(idx))),
     );
     entries
@@ -1420,36 +1263,7 @@ fn eval_entry_mask(
             eval_simple_filter_mask(batch, &prefilter_ctx.filters[idx], file_path)
         }
         PrefilterEntryKind::Physical(idx) => {
-            let filter_ctx = &prefilter_ctx.physical_filters[idx];
-            let Some(snapshot) = prefilter_ctx
-                .dynamic_snapshots
-                .get(idx)
-                .and_then(Option::as_ref)
-            else {
-                // A static filter; a dynamic filter without a usable snapshot keeps all
-                // rows instead of being evaluated at its live, ever-changing generation.
-                let Some(filter) = filter_ctx.filter() else {
-                    return Ok(BooleanBuffer::new_set(batch.num_rows()));
-                };
-                return evaluate_physical_mask(batch, filter_ctx, filter, file_path);
-            };
-            // A producer-owned expression is only checked against the prefilter schema
-            // when it is snapshotted. Keep every row if evaluating it fails, exactly like
-            // any other unsupported prefilter candidate.
-            match evaluate_physical_mask(batch, filter_ctx, &snapshot.expr, file_path) {
-                Ok(mask) => Ok(mask),
-                Err(error) => {
-                    // The producer owns the expression, so a snapshot that cannot be
-                    // evaluated is a miss for this pass, not a scan error.
-                    debug!(
-                        "Ignored dynamic prefilter snapshot of {} that failed to evaluate: {}, file: {}",
-                        filter_ctx.column_name(),
-                        error,
-                        file_path
-                    );
-                    Ok(BooleanBuffer::new_set(batch.num_rows()))
-                }
-            }
+            eval_physical_filter_mask(batch, &prefilter_ctx.physical_filters[idx], file_path)
         }
         PrefilterEntryKind::PkGroup => {
             let pk_filter = prefilter_ctx.pk_filter.as_mut().context(UnexpectedSnafu {
@@ -1508,17 +1322,13 @@ fn eval_simple_filter_mask(
     filter.evaluate_array(&column).context(RecordBatchSnafu)
 }
 
-/// Evaluates a physical prefilter expression against the single filter column of `batch`.
-///
-/// `NULL` results count as filtered out, which is how the upper filter consumes the
-/// predicate as well; no `IS NULL` guard is added or removed here because the producer
-/// owns the null semantics of its expression.
-pub(crate) fn evaluate_physical_mask(
+fn eval_physical_filter_mask(
     batch: &RecordBatch,
     filter_ctx: &PhysicalFilterContext,
-    filter: &Arc<dyn PhysicalExpr>,
     file_path: &str,
 ) -> Result<BooleanBuffer> {
+    let filter = filter_ctx.filter();
+
     let (idx, _) = batch
         .schema()
         .column_with_name(filter_ctx.column_name())
@@ -1561,13 +1371,12 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use bytes::Bytes;
-    use common_recordbatch::filter::{SimpleFilterEvaluator, batch_filter};
-    use datafusion::physical_plan::expressions::{Column, DynamicFilterPhysicalExpr};
+    use common_recordbatch::filter::SimpleFilterEvaluator;
     use datafusion_common::ScalarValue;
     use datafusion_expr::{col, lit};
     use datatypes::arrow::array::{
-        ArrayRef, DictionaryArray, Float64Array, Int32Array, TimestampMillisecondArray, UInt8Array,
-        UInt32Array, UInt64Array,
+        ArrayRef, DictionaryArray, Int32Array, TimestampMillisecondArray, UInt8Array, UInt32Array,
+        UInt64Array,
     };
     use datatypes::arrow::datatypes::{DataType, Field, Schema, UInt32Type};
     use datatypes::arrow::record_batch::RecordBatch;
@@ -2202,7 +2011,6 @@ mod tests {
             pk_filter: None,
             filters,
             physical_filters: Vec::new(),
-            dynamic_snapshots: Vec::new(),
             schema_version: metadata.schema_version,
             pk_filter_expr_strs: None,
             arrow_schema: metadata.schema.arrow_schema().clone(),
@@ -2434,116 +2242,6 @@ mod tests {
         );
     }
 
-    /// Creates the dynamic filter a single-key `HashJoin` publishes for `members`.
-    fn new_dynamic_field_filter(
-        read_format: &FlatReadFormat,
-        members: Vec<u64>,
-    ) -> Arc<DynamicFilterPhysicalExpr> {
-        let arrow_schema = read_format.arrow_schema();
-        let key = Arc::new(Column::new("field_0", 0)) as Arc<dyn PhysicalExpr>;
-        let handle = Arc::new(DynamicFilterPhysicalExpr::new(
-            vec![key],
-            Predicate::to_physical_expr(&lit(true), arrow_schema).unwrap(),
-        ));
-        let expr = col("field_0").in_list(members.into_iter().map(lit).collect(), false);
-        handle
-            .update(Predicate::to_physical_expr(&expr, arrow_schema).unwrap())
-            .unwrap();
-        handle
-    }
-
-    fn dynamic_filter_count(builder: &PrefilterContextBuilder) -> usize {
-        builder
-            .physical_filters
-            .iter()
-            .filter(|filter| filter.is_dynamic())
-            .count()
-    }
-
-    /// A dynamic filter on a field column is admitted only where field pruning is safe.
-    /// `SkipFields` preserves the dedup semantics of a multi-source `LastRow` /
-    /// `LastNonNull` merge, so the dynamic filter must not prune fields there either.
-    #[test]
-    fn test_build_reader_filter_plan_gates_dynamic_filters_by_prefilter_mode() {
-        let metadata: RegionMetadataRef = Arc::new(sst_region_metadata());
-        let read_format = FlatReadFormat::new(
-            metadata.clone(),
-            ReadColumns::new(metadata.column_metadatas.iter().map(|c| c.column_id)),
-            None,
-            "test",
-            true,
-        )
-        .unwrap();
-        let codec = build_primary_key_codec(metadata.as_ref());
-        let parquet_metadata = stats_metadata(&[vec![1]], None);
-        let predicate = || {
-            Predicate::with_dyn_filters(
-                vec![],
-                vec![new_dynamic_field_filter(&read_format, vec![1])],
-            )
-        };
-
-        let all_plan = build_reader_filter_plan(
-            Some(&predicate()),
-            None,
-            PreFilterMode::All,
-            true,
-            false,
-            &read_format,
-            &codec,
-            &parquet_metadata,
-        );
-        assert_eq!(
-            1,
-            dynamic_filter_count(all_plan.prefilter_builder.as_ref().unwrap())
-        );
-
-        // The dynamic filter is the only prefilter candidate, and it is gated out.
-        let skip_fields_plan = build_reader_filter_plan(
-            Some(&predicate()),
-            None,
-            PreFilterMode::SkipFields,
-            true,
-            false,
-            &read_format,
-            &codec,
-            &parquet_metadata,
-        );
-        assert!(skip_fields_plan.prefilter_builder.is_none());
-
-        // With a tag filter the prefilter still runs, without the dynamic field filter.
-        let skip_fields_plan = build_reader_filter_plan(
-            Some(&Predicate::with_dyn_filters(
-                vec![col("tag_0").eq(lit("a"))],
-                vec![new_dynamic_field_filter(&read_format, vec![1])],
-            )),
-            None,
-            PreFilterMode::SkipFields,
-            true,
-            false,
-            &read_format,
-            &codec,
-            &parquet_metadata,
-        );
-        assert_eq!(
-            0,
-            dynamic_filter_count(skip_fields_plan.prefilter_builder.as_ref().unwrap())
-        );
-
-        // Disabled predicate prefiltering keeps dynamic filters on the normal path.
-        let disabled_plan = build_reader_filter_plan(
-            Some(&predicate()),
-            None,
-            PreFilterMode::All,
-            false,
-            false,
-            &read_format,
-            &codec,
-            &parquet_metadata,
-        );
-        assert!(disabled_plan.prefilter_builder.is_none());
-    }
-
     #[test]
     fn test_pk_filter_expr_strings_are_stable_under_expr_order() {
         let metadata: RegionMetadataRef = Arc::new(sst_region_metadata_with_encoding(
@@ -2650,175 +2348,8 @@ mod tests {
         let pk = new_primary_key(&["a", "x"]);
         let batch = new_raw_batch(&[pk.as_slice(), pk.as_slice(), pk.as_slice()], &[9, 10, 11]);
 
-        let filter = physical_filters[0].filter().unwrap();
-        let mask = evaluate_physical_mask(&batch, &physical_filters[0], filter, "test").unwrap();
+        let mask = eval_physical_filter_mask(&batch, &physical_filters[0], "test").unwrap();
         assert_eq!(mask.count_set_bits(), 1);
-    }
-
-    /// The producer's input schema, where `field_0` is its fourth column rather than the
-    /// only column of a prefilter batch.
-    fn producer_schema(field_type: DataType) -> SchemaRef {
-        Arc::new(Schema::new(vec![
-            Field::new("tag_0", DataType::Utf8, true),
-            Field::new("tag_1", DataType::Utf8, true),
-            Field::new("ts", DataType::UInt64, true),
-            Field::new("field_0", field_type, true),
-        ]))
-    }
-
-    fn full_read_format(metadata: &RegionMetadataRef) -> FlatReadFormat {
-        FlatReadFormat::new(
-            metadata.clone(),
-            ReadColumns::new(metadata.column_metadatas.iter().map(|c| c.column_id)),
-            None,
-            "test",
-            false,
-        )
-        .unwrap()
-    }
-
-    /// Evaluates a producer-owned dynamic filter over `batch` both ways: as a prefilter
-    /// mask, and as the live `batch_filter` that runs above the scan.
-    ///
-    /// `batch` carries the filter column plus a `row` column holding row indexes, so the
-    /// rows the upper filter keeps come back as values. Both evaluations see the same
-    /// rows, so the returned row lists are directly comparable.
-    fn prefilter_and_upper_rows(
-        metadata: &RegionMetadataRef,
-        read_format: &FlatReadFormat,
-        producer_schema: &SchemaRef,
-        published: &Expr,
-        batch: &RecordBatch,
-    ) -> (Vec<usize>, Vec<usize>) {
-        let key = Arc::new(Column::new("field_0", 3)) as Arc<dyn PhysicalExpr>;
-        let handle = Arc::new(DynamicFilterPhysicalExpr::new(
-            vec![key],
-            Predicate::to_physical_expr(&lit(true), producer_schema).unwrap(),
-        ));
-        handle
-            .update(Predicate::to_physical_expr(published, producer_schema).unwrap())
-            .unwrap();
-        let filter_ctx =
-            PhysicalFilterContext::new_dynamic(metadata, None, read_format, &handle).unwrap();
-        let snapshot = filter_ctx.capture_dynamic_snapshot().unwrap();
-
-        let mask = evaluate_physical_mask(batch, &filter_ctx, &snapshot.expr, "test").unwrap();
-        let prefilter_rows = mask
-            .iter()
-            .enumerate()
-            .filter_map(|(row, keep)| keep.then_some(row))
-            .collect::<Vec<_>>();
-
-        let filtered = batch_filter(batch, &snapshot.expr).unwrap();
-        let upper_rows = filtered
-            .column(1)
-            .as_any()
-            .downcast_ref::<UInt64Array>()
-            .unwrap()
-            .values()
-            .iter()
-            .map(|row| *row as usize)
-            .collect::<Vec<_>>();
-
-        (prefilter_rows, upper_rows)
-    }
-
-    /// A batch of `field_0` values plus a `row` column holding their indexes.
-    fn indexed_batch(field: ArrayRef, data_type: DataType) -> RecordBatch {
-        let schema = Arc::new(Schema::new(vec![
-            Field::new("field_0", data_type, true),
-            Field::new("row", DataType::UInt64, false),
-        ]));
-        let rows = Arc::new(UInt64Array::from_iter_values(0..field.len() as u64)) as ArrayRef;
-        RecordBatch::try_new(schema, vec![field, rows]).unwrap()
-    }
-
-    /// A bare `col IN (...)` leaves a NULL comparison UNKNOWN, and the prefilter must
-    /// reject that row exactly like the live filter above the scan: it adds no NULL guard
-    /// of its own, because the producer owns the NULL semantics of its expression.
-    #[test]
-    fn test_dynamic_filter_mask_matches_upper_filter_for_nullable_bare_in() {
-        let metadata: RegionMetadataRef = Arc::new(sst_region_metadata());
-        let read_format = full_read_format(&metadata);
-        let published = col("field_0").in_list(vec![lit(1_u64), lit(3_u64)], false);
-        // Row 1 is NULL, and `NULL IN (1, 3)` is neither a member nor a non-member.
-        let batch = indexed_batch(
-            Arc::new(UInt64Array::from(vec![Some(1), None, Some(2), Some(3)])) as ArrayRef,
-            DataType::UInt64,
-        );
-
-        let (prefilter_rows, upper_rows) = prefilter_and_upper_rows(
-            &metadata,
-            &read_format,
-            &producer_schema(DataType::UInt64),
-            &published,
-            &batch,
-        );
-
-        assert_eq!(vec![0, 3], prefilter_rows);
-        assert_eq!(
-            prefilter_rows, upper_rows,
-            "the prefilter must keep exactly the rows the upper filter keeps"
-        );
-    }
-
-    /// Float membership compares with a total order, so `NaN` is a member of a list that
-    /// holds `NaN` while `-0.0` is not a member of a list that holds `0.0`. The prefilter
-    /// must reproduce those semantics exactly, which it can only do by evaluating the
-    /// producer's whole expression instead of substituting an IEEE `==` or a re-derived
-    /// comparison.
-    #[test]
-    fn test_dynamic_filter_mask_matches_upper_filter_for_float_nan_membership() {
-        let metadata = metadata_with_field_type(ConcreteDataType::float64_datatype());
-        let read_format = full_read_format(&metadata);
-        let published = col("field_0").in_list(vec![lit(0.0_f64), lit(f64::NAN)], false);
-        // Rows: `0.0` and `NaN` are members, `-0.0` is not (total order, not IEEE `==`),
-        // and the NULL row is UNKNOWN.
-        let batch = indexed_batch(
-            Arc::new(Float64Array::from(vec![
-                Some(0.0),
-                Some(-0.0),
-                Some(f64::NAN),
-                None,
-            ])) as ArrayRef,
-            DataType::Float64,
-        );
-        let unlisted = indexed_batch(
-            Arc::new(Float64Array::from(vec![
-                Some(1.5),
-                Some(f64::NAN),
-                Some(0.0),
-                None,
-            ])) as ArrayRef,
-            DataType::Float64,
-        );
-
-        let (prefilter_rows, upper_rows) = prefilter_and_upper_rows(
-            &metadata,
-            &read_format,
-            &producer_schema(DataType::Float64),
-            &published,
-            &batch,
-        );
-
-        assert_eq!(
-            prefilter_rows, upper_rows,
-            "the prefilter must keep exactly the rows the upper filter keeps"
-        );
-        assert_eq!(vec![0, 2], prefilter_rows);
-
-        let (unlisted_prefilter_rows, unlisted_upper_rows) = prefilter_and_upper_rows(
-            &metadata,
-            &read_format,
-            &producer_schema(DataType::Float64),
-            &published,
-            &unlisted,
-        );
-        assert_eq!(
-            unlisted_prefilter_rows, unlisted_upper_rows,
-            "the prefilter must keep exactly the rows the upper filter keeps"
-        );
-        assert_eq!(vec![1, 2], unlisted_prefilter_rows);
     }
 
     #[test]

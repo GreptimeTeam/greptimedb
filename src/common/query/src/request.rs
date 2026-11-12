@@ -14,20 +14,17 @@
 
 mod base64_serde;
 mod initial_remote_dyn_filter_reg;
-#[cfg(any(test, feature = "testing"))]
-pub mod remote_membership_test_support;
 
 use std::cell::Cell;
 use std::sync::Arc;
 
 use api::v1::region::RegionRequestHeader;
-use datafusion::arrow::array::{Array, ArrayRef, StringArray};
 use datafusion::execution::TaskContext;
-use datafusion::physical_expr::expressions::{Column, Literal, lit};
+use datafusion::physical_expr::expressions::{Column, InListExpr, lit};
 use datafusion::physical_plan::joins::HashTableLookupExpr;
 use datafusion::physical_plan::{ExecutionPlan, PhysicalExpr};
-use datafusion_common::tree_node::{TreeNode, TreeNodeRecursion};
-use datafusion_common::{DataFusionError, Result as DataFusionResult, ScalarValue};
+use datafusion_common::tree_node::{Transformed, TreeNode, TreeNodeRecursion};
+use datafusion_common::{DataFusionError, Result as DataFusionResult};
 use datafusion_expr::LogicalPlan;
 use datafusion_proto::physical_plan::from_proto::parse_physical_expr;
 use datafusion_proto::physical_plan::to_proto::{
@@ -37,8 +34,7 @@ use datafusion_proto::physical_plan::{
     DefaultPhysicalExtensionCodec, DefaultPhysicalProtoConverter, PhysicalExtensionCodec,
     PhysicalPlanDecodeContext, PhysicalProtoConverterExtension,
 };
-use datafusion_proto::protobuf::physical_expr_node::ExprType as PhysicalExprNodeType;
-use datafusion_proto::protobuf::{PhysicalExprNode, PhysicalInListNode, PhysicalPlanNode};
+use datafusion_proto::protobuf::{PhysicalExprNode, PhysicalPlanNode};
 use prost::Message;
 use serde::{Deserialize, Serialize};
 use snafu::ensure;
@@ -76,42 +72,20 @@ pub enum DynFilterPayload {
 impl DynFilterPayload {
     /// Encodes a DataFusion physical expression into a bounded dynamic filter payload.
     ///
-    /// # Narrow contract: a key list used as a positive pruning hint
-    ///
-    /// A runtime [`HashTableLookupExpr`] is written as the existing
-    /// `PhysicalInListNode` — `key IN (build key, ...)` — built from the lookup's
-    /// published build-key list, so no new wire variant is needed. The expression tree
-    /// around it is preserved node for node: `IS NULL`, `NOT`, `CASE`, `AND`, `OR` and
-    /// every other parent are serialized as-is, and a `NOT` over a lookup therefore
-    /// becomes `NOT IN`.
-    ///
-    /// The membership is a **hint for pruning only**, not a re-statement of the join
-    /// semantics. For supported positive pruning, the list preserves actual build-key
-    /// matches; it is not universal Boolean equivalence. `IN`/`NOT IN` propagate
-    /// `NULL` while a hash lookup can be definite on a `NULL` probe key, and hash
-    /// presence can admit collisions, so a predicate that inspects the *negation* of a
-    /// lookup is not universally equivalent.
-    ///
-    /// The conversion is decided by the lookup alone (single-column `Utf8`, non-empty,
-    /// `NULL`-free build keys — see [`HashTableLookupExpr::build_key_membership`]).
-    /// There is no analysis of where the lookup sits in the tree, and no per-node
-    /// substitution. If a lookup has no such key list (accessor limitation) or the
-    /// serialized predicate does not fit `max_payload_bytes`, the **whole payload**
-    /// falls back to `true`, which prunes nothing and can never drop a row the
-    /// producer would keep.
+    /// Runtime-only hash lookup predicates are degraded to `true` before encoding so
+    /// serializable min/max bounds around them can still be shipped to remote scans.
+    /// If the full serializable predicate is still larger than `max_payload_bytes`, large
+    /// membership predicates (`IN (...)`) are also degraded to `true` as a bounds-only fallback.
     pub fn from_datafusion_expr(
         expr: &Arc<dyn PhysicalExpr>,
         max_payload_bytes: usize,
     ) -> DataFusionResult<Self> {
-        match encode_bounded_physical_expr_to_bytes(expr, max_payload_bytes) {
-            Ok(Some(bytes)) => Ok(Self::Datafusion(bytes)),
-            Ok(None) | Err(CommonQueryError::DynFilterPayloadTooLarge { .. }) => {
-                // Whole-payload fallback: no membership to ship, so ship the widest
-                // predicate there is instead of rewriting parts of the tree.
-                let bytes = encode_physical_expr_to_bytes(&lit(true))?;
-                validate_payload_size(bytes.len(), max_payload_bytes)
-                    .map_err(DataFusionError::from)?;
-                Ok(Self::Datafusion(bytes))
+        match encode_remote_dyn_filter_expr(expr, max_payload_bytes, false) {
+            Ok(bytes) => Ok(Self::Datafusion(bytes)),
+            Err(CommonQueryError::DynFilterPayloadTooLarge { .. }) => {
+                encode_remote_dyn_filter_expr(expr, max_payload_bytes, true)
+                    .map(Self::Datafusion)
+                    .map_err(DataFusionError::from)
             }
             Err(error) => Err(DataFusionError::from(error)),
         }
@@ -155,94 +129,6 @@ fn encode_physical_expr_to_bytes(expr: &Arc<dyn PhysicalExpr>) -> DataFusionResu
 struct BoundedPhysicalExprEncoder {
     max_payload_bytes: usize,
     encoded_bytes: Cell<usize>,
-    /// Set when a runtime lookup has no serializable key list.
-    ///
-    /// The encoder still writes a `true` placeholder so the tree stays well formed, but
-    /// the produced bytes are discarded: the caller replaces the **whole** payload with
-    /// `true` rather than rewriting individual nodes.
-    unrepresentable: Cell<bool>,
-}
-
-impl BoundedPhysicalExprEncoder {
-    fn new(max_payload_bytes: usize) -> Self {
-        Self {
-            max_payload_bytes,
-            encoded_bytes: Cell::new(0),
-            unrepresentable: Cell::new(false),
-        }
-    }
-
-    /// Charges `proto` (including its encoded children) against the payload budget.
-    ///
-    /// The accounting is additive over siblings and exact for the top-level node, so
-    /// no branch can push the payload over budget unnoticed.
-    fn finish(
-        &self,
-        before_children: usize,
-        proto: PhysicalExprNode,
-    ) -> DataFusionResult<PhysicalExprNode> {
-        let encoded_bytes = before_children.saturating_add(proto.encoded_len());
-        self.encoded_bytes.set(encoded_bytes);
-        validate_payload_size(encoded_bytes, self.max_payload_bytes)
-            .map_err(DataFusionError::from)?;
-        Ok(proto)
-    }
-
-    /// Encodes a lookup as its build-key membership, charging every list literal and
-    /// node against the payload budget.
-    ///
-    /// The decision only looks at the lookup itself: if DataFusion can hand out the
-    /// single-column `Utf8` build-key list it is written as `key IN (...)`; otherwise
-    /// the payload is marked unrepresentable. `Err` (including the payload budget
-    /// error) aborts the whole payload.
-    fn membership_to_proto(
-        &self,
-        lookup: &HashTableLookupExpr,
-        codec: &dyn PhysicalExtensionCodec,
-    ) -> DataFusionResult<PhysicalExprNode> {
-        let Some(membership) = RemoteMembership::from_lookup(lookup, self.max_payload_bytes) else {
-            self.unrepresentable.set(true);
-            return self.encode_true(codec);
-        };
-        let Some(literals) = utf8_list_literals(&membership.values) else {
-            self.unrepresentable.set(true);
-            return self.encode_true(codec);
-        };
-
-        let before_children = self.encoded_bytes.get();
-        let mut list = Vec::with_capacity(literals.len());
-        for literal in literals {
-            list.push(self.physical_expr_to_proto(&literal, codec)?);
-        }
-
-        let proto = PhysicalExprNode {
-            expr_id: None,
-            expr_type: Some(PhysicalExprNodeType::InList(Box::new(PhysicalInListNode {
-                expr: Some(Box::new(
-                    self.physical_expr_to_proto(&membership.key, codec)?,
-                )),
-                list,
-                negated: false,
-            }))),
-        };
-
-        self.finish(before_children, proto)
-    }
-
-    /// Encodes the `true` placeholder for a lookup without a key list.
-    ///
-    /// This is the same degradation DataFusion's own `try_to_proto` applies. It is only
-    /// ever used together with [`Self::unrepresentable`], which makes the caller drop
-    /// the whole encoded payload in favour of `true`.
-    fn encode_true(
-        &self,
-        codec: &dyn PhysicalExtensionCodec,
-    ) -> DataFusionResult<PhysicalExprNode> {
-        let before_children = self.encoded_bytes.get();
-        let literal = lit(true);
-        let proto = serialize_physical_expr_with_converter(&literal, codec, self)?;
-        self.finish(before_children, proto)
-    }
 }
 
 impl PhysicalProtoConverterExtension for BoundedPhysicalExprEncoder {
@@ -276,98 +162,55 @@ impl PhysicalProtoConverterExtension for BoundedPhysicalExprEncoder {
         expr: &Arc<dyn PhysicalExpr>,
         codec: &dyn PhysicalExtensionCodec,
     ) -> DataFusionResult<PhysicalExprNode> {
-        // A real `HashTableLookupExpr` has no wire form: DataFusion's own
-        // `try_to_proto` degrades it to `true`. Intercept it so the build-key list can
-        // be written with the existing `InList` node instead. The decision is made by
-        // the lookup alone; every other node, including `IS NULL`, `NOT`, `CASE`,
-        // `AND` and `OR`, is serialized exactly as it is.
-        if let Some(lookup) = expr.downcast_ref::<HashTableLookupExpr>() {
-            return self.membership_to_proto(lookup, codec);
-        }
-
         let before_children = self.encoded_bytes.get();
         let proto = serialize_physical_expr_with_converter(expr, codec, self)?;
         // Replace the children's contribution with the whole subtree, including protobuf framing.
         // Checking each child stops large IN lists before materializing all their Arrow IPC literals.
-        self.finish(before_children, proto)
+        let encoded_bytes = before_children.saturating_add(proto.encoded_len());
+        self.encoded_bytes.set(encoded_bytes);
+        validate_payload_size(encoded_bytes, self.max_payload_bytes)
+            .map_err(DataFusionError::from)?;
+        Ok(proto)
     }
 }
 
-/// Encodes `expr` for the remote wire under `max_payload_bytes`.
-///
-/// Returns `Ok(None)` when the predicate holds a lookup whose key list cannot be
-/// serialized, which the caller answers with the whole-payload `true` fallback.
 fn encode_bounded_physical_expr_to_bytes(
     expr: &Arc<dyn PhysicalExpr>,
     max_payload_bytes: usize,
-) -> Result<Option<Vec<u8>>, CommonQueryError> {
+) -> Result<Vec<u8>, CommonQueryError> {
     let codec = DefaultPhysicalExtensionCodec {};
-    let encoder = BoundedPhysicalExprEncoder::new(max_payload_bytes);
+    let encoder = BoundedPhysicalExprEncoder {
+        max_payload_bytes,
+        encoded_bytes: Cell::new(0),
+    };
     let proto = encoder.physical_expr_to_proto(expr, &codec);
-    // The encoder stops at the node that went over budget, so this reports the size
-    // error unwrapped and the caller can recognize the fallback case.
+    // Preserve the size error so the caller can retry with bounds only.
     validate_payload_size(encoder.encoded_bytes.get(), max_payload_bytes)?;
-    let proto = proto.map_err(CommonQueryError::from)?;
-    if encoder.unrepresentable.get() {
-        return Ok(None);
-    }
-    Ok(Some(proto.encode_to_vec()))
+    Ok(proto.map_err(CommonQueryError::from)?.encode_to_vec())
 }
 
-/// Build-key list of one hash lookup, written as `probe_key IN (value, ...)`.
-///
-/// The membership reuses the existing `PhysicalInListNode`, so no new wire variant
-/// and no in-payload version tag are needed, and it is charged against the normal
-/// payload budget. Only the build-key list itself is consulted here; the wire form
-/// never depends on where the lookup sits in the predicate tree.
-struct RemoteMembership {
-    /// Probe-side key expression, reused as the `InList` operand.
-    key: Arc<dyn PhysicalExpr>,
-    /// Published build key values, tied to the lookup's build lease.
-    values: ArrayRef,
+fn encode_remote_dyn_filter_expr(
+    expr: &Arc<dyn PhysicalExpr>,
+    max_payload_bytes: usize,
+    bounds_only: bool,
+) -> Result<Vec<u8>, CommonQueryError> {
+    let expr = portable_remote_dyn_filter_expr(Arc::clone(expr), bounds_only)
+        .map_err(CommonQueryError::from)?;
+    encode_bounded_physical_expr_to_bytes(&expr, max_payload_bytes)
 }
 
-impl RemoteMembership {
-    /// Key-list membership of `lookup`, or `None` when it has no such form.
-    ///
-    /// The bounds passed to DataFusion are the payload budget the caller already
-    /// enforces, for both the value count and the raw build-key bytes. This is a
-    /// conservative early guard, not the exact serialized frame length. The accessor
-    /// itself keeps the remaining
-    /// limitations — it returns `None` for lookups without a build lease (e.g. a
-    /// test-only lookup), composite keys, non-`Utf8` keys (integer/float/decimal/
-    /// dictionary/unknown), and `NULL`-containing or empty build keys. Those are
-    /// accessor limitations, not encoder policy.
-    fn from_lookup(lookup: &HashTableLookupExpr, max_payload_bytes: usize) -> Option<Self> {
-        let membership = lookup.build_key_membership(max_payload_bytes, max_payload_bytes)?;
-        let values = Arc::clone(membership.values());
-        // Defensive: the accessor already restricted the key type to `Utf8`.
-        values.as_any().downcast_ref::<StringArray>()?;
-        Some(Self {
-            key: Arc::clone(membership.key()),
-            values,
-        })
-    }
-}
-
-/// Materializes the `IN` list literals for a build-key membership.
-///
-/// Returns `None` if the values are not a non-empty, `NULL`-free `Utf8` array
-/// (defensive: [`RemoteMembership::from_lookup`] already checked it).
-fn utf8_list_literals(values: &ArrayRef) -> Option<Vec<Arc<dyn PhysicalExpr>>> {
-    let values = values.as_any().downcast_ref::<StringArray>()?;
-    if values.is_empty() || values.null_count() != 0 {
-        return None;
-    }
-    values
-        .iter()
-        .map(|value| {
-            value.map(|value| {
-                Arc::new(Literal::new(ScalarValue::Utf8(Some(value.to_owned()))))
-                    as Arc<dyn PhysicalExpr>
-            })
-        })
-        .collect()
+fn portable_remote_dyn_filter_expr(
+    expr: Arc<dyn PhysicalExpr>,
+    bounds_only: bool,
+) -> DataFusionResult<Arc<dyn PhysicalExpr>> {
+    expr.transform_up(|node| {
+        if node.is::<HashTableLookupExpr>() || (bounds_only && node.is::<InListExpr>()) {
+            Ok(Transformed::yes(lit(true)))
+        } else {
+            Ok(Transformed::no(node))
+        }
+    })
+    .map(|transformed| transformed.data)
 }
 
 pub(crate) fn decode_physical_expr_from_bytes(
@@ -665,9 +508,7 @@ mod tests {
     }
 
     #[test]
-    fn dyn_filter_payload_unconvertible_lookup_falls_back_to_whole_payload_true() {
-        // A hand-built lookup has no build lease, so it has no key list: the payload
-        // falls back as a whole instead of rewriting the bounds around it.
+    fn dyn_filter_payload_hash_lookup_fallback_preserves_bounds() {
         let schema = Arc::new(Schema::new(vec![Field::new(
             "device_id",
             DataType::Int32,
@@ -689,23 +530,20 @@ mod tests {
         let expr =
             Arc::new(BinaryExpr::new(lower_bound, Operator::And, lookup)) as Arc<dyn PhysicalExpr>;
 
-        assert!(
-            encode_bounded_physical_expr_to_bytes(&expr, 1024)
-                .unwrap()
-                .is_none()
-        );
-
         let payload = DynFilterPayload::from_datafusion_expr(&expr, 1024).unwrap();
         let decoded = payload
             .decode_datafusion_expr(&TaskContext::default(), &schema, 1024)
             .unwrap();
 
-        assert_eq!(decoded.to_string(), "true");
         assert!(!contains_expr::<HashTableLookupExpr>(&decoded));
+        let decoded_display = decoded.to_string();
+        assert!(decoded_display.contains("device_id"));
+        assert!(decoded_display.contains(">="));
+        assert!(!decoded_display.contains("hash_lookup"));
     }
 
     #[test]
-    fn dyn_filter_payload_over_budget_falls_back_to_whole_payload_true() {
+    fn dyn_filter_payload_oversized_inlist_falls_back_to_bounds() {
         let schema = Arc::new(Schema::new(vec![Field::new(
             "device_id",
             DataType::Int32,
@@ -735,17 +573,21 @@ mod tests {
         ) as Arc<dyn PhysicalExpr>;
         let expr = Arc::new(BinaryExpr::new(Arc::clone(&bounds), Operator::And, in_list))
             as Arc<dyn PhysicalExpr>;
-        // The smallest budget that can still carry a payload: only `true` fits.
-        let true_size = encode_physical_expr_to_bytes(&lit(true)).unwrap().len();
+        let bounds_only = portable_remote_dyn_filter_expr(Arc::clone(&expr), true).unwrap();
+        let bounds_only_size = encode_physical_expr_to_bytes(&bounds_only).unwrap().len();
+        let full_size = encode_physical_expr_to_bytes(&expr).unwrap().len();
+        assert!(full_size > bounds_only_size);
 
-        // Nothing is dropped from the payload node by node: over budget means "ship
-        // `true`", so the predicate keeps every row the producer kept.
-        let payload = DynFilterPayload::from_datafusion_expr(&expr, true_size).unwrap();
+        let payload = DynFilterPayload::from_datafusion_expr(&expr, bounds_only_size).unwrap();
         let decoded = payload
-            .decode_datafusion_expr(&TaskContext::default(), &schema, true_size)
+            .decode_datafusion_expr(&TaskContext::default(), &schema, bounds_only_size)
             .unwrap();
-        assert_eq!(decoded.to_string(), "true");
+
         assert!(!contains_expr::<InListExpr>(&decoded));
+        let decoded_display = decoded.to_string();
+        assert!(decoded_display.contains("device_id"));
+        assert!(decoded_display.contains(">="));
+        assert!(decoded_display.contains("<="));
     }
 
     #[test]
@@ -770,9 +612,7 @@ mod tests {
             .encode_to_vec();
 
         assert_eq!(
-            encode_bounded_physical_expr_to_bytes(&expr, expected.len())
-                .unwrap()
-                .unwrap(),
+            encode_bounded_physical_expr_to_bytes(&expr, expected.len()).unwrap(),
             expected
         );
         assert!(matches!(
@@ -833,774 +673,5 @@ mod tests {
         })
         .unwrap();
         found
-    }
-}
-
-/// Remote dynamic filter membership recovered from *real* DataFusion build leases.
-///
-/// The tests above build `HashTableLookupExpr` by hand, which always has
-/// `build_lease = None`. These tests run an actual `HashJoinExec` so DataFusion
-/// publishes lookups backed by a real build lease, which is the only way to prove that
-/// the key list (and its fallback path) actually works.
-///
-/// Most remote predicates are checked twice: structurally (what the payload contains)
-/// and by **evaluating** the producer predicate and the decoded predicate on the same
-/// `NULL`-free rows. Evaluation pins the contract that applies here: the converted
-/// membership is the build key list, so on `NULL`-free keys only, the decoded predicate
-/// keeps exactly the rows the producer kept. It is a pruning hint, not a universal
-/// equivalence — see `not_lookup_becomes_not_in` for the `NULL` caveat.
-#[cfg(test)]
-mod remote_membership_tests {
-    use std::collections::BTreeMap;
-
-    use datafusion::arrow::array::{ArrayRef, BooleanArray, Float64Array, StringDictionaryBuilder};
-    use datafusion::arrow::datatypes::{DataType, Field, Int32Type, Schema};
-    use datafusion::arrow::record_batch::RecordBatch;
-    use datafusion::physical_expr::expressions::{
-        BinaryExpr, CaseExpr, Column, InListExpr, IsNullExpr, Literal, NotExpr,
-    };
-    use datafusion::physical_plan::PhysicalExpr;
-    use datafusion::physical_plan::joins::{HashExpr, HashTableLookupExpr};
-    use datafusion_expr::Operator;
-
-    use super::remote_membership_test_support::{
-        RealDynFilter, key, one_column_schema, partitions, run_real_hash_join, utf8, utf8_join,
-    };
-    use super::*;
-
-    fn has_expr<T: PhysicalExpr>(expr: &Arc<dyn PhysicalExpr>) -> bool {
-        find_expr::<T>(expr).is_some()
-    }
-
-    fn find_expr<T: PhysicalExpr>(expr: &Arc<dyn PhysicalExpr>) -> Option<Arc<dyn PhysicalExpr>> {
-        let mut found = None;
-        expr.apply(|node| {
-            if node.is::<T>() {
-                found = Some(Arc::clone(node));
-                Ok(TreeNodeRecursion::Stop)
-            } else {
-                Ok(TreeNodeRecursion::Continue)
-            }
-        })
-        .unwrap();
-        found
-    }
-
-    fn in_lists(expr: &Arc<dyn PhysicalExpr>) -> Vec<Arc<dyn PhysicalExpr>> {
-        let mut found = Vec::new();
-        expr.apply(|node| {
-            if node.is::<InListExpr>() {
-                found.push(Arc::clone(node));
-            }
-            Ok(TreeNodeRecursion::Continue)
-        })
-        .unwrap();
-        found
-    }
-
-    fn in_list_values(expr: &Arc<dyn PhysicalExpr>) -> Vec<String> {
-        let in_list = expr.downcast_ref::<InListExpr>().unwrap();
-        assert!(!in_list.negated());
-        in_list
-            .list()
-            .iter()
-            .map(|literal| {
-                literal
-                    .downcast_ref::<Literal>()
-                    .unwrap()
-                    .value()
-                    .to_string()
-                    .trim_matches('\'')
-                    .to_string()
-            })
-            .collect()
-    }
-
-    fn assert_has_bounds(expr: &Arc<dyn PhysicalExpr>) {
-        let display = expr.to_string();
-        assert!(display.contains(">="), "missing lower bound: {display}");
-        assert!(display.contains("<="), "missing upper bound: {display}");
-    }
-
-    fn decode(
-        expr: &Arc<dyn PhysicalExpr>,
-        schema: &Arc<Schema>,
-        max_payload_bytes: usize,
-    ) -> Arc<dyn PhysicalExpr> {
-        DynFilterPayload::from_datafusion_expr(expr, max_payload_bytes)
-            .unwrap()
-            .decode_datafusion_expr(&TaskContext::default(), schema, max_payload_bytes)
-            .unwrap()
-    }
-
-    fn utf8_batch(schema: &Arc<Schema>, values: &[&str]) -> RecordBatch {
-        RecordBatch::try_new(Arc::clone(schema), vec![utf8(values)]).unwrap()
-    }
-
-    fn selected(expr: &Arc<dyn PhysicalExpr>, batch: &RecordBatch) -> Vec<bool> {
-        let array = expr
-            .evaluate(batch)
-            .unwrap()
-            .into_array(batch.num_rows())
-            .unwrap();
-        let booleans = array.as_any().downcast_ref::<BooleanArray>().unwrap();
-        (0..batch.num_rows())
-            .map(|index| booleans.value(index))
-            .collect()
-    }
-
-    /// Widening check: the decoded predicate keeps every row the producer kept.
-    ///
-    /// Only used on `NULL`-free rows, where the build-key membership is exact for the
-    /// converted node.
-    fn assert_fail_open(
-        original: &Arc<dyn PhysicalExpr>,
-        decoded: &Arc<dyn PhysicalExpr>,
-        batch: &RecordBatch,
-    ) -> (Vec<bool>, Vec<bool>) {
-        let original_selected = selected(original, batch);
-        let decoded_selected = selected(decoded, batch);
-        for (row, (kept, kept_after)) in original_selected
-            .iter()
-            .zip(decoded_selected.iter())
-            .enumerate()
-        {
-            assert!(
-                kept_after >= kept,
-                "decoded predicate dropped row {row}: producer={kept} decoded={kept_after} \
-                 (decoded predicate: {decoded})"
-            );
-        }
-        (original_selected, decoded_selected)
-    }
-
-    /// Branch chosen by the CASE routing expression for every row.
-    fn routed_branch(case: &CaseExpr, batch: &RecordBatch) -> Vec<u64> {
-        let routing = case.expr().expect("hash routing operand");
-        let array = routing
-            .evaluate(batch)
-            .unwrap()
-            .into_array(batch.num_rows())
-            .unwrap();
-        let branches = array
-            .as_any()
-            .downcast_ref::<datafusion::arrow::array::UInt64Array>()
-            .unwrap();
-        (0..batch.num_rows())
-            .map(|index| branches.value(index))
-            .collect()
-    }
-
-    fn hash_seed(expr: &Arc<dyn PhysicalExpr>) -> u64 {
-        let mut seed = None;
-        expr.apply(|node| {
-            if let Some(hash) = node.downcast_ref::<HashExpr>() {
-                seed = Some(hash.seed());
-                Ok(TreeNodeRecursion::Stop)
-            } else {
-                Ok(TreeNodeRecursion::Continue)
-            }
-        })
-        .unwrap();
-        seed.expect("hash routing expression")
-    }
-
-    /// `trace_id` values used to evaluate recovered filters.
-    fn evaluation_batch(schema: &Arc<Schema>, values: &[String]) -> RecordBatch {
-        let borrowed = values.iter().map(String::as_str).collect::<Vec<_>>();
-        utf8_batch(schema, &borrowed)
-    }
-
-    /// UTF-8 batch that can contain SQL NULLs, for wrapper semantics.
-    fn nullable_evaluation_batch(schema: &Arc<Schema>, values: &[Option<String>]) -> RecordBatch {
-        let array = StringArray::from(values.to_vec());
-        RecordBatch::try_new(Arc::clone(schema), vec![Arc::new(array) as ArrayRef]).unwrap()
-    }
-
-    #[tokio::test]
-    async fn membership_round_trips_real_utf8_build_lease() {
-        let schema = one_column_schema("trace_id", DataType::Utf8);
-        let (build, probe, values) = utf8_join(1);
-        let trace_id = key("trace_id", 0);
-        let filter = run_real_hash_join(
-            1,
-            Arc::clone(&schema),
-            Arc::clone(&schema),
-            build,
-            probe,
-            vec![(Arc::clone(&trace_id), Arc::clone(&trace_id))],
-        )
-        .await;
-
-        // The producer predicate really holds a runtime-only lookup...
-        assert!(has_expr::<HashTableLookupExpr>(&filter.expr));
-
-        // ...and it is serialized as exact build membership, not as `true`.
-        let decoded = decode(
-            &filter.expr,
-            &filter.probe_schema,
-            REMOTE_DYN_FILTER_PAYLOAD_MAX_BYTES,
-        );
-        assert!(!has_expr::<HashTableLookupExpr>(&decoded));
-        let lists = in_lists(&decoded);
-        assert_eq!(lists.len(), 1, "expected one recovered InList: {decoded}");
-        assert_eq!(in_list_values(&lists[0]), values);
-        assert_has_bounds(&decoded);
-
-        // Members are selected, non-members are not, nothing else changes.
-        let mut rows = values.clone();
-        rows.push("miss-not-a-member".to_string());
-        let batch = evaluation_batch(&schema, &rows);
-        let (original_selected, decoded_selected) =
-            assert_fail_open(&filter.expr, &decoded, &batch);
-        for row in 0..values.len() {
-            assert!(original_selected[row], "member row {row} must be selected");
-            assert!(decoded_selected[row], "member row {row} must stay selected");
-        }
-        assert!(
-            !decoded_selected[values.len()],
-            "non-member must not be selected"
-        );
-    }
-
-    #[tokio::test]
-    async fn membership_preserves_three_branch_case_structure() {
-        let schema = one_column_schema("trace_id", DataType::Utf8);
-        let (build, probe, values) = utf8_join(3);
-        let trace_id = key("trace_id", 0);
-        let filter = run_real_hash_join(
-            3,
-            Arc::clone(&schema),
-            Arc::clone(&schema),
-            build,
-            probe,
-            vec![(Arc::clone(&trace_id), Arc::clone(&trace_id))],
-        )
-        .await;
-
-        // Three hash-routed partitions produce a three-branch CASE.
-        let original_case = filter
-            .expr
-            .downcast_ref::<CaseExpr>()
-            .expect("real three-branch CASE");
-        assert_eq!(original_case.when_then_expr().len(), 3);
-
-        let decoded = decode(
-            &filter.expr,
-            &filter.probe_schema,
-            REMOTE_DYN_FILTER_PAYLOAD_MAX_BYTES,
-        );
-        let case = decoded.downcast_ref::<CaseExpr>().expect("CASE preserved");
-        assert_eq!(case.when_then_expr().len(), 3);
-        assert!(case.else_expr().is_some());
-
-        // Routing is untouched: same operand expression and same `HashExpr` seed, so
-        // the receiver selects the same branch for every row.
-        assert_eq!(
-            original_case.expr().unwrap().to_string(),
-            case.expr().unwrap().to_string()
-        );
-        assert_eq!(
-            hash_seed(original_case.expr().unwrap()),
-            hash_seed(case.expr().unwrap())
-        );
-
-        // Branch-specific membership: the WHEN literal names the branch, so the values
-        // recovered for each branch can be checked individually.
-        let mut branch_values: BTreeMap<u64, Vec<String>> = BTreeMap::new();
-        for (when, then) in case.when_then_expr() {
-            let branch = match when.downcast_ref::<Literal>().unwrap().value() {
-                ScalarValue::UInt64(Some(branch)) => *branch,
-                other => panic!("unexpected CASE routing literal: {other:?}"),
-            };
-            let lists = in_lists(then);
-            assert_eq!(lists.len(), 1, "each branch keeps its membership: {then}");
-            let mut branch_list = in_list_values(&lists[0]);
-            branch_list.sort();
-            assert!(
-                branch_values.insert(branch, branch_list).is_none(),
-                "branch {branch} appears twice"
-            );
-            assert_has_bounds(then);
-        }
-        assert_eq!(branch_values.len(), 3, "three distinct branches");
-
-        // Every build key is recovered exactly once, in its own branch.
-        let mut recovered = branch_values
-            .values()
-            .flatten()
-            .cloned()
-            .collect::<Vec<_>>();
-        recovered.sort();
-        assert_eq!(recovered, values);
-
-        // Evaluation proves branch-specific routing: a row is selected iff its key is in
-        // the membership of the branch the routing sends it to.
-        let mut rows = values.clone();
-        rows.extend((0..4).map(|i| format!("miss-{i:02}")));
-        let batch = evaluation_batch(&schema, &rows);
-        let (original_selected, decoded_selected) =
-            assert_fail_open(&filter.expr, &decoded, &batch);
-        let branches = routed_branch(case, &batch);
-        for (row, value) in rows.iter().enumerate() {
-            let branch = branches[row];
-            let expected = branch_values
-                .get(&branch)
-                .is_some_and(|members| members.binary_search(value).is_ok());
-            assert_eq!(
-                decoded_selected[row], expected,
-                "row {value} routed to branch {branch} must be selected iff it is a \
-                 member of that branch's list"
-            );
-            // Build members must keep their decision; misses only ever widen.
-            if expected {
-                assert!(
-                    original_selected[row],
-                    "producer must select its own build member {value}"
-                );
-                assert!(decoded_selected[row]);
-            }
-        }
-        assert!(
-            decoded_selected
-                .iter()
-                .filter(|selected| **selected)
-                .count()
-                >= values.len(),
-            "every build member must still be selected"
-        );
-    }
-
-    /// Runs a real one-partition `Utf8` hash join over `key_count` distinct keys.
-    async fn real_join_with_keys(key_count: usize) -> (Arc<Schema>, RealDynFilter, Vec<String>) {
-        let schema = one_column_schema("trace_id", DataType::Utf8);
-        let trace_id = key("trace_id", 0);
-        let values = (0..key_count)
-            .map(|i| format!("trace-{i:04}"))
-            .collect::<Vec<_>>();
-        let borrowed = values.iter().map(String::as_str).collect::<Vec<_>>();
-        let build = partitions(&schema, vec![vec![utf8(&borrowed)]]);
-        let probe = partitions(&schema, vec![vec![utf8(&borrowed)]]);
-        let filter = run_real_hash_join(
-            1,
-            Arc::clone(&schema),
-            Arc::clone(&schema),
-            build,
-            probe,
-            vec![(Arc::clone(&trace_id), Arc::clone(&trace_id))],
-        )
-        .await;
-        (schema, filter, values)
-    }
-
-    #[tokio::test]
-    async fn real_642_key_hash_join_becomes_exact_642_literal_in() {
-        let (schema, filter, values) = real_join_with_keys(642).await;
-        assert_eq!(values.len(), 642);
-        // The producer predicate really holds a runtime-only lookup...
-        assert!(has_expr::<HashTableLookupExpr>(&filter.expr));
-
-        // ...and it is written as one literal per build key, with no encoder-side cap.
-        let decoded = decode(
-            &filter.expr,
-            &filter.probe_schema,
-            REMOTE_DYN_FILTER_PAYLOAD_MAX_BYTES,
-        );
-        assert!(!has_expr::<HashTableLookupExpr>(&decoded));
-        let lists = in_lists(&decoded);
-        assert_eq!(lists.len(), 1, "expected one converted InList: {decoded}");
-        let mut recovered = in_list_values(&lists[0]);
-        assert_eq!(recovered.len(), 642, "one literal per build key");
-        recovered.sort();
-        assert_eq!(recovered, values);
-
-        // The membership selects exactly the build keys.
-        let mut rows = values.clone();
-        rows.push("miss-not-a-member".to_string());
-        let batch = evaluation_batch(&schema, &rows);
-        let (original_selected, decoded_selected) =
-            assert_fail_open(&filter.expr, &decoded, &batch);
-        for row in 0..values.len() {
-            assert!(
-                original_selected[row],
-                "build key row {row} must be selected"
-            );
-            assert!(
-                decoded_selected[row],
-                "build key row {row} must stay selected"
-            );
-        }
-        assert!(
-            !decoded_selected[values.len()],
-            "non-member must not be selected"
-        );
-    }
-
-    #[tokio::test]
-    async fn lookup_or_key_is_null_preserves_wrapper_and_becomes_in_list() {
-        // The `key IS NULL OR <filter>` wrapper of a null-aware join is an ordinary
-        // node: it stays in the payload and only the lookup inside it is converted.
-        let (schema, filter, values) = real_join_with_keys(8).await;
-        let lookup = find_expr::<HashTableLookupExpr>(&filter.expr).expect("real lookup");
-        let trace_id = key("trace_id", 0);
-        let wrapped = Arc::new(BinaryExpr::new(
-            Arc::clone(&lookup),
-            Operator::Or,
-            Arc::new(IsNullExpr::new(Arc::clone(&trace_id))),
-        )) as Arc<dyn PhysicalExpr>;
-
-        let decoded = decode(
-            &wrapped,
-            &filter.probe_schema,
-            REMOTE_DYN_FILTER_PAYLOAD_MAX_BYTES,
-        );
-        let display = decoded.to_string();
-        assert!(
-            display.contains("IS NULL"),
-            "IS NULL wrapper must survive: {display}"
-        );
-        assert!(!display.contains("hash_lookup"), "{display}");
-        let lists = in_lists(&decoded);
-        assert_eq!(lists.len(), 1, "expected one converted InList: {display}");
-        assert_eq!(in_list_values(&lists[0]), values);
-
-        let mut rows = values
-            .iter()
-            .map(|value| Some(value.clone()))
-            .collect::<Vec<_>>();
-        rows.push(Some("miss-not-a-member".to_string()));
-        rows.push(None);
-        let batch = nullable_evaluation_batch(&schema, &rows);
-        let (original_selected, decoded_selected) = assert_fail_open(&wrapped, &decoded, &batch);
-        for row in 0..values.len() {
-            assert!(original_selected[row]);
-            assert!(decoded_selected[row]);
-        }
-        assert!(
-            original_selected[rows.len() - 1],
-            "producer `lookup OR key IS NULL` keeps a NULL probe"
-        );
-        assert!(
-            decoded_selected[rows.len() - 1],
-            "decoded `IN ... OR key IS NULL` must also keep a NULL probe"
-        );
-    }
-
-    /// `NOT lookup` becomes `NOT (key IN (...))`.
-    ///
-    /// This narrow contract is about **positive pruning**: the membership is the build
-    /// key list of the join, so converting the node in place structurally preserves the
-    /// negation instead of substituting `true` into it. It is *not* a claim of
-    /// universal equivalence with the join: `IN`/`NOT IN` are `NULL`-propagating while
-    /// a hash lookup can be definite on a `NULL` probe key, so a `NULL` key that the
-    /// lookup keeps can still be dropped by `NOT IN`. The rows below are non-`NULL`,
-    /// which is the shape the hint is meant for.
-    #[tokio::test]
-    async fn not_lookup_becomes_not_in() {
-        let (schema, filter, values) = real_join_with_keys(8).await;
-        let lookup = find_expr::<HashTableLookupExpr>(&filter.expr).expect("real lookup");
-        let not_lookup = Arc::new(NotExpr::new(Arc::clone(&lookup))) as Arc<dyn PhysicalExpr>;
-
-        let decoded = decode(
-            &not_lookup,
-            &filter.probe_schema,
-            REMOTE_DYN_FILTER_PAYLOAD_MAX_BYTES,
-        );
-        let display = decoded.to_string();
-        assert!(
-            display.starts_with("NOT "),
-            "NOT must survive the wire: {display}"
-        );
-        let lists = in_lists(&decoded);
-        assert_eq!(lists.len(), 1, "expected one converted InList: {display}");
-        assert_eq!(in_list_values(&lists[0]), values);
-
-        let mut rows = values.clone();
-        rows.push("miss-not-a-member".to_string());
-        let batch = evaluation_batch(&schema, &rows);
-        let (original_selected, decoded_selected) = assert_fail_open(&not_lookup, &decoded, &batch);
-        assert!(original_selected[..values.len()].iter().all(|kept| !*kept));
-        assert!(
-            original_selected[values.len()],
-            "producer `NOT lookup` keeps the non-member"
-        );
-        assert!(decoded_selected[..values.len()].iter().all(|kept| !*kept));
-        assert!(
-            decoded_selected[values.len()],
-            "decoded `NOT IN` keeps the non-member"
-        );
-    }
-
-    #[tokio::test]
-    async fn membership_falls_back_to_whole_payload_true_for_float_composite_and_dictionary_keys() {
-        // Float64 keys: the key-list accessor only exposes a single `Utf8` column.
-        let float_schema = one_column_schema("k", DataType::Float64);
-        let float_on = key("k", 0);
-        let float_filter = run_real_hash_join(
-            2,
-            Arc::clone(&float_schema),
-            Arc::clone(&float_schema),
-            partitions(
-                &float_schema,
-                vec![
-                    vec![Arc::new(Float64Array::from(vec![0.0, -0.0])) as ArrayRef],
-                    vec![Arc::new(Float64Array::from(vec![1.5])) as ArrayRef],
-                ],
-            ),
-            partitions(
-                &float_schema,
-                vec![
-                    vec![Arc::new(Float64Array::from(vec![0.0, 2.5])) as ArrayRef],
-                    vec![Arc::new(Float64Array::from(vec![1.5])) as ArrayRef],
-                ],
-            ),
-            vec![(Arc::clone(&float_on), Arc::clone(&float_on))],
-        )
-        .await;
-        assert!(has_expr::<HashTableLookupExpr>(&float_filter.expr));
-        let decoded = decode(
-            &float_filter.expr,
-            &float_filter.probe_schema,
-            REMOTE_DYN_FILTER_PAYLOAD_MAX_BYTES,
-        );
-        assert_eq!(decoded.to_string(), "true");
-        assert!(!has_expr::<HashTableLookupExpr>(&decoded));
-
-        // Composite (two-column) keys: not a single-column membership. Both columns
-        // take part in the hash partitioning, exactly like a real two-key join.
-        let composite_schema = Arc::new(Schema::new(vec![
-            Field::new("trace_id", DataType::Utf8, true),
-            Field::new("host", DataType::Utf8, true),
-        ]));
-        let composite_on = vec![
-            (key("trace_id", 0), key("trace_id", 0)),
-            (key("host", 1), key("host", 1)),
-        ];
-        let composite_filter = run_real_hash_join(
-            2,
-            Arc::clone(&composite_schema),
-            Arc::clone(&composite_schema),
-            partitions(
-                &composite_schema,
-                vec![
-                    vec![utf8(&["trace-0", "trace-1"]), utf8(&["host-a", "host-a"])],
-                    vec![utf8(&["trace-2"]), utf8(&["host-b"])],
-                ],
-            ),
-            partitions(
-                &composite_schema,
-                vec![
-                    vec![utf8(&["trace-0", "trace-9"]), utf8(&["host-a", "host-z"])],
-                    vec![utf8(&["trace-2"]), utf8(&["host-b"])],
-                ],
-            ),
-            composite_on,
-        )
-        .await;
-        assert!(has_expr::<HashTableLookupExpr>(&composite_filter.expr));
-        let decoded = decode(
-            &composite_filter.expr,
-            &composite_filter.probe_schema,
-            REMOTE_DYN_FILTER_PAYLOAD_MAX_BYTES,
-        );
-        assert_eq!(decoded.to_string(), "true");
-        assert!(!has_expr::<HashTableLookupExpr>(&decoded));
-
-        // Dictionary keys: not a plain `Utf8` key column.
-        let dict_type = DataType::Dictionary(Box::new(DataType::Int32), Box::new(DataType::Utf8));
-        let dict_schema = one_column_schema("trace_id", dict_type);
-        let dict_on = key("trace_id", 0);
-        let mut dict_builder = StringDictionaryBuilder::<Int32Type>::new();
-        dict_builder.append_value("trace-0");
-        dict_builder.append_value("trace-1");
-        let dict_values: ArrayRef = Arc::new(dict_builder.finish());
-        let dict_filter = run_real_hash_join(
-            2,
-            Arc::clone(&dict_schema),
-            Arc::clone(&dict_schema),
-            partitions(&dict_schema, vec![vec![Arc::clone(&dict_values)]]),
-            partitions(&dict_schema, vec![vec![dict_values]]),
-            vec![(Arc::clone(&dict_on), Arc::clone(&dict_on))],
-        )
-        .await;
-        assert!(has_expr::<HashTableLookupExpr>(&dict_filter.expr));
-        let decoded = decode(
-            &dict_filter.expr,
-            &dict_filter.probe_schema,
-            REMOTE_DYN_FILTER_PAYLOAD_MAX_BYTES,
-        );
-        assert_eq!(decoded.to_string(), "true");
-        assert!(!has_expr::<HashTableLookupExpr>(&decoded));
-    }
-
-    #[tokio::test]
-    async fn producer_paths_encode_150_and_1024_keys() {
-        // The two producer shapes that can carry a build key list: the static `IN` list
-        // pushdown (150 and 1024 are the pushdown limits of the runtime experiment) and
-        // the hash lookup. Neither is capped by an encoder-side value/byte policy: the
-        // only bound is the payload budget itself.
-        for key_count in [150, 1024] {
-            let (schema, filter, values) = real_join_with_keys(key_count).await;
-            assert!(has_expr::<HashTableLookupExpr>(&filter.expr));
-            let decoded = decode(
-                &filter.expr,
-                &filter.probe_schema,
-                REMOTE_DYN_FILTER_PAYLOAD_MAX_BYTES,
-            );
-            let lists = in_lists(&decoded);
-            assert_eq!(lists.len(), 1, "{key_count} keys: {decoded}");
-            assert_eq!(in_list_values(&lists[0]), values);
-
-            // The static `IN` list pushdown of the same size encodes as well.
-            let in_list = Arc::new(
-                InListExpr::try_new(
-                    key("trace_id", 0),
-                    values.iter().map(|value| lit(value.clone())).collect(),
-                    false,
-                    &schema,
-                )
-                .unwrap(),
-            ) as Arc<dyn PhysicalExpr>;
-            let decoded = decode(
-                &in_list,
-                &filter.probe_schema,
-                REMOTE_DYN_FILTER_PAYLOAD_MAX_BYTES,
-            );
-            let lists = in_lists(&decoded);
-            assert_eq!(lists.len(), 1, "{key_count} static keys: {decoded}");
-            assert_eq!(in_list_values(&lists[0]), values);
-        }
-    }
-
-    #[tokio::test]
-    async fn over_budget_payload_falls_back_to_whole_payload_true() {
-        let schema = one_column_schema("trace_id", DataType::Utf8);
-        // Long values so the membership lists dominate the payload.
-        let long = "t".repeat(256);
-        let values = (0..24)
-            .map(|i| format!("{long}-{i:02}"))
-            .collect::<Vec<_>>();
-        let borrowed = values.iter().map(String::as_str).collect::<Vec<_>>();
-        let build = partitions(&schema, vec![vec![utf8(&borrowed)]]);
-        let probe = partitions(&schema, vec![vec![utf8(&borrowed)]]);
-        let trace_id = key("trace_id", 0);
-        let filter = run_real_hash_join(
-            3,
-            Arc::clone(&schema),
-            Arc::clone(&schema),
-            build,
-            probe,
-            vec![(Arc::clone(&trace_id), Arc::clone(&trace_id))],
-        )
-        .await;
-        assert!(has_expr::<HashTableLookupExpr>(&filter.expr));
-
-        // The real payload budget carries all three branch memberships exactly.
-        let decoded = decode(
-            &filter.expr,
-            &filter.probe_schema,
-            REMOTE_DYN_FILTER_PAYLOAD_MAX_BYTES,
-        );
-        assert_eq!(in_lists(&decoded).len(), 3);
-        let case = decoded.downcast_ref::<CaseExpr>().expect("CASE preserved");
-        assert_eq!(case.when_then_expr().len(), 3);
-
-        // A budget that only fits `true` gives up on the whole payload instead of
-        // dropping membership node by node, so nothing can become narrower.
-        let true_size = encode_physical_expr_to_bytes(&lit(true)).unwrap().len();
-        assert!(true_size < REMOTE_DYN_FILTER_PAYLOAD_MAX_BYTES);
-        let decoded = decode(&filter.expr, &filter.probe_schema, true_size);
-        assert_eq!(decoded.to_string(), "true");
-
-        let mut rows = values.clone();
-        rows.push("miss-not-a-member".to_string());
-        let batch = evaluation_batch(&schema, &rows);
-        let (original_selected, decoded_selected) =
-            assert_fail_open(&filter.expr, &decoded, &batch);
-        for row in 0..values.len() {
-            assert!(original_selected[row]);
-            assert!(decoded_selected[row]);
-        }
-    }
-
-    #[test]
-    fn over_budget_payload_never_narrows_a_negation() {
-        let schema = Arc::new(Schema::new(vec![Field::new("host", DataType::Utf8, false)]));
-        let host = Arc::new(Column::new("host", 0)) as Arc<dyn PhysicalExpr>;
-        let long = "h".repeat(256);
-        let in_list = Arc::new(
-            InListExpr::try_new(
-                Arc::clone(&host),
-                (0..16).map(|i| lit(format!("{long}-{i:02}"))).collect(),
-                false,
-                &schema,
-            )
-            .unwrap(),
-        ) as Arc<dyn PhysicalExpr>;
-        // `NOT (host IN (...))`: dropping the list in place would evaluate `NOT true`
-        // = false and drop every row.
-        let not_in = Arc::new(NotExpr::new(Arc::clone(&in_list))) as Arc<dyn PhysicalExpr>;
-        let true_size = encode_physical_expr_to_bytes(&lit(true)).unwrap().len();
-
-        let decoded = decode(&not_in, &schema, true_size);
-        assert_eq!(decoded.to_string(), "true");
-
-        let batch = utf8_batch(&schema, &["h-other", &format!("{long}-00")]);
-        let (original_selected, decoded_selected) = assert_fail_open(&not_in, &decoded, &batch);
-        assert_eq!(original_selected, vec![true, false]);
-        assert_eq!(decoded_selected, vec![true, true]);
-    }
-
-    #[tokio::test]
-    async fn recovered_payload_uses_only_existing_wire_variants() {
-        let schema = one_column_schema("trace_id", DataType::Utf8);
-        let (build, probe, values) = utf8_join(3);
-        let trace_id = key("trace_id", 0);
-        let filter = run_real_hash_join(
-            3,
-            Arc::clone(&schema),
-            Arc::clone(&schema),
-            build,
-            probe,
-            vec![(Arc::clone(&trace_id), Arc::clone(&trace_id))],
-        )
-        .await;
-        let max = REMOTE_DYN_FILTER_PAYLOAD_MAX_BYTES;
-
-        // The recovered payload decodes with the default extension codec, which rejects
-        // every expression variant it does not know: a new wire variant would fail here.
-        let payload = DynFilterPayload::from_datafusion_expr(&filter.expr, max).unwrap();
-        let bytes = match &payload {
-            DynFilterPayload::Datafusion(bytes) => bytes.clone(),
-        };
-        let decoded = payload
-            .decode_datafusion_expr(&TaskContext::default(), &filter.probe_schema, max)
-            .unwrap();
-        assert_eq!(in_lists(&decoded).len(), 3);
-        assert_eq!(
-            hash_seed(
-                filter
-                    .expr
-                    .downcast_ref::<CaseExpr>()
-                    .unwrap()
-                    .expr()
-                    .unwrap()
-            ),
-            hash_seed(decoded.downcast_ref::<CaseExpr>().unwrap().expr().unwrap()),
-            "HashExpr routing seed must survive the wire"
-        );
-
-        // A payload of plain `true` — the whole-payload fallback, and what the previous
-        // encoder shipped for every lookup — is still readable.
-        let legacy_bytes = encode_physical_expr_to_bytes(&lit(true)).unwrap();
-        assert!(legacy_bytes.len() < bytes.len());
-        let legacy_decoded = DynFilterPayload::Datafusion(legacy_bytes)
-            .decode_datafusion_expr(&TaskContext::default(), &filter.probe_schema, max)
-            .unwrap();
-        assert_eq!(legacy_decoded.to_string(), "true");
-        let mut rows = values.clone();
-        rows.push("miss-not-a-member".to_string());
-        let batch = evaluation_batch(&schema, &rows);
-        assert_fail_open(&filter.expr, &legacy_decoded, &batch);
     }
 }
