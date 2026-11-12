@@ -32,7 +32,7 @@ pub(crate) mod samples;
 mod searcher;
 mod task;
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 mod version;
 mod writer;
 

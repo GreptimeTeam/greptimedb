@@ -20,10 +20,12 @@ use std::time::Duration;
 use api::v1::helper::row;
 use api::v1::value::ValueData;
 use api::v1::{ColumnDataType, Rows, SemanticType, WriteHint};
+use futures::TryStreamExt;
 use object_store::ObjectStore;
 use object_store::layers::mock::{self, MockLayerBuilder, oio};
 use object_store::services::Memory;
 use store_api::codec::PrimaryKeyEncoding;
+use store_api::metadata::RegionMetadata;
 use store_api::metric_engine_consts::PRIMARY_KEY_ENCODING;
 use store_api::region_engine::RegionEngine;
 use store_api::region_request::{RegionPutRequest, RegionRequest};
@@ -38,10 +40,65 @@ use super::maintenance::reconcile_series_indexes;
 use super::purger::series_index_channel;
 use crate::config::MitoConfig;
 use crate::engine::MitoEngine;
+use crate::manifest::action::RegionEdit;
 use crate::region::{MitoRegionRef, RegionMap};
+use crate::sst::file::{FileMeta, RegionFileId};
+use crate::sst::location;
 use crate::test_util::sst_util::{new_sparse_primary_key, sst_region_metadata_with_encoding};
 use crate::test_util::{CreateRequestBuilder, TestEnv, flush_region, rows_schema};
 use crate::time_provider::StdTimeProvider;
+
+/// Builds the sparse-metric rows of one write request against `metadata`.
+fn sparse_put_rows(metadata: &store_api::metadata::RegionMetadataRef, ts: i64) -> Rows {
+    let mut request = CreateRequestBuilder::new().build();
+    request.column_metadatas = metadata.column_metadatas.clone();
+    request.primary_key = metadata.primary_key.clone();
+    let full_schema = rows_schema(&request);
+    let mut pk_column = full_schema[0].clone();
+    pk_column.column_name = PRIMARY_KEY_COLUMN_NAME.to_string();
+    pk_column.datatype = ColumnDataType::Binary.into();
+    pk_column.semantic_type = SemanticType::Tag.into();
+    let schema = vec![pk_column, full_schema[5].clone(), full_schema[4].clone()];
+    Rows {
+        schema,
+        rows: vec![row(vec![
+            ValueData::BinaryValue(new_sparse_primary_key(&["a", "x"], metadata, 10, 0)),
+            ValueData::TimestampMillisecondValue(ts),
+            if metadata
+                .field_columns()
+                .next()
+                .unwrap()
+                .column_schema
+                .data_type
+                == datatypes::prelude::ConcreteDataType::float64_datatype()
+            {
+                ValueData::F64Value(1.0)
+            } else {
+                ValueData::U64Value(1)
+            },
+        ])],
+    }
+}
+
+/// Writes one sparse row without flushing, so the region keeps a mutable memtable.
+async fn put_sparse_row(engine: &MitoEngine, region: &MitoRegionRef, ts: i64) {
+    let metadata = region.version().metadata.clone();
+    let result = engine
+        .handle_request(
+            region.region_id,
+            RegionRequest::Put(RegionPutRequest {
+                skip_wal: false,
+                rows: sparse_put_rows(&metadata, ts),
+                hint: Some(WriteHint {
+                    primary_key_encoding: api::v1::PrimaryKeyEncoding::Sparse.into(),
+                }),
+                partition_expr_version: None,
+            }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(1, result.affected_rows);
+}
 
 /// Builds real sparse SSTs; background maintenance is disabled so tests control publication.
 pub(super) async fn prepare_region(env: &mut TestEnv) -> (MitoEngine, MitoRegionRef) {
@@ -123,12 +180,6 @@ pub(crate) async fn prepare_region_with_metadata_and_flush(
             "100".to_string(),
         );
     }
-    let full_schema = rows_schema(&request);
-    let mut pk_column = full_schema[0].clone();
-    pk_column.column_name = PRIMARY_KEY_COLUMN_NAME.to_string();
-    pk_column.datatype = ColumnDataType::Binary.into();
-    pk_column.semantic_type = SemanticType::Tag.into();
-    let schema = vec![pk_column, full_schema[5].clone(), full_schema[4].clone()];
     engine
         .handle_request(region_id, RegionRequest::Create(request))
         .await
@@ -138,43 +189,7 @@ pub(crate) async fn prepare_region_with_metadata_and_flush(
     let region = engine.get_region(region_id).unwrap();
     region.update_schedule_compaction_millis();
     for &ts in timestamps {
-        engine
-            .handle_request(
-                region_id,
-                RegionRequest::Put(RegionPutRequest {
-                    skip_wal: false,
-                    rows: Rows {
-                        schema: schema.clone(),
-                        rows: vec![row(vec![
-                            ValueData::BinaryValue(new_sparse_primary_key(
-                                &["a", "x"],
-                                &metadata,
-                                10,
-                                0,
-                            )),
-                            ValueData::TimestampMillisecondValue(ts),
-                            if metadata
-                                .field_columns()
-                                .next()
-                                .unwrap()
-                                .column_schema
-                                .data_type
-                                == datatypes::prelude::ConcreteDataType::float64_datatype()
-                            {
-                                ValueData::F64Value(1.0)
-                            } else {
-                                ValueData::U64Value(1)
-                            },
-                        ])],
-                    },
-                    hint: Some(WriteHint {
-                        primary_key_encoding: api::v1::PrimaryKeyEncoding::Sparse.into(),
-                    }),
-                    partition_expr_version: None,
-                }),
-            )
-            .await
-            .unwrap();
+        put_sparse_row(&engine, &region, ts).await;
         if flush_each {
             flush_region(&engine, region_id, None).await;
         }
@@ -237,7 +252,7 @@ impl IndexTest {
 }
 
 #[rstest::rstest]
-#[case::range_only(vec![1000], 0)]
+#[case::single_file(vec![1000], 1)]
 #[case::series_bucket(vec![1000, 2000, 3000, 4000], 1)]
 #[tokio::test]
 async fn test_reconcile_range_index_disabled(
@@ -270,7 +285,7 @@ async fn test_reconcile_range_index_disabled(
         .map(|file| file.meta_ref().clone())
         .collect::<Vec<_>>();
 
-    // Both planned series buckets and SSTs without a series build must skip range builds.
+    // Every planned series bucket - including one built from a single SST - skips range builds.
     let stats = test
         .reconcile_with_range_index(store.clone(), false)
         .await
@@ -416,14 +431,44 @@ async fn test_reconcile_restores_and_reuses_indexes() {
     engine.stop().await.unwrap();
 }
 
+/// A single flushed SST is converted by the automatic pass: no file-count threshold holds a
+/// bucket back, because a native reader can only serve published artifacts.
 #[tokio::test]
-async fn test_reconcile_range_only_build_and_removal() {
+async fn test_reconcile_single_flushed_sst_builds_both_indexes() {
     let mut env = TestEnv::with_prefix("series-range-lifecycle").await;
     let (engine, region) = prepare_region_with_timestamps(&mut env, &[1000]).await;
     let (test, _receiver) = IndexTest::new(region.clone());
     let initial = region.series_index_version();
+    let files = region
+        .version()
+        .ssts
+        .levels()
+        .iter()
+        .flat_map(|level| level.files())
+        .cloned()
+        .collect::<Vec<_>>();
+    assert_eq!(1, files.len(), "the fixture must flush exactly one SST");
     let stats = test.reconcile(test.store.clone()).await.unwrap();
-    assert_eq!((1, 0), (stats.built_range, stats.built_series));
+    assert_eq!((1, 1), (stats.built_range, stats.built_series));
+    let published = region.series_index_version();
+    let entry = published
+        .series_indexes
+        .values()
+        .next()
+        .expect("one series index covers the single SST")
+        .entry();
+    assert!(
+        entry.covers_file(files[0].meta_ref(), region.region_id),
+        "the published index must cover the flushed SST"
+    );
+    // A repeated pass reuses the published index instead of rebuilding it.
+    assert_eq!(
+        0,
+        test.reconcile(test.store.clone())
+            .await
+            .unwrap()
+            .built_series
+    );
     let built = region.series_index_version();
     assert!(!Arc::ptr_eq(&initial, &built));
     let files = region
@@ -669,6 +714,162 @@ async fn test_reconcile_publishes_after_region_version_changes() {
     }
 }
 
+/// Parks the first artifact write of a build so a test can observe it while in flight.
+///
+/// Only the object-store mock layer is involved: production code has no pause hook, so a
+/// build can only be observed at a real artifact write, which always happens after the build
+/// captured its inputs. The pause therefore cannot hide a retained region version.
+#[derive(Default)]
+struct BuildPause {
+    paused: std::sync::atomic::AtomicBool,
+    started: tokio::sync::Notify,
+    resume: tokio::sync::Notify,
+}
+
+impl BuildPause {
+    /// Blocks the caller once, until the test releases the build.
+    async fn pause_once(&self) {
+        if self.paused.swap(true, std::sync::atomic::Ordering::AcqRel) {
+            return;
+        }
+        self.started.notify_one();
+        self.resume.notified().await;
+    }
+}
+
+/// Forwards to the inner writer after parking the first artifact write.
+struct PausingWriter {
+    inner: oio::Writer,
+    pause: Arc<BuildPause>,
+}
+
+impl mock::Write for PausingWriter {
+    async fn write(&mut self, buffer: mock::Buffer) -> mock::Result<()> {
+        self.pause.pause_once().await;
+        self.inner.write(buffer).await
+    }
+
+    async fn close(&mut self) -> mock::Result<mock::Metadata> {
+        self.pause.pause_once().await;
+        self.inner.close().await
+    }
+
+    async fn abort(&mut self) -> mock::Result<()> {
+        self.inner.abort().await
+    }
+}
+
+/// Asserts every observed memtable is freed, retrying so async drops can settle.
+async fn assert_memtables_released(memtables: &[std::sync::Weak<dyn crate::memtable::Memtable>]) {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while memtables
+            .iter()
+            .any(|memtable| memtable.upgrade().is_some())
+        {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the in-flight build still retains a flushed memtable");
+}
+
+#[tokio::test]
+async fn test_build_snapshot_releases_flushed_memtable() {
+    use std::collections::HashSet;
+
+    let mut env = TestEnv::with_prefix("series-snapshot-inputs").await;
+    let (engine, region) = prepare_region(&mut env).await;
+    let (test, _receiver) = IndexTest::new(region.clone());
+    let source_files = region
+        .version()
+        .ssts
+        .levels()
+        .iter()
+        .flat_map(|level| level.files())
+        .map(|file| file.file_id().file_id())
+        .collect::<HashSet<_>>();
+    assert_eq!(4, source_files.len());
+
+    // An unflushed row keeps write-buffer memory alive in the version a build captures.
+    put_sparse_row(&engine, &region, 5000).await;
+    let memtables = region
+        .version()
+        .memtables
+        .list_memtables()
+        .iter()
+        .map(Arc::downgrade)
+        .collect::<Vec<_>>();
+    assert!(!memtables.is_empty());
+
+    let pause = Arc::new(BuildPause::default());
+    let layer = MockLayerBuilder::default()
+        .writer_factory(Arc::new({
+            let pause = pause.clone();
+            move |_, _, inner| {
+                Box::new(PausingWriter {
+                    inner,
+                    pause: pause.clone(),
+                })
+            }
+        }))
+        .build()
+        .unwrap();
+    let build = test.reconcile(test.store.clone().layer(layer));
+    let observe = async {
+        // The build is parked at its first artifact write, after capturing its inputs.
+        pause.started.notified().await;
+        // Freezing and flushing must release the write buffer while the build still runs.
+        flush_region(&engine, region.region_id, None).await;
+        assert_memtables_released(&memtables).await;
+        pause.resume.notify_one();
+    };
+    let (stats, ()) = tokio::join!(build, observe);
+    let stats = stats.unwrap();
+    assert_eq!((4, 1), (stats.built_range, stats.built_series));
+
+    // The flush added a newer SST that the captured inputs must not include.
+    let live_files = region
+        .version()
+        .ssts
+        .levels()
+        .iter()
+        .flat_map(|level| level.files())
+        .map(|file| file.file_id().file_id())
+        .collect::<HashSet<_>>();
+    assert_eq!(5, live_files.len());
+    let published = region.series_index_version();
+    assert_eq!(4, published.range_indexes.len());
+    let handle = published.series_indexes.values().next().unwrap();
+    assert_eq!(
+        source_files,
+        handle
+            .entry()
+            .source_file_ids
+            .iter()
+            .copied()
+            .collect::<HashSet<_>>()
+    );
+
+    // A later pass converts the SST that arrived during the paused build.
+    let stats = test.reconcile(test.store.clone()).await.unwrap();
+    assert_eq!(1, stats.built_series);
+    let published = region.series_index_version();
+    assert_eq!(
+        live_files,
+        published
+            .series_indexes
+            .values()
+            .next()
+            .unwrap()
+            .entry()
+            .source_file_ids
+            .iter()
+            .copied()
+            .collect::<HashSet<_>>()
+    );
+    engine.stop().await.unwrap();
+}
+
 #[tokio::test]
 async fn test_reconcile_cleans_up_after_region_drop() {
     let mut env = TestEnv::with_prefix("series-reconcile-drop").await;
@@ -756,19 +957,35 @@ async fn test_failed_reconcile_retires_only_unpublished_series() {
             None,
             0,
         );
-        assert_eq!(if failure == "range" { 2 } else { 3 }, plan.builds.len());
+        // Every bucket is planned, including the third one built from a single SST.
+        assert_eq!(3, plan.builds.len());
         let (bucket, entry) = &plan.builds[0];
         let mut ranges = HashMap::new();
         for file in &bucket.files {
-            let entry = build_range_index(store, &region, &version, file.clone())
-                .await
-                .unwrap()
-                .unwrap();
+            let entry = build_range_index(
+                store,
+                &region.access_layer,
+                region.region_id,
+                &version.metadata,
+                file.clone(),
+            )
+            .await
+            .unwrap()
+            .unwrap();
             ranges.insert(entry.file_id, entry);
         }
-        let handle = build_series_index(store, &region, &version, bucket, entry, None, purger)
-            .await
-            .unwrap();
+        let handle = build_series_index(
+            store,
+            &region.access_layer,
+            region.region_id,
+            &version.metadata,
+            bucket,
+            entry,
+            None,
+            purger,
+        )
+        .await
+        .unwrap();
         let reused_path = series_index_path(region.region_id, entry.index_uuid);
         region
             .series_index_version_control
@@ -839,7 +1056,8 @@ async fn test_failed_reconcile_retires_only_unpublished_series() {
         assert!(store.exists(&reused_path).await.unwrap());
 
         let stats = test.reconcile(store.clone()).await.unwrap();
-        assert_eq!(if failure == "range" { 1 } else { 2 }, stats.built_series);
+        // The pre-published bucket is reused, so the remaining two buckets are built.
+        assert_eq!(2, stats.built_series);
         let published = region.series_index_version();
         for handle in published.series_indexes.values() {
             assert!(
@@ -1115,5 +1333,634 @@ async fn test_manual_reconcile_returns_storage_failure(#[case] catalog_failure: 
     );
     state.stop();
     task.await.unwrap();
+    engine.stop().await.unwrap();
+}
+
+/// Config for the ingestion-trigger tests.
+///
+/// Periodic maintenance is neutralized (one hour) so only the ingestion triggers can publish
+/// coverage, and compaction is kept away from the source SSTs.
+fn ingestion_trigger_config(enable_series_index: bool) -> MitoConfig {
+    MitoConfig {
+        experimental_enable_series_index: enable_series_index,
+        experimental_series_index_maintenance_interval: Duration::from_secs(3600),
+        min_compaction_interval: Duration::from_secs(3600),
+        schedule_compaction_after_edit: false,
+        ..Default::default()
+    }
+}
+
+/// Creates a sparse metrics region whose SSTs stay stable while a test runs.
+///
+/// Returns the schema of the rows accepted by `Put`.
+async fn create_metrics_region(
+    engine: &MitoEngine,
+    region_id: RegionId,
+    metadata: &Arc<RegionMetadata>,
+) -> Vec<api::v1::ColumnSchema> {
+    let mut request = CreateRequestBuilder::new().build();
+    request.column_metadatas = metadata.column_metadatas.clone();
+    request.primary_key = metadata.primary_key.clone();
+    request
+        .options
+        .insert(PRIMARY_KEY_ENCODING.to_string(), "sparse".to_string());
+    request
+        .options
+        .insert("memtable.type".to_string(), "bulk".to_string());
+    request
+        .options
+        .insert("sst_format".to_string(), "flat".to_string());
+    request
+        .options
+        .insert("compaction.type".to_string(), "twcs".to_string());
+    request.options.insert(
+        "compaction.twcs.time_window".to_string(),
+        "100s".to_string(),
+    );
+    for window in ["active_window", "inactive_window"] {
+        request.options.insert(
+            format!("compaction.twcs.{window}.trigger_file_num"),
+            "100".to_string(),
+        );
+    }
+    let full_schema = rows_schema(&request);
+    let mut pk_column = full_schema[0].clone();
+    pk_column.column_name = PRIMARY_KEY_COLUMN_NAME.to_string();
+    pk_column.datatype = ColumnDataType::Binary.into();
+    pk_column.semantic_type = SemanticType::Tag.into();
+    let schema = vec![pk_column, full_schema[5].clone(), full_schema[4].clone()];
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+    schema
+}
+
+/// Writes one sparse series with the given timestamps into the region.
+async fn put_metric_rows(
+    engine: &MitoEngine,
+    region_id: RegionId,
+    metadata: &Arc<RegionMetadata>,
+    schema: &[api::v1::ColumnSchema],
+    timestamps: &[i64],
+) {
+    let rows = timestamps
+        .iter()
+        .map(|ts| {
+            row(vec![
+                ValueData::BinaryValue(new_sparse_primary_key(&["a", "x"], metadata, 10, 0)),
+                ValueData::TimestampMillisecondValue(*ts),
+                ValueData::U64Value(*ts as u64),
+            ])
+        })
+        .collect::<Vec<_>>();
+    let result = engine
+        .handle_request(
+            region_id,
+            RegionRequest::Put(RegionPutRequest {
+                rows: Rows {
+                    schema: schema.to_vec(),
+                    rows,
+                },
+                hint: Some(WriteHint {
+                    primary_key_encoding: api::v1::PrimaryKeyEncoding::Sparse.into(),
+                }),
+                skip_wal: false,
+                partition_expr_version: None,
+            }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(timestamps.len(), result.affected_rows);
+}
+
+/// Returns the metadata of the single SST the region currently stores.
+fn single_sst(region: &MitoRegionRef) -> FileMeta {
+    let version = region.version();
+    let files = version
+        .ssts
+        .levels()
+        .iter()
+        .flat_map(|level| level.files())
+        .collect::<Vec<_>>();
+    assert_eq!(1, files.len(), "expected exactly one SST in the region");
+    files[0].meta_ref().clone()
+}
+
+/// Returns the metadata of `file_id` as stored in the region version.
+fn region_file_meta(region: &MitoRegionRef, file_id: FileId) -> FileMeta {
+    region
+        .version()
+        .ssts
+        .levels()
+        .iter()
+        .flat_map(|level| level.files())
+        .find(|file| file.file_id().file_id() == file_id)
+        .map(|file| file.meta_ref().clone())
+        .unwrap_or_else(|| panic!("SST {} is not in region {}", file_id, region.region_id))
+}
+
+/// Copies a flushed SST into `target`'s directory under the target region id, like the writers of
+/// a bulk ingestion job do, and installs it through `RegionEdit::files_to_add`.
+async fn install_foreign_sst(
+    engine: &MitoEngine,
+    source: &MitoRegionRef,
+    target: &MitoRegionRef,
+    source_meta: &FileMeta,
+) -> FileId {
+    let layer = target.access_layer.clone();
+    let source_path = location::sst_file_path(
+        source.table_dir(),
+        RegionFileId::new(source.region_id, source_meta.file_id),
+        layer.path_type(),
+    );
+    let target_path = location::sst_file_path(
+        layer.table_dir(),
+        RegionFileId::new(target.region_id, source_meta.file_id),
+        layer.path_type(),
+    );
+    layer
+        .object_store()
+        .copy(&source_path, &target_path)
+        .await
+        .unwrap();
+
+    let mut installed = source_meta.clone();
+    installed.region_id = target.region_id;
+    // The puffin index lives beside the SST and is keyed by the file's region id as well.
+    if source_meta.exists_index() {
+        let source_index = location::index_file_path(
+            source.table_dir(),
+            source_meta.index_id(),
+            layer.path_type(),
+        );
+        let target_index =
+            location::index_file_path(layer.table_dir(), installed.index_id(), layer.path_type());
+        layer
+            .object_store()
+            .copy(&source_index, &target_index)
+            .await
+            .unwrap();
+    }
+    let file_id = installed.file_id;
+    engine
+        .edit_region(
+            target.region_id,
+            RegionEdit {
+                files_to_add: vec![installed],
+                files_to_remove: Vec::new(),
+                timestamp_ms: None,
+                compaction_time_window: None,
+                flushed_entry_id: None,
+                flushed_sequence: None,
+                committed_sequence: None,
+            },
+        )
+        .await
+        .unwrap();
+    file_id
+}
+
+/// Waits until the region publishes a series index that lists `file_id` as a source.
+///
+/// The wait is bounded and returns as soon as the condition holds, so it cannot pass by timing.
+async fn wait_for_series_index(
+    region: &MitoRegionRef,
+    file_id: FileId,
+) -> Arc<super::SeriesIndexVersion> {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    loop {
+        let version = region.series_index_version();
+        if version
+            .series_indexes
+            .values()
+            .any(|handle| handle.entry().source_file_ids.contains(&file_id))
+        {
+            return version;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "timed out waiting for region {} to publish a series index for SST {}",
+            region.region_id,
+            file_id
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+/// Waits until the series-index worker finishes the builds triggered by earlier flushes and edits.
+///
+/// The trigger submits its builds to the series-index worker, so a manual build submitted
+/// afterwards is queued behind them and reports completion: awaiting it drains the automatic
+/// builds. `expected_buckets` documents the settled coverage a caller relies on, which then must
+/// cover every visible SST.
+///
+/// Both waits are bounded, so a stalled build fails the test instead of hanging it.
+pub(crate) async fn wait_for_series_index_builds(
+    engine: &MitoEngine,
+    region: &MitoRegionRef,
+    expected_buckets: Option<usize>,
+) {
+    use api::v1::region::build_index_request;
+    use store_api::region_request::RegionBuildIndexRequest;
+
+    let request = RegionRequest::BuildIndex(RegionBuildIndexRequest {
+        options: Some(build_index_request::Options::SeriesIndex(Default::default())),
+    });
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        engine.handle_request(region.region_id, request),
+    )
+    .await
+    .expect("the series-index worker should finish the automatic builds")
+    .unwrap();
+
+    let files = region
+        .version()
+        .ssts
+        .levels()
+        .iter()
+        .flat_map(|level| level.files())
+        .map(|file| file.meta_ref().clone())
+        .collect::<Vec<_>>();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let version = region.series_index_version();
+            let settled = expected_buckets
+                .is_none_or(|buckets| version.series_indexes.len() == buckets)
+                && files.iter().all(|file| {
+                    version
+                        .series_indexes
+                        .values()
+                        .any(|handle| handle.entry().covers_file(file, region.region_id))
+                });
+            if settled {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the settled series-index coverage should cover every visible SST");
+}
+
+/// Waits until the series-index worker has no queued or running build left for `region`.
+///
+/// The flush trigger submits its builds to the series-index worker, so a manual build submitted
+/// afterwards is served after them and only replies once they finished. A short settle poll then
+/// covers a build triggered by an edit that committed while the manual request was in flight.
+///
+/// Test-only: it exists so a test that needs the *uncovered* region it had before the flush
+/// trigger can first stop the automatic builds, and only then reset the published snapshot.
+pub(crate) async fn drain_series_index_builds(engine: &MitoEngine, region: &MitoRegionRef) {
+    use api::v1::region::build_index_request;
+    use store_api::region_request::RegionBuildIndexRequest;
+
+    let request = RegionRequest::BuildIndex(RegionBuildIndexRequest {
+        options: Some(build_index_request::Options::SeriesIndex(Default::default())),
+    });
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        engine.handle_request(region.region_id, request),
+    )
+    .await
+    .expect("the series-index worker should finish the triggered builds")
+    .unwrap();
+
+    // Wait until the snapshot stops changing. A build longer than one poll interval can still be
+    // in flight when two observations agree, so callers must establish quiescence themselves:
+    // every fixture here has already finished its last flush and the periodic maintenance is
+    // distant, so the queued manual reconciliation above is the real barrier.
+    tokio::time::timeout(Duration::from_secs(5), async {
+        let mut previous: Option<(usize, usize)> = None;
+        loop {
+            let version = region.series_index_version();
+            let observed = (
+                Arc::as_ptr(&version) as usize,
+                version.series_indexes.len() + version.samples.len() + version.range_indexes.len(),
+            );
+            if previous == Some(observed) {
+                return;
+            }
+            previous = Some(observed);
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the series-index snapshot should settle after the drain");
+}
+
+/// Replaces the published series-index snapshot with an empty one.
+///
+/// Test-only: it discards the coverage the automatic flush trigger published, so a test keeps
+/// starting from the uncovered region it had before that trigger existed. The index files stay in
+/// the store (no handle is retired here), so a later build reuses or replaces them as usual.
+pub(crate) fn reset_published_series_index(region: &MitoRegionRef) {
+    region
+        .series_index_version_control
+        .publish(Arc::new(super::SeriesIndexVersion::default()));
+}
+
+/// Asserts the region's series-index catalog has been persisted to the local index store.
+async fn assert_series_catalog_published(env: &TestEnv, region_id: RegionId) {
+    let path = env
+        .data_home()
+        .join("series_index")
+        .join(series_catalog_path(region_id));
+    assert!(
+        tokio::fs::try_exists(&path).await.unwrap(),
+        "series-index catalog should be persisted at {}",
+        path.display()
+    );
+}
+
+/// Reads all source timestamps through the native raw series-scan path.
+async fn raw_series_timestamps(engine: &MitoEngine, region_id: RegionId) -> Vec<i64> {
+    use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
+    use store_api::region_engine::{BoundTag, PrepareRequest, QueryScanContext, RawLabelSource};
+    use store_api::storage::TimeSeriesDistribution;
+
+    let mut scanner = engine
+        .handle_query(
+            region_id,
+            store_api::storage::ScanRequest {
+                distribution: Some(TimeSeriesDistribution::PerSeries),
+                preserve_pk_dictionary_encoding: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let metadata = scanner.metadata();
+    let source = RawLabelSource::PrimaryKey {
+        metric_name: Arc::from("fixture_metric"),
+        physical_metadata: metadata.clone(),
+        logical_tags: metadata
+            .column_metadatas
+            .iter()
+            .filter(|column| {
+                column.semantic_type == SemanticType::Tag
+                    && !store_api::storage::consts::is_internal_column(&column.column_schema.name)
+                    && !store_api::metric_engine_consts::is_metric_engine_internal_column(
+                        &column.column_schema.name,
+                    )
+            })
+            .map(|column| BoundTag {
+                column_id: column.column_id,
+                name: Arc::from(column.column_schema.name.as_str()),
+            })
+            .collect::<Vec<_>>()
+            .into(),
+    };
+    let ranges = scanner.properties().partitions.clone();
+    scanner
+        .prepare(PrepareRequest {
+            ranges: Some(ranges.clone()),
+            target_partitions: Some(ranges.len()),
+            ..Default::default()
+        })
+        .unwrap();
+    let metrics = ExecutionPlanMetricsSet::default();
+    let mut times = Vec::new();
+    for partition in 0..ranges.len() {
+        let Some(stream) = scanner
+            .scan_series_partition(&QueryScanContext::default(), &metrics, partition, &source)
+            .unwrap()
+        else {
+            continue;
+        };
+        for chunk in stream.try_collect::<Vec<_>>().await.unwrap() {
+            times.extend(chunk.time.as_buffer().iter().copied());
+        }
+    }
+    times
+}
+
+/// Installs an existing metrics SST through the bulk-ingestion edit path.
+///
+/// The target region has no memtable, no flush and no manual reconcile, and periodic maintenance
+/// is neutralized, so only the edit trigger can publish the index.
+#[tokio::test]
+async fn test_installed_sst_triggers_series_index_build() {
+    let mut env = TestEnv::with_prefix("series-ingest-trigger").await;
+    let engine = env.create_engine(ingestion_trigger_config(true)).await;
+    let metadata = Arc::new(sst_region_metadata_with_encoding(
+        PrimaryKeyEncoding::Sparse,
+    ));
+    let source_id = RegionId::new(1, 1);
+    let target_id = RegionId::new(1, 2);
+    let schema = create_metrics_region(&engine, source_id, &metadata).await;
+    create_metrics_region(&engine, target_id, &metadata).await;
+    let source = engine.get_region(source_id).unwrap();
+    let target = engine.get_region(target_id).unwrap();
+
+    let timestamps = vec![1000, 2000, 3000, 4000];
+    put_metric_rows(&engine, source_id, &metadata, &schema, &timestamps).await;
+    flush_region(&engine, source_id, None).await;
+    let flushed = single_sst(&source);
+
+    let file_id = install_foreign_sst(&engine, &source, &target, &flushed).await;
+    // No memtable and no flush: the ingested SST is the only source of the region.
+    assert!(target.version().memtables.is_empty());
+
+    let published = wait_for_series_index(&target, file_id).await;
+    let installed = region_file_meta(&target, file_id);
+    assert!(
+        published
+            .series_indexes
+            .values()
+            .any(|handle| handle.entry().covers_file(&installed, target_id)),
+        "the published series index should cover the ingested SST"
+    );
+    assert_series_catalog_published(&env, target_id).await;
+    assert_eq!(timestamps, raw_series_timestamps(&engine, target_id).await);
+
+    engine.stop().await.unwrap();
+}
+
+/// Flushes a bulk memtable and expects the flush to publish the series index of its SSTs.
+#[tokio::test]
+async fn test_bulk_flush_triggers_series_index_build() {
+    let mut env = TestEnv::with_prefix("series-flush-trigger").await;
+    let engine = env.create_engine(ingestion_trigger_config(true)).await;
+    let metadata = Arc::new(sst_region_metadata_with_encoding(
+        PrimaryKeyEncoding::Sparse,
+    ));
+    let region_id = RegionId::new(1, 1);
+    let schema = create_metrics_region(&engine, region_id, &metadata).await;
+    let region = engine.get_region(region_id).unwrap();
+
+    let timestamps = vec![1000, 2000, 3000];
+    put_metric_rows(&engine, region_id, &metadata, &schema, &timestamps).await;
+    assert!(region.series_index_version().series_indexes.is_empty());
+    flush_region(&engine, region_id, None).await;
+    let flushed = single_sst(&region);
+
+    let published = wait_for_series_index(&region, flushed.file_id).await;
+    let installed = region_file_meta(&region, flushed.file_id);
+    assert!(
+        published
+            .series_indexes
+            .values()
+            .any(|handle| handle.entry().covers_file(&installed, region_id)),
+        "the published series index should cover the flushed SST"
+    );
+    assert_series_catalog_published(&env, region_id).await;
+    assert_eq!(timestamps, raw_series_timestamps(&engine, region_id).await);
+
+    engine.stop().await.unwrap();
+}
+
+/// A single ingested SST without a sequence is converted too: neither the file count nor the
+/// missing sequence defers a non-empty bucket, and the published coverage is exact membership.
+#[tokio::test]
+async fn test_automatic_build_indexes_a_single_ingested_sst() {
+    let mut env = TestEnv::with_prefix("series-single-ingested-sst").await;
+    // The series-index task stays disabled, so only the automatic pass below can publish.
+    let engine = env
+        .create_engine(MitoConfig {
+            min_compaction_interval: Duration::from_secs(3600),
+            schedule_compaction_after_edit: false,
+            ..Default::default()
+        })
+        .await;
+    let metadata = Arc::new(sst_region_metadata_with_encoding(
+        PrimaryKeyEncoding::Sparse,
+    ));
+    let source_id = RegionId::new(1, 1);
+    let target_id = RegionId::new(1, 2);
+    let schema = create_metrics_region(&engine, source_id, &metadata).await;
+    create_metrics_region(&engine, target_id, &metadata).await;
+    let source = engine.get_region(source_id).unwrap();
+    let target = engine.get_region(target_id).unwrap();
+
+    let timestamps = vec![1000, 2000, 3000, 4000];
+    put_metric_rows(&engine, source_id, &metadata, &schema, &timestamps).await;
+    flush_region(&engine, source_id, None).await;
+    let flushed = single_sst(&source);
+    let file_id = install_foreign_sst(&engine, &source, &target, &flushed).await;
+    // No memtable and no flush: the ingested SST is the region's only source.
+    assert!(target.version().memtables.is_empty());
+    assert!(target.series_index_version().series_indexes.is_empty());
+
+    let (test, _receiver) = IndexTest::new(target.clone());
+    let stats = test.reconcile(test.store.clone()).await.unwrap();
+    assert_eq!(1, stats.built_series);
+    let published = target.series_index_version();
+    let entry = published
+        .series_indexes
+        .values()
+        .next()
+        .expect("the ingested SST must be indexed")
+        .entry()
+        .clone();
+    assert!(
+        entry.covers_file(&region_file_meta(&target, file_id), target_id),
+        "the published index must cover the ingested SST"
+    );
+    // A repeated pass reuses the published index instead of rebuilding it.
+    assert_eq!(
+        0,
+        test.reconcile(test.store.clone())
+            .await
+            .unwrap()
+            .built_series
+    );
+    engine.stop().await.unwrap();
+}
+
+/// A bucket whose sources carry no sequence is built by the automatic pass: coverage of a
+/// sequence-less SST is exact file membership, so nothing has to be deferred.
+#[tokio::test]
+async fn test_automatic_build_indexes_unknown_sequence_sources() {
+    use crate::region::version::VersionBuilder;
+
+    let mut env = TestEnv::with_prefix("series-unknown-sequence").await;
+    let (engine, region) =
+        prepare_region_with_timestamps(&mut env, &[1000, 2000, 3000, 4000]).await;
+    let original = region.version();
+    let originals = original
+        .ssts
+        .levels()
+        .iter()
+        .flat_map(|level| level.files())
+        .map(|file| file.meta_ref().clone())
+        .collect::<Vec<_>>();
+    // Rewrite the same SSTs without a sequence, like files a bulk writer installed itself.
+    let mut unknown = originals.clone();
+    for file in &mut unknown {
+        file.sequence = None;
+    }
+    let version = VersionBuilder::from_version(original.clone())
+        .remove_files(originals.into_iter())
+        .add_files(region.file_purger.clone(), unknown.into_iter())
+        .build();
+    region.version_control.overwrite_current(Arc::new(version));
+    let installed = region
+        .version()
+        .ssts
+        .levels()
+        .iter()
+        .flat_map(|level| level.files())
+        .map(|file| file.meta_ref().clone())
+        .collect::<Vec<_>>();
+    assert_eq!(4, installed.len());
+    assert!(installed.iter().all(|file| file.sequence.is_none()));
+
+    let (test, _receiver) = IndexTest::new(region.clone());
+    let stats = test.reconcile(test.store.clone()).await.unwrap();
+    assert_eq!(1, stats.built_series);
+    let published = region.series_index_version();
+    let entry = published
+        .series_indexes
+        .values()
+        .next()
+        .expect("unknown-sequence sources must be indexed")
+        .entry()
+        .clone();
+    assert_eq!(0, entry.min_file_sequence);
+    for file in &installed {
+        assert!(
+            entry.covers_file(file, region.region_id),
+            "coverage of a sequence-less SST is exact file membership"
+        );
+    }
+    // The same exact source set is reused instead of being rebuilt on every pass.
+    assert_eq!(
+        0,
+        test.reconcile(test.store.clone())
+            .await
+            .unwrap()
+            .built_series
+    );
+    engine.stop().await.unwrap();
+}
+
+/// Without the series-index task the edit and flush paths must still succeed and publish nothing.
+#[tokio::test]
+async fn test_disabled_series_index_keeps_ingestion_working() {
+    let mut env = TestEnv::with_prefix("series-ingest-disabled").await;
+    let engine = env.create_engine(ingestion_trigger_config(false)).await;
+    let metadata = Arc::new(sst_region_metadata_with_encoding(
+        PrimaryKeyEncoding::Sparse,
+    ));
+    let source_id = RegionId::new(1, 1);
+    let target_id = RegionId::new(1, 2);
+    let schema = create_metrics_region(&engine, source_id, &metadata).await;
+    create_metrics_region(&engine, target_id, &metadata).await;
+    let source = engine.get_region(source_id).unwrap();
+    let target = engine.get_region(target_id).unwrap();
+
+    let timestamps = vec![1000, 2000];
+    put_metric_rows(&engine, source_id, &metadata, &schema, &timestamps).await;
+    flush_region(&engine, source_id, None).await;
+    let flushed = single_sst(&source);
+    install_foreign_sst(&engine, &source, &target, &flushed).await;
+
+    assert!(source.series_index_version().series_indexes.is_empty());
+    assert!(target.series_index_version().series_indexes.is_empty());
+    // The ingested rows stay queryable without a series index.
+    assert_eq!(timestamps, raw_series_timestamps(&engine, target_id).await);
+
     engine.stop().await.unwrap();
 }

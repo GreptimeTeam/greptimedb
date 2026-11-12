@@ -399,18 +399,22 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             }
         };
 
-        let need_compaction = if edit_result.is_staging {
+        let (need_compaction, need_series_index_build) = if edit_result.is_staging {
             if edit_result.update_region_state {
                 // For staging regions, edits are not applied immediately,
                 // as they remain invisible until the region exits the staging state.
                 region.switch_state_to_staging(RegionLeaderState::Editing);
             }
 
-            false
+            (false, false)
         } else {
             let need_compaction = self.config.schedule_compaction_after_edit
                 && edit_result.result.is_ok()
                 && !edit_result.edit.files_to_add.is_empty();
+            // Ingested files become visible with this edit, so a series-index build can cover
+            // them now. Edit-only requests (no new files) have nothing to index.
+            let need_series_index_build =
+                edit_result.result.is_ok() && !edit_result.edit.files_to_add.is_empty();
 
             // Only apply the edit if the result is ok and region is not in staging state.
             if edit_result.result.is_ok() {
@@ -425,7 +429,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 region.switch_state_to_writable(RegionLeaderState::Editing);
             }
 
-            need_compaction
+            (need_compaction, need_series_index_build)
         };
 
         edit_result
@@ -436,6 +440,12 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                     region_id: edit_result.region_id,
                 }),
             });
+
+        // The edit has been applied and the ingestion caller is answered, so build the series
+        // indexes that now cover the ingested files without making the caller wait for the build.
+        if need_series_index_build {
+            self.submit_series_index_build(&region);
+        }
 
         if edit_result.update_region_state {
             // Writes stalled specifically by this edit are handled before the next queued edit.
@@ -461,6 +471,67 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         if need_compaction {
             self.schedule_compaction(&region).await;
         }
+    }
+
+    /// Submits a background series-index build covering the region's currently visible SSTs.
+    ///
+    /// Call this after new SSTs have been applied to the region, so bulk-ingested data becomes
+    /// queryable through the series index without waiting for the next periodic maintenance pass.
+    /// The build runs on the worker's series-index task, so it never blocks the region worker.
+    /// It is best effort: a disabled, busy, or stopped task must never fail the edit or flush that
+    /// installed the SSTs.
+    ///
+    /// Submissions coalesce per region: while a build for the region is queued or running, a
+    /// submission only marks the region dirty, and that pass's completion queues one follow-up
+    /// covering every submission that arrived meanwhile.
+    pub(crate) fn submit_series_index_build(&self, region: &MitoRegionRef) {
+        // The worker only creates this state when `experimental_enable_series_index` is on, the
+        // same gate `handle_build_series_index_request` and periodic maintenance rely on.
+        let Some(state) = &self.series_index_task_state else {
+            return;
+        };
+        let region_id = region.region_id;
+        let receiver = match state.try_reconcile_coalesced(region.clone()) {
+            Ok(Some(receiver)) => receiver,
+            Ok(None) => {
+                // A queued or running pass already covers this submission.
+                debug!(
+                    "Coalesced series-index build with a queued pass, region: {}",
+                    region_id
+                );
+                return;
+            }
+            Err(error) => {
+                // A busy queue or a stopped task is expected under load or during shutdown.
+                debug!(
+                    "Skipped series-index build after adding SSTs, region: {}, error: {}",
+                    region_id, error
+                );
+                return;
+            }
+        };
+        common_runtime::spawn_global(async move {
+            match receiver.await {
+                Ok(Ok(stats)) => debug!(
+                    "Built series indexes after adding SSTs, region: {}, sources: {}, built series: {}, built range: {}, built samples: {}",
+                    region_id,
+                    stats.source_files,
+                    stats.built_series,
+                    stats.built_range,
+                    stats.built_samples
+                ),
+                // A failed build leaves the new SSTs out of native reads until the next pass,
+                // so it must be visible in the log even though it never fails the edit.
+                Ok(Err(error)) => warn!(
+                    "Failed to build series indexes after adding SSTs, region: {}, error: {}",
+                    region_id, error
+                ),
+                Err(_) => debug!(
+                    "Series-index task stopped before building indexes after adding SSTs, region: {}",
+                    region_id
+                ),
+            }
+        });
     }
 
     /// Writes truncate action to the manifest and then applies it to the region in background.

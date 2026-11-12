@@ -60,6 +60,11 @@ impl<S> RegionWorkerLoop<S> {
                         }
                         let progress =
                             made_progress(edit.files_to_add.len(), edit.files_to_remove.len());
+                        // New output files carry data that has no series-index artifact yet, and
+                        // the removed sources invalidate the artifacts that covered them, so either
+                        // direction changes the native representation.
+                        let changed_files =
+                            !edit.files_to_add.is_empty() || !edit.files_to_remove.is_empty();
                         region.version_control.apply_edit(
                             Some(edit.clone()),
                             &[],
@@ -71,6 +76,14 @@ impl<S> RegionWorkerLoop<S> {
                             plan_id,
                             Ok(progress),
                         );
+                        // The unit's SSTs are published now. Rebuild the series indexes that cover
+                        // them in the background so the native representation does not keep
+                        // answering from the removed files until the next periodic maintenance
+                        // pass. Best effort: a disabled, busy, or stopped task only logs and never
+                        // changes the compaction outcome.
+                        if changed_files {
+                            self.submit_series_index_build(&region);
+                        }
                         if self.config.index.build_mode == IndexBuildMode::Async
                             && !edit.files_to_add.is_empty()
                         {
@@ -223,6 +236,11 @@ impl<S> RegionWorkerLoop<S> {
             request.edit.files_to_add.len(),
             request.edit.files_to_remove.len(),
         );
+        // New output files carry data that has no series-index artifact yet, and the removed
+        // sources invalidate the artifacts that covered them, so either direction changes the
+        // native representation.
+        let changed_files =
+            !request.edit.files_to_add.is_empty() || !request.edit.files_to_remove.is_empty();
 
         region.version_control.apply_edit(
             Some(request.edit.clone()),
@@ -234,6 +252,15 @@ impl<S> RegionWorkerLoop<S> {
 
         // compaction finished.
         request.on_success();
+
+        // The compacted SSTs are published now. Rebuild the series indexes that cover them in the
+        // background so the native representation does not keep answering from the removed files
+        // until the next periodic maintenance pass. Best effort: a disabled, busy, or stopped task
+        // only logs and never changes the compaction outcome.
+        if changed_files {
+            self.submit_series_index_build(&region);
+        }
+
         self.listener.on_compaction_result_notified(region_id).await;
 
         // In async mode, create indexes after compact if new files are created.

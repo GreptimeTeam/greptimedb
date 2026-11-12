@@ -58,7 +58,7 @@ pub(crate) struct WindowSequence {
 ///
 /// A published entry must include every series from every SST in the region
 /// contained by its bucket and inclusive file-sequence interval. Query planning
-/// relies on this complete-coverage contract. Manual builds additionally use exact
+/// relies on this complete-coverage contract. Builds also use exact
 /// `source_file_ids` membership for SSTs without a file sequence.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct SeriesIndexEntry {
@@ -110,7 +110,7 @@ impl SeriesIndexEntry {
                     self.min_file_sequence <= sequence.get()
                         && sequence.get() <= self.max_file_sequence
                 }
-                // Manual builds can cover immutable files without sequence metadata.
+                // Builds can cover immutable files without sequence metadata.
                 // This is exact membership, never a claim about replacement SSTs.
                 None => self.min_file_sequence == 0 && self.source_file_ids.contains(&file.file_id),
             }

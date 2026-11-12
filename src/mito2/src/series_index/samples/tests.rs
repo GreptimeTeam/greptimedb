@@ -1078,6 +1078,9 @@ async fn real_samples_reconcile_reopen_and_retire(
                 })
         );
     }
+    // The flushes above trigger background builds. Let them settle before injecting a format, so
+    // a pending automatic pass cannot build the samples this test expects to build itself.
+    crate::series_index::tests::wait_for_series_index_builds(&engine, &region, None).await;
     let format = Arc::new(ColumnarSamplesFormat::default());
     *region.series_index_version_control.formats.write().unwrap() = Arc::new(SeriesFormats {
         samples: Some(format.clone()),

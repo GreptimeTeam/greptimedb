@@ -1939,6 +1939,25 @@ impl PhysicalPlanWrapper for NativePlanObserver {
     }
 }
 
+/// How many values the fused node of `plan` emitted, from its `native.root.output_values` count.
+///
+/// A planned node reports zero, so every call site states the count it expects: the helper never
+/// answers "no metric", which is what a `filter_map` over a missing counter would silently do.
+fn native_output_values(plan: &dyn ExecutionPlan) -> usize {
+    plan.metrics()
+        .expect("fused plan metrics")
+        .iter()
+        .filter_map(|metric| match metric.value() {
+            datafusion::physical_plan::metrics::MetricValue::Count { name, count }
+                if name.as_ref() == "native.root.output_values" =>
+            {
+                Some(count.value())
+            }
+            _ => None,
+        })
+        .sum()
+}
+
 fn native_query_context(enabled: bool, parallelism: usize) -> Arc<QueryContext> {
     let mut ctx = QueryContext::with_db_name(None);
     ctx.set_extension(QUERY_PARALLELISM_HINT, parallelism.to_string());
@@ -11776,20 +11795,11 @@ async fn native_promql_columnar_fused_series_matches_legacy() {
             .all(|entry| entry["artifact"]["format"] == "columnar-series")
     );
     // One value per series: the node ran, rather than being merely planned.
-    let output_values = plan
-        .metrics()
-        .expect("fused plan metrics")
-        .iter()
-        .filter_map(|metric| match metric.value() {
-            datafusion::physical_plan::metrics::MetricValue::Count { name, count }
-                if name.as_ref() == "native.root.output_values" =>
-            {
-                Some(count.value())
-            }
-            _ => None,
-        })
-        .sum::<usize>();
-    assert_eq!(output_values, 2, "both series must report one value");
+    assert_eq!(
+        native_output_values(plan.as_ref()),
+        2,
+        "both series must report one value"
+    );
     // Native off: the same rows must come from the existing plan.
     observer.clear();
     let legacy_rows = native_result_rows(native_tql_output(&instance, &sql, false).await).await;
@@ -11810,13 +11820,18 @@ async fn native_promql_columnar_fused_series_matches_legacy() {
     assert_eq!(matched_rows, vec![(120_000, "b".to_string(), 80.0)]);
 }
 
-/// No published series index: the columnar `Float64` selector must answer from the raw memtable
-/// and from an unindexed SST instead of failing to plan.
+/// Nothing published: the native route still answers every row, exactly like the existing plan.
+/// Artifacts accelerate a read, they never decide visibility, so a memtable or an unindexed SST
+/// contributes its rows through the raw sources the prepared reader merges in.
+///
+/// That pair — the fused node running and both routes answering the same complete sums — is what
+/// pins "publication is an optimisation". A reader that narrowed itself to published artifacts
+/// would answer fewer rows here and fail this test, before and after the build below.
 #[rstest]
 #[case::memtable("memtable", false)]
 #[case::unindexed_sst("unindexed_sst", true)]
 #[tokio::test(flavor = "multi_thread")]
-async fn native_promql_columnar_unindexed_float64_matches_legacy(
+async fn native_promql_columnar_unpublished_float64_matches_legacy_with_and_without_artifacts(
     #[case] stage: &str,
     #[case] flush: bool,
 ) {
@@ -11826,7 +11841,9 @@ async fn native_promql_columnar_unindexed_float64_matches_legacy(
     let mito_config = mito2::config::MitoConfig {
         experimental_enable_series_index: true,
         experimental_series_index_format: mito2::config::SeriesIndexFormat::Columnar,
-        // No periodic build, so neither case ever gets an index.
+        // Beyond the test's lifetime, so neither case gets a periodic build. The publication this
+        // test measures is the one the build at the end of the body performs, or the one a flush
+        // queues for itself.
         experimental_series_index_maintenance_interval: Duration::from_secs(3600),
         ..Default::default()
     };
@@ -11857,8 +11874,10 @@ async fn native_promql_columnar_unindexed_float64_matches_legacy(
         )
         .await;
     }
-    // Both samples of each series fall in the 2m window: 10 + 30 and 20 + 60.
-    let expected = vec![
+    // The 2m window at t = 120s holds both samples of each series, so the complete answer is
+    // 10 + 30 = 40 for `a` and 20 + 60 = 80 for `b`. No artifact carries them yet, so the native
+    // route reads whichever sources hold them and answers the same rows.
+    let complete = vec![
         (120_000, "a".to_string(), 40.0),
         (120_000, "b".to_string(), 80.0),
     ];
@@ -11866,41 +11885,70 @@ async fn native_promql_columnar_unindexed_float64_matches_legacy(
     // Legacy off first, so a red native query is about the fused route.
     observer.clear();
     let legacy_rows = native_result_rows(native_tql_output(&instance, &sql, false).await).await;
-    assert_eq!(legacy_rows, expected, "{stage}: existing plan must answer");
+    assert_eq!(legacy_rows, complete, "{stage}: existing plan must answer");
     assert!(observer.fused().is_none(), "{stage}: legacy must not fuse");
     observer.clear();
     let native_rows = native_result_rows(native_tql_output(&instance, &sql, true).await).await;
     // Drained first, so the counter below describes execution, not planning; `take` requires the
     // fused node to have run.
     let plan = observer.take();
-    assert_eq!(native_rows, expected, "{stage}: fused route must answer");
-    let output_values = plan
-        .metrics()
-        .expect("fused plan metrics")
-        .iter()
-        .filter_map(|metric| match metric.value() {
-            datafusion::physical_plan::metrics::MetricValue::Count { name, count }
-                if name.as_ref() == "native.root.output_values" =>
-            {
-                Some(count.value())
-            }
-            _ => None,
-        })
-        .sum::<usize>();
-    assert_eq!(output_values, 2, "{stage}: two values, one per series");
+    // Whether the rows sit in a memtable or in an SST no build has covered yet, the fused route
+    // answers them all: readiness chooses the reader, never the answer.
+    assert_eq!(
+        native_rows, complete,
+        "{stage}: the fused route answers every row without any artifact"
+    );
+    assert_eq!(
+        native_output_values(plan.as_ref()),
+        2,
+        "{stage}: the fused route reports one value per series it answers"
+    );
     assert_eq!(
         native_rows, legacy_rows,
-        "{stage}: same rows on both routes"
+        "{stage}: both routes answer the same rows without any artifact"
+    );
+    // Flush the samples and cover them with a build: coverage adds an acceleration, and both
+    // routes still answer the same complete sums.
+    execute_all(
+        &instance,
+        &format!("ADMIN FLUSH_TABLE('{PHYSICAL}'); ADMIN BUILD_SERIES_INDEX('{PHYSICAL}');"),
+        QueryContext::arc(),
+    )
+    .await;
+    observer.clear();
+    let converged_rows = native_result_rows(native_tql_output(&instance, &sql, true).await).await;
+    let converged_plan = observer.take();
+    assert_eq!(
+        converged_rows, complete,
+        "{stage}: after a flush and a build the fused route answers every row"
+    );
+    assert_eq!(
+        native_output_values(converged_plan.as_ref()),
+        2,
+        "{stage}: two values, one per series"
+    );
+    observer.clear();
+    let converged_legacy =
+        native_result_rows(native_tql_output(&instance, &sql, false).await).await;
+    assert_eq!(
+        converged_legacy, complete,
+        "{stage}: existing plan must still answer"
+    );
+    assert_eq!(
+        converged_rows, converged_legacy,
+        "{stage}: once published, both routes answer the same rows"
     );
 }
 
-/// An index over the first SST only: the newer rows still in the memtable, then flushed into a
-/// second unindexed SST, must answer the same sums.
+/// An index over the first SST only. The native route answers every row exactly like the existing
+/// plan: the indexed SST comes from its artifact, while the later samples — in an assigned memtable
+/// or in an SST no build has covered yet — are read from their own sources. A flush plus a build
+/// covers them too, which changes the reader and not the answer.
 #[rstest]
 #[case::partial_memtable("partial_memtable", false)]
 #[case::partial_sst("partial_sst", true)]
 #[tokio::test(flavor = "multi_thread")]
-async fn native_promql_columnar_partial_index_float64_matches_legacy(
+async fn native_promql_columnar_partial_index_matches_legacy_with_and_without_artifacts(
     #[case] stage: &str,
     #[case] flush: bool,
 ) {
@@ -11938,7 +11986,9 @@ async fn native_promql_columnar_partial_index_float64_matches_legacy(
     )
     .await;
     if flush {
-        // The new SST stays unindexed: the build above is not repeated.
+        // The newer rows leave the memtable, but no build covers the SST they land in: a flush
+        // queues its own build, so the artifact may or may not include that SST by the time the
+        // query below plans. Neither state changes which rows are visible.
         execute_all(
             &instance,
             &format!("ADMIN FLUSH_TABLE('{PHYSICAL}');"),
@@ -11946,8 +11996,9 @@ async fn native_promql_columnar_partial_index_float64_matches_legacy(
         )
         .await;
     }
-    // Both samples of each series fall in the 2m window: 10 + 30 and 20 + 60.
-    let expected = vec![
+    // The 2m window at t = 120s holds both samples of a series, so both routes answer
+    // 10 + 30 = 40 for `a` and 20 + 60 = 80 for `b`, whatever the artifacts cover.
+    let complete = vec![
         (120_000, "a".to_string(), 40.0),
         (120_000, "b".to_string(), 80.0),
     ];
@@ -11955,31 +12006,61 @@ async fn native_promql_columnar_partial_index_float64_matches_legacy(
     // Legacy off first, so a red native query is about the fused route.
     observer.clear();
     let legacy_rows = native_result_rows(native_tql_output(&instance, &sql, false).await).await;
-    assert_eq!(legacy_rows, expected, "{stage}: existing plan must answer");
+    assert_eq!(
+        legacy_rows, complete,
+        "{stage}: the existing plan reads memtables and unindexed SSTs, so it answers every row"
+    );
     assert!(observer.fused().is_none(), "{stage}: legacy must not fuse");
     observer.clear();
     let native_rows = native_result_rows(native_tql_output(&instance, &sql, true).await).await;
     // Drained first, so the counter below describes execution, not planning; `take` requires the
     // fused node to have run.
     let plan = observer.take();
-    assert_eq!(native_rows, expected, "{stage}: fused route must answer");
-    let output_values = plan
-        .metrics()
-        .expect("fused plan metrics")
-        .iter()
-        .filter_map(|metric| match metric.value() {
-            datafusion::physical_plan::metrics::MetricValue::Count { name, count }
-                if name.as_ref() == "native.root.output_values" =>
-            {
-                Some(count.value())
-            }
-            _ => None,
-        })
-        .sum::<usize>();
-    assert_eq!(output_values, 2, "{stage}: two values, one per series");
+    // The indexed SST's samples come from its artifact and the newer ones from the memtable or the
+    // unindexed SST, so the fused route answers the complete sum in both cases.
+    assert_eq!(
+        native_rows, complete,
+        "{stage}: the fused route answers the indexed SST and the rows no artifact covers"
+    );
+    assert_eq!(
+        native_output_values(plan.as_ref()),
+        2,
+        "{stage}: two values, one per series"
+    );
     assert_eq!(
         native_rows, legacy_rows,
-        "{stage}: same rows on both routes"
+        "{stage}: both routes answer the same rows with a partial index"
+    );
+    // Flush the newer samples and cover them with a build: coverage adds an acceleration, and both
+    // routes still answer the same complete sums.
+    execute_all(
+        &instance,
+        &format!("ADMIN FLUSH_TABLE('{PHYSICAL}'); ADMIN BUILD_SERIES_INDEX('{PHYSICAL}');"),
+        QueryContext::arc(),
+    )
+    .await;
+    observer.clear();
+    let converged_rows = native_result_rows(native_tql_output(&instance, &sql, true).await).await;
+    let converged_plan = observer.take();
+    assert_eq!(
+        converged_rows, complete,
+        "{stage}: after a flush and a build the fused route answers every row"
+    );
+    assert_eq!(
+        native_output_values(converged_plan.as_ref()),
+        2,
+        "{stage}: two values, one per series"
+    );
+    observer.clear();
+    let converged_legacy =
+        native_result_rows(native_tql_output(&instance, &sql, false).await).await;
+    assert_eq!(
+        converged_legacy, complete,
+        "{stage}: the existing plan must still answer"
+    );
+    assert_eq!(
+        converged_rows, converged_legacy,
+        "{stage}: once published, both routes answer the same rows"
     );
 }
 

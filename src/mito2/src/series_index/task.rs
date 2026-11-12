@@ -14,13 +14,15 @@
 
 //! Worker-owned background maintenance for series indexes.
 
-use std::sync::Arc;
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use common_telemetry::{info, warn};
+use common_telemetry::{debug, info, warn};
 use object_store::ObjectStore;
 use snafu::ensure;
+use store_api::storage::RegionId;
 use tokio::sync::mpsc::{self, Receiver, Sender, UnboundedReceiver};
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
@@ -28,7 +30,9 @@ use tokio::time::Instant;
 
 use crate::error::{InvalidRequestSnafu, RegionBusySnafu, Result, WorkerStoppedSnafu};
 use crate::metrics::{
-    SERIES_INDEX_CAPACITY_DEFERRED, SERIES_INDEX_DISK_BYTES, SERIES_INDEX_RECONCILE_TOTAL,
+    SERIES_INDEX_BUILD_COALESCED, SERIES_INDEX_CAPACITY_DEFERRED, SERIES_INDEX_DISK_BYTES,
+    SERIES_INDEX_RECONCILE_ELAPSED, SERIES_INDEX_RECONCILE_FOLLOW_UP_TOTAL,
+    SERIES_INDEX_RECONCILE_TOTAL,
 };
 use crate::read::series_candidate::is_sparse_metric_metadata;
 use crate::region::{MitoRegionRef, RegionLeaderState, RegionMapRef, RegionRoleState};
@@ -36,15 +40,43 @@ use crate::series_index::maintenance::{ReconcileStats, reconcile_series_indexes_
 use crate::series_index::purger::{IndexFilePurger, PurgeRequest, run_index_purge_task};
 use crate::time_provider::TimeProviderRef;
 
+/// Who submitted a reconcile command, which decides how the task tracks the region.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ReconcileMode {
+    /// A best-effort build submitted after an edit, flush, or compaction.
+    ///
+    /// Background mode is coalesced per region by [`SeriesIndexTaskState::try_reconcile_coalesced`]
+    /// and the task releases the region's coalescing state when the pass finishes.
+    Background,
+    /// An explicit `BUILD_SERIES_INDEX` request. It always gets its own pass so the caller's
+    /// completion notification describes its own request, and it never touches the coalescing
+    /// state of a queued or running background pass.
+    Manual,
+}
+
 /// Commands serialized with periodic series-index maintenance.
 #[derive(Debug)]
 pub(crate) enum SeriesIndexCommand {
     Wake,
     Reconcile {
         region: MitoRegionRef,
+        mode: ReconcileMode,
         sender: oneshot::Sender<Result<ReconcileStats>>,
     },
     Stop,
+}
+
+/// Coalescing state of one region's background series-index build.
+///
+/// Idle (`!in_flight`) is the resting state that admits the next submission. A submission that
+/// finds the region `in_flight` only sets `dirty`, so any number of flushes landing during one
+/// pass collapse into a single follow-up pass.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct RegionBuildState {
+    /// A background reconcile for the region is queued or running.
+    in_flight: bool,
+    /// A submission arrived while `in_flight`; one follow-up pass is owed.
+    dirty: bool,
 }
 
 /// Shared lifecycle state and command sender for a worker's series-index task.
@@ -53,6 +85,11 @@ pub(crate) struct SeriesIndexTaskState {
     worker_id: u32,
     running: AtomicBool,
     sender: Sender<SeriesIndexCommand>,
+    /// Coalescing state per region, owned here so the worker loop only dispatches commands.
+    ///
+    /// Entries are removed by [`SeriesIndexTaskState::release_region`] when the worker closes or
+    /// drops a region, so a closed region never retains state.
+    builds: Mutex<HashMap<RegionId, RegionBuildState>>,
 }
 
 impl SeriesIndexTaskState {
@@ -63,6 +100,7 @@ impl SeriesIndexTaskState {
                 worker_id,
                 running: AtomicBool::new(true),
                 sender,
+                builds: Mutex::new(HashMap::new()),
             },
             receiver,
         )
@@ -80,23 +118,120 @@ impl SeriesIndexTaskState {
         }
     }
 
-    /// Returns a receiver for build completion, or RegionBusy if the queue is full.
+    /// Submits an explicit `BUILD_SERIES_INDEX` request that always gets its own pass.
+    ///
+    /// Returns a receiver for build completion, or RegionBusy if the queue is full. Manual
+    /// requests bypass the coalescing of background submissions: their caller is told about its
+    /// own reconciliation, so an earlier queued pass must never answer for it.
     pub(crate) fn try_reconcile(
         &self,
         region: MitoRegionRef,
     ) -> Result<oneshot::Receiver<Result<ReconcileStats>>> {
         ensure!(self.is_running(), WorkerStoppedSnafu { id: self.worker_id });
-        let region_id = region.region_id;
         let (sender, receiver) = oneshot::channel();
+        self.try_send_reconcile(region, ReconcileMode::Manual, sender)?;
+        Ok(receiver)
+    }
+
+    /// Submits a best-effort background build that coalesces with a queued or running pass.
+    ///
+    /// Returns `None` when the region is already covered: the submission only marks the region
+    /// dirty so the running pass's completion queues exactly one follow-up, and nothing is queued.
+    /// A busy queue or a stopped task is still an error the caller may ignore, as before.
+    pub(crate) fn try_reconcile_coalesced(
+        &self,
+        region: MitoRegionRef,
+    ) -> Result<Option<oneshot::Receiver<Result<ReconcileStats>>>> {
+        ensure!(self.is_running(), WorkerStoppedSnafu { id: self.worker_id });
+        let region_id = region.region_id;
+        let mut builds = self.builds.lock().unwrap();
+        let state = builds.entry(region_id).or_default();
+        if state.in_flight {
+            // A queued or running pass already covers this submission. The caller is never
+            // blocked on the pass and never fails because of it.
+            state.dirty = true;
+            SERIES_INDEX_BUILD_COALESCED.inc();
+            return Ok(None);
+        }
+        state.in_flight = true;
+        let (sender, receiver) = oneshot::channel();
+        match self.try_send_reconcile(region, ReconcileMode::Background, sender) {
+            Ok(()) => Ok(Some(receiver)),
+            Err(error) => {
+                // Nothing owns the region: forget the entry instead of leaving it in flight.
+                builds.remove(&region_id);
+                Err(error)
+            }
+        }
+    }
+
+    /// Releases the coalescing state of a region the worker closed or dropped.
+    pub(crate) fn release_region(&self, region_id: RegionId) {
+        self.builds.lock().unwrap().remove(&region_id);
+    }
+
+    fn try_send_reconcile(
+        &self,
+        region: MitoRegionRef,
+        mode: ReconcileMode,
+        sender: oneshot::Sender<Result<ReconcileStats>>,
+    ) -> Result<()> {
+        let region_id = region.region_id;
         self.sender
-            .try_send(SeriesIndexCommand::Reconcile { region, sender })
+            .try_send(SeriesIndexCommand::Reconcile {
+                region,
+                mode,
+                sender,
+            })
             .map_err(|error| match error {
                 mpsc::error::TrySendError::Full(_) => RegionBusySnafu { region_id }.build(),
                 mpsc::error::TrySendError::Closed(_) => {
                     WorkerStoppedSnafu { id: self.worker_id }.build()
                 }
-            })?;
-        Ok(receiver)
+            })
+    }
+
+    /// Releases or re-arms a region after one of its background passes finished.
+    ///
+    /// The dirty flag is cleared before the follow-up is enqueued, so a submission arriving while
+    /// the follow-up runs sets it again and earns another pass. Exactly one follow-up is queued
+    /// per dirty region, and nothing is queued when the region stayed clean.
+    fn after_background_pass(&self, region: MitoRegionRef) {
+        let region_id = region.region_id;
+        let mut builds = self.builds.lock().unwrap();
+        let Some(state) = builds.get_mut(&region_id) else {
+            // The region was closed or dropped during the pass: it owes no follow-up.
+            return;
+        };
+        if state.dirty && self.is_running() {
+            state.dirty = false;
+            let (sender, _receiver) = oneshot::channel();
+            let command = SeriesIndexCommand::Reconcile {
+                region,
+                mode: ReconcileMode::Background,
+                sender,
+            };
+            match self.sender.try_send(command) {
+                Ok(()) => {
+                    SERIES_INDEX_RECONCILE_FOLLOW_UP_TOTAL
+                        .with_label_values(&["submitted"])
+                        .inc();
+                    return;
+                }
+                Err(_) => {
+                    SERIES_INDEX_RECONCILE_FOLLOW_UP_TOTAL
+                        .with_label_values(&["dropped"])
+                        .inc();
+                    debug!(
+                        "Skipped the follow-up series-index build, worker: {}, region: {}, queue full or closed",
+                        self.worker_id, region_id
+                    );
+                }
+            }
+        }
+        // The region is idle again: the next submission queues its own pass.
+        state.in_flight = false;
+        state.dirty = false;
     }
 
     pub(crate) fn stop(&self) {
@@ -104,6 +239,23 @@ impl SeriesIndexTaskState {
             // A full queue already wakes the task, which checks the running flag.
             let _ = self.sender.try_send(SeriesIndexCommand::Stop);
         }
+    }
+}
+
+#[cfg(test)]
+impl SeriesIndexTaskState {
+    /// Number of commands waiting in the queue.
+    fn queued(&self) -> usize {
+        self.sender.max_capacity() - self.sender.capacity()
+    }
+
+    /// `(in_flight, dirty)` of a region, to assert the coalescing state machine directly.
+    fn build_state(&self, region_id: RegionId) -> Option<(bool, bool)> {
+        self.builds
+            .lock()
+            .unwrap()
+            .get(&region_id)
+            .map(|state| (state.in_flight, state.dirty))
     }
 }
 
@@ -191,8 +343,39 @@ impl SeriesIndexTask {
                         deadline = Instant::now() + interval;
                     }
                 }
-                Ok(Some(SeriesIndexCommand::Reconcile { region, sender })) => {
-                    let result = self.reconcile_manual(region).await;
+                Ok(Some(SeriesIndexCommand::Reconcile {
+                    region,
+                    mode,
+                    sender,
+                })) => {
+                    let started = Instant::now();
+                    let region_id = region.region_id;
+                    let result = match mode {
+                        ReconcileMode::Manual => self.reconcile_manual(region).await,
+                        ReconcileMode::Background => {
+                            let result = self.reconcile_region(region.clone()).await;
+                            // Reschedule before replying so a caller that observes completion can
+                            // rely on its follow-up already being queued.
+                            self.state.after_background_pass(region);
+                            result
+                        }
+                    };
+                    // One queued pass from dequeue to reply, including a failed pass whose phase
+                    // timings in maintenance never get observed because they return early.
+                    SERIES_INDEX_RECONCILE_ELAPSED
+                        .with_label_values(&["command"])
+                        .observe(started.elapsed().as_secs_f64());
+                    // A follow-up pass has no waiting caller, so its failure is reported here.
+                    if let Err(error) = &result
+                        && sender.is_closed()
+                    {
+                        warn!(
+                            error;
+                            "Failed to run the follow-up series-index build, worker: {}, region: {}",
+                            worker_id,
+                            region_id
+                        );
+                    }
                     let _ = sender.send(result);
                 }
             }
@@ -372,11 +555,19 @@ mod tests {
     }
 
     fn new_task(region: MitoRegionRef) -> (SeriesIndexTask, UnboundedReceiver<PurgeRequest>) {
+        new_task_with_capacity(region, 1)
+    }
+
+    /// A task whose command queue can hold `channel_size` commands.
+    fn new_task_with_capacity(
+        region: MitoRegionRef,
+        channel_size: usize,
+    ) -> (SeriesIndexTask, UnboundedReceiver<PurgeRequest>) {
         let store = ObjectStore::new(Memory::default()).unwrap();
         let (purger, purge_receiver) = series_index_channel(store.clone());
         let regions = Arc::new(RegionMap::default());
         regions.insert_region(region);
-        let (state, receiver) = SeriesIndexTaskState::new(0, 1);
+        let (state, receiver) = SeriesIndexTaskState::new(0, channel_size);
         (
             SeriesIndexTask {
                 store,
@@ -420,6 +611,229 @@ mod tests {
             SeriesIndexCommand::Stop
         ));
         assert!(receiver.try_recv().is_err());
+    }
+
+    /// Background submissions that land while one pass is queued collapse into that pass plus
+    /// exactly one follow-up; a submission during the follow-up sets the dirty flag again.
+    #[tokio::test]
+    async fn test_background_builds_coalesce_into_one_follow_up() {
+        let mut env = TestEnv::with_prefix("series-coalesce").await;
+        let (engine, region) = prepare_region(&mut env).await;
+        let (state, mut commands) = SeriesIndexTaskState::new(0, 8);
+        let region_id = region.region_id;
+
+        let first = state.try_reconcile_coalesced(region.clone()).unwrap();
+        assert!(first.is_some());
+        for _ in 0..3 {
+            assert!(
+                state
+                    .try_reconcile_coalesced(region.clone())
+                    .unwrap()
+                    .is_none()
+            );
+        }
+        // Nothing past the first command was queued; the rest only marked the region dirty.
+        assert_eq!(1, state.queued());
+        assert_eq!(Some((true, true)), state.build_state(region_id));
+
+        // Completing the pass queues exactly one follow-up and clears the dirty flag.
+        assert!(matches!(
+            commands.try_recv().unwrap(),
+            SeriesIndexCommand::Reconcile {
+                mode: ReconcileMode::Background,
+                ..
+            }
+        ));
+        state.after_background_pass(region.clone());
+        assert_eq!(1, state.queued());
+        assert_eq!(Some((true, false)), state.build_state(region_id));
+
+        // A submission during the follow-up sets dirty again instead of queueing a third pass.
+        assert!(
+            state
+                .try_reconcile_coalesced(region.clone())
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(1, state.queued());
+        assert_eq!(Some((true, true)), state.build_state(region_id));
+
+        // The follow-up owes one more pass for that submission.
+        commands.try_recv().unwrap();
+        state.after_background_pass(region.clone());
+        assert_eq!(1, state.queued());
+        assert_eq!(Some((true, false)), state.build_state(region_id));
+
+        // A clean pass leaves the region idle, so the next submission is admitted.
+        commands.try_recv().unwrap();
+        state.after_background_pass(region.clone());
+        assert_eq!(0, state.queued());
+        assert_eq!(Some((false, false)), state.build_state(region_id));
+        assert!(
+            state
+                .try_reconcile_coalesced(region.clone())
+                .unwrap()
+                .is_some()
+        );
+
+        // Closing the region releases its state.
+        state.release_region(region_id);
+        assert_eq!(None, state.build_state(region_id));
+        engine.stop().await.unwrap();
+    }
+
+    /// The task loop reschedules a dirty region: the coalesced submission is covered by the pass
+    /// it joined, and completing the follow-up releases the region instead of leaving it in flight
+    /// forever.
+    #[tokio::test]
+    async fn test_task_loop_runs_the_dirty_follow_up() {
+        let mut env = TestEnv::with_prefix("series-coalesce-loop").await;
+        let (engine, region) = prepare_region(&mut env).await;
+        let (task, _purge_receiver) = new_task(region.clone());
+        let state = task.state.clone();
+        let region_id = region.region_id;
+
+        let first = state.try_reconcile_coalesced(region.clone()).unwrap();
+        let first = first.expect("the first submission queues its own pass");
+        assert!(
+            state
+                .try_reconcile_coalesced(region.clone())
+                .unwrap()
+                .is_none()
+        );
+
+        let handle = tokio::spawn(task.run());
+        let first = tokio::time::timeout(Duration::from_secs(10), first)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        // The coalesced submission is covered by the pass it joined.
+        assert_eq!(1, first.built_series);
+        // The dirty region is rescheduled and the follow-up releases it: without that release the
+        // region would stay in flight and never become idle again.
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while state.build_state(region_id) != Some((false, false)) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(0, state.queued());
+        assert_eq!(1, region.series_index_version().series_indexes.len());
+
+        state.stop();
+        handle.await.unwrap();
+        engine.stop().await.unwrap();
+    }
+
+    /// A manual request that arrives while a background pass is queued is never answered by that
+    /// pass: it queues its own command and reports its own reconciliation.
+    #[tokio::test]
+    async fn test_manual_request_gets_its_own_pass_while_a_build_is_queued() {
+        let mut env = TestEnv::with_prefix("series-manual-during-build").await;
+        let (engine, region) = prepare_region(&mut env).await;
+        // Two slots: the queued background pass and the manual request's own command.
+        let (task, _purge_receiver) = new_task_with_capacity(region.clone(), 2);
+        let state = task.state.clone();
+        let region_id = region.region_id;
+
+        let background = state.try_reconcile_coalesced(region.clone()).unwrap();
+        let background = background.expect("the background submission queues a pass");
+        // Manual requests bypass the coalescing, so they always have a command of their own.
+        let manual = state.try_reconcile(region.clone()).unwrap();
+        assert_eq!(2, state.queued());
+
+        let handle = tokio::spawn(task.run());
+        let background = tokio::time::timeout(Duration::from_secs(10), background)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let manual = tokio::time::timeout(Duration::from_secs(10), manual)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        // Both passes ran: the manual reply describes the second, already covered pass.
+        assert_eq!(1, background.built_series);
+        assert_eq!(0, manual.built_series);
+        assert_eq!(Some((false, false)), state.build_state(region_id));
+        // Manual traffic does not wedge the coalescing state: a later submission is admitted.
+        assert!(
+            state
+                .try_reconcile_coalesced(region.clone())
+                .unwrap()
+                .is_some()
+        );
+
+        state.stop();
+        handle.await.unwrap();
+        engine.stop().await.unwrap();
+    }
+
+    /// A full queue or a stopped task only ever returns an error the best-effort caller logs, and
+    /// a rejected submission leaves no state behind.
+    #[tokio::test]
+    async fn test_background_submission_stays_best_effort() {
+        let mut env = TestEnv::with_prefix("series-coalesce-busy").await;
+        let (engine, region) = prepare_region(&mut env).await;
+        let region_id = region.region_id;
+
+        // One slot, filled by a queued maintenance wakeup: the submission cannot be enqueued.
+        let (state, mut commands) = SeriesIndexTaskState::new(0, 1);
+        state.wake();
+        assert_eq!(1, state.queued());
+        assert!(matches!(
+            state.try_reconcile_coalesced(region.clone()),
+            Err(crate::error::Error::RegionBusy { .. })
+        ));
+        // The rejected submission left nothing behind: the region is neither busy nor dirty.
+        assert_eq!(None, state.build_state(region_id));
+
+        // Draining the queue admits the region again.
+        assert!(matches!(
+            commands.try_recv().unwrap(),
+            SeriesIndexCommand::Wake
+        ));
+        assert!(
+            state
+                .try_reconcile_coalesced(region.clone())
+                .unwrap()
+                .is_some()
+        );
+        assert_eq!(Some((true, false)), state.build_state(region_id));
+        // A pass already owns the region, so a further submission never touches the full queue.
+        assert!(
+            state
+                .try_reconcile_coalesced(region.clone())
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(1, state.queued());
+        assert_eq!(Some((true, true)), state.build_state(region_id));
+
+        // A stopped task rejects both kinds of submission.
+        state.stop();
+        assert!(matches!(
+            state.try_reconcile_coalesced(region.clone()),
+            Err(crate::error::Error::WorkerStopped { .. })
+        ));
+        assert!(matches!(
+            state.try_reconcile(region.clone()),
+            Err(crate::error::Error::WorkerStopped { .. })
+        ));
+
+        // A dropped task closes the channel; the caller still only sees an error it can log.
+        let (dropped, receiver) = SeriesIndexTaskState::new(0, 1);
+        drop(receiver);
+        assert!(matches!(
+            dropped.try_reconcile_coalesced(region.clone()),
+            Err(crate::error::Error::WorkerStopped { .. })
+        ));
+        assert_eq!(None, dropped.build_state(region_id));
+
+        engine.stop().await.unwrap();
     }
 
     #[rstest::rstest]

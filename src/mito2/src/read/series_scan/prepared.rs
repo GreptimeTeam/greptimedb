@@ -26,7 +26,9 @@ use api::v1::SemanticType;
 use common_error::ext::BoxedError;
 use common_recordbatch::filter::SimpleFilterEvaluator;
 use common_time::Timestamp;
+use common_time::timestamp::TimeUnit;
 use datafusion::execution::memory_pool::{MemoryConsumer, MemoryReservation};
+use datafusion::physical_expr::PhysicalExpr;
 use datafusion_expr::{Expr, utils::split_conjunction};
 use datatypes::arrow::array::{
     Array, ArrayRef, BinaryArray, BooleanArray, DictionaryArray, StringArray, UInt32Array,
@@ -56,6 +58,7 @@ use crate::error::{
     ComputeArrowSnafu, Error, InvalidRecordBatchSnafu, NewRecordBatchSnafu, Result,
 };
 use crate::read::BoxedRecordBatchStream;
+use crate::read::range::RowGroupIndex;
 use crate::read::scan_region::StreamContext;
 use crate::read::scan_util::PartitionMetrics;
 use crate::read::seq_scan::SeqScan;
@@ -67,6 +70,7 @@ use crate::series_index::format::{
 };
 use crate::series_index::identity::ExactSeriesKey;
 use crate::series_index::{MetricSeriesId, ROW_COUNT_COLUMN};
+use crate::sst::file::FileTimeRange;
 
 fn invalid(reason: impl Into<String>) -> Error {
     InvalidRecordBatchSnafu {
@@ -82,10 +86,15 @@ pub(crate) struct Preparation {
 }
 
 impl Preparation {
+    /// Prepares the scanner-wide source for the caller's captured [`SelectedInputs`].
+    ///
+    /// The cache holds at most one source per scanner, so the first preparation wins. A later
+    /// caller may only reuse it when its label binding and its selection are identical: the
+    /// capture is the single answer, and a different capture means a different assignment.
     pub(crate) async fn prepare(
         &self,
         context: Arc<StreamContext>,
-        ranges: Vec<PartitionRange>,
+        selection: SelectedInputs,
         labels: RawLabelSource,
         raw: RawScanPreparation,
         metrics: PartitionMetrics,
@@ -96,10 +105,11 @@ impl Preparation {
             .with_label_values(&["columnar_prepare_acquire_wall"])
             .start_timer();
         let expected = labels.clone();
+        let expected_selection = selection.clone();
         let result = self
             .source
             .get_or_init(|| async {
-                ColumnarPreparedSource::prepare(context, ranges, labels, raw, metrics)
+                ColumnarPreparedSource::prepare(context, selection, labels, raw, metrics)
                     .await
                     .map(Arc::new)
                     .map_err(Arc::new)
@@ -112,6 +122,13 @@ impl Preparation {
         if !same_labels(&source.labels, &expected) {
             return Err(BoxedError::new(invalid(
                 "label binding changed after series preparation",
+            )));
+        }
+        if source.selection != expected_selection {
+            // Every entry serves its own capture, so a different capture can only come from
+            // another assignment.
+            return Err(BoxedError::new(invalid(
+                "series preparation selection changed",
             )));
         }
         Ok(source.clone())
@@ -144,31 +161,124 @@ fn same_labels(left: &RawLabelSource, right: &RawLabelSource) -> bool {
     }
 }
 
-/// Validates the pinned assignments and coverage without opening artifacts.
+/// Inputs one scanner-wide preparation may read, selected from the pinned context and ranges.
 ///
-/// Returns whether every assigned source can be read from columnar artifacts. `false` is not an
-/// error: the caller scans those sources with the ordinary reader instead.
-pub(crate) fn validate_inputs(context: &StreamContext, ranges: &[PartitionRange]) -> Result<bool> {
-    collect_inputs(context, ranges).map(|inputs| inputs.is_some())
+/// Selection only decides which sources and artifacts participate, never which rows are visible.
+/// A scan reads one way: when every assigned SST is completely carried by the selected artifacts,
+/// those SSTs are read from the artifacts; otherwise the whole scan keeps the ordinary reader. The
+/// one source mixed into the artifact read is the memtable, which never has artifacts and whose
+/// rows decide the visibility of rows that are already published.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct SelectedInputs {
+    /// Indices into the scanner's assigned SST list that a selected artifact carries completely.
+    pub(crate) ready_files: Vec<usize>,
+    /// Covering columnar series index ids, restricted to ready SSTs.
+    pub(crate) series_indexes: HashSet<FileId>,
+    /// Eligible sample artifacts covering at least one ready SST.
+    pub(crate) sample_artifacts: HashSet<FileId>,
+    /// Assigned memtable ranges, read as raw rows and merged with the artifact rows.
+    ///
+    /// A memtable never has artifacts, and it carries the deletes and overwrites that decide rows
+    /// the artifacts already hold, so it is the one source the prepared reader always reads itself.
+    pub(crate) raw_sources: Vec<RawSource>,
+    /// Whether every assigned SST is completely carried by the selected artifacts.
+    ///
+    /// This is the switch for the whole scan. `false` means some assigned SST has no covering
+    /// series index, no complete sample coverage, or only a partial one - a windowed group that
+    /// carries some of the source's UTC days but not all of them - and the scan is then answered by
+    /// the ordinary reader, never by artifacts plus raw SST rows: mixing two formats over one
+    /// assignment cannot be proven complete without a per-row partition, and reading some SSTs
+    /// from artifacts while others are read raw is exactly the subset this path must not return.
+    /// This is a completeness decision, never a performance heuristic.
+    pub(crate) sst_coverage_complete: bool,
+    /// Why the first uncovered assigned SST is not carried, for the coverage metric.
+    pub(crate) uncovered_reason: Option<UncoveredReason>,
+    /// Whether no raw source has to be read at all, because no memtable is assigned and every SST
+    /// is carried.
+    ///
+    /// This is an optimisation report, never a visibility decision: a `false` capture answers
+    /// exactly like a `true` one, only with the memtable read as raw rows or with the whole scan on
+    /// the ordinary reader. Vacuously `true` for an empty assignment.
+    pub(crate) all_ready: bool,
 }
 
-/// Collects the assigned SSTs and their covering columnar series indexes.
+impl SelectedInputs {
+    /// Why the assigned SST set is or is not carried by artifacts, for the coverage metric.
+    ///
+    /// The label separates "no acceleration" from "no mixing": `all_native` is a scan whose SSTs
+    /// all come from artifacts, and the other labels name the reason the whole scan had to keep the
+    /// ordinary reader.
+    pub(crate) fn sst_coverage_outcome(&self) -> &'static str {
+        if self.sst_coverage_complete {
+            return "all_native";
+        }
+        match self.uncovered_reason {
+            Some(UncoveredReason::NoSeriesIndex) => "uncovered_sst_no_series_index",
+            Some(UncoveredReason::IncompleteSamples) => "uncovered_sst_incomplete_samples",
+            Some(UncoveredReason::CarriedPartly) => "carried_sst_partial_group",
+            None => "all_ordinary",
+        }
+    }
+}
+
+/// Why one assigned SST is not completely carried by the selected artifacts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum UncoveredReason {
+    /// No covering columnar series index, so its series cannot be named.
+    NoSeriesIndex,
+    /// No selected artifact carries all of it.
+    IncompleteSamples,
+    /// A selected windowed group carries some of its UTC days but not all of them.
+    CarriedPartly,
+}
+
+/// One assigned memtable range the prepared reader reads as raw rows.
 ///
-/// `None` means the assignments are structurally valid but not ready for columnar reads: an
-/// assigned memtable, an SST without columnar series coverage, or an SST without columnar
-/// samples. Structural corruption is still an error, and every assignment is validated before
-/// either answer is returned, so a later invalid assignment is never masked by missing artifacts.
-fn collect_inputs(
+/// The prepared reader reads these as raw flat batches, so they keep their own sequence and op
+/// type and take part in the final merge and dedup exactly like an ordinary scan.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct RawSource {
+    /// Index into the pinned memtable list.
+    pub(crate) index: usize,
+    /// Row group of the memtable, or a negative value for all of them.
+    pub(crate) row_group_index: i64,
+    /// Inclusive time bound of the partition range that assigned this source.
+    pub(crate) time_range: FileTimeRange,
+}
+
+/// Validates the pinned assignments and coverage without opening artifacts.
+///
+/// Returns whether every assigned source can be read from columnar artifacts, which is a report
+/// about artifact coverage only: an incomplete capture is not an error and not a narrower answer,
+/// because the scan then keeps the ordinary reader.
+///
+/// Test-only: the production entries capture the whole selection with [`select_inputs`] and serve
+/// it from [`ColumnarPreparedSource`], so readiness no longer decides whether a source is read.
+#[cfg(test)]
+pub(crate) fn validate_inputs(context: &StreamContext, ranges: &[PartitionRange]) -> Result<bool> {
+    select_inputs(context, ranges).map(|inputs| inputs.all_ready)
+}
+
+/// Selects the assigned SSTs a columnar read may serve and the artifacts that cover them.
+///
+/// Every assignment is validated before any readiness answer, so a malformed assignment is never
+/// masked by an earlier unready one. `allowed` joins every assigned SST with the sources the query
+/// pruned by time only, and is computed once: a grouped artifact may carry rows of a pruned source
+/// that are still live rows of a discovered series, so the ready files must never narrow it.
+///
+/// Selection decides how a scan reads, never what it returns: the artifacts a read may use, and
+/// the assigned sources it must read itself because no selected artifact carries their rows.
+pub(crate) fn select_inputs(
     context: &StreamContext,
     ranges: &[PartitionRange],
-) -> Result<Option<(Vec<usize>, HashSet<FileId>)>> {
+) -> Result<SelectedInputs> {
     let input = &context.input;
     let metadata = input.region_metadata();
     let index = input
         .series_index
         .as_ref()
         .ok_or_else(|| invalid("missing columnar index context"))?;
-    let mut ready = true;
+    let mut mem_ranges = Vec::<(RowGroupIndex, FileTimeRange)>::new();
     let mut files = BTreeMap::<usize, HashSet<i64>>::new();
     for range in ranges {
         let range = context
@@ -177,8 +287,18 @@ fn collect_inputs(
             .ok_or_else(|| invalid("invalid prepared scan range"))?;
         for row_group in &range.row_group_indices {
             if context.is_mem_range_index(*row_group) {
-                // Artifacts exist for flushed SSTs only.
-                ready = false;
+                // Artifacts exist for flushed SSTs only, and a memtable is never converted here,
+                // so the assigned range is always read as raw rows beside the artifacts.
+                match mem_ranges.iter_mut().find(|(index, _)| index == row_group) {
+                    // One memtable row group may be assigned to more than one partition range.
+                    // Widening the remembered bound keeps every assigned row reachable, and the
+                    // merge visibility filter still applies the scan's own time range.
+                    Some((_, bound)) => {
+                        bound.0 = bound.0.min(range.time_range.0);
+                        bound.1 = bound.1.max(range.time_range.1);
+                    }
+                    None => mem_ranges.push((*row_group, range.time_range)),
+                }
                 continue;
             }
             if !context.is_file_range_index(*row_group) {
@@ -192,31 +312,9 @@ fn collect_inputs(
                 .insert(row_group.row_group_index);
         }
     }
-    // Grouped artifacts may also contain sources excluded solely by time pruning.
-    // Sequence-pruned, unassigned, and retired sources remain ineligible.
-    let assigned: HashSet<_> = files
-        .keys()
-        .map(|i| input.files[*i].file_id().file_id())
-        .collect();
-    let allowed = assigned
-        .iter()
-        .chain(&input.time_pruned_files)
-        .copied()
-        .collect();
-    let eligible_samples = index
-        .version
-        .samples
-        .iter()
-        .filter(|(_, handle)| {
-            handle.entry().sources_visible(&allowed)
-                && assigned.iter().any(|id| handle.entry().covers(*id))
-        })
-        .map(|(id, handle)| (*id, handle.clone()))
-        .collect();
-    let mut indexes = HashSet::new();
-    let file_indices = files.keys().copied().collect();
-    for (file_idx, groups) in files {
-        let file = &input.files[file_idx];
+    // Structural validation of every assigned SST, before any readiness answer.
+    for (file_idx, groups) in &files {
+        let file = &input.files[*file_idx];
         if !groups.contains(&-1)
             && (groups.len() as u64 != file.meta_ref().num_row_groups
                 || groups
@@ -232,30 +330,106 @@ fn collect_inputs(
                 "columnar prepared reads do not support foreign SSTs",
             ));
         }
-        let mut covered = false;
+    }
+    // Grouped artifacts may also contain sources excluded solely by time pruning.
+    // Sequence-pruned, unassigned, and retired sources remain ineligible.
+    let assigned: HashSet<_> = files
+        .keys()
+        .map(|i| input.files[*i].file_id().file_id())
+        .collect();
+    let allowed: HashSet<_> = assigned
+        .iter()
+        .chain(&input.time_pruned_files)
+        .copied()
+        .collect();
+    let eligible: HashMap<FileId, crate::series_index::artifact::SamplesFileHandle> = index
+        .version
+        .samples
+        .iter()
+        .filter(|(_, handle)| {
+            handle.entry().sources_visible(&allowed)
+                && assigned.iter().any(|id| handle.entry().covers(*id))
+        })
+        .map(|(id, handle)| (*id, handle.clone()))
+        .collect();
+    let mut selected = SelectedInputs::default();
+    // Unready assigned SSTs with whether a covering series index exists. The reason an artifact
+    // does not carry them is resolved after the loop, when the selected artifacts are final.
+    let mut uncovered = Vec::<(usize, bool)>::new();
+    for file_idx in files.keys() {
+        let file = &input.files[*file_idx];
+        let id = file.file_id().file_id();
+        let mut covering = HashSet::new();
         for handle in index.version.series_indexes.values() {
             if handle.entry().format() == ArtifactFormat::ColumnarSeries
                 && handle
                     .entry()
                     .covers_file(file.meta_ref(), metadata.region_id)
             {
-                indexes.insert(handle.entry().index_uuid);
-                covered = true;
+                covering.insert(handle.entry().index_uuid);
             }
         }
-        if !covered {
-            ready = false;
+        let ready = !covering.is_empty()
+            && crate::series_index::artifact::samples_cover_file(&eligible, file)
+            && !index.version.samples.values().any(|h| {
+                h.entry().covers(id) && h.entry().artifact.format != ArtifactFormat::ColumnarSamples
+            });
+        if !ready {
+            uncovered.push((*file_idx, !covering.is_empty()));
+            continue;
         }
-        if !crate::series_index::artifact::samples_cover_file(&eligible_samples, file)
-            || index.version.samples.values().any(|h| {
-                h.entry().covers(file.file_id().file_id())
-                    && h.entry().artifact.format != ArtifactFormat::ColumnarSamples
-            })
-        {
-            ready = false;
+        selected.ready_files.push(*file_idx);
+        selected.series_indexes.extend(covering);
+        for (sample_id, handle) in &eligible {
+            if handle.entry().covers(id) {
+                selected.sample_artifacts.insert(*sample_id);
+            }
         }
     }
-    Ok(ready.then_some((file_indices, indexes)))
+    // This implementation deliberately does not mix SST read formats within one scan. Every
+    // assigned SST must be carried completely by the selected artifacts - a covering series index,
+    // complete sample coverage, and a windowed group whose recorded days are all selected - and
+    // otherwise the scan uses the ordinary reader. Comparing the counts is exact: `ready_files`
+    // only ever holds assigned files, and one unready file is enough to decide it.
+    //
+    // That is a complexity choice, not a correctness claim about mixing: reading some SSTs from
+    // artifacts while others are read as raw rows could be made correct, it just needs a per-source
+    // attribution this change does not take on. What is *not* negotiable is completeness - the
+    // ordinary reader answers every assigned row, so falling back can never return a subset - and
+    // the choice is never made as a performance heuristic.
+    selected.sst_coverage_complete = selected.ready_files.len() == files.len();
+    // The first uncovered file names why the whole scan keeps the ordinary reader.
+    selected.uncovered_reason = uncovered.first().map(|(file_idx, has_index)| {
+        if !has_index {
+            return UncoveredReason::NoSeriesIndex;
+        }
+        let id = input.files[*file_idx].file_id().file_id();
+        let carried = index.version.samples.values().any(|handle| {
+            selected
+                .sample_artifacts
+                .contains(&handle.file_id().file_id())
+                && handle.entry().covers(id)
+        });
+        if carried {
+            // A selected group lists this source but does not carry all of it.
+            UncoveredReason::CarriedPartly
+        } else {
+            UncoveredReason::IncompleteSamples
+        }
+    });
+    // A memtable never has artifacts and its rows decide the visibility of rows the artifacts
+    // already hold, so it is read as raw rows and merged with the artifact rows.
+    selected.raw_sources = mem_ranges
+        .into_iter()
+        .map(|(index, time_range)| RawSource {
+            index: index.index,
+            row_group_index: index.row_group_index,
+            time_range,
+        })
+        .collect();
+    // Whether anything at all is read outside the artifacts: a memtable, or an unprovable capture.
+    selected.all_ready = selected.sst_coverage_complete && selected.raw_sources.is_empty();
+    Ok(selected)
 }
 
 /// Pushes the supported conjuncts into the request.
@@ -326,8 +500,242 @@ struct Candidate {
     metric: Option<SeriesLabels>,
 }
 
+impl Candidate {
+    /// Builds a candidate from an exact key alone, without reading any sample payload.
+    ///
+    /// Labels come from the key itself: the sparse key encodes every non-null label, so a source
+    /// whose series are known only by their keys still yields the same identity, the same
+    /// region-qualified output key, and the same labels an artifact row would carry.
+    fn from_key(
+        exact: &ExactSeriesKey,
+        metadata: &store_api::metadata::RegionMetadataRef,
+        labels: &RawLabelSource,
+        direct_labels: bool,
+        reservation: &MemoryReservation,
+    ) -> Result<Self> {
+        let mut offsets = mito_codec::row_converter::SparseOffsetsCache::new();
+        let mut view = mito_codec::row_converter::sparse::SparsePrimaryKeyView::new(
+            exact.bytes(),
+            &mut offsets,
+        )
+        .map_err(|e| invalid(e.to_string()))?;
+        let mut buffer = Vec::new();
+        let mut tags = HashMap::new();
+        for column in &metadata.column_metadatas {
+            if column.semantic_type != SemanticType::Tag
+                || ReservedColumnId::is_reserved(column.column_id)
+            {
+                continue;
+            }
+            let value = view
+                .label(column.column_id, &mut buffer)
+                .map_err(|e| invalid(e.to_string()))?;
+            tags.insert(column.column_id, value.map(str::to_owned));
+        }
+        // `merge_key` is always the exact key bytes. Explicit-label chunks keep the
+        // region-qualified form as their `key`, exactly like a discovered artifact row.
+        let (key, merge_key) = if direct_labels {
+            let mut qualified = Vec::with_capacity(8 + exact.bytes().len());
+            qualified.extend_from_slice(&metadata.region_id.as_u64().to_be_bytes());
+            qualified.extend_from_slice(exact.bytes());
+            let key = Buffer::from(qualified);
+            let merge_key = key.slice_with_length(8, exact.bytes().len());
+            (key, merge_key)
+        } else {
+            let key = Buffer::from(exact.bytes().to_vec());
+            (key.clone(), key)
+        };
+        let metric = if direct_labels {
+            let RawLabelSource::PrimaryKey {
+                metric_name,
+                logical_tags,
+                ..
+            } = labels
+            else {
+                return Err(invalid("expected bound labels"));
+            };
+            let mut values = Vec::with_capacity(logical_tags.len());
+            for tag in logical_tags.iter() {
+                if let Some(Some(value)) = tags.get(&tag.column_id) {
+                    values.push(datatypes::series::Label {
+                        name: tag.name.clone(),
+                        value: Arc::from(value.as_str()),
+                    });
+                }
+            }
+            Some(
+                SeriesLabels::try_new(Some(metric_name.clone()), values)
+                    .map_err(|e| invalid(e.to_string()))?,
+            )
+        } else {
+            None
+        };
+        let bytes = key.len()
+            + values_size(&tags)
+            + std::mem::size_of::<Candidate>()
+            + metric
+                .as_ref()
+                .map(|metric| {
+                    metric
+                        .tags()
+                        .iter()
+                        .map(|tag| tag.name.len() + tag.value.len())
+                        .sum::<usize>()
+                })
+                .unwrap_or(0)
+            + 64;
+        reservation
+            .try_grow(bytes)
+            .context(crate::error::ScanMemoryExhaustedSnafu)?;
+        Ok(Self {
+            id: exact.id(),
+            key,
+            merge_key,
+            tags,
+            metric,
+        })
+    }
+}
+
+/// Estimates the memory a tag map retains, matching the charge the artifact path pays.
+fn values_size(values: &HashMap<u32, Option<String>>) -> usize {
+    values.values().flatten().map(String::len).sum::<usize>()
+        + values.capacity() * (std::mem::size_of::<(u32, Option<String>)>() + 16)
+}
+
+/// The pinned index of one raw source, with every row group of its assignment.
+///
+/// A raw source is always a memtable range: memtable indices already index the pinned source list.
+fn raw_source_index(source: &RawSource) -> RowGroupIndex {
+    RowGroupIndex {
+        index: source.index,
+        row_group_index: source.row_group_index,
+    }
+}
+
+/// Discovers the exact keys of the assigned memtable ranges.
+///
+/// Artifacts are flushed SSTs only, so a series that exists solely in a memtable has no series
+/// index and no artifact row to be found from: its keys are read from the memtable itself.
+///
+/// The keys are the same sparse encoding the artifacts use, so a series found here has the same
+/// identity, ordering, and labels an artifact discovery would give it, and one found by an artifact
+/// index too is still a single candidate.
+///
+/// Discovery reads key columns only, with the documented exception at
+/// [`crate::read::series_candidate::mem_primary_key_stream`]: the memtable builds its ranges with
+/// the scan's projection, so each batch is materialized with payload columns and reduced to its key
+/// column here. Nothing is retained, so every ordinal read stays independent.
+#[allow(clippy::too_many_arguments)]
+async fn discover_memtable_series(
+    context: &Arc<StreamContext>,
+    selection: &SelectedInputs,
+    metrics: &PartitionMetrics,
+    labels: &RawLabelSource,
+    direct_labels: bool,
+    reservation: &MemoryReservation,
+    candidates: &mut BTreeMap<ExactSeriesKey, Candidate>,
+    preparation_metrics: &mut crate::metrics::ColumnarReadMetrics,
+) -> Result<()> {
+    let metadata = context.input.region_metadata();
+    let mut offsets = mito_codec::row_converter::SparseOffsetsCache::new();
+    // The labels are resolved after the merge, so `sample_merge_schema` drops the tag-only
+    // conjuncts from the downstream residuals and discovery must apply them itself. A memtable
+    // range only evaluates the simple filters its builder recognises, so without this a regex,
+    // `NOT` or `OR` shape would return series the scan must not answer.
+    let tag_filters = tag_only_filters(context)?;
+    for source in &selection.raw_sources {
+        let keys = crate::read::series_candidate::mem_primary_key_stream(
+            context,
+            metrics,
+            raw_source_index(source),
+            source.time_range,
+            &tag_filters,
+        );
+        let mut keys: BoxedRecordBatchStream = Box::pin(keys);
+        let mut discovered = 0_u64;
+        while let Some(batch) = keys.try_next().await? {
+            let array = batch
+                .column(0)
+                .as_any()
+                .downcast_ref::<BinaryArray>()
+                .ok_or_else(|| invalid("raw series discovery is not a binary key stream"))?;
+            for key in array.iter().flatten() {
+                if candidates.contains_key(key) {
+                    continue;
+                }
+                let exact = ExactSeriesKey::from_sparse_key(key, &mut offsets)?;
+                let candidate =
+                    Candidate::from_key(&exact, metadata, labels, direct_labels, reservation)?;
+                candidates.insert(exact, candidate);
+                discovered += 1;
+            }
+        }
+        *preparation_metrics
+            .counts
+            .entry("prepare_raw_discovered_series")
+            .or_default() += discovered;
+    }
+    Ok(())
+}
+
+/// Compiles the tag-only conjuncts of the scan predicate against the flat batch schema.
+///
+/// These are exactly the conjuncts [`sample_merge_schema`] leaves out of the downstream residuals
+/// because every column they reference is a tag, so whatever reads series must apply them. A tag
+/// value is not its own column before the labels are resolved, which is why they run here over the
+/// flat batch rather than over the encoded keys.
+fn tag_only_filters(context: &StreamContext) -> Result<Vec<Arc<dyn PhysicalExpr>>> {
+    let metadata = context.input.region_metadata();
+    let schema = context.input.mapper.input_arrow_schema(false);
+    let mut filters = Vec::new();
+    for expr in predicate_conjuncts(context.input.predicate_group().predicate()) {
+        let columns = expr.column_refs();
+        if columns.is_empty()
+            || !columns.iter().all(|column| {
+                metadata
+                    .column_by_name(&column.name)
+                    .is_some_and(|column| column.semantic_type == SemanticType::Tag)
+            })
+        {
+            continue;
+        }
+        filters
+            .push(Predicate::to_physical_expr(expr, &schema).map_err(|e| invalid(e.to_string()))?);
+    }
+    Ok(filters)
+}
+
+/// Records how far artifact coverage lags the newest source a preparation must read as raw rows.
+///
+/// The cheap proxy is the end of the newest raw source's own time range: an SST's per-file time
+/// range, or the inclusive bound its partition assigned to a memtable range. No row is read and no
+/// metadata is fetched, so one observation per preparation is affordable. `now` is the wall clock,
+/// because preparation owns no region time provider; a source whose range ends in the future (a
+/// writer ahead of this node's clock) observes an age of zero instead of a negative one.
+fn record_uncovered_age(selection: &SelectedInputs) {
+    // Raw sources are memtable ranges only, so this observes how far the rows that still have no
+    // artifact lag. An incomplete SST capture takes the whole scan to the ordinary reader, where
+    // this preparation never runs.
+    let newest = selection
+        .raw_sources
+        .iter()
+        .map(|source| source.time_range.1)
+        .max();
+    let Some(newest) = newest else {
+        return;
+    };
+    let Some(newest) = newest.convert_to_ceil(TimeUnit::Millisecond) else {
+        return;
+    };
+    let age_ms = common_time::util::current_time_millis().saturating_sub(newest.value());
+    crate::metrics::SERIES_SCAN_UNCOVERED_AGE.observe(age_ms as f64 / 1000.0);
+}
+
 struct ColumnarPreparedSource {
     context: Arc<StreamContext>,
+    /// Inputs this source was built from; a shared cache is only reusable for an equal selection.
+    selection: SelectedInputs,
     labels: RawLabelSource,
     raw: Arc<RawScanPreparation>,
     sample_schema: Option<SchemaRef>,
@@ -339,9 +747,14 @@ struct ColumnarPreparedSource {
 }
 
 impl ColumnarPreparedSource {
+    /// Builds the prepared source from an already selected input set.
+    ///
+    /// Readiness is never recomputed here: the caller's capture is the single answer, so an
+    /// artifact that merely covers a ready SST stays readable even when another of its sources
+    /// has no covering series index.
     async fn prepare(
         context: Arc<StreamContext>,
-        ranges: Vec<PartitionRange>,
+        selection: SelectedInputs,
         labels: RawLabelSource,
         raw: RawScanPreparation,
         metrics: PartitionMetrics,
@@ -351,38 +764,19 @@ impl ColumnarPreparedSource {
             .start_timer();
         let mut preparation_metrics = crate::metrics::ColumnarReadMetrics::default();
         preparation_metrics.counts.insert("prepare_executions", 1);
-        let started = Instant::now();
         let input = &context.input;
         let metadata = input.region_metadata();
         let index = input
             .series_index
             .as_ref()
             .ok_or_else(|| invalid("missing columnar index context"))?;
-        let Some((files, indexes)) = collect_inputs(&context, &ranges)? else {
-            // Readiness was checked before preparation, so this is a real capability change.
-            return Err(invalid(
-                "columnar series coverage changed after series preparation",
-            ));
-        };
-        preparation_metrics.add_elapsed("columnar_prepare_coverage", started.elapsed());
         let timer = preparation_metrics.timer("columnar_prepare_samples_open_wall");
         let cache = input
             .cache_strategy
             .columnar_metadata(index.cache_namespace);
         let mut samples = Vec::<Arc<dyn SamplesFormatReader>>::new();
-        let assigned: HashSet<_> = files
-            .iter()
-            .map(|i| input.files[*i].file_id().file_id())
-            .collect();
-        let allowed = assigned
-            .iter()
-            .chain(&input.time_pruned_files)
-            .copied()
-            .collect();
         for handle in index.version.samples.values().filter(|h| {
-            if !h.entry().sources_visible(&allowed)
-                || !assigned.iter().any(|id| h.entry().covers(*id))
-            {
+            if !selection.sample_artifacts.contains(&h.file_id().file_id()) {
                 return false;
             }
             // Coverage validation above still needs every day of each source. Only
@@ -414,9 +808,14 @@ impl ColumnarPreparedSource {
         preparation_metrics
             .counts
             .insert("prepare_sample_readers", samples.len() as u64);
+        preparation_metrics.counts.insert(
+            "prepare_series_indexes",
+            selection.series_indexes.len() as u64,
+        );
+        // Whether this preparation had full artifact coverage, so no raw source had to be read.
         preparation_metrics
             .counts
-            .insert("prepare_series_indexes", indexes.len() as u64);
+            .insert("prepare_all_ready", u64::from(selection.all_ready));
         let reservation =
             MemoryConsumer::new("ColumnarPreparedSource").register(&input.scan_memory_pool);
         let started = Instant::now();
@@ -429,11 +828,11 @@ impl ColumnarPreparedSource {
         let conjuncts = predicate_conjuncts(input.predicate_group().predicate());
         let mut retained_rows = 0_usize;
         let mut candidates = BTreeMap::<ExactSeriesKey, Candidate>::new();
-        for id in indexes {
+        for id in &selection.series_indexes {
             let timer = preparation_metrics.timer("columnar_prepare_series_open_wall");
             let reader = crate::series_index::columnar::reader::ColumnarReader::open_cached(
                 index.store.clone(),
-                index.version.series_indexes[&id].clone(),
+                index.version.series_indexes[id].clone(),
                 cache.clone(),
             )
             .await?;
@@ -651,11 +1050,8 @@ impl ColumnarPreparedSource {
                     };
                     // The exact key is stored once: `merge_key` is a view of `key`, so the
                     // reservation charges the single key allocation the candidate retains.
-                    let bytes = key.len()
-                        + values.values().flatten().map(String::len).sum::<usize>()
-                        + values.capacity() * (std::mem::size_of::<(u32, Option<String>)>() + 16)
-                        + std::mem::size_of::<Candidate>()
-                        + 64;
+                    let bytes =
+                        key.len() + values_size(&values) + std::mem::size_of::<Candidate>() + 64;
                     reservation
                         .try_grow(bytes)
                         .map_err(|e| invalid(e.to_string()))?;
@@ -706,6 +1102,31 @@ impl ColumnarPreparedSource {
                 preparation_metrics.add_elapsed("columnar_prepare_candidates", started.elapsed());
             }
         }
+        // How many assigned sources no selected artifact covers, recorded for every preparation
+        // so "mixed reading" (artifacts plus raw rows) is measurable rather than assumed rare.
+        preparation_metrics
+            .counts
+            .insert("prepare_raw_sources", selection.raw_sources.len() as u64);
+        record_uncovered_age(&selection);
+        // A memtable has no series index and no artifact row, so the series only it holds are
+        // discovered from its own key column. This is key-only discovery: the payload is read
+        // inside `read_series`, so the ordinal set stays complete and stable while the source
+        // retains no sample data.
+        if !selection.raw_sources.is_empty() {
+            let started = Instant::now();
+            discover_memtable_series(
+                &context,
+                &selection,
+                &metrics,
+                &labels,
+                direct_labels,
+                &reservation,
+                &mut candidates,
+                &mut preparation_metrics,
+            )
+            .await?;
+            preparation_metrics.add_elapsed("columnar_prepare_raw_series", started.elapsed());
+        }
         let started = Instant::now();
         preparation_metrics
             .counts
@@ -718,6 +1139,7 @@ impl ColumnarPreparedSource {
         preparation_metrics.add_elapsed("columnar_prepare_sort", started.elapsed());
         Ok(Self {
             context,
+            selection,
             labels,
             raw: Arc::new(raw),
             sample_schema,
@@ -759,6 +1181,7 @@ impl PreparedSeriesSource for ColumnarPreparedSource {
         let samples = self.samples.clone();
         let metrics = self.metrics.clone();
         let reservation = self.reservation.clone();
+        let raw_sources = self.selection.raw_sources.clone();
         let stream = async_stream::try_stream! {
             let _reservation = reservation;
             if range.is_empty() { return; }
@@ -827,6 +1250,55 @@ impl PreparedSeriesSource for ColumnarPreparedSource {
                         let bytes = flat.get_array_memory_size();
                         reservation.try_grow(bytes).context(crate::error::ScanMemoryExhaustedSnafu)?;
                         yield flat;
+                        reservation.shrink(bytes);
+                    }
+                }));
+            }
+            // Rows of the sources no artifact covers join the same merge as the artifact samples.
+            // They keep their own sequence and op type, so a memtable update or delete still
+            // applies to an artifact row and the final dedup decides visibility.
+            for source in raw_sources.iter() {
+                let candidates = candidates.clone();
+                let range = range.clone();
+                let context = context.clone();
+                let sample_schema = sample_schema.clone();
+                let metrics = metrics.clone();
+                let source = *source;
+                sources.push(Box::pin(async_stream::try_stream! {
+                    // This reservation covers the batch that is handed to the merge, and only that:
+                    // it is grown after the batch exists. The raw read itself is not covered by the
+                    // scan pool - the memtable iterator and the Parquet flat decoder
+                    // (`sst/parquet/push_decoder.rs`) both take no pool - so raw read buffering and
+                    // its peak stay outside the pool's accounting. Charging them would need those
+                    // readers to accept the scan pool, which is a wider change than this adapter.
+                    let reservation = MemoryConsumer::new("ColumnarRawSource").register(&context.input.scan_memory_pool);
+                    // One scan of one raw source for this `read_series` call. Counting inside the
+                    // stream body counts only sources that are actually read, and one increment
+                    // per ordinal read makes repeated per-ordinal scans visible.
+                    crate::metrics::COLUMNAR_READ_COUNT
+                        .with_label_values(&["read_raw_sources"])
+                        .inc();
+                    // A raw source is always a memtable range: artifacts are flushed SSTs only,
+                    // and an assigned SST that no artifact carries completely takes the whole scan
+                    // to the ordinary reader instead of being mixed in here.
+                    let mut raw: BoxedRecordBatchStream = Box::pin(
+                        crate::read::scan_util::scan_flat_mem_ranges(
+                            context.clone(),
+                            metrics.clone(),
+                            raw_source_index(&source),
+                            source.time_range,
+                        ),
+                    );
+                    while let Some(batch) = raw.try_next().await? {
+                        // One raw batch carries several series, and only the ordinals this read
+                        // serves belong to this stream.
+                        let Some(batch) = retain_candidate_rows(batch, &candidates[range.clone()])? else { continue };
+                        let batch = merge_shape(batch, sample_schema.as_ref())?;
+                        let batch = filter_visibility(batch, &context)?;
+                        if batch.num_rows() == 0 { continue; }
+                        let bytes = batch.get_array_memory_size();
+                        reservation.try_grow(bytes).context(crate::error::ScanMemoryExhaustedSnafu)?;
+                        yield batch;
                         reservation.shrink(bytes);
                     }
                 }));
@@ -1008,6 +1480,74 @@ fn sample_to_flat(
         });
     }
     RecordBatch::try_new(schema, arrays).context(NewRecordBatchSnafu)
+}
+
+/// Keeps only the rows whose exact key belongs to the ordinals this read serves.
+///
+/// A raw source carries many series in one batch, so the batch is filtered before the merge: the
+/// ordinals of one `read_series` call are exactly its candidate keys, and `tsid` alone is a hash
+/// that two distinct series can share. Returns `None` when no row survives.
+fn retain_candidate_rows(
+    batch: RecordBatch,
+    candidates: &[Candidate],
+) -> Result<Option<RecordBatch>> {
+    let primary_key = batch
+        .column(crate::sst::parquet::flat_format::primary_key_column_index(
+            batch.num_columns(),
+        ))
+        .as_any()
+        .downcast_ref::<crate::sst::parquet::format::PrimaryKeyArray>()
+        .ok_or_else(|| invalid("raw source is missing a dictionary primary key"))?;
+    let values = primary_key
+        .values()
+        .as_any()
+        .downcast_ref::<BinaryArray>()
+        .ok_or_else(|| invalid("raw source primary key values are not binary"))?;
+    // The batch is dictionary encoded, so membership is decided once per distinct key.
+    let mut retained_values = vec![false; values.len()];
+    for (index, retained) in retained_values.iter_mut().enumerate() {
+        *retained = candidates
+            .binary_search_by(|candidate| candidate.merge_key.as_slice().cmp(values.value(index)))
+            .is_ok();
+    }
+    if retained_values.iter().all(|retained| *retained) {
+        return Ok(Some(batch));
+    }
+    let keys = primary_key.keys();
+    let mask = BooleanArray::from(
+        (0..batch.num_rows())
+            .map(|row| keys.is_valid(row) && retained_values[keys.value(row) as usize])
+            .collect::<Vec<_>>(),
+    );
+    if mask.true_count() == 0 {
+        return Ok(None);
+    }
+    filter_record_batch(&batch, &mask)
+        .map(Some)
+        .context(ComputeArrowSnafu)
+}
+
+/// Reshapes a raw flat batch into the schema the merge expects.
+///
+/// The artifact source emits the tagless sample schema when the predicate allows labels to be
+/// resolved after the merge; a raw batch keeps its own tag columns, so it is projected onto the
+/// same columns in the same order. Without that schema both sides already share the mapper schema.
+fn merge_shape(batch: RecordBatch, schema: Option<&SchemaRef>) -> Result<RecordBatch> {
+    let Some(schema) = schema else {
+        return Ok(batch);
+    };
+    let mut columns = Vec::with_capacity(schema.fields().len());
+    for field in schema.fields() {
+        let column = batch
+            .column_by_name(field.name())
+            .ok_or_else(|| invalid(format!("raw source is missing column {}", field.name())))?;
+        columns.push(if column.data_type() == field.data_type() {
+            column.clone()
+        } else {
+            cast(column, field.data_type()).context(ComputeArrowSnafu)?
+        });
+    }
+    RecordBatch::try_new(schema.clone(), columns).context(NewRecordBatchSnafu)
 }
 
 fn filter_visibility(batch: RecordBatch, context: &StreamContext) -> Result<RecordBatch> {
