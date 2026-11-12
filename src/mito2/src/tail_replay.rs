@@ -87,8 +87,8 @@ impl<S: LogStore> TailReplayTask<S> {
         let mut backoff = MIN_BACKOFF;
         while !self.state.is_cancelled() && should_replay_tails(&self.region) {
             match self.replay_round().await {
+                Ok(()) | Err(_) if self.state.is_cancelled() => break,
                 Ok(()) => return,
-                Err(_) if self.state.is_cancelled() => break,
                 Err(e) => {
                     error!(e; "Failed to replay the pending WAL tails of region {region_id}");
                     self.flush_task
@@ -270,6 +270,7 @@ impl<S: LogStore> TailReplayTask<S> {
                 return false;
             }
         }
+        info!("Region {region_id} can no longer replay, keeping its unread listed tails");
         false
     }
 
@@ -368,6 +369,7 @@ impl<S: LogStore> TailReplayTask<S> {
                     error!(e; "Publishing the replayed WAL tails of region {region_id} may have failed, retrying");
                 }
                 Err(Error::RegionStopped { .. }) => {
+                    info!("Region {region_id} stopped, dropping the replay");
                     uncommitted.cleanup().await;
                     return Ok(false);
                 }
