@@ -115,7 +115,9 @@ mod tests {
     use datafusion::datasource::memory::MemorySourceConfig;
     use datafusion::datasource::source::DataSourceExec;
     use datafusion::logical_expr::{EmptyRelation, LogicalPlan};
+    use datafusion::physical_optimizer::ensure_coop::EnsureCooperative;
     use datafusion::physical_plan::PhysicalExpr;
+    use datafusion::physical_plan::coop::CooperativeExec;
     use datafusion::physical_plan::display::{DisplayAs, DisplayFormatType};
     use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
     use datatypes::data_type::ConcreteDataType;
@@ -473,6 +475,27 @@ mod tests {
             promql::extension_plan::IdentityCompletion::CompleteDisjoint,
             router.identity_completion(),
             "a per-series scan owns each identity in one partition"
+        );
+    }
+
+    /// `EnsureCooperative` runs before this rule and rebuilds the raw source over a wrapped scan.
+    #[test]
+    fn a_per_series_raw_root_stays_complete_disjoint_behind_ensure_cooperative() {
+        let root = EnsureCooperative::new()
+            .optimize(raw_source_root(series_scan(2)), &ConfigOptions::default())
+            .unwrap();
+        assert!(
+            root.children()[0].is::<CooperativeExec>(),
+            "the fixture scan is wrapped the way the default rules leave it"
+        );
+
+        let exec = optimized(root).unwrap();
+        let router = exec
+            .downcast_ref::<SeriesRepartitionExec>()
+            .expect("the root is routed");
+        assert_eq!(
+            promql::extension_plan::IdentityCompletion::CompleteDisjoint,
+            router.identity_completion()
         );
     }
 
