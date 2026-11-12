@@ -86,7 +86,11 @@ use crate::optimizer::string_normalization::StringNormalizationRule;
 use crate::optimizer::transcribe_atat::TranscribeAtatRule;
 use crate::optimizer::type_conversion::TypeConversionRule;
 use crate::optimizer::windowed_sort::WindowedSortPhysicalRule;
-use crate::options::{QueryMemoryPoolPolicy, QueryOptions as QueryOptionsNew};
+use crate::options::{
+    NativePromqlExtension, QueryMemoryPoolPolicy, QueryOptions as QueryOptionsNew,
+};
+use crate::promql::planner::NATIVE_PROMQL_EXTENSION_KEY;
+use crate::promql::planner::native::native_promql_requested;
 use crate::query_engine::DefaultSerializer;
 use crate::query_engine::options::QueryOptions;
 use crate::query_engine::runtime::{
@@ -430,6 +434,23 @@ impl QueryEngineState {
                     allow_query_fallback: fallback == "true",
                 });
         }
+        // The native PromQL route resolves like the other query options: a request value over a
+        // session `SET` over the engine-wide default. It is recorded here, once, so that planning
+        // and `SHOW query.experimental_native_promql` read the same value instead of each resolving
+        // the sources again.
+        let native_promql = match query_ctx.extension(NATIVE_PROMQL_EXTENSION_KEY) {
+            // The snapshot states the option: the request value, or the session `SET` it inherits.
+            Some(_) => native_promql_requested(&query_ctx),
+            // Neither source states it, so the engine-wide default answers.
+            None => self.experimental_native_promql(),
+        };
+        state
+            .config_mut()
+            .options_mut()
+            .extensions
+            .insert(NativePromqlExtension {
+                enabled: native_promql,
+            });
         Ok(query_ctx)
     }
 
