@@ -508,7 +508,9 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                     stats.built_range,
                     stats.built_samples
                 ),
-                Ok(Err(error)) => debug!(
+                // A failed build leaves the new SSTs out of native reads until the next pass,
+                // so it must be visible in the log even though it never fails the edit.
+                Ok(Err(error)) => warn!(
                     "Failed to build series indexes after adding SSTs, region: {}, error: {}",
                     region_id, error
                 ),
