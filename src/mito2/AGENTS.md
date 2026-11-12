@@ -172,6 +172,9 @@ Tests live next to the code as `*_test.rs` (e.g. `src/mito2/src/engine/flush_tes
 - Staging regions never flush: a flush would move rows into the staging manifest and
   release their WAL, losing them if staging does not end successfully. Every flush
   trigger in `worker/handle_flush.rs` must skip them, and `handle_close` leaves staging first.
+- Direct SST imports without a staging binding cannot publish into staging.
+  `worker/handle_manifest.rs` seals edit admission while EnterStaging drains accepted
+  edits. Scheduler-owned DDLs resume through execution, bypassing initial admission.
 
 ## Maintenance contract
 

@@ -569,15 +569,8 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             self.flush_scheduler.on_flush_success(region_id)
         {
             // Perform DDLs first because they require empty memtables.
-            // These ALTERs already own the flush turn; bypass initial admission.
-            for ddl in ddl_requests.drain(..) {
-                if let crate::request::DdlRequest::Alter(request) = ddl.request {
-                    self.execute_alter_request(ddl.region_id, request, ddl.sender)
-                        .await;
-                } else {
-                    self.handle_ddl_requests(&mut vec![ddl]).await;
-                }
-            }
+            // Scheduler-owned requests bypass initial admission but retain handler validation.
+            self.handle_ddl_requests(&mut ddl_requests).await;
             if self.flush_scheduler.is_flush_requested(region_id) {
                 // The DDL may schedule another flush, e.g. a close-time flush after writes
                 // arrived in the mutable memtable during the previous flush. Keep pending

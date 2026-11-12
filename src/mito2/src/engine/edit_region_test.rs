@@ -1213,7 +1213,7 @@ async fn test_drop_rejects_alter_and_edit_queues_after_flush_commit() {
     });
     wait_worker_recv_event(&mut rx).await;
 
-    // The first ALTER waits in the flush scheduler; the second uses pending_alters.
+    // The first ALTER waits in the flush scheduler; the second uses pending_ddls.
     let mut alters = Vec::new();
     for _ in 0..2 {
         let e = engine.clone();
@@ -1262,4 +1262,426 @@ async fn test_drop_rejects_alter_and_edit_queues_after_flush_commit() {
     })
     .await
     .expect("DROP left queued ALTER or edit requests unresolved");
+}
+
+/// Submits without awaiting the reply so a test can observe a deferred control request.
+async fn submit_control(
+    engine: &MitoEngine,
+    region_id: RegionId,
+    request: crate::request::DdlRequest,
+) -> oneshot::Receiver<crate::error::Result<store_api::region_request::AffectedRows>> {
+    let (sender, receiver) = oneshot::channel();
+    engine
+        .inner
+        .workers
+        .submit_to_worker(
+            region_id,
+            WorkerRequest::Ddl(crate::request::SenderDdlRequest {
+                region_id,
+                request,
+                sender: sender.into(),
+            }),
+        )
+        .await
+        .unwrap();
+    receiver
+}
+
+#[tokio::test]
+async fn test_repartition_flush_waits_for_region_edit() {
+    use crate::request::DdlRequest;
+    use store_api::region_request::{RegionFlushReason, RegionFlushRequest};
+
+    let mut env = TestEnv::new().await;
+    let engine = env
+        .create_engine(MitoConfig {
+            num_workers: 1,
+            schedule_compaction_after_edit: false,
+            ..Default::default()
+        })
+        .await;
+    let region_id = RegionId::new(1, 1);
+    let other_id = RegionId::new(1, 2);
+    for id in [region_id, other_id] {
+        engine
+            .handle_request(
+                id,
+                RegionRequest::Create(CreateRequestBuilder::new().build()),
+            )
+            .await
+            .unwrap();
+    }
+    let region = engine.get_region(region_id).unwrap();
+    let guard = region.manifest_ctx.manifest_manager.write().await;
+    let e = engine.clone();
+    let edit = tokio::spawn(async move {
+        e.edit_region(region_id, test_region_edit(region_id, FileId::random()))
+            .await
+    });
+    wait_until_region_is_in_editing(&region).await;
+    let mut flush = submit_control(
+        &engine,
+        region_id,
+        DdlRequest::Flush(RegionFlushRequest {
+            reason: Some(RegionFlushReason::Repartition),
+            ..Default::default()
+        }),
+    )
+    .await;
+    // The same worker processes this barrier after admitting the flush. It must remain free
+    // to serve another region while the first region's manifest lock is held.
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        crate::test_util::flush_region(&engine, other_id, None),
+    )
+    .await
+    .unwrap();
+    let early_reply = flush.try_recv();
+    assert!(
+        matches!(&early_reply, Err(oneshot::error::TryRecvError::Empty)),
+        "flush replied before the edit completed: {early_reply:?}"
+    );
+    drop(guard);
+    tokio::time::timeout(Duration::from_secs(5), edit)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        0,
+        tokio::time::timeout(Duration::from_secs(5), flush)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap()
+    );
+    engine.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn test_staging_drains_accepted_edits_before_later_controls() {
+    use crate::request::DdlRequest;
+    use store_api::region_request::{
+        AlterKind, EnterStagingRequest, RegionAlterRequest, RegionFlushRequest, SetRegionOption,
+        StagingPartitionDirective,
+    };
+
+    let mut env = TestEnv::new().await;
+    let engine = env
+        .create_engine(MitoConfig {
+            num_workers: 1,
+            schedule_compaction_after_edit: false,
+            ..Default::default()
+        })
+        .await;
+    let region_id = RegionId::new(1, 1);
+    let other_id = RegionId::new(1, 2);
+    for id in [region_id, other_id] {
+        engine
+            .handle_request(
+                id,
+                RegionRequest::Create(CreateRequestBuilder::new().build()),
+            )
+            .await
+            .unwrap();
+    }
+    let region = engine.get_region(region_id).unwrap();
+    let guard = region.manifest_ctx.manifest_manager.write().await;
+    let e = engine.clone();
+    let first = tokio::spawn(async move {
+        e.edit_region(region_id, test_region_edit(region_id, FileId::random()))
+            .await
+    });
+    wait_until_region_is_in_editing(&region).await;
+    let file_id = FileId::random();
+    let (tx, queued) = oneshot::channel();
+    engine
+        .inner
+        .workers
+        .submit_to_worker(
+            region_id,
+            WorkerRequest::EditRegion(RegionEditRequest::new(
+                region_id,
+                test_region_edit(region_id, file_id),
+                false,
+                tx,
+            )),
+        )
+        .await
+        .unwrap();
+    crate::test_util::flush_region(&engine, other_id, None).await;
+    let staging = submit_control(
+        &engine,
+        region_id,
+        DdlRequest::EnterStaging(EnterStagingRequest {
+            partition_directive: StagingPartitionDirective::RejectAllWrites,
+        }),
+    )
+    .await;
+    let mut alter = submit_control(
+        &engine,
+        region_id,
+        DdlRequest::Alter(RegionAlterRequest {
+            kind: AlterKind::SetRegionOptions {
+                options: vec![SetRegionOption::SkipWal(false)],
+            },
+        }),
+    )
+    .await;
+    let mut later = submit_control(
+        &engine,
+        region_id,
+        DdlRequest::Flush(RegionFlushRequest::default()),
+    )
+    .await;
+    crate::test_util::flush_region(&engine, other_id, None).await;
+    let err = tokio::time::timeout(
+        Duration::from_secs(5),
+        engine.edit_region(region_id, test_region_edit(region_id, FileId::random())),
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(StatusCode::RegionBusy, err.status_code());
+    assert!(matches!(
+        later.try_recv(),
+        Err(oneshot::error::TryRecvError::Empty)
+    ));
+    assert!(matches!(
+        alter.try_recv(),
+        Err(oneshot::error::TryRecvError::Empty)
+    ));
+    drop(guard);
+    tokio::time::timeout(Duration::from_secs(5), first)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), queued)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), staging)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), later)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    // ALTER is validated after staging has begun, so it fails rather than crossing the boundary.
+    assert!(
+        tokio::time::timeout(Duration::from_secs(5), alter)
+            .await
+            .unwrap()
+            .unwrap()
+            .is_err()
+    );
+    assert!(region.is_staging());
+    // The accepted import belongs to the normal manifest, not the disposable staging one.
+    assert!(
+        region
+            .manifest_ctx
+            .manifest()
+            .await
+            .files
+            .contains_key(&file_id)
+    );
+    let err = engine
+        .edit_region(region_id, test_region_edit(region_id, FileId::random()))
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        crate::error::Error::RejectWriteInStaging { .. }
+    ));
+    engine.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn test_merged_flush_allows_region_edits() {
+    use crate::request::DdlRequest;
+    use store_api::region_request::{RegionFlushReason, RegionFlushRequest};
+    use tokio::sync::{Notify, RwLock};
+
+    #[derive(Default)]
+    struct Listener {
+        flushing: Notify,
+        gate: RwLock<()>,
+    }
+    #[async_trait::async_trait]
+    impl EventListener for Listener {
+        async fn on_flush_begin(&self, _: RegionId) {
+            self.flushing.notify_one();
+            let _guard = self.gate.read().await;
+        }
+    }
+    for repartition in [false, true] {
+        let mut env = TestEnv::new().await;
+        let listener = Arc::new(Listener::default());
+        let engine = env
+            .create_engine_with(
+                MitoConfig {
+                    num_workers: 1,
+                    schedule_compaction_after_edit: false,
+                    ..Default::default()
+                },
+                None,
+                Some(listener.clone()),
+                None,
+            )
+            .await;
+        let region_id = RegionId::new(1, 1);
+        let other_id = RegionId::new(1, 2);
+        let create = CreateRequestBuilder::new().build();
+        let schema = rows_schema(&create);
+        for id in [region_id, other_id] {
+            engine
+                .handle_request(id, RegionRequest::Create(create.clone()))
+                .await
+                .unwrap();
+        }
+        crate::test_util::put_rows(
+            &engine,
+            region_id,
+            Rows {
+                schema,
+                rows: build_rows(0, 3),
+            },
+        )
+        .await;
+        let gate = listener.gate.write().await;
+        let first = submit_control(
+            &engine,
+            region_id,
+            DdlRequest::Flush(RegionFlushRequest::default()),
+        )
+        .await;
+        tokio::time::timeout(Duration::from_secs(5), listener.flushing.notified())
+            .await
+            .unwrap();
+        let merged = submit_control(
+            &engine,
+            region_id,
+            DdlRequest::Flush(RegionFlushRequest {
+                reason: repartition.then_some(RegionFlushReason::Repartition),
+                ..Default::default()
+            }),
+        )
+        .await;
+        crate::test_util::flush_region(&engine, other_id, None).await;
+        let (tx, mut edit) = oneshot::channel();
+        engine
+            .inner
+            .workers
+            .submit_to_worker(
+                region_id,
+                WorkerRequest::EditRegion(RegionEditRequest::new(
+                    region_id,
+                    test_region_edit(region_id, FileId::random()),
+                    false,
+                    tx,
+                )),
+            )
+            .await
+            .unwrap();
+        crate::test_util::flush_region(&engine, other_id, None).await;
+        // Both ordinary and repartition flushes retain concurrency with direct edits.
+        tokio::time::timeout(Duration::from_secs(5), &mut edit)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        drop(gate);
+        for flush in [first, merged] {
+            tokio::time::timeout(Duration::from_secs(5), flush)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+        }
+        engine.stop().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn test_deferred_flush_queue_is_bounded_and_drains_after_role_change() {
+    use crate::request::DdlRequest;
+    use store_api::region_request::{RegionFlushReason, RegionFlushRequest};
+
+    let mut env = TestEnv::new().await;
+    let engine = env
+        .create_engine(MitoConfig {
+            num_workers: 1,
+            schedule_compaction_after_edit: false,
+            ..Default::default()
+        })
+        .await;
+    let region_id = RegionId::new(1, 1);
+    let other_id = RegionId::new(1, 2);
+    for id in [region_id, other_id] {
+        engine
+            .handle_request(
+                id,
+                RegionRequest::Create(CreateRequestBuilder::new().build()),
+            )
+            .await
+            .unwrap();
+    }
+    let region = engine.get_region(region_id).unwrap();
+    let guard = region.manifest_ctx.manifest_manager.write().await;
+    let e = engine.clone();
+    let edit = tokio::spawn(async move {
+        e.edit_region(region_id, test_region_edit(region_id, FileId::random()))
+            .await
+    });
+    wait_until_region_is_in_editing(&region).await;
+    let mut replies = Vec::new();
+    for _ in 0..crate::worker::MAX_PENDING_DDLS_PER_REGION + 1 {
+        replies.push(
+            submit_control(
+                &engine,
+                region_id,
+                DdlRequest::Flush(RegionFlushRequest {
+                    reason: Some(RegionFlushReason::Repartition),
+                    ..Default::default()
+                }),
+            )
+            .await,
+        );
+    }
+    crate::test_util::flush_region(&engine, other_id, None).await;
+    let overflow = replies.pop().unwrap().await.unwrap().unwrap_err();
+    assert_eq!(StatusCode::RegionBusy, overflow.status_code());
+    for reply in &mut replies {
+        assert!(matches!(
+            reply.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        ));
+    }
+    engine
+        .set_region_role(region_id, RegionRole::Follower)
+        .unwrap();
+    drop(guard);
+    assert!(
+        tokio::time::timeout(Duration::from_secs(5), edit)
+            .await
+            .unwrap()
+            .unwrap()
+            .is_err()
+    );
+    for reply in replies {
+        assert!(
+            tokio::time::timeout(Duration::from_secs(5), reply)
+                .await
+                .unwrap()
+                .unwrap()
+                .is_err()
+        );
+    }
+    assert_eq!(RegionRoleState::Follower, region.state());
+    engine.stop().await.unwrap();
 }

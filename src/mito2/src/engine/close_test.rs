@@ -277,3 +277,129 @@ async fn test_engine_close_region_flush_on_close_while_flushing() {
     let batches = RecordBatches::try_collect(stream).await.unwrap();
     assert_eq!(6, batches.iter().map(|b| b.num_rows()).sum::<usize>());
 }
+
+#[tokio::test]
+async fn test_repeated_close_during_edit_preserves_skip_wal_rows() {
+    use crate::manifest::action::RegionEdit;
+    use crate::region::{RegionLeaderState, RegionRoleState};
+    use crate::request::{DdlRequest, SenderDdlRequest, WorkerRequest};
+    use store_api::region_request::RegionPutRequest;
+
+    let mut env = TestEnv::new().await;
+    let engine = env
+        .create_engine(MitoConfig {
+            num_workers: 1,
+            schedule_compaction_after_edit: false,
+            ..Default::default()
+        })
+        .await;
+    let region_id = RegionId::new(1, 1);
+    let other_id = RegionId::new(1, 2);
+    let create = CreateRequestBuilder::new().build();
+    let schema = rows_schema(&create);
+    for id in [region_id, other_id] {
+        engine
+            .handle_request(id, RegionRequest::Create(create.clone()))
+            .await
+            .unwrap();
+    }
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::Put(RegionPutRequest {
+                rows: Rows {
+                    schema,
+                    rows: build_rows(0, 3),
+                },
+                hint: None,
+                partition_expr_version: None,
+                skip_wal: true,
+            }),
+        )
+        .await
+        .unwrap();
+    let region = engine.get_region(region_id).unwrap();
+    let guard = region.manifest_ctx.manifest_manager.write().await;
+    // A removal of a nonexistent file exercises manifest serialization without fake SSTs.
+    let e = engine.clone();
+    let edit = tokio::spawn(async move {
+        e.edit_region(
+            region_id,
+            RegionEdit {
+                files_to_remove: vec![crate::sst::file::FileMeta {
+                    region_id,
+                    file_id: store_api::storage::FileId::random(),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+        )
+        .await
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while region.state() != RegionRoleState::Leader(RegionLeaderState::Editing) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    let mut closes = Vec::new();
+    for _ in 0..2 {
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        engine
+            .inner
+            .workers
+            .submit_to_worker(
+                region_id,
+                WorkerRequest::Ddl(SenderDdlRequest {
+                    region_id,
+                    sender: sender.into(),
+                    request: DdlRequest::Close(RegionCloseRequest::default()),
+                }),
+            )
+            .await
+            .unwrap();
+        closes.push(receiver);
+    }
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        flush_region(&engine, other_id, None),
+    )
+    .await
+    .unwrap();
+    for close in &mut closes {
+        assert!(matches!(
+            close.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+        ));
+    }
+    drop(guard);
+    tokio::time::timeout(std::time::Duration::from_secs(5), edit)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    for close in closes {
+        assert_eq!(
+            0,
+            tokio::time::timeout(std::time::Duration::from_secs(5), close)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap()
+        );
+    }
+    assert!(!engine.is_region_exists(region_id));
+    crate::test_util::reopen_region(&engine, region_id, create.table_dir, true, create.options)
+        .await;
+    let stream = engine
+        .scan_to_stream(region_id, ScanRequest::default())
+        .await
+        .unwrap();
+    let batches = RecordBatches::try_collect(stream).await.unwrap();
+    assert_eq!(
+        3,
+        batches.iter().map(|batch| batch.num_rows()).sum::<usize>()
+    );
+    engine.stop().await.unwrap();
+}

@@ -1128,7 +1128,10 @@ async fn test_reload_ignores_edit_of_replaced_instance() {
     plugins.insert::<RegionHookRef>(hook.clone());
     let engine = env
         .create_engine_with_log_store_and_plugins(
-            MitoConfig::default(),
+            MitoConfig {
+                num_workers: 1,
+                ..Default::default()
+            },
             new_log_store().await,
             plugins,
         )
@@ -1153,6 +1156,8 @@ async fn test_reload_ignores_edit_of_replaced_instance() {
     };
     let added = file(FileId::random());
 
+    let barrier_region_id = RegionId::new(1, 2);
+    create_leased_region_on(&engine, barrier_region_id).await;
     hook.armed.store(true, Ordering::Relaxed);
     let committed = {
         let engine = engine.clone();
@@ -1169,9 +1174,8 @@ async fn test_reload_ignores_edit_of_replaced_instance() {
         .submit_to_worker(region_id, request)
         .await
         .unwrap();
-    // The worker queues the edit before it handles the flush request sent after it.
-    let flush = RegionRequest::Flush(RegionFlushRequest::default());
-    engine.handle_request(region_id, flush).await.unwrap_err();
+    // An empty flush on the same worker acknowledges receipt without waiting for this edit.
+    flush_region(&engine, barrier_region_id, None).await;
     let region_dir = region_dir_from_table_dir(&table_dir, region_id, PathType::Bare);
     let version = next_manifest_version(&old).await;
     let removal = RegionMetaActionList::with_action(RegionMetaAction::Edit(edit_files(
@@ -1347,10 +1351,27 @@ async fn test_end_of_staging_conflict_reloads_region() {
         .handle_request(region_id, enter_staging_request())
         .await
         .unwrap();
+    let partition_expr = old
+        .manifest_ctx
+        .staging_partition_info()
+        .unwrap()
+        .partition_expr()
+        .unwrap()
+        .to_string();
+    let (sender, receiver) = oneshot::channel();
     engine
-        .edit_region(region_id, edit_files(vec![file], vec![]))
+        .inner
+        .workers
+        .submit_to_worker(
+            region_id,
+            WorkerRequest::EditRegion(
+                RegionEditRequest::new(region_id, edit_files(vec![file], vec![]), false, sender)
+                    .for_staging(partition_expr),
+            ),
+        )
         .await
         .unwrap();
+    receiver.await.unwrap().unwrap();
     let region_dir = region_dir_from_table_dir(&table_dir, region_id, PathType::Bare);
     let version = next_manifest_version(&old).await;
     let store = env.get_object_store().unwrap();
