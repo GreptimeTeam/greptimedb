@@ -113,6 +113,7 @@ pub async fn inner_auth<B>(
         {
             Ok(userinfo) => {
                 query_ctx.set_current_user(userinfo);
+                req.extensions_mut().insert(user_provider);
                 let _ = req.extensions_mut().insert(query_ctx);
                 return Ok(req);
             }
@@ -163,6 +164,7 @@ pub async fn inner_auth<B>(
     {
         Ok(userinfo) => {
             query_ctx.set_current_user(userinfo);
+            req.extensions_mut().insert(user_provider);
             let _ = req.extensions_mut().insert(query_ctx);
             Ok(req)
         }
