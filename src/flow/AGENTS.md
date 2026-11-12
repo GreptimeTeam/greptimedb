@@ -76,9 +76,18 @@ plan-to-schema helper shared with batching.
 - `adapter.rs` still owns `AUTO_CREATED_PLACEHOLDER_TS_COL` /
   `AUTO_CREATED_UPDATE_AT_TS_COL` and `output_column_schemas`; batching imports
   them. Do not move or delete them without updating `batching_mode`.
+- `FlowConfig` no longer has `num_workers`: flow workers are gone. Old TOMLs that
+  still set `flow.num_workers` keep parsing because serde ignores unknown fields
+  (covered by a test in `adapter/tests.rs`). Do not re-add the field.
 - Recovery collects per-flow errors and logs them
   (`adapter/flownode_impl.rs`): one rejected (old streaming) flow must not stop
   the other flows from recovering.
 - `flow_type` is still written into flow options so the metadata shape does not
   change; it is a reserved internal key and must stay out of `SHOW CREATE FLOW`
-  rendering.
+  rendering. Writing it is a deliberate keep, not an oversight: dropping it would
+  change the persisted metadata and the `options` column users can query, for no
+  runtime benefit. Options that already say `streaming` must stay readable: that
+  is what keeps such legacy metadata listable and droppable, and a test in
+  `common-meta`'s `key/flow.rs` covers it. Independently,
+  `get_flow_type_from_options` must keep recognizing `streaming` so the persisted
+  options and in-flight data of an old create procedure still deserialize.
