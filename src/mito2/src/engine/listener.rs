@@ -726,3 +726,30 @@ impl EventListener for WriteWalListener {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_flush_failed_listener_counts_failures() {
+        let listener = FlushFailedListener::default();
+        let region_id = RegionId::new(1024, 0);
+        let mut wait = Box::pin(listener.wait_failure_count(2));
+        assert!(futures::poll!(&mut wait).is_pending());
+        listener.on_flush_failed(region_id);
+        assert!(futures::poll!(&mut wait).is_pending());
+        listener.on_flush_failed(region_id);
+        tokio::time::timeout(Duration::from_secs(3), wait)
+            .await
+            .unwrap();
+        assert_eq!(2, listener.failure_count());
+
+        // Thresholds already reached complete without another failure.
+        for times in [1, 2] {
+            tokio::time::timeout(Duration::from_secs(3), listener.wait_failure_count(times))
+                .await
+                .unwrap();
+        }
+    }
+}
