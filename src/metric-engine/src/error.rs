@@ -255,6 +255,18 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display(
+        "Column {} is missing from physical region {} after adding columns",
+        name,
+        region_id
+    ))]
+    MissingPhysicalColumn {
+        name: String,
+        region_id: RegionId,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Table id count mismatch. Expect {}, got {}", expected, actual))]
     TableIdCountMismatch {
         expected: usize,
@@ -450,6 +462,10 @@ impl ErrorExt for Error {
             }
 
             ColumnNotFound { .. } => StatusCode::TableColumnNotFound,
+
+            // The physical region was read twice around the alter and lost a column in
+            // between, so the failure is an inconsistent server state, not a bad request.
+            MissingPhysicalColumn { .. } => StatusCode::Unexpected,
 
             CreateMitoRegion { source, .. }
             | OpenMitoRegion { source, .. }
