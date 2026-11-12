@@ -1241,17 +1241,22 @@ async fn test_using_join_executes_with_dist_join_opt_in() {
         run_sql(&frontend, sql, query_ctx()).await;
     }
 
-    let sql = "SELECT l.k, l.v, r.w FROM using_left l INNER JOIN using_right r USING (k) ORDER BY l.k";
+    let sql =
+        "SELECT l.k, l.v, r.w FROM using_left l INNER JOIN using_right r USING (k) ORDER BY l.k";
     let without = query_pretty(&frontend, sql, query_ctx()).await;
     let with = query_pretty(&frontend, sql, {
         let mut ctx = QueryContext::with_db_name(None);
         ctx.set_extension(QUERY_PARALLELISM_HINT, "1");
-        ctx.configuration_parameter().set_experimental_dist_join(true);
+        ctx.configuration_parameter()
+            .set_experimental_dist_join(true);
         Arc::new(ctx)
     })
     .await;
 
-    assert_eq!(without, with, "USING join output must not depend on the opt-in");
+    assert_eq!(
+        without, with,
+        "USING join output must not depend on the opt-in"
+    );
 }
 
 async fn prepare_tables(frontend: &Arc<Instance>) {
