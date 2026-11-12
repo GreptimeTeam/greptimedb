@@ -55,7 +55,8 @@ use log_store::test_util::log_store_util;
 use moka::future::CacheBuilder;
 use object_store::ObjectStore;
 use object_store::layers::mock::{
-    Buffer, Deleter, Metadata, MockLayer, MockLayerBuilder, OpDelete, Result as MockResult, Writer,
+    Buffer, Deleter, Error as MockError, ErrorKind, Metadata, MockLayer, MockLayerBuilder,
+    OpDelete, Result as MockResult, Writer,
 };
 use object_store::manager::{ObjectStoreManager, ObjectStoreManagerRef};
 use object_store::services::{Fs, Memory};
@@ -249,6 +250,84 @@ impl object_store::layers::mock::Write for BlockingManifestWriter {
 
     async fn abort(&mut self) -> MockResult<()> {
         self.inner.abort().await
+    }
+}
+
+/// Injects faults into the next manifest delta write of a mock object store.
+#[derive(Clone, Default)]
+pub(crate) struct DeltaFaults {
+    /// Whether the next delta write lands but reports an error, like a lost response.
+    lose_response: Arc<AtomicBool>,
+    /// Whether the next delta write fails without landing.
+    fail_write: Arc<AtomicBool>,
+}
+
+impl DeltaFaults {
+    pub(crate) fn lose_next_response(&self) {
+        self.lose_response.store(true, Ordering::Relaxed);
+    }
+
+    pub(crate) fn fail_next_write(&self) {
+        self.fail_write.store(true, Ordering::Relaxed);
+    }
+
+    pub(crate) fn layer(&self) -> MockLayer {
+        let faults = self.clone();
+        MockLayerBuilder::default()
+            .writer_factory(Arc::new(move |path, _args, inner| {
+                if !is_delta_file(path.rsplit('/').next().unwrap_or_default()) {
+                    inner
+                } else if faults.fail_write.swap(false, Ordering::Relaxed) {
+                    Box::new(FailedWriter)
+                } else {
+                    Box::new(LostResponseWriter {
+                        inner,
+                        faults: faults.clone(),
+                    })
+                }
+            }))
+            .build()
+            .unwrap()
+    }
+}
+
+struct LostResponseWriter {
+    inner: Writer,
+    faults: DeltaFaults,
+}
+
+impl object_store::layers::mock::Write for LostResponseWriter {
+    async fn write(&mut self, bs: Buffer) -> MockResult<()> {
+        self.inner.write(bs).await
+    }
+
+    async fn close(&mut self) -> MockResult<Metadata> {
+        let metadata = self.inner.close().await?;
+        if self.faults.lose_response.swap(false, Ordering::Relaxed) {
+            return Err(MockError::new(ErrorKind::Unexpected, "mock lost response"));
+        }
+        Ok(metadata)
+    }
+
+    async fn abort(&mut self) -> MockResult<()> {
+        self.inner.abort().await
+    }
+}
+
+/// A write that fails without touching the store.
+struct FailedWriter;
+
+impl object_store::layers::mock::Write for FailedWriter {
+    async fn write(&mut self, _: Buffer) -> MockResult<()> {
+        Err(MockError::new(ErrorKind::Unexpected, "mock failed write"))
+    }
+
+    async fn close(&mut self) -> MockResult<Metadata> {
+        Err(MockError::new(ErrorKind::Unexpected, "mock failed write"))
+    }
+
+    async fn abort(&mut self) -> MockResult<()> {
+        Ok(())
     }
 }
 
