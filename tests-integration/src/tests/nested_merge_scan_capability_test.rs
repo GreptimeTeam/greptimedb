@@ -1223,6 +1223,37 @@ async fn run_nested_queries(
 }
 
 /// Creates the probe and build tables of the tests and inserts the rows.
+/// `JOIN ... USING` stays executable with `experimental_dist_join = true`: the rewrite
+/// rejects the constraint because the pinned Substrait producer cannot encode
+/// `JoinConstraint::Using`.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_using_join_executes_with_dist_join_opt_in() {
+    common_telemetry::init_default_ut_logging();
+    let cluster = build_cluster("test_using_join_executes_with_dist_join_opt_in").await;
+    let frontend = cluster.fe_instance().clone();
+
+    for sql in [
+        "CREATE TABLE IF NOT EXISTS using_left (k INT, v INT, ts TIMESTAMP TIME INDEX)",
+        "CREATE TABLE IF NOT EXISTS using_right (k INT, w INT, ts TIMESTAMP TIME INDEX)",
+        "INSERT INTO using_left VALUES (1, 10, 0), (2, 20, 1)",
+        "INSERT INTO using_right VALUES (1, 100, 0), (3, 300, 1)",
+    ] {
+        run_sql(&frontend, sql, query_ctx()).await;
+    }
+
+    let sql = "SELECT l.k, l.v, r.w FROM using_left l INNER JOIN using_right r USING (k) ORDER BY l.k";
+    let without = query_pretty(&frontend, sql, query_ctx()).await;
+    let with = query_pretty(&frontend, sql, {
+        let mut ctx = QueryContext::with_db_name(None);
+        ctx.set_extension(QUERY_PARALLELISM_HINT, "1");
+        ctx.configuration_parameter().set_experimental_dist_join(true);
+        Arc::new(ctx)
+    })
+    .await;
+
+    assert_eq!(without, with, "USING join output must not depend on the opt-in");
+}
+
 async fn prepare_tables(frontend: &Arc<Instance>) {
     execute_sql(
         frontend,
