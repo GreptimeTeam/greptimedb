@@ -23,7 +23,7 @@ use datatypes::schema::{ColumnDefaultConstraint, ColumnSchema};
 use rstest::rstest;
 use store_api::logstore::provider::RaftEngineProvider;
 use store_api::metadata::ColumnMetadata;
-use store_api::region_engine::{RegionEngine, SettableRegionRoleState};
+use store_api::region_engine::{RegionEngine, SetRegionRoleStateResponse, SettableRegionRoleState};
 use store_api::region_request::{
     AddColumn, AlterKind, EnterStagingRequest, RegionAlterRequest, RegionCloseRequest,
     RegionCompactRequest, RegionCreateRequest, RegionDropRequest, RegionFlushReason,
@@ -396,10 +396,14 @@ async fn test_enter_staging_rejects_region_with_pending_tails() {
         .unwrap_err();
 
     assert_pending_tails_error(&err);
-    engine
+    let response = engine
         .set_region_role_state_gracefully(region_id, SettableRegionRoleState::StagingLeader)
         .await
         .unwrap();
+    let SetRegionRoleStateResponse::InvalidTransition(err) = response else {
+        panic!("{response:?}");
+    };
+    assert_pending_tails_error(&err);
     let region = engine.get_region(region_id).unwrap();
     assert!(!region.is_staging());
     assert_eq!(1, region.version().memtables.num_rows());

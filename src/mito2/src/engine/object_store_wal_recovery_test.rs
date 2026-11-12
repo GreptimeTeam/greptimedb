@@ -2192,14 +2192,16 @@ async fn test_wal_pressure_flushes_blockers_across_workers(#[case] state: Region
     store.stop().await.unwrap();
 }
 
-/// A flush cannot move the WAL release of a region past one of this node's pending tails,
-/// so pressure leaves such a region alone, but flushes a region whose tails are another node's.
+/// Pressure leaves alone a region whose own pending tail starts at or below its flushed entry id,
+/// since a flush cannot move its WAL release past that tail, and flushes any other region.
 #[rstest]
-#[case::own_tail(0, false)]
-#[case::other_node_tail(1, true)]
+#[case::own_tail(0, 0, false)]
+#[case::own_tail_ahead(0, 1, true)]
+#[case::other_node_tail(1, 0, true)]
 #[tokio::test]
 async fn test_wal_pressure_skips_regions_capped_by_own_tails(
     #[case] node_id: u64,
+    #[case] after: u64,
     #[case] flushed: bool,
 ) {
     use crate::time_provider::mock::MockTimeProvider;
@@ -2230,7 +2232,7 @@ async fn test_wal_pressure_skips_regions_capped_by_own_tails(
     assert_eq!(vec![REGION_A], store.flush_candidates());
     let tail = PendingTail {
         node_id,
-        after: 0,
+        after,
         upto: latest(&store, REGION_A),
         upto_kind: UptoKind::Reported,
     };

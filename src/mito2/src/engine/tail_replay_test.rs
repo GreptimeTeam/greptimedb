@@ -477,6 +477,32 @@ async fn test_reported_tail_must_reach_its_upto() {
     assert!(region.has_pending_tails());
 }
 
+#[tokio::test]
+async fn test_remote_tail_fails_on_log_store_reading_no_other_node() {
+    let mut env = TestEnv::with_prefix("tail-replay-raft-engine")
+        .await
+        .with_node_id(NODE_ID);
+    let listener = Arc::new(TailReplayListener::default());
+    let engine = env
+        .create_engine_with(MitoConfig::default(), None, Some(listener.clone()), None)
+        .await;
+    let region_id = RegionId::new(1, 1);
+    let request = RegionRequest::Create(CreateRequestBuilder::new().build());
+    engine.handle_request(region_id, request).await.unwrap();
+    let tails = vec![remote_tail(0, 1, UptoKind::Listed)];
+    set_pending_tails(&engine, region_id, tails.clone()).await;
+
+    // The Raft engine log store cannot read another node's WAL.
+    let notify = BackgroundNotify::RegionWritable;
+    let request = WorkerRequest::Background { region_id, notify };
+    let workers = &engine.inner.workers;
+    workers.submit_to_worker(region_id, request).await.unwrap();
+    wait_until(|| listener.failed_with(StatusCode::Unsupported)).await;
+
+    let region = engine.get_region(region_id).unwrap();
+    assert_eq!(tails, region.version().pending_tails);
+}
+
 #[rstest]
 #[case::reported(UptoKind::Reported)]
 #[case::listed(UptoKind::Listed)]
