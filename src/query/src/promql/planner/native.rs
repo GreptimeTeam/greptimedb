@@ -20,9 +20,11 @@
 //! folds across series - an aggregate - is split instead: its per-series prefix and a `Partial`
 //! aggregate run in a `FusedSeries` producer, a `SeriesRepartitionExec` routes that state, and a
 //! second `FusedSeries` runs the `Final` aggregate over it, because a region holds only part of a
-//! group. Declining is the normal answer: every shape the
-//! compiler does not accept, and every query this route cannot bind to a scan faithfully, keeps the
-//! plan the existing planner builds.
+//! group. The planner cuts one state hop, so the merge finalizes the producer's state; a second
+//! hop - a `PartialReduce` folding state into state - stays part of the split's own API but is not
+//! planned here. Declining is the normal answer:
+//! every shape the compiler does not accept, and every query this route cannot bind to a scan
+//! faithfully, keeps the plan the existing planner builds.
 //!
 //! What the node needs from here is the raw series schema the tree's input was compiled against
 //! (the selector's selected field columns), the statement's evaluation grid, and output tag names
@@ -58,7 +60,8 @@ use datatypes::series::time::EvalGrid;
 use futures::future::BoxFuture;
 use promql::extension_plan::{
     FieldKind, FusedOutputFormat, FusedSeries, FusedSeriesBinding, FusedSeriesExec, InputLocality,
-    RawSeriesSource, input_locality, matching_operands_drop_key, tree_source_fields,
+    RawSeriesSource, SplitDepth, SplitTrees, input_locality, matching_operands_drop_key,
+    tree_source_fields,
 };
 use promql::native::execute::NativeExecutionState;
 use promql::native::plan::{
@@ -1590,12 +1593,23 @@ impl PromPlanner {
             // without this route. Its producer reads whatever input the statement prepared: over
             // the wire that is the raw series source, and the partial/final halves stay on the
             // frontend above the regions, so per-series work keeps the scan width.
+            // The split this route plans keeps one state hop: the producer exports the state each
+            // partition folded and the merge above them finalizes it. `SplitDepth::Two` stays the
+            // caller's choice - the reducer, the state routers and the suffix that finalizes through
+            // them are all built from the canonical tree this route splits - but nothing is folded
+            // twice behind the caller's back.
             let split = if selectors.len() == 1 {
-                FusedSeries::split_aggregate(&tree, &time).context(DataFusionPlanningSnafu)?
+                FusedSeries::split_aggregate(&tree, &time, SplitDepth::One)
+                    .context(DataFusionPlanningSnafu)?
             } else {
                 None
             };
-            if let Some((partial, final_tree)) = split {
+            if let Some(SplitTrees {
+                partial,
+                reduce,
+                final_tree,
+            }) = split
+            {
                 // The split's output is the suffix's, and the state it exports is float: the gate
                 // above already declines a histogram entering an aggregate, and this declines a
                 // histogram answer whose aggregate sits elsewhere, because the merge folds float
@@ -1625,6 +1639,7 @@ impl PromPlanner {
                 let node = plan_split_aggregate(
                     Arc::from(prom_expr.to_string()),
                     partial,
+                    reduce,
                     final_tree,
                     FusedSeriesBinding {
                         grid: publish_grid,
@@ -3074,14 +3089,16 @@ fn fused_output_schema(
     ))
 }
 
-/// Builds the two nodes a split native aggregate runs in.
+/// Builds the nodes a split native aggregate runs in.
 ///
 /// The first is a [`FusedSeries`] over `rawinput` running the per-series prefix and a `Partial`
-/// aggregate at its root, so each partition exports the state it folded. The second is a
-/// [`FusedSeries`] over the first running the `Final` aggregate and everything the split moved
-/// above it: it reads state where the first reads series, and answers the statement's rows. Between
-/// them the physical planner puts a `SeriesRepartitionExec`, which is what makes every row of a
-/// group reach one final partition.
+/// aggregate at its root, so each partition exports the state it folded. When the split runs at
+/// depth two, a second state-exporting [`FusedSeries`] runs the `PartialReduce` the split built, and
+/// it reads that state rather than series. The last is a [`FusedSeries`] over the one before it
+/// running the `Final` aggregate and everything the split moved above it: it answers the statement's
+/// rows. Between each pair the physical planner puts a [`SeriesRepartitionExec`], which is what makes
+/// every row of a group reach one owner; every state hop keeps the same group binding, so the merge's
+/// owners are the ones the reducer folded for.
 ///
 /// `format` is the representation the caller needs from the second node: the statement's row table,
 /// or the evaluated series frame another native node reads as an operand. The producer is
@@ -3094,6 +3111,7 @@ fn fused_output_schema(
 fn plan_split_aggregate(
     promql: Arc<str>,
     partial: NativeTree,
+    reduce: Option<NativeTree>,
     final_tree: NativeTree,
     binding: FusedSeriesBinding,
     rawinput: LogicalPlan,
@@ -3138,6 +3156,23 @@ fn plan_split_aggregate(
         vec![rawinput],
     )
     .context(DataFusionPlanningSnafu)?;
+    let mut input = LogicalPlan::Extension(Extension {
+        node: Arc::new(partial),
+    });
+    // The optional second state hop: the reducer folds the producer's state into state, so the
+    // merge above it reads the reducer's output instead of the producer's.
+    if let Some(reduce) = reduce {
+        let reduce = FusedSeries::try_new_state_export(
+            Arc::clone(&promql),
+            reduce,
+            binding.clone(),
+            vec![input],
+        )
+        .context(DataFusionPlanningSnafu)?;
+        input = LogicalPlan::Extension(Extension {
+            node: Arc::new(reduce),
+        });
+    }
     let output_schema = match format {
         FusedOutputFormat::PlainRows => value_schema,
         // The final node's output is the frame its own evaluated root declares, so it is derived
@@ -3152,9 +3187,7 @@ fn plan_split_aggregate(
         promql,
         final_tree,
         binding,
-        vec![LogicalPlan::Extension(Extension {
-            node: Arc::new(partial),
-        })],
+        vec![input],
         output_schema,
         format,
     )

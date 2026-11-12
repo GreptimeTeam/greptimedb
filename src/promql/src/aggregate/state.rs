@@ -112,86 +112,106 @@ impl FloatAggregator {
     }
 
     /// [`Self::finish_partial`] that admits what it builds first: the fold state and the groups it
-    /// is exported as, at the exact capacity [`Self::finish_partial_inner`] gives them. A refusal
-    /// consumes the aggregator, so the caller drops the execution.
+    /// is exported as, at the exact capacity [`export_partial`] gives them. A refusal consumes the
+    /// aggregator, so the caller drops the execution.
     pub(crate) fn finish_partial_budgeted(
         self,
         mut budget: impl FnMut(usize) -> Result<()>,
     ) -> Result<PartialAggregate> {
-        let width = self.schema.fields.len();
-        let mut partial_bytes = self.groups.len().saturating_mul(size_of::<StateSeries>());
-        for group in &self.groups {
-            let points = seen_points(group, width);
-            partial_bytes = partial_bytes
-                .saturating_add(size_of::<TimeAxis>())
-                .saturating_add(
-                    points.saturating_mul(size_of::<GridSpan>().saturating_add(size_of::<usize>())),
-                )
-                .saturating_add(
-                    width.saturating_mul(size_of::<Vec<Option<AggregateStateValues>>>()),
-                )
-                .saturating_add(
-                    points
-                        .saturating_mul(width)
-                        .saturating_mul(size_of::<Option<AggregateStateValues>>()),
-                );
-        }
+        let partial_bytes = export_bytes(&self.schema, &self.groups);
         budget(self.state_bytes().saturating_add(partial_bytes))?;
-        self.finish_partial_inner()
+        export_partial(Arc::clone(&self.schema), self.op, self.groups)
     }
 
     /// Turns the fold into the frame's own groups: field-major states on sparse absolute positions.
-    ///
-    /// The blocks are walked once, in ascending position order, so a position's states are appended
-    /// to every field at the same time and adjacent positions coalesce into one span as they come.
-    /// What comes out is the representation the frame writes; no per-point vector is built.
     fn finish_partial_inner(self) -> Result<PartialAggregate> {
-        let width = self.schema.fields.len();
-        let grid = self.schema.eval_grid.as_ref().ok_or_else(|| {
-            DataFusionError::Execution("aggregate state is indexed on an evaluated grid".into())
-        })?;
-        let grid_len = grid.spec().len as usize;
-        let mut groups: Vec<StateSeries> = Vec::with_capacity(self.groups.len());
-        for group in self.groups {
-            let points = seen_points(&group, width);
-            let mut spans: Vec<GridSpan> = Vec::with_capacity(points.min(1));
-            let mut states: Vec<Vec<Option<AggregateStateValues>>> =
-                (0..width).map(|_| Vec::with_capacity(points)).collect();
-            for (&block, block_states) in &group.blocks {
-                for (offset, point) in block_states.chunks_exact(width).enumerate() {
-                    if !point.iter().any(|state| state.seen) {
-                        continue;
+        export_partial(self.schema, self.op, self.groups)
+    }
+}
+
+/// Bytes the export of `groups` builds beside the fold it is exported from.
+///
+/// The export is a second representation that exists while the fold it came from is still alive:
+/// one [`StateSeries`] per group, one axis, and one vector per field at the point count the group
+/// carries. Reserving it on top of what the fold holds is what keeps the two from being counted as
+/// one.
+fn export_bytes(schema: &SeriesSchema, groups: &[Group]) -> usize {
+    let width = schema.fields.len();
+    let mut partial_bytes = groups.len().saturating_mul(size_of::<StateSeries>());
+    for group in groups {
+        let points = seen_points(group, width);
+        partial_bytes = partial_bytes
+            .saturating_add(size_of::<TimeAxis>())
+            .saturating_add(
+                points.saturating_mul(size_of::<GridSpan>().saturating_add(size_of::<usize>())),
+            )
+            .saturating_add(width.saturating_mul(size_of::<Vec<Option<AggregateStateValues>>>()))
+            .saturating_add(
+                points
+                    .saturating_mul(width)
+                    .saturating_mul(size_of::<Option<AggregateStateValues>>()),
+            );
+    }
+    partial_bytes
+}
+
+/// Exports folded groups as the frame's own groups: field-major states on sparse absolute positions.
+///
+/// The blocks are walked once, in ascending position order, so a position's states are appended to
+/// every field at the same time and adjacent positions coalesce into one span as they come. What
+/// comes out is the representation the frame writes; no per-point vector is built, and a position no
+/// field contributed to is a hole rather than a state of zeroes.
+///
+/// Both an aggregate that folds values and one that folds state export through here, so a reducer's
+/// output is the same shape as a producer's: that is what lets a reduce hand its state to the next
+/// hop without a transposition of its own.
+fn export_partial(
+    schema: Arc<SeriesSchema>,
+    op: AggregateOp,
+    fold: Vec<Group>,
+) -> Result<PartialAggregate> {
+    let width = schema.fields.len();
+    let grid = schema.eval_grid.as_ref().ok_or_else(|| {
+        DataFusionError::Execution("aggregate state is indexed on an evaluated grid".into())
+    })?;
+    let grid_len = grid.spec().len as usize;
+    let mut groups: Vec<StateSeries> = Vec::with_capacity(fold.len());
+    for group in fold {
+        let points = seen_points(&group, width);
+        let mut spans: Vec<GridSpan> = Vec::with_capacity(points.min(1));
+        let mut states: Vec<Vec<Option<AggregateStateValues>>> =
+            (0..width).map(|_| Vec::with_capacity(points)).collect();
+        for (&block, block_states) in &group.blocks {
+            for (offset, point) in block_states.chunks_exact(width).enumerate() {
+                if !point.iter().any(|state| state.seen) {
+                    continue;
+                }
+                let position = block * BLOCK_POINTS + offset;
+                if position >= grid_len {
+                    return Err(DataFusionError::Execution(format!(
+                        "aggregate state point {position} exceeds a grid of {grid_len}"
+                    )));
+                }
+                match spans.last_mut() {
+                    Some(span) if span.start() + span.len() == position => {
+                        *span = GridSpan::new(span.start(), span.len() + 1);
                     }
-                    let position = block * BLOCK_POINTS + offset;
-                    if position >= grid_len {
-                        return Err(DataFusionError::Execution(format!(
-                            "aggregate state point {position} exceeds a grid of {grid_len}"
-                        )));
-                    }
-                    match spans.last_mut() {
-                        Some(span) if span.start() + span.len() == position => {
-                            *span = GridSpan::new(span.start(), span.len() + 1);
-                        }
-                        _ => spans.push(GridSpan::new(position, 1)),
-                    }
-                    for (field, state) in point.iter().enumerate() {
-                        states[field].push(state.partial());
-                    }
+                    _ => spans.push(GridSpan::new(position, 1)),
+                }
+                for (field, state) in point.iter().enumerate() {
+                    states[field].push(state.partial());
                 }
             }
-            let time = TimeAxis::from_grid_spans(Arc::clone(grid), spans)
-                .map_err(|error| DataFusionError::Execution(error.to_string()))?;
-            groups.push(StateSeries {
-                metric: group.metric,
-                time,
-                states,
-            });
         }
-        Ok(PartialAggregate {
-            op: self.op,
-            groups,
-        })
+        let time = TimeAxis::from_grid_spans(Arc::clone(grid), spans)
+            .map_err(|error| DataFusionError::Execution(error.to_string()))?;
+        groups.push(StateSeries {
+            metric: group.metric,
+            time,
+            states,
+        });
     }
+    Ok(PartialAggregate { op, groups })
 }
 
 /// The points of `group` that carry a state: the ones a partial of it holds.
@@ -603,6 +623,31 @@ impl FloatMerger {
         budget: impl FnMut(usize) -> Result<()>,
     ) -> Result<Vec<Series>> {
         finish_groups_budgeted(self.schema, self.op, self.groups, self.retained, budget)
+    }
+
+    /// The merged state, exported as the frame's own groups, without finishing it.
+    ///
+    /// This is what a reduce hands on: the states it merged stay states, so the values a
+    /// [`crate::aggregate::AggregateOp`] would divide, take the root of or report are left in their
+    /// accumulator form for the `Final` above to finish. The kernel adds nothing a producer would
+    /// not write -- the same groups, components and holes -- so exporting here is the same
+    /// representation a `Partial` produces.
+    ///
+    /// [`Self::finish_partial_budgeted`] admits the export beside the fold it came from: both are
+    /// live while it runs, and the fold is dropped once the groups are built. A refusal consumes the
+    /// merge, so a caller that budgets drops the execution.
+    pub(crate) fn finish_partial_budgeted(
+        self,
+        mut budget: impl FnMut(usize) -> Result<()>,
+    ) -> Result<PartialAggregate> {
+        let partial_bytes = export_bytes(&self.schema, &self.groups);
+        budget(self.retained.saturating_add(partial_bytes))?;
+        export_partial(self.schema, self.op, self.groups)
+    }
+
+    /// The number of groups the merge holds, which is the number of series it will export.
+    pub(crate) fn groups(&self) -> usize {
+        self.groups.len()
     }
 }
 

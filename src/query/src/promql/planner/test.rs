@@ -2608,7 +2608,13 @@ fn fused_trees(plan: &LogicalPlan) -> Vec<String> {
 }
 
 async fn build_native_fused_plan(query: &str, native_fused: bool) -> LogicalPlan {
-    let table_provider = build_test_table_provider_with_options(
+    let table_provider = native_test_table_provider().await;
+    build_native_fused_plan_with_provider(query, native_fused, table_provider).await
+}
+
+/// The one-table provider every native planner test plans against.
+async fn native_test_table_provider() -> DfTableSourceProvider {
+    build_test_table_provider_with_options(
         &[(DEFAULT_SCHEMA_NAME.to_string(), "some_metric".to_string())],
         1,
         1,
@@ -2618,8 +2624,7 @@ async fn build_native_fused_plan(query: &str, native_fused: bool) -> LogicalPlan
         ConcreteDataType::float64_datatype(),
         NATIVE_ENGINE,
     )
-    .await;
-    build_native_fused_plan_with_provider(query, native_fused, table_provider).await
+    .await
 }
 
 async fn build_native_fused_plan_with_provider(
@@ -3223,6 +3228,32 @@ async fn native_fused_label_rewrite_lowers_canonical_boundary() {
     assert!(
         sorted_column_names(&plan).contains(&"tag_0".to_string()),
         "the consumer retains the rewritten output label: {plan}"
+    );
+}
+
+/// A collapsing label rewrite keeps its canonical boundary when the aggregate is split.
+///
+/// `sum(label_replace(m, "tag_0", "same", "tag_0", ".*"))` gives every series one label set, so the
+/// canonicalization pass puts a `Merge` under the aggregate. The splitter must see that tree, not
+/// the raw one: its per-series prefix cannot express the merge, so it declines and the statement
+/// keeps the plan the existing route builds. Splitting the raw tree would have let two partitions'
+/// contributions to one label set reach the state router as separate groups.
+#[tokio::test]
+async fn native_fused_collapsing_rewrite_under_an_aggregate_keeps_the_canonical_boundary() {
+    let query = r#"sum(label_replace(some_metric, "tag_0", "same", "tag_0", ".*"))"#;
+    let native =
+        build_native_fused_plan_with_provider(query, true, native_test_table_provider().await)
+            .await;
+    let display = native.display_indent().to_string();
+    assert!(
+        !display.contains("partial state") && !display.contains("PartialReduce"),
+        "a collapsing rewrite under an aggregate must not split: {display}"
+    );
+    // The tree still plans, but as a segmented node that keeps the canonical merge the rewrite
+    // needs; what it must not do is hand the rewrite to a state producer's per-series prefix.
+    assert!(
+        display.contains("canonical merge"),
+        "the canonical boundary must survive: {display}"
     );
 }
 
@@ -5614,10 +5645,14 @@ async fn native_fused_aggregate_splits_into_a_final_over_a_partial_producer() {
             }
             _ => {}
         }
-        let partial = partial_below(final_node).expect("the final node reads a partial producer");
-        // The physical final must accept the producer's state and classify its own output fields.
+        // The planner cuts one state hop whatever the cut's grouping is: the merge finishes the
+        // producer's state directly, with no reducer between the halves.
+        let partial = partial_below(final_node).expect("the merge reads the partial producer");
+        // The physical final must accept the state the producer hands it and classify its own
+        // output fields.
+        let state_schema = Arc::clone(partial.schema().inner());
         let input = Arc::new(datafusion::physical_plan::empty::EmptyExec::new(
-            Arc::clone(partial.schema().inner()),
+            state_schema,
         ));
         final_node
             .to_execution_plan(vec![(
@@ -5759,6 +5794,126 @@ async fn native_fused_topk_above_aggregate_declines_the_split_in_every_form() {
             find_final_split(&plan).is_none(),
             "`{query}` must not split: {display}"
         );
+    }
+}
+
+/// Whether `plan` is a `FusedSeries` node.
+fn is_fused(plan: &LogicalPlan) -> bool {
+    matches!(plan, LogicalPlan::Extension(extension) if extension.node.as_any().is::<FusedSeries>())
+}
+
+/// How many `FusedSeries` nodes `plan` holds.
+fn fused_count(plan: &LogicalPlan) -> usize {
+    usize::from(is_fused(plan))
+        + plan
+            .inputs()
+            .iter()
+            .map(|input| fused_count(input))
+            .sum::<usize>()
+}
+
+/// The planner cuts one state hop, whatever the cut's grouping is.
+///
+/// `sum(some_metric)` is one group and `sum by (tag_0) (some_metric)` can need several, but both
+/// keep the same shape: a `Final` merge over the `Partial` producer, with no reducer between the
+/// halves. A second hop - a `PartialReduce` folding state into state - stays the split's own API
+/// (`SplitDepth::Two`) rather than something this planner selects.
+///
+/// The grouping decides the merge's routing, not the hop count: a grouped cut puts a state router
+/// between the producer and the merge, carrying each group's rows to the owner that finalizes them,
+/// while one group needs none.
+#[tokio::test]
+async fn native_split_plans_one_state_hop_only() {
+    use datafusion::physical_plan::ExecutionPlan;
+    use datafusion::physical_plan::displayable;
+    use datafusion::physical_plan::empty::EmptyExec;
+    use promql::extension_plan::{FusedOutputFormat, SeriesRepartitionExec, SeriesRouting};
+    use store_api::region_engine::RawLabelSource;
+
+    /// The state routers a physical plan holds, as `(owners, policy)` pairs.
+    fn routers(plan: &Arc<dyn ExecutionPlan>) -> Vec<(usize, SeriesRouting)> {
+        fn visit(plan: &Arc<dyn ExecutionPlan>, found: &mut Vec<(usize, SeriesRouting)>) {
+            if let Some(router) = plan.downcast_ref::<SeriesRepartitionExec>() {
+                found.push((router.outputs(), router.routing_policy().clone()));
+            }
+            for child in plan.children() {
+                visit(child, found);
+            }
+        }
+        let mut found = Vec::new();
+        visit(plan, &mut found);
+        found
+    }
+
+    /// The merge's physical plan over `state`, the stand-in for what it reads.
+    fn merge_plan(
+        final_node: &FusedSeries,
+        state: Arc<dyn ExecutionPlan>,
+        width: usize,
+    ) -> Arc<dyn ExecutionPlan> {
+        final_node
+            .to_execution_plan_with_parallelism(
+                vec![(state, RawLabelSource::Explicit, SeriesOrdering::Contiguous)],
+                width,
+            )
+            .unwrap()
+    }
+
+    let width = 4;
+    for (query, grouped) in [
+        ("sum(some_metric)", false),
+        ("sum by (tag_0) (some_metric)", true),
+    ] {
+        let plan = build_native_fused_plan(query, true).await;
+        assert_eq!(
+            2,
+            fused_count(&plan),
+            "`{query}`: a producer and a merge, with no reducer: {plan}"
+        );
+        let final_node = find_final_split(&plan).expect("the merge is the outer node");
+        assert!(final_node.reads_aggregate_state(), "`{query}`: {plan}");
+        let partial = partial_below(final_node).expect("the merge reads the producer");
+        assert!(
+            matches!(partial.children(), [LogicalPlan::TableScan(_)]),
+            "`{query}`: the producer reads its own scan: {}",
+            partial.tree()
+        );
+        assert_eq!(
+            FusedOutputFormat::SeriesFrame,
+            partial.format(),
+            "`{query}`: the producer publishes state frames"
+        );
+        let NativeExpr::Aggregate { op, .. } = &partial.tree().root().expr else {
+            panic!(
+                "`{query}`: the producer is an aggregate: {}",
+                partial.tree()
+            );
+        };
+        assert_eq!(AggregateStage::Partial, op.stage, "`{query}`");
+
+        // The merge finalizes the producer's state directly, so the state it is handed is the one
+        // the merge's own binding routes.
+        let producer = Arc::new(EmptyExec::new(Arc::clone(partial.schema().inner())))
+            as Arc<dyn ExecutionPlan>;
+        let merge = merge_plan(final_node, producer, width);
+        let explain = displayable(merge.as_ref()).indent(true).to_string();
+        assert!(
+            !explain.contains("partial_reduce"),
+            "`{query}`: the planner must not fold state twice: {explain}"
+        );
+        let found = routers(&merge);
+        if grouped {
+            assert_eq!(
+                vec![(width, SeriesRouting::CanonicalLabels)],
+                found,
+                "`{query}`: the merge routes the state by the group it finalizes: {explain}"
+            );
+        } else {
+            assert!(
+                found.is_empty(),
+                "`{query}`: one group needs no state router: {explain}"
+            );
+        }
     }
 }
 
@@ -5940,7 +6095,7 @@ async fn native_split_and_complete_aggregate_produce_identical_values() {
         .await
         .unwrap();
     let final_node = find_final_split(&split).expect("the query must use a split aggregate");
-    let partial = partial_below(final_node).unwrap();
+    let partial = partial_below(final_node).expect("the merge reads the partial producer");
     let complete = FusedSeries::try_new(
         Arc::from(query),
         complete_tree,
@@ -6539,6 +6694,32 @@ async fn native_fused_binary_inside_scalar_and_quantile() {
     }
 }
 
+/// Both `histogram_quantile` calls report the tags their operand carries at the contract
+/// boundary: a classic-histogram fold drops the bucket label from what it publishes, so neither
+/// call keeps `le` and each keeps the `host` it reads. Each call is planned on its own, so neither
+/// answer can stand in for the other's.
+#[tokio::test]
+async fn native_histogram_operands_report_context_tags() {
+    for operand in ["histogram_quantile(0.9, m)", "histogram_quantile(0.5, m)"] {
+        let provider = native_classic_histogram_provider().await;
+        let plan = build_native_fused_plan_with_provider(operand, true, provider).await;
+        let display = plan.display_indent().to_string();
+        assert!(
+            find_fused_series(&plan).is_some(),
+            "`{operand}` is admitted as one fused node: {display}"
+        );
+        let columns = sorted_column_names(&plan);
+        assert!(
+            columns.contains(&"host".to_string()),
+            "`{operand}` keeps the tag it reads: {columns:?}\n{display}"
+        );
+        assert!(
+            !columns.contains(&LE_COLUMN_NAME.to_string()),
+            "`{operand}` drops the bucket label: {columns:?}\n{display}"
+        );
+    }
+}
+
 /// A shape neither the split nor the node can keep correct keeps the existing plan: a group by a
 /// value field cannot be named by the state rows, and a kernel the compiler does not fold keeps it
 /// too.
@@ -6664,6 +6845,10 @@ async fn native_fused_split_declines_a_whole_vector_suffix() {
 
 /// A histogram suffix runs after the Final aggregate, with all of each histogram's buckets routed
 /// together rather than distributed by `le`.
+///
+/// The cut's routing key decides how the state is routed, not how many hops it takes: `by (le)`
+/// leaves nothing outside the routing set, so one owner finishes the state, while `by (le, host)`
+/// keeps another label and routes the state by it. Both merge the producer's state directly.
 #[tokio::test]
 async fn native_fused_histogram_above_aggregate_splits_with_bucket_routing() {
     let query = "histogram_quantile(0.99, sum by (le) (rate(m[5m])))";
@@ -6694,11 +6879,41 @@ async fn native_fused_histogram_above_aggregate_splits_with_bucket_routing() {
         matches!(&input.expr, NativeExpr::Aggregate { op, .. } if op.stage == AggregateStage::Final),
         "`{query}`: histogram must read the Final aggregate: {display}"
     );
+    // Every label of the cut's routing key is excluded from routing, so the state has one owner and
+    // the merge finalizes the producer's own state: no reducer between the halves.
     let partial = partial_below(final_node)
         .unwrap_or_else(|| panic!("`{query}`: Final must read a Partial producer: {display}"));
     assert!(
         matches!(&partial.tree().root().expr, NativeExpr::Aggregate { op, .. } if op.stage == AggregateStage::Partial),
         "`{query}`: producer must export Partial state: {display}"
+    );
+    assert!(
+        !partial.tree().to_string().contains("partial_reduce"),
+        "`{query}`: one owner needs no reducer: {}",
+        partial.tree()
+    );
+
+    // The same suffix over a cut that keeps another label: the state is routed by that label and
+    // the merge still finalizes the producer's own state, one hop.
+    let grouped = "histogram_quantile(0.99, sum by (le, host) (rate(m[5m])))";
+    let plan = build_native_fused_plan_with_provider(
+        grouped,
+        true,
+        native_classic_histogram_provider().await,
+    )
+    .await;
+    let display = plan.display_indent().to_string();
+    let final_node = find_final_split(&plan)
+        .unwrap_or_else(|| panic!("`{grouped}` must split into Partial and Final: {display}"));
+    let partial = partial_below(final_node)
+        .unwrap_or_else(|| panic!("`{grouped}`: Final must read a Partial producer: {display}"));
+    assert!(
+        matches!(&partial.tree().root().expr, NativeExpr::Aggregate { op, .. } if op.stage == AggregateStage::Partial),
+        "`{grouped}`: producer must export Partial state: {display}"
+    );
+    assert!(
+        !display.contains("partial_reduce"),
+        "`{grouped}`: the planner must not fold state twice: {display}"
     );
 }
 
@@ -14844,6 +15059,7 @@ async fn native_composed_binary_admits_a_split_aggregate_frame_operand() {
             operand.reads_aggregate_state(),
             "{query}: the operand must be the Final half: {display}"
         );
+        // The planner cuts one state hop, so the Final half reads the producer directly.
         let partial = partial_below(operand).unwrap_or_else(|| {
             panic!("{query}: the Final half reads a Partial producer: {display}")
         });

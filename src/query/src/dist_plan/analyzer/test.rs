@@ -50,7 +50,7 @@ use futures::Stream;
 use futures::task::{Context, Poll};
 use pretty_assertions::assert_eq;
 use promql::extension_plan::{
-    FusedSeries, FusedSeriesBinding, HistogramFold, HistogramFoldOperation,
+    FusedSeries, FusedSeriesBinding, HistogramFold, HistogramFoldOperation, SplitDepth,
 };
 use regex::Regex;
 use store_api::data_source::DataSource;
@@ -359,6 +359,95 @@ fn hybrid_fused(scan: LogicalPlan, metric: &str) -> LogicalPlan {
     LogicalPlan::Extension(Extension {
         node: Arc::new(fused),
     })
+}
+
+/// A split aggregate over `scan` at `depth`, compiled from `sum(some_metric)`.
+///
+/// The producer reads `scan` and exports state; at [`SplitDepth::Two`] the reducer folds that state
+/// into state and the merge reads the reducer's output instead of the producer's.
+fn split_aggregate_plan(scan: LogicalPlan, depth: SplitDepth) -> LogicalPlan {
+    let stmt = promql_parser::parser::EvalStmt {
+        expr: promql_parser::parser::parse("sum(some_metric)").unwrap(),
+        start: std::time::UNIX_EPOCH,
+        end: std::time::UNIX_EPOCH + std::time::Duration::from_secs(10),
+        interval: std::time::Duration::from_secs(1),
+        lookback_delta: std::time::Duration::from_secs(1),
+    };
+    let series = Arc::new(SeriesSchema {
+        fields: Arc::from([FieldSpec { name: "v0".into() }]),
+        eval_grid: None,
+    });
+    let tree = compile(&stmt, series, SeriesOrdering::KeyThenTime).unwrap();
+    let binding = FusedSeriesBinding {
+        grid: statement_grid(&stmt).unwrap(),
+        time_index: "ts".into(),
+        tags: vec![],
+        metric_name: Some(Arc::from("some_metric")),
+    };
+    let trees = FusedSeries::split_aggregate(&tree, "ts", depth)
+        .unwrap()
+        .expect("sum(some_metric) splits");
+    let mut input = LogicalPlan::Extension(Extension {
+        node: Arc::new(
+            FusedSeries::try_new_state_export(
+                Arc::from("sum(some_metric)"),
+                trees.partial,
+                binding.clone(),
+                vec![scan],
+            )
+            .unwrap(),
+        ),
+    });
+    if let Some(reduce) = trees.reduce {
+        input = LogicalPlan::Extension(Extension {
+            node: Arc::new(
+                FusedSeries::try_new_state_export(
+                    Arc::from("sum(some_metric)"),
+                    reduce,
+                    binding.clone(),
+                    vec![input],
+                )
+                .unwrap(),
+            ),
+        });
+    }
+    let output_schema = Arc::new(
+        datafusion_common::DFSchema::try_from(arrow::datatypes::Schema::new(vec![
+            arrow::datatypes::Field::new(
+                "ts",
+                DataType::Timestamp(TimeUnit::Millisecond, None),
+                false,
+            ),
+            arrow::datatypes::Field::new("sum(v0)", DataType::Float64, true),
+        ]))
+        .unwrap(),
+    );
+    LogicalPlan::Extension(Extension {
+        node: Arc::new(
+            FusedSeries::try_new(
+                Arc::from("sum(some_metric)"),
+                trees.final_tree,
+                binding,
+                vec![input],
+                output_schema,
+            )
+            .unwrap(),
+        ),
+    })
+}
+
+/// A one-table scan the split plans read.
+fn test_table_scan(name: &str) -> LogicalPlan {
+    LogicalPlanBuilder::scan(
+        name,
+        Arc::new(DefaultTableSource::new(Arc::new(
+            DfTableProviderAdapter::new(TestTable::table_with_name(0, name.to_string())),
+        ))),
+        None,
+    )
+    .unwrap()
+    .build()
+    .unwrap()
 }
 
 fn count_merge_scans(plan: &LogicalPlan) -> usize {
@@ -816,6 +905,121 @@ fn a_requirement_that_has_to_cross_a_join_is_refused() {
         err.to_string().contains("ambiguous"),
         "expected the two branches to be reported as ambiguous, got: {err}"
     );
+}
+
+/// A two-level split keeps both of its state links on the frontend and only the producer inside the
+/// region: the reducer folds state the partitions exported, so it has to run where every
+/// partition's state has arrived, while the producer reads the region's own scan.
+///
+/// The reducer reads another `FusedSeries` rather than a scan, so the per-series rules already
+/// place it above the boundary; this pins the whole chain, in process and over the wire alike.
+#[test]
+fn a_two_level_split_keeps_its_reducer_on_the_frontend() {
+    use promql::native::plan::{AggregateStage, NativeExpr, NativeType};
+
+    let split = split_aggregate_plan(test_table_scan("t"), SplitDepth::Two);
+    // The state-exporting and state-reading halves carry their frame layout, so the chain has a wire
+    // form: the transport is a placement question, not an encoding prerequisite.
+    assert!(
+        DFLogicalSubstraitConvertor
+            .encode(&split, DefaultSerializer)
+            .is_ok(),
+        "the split's state frames are encodable: {split}"
+    );
+    for analyzer in [
+        DistPlannerAnalyzer::default(),
+        DistPlannerAnalyzer::new(true),
+    ] {
+        let analyzed = analyzer
+            .analyze(split.clone(), &ConfigOptions::default())
+            .unwrap();
+        let text = analyzed.to_string();
+
+        let final_node = fused_node(&analyzed)
+            .unwrap_or_else(|| panic!("the final half stays above the boundary: {text}"));
+        assert!(final_node.reads_aggregate_state(), "{text}");
+
+        // The reducer is the final half's one input, and it folds state into state itself.
+        let [reducer] = final_node.children() else {
+            panic!("the final half keeps one input: {text}")
+        };
+        let reducer = fused_node(reducer)
+            .unwrap_or_else(|| panic!("the reducer stays on the frontend: {text}"));
+        assert!(reducer.reads_aggregate_state(), "{text}");
+        assert!(
+            matches!(
+                &reducer.tree().root().expr,
+                NativeExpr::Aggregate { op, .. } if op.stage == AggregateStage::PartialReduce
+            ),
+            "the reducer folds state into state: {text}"
+        );
+        assert!(
+            matches!(&reducer.tree().root().output, NativeType::AggregateState(_)),
+            "the reducer exports state again: {text}"
+        );
+
+        // Only the producer rides inside the region, over the scan it reads.
+        let [below] = reducer.children() else {
+            panic!("the reducer keeps one input: {text}")
+        };
+        let merge_scan =
+            find_merge_scan(below).unwrap_or_else(|| panic!("the producer is region work: {text}"));
+        let partial = fused_node(merge_scan.input())
+            .unwrap_or_else(|| panic!("the producer runs inside the region input: {text}"));
+        assert!(
+            !partial.reads_aggregate_state(),
+            "the producer reads series, not the state it exports: {text}"
+        );
+        assert!(
+            matches!(
+                &partial.tree().root().expr,
+                NativeExpr::Aggregate { op, .. } if op.stage == AggregateStage::Partial
+            ),
+            "{text}"
+        );
+        assert!(
+            partial
+                .children()
+                .iter()
+                .any(|child| matches!(child, LogicalPlan::TableScan(_))),
+            "the producer reads the region's own scan: {text}"
+        );
+    }
+
+    // The reducer is not the plan's finalizing consumer: handed to the analyzer on its own it stays
+    // above the boundary, and only the producer below it is region work. A state exporter standing
+    // where the final half was does not inherit that half's placement.
+    let Some(merge) = fused_node(&split) else {
+        panic!("a split aggregate is a fused node: {split}")
+    };
+    let [reducer_only] = merge.children() else {
+        panic!("the split's merge has one input: {split}")
+    };
+    let analyzed = analyzer()
+        .analyze(reducer_only.clone(), &ConfigOptions::default())
+        .unwrap();
+    let text = analyzed.to_string();
+    let reducer = fused_node(&analyzed)
+        .unwrap_or_else(|| panic!("the reducer keeps its place above the boundary: {text}"));
+    assert!(
+        matches!(
+            &reducer.tree().root().expr,
+            NativeExpr::Aggregate { op, .. } if op.stage == AggregateStage::PartialReduce
+        ),
+        "the reducer stays where it was: {text}"
+    );
+    assert!(
+        find_merge_scan(&analyzed).is_some(),
+        "the producer below the reducer is region work: {text}"
+    );
+}
+
+/// The `FusedSeries` node `plan` is, if it is one.
+fn fused_node(plan: &LogicalPlan) -> Option<&FusedSeries> {
+    let LogicalPlan::Extension(extension) = plan else {
+        return None;
+    };
+    extension.node.as_any().downcast_ref::<FusedSeries>()
 }
 
 #[test]

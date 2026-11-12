@@ -1494,6 +1494,164 @@ fn a_grouping_cannot_swap_by_for_without() {
     assert!(node.validate().is_ok());
 }
 
+/// A `PartialReduce` folds state into state, so neither side of it is a vector.
+fn reduce_aggregate(state: NativeNode) -> NativeNode {
+    let NativeType::AggregateState(schema) = &state.output else {
+        unreachable!("a reduce reads aggregate state")
+    };
+    let schema = Arc::clone(schema);
+    NativeNode {
+        expr: NativeExpr::Aggregate {
+            input: Box::new(state),
+            op: BoundAggregate {
+                kind: AggregateKind::Sum,
+                group: Grouping::By(Arc::new(["job".into()])),
+                stage: AggregateStage::PartialReduce,
+            },
+        },
+        output: NativeType::AggregateState(schema),
+    }
+}
+
+/// A reduce is the one stage whose input and output are the same binding, which is what makes it a
+/// hop between two state transports rather than a place a value appears.
+#[test]
+fn a_partial_reduce_hands_on_the_state_it_is_handed() {
+    let state = partial_aggregate(window_over(input(), None));
+    let binding = match &state.output {
+        NativeType::AggregateState(schema) => Arc::clone(schema),
+        other => panic!("a partial aggregate produces state, not {other:?}"),
+    };
+    let reduced = reduce_aggregate(state);
+    assert_eq!(
+        reduced.output,
+        NativeType::AggregateState(Arc::clone(&binding)),
+        "a reduce declares the state it is handed"
+    );
+    assert!(NativeTree::try_new(reduced).is_ok());
+}
+
+/// State in, not samples: a reduce has no values to fold, so a vector is refused by type.
+#[test]
+fn a_partial_reduce_cannot_consume_a_vector() {
+    let grid = grid(0, 60_000, 4);
+    let node = NativeNode {
+        expr: NativeExpr::Aggregate {
+            input: Box::new(window_on(input(), None, Arc::clone(&grid))),
+            op: BoundAggregate {
+                kind: AggregateKind::Sum,
+                group: Grouping::By(Arc::new(["job".into()])),
+                stage: AggregateStage::PartialReduce,
+            },
+        },
+        output: NativeType::AggregateState(Arc::new(super::AggregateStateSchema {
+            group: Grouping::By(Arc::new(["job".into()])),
+            kind: datatypes::series::aggregate_state::AggregateStateKind::Sum,
+            components: Arc::from([
+                datatypes::series::aggregate_state::StateComponent::Value,
+                datatypes::series::aggregate_state::StateComponent::Compensation,
+            ]),
+            accumulators: Arc::new([]),
+            grid,
+        })),
+    };
+    let error = node.validate().unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("a partial reduce consumes aggregate state, not an evaluated vector"),
+        "{error}"
+    );
+}
+
+/// A reduce cannot change the state it folds: another kind, another set of accumulators or another
+/// grid would merge accumulators that mean something else.
+#[test]
+fn a_partial_reduce_cannot_change_the_state_it_folds() {
+    let out = grid(0, 60_000, 4);
+    // Two input fields, so the state that folds them carries two accumulators.
+    let state = NativeNode {
+        expr: NativeExpr::Aggregate {
+            input: Box::new(window_fields(input_with_fields(2), Arc::clone(&out), 2)),
+            op: BoundAggregate {
+                kind: AggregateKind::Sum,
+                group: Grouping::By(Arc::new(["job".into()])),
+                stage: AggregateStage::Partial,
+            },
+        },
+        output: NativeType::AggregateState(Arc::new(super::AggregateStateSchema {
+            group: Grouping::By(Arc::new(["job".into()])),
+            kind: datatypes::series::aggregate_state::AggregateStateKind::Sum,
+            components: Arc::from([
+                datatypes::series::aggregate_state::StateComponent::Value,
+                datatypes::series::aggregate_state::StateComponent::Compensation,
+            ]),
+            accumulators: fields(2),
+            grid: Arc::clone(&out),
+        })),
+    };
+    assert!(
+        state.validate().is_ok(),
+        "{}",
+        state.validate().unwrap_err()
+    );
+
+    // The reduce declares one accumulator, so it is not the state it reads.
+    let node = NativeNode {
+        expr: NativeExpr::Aggregate {
+            input: Box::new(state),
+            op: BoundAggregate {
+                kind: AggregateKind::Sum,
+                group: Grouping::By(Arc::new(["job".into()])),
+                stage: AggregateStage::PartialReduce,
+            },
+        },
+        output: NativeType::AggregateState(Arc::new(super::AggregateStateSchema {
+            group: Grouping::By(Arc::new(["job".into()])),
+            kind: datatypes::series::aggregate_state::AggregateStateKind::Sum,
+            components: Arc::from([
+                datatypes::series::aggregate_state::StateComponent::Value,
+                datatypes::series::aggregate_state::StateComponent::Compensation,
+            ]),
+            accumulators: fields(1),
+            grid: Arc::clone(&out),
+        })),
+    };
+    let error = node.validate().unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("input state is a different layout"),
+        "{error}"
+    );
+}
+
+/// The merge above a reduce finishes the state it was handed, so its own binding has to describe
+/// that state: a `count` does not consume the state of a `sum`.
+#[test]
+fn a_final_aggregate_cannot_finish_a_reduce_of_another_kind() {
+    let reduced = reduce_aggregate(partial_aggregate(window_over(input(), None)));
+    let out = state_grid(&reduced);
+    let node = NativeNode {
+        expr: NativeExpr::Aggregate {
+            input: Box::new(reduced),
+            op: BoundAggregate {
+                kind: AggregateKind::Count,
+                group: Grouping::By(Arc::new(["job".into()])),
+                stage: AggregateStage::Final,
+            },
+        },
+        output: evaluated(Arc::new([]), out),
+    };
+    let error = node.validate().unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("final Count aggregate requires state kind Count"),
+        "{error}"
+    );
+}
+
 /// A `Final` aggregate consumes the state a `Partial` produced, which is what an exchange
 /// boundary hands over between the two stages.
 #[test]

@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! The aggregate-state chunk a native `Partial`/`Final` aggregate passes between executions.
+//! The aggregate-state chunk a native state stage passes between executions.
 //!
 //! A state chunk is not a query value. It names the group a partition folded and the grid
 //! positions that group has contributions at, and it carries the accumulator components its
@@ -20,6 +20,10 @@
 //! ([`PartialAggregate`]) and frame state ([`StateSeries`]) meet, so a hole in one is a hole in the
 //! other: a field with no contribution at a carried position stays absent through both directions
 //! rather than being filled in with a zero that a later merge would count.
+//!
+//! Both a `Partial` producer and a `PartialReduce` reducer export through here, and a `Final` above
+//! either of them reads the decoded form: the chunk is the one representation state travels as, so a
+//! reducer's output is a producer's output as far as the next hop can tell.
 
 use std::mem::{size_of, size_of_val};
 use std::sync::Arc;
@@ -138,14 +142,14 @@ pub(crate) fn state_row_from_frame_row(
         .map_err(|error| DataFusionError::Execution(error.to_string()))?;
     if fields.kind() != binding.kind {
         return Err(DataFusionError::Execution(format!(
-            "aggregate state row kind {:?} does not match Final binding {:?}",
+            "aggregate state row kind {:?} does not match the state binding {:?}",
             fields.kind(),
             binding.kind
         )));
     }
     if fields.components() != binding.components.as_ref() {
         return Err(DataFusionError::Execution(format!(
-            "aggregate state row components {:?} do not match Final binding {:?}",
+            "aggregate state row components {:?} do not match the state binding {:?}",
             fields.components(),
             binding.components
         )));

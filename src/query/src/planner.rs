@@ -674,6 +674,7 @@ impl DfLogicalPlanner {
                 stmt,
                 &self.engine_state,
                 promql_annotations,
+                // The fallback plan is the legacy one: it is not offered to the native route.
                 false,
             )
             .await

@@ -159,7 +159,8 @@ fn clamp_min(inner: NativeNode, argument: NativeNode) -> NativeNode {
 /// `sum without() (inner)` at `stage`, which folds every series it is handed into one group.
 fn aggregate_over(inner: NativeNode, out: Arc<EvalGrid>, stage: AggregateStage) -> NativeNode {
     let output = match stage {
-        AggregateStage::Partial => {
+        // A reducer folds state into state, so its output type is the producer's.
+        AggregateStage::Partial | AggregateStage::PartialReduce => {
             NativeType::AggregateState(Arc::new(crate::native::plan::AggregateStateSchema {
                 group: Grouping::By(Arc::from([])),
                 // The state family this branch carries: the kind and its components come from the
