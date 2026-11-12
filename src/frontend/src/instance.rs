@@ -40,8 +40,8 @@ use std::time::{Duration, SystemTime};
 use async_stream::stream;
 use async_trait::async_trait;
 use auth::{
-    PROMQL_QUERY, PermissionChecker, PermissionCheckerRef, PermissionReq, PermissionTableTarget,
-    PermissionTableTargets,
+    PROMQL_QUERY, PermissionAction, PermissionChecker, PermissionCheckerRef, PermissionReq,
+    PermissionTableTarget, PermissionTableTargets,
 };
 use catalog::CatalogManagerRef;
 use catalog::process_manager::{
@@ -95,7 +95,7 @@ use sql::ast::ObjectNamePartExt;
 use sql::dialect::Dialect;
 use sql::parser::{ParseOptions, ParserContext};
 use sql::statements::comment::CommentObject;
-use sql::statements::copy::{CopyDatabase, CopyTable};
+use sql::statements::copy::{Copy, CopyDatabase, CopyTable};
 use sql::statements::statement::Statement;
 use sql::statements::tql::Tql;
 use sql::util::{extract_tables_from_prom_expr_checked, extract_tables_from_statement_checked};
@@ -592,6 +592,22 @@ impl Instance {
             .await
             .map_err(BoxedError::new)
             .context(ExternalSnafu)?;
+        if matches!(
+            stmt,
+            Statement::Copy(
+                Copy::CopyTable(CopyTable::To(_))
+                    | Copy::CopyDatabase(CopyDatabase::To(_))
+                    | Copy::CopyQueryTo(_)
+            )
+        ) {
+            // COPY retains its write permission requirement and also reads source data.
+            self.check_table_permission(
+                query_ctx,
+                PermissionReq::Action(PermissionAction::read("copy.to")),
+                targets.clone(),
+            )
+            .context(PermissionSnafu)?;
+        }
         self.check_table_permission(query_ctx, PermissionReq::SqlStatement(stmt), targets)
             .context(PermissionSnafu)?;
         Ok(())
@@ -3473,6 +3489,69 @@ mod tests {
             .unwrap();
         assert_eq!(axum::http::StatusCode::FORBIDDEN, response.status());
 
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_copy_export_requires_read_and_write_permission() -> TestResult<()> {
+        use auth::UserProvider;
+
+        let plugins = Plugins::new();
+        plugins.insert::<PermissionCheckerRef>(auth::DefaultPermissionChecker::arc());
+        let instance = test_instance_with_plugins(
+            test_table(1024, "source")?,
+            test_table(1025, "target")?,
+            plugins,
+        )
+        .await?;
+        let provider = auth::static_user_provider_from_option(
+            "static_user_provider:cmd:reader:ro=pwd,writer:wo=pwd,owner:rw=pwd",
+        )
+        .unwrap();
+        for (username, can_export, can_import) in [
+            ("reader", false, false),
+            ("writer", false, true),
+            ("owner", true, true),
+        ] {
+            let ctx = QueryContext::arc();
+            ctx.set_current_user(
+                provider
+                    .authenticate(
+                        auth::Identity::UserId(username, None),
+                        auth::Password::PlainText("pwd".to_string().into()),
+                    )
+                    .await
+                    .unwrap(),
+            );
+            for sql in [
+                "COPY source TO '/unused.parquet'",
+                "COPY (SELECT * FROM source) TO '/unused.parquet'",
+                "COPY DATABASE public TO '/unused/'",
+            ] {
+                let result = instance
+                    .check_sql_permission(&parse_one_sql(sql), &ctx)
+                    .await;
+                if can_export {
+                    result.unwrap();
+                } else {
+                    assert_eq!(
+                        StatusCode::PermissionDenied,
+                        result.unwrap_err().status_code()
+                    );
+                }
+            }
+            let result = instance
+                .check_sql_permission(&parse_one_sql("COPY target FROM '/unused.parquet'"), &ctx)
+                .await;
+            if can_import {
+                result.unwrap();
+            } else {
+                assert_eq!(
+                    StatusCode::PermissionDenied,
+                    result.unwrap_err().status_code()
+                );
+            }
+        }
         Ok(())
     }
 
