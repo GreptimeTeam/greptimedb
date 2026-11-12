@@ -412,6 +412,9 @@ impl Instance {
                 {
                     return self.copy_metric_database(arg.clone(), query_ctx).await;
                 }
+                if let Statement::Copy(sql::statements::copy::Copy::CopyDatabase(copy)) = &stmt {
+                    return self.copy_database(copy.clone(), &stmt, query_ctx).await;
+                }
                 self.statement_executor
                     .execute_sql(stmt, query_ctx)
                     .await
@@ -556,6 +559,83 @@ fn attach_timeout(
 }
 
 impl Instance {
+    async fn copy_database(
+        &self,
+        copy: CopyDatabase,
+        stmt: &Statement,
+        ctx: QueryContextRef,
+    ) -> Result<Output> {
+        match copy {
+            CopyDatabase::To(arg) => {
+                let req = operator::statement::to_copy_database_request(arg, &ctx)?;
+                let tables = self
+                    .statement_executor
+                    .capture_database_export_tables(&req, None, &ctx)
+                    .await?;
+                let targets = PermissionTableTargets::resolved(
+                    tables
+                        .iter()
+                        .map(|table| {
+                            let info = table.table_info();
+                            PermissionTableTarget::new(
+                                &info.catalog_name,
+                                &info.schema_name,
+                                &info.name,
+                            )
+                            .with_physical_metric_table(info.is_physical_table())
+                        })
+                        .collect(),
+                );
+                self.check_table_permission(
+                    &ctx,
+                    PermissionReq::SqlStatement(stmt),
+                    targets.clone(),
+                )
+                .context(PermissionSnafu)?;
+                self.check_table_permission(
+                    &ctx,
+                    PermissionReq::Action(auth::PermissionAction::read("database.export")),
+                    targets,
+                )
+                .context(PermissionSnafu)?;
+                self.statement_executor
+                    .copy_database_to_tables(req, tables, ctx)
+                    .await
+                    .context(TableOperationSnafu)
+            }
+            CopyDatabase::From(arg) => {
+                let req = operator::statement::to_copy_database_request(arg, &ctx)?;
+                let requests = self
+                    .statement_executor
+                    .prepare_database_import(&req)
+                    .await?;
+                let targets = PermissionTableTargets::resolved(
+                    requests
+                        .iter()
+                        .map(|request| {
+                            PermissionTableTarget::new(
+                                &request.catalog_name,
+                                &request.schema_name,
+                                &request.table_name,
+                            )
+                        })
+                        .collect(),
+                );
+                let targets = self
+                    .resolve_query_permission_targets(targets, &ctx)
+                    .await
+                    .map_err(BoxedError::new)
+                    .context(ExternalSnafu)?;
+                self.check_table_permission(&ctx, PermissionReq::SqlStatement(stmt), targets)
+                    .context(PermissionSnafu)?;
+                self.statement_executor
+                    .copy_database_from_requests(req, requests, ctx)
+                    .await
+                    .context(TableOperationSnafu)
+            }
+        }
+    }
+
     async fn check_sql_permission(
         &self,
         stmt: &Statement,
@@ -4795,6 +4875,68 @@ mod tests {
             "expected one create table task, got {submitted:?}"
         );
         assert!(matches!(&submitted[0], DdlTask::CreateTable(_)));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_copy_database_authorizes_all_tables_before_io() -> TestResult<()> {
+        for (table, direction) in [
+            (test_table(1024, "denied")?, "TO"),
+            (test_table(1024, "denied")?, "FROM"),
+            (test_physical_table(1024, "physical")?, "FROM"),
+        ] {
+            let dir = common_test_util::temp_dir::create_temp_dir("copy_database_permissions");
+            let name = table.table_info().name.clone();
+            let catalog = catalog::memory::MemoryCatalogManager::new_with_table(table);
+            catalog
+                .register_table_sync(catalog::RegisterTableRequest {
+                    catalog: "greptime".into(),
+                    schema: "public".into(),
+                    table_name: "allowed".into(),
+                    table_id: 1025,
+                    table: test_table(1025, "allowed")?,
+                })
+                .unwrap();
+            if direction == "FROM" {
+                // Invalid source data must never be read before all destinations are authorized.
+                std::fs::write(dir.path().join("allowed.parquet"), b"not parquet").unwrap();
+                std::fs::write(dir.path().join(format!("{name}.parquet")), b"not parquet").unwrap();
+            }
+            let kv = Arc::new(MemoryKvBackend::new());
+            let plugins = Plugins::new();
+            plugins.insert::<PermissionCheckerRef>(Arc::new(RejectUnresolvedPermissionChecker));
+            let instance = FrontendBuilder::new(
+                FrontendOptions::default(),
+                kv.clone(),
+                test_cache_registry(kv)?,
+                catalog,
+                Arc::new(client::client_manager::NodeClients::default()),
+                Arc::new(NoopProcedureExecutor),
+                Arc::new(ProcessManager::new("copy-permissions".into(), None)),
+            )
+            .with_plugin(plugins)
+            .with_local_file_access(
+                common_datasource::object_store::LocalFileAccess::sandboxed(dir.path()).unwrap(),
+            )
+            .try_build()
+            .await
+            .context(BuildFrontendSnafu)?;
+            let location = reqwest::Url::from_directory_path(dir.path()).unwrap();
+            let sql = format!(
+                "COPY DATABASE public {direction} '{location}' WITH (continue_on_error='true')"
+            );
+            let result = instance
+                .do_query_inner(&sql, QueryContext::arc())
+                .await
+                .remove(0);
+            assert_eq!(
+                StatusCode::PermissionDenied,
+                result.unwrap_err().status_code()
+            );
+            if direction == "TO" {
+                assert_eq!(0, std::fs::read_dir(dir.path()).unwrap().count());
+            }
+        }
         Ok(())
     }
 

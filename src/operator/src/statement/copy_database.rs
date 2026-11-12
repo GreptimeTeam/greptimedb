@@ -26,6 +26,7 @@ use object_store::Entry;
 use regex::Regex;
 use session::context::QueryContextRef;
 use snafu::ResultExt;
+use table::TableRef;
 use table::requests::{CopyDatabaseRequest, CopyDirection, CopyTableRequest};
 use tokio::sync::Semaphore;
 
@@ -47,20 +48,29 @@ impl StatementExecutor {
         req: CopyDatabaseRequest,
         ctx: QueryContextRef,
     ) -> error::Result<Output> {
+        let tables = self
+            .capture_database_export_tables(&req, None, &ctx)
+            .await?;
+        self.copy_database_to_tables(req, tables, ctx).await
+    }
+
+    /// Exports the captured tables without enumerating the database again.
+    pub async fn copy_database_to_tables(
+        &self,
+        req: CopyDatabaseRequest,
+        tables: Vec<TableRef>,
+        ctx: QueryContextRef,
+    ) -> error::Result<Output> {
         validate_database_export_layout(&req.with)?;
         validate_database_directory(&req.location)?;
         build_backend_for_write(&req.location, &req.connection, &self.local_file_access)
             .await
             .context(error::BuildBackendSnafu)?;
-
         let parallelism = parse_parallelism_from_option_map(&req.with);
         info!(
             "Copy database {}.{} to dir: {}, time: {:?}, parallelism: {}",
             req.catalog_name, req.schema_name, req.location, req.time_range, parallelism
         );
-        let tables = self
-            .capture_database_export_tables(&req, None, &ctx)
-            .await?;
         let num_tables = tables.len();
 
         let suffix = Format::try_from(&req.with)
@@ -114,6 +124,15 @@ impl StatementExecutor {
         req: CopyDatabaseRequest,
         ctx: QueryContextRef,
     ) -> error::Result<Output> {
+        let requests = self.prepare_database_import(&req).await?;
+        self.copy_database_from_requests(req, requests, ctx).await
+    }
+
+    /// Lists and resolves all destination tables before importing any rows.
+    pub async fn prepare_database_import(
+        &self,
+        req: &CopyDatabaseRequest,
+    ) -> error::Result<Vec<CopyTableRequest>> {
         if let Some(layout) = req.with.get("metric_data_layout") {
             return error::InvalidCopyParameterSnafu {
                 key: "metric_data_layout",
@@ -123,16 +142,11 @@ impl StatementExecutor {
         }
         validate_database_directory(&req.location)?;
 
-        let parallelism = parse_parallelism_from_option_map(&req.with);
-        info!(
-            "Copy database {}.{} from dir: {}, time: {:?}, parallelism: {}",
-            req.catalog_name, req.schema_name, req.location, req.time_range, parallelism
-        );
         let suffix = Format::try_from(&req.with)
             .context(error::ParseFileFormatSnafu)?
             .suffix();
 
-        let entries = list_files_to_copy(&req, suffix, &self.local_file_access).await?;
+        let entries = list_files_to_copy(req, suffix, &self.local_file_access).await?;
 
         let continue_on_error = req
             .with
@@ -140,8 +154,7 @@ impl StatementExecutor {
             .and_then(|v| bool::from_str(v).ok())
             .unwrap_or(false);
 
-        let mut tasks = Vec::with_capacity(entries.len());
-        let semaphore = Arc::new(Semaphore::new(parallelism));
+        let mut requests = Vec::with_capacity(entries.len());
 
         for e in entries {
             let (table_name, location) = match database_import_source(&req.location, e.path()) {
@@ -156,10 +169,10 @@ impl StatementExecutor {
                 }
             };
 
-            let req = CopyTableRequest {
+            requests.push(CopyTableRequest {
                 catalog_name: req.catalog_name.clone(),
                 schema_name: req.schema_name.clone(),
-                table_name: table_name.clone(),
+                table_name,
                 location,
                 with: req.with.clone(),
                 connection: req.connection.clone(),
@@ -167,9 +180,33 @@ impl StatementExecutor {
                 direction: CopyDirection::Import,
                 timestamp_range: None,
                 limit: None,
-            };
+            });
+        }
+        Ok(requests)
+    }
+
+    /// Imports the prepared file requests without listing the source again.
+    pub async fn copy_database_from_requests(
+        &self,
+        req: CopyDatabaseRequest,
+        requests: Vec<CopyTableRequest>,
+        ctx: QueryContextRef,
+    ) -> error::Result<Output> {
+        let parallelism = parse_parallelism_from_option_map(&req.with);
+        info!(
+            "Copy database {}.{} from dir: {}, time: {:?}, parallelism: {}",
+            req.catalog_name, req.schema_name, req.location, req.time_range, parallelism
+        );
+        let continue_on_error = req
+            .with
+            .get(CONTINUE_ON_ERROR_KEY)
+            .and_then(|v| bool::from_str(v).ok())
+            .unwrap_or(false);
+        let mut tasks = Vec::with_capacity(requests.len());
+        let semaphore = Arc::new(Semaphore::new(parallelism));
+        for req in requests {
             let moved_ctx = ctx.clone();
-            let moved_table_name = table_name.clone();
+            let moved_table_name = req.table_name.clone();
             let moved_semaphore = semaphore.clone();
             tasks.push(async move {
                 let _permit = moved_semaphore.acquire().await.unwrap();
