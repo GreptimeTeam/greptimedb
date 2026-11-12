@@ -39,10 +39,12 @@ use tracing_appender::non_blocking::{NonBlocking, WorkerGuard};
 use tracing_log::LogTracer;
 use tracing_subscriber::filter::{FilterFn, Targets};
 use tracing_subscriber::fmt::Layer;
+use tracing_subscriber::fmt::format::Format;
 use tracing_subscriber::layer::{Layered, SubscriberExt};
 use tracing_subscriber::prelude::*;
 use tracing_subscriber::{EnvFilter, Registry, filter};
 
+use crate::redact::RedactingFormatter;
 use crate::tracing_sampler::{TracingSampleOptions, create_sampler};
 
 /// The default endpoint when use gRPC exporter protocol.
@@ -743,11 +745,16 @@ where
     if log_format == LogFormat::Json {
         Layer::new()
             .json()
+            .event_format(RedactingFormatter::new(Format::default().json()))
             .with_writer(writer)
             .with_ansi(ansi)
             .boxed()
     } else {
-        Layer::new().with_writer(writer).with_ansi(ansi).boxed()
+        Layer::new()
+            .event_format(RedactingFormatter::new(Format::default()))
+            .with_writer(writer)
+            .with_ansi(ansi)
+            .boxed()
     }
 }
 
