@@ -22,7 +22,7 @@ use common_base::cancellation::CancellableFuture;
 use common_telemetry::{error, info, warn};
 use futures::TryStreamExt;
 use snafu::ensure;
-use store_api::logstore::LogStore;
+use store_api::logstore::{LogStore, WalReadUpperBound};
 use store_api::storage::RegionId;
 use tokio::sync::mpsc::Sender;
 
@@ -39,7 +39,7 @@ use crate::region::{MitoRegion, MitoRegionRef, TailPublication};
 use crate::request::{BackgroundNotify, WorkerRequest, WorkerRequestWithTime};
 use crate::schedule::CancellableTaskState;
 use crate::sst::file::{FileMeta, UncommittedSsts};
-use crate::wal::{EntryId, Wal};
+use crate::wal::{EntryId, Wal, WalEntryStream};
 
 /// Memtable usage at which replayed rows are written to SSTs.
 const CHUNK_MEMTABLE_USAGE: usize = 64 * 1024 * 1024;
@@ -203,9 +203,7 @@ impl<S: LogStore> TailReplayTask<S> {
         let mut files = Vec::new();
         let mut last_entry_ids = Vec::with_capacity(tails.len());
         for tail in tails {
-            let mut entries = self
-                .unless_cancelled(self.wal.read_tail(provider, region_id, self.node_id, tail))
-                .await?;
+            let mut entries = self.unless_cancelled(self.read_tail_entries(tail)).await?;
             let mut chunk = self.new_chunk_version();
             let mut last_entry_id = None;
             while let Some((entry_id, entry)) = self.unless_cancelled(entries.try_next()).await? {
@@ -234,6 +232,24 @@ impl<S: LogStore> TailReplayTask<S> {
             last_entry_ids.push(last_entry_id);
         }
         Ok((files, last_entry_ids))
+    }
+
+    /// Streams the region's entries of `tail`, starting after `tail.after`. This node's reported
+    /// tail comes from its own WAL, whose stream may go past `tail.upto`. Every other tail is read
+    /// up to its bound through [Wal::read_node], since a listed bound may name no entry.
+    async fn read_tail_entries(&self, tail: &PendingTail) -> Result<WalEntryStream<'static>> {
+        let (provider, region_id) = (&self.region.provider, self.region.region_id);
+        let upper = match tail.upto_kind {
+            UptoKind::Reported if Some(tail.node_id) == self.node_id => {
+                let mut reader = self.wal.wal_entry_reader(provider, region_id);
+                return reader.read(provider, tail.after + 1);
+            }
+            UptoKind::Reported => WalReadUpperBound::LastEntry(tail.upto),
+            UptoKind::Listed => WalReadUpperBound::Listed(tail.upto),
+        };
+        self.wal
+            .read_node(region_id, tail.node_id, tail.after, upper)
+            .await
     }
 
     /// Waits until the region receives a Leader lease. Returns false if the region stops being

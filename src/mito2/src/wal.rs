@@ -43,7 +43,6 @@ use crate::error::{
     BuildEntrySnafu, CheckWalHistorySnafu, DeleteWalSnafu, ReadNodeWalSnafu,
     RemoteWalUnsupportedSnafu, Result, WaitWalDurableSnafu, WriteWalSnafu,
 };
-use crate::manifest::action::{PendingTail, UptoKind};
 use crate::wal::entry_reader::{LogStoreEntryReader, WalEntryReader, decode_raw_entry};
 use crate::wal::raw_entry_reader::{LogStoreRawEntryReader, RegionRawEntryReader};
 
@@ -245,30 +244,18 @@ impl<S: LogStore> Wal<S> {
         }
     }
 
-    /// Streams the region's entries of `tail` from the WAL of its node, starting after
-    /// `tail.after`. A reported tail of node `node_id` comes from this log store's own WAL,
-    /// whose stream may go past `tail.upto`. A listed bound may name no entry, so the read of
-    /// every listed tail stops at its bound through `read_node`.
-    pub(crate) async fn read_tail(
+    /// Streams the region's entries in `(after, upper]` from the WAL of node `node_id`, which may
+    /// be this node, without writing to it.
+    pub(crate) async fn read_node(
         &self,
-        provider: &Provider,
         region_id: RegionId,
-        node_id: Option<u64>,
-        tail: &PendingTail,
+        node_id: u64,
+        after: EntryId,
+        upper: WalReadUpperBound,
     ) -> Result<WalEntryStream<'static>> {
-        if Some(tail.node_id) == node_id && tail.upto_kind == UptoKind::Reported {
-            return self
-                .wal_entry_reader(provider, region_id)
-                .read(provider, tail.after + 1);
-        }
-        let node_id = tail.node_id;
-        let upper = match tail.upto_kind {
-            UptoKind::Reported => WalReadUpperBound::LastEntry(tail.upto),
-            UptoKind::Listed => WalReadUpperBound::Listed(tail.upto),
-        };
         let entries = self
             .store
-            .read_node(node_id, region_id, tail.after, upper)
+            .read_node(node_id, region_id, after, upper)
             .await
             .map_err(BoxedError::new)
             .context(ReadNodeWalSnafu { region_id, node_id })?
