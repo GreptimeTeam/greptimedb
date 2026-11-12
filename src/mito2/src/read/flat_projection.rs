@@ -487,7 +487,7 @@ pub(crate) fn compute_input_arrow_schema(
 /// rather than from a projection recomputed over the source metadata. This is
 /// the same projection `FlatCompatBatch` indexes the batch with.
 pub(crate) struct CompactionProjectionMapper {
-    /// Index in the input flat batch of each field and time index column, in
+    /// Indices in the input flat batch of the field and time index columns, in
     /// the order the reader projects them.
     projection: Vec<usize>,
 }

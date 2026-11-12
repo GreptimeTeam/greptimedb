@@ -461,7 +461,7 @@ mod tests {
         Arc::new(builder.build().unwrap())
     }
 
-    /// Writes one flat batch for [`sparse_metadata`] with `4` rows in one series.
+    /// Builds the flat batch for [`sparse_metadata`] with `4` rows in one series.
     fn sparse_flat_batch(metadata: &RegionMetadataRef) -> RecordBatch {
         let schema = to_flat_sst_arrow_schema(
             metadata,
@@ -486,12 +486,15 @@ mod tests {
         for _ in 0..num_rows {
             pk_builder.append(&pk).unwrap();
         }
+        let values: Vec<f64> = (0..num_rows).map(|idx| idx as f64 + 0.5).collect();
+        let weights: Vec<f64> = (0..num_rows).map(|idx| (idx + 1) as f64 * 10.0).collect();
+        let timestamps: Vec<i64> = (0..num_rows as i64).map(|idx| idx + 1).collect();
         RecordBatch::try_new(
             schema,
             vec![
-                Arc::new(Float64Array::from(vec![0.5, 1.5, 2.5, 3.5])) as ArrayRef,
-                Arc::new(Float64Array::from(vec![10.0, 20.0, 30.0, 40.0])),
-                Arc::new(TimestampMillisecondArray::from(vec![1, 2, 3, 4])),
+                Arc::new(Float64Array::from(values)) as ArrayRef,
+                Arc::new(Float64Array::from(weights)),
+                Arc::new(TimestampMillisecondArray::from(timestamps)),
                 Arc::new(pk_builder.finish()),
                 Arc::new(UInt64Array::from_value(1, num_rows)),
                 Arc::new(UInt8Array::from_value(OpType::Put as u8, num_rows)),
