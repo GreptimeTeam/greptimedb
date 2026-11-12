@@ -106,7 +106,9 @@ including caches owned by pipeline and protocol handlers.
   inserter, with no batcher attached, sends the prepared bulk writes to datanodes,
   avoiding recursive batching. The batcher handles successful-write Flow notifications.
   `FrontendBuilder` creates the write memory limiter shared by conversion admission
-  and the protocol servers wired by `Services`.
+  and the protocol servers wired by `Services`. Conversion admission includes the
+  request's live transport and retained decoder reservations in its fit check;
+  previously queued Arrow batches remain transient contention.
 
 ## Public surface
 

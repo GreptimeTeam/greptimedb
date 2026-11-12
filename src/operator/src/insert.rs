@@ -771,7 +771,10 @@ impl Inserter {
         } else {
             Some(
                 batcher
-                    .acquire(estimated_bytes.unwrap_or(usize::MAX))
+                    .acquire(
+                        estimated_bytes.unwrap_or(usize::MAX),
+                        ctx.held_memory_bytes(),
+                    )
                     .await?,
             )
         };
@@ -4304,7 +4307,7 @@ mod tests {
 
     #[async_trait::async_trait]
     impl PendingRowsBatcher for UnexpectedBatcher {
-        async fn acquire(&self, _: usize) -> Result<crate::batcher::PendingRowsPermit> {
+        async fn acquire(&self, _: usize, _: u64) -> Result<crate::batcher::PendingRowsPermit> {
             panic!("empty writes must not acquire batch admission")
         }
 

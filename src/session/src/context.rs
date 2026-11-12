@@ -16,7 +16,8 @@ use std::collections::HashMap;
 use std::fmt::{Display, Formatter};
 use std::net::SocketAddr;
 use std::str::FromStr;
-use std::sync::{Arc, RwLock};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, RwLock, Weak};
 use std::time::Duration;
 
 use api::v1::ExplainOptions;
@@ -99,6 +100,9 @@ pub struct QueryContext {
     /// Process-local storage acknowledgements; never accepted from a wire context.
     #[builder(setter(skip))]
     write_progress: Option<Arc<WriteProgress>>,
+    /// Reads transport-owned reservations without retaining them in queued writes.
+    #[builder(setter(skip))]
+    body_memory_bytes: Weak<AtomicU64>,
     /// Preserve storage acknowledgements for protocol-level partial-write accounting.
     #[builder(setter(skip))]
     confirmed_writes: bool,
@@ -302,6 +306,23 @@ impl QueryContext {
 
     pub fn set_write_progress(&mut self, progress: Arc<WriteProgress>) {
         self.write_progress = Some(progress);
+    }
+
+    /// Attaches the live, process-local count of transport-owned memory permits.
+    pub fn set_body_memory_bytes(&mut self, bytes: Weak<AtomicU64>) {
+        self.body_memory_bytes = bytes;
+    }
+
+    /// Returns permits held through conversion, excluding independently flushing Arrow batches.
+    pub fn held_memory_bytes(&self) -> u64 {
+        self.body_memory_bytes
+            .upgrade()
+            .map_or(0, |bytes| bytes.load(Ordering::Acquire))
+            .saturating_add(
+                self.write_progress
+                    .as_ref()
+                    .map_or(0, |progress| progress.reserved_bytes()),
+            )
     }
 
     /// Forks this context to retain storage acknowledgements for partial write accounting.
@@ -797,6 +818,7 @@ impl QueryContextBuilder {
             batching_enabled: self.batching_enabled.unwrap_or_default(),
             admitted_write: None,
             write_progress: None,
+            body_memory_bytes: Weak::new(),
             confirmed_writes: false,
             logical_batching_enabled: self.logical_batching_enabled.unwrap_or_default(),
             process_id: self.process_id.unwrap_or_default(),

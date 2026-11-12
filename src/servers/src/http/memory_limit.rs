@@ -31,8 +31,8 @@
 //! buffers that outlive the body stream itself).
 
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, Weak};
 use std::task::{Context, Poll};
 
 use axum::body::Body;
@@ -182,6 +182,7 @@ pub async fn decoded_body_accounting_middleware(
 #[derive(Clone, Default)]
 pub(crate) struct BodyMemoryAccounting {
     guards: Arc<Mutex<Vec<MemoryGuard<RequestMemoryMetrics>>>>,
+    reserved_bytes: Arc<AtomicU64>,
     /// Set when an incremental charge hit the quota, so the rejection can be
     /// rewritten into a 429 after the middleware regains control.
     quota_exceeded: Arc<AtomicBool>,
@@ -190,15 +191,17 @@ pub(crate) struct BodyMemoryAccounting {
 impl BodyMemoryAccounting {
     /// Includes permit rounding and all frames collected so far.
     pub(crate) fn reserved_bytes(&self) -> u64 {
-        self.guards
-            .lock()
-            .unwrap()
-            .iter()
-            .map(MemoryGuard::granted_bytes)
-            .sum()
+        self.reserved_bytes.load(Ordering::Acquire)
+    }
+
+    /// Observes subsequent body charges without extending the guards' lifetime.
+    pub(crate) fn reserved_bytes_counter(&self) -> Weak<AtomicU64> {
+        Arc::downgrade(&self.reserved_bytes)
     }
 
     fn hold(&self, guard: MemoryGuard<RequestMemoryMetrics>) {
+        self.reserved_bytes
+            .fetch_add(guard.granted_bytes(), Ordering::Release);
         self.guards.lock().unwrap().push(guard);
     }
 
@@ -532,6 +535,79 @@ mod tests {
     fn zstd_body(decoded: &[u8]) -> Body {
         let compressed = zstd::stream::encode_all(decoded, 3).unwrap();
         Body::from(compressed)
+    }
+
+    #[tokio::test]
+    async fn test_body_reservations_follow_context_without_extending_lifetime() {
+        use std::sync::{Arc, Mutex};
+
+        use axum::Extension;
+        use session::context::QueryContext;
+        use tower_http::decompression::RequestDecompressionLayer;
+
+        use crate::batcher::BatchingProtocol;
+        use crate::http::set_http_write_batching;
+
+        for limit in [0, 8 * 1024] {
+            for compressed in [false, true] {
+                let limiter = ServerMemoryLimiter::new(limit, OnExhaustedPolicy::default());
+                let captured = Arc::new(Mutex::new(None));
+                let output = captured.clone();
+                let memory = limiter.clone();
+                let app = Router::new()
+                    .route(
+                        "/echo",
+                        post(
+                            move |Extension(ctx): Extension<QueryContext>, body: Bytes| async move {
+                                assert_eq!(body.len(), 1536);
+                                assert!(ctx.batching_enabled());
+                                assert!(ctx.held_memory_bytes() >= body.len() as u64);
+                                assert_eq!(ctx.held_memory_bytes(), memory.used_bytes());
+                                *output.lock().unwrap() = Some(ctx.with_write_admission());
+                                StatusCode::OK
+                            },
+                        ),
+                    )
+                    .layer(middleware::from_fn_with_state(
+                        limiter.clone(),
+                        super::decoded_body_accounting_middleware,
+                    ))
+                    .layer(RequestDecompressionLayer::new())
+                    .layer(middleware::from_fn_with_state(
+                        BatchingProtocol::Influxdb,
+                        set_http_write_batching,
+                    ))
+                    .layer(Extension(QueryContext::with("greptime", "public")))
+                    .layer(Extension(Arc::new(vec![BatchingProtocol::Influxdb])))
+                    .layer(middleware::from_fn_with_state(
+                        limiter.clone(),
+                        memory_limit_middleware,
+                    ));
+                let body = vec![b'x'; 1536];
+                let body = if compressed {
+                    zstd::stream::encode_all(body.as_slice(), 3).unwrap()
+                } else {
+                    body
+                };
+                let mut request = chunked_request("/echo", body, 512);
+                if compressed {
+                    request
+                        .headers_mut()
+                        .insert(header::CONTENT_ENCODING, "zstd".parse().unwrap());
+                }
+                assert_eq!(app.oneshot(request).await.unwrap().status(), StatusCode::OK);
+                assert_eq!(limiter.used_bytes(), 0);
+                assert_eq!(
+                    captured
+                        .lock()
+                        .unwrap()
+                        .as_ref()
+                        .unwrap()
+                        .held_memory_bytes(),
+                    0
+                );
+            }
+        }
     }
 
     #[tokio::test]
