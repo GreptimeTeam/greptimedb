@@ -922,7 +922,9 @@ async fn test_chain_object_vanished_at_reclaim_boundary_fails() {
         let (_, io, observed, reader) = fixture();
         put_reclaimed_chain(&io).await;
         // Without object 2 a listed read would select the complete chain
-        // ending at object 1, which already reaches the watermark.
+        // ending at object 1. Its epoch is the newest and its entries end at
+        // `after`, so unless the vanished object 2 fails the read, it succeeds
+        // with no entries.
         *observed.vanishing.lock().unwrap() = vec![2];
         let error = collect(&reader, entry_id(1, 1), upper).await.unwrap_err();
         assert!(index::is_not_found(&error), "{upper:?}: {error:?}");
@@ -940,7 +942,13 @@ async fn test_unreadable_object_below_reclaim_boundary_fails() {
         bytes[0] ^= 1;
         store.write(&io.object_path(1), bytes).await.unwrap();
         let error = collect(&reader, entry_id(1, 1), upper).await.unwrap_err();
-        assert!(!index::is_not_found(&error), "{upper:?}: {error:?}");
+        let Error::ObjectStoreWal { source, .. } = &error else {
+            panic!("{upper:?}: {error:?}");
+        };
+        assert!(
+            matches!(source.as_ref(), Error::InvalidWalObject { path, .. } if *path == io.object_path(1)),
+            "{upper:?}: {error:?}"
+        );
     }
 }
 
