@@ -225,12 +225,20 @@ impl EventListener for CountingStallListener {
 #[derive(Default)]
 pub struct FlushFailedListener {
     notify: Notify,
+    failure_count: AtomicUsize,
 }
 
 impl FlushFailedListener {
-    /// Waits until the worker handles a failed flush.
-    pub async fn wait(&self) {
-        self.notify.notified().await;
+    /// Waits until the worker has handled at least `times` failed flushes.
+    pub async fn wait_failure_count(&self, times: usize) {
+        while self.failure_count.load(Ordering::Relaxed) < times {
+            self.notify.notified().await;
+        }
+    }
+
+    /// Returns the number of failed flushes the worker has handled.
+    pub fn failure_count(&self) -> usize {
+        self.failure_count.load(Ordering::Relaxed)
     }
 }
 
@@ -239,6 +247,7 @@ impl EventListener for FlushFailedListener {
     fn on_flush_failed(&self, region_id: RegionId) {
         info!("Region {} flush failed", region_id);
 
+        self.failure_count.fetch_add(1, Ordering::Relaxed);
         self.notify.notify_one();
     }
 }

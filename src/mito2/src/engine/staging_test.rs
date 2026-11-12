@@ -2184,8 +2184,9 @@ async fn test_stale_staging_edit_rejected_after_close_time_flush_fails() {
         )
         .await
         .unwrap_err();
-    // The close returns before the worker handles its failed flush; edits stay busy until then.
-    tokio::time::timeout(Duration::from_secs(3), listener.wait())
+    // The close can return before the worker handles its failed flush, which clears the
+    // close-time flush that rejects edits as busy.
+    tokio::time::timeout(Duration::from_secs(3), listener.wait_failure_count(1))
         .await
         .unwrap();
 
@@ -2219,6 +2220,8 @@ async fn test_stale_staging_edit_rejected_after_close_time_flush_fails() {
         .unwrap();
     let result = submit_staging_edit(&engine, region_id, file, stale_expr).await;
     assert_matches!(result.unwrap_err(), Error::RegionState { .. });
+    // Only the close-time flush failed.
+    assert_eq!(1, listener.failure_count());
 
     let manager = region.manifest_ctx.manifest_manager.read().await;
     assert!(!manager.manifest().files.contains_key(&file_id));
