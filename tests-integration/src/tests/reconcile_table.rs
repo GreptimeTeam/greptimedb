@@ -541,6 +541,21 @@ async fn test_renamed_table() {
     check_output_stream(output.data, expected).await;
 }
 
+fn show_create_column_pos(section: &str, name: &str) -> Option<usize> {
+    for pattern in [
+        format!(" {name} "),
+        format!("({name} "),
+        format!("\n{name} "),
+        format!(" {name},"),
+        format!("({name},"),
+    ] {
+        if let Some(pos) = section.find(&pattern) {
+            return Some(pos);
+        }
+    }
+    None
+}
+
 #[tokio::test]
 async fn test_reconcile_table_preserves_column_order_and_pk_order() {
     let builder =
@@ -594,34 +609,16 @@ async fn test_reconcile_table_preserves_column_order_and_pk_order() {
     // varies between builds.
     let output = execute_sql(&frontend, "SHOW CREATE TABLE q8").await;
     let formatted = output.data.pretty_print().await;
-    let normalized = formatted
-        .replace('`', "")
-        .replace('"', "")
-        .to_lowercase();
+    let normalized = formatted.replace('`', "").replace('"', "").to_lowercase();
 
     let column_section = normalized
         .split("primary key")
         .next()
         .expect("SHOW CREATE TABLE should declare PRIMARY KEY");
 
-    fn column_pos(section: &str, name: &str) -> Option<usize> {
-        for pattern in [
-            format!(" {name} "),
-            format!("({name} "),
-            format!("\n{name} "),
-            format!(" {name},"),
-            format!("({name},"),
-        ] {
-            if let Some(pos) = section.find(&pattern) {
-                return Some(pos);
-            }
-        }
-        None
-    }
-
-    let ts_pos = column_pos(column_section, "ts").expect("ts column missing");
-    let a_pos = column_pos(column_section, "a").expect("a column missing");
-    let b_pos = column_pos(column_section, "b").expect("b column missing");
+    let ts_pos = show_create_column_pos(column_section, "ts").expect("ts column missing");
+    let a_pos = show_create_column_pos(column_section, "a").expect("a column missing");
+    let b_pos = show_create_column_pos(column_section, "b").expect("b column missing");
     assert!(
         ts_pos < a_pos && a_pos < b_pos,
         "expected column order ts, a, b, got:\n{formatted}"
@@ -631,9 +628,7 @@ async fn test_reconcile_table_preserves_column_order_and_pk_order() {
         .split("primary key")
         .nth(1)
         .expect("primary key section missing");
-    let key_normalized = key_section
-        .replace(' ', "")
-        .replace('\n', "");
+    let key_normalized = key_section.replace(' ', "").replace('\n', "");
     assert!(
         key_normalized.contains("(b,a)"),
         "expected PRIMARY KEY (b, a), got:\n{formatted}"
