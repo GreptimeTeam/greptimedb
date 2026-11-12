@@ -20,6 +20,7 @@ use std::time::{Duration, Instant};
 
 use api::v1::{Mutation, OpType, Rows, WalEntry};
 use async_trait::async_trait;
+use common_base::Plugins;
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_recordbatch::RecordBatches;
@@ -37,6 +38,7 @@ use object_store::services::Memory;
 use rstest::rstest;
 use store_api::logstore::LogStore;
 use store_api::logstore::provider::Provider;
+use store_api::metadata::RegionMetadataRef;
 use store_api::region_engine::{
     RegionEngine, RegionManifestInfo, RegionRole, SettableRegionRoleState,
 };
@@ -57,6 +59,7 @@ use crate::engine::object_store_wal_test::{
 use crate::engine::pending_tail_test::{
     add_field, commit_edit, pending_tails_edit, set_pending_tails,
 };
+use crate::engine::region_hook::{RegionHook, RegionHookRef, SstFileInfo};
 use crate::error::Error;
 use crate::manifest::action::{
     PendingTail, RegionEdit, RegionMetaAction, RegionMetaActionList, UptoKind,
@@ -84,8 +87,9 @@ struct TailReplayListener {
     commits: AtomicUsize,
     /// Commit attempts numbered from it on wait until it changes; 0 holds none.
     held_from: AtomicUsize,
-    failures: Mutex<Vec<StatusCode>>,
+    failures: Mutex<Vec<(StatusCode, String)>>,
     ended: AtomicUsize,
+    lease_checks: AtomicUsize,
 }
 
 #[async_trait]
@@ -97,8 +101,13 @@ impl EventListener for TailReplayListener {
         }
     }
 
+    fn on_tail_lease_check(&self, _region_id: RegionId) {
+        self.lease_checks.fetch_add(1, Ordering::Relaxed);
+    }
+
     fn on_tail_replay_failed(&self, _region_id: RegionId, error: &Error) {
-        self.failures.lock().unwrap().push(error.status_code());
+        let failure = (error.status_code(), format!("{error:?}"));
+        self.failures.lock().unwrap().push(failure);
     }
 
     fn on_tail_replay_ended(&self, _region_id: RegionId) {
@@ -124,7 +133,18 @@ impl TailReplayListener {
     }
 
     fn failed_with(&self, code: StatusCode) -> bool {
-        self.failures.lock().unwrap().contains(&code)
+        let failures = self.failures.lock().unwrap();
+        failures.iter().any(|(failed, _)| *failed == code)
+    }
+
+    /// Returns whether a failure's debug output names `cause`.
+    fn failed_naming(&self, cause: &str) -> bool {
+        let failures = self.failures.lock().unwrap();
+        failures.iter().any(|(_, error)| error.contains(cause))
+    }
+
+    fn lease_checks(&self) -> usize {
+        self.lease_checks.load(Ordering::Relaxed)
     }
 }
 
@@ -575,7 +595,12 @@ async fn test_missing_reported_object_fails_until_restored() {
     region.wal_store.delete(&path).await.unwrap();
 
     region.catchup().await;
-    wait_until(|| region.listener.failed()).await;
+    wait_until(|| {
+        region
+            .listener
+            .failed_naming("does not hold the history of region")
+    })
+    .await;
     assert!(region.has_pending_tails());
     region.wal_store.write(&path, bytes).await.unwrap();
     region.wait_until_replayed().await;
@@ -616,7 +641,8 @@ async fn test_unread_remote_listed_tail_waits_for_leader_lease() {
     region.catchup().await;
     // The catchup reopens the region.
     let mito_region = region.engine.get_region(region.region_id).unwrap();
-    tokio::time::sleep(Duration::from_secs(1)).await;
+    // A second check means the empty read is done and the replay keeps waiting.
+    wait_until(|| region.listener.lease_checks() >= 2).await;
     assert!(region.has_pending_tails());
     assert_eq!(version, next_manifest_version(&mito_region).await);
     // The replay waits for the lease instead of ending and starting again.
@@ -889,6 +915,46 @@ async fn test_uncertain_commit_is_retried_after_expired_lease() {
         &mito_region,
         &region.engine.get_region(region.region_id).unwrap()
     ));
+}
+
+#[tokio::test]
+async fn test_closed_replay_keeps_chunks_of_uncertain_commit() {
+    let version = Arc::new(AtomicU64::new(u64::MAX));
+    let region = TestRegion::new(
+        "tail-replay-uncertain-closed",
+        true,
+        Some(lose_delta_response(version.clone())),
+    )
+    .await;
+    region
+        .reopen_with_tails(vec![own_tail(0, region.entries[1], UptoKind::Reported)])
+        .await;
+    let mito_region = region.engine.get_region(region.region_id).unwrap();
+    version.store(next_manifest_version(&mito_region).await, Ordering::Relaxed);
+    region.listener.hold_from(2);
+    region.promote_with_lease();
+    // The first attempt lands but reports an error, and the region closes before a retry.
+    wait_until(|| region.listener.commits() == 2).await;
+    let close = RegionRequest::Close(RegionCloseRequest::default());
+    region
+        .engine
+        .handle_request(region.region_id, close)
+        .await
+        .unwrap();
+    region.listener.hold_from(0);
+    wait_until(|| region.listener.ended() == 1).await;
+
+    assert_eq!(1, region.stored_ssts().await);
+    reopen_region(
+        &region.engine,
+        region.region_id,
+        region.table_dir.clone(),
+        false,
+        wal_options(),
+    )
+    .await;
+    assert!(!region.has_pending_tails());
+    assert_eq!(6, count_rows(&region.engine, region.region_id).await);
 }
 
 #[tokio::test]
@@ -1256,4 +1322,55 @@ async fn test_triggers_during_replay_start_no_second_one() {
     region.listener.hold_from(0);
     region.wait_until_replayed().await;
     assert_eq!(1, region.listener.commits());
+}
+
+/// Counts the SST files that the engine reports written.
+#[derive(Debug, Default)]
+struct SstWriteCounter(AtomicUsize);
+
+#[async_trait]
+impl RegionHook for SstWriteCounter {
+    async fn on_sst_files_written(
+        &self,
+        _region_id: RegionId,
+        _region_metadata: &RegionMetadataRef,
+        files: &[SstFileInfo<'_>],
+    ) {
+        self.0.fetch_add(files.len(), Ordering::Relaxed);
+    }
+}
+
+#[tokio::test]
+async fn test_replay_chunks_fire_sst_written_hook() {
+    let mut env = TestEnv::with_prefix("tail-replay-hook")
+        .await
+        .with_node_id(NODE_ID);
+    let wal_store = ObjectStore::new(Memory::default()).unwrap();
+    let log_store =
+        ObjectStoreLogStore::try_new(wal_store, &wal_config(), NODE_ID, STANDALONE_GENERATION)
+            .await
+            .unwrap();
+    let hook = Arc::new(SstWriteCounter::default());
+    let plugins = Plugins::new();
+    plugins.insert(hook.clone() as RegionHookRef);
+    let engine = env
+        .create_engine_with_log_store_and_plugins(MitoConfig::default(), log_store, plugins)
+        .await;
+    let region_id = RegionId::new(1, 1);
+    let (table_dir, schema) = create_region(&engine, region_id).await;
+    put_range(&engine, region_id, &schema, 0, 3).await;
+    let region = engine.get_region(region_id).unwrap();
+    let last = region.version_control.current().last_entry_id;
+    let tails = vec![own_tail(0, last, UptoKind::Reported)];
+    commit_edit(&engine, region_id, pending_tails_edit(tails)).await;
+    reopen_region(&engine, region_id, table_dir, false, wal_options()).await;
+
+    engine
+        .set_region_role(region_id, RegionRole::Leader)
+        .unwrap();
+    let region = engine.get_region(region_id).unwrap();
+    wait_until(|| !region.version().has_pending_tails()).await;
+
+    // Nothing else wrote an SST: the region never flushed.
+    assert_eq!(1, hook.0.load(Ordering::Relaxed));
 }
