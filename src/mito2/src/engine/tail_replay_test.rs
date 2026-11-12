@@ -279,6 +279,27 @@ impl TestRegion {
             .unwrap();
     }
 
+    /// Reopens the follower region as a new instance, through a catchup that finds a manifest
+    /// version another writer published.
+    async fn replace_follower(&self) {
+        let mito_region = self.engine.get_region(self.region_id).unwrap();
+        let store = self.env.get_object_store().unwrap();
+        let version = next_manifest_version(&mito_region).await;
+        publish_delta(
+            &store,
+            &self.region_dir(),
+            version,
+            encode_delta(nop_action()).await,
+        )
+        .await;
+        let catchup = RegionRequest::Catchup(RegionCatchupRequest::default());
+        self.engine
+            .handle_request(self.region_id, catchup)
+            .await
+            .unwrap();
+        assert!(is_replaced(&self.engine, &mito_region));
+    }
+
     async fn catchup(&self) {
         let catchup = RegionRequest::Catchup(RegionCatchupRequest {
             set_writable: true,
@@ -785,7 +806,8 @@ async fn test_leased_first_round_clears_remote_listed_tail() {
     let mito_region = region.engine.get_region(region.region_id).unwrap();
     let version = next_manifest_version(&mito_region).await;
 
-    // A direct promotion counts as a lease, so no commit keeps part of the tail.
+    // No catchup promoted this instance, so it counts as leased and no commit keeps part of
+    // the tail.
     region.promote();
     region.wait_until_replayed().await;
 
@@ -1267,28 +1289,6 @@ async fn test_stalled_remote_read_ends_when_region_stops(#[case] stop_engine: bo
     wait_until(|| replaying.strong_count() == 0).await;
 }
 
-/// Reopens the follower `region` as a new instance, through a catchup that finds a manifest
-/// version another writer published.
-async fn replace_follower(region: &TestRegion) {
-    let mito_region = region.engine.get_region(region.region_id).unwrap();
-    let store = region.env.get_object_store().unwrap();
-    let version = next_manifest_version(&mito_region).await;
-    publish_delta(
-        &store,
-        &region.region_dir(),
-        version,
-        encode_delta(nop_action()).await,
-    )
-    .await;
-    let catchup = RegionRequest::Catchup(RegionCatchupRequest::default());
-    region
-        .engine
-        .handle_request(region.region_id, catchup)
-        .await
-        .unwrap();
-    assert!(is_replaced(&region.engine, &mito_region));
-}
-
 #[tokio::test]
 async fn test_replacing_region_cancels_its_replay() {
     let stall = Arc::new(AtomicBool::new(false));
@@ -1308,7 +1308,7 @@ async fn test_replacing_region_cancels_its_replay() {
         .engine
         .set_region_role(region.region_id, RegionRole::Follower)
         .unwrap();
-    replace_follower(&region).await;
+    region.replace_follower().await;
 
     wait_until(|| replaying.strong_count() == 0).await;
 }
@@ -1319,7 +1319,7 @@ async fn test_commit_notice_of_replaced_instance_changes_nothing() {
     let tails = vec![own_tail(0, region.entries[1], UptoKind::Reported)];
     region.reopen_with_tails(tails.clone()).await;
     let old = region.engine.get_region(region.region_id).unwrap();
-    replace_follower(&region).await;
+    region.replace_follower().await;
 
     let notify = BackgroundNotify::TailReplayCommitted {
         region: old.clone(),
