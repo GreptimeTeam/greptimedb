@@ -20,7 +20,9 @@ use std::time::Instant;
 
 use api::v1::SemanticType;
 use common_error::ext::BoxedError;
-use common_query::series_frame::{pack_raw_series, raw_series_frame_schema_with_ordering};
+use common_query::series_frame::{
+    pack_raw_series_with_key_range, raw_series_frame_schema_with_ordering,
+};
 use common_recordbatch::adapter::{
     RecordBatchStreamAdapter, RegionQueryStatCounters, SERIES_SCAN_EXEC_NAME,
 };
@@ -60,7 +62,8 @@ use datatypes::series::samples::{FieldSpec, SeriesSchema};
 use futures::{Stream, StreamExt};
 use store_api::metric_engine_consts::DATA_SCHEMA_TSID_COLUMN_NAME;
 use store_api::region_engine::{
-    BoundTag, PartitionRange, PrepareRequest, QueryScanContext, RawLabelSource, RegionScannerRef,
+    BoundTag, InitializedRawSeriesScan, PartitionRange, PrepareRequest, QueryScanContext,
+    RawLabelSource, RawSeriesKeyRange, RegionScannerRef, SendableRawSeriesStream,
 };
 use store_api::storage::{ScanRequest, TimeSeriesDistribution};
 
@@ -663,6 +666,34 @@ pub struct SeriesScanExec {
     properties: Arc<PlanProperties>,
 }
 
+/// The owned initialization of one raw-series partition, resolving to its packed frame stream.
+///
+/// The stream is fully initialized: the scanner-wide preparation and the partition's candidate
+/// slice are already resolved, and the frames are packed under a schema that already declares the
+/// range that initialization selected. A caller can therefore read the schema, and publish what it
+/// says, before the first cohort of rows is polled.
+pub type RawSeriesInitializationFuture =
+    futures::future::BoxFuture<'static, DfResult<DfSendableRecordBatchStream>>;
+
+/// The scanner's owned initialization of one partition, or `None` when it offers no such form.
+///
+/// The scanner decides synchronously which of the two it is: `Some` is work it has taken on and
+/// reports through the future, `None` means the ordinary entrypoint stays the stream and the caller
+/// captures it itself.
+type RawScannerInitializationFuture =
+    Option<futures::future::BoxFuture<'static, Result<InitializedRawSeriesScan, BoxedError>>>;
+
+/// What one partition needs after its initialization resolves to pack and wrap its stream.
+struct PartitionTail {
+    scan: Arc<RegionScanExec>,
+    scan_binding: RawLabelSource,
+    series_schema: Arc<SeriesSchema>,
+    arrow_schema: ArrowSchemaRef,
+    ordering: SeriesOrdering,
+    partition: usize,
+    span: Span,
+}
+
 impl std::fmt::Debug for SeriesScanExec {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let source = match &self.scan_binding {
@@ -791,6 +822,78 @@ impl ExecutionPlan for SeriesScanExec {
         partition: usize,
         context: Arc<TaskContext>,
     ) -> datafusion_common::Result<DfSendableRecordBatchStream> {
+        self.execute_partition(partition, context)
+    }
+}
+
+impl SeriesScanExec {
+    /// Initializes one raw-series partition before its frames are packed.
+    ///
+    /// This runs [`ExecutionPlan::execute`]'s own validation: under the scanner lock it checks the
+    /// partition range, pending dynamic filters, and that the scanner still declares the planned
+    /// schema, ordering, partition count, and binding. It then captures the scanner's owned
+    /// initialization and releases the lock before awaiting it, because resolving preparation is
+    /// asynchronous.
+    ///
+    /// A scanner that offers no initialized form keeps `scan_series_partition`'s stream unchanged
+    /// and declares no key range; that is the same stream an ordinary execution packs, not a
+    /// reduced capability. That stream is captured here, synchronously, and the future this method
+    /// returns already owns it: a caller that drops the future without polling it - a router that
+    /// fails or is cancelled before the task it spawned reads it - still releases the stream and
+    /// every reader, receiver and reservation behind it. Deferring that capture to the task would
+    /// leave a scanner that the caller still holds owning the partition's receiver, and the read
+    /// feeding it alive, until the whole plan goes away. Errors are the scan's own and are reported
+    /// here, never replayed through another entrypoint.
+    pub fn initialize_partition(
+        &self,
+        partition: usize,
+        context: Arc<TaskContext>,
+    ) -> RawSeriesInitializationFuture {
+        let tail = match self.partition_tail(partition, &context) {
+            Ok(tail) => tail,
+            Err(error) => return Box::pin(async move { Err(error) }),
+        };
+        let initialization = match tail.initialize() {
+            Some(initialization) => initialization,
+            // The source offers no initialized form, so its ordinary entrypoint is the stream and
+            // no range is claimed. The capture is part of this call, not of the returned future:
+            // what it creates is owned by the future from here on, whether or not anyone polls it.
+            None => {
+                let raw = match tail.ordinary() {
+                    Ok(raw) => raw,
+                    Err(error) => return Box::pin(async move { Err(error) }),
+                };
+                return match tail.finish(raw, None) {
+                    Ok(stream) => Box::pin(std::future::ready(Ok(stream))),
+                    Err(error) => Box::pin(async move { Err(error) }),
+                };
+            }
+        };
+        Box::pin(async move {
+            let initialized = initialization
+                .await
+                .map_err(|error| DataFusionError::External(Box::new(error)))?;
+            tail.finish(initialized.stream, initialized.key_range)
+        })
+    }
+
+    /// Executes one partition with the scanner's ordinary raw entrypoint and no key range.
+    fn execute_partition(
+        &self,
+        partition: usize,
+        context: Arc<TaskContext>,
+    ) -> DfResult<DfSendableRecordBatchStream> {
+        let tail = self.partition_tail(partition, &context)?;
+        let raw = tail.ordinary()?;
+        tail.finish(raw, None)
+    }
+
+    /// Validates this partition against the plan and builds what its stream needs after capture.
+    fn partition_tail(
+        &self,
+        partition: usize,
+        context: &Arc<TaskContext>,
+    ) -> DfResult<PartitionTail> {
         let partitions = self.properties.output_partitioning().partition_count();
         if partition >= partitions {
             return Err(DataFusionError::Execution(format!(
@@ -807,10 +910,8 @@ impl ExecutionPlan for SeriesScanExec {
             "read_from_region",
             partition = partition
         ));
-        let _enter = span.enter();
-        let ctx = QueryScanContext {
-            explain_verbose: self.scan.explain_verbose,
-        };
+        let entered = span.clone();
+        let _enter = entered.enter();
         let scanner = self.scan.scanner.lock().unwrap();
         let current = scanner
             .raw_series_schema(&self.scan_binding)
@@ -818,7 +919,7 @@ impl ExecutionPlan for SeriesScanExec {
             .ok_or_else(|| {
                 DataFusionError::Execution("raw series capability changed after planning".into())
             })?;
-        let current_ordering = scanner
+        let ordering = scanner
             .raw_series_ordering()
             .map_err(|e| DataFusionError::External(Box::new(e)))?;
         let frame_labels = if scanner
@@ -830,7 +931,7 @@ impl ExecutionPlan for SeriesScanExec {
             self.scan_binding.clone()
         };
         let current_frame =
-            raw_series_frame_schema_with_ordering(&current, &frame_labels, current_ordering)?;
+            raw_series_frame_schema_with_ordering(&current, &frame_labels, ordering)?;
         if current_frame != self.arrow_schema
             || scanner.properties().num_partitions().max(1) != partitions
         {
@@ -838,15 +939,72 @@ impl ExecutionPlan for SeriesScanExec {
                 "raw series schema or prepared partitions changed after planning".into(),
             ));
         }
-        let raw = scanner
-            .scan_series_partition(&ctx, &self.scan.metric, partition, &self.scan_binding)
+        drop(scanner);
+        drop(_enter);
+        Ok(PartitionTail {
+            scan: Arc::clone(&self.scan),
+            scan_binding: self.scan_binding.clone(),
+            series_schema: Arc::clone(&self.series_schema),
+            arrow_schema: self.arrow_schema.clone(),
+            ordering,
+            partition,
+            span,
+        })
+    }
+}
+
+impl PartitionTail {
+    /// Captures the scanner's initialized partition, if it offers one.
+    ///
+    /// The capture is synchronous and holds the scanner lock only for the call itself; a returned
+    /// future is owned and is awaited after the lock is released. A scanner without an initialized
+    /// form answers `None` here, before doing any work, and the caller captures the ordinary
+    /// stream itself while it still owns the call.
+    fn initialize(&self) -> RawScannerInitializationFuture {
+        let ctx = QueryScanContext {
+            explain_verbose: self.scan.explain_verbose,
+        };
+        self.scan
+            .scanner
+            .lock()
+            .unwrap()
+            .initialize_series_partition(
+                &ctx,
+                &self.scan.metric,
+                self.partition,
+                &self.scan_binding,
+            )
+    }
+
+    /// The stream of a scanner that offers no initialized form: the unchanged raw entrypoint.
+    fn ordinary(&self) -> DfResult<SendableRawSeriesStream> {
+        let ctx = QueryScanContext {
+            explain_verbose: self.scan.explain_verbose,
+        };
+        self.scan
+            .scanner
+            .lock()
+            .unwrap()
+            .scan_series_partition(&ctx, &self.scan.metric, self.partition, &self.scan_binding)
             .map_err(|e| DataFusionError::External(Box::new(e)))?
             .ok_or_else(|| {
                 DataFusionError::Execution(
                     "raw series capability disappeared during execution".into(),
                 )
-            })?;
-        if raw.ordering() != current_ordering {
+            })
+    }
+
+    /// Checks the captured stream against the plan, then packs and wraps it.
+    ///
+    /// The key range is sealed into the frame schema here, before any wrapper or batch exists, so
+    /// every batch the stream produces - and its schema, even when it produces none - declares the
+    /// same range.
+    fn finish(
+        self,
+        raw: SendableRawSeriesStream,
+        key_range: Option<RawSeriesKeyRange>,
+    ) -> DfResult<DfSendableRecordBatchStream> {
+        if raw.ordering() != self.ordering {
             return Err(DataFusionError::Execution(
                 "raw series stream ordering does not match its planned guarantee".into(),
             ));
@@ -865,8 +1023,11 @@ impl ExecutionPlan for SeriesScanExec {
                 "raw series stream does not match its planned binding".into(),
             ));
         }
-        let packed = pack_raw_series(raw)?;
-        if packed.schema() != self.arrow_schema {
+        let key_range_present = key_range.is_some();
+        let packed = pack_raw_series_with_key_range(raw, key_range)?;
+        if (!key_range_present && packed.schema() != self.arrow_schema)
+            || (key_range_present && packed.schema().fields() != self.arrow_schema.fields())
+        {
             return Err(DataFusionError::Execution(
                 "raw series label representation changed after planning".into(),
             ));
@@ -879,11 +1040,10 @@ impl ExecutionPlan for SeriesScanExec {
         } else {
             stream
         };
-        drop(_enter);
         Ok(Box::pin(StreamWithMetricWrapper {
             stream,
-            metric: StreamMetrics::new(&self.scan.metric, partition),
-            span,
+            metric: StreamMetrics::new(&self.scan.metric, self.partition),
+            span: self.span,
             await_timer: None,
             dyn_filter: None,
         }))

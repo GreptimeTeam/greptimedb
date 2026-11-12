@@ -124,7 +124,8 @@ use std::task::{Context, Poll};
 use common_error::ext::BoxedError;
 use common_query::series_frame::{
     SendableEvaluatedSeriesStream, pack_evaluated_series, pack_raw_series,
-    raw_series_frame_schema_with_ordering, unpack_evaluated_series, unpack_raw_series,
+    raw_series_frame_schema_with_ordering, raw_series_scan_key_range, unpack_evaluated_series,
+    unpack_raw_series,
 };
 use datafusion::arrow::datatypes::SchemaRef;
 use datafusion::arrow::record_batch::RecordBatch;
@@ -146,7 +147,7 @@ use datatypes::series::raw::RawSeriesChunk;
 use datatypes::series::samples::{Series, SeriesSchema};
 use datatypes::series::{SeriesLabels, SeriesOrdering};
 use futures::{Stream, StreamExt};
-use store_api::region_engine::{RawSeriesStream, SendableRawSeriesStream};
+use store_api::region_engine::{RawSeriesKeyRange, RawSeriesStream, SendableRawSeriesStream};
 use tokio::sync::mpsc;
 use twox_hash::XxHash64;
 
@@ -154,6 +155,7 @@ use crate::grid_series::{label_set, merge_same_labelset};
 use crate::native::execute::{merge_workspace_bytes, operand_chunk_bytes};
 use crate::source::merge_raw_identity_charging;
 use datatypes::series::samples::DenseSamplesRef;
+use table::table::scan::{RawSeriesInitializationFuture, SeriesScanExec};
 
 /// Selects the key used to route a series to an output partition.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -658,9 +660,28 @@ impl SharedExecution {
         let content = SeriesFrameDeclaration::parse(input.schema().as_ref())
             .map_err(|error| DataFusionError::Plan(error.to_string()))?
             .content();
+        // A static scan range is only usable under the ordering whose gate reads it: it lets an
+        // owner publish a lower key while a silent input has not sent anything. A frame that
+        // declares neither keys nor key order keeps the ordinary read and states nothing.
+        let local_raw = content == FrameContent::Raw
+            && common_query::series_frame::series_frame_ordering(input.schema().as_ref())?
+                == SeriesOrdering::KeyThenTime;
         let partitions = input.properties().partitioning.partition_count();
         let mut streams = Vec::with_capacity(partitions);
         for child_partition in 0..partitions {
+            // Only a direct raw series scan is initialized here: it resolves its own preparation
+            // before packing, so the frames it hands out declare the range its candidate slice
+            // covers. Every other child - wrapped, remote, or evaluated - keeps the ordinary
+            // execution, and any annotation it may carry is not this node's to trust.
+            if let Some(scan) = input.downcast_ref::<SeriesScanExec>()
+                && local_raw
+            {
+                streams.push(RoutedInput::LocalRaw {
+                    initialization: scan.initialize_partition(child_partition, Arc::clone(context)),
+                    series_schema: Arc::clone(&series_schema),
+                });
+                continue;
+            }
             let frames = input.execute(child_partition, Arc::clone(context))?;
             // The expected schema is a check and never an input: the decoder reads the frame's own
             // declaration, and a partition declaring another frame is refused here rather than
@@ -1275,7 +1296,7 @@ async fn read_state_batches(
 /// queued chains remain charged to the pool until consumed or dropped. Each task records its outcome
 /// before returning and dropping its senders, so output streams observe the final read outcome.
 async fn route_partition(
-    mut stream: RoutedInput,
+    stream: RoutedInput,
     partition: usize,
     routing: Routing,
     senders: Vec<mpsc::UnboundedSender<Queued>>,
@@ -1284,22 +1305,36 @@ async fn route_partition(
     mut report: ReportIfUnreported,
 ) {
     // The variant is the content: decoding the input's declared frame is what produced it.
-    let stop = match &mut stream {
-        RoutedInput::Evaluated(stream) => {
-            read_evaluated_chains(stream, partition, &routing, &senders, &read_ahead).await
+    let stop = match stream {
+        RoutedInput::Evaluated(mut stream) => {
+            read_evaluated_chains(&mut stream, partition, &routing, &senders, &read_ahead).await
         }
-        RoutedInput::Raw(stream) => {
-            read_raw_chains(stream, partition, &routing, &senders, &read_ahead).await
+        RoutedInput::Raw(mut stream) => {
+            read_raw_chains(&mut stream, partition, &routing, &senders, &read_ahead).await
         }
-        RoutedInput::State(stream, state, series) => {
-            read_state_batches(
-                stream,
+        RoutedInput::LocalRaw {
+            initialization,
+            series_schema,
+        } => {
+            route_initialized_raw(
+                initialization,
+                series_schema,
                 partition,
                 &routing,
                 &senders,
                 &read_ahead,
-                state,
-                series,
+            )
+            .await
+        }
+        RoutedInput::State(mut stream, state, series) => {
+            read_state_batches(
+                &mut stream,
+                partition,
+                &routing,
+                &senders,
+                &read_ahead,
+                &state,
+                &series,
             )
             .await
         }
@@ -1330,6 +1365,86 @@ async fn route_partition(
     // This task said what became of its partition, so the guard has nothing left to report.
     report.reported = true;
     drop(report);
+}
+
+/// Awaits one direct scan's initialization, publishes the range its frames declare, then reads it.
+///
+/// The frames are initialized here, so the annotation they carry describes this task's own scan
+/// partition and nothing else: the caller reached this arm only by downcasting the child to the
+/// local raw leaf. It is read from the schema before the first payload is pulled, published to every
+/// owner, and only then is the stream unpacked and consumed. Consuming the real stream afterwards is
+/// what keeps a failure that arrives with, or after, the range reported like any other.
+async fn route_initialized_raw(
+    initialization: RawSeriesInitializationFuture,
+    series_schema: Arc<SeriesSchema>,
+    partition: usize,
+    routing: &Routing,
+    senders: &[mpsc::UnboundedSender<Queued>],
+    read_ahead: &MemoryReservation,
+) -> Stop {
+    let frames = match initialization.await {
+        Ok(frames) => frames,
+        Err(error) => return Stop::Failed(Arc::new(error)),
+    };
+    // A range that is present but unreadable is this scan's failure, not "no range": silently
+    // dropping it would leave an owner waiting on a partition it could have reasoned about.
+    let key_range = match raw_series_scan_key_range(frames.schema().as_ref()) {
+        Ok(key_range) => key_range,
+        Err(error) => return Stop::Failed(Arc::new(error)),
+    };
+    if let Some(key_range) = key_range
+        && let Err(stop) = publish_key_range(key_range, partition, senders, read_ahead)
+    {
+        return stop;
+    }
+    let stream = match unpack_raw_series(frames, Some(series_schema)) {
+        Ok(stream) => stream,
+        Err(error) => return Stop::Failed(Arc::new(error)),
+    };
+    let mut stream = match crate::source::materialize_raw_labels(stream) {
+        Ok(stream) => stream,
+        Err(error) => return Stop::Failed(Arc::new(DataFusionError::External(Box::new(error)))),
+    };
+    read_raw_chains(&mut stream, partition, routing, senders, read_ahead).await
+}
+
+/// Publishes this input's static scan range to every owner before its first payload.
+///
+/// Every owner needs it: which output an identity belongs to is decided by the payload, so the owner
+/// of a lower key may be any of them, and an owner that never receives the range keeps waiting for a
+/// key this input cannot emit. One range per input is delivered, not the vector of every input's
+/// ranges. A closed owner is skipped, and the message carries its own pool charge so the retained
+/// keys stay accounted while an owner may still consult them.
+///
+/// A partition whose candidate slice covers nothing states no range and publishes none: that is not
+/// an absence claim about its keys, so an owner learns nothing and waits exactly as without evidence.
+fn publish_key_range(
+    key_range: RawSeriesKeyRange,
+    input: usize,
+    senders: &[mpsc::UnboundedSender<Queued>],
+    read_ahead: &MemoryReservation,
+) -> Result<(), Stop> {
+    for sender in senders {
+        if sender.is_closed() {
+            continue;
+        }
+        let metadata = read_ahead.new_empty();
+        let bytes = std::mem::size_of::<Queued>().saturating_add(key_range.retained_bytes());
+        if let Err(error) = metadata.try_grow(bytes) {
+            return Err(Stop::Failed(Arc::new(error)));
+        }
+        if sender
+            .send(Queued::KeyRange {
+                input,
+                range: key_range.clone(),
+                metadata,
+            })
+            .is_err()
+        {
+            continue;
+        }
+    }
+    Ok(())
 }
 
 /// Reports an input task that stopped without recording an outcome, on the paths that would
@@ -1777,7 +1892,14 @@ enum Ending {
 /// chains before locally merging exact identities and producing their final output.
 enum RoutedInput {
     Evaluated(SendableEvaluatedSeriesStream),
+    /// A raw input already unpacked from its frame; it states no locally initialized range.
     Raw(SendableRawSeriesStream),
+    /// A direct scan still initializing: awaiting it is the partition's preparation and reader,
+    /// and its frames declare the candidate range that initialization selected.
+    LocalRaw {
+        initialization: RawSeriesInitializationFuture,
+        series_schema: Arc<SeriesSchema>,
+    },
     State(
         SendableRecordBatchStream,
         Arc<AggregateStateSchema>,
@@ -1800,6 +1922,12 @@ enum Queued {
     Eof {
         input: usize,
         _metadata: MemoryReservation,
+    },
+    KeyRange {
+        input: usize,
+        range: RawSeriesKeyRange,
+        /// Retained with the range while an owner may still consult it.
+        metadata: MemoryReservation,
     },
     StateBatch {
         batch: Arc<RecordBatch>,
@@ -2005,6 +2133,7 @@ fn group_ready(
     group: &PendingGroup,
     eof: &[bool],
     last_key_from: &[Option<Vec<u8>>],
+    key_ranges: &[Option<RawSeriesKeyRange>],
     ordering: SeriesOrdering,
     completion: IdentityCompletion,
     key: &OwnerKey,
@@ -2016,11 +2145,18 @@ fn group_ready(
         let OwnerKey::Raw(key) = key else {
             return false;
         };
-        return group.received.iter().zip(eof).zip(last_key_from).all(
-            |((received, eof), last_key)| {
-                *received || *eof || last_key.as_ref().is_some_and(|last| last > key)
-            },
-        );
+        return group
+            .received
+            .iter()
+            .zip(eof)
+            .zip(last_key_from)
+            .zip(key_ranges)
+            .all(|(((received, eof), last_key), range)| {
+                *received
+                    || *eof
+                    || last_key.as_ref().is_some_and(|last| last > key)
+                    || range_excludes_key(range, key)
+            });
     }
     if completion == IdentityCompletion::CompleteDisjoint {
         return true;
@@ -2030,6 +2166,20 @@ fn group_ready(
         .iter()
         .zip(eof)
         .all(|(received, eof)| *received || *eof)
+}
+
+/// Whether one input's published candidate range proves it will never contribute `key`.
+///
+/// Only the range's `min` is consulted: a key strictly below it cannot be one of the candidates this
+/// input's slice selected. A key equal to `min` is not excluded - the input may still send that very
+/// identity, and publishing before it arrives would divide one identity between two publications -
+/// and a key inside or above the range proves nothing about whether it will arrive. The `max` is
+/// carried faithfully but says nothing here. An input that published no range keeps the original
+/// barrier.
+fn range_excludes_key(range: &Option<RawSeriesKeyRange>, key: &[u8]) -> bool {
+    range
+        .as_ref()
+        .is_some_and(|range| key < range.min.as_slice())
 }
 
 enum ReadyOutput {
@@ -2102,7 +2252,8 @@ impl Stream for StateBatchOutputStream {
                     let _ = input;
                     drop(_metadata);
                 }
-                Poll::Ready(Some(Queued::Chain { .. })) => {
+                Poll::Ready(Some(Queued::Chain { .. }))
+                | Poll::Ready(Some(Queued::KeyRange { .. })) => {
                     let error = DataFusionError::Internal(
                         "series router received a non-state message".into(),
                     );
@@ -2142,6 +2293,10 @@ struct RepartitionStream {
     groups: BTreeMap<OwnerKey, PendingGroup>,
     eof: Vec<bool>,
     last_key_from: Vec<Option<Vec<u8>>>,
+    /// The candidate key range each input published for its own partition stream.
+    key_range: Vec<Option<RawSeriesKeyRange>>,
+    /// Keeps a published range's keys charged while an owner may still consult it.
+    key_range_charges: Vec<Option<MemoryReservation>>,
     eof_metadata: Option<MemoryReservation>,
     inputs: usize,
     output: VecDeque<ReadySeries>,
@@ -2225,6 +2380,8 @@ impl RepartitionStream {
             groups: BTreeMap::new(),
             eof: Vec::new(),
             last_key_from: vec![None; inputs],
+            key_range: Vec::new(),
+            key_range_charges: Vec::new(),
             eof_metadata: None,
             inputs,
             output: VecDeque::new(),
@@ -2373,17 +2530,29 @@ impl Stream for RepartitionStream {
                 this.groups.clear();
                 this.output.clear();
                 this.eof.clear();
+                this.key_range.clear();
+                this.key_range_charges.clear();
                 this.eof_metadata = None;
                 return Poll::Ready(Some(Err(boxed(DataFusionError::from(&error)))));
             }
             if this.eof_metadata.is_none() {
                 let metadata = MemoryConsumer::new("SeriesRepartitionEof").register(&this.pool);
-                let bytes = this.inputs.saturating_mul(std::mem::size_of::<bool>());
+                // Every vector allocated below is charged for before any of them exists: one flag,
+                // one range slot and one range charge per input. Charging the flags alone would
+                // admit a pool too small for the two slot vectors and only discover it after the
+                // allocation, so the charge covers the whole bookkeeping or nothing.
+                let bytes = this.inputs.saturating_mul(
+                    std::mem::size_of::<bool>()
+                        .saturating_add(std::mem::size_of::<Option<RawSeriesKeyRange>>())
+                        .saturating_add(std::mem::size_of::<Option<MemoryReservation>>()),
+                );
                 if let Err(error) = metadata.try_grow(bytes) {
                     this.lease.fail(Arc::new(error));
                     continue;
                 }
                 this.eof = vec![false; this.inputs];
+                this.key_range = vec![None; this.inputs];
+                this.key_range_charges = (0..this.inputs).map(|_| None).collect();
                 this.eof_metadata = Some(metadata);
             }
             if let Ending::Failed(error) = this.lease.shared.ending() {
@@ -2396,6 +2565,8 @@ impl Stream for RepartitionStream {
                 this.groups.clear();
                 this.output.clear();
                 this.eof.clear();
+                this.key_range.clear();
+                this.key_range_charges.clear();
                 this.eof_metadata = None;
                 return Poll::Ready(Some(Err(boxed(DataFusionError::from(&error)))));
             }
@@ -2406,6 +2577,7 @@ impl Stream for RepartitionStream {
                             group,
                             &this.eof,
                             &this.last_key_from,
+                            &this.key_range,
                             this.ordering,
                             this.identity_completion,
                             key,
@@ -2425,6 +2597,7 @@ impl Stream for RepartitionStream {
                                     group,
                                     &this.eof,
                                     &this.last_key_from,
+                                    &this.key_range,
                                     this.ordering,
                                     this.identity_completion,
                                     key,
@@ -2436,6 +2609,7 @@ impl Stream for RepartitionStream {
                                 group,
                                 &this.eof,
                                 &this.last_key_from,
+                                &this.key_range,
                                 this.ordering,
                                 this.identity_completion,
                                 key,
@@ -2594,6 +2768,7 @@ impl Stream for RepartitionStream {
                         group,
                         &this.eof,
                         &this.last_key_from,
+                        &this.key_range,
                         this.ordering,
                         this.identity_completion,
                         &key,
@@ -2601,6 +2776,27 @@ impl Stream for RepartitionStream {
                     {
                         this.lease.fail(Arc::new(error));
                     }
+                }
+                Poll::Ready(Some(Queued::KeyRange {
+                    input,
+                    range,
+                    metadata,
+                })) => {
+                    drained += 1;
+                    if input >= this.key_range.len() || this.key_range[input].is_some() {
+                        this.lease.fail(Arc::new(DataFusionError::Execution(
+                            "series repartition input repeated its key range".into(),
+                        )));
+                        continue;
+                    }
+                    this.key_range[input] = Some(range);
+                    // Retained with its charge: an owner keeps consulting the range while any
+                    // identity below it is still pending.
+                    this.key_range_charges[input] = Some(metadata);
+                    // The range can complete any identity that was waiting for this input's keys,
+                    // and it may arrive without that input ever sending a sample.
+                    this.rescan = true;
+                    this.resume_after = None;
                 }
                 Poll::Ready(Some(Queued::Eof { input, _metadata })) => {
                     drained += 1;

@@ -8094,3 +8094,1040 @@ async fn histogram_state_router_dispatches_each_row_of_a_packed_batch() {
     }
     assert_eq!(seen, groups.len());
 }
+
+// ---- Static scan range: a direct raw scan's candidate range crosses this node ----
+//
+// The producer below is a test double for the one thing a region adds to the routing contract: a
+// direct raw scan initializes its partition before packing, so its frames declare the conservative
+// range of the candidates that partition selected. The consumer path is real: the double is wrapped
+// in the same `RegionScanExec`/`SeriesScanExec` a planned query uses, so the range travels through
+// the same capture, frame schema, input task, owner queues and ordering gate.
+
+use api::v1::SemanticType;
+use common_query::series_frame::pack_raw_series_with_key_range;
+use common_recordbatch::EmptyRecordBatchStream;
+use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
+use datatypes::schema::{ColumnSchema, Schema as DfSchema, SchemaRef as DfSchemaRef};
+use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder, RegionMetadataRef};
+use store_api::region_engine::{
+    InitializedRawSeriesScan, PrepareRequest, QueryScanContext, RawSeriesKeyRange, RegionScanner,
+    ScannerProperties,
+};
+use store_api::storage::ScanRequest;
+use table::table::scan::RegionScanExec;
+
+/// A raw scan partition: its chunks, the candidate range it reports, and the gate on its payload.
+struct RangePartition {
+    chunks: Vec<RawSeriesChunk>,
+    /// `None` is a slice that covers no candidate: it states no range at all.
+    key_range: Option<RawSeriesKeyRange>,
+    /// Closed until the test releases this partition's payload, including its EOF or failure.
+    payload: Arc<Switch>,
+    /// Reported after the released payload, so a late failure can be observed.
+    failure: Option<&'static str>,
+}
+
+/// A switch that is already open: an ungated partition answers as soon as it is polled.
+fn released_switch() -> Arc<Switch> {
+    let switch = Arc::new(Switch::default());
+    switch.open();
+    switch
+}
+
+impl RangePartition {
+    fn new(chunks: Vec<RawSeriesChunk>, min: &[u8], max: &[u8]) -> Self {
+        Self {
+            chunks,
+            key_range: Some(RawSeriesKeyRange {
+                min: Buffer::from_slice_ref(min),
+                max: Buffer::from_slice_ref(max),
+            }),
+            payload: released_switch(),
+            failure: None,
+        }
+    }
+
+    /// A slice that covers no candidate: it reports no range and emits nothing.
+    fn empty() -> Self {
+        Self {
+            chunks: Vec::new(),
+            key_range: None,
+            payload: released_switch(),
+            failure: None,
+        }
+    }
+
+    fn held(mut self, payload: Arc<Switch>) -> Self {
+        self.payload = payload;
+        self
+    }
+
+    fn failing(mut self, reason: &'static str) -> Self {
+        self.failure = Some(reason);
+        self
+    }
+}
+
+/// What a test can observe about the partitions behind a [`RangeScanner`].
+///
+/// Payload polling is the observable that a negative control has to wait for on the held side: the
+/// stream is built and polled only after its partition's initialization resolved and any range it
+/// states was published, so a parked payload says the input has done everything it can before the
+/// assertion.
+///
+/// Nothing about the released side is recorded here. A chunk having been handed over says a chunk
+/// was read, not that the route task queued it, and only the read's own bookkeeping says that.
+#[derive(Debug, Default)]
+struct RangeProgress {
+    polls: Vec<AtomicUsize>,
+}
+
+impl RangeProgress {
+    fn for_partitions(partitions: usize) -> Self {
+        Self {
+            polls: (0..partitions).map(|_| AtomicUsize::new(0)).collect(),
+        }
+    }
+
+    fn record_poll(&self, partition: usize) {
+        self.polls[partition].fetch_add(1, Ordering::SeqCst);
+    }
+
+    /// Whether this partition's payload has been polled at all.
+    fn polled(&self, partition: usize) -> bool {
+        self.polls[partition].load(Ordering::SeqCst) > 0
+    }
+}
+
+/// The stream one partition hands out: nothing until its payload is released, then its chunks and
+/// possibly a failure.
+struct RangeStream {
+    chunks: std::vec::IntoIter<RawSeriesChunk>,
+    failure: Option<&'static str>,
+    schema: Arc<SeriesSchema>,
+    binding: RawLabelSource,
+    payload: Arc<Switch>,
+    partition: usize,
+    progress: Arc<RangeProgress>,
+}
+
+impl Stream for RangeStream {
+    type Item = Result<RawSeriesChunk, BoxedError>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        self.progress.record_poll(self.partition);
+        if !self.payload.is_open() {
+            self.payload.wait(cx);
+            return Poll::Pending;
+        }
+        if let Some(chunk) = self.chunks.next() {
+            return Poll::Ready(Some(Ok(chunk)));
+        }
+        Poll::Ready(self.failure.take().map(|reason| {
+            Err(BoxedError::new(common_error::ext::PlainError::new(
+                reason.to_string(),
+                common_error::status_code::StatusCode::Internal,
+            )))
+        }))
+    }
+}
+
+impl RawSeriesStream for RangeStream {
+    fn schema(&self) -> &Arc<SeriesSchema> {
+        &self.schema
+    }
+    fn label_source(&self) -> &RawLabelSource {
+        &self.binding
+    }
+    fn ordering(&self) -> SeriesOrdering {
+        SeriesOrdering::KeyThenTime
+    }
+}
+
+/// A region scanner test double: initialized raw series per partition plus an optional key range.
+#[derive(Debug)]
+struct RangeScanner {
+    properties: ScannerProperties,
+    metadata: RegionMetadataRef,
+    arrow_schema: DfSchemaRef,
+    series_schema: Arc<SeriesSchema>,
+    partitions: Vec<RangePartition>,
+    progress: Arc<RangeProgress>,
+}
+
+impl fmt::Debug for RangePartition {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RangePartition")
+            .field("chunks", &self.chunks.len())
+            .field("key_range", &self.key_range)
+            .finish()
+    }
+}
+
+fn range_metadata() -> RegionMetadataRef {
+    let mut metadata = RegionMetadataBuilder::new(store_api::storage::RegionId::new(1, 1));
+    metadata
+        .push_column_metadata(ColumnMetadata {
+            column_schema: ColumnSchema::new("value", ConcreteDataType::float64_datatype(), false),
+            semantic_type: SemanticType::Field,
+            column_id: 1,
+        })
+        .push_column_metadata(ColumnMetadata {
+            column_schema: ColumnSchema::new(
+                "ts",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            ),
+            semantic_type: SemanticType::Timestamp,
+            column_id: 2,
+        })
+        .primary_key(vec![]);
+    Arc::new(metadata.build().expect("the test metadata builds"))
+}
+
+impl RangeScanner {
+    fn with_progress(partitions: Vec<RangePartition>, progress: Arc<RangeProgress>) -> Self {
+        Self {
+            properties: ScannerProperties::new(vec![vec![]; partitions.len()], false, 0),
+            metadata: range_metadata(),
+            arrow_schema: Arc::new(DfSchema::new(vec![
+                ColumnSchema::new("value", ConcreteDataType::float64_datatype(), false),
+                ColumnSchema::new(
+                    "ts",
+                    ConcreteDataType::timestamp_millisecond_datatype(),
+                    false,
+                ),
+            ])),
+            series_schema: raw_schema(),
+            partitions,
+            progress,
+        }
+    }
+}
+
+impl fmt::Display for RangeScanner {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        f.write_str("RangeScanner")
+    }
+}
+
+impl DisplayAs for RangeScanner {
+    fn fmt_as(&self, _t: DisplayFormatType, f: &mut Formatter<'_>) -> fmt::Result {
+        write!(f, "{self}")
+    }
+}
+
+impl RegionScanner for RangeScanner {
+    fn name(&self) -> &str {
+        "RangeScanner"
+    }
+    fn properties(&self) -> &ScannerProperties {
+        &self.properties
+    }
+    fn schema(&self) -> DfSchemaRef {
+        self.arrow_schema.clone()
+    }
+    fn metadata(&self) -> RegionMetadataRef {
+        self.metadata.clone()
+    }
+    fn prepare(&mut self, request: PrepareRequest) -> Result<(), BoxedError> {
+        self.properties.prepare(request);
+        Ok(())
+    }
+    fn scan_partition(
+        &self,
+        _ctx: &QueryScanContext,
+        _metrics: &ExecutionPlanMetricsSet,
+        _partition: usize,
+    ) -> Result<common_recordbatch::SendableRecordBatchStream, BoxedError> {
+        Ok(Box::pin(EmptyRecordBatchStream::new(
+            self.arrow_schema.clone(),
+        )))
+    }
+    fn raw_series_ordering(&self) -> Result<SeriesOrdering, BoxedError> {
+        Ok(SeriesOrdering::KeyThenTime)
+    }
+    fn raw_series_schema(
+        &self,
+        _source: &RawLabelSource,
+    ) -> Result<Option<Arc<SeriesSchema>>, BoxedError> {
+        Ok(Some(Arc::clone(&self.series_schema)))
+    }
+    fn scan_series_partition(
+        &self,
+        _ctx: &QueryScanContext,
+        _metrics: &ExecutionPlanMetricsSet,
+        partition: usize,
+        _source: &RawLabelSource,
+    ) -> Result<Option<SendableRawSeriesStream>, BoxedError> {
+        Ok(Some(self.partition_stream(partition)))
+    }
+    fn initialize_series_partition(
+        &self,
+        _ctx: &QueryScanContext,
+        _metrics: &ExecutionPlanMetricsSet,
+        partition: usize,
+        _source: &RawLabelSource,
+    ) -> Option<futures::future::BoxFuture<'static, Result<InitializedRawSeriesScan, BoxedError>>>
+    {
+        let stream = self.partition_stream(partition);
+        let key_range = self
+            .partitions
+            .get(partition)
+            .expect("this double has every partition it declares")
+            .key_range
+            .clone();
+        Some(Box::pin(async move {
+            Ok(InitializedRawSeriesScan { stream, key_range })
+        }))
+    }
+    fn has_predicate_without_region(&self) -> bool {
+        false
+    }
+    fn add_dyn_filter_to_predicate(&mut self, filters: Vec<Arc<dyn PhysicalExpr>>) -> Vec<bool> {
+        filters.into_iter().map(|_| false).collect()
+    }
+    fn set_logical_region(&mut self, logical_region: bool) {
+        self.properties.set_logical_region(logical_region);
+    }
+    fn set_query_load_region_id(&mut self, region_id: store_api::storage::RegionId) {
+        self.properties.set_query_load_region_id(region_id);
+    }
+}
+
+impl RangeScanner {
+    fn partition_stream(&self, partition: usize) -> SendableRawSeriesStream {
+        let spec = self
+            .partitions
+            .get(partition)
+            .expect("this double has every partition it declares");
+        Box::pin(RangeStream {
+            chunks: spec.chunks.clone().into_iter(),
+            failure: spec.failure,
+            schema: Arc::clone(&self.series_schema),
+            binding: RawLabelSource::Explicit,
+            payload: Arc::clone(&spec.payload),
+            partition,
+            progress: Arc::clone(&self.progress),
+        })
+    }
+}
+
+/// The real raw leaf over a [`RangeScanner`], as a planned query builds it, with the progress of its
+/// partitions observable to the test.
+fn range_scan_with_progress(
+    partitions: Vec<RangePartition>,
+    progress: Arc<RangeProgress>,
+) -> Arc<dyn ExecutionPlan> {
+    let scanner = RangeScanner::with_progress(partitions, progress);
+    let count = scanner.properties.num_partitions();
+    let region = RegionScanExec::new(Box::new(scanner), ScanRequest::default(), None)
+        .expect("the raw region scan builds");
+    let region = region
+        .with_new_partitions(vec![vec![]; count], count)
+        .expect("the prepared partition ranges are accepted");
+    Arc::new(region)
+        .try_to_series_scan(RawLabelSource::Explicit)
+        .expect("the raw leaf is selected")
+        .expect("the scanner supports raw series")
+}
+
+/// The routing node over the real raw leaf, with the matching policy the fused route uses.
+fn range_node(partitions: Vec<RangePartition>, outputs: usize) -> Arc<SeriesRepartitionExec> {
+    range_node_with_progress(partitions, outputs).0
+}
+
+/// The same node, with the progress of the scan's partitions observable to the test.
+fn range_node_with_progress(
+    partitions: Vec<RangePartition>,
+    outputs: usize,
+) -> (Arc<SeriesRepartitionExec>, Arc<RangeProgress>) {
+    let progress = Arc::new(RangeProgress::for_partitions(partitions.len()));
+    let plan = Arc::new(
+        SeriesRepartitionExec::try_new_with_routing(
+            range_scan_with_progress(partitions, Arc::clone(&progress)),
+            outputs,
+            SeriesRouting::Matching(MatchingLabels::Ignoring(Vec::new())),
+        )
+        .expect("the router is built over the raw leaf"),
+    );
+    (plan, progress)
+}
+
+/// One final raw chunk of `host` at one timestamp.
+fn range_chunk(host: &str, timestamp: i64, value: f64) -> RawSeriesChunk {
+    raw_chunk(
+        host,
+        Some(labels(host)),
+        &[timestamp],
+        vec![Some(value)],
+        true,
+    )
+}
+
+/// The identity, labels, time axis, samples and finality of one decoded chunk.
+fn range_chunk_summary(
+    chunk: &RawSeriesChunk,
+) -> (
+    String,
+    Option<SeriesLabels>,
+    Vec<i64>,
+    Vec<Option<f64>>,
+    bool,
+) {
+    let times = (0..chunk.time.len())
+        .map(|i| chunk.time.timestamp(i).expect("timestamps are present"))
+        .collect();
+    let values = (0..chunk.time.len())
+        .map(
+            |i| match chunk.fields.get(0).expect("one field").sample(i) {
+                datatypes::series::samples::SampleRef::Float(value) => Some(value),
+                _ => panic!("the test chunk carries floats"),
+            },
+        )
+        .collect();
+    (
+        String::from_utf8(chunk.primary_key.to_vec()).expect("the test keys are text"),
+        chunk.metric.clone(),
+        times,
+        values,
+        chunk.is_last,
+    )
+}
+
+/// Waits until every input task but the still-held ones has ended normally, and states how that is
+/// known.
+///
+/// [`Inputs::live`] is the read's own count of input tasks that have not reported an outcome, and a
+/// route task counts itself out only at the end of [`route_partition`]: after it has sent its whole
+/// chain to the owner and, for a normal end, one `Eof` per live output. The count reaching
+/// `expected_live` is therefore the read's record that the released input's chain *and* its EOF are
+/// queued for the owners - not that a chunk was read somewhere, which a pool total can say no more
+/// specifically than "some input charged it".
+///
+/// A task that fails or is aborted counts itself out too, so the cancellation flag and the recorded
+/// ending are asserted beside the count: with the read neither cancelled nor failed, what counted
+/// itself out did so by returning from its sends. That is what makes a `Pending` asserted afterwards
+/// a statement about the gate rather than about the released input not having got that far yet.
+async fn wait_until_released_inputs_end(plan: &Arc<SeriesRepartitionExec>, expected_live: usize) {
+    // Kept as an `Arc` of its own: the read outlives the plan and its outputs, and a guard over the
+    // plan's slot must not be the thing the assertions read through.
+    let execution = execution(plan);
+    wait_until(
+        "the released inputs end after queueing their chains and EOFs",
+        || execution.running.lock().unwrap().inputs.live() == expected_live,
+    )
+    .await;
+    // Read through closed scopes, so no lock over the read's live state spans an await.
+    let inputs = {
+        let running = execution.running.lock().unwrap();
+        Arc::clone(&running.inputs)
+    };
+    assert!(
+        !inputs.is_cancelled(),
+        "the released inputs ended normally, not through a failure that cancelled the read"
+    );
+    let failed = {
+        let ending = execution.ending.lock().unwrap();
+        matches!(*ending, Ending::Failed(_))
+    };
+    assert!(
+        !failed,
+        "the read recorded no failure, so the input that counted itself out did so by ending"
+    );
+}
+
+/// Waits until a negative control's two inputs have done everything the gate can read before the
+/// assertion: the held input resolved its initialization - which is where any range it states is
+/// published, or none is - and parked its payload at the gate the test has not opened, and the
+/// released input came to a normal end, so its chain and its EOF are queued to the owner (see
+/// [`wait_until_released_inputs_end`]).
+///
+/// Asserting `Pending` right after spawning the read would only say that nothing was ready yet; this
+/// waits for the evidence the gate is supposed to read, so a pending output after it means the
+/// evidence was not over-read.
+async fn wait_for_routed_lower_chain(
+    plan: &Arc<SeriesRepartitionExec>,
+    progress: &RangeProgress,
+    held_partition: usize,
+    held_gate: &Switch,
+) {
+    wait_until("the held input resolves and parks its payload", || {
+        progress.polled(held_partition)
+    })
+    .await;
+    assert!(
+        !held_gate.is_open(),
+        "the held input is parked at a gate the test keeps closed"
+    );
+    // One of the two route tasks is parked at that gate, so a count of one says the other ended.
+    wait_until_released_inputs_end(plan, 1).await;
+}
+
+/// The candidate range of the higher input excludes the lower key, so the lower identity is
+/// published while that input has produced neither a chunk nor an EOF.
+#[tokio::test]
+async fn scan_key_range_publishes_a_lower_identity_before_a_gated_input_payload() {
+    let high = Arc::new(Switch::default());
+    let plan = range_node(
+        vec![
+            RangePartition::new(vec![range_chunk("a", 1, 1.0)], b"a", b"a"),
+            RangePartition::new(vec![range_chunk("b", 2, 2.0)], b"b", b"b").held(Arc::clone(&high)),
+        ],
+        1,
+    );
+    let context = SessionContext::default().task_ctx();
+    let frames = plan
+        .execute(0, Arc::clone(&context))
+        .expect("the one output executes");
+    let mut output = unpack_raw_series(frames, Some(raw_schema())).expect("the frame decodes");
+
+    let first = tokio::time::timeout(Duration::from_secs(10), output.next())
+        .await
+        .expect("the lower identity is published while the high input is silent")
+        .expect("one chunk is published")
+        .expect("the published chunk succeeds");
+    assert_eq!(
+        (
+            "a".to_string(),
+            Some(labels("a")),
+            vec![1],
+            vec![Some(1.0)],
+            true
+        ),
+        range_chunk_summary(&first),
+        "the early publication is the complete raw row, not a placeholder"
+    );
+    assert!(
+        !high.is_open(),
+        "the high input has neither sent a chunk nor reached EOF"
+    );
+
+    high.open();
+    let rest = tokio::time::timeout(Duration::from_secs(10), output.try_collect::<Vec<_>>())
+        .await
+        .expect("the released input finishes the read")
+        .expect("the rest of the read succeeds");
+    assert_eq!(
+        vec![(
+            "b".to_string(),
+            Some(labels("b")),
+            vec![2],
+            vec![Some(2.0)],
+            true
+        )],
+        rest.iter().map(range_chunk_summary).collect::<Vec<_>>(),
+        "the high identity arrives whole and last"
+    );
+}
+
+/// Without a range the same shape stays pending: the identity below cannot be published before the
+/// silent input contributes or ends.
+#[tokio::test]
+async fn without_a_scan_key_range_the_lower_identity_waits_for_the_gated_input() {
+    let high = Arc::new(Switch::default());
+    let mut low = RangePartition::new(vec![range_chunk("a", 1, 1.0)], b"a", b"a");
+    low.key_range = None;
+    let mut held =
+        RangePartition::new(vec![range_chunk("b", 2, 2.0)], b"b", b"b").held(Arc::clone(&high));
+    held.key_range = None;
+    let (plan, progress) = range_node_with_progress(vec![low, held], 1);
+    let pool = Arc::new(GreedyMemoryPool::new(1 << 20));
+    let context = task_context(&pool);
+    let frames = plan
+        .execute(0, Arc::clone(&context))
+        .expect("the one output executes");
+    let mut output = unpack_raw_series(frames, Some(raw_schema())).expect("the frame decodes");
+
+    // The held input has resolved its initialization - it states no range - and parked; the lower
+    // input's route task ended normally, so its whole chain and its EOF are queued to the owner.
+    // Only then does waiting mean the barrier held.
+    wait_for_routed_lower_chain(&plan, &progress, 1, &high).await;
+    assert!(
+        futures::future::poll_fn(|cx| match output.as_mut().poll_next(cx) {
+            Poll::Pending => Poll::Ready(true),
+            Poll::Ready(_) => Poll::Ready(false),
+        })
+        .await,
+        "an input that states no range keeps the original barrier"
+    );
+
+    high.open();
+    let chunks = tokio::time::timeout(Duration::from_secs(10), output.try_collect::<Vec<_>>())
+        .await
+        .expect("the released input finishes the read")
+        .expect("the read succeeds");
+    assert_eq!(
+        vec!["a".to_string(), "b".to_string()],
+        chunks
+            .iter()
+            .map(|c| range_chunk_summary(c).0)
+            .collect::<Vec<_>>(),
+        "both identities arrive in key order once the input ends"
+    );
+}
+
+/// A range whose minimum is the pending key proves nothing: the input may still send that identity.
+#[tokio::test]
+async fn a_scan_key_range_starting_at_the_pending_key_keeps_waiting() {
+    let second = Arc::new(Switch::default());
+    let (plan, progress) = range_node_with_progress(
+        vec![
+            RangePartition::new(vec![range_chunk("a", 1, 1.0)], b"a", b"a"),
+            // This slice may still contain `a`, so its range starts at `a` itself; it does contain
+            // `a`, at a later timestamp, which must survive the wait and the merge.
+            RangePartition::new(vec![range_chunk("a", 3, 3.0)], b"a", b"b")
+                .held(Arc::clone(&second)),
+        ],
+        1,
+    );
+    let pool = Arc::new(GreedyMemoryPool::new(1 << 20));
+    let context = task_context(&pool);
+    let frames = plan
+        .execute(0, Arc::clone(&context))
+        .expect("the one output executes");
+    let mut output = unpack_raw_series(frames, Some(raw_schema())).expect("the frame decodes");
+
+    // The equal-min range is published and the held input is parked; the lower input's route task
+    // ended normally, so its whole chain and its EOF are queued. Waiting now is a statement about
+    // the strict minimum, not about nothing having happened yet.
+    wait_for_routed_lower_chain(&plan, &progress, 1, &second).await;
+    assert!(
+        futures::future::poll_fn(|cx| match output.as_mut().poll_next(cx) {
+            Poll::Pending => Poll::Ready(true),
+            Poll::Ready(_) => Poll::Ready(false),
+        })
+        .await,
+        "a range starting at the key does not prove the key is absent"
+    );
+
+    second.open();
+    let chunks = tokio::time::timeout(Duration::from_secs(10), output.try_collect::<Vec<_>>())
+        .await
+        .expect("the released input finishes the read")
+        .expect("the read succeeds");
+    // The owner merges the two pieces into one identity; the packer may encode that merged payload
+    // as more than one frame row, so the identity is asserted as one chain: every piece is `a`, only
+    // the last closes it, and every sample survives.
+    assert!(
+        chunks
+            .iter()
+            .all(|chunk| chunk.primary_key.as_slice() == b"a"
+                && chunk.metric.as_ref() == Some(&labels("a"))),
+        "every published piece belongs to the one merged identity"
+    );
+    assert!(
+        chunks.last().is_some_and(|chunk| chunk.is_last),
+        "the merged identity is closed by its last piece"
+    );
+    assert!(
+        chunks.iter().rev().skip(1).all(|chunk| !chunk.is_last),
+        "the merged identity is published as one chain, not one chain per piece"
+    );
+    let timestamps = chunks
+        .iter()
+        .flat_map(|chunk| range_chunk_summary(chunk).2)
+        .collect::<Vec<_>>();
+    let values = chunks
+        .iter()
+        .flat_map(|chunk| range_chunk_summary(chunk).3)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        (vec![1, 3], vec![Some(1.0), Some(3.0)]),
+        (timestamps, values),
+        "the held input's own `a` at another timestamp meets the lower chain in one merged identity \
+         that preserves every sample"
+    );
+}
+
+/// A slice that covers no candidate states no range, and that is not an absence proof: the identity
+/// below waits, and a failure the same input reports later is still surfaced.
+#[tokio::test]
+async fn an_empty_slice_reports_no_range_and_a_late_input_error_is_reported() {
+    let failing = Arc::new(Switch::default());
+    let (plan, progress) = range_node_with_progress(
+        vec![
+            RangePartition::new(vec![range_chunk("a", 1, 1.0)], b"a", b"a"),
+            RangePartition::empty()
+                .held(Arc::clone(&failing))
+                .failing("held input failed"),
+        ],
+        1,
+    );
+    let pool = Arc::new(GreedyMemoryPool::new(1 << 20));
+    let context = task_context(&pool);
+    let frames = plan
+        .execute(0, Arc::clone(&context))
+        .expect("the one output executes");
+    let mut output = unpack_raw_series(frames, Some(raw_schema())).expect("the frame decodes");
+
+    // The empty slice resolved to no range and its payload is parked; the lower input's route task
+    // ended normally, so its whole chain and its EOF are queued.
+    wait_for_routed_lower_chain(&plan, &progress, 1, &failing).await;
+    assert!(
+        futures::future::poll_fn(|cx| match output.as_mut().poll_next(cx) {
+            Poll::Pending => Poll::Ready(true),
+            Poll::Ready(_) => Poll::Ready(false),
+        })
+        .await,
+        "an input that covers no candidate has said nothing about its keys"
+    );
+
+    failing.open();
+    let tail = tokio::time::timeout(Duration::from_secs(10), output.try_collect::<Vec<_>>()).await;
+    match tail {
+        Err(error) => panic!("the read hung instead of reporting the input failure: {error}"),
+        Ok(Ok(chunks)) => panic!("an input failure was reported as a clean end: {chunks:?}"),
+        Ok(Err(error)) => assert!(
+            error.to_string().contains("held input failed"),
+            "the producer's own failure must be reported: {error}"
+        ),
+    }
+}
+
+/// The same annotation text on a frame the node did not initialize itself is not evidence.
+#[tokio::test]
+async fn an_annotated_frame_from_another_child_is_not_trusted() {
+    // A raw plan that packs its own frames with the annotation a local scan would write.
+    struct Annotated {
+        partitions: Vec<(Vec<RawSeriesChunk>, Option<Arc<Switch>>)>,
+        schema: Arc<SeriesSchema>,
+        properties: Arc<PlanProperties>,
+        /// How often each partition's stream has been polled, so the test knows the held input
+        /// parked at its gate after handing over the annotated frame. The low input's progress is
+        /// read off the read's own task bookkeeping instead, which also says its chain was queued.
+        started: Arc<Vec<AtomicUsize>>,
+    }
+    impl fmt::Debug for Annotated {
+        fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+            f.write_str("Annotated")
+        }
+    }
+    impl DisplayAs for Annotated {
+        fn fmt_as(&self, _t: DisplayFormatType, f: &mut Formatter) -> fmt::Result {
+            write!(f, "{self:?}")
+        }
+    }
+    impl ExecutionPlan for Annotated {
+        fn name(&self) -> &str {
+            "Annotated"
+        }
+        fn properties(&self) -> &Arc<PlanProperties> {
+            &self.properties
+        }
+        fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
+            Vec::new()
+        }
+        fn apply_expressions(
+            &self,
+            _f: &mut dyn FnMut(&Arc<dyn PhysicalExpr>) -> DataFusionResult<TreeNodeRecursion>,
+        ) -> DataFusionResult<TreeNodeRecursion> {
+            Ok(TreeNodeRecursion::Continue)
+        }
+        fn with_new_children(
+            self: Arc<Self>,
+            children: Vec<Arc<dyn ExecutionPlan>>,
+        ) -> DataFusionResult<Arc<dyn ExecutionPlan>> {
+            assert!(children.is_empty());
+            Ok(self)
+        }
+        fn execute(
+            &self,
+            partition: usize,
+            _context: Arc<TaskContext>,
+        ) -> DataFusionResult<SendableRecordBatchStream> {
+            let (chunks, gate) = self.partitions[partition].clone();
+            let schema = Arc::clone(&self.schema);
+            let gate = gate.unwrap_or_else(released_switch);
+            let started = Arc::clone(&self.started);
+            let stream =
+                futures::stream::unfold((chunks.into_iter(), gate), move |(mut chunks, gate)| {
+                    let started = Arc::clone(&started);
+                    async move {
+                        started[partition].fetch_add(1, Ordering::SeqCst);
+                        futures::future::poll_fn(|cx| {
+                            if gate.is_open() {
+                                Poll::Ready(())
+                            } else {
+                                gate.wait(cx);
+                                Poll::Pending
+                            }
+                        })
+                        .await;
+                        chunks.next().map(|chunk| (Ok(chunk), (chunks, gate)))
+                    }
+                });
+            let stream: SendableRawSeriesStream = Box::pin(RawSeriesStreamAdapter {
+                stream: Box::pin(stream),
+                schema: Arc::clone(&schema),
+                binding: RawLabelSource::Explicit,
+            });
+            // The annotation is a key strictly above the lower row: trusting it as an absence proof
+            // would exclude `a` and publish early. It is on a frame this node did not initialize.
+            pack_raw_series_with_key_range(
+                stream,
+                Some(RawSeriesKeyRange {
+                    min: Buffer::from_slice_ref(b"b"),
+                    max: Buffer::from_slice_ref(b"c"),
+                }),
+            )
+        }
+    }
+    struct RawSeriesStreamAdapter {
+        stream: std::pin::Pin<Box<dyn Stream<Item = Result<RawSeriesChunk, BoxedError>> + Send>>,
+        schema: Arc<SeriesSchema>,
+        binding: RawLabelSource,
+    }
+    impl Stream for RawSeriesStreamAdapter {
+        type Item = Result<RawSeriesChunk, BoxedError>;
+        fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+            self.stream.as_mut().poll_next(cx)
+        }
+    }
+    impl RawSeriesStream for RawSeriesStreamAdapter {
+        fn schema(&self) -> &Arc<SeriesSchema> {
+            &self.schema
+        }
+        fn label_source(&self) -> &RawLabelSource {
+            &self.binding
+        }
+        fn ordering(&self) -> SeriesOrdering {
+            SeriesOrdering::KeyThenTime
+        }
+    }
+
+    let high = Arc::new(Switch::default());
+    let started = Arc::new(vec![AtomicUsize::new(0), AtomicUsize::new(0)]);
+    let frame = common_query::series_frame::raw_series_frame_schema_with_ordering(
+        &raw_schema(),
+        &RawLabelSource::Explicit,
+        SeriesOrdering::KeyThenTime,
+    )
+    .unwrap();
+    let properties = Arc::new(PlanProperties::new(
+        EquivalenceProperties::new(frame),
+        Partitioning::UnknownPartitioning(2),
+        EmissionType::Incremental,
+        Boundedness::Bounded,
+    ));
+    let child = Arc::new(Annotated {
+        partitions: vec![
+            (vec![range_chunk("a", 1, 1.0)], None),
+            (vec![range_chunk("b", 2, 2.0)], Some(Arc::clone(&high))),
+        ],
+        schema: raw_schema(),
+        properties,
+        started: Arc::clone(&started),
+    });
+    let plan = Arc::new(
+        SeriesRepartitionExec::try_new_with_routing(
+            child,
+            1,
+            SeriesRouting::Matching(MatchingLabels::Ignoring(Vec::new())),
+        )
+        .unwrap(),
+    );
+    let pool = Arc::new(GreedyMemoryPool::new(1 << 20));
+    let context = task_context(&pool);
+    let frames = plan.execute(0, Arc::clone(&context)).unwrap();
+    let mut output = unpack_raw_series(frames, Some(raw_schema())).unwrap();
+    // The high input is parked at its gate after handing over the annotated frame, and the low
+    // input's route task ended normally, so its whole chain and its EOF are queued. Only with both
+    // facts established does waiting say the nonlocal annotation was not believed.
+    wait_until("the held input parks after its annotated frame", || {
+        started[1].load(Ordering::SeqCst) > 0
+    })
+    .await;
+    assert!(
+        !high.is_open(),
+        "the held input is parked at a gate the test keeps closed"
+    );
+    wait_until_released_inputs_end(&plan, 1).await;
+    assert!(
+        futures::future::poll_fn(|cx| match output.as_mut().poll_next(cx) {
+            Poll::Pending => Poll::Ready(true),
+            Poll::Ready(_) => Poll::Ready(false),
+        })
+        .await,
+        "a frame the node did not initialize itself states no evidence, whatever it carries"
+    );
+    high.open();
+    let chunks = tokio::time::timeout(Duration::from_secs(10), output.try_collect::<Vec<_>>())
+        .await
+        .expect("the released input finishes the read")
+        .unwrap();
+    assert_eq!(2, chunks.len());
+}
+
+/// What an owner retains for a published range is charged to the pool and released with the read.
+#[tokio::test]
+async fn scan_key_range_evidence_is_charged_and_released() {
+    let pool = Arc::new(GreedyMemoryPool::new(1 << 20));
+    let context = task_context(&pool);
+    let a = Arc::new(Switch::default());
+    let b = Arc::new(Switch::default());
+    let plan = range_node(
+        vec![
+            RangePartition::new(vec![range_chunk("a", 1, 1.0)], b"aaaaaaaa", b"aaaaaaaa")
+                .held(Arc::clone(&a)),
+            RangePartition::empty().held(Arc::clone(&b)),
+        ],
+        2,
+    );
+    let output = plan
+        .execute(0, Arc::clone(&context))
+        .expect("the first output starts the read");
+    let reserved = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let reserved = pool.reserved();
+            if reserved > 0 {
+                return reserved;
+            }
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await
+    .expect("the published range is charged");
+    assert!(reserved > 0, "the retained range is accounted");
+
+    drop(output);
+    drop(plan);
+    a.open();
+    b.open();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while pool.reserved() != 0 {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| {
+        panic!(
+            "the dropped execution still holds {} bytes",
+            pool.reserved()
+        )
+    });
+}
+
+/// The owner's first poll charges for every vector it allocates, not only the EOF flags: a pool that
+/// admits the flags but not the range slots is refused as an admission error instead of being
+/// overcommitted and left waiting.
+#[tokio::test]
+async fn eof_bookkeeping_refuses_a_pool_that_only_admits_the_flags() {
+    let a = Arc::new(Switch::default());
+    let b = Arc::new(Switch::default());
+    let (plan, progress) = range_node_with_progress(
+        vec![
+            RangePartition::empty().held(Arc::clone(&a)),
+            RangePartition::empty().held(Arc::clone(&b)),
+        ],
+        1,
+    );
+    let inputs = 2usize;
+    // What the flags alone cost: enough for `vec![bool; inputs]`, and nothing for the two `Option`
+    // vectors the owner allocates beside it.
+    let flags = inputs * std::mem::size_of::<bool>();
+    let pool = Arc::new(GreedyMemoryPool::new(flags));
+    let context = task_context(&pool);
+    let frames = plan
+        .execute(0, Arc::clone(&context))
+        .expect("the one output executes");
+    let mut output = unpack_raw_series(frames, Some(raw_schema())).expect("the frame decodes");
+    // Both inputs are silent and state no range: nothing they do reserves any pool memory, so the
+    // owner's own bookkeeping is the only allocation the budget has to admit.
+    wait_until("both silent inputs are parked", || {
+        progress.polled(0) && progress.polled(1)
+    })
+    .await;
+    assert_eq!(0, pool.reserved(), "silent inputs reserve nothing");
+
+    let first = futures::future::poll_fn(|cx| Poll::Ready(output.as_mut().poll_next(cx))).await;
+    match first {
+        Poll::Ready(Some(Err(error))) => assert!(
+            error.to_string().contains("Failed to allocate additional"),
+            "the owner must report the pool's refusal: {error}"
+        ),
+        Poll::Ready(None) => {
+            panic!("the owner ended cleanly although its bookkeeping did not fit the pool")
+        }
+        Poll::Ready(Some(Ok(chunk))) => panic!(
+            "the owner published a chunk of {} bytes although its bookkeeping did not fit the pool",
+            chunk.primary_key.len()
+        ),
+        Poll::Pending => panic!(
+            "the owner admitted only the flags, allocated the slot vectors anyway and then waited \
+             with {} bytes reserved",
+            pool.reserved()
+        ),
+    }
+    assert_eq!(0, pool.reserved(), "the refused admission retains nothing");
+
+    let execution = execution(&plan);
+    drop(output);
+    drop(plan);
+    a.open();
+    b.open();
+    wait_until("the failed read's tasks stop", || {
+        producer_stopped(&execution)
+    })
+    .await;
+    assert_eq!(
+        0,
+        pool.reserved(),
+        "the failed read leaves nothing reserved"
+    );
+}
+
+/// The owner's EOF bookkeeping charges exactly the three vectors its first poll allocates, and
+/// cancelling the read releases that charge.
+#[tokio::test]
+async fn eof_bookkeeping_charge_is_exact_and_released_on_cancel() {
+    let a = Arc::new(Switch::default());
+    let b = Arc::new(Switch::default());
+    let (plan, progress) = range_node_with_progress(
+        vec![
+            RangePartition::empty().held(Arc::clone(&a)),
+            RangePartition::empty().held(Arc::clone(&b)),
+        ],
+        1,
+    );
+    let inputs = 2usize;
+    let expected = inputs
+        * (std::mem::size_of::<bool>()
+            + std::mem::size_of::<Option<RawSeriesKeyRange>>()
+            + std::mem::size_of::<Option<MemoryReservation>>());
+    let pool = Arc::new(GreedyMemoryPool::new(1 << 20));
+    let context = task_context(&pool);
+    let frames = plan
+        .execute(0, Arc::clone(&context))
+        .expect("the one output executes");
+    let mut output = unpack_raw_series(frames, Some(raw_schema())).expect("the frame decodes");
+    wait_until("both silent inputs are parked", || {
+        progress.polled(0) && progress.polled(1)
+    })
+    .await;
+    assert_eq!(0, pool.reserved(), "silent inputs reserve nothing");
+
+    let first = futures::future::poll_fn(|cx| Poll::Ready(output.as_mut().poll_next(cx))).await;
+    assert!(
+        matches!(first, Poll::Pending),
+        "the admitted bookkeeping leaves the output waiting for its silent inputs"
+    );
+    wait_until("the owner charges every vector it allocates", || {
+        pool.reserved() == expected
+    })
+    .await;
+
+    let execution = execution(&plan);
+    drop(output);
+    drop(plan);
+    a.open();
+    b.open();
+    wait_until("the cancelled read's tasks stop", || {
+        producer_stopped(&execution)
+    })
+    .await;
+    wait_until("cancelling the read releases its bookkeeping", || {
+        pool.reserved() == 0
+    })
+    .await;
+}

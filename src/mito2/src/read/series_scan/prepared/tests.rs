@@ -32,7 +32,8 @@ use object_store::ObjectStore;
 use object_store::layers::mock::{self, MockLayerBuilder, oio};
 use store_api::codec::PrimaryKeyEncoding;
 use store_api::region_engine::{
-    BoundTag, PartitionRange, PrepareRequest, QueryScanContext, RegionEngine, RegionScanner,
+    BoundTag, PartitionRange, PrepareRequest, QueryScanContext, RawLabelSource, RawSeriesKeyRange,
+    RegionEngine, RegionScanner,
 };
 use store_api::region_request::{
     RegionBuildIndexRequest, RegionDeleteRequest, RegionPutRequest, RegionRequest,
@@ -2332,6 +2333,489 @@ async fn identity_merge_preserves_tag_and_mixed_predicates(#[case] last_non_null
         }
         assert_eq!(results[0], results[1]);
     }
+    engine.stop().await.unwrap();
+}
+
+/// The ordinal slice a partition reads is total: zero series, fewer series than partitions, an
+/// uneven split, and an out-of-range index all produce an in-bounds slice.
+#[test]
+fn partition_series_range_is_total() {
+    use super::super::partition_series_range;
+
+    // No series at all: every partition owns an empty slice.
+    for partition in 0..3 {
+        assert_eq!(0..0, partition_series_range(0, 3, partition));
+    }
+    // Fewer series than partitions: the leading partitions are empty, the last one owns the tail.
+    assert_eq!(0..0, partition_series_range(1, 3, 0));
+    assert_eq!(0..0, partition_series_range(1, 3, 1));
+    assert_eq!(0..1, partition_series_range(1, 3, 2));
+    // Uneven split: five series over two partitions is two and three.
+    assert_eq!(0..2, partition_series_range(5, 2, 0));
+    assert_eq!(2..5, partition_series_range(5, 2, 1));
+    // Every slice is contiguous, ordered, and together they cover the source once.
+    for num_series in 0..7 {
+        for partitions in 1..5 {
+            let mut next = 0;
+            for partition in 0..partitions {
+                let range = partition_series_range(num_series, partitions, partition);
+                assert_eq!(next, range.start, "{num_series}/{partitions}/{partition}");
+                assert!(range.end <= num_series);
+                next = range.end;
+            }
+            assert_eq!(num_series, next, "{num_series}/{partitions} covers once");
+        }
+    }
+    // An index outside the partition count reads nothing instead of a bogus slice.
+    assert!(partition_series_range(4, 2, 2).is_empty());
+    assert!(partition_series_range(4, 0, 0).is_empty());
+}
+
+/// Initializes one partition the way a direct execution does: preparation and reader resolved up
+/// front, then the range and every emitted chunk.
+async fn initialized_partition(
+    scan: &SeriesScan,
+    ctx: &QueryScanContext,
+    metrics: &ExecutionPlanMetricsSet,
+    partition: usize,
+    binding: &RawLabelSource,
+) -> (Option<RawSeriesKeyRange>, Vec<RawSeriesChunk>) {
+    let initialized = scan
+        .initialize_series_partition(ctx, metrics, partition, binding)
+        .expect("the prepared reader offers an initialized form")
+        .await
+        .expect("the initialized partition resolves");
+    let chunks = initialized
+        .stream
+        .try_collect::<Vec<_>>()
+        .await
+        .expect("the initialized stream reads");
+    (initialized.key_range, chunks)
+}
+
+/// Checks a reported range against every key its own initialized stream emitted.
+fn assert_range_covers(range: &Option<RawSeriesKeyRange>, chunks: &[RawSeriesChunk]) {
+    match range {
+        None => assert!(
+            chunks.is_empty(),
+            "a slice that covers no candidate cannot emit a data key"
+        ),
+        Some(range) => {
+            assert!(
+                range.min.as_slice() <= range.max.as_slice(),
+                "a candidate range is ordered"
+            );
+            for chunk in chunks {
+                assert!(
+                    chunk.primary_key.as_slice() >= range.min.as_slice(),
+                    "an emitted key is below the reported candidate range"
+                );
+                assert!(
+                    chunk.primary_key.as_slice() <= range.max.as_slice(),
+                    "an emitted key is above the reported candidate range"
+                );
+            }
+        }
+    }
+}
+
+/// Two series over two partitions: each range is exactly the one candidate its partition owns, and
+/// that candidate is the key the partition emits.
+#[tokio::test]
+async fn initialized_partition_key_ranges_cover_the_keys_their_slices_emit() {
+    let (_env, engine, region) = fixture().await;
+    write(&engine, &region, 1, 1500, Some(2.0)).await;
+    flush_region(&engine, region.region_id, None).await;
+    build(&engine, &region).await;
+    let mut scan = scanner(&region, region.series_index_store.clone().unwrap());
+    let binding = labels(scan.metadata());
+    let ranges = scan.properties().partitions[0].clone();
+    scan.prepare(PrepareRequest::default().with_ranges(vec![ranges.clone(), ranges]))
+        .unwrap();
+    let ctx = QueryScanContext::default();
+    let metrics = ExecutionPlanMetricsSet::new();
+
+    let (first_range, first) = initialized_partition(&scan, &ctx, &metrics, 0, &binding).await;
+    let (second_range, second) = initialized_partition(&scan, &ctx, &metrics, 1, &binding).await;
+    assert_range_covers(&first_range, &first);
+    assert_range_covers(&second_range, &second);
+    let first_range = first_range.expect("a one-series slice reports its candidate");
+    let second_range = second_range.expect("a one-series slice reports its candidate");
+    assert_eq!(first[0].primary_key.as_slice(), first_range.min.as_slice());
+    assert_eq!(first[0].primary_key.as_slice(), first_range.max.as_slice());
+    assert_eq!(
+        second[0].primary_key.as_slice(),
+        second_range.min.as_slice()
+    );
+    assert_eq!(
+        second[0].primary_key.as_slice(),
+        second_range.max.as_slice()
+    );
+    assert!(
+        first_range.max.as_slice() < second_range.min.as_slice(),
+        "the slices are ordered by complete primary key"
+    );
+    engine.stop().await.unwrap();
+}
+
+/// Fewer series than partitions: an empty slice reports no range at all - which is not an absence
+/// claim about keys - and each remaining slice reports exactly its candidate.
+#[tokio::test]
+async fn initialized_partition_key_ranges_distinguish_empty_and_uneven_slices() {
+    let (_env, engine, region) = fixture().await;
+    write(&engine, &region, 1, 1500, Some(2.0)).await;
+    flush_region(&engine, region.region_id, None).await;
+    build(&engine, &region).await;
+    let mut scan = scanner(&region, region.series_index_store.clone().unwrap());
+    let binding = labels(scan.metadata());
+    let ranges = scan.properties().partitions[0].clone();
+    // Three partitions over two series: `0..0` and `0..1` and `1..2`.
+    scan.prepare(PrepareRequest::default().with_ranges(vec![ranges, vec![], vec![]]))
+        .unwrap();
+    let ctx = QueryScanContext::default();
+    let metrics = ExecutionPlanMetricsSet::new();
+
+    let (empty, none) = initialized_partition(&scan, &ctx, &metrics, 0, &binding).await;
+    let (first_range, first) = initialized_partition(&scan, &ctx, &metrics, 1, &binding).await;
+    let (second_range, second) = initialized_partition(&scan, &ctx, &metrics, 2, &binding).await;
+    assert_eq!(None, empty, "an empty slice reports no range");
+    assert!(none.is_empty(), "an empty slice reads nothing");
+    assert_range_covers(&first_range, &first);
+    assert_range_covers(&second_range, &second);
+    let first_range = first_range.expect("a one-series slice reports its candidate");
+    let second_range = second_range.expect("a one-series slice reports its candidate");
+    assert_eq!(first[0].primary_key.as_slice(), first_range.min.as_slice());
+    assert_eq!(
+        second[0].primary_key.as_slice(),
+        second_range.min.as_slice()
+    );
+    engine.stop().await.unwrap();
+}
+
+/// A slice whose first candidate has no visible sample still reports that candidate: the range
+/// covers what the slice may emit, so having nothing to emit is not the same as covering no series.
+#[tokio::test]
+async fn initialized_partition_key_range_stays_conservative_for_a_filtered_first_series() {
+    let (_env, engine, region) = fixture().await;
+    write(&engine, &region, 1, 1500, Some(2.0)).await;
+    // Delete every sample of the first series: the candidate stays selected but emits nothing.
+    write(&engine, &region, 0, 1000, None).await;
+    write(&engine, &region, 0, 2000, None).await;
+    flush_region(&engine, region.region_id, None).await;
+    build(&engine, &region).await;
+    let mut scan = scanner(&region, region.series_index_store.clone().unwrap());
+    let binding = labels(scan.metadata());
+    let ranges = scan.properties().partitions[0].clone();
+    scan.prepare(PrepareRequest::default().with_ranges(vec![ranges.clone(), ranges]))
+        .unwrap();
+    let ctx = QueryScanContext::default();
+    let metrics = ExecutionPlanMetricsSet::new();
+    let source = scan
+        .prepare_series(&ctx, &metrics, &binding)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(2, source.num_series(), "both candidates are selected");
+    let first_key = source.series_info(0).unwrap().primary_key;
+    let second_key = source.series_info(1).unwrap().primary_key;
+
+    let (range, chunks) = initialized_partition(&scan, &ctx, &metrics, 0, &binding).await;
+    let range = range.expect("the slice still covers its first candidate");
+    assert_eq!(first_key.as_slice(), range.min.as_slice());
+    assert_eq!(first_key.as_slice(), range.max.as_slice());
+    assert!(
+        chunks.is_empty(),
+        "the deleted series emits no key, while the range still covers it"
+    );
+    let (other_range, other) = initialized_partition(&scan, &ctx, &metrics, 1, &binding).await;
+    let other_range = other_range.expect("the second slice reports its candidate");
+    assert_eq!(second_key.as_slice(), other_range.min.as_slice());
+    assert_eq!(second_key.as_slice(), other[0].primary_key.as_slice());
+    engine.stop().await.unwrap();
+}
+
+/// Known unsupported coverage keeps the ordinary reader and offers no initialized form.
+#[tokio::test]
+async fn unsupported_coverage_keeps_the_ordinary_reader_and_no_initialization() {
+    let (_env, engine, region) = fixture().await;
+    let ctx = QueryScanContext::default();
+    let metrics = ExecutionPlanMetricsSet::new();
+    let store = region.series_index_store.clone().unwrap();
+
+    // A scanner without the columnar reader: the ordinary raw entrypoint is unaffected.
+    write(&engine, &region, 1, 1500, Some(2.0)).await;
+    let legacy_format = scanner_with_format(&region, store.clone(), SelectedFormat::Legacy);
+    let binding = labels(legacy_format.metadata());
+    assert!(
+        legacy_format
+            .initialize_series_partition(&ctx, &metrics, 0, &binding)
+            .is_none(),
+        "a scanner without the columnar reader offers no initialized form"
+    );
+    let ordinary = legacy_format
+        .scan_series_partition(&ctx, &metrics, 0, &binding)
+        .unwrap()
+        .expect("the ordinary raw path stays available");
+    assert_eq!(SeriesOrdering::KeyThenTime, ordinary.ordering());
+    assert!(!ordinary.try_collect::<Vec<_>>().await.unwrap().is_empty());
+
+    // A columnar-format scanner over an SST the index was never built for: the prepared reader is
+    // not selected, and the ordinary reader still answers.
+    write(&engine, &region, 1, 2500, Some(4.0)).await;
+    flush_region(&engine, region.region_id, None).await;
+    let columnar = scanner(&region, store);
+    let binding = labels(columnar.metadata());
+    assert!(
+        columnar
+            .initialize_series_partition(&ctx, &metrics, 0, &binding)
+            .is_none(),
+        "an unindexed SST is not covered by the prepared reader"
+    );
+    assert!(
+        !columnar
+            .scan_series_partition(&ctx, &metrics, 0, &binding)
+            .unwrap()
+            .expect("the raw fallback still answers for the unindexed SST")
+            .try_collect::<Vec<_>>()
+            .await
+            .unwrap()
+            .is_empty(),
+        "the ordinary reader reads the uncovered SST"
+    );
+    engine.stop().await.unwrap();
+}
+
+/// A raw partition's ordinary fallback owns its receiver from the moment it is initialized.
+///
+/// The prepared form hands back an owned future, so a caller can start every input before it spawns
+/// the task that polls it. The ordinary fallback has no such future to own the work: its stream is
+/// created by the initialization call, and the initialization handed to the task must already hold
+/// it rather than look it up when it is first polled. Otherwise a router that initializes all of its
+/// inputs and then fails - or is cancelled - before any of its tasks run leaves the scanner it still
+/// holds owning those receivers, and the distributor feeding them keeps reading the region behind a
+/// plan nobody is going to finish.
+///
+/// The interleaving below is that router without its routing: initialize both ordinary partitions,
+/// read one to the end, drop the sibling un-polled and the read with it, and keep the plan. The
+/// scanner's receiver counts are the evidence, so nothing here waits on a timer - a released
+/// receiver is a receiver released.
+///
+/// The counts belong to the scanner under test, not to the process, so they are exact: a scanner
+/// keeps its own evidence while other scans hand their receivers over in the same test process.
+#[tokio::test]
+async fn ordinary_fallback_initialization_owns_its_receiver_before_it_is_polled() {
+    let (_env, engine, region) = fixture_with(true).await;
+    // The fixture's own flushed rows, and then series on both sides of the series id range its
+    // assignment splits on, so each of the two partitions owns rows. Every timestamp is distinct,
+    // so a partition's rows can be compared before and after the interleaving.
+    let mut expected = vec![(1000, 1.0), (2000, 1.0)];
+    for (index, tsid) in [
+        0u64,
+        1,
+        2,
+        3,
+        u64::MAX - 3,
+        u64::MAX - 2,
+        u64::MAX - 1,
+        u64::MAX,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        for offset in 0..2i64 {
+            let time = (index as i64 + 1) * 100 + offset;
+            let value = (index + 1) as f64;
+            write(&engine, &region, tsid, time, Some(value)).await;
+            expected.push((time, value));
+        }
+    }
+    flush_region(&engine, region.region_id, None).await;
+    // Every row is flushed behind a series index that was never built, so the prepared reader is
+    // not selected and the ordinary reader has to answer for all of them. The fixture pins the
+    // region's SSTs only, so a row left in the memtable is outside this scan's ranges.
+    expected.sort_unstable_by_key(|(time, _)| *time);
+
+    let store = region.series_index_store.clone().unwrap();
+    let new_scan = || {
+        let projection = (0..region.version().metadata.column_metadatas.len()).collect();
+        SeriesScan::new(
+            scan_input(&region, store.clone(), SelectedFormat::Columnar, projection),
+            true,
+        )
+    };
+    let ctx = QueryScanContext::default();
+    let metrics = ExecutionPlanMetricsSet::new();
+    let mut scan = new_scan();
+    assert_eq!("two_phase", scan.mode.as_str());
+    let binding = labels(scan.metadata());
+    // Every range belongs to exactly one output partition: a partition reads the union of the
+    // scan's ranges, so handing the same range to both partitions would read every row twice and
+    // the series a partition owns would arrive twice per chunk.
+    let ranges = scan.properties().partitions[0].clone();
+    let partition_ranges = vec![
+        ranges.iter().step_by(2).copied().collect::<Vec<_>>(),
+        ranges
+            .iter()
+            .skip(1)
+            .step_by(2)
+            .copied()
+            .collect::<Vec<_>>(),
+    ];
+    scan.prepare(PrepareRequest::default().with_ranges(partition_ranges.clone()))
+        .unwrap();
+    assert_eq!(2, scan.properties().num_partitions());
+    // Preflight keeps the ordinary path, so the initialized form is refused before any work.
+    assert!(
+        scan.prepare_series(&ctx, &metrics, &binding)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        scan.initialize_series_partition(&ctx, &metrics, 0, &binding)
+            .is_none(),
+        "an ordinary partition has no initialized form to poll"
+    );
+
+    let request = ScanRequest {
+        distribution: Some(TimeSeriesDistribution::PerSeries),
+        ..Default::default()
+    };
+    // The scanner's own receiver counts, taken before the plan takes ownership of it.
+    let receivers = scan.candidate_receiver_counts();
+    let plan = Arc::new(RegionScanExec::new(Box::new(scan), request, None).unwrap())
+        .try_to_series_scan(binding.clone())
+        .unwrap()
+        .expect("the ordinary fallback keeps the raw path available");
+    assert_eq!(
+        (0, 0),
+        receivers.counts(),
+        "a scanner starts with no receiver handed over, whatever other scans are doing"
+    );
+
+    // The router's start: every input is initialized before a task exists to poll any of them.
+    let first = plan.initialize_partition(0, Arc::new(TaskContext::default()));
+    let sibling = plan.initialize_partition(1, Arc::new(TaskContext::default()));
+    assert_eq!(
+        (2, 0),
+        receivers.counts(),
+        "each ordinary partition must own its receiver before anything polls it"
+    );
+
+    // One partition is read to the end; the sibling is never polled at all.
+    let frames = first.await.expect("the ordinary initialization resolves");
+    let mut initialization_rows = samples(
+        &unpack_raw_series(frames, Some(plan.series_schema().clone()))
+            .expect("the packed frames keep the raw declaration")
+            .try_collect::<Vec<_>>()
+            .await
+            .expect("the ordinary reader reads its partition"),
+    );
+    initialization_rows.sort_unstable_by_key(|(time, _)| *time);
+    drop(sibling);
+
+    // The plan is still retained here, and every receiver its initializations captured is gone.
+    assert_eq!(
+        (2, 2),
+        receivers.counts(),
+        "dropping the initializations must release every receiver they captured"
+    );
+
+    // A bounded read of the same rows, with the abandoned plan still alive: no receiver left in it
+    // can hold the region's read open, and the rows are the ones the interrupted read returned.
+    let per_partition = tokio::time::timeout(Duration::from_secs(10), async {
+        let mut control = new_scan();
+        control
+            .prepare(PrepareRequest::default().with_ranges(partition_ranges.clone()))
+            .unwrap();
+        let binding = labels(control.metadata());
+        let mut per_partition = Vec::new();
+        for partition in 0..2 {
+            let chunks = control
+                .scan_series_partition(&ctx, &metrics, partition, &binding)
+                .unwrap()
+                .expect("the ordinary reader still answers")
+                .try_collect::<Vec<_>>()
+                .await
+                .expect("the ordinary reader reads its partition");
+            let mut rows = samples(&chunks);
+            rows.sort_unstable_by_key(|(time, _)| *time);
+            per_partition.push(rows);
+        }
+        per_partition
+    })
+    .await
+    .expect("the retained plan does not hold the region's read open");
+    let mut control_all = per_partition[0].clone();
+    control_all.extend(per_partition[1].clone());
+    control_all.sort_unstable_by_key(|(time, _)| *time);
+    assert_eq!(expected, control_all, "every row is still read once");
+    assert!(
+        !initialization_rows.is_empty(),
+        "the initialized partition owns rows"
+    );
+    assert_eq!(
+        per_partition[0], initialization_rows,
+        "the interleaved read returned the rows its partition owns"
+    );
+    // The control scanner is a different scanner: it handed over and released its own receivers,
+    // and none of that reached the counts of the scanner under test.
+    assert_eq!(
+        (2, 2),
+        receivers.counts(),
+        "another scanner's receivers are not counted against this one"
+    );
+    engine.stop().await.unwrap();
+}
+
+/// An initialized execution keeps the source and partition count it was started with: a later reset
+/// and a changed partition count only affect later executions.
+#[tokio::test]
+async fn initialized_partition_keeps_its_own_source_and_range_across_reset() {
+    let (_env, engine, region) = fixture().await;
+    write(&engine, &region, 1, 1500, Some(2.0)).await;
+    flush_region(&engine, region.region_id, None).await;
+    build(&engine, &region).await;
+    let mut scan = scanner(&region, region.series_index_store.clone().unwrap());
+    let binding = labels(scan.metadata());
+    let ranges = scan.properties().partitions[0].clone();
+    let ctx = QueryScanContext::default();
+    let metrics = ExecutionPlanMetricsSet::new();
+    scan.prepare(PrepareRequest::default().with_ranges(vec![ranges.clone(), ranges.clone()]))
+        .unwrap();
+    let source = scan
+        .prepare_series(&ctx, &metrics, &binding)
+        .await
+        .unwrap()
+        .unwrap();
+    let first_key = source.series_info(0).unwrap().primary_key;
+    let second_key = source.series_info(1).unwrap().primary_key;
+    drop(source);
+
+    // Two partitions: this execution owns the second ordinal. It is started, not awaited.
+    let started = scan
+        .initialize_series_partition(&ctx, &metrics, 1, &binding)
+        .expect("the prepared reader keeps its initialized form across a reset");
+    // Replace the preparation and the partition count before the execution is awaited.
+    scan.reset_state();
+    scan.prepare(PrepareRequest::default().with_ranges(vec![ranges, vec![], vec![]]))
+        .unwrap();
+
+    let initialized = started
+        .await
+        .expect("the started execution is not invalidated by a later reset");
+    let old_range = initialized
+        .key_range
+        .expect("the old slice has a candidate");
+    assert_eq!(second_key.as_slice(), old_range.min.as_slice());
+    let old_chunks = initialized.stream.try_collect::<Vec<_>>().await.unwrap();
+    assert_eq!(second_key.as_slice(), old_chunks[0].primary_key.as_slice());
+
+    // Three partitions: the same partition index now owns the first ordinal.
+    let (new_range, new_chunks) = initialized_partition(&scan, &ctx, &metrics, 1, &binding).await;
+    let new_range = new_range.expect("the new slice has a candidate");
+    assert_eq!(first_key.as_slice(), new_range.min.as_slice());
+    assert_eq!(first_key.as_slice(), new_chunks[0].primary_key.as_slice());
     engine.stop().await.unwrap();
 }
 

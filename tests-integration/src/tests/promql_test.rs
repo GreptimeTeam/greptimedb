@@ -11810,6 +11810,256 @@ async fn native_promql_columnar_fused_series_matches_legacy() {
     assert_eq!(matched_rows, vec![(120_000, "b".to_string(), 80.0)]);
 }
 
+/// A repeated selector over a real standalone `metric` logical table must fuse two *direct* raw
+/// scans, each below its own matching router, and read both raw scan partitions.
+#[tokio::test(flavor = "multi_thread")]
+async fn native_promql_columnar_matching_two_scan_partitions() {
+    common_telemetry::init_default_ut_logging();
+    const PHYSICAL: &str = "native_columnar_matching_phy";
+    const TABLE: &str = "native_columnar_matching";
+    let mito_config = mito2::config::MitoConfig {
+        experimental_enable_series_index: true,
+        experimental_series_index_format: mito2::config::SeriesIndexFormat::Columnar,
+        // Slow the periodic pass, so the manual build below is what publishes the catalog.
+        experimental_series_index_maintenance_interval: Duration::from_secs(3600),
+        ..Default::default()
+    };
+    let (standalone, observer) = native_test_instance(
+        GreptimeDbStandaloneBuilder::new("native_promql_columnar_matching")
+            .with_mito_config(mito_config),
+    )
+    .await;
+    let instance = standalone.fe_instance().clone();
+    execute_all(
+        &instance,
+        &format!(
+            "CREATE TABLE {PHYSICAL} (ts TIMESTAMP(3) TIME INDEX, val DOUBLE) ENGINE=metric \
+             WITH ('physical_metric_table' = 'true', 'primary_key_encoding' = 'sparse'); \
+             CREATE TABLE {TABLE} (host STRING, ts TIMESTAMP(3) TIME INDEX, val DOUBLE, PRIMARY KEY (host)) \
+             ENGINE=metric WITH ('on_physical_table' = '{PHYSICAL}'); \
+             INSERT INTO {TABLE} (host, ts, val) VALUES ('a', 60000, 10), ('a', 120000, 30), \
+             ('b', 60000, 20), ('b', 120000, 60); \
+             ADMIN FLUSH_TABLE('{PHYSICAL}'); \
+             ADMIN BUILD_SERIES_INDEX('{PHYSICAL}');"
+        ),
+        QueryContext::arc(),
+    )
+    .await;
+    // At 120s each selector resolves its 120s sample: `a` is 30 and `b` is 60, so `T + T` reports 60
+    // and 120, one row per series.
+    let expected = vec![
+        (120_000, "a".to_string(), 60.0),
+        (120_000, "b".to_string(), 120.0),
+    ];
+    let sql = format!("TQL EVAL (120, 120, '1m') {TABLE} + {TABLE}");
+    // Two partitions, so merely declaring the width cannot pass: both raw scan partitions have to
+    // report rows. `native_tql_output` hard-codes a width of four.
+    observer.clear();
+    let native_rows = native_result_rows(
+        instance
+            .do_query(&sql, native_query_context(true, 2))
+            .await
+            .remove(0)
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(native_rows, expected, "the fused route reports both sums");
+
+    // The two selector occurrences must be read by two independent raw scans, each one owned by
+    // its own matching router *directly* under the fused node. A `MergeScan` between a router and
+    // its scan is disallowed; a frontend `MergeScan` wrapping this observed region-local fused tree
+    // is the actual shape and is valid.
+    let plan = observer.two_input_fused();
+    assert_eq!(
+        plan.output_partitioning().partition_count(),
+        2,
+        "the fused node answers the two routed partitions"
+    );
+    let mut scan_nodes = Vec::with_capacity(2);
+    for (index, child) in plan.children().iter().enumerate() {
+        let router = child
+            .downcast_ref::<promql::extension_plan::SeriesRepartitionExec>()
+            .unwrap_or_else(|| {
+                panic!(
+                    "fused input {index} must be the matching router itself, found {}:\n{}",
+                    child.name(),
+                    datafusion::physical_plan::displayable(plan.as_ref()).indent(true)
+                )
+            });
+        assert_eq!(
+            router.outputs(),
+            2,
+            "fused input {index}: the router owns the fused width"
+        );
+        // `Ignoring([])` is the default matching policy; this test pins the policy, not the
+        // label-key semantics.
+        assert_eq!(
+            router.routing_policy(),
+            &promql::extension_plan::SeriesRouting::Matching(
+                promql::vector_match::MatchingLabels::Ignoring(Vec::new())
+            ),
+            "fused input {index}: the router must match both sides by the default key"
+        );
+        let routed = router.children();
+        assert_eq!(routed.len(), 1, "a router reads one input");
+        assert!(
+            routed[0].downcast_ref::<SeriesScanExec>().is_some(),
+            "fused input {index} must route a raw series scan directly, found {}:\n{}",
+            routed[0].name(),
+            datafusion::physical_plan::displayable(plan.as_ref()).indent(true)
+        );
+        scan_nodes.push(Arc::clone(routed[0]));
+    }
+    assert!(
+        !Arc::ptr_eq(&scan_nodes[0], &scan_nodes[1]),
+        "each selector occurrence reads its own scan"
+    );
+    let observed = observed_series_scans(&observer);
+    assert_eq!(
+        observed.len(),
+        2,
+        "the observed plans must contain exactly the two direct scans"
+    );
+    for scan in &scan_nodes {
+        assert!(
+            observed.iter().any(|observed| Arc::ptr_eq(observed, scan)),
+            "the fused input must be one of the observed scans"
+        );
+    }
+
+    let mut region_ids = Vec::with_capacity(2);
+    for (index, node) in scan_nodes.iter().enumerate() {
+        let scan = node.downcast_ref::<SeriesScanExec>().unwrap();
+        assert_eq!(
+            scan.properties().output_partitioning().partition_count(),
+            2,
+            "scan {index} must split the raw series over two scan partitions"
+        );
+        // Both the prepared columnar reader and the ordinary fallback declare `KeyThenTime`, so the
+        // ordering alone does not name the reader; the assertions below still have to establish
+        // that this exact execution read both partitions.
+        assert_eq!(
+            scan.raw_series_ordering(),
+            datatypes::series::SeriesOrdering::KeyThenTime,
+            "scan {index} must produce key-then-time raw frames"
+        );
+        let metrics = scan.metrics().expect("series scan metrics");
+        let mut rows_by_partition = [0_usize; 2];
+        let mut partitions = Vec::new();
+        for metric in metrics.iter() {
+            if let datafusion::physical_plan::metrics::MetricValue::OutputRows(count) =
+                metric.value()
+                && let Some(partition) = metric.partition()
+            {
+                partitions.push(partition);
+                if let Some(rows) = rows_by_partition.get_mut(partition) {
+                    *rows += count.value();
+                }
+            }
+        }
+        partitions.sort_unstable();
+        partitions.dedup();
+        assert_eq!(
+            partitions,
+            vec![0, 1],
+            "scan {index} must execute both raw scan partitions, found {partitions:?}"
+        );
+        assert!(
+            rows_by_partition.iter().all(|rows| *rows > 0),
+            "scan {index} must read rows on both raw scan partitions: {rows_by_partition:?}"
+        );
+        let RawLabelSource::PrimaryKey {
+            metric_name,
+            physical_metadata,
+            logical_tags,
+        } = scan.scan_binding()
+        else {
+            panic!("scan {index} must bind labels from the primary key");
+        };
+        assert!(
+            matches!(scan.label_source(), RawLabelSource::Explicit),
+            "scan {index} must encode labels explicitly from that binding"
+        );
+        assert_eq!(metric_name.as_ref(), TABLE, "scan {index}: metric name");
+        assert_eq!(
+            logical_tags
+                .iter()
+                .map(|tag| tag.name.as_ref())
+                .collect::<Vec<_>>(),
+            vec!["host"],
+            "scan {index}: the logical tags are the primary-key columns"
+        );
+        for tag in logical_tags.iter() {
+            let column = physical_metadata.column_by_id(tag.column_id).unwrap();
+            assert_eq!(column.column_schema.name, "host");
+            assert_eq!(column.semantic_type, SemanticType::Tag);
+        }
+        assert_eq!(
+            physical_metadata.primary_key_encoding,
+            PrimaryKeyEncoding::Sparse,
+            "scan {index} must read the sparse physical table"
+        );
+        let series_schema = scan.series_schema();
+        assert_eq!(series_schema.fields.len(), 1);
+        assert_eq!(series_schema.fields[0].name.as_ref(), "val");
+        region_ids.push(physical_metadata.region_id);
+    }
+    assert_eq!(
+        region_ids[0], region_ids[1],
+        "both selector occurrences scan the same physical region"
+    );
+    // Only the columnar writer publishes these formats, so the scanned region's catalog rules out a
+    // configuration-only run. That the *executed* reader was the prepared columnar reader rather
+    // than the fallback is not exposed by this node or its metrics and is deliberately not claimed
+    // here; the per-partition output rows above are what this regression pins.
+    let samples = std::path::Path::new(&standalone.opts.storage.data_home)
+        .join("series_index")
+        .join(region_ids[0].as_u64().to_string())
+        .join("samples.json");
+    let catalog: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(samples).unwrap()).unwrap();
+    let entries = catalog["entries"].as_array().unwrap();
+    let series = catalog["series"].as_array().unwrap();
+    assert!(!entries.is_empty() && !series.is_empty(), "published");
+    assert!(
+        entries
+            .iter()
+            .all(|entry| entry["artifact"]["format"] == "columnar-samples")
+    );
+    assert!(
+        series
+            .iter()
+            .all(|entry| entry["artifact"]["format"] == "columnar-series")
+    );
+    // One value per series: the node ran, rather than being merely planned.
+    let output_values = plan
+        .metrics()
+        .expect("fused plan metrics")
+        .iter()
+        .filter_map(|metric| match metric.value() {
+            datafusion::physical_plan::metrics::MetricValue::Count { name, count }
+                if name.as_ref() == "native.root.output_values" =>
+            {
+                Some(count.value())
+            }
+            _ => None,
+        })
+        .sum::<usize>();
+    assert_eq!(output_values, 2, "both series must report one value");
+    // Native off: the same rows must come from the existing plan.
+    observer.clear();
+    let legacy_rows = native_result_rows(
+        instance
+            .do_query(&sql, native_query_context(false, 2))
+            .await
+            .remove(0)
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(native_rows, legacy_rows, "same rows on both routes");
+    assert!(observer.fused().is_none(), "the legacy route must not fuse");
+}
+
 /// No published series index: the columnar `Float64` selector must answer from the raw memtable
 /// and from an unindexed SST instead of failing to plan.
 #[rstest]
