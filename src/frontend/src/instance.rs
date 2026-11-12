@@ -646,6 +646,11 @@ impl Instance {
             )
             .context(PermissionSnafu)?;
 
+        // Database COPY needs the full table set before table-target authorization.
+        if matches!(stmt, Statement::Copy(Copy::CopyDatabase(_))) {
+            return Ok(());
+        }
+
         let targets = match extract_tables_from_statement_checked(stmt) {
             Some(tables) => PermissionTableTargets::resolved(
                 tables
