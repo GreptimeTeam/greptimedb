@@ -29,6 +29,7 @@ pub mod vector;
 
 pub(crate) mod avg_calc;
 pub(crate) mod hll_count;
+pub(crate) mod iceberg_hash;
 pub mod ip;
 #[cfg(test)]
 pub(crate) mod test;

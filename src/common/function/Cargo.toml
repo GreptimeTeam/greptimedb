@@ -53,6 +53,7 @@ mito-codec.workspace = true
 nalgebra.workspace = true
 num-traits = "0.2"
 paste.workspace = true
+partition.workspace = true
 regex.workspace = true
 reqwest = { workspace = true, optional = true }
 s2 = { version = "0.0.12", optional = true }

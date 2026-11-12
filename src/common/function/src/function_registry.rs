@@ -36,6 +36,7 @@ use crate::scalars::avg_calc::AvgCalcFunction;
 use crate::scalars::date::DateFunction;
 use crate::scalars::expression::ExpressionFunction;
 use crate::scalars::hll_count::HllCalcFunction;
+use crate::scalars::iceberg_hash::{IcebergHashBoundsFunction, IcebergHashFunction};
 use crate::scalars::ip::IpFunctions;
 use crate::scalars::json::JsonFunction;
 use crate::scalars::matches::MatchesFunction;
@@ -225,6 +226,10 @@ pub static FUNCTION_REGISTRY: LazyLock<Arc<FunctionRegistry>> = LazyLock::new(||
     HllCalcFunction::register(&function_registry);
     WelfordStddevFunction::register(&function_registry);
     DecodePrimaryKeyFunction::register(&function_registry);
+
+    // Hash used by `iceberg_hash` partition rules, plus its breakpoint helper.
+    IcebergHashFunction::register(&function_registry);
+    IcebergHashBoundsFunction::register(&function_registry);
 
     // Full text search function
     MatchesFunction::register(&function_registry);
