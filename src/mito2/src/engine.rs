@@ -1327,10 +1327,11 @@ impl EngineInner {
     /// does not check whether the region waits for a reload.
     fn set_region_role(&self, region_id: RegionId, role: RegionRole) -> Result<()> {
         let region = self.find_region(region_id)?;
+        let was_leader = region.region_role() == RegionRole::Leader;
         let was_writable = region.is_writable();
         region.set_role(role);
-        if role == RegionRole::Leader {
-            // No lease comes for a direct promotion, so it counts as one.
+        if role == RegionRole::Leader && !was_leader {
+            // No lease comes for a direct promotion, so it counts as one. A leader is not promoted.
             region.manifest_ctx.note_leader_lease(Instant::now());
         }
         self.notify_if_became_writable(&region, was_writable);
