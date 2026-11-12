@@ -62,17 +62,17 @@ const METRIC_NAME: &str = "__name__";
 /// Metadata labels the runtime removes from histogram result label sets.
 const PROMQL_METADATA_LABELS: [&str; 3] = ["__name__", "__type__", "__unit__"];
 
-/// The complete label set `node` reports at run time, from the labels each input reports and the
-/// ones the nodes above it write.
+/// The labels `node` reports, from the labels each input reports and the ones the nodes above it
+/// write.
 ///
-/// This is the identity a [`NativeExpr::Merge`] groups by and a vector match reads, so the metric
-/// name is part of it whenever the series carries one. The caller's `source_tags` are the complete
-/// label sets of the sources, indexed by the `source_index` of the leaf that reads each: a scan
-/// bound to a single metric names every series it hands over even though the name is not one of its
-/// tag columns, so the canonical pass includes `__name__` in that source's entry. The query planner
-/// derives the *output columns* with its own walk, which reads the same algebra from the tag columns
-/// each source declares; the two have to agree on where a kernel drops the name, which is why this
-/// walk drops it exactly where the runtime does.
+/// `source_tags` holds what each source reports, indexed by the `source_index` of the leaf that
+/// reads it, and decides which question this answers. The canonical pass passes the complete
+/// run-time label sets: a scan bound to a single metric names every series it hands over even
+/// though the name is not one of its tag columns, so `__name__` is in that source's entry, and the
+/// answer is the identity a [`NativeExpr::Merge`] groups by and a vector match reads. The query
+/// planner passes the tag columns each source declares, and the answer is the output columns. One
+/// walk serves both so they cannot disagree on where a kernel drops the name, which is exactly
+/// where the runtime does.
 ///
 /// They follow Prometheus' result labels: a one-to-one match keeps the left side's labels, narrowed
 /// by `on` or `ignoring`; `and` and `unless` keep the left side's series and `or` adds the right
@@ -89,7 +89,9 @@ const PROMQL_METADATA_LABELS: [&str; 3] = ["__name__", "__type__", "__unit__"];
 /// make the name reappear above it.
 ///
 /// `None` for a node whose labels this walk does not derive - a `count_values` whose destination is
-/// empty. `None` proves nothing, so the caller treats it as "may alias" rather than as "distinct".
+/// empty, or an input whose source has no entry. `None` proves nothing: the canonical pass treats
+/// it as "may alias" rather than as "distinct", and the planner keeps the statement off the native
+/// route.
 pub fn fused_output_tags(node: &NativeNode, source_tags: &[Vec<String>]) -> Option<Vec<String>> {
     match &node.expr {
         NativeExpr::Input(input) => source_tags.get(input.source_index).cloned(),
@@ -389,6 +391,12 @@ pub fn fused_output_tags(node: &NativeNode, source_tags: &[Vec<String>]) -> Opti
                     if !tags.contains(&tag) {
                         tags.push(tag);
                     }
+                }
+                // `or` reports the series of both sides, and each row keeps the name of the side it
+                // came from, so the name is a label of the result even when neither source declares
+                // it as a tag column. A side whose kernel dropped the name leaves the column empty.
+                if !tags.iter().any(|tag| tag == METRIC_NAME) {
+                    tags.push(METRIC_NAME.to_string());
                 }
             }
             Some(tags)

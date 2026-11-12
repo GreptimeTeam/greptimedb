@@ -62,11 +62,11 @@ use promql::extension_plan::{
 };
 use promql::native::execute::NativeExecutionState;
 use promql::native::plan::{
-    AggregateKind, BoundAggregate, BoundInput, BoundVectorOp, Grouping, InstantValue, MapOp,
-    NativeExpr, NativeNode, NativeTree, NativeType, binary_output_field_kind, reads_across_series,
+    AggregateKind, BoundAggregate, BoundInput, BoundVectorOp, Grouping, NativeExpr, NativeNode,
+    NativeTree, NativeType, binary_output_field_kind, fused_output_tags, reads_across_series,
     uniform_field_kind,
 };
-use promql::vector_match::{Cardinality, MatchingLabels, SetOp};
+use promql::vector_match::Cardinality;
 use promql_parser::label::{METRIC_NAME, MatchOp, Matchers};
 use promql_parser::parser::value::ValueType;
 use promql_parser::parser::{
@@ -589,7 +589,7 @@ impl PromPlanner {
         let metadata = match format {
             FusedOutputFormat::PlainRows => None,
             FusedOutputFormat::SeriesFrame => {
-                let Some(tags) = native_output_tags(tree.root(), &source_tags) else {
+                let Some(tags) = fused_output_tags(tree.root(), &source_tags) else {
                     return Ok(None);
                 };
                 Some((tree.root().output.clone(), tags))
@@ -749,7 +749,7 @@ impl PromPlanner {
             }
             // Bind only input tags: this data-free tree has no input, and its tags belong to its
             // output schema.
-            let Some(output_tags) = native_output_tags(tree.root(), &[]) else {
+            let Some(output_tags) = fused_output_tags(tree.root(), &[]) else {
                 return Ok(None);
             };
             let Some(values) = native_root_fields(tree.root()) else {
@@ -1502,7 +1502,7 @@ impl PromPlanner {
             if schema.eval_grid.is_none() {
                 return Ok(None);
             }
-            let Some(output_tags) = native_output_tags(root, &source_tags) else {
+            let Some(output_tags) = fused_output_tags(root, &source_tags) else {
                 return Ok(None);
             };
             Some((root.output.clone(), output_tags))
@@ -1699,7 +1699,7 @@ impl PromPlanner {
         let output_tags = match &tree.root().output {
             // A scalar has no labels, and its value is named as a bare literal's is.
             NativeType::Scalar(_) => Vec::new(),
-            NativeType::Samples(_) => match native_output_tags(tree.root(), &source_tags) {
+            NativeType::Samples(_) => match fused_output_tags(tree.root(), &source_tags) {
                 Some(output_tags) => output_tags,
                 None => return Ok(None),
             },
@@ -1786,7 +1786,7 @@ impl PromPlanner {
     ) -> Option<DFSchemaRef> {
         let output_tags = match &tree.root().output {
             NativeType::Scalar(_) => Vec::new(),
-            NativeType::Samples(_) => native_output_tags(tree.root(), source_tags)?,
+            NativeType::Samples(_) => fused_output_tags(tree.root(), source_tags)?,
             NativeType::AggregateState(_) => return None,
         };
         let root_fields = native_root_fields(tree.root())?;
@@ -2392,7 +2392,7 @@ fn canonical_boundary_stages(
         .iter()
         .map(|field| field.name.to_string())
         .collect::<Vec<_>>();
-    let output_tags = native_output_tags(tree.root(), source_tags)?;
+    let output_tags = fused_output_tags(tree.root(), source_tags)?;
     let output_schema = fused_output_schema(&fields, &output_tags, time_index, root_kind).ok()?;
 
     // The producer: the statement's own tree, run per partition, exporting a frame.
@@ -2549,7 +2549,7 @@ fn build_evaluated_segment(
         )?;
         return Some((plan, tags));
     }
-    let output_tags = native_output_tags(tree.root(), &local_tags)?;
+    let output_tags = fused_output_tags(tree.root(), &local_tags)?;
     if NativeExecutionState::try_new(&tree, Arc::new(UnboundedMemoryPool::default()), None).is_err()
     {
         return None;
@@ -2604,7 +2604,7 @@ fn build_inner_segment(
         .map(|&index| per_source.get(index).map(|(_, _, tags)| tags.clone()))
         .collect::<Option<Vec<_>>>()?;
     let tree = NativeTree::try_new(rewrite_inner_segment(node, &sources)).ok()?;
-    let output_tags = native_output_tags(tree.root(), &source_tags)?;
+    let output_tags = fused_output_tags(tree.root(), &source_tags)?;
     // A segment publishes on the grid its own root declares, which is the grid its parent reads it
     // on: the segments of a subquery's inner expression are evaluated on the subquery's grid, not on
     // the statement's, whatever their root computes. The statement's grid is only the fallback for a
@@ -2781,7 +2781,7 @@ fn segment_tree(
                 )?;
                 match plan {
                     Some(plan) => {
-                        let Some(cut_tags) = native_output_tags(cut, &current_tags) else {
+                        let Some(cut_tags) = fused_output_tags(cut, &current_tags) else {
                             return Ok(None);
                         };
                         Some((plan, cut_tags))
@@ -3321,365 +3321,6 @@ pub fn discovers_metric_name(selector: &VectorSelector) -> bool {
             }))
 }
 
-/// Whether a binary operation reports the samples of the side it keeps, name included.
-fn keeps_metric_name(matching: &promql::vector_match::BinaryMatching) -> bool {
-    use promql::vector_match::BinaryOp;
-    matches!(
-        matching.op,
-        BinaryOp::Eq | BinaryOp::Ne | BinaryOp::Gt | BinaryOp::Lt | BinaryOp::Ge | BinaryOp::Le
-    ) && !matching.return_bool
-}
-
-/// The tags a node reports after the metric name is dropped, which is what its runtime does to the
-/// samples it reports.
-fn without_metric_name(tags: Vec<String>) -> Vec<String> {
-    tags.into_iter().filter(|tag| tag != METRIC_NAME).collect()
-}
-
-/// The label columns `node` reports, from the tags of the scan each input reads.
-///
-/// They follow Prometheus' result labels: a one-to-one match keeps the left side's labels, narrowed
-/// by `on` or `ignoring`; `and` and `unless` keep the left side's series and `or` adds the right
-/// side's; `info` adds the data labels of the info table; an operation with a scalar or a function
-/// of each value keeps its operand's; a scalar and `vector(s)` have none; a fill that answers a
-/// missing many-side sample files the one side's matching labels, so they join the set, while a
-/// grouped `include` label joins them only when the one side carries it or the matching keeps it in
-/// the key a fill reads. `None` for a node whose labels this walk does not derive - a whole-vector
-/// operation or a label rewrite, which renames the labels below it - so a tree holding one reports
-/// no label set here. Such a tree is declined rather than borrowing output names from the legacy
-/// planner.
-fn native_output_tags(node: &NativeNode, source_tags: &[Vec<String>]) -> Option<Vec<String>> {
-    match &node.expr {
-        NativeExpr::Aggregate { input, op } => {
-            if matches!(&op.group, Grouping::By(names) if names.is_empty()) {
-                return Some(Vec::new());
-            }
-            let tags = native_output_tags(input, source_tags)?;
-            Some(match &op.group {
-                Grouping::By(names) => tags
-                    .into_iter()
-                    .filter(|tag| names.iter().any(|name| name.as_ref() == tag))
-                    .collect(),
-                Grouping::Without(names) => tags
-                    .into_iter()
-                    .filter(|tag| {
-                        tag != METRIC_NAME && !names.iter().any(|name| name.as_ref() == tag)
-                    })
-                    .collect(),
-            })
-        }
-        NativeExpr::Input(input) => source_tags.get(input.source_index).cloned(),
-        NativeExpr::Scalar(_) | NativeExpr::EvalTime { .. } | NativeExpr::VectorOf { .. } => {
-            Some(Vec::new())
-        }
-        // These report a value of their own rather than the sample they read, and the runtime drops
-        // the name for each of them. `source_tags` is the authority on what an input carries, so a
-        // discovery input arrives carrying `__name__` and these arms are what decides it does not
-        // survive.
-        NativeExpr::Instant { input, op } => {
-            let tags = native_output_tags(input, source_tags)?;
-            Some(match op.value {
-                InstantValue::Timestamp => without_metric_name(tags),
-                InstantValue::Sample | InstantValue::InfoTimestamp => tags,
-            })
-        }
-        NativeExpr::Window { input, op } => {
-            let tags = native_output_tags(input, source_tags)?;
-            Some(if op.function.drops_metric_name() {
-                without_metric_name(tags)
-            } else {
-                tags
-            })
-        }
-        NativeExpr::Timestamp { input } => {
-            Some(without_metric_name(native_output_tags(input, source_tags)?))
-        }
-        // A label rewrite changes the label set itself: `label_replace` and `label_join` write their
-        // destination label, so the input's labels are not the output's. A map of math alone keeps
-        // them, minus the metric name its kernel drops.
-        NativeExpr::Map { input, op } => {
-            if op.ops.iter().any(|op| matches!(op, MapOp::Label(_))) {
-                let mut tags = native_output_tags(input, source_tags)?;
-                for operation in op.ops.iter() {
-                    if let MapOp::Label(rewrite) = operation {
-                        let destination = rewrite.destination();
-                        if tags.iter().any(|tag| tag == destination) {
-                            // The input carries the label - a discovered source declares `__name__`
-                            // among its tags - so the rewrite changes its value, and an empty
-                            // replacement may remove it, which the nullable column still represents.
-                            tags.retain(|tag| tag != destination);
-                            tags.push(destination.to_string());
-                        } else if rewrite.writes_value() {
-                            // A fresh destination is a column only when the rewrite can write a
-                            // value: that is how a `__name__` destination publishes a name column,
-                            // and how a delete-only rewrite publishes none.
-                            tags.push(destination.to_string());
-                        }
-                    }
-                }
-                return Some(tags);
-            }
-            let tags = native_output_tags(input, source_tags)?;
-            // A math kernel drops the name; a histogram kernel drops only the name, keeping the type
-            // and unit.
-            Some(
-                if op
-                    .ops
-                    .iter()
-                    .any(|op| matches!(op, MapOp::Math(_) | MapOp::Histogram(_)))
-                {
-                    without_metric_name(tags)
-                } else {
-                    tags
-                },
-            )
-        }
-        // Its parameters are scalars, which carry no labels, so what the node reports are its
-        // input's labels.
-        NativeExpr::ParameterizedMap { input, .. } => {
-            Some(without_metric_name(native_output_tags(input, source_tags)?))
-        }
-        // `scalar()` reports one value and no labels, like the scalar it produces.
-        NativeExpr::ScalarOf { .. } => Some(Vec::new()),
-        // Ranking keeps each selected series' own labels, and its parameter is a scalar.
-        NativeExpr::ParameterizedTopK { input, .. } => native_output_tags(input, source_tags),
-        // A parameterized histogram function drops the bucket bound and the metadata labels, as its
-        // bound counterpart does; its parameters are scalars and carry no labels.
-        NativeExpr::ParameterizedHistogram { input, .. } => native_output_tags(input, source_tags)
-            .map(|tags| {
-                tags.into_iter()
-                    .filter(|tag| {
-                        tag != "le" && tag != "__name__" && tag != "__type__" && tag != "__unit__"
-                    })
-                    .collect()
-            }),
-        NativeExpr::Vector { input, op } => match op {
-            BoundVectorOp::TopK { .. }
-            | BoundVectorOp::LimitK { .. }
-            | BoundVectorOp::LimitRatio { .. }
-            | BoundVectorOp::Sort(_) => native_output_tags(input, source_tags),
-            // Keep in sync with promql::grid_series::METADATA_LABELS, which is crate-private.
-            BoundVectorOp::Histogram(_) => native_output_tags(input, source_tags).map(|tags| {
-                tags.into_iter()
-                    .filter(|tag| {
-                        tag != "le" && tag != "__name__" && tag != "__type__" && tag != "__unit__"
-                    })
-                    .collect()
-            }),
-            BoundVectorOp::Absent { labels } => Some(
-                labels
-                    .tags()
-                    .iter()
-                    .map(|label| label.name.to_string())
-                    .collect(),
-            ),
-            BoundVectorOp::CountValues { label, group } => {
-                let mut tags = native_output_tags(input, source_tags)?;
-                if !tags.contains(&label.to_string()) {
-                    tags.push(label.to_string());
-                }
-                Some(match group {
-                    Grouping::By(names) => {
-                        let mut output = tags
-                            .into_iter()
-                            .filter(|tag| names.iter().any(|name| name.as_ref() == tag))
-                            .collect::<Vec<_>>();
-                        if !output.contains(&label.to_string()) {
-                            output.push(label.to_string());
-                        }
-                        output
-                    }
-                    Grouping::Without(names) => tags
-                        .into_iter()
-                        .filter(|tag| {
-                            tag != METRIC_NAME && !names.iter().any(|name| name.as_ref() == tag)
-                        })
-                        .collect(),
-                })
-            }
-        },
-        // The merge already assembled one series per canonical label set, so its labels are the
-        // labels its input reported.
-        NativeExpr::Merge { input } => native_output_tags(input, source_tags),
-        // A filtering comparison reports the samples of the side it keeps, so the name survives it.
-        // Every other binary operation computes new values, and `bool` reports the comparison's
-        // outcome rather than either operand's samples, so both drop the name.
-        NativeExpr::Binary {
-            left,
-            right,
-            matching,
-        } => {
-            let keeps_name = keeps_metric_name(matching);
-            let scalar_side = matches!(&left.output, NativeType::Scalar(_))
-                || matches!(&right.output, NativeType::Scalar(_));
-            let tags = match (&left.output, &right.output) {
-                (NativeType::Scalar(_), _) => native_output_tags(right, source_tags)?,
-                (_, NativeType::Scalar(_)) => native_output_tags(left, source_tags)?,
-                _ => {
-                    let kept = |tags: Vec<String>| -> Vec<String> {
-                        match &matching.labels {
-                            MatchingLabels::On(names) => tags
-                                .into_iter()
-                                .filter(|tag| {
-                                    names.iter().any(|name| name.as_ref() == tag.as_str())
-                                })
-                                .collect(),
-                            MatchingLabels::Ignoring(names) => tags
-                                .into_iter()
-                                .filter(|tag| {
-                                    !names.iter().any(|name| name.as_ref() == tag.as_str())
-                                })
-                                .collect(),
-                        }
-                    };
-                    let left_tags = native_output_tags(left, source_tags)?;
-                    let right_tags = native_output_tags(right, source_tags)?;
-                    // A group takes the many side's labels as they are, because its result keeps
-                    // one series per series of that side: `group_left` reports the left side's
-                    // labels, `group_right` the right side's. `group_left(...)`/`group_right(...)`
-                    // add the labels the modifier names from the one side. A one-to-one match
-                    // reports the left side's labels narrowed by `on` or `ignoring`.
-                    let mut tags = match &matching.cardinality {
-                        Cardinality::OneToOne => kept(left_tags.clone()),
-                        Cardinality::ManyToOne(_) => left_tags.clone(),
-                        Cardinality::OneToMany(_) => right_tags.clone(),
-                    };
-                    // `result_metric` drops the metadata labels before it matches or copies an
-                    // included label, so an arithmetic result starts without the name. An include can
-                    // still put it back from the one side, which is why the final rule below does not
-                    // run on this branch.
-                    if !keeps_name {
-                        tags.retain(|tag| tag != METRIC_NAME);
-                    }
-                    let (includes, include_tags) = match &matching.cardinality {
-                        Cardinality::OneToOne => (&[][..], &[][..]),
-                        Cardinality::ManyToOne(labels) => {
-                            (labels.as_slice(), right_tags.as_slice())
-                        }
-                        Cardinality::OneToMany(labels) => (labels.as_slice(), left_tags.as_slice()),
-                    };
-                    for tag in include_tags {
-                        if includes.iter().any(|label| label.as_ref() == tag.as_str())
-                            && !tags.contains(tag)
-                        {
-                            tags.push(tag.clone());
-                        }
-                    }
-                    // A grouped result carries an include label only when a row can give it one.
-                    // `result_metric` removes the label from the many side's labels unless the one
-                    // side has it, so a paired row and a row filed from a one-side series take it
-                    // from the one series, which is what the loop above declares. A row filed from
-                    // a many-side series takes it from that series' match key instead, so it carries
-                    // the label only when the matching keeps the label in the key. Everything else
-                    // the many side carries is the base above, so a label neither of those can
-                    // provide has to leave the set: nothing would ever fill its column.
-                    if !includes.is_empty() {
-                        let many_rows_filled = match &matching.cardinality {
-                            // `group_right` puts the one side on the left, so the fills trade
-                            // places: `fill_left` is the one that answers a missing one-side sample
-                            // there.
-                            Cardinality::OneToMany(_) => matching.fill.lhs,
-                            Cardinality::ManyToOne(_) | Cardinality::OneToOne => matching.fill.rhs,
-                        }
-                        .is_some();
-                        let in_match_key = |label: &str| match &matching.labels {
-                            MatchingLabels::On(names) => {
-                                names.iter().any(|name| name.as_ref() == label)
-                            }
-                            // A match key is built from a series' tags, which never hold the metric
-                            // name.
-                            MatchingLabels::Ignoring(names) => {
-                                label != METRIC_NAME
-                                    && !names.iter().any(|name| name.as_ref() == label)
-                            }
-                        };
-                        tags.retain(|tag| {
-                            !includes.iter().any(|label| label.as_ref() == tag.as_str())
-                                || include_tags.contains(tag)
-                                || (many_rows_filled && in_match_key(tag))
-                        });
-                    }
-                    // A fill answers a missing sample from the series of the other side, and the
-                    // kernel files that row at the label set the series it has gives it
-                    // (`vector_match::binary_field`): a many-side series keeps all of its labels,
-                    // which `tags` already holds, while a one-side series keeps only its matching
-                    // labels plus the group labels the modifier names, which the loop above adds.
-                    // So what a fill can add here is the one side's matching labels, and only a
-                    // fill that can file a one-side row has any to add: one where the many side is
-                    // the missing side. Which fill that is follows the kernel, which trades the two
-                    // for `group_right`, whose one side is the left - there it is `fill_right` that
-                    // leaves the many side missing.
-                    let (one_tags, fills_many_side) = match &matching.cardinality {
-                        Cardinality::OneToMany(_) => (left_tags.as_slice(), matching.fill.rhs),
-                        Cardinality::ManyToOne(_) | Cardinality::OneToOne => {
-                            (right_tags.as_slice(), matching.fill.lhs)
-                        }
-                    };
-                    // A filled row keeps only the one side's matching labels, so the name can reach
-                    // it only through an `on` key that names the metric name, and only while the
-                    // operation reports its samples' names.
-                    let fill_carries_name = keeps_name
-                        && matches!(&matching.labels, MatchingLabels::On(names)
-                            if names.iter().any(|name| name.as_ref() == METRIC_NAME));
-                    if fills_many_side.is_some() {
-                        for tag in kept(one_tags.to_vec()) {
-                            if tag == METRIC_NAME && !fill_carries_name {
-                                continue;
-                            }
-                            if !tags.contains(&tag) {
-                                tags.push(tag);
-                            }
-                        }
-                    }
-                    tags
-                }
-            };
-            Some(if scalar_side && !keeps_name {
-                without_metric_name(tags)
-            } else {
-                tags
-            })
-        }
-        NativeExpr::Set { left, right, op } => {
-            let mut tags = native_output_tags(left, source_tags)?;
-            if op.op == SetOp::Or {
-                for tag in native_output_tags(right, source_tags)? {
-                    if !tags.contains(&tag) {
-                        tags.push(tag);
-                    }
-                }
-                // `or` reports the series of both sides, and each row keeps the name of the side it
-                // came from. The runtime already answers that name for every series it reports, so
-                // the column it is read from is the one the tags name.
-                if !tags.iter().any(|tag| tag == METRIC_NAME) {
-                    tags.push(METRIC_NAME.to_string());
-                }
-            }
-            Some(tags)
-        }
-        // A base series keeps its labels and takes the data labels of its info series: the ones the
-        // selector names, or all of them when it names none.
-        NativeExpr::Info {
-            base,
-            info,
-            selector,
-        } => {
-            let mut tags = native_output_tags(base, source_tags)?;
-            for tag in native_output_tags(info, source_tags)? {
-                let copied = selector.data_labels.is_empty()
-                    || selector
-                        .data_labels
-                        .iter()
-                        .any(|label| label.as_ref() == tag.as_str());
-                if copied && !tags.contains(&tag) {
-                    tags.push(tag);
-                }
-            }
-            Some(tags)
-        }
-    }
-}
-
 /// Whether `node` reads no data at all: a constant, the evaluation time, or an operation between
 /// them. Every execution computes the same value for it.
 fn data_free(node: &NativeNode) -> bool {
@@ -4153,7 +3794,7 @@ mod tests {
     use super::{
         ArrowDataType, ArrowTimeUnit, FieldKind, METRIC_NAME, NATIVE_PROMQL_EXTENSION_KEY,
         NativeType, aggregate_reads_histogram, collect_selectors_with_set_operations, cut_segments,
-        fused_output_schema, independent_scan_pair, native_output_tags, native_promql_requested,
+        fused_output_schema, independent_scan_pair, native_promql_requested,
         native_raw_plan_bounds_region_reads, node_children, plans_over_remote_regions,
         reads_across_series, region_local_segment, scan_time_filter,
     };
@@ -4437,15 +4078,14 @@ mod tests {
         let on = compiled_test_tree("x + on(host) x");
         assert_eq!(
             Some(vec!["host".to_string()]),
-            native_output_tags(on.root(), &sources)
+            fused_output_tags(on.root(), &sources)
         );
         let ignoring = compiled_test_tree("x + x");
         assert_eq!(
             Some(tags.clone()),
-            native_output_tags(ignoring.root(), &sources)
+            fused_output_tags(ignoring.root(), &sources)
         );
         let empty_on = compiled_test_tree("x + on() x");
-        assert_eq!(Some(vec![]), native_output_tags(empty_on.root(), &sources));
         assert_eq!(Some(vec![]), fused_output_tags(empty_on.root(), &sources));
 
         // Two tables with different tags: the left side's labels pass through a wrapper and a
@@ -4457,12 +4097,12 @@ mod tests {
         let wrapped = compiled_test_tree("100 * (1 - x / on(host) y)");
         assert_eq!(
             Some(vec!["host".to_string()]),
-            native_output_tags(wrapped.root(), &sources)
+            fused_output_tags(wrapped.root(), &sources)
         );
         let and = compiled_test_tree("x and on(host) y");
         assert_eq!(
             Some(sources[0].clone()),
-            native_output_tags(and.root(), &sources)
+            fused_output_tags(and.root(), &sources)
         );
         let or = compiled_test_tree("x or y");
         // `or` reports the series of both sides, so it reports each row's own name as well.
@@ -4473,7 +4113,7 @@ mod tests {
                 "zone".to_string(),
                 "__name__".to_string()
             ]),
-            native_output_tags(or.root(), &sources)
+            fused_output_tags(or.root(), &sources)
         );
         // An unmatched right series answers with its own matching labels under a left fill.
         let fill = compiled_test_tree("x + fill_left(0) y");
@@ -4483,12 +4123,12 @@ mod tests {
                 "kind".to_string(),
                 "zone".to_string()
             ]),
-            native_output_tags(fill.root(), &sources)
+            fused_output_tags(fill.root(), &sources)
         );
         let fill_on = compiled_test_tree("x + on(host) fill(0) y");
         assert_eq!(
             Some(vec!["host".to_string()]),
-            native_output_tags(fill_on.root(), &sources)
+            fused_output_tags(fill_on.root(), &sources)
         );
         // Group modifiers retain the many-side labels and copy declared labels from the one side.
         let group_sources = [
@@ -4523,7 +4163,7 @@ mod tests {
                 .map(String::from)
                 .collect()
             ),
-            native_output_tags(group_left.root(), &group_sources)
+            fused_output_tags(group_left.root(), &group_sources)
         );
         let group_right =
             compiled_test_tree("x * on(cluster, namespace, pod) group_right(container) y");
@@ -4541,7 +4181,7 @@ mod tests {
                 .map(String::from)
                 .collect()
             ),
-            native_output_tags(group_right.root(), &group_sources)
+            fused_output_tags(group_right.root(), &group_sources)
         );
         for query in [
             "x * on() group_left(workload) y",
@@ -4561,7 +4201,6 @@ mod tests {
                 ]
             };
             let expected = Some(expected.into_iter().map(String::from).collect());
-            assert_eq!(expected, native_output_tags(tree.root(), &group_sources));
             assert_eq!(expected, fused_output_tags(tree.root(), &group_sources));
         }
         // An outer match narrows the labels the inner one already narrowed.
@@ -4581,7 +4220,7 @@ mod tests {
         ] {
             assert_eq!(
                 Some(expected.into_iter().map(String::from).collect::<Vec<_>>()),
-                native_output_tags(compiled_test_tree(query).root(), &sources),
+                fused_output_tags(compiled_test_tree(query).root(), &sources),
                 "{query}"
             );
         }
@@ -4597,7 +4236,7 @@ mod tests {
             let aggregate = compiled_test_tree(query);
             assert_eq!(
                 Some(expected.into_iter().map(String::from).collect::<Vec<_>>()),
-                native_output_tags(aggregate.root(), &sources),
+                fused_output_tags(aggregate.root(), &sources),
                 "{query}"
             );
         }
@@ -4613,21 +4252,21 @@ mod tests {
         ] {
             assert_eq!(
                 Some(vec!["hostname".to_string()]),
-                native_output_tags(compiled_test_tree(query).root(), &hostname_source),
+                fused_output_tags(compiled_test_tree(query).root(), &hostname_source),
                 "{query}"
             );
         }
         let absent = compiled_test_tree("absent(x{host=\"a\", job=\"b\"})");
         assert_eq!(
             Some(vec!["host".to_string(), "job".to_string()]),
-            native_output_tags(absent.root(), &sources)
+            fused_output_tags(absent.root(), &sources)
         );
         // A per-point `k` keeps the input's labels too: it selects the same series the bound form
         // selects, so it reports the same set. Its parameter reads a source of its own, so this tree
         // binds two.
         assert_eq!(
             Some(vec!["hostname".to_string()]),
-            native_output_tags(
+            fused_output_tags(
                 compiled_test_tree("topk(scalar(x), sum by (hostname) (rate(x[5m])))").root(),
                 &[vec!["hostname".to_string()], vec!["hostname".to_string()]]
             ),
@@ -4637,19 +4276,19 @@ mod tests {
             compiled_test_tree("count_values by (host) (\"sample\", sum by (host) (x))");
         assert_eq!(
             Some(vec!["host".to_string(), "sample".to_string()]),
-            native_output_tags(count_values.root(), &sources)
+            fused_output_tags(count_values.root(), &sources)
         );
         // A destination already present in the grouping is reported once, not duplicated.
         let count_values = compiled_test_tree("count_values by (host) (\"host\", x)");
         assert_eq!(
             Some(vec!["host".to_string()]),
-            native_output_tags(count_values.root(), &sources)
+            fused_output_tags(count_values.root(), &sources)
         );
         // Selecting some series keeps each one's own labels, whatever the grouping was.
         let topk = compiled_test_tree("topk(1, x)");
         assert_eq!(
             Some(sources[0].clone()),
-            native_output_tags(topk.root(), &sources),
+            fused_output_tags(topk.root(), &sources),
             "topk keeps the labels of the series it selects"
         );
         for query in [
@@ -4664,7 +4303,7 @@ mod tests {
                         .map(String::from)
                         .collect()
                 ),
-                native_output_tags(rewrite.root(), &sources),
+                fused_output_tags(rewrite.root(), &sources),
                 "{query}"
             );
         }
@@ -4721,7 +4360,7 @@ mod tests {
         let tree = compiled_test_tree("x * on(pod) group_left(container) y");
         assert_eq!(
             Some(vec!["pod".into(), "workload".into(), "container".into()]),
-            native_output_tags(tree.root(), &sources)
+            fused_output_tags(tree.root(), &sources)
         );
     }
 
@@ -4736,20 +4375,20 @@ mod tests {
         let sum = compiled_test_tree("sum without (instance) (x)");
         assert_eq!(
             Some(vec!["job".to_string()]),
-            native_output_tags(sum.root(), &sources)
+            fused_output_tags(sum.root(), &sources)
         );
 
         let count_values = compiled_test_tree("count_values without (instance) (\"sample\", x)");
         assert_eq!(
             Some(vec!["job".to_string(), "sample".to_string()]),
-            native_output_tags(count_values.root(), &sources)
+            fused_output_tags(count_values.root(), &sources)
         );
 
         let count_values =
             compiled_test_tree("count_values without (sample, instance) (\"sample\", x)");
         assert_eq!(
             Some(vec!["job".to_string()]),
-            native_output_tags(count_values.root(), &sources)
+            fused_output_tags(count_values.root(), &sources)
         );
     }
 
@@ -4767,7 +4406,7 @@ mod tests {
             compiled_test_tree(r#"label_replace(x, "__name__", "same", "__name__", "(.*)")"#);
         assert_eq!(
             Some(vec!["host".into(), "kind".into(), METRIC_NAME.into()]),
-            native_output_tags(tree.root(), &columns),
+            fused_output_tags(tree.root(), &columns),
             "a written name is a column the output publishes"
         );
         let collected = promql::native::canonicalize::merge_label_rewrites(&tree, &runtime)
@@ -4777,8 +4416,8 @@ mod tests {
             "a name rewrite writes an existing runtime label: {collected}"
         );
         assert_eq!(
-            native_output_tags(tree.root(), &columns),
-            native_output_tags(collected.root(), &columns),
+            fused_output_tags(tree.root(), &columns),
+            fused_output_tags(collected.root(), &columns),
             "collecting the pieces does not change the columns"
         );
 
@@ -4786,7 +4425,7 @@ mod tests {
         let deleted = compiled_test_tree(r#"label_replace(x, "__name__", "", "__name__", "(.*)")"#);
         assert_eq!(
             Some(vec!["host".into(), "kind".into()]),
-            native_output_tags(deleted.root(), &columns)
+            fused_output_tags(deleted.root(), &columns)
         );
 
         // A kernel that computes a value of its own drops the name a rewrite below it wrote.
@@ -4797,7 +4436,7 @@ mod tests {
             r#"sum(label_replace(x, "__name__", "same", "__name__", "(.*)"))"#,
         ] {
             let tree = compiled_test_tree(query);
-            let tags = native_output_tags(tree.root(), &columns)
+            let tags = fused_output_tags(tree.root(), &columns)
                 .unwrap_or_else(|| panic!("{query} derives its columns"));
             assert!(
                 !tags.iter().any(|tag| tag == METRIC_NAME),
@@ -4832,7 +4471,7 @@ mod tests {
         // The rewrite writes a name over a dropped one, so the output publishes a name column.
         assert_eq!(
             Some(vec!["host".into(), "kind".into(), METRIC_NAME.into()]),
-            native_output_tags(collected.root(), &[vec!["host".into(), "kind".into()]])
+            fused_output_tags(collected.root(), &[vec!["host".into(), "kind".into()]])
         );
 
         // A fresh ordinary destination above the same kernel is still uncollected: no scan can carry
@@ -4855,7 +4494,7 @@ mod tests {
         let tree = compiled_test_tree("x * on(pod) group_right(container) y");
         assert_eq!(
             Some(vec!["pod".into(), "workload".into(), "container".into()]),
-            native_output_tags(tree.root(), &sources)
+            fused_output_tags(tree.root(), &sources)
         );
     }
 
@@ -4873,12 +4512,12 @@ mod tests {
         );
         assert_eq!(
             Some(vec!["host".to_string(), METRIC_NAME.to_string()]),
-            native_output_tags(included.root(), &sources)
+            fused_output_tags(included.root(), &sources)
         );
         let unnamed = compiled_test_tree(r#"x * on(host) group_left(__name__) y"#);
         assert_eq!(
             Some(vec!["host".to_string()]),
-            native_output_tags(
+            fused_output_tags(
                 unnamed.root(),
                 &[vec!["host".to_string()], vec!["host".to_string()]]
             )
@@ -4903,7 +4542,7 @@ mod tests {
             };
             assert_eq!(1, schema.fields.len(), "{query}");
             assert_eq!("v0", schema.fields[0].name.as_ref(), "{query}");
-            let tags = native_output_tags(tree.root(), &sources).unwrap();
+            let tags = fused_output_tags(tree.root(), &sources).unwrap();
             assert_eq!(
                 vec!["host", "zone"],
                 tags.iter().map(String::as_str).collect::<Vec<_>>(),
@@ -4960,7 +4599,7 @@ mod tests {
         let tree = compiled_test_tree("histogram_quantile(0.9, x)");
         assert_eq!(
             Some(vec!["job".to_string()]),
-            native_output_tags(tree.root(), &sources)
+            fused_output_tags(tree.root(), &sources)
         );
     }
 
@@ -4971,7 +4610,7 @@ mod tests {
         let tree = compiled_test_tree("abs(x) * 2");
         assert_eq!(
             Some(vec!["host".to_string(), "kind".to_string()]),
-            native_output_tags(tree.root(), &sources)
+            fused_output_tags(tree.root(), &sources)
         );
     }
 
