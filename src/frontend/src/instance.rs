@@ -2868,6 +2868,74 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_copy_database_authorizes_all_tables_before_data_access() -> TestResult<()> {
+        for (table, direction) in [
+            (test_table(1024, "denied")?, "TO"),
+            (test_table(1024, "denied")?, "FROM"),
+            (test_physical_table(1024, "physical")?, "FROM"),
+            (test_table(1024, "source")?, "TO"),
+            (test_table(1024, "source")?, "FROM"),
+        ] {
+            let dir = common_test_util::temp_dir::create_temp_dir("copy_database_permissions");
+            let name = table.table_info().name.clone();
+            let catalog = catalog::memory::MemoryCatalogManager::new_with_table(table);
+            catalog
+                .register_table_sync(catalog::RegisterTableRequest {
+                    catalog: "greptime".into(),
+                    schema: "public".into(),
+                    table_name: "allowed".into(),
+                    table_id: 1025,
+                    table: test_table(1025, "allowed")?,
+                })
+                .unwrap();
+            if direction == "FROM" {
+                // Invalid source data must never be read before all destinations are authorized.
+                std::fs::write(dir.path().join("allowed.parquet"), b"not parquet").unwrap();
+                std::fs::write(dir.path().join(format!("{name}.parquet")), b"not parquet").unwrap();
+            }
+            let kv = Arc::new(MemoryKvBackend::new());
+            let plugins = Plugins::new();
+            plugins.insert::<PermissionCheckerRef>(Arc::new(RejectUnresolvedPermissionChecker));
+            let instance = FrontendBuilder::new(
+                FrontendOptions::default(),
+                kv.clone(),
+                test_cache_registry(kv)?,
+                catalog,
+                Arc::new(client::client_manager::NodeClients::default()),
+                Arc::new(NoopProcedureExecutor),
+                Arc::new(ProcessManager::new("copy-permissions".into(), None)),
+            )
+            .with_plugin(plugins)
+            .with_local_file_access(
+                common_datasource::object_store::LocalFileAccess::sandboxed(dir.path()).unwrap(),
+            )
+            .try_build()
+            .await
+            .context(BuildFrontendSnafu)?;
+            let location = reqwest::Url::from_directory_path(dir.path()).unwrap();
+            let sql = format!(
+                "COPY DATABASE public {direction} '{location}' WITH (continue_on_error='true')"
+            );
+            let result = instance
+                .do_query_inner(&sql, QueryContext::arc())
+                .await
+                .remove(0);
+            if name == "source" {
+                assert!(result.is_ok(), "{result:?}");
+            } else {
+                assert_eq!(
+                    StatusCode::PermissionDenied,
+                    result.unwrap_err().status_code()
+                );
+                if direction == "TO" {
+                    assert_eq!(0, std::fs::read_dir(dir.path()).unwrap().count());
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn test_metric_export_http_timeout_cancels_ordinary_source() {
         let destination = common_test_util::temp_dir::create_temp_dir("metric_export_timeout");
         let (started_tx, started_rx) = oneshot::channel();
@@ -4875,74 +4943,6 @@ mod tests {
             "expected one create table task, got {submitted:?}"
         );
         assert!(matches!(&submitted[0], DdlTask::CreateTable(_)));
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn test_copy_database_authorizes_all_tables_before_io() -> TestResult<()> {
-        for (table, direction) in [
-            (test_table(1024, "denied")?, "TO"),
-            (test_table(1024, "denied")?, "FROM"),
-            (test_physical_table(1024, "physical")?, "FROM"),
-            (test_table(1024, "source")?, "TO"),
-            (test_table(1024, "source")?, "FROM"),
-        ] {
-            let dir = common_test_util::temp_dir::create_temp_dir("copy_database_permissions");
-            let name = table.table_info().name.clone();
-            let catalog = catalog::memory::MemoryCatalogManager::new_with_table(table);
-            catalog
-                .register_table_sync(catalog::RegisterTableRequest {
-                    catalog: "greptime".into(),
-                    schema: "public".into(),
-                    table_name: "allowed".into(),
-                    table_id: 1025,
-                    table: test_table(1025, "allowed")?,
-                })
-                .unwrap();
-            if direction == "FROM" {
-                // Invalid source data must never be read before all destinations are authorized.
-                std::fs::write(dir.path().join("allowed.parquet"), b"not parquet").unwrap();
-                std::fs::write(dir.path().join(format!("{name}.parquet")), b"not parquet").unwrap();
-            }
-            let kv = Arc::new(MemoryKvBackend::new());
-            let plugins = Plugins::new();
-            plugins.insert::<PermissionCheckerRef>(Arc::new(RejectUnresolvedPermissionChecker));
-            let instance = FrontendBuilder::new(
-                FrontendOptions::default(),
-                kv.clone(),
-                test_cache_registry(kv)?,
-                catalog,
-                Arc::new(client::client_manager::NodeClients::default()),
-                Arc::new(NoopProcedureExecutor),
-                Arc::new(ProcessManager::new("copy-permissions".into(), None)),
-            )
-            .with_plugin(plugins)
-            .with_local_file_access(
-                common_datasource::object_store::LocalFileAccess::sandboxed(dir.path()).unwrap(),
-            )
-            .try_build()
-            .await
-            .context(BuildFrontendSnafu)?;
-            let location = reqwest::Url::from_directory_path(dir.path()).unwrap();
-            let sql = format!(
-                "COPY DATABASE public {direction} '{location}' WITH (continue_on_error='true')"
-            );
-            let result = instance
-                .do_query_inner(&sql, QueryContext::arc())
-                .await
-                .remove(0);
-            if name == "source" {
-                assert!(result.is_ok(), "{result:?}");
-            } else {
-                assert_eq!(
-                    StatusCode::PermissionDenied,
-                    result.unwrap_err().status_code()
-                );
-                if direction == "TO" {
-                    assert_eq!(0, std::fs::read_dir(dir.path()).unwrap().count());
-                }
-            }
-        }
         Ok(())
     }
 
