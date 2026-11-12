@@ -37,7 +37,8 @@ pub trait PendingRowsBatcher: Send + Sync {
     /// Admits an original request before conversion, retaining its slot and estimated
     /// Arrow memory across all table submissions. Memory acquisition must not wait
     /// because the caller can already hold transport and decoded-row reservations.
-    async fn acquire(&self, estimated_bytes: usize) -> Result<PendingRowsPermit>;
+    /// `held_bytes` counts those reservations, which cannot be released during conversion.
+    async fn acquire(&self, estimated_bytes: usize, held_bytes: u64) -> Result<PendingRowsPermit>;
 
     /// Submits rows according to the acknowledgement policy, retaining the slot until
     /// writing completes even when the response acknowledges queue admission only.

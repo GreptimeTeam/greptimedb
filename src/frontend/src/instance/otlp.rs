@@ -226,7 +226,10 @@ impl OpenTelemetryProtocolHandler for Instance {
             });
             let mut ctx = ctx.fork();
             // Queued and detached writes retain the reservation after caller cancellation.
-            ctx.set_write_progress(Arc::new(WriteProgress::with_reservation(reservation)));
+            ctx.set_write_progress(Arc::new(WriteProgress::with_reservation(
+                reservation.granted_bytes(),
+                reservation,
+            )));
             Arc::new(ctx)
         } else {
             ctx

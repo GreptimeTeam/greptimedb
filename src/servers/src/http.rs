@@ -240,9 +240,16 @@ pub async fn set_http_write_batching(
         .extensions()
         .get::<LogicalBatchingProtocols>()
         .is_some_and(|protocols| protocols.0.contains(&protocol));
+    let body_memory_bytes = req
+        .extensions()
+        .get::<memory_limit::BodyMemoryAccounting>()
+        .map(memory_limit::BodyMemoryAccounting::reserved_bytes_counter);
     if let Some(ctx) = req.extensions_mut().get_mut::<QueryContext>() {
         ctx.set_batching_enabled(enabled);
         ctx.set_logical_batching_enabled(logical_enabled);
+        if let Some(bytes) = body_memory_bytes {
+            ctx.set_body_memory_bytes(bytes);
+        }
     }
     next.run(req).await
 }

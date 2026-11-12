@@ -166,7 +166,7 @@ impl PendingRowsBatcher for TablePendingRowsBatcher {
 
     /// Acquires once per original request, before submitting any of its tables.
     /// Retain a clone in every submission until its flush has completed.
-    async fn acquire(&self, estimated_bytes: usize) -> Result<PendingRowsPermit> {
+    async fn acquire(&self, estimated_bytes: usize, held_bytes: u64) -> Result<PendingRowsPermit> {
         let permit = self.request_limiter.acquire().await.map_err(|_| {
             UnexpectedSnafu {
                 violated: "batcher admission closed".to_string(),
@@ -178,7 +178,7 @@ impl PendingRowsBatcher for TablePendingRowsBatcher {
         }
         let bytes = u64::try_from(estimated_bytes).unwrap_or(u64::MAX);
         let reserve = || {
-            self.memory_limiter.check_request_fits(bytes, 0)?;
+            self.memory_limiter.check_request_fits(bytes, held_bytes)?;
             self.memory_limiter.try_acquire(bytes).ok_or_else(|| {
                 let source = common_memory_manager::Error::MemoryLimitExceeded {
                     requested_bytes: bytes,
@@ -420,9 +420,17 @@ mod tests {
                     pending_rows_batch_sync_enabled()
                 );
                 Arc::get_mut(&mut batcher).unwrap().pending_rows_batch_sync = sync;
-                assert!(batcher.acquire(4097).await.is_err());
+                assert!(batcher.acquire(4097, 0).await.is_err());
                 let held = memory.try_acquire(3072).unwrap();
-                let acquire = batcher.acquire(2048);
+                let Err(error) = batcher.acquire(2048, held.granted_bytes()).await else {
+                    panic!("body and conversion together exceed the entire quota");
+                };
+                assert_eq!(error.status_code(), StatusCode::RateLimited);
+                let additional = batcher.acquire(1024, held.granted_bytes()).await.unwrap();
+                assert_eq!(memory.used_bytes(), 4096);
+                drop(additional);
+                // The same occupied quota belongs to another request and can be released.
+                let acquire = batcher.acquire(2048, 0);
                 tokio::pin!(acquire);
                 let std::task::Poll::Ready(Err(error)) = futures::poll!(acquire.as_mut()) else {
                     panic!("conversion memory must not wait while a request holds other permits");
@@ -451,7 +459,7 @@ mod tests {
                     Arc::new(Int32Array::from(vec![1])) as ArrayRef,
                 )])
                 .unwrap();
-                let permit = batcher.acquire(2048).await.unwrap();
+                let permit = batcher.acquire(2048, 0).await.unwrap();
                 let submitter = batcher.clone();
                 let submitted =
                     tokio::spawn(async move { submitter.submit(table, batch, ctx, permit).await });
@@ -487,7 +495,7 @@ mod tests {
                 }
                 assert_eq!(memory.used_bytes(), 2048);
                 // Early acknowledgement must not release capacity before completion.
-                let acquire = batcher.acquire(0);
+                let acquire = batcher.acquire(0, 0);
                 tokio::pin!(acquire);
                 assert!(futures::poll!(acquire.as_mut()).is_pending());
                 let result = if fail {
@@ -628,7 +636,7 @@ mod tests {
         opentsdb_ctx.set_skip_wal(skip_wal);
         let (first_result, second_result) = timeout(Duration::from_secs(5), async {
             if shared_request {
-                let permit = batcher.acquire(0).await.unwrap();
+                let permit = batcher.acquire(0, 0).await.unwrap();
                 let (first, second) = tokio::join!(
                     batcher.submit(table.clone(), first, influx_ctx, permit.clone()),
                     batcher.submit(table.clone(), second, opentsdb_ctx, permit),
@@ -830,8 +838,8 @@ mod tests {
                 ctx.set_write_progress(counter.clone());
                 Arc::new(ctx)
             });
-            let first_permit = batcher.acquire(0).await.unwrap();
-            let second_permit = batcher.acquire(0).await.unwrap();
+            let first_permit = batcher.acquire(0, 0).await.unwrap();
+            let second_permit = batcher.acquire(0, 0).await.unwrap();
             let (first, second) = tokio::join!(
                 batcher.submit(table.clone(), first, contexts[0].clone(), first_permit),
                 batcher.submit(table, second, contexts[1].clone(), second_permit),

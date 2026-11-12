@@ -271,7 +271,10 @@ async fn remote_write_v1(
         });
         let mut ctx = query_ctx.fork();
         ctx.set_write_progress(Arc::new(
-            session::write_progress::WriteProgress::with_reservation(reservation),
+            session::write_progress::WriteProgress::with_reservation(
+                reservation.granted_bytes(),
+                reservation,
+            ),
         ));
         Arc::new(ctx)
     };
@@ -372,8 +375,11 @@ async fn remote_write_v2(
         let counter = crate::metrics::PROM_STORE_REMOTE_WRITE_EXEMPLARS
             .with_label_values(&[&db, REMOTE_WRITE_V2_VERSION]);
         query_ctx.set_write_progress(Arc::new(
-            session::write_progress::WriteProgress::with_reservation(req.memory_guard.clone())
-                .with_observer(move |rows| counter.inc_by(rows)),
+            session::write_progress::WriteProgress::with_reservation(
+                req.memory_guard.granted_bytes(),
+                req.memory_guard.clone(),
+            )
+            .with_observer(move |rows| counter.inc_by(rows)),
         ));
     }
     let query_ctx = Arc::new(query_ctx);
@@ -390,9 +396,11 @@ async fn remote_write_v2(
         };
         for (ctx, _) in batches {
             let counter = counter.clone();
-            let progress =
-                session::write_progress::WriteProgress::with_reservation(req.memory_guard.clone())
-                    .with_observer(move |rows| counter.inc_by(rows));
+            let progress = session::write_progress::WriteProgress::with_reservation(
+                req.memory_guard.granted_bytes(),
+                req.memory_guard.clone(),
+            )
+            .with_observer(move |rows| counter.inc_by(rows));
             let mut fork = ctx.fork();
             fork.set_write_progress(Arc::new(progress));
             *ctx = Arc::new(fork);

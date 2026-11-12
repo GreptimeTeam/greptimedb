@@ -46,6 +46,146 @@ mod tests {
     use crate::tests;
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn test_table_batch_combined_memory_limit() {
+        use std::time::Duration;
+
+        use api::greptime_proto::io::prometheus::write::v2;
+        use frontend::service_config::BatcherOptions;
+        use servers::batcher::BatchingProtocol;
+        use servers::prom_remote_write::validation::PromValidationMode;
+
+        let label = "x".repeat(64 * 1024);
+        let v1 = WriteRequest {
+            timeseries: vec![TimeSeries {
+                labels: vec![
+                    Label {
+                        name: "__name__".into(),
+                        value: "quota_probe".into(),
+                    },
+                    Label {
+                        name: "job".into(),
+                        value: label.clone(),
+                    },
+                ],
+                samples: vec![Sample {
+                    value: 1.0,
+                    timestamp: 1,
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let v2 = v2::Request {
+            symbols: vec![
+                "".into(),
+                "__name__".into(),
+                "quota_probe".into(),
+                "job".into(),
+                "x".repeat(32 * 1024),
+            ],
+            timeseries: vec![v2::TimeSeries {
+                labels_refs: vec![1, 2, 3, 4],
+                samples: vec![v2::Sample {
+                    value: 1.0,
+                    timestamp: 1,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+        };
+        for limit in [320 * 1024, 768 * 1024, 0] {
+            let standalone = GreptimeDbStandaloneBuilder::new(&format!("combined_memory_{limit}"))
+                .with_write_memory_limit(limit)
+                .with_table_batcher(BatcherOptions {
+                    protocols: vec![BatchingProtocol::Prom, BatchingProtocol::Influxdb],
+                    pending_rows_flush_interval: Duration::from_millis(10),
+                    ..Default::default()
+                })
+                .build()
+                .await;
+            let instance = standalone.fe_instance();
+            let memory = instance.server_memory_limiter();
+            let build_server = |protocols| {
+                HttpServerBuilder::new(HttpOptions::default())
+                    .with_memory_limiter(memory.clone())
+                    .with_batching_protocols(protocols)
+                    .with_influxdb_handler(instance.clone())
+                    .with_prom_handler(
+                        instance.clone(),
+                        None,
+                        false,
+                        PromValidationMode::Strict,
+                        None,
+                    )
+                    .build()
+            };
+            let server = build_server(vec![BatchingProtocol::Prom, BatchingProtocol::Influxdb]);
+            let client = TestClient::new(server.build(server.make_app()).unwrap()).await;
+            let v2_body = prom_store::snappy_compress(&v2.encode_to_vec()).unwrap();
+            // The v2 decoder itself fits; the rejection below must happen during Arrow admission.
+            let unbatched = build_server(vec![]);
+            let unbatched = TestClient::new(unbatched.build(unbatched.make_app()).unwrap()).await;
+            let response = unbatched
+                .post("/v1/prometheus/write")
+                .header(
+                    "content-type",
+                    "application/x-protobuf;proto=io.prometheus.write.v2.Request",
+                )
+                .header("content-encoding", "snappy")
+                .body(v2_body.clone())
+                .send()
+                .await;
+            assert!(response.status().is_success(), "{}", response.text().await);
+            assert_eq!(memory.used_bytes(), 0);
+
+            for (path, content_type, encoding, body, fits_alone) in [
+                // The longer label still fits in Arrow when only the compressed body is retained.
+                (
+                    "/v1/prometheus/write",
+                    "application/x-protobuf",
+                    "snappy",
+                    prom_store::snappy_compress(&v1.encode_to_vec()).unwrap(),
+                    true,
+                ),
+                (
+                    "/v1/influxdb/write",
+                    "text/plain",
+                    "identity",
+                    format!("quota_probe,job={label} greptime_value=1 1000000").into_bytes(),
+                    false,
+                ),
+                (
+                    "/v1/prometheus/write",
+                    "application/x-protobuf;proto=io.prometheus.write.v2.Request",
+                    "snappy",
+                    v2_body,
+                    false,
+                ),
+            ] {
+                let response = client
+                    .post(path)
+                    .header("content-type", content_type)
+                    .header("content-encoding", encoding)
+                    .body(body)
+                    .send()
+                    .await;
+                if limit == 320 * 1024 && !fits_alone {
+                    assert_eq!(response.status(), 429, "{}", response.text().await);
+                } else {
+                    assert!(response.status().is_success(), "{}", response.text().await);
+                }
+                tokio::time::timeout(Duration::from_secs(5), async {
+                    while memory.used_bytes() != 0 {
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await
+                .unwrap();
+            }
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_exemplar_wide_schema_conversion_memory_limit() {
         use std::time::Duration;
 
