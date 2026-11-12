@@ -98,8 +98,7 @@ use tokio_util::sync::CancellationToken;
 use crate::batcher::PendingRowsBatcher;
 use crate::error::{
     CatalogSnafu, ColumnOptionsSnafu, CreatePartitionRulesSnafu, InvalidInsertRequestSnafu,
-    JoinTaskSnafu, RequestInsertsSnafu, Result, RetentionTtlOnLogicalTableSnafu,
-    TableNotFoundSnafu, WriteRejectedSnafu,
+    JoinTaskSnafu, RequestInsertsSnafu, Result, TableNotFoundSnafu, WriteRejectedSnafu,
 };
 use crate::expr_helper;
 use crate::region_req_factory::RegionRequestFactory;
@@ -2362,20 +2361,17 @@ pub fn validate_trace_table_model(table_info: &TableInfo, ctx: &QueryContextRef)
     Ok(())
 }
 
-/// Returns true if the TTL option value is `instant`, per the engine's TTL
-/// semantics (`TimeToLive::Instant`), as opposed to a retention duration.
-pub fn is_instant_ttl(ttl: &str) -> bool {
+fn is_instant_ttl(ttl: &str) -> bool {
     common_time::ttl::TimeToLive::from_humantime_or_str(ttl)
         .map(|ttl| ttl.is_instant())
         .unwrap_or(false)
 }
 
-/// Returns true when `ttl` is a retention duration (anything other than `instant`).
-pub fn is_retention_ttl(ttl: &str) -> bool {
+pub(crate) fn is_retention_ttl(ttl: &str) -> bool {
     !is_instant_ttl(ttl)
 }
 
-pub fn logical_table_options_have_retention_ttl(
+fn logical_table_options_have_retention_ttl(
     table_options: &std::collections::HashMap<String, String>,
 ) -> bool {
     table_options
@@ -2383,27 +2379,28 @@ pub fn logical_table_options_have_retention_ttl(
         .is_some_and(|ttl| is_retention_ttl(ttl))
 }
 
-pub fn ensure_no_retention_ttl_on_logical_table(
-    table_options: &std::collections::HashMap<String, String>,
-) -> Result<()> {
-    if logical_table_options_have_retention_ttl(table_options) {
-        return RetentionTtlOnLogicalTableSnafu.fail();
+/// Strips a retention `ttl` from logical table options (legacy snapshots and
+/// database TTL fallbacks). `ttl=instant` is kept for flow forwarding.
+pub(crate) fn strip_retention_ttl_from_logical_table_options(
+    table_options: &mut std::collections::HashMap<String, String>,
+) {
+    if logical_table_options_have_retention_ttl(table_options)
+        && let Some(ttl) = table_options.remove(TTL_KEY)
+    {
+        warn!(
+            "Ignoring retention ttl='{}' on metric logical table; set ttl on the physical table instead",
+            ttl
+        );
     }
-    Ok(())
-}
-
-/// Retention TTL from an ingest hint. `ttl=instant` is excluded: it stays on
-/// the logical table and must not be copied onto the shared physical table.
-pub fn retention_ttl_hint(ctx: &QueryContextRef) -> Option<&str> {
-    ctx.extension(TTL_KEY).filter(|ttl| is_retention_ttl(ttl))
 }
 
 /// Copies a retention TTL hint onto a physical metric table being created.
+/// `ttl=instant` ingest hints are ignored and stay on the logical table only.
 pub fn apply_retention_ttl_hint(
     table_options: &mut std::collections::HashMap<String, String>,
     ctx: &QueryContextRef,
 ) {
-    if let Some(ttl) = retention_ttl_hint(ctx) {
+    if let Some(ttl) = ctx.extension(TTL_KEY).filter(|ttl| is_retention_ttl(ttl)) {
         table_options.insert(TTL_KEY.to_string(), ttl.to_string());
     }
 }
@@ -4066,13 +4063,15 @@ mod tests {
     }
 
     #[test]
-    fn test_ensure_no_retention_ttl_on_logical_table() {
+    fn test_strip_retention_ttl_from_logical_table_options() {
         let mut options = std::collections::HashMap::new();
         options.insert(TTL_KEY.to_string(), "instant".to_string());
-        ensure_no_retention_ttl_on_logical_table(&options).unwrap();
+        strip_retention_ttl_from_logical_table_options(&mut options);
+        assert_eq!(options.get(TTL_KEY).map(String::as_str), Some("instant"));
 
         options.insert(TTL_KEY.to_string(), "7d".to_string());
-        assert!(ensure_no_retention_ttl_on_logical_table(&options).is_err());
+        strip_retention_ttl_from_logical_table_options(&mut options);
+        assert!(!options.contains_key(TTL_KEY));
     }
 
     #[test]
