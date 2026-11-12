@@ -1,0 +1,1 @@
+../../../../cases/standalone/common/promql/vector_matching.sql

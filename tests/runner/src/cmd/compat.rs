@@ -720,6 +720,8 @@ async fn run_profile(profile: &CompatProfile, config: &ProfileRunConfig<'_>) -> 
         setup_mysql: None,
         enable_flat_format: false,
         enable_gc: false,
+        enable_native_promql: false,
+        query_hints: Vec::new(),
     };
     let env = Env::new(
         sqlness_home.clone(),

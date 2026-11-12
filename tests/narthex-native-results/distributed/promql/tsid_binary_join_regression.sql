@@ -1,0 +1,1 @@
+../../../cases/distributed/common/promql/tsid_binary_join_regression.sql

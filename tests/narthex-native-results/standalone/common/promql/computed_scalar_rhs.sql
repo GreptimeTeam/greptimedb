@@ -1,0 +1,1 @@
+../../../../cases/standalone/common/promql/computed_scalar_rhs.sql

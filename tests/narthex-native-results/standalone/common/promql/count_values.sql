@@ -1,0 +1,1 @@
+../../../../cases/standalone/common/promql/count_values.sql

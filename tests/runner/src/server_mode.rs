@@ -153,6 +153,8 @@ struct ConfigContext {
     enable_flat_format: bool,
     // enable garbage collection in metasrv and datanodes
     enable_gc: bool,
+    // opt the server into the native PromQL route
+    enable_native_promql: bool,
 }
 
 impl ServerMode {
@@ -363,6 +365,7 @@ impl ServerMode {
             addrs,
             enable_flat_format: db_ctx.store_config().enable_flat_format,
             enable_gc: db_ctx.store_config().enable_gc,
+            enable_native_promql: db_ctx.store_config().enable_native_promql,
         };
 
         let rendered = tt.render(self.name(), &ctx).unwrap();
@@ -614,6 +617,8 @@ mod tests {
             setup_mysql: None,
             enable_flat_format: false,
             enable_gc: false,
+            enable_native_promql: false,
+            query_hints: Vec::new(),
         };
         let env = Env::new(
             sqlness_home.to_path_buf(),
@@ -821,6 +826,8 @@ mod tests {
             setup_mysql: None,
             enable_flat_format: false,
             enable_gc: true,
+            enable_native_promql: false,
+            query_hints: Vec::new(),
         };
         let db_ctx = GreptimeDBContext::new(WalConfig::RaftEngine, store_config);
         let metasrv = ServerMode::Metasrv {
