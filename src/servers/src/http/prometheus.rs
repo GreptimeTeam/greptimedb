@@ -891,10 +891,13 @@ pub async fn labels_query(
         prom_queries
     };
 
+    let catalog = query_ctx.current_catalog();
+    let schema = query_ctx.current_schema();
+
     // Fetch all columns if no query matcher is provided
     if prom_queries.is_empty() {
         let (mut labels, table_names) =
-            match get_all_column_names(&catalog, &schema, &handler.catalog_manager()).await {
+            match get_all_column_names(catalog, &schema, &handler.catalog_manager()).await {
                 Ok(result) => result,
                 Err(e) => return PrometheusJsonResponse::error(e.status_code(), e.output_msg()),
             };
@@ -920,7 +923,7 @@ pub async fn labels_query(
                 Err(e) => return PrometheusJsonResponse::error(e.status_code(), e.output_msg()),
             }
         }
-        None => match get_all_column_names(&catalog, &schema, &handler.catalog_manager()).await {
+        None => match get_all_column_names(catalog, &schema, &handler.catalog_manager()).await {
             Ok((labels, _)) => labels,
             Err(e) => return PrometheusJsonResponse::error(e.status_code(), e.output_msg()),
         },
@@ -2983,10 +2986,13 @@ mod tests {
                     request = request.header("x-greptime-db-name", "public");
                 }
                 let body = if form_db { "db=denied" } else { "" };
-                let response = app
-                    .oneshot(request.body(axum::body::Body::from(body)).unwrap())
-                    .await
-                    .unwrap();
+                let response = tokio::time::timeout(
+                    std::time::Duration::from_secs(5),
+                    app.oneshot(request.body(axum::body::Body::from(body)).unwrap()),
+                )
+                .await
+                .unwrap()
+                .unwrap();
                 assert_eq!(
                     HttpStatusCode::FORBIDDEN,
                     response.into_response().status(),
