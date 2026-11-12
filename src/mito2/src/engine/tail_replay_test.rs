@@ -38,7 +38,6 @@ use object_store::services::Memory;
 use rstest::rstest;
 use store_api::logstore::LogStore;
 use store_api::logstore::provider::Provider;
-use store_api::metadata::RegionMetadataRef;
 use store_api::region_engine::{
     RegionEngine, RegionManifestInfo, RegionRole, SettableRegionRoleState,
 };
@@ -50,6 +49,7 @@ use store_api::storage::{RegionId, ScanRequest};
 
 use crate::config::MitoConfig;
 use crate::engine::MitoEngine;
+use crate::engine::flush_test::MockRegionHook;
 use crate::engine::listener::EventListener;
 use crate::engine::object_store_wal_test::{
     count_rows, count_ssts, create_leased_region_on, create_region, encode_delta, is_replaced,
@@ -59,7 +59,7 @@ use crate::engine::object_store_wal_test::{
 use crate::engine::pending_tail_test::{
     add_field, commit_edit, pending_tails_edit, set_pending_tails,
 };
-use crate::engine::region_hook::{RegionHook, RegionHookRef, SstFileInfo};
+use crate::engine::region_hook::RegionHookRef;
 use crate::error::Error;
 use crate::manifest::action::{
     PendingTail, RegionEdit, RegionMetaAction, RegionMetaActionList, UptoKind,
@@ -1317,27 +1317,12 @@ async fn test_triggers_during_replay_start_no_second_one() {
         .set_region_role_state_gracefully(region.region_id, SettableRegionRoleState::Leader)
         .await
         .unwrap();
-    assert_eq!(holders, Arc::strong_count(&mito_region));
+    // The graceful role change holds the region until its task ends.
+    wait_until(|| Arc::strong_count(&mito_region) == holders).await;
 
     region.listener.hold_from(0);
     region.wait_until_replayed().await;
     assert_eq!(1, region.listener.commits());
-}
-
-/// Counts the SST files that the engine reports written.
-#[derive(Debug, Default)]
-struct SstWriteCounter(AtomicUsize);
-
-#[async_trait]
-impl RegionHook for SstWriteCounter {
-    async fn on_sst_files_written(
-        &self,
-        _region_id: RegionId,
-        _region_metadata: &RegionMetadataRef,
-        files: &[SstFileInfo<'_>],
-    ) {
-        self.0.fetch_add(files.len(), Ordering::Relaxed);
-    }
 }
 
 #[tokio::test]
@@ -1350,7 +1335,7 @@ async fn test_replay_chunks_fire_sst_written_hook() {
         ObjectStoreLogStore::try_new(wal_store, &wal_config(), NODE_ID, STANDALONE_GENERATION)
             .await
             .unwrap();
-    let hook = Arc::new(SstWriteCounter::default());
+    let hook = Arc::new(MockRegionHook::new());
     let plugins = Plugins::new();
     plugins.insert(hook.clone() as RegionHookRef);
     let engine = env
@@ -1372,5 +1357,5 @@ async fn test_replay_chunks_fire_sst_written_hook() {
     wait_until(|| !region.version().has_pending_tails()).await;
 
     // Nothing else wrote an SST: the region never flushed.
-    assert_eq!(1, hook.0.load(Ordering::Relaxed));
+    assert_eq!(1, hook.sst_written_count.load(Ordering::Relaxed));
 }
