@@ -781,6 +781,13 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Region {} waits for a retry of its end-of-staging commit", region_id))]
+    EndStagingPending {
+        region_id: RegionId,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display(
         "Failed to compat readers for region {}, reason: {}",
         region_id,
@@ -1569,7 +1576,7 @@ impl Error {
             | Error::RegionTruncated { .. }
             | Error::RegionStopped { .. }
             | Error::RegionLeaseExpired { .. }
-            | Error::RegionBusy { .. }
+            | Error::EndStagingPending { .. }
             | Error::SerdeJson { .. }
             | Error::CompressObject { .. } => false,
             Error::OpenDal { error, .. } => !matches!(
@@ -1756,7 +1763,7 @@ impl ErrorExt for Error {
             | StatsNotPresent { .. }
             | InvalidPrimaryKeyRange { .. }
             | DecodePrimaryKeyRange { .. } => StatusCode::Internal,
-            RegionBusy { .. } => StatusCode::RegionBusy,
+            RegionBusy { .. } | EndStagingPending { .. } => StatusCode::RegionBusy,
             GetSchemaMetadata { source, .. } => source.status_code(),
             Timeout { .. } => StatusCode::Cancelled,
 
@@ -1828,6 +1835,7 @@ impl ErrorExt for Error {
             | RegionBusy { .. }
             | RegionPendingTails { .. }
             | EndStaging { .. }
+            | EndStagingPending { .. }
             | ManualCompactionAlreadyRunning { .. }
             | FlushableRegionState { .. }
             | ManifestDeltaNotFound { .. }
@@ -2052,10 +2060,14 @@ mod tests {
         }
         .build();
         assert!(!error.may_have_persisted_manifest_update());
-        // Raised before storage I/O, for example by staging that waits for a retried end commit.
-        let error = RegionBusySnafu { region_id }.build();
+        // Staging that waits for a retried end commit refuses before storage I/O.
+        let error = EndStagingPendingSnafu { region_id }.build();
         assert!(!error.may_have_persisted_manifest_update());
         assert!(error.retry_hint().is_retryable());
+        assert_eq!(error.status_code(), StatusCode::RegionBusy);
+        // Other busy errors keep the conservative classification.
+        let error = RegionBusySnafu { region_id }.build();
+        assert!(error.may_have_persisted_manifest_update());
 
         // A commit refused before its PUT because the Leader deadline has passed.
         let error = RegionLeaseExpiredSnafu { region_id }.build();

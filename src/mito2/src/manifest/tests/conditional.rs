@@ -405,7 +405,7 @@ async fn test_staged_commit_retry_writes_same_content() {
     manager.update(empty, true).await.unwrap();
     let refused = manager.update(import(FileId::random()), true).await;
     assert!(
-        matches!(refused, Err(Error::RegionBusy { .. })),
+        matches!(refused, Err(Error::EndStagingPending { .. })),
         "{refused:?}"
     );
 

@@ -28,7 +28,7 @@ use store_api::{MAX_VERSION, MIN_VERSION, ManifestVersion};
 use crate::cache::manifest_cache::ManifestCache;
 use crate::config::MitoConfig;
 use crate::error::{
-    self, InstallManifestToSnafu, NoCheckpointSnafu, NoManifestsSnafu, RegionBusySnafu,
+    self, EndStagingPendingSnafu, InstallManifestToSnafu, NoCheckpointSnafu, NoManifestsSnafu,
     RegionStoppedSnafu, Result,
 };
 use crate::manifest::action::{
@@ -762,7 +762,7 @@ impl RegionManifestManager {
             // files that are already staged changes nothing, and nothing else is staged.
             ensure!(
                 self.staged.only_adds_staged_files(&action_list),
-                RegionBusySnafu {
+                EndStagingPendingSnafu {
                     region_id: self.manifest.metadata.region_id,
                 }
             );
