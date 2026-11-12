@@ -86,10 +86,11 @@ impl DynFilterPayload {
     /// becomes `NOT IN`.
     ///
     /// The membership is a **hint for pruning only**, not a re-statement of the join
-    /// semantics. It is exact for a row whose key is non-`NULL`, but `IN`/`NOT IN`
-    /// propagate `NULL` while a hash lookup can be definite on a `NULL` probe key, so
-    /// a predicate that inspects the *negation* of a lookup is not universally
-    /// equivalent.
+    /// semantics. For supported positive pruning, the list preserves actual build-key
+    /// matches; it is not universal Boolean equivalence. `IN`/`NOT IN` propagate
+    /// `NULL` while a hash lookup can be definite on a `NULL` probe key, and hash
+    /// presence can admit collisions, so a predicate that inspects the *negation* of a
+    /// lookup is not universally equivalent.
     ///
     /// The conversion is decided by the lookup alone (single-column `Utf8`, non-empty,
     /// `NULL`-free build keys — see [`HashTableLookupExpr::build_key_membership`]).
@@ -330,8 +331,9 @@ impl RemoteMembership {
     /// Key-list membership of `lookup`, or `None` when it has no such form.
     ///
     /// The bounds passed to DataFusion are the payload budget the caller already
-    /// enforces, for both the value count and the raw build-key bytes: anything larger
-    /// could not be serialized anyway. The accessor itself keeps the remaining
+    /// enforces, for both the value count and the raw build-key bytes. This is a
+    /// conservative early guard, not the exact serialized frame length. The accessor
+    /// itself keeps the remaining
     /// limitations — it returns `None` for lookups without a build lease (e.g. a
     /// test-only lookup), composite keys, non-`Utf8` keys (integer/float/decimal/
     /// dictionary/unknown), and `NULL`-containing or empty build keys. Those are
@@ -1009,6 +1011,12 @@ mod remote_membership_tests {
         utf8_batch(schema, &borrowed)
     }
 
+    /// UTF-8 batch that can contain SQL NULLs, for wrapper semantics.
+    fn nullable_evaluation_batch(schema: &Arc<Schema>, values: &[Option<String>]) -> RecordBatch {
+        let array = StringArray::from(values.to_vec());
+        RecordBatch::try_new(Arc::clone(schema), vec![Arc::new(array) as ArrayRef]).unwrap()
+    }
+
     #[tokio::test]
     async fn membership_round_trips_real_utf8_build_lease() {
         let schema = one_column_schema("trace_id", DataType::Utf8);
@@ -1256,21 +1264,33 @@ mod remote_membership_tests {
         assert_eq!(lists.len(), 1, "expected one converted InList: {display}");
         assert_eq!(in_list_values(&lists[0]), values);
 
-        let mut rows = values.clone();
-        rows.push("miss-not-a-member".to_string());
-        let batch = evaluation_batch(&schema, &rows);
+        let mut rows = values
+            .iter()
+            .map(|value| Some(value.clone()))
+            .collect::<Vec<_>>();
+        rows.push(Some("miss-not-a-member".to_string()));
+        rows.push(None);
+        let batch = nullable_evaluation_batch(&schema, &rows);
         let (original_selected, decoded_selected) = assert_fail_open(&wrapped, &decoded, &batch);
         for row in 0..values.len() {
             assert!(original_selected[row]);
             assert!(decoded_selected[row]);
         }
+        assert!(
+            original_selected[rows.len() - 1],
+            "producer `lookup OR key IS NULL` keeps a NULL probe"
+        );
+        assert!(
+            decoded_selected[rows.len() - 1],
+            "decoded `IN ... OR key IS NULL` must also keep a NULL probe"
+        );
     }
 
     /// `NOT lookup` becomes `NOT (key IN (...))`.
     ///
     /// This narrow contract is about **positive pruning**: the membership is the build
-    /// key list of the join, so converting the node in place keeps the meaning of a
-    /// negated predicate instead of substituting `true` into it. It is *not* a claim of
+    /// key list of the join, so converting the node in place structurally preserves the
+    /// negation instead of substituting `true` into it. It is *not* a claim of
     /// universal equivalence with the join: `IN`/`NOT IN` are `NULL`-propagating while
     /// a hash lookup can be definite on a `NULL` probe key, so a `NULL` key that the
     /// lookup keeps can still be dropped by `NOT IN`. The rows below are non-`NULL`,
