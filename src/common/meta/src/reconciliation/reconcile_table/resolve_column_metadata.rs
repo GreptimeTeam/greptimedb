@@ -92,7 +92,7 @@ impl State for ResolveColumnMetadata {
         ctx.persistent_ctx.table_info_value = Some(table_info_value);
 
         if let Some(column_metadatas) = check_column_metadatas_consistent(&self.region_metadata) {
-            // Note: `reorder_tag_columns` is only for `SyncColumns`; the consistent branch keeps the regions' column order.
+            // Column and key order come from the stored `TableInfo`; see `build_table_meta_from_column_metadatas`.
             // Safety: fetched in the above.
             let table_info_value = ctx.persistent_ctx.table_info_value.clone().unwrap();
             info!(

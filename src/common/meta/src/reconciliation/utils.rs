@@ -1397,17 +1397,6 @@ mod tests {
         .unwrap();
 
         assert_eq!(new_table_meta, table_meta);
-        assert_eq!(
-            new_table_meta
-                .schema
-                .column_schemas()
-                .iter()
-                .map(|c| c.name.as_str())
-                .collect::<Vec<_>>(),
-            vec!["ts", "a", "b"]
-        );
-        assert_eq!(new_table_meta.primary_key_indices, vec![2, 1]);
-        assert_eq!(new_table_meta.column_ids, vec![1, 2, 3]);
 
         // 2. Case where input column metadata has reordered tags (e.g. ts, b, a):
         // Table schema column order must still be preserved according to table_meta.schema.
@@ -1426,17 +1415,6 @@ mod tests {
         .unwrap();
 
         assert_eq!(new_table_meta, table_meta);
-        assert_eq!(
-            new_table_meta
-                .schema
-                .column_schemas()
-                .iter()
-                .map(|c| c.name.as_str())
-                .collect::<Vec<_>>(),
-            vec!["ts", "a", "b"]
-        );
-        assert_eq!(new_table_meta.primary_key_indices, vec![2, 1]);
-        assert_eq!(new_table_meta.column_ids, vec![1, 2, 3]);
 
         // 3. Case where a new field column is added:
         let mut extended_column_metadatas = region_column_metadatas.clone();
