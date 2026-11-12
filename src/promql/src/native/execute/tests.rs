@@ -7579,9 +7579,9 @@ fn binary_histogram_fill_reports_the_dropped_info() {
     assert_eq!(pool.reserved(), 0);
 }
 
-/// Matched histogram arithmetic preserves the existing reset/schema diagnostics and values.
+/// Matched histogram arithmetic: the payload it answers with, and the pairs its diagnostics drop.
 #[test]
-fn binary_histogram_add_sub_preserves_payload_and_diagnostics() {
+fn binary_histogram_add_sub_payload_and_diagnostics() {
     use common_query::native_histogram::CUSTOM_BUCKETS_SCHEMA;
     use common_query::promql_annotations::PromqlAnnotationCollector;
 
@@ -7623,19 +7623,24 @@ fn binary_histogram_add_sub_preserves_payload_and_diagnostics() {
             "prom_native_histogram_sub"
         };
         let factor = if op == BinaryOp::Add { 1.0 } else { -1.0 };
-        for reverse in [false, true] {
-            // Same exponential buckets; both orientations of the reset contradiction are tested.
-            let hints = if reverse {
-                (
-                    CounterResetHint::NotCounterReset,
-                    CounterResetHint::CounterReset,
-                )
-            } else {
-                (
-                    CounterResetHint::CounterReset,
-                    CounterResetHint::NotCounterReset,
-                )
-            };
+        // Same exponential buckets: agreeing hints answer, and a contradiction in either
+        // orientation drops the pair with the warning, as Prometheus skips a pair whose operation
+        // reports one.
+        for hints in [
+            (
+                CounterResetHint::NotCounterReset,
+                CounterResetHint::NotCounterReset,
+            ),
+            (
+                CounterResetHint::CounterReset,
+                CounterResetHint::NotCounterReset,
+            ),
+            (
+                CounterResetHint::NotCounterReset,
+                CounterResetHint::CounterReset,
+            ),
+        ] {
+            let collision = hints.0 != hints.1;
             let left_hist = hist(false, &[], hints.0, 5.0, 10.0);
             let right_hist = hist(false, &[], hints.1, 2.0, 4.0);
             let (tree, grid, left, right) = binary_tree(op, 1);
@@ -7661,41 +7666,46 @@ fn binary_histogram_add_sub_preserves_payload_and_diagnostics() {
                     .unwrap();
             }
             let chunks = run(&mut execution);
-            assert_eq!(chunks.len(), 1);
-            let mut cursor = chunks[0].series.fields.as_slice()[0].cursor();
-            let SampleRef::Histogram(h) = cursor.at(0).unwrap() else {
-                panic!("expected histogram")
-            };
-            assert_eq!(
-                (h.count, h.sum, h.zero_count),
-                (5.0 + factor * 2.0, 10.0 + factor * 4.0, 0.0)
-            );
-            assert_eq!(h.positive.buckets, &[5.0 + factor * 2.0]);
-            assert_eq!(
-                h.reset_hint,
-                if op == BinaryOp::Add {
-                    CounterResetHint::Unknown
-                } else {
-                    CounterResetHint::Gauge
-                }
-            );
-            assert_eq!(chunks[0].series.metric.get("job"), Some("a"));
-            assert_eq!(chunks[0].series.metric.name(), None);
             let mut warnings = Vec::new();
             let mut infos = Vec::new();
             collector.append_to(&mut warnings, &mut infos);
-            assert_eq!(
-                warnings,
-                vec![format!(
-                    "{name}: native histogram counter reset hints contradict"
-                )]
-            );
+            if collision {
+                assert!(chunks.is_empty());
+                assert_eq!(
+                    warnings,
+                    vec![format!(
+                        "{name}: native histogram counter reset hints contradict"
+                    )]
+                );
+            } else {
+                assert_eq!(chunks.len(), 1);
+                let mut cursor = chunks[0].series.fields.as_slice()[0].cursor();
+                let SampleRef::Histogram(h) = cursor.at(0).unwrap() else {
+                    panic!("expected histogram")
+                };
+                assert_eq!(
+                    (h.count, h.sum, h.zero_count),
+                    (5.0 + factor * 2.0, 10.0 + factor * 4.0, 0.0)
+                );
+                assert_eq!(h.positive.buckets, &[5.0 + factor * 2.0]);
+                assert_eq!(
+                    h.reset_hint,
+                    if op == BinaryOp::Add {
+                        CounterResetHint::NotCounterReset
+                    } else {
+                        CounterResetHint::Gauge
+                    }
+                );
+                assert_eq!(chunks[0].series.metric.get("job"), Some("a"));
+                assert_eq!(chunks[0].series.metric.name(), None);
+                assert!(warnings.is_empty(), "{warnings:?}");
+            }
             assert!(infos.is_empty());
             assert_eq!(pool.reserved(), 0);
         }
 
-        // Differing custom bounds reconcile; exercise partially overlapping and disjoint bounds,
-        // with and without contradictory reset hints, so each existing diagnostic is independent.
+        // Differing custom bounds reconcile; exercise partially overlapping and disjoint bounds.
+        // Contradictory reset hints drop the pair before its reconciliation is reported.
         for (left_bounds, right_bounds) in
             [(&[1.0, 2.0][..], &[2.0, 3.0][..]), (&[1.0][..], &[2.0][..])]
         {
@@ -7734,6 +7744,21 @@ fn binary_histogram_add_sub_preserves_payload_and_diagnostics() {
                         .unwrap();
                 }
                 let chunks = run(&mut execution);
+                let mut warnings = Vec::new();
+                let mut infos = Vec::new();
+                collector.append_to(&mut warnings, &mut infos);
+                if collision {
+                    assert!(chunks.is_empty());
+                    assert_eq!(
+                        warnings,
+                        vec![format!(
+                            "{name}: native histogram counter reset hints contradict"
+                        )]
+                    );
+                    assert!(infos.is_empty(), "{infos:?}");
+                    assert_eq!(pool.reserved(), 0);
+                    continue;
+                }
                 assert_eq!(chunks.len(), 1);
                 let mut cursor = chunks[0].series.fields.as_slice()[0].cursor();
                 let SampleRef::Histogram(h) = cursor.at(0).unwrap() else {
@@ -7757,17 +7782,7 @@ fn binary_histogram_add_sub_preserves_payload_and_diagnostics() {
                         CounterResetHint::Gauge
                     }
                 );
-                let mut warnings = Vec::new();
-                let mut infos = Vec::new();
-                collector.append_to(&mut warnings, &mut infos);
-                let expected_warnings = if collision {
-                    vec![format!(
-                        "{name}: native histogram counter reset hints contradict"
-                    )]
-                } else {
-                    vec![]
-                };
-                assert_eq!(warnings, expected_warnings);
+                assert!(warnings.is_empty(), "{warnings:?}");
                 assert_eq!(
                     infos,
                     vec![format!(
