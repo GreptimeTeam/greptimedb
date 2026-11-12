@@ -67,11 +67,11 @@ ORDER BY f.k;
 | logical_plan  | Sort: f.k ASC NULLS LAST                                                                                                        |
 |               |   Projection: f.k, d.threshold                                                                                                  |
 |               |     Inner Join: f.k = d.k Filter: f.val > d.threshold                                                                           |
-|               |       Projection: f.k, f.val                                                                                                    |
-|               |         MergeScan [is_placeholder=false, remote_input=[                                                                         |
-|               | SubqueryAlias: f                                                                                                                |
-|               |   Filter: lateral_fact.k IS NOT NULL                                                                                            |
-|               |     TableScan: lateral_fact, partial_filters=[lateral_fact.k IS NOT NULL]                                                       |
+|               |       MergeScan [is_placeholder=false, remote_input=[                                                                           |
+|               | Projection: f.k, f.val                                                                                                          |
+|               |   SubqueryAlias: f                                                                                                              |
+|               |     Filter: lateral_fact.k IS NOT NULL                                                                                          |
+|               |       TableScan: lateral_fact, partial_filters=[lateral_fact.k IS NOT NULL]                                                     |
 |               | ]]                                                                                                                              |
 |               |       MergeScan [is_placeholder=false, remote_input=[                                                                           |
 |               | SubqueryAlias: d                                                                                                                |
@@ -84,8 +84,7 @@ ORDER BY f.k;
 |               |   SortExec: expr=[k@0 ASC NULLS LAST], preserve_partitioning=[true]                                                             |
 |               |     HashJoinExec: mode=Partitioned, join_type=Inner, on=[(k@0, k@1)], filter=val@0 > threshold@1, projection=[k@0, threshold@2] |
 |               |       RepartitionExec: partitioning=Hash([k@0], REDACTED), input_partitions=REDACTED|
-|               |         ProjectionExec: expr=[k@1 as k, val@2 as val]                                                                           |
-|               |           MergeScanExec: REDACTED
+|               |         MergeScanExec: REDACTED
 |               |       RepartitionExec: partitioning=Hash([k@1], REDACTED), input_partitions=REDACTED|
 |               |         MergeScanExec: REDACTED
 |               |                                                                                                                                 |

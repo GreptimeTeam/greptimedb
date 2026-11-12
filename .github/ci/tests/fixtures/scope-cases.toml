@@ -150,9 +150,9 @@ paths = [
 suites = ["*"]
 
 [[case]]
-name = "fuzz target orchestration: every suite"
-note = "Fuzz jobs execute targets through the `fuzz-test` action."
+name = "fuzz corpus seeding: every suite"
+note = "Every fuzz job seeds its corpus through the `fuzz-test` action first."
 paths = [
-  ".github/scripts/run-fuzz-targets.sh",
+  ".github/scripts/prepare-fuzz-corpus.sh",
 ]
 suites = ["*"]

@@ -32,7 +32,6 @@ use common_meta::key::flow::FlowMetadataManager;
 use common_meta::kv_backend::KvBackendRef;
 use common_meta::node_manager::NodeManagerRef;
 use common_meta::procedure_executor::ProcedureExecutorRef;
-use dashmap::DashMap;
 use operator::batcher::PendingRowsBatcher;
 use operator::delete::Deleter;
 use operator::flow::FlowServiceOperator;
@@ -59,7 +58,6 @@ use snafu::{OptionExt, ResultExt};
 use crate::error::{self, DataFusionSnafu, ExternalSnafu, Result};
 use crate::events::EventHandlerImpl;
 use crate::frontend::FrontendOptions;
-use crate::heartbeat::frontend_peer_addr;
 use crate::instance::Instance;
 use crate::instance::entity_graph::EntityGraphProviderImpl;
 use crate::instance::otlp::TraceAuxCache;
@@ -365,7 +363,7 @@ impl FrontendBuilder {
             kv_catalog.set_entity_graph_provider(provider);
         }
 
-        let frontend_peer_addr = frontend_peer_addr(&self.options);
+        let frontend_peer_addr = self.options.peer_addr();
         let statement_executor = StatementExecutor::new(
             self.catalog_manager.clone(),
             query_engine.clone(),
@@ -451,7 +449,6 @@ impl FrontendBuilder {
             event_recorder,
             slow_query_recorder,
             process_manager,
-            otlp_metrics_table_legacy_cache: Arc::new(DashMap::new()),
             slow_query_options: self.options.slow_query.clone(),
             influxdb_default_merge_mode: self.options.influxdb.default_merge_mode,
             trace_ingest_chunk_size: self.options.otlp.trace_ingest_chunk_size,

@@ -23,8 +23,8 @@ use std::ops::Bound;
 
 use datatypes::value::{OrderedF64, Value};
 
-use crate::collider::{AtomicExpr, Collider, GluonOp, NucleonExpr};
-use crate::expr::{Operand, PartitionExpr, RestrictedOp, col};
+use crate::collider::{AtomicExpr, Collider, GluonOp, NucleonExpr, PartitionDim};
+use crate::expr::{Operand, PartitionExpr, RestrictedOp};
 
 /// Attempts to simplify a merged partition expression (typically an `OR` of multiple partitions)
 /// into an equivalent but shorter expression.
@@ -36,7 +36,7 @@ pub fn simplify_merged_partition_expr(expr: PartitionExpr) -> PartitionExpr {
     try_simplify_merged_partition_expr(&expr).unwrap_or(expr)
 }
 
-type DenormValues = BTreeMap<String, BTreeMap<OrderedF64, Value>>;
+type DenormValues = BTreeMap<PartitionDim, BTreeMap<OrderedF64, Value>>;
 
 fn try_simplify_merged_partition_expr(expr: &PartitionExpr) -> Option<PartitionExpr> {
     let collider = Collider::new(std::slice::from_ref(expr)).ok()?;
@@ -87,7 +87,7 @@ fn term_from_atomic(atomic: &AtomicExpr, denorm_values: &DenormValues) -> Option
 
         let interval = interval_from_nucleons(&atomic.nucleons[start..i])?;
         if !interval.is_unbounded() {
-            constraints.insert(column.to_string(), interval);
+            constraints.insert(column.clone(), interval);
         }
     }
 
@@ -105,7 +105,7 @@ fn interval_from_nucleons(nucleons: &[NucleonExpr]) -> Option<Interval> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Term {
     // Only stores constrained columns. Missing column means unbounded.
-    constraints: BTreeMap<String, Interval>,
+    constraints: BTreeMap<PartitionDim, Interval>,
 }
 
 impl Term {
@@ -358,11 +358,11 @@ fn simplify_terms(mut terms: Vec<Term>) -> Option<Vec<Term>> {
 
 fn try_merge_terms(a: &Term, b: &Term) -> Option<Term> {
     // Find the only differing column (treat missing as unbounded).
-    let mut diff_col: Option<&str> = None;
+    let mut diff_col: Option<&PartitionDim> = None;
 
     let mut cols = BTreeSet::new();
-    cols.extend(a.constraints.keys().map(|s| s.as_str()));
-    cols.extend(b.constraints.keys().map(|s| s.as_str()));
+    cols.extend(a.constraints.keys());
+    cols.extend(b.constraints.keys());
 
     for col in cols {
         let a_interval = a.constraints.get(col);
@@ -387,7 +387,7 @@ fn try_merge_terms(a: &Term, b: &Term) -> Option<Term> {
             constraints.remove(diff_col);
         }
         UnionInterval::Interval(interval) => {
-            constraints.insert(diff_col.to_string(), interval);
+            constraints.insert(diff_col.clone(), interval);
         }
     }
 
@@ -440,7 +440,7 @@ fn term_to_expr(term: &Term, denorm_values: &DenormValues) -> Option<PartitionEx
 }
 
 fn interval_to_exprs(
-    column: &str,
+    column: &PartitionDim,
     interval: &Interval,
     denorm_values: &DenormValues,
 ) -> Option<Vec<PartitionExpr>> {
@@ -457,7 +457,7 @@ fn interval_to_exprs(
 
     match (lower, upper) {
         (Included(lv), Included(uv)) if lv == uv => {
-            return Some(vec![col(column).eq(col_values.get(lv)?.clone())]);
+            return Some(vec![column.to_operand().eq(col_values.get(lv)?.clone())]);
         }
         (Excluded(lv), Excluded(uv)) if lv == uv => return None,
         (Included(lv), Excluded(uv)) if lv == uv => return None,
@@ -468,13 +468,13 @@ fn interval_to_exprs(
     let mut exprs = Vec::new();
     match lower {
         Unbounded => {}
-        Included(v) => exprs.push(col(column).gt_eq(col_values.get(v)?.clone())),
-        Excluded(v) => exprs.push(col(column).gt(col_values.get(v)?.clone())),
+        Included(v) => exprs.push(column.to_operand().gt_eq(col_values.get(v)?.clone())),
+        Excluded(v) => exprs.push(column.to_operand().gt(col_values.get(v)?.clone())),
     }
     match upper {
         Unbounded => {}
-        Included(v) => exprs.push(col(column).lt_eq(col_values.get(v)?.clone())),
-        Excluded(v) => exprs.push(col(column).lt(col_values.get(v)?.clone())),
+        Included(v) => exprs.push(column.to_operand().lt_eq(col_values.get(v)?.clone())),
+        Excluded(v) => exprs.push(column.to_operand().lt(col_values.get(v)?.clone())),
     }
 
     Some(exprs)
@@ -487,7 +487,7 @@ mod tests {
     use datatypes::value::{OrderedFloat, Value};
 
     use super::*;
-    use crate::expr::Operand;
+    use crate::expr::col;
 
     fn or(lhs: PartitionExpr, rhs: PartitionExpr) -> PartitionExpr {
         PartitionExpr::new(Operand::Expr(lhs), RestrictedOp::Or, Operand::Expr(rhs))
@@ -506,6 +506,20 @@ mod tests {
         let merged = or(left, right);
         let simplified = simplify_merged_partition_expr(merged);
         assert_eq!(simplified.to_string(), "device_id < 100");
+    }
+
+    #[test]
+    fn simplify_adjacent_hash_ranges() {
+        use crate::function::IcebergHash;
+
+        let hash = Operand::IcebergHash(IcebergHash::new("host"));
+        let left = hash.clone().lt(Value::Int32(0));
+        let right = hash
+            .clone()
+            .gt_eq(Value::Int32(0))
+            .and(hash.clone().lt(Value::Int32(100)));
+        let simplified = simplify_merged_partition_expr(or(left, right));
+        assert_eq!(simplified, hash.lt(Value::Int32(100)));
     }
 
     #[test]

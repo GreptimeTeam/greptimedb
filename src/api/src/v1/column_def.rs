@@ -16,8 +16,8 @@ use std::collections::HashMap;
 
 use arrow_schema::extension::{EXTENSION_TYPE_METADATA_KEY, EXTENSION_TYPE_NAME_KEY};
 use datatypes::schema::{
-    COMMENT_KEY, COMPRESSION_KEY, ColumnDefaultConstraint, ColumnSchema, FULLTEXT_KEY,
-    FulltextAnalyzer, FulltextBackend, FulltextOptions, INVERTED_INDEX_KEY, Metadata,
+    COMMENT_KEY, COMPRESSION_KEY, ColumnDefaultConstraint, ColumnSchema, CompressionOptions,
+    FULLTEXT_KEY, FulltextAnalyzer, FulltextBackend, FulltextOptions, INVERTED_INDEX_KEY, Metadata,
     SKIPPING_INDEX_KEY, SkippingIndexOptions, SkippingIndexType,
 };
 use greptime_proto::v1::{
@@ -240,6 +240,14 @@ pub fn options_from_skipping(skipping: &SkippingIndexOptions) -> Result<Option<C
     Ok((!options.options.is_empty()).then_some(options))
 }
 
+/// Tries to construct a `ColumnOptions` from the given `CompressionOptions`.
+pub fn options_from_compression(compression: &CompressionOptions) -> Result<ColumnOptions> {
+    let mut options = ColumnOptions::default();
+    let v = serde_json::to_string(compression).context(error::SerializeJsonSnafu)?;
+    options.options.insert(COMPRESSION_GRPC_KEY.to_string(), v);
+    Ok(options)
+}
+
 /// Tries to construct a `ColumnOptions` for inverted index.
 pub fn options_from_inverted() -> ColumnOptions {
     let mut options = ColumnOptions::default();
@@ -272,15 +280,97 @@ pub fn as_skipping_index_type(skipping_index_type: PbSkippingIndexType) -> Skipp
     }
 }
 
+/// Converts fulltext options for a JSON2 type hint to the wire representation.
+pub fn json_fulltext_options_to_proto(
+    options: FulltextOptions,
+) -> crate::v1::JsonFulltextIndexOptions {
+    crate::v1::JsonFulltextIndexOptions {
+        analyzer: match options.analyzer {
+            FulltextAnalyzer::English => Analyzer::English.into(),
+            FulltextAnalyzer::Chinese => Analyzer::Chinese.into(),
+        },
+        case_sensitive: options.case_sensitive,
+        backend: match options.backend {
+            FulltextBackend::Bloom => PbFulltextBackend::Bloom.into(),
+            FulltextBackend::Tantivy => PbFulltextBackend::Tantivy.into(),
+        },
+        granularity: options.granularity,
+        false_positive_rate: options.false_positive_rate(),
+    }
+}
+
+/// Validates fulltext options received for a JSON2 type hint.
+/// The presence of these options enables the fulltext index.
+pub fn json_fulltext_options_from_proto(
+    options: crate::v1::JsonFulltextIndexOptions,
+) -> datatypes::error::Result<FulltextOptions> {
+    let analyzer = Analyzer::try_from(options.analyzer).map_err(|_| {
+        datatypes::error::InvalidFulltextOptionSnafu {
+            msg: format!("Unknown fulltext analyzer: {}", options.analyzer),
+        }
+        .build()
+    })?;
+    let backend = PbFulltextBackend::try_from(options.backend).map_err(|_| {
+        datatypes::error::InvalidFulltextOptionSnafu {
+            msg: format!("Unknown fulltext backend: {}", options.backend),
+        }
+        .build()
+    })?;
+    FulltextOptions::new(
+        true,
+        as_fulltext_option_analyzer(analyzer),
+        options.case_sensitive,
+        as_fulltext_option_backend(backend),
+        options.granularity,
+        options.false_positive_rate,
+    )
+}
+
+/// Validates skipping options received for a JSON2 type hint.
+pub fn json_skipping_options_from_proto(
+    options: crate::v1::JsonSkippingIndexOptions,
+) -> datatypes::error::Result<SkippingIndexOptions> {
+    let index_type = PbSkippingIndexType::try_from(options.index_type).map_err(|_| {
+        datatypes::error::InvalidSkippingIndexOptionSnafu {
+            msg: format!("Unknown skipping index type: {}", options.index_type),
+        }
+        .build()
+    })?;
+    SkippingIndexOptions::new(
+        options.granularity,
+        options.false_positive_rate,
+        as_skipping_index_type(index_type),
+    )
+}
+
 #[cfg(test)]
 mod tests {
-
     use common_base::readable_size::ReadableSize;
     use datatypes::data_type::ConcreteDataType;
     use datatypes::schema::{CompressionOptions, FulltextAnalyzer, FulltextBackend};
 
     use super::*;
     use crate::v1::ColumnDataType;
+
+    #[test]
+    fn json_fulltext_options_roundtrip() {
+        for backend in [FulltextBackend::Bloom, FulltextBackend::Tantivy] {
+            let options =
+                FulltextOptions::new(true, FulltextAnalyzer::Chinese, true, backend, 8, 0.05)
+                    .unwrap();
+            let wire = json_fulltext_options_to_proto(options.clone());
+            assert_eq!(options, json_fulltext_options_from_proto(wire).unwrap());
+            let mut invalid = wire;
+            invalid.backend = 99;
+            assert!(json_fulltext_options_from_proto(invalid).is_err());
+            let mut invalid = wire;
+            invalid.analyzer = 99;
+            assert!(json_fulltext_options_from_proto(invalid).is_err());
+            let mut invalid = wire;
+            invalid.granularity = 0;
+            assert!(json_fulltext_options_from_proto(invalid).is_err());
+        }
+    }
 
     #[test]
     fn test_try_as_column_schema() {

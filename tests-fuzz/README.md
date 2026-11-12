@@ -42,6 +42,87 @@ cargo fuzz list --fuzz-dir tests-fuzz
 cargo fuzz run fuzz_create_table --fuzz-dir tests-fuzz -D -s none
 ```
 
+## CI Corpus Persistence
+
+The shared `.github/actions/fuzz-test` action restores inputs before running
+the selected targets and saves the updated corpus afterward, including when a
+target fails. Cache failures are best-effort and do not change the fuzz result.
+Crash files, diagnostic artifacts, and fail-fast behavior are unchanged.
+
+Each target reads and writes its own `tests-fuzz/corpus/<target>` directory.
+Both prebuilt executables and the `cargo fuzz` fallback receive that directory
+explicitly. For local runs of `.github/scripts/run-fuzz-targets.sh`, set
+`FUZZ_CORPUS_ROOT` to use a different corpus root.
+
+The selected target directories are cached together to preserve the existing
+job grouping. The stable key prefix identifies the sorted, deduplicated target
+set, not a source hash, so code changes do not invalidate existing inputs.
+Each job saves a new immutable entry, distinguished by run ID, attempt, job,
+and matrix index. Restore uses the latest accessible entry matching the prefix.
+Changing the target set starts a different cache; corpora are not shared between
+different target sets. Parallel jobs may start from the same entry, but their
+new inputs are not merged automatically.
+
+The restore step logs the matched key (including prefix matches) or a cache
+miss. GitHub's [cache access restrictions](https://docs.github.com/en/actions/reference/workflows-and-actions/dependency-caching#restrictions-for-accessing-a-cache)
+still apply: PR caches are scoped to that PR, while a default-branch cache can
+seed other PRs. The existing scheduled workflow does not run fuzz jobs; a
+maintainer can populate the default-branch corpus through the existing manual
+fuzz workflow. This change does not add scheduling, target selection, or corpus
+pruning. Rolling entries remain subject to GitHub's cache limits and eviction.
+
+### Validation
+
+The orchestration tests use mock fuzz executables and do not build Rust or
+start GreptimeDB. They cover both runner paths, restored inputs, separate
+target directories, retained inputs after failure, cache identity, and invalid
+target names. Run them on Linux with Bash, jq, and GNU coreutils:
+
+```bash
+bash .github/scripts/run-fuzz-targets-test.sh
+```
+
+These tests do not exercise the hosted GitHub cache service. To verify that
+service, inspect two fuzz workflow runs on the same PR: the first should save
+an entry, and the second should report its restored key and load a nonempty
+corpus. Also verify that cache save still runs after a target failure, without
+turning that failure into a successful fuzz result.
+
+To compare useful coverage, use the same fuzz executable, GreptimeDB revision,
+service configuration, and time budget for empty and restored corpora. Both
+runner paths enable `-print_final_stats=1`; the target's `fuzz.log` retains the
+libFuzzer coverage and final statistics. Seed the restored corpus with a
+separate warm-up run (or a downloaded corpus), then compare it with a fresh,
+empty directory. Keep warm-up time separate from the comparison and repeat
+trials to account for randomness. Report initial corpus size, final covered
+edges (`cov:`), executions, and elapsed time, rather than inferring a coverage
+improvement merely from a cache hit.
+
+For example, with a prebuilt `fuzz_create_table` binary and a running standalone
+service, the following creates separate warm-up, empty, and seeded corpora. Set
+`FUZZ_BIN_DIR` to the absolute binary directory and `GT_MYSQL_ADDR` to the test
+service address first. All runs use the same executable and 120-second budget;
+the warm-up is not part of the measured comparison. This creates temporary
+inputs, logs, and crash files, and executes DDL against the test service.
+
+```bash
+set -euo pipefail
+: "${FUZZ_BIN_DIR:?Set the prebuilt fuzz binary directory}"
+: "${GT_MYSQL_ADDR:?Set the test service address}"
+comparison_dir="$(mktemp -d -t fuzz-corpus-comparison.XXXXXX)"
+for trial in seed cold warm; do
+  mkdir -p "${comparison_dir}/${trial}" "${comparison_dir}/artifacts/${trial}"
+  if [[ "${trial}" == warm ]]; then
+    cp -a "${comparison_dir}/seed/." "${comparison_dir}/warm/"
+  fi
+  "${FUZZ_BIN_DIR}/fuzz_create_table" "${comparison_dir}/${trial}" \
+    -max_total_time=120 -print_final_stats=1 \
+    "-artifact_prefix=${comparison_dir}/artifacts/${trial}/" \
+    2>&1 | tee "${comparison_dir}/${trial}.log"
+done
+printf 'Comparison logs and corpora: %s\n' "${comparison_dir}"
+```
+
 ## Crash Reproduction
 If you want to reproduce a crash, you first need to obtain the Base64 encoded code, which usually appears at the end of a crash report, and store it in a file.
 

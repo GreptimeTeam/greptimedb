@@ -123,6 +123,16 @@ lazy_static! {
         &[METRIC_DB_LABEL, METRIC_VERSION_LABEL]
     )
     .unwrap();
+    pub static ref PROM_STORE_REMOTE_WRITE_EXEMPLARS: IntCounterVec = register_int_counter_vec!(
+        "greptime_servers_prometheus_remote_write_exemplars",
+        "Acknowledged Prometheus remote write exemplars",
+        &[METRIC_DB_LABEL, METRIC_VERSION_LABEL]
+    ).unwrap();
+    pub static ref EXEMPLARS_DROPPED_TOTAL: IntCounterVec = register_int_counter_vec!(
+        "greptime_servers_exemplars_dropped_total",
+        "Exemplars dropped during ingestion",
+        &["protocol"]
+    ).unwrap();
     /// The native histograms count of Prometheus remote write per protocol version.
     pub static ref PROM_STORE_REMOTE_WRITE_HISTOGRAMS: IntCounterVec = register_int_counter_vec!(
         "greptime_servers_prometheus_remote_write_histograms",
@@ -154,12 +164,12 @@ lazy_static! {
     .unwrap();
     pub static ref FLUSH_TOTAL: IntCounter = register_int_counter!(
         "greptime_prom_store_flush_total",
-        "Total number of batch flushes"
+        "Total number of successful batch flushes"
     )
     .unwrap();
     pub static ref FLUSH_ROWS: Histogram = register_histogram!(
         "greptime_prom_store_flush_rows",
-        "Number of rows per flush",
+        "Number of rows per successful flush",
         vec![100.0, 1000.0, 10000.0, 50000.0, 100000.0, 500000.0]
     )
     .unwrap();
@@ -247,6 +257,12 @@ lazy_static! {
             &[METRIC_DB_LABEL, METRIC_RESULT_LABEL]
         )
         .unwrap();
+    pub static ref METRIC_HTTP_LOGS_UTF8_RETRIES_TOTAL: IntCounterVec = register_int_counter_vec!(
+        "greptime_servers_http_logs_utf8_retries_total",
+        "UTF-8 parse retry attempts for HTTP logs and pipeline dry-runs, per JSON/JSON stream payload or NDJSON line, regardless of outcome",
+        &["format"]
+    )
+    .unwrap();
 
     /// Count of logs ingested into Loki.
     pub static ref METRIC_LOKI_LOGS_INGESTION_COUNTER: IntCounterVec = register_int_counter_vec!(
@@ -318,6 +334,11 @@ lazy_static! {
     pub static ref METRIC_POSTGRES_PREPARED_COUNT: IntCounter = register_int_counter!(
         "greptime_servers_postgres_prepared_count",
         "servers postgres prepared count"
+    )
+    .unwrap();
+    pub static ref METRIC_POSTGRES_COPY_IN_ROWS: IntCounter = register_int_counter!(
+        "greptime_servers_postgres_copy_in_rows",
+        "servers postgres COPY FROM STDIN rows written"
     )
     .unwrap();
     pub static ref METRIC_SERVER_GRPC_DB_REQUEST_TIMER: HistogramVec = register_histogram_vec!(

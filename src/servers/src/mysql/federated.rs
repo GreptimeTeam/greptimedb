@@ -280,8 +280,31 @@ fn check_show_variables(query: &str) -> Option<Output> {
         ))
     } else if SHOW_LOWER_CASE_PATTERN.is_match(query) {
         Some(show_variables("lower_case_table_names", "0"))
-    } else if SHOW_VARIABLES_LIKE_PATTERN.is_match(query) {
-        Some(show_variables("", ""))
+    } else if let Some(matched) = SHOW_VARIABLES_LIKE_PATTERN.find(query) {
+        let mut remainder = strip_leading_comments(&query[matched.end()..]);
+        while let Some(rest) = remainder.strip_prefix(';') {
+            remainder = strip_leading_comments(rest);
+        }
+        if remainder.is_empty() {
+            Some(show_variables("", ""))
+        } else {
+            let remainder = remainder.trim_start();
+            // Filter keywords need an identifier boundary; named variables do not.
+            let looks_like_filter = ["WHERE", "LIKE"].iter().any(|keyword| {
+                remainder
+                    .get(..keyword.len())
+                    .is_some_and(|prefix| prefix.eq_ignore_ascii_case(keyword))
+                    && remainder[keyword.len()..]
+                        .chars()
+                        .next()
+                        .is_none_or(|c| !(c == '_' || c == '$' || c.is_alphanumeric()))
+            });
+            if looks_like_filter {
+                Some(show_variables("", ""))
+            } else {
+                None
+            }
+        }
     } else {
         None
     };
@@ -553,6 +576,44 @@ mod test {
     use session::context::{Channel, QueryContext};
 
     use super::*;
+
+    #[test]
+    fn test_show_variables_where_filter_is_absorbed() {
+        // Old Connector/J `loadServerVariables` issues `SHOW VARIABLES WHERE
+        // Variable_name = '...'`; the federated path answers with an empty table
+        // instead of falling through to our parser, which would reject it.
+        let session = Arc::new(Session::new(None, Channel::Mysql, Default::default(), 0));
+        let output = check(
+            "show variables where Variable_name = 'sql_mode'",
+            QueryContext::arc(),
+            session,
+        )
+        .expect("WHERE-filtered SHOW VARIABLES should be absorbed");
+        assert!(matches!(output.data, OutputData::RecordBatches(_)));
+    }
+
+    #[test]
+    fn test_show_variables_named_variable_falls_back() {
+        // A named variable (e.g. `SHOW VARIABLES MAX_EXECUTION_TIME`,
+        // `SHOW VARIABLES query.parallelism`) reaches the real handler.
+        let session = Arc::new(Session::new(None, Channel::Mysql, Default::default(), 0));
+        assert!(
+            check(
+                "show variables max_execution_time",
+                QueryContext::arc(),
+                session.clone()
+            )
+            .is_none()
+        );
+        assert!(
+            check(
+                "show variables query.parallelism",
+                QueryContext::arc(),
+                session
+            )
+            .is_none()
+        );
+    }
 
     #[test]
     fn test_check_abnormal() {

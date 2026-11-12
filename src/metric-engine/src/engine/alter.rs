@@ -15,7 +15,7 @@
 mod extract_new_columns;
 mod validate;
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap};
 
 use api::v1::SemanticType;
 use common_query::native_histogram::is_native_histogram_value_type;
@@ -123,7 +123,7 @@ impl MetricEngineInner {
             .await?;
 
         // Finds new columns to add
-        let mut new_column_names = HashSet::new();
+        let mut new_column_indices = HashMap::new();
         let mut new_columns_to_add = vec![];
 
         let index_options = {
@@ -139,7 +139,7 @@ impl MetricEngineInner {
             extract_new_columns(
                 &requests,
                 physical_columns,
-                &mut new_column_names,
+                &mut new_column_indices,
                 &mut new_columns_to_add,
             )?;
 
@@ -190,25 +190,35 @@ impl MetricEngineInner {
             )
         });
 
-        let new_add_columns = new_column_names.iter().map(|name| {
+        let new_add_columns = new_column_indices.keys().map(|name| {
             // Safety: previous steps ensure the physical region exist
             let column_metadata = *physical_schema_map.get(name).unwrap();
             (name.to_string(), column_metadata.clone())
         });
 
+        // The data region has the new columns, whatever happens to the metadata write.
+        self.state
+            .write()
+            .unwrap()
+            .add_physical_columns(data_region_id, new_add_columns);
+
         // Writes logical regions metadata to metadata region
-        self.metadata_region
+        let result = self
+            .metadata_region
             .add_logical_regions(physical_region_id, false, logical_region_columns)
-            .await?;
+            .await;
+        // A failed write may still be applied, e.g. when the region lease expires after the WAL
+        // append, so the cached logical columns are dropped either way.
+        self.state
+            .write()
+            .unwrap()
+            .invalid_logical_regions_cache(requests.iter().map(|(region_id, _)| *region_id));
+        result?;
 
         extension_return_value.insert(
             ALTER_PHYSICAL_EXTENSION_KEY.to_string(),
             ColumnMetadata::encode_list(&physical_columns).context(SerializeColumnMetadataSnafu)?,
         );
-
-        let mut state = self.state.write().unwrap();
-        state.add_physical_columns(data_region_id, new_add_columns);
-        state.invalid_logical_regions_cache(requests.iter().map(|(region_id, _)| *region_id));
 
         Ok(0)
     }

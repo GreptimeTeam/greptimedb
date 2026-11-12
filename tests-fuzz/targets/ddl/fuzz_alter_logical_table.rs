@@ -123,7 +123,7 @@ async fn execute_alter_table(ctx: FuzzContext, input: FuzzInput) -> Result<()> {
     let create_physical_table_expr = generate_create_physical_table_expr(&mut rng).unwrap();
     let translator = CreateTableExprTranslator;
     let sql = translator.translate(&create_physical_table_expr)?;
-    let result = sqlx::query(&sql)
+    let result = sqlx::query(sqlx::AssertSqlSafe(sql.as_str()))
         .execute(&ctx.greptime)
         .await
         .context(error::ExecuteQuerySnafu { sql: &sql })?;
@@ -154,7 +154,7 @@ async fn execute_alter_table(ctx: FuzzContext, input: FuzzInput) -> Result<()> {
     let create_logical_table_expr =
         generate_create_logical_table_expr(physical_table_ctx, &mut rng).unwrap();
     let sql = translator.translate(&create_logical_table_expr)?;
-    let result = sqlx::query(&sql)
+    let result = sqlx::query(sqlx::AssertSqlSafe(sql.as_str()))
         .execute(&ctx.greptime)
         .await
         .context(error::ExecuteQuerySnafu { sql: &sql })?;
@@ -178,7 +178,7 @@ async fn execute_alter_table(ctx: FuzzContext, input: FuzzInput) -> Result<()> {
             .unwrap();
         let translator = AlterTableExprTranslator;
         let sql = translator.translate(&expr)?;
-        let result = sqlx::query(&sql)
+        let result = sqlx::query(sqlx::AssertSqlSafe(sql.as_str()))
             .execute(&ctx.greptime)
             .await
             .context(error::ExecuteQuerySnafu { sql: &sql })?;
@@ -213,7 +213,7 @@ async fn execute_alter_table(ctx: FuzzContext, input: FuzzInput) -> Result<()> {
 
     // Clean up logical table
     let sql = format!("DROP TABLE {}", create_logical_table_expr.table_name);
-    let result = sqlx::query(&sql)
+    let result = sqlx::query(sqlx::AssertSqlSafe(sql.as_str()))
         .execute(&ctx.greptime)
         .await
         .context(error::ExecuteQuerySnafu { sql: &sql })?;
@@ -224,7 +224,7 @@ async fn execute_alter_table(ctx: FuzzContext, input: FuzzInput) -> Result<()> {
 
     // Clean up physical table
     let sql = format!("DROP TABLE {}", create_physical_table_expr.table_name);
-    let result = sqlx::query(&sql)
+    let result = sqlx::query(sqlx::AssertSqlSafe(sql.as_str()))
         .execute(&ctx.greptime)
         .await
         .context(error::ExecuteQuerySnafu { sql })?;

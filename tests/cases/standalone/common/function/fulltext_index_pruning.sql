@@ -64,6 +64,14 @@ SELECT ts, msg FROM ft_en_bloom WHERE msg LIKE '连接timeout.%' ORDER BY ts;
 
 SELECT ts, msg FROM ft_en_bloom WHERE msg LIKE '%user-123%' ORDER BY ts;
 
+-- The `LIKE` filter runs on the datanode, after the index prunes the row group.
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE SeqScan:.*("filters":\s\[[^\]]*\]).*("rg_fulltext_filtered":\d+,\s"rows_fulltext_filtered":\d+).* SeqScan:_${1}_${2}
+-- SQLNESS REPLACE (metrics=.*) REDACTED
+EXPLAIN ANALYZE VERBOSE SELECT ts, msg FROM ft_en_bloom WHERE msg LIKE 'nomatch %';
+
 SELECT ts, matches_term(lower(msg), 'quota') AS "matches_term(lower(msg), 'quota')", matches_term(lower(msg), 'vol') AS "matches_term(lower(msg), 'vol')", lower(msg) LIKE '%disk quota exceeded%' AS "lower(msg) LIKE '%disk quota exceeded%'", lower(msg) LIKE 'disk quota%' AS "lower(msg) LIKE 'disk quota%'" FROM ft_en_bloom ORDER BY ts;
 
 SELECT ts, msg FROM ft_en_bloom WHERE matches_term(lower(msg), 'quota') ORDER BY ts;

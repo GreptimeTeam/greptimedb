@@ -184,7 +184,7 @@ async fn execute_insert_with_retry(ctx: &FuzzContext, sql: &str) -> Result<()> {
     let mut attempt = 0;
     let max_attempts = 10;
     loop {
-        match ctx.greptime.execute(sql).await {
+        match ctx.greptime.execute(sqlx::AssertSqlSafe(sql)).await {
             Ok(_) => return Ok(()),
             Err(err) => {
                 tokio::time::sleep(delay).await;
@@ -201,7 +201,7 @@ async fn execute_insert_with_retry(ctx: &FuzzContext, sql: &str) -> Result<()> {
 async fn create_table(ctx: &FuzzContext, expr: &CreateTableExpr) -> Result<TableContextRef> {
     let translator = CreateTableExprTranslator;
     let sql = translator.translate(expr)?;
-    let result = sqlx::query(&sql)
+    let result = sqlx::query(sqlx::AssertSqlSafe(sql.as_str()))
         .execute(&ctx.greptime)
         .await
         .context(error::ExecuteQuerySnafu { sql: &sql })?;
@@ -333,7 +333,7 @@ fn alter_table_partitions_expr_from_table_ctx<R: Rng + 'static>(
 async fn submit_repartition_procedure(ctx: &FuzzContext, expr: &RepartitionExpr) -> Result<String> {
     let translator = RepartitionExprTranslator;
     let sql = translator.translate(expr)?;
-    let (procedure_id,) = sqlx::query_as::<_, (String,)>(&sql)
+    let (procedure_id,) = sqlx::query_as::<_, (String,)>(sqlx::AssertSqlSafe(sql.as_str()))
         .fetch_one(&ctx.greptime)
         .await
         .context(error::ExecuteQuerySnafu { sql: &sql })?;
@@ -418,7 +418,7 @@ async fn validate_terminal_metadata(
 
 async fn drop_table(ctx: &FuzzContext, table_name: &tests_fuzz::ir::Ident) -> Result<()> {
     let sql = format!("DROP TABLE {}", table_name);
-    let result = sqlx::query(&sql)
+    let result = sqlx::query(sqlx::AssertSqlSafe(sql.as_str()))
         .execute(&ctx.greptime)
         .await
         .context(error::ExecuteQuerySnafu { sql: &sql })?;

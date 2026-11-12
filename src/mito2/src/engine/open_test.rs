@@ -33,7 +33,7 @@ use store_api::region_request::{
 use store_api::storage::{RegionId, ScanRequest};
 use tokio::sync::{Notify, oneshot};
 
-use crate::compaction::compactor::{OpenCompactionRegionRequest, open_compaction_region};
+use crate::compaction::compactor::{CompactionRegionOpener, OpenCompactionRegionRequest};
 use crate::config::MitoConfig;
 use crate::engine::flush_test::MockRegionHook;
 use crate::engine::listener::EventListener;
@@ -1037,16 +1037,139 @@ async fn test_open_compaction_region_with_format(flat_format: bool) {
         plugins: Plugins::new(),
     };
 
-    let compaction_region = open_compaction_region(
-        &req,
-        &mito_config,
-        object_store_manager.clone(),
-        Either::Right(schema_metadata_manager),
-    )
-    .await
-    .unwrap();
+    mito_config.index.aux_path = env
+        .data_home()
+        .join("compactor-index")
+        .display()
+        .to_string();
+    let opener = CompactionRegionOpener::new(mito_config, object_store_manager)
+        .await
+        .unwrap();
+    let compaction_region = opener
+        .open(&req, Either::Right(schema_metadata_manager))
+        .await
+        .unwrap();
 
     assert_eq!(region_id, compaction_region.region_id);
+    compaction_region.stop_purger_scheduler().await.unwrap();
+}
+
+// Regression: per-job initialization used to delete another compaction's live
+// atomic-write, external-sort, and staging files under the shared aux_path.
+#[tokio::test]
+async fn test_compaction_region_opens_preserve_live_index_files() {
+    use common_time::TimeToLive;
+    use futures::{AsyncReadExt, AsyncWriteExt};
+    use index::external_provider::ExternalTempFileProvider;
+    use store_api::storage::FileId;
+
+    use crate::sst::index::intermediate::{IntermediateLocation, TempFileProvider};
+
+    let mut env = TestEnv::new().await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+    let mut requests = Vec::new();
+    for (index, path_type) in [PathType::Bare, PathType::Data].into_iter().enumerate() {
+        let region_id = RegionId::new(100 + index as u32, 0);
+        let mut create = CreateRequestBuilder::new()
+            .table_dir(&format!("data/{}/", region_id.table_id()))
+            .build();
+        create.path_type = path_type;
+        engine
+            .handle_request(region_id, RegionRequest::Create(create.clone()))
+            .await
+            .unwrap();
+        put_rows(
+            &engine,
+            region_id,
+            Rows {
+                schema: rows_schema(&create),
+                rows: build_rows(0, 3),
+            },
+        )
+        .await;
+        flush_region(&engine, region_id, None).await;
+        requests.push(OpenCompactionRegionRequest {
+            region_id,
+            table_dir: create.table_dir,
+            path_type,
+            region_options: RegionOptions::default(),
+            max_parallelism: 1,
+            plugins: Plugins::new(),
+        });
+    }
+
+    let mut config = MitoConfig::default();
+    config.sanitize(env.data_home().to_str().unwrap()).unwrap();
+    let aux_path = env.data_home().join("compactor-index");
+    config.index.aux_path = aux_path.display().to_string();
+    let opener = CompactionRegionOpener::new(config, env.get_object_store_manager().unwrap())
+        .await
+        .unwrap();
+    let first = opener
+        .open(&requests[0], Either::Left(TimeToLive::default()))
+        .await
+        .unwrap();
+    let provider = TempFileProvider::new(
+        IntermediateLocation::new(&first.region_id, &FileId::random()),
+        first.access_layer.intermediate_manager().clone(),
+    );
+    let mut committed = provider.create("sort", "committed").await.unwrap();
+    committed.write_all(b"committed sort input").await.unwrap();
+    committed.close().await.unwrap();
+    let mut pending = provider.create("sort", "pending").await.unwrap();
+    pending.write_all(b"pending sort input").await.unwrap();
+    pending.flush().await.unwrap();
+    let staging_file = aux_path.join("staging/inflight.tmp");
+    tokio::fs::write(&staging_file, b"staging input")
+        .await
+        .unwrap();
+
+    let cloned_opener = opener.clone();
+    let (second, reopened) = tokio::try_join!(
+        opener.open(&requests[1], Either::Left(TimeToLive::default())),
+        cloned_opener.open(&requests[0], Either::Left(TimeToLive::default())),
+    )
+    .unwrap();
+    assert_eq!(second.access_layer.path_type(), PathType::Data);
+    assert_eq!(reopened.access_layer.path_type(), PathType::Bare);
+    let missing = OpenCompactionRegionRequest {
+        region_id: RegionId::new(999, 0),
+        table_dir: "missing/".into(),
+        ..requests[0].clone()
+    };
+    assert!(matches!(
+        opener
+            .open(&missing, Either::Left(TimeToLive::default()))
+            .await,
+        Err(error::Error::EmptyRegionDir { .. })
+    ));
+    drop(cloned_opener);
+    drop(opener);
+
+    // Open regions retain the resources even after the opener itself is dropped.
+    pending.close().await.unwrap();
+    let mut contents = Vec::new();
+    for (_, mut reader) in provider.read_all("sort").await.unwrap() {
+        let mut bytes = Vec::new();
+        reader.read_to_end(&mut bytes).await.unwrap();
+        contents.push(bytes);
+    }
+    contents.sort();
+    assert_eq!(
+        contents,
+        vec![
+            b"committed sort input".to_vec(),
+            b"pending sort input".to_vec()
+        ]
+    );
+    assert_eq!(
+        tokio::fs::read(&staging_file).await.unwrap(),
+        b"staging input"
+    );
+    provider.cleanup().await.unwrap();
+    for region in [first, second, reopened] {
+        region.stop_purger_scheduler().await.unwrap();
+    }
 }
 
 /// Returns a dummy fetcher that returns the expr_json only once.
@@ -1242,4 +1365,67 @@ async fn test_region_hook_on_open() {
     assert_eq!(hook.opened_count.load(Ordering::Relaxed), 2);
     assert_eq!(hook.closed_count.load(Ordering::Relaxed), 1);
     assert_eq!(hook.dropped_count.load(Ordering::Relaxed), 0);
+}
+
+#[tokio::test]
+async fn test_reopen_region_with_compressed_manifest_cache() {
+    let mut env = TestEnv::new().await;
+    let engine = env
+        .create_engine(MitoConfig {
+            enable_write_cache: true,
+            compress_manifest: true,
+            manifest_checkpoint_distance: 1,
+            ..Default::default()
+        })
+        .await;
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new().build();
+    let table_dir = request.table_dir.clone();
+    let schema = rows_schema(&request);
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+    for i in 0..3 {
+        put_rows(
+            &engine,
+            region_id,
+            Rows {
+                schema: schema.clone(),
+                rows: build_rows(i * 3, (i + 1) * 3),
+            },
+        )
+        .await;
+        flush_region(&engine, region_id, None).await;
+    }
+    let region = engine.get_region(region_id).unwrap();
+    let mut manager = region.manifest_ctx.manifest_manager.write().await;
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        manager.wait_for_pending_checkpoint(),
+    )
+    .await
+    .unwrap();
+    assert!(manager.checkpointer().last_checkpoint_version() > 0);
+    drop(manager);
+    let stream = engine
+        .scan_to_stream(region_id, ScanRequest::default())
+        .await
+        .unwrap();
+    let expected = RecordBatches::try_collect(stream)
+        .await
+        .unwrap()
+        .pretty_print()
+        .unwrap();
+    reopen_region(&engine, region_id, table_dir, true, HashMap::new()).await;
+    let stream = engine
+        .scan_to_stream(region_id, ScanRequest::default())
+        .await
+        .unwrap();
+    let actual = RecordBatches::try_collect(stream)
+        .await
+        .unwrap()
+        .pretty_print()
+        .unwrap();
+    assert_eq!(expected, actual);
 }

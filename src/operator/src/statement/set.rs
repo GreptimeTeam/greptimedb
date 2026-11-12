@@ -22,7 +22,7 @@ use session::ReadPreference;
 use session::context::Channel::Postgres;
 use session::context::QueryContextRef;
 use session::session_config::{PGByteaOutputValue, PGDateOrder, PGDateTimeStyle, PGIntervalStyle};
-use snafu::{OptionExt, ResultExt, ensure};
+use snafu::{IntoError, OptionExt, ResultExt, ensure};
 use sql::ast::{Expr, Ident, Value};
 use sql::statements::set_variables::SetVariables;
 use sqlparser::ast::ValueWithSpan;
@@ -253,29 +253,49 @@ fn try_parse_datestyle(expr: &Expr) -> Result<(Option<PGDateTimeStyle>, Option<P
     }
 }
 
-/// Set the allow query fallback configuration parameter to true or false based on the provided expressions.
-///
-pub fn set_allow_query_fallback(exprs: Vec<Expr>, ctx: QueryContextRef) -> Result<()> {
-    let allow_fallback_expr = exprs.first().context(NotSupportedSnafu {
-        feat: "No allow query fallback value find in set variable statement",
-    })?;
-    match allow_fallback_expr {
-        Expr::Value(ValueWithSpan {
-            value: Value::Boolean(allow),
-            span: _,
-        }) => {
-            ctx.configuration_parameter()
-                .set_allow_query_fallback(*allow);
-            Ok(())
-        }
-        expr => NotSupportedSnafu {
-            feat: format!(
-                "Unsupported allow query fallback expr {} in set variable statement",
-                expr
-            ),
-        }
-        .fail(),
+/// Applies supported query options and rejects unsupported owned namespaces.
+pub fn set_query_option(variable: &str, exprs: Vec<Expr>, ctx: QueryContextRef) -> Result<bool> {
+    let lower = variable.to_ascii_lowercase();
+    if !lower.starts_with("query.")
+        && !lower.starts_with("datafusion.")
+        && session::query_options::canonical_query_option_name(variable).is_none()
+    {
+        return Ok(false);
     }
+    let [Expr::Value(value)] = exprs.as_slice() else {
+        return Err(InvalidConfigValueSnafu.into_error(
+            session::session_config::Error::InvalidConfigValue {
+                name: variable.to_string(),
+                value: exprs
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                hint: "Expected exactly one literal value".to_string(),
+                location: snafu::Location::new(file!(), line!(), column!()),
+            },
+        ));
+    };
+    let value = match &value.value {
+        Value::Boolean(value) => value.to_string(),
+        Value::Number(value, _)
+        | Value::SingleQuotedString(value)
+        | Value::DoubleQuotedString(value) => value.clone(),
+        _ => {
+            return Err(InvalidConfigValueSnafu.into_error(
+                session::session_config::Error::InvalidConfigValue {
+                    name: variable.to_string(),
+                    value: value.value.to_string(),
+                    hint: "Expected a boolean, number, or quoted string literal".to_string(),
+                    location: snafu::Location::new(file!(), line!(), column!()),
+                },
+            ));
+        }
+    };
+    ctx.configuration_parameter()
+        .set_query_option(variable, &value)
+        .context(InvalidConfigValueSnafu)?;
+    Ok(true)
 }
 
 pub fn set_intervalstyle(exprs: Vec<Expr>, ctx: QueryContextRef) -> Result<()> {

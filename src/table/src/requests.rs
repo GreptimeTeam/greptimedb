@@ -14,7 +14,7 @@
 
 //! Table and TableEngine requests
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
 use std::str::FromStr;
 
@@ -54,14 +54,30 @@ mod semantic;
 pub use semantic::*;
 
 pub const FILE_TABLE_META_KEY: &str = "__private.file_table_meta";
+pub const RELATIONAL_META_KEY: &str = "__private.relational_meta";
 pub const FILE_TABLE_LOCATION_KEY: &str = "location";
 pub const FILE_TABLE_PATTERN_KEY: &str = "pattern";
 pub const FILE_TABLE_FORMAT_KEY: &str = "format";
+
+/// Options captured at `CREATE EXTERNAL TABLE ... ENGINE=relational WITH (...)` time
+/// and persisted in the region manifest.
+///
+/// `connection` is persisted in **plaintext** so the datanode can reconnect to the
+/// remote database when serving queries on the region.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RelationalOptions {
+    /// Full DSN, e.g. `mysql://user:password@host:3306/db`.
+    pub connection: String,
+    pub remote_table: String,
+}
 
 pub const TABLE_DATA_MODEL: &str = "table_data_model";
 pub const TABLE_DATA_MODEL_TRACE_V1: &str = "greptime_trace_v1";
 /// Table data model used by the JSON2-based OTLP trace pipeline.
 pub const TABLE_DATA_MODEL_TRACE_V2: &str = "greptime_trace_v2";
+/// Table data model of OTLP log tables auto-created with the v1 built-in schema.
+/// Log tables without this marker keep the legacy built-in schema.
+pub const TABLE_DATA_MODEL_LOG_V1: &str = "greptime_log_v1";
 
 /// Returns true for the Trace V1 and V2 data models supported
 /// by semantic graph derivation.
@@ -73,6 +89,7 @@ pub fn is_trace_table(table_info: &crate::metadata::TableInfo) -> bool {
     )
 }
 
+/// Retained table metadata; OTLP metrics always use Prometheus-compatible conversion.
 pub const OTLP_METRIC_COMPAT_KEY: &str = "otlp_metric_compat";
 pub const OTLP_METRIC_COMPAT_PROM: &str = "prom";
 
@@ -299,6 +316,23 @@ impl TableOptions {
     }
 }
 
+/// Object store credential keys accepted by [`validate_table_option`].
+const CREDENTIAL_OPTION_KEYS: [&str; 4] = [
+    "access_key_id",
+    "secret_access_key",
+    "session_token",
+    "access_key_secret",
+];
+
+/// Placeholder rendered instead of a credential value.
+pub const REDACTED_OPTION_VALUE: &str = "******";
+
+pub fn is_credential_option(key: &str) -> bool {
+    CREDENTIAL_OPTION_KEYS.contains(&key)
+}
+
+/// Renders the options for users, e.g. `information_schema.tables.create_options`,
+/// so credential values are masked.
 impl fmt::Display for TableOptions {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         let mut key_vals = vec![];
@@ -314,7 +348,14 @@ impl fmt::Display for TableOptions {
             key_vals.push(format!("{}={}", SKIP_WAL_KEY, self.skip_wal));
         }
 
-        for (k, v) in &self.extra_options {
+        // Sort by key so `create_options` is stable across queries; `HashMap` order is not.
+        let extra_options: BTreeMap<_, _> = self.extra_options.iter().collect();
+        for (k, v) in extra_options {
+            let v = if is_credential_option(k) {
+                REDACTED_OPTION_VALUE
+            } else {
+                v
+            };
             key_vals.push(format!("{}={}", k, v));
         }
 

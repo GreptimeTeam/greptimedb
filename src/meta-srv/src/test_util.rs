@@ -24,7 +24,9 @@ use common_time::util as time_util;
 use common_workload::DatanodeWorkloadType;
 
 use crate::cluster::{MetaPeerClientBuilder, MetaPeerClientRef};
+use crate::discovery::node_scheduling::SchedulingAwarePeerDiscovery;
 use crate::key::{DatanodeLeaseKey, LeaseValue};
+use crate::node_scheduling::{NodeSchedulingManager, NodeSchedulingManagerRef};
 
 pub(crate) fn new_region_route(region_id: u64, peers: &[Peer], leader_node: u64) -> RegionRoute {
     let region = Region {
@@ -53,6 +55,20 @@ pub(crate) fn create_meta_peer_client() -> MetaPeerClientRef {
         .map(Arc::new)
         // Safety: all required fields set at initialization
         .unwrap()
+}
+
+/// Wraps `meta_peer_client` into the node scheduling discovery.
+///
+/// The manager shares the client's in-memory backend, so marks written through the returned
+/// manager are visible to the discovery.
+pub(crate) fn new_node_scheduling_discovery(
+    meta_peer_client: &MetaPeerClientRef,
+) -> (NodeSchedulingManagerRef, SchedulingAwarePeerDiscovery) {
+    let manager = Arc::new(NodeSchedulingManager::new(
+        meta_peer_client.memory_backend().as_kv_backend_ref(),
+    ));
+    let discovery = SchedulingAwarePeerDiscovery::new(manager.clone(), meta_peer_client.clone());
+    (manager, discovery)
 }
 
 pub(crate) async fn put_datanodes(meta_peer_client: &MetaPeerClientRef, datanodes: Vec<Peer>) {
@@ -102,6 +118,7 @@ pub(crate) async fn put_datanodes(meta_peer_client: &MetaPeerClientRef, datanode
             memory_usage_bytes: 0,
             hostname: String::new(),
             env_vars: Default::default(),
+            schedulable: None,
         };
         let node_info_key = NodeInfoKey {
             role: Role::Datanode,

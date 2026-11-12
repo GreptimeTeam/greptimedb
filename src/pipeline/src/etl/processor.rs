@@ -25,6 +25,7 @@ pub mod join;
 pub mod json_parse;
 pub mod json_path;
 pub mod letter;
+pub mod logfmt;
 pub mod regex;
 pub mod select;
 pub mod simple_extract;
@@ -45,13 +46,14 @@ use gsub::GsubProcessor;
 use join::JoinProcessor;
 use json_path::JsonPathProcessor;
 use letter::LetterProcessor;
+use logfmt::LogfmtProcessor;
 use regex::RegexProcessor;
 use snafu::{OptionExt, ResultExt};
 use urlencoding::UrlEncodingProcessor;
 use vrl::value::Value as VrlValue;
 
 use crate::error::{
-    Error, FailedParseFieldFromStringSnafu, FieldMustBeTypeSnafu, InvalidFieldRenameSnafu,
+    FailedParseFieldFromStringSnafu, FieldMustBeTypeSnafu, InvalidFieldRenameSnafu,
     ProcessorKeyMustBeStringSnafu, ProcessorMustBeMapSnafu, ProcessorMustHaveStringKeySnafu,
     Result, UnsupportedProcessorSnafu,
 };
@@ -143,6 +145,7 @@ pub enum ProcessorKind {
     Date(DateProcessor),
     JsonPath(JsonPathProcessor),
     JsonParse(JsonParseProcessor),
+    Logfmt(LogfmtProcessor),
     SimpleJsonPath(SimpleExtractProcessor),
     Decolorize(DecolorizeProcessor),
     Digest(DigestProcessor),
@@ -173,13 +176,12 @@ impl std::ops::DerefMut for Processors {
     }
 }
 
-impl TryFrom<&Vec<yaml_rust::Yaml>> for Processors {
-    type Error = Error;
-
-    fn try_from(vec: &Vec<yaml_rust::Yaml>) -> Result<Self> {
+impl Processors {
+    /// Parses processors using the server's VRL host access policy.
+    pub fn from_yaml(vec: &[yaml_rust::Yaml], allow_vrl_host_access: bool) -> Result<Self> {
         let mut processors_builders = vec![];
         for doc in vec {
-            let processor = parse_processor(doc)?;
+            let processor = parse_processor(doc, allow_vrl_host_access)?;
             processors_builders.push(processor);
         }
         Ok(Processors {
@@ -188,7 +190,7 @@ impl TryFrom<&Vec<yaml_rust::Yaml>> for Processors {
     }
 }
 
-fn parse_processor(doc: &yaml_rust::Yaml) -> Result<ProcessorKind> {
+fn parse_processor(doc: &yaml_rust::Yaml, allow_vrl_host_access: bool) -> Result<ProcessorKind> {
     let map = doc.as_hash().context(ProcessorMustBeMapSnafu)?;
 
     let key = map.keys().next().context(ProcessorMustHaveStringKeySnafu)?;
@@ -227,7 +229,10 @@ fn parse_processor(doc: &yaml_rust::Yaml) -> Result<ProcessorKind> {
         json_parse::PROCESSOR_JSON_PARSE => {
             ProcessorKind::JsonParse(JsonParseProcessor::try_from(value)?)
         }
-        vrl_processor::PROCESSOR_VRL => ProcessorKind::Vrl(VrlProcessor::try_from(value)?),
+        logfmt::PROCESSOR_LOGFMT => ProcessorKind::Logfmt(LogfmtProcessor::try_from(value)?),
+        vrl_processor::PROCESSOR_VRL => {
+            ProcessorKind::Vrl(VrlProcessor::from_yaml(value, allow_vrl_host_access)?)
+        }
         select::PROCESSOR_SELECT => ProcessorKind::Select(SelectProcessor::try_from(value)?),
         filter::PROCESSOR_FILTER => ProcessorKind::Filter(FilterProcessor::try_from(value)?),
         _ => return UnsupportedProcessorSnafu { processor: str_key }.fail(),

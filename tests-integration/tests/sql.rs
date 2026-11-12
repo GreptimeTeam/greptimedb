@@ -198,7 +198,8 @@ pub async fn test_mysql_auth(store_type: StorageType) {
         "test",
         "writeonly_user",
         |query| async move {
-            sqlx::query_scalar::<_, bool>(&query)
+            // Safety: the SQL is built from test-local identifiers only.
+            sqlx::query_scalar::<_, bool>(sqlx::AssertSqlSafe(query.as_str()))
                 .fetch_one(actor_query_pool)
                 .await
                 .unwrap_or(false)
@@ -563,7 +564,8 @@ pub async fn test_postgres_auth(store_type: StorageType) {
         "postgres_auth_actor",
         "writeonly_user",
         |query| async move {
-            sqlx::query_scalar::<_, bool>(&query)
+            // Safety: the SQL is built from test-local identifiers only.
+            sqlx::query_scalar::<_, bool>(sqlx::AssertSqlSafe(query.as_str()))
                 .fetch_one(actor_query_pool)
                 .await
                 .unwrap_or(false)
@@ -784,7 +786,8 @@ pub async fn test_mysql_slow_query(store_type: StorageType) {
 
     let row = tokio::time::timeout(Duration::from_secs(10), async {
         loop {
-            if let Ok(Some(row)) = sqlx::query(&query)
+            // Safety: the SQL is built from test-local identifiers only.
+            if let Ok(Some(row)) = sqlx::query(sqlx::AssertSqlSafe(query.as_str()))
                 .bind(slow_query)
                 .fetch_optional(&pool)
                 .await
@@ -1142,7 +1145,8 @@ pub async fn test_postgres_slow_query(store_type: StorageType) {
 
     let row = tokio::time::timeout(Duration::from_secs(10), async {
         loop {
-            if let Ok(Some(row)) = sqlx::query(&query)
+            // Safety: the SQL is built from test-local identifiers only.
+            if let Ok(Some(row)) = sqlx::query(sqlx::AssertSqlSafe(query.as_str()))
                 .bind(slow_query)
                 .fetch_optional(&pool)
                 .await
@@ -2898,6 +2902,115 @@ async fn test_sql_batcher_alignment() {
             mysql.execute("DROP TABLE batch_copy").await.unwrap();
         }
         mysql.close().await.unwrap();
+        drop(pg);
+        pg_task.await.unwrap();
+        servers.shutdown_all().await.unwrap();
+        instance.guard.remove_all().await;
+    }
+}
+
+/// COPY FROM STDIN must route through the pending-rows batcher (with
+/// synchronous acknowledgement) when PostgreSQL batching is enabled, and
+/// keep direct writes when it is not.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_postgres_copy_in_with_batching() {
+    use bytes::Bytes;
+    use common_telemetry::{dump_metrics, init_default_ut_logging};
+    use frontend::server::Services;
+    use frontend::service_config::BatcherOptions;
+    use futures::SinkExt;
+    use servers::batcher::BatchingProtocol;
+    use tests_integration::standalone::GreptimeDbStandaloneBuilder;
+
+    fn flushes() -> u64 {
+        dump_metrics()
+            .unwrap()
+            .lines()
+            .find_map(|line| {
+                line.strip_prefix("greptime_table_batcher_flush_total ")
+                    .map(|value| value.parse().unwrap())
+            })
+            .unwrap_or(0)
+    }
+
+    async fn feed_copy_in(
+        client: &Client,
+        sql: &str,
+        chunks: Vec<Bytes>,
+    ) -> std::result::Result<u64, tokio_postgres::Error> {
+        let mut sink = Box::pin(client.copy_in(sql).await?);
+        for chunk in chunks {
+            sink.as_mut().send(chunk).await?;
+        }
+        sink.as_mut().finish().await
+    }
+
+    init_default_ut_logging();
+    for pg_enabled in [false, true] {
+        let protocols = if pg_enabled {
+            vec![BatchingProtocol::Postgres]
+        } else {
+            vec![]
+        };
+        let mut instance = GreptimeDbStandaloneBuilder::new("pg_copy_in_batching")
+            .with_table_batcher(BatcherOptions {
+                protocols,
+                pending_rows_flush_interval: Duration::from_millis(10),
+                ..Default::default()
+            })
+            .build()
+            .await;
+        let mut opts = instance.opts.clone();
+        opts.http.addr = "127.0.0.1:0".into();
+        opts.grpc.bind_addr = "127.0.0.1:0".into();
+        opts.postgres.addr = "127.0.0.1:0".into();
+        let mut servers = Services::new(opts, instance.fe_instance().clone(), Default::default())
+            .build()
+            .unwrap();
+        servers.start_all().await.unwrap();
+        let (pg, connection) = tokio_postgres::connect(
+            &format!(
+                "postgres://{}/public",
+                servers.addr("POSTGRES_SERVER").unwrap()
+            ),
+            NoTls,
+        )
+        .await
+        .unwrap();
+        let pg_task = tokio::spawn(async move { connection.await.unwrap() });
+
+        pg.simple_query(
+            "CREATE TABLE batch_copy_in (ts TIMESTAMP TIME INDEX, host STRING, val INT)",
+        )
+        .await
+        .unwrap();
+
+        let before = flushes();
+        let rows = feed_copy_in(
+            &pg,
+            "COPY batch_copy_in FROM STDIN WITH (FORMAT csv)",
+            vec![Bytes::from_static(
+                b"2023-11-14 22:13:20,host1,1\n2023-11-14 22:13:21,host2,2\n",
+            )],
+        )
+        .await
+        .unwrap();
+        // Synchronous acknowledgement: the reported count is exact whether
+        // or not the batcher is active.
+        assert_eq!(rows, 2);
+        // The batch must have been flushed through the pending-rows batcher.
+        assert_eq!(flushes() - before, if pg_enabled { 1 } else { 0 });
+
+        // The flushed rows are visible immediately after the copy.
+        let rows: Vec<String> = pg
+            .query("SELECT host FROM batch_copy_in ORDER BY host", &[])
+            .await
+            .unwrap()
+            .iter()
+            .map(|row| row.get(0))
+            .collect();
+        assert_eq!(rows, vec!["host1", "host2"]);
+
         drop(pg);
         pg_task.await.unwrap();
         servers.shutdown_all().await.unwrap();

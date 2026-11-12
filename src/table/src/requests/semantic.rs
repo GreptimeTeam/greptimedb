@@ -50,8 +50,9 @@ pub const SEMANTIC_PER_TABLE_INDEX_KEY: &str = "greptime.internal.semantic.per_t
 // ---- Common keys (all signals) ----
 
 /// Information-schema visibility: `catalog` for providers that filter rows to
-/// their catalog, or `global` for catalog-independent data. Only registered
-/// system-table metadata is trusted for authorization.
+/// their catalog, `public_global` for shared data safe for non-admin reads, or
+/// `global` for shared data without that guarantee. Only registered system-table
+/// metadata is trusted for authorization.
 pub const SEMANTIC_TABLE_SCOPE: &str = "greptime.semantic.table_scope";
 
 /// Signal kind: one of [`SIGNAL_TYPE_TRACE`] / [`SIGNAL_TYPE_LOG`] /
@@ -288,7 +289,7 @@ pub fn validate_semantic_option(key: &str, value: &str) -> bool {
         return !value.is_empty() && value.split(',').all(|column| !column.trim().is_empty());
     }
     match key {
-        SEMANTIC_TABLE_SCOPE => matches!(value, "catalog" | "global"),
+        SEMANTIC_TABLE_SCOPE => matches!(value, "catalog" | "public_global" | "global"),
         SEMANTIC_PIPELINE
         | SEMANTIC_SOURCE_VERSION
         | SEMANTIC_METRIC_UNIT
@@ -412,6 +413,10 @@ mod tests {
     fn test_validate_semantic_option() {
         // Enum keys reject out-of-domain values.
         assert!(validate_semantic_option(SEMANTIC_TABLE_SCOPE, "catalog"));
+        assert!(validate_semantic_option(
+            SEMANTIC_TABLE_SCOPE,
+            "public_global"
+        ));
         assert!(validate_semantic_option(SEMANTIC_TABLE_SCOPE, "global"));
         assert!(!validate_semantic_option(SEMANTIC_TABLE_SCOPE, "cluster"));
         assert!(!validate_semantic_option(SEMANTIC_TABLE_SCOPE, "unknown"));

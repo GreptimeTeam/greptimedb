@@ -65,6 +65,84 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display(
+        "Invalid environment variable key '{key}': '{target}' is a sequence that cannot be \
+         overridden as a whole; address one of its entries with '{target}__<TAG>__<FIELD>'"
+    ))]
+    TaggedSeqMissingTag {
+        key: String,
+        target: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display(
+        "Invalid environment variable key '{key}': '{tag}' is a numeric index, but '{target}' \
+         is addressed by tag name; use '{target}__<TAG>__<FIELD>' instead, e.g. \
+         '{target}__MITO__<FIELD>'"
+    ))]
+    TaggedSeqNumericTag {
+        key: String,
+        tag: String,
+        target: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display(
+        "Invalid environment variable key '{key}': the entry '{tag}' of '{target}' needs a \
+         field to override; use '{target}__<TAG>__<FIELD>' instead"
+    ))]
+    TaggedSeqMissingField {
+        key: String,
+        tag: String,
+        target: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display(
+        "Invalid environment variable key '{key}': another environment variable sets '{path}' \
+         as a whole, so this key cannot set a field below it; set either the whole '{path}' or \
+         its fields, not both"
+    ))]
+    TaggedSeqOverridesConflict {
+        key: String,
+        path: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display(
+        "'{path}' cannot be overridden from the environment: its default value is not a table, \
+         so a field below it cannot be set"
+    ))]
+    TaggedSeqNotATable {
+        path: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display(
+        "'{key}' is registered as a sequence of tagged tables, but it is not a top-level field \
+         of the options; the default entries to merge onto are looked up by literal key"
+    ))]
+    TaggedSeqNotTopLevel {
+        key: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display(
+        "The default value of '{target}' is not a sequence of single-key tables: {reason}"
+    ))]
+    TaggedSeqInvalidDefault {
+        target: String,
+        reason: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 impl ErrorExt for Error {
@@ -73,7 +151,14 @@ impl ErrorExt for Error {
             Error::TomlFormat { .. }
             | Error::LoadLayeredConfig { .. }
             | Error::FileWatch { .. }
-            | Error::InvalidPath { .. } => StatusCode::InvalidArguments,
+            | Error::InvalidPath { .. }
+            | Error::TaggedSeqMissingTag { .. }
+            | Error::TaggedSeqNumericTag { .. }
+            | Error::TaggedSeqMissingField { .. }
+            | Error::TaggedSeqOverridesConflict { .. }
+            | Error::TaggedSeqNotATable { .. }
+            | Error::TaggedSeqNotTopLevel { .. }
+            | Error::TaggedSeqInvalidDefault { .. } => StatusCode::InvalidArguments,
             Error::SerdeJson { .. } => StatusCode::Unexpected,
         }
     }

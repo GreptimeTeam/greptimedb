@@ -285,6 +285,11 @@ where
     schema: SchemaRef,
     record_batches: Pin<Box<B>>,
     encoder: S,
+    /// When set, replaces each batch's arrow schema for value encoding.
+    /// The COPY OUT path uses this to render timestamps with an explicit
+    /// session-timezone offset, so exported text re-imports identically
+    /// by the timezone-aware COPY IN decoder.
+    arrow_schema_override: Option<Arc<arrow::datatypes::Schema>>,
 }
 
 impl<S, B> Stream for RecordBatchRowStream<S, B>
@@ -304,7 +309,10 @@ where
                     return Poll::Ready(Some(Ok(vec![])));
                 }
 
-                let arrow_schema = record_batch.schema();
+                let arrow_schema = self
+                    .arrow_schema_override
+                    .clone()
+                    .unwrap_or_else(|| record_batch.schema());
                 let query_ctx = self.query_ctx.clone();
                 let pg_schema = self.pg_schema.clone();
                 let schema = self.schema.clone();
@@ -352,7 +360,17 @@ where
             schema,
             record_batches: Box::pin(record_batches),
             encoder,
+            arrow_schema_override: None,
         }
+    }
+
+    /// See [`RecordBatchRowStream::arrow_schema_override`].
+    pub(crate) fn with_arrow_schema_override(
+        mut self,
+        schema: Option<Arc<arrow::datatypes::Schema>>,
+    ) -> Self {
+        self.arrow_schema_override = schema;
+        self
     }
 
     fn encode_row(
@@ -2464,6 +2482,7 @@ mod test {
             PgSqlPlan {
                 plan: SqlPlan::Empty,
                 copy_to_stdout_format: None,
+                copy_from_stdin: None,
             },
             client_param_types,
         ));

@@ -17,6 +17,7 @@ use api::v1::add_column_location::LocationType;
 use api::v1::alter_table_expr::Kind;
 use api::v1::column_def::{
     as_fulltext_option_analyzer, as_fulltext_option_backend, as_skipping_index_type,
+    json_fulltext_options_from_proto,
 };
 use api::v1::{
     AddColumnLocation as Location, AlterTableExpr, Analyzer, CreateTableExpr, DropColumns,
@@ -74,9 +75,27 @@ fn json_settings_from_proto(settings: api::v1::JsonSettings) -> Result<JsonSetti
             Ok(JsonTypeHint {
                 path: hint.path,
                 data_type,
-                // Index configuration is not supported yet, so this is temporarily
-                // hardcoded to false.
-                inverted_index: false,
+                inverted_index: hint.inverted_index,
+                fulltext_index: hint
+                    .fulltext_index
+                    .map(json_fulltext_options_from_proto)
+                    .transpose()
+                    .map_err(|err| {
+                        InvalidJsonSettingsSnafu {
+                            err: err.to_string(),
+                        }
+                        .build()
+                    })?,
+                skipping_index: hint
+                    .skipping_index
+                    .map(api::v1::column_def::json_skipping_options_from_proto)
+                    .transpose()
+                    .map_err(|err| {
+                        InvalidJsonSettingsSnafu {
+                            err: err.to_string(),
+                        }
+                        .build()
+                    })?,
             })
         })
         .collect::<Result<Vec<_>>>()?;
@@ -419,6 +438,100 @@ mod tests {
     use table::requests::REPARTITION_COLUMN_HINT_KEY;
 
     use super::*;
+
+    #[test]
+    fn test_json_settings_preserve_inverted_index() {
+        for enabled in [false, true] {
+            let settings = json_settings_from_proto(api::v1::JsonSettings {
+                type_hints: vec![api::v1::JsonTypeHint {
+                    path: vec!["service".into()],
+                    data_type: ColumnDataType::String as i32,
+                    inverted_index: enabled,
+                    skipping_index: None,
+                    fulltext_index: None,
+                    ..Default::default()
+                }],
+                max_auto_expanded_paths: Some(0),
+            })
+            .unwrap();
+            assert_eq!(enabled, settings.type_hints()[0].inverted_index);
+        }
+    }
+
+    #[test]
+    fn test_json_settings_skipping_options_from_proto() {
+        for (granularity, rate, index_type, valid) in [
+            (8, 0.05, 0, true),
+            (0, 0.05, 0, false),
+            (8, 0.0, 0, false),
+            (8, 0.05, 9, false),
+        ] {
+            let settings = json_settings_from_proto(api::v1::JsonSettings {
+                type_hints: vec![api::v1::JsonTypeHint {
+                    path: vec!["service".into()],
+                    data_type: ColumnDataType::String as i32,
+                    skipping_index: Some(api::v1::JsonSkippingIndexOptions {
+                        granularity,
+                        index_type,
+                        false_positive_rate: rate,
+                    }),
+                    ..Default::default()
+                }],
+                max_auto_expanded_paths: Some(0),
+            });
+            assert_eq!(settings.is_ok(), valid);
+            if let Ok(settings) = settings {
+                let options = settings.type_hints()[0].skipping_index.as_ref().unwrap();
+                assert_eq!(options.granularity, granularity);
+                assert_eq!(options.false_positive_rate(), rate);
+            }
+        }
+    }
+
+    #[test]
+    fn test_json_settings_path_validation_from_proto() {
+        for (path, valid_path) in [
+            (vec!["nested", "leaf"], true),
+            (vec![""], false),
+            (vec!["nested", ""], false),
+            (
+                vec!["nested", datatypes::json::JSON2_REMAINDER_FIELD_NAME],
+                false,
+            ),
+        ] {
+            for inverted_index in [false, true] {
+                let settings = api::v1::SetJsonSettings {
+                    column_name: "payload".into(),
+                    settings: Some(api::v1::JsonSettings {
+                        type_hints: vec![api::v1::JsonTypeHint {
+                            path: path.iter().map(|part| (*part).to_string()).collect(),
+                            data_type: ColumnDataType::String as i32,
+                            inverted_index,
+                            skipping_index: None,
+                            fulltext_index: None,
+                            ..Default::default()
+                        }],
+                        max_auto_expanded_paths: Some(0),
+                    }),
+                };
+                let result = alter_expr_to_request(
+                    1,
+                    AlterTableExpr {
+                        catalog_name: "greptime".into(),
+                        schema_name: "public".into(),
+                        table_name: "logs".into(),
+                        kind: Some(Kind::SetJsonSettings(settings)),
+                    },
+                    None,
+                );
+                assert_eq!(
+                    result.is_ok(),
+                    valid_path,
+                    "path: {path:?}, inverted_index: {inverted_index}"
+                );
+            }
+        }
+    }
 
     #[test]
     fn test_alter_expr_to_request() {

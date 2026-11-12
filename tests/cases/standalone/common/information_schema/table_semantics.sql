@@ -39,7 +39,9 @@ ORDER BY table_name;
 SELECT table_name, semantic_options
 FROM information_schema.table_semantics
 WHERE table_schema = 'information_schema'
-  AND table_name IN ('build_info', 'partitions', 'process_list', 'table_semantics')
+  AND table_name IN ('build_info', 'engines', 'character_sets', 'collations',
+                     'collation_character_set_applicability', 'partitions',
+                     'process_list', 'table_semantics')
 ORDER BY table_name;
 
 -- Predicate pushdown on a promoted column.

@@ -152,14 +152,19 @@ macro_rules! trace {
     };
 }
 
+/// Records a slow query independently of the global log level.
 #[macro_export]
 macro_rules! slow {
     (target: $target:expr, $($arg:tt)+) => {
-        $crate::log!(target: $target, slow = true, $crate::tracing::Level::INFO, $($arg)+)
+        if let Some(logger) = $crate::logging::SLOW_QUERY_LOGGER.get() {
+            $crate::tracing::dispatcher::with_default(logger, || {
+                $crate::log!(target: $target, $crate::tracing::Level::INFO, slow = true, $($arg)+)
+            });
+        }
     };
 
     ($($arg:tt)+) => {
-        $crate::log!($crate::tracing::Level::INFO, slow = true, $($arg)+)
+        $crate::slow!(target: module_path!(), $($arg)+)
     };
 }
 

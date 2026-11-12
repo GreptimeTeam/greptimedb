@@ -24,27 +24,29 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 
 use common_datasource::compression::CompressionType;
+use common_error::ext::ErrorExt;
 use common_telemetry::{debug, warn};
 use crc32fast::Hasher;
+use futures::TryStreamExt;
 use lazy_static::lazy_static;
 use object_store::util::join_dir;
 use object_store::{Lister, ObjectStore, util};
 use regex::Regex;
-#[cfg(test)]
-use snafu::ResultExt;
-use snafu::ensure;
-use store_api::ManifestVersion;
+use snafu::{ResultExt, ensure};
 use store_api::storage::RegionId;
+use store_api::{MIN_VERSION, ManifestVersion};
 
 use crate::cache::manifest_cache::ManifestCache;
-#[cfg(test)]
-use crate::error::OpenDalSnafu;
-use crate::error::{ChecksumMismatchSnafu, Result};
+use crate::error::{
+    ChecksumMismatchSnafu, ManifestVersionConflictSnafu, OpenDalSnafu, Result,
+    UnsupportedOperationSnafu,
+};
 use crate::manifest::storage::checkpoint::CheckpointStorage;
 use crate::manifest::storage::delta::DeltaStorage;
 use crate::manifest::storage::size_tracker::{CheckpointTracker, DeltaTracker, SizeTracker};
 use crate::manifest::storage::staging::StagingStorage;
 use crate::manifest::storage::utils::remove_from_cache;
+use crate::metrics::manifest_size::RegionManifestSizeMetric;
 
 lazy_static! {
     static ref DELTA_RE: Regex = Regex::new("^\\d+\\.json").unwrap();
@@ -166,6 +168,8 @@ pub struct ManifestObjectStore {
     delta_storage: DeltaStorage<DeltaTracker>,
     /// The staging file storage.
     staging_storage: StagingStorage,
+    /// Whether deltas are created conditionally and the last checkpoint is found by LIST.
+    conditional_publication: bool,
 }
 
 impl ManifestObjectStore {
@@ -176,10 +180,29 @@ impl ManifestObjectStore {
         total_manifest_size: Arc<AtomicU64>,
         manifest_cache: Option<ManifestCache>,
     ) -> Self {
+        Self::new_with_metric(
+            path,
+            object_store,
+            compress_type,
+            total_manifest_size,
+            None,
+            manifest_cache,
+        )
+    }
+
+    /// Constructs a store sharing the region instance's publication state.
+    pub(crate) fn new_with_metric(
+        path: &str,
+        object_store: ObjectStore,
+        compress_type: CompressionType,
+        total_manifest_size: Arc<AtomicU64>,
+        metric: Option<RegionManifestSizeMetric>,
+        manifest_cache: Option<ManifestCache>,
+    ) -> Self {
         common_telemetry::info!("Create manifest store, cache: {}", manifest_cache.is_some());
 
         let path = util::normalize_dir(path);
-        let size_tracker = SizeTracker::new(total_manifest_size);
+        let size_tracker = SizeTracker::new(total_manifest_size, metric);
         let checkpoint_tracker = Arc::new(size_tracker.checkpoint_tracker());
         let delta_tracker = Arc::new(size_tracker.manifest_tracker());
         let checkpoint_storage = CheckpointStorage::new(
@@ -207,7 +230,32 @@ impl ManifestObjectStore {
             checkpoint_storage,
             delta_storage,
             staging_storage,
+            conditional_publication: false,
         }
+    }
+
+    /// Sets whether this store publishes deltas by conditional create and recovers from the
+    /// highest checkpoint found by LIST.
+    ///
+    /// Returns an error if the mode is enabled on a backend without conditional create.
+    pub(crate) fn with_conditional_publication(mut self, enabled: bool) -> Result<Self> {
+        let capability = self.object_store.info().capability();
+        ensure!(
+            !enabled || capability.write_with_if_not_exists,
+            UnsupportedOperationSnafu {
+                err_msg: format!(
+                    "conditional create is required for manifest {} of a region whose writes need a lease",
+                    self.path
+                ),
+            }
+        );
+        self.conditional_publication = enabled;
+        Ok(self)
+    }
+
+    /// Returns whether this store publishes deltas by conditional create.
+    pub(crate) fn is_conditional_publication(&self) -> bool {
+        self.conditional_publication
     }
 
     /// Returns the manifest dir
@@ -262,7 +310,7 @@ impl ManifestObjectStore {
     /// Delete manifest files that version < end.
     /// If keep_last_checkpoint is true, the last checkpoint file will be kept.
     /// ### Return
-    /// The number of deleted files.
+    /// The number of files whose deletion was acknowledged by the object store.
     pub async fn delete_until(
         &self,
         end: ManifestVersion,
@@ -336,9 +384,9 @@ impl ManifestObjectStore {
 
         // Try batch delete first. On failure, fall back to per-file deletes.
         // This is a workaround for S3-compatible object stores that do not support batch delete. See issue #7986.
-        let mut succeeded = vec![false; del_entries.len()];
+        let mut deleted = 0;
         match self.object_store.delete_iter(paths.clone()).await {
-            Ok(()) => succeeded.fill(true),
+            Ok(()) => deleted = total,
             Err(batch_err) => {
                 warn!(
                     batch_err;
@@ -354,23 +402,8 @@ impl ManifestObjectStore {
                         );
                         break;
                     }
-                    succeeded[i] = true;
+                    deleted += 1;
                 }
-            }
-        }
-
-        let mut deleted = 0usize;
-        for (i, (_, is_checkpoint, version)) in del_entries.iter().enumerate() {
-            if !succeeded[i] {
-                continue;
-            }
-            deleted += 1;
-            if *is_checkpoint {
-                self.size_tracker
-                    .remove(&size_tracker::FileKey::Checkpoint(*version));
-            } else {
-                self.size_tracker
-                    .remove(&size_tracker::FileKey::Delta(*version));
             }
         }
 
@@ -386,9 +419,33 @@ impl ManifestObjectStore {
     ) -> Result<()> {
         if is_staging {
             self.staging_storage.save(version, bytes).await
+        } else if self.conditional_publication {
+            self.delta_storage.save_conditional(version, bytes).await
         } else {
             self.delta_storage.save(version, bytes).await
         }
+    }
+
+    /// Fails with a version conflict unless LIST proves that no checkpoint at or above `version`
+    /// exists.
+    ///
+    /// Cleanup deletes a delta only after a checkpoint that covers it is saved, and never deletes
+    /// the highest checkpoint. So a late create that landed on a deleted name always finds one.
+    pub(crate) async fn ensure_version_not_checkpointed(
+        &self,
+        version: ManifestVersion,
+    ) -> Result<()> {
+        let reason = match self.list_highest_checkpoint(version).await {
+            Ok(None) => return Ok(()),
+            Ok(Some((checkpoint, _))) => format!("covered by checkpoint {checkpoint}"),
+            Err(e) => format!("cannot list the checkpoints: {}", e.output_msg()),
+        };
+        ManifestVersionConflictSnafu {
+            version,
+            manifest_dir: &self.path,
+            reason,
+        }
+        .fail()
     }
 
     /// Save the checkpoint manifest file.
@@ -404,8 +461,27 @@ impl ManifestObjectStore {
 
     /// Load the latest checkpoint.
     /// Return manifest version and the raw [RegionCheckpoint](crate::manifest::action::RegionCheckpoint) content if any
+    /// Also applies the checkpoint retention rule to the tracked size.
     pub async fn load_last_checkpoint(&mut self) -> Result<Option<(ManifestVersion, Vec<u8>)>> {
-        self.checkpoint_storage.load_last_checkpoint().await
+        let checkpoint = if self.conditional_publication {
+            match self.list_highest_checkpoint(MIN_VERSION).await {
+                Ok(Some((version, compress_type))) => Some(
+                    self.checkpoint_storage
+                        .load_listed_checkpoint(version, compress_type)
+                        .await?,
+                ),
+                Ok(None) => None,
+                // A region that does not exist yet can have no manifest directory.
+                Err(e) if e.is_object_not_found() => None,
+                Err(e) => return Err(e),
+            }
+        } else {
+            self.checkpoint_storage.load_last_checkpoint().await?
+        };
+        if let Some((version, _)) = &checkpoint {
+            self.retain_manifest_size_after(*version);
+        }
+        Ok(checkpoint)
     }
 
     /// Compute the size(Byte) in manifest size map.
@@ -413,19 +489,36 @@ impl ManifestObjectStore {
         self.size_tracker.total()
     }
 
-    /// Resets the size of all files.
-    pub(crate) fn reset_manifest_size(&mut self) {
-        self.size_tracker.reset();
+    /// Accounts for the latest checkpoint already covered by this follower's replay.
+    /// Only a changed or previously unaccounted checkpoint needs a stat.
+    pub(crate) async fn update_manifest_size(
+        &self,
+        replayed_version: ManifestVersion,
+    ) -> Result<()> {
+        let Some(metadata) = self
+            .checkpoint_storage
+            .read_last_checkpoint_metadata()
+            .await?
+        else {
+            return Ok(());
+        };
+        if metadata.version > replayed_version {
+            // Pruning now would stop counting deltas still in this follower's recovery set.
+            // Retention applies once replay covers this version or sync installs the checkpoint.
+            return Ok(());
+        }
+        if !self.size_tracker.contains_checkpoint(metadata.version) {
+            self.checkpoint_storage
+                .record_checkpoint_size(metadata.version)
+                .await?;
+        }
+        self.retain_manifest_size_after(metadata.version);
+        Ok(())
     }
 
-    /// Set the size of the delta file by delta version.
-    pub(crate) fn set_delta_file_size(&mut self, version: ManifestVersion, size: u64) {
-        self.size_tracker.record_delta(version, size);
-    }
-
-    /// Set the size of the checkpoint file by checkpoint version.
-    pub(crate) fn set_checkpoint_file_size(&self, version: ManifestVersion, size: u64) {
-        self.size_tracker.record_checkpoint(version, size);
+    /// Prunes logical accounting independently of physical cleanup success.
+    pub(crate) fn retain_manifest_size_after(&self, version: ManifestVersion) {
+        self.size_tracker.retain_after(version);
     }
 
     /// Fetch all staging manifest files and return them as (version, action_list) pairs.
@@ -441,6 +534,31 @@ impl ManifestObjectStore {
     /// Returns the staging storage.
     pub(crate) fn staging_storage(&self) -> &StagingStorage {
         &self.staging_storage
+    }
+
+    /// Returns the version and compression of the highest checkpoint at or above `min_version`
+    /// found by LIST.
+    async fn list_highest_checkpoint(
+        &self,
+        min_version: ManifestVersion,
+    ) -> Result<Option<(ManifestVersion, CompressionType)>> {
+        let mut lister = self
+            .object_store
+            .lister_with(&self.path)
+            .start_after(&list_start_after(&self.path, min_version))
+            .await
+            .context(OpenDalSnafu)?;
+        let mut highest = None;
+        while let Some(entry) = lister.try_next().await.context(OpenDalSnafu)? {
+            let file_name = entry.name();
+            if is_checkpoint_file(file_name) {
+                let version = file_version(file_name);
+                if version >= min_version && highest.is_none_or(|(v, _)| v < version) {
+                    highest = Some((version, file_compress_type(file_name)));
+                }
+            }
+        }
+        Ok(highest)
     }
 }
 
@@ -701,8 +819,10 @@ mod tests {
         // delete 3 manifest files
         assert_eq!(log_store.delete_until(3, false).await.unwrap(), 3);
 
-        // manifest files size after delete
-        assert_eq!(log_store.total_manifest_size(), 39);
+        // Physical deletion does not define the logical recovery set.
+        assert_eq!(log_store.total_manifest_size(), 63);
+        log_store.retain_manifest_size_after(5);
+        assert_eq!(log_store.total_manifest_size(), 23);
 
         // delete all manifest files
         assert_eq!(
@@ -713,7 +833,7 @@ mod tests {
             3
         );
 
-        assert_eq!(log_store.total_manifest_size(), 0);
+        assert_eq!(log_store.total_manifest_size(), 23);
     }
 
     #[tokio::test]
@@ -739,8 +859,10 @@ mod tests {
         // delete 3 manifest files
         assert_eq!(log_store.delete_until(3, false).await.unwrap(), 3);
 
-        // manifest files size after delete
-        assert_eq!(log_store.total_manifest_size(), 97);
+        // Physical deletion does not define the logical recovery set.
+        assert_eq!(log_store.total_manifest_size(), 181);
+        log_store.retain_manifest_size_after(5);
+        assert_eq!(log_store.total_manifest_size(), 41);
 
         // delete all manifest files
         assert_eq!(
@@ -751,7 +873,7 @@ mod tests {
             3
         );
 
-        assert_eq!(log_store.total_manifest_size(), 0);
+        assert_eq!(log_store.total_manifest_size(), 41);
     }
 
     #[tokio::test]
@@ -814,5 +936,244 @@ mod tests {
             .await
             .unwrap();
         assert!(entries.is_empty());
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum CacheSource {
+        WriteThrough,
+        RemoteFill,
+        LegacyDecoded,
+        Truncated,
+    }
+
+    #[derive(Debug, Clone, Copy)]
+    enum PayloadKind {
+        Delta,
+        Checkpoint { checksum: bool },
+    }
+
+    // Exercise both representations left by older versions, as well as new writes
+    // and remote fills. Truncation only applies to compression envelopes.
+    #[rstest::rstest]
+    #[case::write_through_uncompressed(CacheSource::WriteThrough, CompressionType::Uncompressed)]
+    #[case::write_through_gzip(CacheSource::WriteThrough, CompressionType::Gzip)]
+    #[case::write_through_zstd(CacheSource::WriteThrough, CompressionType::Zstd)]
+    #[case::write_through_xz(CacheSource::WriteThrough, CompressionType::Xz)]
+    #[case::write_through_bzip2(CacheSource::WriteThrough, CompressionType::Bzip2)]
+    #[case::remote_fill_uncompressed(CacheSource::RemoteFill, CompressionType::Uncompressed)]
+    #[case::remote_fill_gzip(CacheSource::RemoteFill, CompressionType::Gzip)]
+    #[case::remote_fill_zstd(CacheSource::RemoteFill, CompressionType::Zstd)]
+    #[case::remote_fill_xz(CacheSource::RemoteFill, CompressionType::Xz)]
+    #[case::remote_fill_bzip2(CacheSource::RemoteFill, CompressionType::Bzip2)]
+    #[case::legacy_decoded_uncompressed(CacheSource::LegacyDecoded, CompressionType::Uncompressed)]
+    #[case::legacy_decoded_gzip(CacheSource::LegacyDecoded, CompressionType::Gzip)]
+    #[case::legacy_decoded_zstd(CacheSource::LegacyDecoded, CompressionType::Zstd)]
+    #[case::legacy_decoded_xz(CacheSource::LegacyDecoded, CompressionType::Xz)]
+    #[case::legacy_decoded_bzip2(CacheSource::LegacyDecoded, CompressionType::Bzip2)]
+    #[case::truncated_gzip(CacheSource::Truncated, CompressionType::Gzip)]
+    #[case::truncated_zstd(CacheSource::Truncated, CompressionType::Zstd)]
+    #[case::truncated_xz(CacheSource::Truncated, CompressionType::Xz)]
+    #[case::truncated_bzip2(CacheSource::Truncated, CompressionType::Bzip2)]
+    #[tokio::test]
+    async fn test_manifest_cache_payload(
+        #[case] source: CacheSource,
+        #[case] compression: CompressionType,
+        #[values(PayloadKind::Delta, PayloadKind::Checkpoint { checksum: false }, PayloadKind::Checkpoint { checksum: true })]
+        payload: PayloadKind,
+    ) {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        use common_base::readable_size::ReadableSize;
+        use object_store::layers::mock::MockLayerBuilder;
+
+        let remote_dir = create_temp_dir("manifest-cache-remote");
+        let cache_dir = create_temp_dir("manifest-cache-local");
+        let remote =
+            ObjectStore::new(Fs::default().root(remote_dir.path().to_str().unwrap())).unwrap();
+        let local =
+            ObjectStore::new(Fs::default().root(cache_dir.path().to_str().unwrap())).unwrap();
+        let reads = Arc::new(AtomicUsize::new(0));
+        let observed = reads.clone();
+        let remote = remote.layer(
+            MockLayerBuilder::default()
+                .reader_factory(Arc::new(move |_, _, reader| {
+                    observed.fetch_add(1, Ordering::Relaxed);
+                    reader
+                }))
+                .build()
+                .unwrap(),
+        );
+        let mut cache = ManifestCache::new(local.clone(), ReadableSize::mb(32), None, true).await;
+        let mut store = ManifestObjectStore::new(
+            "region/manifest/",
+            remote.clone(),
+            compression,
+            Default::default(),
+            (source != CacheSource::RemoteFill).then(|| cache.clone()),
+        );
+        let data = br#"{"manifest":"persistent cache payload"}"#;
+        let key = gen_path(
+            "region/manifest/",
+            &if matches!(payload, PayloadKind::Checkpoint { .. }) {
+                checkpoint_file(3)
+            } else {
+                delta_file(3)
+            },
+            compression,
+        );
+        if matches!(payload, PayloadKind::Checkpoint { .. }) {
+            store.save_checkpoint(3, data).await.unwrap();
+        } else {
+            store.save(3, data, false).await.unwrap();
+        }
+        let encoded = remote.read(&key).await.unwrap().to_vec();
+        if source == CacheSource::LegacyDecoded {
+            cache.put_file(key.clone(), data.to_vec()).await;
+        } else if source == CacheSource::Truncated {
+            cache
+                .put_file(key.clone(), encoded[..encoded.len() / 2].to_vec())
+                .await;
+        }
+        drop(store);
+        for iteration in 0..2 {
+            drop(cache);
+            cache = ManifestCache::new(local.clone(), ReadableSize::mb(32), None, true).await;
+            if source != CacheSource::RemoteFill || iteration > 0 {
+                assert!(
+                    cache.get(&key).await.is_some(),
+                    "cache recovery missed {key}"
+                );
+            }
+            store = ManifestObjectStore::new(
+                "region/manifest/",
+                remote.clone(),
+                compression,
+                Default::default(),
+                Some(cache.clone()),
+            );
+            let before = reads.load(Ordering::Relaxed);
+            let actual = if let PayloadKind::Checkpoint { checksum } = payload {
+                let metadata = CheckpointMetadata {
+                    size: data.len(),
+                    version: 3,
+                    checksum: checksum.then(|| checkpoint_checksum(data)),
+                    extend_metadata: Default::default(),
+                };
+                store
+                    .checkpoint_storage
+                    .load_checkpoint(metadata)
+                    .await
+                    .unwrap()
+                    .unwrap()
+            } else {
+                let mut deltas = store.fetch_manifests(3, 4).await.unwrap();
+                assert_eq!(1, deltas.len());
+                deltas.remove(0)
+            };
+            assert_eq!((3, data.to_vec()), actual);
+            // A successful roundtrip alone could hide a decoded refill that causes
+            // repeated cache misses. Check both the bytes and remote read count.
+            assert_eq!(encoded, cache.get_file(&key).await.unwrap());
+            let must_refill = iteration == 0
+                && (source == CacheSource::RemoteFill
+                    || (compression != CompressionType::Uncompressed
+                        && (source == CacheSource::LegacyDecoded
+                            || source == CacheSource::Truncated)));
+            assert_eq!(
+                usize::from(must_refill),
+                reads.load(Ordering::Relaxed) - before
+            );
+            drop(store);
+        }
+    }
+
+    #[rstest::rstest]
+    #[case::checksum(false)]
+    #[case::decompression(true)]
+    #[tokio::test]
+    async fn test_manifest_cache_corrupted_remote(#[case] invalid_encoding: bool) {
+        use crate::error::Error;
+        use common_base::readable_size::ReadableSize;
+
+        let remote_dir = create_temp_dir("manifest-cache-remote");
+        let cache_dir = create_temp_dir("manifest-cache-local");
+        let remote =
+            ObjectStore::new(Fs::default().root(remote_dir.path().to_str().unwrap())).unwrap();
+        let local =
+            ObjectStore::new(Fs::default().root(cache_dir.path().to_str().unwrap())).unwrap();
+        let cache = ManifestCache::new(local, ReadableSize::mb(32), None, true).await;
+        let mut store = ManifestObjectStore::new(
+            "region/",
+            remote.clone(),
+            CompressionType::Gzip,
+            Default::default(),
+            Some(cache.clone()),
+        );
+        store.save_checkpoint(3, b"checkpoint").await.unwrap();
+        let key = gen_path("region/", &checkpoint_file(3), CompressionType::Gzip);
+        let corrupted = if invalid_encoding {
+            b"invalid gzip".to_vec()
+        } else {
+            CompressionType::Gzip
+                .encode(b"other".as_slice())
+                .await
+                .unwrap()
+        };
+        remote.write(&key, corrupted).await.unwrap();
+        // A legacy decoded cache entry must not hide the remote error on refill.
+        cache.put_file(key.clone(), b"checkpoint".to_vec()).await;
+        let error = store.load_last_checkpoint().await.unwrap_err();
+        if invalid_encoding {
+            assert!(matches!(error, Error::DecompressObject { .. }), "{error}");
+        } else {
+            assert!(matches!(error, Error::ChecksumMismatch { .. }), "{error}");
+        }
+        assert!(cache.get(&key).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_manifest_cache_uncompressed_fallback() {
+        use common_base::readable_size::ReadableSize;
+
+        let remote_dir = create_temp_dir("manifest-cache-remote");
+        let cache_dir = create_temp_dir("manifest-cache-local");
+        let remote =
+            ObjectStore::new(Fs::default().root(remote_dir.path().to_str().unwrap())).unwrap();
+        let local =
+            ObjectStore::new(Fs::default().root(cache_dir.path().to_str().unwrap())).unwrap();
+        let cache = ManifestCache::new(local.clone(), ReadableSize::mb(32), None, true).await;
+        let store = ManifestObjectStore::new(
+            "region/",
+            remote.clone(),
+            CompressionType::Uncompressed,
+            Default::default(),
+            Some(cache.clone()),
+        );
+        store.save_checkpoint(3, b"checkpoint").await.unwrap();
+        drop(store);
+        drop(cache);
+        let cache = ManifestCache::new(local, ReadableSize::mb(32), None, true).await;
+        assert!(
+            cache
+                .get("region/00000000000000000003.checkpoint")
+                .await
+                .is_some()
+        );
+        // Keep _last_checkpoint, but remove its payload to prove the fallback hit.
+        remote
+            .delete("region/00000000000000000003.checkpoint")
+            .await
+            .unwrap();
+        let mut store = ManifestObjectStore::new(
+            "region/",
+            remote,
+            CompressionType::Gzip,
+            Default::default(),
+            Some(cache),
+        );
+        assert_eq!(
+            Some((3, b"checkpoint".to_vec())),
+            store.load_last_checkpoint().await.unwrap()
+        );
     }
 }

@@ -19,6 +19,7 @@ use std::sync::{Arc, RwLock};
 
 use async_trait::async_trait;
 use catalog::CatalogManagerRef;
+use catalog::information_schema::InformationExtensionRef;
 use common_base::Plugins;
 use common_function::aggrs::aggr_wrapper::fix_order::FixStateUdafOrderingAnalyzer;
 use common_function::function_factory::ScalarFunctionFactory;
@@ -59,6 +60,7 @@ use crate::dist_plan::{
     MergeSortExtensionPlanner, RemoteDynFilterReceiverExtensionPlanner,
     RemoteDynFilterRegistryLease,
 };
+use crate::error::InvalidQueryContextExtensionSnafu;
 use crate::metrics::{QUERY_MEMORY_POOL_REJECTED_TOTAL, QUERY_MEMORY_POOL_USAGE_BYTES};
 use crate::optimizer::ExtensionAnalyzerRule;
 use crate::optimizer::const_normalization::ConstNormalizationRule;
@@ -68,13 +70,18 @@ use crate::optimizer::count_wildcard::CountWildcardToTimeIndexRule;
 use crate::optimizer::enforce_sorting::EnforceSorting;
 use crate::optimizer::expr_depth;
 use crate::optimizer::global_limit::EnsureGlobalLimitForFetch;
+use crate::optimizer::infer_aggregate_input_bounds::InferAggregateInputBoundsRule;
 use crate::optimizer::json_schema_concretize::JsonSchemaConcretizeRule;
 use crate::optimizer::json_type_concretize::JsonTypeConcretizeRule;
+use crate::optimizer::merge_scan_projection::MergeScanProjection;
 use crate::optimizer::parallelize_scan::ParallelizeScan;
 use crate::optimizer::promql_tsid_narrow_join::PromqlTsidNarrowJoin;
 use crate::optimizer::remove_duplicate::RemoveDuplicate;
 use crate::optimizer::scan_hint::ScanHintRule;
 use crate::optimizer::series_frame_output::SeriesFrameOutput;
+use crate::optimizer::sst_manifest_aggregate::{
+    SstManifestAggregatePlanner, SstManifestAggregateRule,
+};
 use crate::optimizer::string_normalization::StringNormalizationRule;
 use crate::optimizer::transcribe_atat::TranscribeAtatRule;
 use crate::optimizer::type_conversion::TypeConversionRule;
@@ -248,6 +255,9 @@ impl QueryEngineState {
                 FUNCTION_REGISTRY.function_rewrites(),
             )),
         );
+        if inspect_query_extension(&catalog_list).is_some() {
+            analyzer.rules.push(Arc::new(SstManifestAggregateRule));
+        }
         if with_dist_planner {
             analyzer.rules.push(Arc::new(DistPlannerAnalyzer::new(
                 in_process_region_transport,
@@ -266,6 +276,22 @@ impl QueryEngineState {
         // handled by the parser's blacklist.
 
         let mut optimizer = Optimizer::new();
+        // Constants must be simplified, but CASE arguments must not yet be
+        // hidden by common-subexpression extraction.
+        let filter_pushdown_index = optimizer
+            .rules
+            .iter()
+            .position(|rule| rule.name() == "push_down_filter")
+            .ok_or_else(|| {
+                datafusion_common::internal_datafusion_err!("Missing PushDownFilter rule")
+            })?;
+        optimizer.rules.insert(
+            filter_pushdown_index,
+            Arc::new(InferAggregateInputBoundsRule),
+        );
+        if with_dist_planner {
+            optimizer.rules.push(Arc::new(MergeScanProjection));
+        }
         optimizer.rules.push(Arc::new(ScanHintRule));
         optimizer.rules.push(Arc::new(JsonTypeConcretizeRule));
 
@@ -353,7 +379,61 @@ impl QueryEngineState {
         rules.retain(|rule| rule.name() != name);
     }
 
-    /// Optimize the logical plan by the extension analyzer rules.
+    /// Applies validated query options to one per-query DataFusion configuration.
+    pub fn apply_query_options(
+        &self,
+        state: &mut SessionState,
+        query_ctx: QueryContextRef,
+    ) -> crate::error::Result<QueryContextRef> {
+        let query_ctx = Arc::new(query_ctx.query_option_snapshot().map_err(|error| {
+            InvalidQueryContextExtensionSnafu {
+                reason: error.to_string(),
+            }
+            .build()
+        })?);
+        let options = query_ctx.extensions();
+        const MASTER: &str = "datafusion.optimizer.enable_dynamic_filter_pushdown";
+        // The master switch cascades to children, so apply explicit child overrides afterward.
+        for (key, value) in options
+            .get_key_value(MASTER)
+            .into_iter()
+            .chain(options.iter().filter(|(key, _)| key.as_str() != MASTER))
+        {
+            if key.starts_with("datafusion.") {
+                state
+                    .config_mut()
+                    .options_mut()
+                    .set(key, value)
+                    .map_err(|error| {
+                        InvalidQueryContextExtensionSnafu {
+                            reason: error.to_string(),
+                        }
+                        .build()
+                    })?;
+            }
+        }
+        if let Some(partitions) = options.get("query.parallelism") {
+            let partitions = partitions.parse::<usize>().map_err(|error| {
+                InvalidQueryContextExtensionSnafu {
+                    reason: error.to_string(),
+                }
+                .build()
+            })?;
+            *state.config_mut() = state.config().clone().with_target_partitions(partitions);
+        }
+        if let Some(fallback) = options.get("query.allow_query_fallback") {
+            state
+                .config_mut()
+                .options_mut()
+                .extensions
+                .insert(DistPlannerOptions {
+                    allow_query_fallback: fallback == "true",
+                });
+        }
+        Ok(query_ctx)
+    }
+
+    /// Optimize the logical plan using registered extension analyzer rules.
     pub fn optimize_by_extension_rules(
         &self,
         plan: DfLogicalPlan,
@@ -363,8 +443,7 @@ impl QueryEngineState {
         self.extension_rules
             .iter()
             .try_fold(plan, |acc_plan, rule| {
-                let plan =
-                    rule.analyze(acc_plan, context, self.session_state().config_options())?;
+                let plan = rule.analyze(acc_plan, context, context.state().config_options())?;
                 expr_depth::validate_plan(&plan)?;
                 Ok(plan)
             })
@@ -629,6 +708,14 @@ fn register_pg_catalog_compat(ctx: &SessionContext) {
     );
 }
 
+fn inspect_query_extension(catalog_manager: &CatalogManagerRef) -> Option<InformationExtensionRef> {
+    catalog_manager
+        .as_any()
+        .downcast_ref::<catalog::kvbackend::KvBackendCatalogManager>()
+        .map(|catalog| catalog.information_extension())
+        .filter(|extension| extension.supports_inspect_query_plan())
+}
+
 impl DfQueryPlanner {
     fn new(
         catalog_manager: CatalogManagerRef,
@@ -641,6 +728,9 @@ impl DfQueryPlanner {
             Arc::new(RangeSelectPlanner),
             Arc::new(RemoteDynFilterReceiverExtensionPlanner),
         ];
+        if let Some(extension) = inspect_query_extension(&catalog_manager) {
+            planners.push(Arc::new(SstManifestAggregatePlanner::new(extension)));
+        }
         if let (Some(region_query_handler), Some(partition_rule_manager)) =
             (region_query_handler, partition_rule_manager)
         {

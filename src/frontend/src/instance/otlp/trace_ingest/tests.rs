@@ -33,7 +33,7 @@ use opentelemetry_proto::tonic::common::v1::any_value::Value as OtlpValue;
 use opentelemetry_proto::tonic::common::v1::{AnyValue, ArrayValue, KeyValue};
 use prometheus::IntCounter;
 use servers::otlp::trace::attributes::Attributes;
-use servers::otlp::trace::span::{SpanEvents, SpanLinks, TraceSpan};
+use servers::otlp::trace::span::{SpanEvents, SpanLinks, TraceSpan, TraceSpanGroup};
 use servers::otlp::trace::v1::{TraceBinaryType, TraceRetryColumn};
 use servers::otlp::trace::{SERVICE_NAME_COLUMN, TraceAuxData};
 use table::table_name::TableName;
@@ -42,7 +42,7 @@ use super::{
     ChunkFailureReaction, Instance, TraceAuxCache, TraceAuxCacheKey, TraceAuxEntry,
     TraceChunkRetry, TraceChunkSchemaState, TraceFailureMessages, TraceRequestSchema,
     TraceRequestSchemaPlan, TraceSpanMetadata, TraceTablePreAlter, chunk_owned,
-    wrap_trace_alter_failure,
+    chunk_spans_across_groups, wrap_trace_alter_failure,
 };
 use crate::metrics::OTLP_TRACES_FAILURE_COUNT;
 
@@ -294,6 +294,49 @@ fn test_chunk_owned() {
     assert_eq!(chunks[0].len(), 3);
 
     assert!(chunk_owned::<i32>(Vec::new(), 0).is_empty());
+}
+
+#[test]
+fn test_chunks_span_resource_groups() {
+    // Chunks fill up across resource groups instead of restarting per group.
+    let groups = ["a", "b", "c"]
+        .into_iter()
+        .map(|service| {
+            let mut spans = (0..3)
+                .map(|i| trace_span(&format!("{service}{i}"), vec![]))
+                .collect::<Vec<_>>();
+            for span in &mut spans {
+                span.service_name = Some(service.to_string());
+            }
+            TraceSpanGroup {
+                service_name: Some(service.to_string()),
+                resource_attributes: Attributes::from(vec![]).into(),
+                scope_name: String::new(),
+                scope_version: String::new(),
+                scope_attributes: Attributes::from(vec![]).into(),
+                spans,
+            }
+        })
+        .collect::<Vec<_>>();
+
+    let chunks = chunk_spans_across_groups(groups, 4);
+    let services = chunks
+        .iter()
+        .map(|chunk| {
+            chunk
+                .iter()
+                .map(|span| span.service_name.as_deref().unwrap())
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        services,
+        vec![
+            vec!["a", "a", "a", "b"],
+            vec!["b", "b", "c", "c"],
+            vec!["c"]
+        ]
+    );
 }
 
 #[test]

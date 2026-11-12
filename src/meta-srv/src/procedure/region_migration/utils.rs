@@ -94,9 +94,12 @@ impl RegionMigrationTaskBatch {
     }
 }
 
-/// Represents the result of analyzing a migration task.
+/// Classifies regions during migration batch construction.
+/// Route analysis fills metadata categories; the builder adds tracker-owned regions.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub(crate) struct RegionMigrationAnalysis {
+    /// Regions already owned by another migration, populated by the batch builder.
+    pub(crate) migrating: Vec<RegionId>,
     /// Regions already migrated to the `to_peer`.
     pub(crate) migrated: Vec<RegionId>,
     /// Regions where the leader peer has changed.
@@ -174,7 +177,8 @@ fn update_result_with_region_route(
 
 /// Analyzes the migration task and categorizes regions by their current state.
 ///
-/// Returns a [`RegionMigrationAnalysis`] describing the migration status.
+/// Returns a [`RegionMigrationAnalysis`] based on table routes.
+/// The `migrating` category remains empty because this function does not access the tracker.
 pub async fn analyze_region_migration_task(
     task: &RegionMigrationTaskBatch,
     table_metadata_manager: &TableMetadataManagerRef,
@@ -504,6 +508,7 @@ mod tests {
                 peer_conflict: vec![RegionId::new(1024, 3)],
                 region_not_found: vec![RegionId::new(1024, 5)],
                 table_not_found: vec![RegionId::new(1025, 1)],
+                migrating: vec![],
             }
         );
     }

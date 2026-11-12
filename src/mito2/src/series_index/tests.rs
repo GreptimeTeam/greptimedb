@@ -334,6 +334,7 @@ async fn test_reconcile_range_index_disabled(
             flushed_entry_id: None,
             flushed_sequence: None,
             committed_sequence: None,
+            wal_recovery: Default::default(),
         }),
         &[],
         crate::test_util::new_noop_file_purger(),
@@ -443,6 +444,7 @@ async fn test_reconcile_range_only_build_and_removal() {
             flushed_entry_id: None,
             flushed_sequence: None,
             committed_sequence: None,
+            wal_recovery: Default::default(),
         }),
         &[],
         crate::test_util::new_noop_file_purger(),
@@ -495,6 +497,7 @@ async fn test_reconcile_replaces_whole_bucket_after_failure(#[case] failure: &st
         flushed_entry_id: None,
         flushed_sequence: None,
         committed_sequence: None,
+        wal_recovery: Default::default(),
     };
     region.version_control.apply_edit(
         Some(edit(false)),
@@ -760,15 +763,23 @@ async fn test_failed_reconcile_retires_only_unpublished_series() {
         let (bucket, entry) = &plan.builds[0];
         let mut ranges = HashMap::new();
         for file in &bucket.files {
-            let entry = build_range_index(store, &region, &version, file.clone())
+            let entry = build_range_index(store, &region, &version.metadata, file.clone())
                 .await
                 .unwrap()
                 .unwrap();
             ranges.insert(entry.file_id, entry);
         }
-        let handle = build_series_index(store, &region, &version, bucket, entry, None, purger)
-            .await
-            .unwrap();
+        let handle = build_series_index(
+            store,
+            &region,
+            &version.metadata,
+            bucket,
+            entry,
+            None,
+            purger,
+        )
+        .await
+        .unwrap();
         let reused_path = series_index_path(region.region_id, entry.index_uuid);
         region
             .series_index_version_control

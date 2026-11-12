@@ -8,7 +8,7 @@ runs:
         node-version: 24
     - name: Run Node GitHub script tests
       shell: bash
-      run: node --test .github/scripts/query-regression-comment.test.cjs .github/scripts/heavy-ci-policy.test.cjs
+      run: node --test .github/scripts/tests/ci-cache-policy.test.cjs .github/scripts/query-regression-comment.test.cjs .github/scripts/heavy-ci-policy.test.cjs .github/scripts/tests/nightly-merge.test.cjs
     - name: Setup uv
       uses: astral-sh/setup-uv@v3
       with:
@@ -44,6 +44,7 @@ runs:
         python3 tests/perf/test_query_regression_runner_otlp_trace_load.py
         python3 tests/perf/test_query_regression_summary_otlp.py
         python3 tests/perf/test_query_regression_case_selection.py
+        python3 tests/perf/test_query_regression_helpers.py
         python3 tests/perf/test_query_regression_nightly_refs.py
         python3 tests/perf/test_query_regression_slash.py
         python3 tests/perf/test_aliyun_ecs_runner_scripts.py

@@ -63,6 +63,12 @@ pub(crate) struct PreDecodeMemoryReservation {
     _guard: Arc<MemoryGuard<RequestMemoryMetrics>>,
 }
 
+impl PreDecodeMemoryReservation {
+    pub(crate) fn reserved_bytes(&self) -> u64 {
+        self._guard.granted_bytes()
+    }
+}
+
 #[derive(Clone)]
 pub struct MemoryLimiterExtensionLayer {
     limiter: ServerMemoryLimiter,

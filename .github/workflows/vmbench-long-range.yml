@@ -2,6 +2,11 @@ name: VMBench Long Range
 on:
   workflow_dispatch:
     inputs:
+      greptimedb_storage:
+        description: 'GreptimeDB data storage (S3 requires AWS in the bucket region; WAL stays local)'
+        type: choice
+        options: [file, s3, both]
+        default: file
       run_greptimedb:
         description: Run GreptimeDB
         type: boolean
@@ -9,6 +14,11 @@ on:
         required: false
       run_victoriametrics:
         description: Run VictoriaMetrics
+        type: boolean
+        default: false
+        required: false
+      run_prometheus:
+        description: Run Prometheus (requires a runtime image with managed Prometheus support)
         type: boolean
         default: false
         required: false
@@ -40,8 +50,13 @@ on:
         type: string
         default: v1.114.0@sha256:227ad53fd57a4b4430624898a1be0cac39431e1235fa0dc92f567cce38969344
         required: true
+      prometheus_tag:
+        description: Docker Hub prom/prometheus tag or tag@sha256 digest
+        type: string
+        default: v3.2.1@sha256:6927e0919a144aa7616fd0137d4816816d42f6b816de3af269ab065250859a62
+        required: true
       runtime_image:
-        description: 'Runtime image: auto = AWS ECR Public or Aliyun ACR by provider; explicit tag/digest overrides'
+        description: 'Runtime image: auto = pinned Prometheus/File/S3 runtime on ACR; explicit tag/digest overrides'
         type: string
         default: auto
         required: true
@@ -89,13 +104,19 @@ on:
 permissions:
   contents: read
 env:
+  GREPTIMEDB_STORAGE: ${{ inputs.greptimedb_storage || 'file' }}
+  S3_BUCKET: ${{ vars.AWS_CI_TEST_BUCKET }}
+  S3_REGION: ${{ vars.AWS_CI_TEST_BUCKET_REGION }}
+  RUNNER_REGION: ${{ vars.EC2_RUNNER_REGION }}
+  RUN_GREPTIMEDB: ${{ inputs.run_greptimedb }}
   COMPARE_GREPTIMEDB: ${{ inputs.compare_greptimedb }}
   BASELINE_GREPTIMEDB_TAG: ${{ inputs.baseline_greptimedb_tag }}
   BENCHMARK_ROOT: ${{ inputs.benchmark_root }}
   RANGE_PRESET: ${{ inputs.range_preset }}
   GREPTIMEDB_TAG: ${{ inputs.greptimedb_tag }}
   VICTORIAMETRICS_TAG: ${{ inputs.victoriametrics_tag }}
-  RUNTIME_IMAGE: ${{ inputs.runtime_image != 'auto' && inputs.runtime_image || inputs.provider == 'AWS' && 'public.ecr.aws/i8k6a5e1/greptime/o11ybenchruntime:b43785b56f42@sha256:e38811eb68caf3682ba56f5591a3e8e27e78e7983a923abb29fa2d7cd8fdbd46' || 'greptime-registry.cn-hangzhou.cr.aliyuncs.com/tools/o11ybench-runtime:b43785b56f42@sha256:e38811eb68caf3682ba56f5591a3e8e27e78e7983a923abb29fa2d7cd8fdbd46' }}
+  PROMETHEUS_TAG: ${{ inputs.prometheus_tag }}
+  RUNTIME_IMAGE: ${{ inputs.runtime_image != 'auto' && inputs.runtime_image || 'greptime-registry.cn-hangzhou.cr.aliyuncs.com/tools/o11ybench-runtime:345b6f7c-prometheus-s3@sha256:39d207f4a9c479b8614b8283e2d049fc8f430fcbd2b3362ce3035cfbf294edf9' }}
   PROVIDER: ${{ inputs.provider }}
   REQUESTED_INSTANCE_TYPE: ${{ inputs.instance_type }}
   SYSTEM_DISK_GIB: ${{ inputs.system_disk_gib }}
@@ -119,6 +140,10 @@ jobs:
       with:
         path: greptimedb
         persist-credentials: false
+    - name: Validate GreptimeDB storage
+      run: |
+        python3 greptimedb/tests/perf/test_o11ybench_storage.py
+        python3 greptimedb/.github/scripts/o11ybench-storage.py validate
     - name: Validate version comparison
       env:
         RUN_GREPTIMEDB: ${{ inputs.run_greptimedb }}
@@ -132,11 +157,24 @@ jobs:
       run: |
         python3 greptimedb/tests/perf/test_aliyun_ecs_runner_scripts.py
         python3 greptimedb/tests/perf/test_ci_runner_scripts.py
+    - name: Configure AWS credentials for ECR Public
+      if: startsWith(env.RUNTIME_IMAGE, 'public.ecr.aws/')
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ECR_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_ECR_SECRET_ACCESS_KEY }}
+        aws-region: us-east-1
+    - name: Login to Amazon ECR Public
+      if: startsWith(env.RUNTIME_IMAGE, 'public.ecr.aws/')
+      uses: aws-actions/amazon-ecr-login@v2
+      with:
+        registry-type: public
     - name: Validate budgets and build warm plan
       id: plan
       env:
         RUN_GREPTIMEDB: ${{ inputs.run_greptimedb }}
         RUN_VICTORIAMETRICS: ${{ inputs.run_victoriametrics }}
+        RUN_PROMETHEUS: ${{ inputs.run_prometheus }}
       run: |
         set -euo pipefail
         [[ "$BENCHMARK_ROOT" == /* && "$BENCHMARK_ROOT" != / && "$BENCHMARK_ROOT" != */ ]]
@@ -161,17 +199,18 @@ jobs:
         [[ "$revision" =~ ^[0-9a-f]{40}$ ]]
         printf 'runtime_image=%s\no11ybench_ref=%s\nsystem_disk_gib=%s\n' "$resolved" "$revision" "$SYSTEM_DISK_GIB" >> "$GITHUB_OUTPUT"
         printf 'run_id=long-range-%s-%s\nplan_artifact=vmbench-plan-%s-%s\n' "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" >> "$GITHUB_OUTPUT"
-        args=(--workload vmbench-long-range --range-preset "$RANGE_PRESET"
+        args=(--workload vmbench-long-range --range-preset "$RANGE_PRESET" --greptimedb-storage "$GREPTIMEDB_STORAGE"
           --db-cpus "$DB_CPUS" --db-memory "$DB_MEMORY"
           --run-classification controlled_server_benchmark --no-open-browser)
         if [[ "$COMPARE_GREPTIMEDB" == true ]]; then
           args+=(--target "greptimedb:name=greptimedb-baseline,image=greptime/greptimedb:$BASELINE_GREPTIMEDB_TAG,url=http://127.0.0.1:14000/v1/prometheus/api/v1/query_range")
         fi
         # Tags become target-spec fields; reject separators before passing them to the planner.
-        for target in greptimedb victoriametrics; do
+        for target in greptimedb victoriametrics prometheus; do
           case "$target" in
             greptimedb) enabled=$RUN_GREPTIMEDB; tag=$GREPTIMEDB_TAG; repo=greptime/greptimedb; url=http://127.0.0.1:14000/v1/prometheus/api/v1/query_range ;;
             victoriametrics) enabled=$RUN_VICTORIAMETRICS; tag=$VICTORIAMETRICS_TAG; repo=victoriametrics/victoria-metrics; url=http://127.0.0.1:18428/api/v1/query_range ;;
+            prometheus) enabled=$RUN_PROMETHEUS; tag=$PROMETHEUS_TAG; repo=prom/prometheus; url=http://127.0.0.1:19090/api/v1/query_range ;;
           esac
           [[ "$enabled" == true ]] || continue
           [[ "$tag" =~ ^[a-zA-Z0-9_][a-zA-Z0-9_.-]{0,127}(@sha256:[0-9a-f]{64})?$ ]]
@@ -180,10 +219,11 @@ jobs:
         # The packaged planner owns profile, target and resource-limit validation.
         mkdir -p "$RUNNER_TEMP/vmbench-plans"
         # Keep the original warm defaults: serial 5/1 and c1/c4 30s/5s.
-        docker run --rm "$resolved" scripts/o11ybench_plan.py "${args[@]}" \
+        docker run --rm -e S3_BUCKET -e S3_REGION "$resolved" scripts/o11ybench_plan.py "${args[@]}" \
           --run-id "long-range-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-warm" \
           --output-root "$BENCHMARK_ROOT/o11ybench/o11ybench-long-range-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-warm" \
           --cache-policy warm > "$RUNNER_TEMP/vmbench-plans/warm.json"
+        python3 greptimedb/.github/scripts/o11ybench-storage.py normalize-metrics "$RUNNER_TEMP/vmbench-plans/warm.json"
     - uses: actions/upload-artifact@v4
       with:
         name: vmbench-plan-${{ github.run_id }}-${{ github.run_attempt }}
@@ -266,7 +306,10 @@ jobs:
         path: greptimedb
         persist-credentials: false
     - name: Set up benchmark dependencies
-      uses: ./greptimedb/.github/actions/setup-benchmark
+      uses: ./greptimedb/.github/actions/setup-linux-runner
+      with:
+        tools: curl jq python3 rsync
+        expected-architecture: x86_64
     - name: Checkout matching benchmark tools
       uses: actions/checkout@v4
       with:
@@ -279,6 +322,18 @@ jobs:
       with:
         name: ${{ needs.validate.outputs.plan_artifact }}
         path: ${{ env.METADATA_ROOT }}
+    - name: Configure AWS credentials for ECR Public
+      if: startsWith(env.RUNTIME_IMAGE, 'public.ecr.aws/')
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ECR_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_ECR_SECRET_ACCESS_KEY }}
+        aws-region: us-east-1
+    - name: Login to Amazon ECR Public
+      if: startsWith(env.RUNTIME_IMAGE, 'public.ecr.aws/')
+      uses: aws-actions/amazon-ecr-login@v2
+      with:
+        registry-type: public
     - name: Check runner and resolve database images
       run: |
         set -euo pipefail
@@ -313,25 +368,92 @@ jobs:
           --plan "$METADATA_ROOT/warm.json" --runtime-image "$RESOLVED_RUNTIME_IMAGE" --dry-run \
           > "$METADATA_ROOT/warm-execution-plan.json"
         cat "$METADATA_ROOT/warm-execution-plan.json"
-    - name: Warm serial and concurrent benchmarks
+    - name: Generate shared dataset and split target plans
+      id: generate
       run: |
-        set -euo pipefail
-        python3 -u o11ybench/scripts/run_benchmark_plan.py \
-          --plan "$METADATA_ROOT/warm.json" --runtime-image "$RESOLVED_RUNTIME_IMAGE" --execute \
-          2>&1 | tee "$METADATA_ROOT/warm-execution.log"
-        python3 o11ybench/scripts/check_run_benchmark_plan.py --artifacts "$ARTIFACT_ROOT-warm"
+        python3 greptimedb/.github/scripts/o11ybench-storage.py metrics-prepare \
+          --plan "$METADATA_ROOT/warm.json" --tools o11ybench --runtime-image "$RESOLVED_RUNTIME_IMAGE"
+    - name: Load and benchmark Baseline GreptimeDB File
+      if: ${{ !cancelled() && steps.generate.outcome == 'success' && inputs.compare_greptimedb && inputs.greptimedb_storage != 's3' }}
+      run: |
+        python3 greptimedb/.github/scripts/o11ybench-storage.py metrics-run --target greptimedb-baseline \
+          --plan "$METADATA_ROOT/warm.json" --tools o11ybench --runtime-image "$RESOLVED_RUNTIME_IMAGE"
+    - name: Load and benchmark Baseline GreptimeDB S3
+      if: ${{ !cancelled() && steps.generate.outcome == 'success' && inputs.compare_greptimedb && inputs.greptimedb_storage != 'file' }}
+      env:
+        AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      run: |
+        python3 greptimedb/.github/scripts/o11ybench-storage.py metrics-run --target greptimedb-s3-baseline \
+          --plan "$METADATA_ROOT/warm.json" --tools o11ybench --runtime-image "$RESOLVED_RUNTIME_IMAGE"
+    - name: Load and benchmark GreptimeDB File
+      if: ${{ !cancelled() && steps.generate.outcome == 'success' && inputs.run_greptimedb && inputs.greptimedb_storage != 's3' }}
+      run: |
+        python3 greptimedb/.github/scripts/o11ybench-storage.py metrics-run --target greptimedb \
+          --plan "$METADATA_ROOT/warm.json" --tools o11ybench --runtime-image "$RESOLVED_RUNTIME_IMAGE"
+    - name: Load and benchmark GreptimeDB S3
+      if: ${{ !cancelled() && steps.generate.outcome == 'success' && inputs.run_greptimedb && inputs.greptimedb_storage != 'file' }}
+      env:
+        AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      run: |
+        python3 greptimedb/.github/scripts/o11ybench-storage.py metrics-run --target greptimedb-s3 \
+          --plan "$METADATA_ROOT/warm.json" --tools o11ybench --runtime-image "$RESOLVED_RUNTIME_IMAGE"
+    - name: Load and benchmark VictoriaMetrics
+      if: ${{ !cancelled() && steps.generate.outcome == 'success' && inputs.run_victoriametrics }}
+      run: |
+        python3 greptimedb/.github/scripts/o11ybench-storage.py metrics-run --target victoriametrics \
+          --plan "$METADATA_ROOT/warm.json" --tools o11ybench --runtime-image "$RESOLVED_RUNTIME_IMAGE"
+    - name: Load and benchmark Prometheus
+      if: ${{ !cancelled() && steps.generate.outcome == 'success' && inputs.run_prometheus }}
+      run: |
+        python3 greptimedb/.github/scripts/o11ybench-storage.py metrics-run --target prometheus \
+          --plan "$METADATA_ROOT/warm.json" --tools o11ybench --runtime-image "$RESOLVED_RUNTIME_IMAGE"
+    - name: Validate all selected target results
+      if: always() && steps.generate.outcome == 'success'
+      run: |
+        python3 greptimedb/.github/scripts/o11ybench-storage.py metrics-validate \
+          --plan "$METADATA_ROOT/warm.json" --tools o11ybench --runtime-image "$RESOLVED_RUNTIME_IMAGE"
     - name: Clean up owned containers
+      env:
+        AWS_ACCESS_KEY_ID: ${{ inputs.greptimedb_storage != 'file' && secrets.AWS_ACCESS_KEY_ID || '' }}
+        AWS_SECRET_ACCESS_KEY: ${{ inputs.greptimedb_storage != 'file' && secrets.AWS_SECRET_ACCESS_KEY || '' }}
       if: always()
       run: |
         docker ps -aq --filter "label=o11ybench.run-id=$RUN_ID-warm" | xargs -r docker rm -fv
+        for name in greptimedb greptimedb-s3 greptimedb-baseline greptimedb-s3-baseline victoriametrics prometheus; do
+          plan="$METADATA_ROOT/$name.json"
+          [[ -f "$plan" ]] || continue
+          run_id=$(jq -r '.run_id // empty' "$plan")
+          [[ -n "$run_id" ]] || continue
+          docker ps -aq --filter "label=o11ybench.run-id=$run_id" | xargs -r docker rm -fv
+        done
+        if [[ -d "$ARTIFACT_ROOT-warm" ]]; then
+          for probe in "$ARTIFACT_ROOT-warm"/o11ybench/*/*/s3-probe.json; do
+            [[ -f "$probe" ]] || continue
+            python3 o11ybench/scripts/greptimedb_storage.py recover --runtime-image "$RESOLVED_RUNTIME_IMAGE" --output "${probe%/*}"
+          done
+        fi
     - name: GreptimeDB version comparison
       if: always() && inputs.compare_greptimedb
       run: |
-        python3 greptimedb/.github/scripts/benchmark-version-comparison.py report --kind long-range --root "$ARTIFACT_ROOT-warm" >> "$GITHUB_STEP_SUMMARY"
+        python3 greptimedb/.github/scripts/benchmark-version-comparison.py report --kind long-range --root "$ARTIFACT_ROOT-warm" | tee -a "$ARTIFACT_ROOT-warm/ci-summary.md" >> "$GITHUB_STEP_SUMMARY"
+    - name: Render storage comparison overview
+      if: always() && steps.generate.outcome == 'success'
+      run: |
+        mkdir -p "$ARTIFACT_ROOT-warm/metadata"
+        cp "$METADATA_ROOT"/*-image.json "$ARTIFACT_ROOT-warm/metadata/"
+        python3 o11ybench/scripts/build_query_performance_report.py --metrics "$ARTIFACT_ROOT-warm" \
+          --output "$ARTIFACT_ROOT-warm-query-report.html" --json-output "$ARTIFACT_ROOT-warm-query-report.json"
+        python3 greptimedb/.github/scripts/o11ybench-storage.py overview "$ARTIFACT_ROOT-warm-query-report.json" \
+          | tee -a "$ARTIFACT_ROOT-warm/ci-summary.md" >> "$GITHUB_STEP_SUMMARY"
+        python3 greptimedb/.github/scripts/o11ybench-storage.py audit --root "$ARTIFACT_ROOT-warm" \
+          --report "$ARTIFACT_ROOT-warm-query-report.json" --targets "$(jq -r '[.targets[].kind] | unique | join(",")' "$METADATA_ROOT/warm.json")"
     - name: Stage benchmark artifacts
       if: always()
       run: |
         mkdir -p "$RUNNER_TEMP/vmbench-artifacts"
+        cp "$ARTIFACT_ROOT-warm"-query-report.* "$RUNNER_TEMP/vmbench-artifacts/" 2>/dev/null || true
         if [[ -d "$METADATA_ROOT" ]]; then
           rsync -a --no-owner --no-group "$METADATA_ROOT" "$RUNNER_TEMP/vmbench-artifacts/"
         fi

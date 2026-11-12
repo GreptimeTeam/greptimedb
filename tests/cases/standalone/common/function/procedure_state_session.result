@@ -1,0 +1,124 @@
+-- Each protocol reuses its own connection across requests.
+-- SQLNESS PROTOCOL MYSQL
+SELECT procedure_state();
+
+Failed to parse query result, err: MySqlError { ERROR 1815 (HY000): (EngineExecuteQuery): Execution error: Invalid function args: No procedure ID has been returned in this session; pass an explicit procedure ID }
+
+-- SQLNESS PROTOCOL POSTGRES
+SELECT procedure_state();
+
+Failed to execute query, encountered: Error { kind: Db, cause: Some(DbError { severity: "ERROR", parsed_severity: None, code: SqlState(EP0000), message: "Execution error: Invalid function args: No procedure ID has been returned in this session; pass an explicit procedure ID", detail: None, hint: None, position: None, where_: None, schema: None, table: None, column: None, datatype: None, constraint: None, file: None, line: None, routine: None }) }
+
+CREATE TABLE procedure_state_session (ts TIMESTAMP TIME INDEX);
+
+Affected Rows: 0
+
+-- Synchronous DDL must not record a Procedure ID in the Session.
+-- SQLNESS PROTOCOL MYSQL
+TRUNCATE TABLE procedure_state_session WITH (wait=true);
+
+affected_rows: 0
+
+-- SQLNESS PROTOCOL MYSQL
+SELECT procedure_state();
+
+Failed to parse query result, err: MySqlError { ERROR 1815 (HY000): (EngineExecuteQuery): Execution error: Invalid function args: No procedure ID has been returned in this session; pass an explicit procedure ID }
+
+-- SQLNESS PROTOCOL POSTGRES
+TRUNCATE TABLE procedure_state_session WITH (wait=true);
+
+Affected Rows: 0
+
+-- SQLNESS PROTOCOL POSTGRES
+SELECT procedure_state();
+
+Failed to execute query, encountered: Error { kind: Db, cause: Some(DbError { severity: "ERROR", parsed_severity: None, code: SqlState(EP0000), message: "Execution error: Invalid function args: No procedure ID has been returned in this session; pass an explicit procedure ID", detail: None, hint: None, position: None, where_: None, schema: None, table: None, column: None, datatype: None, constraint: None, file: None, line: None, routine: None }) }
+
+-- Synchronous DDL preserves the ID returned by the previous request.
+-- SQLNESS PROTOCOL MYSQL
+-- SQLNESS REPLACE [0-9a-f]{8}-[0-9a-f-]{27} PROC_ID
+TRUNCATE TABLE procedure_state_session WITH (wait=false);
+
++--------------------------------------+
+| Procedure ID                         |
++--------------------------------------+
+| PROC_ID |
++--------------------------------------+
+
+-- SQLNESS PROTOCOL MYSQL
+TRUNCATE TABLE procedure_state_session WITH (wait=true);
+
+affected_rows: 0
+
+-- SQLNESS PROTOCOL MYSQL
+SELECT procedure_state() IN ('{"status":"Running"}', '{"status":"Done"}') AS has_state;
+
++-----------+
+| has_state |
++-----------+
+| 1         |
++-----------+
+
+-- A different physical connection still has no history.
+-- SQLNESS PROTOCOL POSTGRES
+SELECT procedure_state();
+
+Failed to execute query, encountered: Error { kind: Db, cause: Some(DbError { severity: "ERROR", parsed_severity: None, code: SqlState(EP0000), message: "Execution error: Invalid function args: No procedure ID has been returned in this session; pass an explicit procedure ID", detail: None, hint: None, position: None, where_: None, schema: None, table: None, column: None, datatype: None, constraint: None, file: None, line: None, routine: None }) }
+
+-- SQLNESS PROTOCOL POSTGRES
+-- SQLNESS REPLACE [0-9a-f]{8}-[0-9a-f-]{27} PROC_ID
+TRUNCATE TABLE procedure_state_session WITH (wait=false);
+
++--------------------------------------+
+| Procedure ID                         |
++--------------------------------------+
+| PROC_ID |
++--------------------------------------+
+
+-- SQLNESS PROTOCOL POSTGRES
+TRUNCATE TABLE procedure_state_session WITH (wait=true);
+
+Affected Rows: 0
+
+-- SQLNESS PROTOCOL POSTGRES
+SELECT procedure_state() IN ('{"status":"Running"}', '{"status":"Done"}') AS has_state;
+
++-----------+
+| has_state |
++-----------+
+| t         |
++-----------+
+
+-- Failed submissions must preserve history.
+-- SQLNESS PROTOCOL MYSQL
+TRUNCATE TABLE nonexistent_session_table WITH (wait=false);
+
+Failed to execute query, err: MySqlError { ERROR 1146 (42S02): (TableNotFound): Table not found: greptime.public.nonexistent_session_table }
+
+-- SQLNESS PROTOCOL MYSQL
+SELECT procedure_state() IN ('{"status":"Running"}', '{"status":"Done"}') AS has_state;
+
++-----------+
+| has_state |
++-----------+
+| 1         |
++-----------+
+
+-- SQLNESS PROTOCOL POSTGRES
+TRUNCATE TABLE nonexistent_session_table WITH (wait=false);
+
+Failed to execute query, encountered: Error { kind: Db, cause: Some(DbError { severity: "ERROR", parsed_severity: None, code: SqlState(E42P01), message: "Table not found: greptime.public.nonexistent_session_table", detail: None, hint: None, position: None, where_: None, schema: None, table: None, column: None, datatype: None, constraint: None, file: None, line: None, routine: None }) }
+
+-- SQLNESS PROTOCOL POSTGRES
+SELECT procedure_state() IN ('{"status":"Running"}', '{"status":"Done"}') AS has_state;
+
++-----------+
+| has_state |
++-----------+
+| t         |
++-----------+
+
+DROP TABLE procedure_state_session;
+
+Affected Rows: 0
+

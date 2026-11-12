@@ -71,10 +71,12 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             return;
         }
 
-        // safety: ts data type must be a timestamp type.
+        // safety: `WorkerRequest::try_from_region_request` checked the batch against
+        // `region_metadata`, so the time index is a timestamp array without nulls.
         let (ts_primitive, _) = datatypes::timestamp::timestamp_array_to_primitive(ts).unwrap();
 
-        // safety: we've checked ts.len() == batch.num_rows() and batch is not empty
+        // safety: we've checked ts.len() == batch.num_rows(), batch is not empty and
+        // the time index has no nulls.
         let min_ts = arrow::compute::min(&ts_primitive).unwrap();
         let max_ts = arrow::compute::max(&ts_primitive).unwrap();
 

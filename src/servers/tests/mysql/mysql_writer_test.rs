@@ -264,13 +264,8 @@ fn test_create_mysql_column_unsigned_flags() {
 
 // ── Timestamp precision tests (issue #8227) ───────────────────────────────────
 
-/// Timestamps displayed through the MySQL writer must respect their storage unit.
-///
-/// Before the fix, `to_chrono_datetime_with_timezone` → `NaiveDateTime::Display`
-/// always emitted 6 fractional-second digits, so:
-///   - `TIMESTAMP(3)` showed `.195000` instead of `.195`
-///   - `TIMESTAMP(9)` showed `.195123` instead of `.195123456`
-///
+/// The common timestamp string formatter preserves full storage precision.
+/// The MySQL writer separately caps temporal output at microseconds (issue #9828).
 #[test]
 fn test_timestamp_display_precision_utc() {
     // Use UTC timezone for deterministic, timezone-independent output.

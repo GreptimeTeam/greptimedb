@@ -56,6 +56,7 @@ WHERE c.tier IN ('gold', 'bronze');
 -- SQLNESS REPLACE "partition_count":\{(.*?)\} "partition_count":REDACTED
 -- SQLNESS REPLACE ,\s"dyn_filters":\s\["DynamicFilter\s\[[^"]*\]"\] , "dyn_filters": ["DynamicFilter [ REDACTED ]"]
 -- SQLNESS REPLACE metrics=REDACTED\s*\| metrics=REDACTED_|
+-- SQLNESS REPLACE \\?"(dyn_filters|time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
 EXPLAIN ANALYZE VERBOSE SELECT top_orders."id", top_orders.amount, c."name", c.tier
 FROM (
   SELECT "id", customer_id, amount, ts
@@ -136,6 +137,7 @@ LIMIT 4;
 -- SQLNESS REPLACE "partition_count":\{(.*?)\} "partition_count":REDACTED
 -- SQLNESS REPLACE ,\s"dyn_filters":\s\["DynamicFilter\s\[[^"]*\]"\] , "dyn_filters": ["DynamicFilter [ REDACTED ]"]
 -- SQLNESS REPLACE metrics=REDACTED\s*\| metrics=REDACTED_|
+-- SQLNESS REPLACE \\?"(dyn_filters|time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
 EXPLAIN ANALYZE VERBOSE SELECT "id", customer_id, "name", tier, amount
 FROM (
   SELECT o."id", o.customer_id, c."name", c.tier, o.amount
@@ -218,6 +220,7 @@ WHERE c.tier IN ('gold', 'silver')
 -- SQLNESS REPLACE "partition_count":\{(.*?)\} "partition_count":REDACTED
 -- SQLNESS REPLACE ,\s"dyn_filters":\s\["DynamicFilter\s\[[^"]*\]"\] , "dyn_filters": ["DynamicFilter [ REDACTED ]"]
 -- SQLNESS REPLACE metrics=REDACTED\s*\| metrics=REDACTED_|
+-- SQLNESS REPLACE \\?"(dyn_filters|time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
 EXPLAIN ANALYZE VERBOSE SELECT o."id", o.amount, c."name", c.tier, p."name" as product_name, p."category"
 FROM orders o
 JOIN customers c ON o.customer_id = c.customer_id

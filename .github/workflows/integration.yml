@@ -30,7 +30,7 @@ on:
 name: Integration CI
 
 env:
-  CARGO_FUZZ_VERSION: "0.13.2"
+  FUZZ_VERSION: "0.13.2"
   # Fuzz targets require a nightly toolchain (cargo-fuzz needs
   # `-Zsanitizer=fuzzer`). This pin decouples the fuzz workflow from the
   # workspace default in rust-toolchain.toml, so it keeps working when the
@@ -121,6 +121,8 @@ jobs:
         with:
           tool: protoc@3.23.4
       - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache: false
       - name: Build Binaries Cache
         id: build-binaries-cache
         uses: Swatinem/rust-cache@v2
@@ -292,6 +294,8 @@ jobs:
         with:
           tool: protoc@3.23.4
       - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache: false
       - name: Rust Cache
         uses: Swatinem/rust-cache@v2
         with:
@@ -436,18 +440,18 @@ jobs:
         id: fuzz-dependencies-cache
         uses: Swatinem/rust-cache@v2
         with:
-          prefix-key: "v1-fuzz-${{ env.CARGO_FUZZ_VERSION }}"
+          prefix-key: "v1-fuzz-${{ env.FUZZ_VERSION }}"
           shared-key: "fuzz-dependencies"
           workspaces: ". -> target"
           cache-targets: "true"
           cache-all-crates: "true"
-          save-if: ${{ github.event_name == 'pull_request' }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Look up prebuilt fuzz binaries
         id: fuzz-binaries
         uses: actions/cache/restore@v4
         with:
           path: ${{ runner.temp }}/greptime-fuzz-binaries
-          key: v1-fuzz-binaries-${{ env.CARGO_FUZZ_VERSION }}-${{ env.FUZZ_RUST_TOOLCHAIN }}-all-${{ hashFiles('Cargo.toml', 'Cargo.lock', '.cargo/**', 'tests-fuzz/**', 'src/**') }}
+          key: v1-fuzz-binaries-${{ env.FUZZ_VERSION }}-${{ env.FUZZ_RUST_TOOLCHAIN }}-all-${{ hashFiles('Cargo.toml', 'Cargo.lock', '.cargo/**', 'tests-fuzz/**', 'src/**') }}
       - name: Report fuzz cache lookup
         shell: bash
         run: |
@@ -462,7 +466,7 @@ jobs:
         env:
           RUSTUP_TOOLCHAIN: ${{ env.FUZZ_RUST_TOOLCHAIN }}
         run: |
-          cargo install cargo-fuzz --version "${CARGO_FUZZ_VERSION}" --locked
+          cargo install cargo-fuzz --version "${FUZZ_VERSION}" --locked
       - name: Build fuzz target binaries
         if: steps.fuzz-binaries.outputs.cache-hit != 'true'
         shell: bash
@@ -511,11 +515,11 @@ jobs:
           build_targets false "${FUZZ_TARGETS}"
           build_targets true "${FUZZ_UNSTABLE_TARGETS}"
       - name: Save prebuilt fuzz binaries
-        if: steps.fuzz-binaries.outputs.cache-hit != 'true'
+        if: github.ref == 'refs/heads/main' && steps.fuzz-binaries.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
         with:
           path: ${{ runner.temp }}/greptime-fuzz-binaries
-          key: v1-fuzz-binaries-${{ env.CARGO_FUZZ_VERSION }}-${{ env.FUZZ_RUST_TOOLCHAIN }}-all-${{ hashFiles('Cargo.toml', 'Cargo.lock', '.cargo/**', 'tests-fuzz/**', 'src/**') }}
+          key: v1-fuzz-binaries-${{ env.FUZZ_VERSION }}-${{ env.FUZZ_RUST_TOOLCHAIN }}-all-${{ hashFiles('Cargo.toml', 'Cargo.lock', '.cargo/**', 'tests-fuzz/**', 'src/**') }}
       - name: Pack prebuilt fuzz binaries
         shell: bash
         run: |
@@ -688,6 +692,8 @@ jobs:
         with:
           tool: protoc@3.23.4
       - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache: false
       - name: Build Profile-CI Cache
         id: build-greptime-ci-cache
         uses: Swatinem/rust-cache@v2
@@ -696,7 +702,7 @@ jobs:
           shared-key: "build-greptime-ci"
           cache-all-crates: "true"
           cache-workspace-crates: "true"
-          save-if: ${{ github.event_name == 'pull_request' }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Report profile-CI cache lookup
         shell: bash
         run: |
@@ -819,7 +825,7 @@ jobs:
           workspaces: ". -> target"
           cache-targets: "true"
           cache-all-crates: "true"
-          save-if: ${{ github.event_name == 'pull_request' }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - if: matrix.mode.kafkaWalHelper
         name: Report Kafka WAL helper cache lookup
         shell: bash

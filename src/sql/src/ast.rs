@@ -32,3 +32,37 @@ impl ObjectNamePartExt for ObjectNamePart {
         ident.value.clone()
     }
 }
+
+/// Formats an object name by joining its identifier values without quotes.
+pub fn object_name_to_string_unquoted(name: &ObjectName) -> String {
+    name.0
+        .iter()
+        .map(ObjectNamePartExt::to_string_unquoted)
+        .collect::<Vec<_>>()
+        .join(".")
+}
+
+#[cfg(test)]
+mod tests {
+    use sqlparser::ast::{Ident, ObjectName, ObjectNamePart};
+
+    use super::object_name_to_string_unquoted;
+
+    #[test]
+    fn test_object_name_to_string_unquoted() {
+        let quoted = ObjectName(vec![ObjectNamePart::Identifier(Ident::with_quote(
+            '"',
+            "query.parallelism",
+        ))]);
+        let unquoted = ObjectName(vec![
+            ObjectNamePart::Identifier(Ident::new("query")),
+            ObjectNamePart::Identifier(Ident::new("parallelism")),
+        ]);
+
+        assert_eq!("query.parallelism", object_name_to_string_unquoted(&quoted));
+        assert_eq!(
+            object_name_to_string_unquoted(&unquoted),
+            object_name_to_string_unquoted(&quoted)
+        );
+    }
+}

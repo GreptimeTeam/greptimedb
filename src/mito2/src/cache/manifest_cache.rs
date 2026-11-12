@@ -237,7 +237,7 @@ impl ManifestCache {
         join_path(MANIFEST_DIR, key)
     }
 
-    /// Gets a manifest file from cache.
+    /// Gets the encoded object-store payload from cache.
     /// Returns the file data if found in cache, None otherwise.
     pub(crate) async fn get_file(&self, key: &str) -> Option<Vec<u8>> {
         if self.get(key).await.is_none() {
@@ -259,7 +259,7 @@ impl ManifestCache {
         }
     }
 
-    /// Puts a manifest file into cache.
+    /// Caches the object-store payload verbatim, before decompression.
     pub(crate) async fn put_file(&self, key: String, data: Vec<u8>) {
         let cache_file_path = self.cache_file_path(&key);
 

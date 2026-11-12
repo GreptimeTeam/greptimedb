@@ -27,11 +27,12 @@ use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use common_telemetry::info;
+use snafu::ensure;
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::{RegionId, SequenceNumber};
 
-use crate::error::Result;
-use crate::manifest::action::{RegionEdit, TruncateKind};
+use crate::error::{RegionPendingTailsSnafu, Result};
+use crate::manifest::action::{PendingTail, RegionEdit, TruncateKind};
 use crate::memtable::time_partition::TimePartitions;
 use crate::memtable::version::{MemtableVersion, MemtableVersionRef};
 use crate::memtable::{MemtableBuilderRef, MemtableId};
@@ -59,6 +60,7 @@ impl VersionControl {
         VersionControl {
             data: RwLock::new(VersionControlData {
                 version: Arc::new(version),
+                last_sequence: flushed_sequence,
                 committed_sequence: flushed_sequence,
                 last_entry_id: flushed_entry_id,
                 is_dropped: false,
@@ -76,16 +78,24 @@ impl VersionControl {
         self.data.read().unwrap().clone()
     }
 
+    /// Updates last sequence number to the maximum.
+    pub(crate) fn update_last_sequence(&self, seq: SequenceNumber) {
+        let mut data = self.data.write().unwrap();
+        data.last_sequence = data.last_sequence.max(seq);
+    }
+
     /// Updates the `committed_sequence` of version.
     pub(crate) fn set_committed_sequence(&self, seq: SequenceNumber) {
         let mut data = self.data.write().unwrap();
-        data.committed_sequence = seq;
+        data.committed_sequence = data.committed_sequence.max(seq);
+        data.last_sequence = data.last_sequence.max(data.committed_sequence);
     }
 
     /// Updates committed sequence and entry id.
     pub(crate) fn set_sequence_and_entry_id(&self, seq: SequenceNumber, entry_id: EntryId) {
         let mut data = self.data.write().unwrap();
-        data.committed_sequence = seq;
+        data.committed_sequence = data.committed_sequence.max(seq);
+        data.last_sequence = data.last_sequence.max(data.committed_sequence);
         data.last_entry_id = entry_id;
     }
 
@@ -162,6 +172,9 @@ impl VersionControl {
         } else {
             version_data.committed_sequence
         };
+        version_data.last_sequence = version_data
+            .last_sequence
+            .max(version_data.committed_sequence);
         version_data.version = new_version;
     }
 
@@ -312,6 +325,7 @@ impl VersionControl {
     /// Overwrites the current version with a new version.
     pub(crate) fn overwrite_current(&self, version: VersionRef) {
         let mut version_data = self.data.write().unwrap();
+        version_data.last_sequence = version_data.last_sequence.max(version.flushed_sequence);
         version_data.version = version;
     }
 
@@ -336,6 +350,8 @@ pub(crate) type VersionControlRef = Arc<VersionControl>;
 pub(crate) struct VersionControlData {
     /// Latest version.
     pub(crate) version: VersionRef,
+    /// Last allocated sequence number.
+    pub(crate) last_sequence: SequenceNumber,
     /// Sequence number of last committed data.
     ///
     /// Starts from 1 (zero means no data).
@@ -384,6 +400,24 @@ pub(crate) struct Version {
     pub(crate) compaction_time_window: Option<Duration>,
     /// Options of the region.
     pub(crate) options: RegionOptions,
+    /// WAL ranges the region still has to recover.
+    pub(crate) pending_tails: Vec<PendingTail>,
+}
+
+impl Version {
+    pub(crate) fn has_pending_tails(&self) -> bool {
+        !self.pending_tails.is_empty()
+    }
+
+    pub(crate) fn ensure_no_pending_tails(&self) -> Result<()> {
+        ensure!(
+            !self.has_pending_tails(),
+            RegionPendingTailsSnafu {
+                region_id: self.metadata.region_id,
+            }
+        );
+        Ok(())
+    }
 }
 
 pub(crate) type VersionRef = Arc<Version>;
@@ -398,6 +432,7 @@ pub(crate) struct VersionBuilder {
     truncated_entry_id: Option<EntryId>,
     compaction_time_window: Option<Duration>,
     options: RegionOptions,
+    pending_tails: Vec<PendingTail>,
 }
 
 impl VersionBuilder {
@@ -412,6 +447,7 @@ impl VersionBuilder {
             truncated_entry_id: None,
             compaction_time_window: None,
             options: RegionOptions::default(),
+            pending_tails: Vec::new(),
         }
     }
 
@@ -426,6 +462,7 @@ impl VersionBuilder {
             truncated_entry_id: version.truncated_entry_id,
             compaction_time_window: version.compaction_time_window,
             options: version.options.clone(),
+            pending_tails: version.pending_tails.clone(),
         }
     }
 
@@ -474,6 +511,11 @@ impl VersionBuilder {
         self
     }
 
+    pub(crate) fn pending_tails(mut self, pending_tails: Vec<PendingTail>) -> Self {
+        self.pending_tails = pending_tails;
+        self
+    }
+
     /// Apply edit to the builder.
     pub(crate) fn apply_edit(mut self, edit: RegionEdit, file_purger: FilePurgerRef) -> Self {
         if let Some(entry_id) = edit.flushed_entry_id {
@@ -484,6 +526,9 @@ impl VersionBuilder {
         }
         if let Some(window) = edit.compaction_time_window {
             self.compaction_time_window = Some(window);
+        }
+        if let Some(pending_tails) = edit.wal_recovery.pending_tails {
+            self.pending_tails = pending_tails;
         }
         if !edit.files_to_add.is_empty() || !edit.files_to_remove.is_empty() {
             let mut ssts = (*self.ssts).clone();
@@ -558,6 +603,65 @@ impl VersionBuilder {
             truncated_entry_id: self.truncated_entry_id,
             compaction_time_window,
             options: self.options,
+            pending_tails: self.pending_tails,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_util::version_util::VersionControlBuilder;
+
+    #[test]
+    fn test_sequence_watermarks_are_monotonic() {
+        let builder = VersionControlBuilder::new();
+        let mut version = builder.build_version();
+        version.flushed_sequence = 8;
+        version.flushed_entry_id = 4;
+        let vc = VersionControl::new(version);
+        assert_eq!(
+            (vc.current().last_sequence, vc.committed_sequence()),
+            (8, 8)
+        );
+
+        vc.update_last_sequence(20);
+        vc.update_last_sequence(9);
+        vc.set_committed_sequence(10);
+        vc.set_committed_sequence(9);
+        assert_eq!(
+            (vc.current().last_sequence, vc.committed_sequence()),
+            (20, 10)
+        );
+        assert_eq!(vc.current().last_entry_id, 4);
+        vc.set_sequence_and_entry_id(12, 5);
+        vc.set_sequence_and_entry_id(4, 6);
+        assert_eq!(
+            (vc.current().last_sequence, vc.committed_sequence()),
+            (20, 12)
+        );
+        assert_eq!(vc.current().version.flushed_sequence, 8);
+
+        for sequence in [25, 11] {
+            vc.apply_edit(
+                Some(RegionEdit {
+                    files_to_add: vec![],
+                    files_to_remove: vec![],
+                    timestamp_ms: None,
+                    compaction_time_window: None,
+                    flushed_entry_id: None,
+                    flushed_sequence: None,
+                    committed_sequence: Some(sequence),
+                    wal_recovery: Default::default(),
+                }),
+                &[],
+                builder.file_purger(),
+            );
+            assert_eq!(
+                (vc.current().last_sequence, vc.committed_sequence()),
+                (25, 25)
+            );
+            assert_eq!(vc.current().last_entry_id, 6);
         }
     }
 }

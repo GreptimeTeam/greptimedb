@@ -33,7 +33,9 @@ use tonic::{Request, Response, Status, Streaming};
 
 use crate::error;
 use crate::grpc::context_auth;
+use crate::grpc::memory_limit::PreDecodeMemoryReservation;
 use crate::query_handler::{MetricsIngestOutcome, OpenTelemetryProtocolHandlerRef};
+use crate::request_memory_limiter::ServerMemoryLimiter;
 
 const EXPONENTIAL_HISTOGRAM_UNSUPPORTED: &str = "OTel Arrow exponential histograms are unsupported because the Arrow wire format omits zero_threshold";
 
@@ -120,6 +122,8 @@ impl ArrowMetricsService for OtelArrowServiceHandler<OpenTelemetryProtocolHandle
         };
 
         let handler = self.handler.clone();
+        let memory_limiter = extensions.get::<ServerMemoryLimiter>().cloned();
+        let decode_reservation = extensions.get::<PreDecodeMemoryReservation>().cloned();
 
         // handles incoming requests
         common_runtime::spawn_global(async move {
@@ -159,7 +163,16 @@ impl ArrowMetricsService for OtelArrowServiceHandler<OpenTelemetryProtocolHandle
                 };
                 let has_exponential_histogram_data_points =
                     remove_exponential_histograms(&mut request);
-                let outcome = match handler.metrics(request, query_ctx.clone()).await {
+                let memory_limiter = memory_limiter.clone().map(|limiter| {
+                    let held_bytes = decode_reservation
+                        .as_ref()
+                        .map_or(0, PreDecodeMemoryReservation::reserved_bytes);
+                    (limiter, held_bytes)
+                });
+                let outcome = match handler
+                    .metrics(request, query_ctx.clone(), memory_limiter)
+                    .await
+                {
                     Ok(outcome) => outcome,
                     Err(error::Error::InvalidOtlpMetricInput { reason }) => {
                         let _ = sender

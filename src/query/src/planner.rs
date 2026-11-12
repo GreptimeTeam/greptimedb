@@ -51,7 +51,6 @@ use sql::statements::tql::Tql;
 use sqlparser::ast::{AccessExpr, Value, visit_expressions_mut};
 use store_api::metric_engine_consts::DATA_SCHEMA_TSID_COLUMN_NAME;
 
-use crate::datafusion::QUERY_FALLBACK_HINT;
 use crate::dist_plan::DistPlannerOptions;
 use crate::error::{
     CteColumnSchemaMismatchSnafu, PlanSqlSnafu, QueryPlanSnafu, Result, SqlSnafu,
@@ -59,6 +58,7 @@ use crate::error::{
 };
 use crate::log_query::planner::LogQueryPlanner;
 use crate::optimizer::expr_depth;
+use crate::options::ScheduledTimeExtension;
 use crate::parser::{DEFAULT_LOOKBACK_STRING, PromQuery, QueryLanguageParser, QueryStatement};
 use crate::promql::planner::PromPlanner;
 use crate::query_engine::{DefaultPlanDecoder, QueryEngineState};
@@ -381,24 +381,40 @@ impl DfLogicalPlanner {
     /// in the query context.
     fn derive_session_state_with_scheduled_time(
         &self,
-        query_ctx: &QueryContextRef,
-    ) -> Result<SessionState> {
+        query_ctx: QueryContextRef,
+    ) -> Result<QueryEngineContext> {
         let extensions = query_ctx.extensions();
-        match crate::options::parse_scheduled_time_datetime(&extensions)? {
+        let mut state = match crate::options::parse_scheduled_time_datetime(&extensions)? {
             Some(dt) => {
                 let execution_props = self
                     .session_state
                     .execution_props()
                     .clone()
                     .with_query_execution_start_time(dt);
-                Ok(
-                    SessionStateBuilder::new_from_existing(self.session_state.clone())
-                        .with_execution_props(execution_props)
-                        .build(),
-                )
+                SessionStateBuilder::new_from_existing(self.session_state.clone())
+                    .with_execution_props(execution_props)
+                    .build()
             }
-            None => Ok(self.session_state.clone()),
-        }
+            None => self.session_state.clone(),
+        };
+        let query_ctx = self
+            .engine_state
+            .apply_query_options(&mut state, query_ctx)?;
+        state.config_mut().set_extension(query_ctx.clone());
+        state.config_mut().set_extension(self.engine_state.clone());
+        state
+            .config_mut()
+            .options_mut()
+            .extensions
+            .insert(ScheduledTimeExtension {
+                scheduled_time: crate::options::scheduled_time_from_ctx(&query_ctx),
+            });
+        let config_options = state.config_options().clone();
+        let _ = state
+            .execution_props_mut()
+            .config_options
+            .insert(config_options);
+        Ok(QueryEngineContext::new(state, query_ctx))
     }
 
     /// Basically the same with `explain_to_plan` in DataFusion, but adapted to Greptime's
@@ -506,7 +522,9 @@ impl DfLogicalPlanner {
             .fail()?;
         }
 
-        let scheduled_state = self.derive_session_state_with_scheduled_time(&query_ctx)?;
+        let engine_context = self.derive_session_state_with_scheduled_time(query_ctx)?;
+        let scheduled_state = engine_context.state().clone();
+        let query_ctx = engine_context.query_ctx();
         let table_provider = DfTableSourceProvider::new(
             self.engine_state.catalog_manager().clone(),
             self.engine_state.disallow_cross_catalog_query(),
@@ -529,7 +547,7 @@ impl DfLogicalPlanner {
         )
         .await?;
 
-        let config_options = self.session_state.config().options();
+        let config_options = scheduled_state.config().options();
         let parser_options = &config_options.sql_parser;
         let parser_options = ParserOptions {
             map_string_types_to_utf8view: false,
@@ -560,10 +578,9 @@ impl DfLogicalPlanner {
             .await?;
 
         // Optimize logical plan by extension rules
-        let context = QueryEngineContext::new(scheduled_state, query_ctx);
         let plan = self
             .engine_state
-            .optimize_by_extension_rules(plan, &context)?;
+            .optimize_by_extension_rules(plan, &engine_context)?;
         common_telemetry::debug!("Logical planner, optimize result: {plan}");
 
         Ok(plan)
@@ -578,16 +595,17 @@ impl DfLogicalPlanner {
         normalize_ident: bool,
         query_ctx: QueryContextRef,
     ) -> Result<DfExpr> {
-        let scheduled_state = self.derive_session_state_with_scheduled_time(&query_ctx)?;
+        let engine_context = self.derive_session_state_with_scheduled_time(query_ctx)?;
+        let query_ctx = engine_context.query_ctx();
         let context_provider = DfContextProviderAdapter::try_new(
             self.engine_state.clone(),
-            scheduled_state,
+            engine_context.state().clone(),
             None,
             query_ctx,
         )
         .await?;
 
-        let config_options = self.session_state.config().options();
+        let config_options = engine_context.state().config().options();
         let parser_options = &config_options.sql_parser;
         let parser_options: ParserOptions = ParserOptions {
             map_string_types_to_utf8view: false,
@@ -600,6 +618,15 @@ impl DfLogicalPlanner {
         Ok(sql_to_rel.sql_to_expr(sql, schema, &mut PlannerContext::new())?)
     }
 
+    /// Plans a PromQL statement, offering it to the native fused-series route when the statement
+    /// may take it and the state it is planned with asks for it.
+    ///
+    /// `native_route_allowed` states whether the statement may take the route at all: a PromQL
+    /// statement embedded in a CTE may not (see [`Self::tql_to_logical_plan`]), every other one
+    /// may. The remaining switches are read from the state the statement is planned with, after
+    /// `apply_query_options` has resolved the per-query options into it: the fallback option,
+    /// which decides whether a fallback rewriter may wrap the plan, and the engine-wide native
+    /// option together with the per-request native extension.
     #[tracing::instrument(skip_all)]
     async fn plan_pql(
         &self,
@@ -607,21 +634,29 @@ impl DfLogicalPlanner {
         query_ctx: QueryContextRef,
         native_route_allowed: bool,
     ) -> Result<LogicalPlan> {
-        let mut scheduled_state = self.derive_session_state_with_scheduled_time(&query_ctx)?;
-        // Whether the distributed planner may fall back to the fallback plan rewriter. The
-        // execution engine resolves the same three sources the same way: the engine option, which
-        // it copies into the session state it plans with, and then, per query, the session
-        // variable or the `query_fallback` hint. Each source only ever turns the fallback on, so
-        // the value they end up with is the disjunction of them.
+        let engine_context = self.derive_session_state_with_scheduled_time(query_ctx)?;
+        let query_ctx = engine_context.query_ctx();
+        let mut scheduled_state = engine_context.state().clone();
+        // Whether the distributed planner may fall back to the fallback plan rewriter. A fallback
+        // rewriter can wrap a native region scan in an unusable MergeScan, so the native route is
+        // only offered to a query that cannot fall back.
+        //
+        // TODO(narthex-merge): this used to disjoin three sources - the engine option, the session
+        // `allow_query_fallback` variable and the `query_fallback` hint - on the assumption that
+        // each of them only ever turns the fallback on. `apply_query_options` above now resolves
+        // all of them from the query option snapshot into this `DistPlannerOptions` extension,
+        // which is why the read happens here instead. One semantics is kept from main rather than
+        // narthex: a stated `false` overrides the engine default instead of leaving it on.
         let allow_query_fallback = scheduled_state
             .config_options()
             .extensions
             .get::<DistPlannerOptions>()
-            .is_some_and(|options| options.allow_query_fallback)
-            || query_ctx.configuration_parameter().allow_query_fallback()
-            || query_ctx
-                .extension(QUERY_FALLBACK_HINT)
-                .is_some_and(|fallback| fallback.to_lowercase().parse::<bool>().unwrap_or(false));
+            .is_some_and(|options| options.allow_query_fallback);
+        // Whether the statement is offered to the native fused-series compiler. This is the second,
+        // independent switch: the engine-wide option and the per-request extension it is requested
+        // with, and no source of it is derived from the fallback option.
+        let native_promql = self.engine_state.experimental_native_promql()
+            && crate::promql::planner::native::native_promql_requested(&query_ctx);
         let promql_annotations = query_ctx.remote_query_id().map(promql_annotation_collector);
         if let Some(collector) = &promql_annotations {
             scheduled_state
@@ -646,10 +681,7 @@ impl DfLogicalPlanner {
                     .enable_ident_normalization,
             )
         };
-        let native_requested = native_route_allowed
-            && !allow_query_fallback
-            && self.engine_state.experimental_native_promql()
-            && crate::promql::planner::native::native_promql_requested(&query_ctx);
+        let native_requested = native_route_allowed && !allow_query_fallback && native_promql;
         let plan = PromPlanner::stmt_to_plan_with_annotations(
             table_provider(),
             stmt,
@@ -1064,22 +1096,19 @@ impl LogicalPlanner for DfLogicalPlanner {
         query: LogQuery,
         query_ctx: QueryContextRef,
     ) -> Result<LogicalPlan> {
-        let plan_decoder = Arc::new(DefaultPlanDecoder::new(
-            self.session_state.clone(),
-            &query_ctx,
-        )?);
+        let engine_context = self.derive_session_state_with_scheduled_time(query_ctx)?;
+        let query_ctx = engine_context.query_ctx();
+        let state = engine_context.state().clone();
+        let plan_decoder = Arc::new(DefaultPlanDecoder::new(state.clone(), &query_ctx)?);
         let table_provider = DfTableSourceProvider::new(
             self.engine_state.catalog_manager().clone(),
             self.engine_state.disallow_cross_catalog_query(),
             query_ctx,
             plan_decoder,
-            self.session_state
-                .config_options()
-                .sql_parser
-                .enable_ident_normalization,
+            state.config_options().sql_parser.enable_ident_normalization,
         );
 
-        let mut planner = LogQueryPlanner::new(table_provider, self.session_state.clone());
+        let mut planner = LogQueryPlanner::new(table_provider, state);
         planner
             .query_to_plan(query)
             .await
@@ -1338,34 +1367,34 @@ mod tests {
         engine.planner().plan(&stmt, query_ctx).await.unwrap()
     }
 
-    /// Plans `rate(some_metric[5m])` on the fixture above with the fallback sources the caller
-    /// states — the engine option, the session variable and the `query_fallback` hint — while the
-    /// native route is enabled and requested, so only the fallback guard decides.
-    async fn plan_native_promql_with_fallback(
-        engine_fallback: bool,
-        session_fallback: bool,
-        hint: Option<&str>,
-    ) -> String {
+    /// Plans `rate(some_metric[5m])`, which the in-process fixture plans natively, stating the
+    /// query options the caller asks for: the engine-wide defaults, one session `SET` and one
+    /// request extension. These are the sources the planning snapshot resolves, in that order.
+    async fn plan_native_promql_with_query_options(
+        engine_options: crate::options::QueryOptions,
+        session: Option<(&str, &str)>,
+        request: Option<(&str, &str)>,
+    ) -> crate::error::Result<String> {
         let engine = create_promql_test_engine_with(
-            crate::options::QueryOptions {
-                allow_query_fallback: engine_fallback,
-                experimental_native_promql: true,
-                ..Default::default()
-            },
+            engine_options,
             // The native route plans a region input the region server in this process accepts.
             true,
         );
-        // The native route request and the fallback hint both reach the planner as query context
-        // extensions, the way a client sends them.
         let mut builder = QueryContextBuilder::default()
+            // The native route request reaches the planner as a query context extension, the way
+            // a client sends it.
             .set_extension(NATIVE_PROMQL_EXTENSION_KEY.to_string(), "true".to_string());
-        if let Some(hint) = hint {
-            builder = builder.set_extension(QUERY_FALLBACK_HINT.to_string(), hint.to_string());
+        if let Some((key, value)) = request {
+            builder = builder.set_extension(key.to_string(), value.to_string());
         }
+        // The session state a query is sent with, as `SET` leaves it.
         let query_ctx = builder.build();
-        query_ctx
-            .configuration_parameter()
-            .set_allow_query_fallback(session_fallback);
+        if let Some((key, value)) = session {
+            query_ctx
+                .configuration_parameter()
+                .set_query_option(key, value)
+                .unwrap();
+        }
         let query_ctx = Arc::new(query_ctx);
         let stmt = QueryLanguageParser::parse_promql(
             &PromQuery {
@@ -1384,39 +1413,75 @@ mod tests {
             .planner()
             .plan(&stmt, query_ctx)
             .await
-            .unwrap()
-            .display_indent()
-            .to_string()
+            .map(|plan| plan.display_indent().to_string())
     }
 
-    /// The native route is admitted only when the query cannot fall back, and every source the
-    /// execution engine resolves the fallback from decides that at plan time too.
+    /// Plans `rate(some_metric[5m])` with the fallback option the caller states, while the native
+    /// route is on and requested, so only the fallback option decides.
+    async fn plan_native_promql_with_fallback(
+        engine_fallback: bool,
+        session_fallback: Option<bool>,
+        request_fallback: Option<&str>,
+    ) -> crate::error::Result<String> {
+        plan_native_promql_with_query_options(
+            crate::options::QueryOptions {
+                allow_query_fallback: engine_fallback,
+                experimental_native_promql: true,
+                ..Default::default()
+            },
+            session_fallback.map(|value| {
+                (
+                    "query.allow_query_fallback",
+                    if value { "true" } else { "false" },
+                )
+            }),
+            request_fallback.map(|value| (QUERY_FALLBACK_HINT, value)),
+        )
+        .await
+    }
+
+    /// The native route is admitted only when the query cannot fall back, and the fallback option
+    /// resolves from the same snapshot, so a stated value overrides the engine default in both
+    /// directions instead of only ever turning the fallback on.
     #[tokio::test]
     async fn test_plan_pql_declines_native_route_when_query_may_fall_back() {
         // (engine option, session variable, hint, native route admitted)
-        for (engine, session, hint, native) in [
+        for (engine, session, request, native) in [
             // Nothing asks for the fallback, so the route is planned as before.
-            (false, false, None, true),
-            // A hint that does not parse as `true` leaves the fallback off, as it does at execution.
-            (false, false, Some("false"), true),
-            (false, false, Some("yes"), true),
-            // Either per-query source turns the fallback on, so the route is declined.
-            (false, true, None, false),
-            (false, false, Some("true"), false),
-            (false, false, Some("TRUE"), false),
-            // Each source only turns the fallback on: neither a `false` hint nor a `false` session
-            // variable clears the engine option, and a `false` hint does not clear the variable.
-            (true, false, None, false),
-            (true, false, Some("false"), false),
-            (true, true, Some("false"), false),
+            (false, None, None, true),
+            (false, None, Some("false"), true),
+            (false, Some(false), None, true),
+            // A per-query source turns the fallback on, so the route is declined.
+            (false, Some(true), None, false),
+            (false, None, Some("true"), false),
+            (false, None, Some("TRUE"), false),
+            // The engine option is the default: a stated `false` overrides it.
+            (true, None, None, false),
+            (true, None, Some("false"), true),
+            (true, Some(true), Some("false"), true),
+            (true, Some(false), None, true),
         ] {
-            let plan = plan_native_promql_with_fallback(engine, session, hint).await;
+            let plan = plan_native_promql_with_fallback(engine, session, request)
+                .await
+                .unwrap();
             assert_eq!(
                 plan.contains("FusedSeries"),
                 native,
-                "engine={engine}, session={session}, hint={hint:?}: {plan}"
+                "engine={engine}, session={session:?}, request={request:?}: {plan}"
             );
         }
+    }
+
+    /// The fallback hint names a query option, so a value that is not a boolean is rejected instead
+    /// of silently leaving the fallback off.
+    #[tokio::test]
+    async fn test_plan_pql_rejects_a_fallback_hint_that_is_not_a_boolean() {
+        let error = plan_native_promql_with_fallback(false, None, Some("yes"))
+            .await
+            .unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("query_fallback"), "{message}");
+        assert!(message.contains("Expected true or false"), "{message}");
     }
 
     /// Remote native planning accepts independent raw sources only. Unsupported shapes are
@@ -1846,7 +1911,7 @@ mod tests {
             .plan(&stmt, query_ctx.clone())
             .await
             .unwrap();
-        let context = engine.engine_context(query_ctx.clone());
+        let context = engine.engine_context(query_ctx.clone()).unwrap();
         let state = context.state();
         state
             .analyzer()

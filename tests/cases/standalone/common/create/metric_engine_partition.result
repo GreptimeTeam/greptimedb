@@ -98,9 +98,9 @@ show create table logical_table_2;
 |                 |   PRIMARY KEY ("another_partition_key", "host", "one_partition_key")          |
 |                 | )                                                                             |
 |                 | PARTITION ON COLUMNS ("host", "one_partition_key", "another_partition_key") ( |
-|                 |   host <= 'host1',                                                            |
-|                 |   host > 'host1' AND host <= 'host2',                                         |
-|                 |   host > 'host2'                                                              |
+|                 |   "host" <= 'host1',                                                          |
+|                 |   "host" > 'host1' AND "host" <= 'host2',                                     |
+|                 |   "host" > 'host2'                                                            |
 |                 | )                                                                             |
 |                 | ENGINE=metric                                                                 |
 |                 | WITH(                                                                         |
@@ -227,9 +227,9 @@ show create table logical_table_3;
 |                 |   PRIMARY KEY ("a", "another_partition_key", "host", "one_partition_key", "z") |
 |                 | )                                                                              |
 |                 | PARTITION ON COLUMNS ("host", "one_partition_key", "another_partition_key") (  |
-|                 |   host <= 'host1',                                                             |
-|                 |   host > 'host1' AND host <= 'host2',                                          |
-|                 |   host > 'host2'                                                               |
+|                 |   "host" <= 'host1',                                                           |
+|                 |   "host" > 'host1' AND "host" <= 'host2',                                      |
+|                 |   "host" > 'host2'                                                             |
 |                 | )                                                                              |
 |                 | ENGINE=metric                                                                  |
 |                 | WITH(                                                                          |
@@ -319,9 +319,9 @@ show create table logical_table_4;
 |                 |   PRIMARY KEY ("another_partition_key", "host", "one_partition_key")          |
 |                 | )                                                                             |
 |                 | PARTITION ON COLUMNS ("host", "one_partition_key", "another_partition_key") ( |
-|                 |   host <= 'host1',                                                            |
-|                 |   host > 'host1' AND host <= 'host2',                                         |
-|                 |   host > 'host2'                                                              |
+|                 |   "host" <= 'host1',                                                          |
+|                 |   "host" > 'host1' AND "host" <= 'host2',                                     |
+|                 |   "host" > 'host2'                                                            |
 |                 | )                                                                             |
 |                 | ENGINE=metric                                                                 |
 |                 | WITH(                                                                         |

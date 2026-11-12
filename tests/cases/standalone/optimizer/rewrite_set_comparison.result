@@ -58,9 +58,9 @@ EXPLAIN SELECT v FROM sc_t WHERE v > ANY(SELECT v FROM sc_s) ORDER BY v;
 |               |       LeftMark Join:  Filter: sc_t.v > __correlated_sq_2.v IS NULL                                            |
 |               |         Filter: __correlated_sq_1.mark OR NOT __correlated_sq_1.mark AND Boolean(NULL)                        |
 |               |           LeftMark Join:  Filter: sc_t.v > __correlated_sq_1.v IS TRUE                                        |
-|               |             Projection: sc_t.v                                                                                |
-|               |               MergeScan [is_placeholder=false, remote_input=[                                                 |
-|               | TableScan: sc_t                                                                                               |
+|               |             MergeScan [is_placeholder=false, remote_input=[                                                   |
+|               | Projection: sc_t.v                                                                                            |
+|               |   TableScan: sc_t                                                                                             |
 |               | ]]                                                                                                            |
 |               |             MergeScan [is_placeholder=false, remote_input=[                                                   |
 |               | Projection: __correlated_sq_1.v                                                                               |
@@ -81,8 +81,7 @@ EXPLAIN SELECT v FROM sc_t WHERE v > ANY(SELECT v FROM sc_s) ORDER BY v;
 |               |         CoalescePartitionsExec                                                                                |
 |               |           FilterExec: mark@1 OR NOT mark@1 AND NULL                                                           |
 |               |             NestedLoopJoinExec: join_type=LeftMark, filter=(v@0 > v@1) IS NOT DISTINCT FROM true              |
-|               |               ProjectionExec: expr=[v@1 as v]                                                                 |
-|               |                 MergeScanExec: REDACTED
+|               |               MergeScanExec: REDACTED
 |               |               RepartitionExec: partitioning=RoundRobinBatch(4), input_partitions=1                            |
 |               |                 MergeScanExec: REDACTED
 |               |         RepartitionExec: partitioning=RoundRobinBatch(4), input_partitions=1                                  |
@@ -113,9 +112,9 @@ EXPLAIN SELECT v FROM sc_t WHERE v != ALL(SELECT v FROM sc_s) ORDER BY v;
 |               |         Projection: sc_t.v                                                                         |
 |               |           Filter: NOT __correlated_sq_1.mark                                                       |
 |               |             LeftMark Join:  Filter: sc_t.v != __correlated_sq_1.v IS FALSE                         |
-|               |               Projection: sc_t.v                                                                   |
-|               |                 MergeScan [is_placeholder=false, remote_input=[                                    |
-|               | TableScan: sc_t                                                                                    |
+|               |               MergeScan [is_placeholder=false, remote_input=[                                      |
+|               | Projection: sc_t.v                                                                                 |
+|               |   TableScan: sc_t                                                                                  |
 |               | ]]                                                                                                 |
 |               |               MergeScan [is_placeholder=false, remote_input=[                                      |
 |               | Projection: __correlated_sq_1.v                                                                    |
@@ -136,8 +135,7 @@ EXPLAIN SELECT v FROM sc_t WHERE v != ALL(SELECT v FROM sc_s) ORDER BY v;
 |               |         CoalescePartitionsExec                                                                     |
 |               |           FilterExec: NOT mark@1, projection=[v@0]                                                 |
 |               |             NestedLoopJoinExec: join_type=LeftMark, filter=(v@0 != v@1) IS NOT DISTINCT FROM false |
-|               |               ProjectionExec: expr=[v@1 as v]                                                      |
-|               |                 MergeScanExec: REDACTED
+|               |               MergeScanExec: REDACTED
 |               |               RepartitionExec: partitioning=RoundRobinBatch(4), input_partitions=1                 |
 |               |                 MergeScanExec: REDACTED
 |               |         RepartitionExec: partitioning=RoundRobinBatch(4), input_partitions=1                       |

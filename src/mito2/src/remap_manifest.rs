@@ -116,6 +116,8 @@ impl RemapManifest {
                 compaction_time_window: None,
                 sst_format,
                 append_mode: None,
+                pending_tails: Default::default(),
+                handoff_floors: Default::default(),
             };
 
             new_manifests.insert(*region_id, manifest);
@@ -467,6 +469,8 @@ mod tests {
             committed_sequence: None,
             sst_format: FormatType::PrimaryKey,
             append_mode: None,
+            pending_tails: Default::default(),
+            handoff_floors: Default::default(),
         }
     }
 

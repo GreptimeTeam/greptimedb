@@ -30,7 +30,7 @@ use crate::compaction::last_non_null::inputs_precede_memtables;
 use crate::compaction::picker::{Picker, PickerOutput, get_expired_ssts};
 use crate::error::{JoinSnafu, Result};
 use crate::region::options::{CompactionOptions, MergeMode};
-use crate::sst::file::FileHandle;
+use crate::sst::file::{self, FileHandle};
 
 /// Compaction picker that splits input files into disjoint time windows and merges the
 /// segments within each window. Outputs may be split further by the configured file size
@@ -115,7 +115,9 @@ impl WindowedCompactionPicker {
                 .iter()
                 .flat_map(|level| level.files.values())
                 .filter(|file| !expired_file_ids.contains(&file.file_id()))
-                .filter(|file| last_non_null || !file.compacting()),
+                .filter(|file| {
+                    last_non_null || (!file.compacting() && file.level() < file::LEVEL_SHARED)
+                }),
         );
         let windows = filter_time_windows(windows, self.time_range);
 
@@ -123,7 +125,9 @@ impl WindowedCompactionPicker {
         // would remove that SST without rewriting all its remaining segments.
         if last_non_null
             && windows.values().any(|(_, inputs)| {
-                inputs.iter().any(FileHandle::compacting)
+                inputs
+                    .iter()
+                    .any(|file| file.compacting() || file.level() == file::LEVEL_SHARED)
                     || !inputs_precede_memtables(inputs, current_version.memtable_min_sequence)
             })
         {
@@ -356,6 +360,7 @@ mod tests {
                 auto_flush_interval: None,
                 compaction: Default::default(),
                 compaction_override: false,
+                compaction_output_parallelism: None,
                 storage: None,
                 append_mode: false,
                 skip_wal: false,

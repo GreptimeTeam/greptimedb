@@ -33,7 +33,7 @@ use datafusion::functions_nested::expr_fn::make_array;
 use datafusion::prelude::SessionContext;
 use datafusion_common::tree_node::TreeNodeRecursion;
 use datafusion_common::{ExprSchema, JoinType, ScalarValue, TableReference};
-use datafusion_expr::expr::{Exists, ScalarFunction};
+use datafusion_expr::expr::{Exists, NullTreatment, ScalarFunction};
 use datafusion_expr::utils::split_conjunction;
 use datafusion_expr::{
     AggregateUDF, Expr, ExprSchemable as _, Extension, LogicalPlanBuilder, Operator, Subquery,
@@ -63,6 +63,7 @@ use table::table::numbers::NumbersTable;
 use table::{Table, TableRef};
 
 use super::*;
+use crate::optimizer::count_wildcard::CountWildcardToTimeIndexRule;
 
 fn collect_merge_scan_remote_dyn_filter_producer_ids(
     plan: &LogicalPlan,
@@ -886,6 +887,72 @@ fn dictionary_literals_in_values_keep_their_schema() {
             .to_string()
             .contains("Dictionary(UInt32, Utf8(\"host-a\"))")
     );
+}
+
+#[test]
+fn like_filters_are_pushed_down() {
+    let test_table = TestTable::table_with_name(0, "t".to_string());
+    let table_provider = Arc::new(DfTableProviderAdapter::new(test_table));
+    let table_source = Arc::new(DefaultTableSource::new(table_provider.clone() as _));
+    let ctx = SessionContext::new();
+    ctx.register_table(TableReference::bare("t"), table_provider as _)
+        .unwrap();
+
+    let like = |negated, pattern: &str, escape_char, case_insensitive| {
+        Expr::Like(datafusion_expr::expr::Like::new(
+            negated,
+            Box::new(col("t.pk1")),
+            Box::new(lit(pattern.to_string())),
+            escape_char,
+            case_insensitive,
+        ))
+    };
+    // Substrait has no negated LIKE, so `NOT LIKE` comes back as `NOT (.. LIKE ..)`.
+    for (predicate, decoded) in [
+        (
+            like(false, "% timeout %", None, false),
+            like(false, "% timeout %", None, false),
+        ),
+        (
+            like(true, "% timeout %", None, false),
+            Expr::Not(Box::new(like(false, "% timeout %", None, false))),
+        ),
+        (
+            like(false, "% timeout %", None, true),
+            like(false, "% timeout %", None, true),
+        ),
+        (
+            like(false, "100!% done", Some('!'), false),
+            like(false, "100!% done", Some('!'), false),
+        ),
+    ] {
+        let plan = LogicalPlanBuilder::scan_with_filters("t", table_source.clone(), None, vec![])
+            .unwrap()
+            .filter(predicate.clone())
+            .unwrap()
+            .build()
+            .unwrap();
+
+        let result = DistPlannerAnalyzer::default()
+            .analyze(plan, &ConfigOptions::default())
+            .unwrap();
+        let remote_input = find_merge_scan(&result).unwrap().input();
+        assert!(
+            has_filter_above_table_scan(remote_input, "t", &predicate),
+            "{result}"
+        );
+
+        let bytes = DFLogicalSubstraitConvertor
+            .encode(remote_input, DefaultSerializer)
+            .unwrap();
+        let decoded_plan =
+            futures::executor::block_on(DFLogicalSubstraitConvertor.decode(bytes, ctx.state()))
+                .unwrap();
+        assert!(
+            has_filter_above_table_scan(&decoded_plan, "t", &decoded),
+            "{decoded_plan}"
+        );
+    }
 }
 
 fn try_encode_decode_substrait(plan: &LogicalPlan, state: SessionState) {
@@ -1990,6 +2057,116 @@ fn sibling_merge_scans_have_unique_remote_dyn_filter_producer_ids() {
     );
 }
 
+#[tokio::test]
+async fn having_bound_reaches_remote_scan_before_aggregate_splitting() {
+    for pushdown in [FilterPushDownType::Inexact, FilterPushDownType::Exact] {
+        let table = TestTable::table_with_filter_pushdown(0, "t".to_string(), pushdown);
+        let ctx = SessionContext::new();
+        ctx.register_table("t", Arc::new(DfTableProviderAdapter::new(table)))
+            .unwrap();
+        // Both region-local groups and groups requiring coordinator aggregation
+        // must receive the bound before MIN/SUM become state aggregates.
+        for group_by in ["pk1, pk2", "pk3"] {
+            let sql = format!(
+                "SELECT {group_by}, MIN(CAST(ts AS BIGINT)) FROM t GROUP BY {group_by}
+                 HAVING SUM(CASE WHEN number > 0 AND CAST(ts AS BIGINT) >= 10
+                     AND CAST(ts AS BIGINT) < 20 THEN 1 ELSE 0 END) > 0"
+            );
+            let state = ctx.state();
+            let plan = state.create_logical_plan(&sql).await.unwrap();
+            let plan = state
+                .analyzer()
+                .execute_and_check(plan, state.config_options(), |_, _| {})
+                .unwrap();
+            let planned = DistPlannerAnalyzer::default()
+                .analyze(plan, state.config_options())
+                .unwrap();
+            let remote = find_merge_scan_for_table(&planned, "t").unwrap().input();
+            let scan = find_table_scan(remote, "t").unwrap();
+            let bound = datafusion_expr::cast(col("t.ts"), DataType::Int64).lt(lit(20_i64));
+            assert!(scan.filters.contains(&bound), "{planned}");
+            assert!(
+                planned.to_string().contains("> Int64(0)"),
+                "HAVING must remain: {planned}"
+            );
+            assert_remote_table_scan_filters_are_safe(&planned);
+        }
+    }
+}
+
+#[tokio::test]
+async fn frontend_having_does_not_reinfer_remote_bounds() {
+    let ctx = SessionContext::new();
+    for (id, name) in [(0, "t"), (1, "u")] {
+        let table = TestTable::table_with_filter_pushdown(
+            id,
+            name.to_string(),
+            FilterPushDownType::Inexact,
+        );
+        ctx.register_table(name, Arc::new(DfTableProviderAdapter::new(table)))
+            .unwrap();
+    }
+    for source in [
+        "SELECT t.pk3, t.ts, t.number FROM t JOIN u ON t.pk1 = u.pk1",
+        "SELECT pk3, ts, number FROM t UNION ALL SELECT pk3, ts, number FROM u",
+    ] {
+        let sql = format!(
+            "SELECT s.pk3, MIN(CAST(s.ts AS BIGINT)) FROM ({source}) s
+            GROUP BY s.pk3 HAVING SUM(CASE WHEN s.number > 0 AND CAST(s.ts AS BIGINT) < 20
+            THEN 1 ELSE 0 END) > 0"
+        );
+        let state = ctx.state();
+        let plan = state.create_logical_plan(&sql).await.unwrap();
+        let plan = state
+            .analyzer()
+            .execute_and_check(plan, state.config_options(), |_, _| {})
+            .unwrap();
+        let planned = DistPlannerAnalyzer::default()
+            .analyze(plan, state.config_options())
+            .unwrap();
+        let remote = find_merge_scan_for_table(&planned, "t").unwrap().input();
+        let scan = find_table_scan(remote, "t").unwrap();
+        let bound = datafusion_expr::cast(col("t.ts"), DataType::Int64).lt(lit(20_i64));
+        assert!(scan.filters.contains(&bound), "{planned}");
+
+        let config = datafusion_optimizer::OptimizerContext::new();
+        let rule_only = Optimizer::with_rules(vec![Arc::new(InferAggregateInputBoundsRule)]);
+        assert_eq!(
+            planned,
+            rule_only
+                .optimize(planned.clone(), &config, |_, _| {})
+                .unwrap()
+        );
+
+        let mut optimizer = Optimizer::new();
+        let index = optimizer
+            .rules
+            .iter()
+            .position(|rule| rule.name() == "push_down_filter")
+            .unwrap();
+        optimizer
+            .rules
+            .insert(index, Arc::new(InferAggregateInputBoundsRule));
+        let optimized = optimizer.optimize(planned, &config, |_, _| {}).unwrap();
+        // MergeScan hides remote filters from this walk. Only HAVING should
+        // remain on the frontend, not another copy of the input bound.
+        let mut filters = 0;
+        optimized
+            .apply(|plan| {
+                filters += usize::from(matches!(plan, LogicalPlan::Filter(_)));
+                Ok(TreeNodeRecursion::Continue)
+            })
+            .unwrap();
+        assert_eq!(1, filters, "{optimized}");
+        assert_eq!(
+            optimized,
+            optimizer
+                .optimize(optimized.clone(), &config, |_, _| {})
+                .unwrap()
+        );
+    }
+}
+
 #[test]
 fn pre_merge_scan_optimizer_eliminates_projected_false_filter() {
     init_default_ut_logging();
@@ -2237,6 +2414,102 @@ fn expand_step_aggr_avg_limit() {
         "    Aggregate: groupBy=[[t.pk1]], aggr=[[__avg_merge(__avg_state(t.number)) AS avg(t.number)]]",
         "      MergeScan [is_placeholder=false, remote_input=[",
         "Aggregate: groupBy=[[t.pk1]], aggr=[[__avg_state(CAST(t.number AS Float64))]]",
+        "  TableScan: t",
+        "]]",
+    ]
+    .join("\n");
+    assert_eq!(expected, result.to_string());
+}
+
+/// `count(*)` and `count(1)` are rewritten to `count(ts)` with their names preserved, so
+/// all three share one state expression and must share one state column.
+#[test]
+fn expand_step_aggr_count_wildcard_and_time_index() {
+    init_default_ut_logging();
+    let test_table = TestTable::table_with_name(0, "t".to_string());
+    let table_source = Arc::new(DefaultTableSource::new(Arc::new(
+        DfTableProviderAdapter::new(test_table),
+    )));
+    let plan = LogicalPlanBuilder::scan_with_filters("t", table_source, None, vec![])
+        .unwrap()
+        .aggregate(
+            Vec::<Expr>::new(),
+            vec![
+                datafusion::functions_aggregate::count::count_all(),
+                datafusion::functions_aggregate::expr_fn::count(lit(1i64)),
+                datafusion::functions_aggregate::expr_fn::count(col("ts")),
+            ],
+        )
+        .unwrap()
+        .project(vec![
+            col("count(*)").alias("a"),
+            col("count(Int64(1))"),
+            col("count(t.ts)").alias("b"),
+        ])
+        .unwrap()
+        .build()
+        .unwrap();
+
+    let config = ConfigOptions::default();
+    let plan = CountWildcardToTimeIndexRule.analyze(plan, &config).unwrap();
+    let result = DistPlannerAnalyzer::default()
+        .analyze(plan, &config)
+        .unwrap();
+    let expected = [
+        "Projection: count(*) AS a, count(Int64(1)), count(t.ts) AS b",
+        "  Projection: count(*), count(Int64(1)), count(t.ts)",
+        "    Aggregate: groupBy=[[]], aggr=[[__count_merge(__count_state(t.ts)) AS count(*), __count_merge(__count_state(t.ts)) AS count(Int64(1)), __count_merge(__count_state(t.ts)) AS count(t.ts)]]",
+        "      MergeScan [is_placeholder=false, remote_input=[",
+        "Aggregate: groupBy=[[]], aggr=[[__count_state(t.ts)]]",
+        "  TableScan: t",
+        "]]",
+    ]
+    .join("\n");
+    assert_eq!(expected, result.to_string());
+}
+
+/// After the `count(*)` rewrite, `count(ts)` and the casts of `ts` are different states with
+/// the same schema name, as schema names hide casts. The output alias `t.ts` and the second
+/// cast make sure a renamed state never takes a name that is already allocated.
+#[test]
+fn expand_step_aggr_count_wildcard_and_cast_time_index() {
+    init_default_ut_logging();
+    let test_table = TestTable::table_with_name(0, "t".to_string());
+    let table_source = Arc::new(DefaultTableSource::new(Arc::new(
+        DfTableProviderAdapter::new(test_table),
+    )));
+    let plan = LogicalPlanBuilder::scan_with_filters("t", table_source, None, vec![])
+        .unwrap()
+        .aggregate(
+            Vec::<Expr>::new(),
+            vec![
+                datafusion::functions_aggregate::count::count_all(),
+                datafusion::functions_aggregate::expr_fn::count(datafusion_expr::cast(
+                    col("ts"),
+                    DataType::Int64,
+                ))
+                .alias("t.ts"),
+                datafusion::functions_aggregate::expr_fn::count(datafusion_expr::cast(
+                    col("ts"),
+                    DataType::Utf8,
+                ))
+                .alias("c"),
+            ],
+        )
+        .unwrap()
+        .build()
+        .unwrap();
+
+    let config = ConfigOptions::default();
+    let plan = CountWildcardToTimeIndexRule.analyze(plan, &config).unwrap();
+    let result = DistPlannerAnalyzer::default()
+        .analyze(plan, &config)
+        .unwrap();
+    let expected = [
+        "Projection: count(*), t.ts, c",
+        "  Aggregate: groupBy=[[]], aggr=[[__count_merge(__count_state(t.ts)) AS count(*), __count_merge(__count_state(t.ts)_1) AS t.ts, __count_merge(__count_state(t.ts)_2) AS c]]",
+        "    MergeScan [is_placeholder=false, remote_input=[",
+        "Aggregate: groupBy=[[]], aggr=[[__count_state(t.ts), __count_state(CAST(t.ts AS Int64)) AS __count_state(t.ts)_1, __count_state(CAST(t.ts AS Utf8)) AS __count_state(t.ts)_2]]",
         "  TableScan: t",
         "]]",
     ]
@@ -2570,6 +2843,75 @@ fn date_bin_ts_group_by() {
     ]
     .join("\n");
     assert_eq!(expected, result.to_string());
+}
+
+#[test]
+fn ignore_nulls_aggregate_stays_on_frontend() {
+    use datafusion::functions_aggregate::first_last::last_value;
+
+    let table = TestTable::table_with_name(0, "t".to_string());
+    let source = Arc::new(DefaultTableSource::new(Arc::new(
+        DfTableProviderAdapter::new(table),
+    )));
+    let input = LogicalPlanBuilder::scan_with_filters("t", source, None, vec![])
+        .unwrap()
+        .build()
+        .unwrap();
+    for (group_by, null_treatment) in [
+        (
+            vec![col("pk1"), col("pk2")],
+            Some(NullTreatment::IgnoreNulls),
+        ),
+        (vec![col("number")], Some(NullTreatment::IgnoreNulls)),
+        (vec![col("pk1"), col("pk2")], None),
+        (
+            vec![col("pk1"), col("pk2")],
+            Some(NullTreatment::RespectNulls),
+        ),
+    ] {
+        let mut ignored = last_value(col("number"), vec![]);
+        let Expr::AggregateFunction(func) = &mut ignored else {
+            panic!("expected aggregate expression");
+        };
+        func.params.null_treatment = null_treatment;
+        let aggregate_exprs = if null_treatment == Some(NullTreatment::IgnoreNulls) {
+            let mut ordinary = last_value(col("number"), vec![]);
+            let Expr::AggregateFunction(func) = &mut ordinary else {
+                panic!("expected aggregate expression");
+            };
+            func.params.null_treatment = None;
+            vec![ordinary.alias("ordinary"), ignored.alias("ignored")]
+        } else {
+            vec![ignored]
+        };
+        let plan = LogicalPlanBuilder::from(input.clone())
+            .aggregate(group_by, aggregate_exprs)
+            .unwrap()
+            .build()
+            .unwrap();
+        let analyzed = DistPlannerAnalyzer::default()
+            .analyze(plan.clone(), &ConfigOptions::default())
+            .unwrap();
+        if null_treatment == Some(NullTreatment::IgnoreNulls) {
+            let LogicalPlan::Aggregate(aggregate) = &analyzed else {
+                panic!("IGNORE NULLS aggregate must remain on the frontend: {analyzed}");
+            };
+            let remote_input = find_merge_scan(&analyzed).unwrap().input();
+            assert!(
+                !matches!(remote_input, LogicalPlan::Aggregate(_)),
+                "remote input contains aggregate: {remote_input}"
+            );
+            let Some(func) =
+                common_function::aggrs::aggr_wrapper::get_aggr_func(&aggregate.aggr_expr[1])
+            else {
+                unreachable!();
+            };
+            assert_eq!(Some(NullTreatment::IgnoreNulls), func.params.null_treatment);
+        } else {
+            let remote_input = find_merge_scan(&analyzed).unwrap().input();
+            assert!(matches!(remote_input, LogicalPlan::Aggregate(_)));
+        }
+    }
 }
 
 #[test]

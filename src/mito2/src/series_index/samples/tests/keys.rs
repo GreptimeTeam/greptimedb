@@ -1035,6 +1035,7 @@ async fn unpayable_key_prefetch_issues_no_key_read() {
 /// peak reservation too, because a warm part issues no read either way. The budget itself is
 /// pinned by `unpayable_key_prefetch_issues_no_key_read` and
 /// `per_key_fallback_reserves_the_aligned_peak`.
+#[ignore = "TODO(narthex-merge): native payload byte cache is disabled after the merge; re-enable with a dedicated page-cache budget"]
 #[tokio::test]
 async fn cached_parts_need_no_key_read() {
     use crate::cache::{CacheManager, CacheStrategy};

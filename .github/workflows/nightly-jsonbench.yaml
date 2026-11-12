@@ -112,6 +112,8 @@ jobs:
         id: start-linux-runner
         with:
           runner: ${{ vars.LARGE_IOPS_RUNNER }}
+          # Database data, WAL, and compaction files use the root volume.
+          ec2-volume-size: "500"
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ vars.EC2_RUNNER_REGION }}

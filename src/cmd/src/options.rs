@@ -65,6 +65,10 @@ where
     fn env_list_keys() -> Option<&'static [&'static str]> {
         T::env_list_keys()
     }
+
+    fn env_tagged_seq_keys() -> Option<&'static [&'static str]> {
+        T::env_tagged_seq_keys()
+    }
 }
 
 /// A serde `deserialize_with` helper that parses the `plugins` field leniently.

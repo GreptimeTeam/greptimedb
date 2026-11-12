@@ -19,7 +19,7 @@ pub mod flow_state;
 mod flownode_addr_helper;
 pub(crate) mod flownode_flow;
 pub(crate) mod table_flow;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::ops::Deref;
 use std::sync::Arc;
 
@@ -42,7 +42,7 @@ pub use crate::key::flow::table_flow::{TableFlowManager, TableFlowManagerRef};
 use crate::key::txn_helper::TxnOpGetResponseSet;
 use crate::key::{DeserializedValueWithBytes, FlowId, FlowPartitionId, MetadataKey};
 use crate::kv_backend::KvBackendRef;
-use crate::kv_backend::txn::Txn;
+use crate::kv_backend::txn::{Txn, TxnOp};
 use crate::rpc::store::BatchDeleteRequest;
 
 pub const FLOW_KEY_PREFIX: &str = "__flow";
@@ -132,6 +132,31 @@ impl<'a, T: MetadataKey<'a, T>> MetadataKey<'a, FlowScoped<T>> for FlowScoped<T>
         let inner = T::from_bytes(&bytes[prefix.len()..])?;
         Ok(FlowScoped { inner })
     }
+}
+
+/// Builds txn ops that replace the `old_keys` with the `new_kvs`.
+///
+/// Only deletes the old keys absent from `new_kvs`: etcd rejects a txn that
+/// writes the same key more than once ("duplicate key given in txn request").
+fn build_replace_ops(
+    old_keys: impl IntoIterator<Item = Vec<u8>>,
+    new_kvs: Vec<(Vec<u8>, Vec<u8>)>,
+) -> Vec<TxnOp> {
+    let new_keys = new_kvs
+        .iter()
+        .map(|(key, _)| key.as_slice())
+        .collect::<HashSet<_>>();
+    let mut ops = old_keys
+        .into_iter()
+        .filter(|key| !new_keys.contains(key.as_slice()))
+        .map(TxnOp::Delete)
+        .collect::<Vec<_>>();
+    ops.extend(
+        new_kvs
+            .into_iter()
+            .map(|(key, value)| TxnOp::Put(key, value)),
+    );
+    ops
 }
 
 pub type FlowMetadataManagerRef = Arc<FlowMetadataManager>;
@@ -456,6 +481,7 @@ mod tests {
     use futures::TryStreamExt;
     use table::metadata::TableId;
     use table::table_name::TableName;
+    use uuid::Uuid;
 
     use super::*;
     use crate::FlownodeId;
@@ -463,8 +489,10 @@ mod tests {
     use crate::key::flow::table_flow::TableFlowKey;
     use crate::key::node_address::{NodeAddressKey, NodeAddressValue};
     use crate::key::{FlowPartitionId, MetadataValue};
-    use crate::kv_backend::KvBackend;
+    use crate::kv_backend::chroot::ChrootKvBackend;
+    use crate::kv_backend::etcd::EtcdStore;
     use crate::kv_backend::memory::MemoryKvBackend;
+    use crate::kv_backend::{KvBackend, KvBackendRef};
     use crate::peer::Peer;
     use crate::rpc::store::PutRequest;
 
@@ -1188,5 +1216,152 @@ mod tests {
             "error: {:?}",
             err
         );
+    }
+
+    #[test]
+    fn test_build_replace_ops() {
+        let ops = build_replace_ops(
+            vec![b"a".to_vec(), b"b".to_vec()],
+            vec![
+                (b"b".to_vec(), b"1".to_vec()),
+                (b"c".to_vec(), b"2".to_vec()),
+            ],
+        );
+        assert_eq!(
+            ops,
+            vec![
+                TxnOp::Delete(b"a".to_vec()),
+                TxnOp::Put(b"b".to_vec(), b"1".to_vec()),
+                TxnOp::Put(b"c".to_vec(), b"2".to_vec()),
+            ]
+        );
+    }
+
+    /// Returns an etcd backend isolated by a chroot if `GT_ETCD_ENDPOINTS` is set,
+    /// because only etcd rejects txns that write the same key more than once.
+    async fn build_kv_backend() -> KvBackendRef {
+        let endpoints = std::env::var("GT_ETCD_ENDPOINTS").unwrap_or_default();
+        if endpoints.is_empty() {
+            return Arc::new(MemoryKvBackend::default());
+        }
+        let endpoints = endpoints.split(',').collect::<Vec<_>>();
+        let backend = EtcdStore::with_endpoints(endpoints, 128).await.unwrap();
+        let chroot = format!("test_update_flow_metadata/{}/", Uuid::new_v4());
+        Arc::new(ChrootKvBackend::new(chroot.into(), backend))
+    }
+
+    async fn assert_flow_metadata(
+        manager: &FlowMetadataManager,
+        flow_id: FlowId,
+        flow_info: &FlowInfoValue,
+    ) {
+        let got = manager.flow_info_manager().get(flow_id).await.unwrap();
+        assert_eq!(got.as_ref(), Some(flow_info));
+
+        let routes = manager.flow_route_manager().routes(flow_id).await.unwrap();
+        let expected_routes = flow_info
+            .flownode_ids()
+            .iter()
+            .map(|(partition_id, flownode_id)| {
+                (
+                    FlowRouteKey::new(flow_id, *partition_id),
+                    FlowRouteValue {
+                        peer: Peer::empty(*flownode_id),
+                    },
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(routes, expected_routes);
+
+        for flownode_id in 1..=4 {
+            let flows = manager
+                .flownode_flow_manager()
+                .flows(flownode_id)
+                .try_collect::<Vec<_>>()
+                .await
+                .unwrap();
+            let expected = flow_info
+                .flownode_ids()
+                .iter()
+                .filter(|(_, id)| **id == flownode_id)
+                .map(|(partition_id, _)| (flow_id, *partition_id))
+                .collect::<Vec<_>>();
+            assert_eq!(flows, expected, "flownode {flownode_id}");
+        }
+
+        for table_id in 1024..=1027 {
+            let flows = manager
+                .table_flow_manager()
+                .flows(table_id)
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|(key, _)| (key.flownode_id(), key.partition_id()))
+                .collect::<Vec<_>>();
+            let expected = if flow_info.source_table_ids().contains(&table_id) {
+                flow_info
+                    .flownode_ids()
+                    .iter()
+                    .map(|(partition_id, flownode_id)| (*flownode_id, *partition_id))
+                    .collect()
+            } else {
+                vec![]
+            };
+            assert_eq!(flows, expected, "table {table_id}");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_update_flow_metadata_with_overlapping_keys() {
+        let flow_metadata_manager = FlowMetadataManager::new(build_kv_backend().await);
+        let flow_id = 10;
+        let to_routes = |flow_info: &FlowInfoValue| {
+            flow_info
+                .flownode_ids()
+                .iter()
+                .map(|(partition_id, flownode_id)| {
+                    (
+                        *partition_id,
+                        FlowRouteValue {
+                            peer: Peer::empty(*flownode_id),
+                        },
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+
+        let mut current =
+            test_flow_info_value("flow", [(0, 1u64), (1, 2u64)].into(), vec![1024, 1025]);
+        flow_metadata_manager
+            .create_flow_metadata(flow_id, current.clone(), to_routes(&current))
+            .await
+            .unwrap();
+        assert_flow_metadata(&flow_metadata_manager, flow_id, &current).await;
+
+        let updates = [
+            // Unchanged partitions, flownodes and source tables.
+            ([(0, 1u64), (1, 2u64)].into(), vec![1024, 1025]),
+            // Partially overlapping flownodes and source tables.
+            ([(0, 1u64), (1, 3u64)].into(), vec![1025, 1026]),
+            // Fully changed partitions, flownodes and source tables.
+            ([(2, 4u64)].into(), vec![1027]),
+        ];
+        for (i, (flownode_ids, source_table_ids)) in updates.into_iter().enumerate() {
+            let mut new_flow_info = current.clone();
+            new_flow_info.raw_sql = format!("update {i}");
+            new_flow_info.flownode_ids = flownode_ids;
+            new_flow_info.source_table_ids = source_table_ids;
+            flow_metadata_manager
+                .update_flow_metadata(
+                    flow_id,
+                    &DeserializedValueWithBytes::from_inner(current.clone()),
+                    &new_flow_info,
+                    to_routes(&new_flow_info),
+                )
+                .await
+                .unwrap();
+            assert_flow_metadata(&flow_metadata_manager, flow_id, &new_flow_info).await;
+            current = new_flow_info;
+        }
     }
 }

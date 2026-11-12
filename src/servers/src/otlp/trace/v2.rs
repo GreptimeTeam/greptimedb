@@ -91,13 +91,13 @@ impl FixedTraceColumnIndexes {
             })?,
             span_attributes: writer.ensure_column(row_writer::build_json2_column_schema(
                 SPAN_ATTRIBUTES_COLUMN,
-            ))?,
+            )?)?,
             scope_attributes: writer.ensure_column(row_writer::build_json2_column_schema(
                 SCOPE_ATTRIBUTES_COLUMN,
-            ))?,
+            )?)?,
             resource_attributes: writer.ensure_column(row_writer::build_json2_column_schema(
                 RESOURCE_ATTRIBUTES_COLUMN,
-            ))?,
+            )?)?,
             span_events: writer
                 .ensure_column(row_writer::build_json_column_schema(SPAN_EVENTS_COLUMN))?,
             span_links: writer

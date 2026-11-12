@@ -22,7 +22,8 @@ use datatypes::arrow::datatypes::{DataType, Field, Schema, TimeUnit};
 use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::value::Value;
 use partition::PartitionRule;
-use partition::expr::{Operand, col};
+use partition::expr::{Operand, PartitionExpr, col};
+use partition::function::IcebergHash;
 use partition::multi_dim::MultiDimPartitionRule;
 use rand::Rng;
 use store_api::storage::RegionNumber;
@@ -219,9 +220,66 @@ fn bench_split_record_batch_vs_row(c: &mut Criterion) {
     group.finish();
 }
 
+/// Splits `dim` into `num_partitions` ranges, `bounds` being the inner boundaries.
+fn range_rule(
+    column: &str,
+    dim: Operand,
+    bounds: impl IntoIterator<Item = i32>,
+) -> MultiDimPartitionRule {
+    let bounds = bounds.into_iter().map(Value::Int32).collect::<Vec<_>>();
+    let mut exprs: Vec<PartitionExpr> = vec![dim.clone().lt(bounds[0].clone())];
+    for pair in bounds.windows(2) {
+        exprs.push(
+            dim.clone()
+                .gt_eq(pair[0].clone())
+                .and(dim.clone().lt(pair[1].clone())),
+        );
+    }
+    exprs.push(dim.gt_eq(bounds[bounds.len() - 1].clone()));
+    let regions = (0..exprs.len()).map(|v| v as u32).collect();
+    MultiDimPartitionRule::try_new(vec![column.to_string()], regions, exprs, true).unwrap()
+}
+
+fn hash_rule(column: &str, num_partitions: i64) -> MultiDimPartitionRule {
+    let width = (1i64 << 32) / num_partitions;
+    range_rule(
+        column,
+        Operand::IcebergHash(IcebergHash::new(column)),
+        (1..num_partitions).map(|k| (i32::MIN as i64 + k * width) as i32),
+    )
+}
+
+fn bench_split_record_batch_hash(c: &mut Criterion) {
+    let mut group = c.benchmark_group("split_record_batch_hash");
+
+    for num_partitions in [4, 16, 64] {
+        for num_rows in [1000, 100000] {
+            let batch = create_test_batch(num_rows);
+            // Baseline: the same number of plain column ranges over a0 in [0, 100).
+            let baseline = range_rule(
+                "a0",
+                col("a0"),
+                (1..num_partitions).map(|k| (k * 100 / num_partitions) as i32),
+            );
+            group.bench_function(format!("column_range_{num_partitions}_{num_rows}"), |b| {
+                b.iter(|| black_box(baseline.split_record_batch(black_box(&batch))).unwrap())
+            });
+            for (key, column) in [("int", "a0"), ("string", "a1")] {
+                let rule = hash_rule(column, num_partitions);
+                group.bench_function(format!("hash_{key}_{num_partitions}_{num_rows}"), |b| {
+                    b.iter(|| black_box(rule.split_record_batch(black_box(&batch))).unwrap())
+                });
+            }
+        }
+    }
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_split_record_batch_naive_vs_optimized,
-    bench_split_record_batch_vs_row
+    bench_split_record_batch_vs_row,
+    bench_split_record_batch_hash
 );
 criterion_main!(benches);

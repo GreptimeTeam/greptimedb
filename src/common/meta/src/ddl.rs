@@ -18,6 +18,7 @@ use std::time::Duration;
 use store_api::storage::{RegionId, TableId};
 
 use crate::DatanodeId;
+use crate::affinity::{AffinityFallback, AffinityResolverRef, PeerAllocContextProviderRef};
 use crate::cache_invalidator::CacheInvalidatorRef;
 use crate::ddl::flow_meta::FlowMetadataAllocatorRef;
 use crate::ddl::table_meta::TableMetadataAllocatorRef;
@@ -105,6 +106,12 @@ impl RegionFailureDetectorController for NoopRegionFailureDetectorControl {
 /// The context of ddl.
 #[derive(Clone)]
 pub struct DdlContext {
+    /// Optional resolver for automatic allocation affinity.
+    pub affinity_resolver: Option<AffinityResolverRef>,
+    /// Fallback policy for allocation without query-specific inputs.
+    pub affinity_fallback: AffinityFallback,
+    /// Builds allocation inputs from the initiating query.
+    pub peer_alloc_context_provider: Option<PeerAllocContextProviderRef>,
     /// Sends querying and requests to nodes.
     pub node_manager: NodeManagerRef,
     /// Cache invalidation.

@@ -231,6 +231,13 @@ pub enum Error {
         source: servers::error::Error,
     },
 
+    #[snafu(display("Invalid Prometheus remote read schema: {detail}"))]
+    InvalidPromRemoteReadSchema {
+        detail: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Failed to create logical plan for prometheus query"))]
     PromStoreRemoteQueryPlan {
         #[snafu(implicit)]
@@ -394,6 +401,7 @@ impl ErrorExt for Error {
             | Error::SchemaExists { .. }
             | Error::ColumnNotFound { .. }
             | Error::AmbiguousValueColumn { .. }
+            | Error::InvalidPromRemoteReadSchema { .. }
             | Error::UnsupportedFormat { .. }
             | Error::IllegalAuthConfig { .. }
             | Error::ColumnNoneDefaultValue { .. }

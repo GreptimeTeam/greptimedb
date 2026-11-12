@@ -470,6 +470,7 @@ pub(super) async fn run_direct_sst(args: DirectArgs) {
             row_group_size: scenario.layout.row_group_size,
             max_file_size: None,
             float_field_encoding: Default::default(),
+            ..Default::default()
         };
         let infos = match format {
             FormatType::Flat => writer.write_all_flat(source, Some(sequence), &opts).await,
@@ -511,6 +512,8 @@ pub(super) async fn run_direct_sst(args: DirectArgs) {
         compaction_time_window: None,
         sst_format: format,
         append_mode: table.append_mode,
+        pending_tails: Default::default(),
+        handoff_floors: Default::default(),
     };
     let checkpoint = RegionCheckpoint {
         last_version: args.checkpoint_version,

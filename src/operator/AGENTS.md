@@ -41,6 +41,8 @@ cargo sqlness bare -t <case>
 Check standalone and distributed routing when changing region dispatch.
 Write retries operate on prepared region requests in `write_dispatcher`; keep
 admission and Flow side effects outside retries, and preserve successful regions.
+Process-local write attribution must follow the same row masks through batching
+and retry repartitioning; only confirmed storage responses advance progress.
 
 Write admission uses fallible `write_meter!` calls in `Inserter::do_request`
 and `handle_bulk_insert`, before flow side effects and datanode dispatch. Bulk

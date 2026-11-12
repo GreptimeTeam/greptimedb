@@ -19,6 +19,7 @@ partition on columns (host) (
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
 -- might write to different partitions
 -- SQLNESS REPLACE "partition_count":\{(.*?)\} "partition_count":REDACTED
+-- SQLNESS REPLACE \\?"(dyn_filters|time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
 explain analyze
 select sum(val) from t group by host;
 
@@ -30,6 +31,7 @@ select sum(val) from t group by host;
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
 -- might write to different partitions
 -- SQLNESS REPLACE "partition_count":\{(.*?)\} "partition_count":REDACTED
+-- SQLNESS REPLACE \\?"(dyn_filters|time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
 explain analyze
 select sum(val) from t;
 
@@ -42,6 +44,7 @@ select sum(val) from t;
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
 -- might write to different partitions
 -- SQLNESS REPLACE "partition_count":\{(.*?)\} "partition_count":REDACTED
+-- SQLNESS REPLACE \\?"(dyn_filters|time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
 explain analyze
 select sum(val) from t group by idc;
 
@@ -53,6 +56,14 @@ insert into t values
 
 -- group keys derived from the partition column span regions
 select substr(host, 6, 1) as g, count(*), sum(val) from t group by g order by g;
+
+-- count(*) and count(1) are rewritten to count(ts), sharing the same state column
+select count(*), count(1), count(ts) from t;
+
+select count(*) as a, count(ts) as b from t;
+
+-- the cast is hidden from the state column name
+select count(*), count(ts::bigint) from t;
 
 -- grouping sets are computed on the frontend, only the PostgreSQL dialect parses them
 -- SQLNESS PROTOCOL POSTGRES

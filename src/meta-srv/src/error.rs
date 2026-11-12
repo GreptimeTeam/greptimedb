@@ -91,6 +91,13 @@ pub enum Error {
         region_id: RegionId,
     },
 
+    #[snafu(display("Another drain procedure is running for datanode: {}", node_id))]
+    DrainDatanodeRunning {
+        #[snafu(implicit)]
+        location: Location,
+        node_id: DatanodeId,
+    },
+
     #[snafu(display(
         "The region migration procedure is completed for region: {}, target_peer: {}",
         region_id,
@@ -108,6 +115,30 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
         reason: String,
+    },
+
+    #[snafu(display(
+        "Drain datanode {} aborted, failed regions: {:?}",
+        node_id,
+        failed_regions
+    ))]
+    DrainDatanodeAbort {
+        node_id: DatanodeId,
+        failed_regions: Vec<RegionId>,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display(
+        "Drain datanode {} exceeded the maximum rescan rounds: {}",
+        node_id,
+        max_rounds
+    ))]
+    DrainDatanodeRescanExceeded {
+        node_id: DatanodeId,
+        max_rounds: u32,
+        #[snafu(implicit)]
+        location: Location,
     },
 
     #[snafu(display(
@@ -333,6 +364,13 @@ pub enum Error {
         key: String,
         #[snafu(implicit)]
         location: Location,
+    },
+
+    #[snafu(display("Invalid node scheduling key: {}", key))]
+    InvalidNodeSchedulingKey {
+        #[snafu(implicit)]
+        location: Location,
+        key: String,
     },
 
     #[snafu(display("Failed to parse lease key from utf8"))]
@@ -1199,6 +1237,7 @@ impl ErrorExt for Error {
             | Error::PusherNotFound { .. } => StatusCode::Unexpected,
             Error::MailboxTimeout { .. } | Error::ExceededDeadline { .. } => StatusCode::Cancelled,
             Error::PruneTaskAlreadyRunning { .. }
+            | Error::DrainDatanodeRunning { .. }
             | Error::RetryLater { .. }
             | Error::MailboxChannelClosed { .. }
             | Error::IsNotLeader { .. } => StatusCode::IllegalState,
@@ -1217,6 +1256,7 @@ impl ErrorExt for Error {
             | Error::InvalidLeaseKey { .. }
             | Error::InvalidStatKey { .. }
             | Error::InvalidInactiveRegionKey { .. }
+            | Error::InvalidNodeSchedulingKey { .. }
             | Error::ParseNum { .. }
             | Error::ParseBool { .. }
             | Error::ParseAddr { .. }
@@ -1246,7 +1286,9 @@ impl ErrorExt for Error {
             | Error::RegionRouteNotFound { .. }
             | Error::MigrationAbort { .. }
             | Error::MigrationRunning { .. }
-            | Error::RegionMigrated { .. } => StatusCode::Unexpected,
+            | Error::RegionMigrated { .. }
+            | Error::DrainDatanodeAbort { .. }
+            | Error::DrainDatanodeRescanExceeded { .. } => StatusCode::Unexpected,
             Error::TableNotFound { .. } => StatusCode::TableNotFound,
             Error::SaveClusterInfo { source, .. }
             | Error::InvalidClusterInfoFormat { source, .. }

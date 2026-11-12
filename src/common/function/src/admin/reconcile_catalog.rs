@@ -96,7 +96,10 @@ pub(crate) async fn reconcile_catalog(
         })
         .await?;
     match pid {
-        Some(pid) => Ok(Value::from(pid)),
+        Some(pid) => {
+            query_ctx.set_last_procedure_id(pid.clone());
+            Ok(Value::from(pid))
+        }
         None => Ok(Value::Null),
     }
 }
@@ -138,7 +141,10 @@ mod tests {
 
         // reconcile_catalog()
         let factory: ScalarFunctionFactory = ReconcileCatalogFunction::factory().into();
-        let provider = factory.provide(FunctionContext::mock());
+        let context = FunctionContext::mock();
+        let query_ctx = context.query_ctx.clone();
+        query_ctx.set_last_procedure_id("previous-id".to_string());
+        let provider = factory.provide(context);
         let f = provider.as_async().unwrap();
 
         let func_args = datafusion::logical_expr::ScalarFunctionArgs {
@@ -150,6 +156,7 @@ mod tests {
         };
 
         let result = f.invoke_async_with_args(func_args).await.unwrap();
+        assert_eq!(query_ctx.last_procedure_id().as_deref(), Some("test_pid"));
         match result {
             ColumnarValue::Array(array) => {
                 let result_array = array.as_any().downcast_ref::<StringArray>().unwrap();

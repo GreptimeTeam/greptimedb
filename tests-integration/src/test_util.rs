@@ -12,9 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::BTreeMap;
 #[cfg(test)]
 use std::collections::HashMap;
+use std::collections::{BTreeMap, HashSet};
 use std::env;
 use std::fmt::Display;
 use std::net::SocketAddr;
@@ -31,7 +31,7 @@ use client::{Client, Database};
 use common_base::Plugins;
 use common_catalog::consts::MIN_USER_TABLE_ID;
 use common_config::Configurable;
-use common_event_recorder::EventRecorderOptions;
+use common_event_recorder::{EventRecorderOptions, EventTypeFilter};
 #[cfg(test)]
 use common_meta::DatanodeId;
 use common_meta::key::TableMetadataManager;
@@ -172,7 +172,8 @@ impl MockInstanceImpl {
         }
     }
 
-    /// Creates a standalone instance or a three-datanode cluster using local storage.
+    /// Creates a standalone instance or a three-datanode cluster using local
+    /// storage, with the event recorder disabled.
     pub async fn new(name: &str, distributed: bool) -> Self {
         let name = format!(
             "{name}_{}",
@@ -188,12 +189,18 @@ impl MockInstanceImpl {
             Self::Distributed(
                 GreptimeDbClusterBuilder::new(&name)
                     .await
+                    .with_event_recorder_options(disabled_event_recorder_options())
                     .with_datanodes(3)
                     .build(false)
                     .await,
             )
         } else {
-            Self::Standalone(GreptimeDbStandaloneBuilder::new(&name).build().await)
+            Self::Standalone(
+                GreptimeDbStandaloneBuilder::new(&name)
+                    .with_event_recorder_options(disabled_event_recorder_options())
+                    .build()
+                    .await,
+            )
         }
     }
 
@@ -337,6 +344,14 @@ impl StorageType {
 pub fn test_event_recorder_options() -> EventRecorderOptions {
     EventRecorderOptions {
         flush_interval: Duration::from_millis(100),
+        ..Default::default()
+    }
+}
+
+/// Event recorder options that record no events, for tests that count WAL writes.
+pub fn disabled_event_recorder_options() -> EventRecorderOptions {
+    EventRecorderOptions {
+        event_types: Arc::new(EventTypeFilter::Only(HashSet::new())),
         ..Default::default()
     }
 }
@@ -578,6 +593,7 @@ pub(crate) fn create_datanode_opts(
         storage: StorageConfig {
             data_home: home_dir,
             copy_root: None,
+            probe_on_startup: false,
             providers,
             store: default_store,
         },
@@ -1132,7 +1148,18 @@ pub async fn setup_mysql_server_with_user_provider(
     }
 
     let instance = setup_standalone_instance_with_plugins(name, store_type, plugins).await;
+    let mysql_server =
+        setup_mysql_server_for_frontend_instance(instance.fe_instance().clone(), user_provider)
+            .await;
 
+    (instance.guard, Arc::new(mysql_server))
+}
+
+/// Builds and starts a MySQL server on an existing frontend instance.
+pub async fn setup_mysql_server_for_frontend_instance(
+    fe_instance_ref: Arc<Instance>,
+    user_provider: Option<UserProviderRef>,
+) -> Box<dyn Server> {
     let runtime = RuntimeBuilder::default()
         .worker_threads(2)
         .thread_name("mysql-runtime")
@@ -1141,7 +1168,6 @@ pub async fn setup_mysql_server_with_user_provider(
 
     let fe_mysql_addr = format!("127.0.0.1:{}", ports::get_port());
 
-    let fe_instance_ref = instance.fe_instance().clone();
     let opts = MysqlOptions {
         addr: fe_mysql_addr.clone(),
         ..Default::default()
@@ -1167,7 +1193,7 @@ pub async fn setup_mysql_server_with_user_provider(
         .await
         .unwrap();
 
-    (instance.guard, Arc::new(mysql_server))
+    mysql_server
 }
 
 pub async fn setup_pg_server(
@@ -1204,15 +1230,20 @@ pub async fn setup_pg_server_with_slow_query_threshold(
             .expect("Failed to load certificates and keys"),
     );
 
-    let mut pg_server = Box::new(PostgresServer::new(
-        fe_instance_ref,
-        opts.tls.should_force_tls(),
-        tls_server_config,
-        0,
-        runtime,
-        None,
-        None,
-    ));
+    let mut pg_server = Box::new(
+        PostgresServer::new(
+            fe_instance_ref.clone(),
+            fe_instance_ref.clone(),
+            opts.tls.should_force_tls(),
+            tls_server_config,
+            0,
+            runtime,
+            None,
+            None,
+        )
+        .with_influxdb_handler(fe_instance_ref.clone())
+        .with_otlp_handler(fe_instance_ref.clone(), true),
+    );
 
     pg_server
         .start(fe_pg_addr.parse::<SocketAddr>().unwrap())
@@ -1228,7 +1259,17 @@ pub async fn setup_pg_server_with_user_provider(
     user_provider: Option<UserProviderRef>,
 ) -> (TestGuard, Arc<Box<dyn Server>>) {
     let instance = setup_standalone_instance(name, store_type).await;
+    let pg_server =
+        setup_pg_server_for_frontend_instance(instance.fe_instance().clone(), user_provider).await;
 
+    (instance.guard, Arc::new(pg_server))
+}
+
+/// Builds and starts a Postgres server on an existing frontend instance.
+pub async fn setup_pg_server_for_frontend_instance(
+    fe_instance_ref: Arc<Instance>,
+    user_provider: Option<UserProviderRef>,
+) -> Box<dyn Server> {
     let runtime = RuntimeBuilder::default()
         .worker_threads(2)
         .thread_name("pg-runtime")
@@ -1237,7 +1278,6 @@ pub async fn setup_pg_server_with_user_provider(
 
     let fe_pg_addr = format!("127.0.0.1:{}", ports::get_port());
 
-    let fe_instance_ref = instance.fe_instance().clone();
     let opts = PostgresOptions {
         addr: fe_pg_addr.clone(),
         ..Default::default()
@@ -1247,22 +1287,27 @@ pub async fn setup_pg_server_with_user_provider(
             .expect("Failed to load certificates and keys"),
     );
 
-    let mut pg_server = Box::new(PostgresServer::new(
-        fe_instance_ref,
-        opts.tls.should_force_tls(),
-        tls_server_config,
-        0,
-        runtime,
-        user_provider,
-        None,
-    ));
+    let mut pg_server = Box::new(
+        PostgresServer::new(
+            fe_instance_ref.clone(),
+            fe_instance_ref.clone(),
+            opts.tls.should_force_tls(),
+            tls_server_config,
+            0,
+            runtime,
+            user_provider,
+            None,
+        )
+        .with_influxdb_handler(fe_instance_ref.clone())
+        .with_otlp_handler(fe_instance_ref.clone(), true),
+    );
 
     pg_server
         .start(fe_pg_addr.parse::<SocketAddr>().unwrap())
         .await
         .unwrap();
 
-    (instance.guard, Arc::new(pg_server))
+    pg_server
 }
 
 /// Sets up a standalone instance with both a Prometheus remote-write HTTP app
@@ -1302,15 +1347,20 @@ pub async fn setup_pg_server_with_prom_native_histogram(
             .expect("Failed to load certificates and keys"),
     );
 
-    let mut pg_server = Box::new(PostgresServer::new(
-        instance.fe_instance().clone(),
-        opts.tls.should_force_tls(),
-        tls_server_config,
-        0,
-        runtime,
-        None,
-        None,
-    ));
+    let mut pg_server = Box::new(
+        PostgresServer::new(
+            instance.fe_instance().clone(),
+            instance.fe_instance().clone(),
+            opts.tls.should_force_tls(),
+            tls_server_config,
+            0,
+            runtime,
+            None,
+            None,
+        )
+        .with_influxdb_handler(instance.fe_instance().clone())
+        .with_otlp_handler(instance.fe_instance().clone(), true),
+    );
 
     pg_server
         .start(fe_pg_addr.parse::<SocketAddr>().unwrap())

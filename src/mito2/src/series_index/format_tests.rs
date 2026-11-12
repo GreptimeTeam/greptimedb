@@ -207,7 +207,12 @@ async fn format_skeleton_abort_removes_all_objects() {
     fake.fail.store(true, Ordering::Relaxed);
     assert!(
         crate::series_index::builder::build_samples(
-            &store, &region, &version, file, &fake, &purger
+            &store,
+            &region,
+            &version.metadata,
+            file,
+            &fake,
+            &purger,
         )
         .await
         .is_err()

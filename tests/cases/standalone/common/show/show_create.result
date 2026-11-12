@@ -35,9 +35,9 @@ SHOW CREATE TABLE system_metrics;
 |                |   PRIMARY KEY ("id", "host")                              |
 |                | )                                                         |
 |                | PARTITION ON COLUMNS ("id") (                             |
-|                |   id < 5,                                                 |
-|                |   id >= 5 AND id < 9,                                     |
-|                |   id >= 9                                                 |
+|                |   "id" < 5,                                               |
+|                |   "id" >= 5 AND "id" < 9,                                 |
+|                |   "id" >= 9                                               |
 |                | )                                                         |
 |                | ENGINE=mito                                               |
 |                | WITH(                                                     |
@@ -204,8 +204,8 @@ SHOW CREATE TABLE partition_num_hint_table;
 |                          |   PRIMARY KEY ("host")                                  |
 |                          | )                                                       |
 |                          | PARTITION ON COLUMNS ("host") (                         |
-|                          |   host < 'm',                                           |
-|                          |   host >= 'm'                                           |
+|                          |   "host" < 'm',                                         |
+|                          |   "host" >= 'm'                                         |
 |                          | )                                                       |
 |                          | ENGINE=mito                                             |
 |                          | WITH(                                                   |
@@ -229,8 +229,8 @@ SHOW CREATE TABLE partition_num_hint_table;
 |                          |   PRIMARY KEY ("host")                                  |
 |                          | )                                                       |
 |                          | PARTITION ON COLUMNS ("host") (                         |
-|                          |   host < 'm',                                           |
-|                          |   host >= 'm'                                           |
+|                          |   "host" < 'm',                                         |
+|                          |   "host" >= 'm'                                         |
 |                          | )                                                       |
 |                          | ENGINE=mito                                             |
 |                          | WITH(                                                   |
@@ -262,8 +262,8 @@ SHOW CREATE TABLE partition_num_hint_table;
 |                          |   PRIMARY KEY ("host")                                  |
 |                          | )                                                       |
 |                          | PARTITION ON COLUMNS ("host") (                         |
-|                          |   host < 'm',                                           |
-|                          |   host >= 'm'                                           |
+|                          |   "host" < 'm',                                         |
+|                          |   "host" >= 'm'                                         |
 |                          | )                                                       |
 |                          | ENGINE=mito                                             |
 |                          |                                                         |

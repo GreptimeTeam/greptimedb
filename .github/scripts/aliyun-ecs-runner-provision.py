@@ -59,6 +59,7 @@ MANAGED_BY_TAG_KEY = "managed-by"
 MANAGED_BY_TAG_VALUE = "query-regression-ci"
 RUN_TAG_KEY = "query-regression-run-id"
 TTL_TAG_KEY = "runner-ttl-hours"
+REPO_TAG_KEY = "github-repository"
 
 # Runner cache paths on the instance system disk. They are created empty
 # every provision and deleted with the VM.
@@ -359,6 +360,7 @@ def run_instance(client, config: ProvisionConfig, user_data: str) -> str:
                 key=MANAGED_BY_TAG_KEY, value=MANAGED_BY_TAG_VALUE
             ),
             ecs_models.RunInstancesRequestTag(key=RUN_TAG_KEY, value=config.run_id),
+            ecs_models.RunInstancesRequestTag(key=REPO_TAG_KEY, value=config.repo),
         ]
         + (
             [

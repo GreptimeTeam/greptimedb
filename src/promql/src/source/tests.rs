@@ -47,6 +47,7 @@ use store_api::region_engine::{
     BoundTag, RawLabelSource, RawSeriesStream, SendableRawSeriesStream,
 };
 use store_api::storage::RegionId;
+use store_api::storage::consts::ReservedColumnId;
 
 use super::materialize_raw_labels;
 
@@ -90,7 +91,28 @@ fn metadata(encoding: PrimaryKeyEncoding) -> Arc<RegionMetadata> {
             column_id: id,
         });
     }
-    builder.primary_key(vec![8, 2, 41]);
+    // main's `fix!: enforce sparse primary key schema` requires sparse primary keys to start
+    // with `(__table_id, __tsid)`, and every primary-key column id must exist in the schema.
+    let mut primary_key = vec![8, 2, 41];
+    if encoding == PrimaryKeyEncoding::Sparse {
+        builder.push_column_metadata(ColumnMetadata {
+            column_schema: ColumnSchema::new(
+                "__table_id",
+                ConcreteDataType::uint32_datatype(),
+                false,
+            ),
+            semantic_type: SemanticType::Tag,
+            column_id: ReservedColumnId::table_id(),
+        });
+        builder.push_column_metadata(ColumnMetadata {
+            column_schema: ColumnSchema::new("__tsid", ConcreteDataType::uint64_datatype(), false),
+            semantic_type: SemanticType::Tag,
+            column_id: ReservedColumnId::tsid(),
+        });
+        primary_key.insert(0, ReservedColumnId::tsid());
+        primary_key.insert(0, ReservedColumnId::table_id());
+    }
+    builder.primary_key(primary_key);
     builder.primary_key_encoding(encoding);
     Arc::new(builder.build().unwrap())
 }

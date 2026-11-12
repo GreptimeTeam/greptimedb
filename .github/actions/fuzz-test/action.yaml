@@ -28,7 +28,38 @@ inputs:
 runs:
   using: composite
   steps:
+    - name: Prepare Fuzz Corpus
+      id: corpus
+      shell: bash
+      env:
+        FUZZ_TARGETS: ${{ inputs.targets }}
+      run: bash .github/scripts/prepare-fuzz-corpus.sh
+
+    - name: Restore Fuzz Corpus
+      id: restore-corpus
+      uses: actions/cache/restore@v4
+      continue-on-error: true
+      with:
+        path: ${{ steps.corpus.outputs.paths }}
+        key: ${{ steps.corpus.outputs.key-prefix }}${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}-${{ strategy.job-index || 0 }}
+        restore-keys: ${{ steps.corpus.outputs.key-prefix }}
+
+    - name: Report Fuzz Corpus Cache
+      shell: bash
+      env:
+        CACHE_OUTCOME: ${{ steps.restore-corpus.outcome }}
+        CACHE_MATCHED_KEY: ${{ steps.restore-corpus.outputs.cache-matched-key }}
+      run: |
+        if [[ "${CACHE_OUTCOME}" == failure ]]; then
+          echo '::warning::Fuzz corpus restore failed; running with available inputs'
+        elif [[ -n "${CACHE_MATCHED_KEY}" ]]; then
+          printf 'Restored fuzz corpus: %s\n' "${CACHE_MATCHED_KEY}"
+        else
+          echo 'No cached fuzz corpus found; starting with an empty corpus'
+        fi
+
     - name: Run Fuzz Tests
+      id: run-fuzz
       shell: bash
       env:
         FUZZ_TARGETS: ${{ inputs.targets }}
@@ -39,4 +70,13 @@ runs:
         FUZZ_COLLECT_CLUSTER_ARTIFACTS: ${{ inputs.collect-cluster-artifacts }}
         FUZZ_ARTIFACT_ROOT: ${{ inputs.artifact-root }}
         FUZZ_BIN_DIR: ${{ inputs.prebuilt-binaries-dir }}
+        FUZZ_CORPUS_ROOT: ${{ github.workspace }}/tests-fuzz/corpus
       run: .github/scripts/run-fuzz-targets.sh
+
+    - name: Save Fuzz Corpus
+      if: ${{ !cancelled() && (steps.run-fuzz.outcome == 'success' || steps.run-fuzz.outcome == 'failure') }}
+      uses: actions/cache/save@v4
+      continue-on-error: true
+      with:
+        path: ${{ steps.corpus.outputs.paths }}
+        key: ${{ steps.corpus.outputs.key-prefix }}${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}-${{ strategy.job-index || 0 }}

@@ -33,7 +33,9 @@ use datafusion_expr::LogicalPlan;
 use datatypes::prelude::VectorRef;
 use datatypes::schema::{ColumnSchema, Schema};
 use datatypes::value::Value;
-use datatypes::vectors::{Int32Vector, TimestampMicrosecondVector, TimestampSecondVector};
+use datatypes::vectors::{
+    Int32Vector, TimestampMicrosecondVector, TimestampNanosecondVector, TimestampSecondVector,
+};
 use mysql_async::prelude::*;
 use mysql_async::{Conn, Row, SslOpts};
 use query::QueryEngineFactory;
@@ -856,6 +858,68 @@ async fn test_mysql_timestamp_precision_slot_isolation() -> Result<()> {
     );
     assert_eq!(Some(1), health_check.unwrap());
 
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_mysql_nanosecond_timestamps_use_microsecond_precision() -> Result<()> {
+    let schema = Arc::new(Schema::new(vec![ColumnSchema::new(
+        "ts",
+        datatypes::prelude::ConcreteDataType::timestamp_nanosecond_datatype(),
+        true,
+    )]));
+    let timestamps = vec![
+        Some(1_792_572_935_718_870_300),
+        Some(123_000_789),
+        Some(999_999_999),
+        Some(999),
+        Some(-1),
+        Some(0),
+        None,
+    ];
+    let batch = RecordBatch::new(
+        schema,
+        vec![Arc::new(TimestampNanosecondVector::from(timestamps)) as VectorRef],
+    )
+    .unwrap();
+    let table = MemTable::table("nanosecond_timestamps", batch);
+    let query = "SELECT ts FROM nanosecond_timestamps".to_string();
+    let (result, health_check) = query_mysql_text_protocol(table.clone(), query.clone()).await;
+    let rows = result.unwrap();
+    let expected = [
+        Some("2026-10-21 08:55:35.718870"),
+        Some("1970-01-01 00:00:00.123"),
+        Some("1970-01-01 00:00:00.999999"),
+        Some("1970-01-01 00:00:00"),
+        Some("1969-12-31 23:59:59.999999"),
+        Some("1970-01-01 00:00:00"),
+        None,
+    ];
+    assert_eq!(expected.len(), rows.len());
+    for (row, expected) in rows.iter().zip(expected) {
+        assert_eq!(
+            vec![expected.map_or(Value::Null, |s| Value::from(s.as_bytes().to_vec()))],
+            row.values
+        );
+    }
+    assert_eq!(Some(1), health_check.unwrap());
+
+    let (result, health_check) = query_mysql_binary_protocol(table, query).await;
+    let rows = result.unwrap();
+    let expected = [
+        mysql_async::Value::Date(2026, 10, 21, 8, 55, 35, 718_870),
+        mysql_async::Value::Date(1970, 1, 1, 0, 0, 0, 123_000),
+        mysql_async::Value::Date(1970, 1, 1, 0, 0, 0, 999_999),
+        mysql_async::Value::Date(1970, 1, 1, 0, 0, 0, 0),
+        mysql_async::Value::Date(1969, 12, 31, 23, 59, 59, 999_999),
+        mysql_async::Value::Date(1970, 1, 1, 0, 0, 0, 0),
+        mysql_async::Value::NULL,
+    ];
+    assert_eq!(expected.len(), rows.len());
+    for (row, expected) in rows.iter().zip(expected) {
+        assert_eq!(Some(&expected), row.as_ref(0));
+    }
+    assert_eq!(Some(1), health_check.unwrap());
     Ok(())
 }
 

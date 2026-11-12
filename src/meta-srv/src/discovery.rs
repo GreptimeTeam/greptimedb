@@ -14,6 +14,7 @@
 
 pub mod lease;
 pub mod node_info;
+pub mod node_scheduling;
 pub mod utils;
 
 use api::v1::meta::heartbeat_request::NodeWorkloads;
@@ -21,7 +22,7 @@ use common_error::ext::BoxedError;
 use common_meta::cluster::NodeInfo;
 use common_meta::distributed_time_constants::default_distributed_time_constants;
 use common_meta::error::Result;
-use common_meta::peer::{Peer, PeerDiscovery, PeerResolver};
+use common_meta::peer::{Peer, PeerResolver};
 use common_meta::{DatanodeId, FlownodeId};
 use common_time::util::DefaultSystemTimer;
 use snafu::ResultExt;
@@ -29,9 +30,13 @@ use snafu::ResultExt;
 use crate::cluster::MetaPeerClient;
 use crate::discovery::lease::{LeaseValueAccessor, LeaseValueType};
 
-#[async_trait::async_trait]
-impl PeerDiscovery for MetaPeerClient {
-    async fn active_frontends(&self) -> Result<Vec<NodeInfo>> {
+// NOTE: these are inherent methods on purpose. `MetaPeerClient` does not implement
+// `PeerDiscovery`, so the only way to obtain a `PeerDiscoveryRef` inside metasrv is
+// `discovery::SchedulingAwarePeerDiscovery`, which stamps node scheduling states. Wrapping the raw
+// client directly would silently drop the drain fence.
+impl MetaPeerClient {
+    /// Returns all frontends that reported a heartbeat recently.
+    pub async fn active_frontends(&self) -> Result<Vec<NodeInfo>> {
         utils::alive_frontend_infos(
             &DefaultSystemTimer,
             self,
@@ -42,7 +47,8 @@ impl PeerDiscovery for MetaPeerClient {
         .context(common_meta::error::ExternalSnafu)
     }
 
-    async fn active_datanodes(
+    /// Returns all datanodes that reported a heartbeat recently, without scheduling states.
+    pub async fn active_datanodes(
         &self,
         filter: Option<for<'a> fn(&'a NodeWorkloads) -> bool>,
     ) -> Result<Vec<NodeInfo>> {
@@ -57,7 +63,8 @@ impl PeerDiscovery for MetaPeerClient {
         .context(common_meta::error::ExternalSnafu)
     }
 
-    async fn active_flownodes(
+    /// Returns all flownodes that reported a heartbeat recently.
+    pub async fn active_flownodes(
         &self,
         filter: Option<for<'a> fn(&'a NodeWorkloads) -> bool>,
     ) -> Result<Vec<NodeInfo>> {

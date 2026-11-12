@@ -108,15 +108,30 @@ impl TryFrom<Record> for KafkaRecord {
 }
 
 // TODO(niebayes): improve the performance of decoding kafka record.
-impl TryFrom<KafkaRecord> for Record {
-    type Error = crate::error::Error;
-
-    fn try_from(kafka_record: KafkaRecord) -> Result<Self> {
-        let key = kafka_record.key.context(MissingKeySnafu)?;
-        let meta = serde_json::from_slice(&key).context(DecodeJsonSnafu)?;
-        let data = kafka_record.value.context(MissingValueSnafu)?;
+impl Record {
+    /// Decodes a record from the key and value of a [`KafkaRecord`].
+    ///
+    /// The key is borrowed so that callers can inspect it if decoding fails, e.g. to
+    /// tell a foreign key apart from a [`RecordMeta`] written by an incompatible version
+    /// of the log store.
+    pub(crate) fn try_from_parts(key: Option<&[u8]>, value: Option<Vec<u8>>) -> Result<Self> {
+        let key = key.context(MissingKeySnafu)?;
+        let meta = serde_json::from_slice(key).context(DecodeJsonSnafu)?;
+        let data = value.context(MissingValueSnafu)?;
         Ok(Self { meta, data })
     }
+}
+
+/// Returns whether a key is a JSON object with a `version` field, i.e. whether it may have
+/// been written as a [`RecordMeta`] key.
+///
+/// A `RecordMeta` key that cannot be decoded may come from an incompatible version of the
+/// log store, so the reader must not treat such a key as a foreign record.
+pub(crate) fn is_record_meta_key(key: &[u8]) -> bool {
+    matches!(
+        serde_json::from_slice::<serde_json::Value>(key),
+        Ok(serde_json::Value::Object(fields)) if fields.contains_key("version")
+    )
 }
 
 pub(crate) fn convert_to_kafka_records(entry: Entry) -> Result<Vec<KafkaRecord>> {
@@ -557,6 +572,29 @@ mod tests {
 
         assert_eq!(multipart_entry.entry_id(), 2);
         assert_eq!(full_entry.entry_id(), 3);
+    }
+
+    #[test]
+    fn test_is_record_meta_key() {
+        let meta = RecordMeta {
+            version: VERSION,
+            tp: RecordType::Full,
+            entry_id: 1,
+            ns: NamespaceImpl {
+                region_id: RegionId::new(1, 1).as_u64(),
+                topic: "greptimedb_wal_topic".to_string(),
+            },
+        };
+        assert!(is_record_meta_key(&serde_json::to_vec(&meta).unwrap()));
+        // A `RecordMeta` key this version cannot decode, e.g. one with a new `RecordType`
+        // variant.
+        assert!(is_record_meta_key(
+            br#"{"version": 0, "tp": "Compressed", "entry_id": 0, "ns": {"region_id": 1, "topic": ""}}"#
+        ));
+        // Keys the log store never writes.
+        assert!(!is_record_meta_key(b"not-a-json-key"));
+        assert!(!is_record_meta_key(b"[1, 2, 3]"));
+        assert!(!is_record_meta_key(br#"{"hello": "world"}"#));
     }
 
     #[test]

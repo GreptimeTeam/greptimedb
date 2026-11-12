@@ -1,0 +1,9 @@
+name = "partition_iceberg_hash"
+reason = "Preserve iceberg_hash partition rules and their routing across restart and upgrade."
+introduced_by = "iceberg_hash partition function"
+topologies = ["standalone", "distributed"]
+# The runner compares core versions only, so this also admits 1.4.0 prereleases.
+from_range = [">=v1.4.0"]
+to_range = [">=v1.4.0"]
+features = ["partition", "table", "metadata"]
+owner = "frontend"

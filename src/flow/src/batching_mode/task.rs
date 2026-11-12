@@ -340,20 +340,33 @@ pub enum QueryCoverage {
     FencedRepairChunk { high: BTreeMap<u64, u64> },
     /// Incremental delta query over `(checkpoint, scan-open snapshot]`.
     IncrementalDelta,
+    /// A caller-fenced incremental delta over `(checkpoints, high]`, where
+    /// `high` is sent as the snapshot read bounds for every source region.
+    ///
+    /// Raw [`BatchingTask::execute_plan_unlocked`] only: the caller owns the
+    /// execution guard and every checkpoint transition. Default execution
+    /// rejects it, and its bounds are validated before dispatch.
+    FencedIncrementalDelta { high: BTreeMap<u64, u64> },
 }
 
 impl QueryCoverage {
-    /// Whether this query should use incremental scan extensions and
-    /// incremental checkpoint advancement rules.
+    /// Whether this query uses incremental delta planning and scan extensions.
+    /// Ordinary deltas may still scan `memtable_only`; the fenced delta may not.
     fn is_incremental_delta(&self) -> bool {
-        matches!(self, Self::IncrementalDelta)
+        matches!(
+            self,
+            Self::IncrementalDelta | Self::FencedIncrementalDelta { .. }
+        )
     }
 
     /// Snapshot upper bounds requested from the storage layer. Only fenced
-    /// repair chunks carry bounds; all other coverage relies on normal scans.
+    /// repair chunks and fenced incremental deltas carry bounds; all other
+    /// coverage relies on normal scans.
     fn snapshot_seqs(&self) -> HashMap<u64, u64> {
         match self {
-            Self::FencedRepairChunk { high } => high.iter().map(|(k, v)| (*k, *v)).collect(),
+            Self::FencedRepairChunk { high } | Self::FencedIncrementalDelta { high } => {
+                high.iter().map(|(k, v)| (*k, *v)).collect()
+            }
             _ => HashMap::new(),
         }
     }
@@ -1164,6 +1177,7 @@ impl BatchingTask {
     }
 
     /// Applies checkpoint state updates around the raw insert-plan execution.
+    /// A fenced incremental delta is rejected before dispatch: it is raw-only.
     async fn execute_logical_plan_unlocked(
         &self,
         engine: &QueryEngineRef,
@@ -1173,6 +1187,14 @@ impl BatchingTask {
         coverage: &QueryCoverage,
     ) -> Result<Option<(usize, Duration)>, Error> {
         let flow_id = self.config.flow_id;
+        if matches!(coverage, QueryCoverage::FencedIncrementalDelta { .. }) {
+            return InvalidQuerySnafu {
+                reason: format!(
+                    "Flow {flow_id} fenced incremental delta is raw-only: its caller owns checkpoint transitions"
+                ),
+            }
+            .fail();
+        }
         let Some((res, elapsed)) = self
             .execute_plan_unlocked(engine, frontend_client, plan, dirty_restore, coverage)
             .await?
@@ -1204,6 +1226,10 @@ impl BatchingTask {
     /// Executes a fully constructed insert plan without checkpoint-state mutation.
     /// Callers must own the serialized execution guard. Its unsafe-incremental safety fallback
     /// still restores the supplied dirty work before returning `Ok(None)`.
+    ///
+    /// This is the only entry point that accepts
+    /// [`QueryCoverage::FencedIncrementalDelta`]; it validates the fence against
+    /// the live checkpoints before dispatch and leaves advancement to its caller.
     pub async fn execute_plan_unlocked(
         &self,
         engine: &QueryEngineRef,
@@ -1214,6 +1240,37 @@ impl BatchingTask {
     ) -> Result<Option<(Result<OutputWithMetrics, Error>, Duration)>, Error> {
         let instant = Instant::now();
         let flow_id = self.config.flow_id;
+
+        // A caller-fenced incremental delta reads `(checkpoints, high]` on every
+        // source region, so its fence is proved before any rewrite or dispatch.
+        if let QueryCoverage::FencedIncrementalDelta { high } = coverage {
+            let state = self.state.read().unwrap();
+            if state.checkpoint_mode() != CheckpointMode::Incremental
+                || state.is_incremental_disabled()
+            {
+                return InvalidQuerySnafu {
+                    reason: format!(
+                        "Flow {flow_id} fenced incremental delta requires an enabled incremental flow in incremental mode"
+                    ),
+                }
+                .fail();
+            }
+            let checkpoints = state.checkpoints();
+            if checkpoints.is_empty()
+                || !high.keys().eq(checkpoints.keys())
+                || high
+                    .values()
+                    .zip(checkpoints.values())
+                    .any(|(upper, lower)| upper < lower)
+            {
+                return InvalidQuerySnafu {
+                    reason: format!(
+                        "Flow {flow_id} fenced incremental delta bounds {high:?} must extend the checkpoint bounds {checkpoints:?} over the same regions"
+                    ),
+                }
+                .fail();
+            }
+        }
 
         debug!(
             "Executing flow {flow_id}(expire_after={:?} secs) with query {}",
@@ -1265,6 +1322,20 @@ impl BatchingTask {
         let extensions = self
             .build_flow_query_extensions(incremental_safe, coverage.is_incremental_delta())
             .await?;
+        // The builder owns capability discovery; an exact fence additionally
+        // requires the extensions it actually emitted to scan a sequence range.
+        if matches!(coverage, QueryCoverage::FencedIncrementalDelta { .. })
+            && !extensions.iter().any(|(key, value)| {
+                *key == FLOW_INCREMENTAL_MODE && *value == FLOW_INCREMENTAL_MODE_SEQUENCE_RANGE
+            })
+        {
+            return InvalidQuerySnafu {
+                reason: format!(
+                    "Flow {flow_id} fenced incremental delta requires {FLOW_INCREMENTAL_MODE}={FLOW_INCREMENTAL_MODE_SEQUENCE_RANGE}"
+                ),
+            }
+            .fail();
+        }
         let frontend_extensions = self.frontend_extensions();
         let extension_refs = extensions
             .iter()

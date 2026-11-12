@@ -34,11 +34,12 @@ use strum::IntoStaticStr;
 use tokio::sync::{Semaphore, mpsc, watch};
 
 use crate::access_layer::{
-    AccessLayerRef, Metrics, OperationType, SstInfoArray, SstWriteRequest, WriteType,
+    AccessLayerRef, EncodedSstIndexBuildParams, Metrics, OperationType, SstInfoArray,
+    SstWriteRequest, WriteType,
 };
 use crate::cache::CacheManagerRef;
 use crate::compaction::{collect_json2_rewrite_plans, rewrite_json2_batch, rewrite_json2_schema};
-use crate::config::MitoConfig;
+use crate::config::{IndexBuildMode, MitoConfig};
 use crate::engine::region_hook::SstFileInfo;
 use crate::error::{
     Error, FlushCancelledSnafu, FlushRegionSnafu, JoinSnafu, RegionBusySnafu, RegionClosedSnafu,
@@ -59,14 +60,14 @@ use crate::read::flat_dedup::{FlatDedupIterator, FlatLastNonNull, FlatLastRow};
 use crate::read::flat_merge::FlatMergeIterator;
 use crate::region::options::{IndexOptions, MergeMode, RegionOptions};
 use crate::region::version::{VersionControlData, VersionControlRef, VersionRef};
-use crate::region::{ManifestContextRef, RegionLeaderState, RegionRoleState, parse_partition_expr};
+use crate::region::{ManifestContextRef, RegionLeaderState, parse_partition_expr};
 use crate::request::{
     BackgroundNotify, DdlRequest, FlushFailed, FlushFinished, OnFailure, OptionOutputTx, OutputTx,
     SenderBulkRequest, SenderDdlRequest, SenderWriteRequest, WorkerRequest, WorkerRequestWithTime,
 };
 use crate::schedule::CancellableTaskState;
 use crate::schedule::scheduler::{Job, SchedulerRef};
-use crate::sst::file::{FileMeta, RegionFileId, UncommittedSsts};
+use crate::sst::file::{FileMeta, UncommittedSsts};
 use crate::sst::parquet::metadata::extract_primary_key_range;
 use crate::sst::parquet::{
     DEFAULT_READ_BATCH_SIZE, DEFAULT_ROW_GROUP_SIZE, SstInfo, WriteOptions, flat_format,
@@ -219,6 +220,8 @@ pub enum FlushReason {
     EngineFull,
     /// Region reaches its write buffer threshold.
     RegionFull,
+    /// Flush to relieve retained WAL pressure.
+    WalPressure,
     /// Manual flush.
     Manual,
     /// Flush to alter table.
@@ -280,8 +283,6 @@ pub(crate) struct RegionFlushTask {
     pub(crate) index_options: IndexOptions,
     /// Semaphore to control flush concurrency.
     pub(crate) flush_semaphore: Arc<Semaphore>,
-    /// Whether the region is in staging mode.
-    pub(crate) is_staging: bool,
     /// Partition expression of the region.
     ///
     /// This is used to generate the file meta.
@@ -411,7 +412,6 @@ impl RegionFlushTask {
                     _timer: timer,
                     edit,
                     memtables_to_remove,
-                    is_staging: self.is_staging,
                 };
                 WorkerRequest::Background {
                     region_id: self.region_id,
@@ -535,11 +535,9 @@ impl RegionFlushTask {
             flushed_entry_id: Some(version_data.last_entry_id),
             flushed_sequence: Some(version_data.committed_sequence),
             committed_sequence: None,
+            wal_recovery: Default::default(),
         };
-        info!(
-            "Applying {edit:?} to region {}, is_staging: {}",
-            self.region_id, self.is_staging
-        );
+        info!("Applying {edit:?} to region {}", self.region_id);
 
         let action_list = RegionMetaActionList::with_action(RegionMetaAction::Edit(edit.clone()));
 
@@ -552,17 +550,11 @@ impl RegionFlushTask {
         let expected_state = if matches!(self.reason, FlushReason::Downgrading) {
             RegionLeaderState::Downgrading
         } else {
-            // Check if region is in staging mode
-            let current_state = self.manifest_ctx.current_state();
-            if current_state == RegionRoleState::Leader(RegionLeaderState::Staging) {
-                RegionLeaderState::Staging
-            } else {
-                RegionLeaderState::Writable
-            }
+            RegionLeaderState::Writable
         };
         let manifest_version = match self
             .manifest_ctx
-            .update_manifest(expected_state, action_list, self.is_staging)
+            .update_manifest(expected_state, action_list, false)
             .await
         {
             Ok(manifest_version) => {
@@ -583,9 +575,8 @@ impl RegionFlushTask {
             }
         };
         info!(
-            "Successfully update manifest version to {manifest_version}, region: {}, is_staging: {}, reason: {}",
+            "Successfully update manifest version to {manifest_version}, region: {}, reason: {}",
             self.region_id,
-            self.is_staging,
             self.reason.as_str()
         );
 
@@ -680,7 +671,7 @@ impl RegionFlushTask {
                         partition_expr.clone(),
                         pk_range,
                         version.options.preserve_row_sequence,
-                    ));
+                    )?);
                 }
                 if hook.is_some() {
                     all_sst_infos.extend(ssts_written);
@@ -751,21 +742,34 @@ impl RegionFlushTask {
             });
             tasks.push(task);
         }
-        for (encoded, max_sequence) in flat_sources.encoded {
+        let build_index = self.engine_config.index.build_mode == IndexBuildMode::Sync;
+        for (mut encoded, max_sequence) in flat_sources.encoded {
             let access_layer = self.access_layer.clone();
             let cache_manager = self.cache_manager.clone();
             let region_id = version.metadata.region_id;
             let write_buffer_size = write_opts.write_buffer_size;
             let semaphore = self.flush_semaphore.clone();
             let uncommitted = uncommitted.clone();
+            let index_build_params = build_index.then(|| EncodedSstIndexBuildParams {
+                metadata: version.metadata.clone(),
+                index_options: self.index_options.clone(),
+                inverted_index_config: self.engine_config.inverted_index.clone(),
+                fulltext_index_config: self.engine_config.fulltext_index.clone(),
+                bloom_filter_index_config: self.engine_config.bloom_filter_index.clone(),
+            });
+            // Index creation runs after the SST is uploaded, so cancellation can land after the
+            // upload. Own the files before uploading them.
+            uncommitted.track_before_upload(encoded.sst_info.file_id, index_build_params.is_some());
             let task = common_runtime::spawn_global(async move {
                 let _permit = semaphore.acquire().await.unwrap();
                 let metrics = access_layer
                     .put_sst(
                         &encoded.data,
-                        RegionFileId::new(region_id, encoded.sst_info.file_id),
+                        region_id,
+                        &mut encoded.sst_info,
                         &cache_manager,
                         write_buffer_size,
+                        index_build_params,
                     )
                     .await?;
                 uncommitted.track(std::slice::from_ref(&encoded.sst_info));
@@ -810,12 +814,12 @@ impl RegionFlushTask {
         partition_expr: Option<PartitionExpr>,
         primary_key_range: Option<(Bytes, Bytes)>,
         preserve_row_sequence: bool,
-    ) -> FileMeta {
+    ) -> Result<FileMeta> {
         let (primary_key_min, primary_key_max) = match primary_key_range {
             Some((min, max)) => (Some(min), Some(max)),
             None => (None, None),
         };
-        FileMeta {
+        Ok(FileMeta {
             region_id,
             file_id: sst_info.file_id,
             time_range: sst_info.time_range,
@@ -823,7 +827,7 @@ impl RegionFlushTask {
             file_size: sst_info.file_size,
             max_row_group_uncompressed_size: sst_info.max_row_group_uncompressed_size,
             available_indexes: sst_info.index_metadata.build_available_indexes(),
-            indexes: sst_info.index_metadata.build_indexes(),
+            indexes: sst_info.index_metadata.build_indexes()?,
             index_file_size: sst_info.index_metadata.file_size,
             index_version: 0,
             num_rows: sst_info.num_rows as u64,
@@ -834,7 +838,7 @@ impl RegionFlushTask {
             primary_key_min,
             primary_key_max,
             preserve_row_sequence,
-        }
+        })
     }
 
     fn new_write_request(
@@ -849,6 +853,7 @@ impl RegionFlushTask {
             .map(|f| f == FormatType::Flat)
             .unwrap_or(self.engine_config.default_flat_format);
         SstWriteRequest {
+            index_build_inputs: None,
             op_type: OperationType::Flush,
             metadata: version.metadata.clone(),
             source,
@@ -1483,6 +1488,23 @@ impl FlushScheduler {
         status.pending_bulk_writes.push(request);
     }
 
+    /// Whether an ALTER owns a turn while waiting for its memtables to flush.
+    pub(crate) fn has_pending_alter(&self, region_id: RegionId) -> bool {
+        self.region_status.get(&region_id).is_some_and(|status| {
+            status
+                .pending_ddls
+                .iter()
+                .any(|ddl| matches!(ddl.request, DdlRequest::Alter(_)))
+        })
+    }
+
+    /// Returns true if the region has a close-time flush.
+    pub(crate) fn has_close_time_flush(&self, region_id: RegionId) -> bool {
+        self.region_status
+            .get(&region_id)
+            .is_some_and(|status| status.closing)
+    }
+
     /// Returns true if the region has pending DDLs or a close-time flush.
     pub(crate) fn has_pending_ddls(&self, region_id: RegionId) -> bool {
         self.region_status
@@ -1634,7 +1656,7 @@ impl FlushStatus {
 #[cfg(test)]
 mod tests {
     use api::v1::{OpType, Rows};
-    use common_error::ext::ErrorExt;
+    use common_error::ext::{ErrorExt, RetryHint};
     use common_error::status_code::StatusCode;
     use datatypes::arrow::datatypes::Schema;
     use datatypes::arrow::record_batch::RecordBatch;
@@ -1689,7 +1711,6 @@ mod tests {
             manifest_ctx,
             index_options: IndexOptions::default(),
             flush_semaphore: Arc::new(Semaphore::new(2)),
-            is_staging: false,
             partition_expr: None,
             durability_barrier: DurabilityBarrier::noop(),
         }
@@ -1840,7 +1861,6 @@ mod tests {
                 .await,
             index_options: IndexOptions::default(),
             flush_semaphore: Arc::new(Semaphore::new(2)),
-            is_staging: false,
             partition_expr: None,
             durability_barrier: DurabilityBarrier::noop(),
         };
@@ -1924,9 +1944,9 @@ mod tests {
                     flushed_entry_id: None,
                     flushed_sequence: None,
                     committed_sequence: None,
+                    wal_recovery: Default::default(),
                 },
                 memtables_to_remove: smallvec![],
-                is_staging: false,
             }),
         };
 
@@ -2076,28 +2096,39 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_region_closed_notifies_pending_bulk_writes() {
+    async fn test_region_closed_notifies_pending_requests() {
         let region_id = RegionId::new(1, 1);
         let version_control = Arc::new(VersionControlBuilder::new().build());
-        let (bulk_req, output_rx) = new_test_bulk_request(region_id);
+        let (write_req, write_rx) = new_test_write_request(region_id);
+        let (bulk_req, bulk_rx) = new_test_bulk_request(region_id);
+        let (ddl_tx, ddl_rx) = oneshot::channel();
         let status = FlushStatus {
             region_id,
             version_control,
             state: CancellableTaskState::new(),
             pending_task: None,
             closing: false,
-            pending_ddls: Vec::new(),
-            pending_writes: Vec::new(),
+            pending_ddls: vec![SenderDdlRequest {
+                region_id,
+                sender: OptionOutputTx::from(ddl_tx),
+                request: DdlRequest::Truncate(
+                    store_api::region_request::RegionTruncateRequest::All,
+                ),
+            }],
+            pending_writes: vec![write_req],
             pending_bulk_writes: vec![bulk_req],
         };
 
         status.on_region_closed(Arc::new(RegionClosedSnafu { region_id }.build()));
 
-        let err = output_rx
-            .await
-            .expect("pending bulk write must receive explicit error")
-            .unwrap_err();
+        for rx in [write_rx, bulk_rx] {
+            let err = rx.await.unwrap().unwrap_err();
+            assert_eq!(err.status_code(), StatusCode::Cancelled);
+            assert_eq!(err.retry_hint(), RetryHint::RetryAfterRouteRefresh);
+        }
+        let err = ddl_rx.await.unwrap().unwrap_err();
         assert_eq!(err.status_code(), StatusCode::Cancelled);
+        assert_eq!(err.retry_hint(), RetryHint::RetryAfterRouteRefresh);
     }
 
     #[tokio::test]
@@ -2131,7 +2162,6 @@ mod tests {
                 manifest_ctx: manifest_ctx.clone(),
                 index_options: IndexOptions::default(),
                 flush_semaphore: Arc::new(Semaphore::new(2)),
-                is_staging: false,
                 partition_expr: None,
                 durability_barrier: DurabilityBarrier::noop(),
             })
@@ -2169,6 +2199,7 @@ mod tests {
                 flushed_entry_id: None,
                 flushed_sequence: None,
                 committed_sequence: None,
+                wal_recovery: Default::default(),
             }),
             &[0],
             builder.file_purger(),
@@ -2438,7 +2469,6 @@ mod tests {
                 manifest_ctx: manifest_ctx.clone(),
                 index_options: IndexOptions::default(),
                 flush_semaphore: Arc::new(Semaphore::new(2)),
-                is_staging: false,
                 partition_expr: None,
                 durability_barrier: DurabilityBarrier::noop(),
             })
@@ -2478,6 +2508,7 @@ mod tests {
                 flushed_entry_id: None,
                 flushed_sequence: None,
                 committed_sequence: None,
+                wal_recovery: Default::default(),
             }),
             &[0],
             builder.file_purger(),
@@ -2552,6 +2583,7 @@ mod tests {
                 flushed_entry_id: None,
                 flushed_sequence: None,
                 committed_sequence: None,
+                wal_recovery: Default::default(),
             }),
             &[0],
             builder.file_purger(),

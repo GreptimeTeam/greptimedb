@@ -5,6 +5,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 RUNNER="${SCRIPT_DIR}/run-fuzz-targets.sh"
 COLLECTOR="${SCRIPT_DIR}/collect-fuzz-target-artifacts.sh"
+PREPARE_CORPUS="${SCRIPT_DIR}/prepare-fuzz-corpus.sh"
 
 fail() {
   printf 'FAIL: %s\n' "$*" >&2
@@ -32,6 +33,13 @@ new_fixture() {
 set -euo pipefail
 printf '%s\t%s\t%s\n' "${GT_FUZZ_DUMP_DIR}" "$*" "${MOCK_CARGO_MARKER:-}" >>"${MOCK_CARGO_LOG}"
 target="$4"
+corpus="$5"
+[[ -d "${corpus}" ]] || exit 18
+printf '%s\t%s\n' "${target}" "${corpus}" >>"${MOCK_CORPUS_LOG}"
+if [[ -f "${corpus}/seed" ]]; then
+  cat "${corpus}/seed" >>"${MOCK_SEED_LOG}"
+fi
+printf '%s\n' "${target}" >"${corpus}/learned"
 case " ${MOCK_FAIL_TARGETS:-} " in
   *" ${target} "*) exit 17 ;;
 esac
@@ -64,12 +72,15 @@ run_fixture() {
     "MOCK_COLLECTOR_LOG=${fixture}/collector.log"
     "MOCK_FAIL_TARGETS=${fail_targets}"
     "MOCK_CARGO_MARKER=fixture"
+    "MOCK_CORPUS_LOG=${fixture}/corpus.log"
+    "MOCK_SEED_LOG=${fixture}/seeds.log"
     "FUZZ_TARGETS=${targets}"
     "FUZZ_GROUP=test-group"
     "FUZZ_MAX_TOTAL_TIME=120"
     "FUZZ_UNSTABLE=${unstable}"
     "FUZZ_COLLECT_CLUSTER_ARTIFACTS=true"
     "FUZZ_ARTIFACT_ROOT=${artifact_root}"
+    "FUZZ_CORPUS_ROOT=${fixture}/corpus with spaces"
     "FUZZ_ARTIFACT_COLLECTOR=${fixture}/collector"
     "GT_FUZZ_BINARY_PATH=${GT_FUZZ_BINARY_PATH:-}"
     "GT_FUZZ_INSTANCE_ROOT_DIR=${GT_FUZZ_INSTANCE_ROOT_DIR:-}"
@@ -81,7 +92,7 @@ run_fixture() {
   fi
 
   set +e
-  env -u FUZZ_FAIL_FAST "${runner_env[@]}" \
+  env -u FUZZ_FAIL_FAST -u FUZZ_BIN_DIR "${runner_env[@]}" \
     "${RUNNER}" >"${fixture}/stdout.log" 2>&1
   fixture_status=$?
   set -e
@@ -89,18 +100,30 @@ run_fixture() {
 
 run_prebuilt_fixture() {
   new_fixture
-  mkdir -p "${fixture}/prebuilt"
+  mkdir -p "${fixture}/prebuilt" "${fixture}/corpus with spaces/fuzz_create_table"
+  printf 'restored prebuilt seed\n' >"${fixture}/corpus with spaces/fuzz_create_table/seed"
   cat >"${fixture}/prebuilt/fuzz_create_table" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 printf '%s\t%s\t%s\n' "${GT_FUZZ_DUMP_DIR}" "$*" "${MOCK_BINARY_MARKER:-}" >>"${MOCK_BINARY_LOG}"
+[[ -d "$1" ]] || exit 18
+printf '%s\n' "$1" >>"${MOCK_CORPUS_LOG}"
+cat "$1/seed" >>"${MOCK_SEED_LOG}"
+printf 'new prebuilt input\n' >"$1/learned"
+exit "${MOCK_BINARY_EXIT_CODE}"
 EOF
   chmod +x "${fixture}/prebuilt/fuzz_create_table"
 
   set +e
   env \
+    "PATH=${fixture}/bin:${PATH}" \
+    "MOCK_CARGO_LOG=${fixture}/cargo.log" \
     "MOCK_BINARY_LOG=${fixture}/binary.log" \
     "MOCK_BINARY_MARKER=fixture" \
+    "MOCK_BINARY_EXIT_CODE=${1:-0}" \
+    "MOCK_CORPUS_LOG=${fixture}/corpus.log" \
+    "MOCK_SEED_LOG=${fixture}/seeds.log" \
+    "MOCK_COLLECTOR_LOG=${fixture}/collector.log" \
     "FUZZ_TARGETS=fuzz_create_table" \
     "FUZZ_GROUP=test-group" \
     "FUZZ_MAX_TOTAL_TIME=120" \
@@ -108,6 +131,7 @@ EOF
     "FUZZ_FAIL_FAST=true" \
     "FUZZ_COLLECT_CLUSTER_ARTIFACTS=false" \
     "FUZZ_ARTIFACT_ROOT=${fixture}/artifacts" \
+    "FUZZ_CORPUS_ROOT=${fixture}/corpus with spaces" \
     "FUZZ_ARTIFACT_COLLECTOR=${fixture}/collector" \
     "FUZZ_BIN_DIR=${fixture}/prebuilt" \
     "GITHUB_SHA=deadbeef" \
@@ -143,6 +167,7 @@ test_successful_targets_run_in_order() {
     "target order"
   grep -q -- '--features=unstable' "${fixture}/cargo.log" || fail "unstable feature missing"
   grep -q -- '-max_total_time=120' "${fixture}/cargo.log" || fail "fuzz time missing"
+  grep -q -- '-print_final_stats=1' "${fixture}/cargo.log" || fail "fuzz statistics missing"
   grep -q -- '-artifact_prefix=.*/targets/fuzz_create_table/libfuzzer/' "${fixture}/cargo.log" || \
     fail "target-scoped libFuzzer prefix missing"
   assert_eq success "$(jq -r '.[0].status' "${fixture}/artifacts/manifest.json")" "first status"
@@ -167,8 +192,49 @@ test_prebuilt_binary_runs_without_cargo() {
   [[ ! -e "${fixture}/cargo.log" ]] || fail "cargo ran for prebuilt binary"
   assert_eq 1 "$(wc -l <"${fixture}/binary.log" | tr -d ' ')" "prebuilt invocation count"
   grep -q -- '-max_total_time=120' "${fixture}/binary.log" || fail "prebuilt fuzz time missing"
+  grep -q -- '-print_final_stats=1' "${fixture}/binary.log" || fail "prebuilt fuzz statistics missing"
   grep -q -- '-artifact_prefix=.*/targets/fuzz_create_table/libfuzzer/' "${fixture}/binary.log" || \
     fail "prebuilt target-scoped libFuzzer prefix missing"
+  assert_eq "${fixture}/corpus with spaces/fuzz_create_table" "$(cat "${fixture}/corpus.log")" \
+    "prebuilt corpus argument"
+  assert_eq 'restored prebuilt seed' "$(cat "${fixture}/seeds.log")" "prebuilt restored input"
+  assert_file "${fixture}/corpus with spaces/fuzz_create_table/learned"
+  cleanup_fixture
+}
+
+test_cargo_reuses_separate_target_corpora() {
+  new_fixture
+  mkdir -p "${fixture}/corpus with spaces/fuzz_create_table" "${fixture}/corpus with spaces/fuzz_insert"
+  printf 'create seed\n' >"${fixture}/corpus with spaces/fuzz_create_table/seed"
+  printf 'insert seed\n' >"${fixture}/corpus with spaces/fuzz_insert/seed"
+  run_fixture $'fuzz_create_table\nfuzz_insert' false false ""
+
+  assert_eq 0 "${fixture_status}" "restored cargo run status"
+  assert_eq $'create seed\ninsert seed' "$(cat "${fixture}/seeds.log")" "target-scoped restored inputs"
+  assert_eq \
+    "fuzz_create_table"$'\t'"${fixture}/corpus with spaces/fuzz_create_table"$'\n'"fuzz_insert"$'\t'"${fixture}/corpus with spaces/fuzz_insert" \
+    "$(cat "${fixture}/corpus.log")" "cargo corpus arguments"
+  assert_eq fuzz_create_table "$(cat "${fixture}/corpus with spaces/fuzz_create_table/learned")" \
+    "first target learned input"
+  assert_eq fuzz_insert "$(cat "${fixture}/corpus with spaces/fuzz_insert/learned")" \
+    "second target learned input"
+
+  run_fixture fuzz_create_table true false ""
+  assert_eq 0 "${fixture_status}" "repeated cargo run status"
+  assert_file "${fixture}/corpus with spaces/fuzz_create_table/seed"
+  assert_file "${fixture}/corpus with spaces/fuzz_insert/learned"
+  cleanup_fixture
+}
+
+test_prebuilt_failure_preserves_corpus_and_artifacts() {
+  run_prebuilt_fixture 17
+
+  assert_eq 1 "${fixture_status}" "prebuilt failure status"
+  assert_eq 17 "$(jq -r '.[0].exit_code' "${fixture}/artifacts/manifest.json")" \
+    "prebuilt failure exit code"
+  assert_file "${fixture}/corpus with spaces/fuzz_create_table/seed"
+  assert_file "${fixture}/corpus with spaces/fuzz_create_table/learned"
+  assert_file "${fixture}/artifacts/targets/fuzz_create_table/mock-artifacts/state.txt"
   cleanup_fixture
 }
 
@@ -183,6 +249,8 @@ test_fail_fast_stops_after_first_failure() {
   assert_eq skipped_after_failure "$(jq -r '.[2].status' "${fixture}/artifacts/manifest.json")" "skipped status"
   assert_eq true "$(jq -r '.[2].after_prior_failure' "${fixture}/artifacts/manifest.json")" "skipped provenance"
   assert_file "${fixture}/artifacts/targets/fuzz_insert/mock-artifacts/state.txt"
+  assert_file "${fixture}/corpus with spaces/fuzz_insert/learned"
+  [[ ! -e "${fixture}/corpus with spaces/fuzz_alter_table" ]] || fail "skipped target corpus created"
   grep -q 'title=Fuzz target failed.*target=fuzz_insert' "${fixture}/stdout.log" || \
     fail "target failure annotation missing"
   grep -q 'title=Fuzz target skipped.*target=fuzz_alter_table' "${fixture}/stdout.log" || \
@@ -191,6 +259,8 @@ test_fail_fast_stops_after_first_failure() {
     fail "reproduction section missing"
   grep -q 'cargo +nightly fuzz run fuzz_insert' "${fixture}/artifacts/summary.md" || \
     fail "reproduction command missing"
+  grep -q 'fuzz_insert --fuzz-dir tests-fuzz' "${fixture}/artifacts/summary.md" || \
+    fail "reproduction command depends on the CI corpus path"
   cleanup_fixture
 }
 
@@ -239,6 +309,56 @@ test_invalid_configuration_fails_before_cargo() {
   assert_eq 2 "${fixture_status}" "invalid fail-fast status"
   [[ ! -e "${fixture}/cargo.log" ]] || fail "cargo ran for invalid fail-fast"
   cleanup_fixture
+}
+
+prepare_corpus_fixture() {
+  local targets="$1"
+  local output="$2"
+  set +e
+  FUZZ_TARGETS="${targets}" \
+    GITHUB_WORKSPACE="${fixture}/workspace with spaces" \
+    GITHUB_OUTPUT="${output}" \
+    bash "${PREPARE_CORPUS}" >"${fixture}/prepare.log" 2>&1
+  prepare_status=$?
+  set -e
+}
+
+test_corpus_cache_identity_and_paths() {
+  new_fixture
+  prepare_corpus_fixture $'fuzz_insert\r\n\nfuzz_create_table\r\nfuzz_insert\r' "${fixture}/first-output"
+  assert_eq 0 "${prepare_status}" "corpus preparation status"
+  prepare_corpus_fixture $'fuzz_create_table\nfuzz_insert' "${fixture}/second-output"
+  assert_eq 0 "${prepare_status}" "reordered corpus preparation status"
+  cmp -s "${fixture}/first-output" "${fixture}/second-output" || \
+    fail "cache identity depends on target order, duplicates, or line endings"
+  assert_eq \
+    "${fixture}/workspace with spaces/tests-fuzz/corpus/fuzz_create_table"$'\n'"${fixture}/workspace with spaces/tests-fuzz/corpus/fuzz_insert" \
+    "$(sed '1,2d; $d' "${fixture}/first-output")" "selected corpus cache paths"
+  [[ -d "${fixture}/workspace with spaces/tests-fuzz/corpus/fuzz_insert" ]] || \
+    fail "corpus directory not created"
+  [[ ! -e "${fixture}/workspace with spaces/tests-fuzz/corpus/fuzz_alter_table" ]] || \
+    fail "unselected corpus directory created"
+
+  GITHUB_SHA=another-revision prepare_corpus_fixture $'fuzz_create_table\nfuzz_insert' "${fixture}/new-revision-output"
+  cmp -s "${fixture}/first-output" "${fixture}/new-revision-output" || \
+    fail "source revision changed cache identity"
+  prepare_corpus_fixture fuzz_insert "${fixture}/subset-output"
+  assert_eq 0 "${prepare_status}" "subset corpus preparation status"
+  [[ "$(head -n 1 "${fixture}/first-output")" != "$(head -n 1 "${fixture}/subset-output")" ]] || \
+    fail "different target sets share cache identity"
+  cleanup_fixture
+}
+
+test_corpus_preparation_rejects_invalid_targets_before_writing() {
+  local targets
+  for targets in $'fuzz_insert\n../escape' 'fuzz target' $'\n\r\n'; do
+    new_fixture
+    prepare_corpus_fixture "${targets}" "${fixture}/output"
+    assert_eq 2 "${prepare_status}" "invalid corpus target status"
+    [[ ! -e "${fixture}/output" ]] || fail "invalid targets wrote cache outputs"
+    [[ ! -e "${fixture}/workspace with spaces" ]] || fail "invalid targets created directories"
+    cleanup_fixture
+  done
 }
 
 test_collector_keeps_target_scopes_separate() {
@@ -373,10 +493,14 @@ EOF
 
 test_successful_targets_run_in_order
 test_prebuilt_binary_runs_without_cargo
+test_cargo_reuses_separate_target_corpora
+test_prebuilt_failure_preserves_corpus_and_artifacts
 test_fail_fast_stops_after_first_failure
 test_fail_fast_defaults_to_true
 test_non_fail_fast_marks_later_targets
 test_invalid_configuration_fails_before_cargo
+test_corpus_cache_identity_and_paths
+test_corpus_preparation_rejects_invalid_targets_before_writing
 test_collector_keeps_target_scopes_separate
 test_cluster_collector_honors_target_scope_and_namespace
 test_setup_failure_writes_artifact_contract

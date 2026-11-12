@@ -15,17 +15,31 @@
 //! Basic tests for mito engine.
 
 use std::collections::HashMap;
-use std::sync::atomic::Ordering;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
 use api::v1::helper::row;
+use api::v1::region::StrictWindow;
+use api::v1::region::compact_request::Options;
 use api::v1::value::ValueData;
-use api::v1::{Rows, SemanticType};
+use api::v1::{ArrowIpc, Rows, SemanticType};
+use async_trait::async_trait;
 use common_base::readable_size::ReadableSize;
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
-use common_recordbatch::RecordBatches;
+use common_recordbatch::{DfRecordBatch, RecordBatches};
+use common_test_util::flight::encode_to_flight_data;
 use common_time::Timestamp;
 use common_wal::options::WAL_OPTIONS_KEY;
+use datafusion::datasource::empty::EmptyTable;
+use datafusion::logical_expr::LogicalPlan;
+use datafusion::prelude::SessionContext;
+use datafusion_common::tree_node::{TreeNode, TreeNodeRecursion};
+use datatypes::arrow::array::{
+    ArrayRef, DictionaryArray, Float64Array, StringArray, TimestampMillisecondArray,
+};
+use datatypes::arrow::datatypes::{DataType, Field, Schema, TimeUnit, UInt32Type};
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::ColumnSchema;
 use futures::TryStreamExt;
@@ -35,13 +49,16 @@ use rstest::rstest;
 use rstest_reuse::{self, apply};
 use store_api::metadata::ColumnMetadata;
 use store_api::region_request::{
-    PathType, RegionCreateRequest, RegionFlushRequest, RegionOpenRequest, RegionPutRequest,
-    RegionRequirements,
+    PathType, RegionBulkInsertsRequest, RegionCompactRequest, RegionCreateRequest,
+    RegionFlushRequest, RegionOpenRequest, RegionPutRequest, RegionRequirements,
 };
 use store_api::storage::RegionId;
+use tokio::sync::Notify;
 
 use super::*;
+use crate::engine::listener::{CompactionListener, EventListener};
 use crate::region::version::VersionControlData;
+use crate::region_write_ctx::test_hooks::arm_bulk_install_barrier;
 use crate::test_util::{
     CreateRequestBuilder, LogStoreFactory, TestEnv, build_delete_rows_for_key, build_rows,
     build_rows_for_key, delete_rows, delete_rows_schema, flush_region, kafka_log_store_factory,
@@ -1871,4 +1888,942 @@ async fn restart_without_region_close(
         .await
         .unwrap();
     engine
+}
+
+/// Builds a bulk insert request for a region created by [CreateRequestBuilder]
+/// with its default columns `(tag_0, field_0, ts)`.
+pub(crate) fn build_bulk_insert_request(
+    region_id: RegionId,
+    num_rows: usize,
+) -> RegionBulkInsertsRequest {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("tag_0", DataType::Utf8, true),
+        Field::new("field_0", DataType::Float64, true),
+        Field::new(
+            "ts",
+            DataType::Timestamp(TimeUnit::Millisecond, None),
+            false,
+        ),
+    ]));
+    let tag = Arc::new(StringArray::from_iter_values(
+        (0..num_rows).map(|v| format!("a{v}")),
+    )) as ArrayRef;
+    let field = Arc::new(Float64Array::from_iter_values(
+        (0..num_rows).map(|v| v as f64),
+    )) as ArrayRef;
+    let ts = Arc::new(TimestampMillisecondArray::from_iter_values(
+        (0..num_rows).map(|v| v as i64 * 1000),
+    )) as ArrayRef;
+    let payload = DfRecordBatch::try_new(schema, vec![tag, field, ts]).unwrap();
+    let (schema, record_batch) = encode_to_flight_data(payload.clone());
+
+    RegionBulkInsertsRequest {
+        skip_wal: false,
+        region_id,
+        payload,
+        raw_data: ArrowIpc {
+            schema: schema.data_header,
+            data_header: record_batch.data_header,
+            payload: record_batch.data_body,
+        },
+        partition_expr_version: None,
+        aligned_schema_version: None,
+    }
+}
+
+/// Builds a bulk insert request whose WAL entry can't be encoded. The batch
+/// misses `field_0`, so the worker fills it and clears `raw_data`, and its
+/// all-null dictionary `tag_0` column can't be encoded into a single IPC
+/// message.
+fn build_unencodable_bulk_insert_request(region_id: RegionId) -> RegionBulkInsertsRequest {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new(
+            "tag_0",
+            DataType::Dictionary(Box::new(DataType::UInt32), Box::new(DataType::Utf8)),
+            true,
+        ),
+        Field::new(
+            "ts",
+            DataType::Timestamp(TimeUnit::Millisecond, None),
+            false,
+        ),
+    ]));
+    let tag = Arc::new(DictionaryArray::<UInt32Type>::from_iter([None::<&str>])) as ArrayRef;
+    let ts = Arc::new(TimestampMillisecondArray::from_iter_values([0])) as ArrayRef;
+    let payload = DfRecordBatch::try_new(schema, vec![tag, ts]).unwrap();
+
+    RegionBulkInsertsRequest {
+        skip_wal: false,
+        region_id,
+        payload,
+        // The worker clears it after filling the missing column.
+        raw_data: ArrowIpc::default(),
+        partition_expr_version: None,
+        aligned_schema_version: None,
+    }
+}
+
+async fn scan_num_rows(engine: &MitoEngine, region_id: RegionId) -> usize {
+    let stream = engine
+        .scan_to_stream(region_id, ScanRequest::default())
+        .await
+        .unwrap();
+    let batches = RecordBatches::try_collect(stream).await.unwrap();
+    batches.iter().map(|batch| batch.num_rows()).sum()
+}
+
+#[tokio::test]
+async fn test_bulk_insert_encode_failure_keeps_worker_batch() {
+    common_telemetry::init_default_ut_logging();
+
+    let mut env = TestEnv::new().await;
+    // A single worker so requests of all regions share one batch.
+    let engine = env
+        .create_engine(MitoConfig {
+            num_workers: 1,
+            ..Default::default()
+        })
+        .await;
+
+    let blocker_region_id = RegionId::new(1, 1);
+    let region_id = RegionId::new(1, 2);
+    let other_region_id = RegionId::new(1, 3);
+    for id in [blocker_region_id, region_id, other_region_id] {
+        engine
+            .handle_request(
+                id,
+                RegionRequest::Create(CreateRequestBuilder::new().build()),
+            )
+            .await
+            .unwrap();
+    }
+
+    // Pauses the worker in a bulk write of the blocker region so the requests
+    // below queue up and reach the worker as one batch.
+    let mut barrier = arm_bulk_install_barrier(
+        blocker_region_id,
+        engine
+            .get_region(blocker_region_id)
+            .unwrap()
+            .version_control
+            .clone(),
+    );
+    let blocker_engine = engine.clone();
+    let blocker = tokio::spawn(async move {
+        blocker_engine
+            .handle_request(
+                blocker_region_id,
+                RegionRequest::BulkInserts(build_bulk_insert_request(blocker_region_id, 1)),
+            )
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(10), barrier.wait_until_reached())
+        .await
+        .expect("bulk write never reached the install barrier");
+
+    let mut receivers = Vec::new();
+    for (id, request) in [
+        (region_id, build_unencodable_bulk_insert_request(region_id)),
+        (region_id, build_bulk_insert_request(region_id, 3)),
+        (
+            other_region_id,
+            build_bulk_insert_request(other_region_id, 2),
+        ),
+    ] {
+        let metadata = engine.inner.get_metadata(id).ok();
+        let (request, receiver) = WorkerRequest::try_from_region_request(
+            id,
+            RegionRequest::BulkInserts(request),
+            metadata,
+        )
+        .unwrap();
+        engine
+            .inner
+            .workers
+            .submit_to_worker(id, request)
+            .await
+            .unwrap();
+        receivers.push(receiver);
+    }
+    barrier.release();
+    assert_eq!(1, blocker.await.unwrap().unwrap().affected_rows);
+
+    let [failed, same_region, other_region] = receivers.try_into().unwrap();
+    let err = failed.await.unwrap().unwrap_err();
+    assert_eq!(StatusCode::Unsupported, err.status_code(), "{err:?}");
+    // Requests after the failed one in the same batch are still written.
+    assert_eq!(3, same_region.await.unwrap().unwrap());
+    assert_eq!(2, other_region.await.unwrap().unwrap());
+    assert_eq!(3, scan_num_rows(&engine, region_id).await);
+    assert_eq!(2, scan_num_rows(&engine, other_region_id).await);
+}
+
+#[tokio::test]
+async fn test_manifest_scan_region_filter() {
+    use datafusion_expr::{col, lit};
+    use futures::StreamExt;
+
+    let regions = 3;
+    let files_per_region = 64;
+    let mut env = TestEnv::new().await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+    for number in 0..regions {
+        add_manifest_scan_region(&engine, RegionId::new(11, number), files_per_region).await;
+    }
+
+    let target = RegionId::new(11, 1);
+    let batch_size = 17;
+    let mut reference = None;
+    for pushed in [false, true] {
+        let filters = if pushed {
+            vec![col("region_id").eq(lit(target.as_u64()))]
+        } else {
+            vec![]
+        };
+        let mut stream = engine.scan_ssts_from_manifest(&filters, batch_size);
+        let mut examined_entries = 0;
+        let mut selected = Vec::new();
+        while let Some(batch) = stream.next().await {
+            assert!(batch.len() <= batch_size);
+            examined_entries += batch.len();
+            selected.extend(batch.into_iter().filter(|entry| entry.region_id == target));
+        }
+        assert_eq!(selected.len(), files_per_region);
+        assert_eq!(
+            examined_entries,
+            if pushed {
+                files_per_region
+            } else {
+                regions as usize * files_per_region
+            }
+        );
+        selected.sort_unstable_by(|a, b| a.file_id.cmp(&b.file_id));
+        if let Some(reference) = &reference {
+            assert_eq!(&selected, reference);
+        } else {
+            reference = Some(selected);
+        }
+    }
+    // Region pruning must happen before acquiring a manifest snapshot. Holding
+    // another region's write lock would deadlock an unpruned enumeration.
+    let unrelated = engine.get_region(RegionId::new(11, 0)).unwrap();
+    let guard = unrelated.manifest_ctx.manifest_manager.write().await;
+    // Node and directory predicates also reject candidates before opening any
+    // manifest; otherwise the locked region would block these empty scans.
+    for predicate in [
+        col("node_id").is_not_null(),
+        col("table_dir").eq(lit("missing/")),
+    ] {
+        let batches = tokio::time::timeout(
+            Duration::from_secs(5),
+            engine
+                .scan_ssts_from_manifest(&[predicate], batch_size)
+                .collect::<Vec<_>>(),
+        )
+        .await
+        .expect("pruned scan must not acquire a manifest lock");
+        assert!(batches.is_empty());
+    }
+    let filtered =
+        engine.scan_ssts_from_manifest(&[col("region_id").eq(lit(target.as_u64()))], batch_size);
+    let batches = tokio::time::timeout(Duration::from_secs(5), filtered.collect::<Vec<_>>())
+        .await
+        .expect("filtered scan must not acquire an unrelated manifest lock");
+    assert_eq!(
+        batches.iter().map(Vec::len).sum::<usize>(),
+        files_per_region
+    );
+    drop(guard);
+
+    let schema = store_api::sst_entry::ManifestSstEntry::schema();
+    let projection = ["file_id", "min_ts"]
+        .map(|name| {
+            schema
+                .column_schemas()
+                .iter()
+                .position(|c| c.name == name)
+                .unwrap()
+        })
+        .to_vec();
+    let mut projected = engine.scan_ssts_from_manifest_projected(
+        &[col("region_id").eq(lit(target.as_u64()))],
+        batch_size,
+        Some(&projection),
+    );
+    let mut projected_entries = Vec::new();
+    while let Some(batch) = projected.next().await {
+        assert!(
+            batch
+                .iter()
+                .all(|entry| entry.table_dir.is_empty() && entry.file_path.is_empty())
+        );
+        projected_entries.extend(batch);
+    }
+    projected_entries.sort_unstable_by(|a, b| a.file_id.cmp(&b.file_id));
+    let builder = store_api::sst_entry::ManifestSstBatchBuilder::new(Arc::new(
+        store_api::sst_entry::ManifestSstEntry::schema()
+            .arrow_schema()
+            .project(&projection)
+            .unwrap(),
+    ));
+    let expected = builder.build(&reference.unwrap()).unwrap();
+    let actual = builder.build(&projected_entries).unwrap();
+    assert_eq!(actual, expected);
+    assert!(
+        engine
+            .scan_ssts_from_manifest(&[col("region_id").eq(lit(0u64))], batch_size)
+            .next()
+            .await
+            .is_none()
+    );
+}
+
+/// Installs synthetic immutable file metadata without creating physical SSTs.
+async fn add_manifest_scan_region(
+    engine: &MitoEngine,
+    region_id: RegionId,
+    files_per_region: usize,
+) {
+    use crate::manifest::action::{RegionEdit, RegionMetaAction, RegionMetaActionList};
+    use crate::sst::file::FileMeta;
+    use store_api::storage::FileId;
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::Create(CreateRequestBuilder::new().build()),
+        )
+        .await
+        .unwrap();
+    let region = engine.get_region(region_id).unwrap();
+    let edit = RegionEdit {
+        files_to_add: (0..files_per_region)
+            .map(|index| FileMeta {
+                region_id,
+                file_id: FileId::from_bytes(
+                    (((region_id.region_number() as u128) << 64) | index as u128).to_be_bytes(),
+                ),
+                time_range: (
+                    Timestamp::new_millisecond(index as i64),
+                    Timestamp::new_millisecond(index as i64 + 1),
+                ),
+                file_size: 1024 + index as u64,
+                ..Default::default()
+            })
+            .collect(),
+        files_to_remove: vec![],
+        timestamp_ms: None,
+        compaction_time_window: None,
+        flushed_entry_id: None,
+        flushed_sequence: None,
+        committed_sequence: None,
+        wal_recovery: Default::default(),
+    };
+    region
+        .manifest_ctx
+        .manifest_manager
+        .write()
+        .await
+        .update(
+            RegionMetaActionList::new(vec![RegionMetaAction::Edit(edit)]),
+            false,
+        )
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn test_manifest_scan_table_filter() {
+    use datafusion_expr::{col, lit};
+    use futures::StreamExt;
+    use store_api::sst_entry::ManifestSstEntry;
+
+    let mut env = TestEnv::new().await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+    let target_regions = [RegionId::new(11, 0), RegionId::new(11, 1)];
+    let unrelated_id = RegionId::new(12, 0);
+    for region_id in target_regions.into_iter().chain([unrelated_id]) {
+        add_manifest_scan_region(&engine, region_id, 3).await;
+    }
+    let mut expected = engine.all_ssts_from_manifest().await;
+    expected.retain(|entry| entry.table_id == 11);
+    expected.sort_unstable_by_key(|entry| (entry.region_id, entry.file_id.clone()));
+    assert_eq!(expected.len(), 6);
+
+    // A table predicate must exclude other tables before locking their manifests,
+    // while keeping every region of the selected table (including the same number).
+    let unrelated = engine.get_region(unrelated_id).unwrap();
+    let guard = unrelated.manifest_ctx.manifest_manager.write().await;
+    let batches = tokio::time::timeout(
+        Duration::from_secs(5),
+        engine
+            .scan_ssts_from_manifest(&[col("table_id").eq(lit(11u32))], 2)
+            .collect::<Vec<_>>(),
+    )
+    .await
+    .expect("table filtering must not acquire another table's manifest lock");
+    assert!(batches.iter().all(|batch| batch.len() <= 2));
+    let mut actual = batches.into_iter().flatten().collect::<Vec<_>>();
+    actual.sort_unstable_by_key(|entry| (entry.region_id, entry.file_id.clone()));
+    assert_eq!(actual, expected);
+
+    let schema = ManifestSstEntry::schema();
+    let projection = ["region_id", "file_id"]
+        .map(|name| {
+            schema
+                .column_schemas()
+                .iter()
+                .position(|column| column.name == name)
+                .unwrap()
+        })
+        .to_vec();
+    let batches = tokio::time::timeout(
+        Duration::from_secs(5),
+        engine
+            .scan_ssts_from_manifest_projected(
+                &[col("table_id").eq(lit(11u32))],
+                2,
+                Some(&projection),
+            )
+            .collect::<Vec<_>>(),
+    )
+    .await
+    .expect("hidden table predicate must prune unrelated manifests");
+    let mut actual = batches.into_iter().flatten().collect::<Vec<_>>();
+    actual.sort_unstable_by_key(|entry| (entry.region_id, entry.file_id.clone()));
+    let builder = store_api::sst_entry::ManifestSstBatchBuilder::new(Arc::new(
+        ManifestSstEntry::schema()
+            .arrow_schema()
+            .project(&projection)
+            .unwrap(),
+    ));
+    assert_eq!(
+        builder.build(&actual).unwrap(),
+        builder.build(&expected).unwrap()
+    );
+    drop(guard);
+}
+
+#[tokio::test]
+async fn test_region_manifest_size_metrics_lifecycle() {
+    use crate::metrics::manifest_size::remove_region_manifest_size;
+    use crate::metrics::manifest_size::tests::manifest_metric_sample;
+    use store_api::region_request::{RegionCloseRequest, RegionDropRequest};
+
+    let mut env = TestEnv::with_prefix("manifest-size-metrics").await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+    let region_id = RegionId::new(u32::MAX, 7);
+    remove_region_manifest_size(region_id);
+    let request = CreateRequestBuilder::new().build();
+    let table_dir = request.table_dir.clone();
+    engine
+        .handle_request(region_id, RegionRequest::Create(request.clone()))
+        .await
+        .unwrap();
+    engine
+        .get_region(region_id)
+        .unwrap()
+        .set_manifest_size_metric_threshold(0);
+    let assert_sample = || {
+        let expected = engine
+            .get_region(region_id)
+            .unwrap()
+            .region_statistic()
+            .manifest_size;
+        assert!(expected > 0);
+        assert_eq!(manifest_metric_sample(region_id), Some(expected as i64));
+        expected
+    };
+    let initial = assert_sample();
+    put_rows(
+        &engine,
+        region_id,
+        Rows {
+            schema: rows_schema(&request),
+            rows: build_rows(0, 3),
+        },
+    )
+    .await;
+    flush_region(&engine, region_id, None).await;
+    assert_ne!(assert_sample(), initial);
+    let old_region = engine.get_region(region_id).unwrap();
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::Close(RegionCloseRequest::default()),
+        )
+        .await
+        .unwrap();
+    assert_eq!(manifest_metric_sample(region_id), None);
+    reopen_region(&engine, region_id, table_dir, true, HashMap::new()).await;
+    engine
+        .get_region(region_id)
+        .unwrap()
+        .set_manifest_size_metric_threshold(0);
+    assert_sample();
+    drop(old_region);
+    assert_sample();
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::Drop(RegionDropRequest {
+                fast_path: false,
+                force: false,
+                partial_drop: false,
+            }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(manifest_metric_sample(region_id), None);
+    let stop_id = RegionId::new(u32::MAX, 9);
+    remove_region_manifest_size(stop_id);
+    engine
+        .handle_request(stop_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+    let region = engine.get_region(stop_id).unwrap();
+    region.set_manifest_size_metric_threshold(0);
+    assert!(manifest_metric_sample(stop_id).is_some());
+    engine.stop().await.unwrap();
+    assert_eq!(manifest_metric_sample(stop_id), None);
+}
+
+#[tokio::test]
+async fn test_region_manifest_size_metrics_failed_open() {
+    use crate::metrics::manifest_size::remove_region_manifest_size;
+    use crate::metrics::manifest_size::tests::manifest_metric_sample;
+    use store_api::region_request::RegionCloseRequest;
+
+    let id = RegionId::new(u32::MAX, 10);
+    remove_region_manifest_size(id);
+    let mut env = TestEnv::with_prefix("manifest-metric-failed-open").await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+    let request = CreateRequestBuilder::new().build();
+    let table_dir = request.table_dir.clone();
+    engine
+        .handle_request(id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+    let region = engine.get_region(id).unwrap();
+    region.set_manifest_size_metric_threshold(0);
+    assert!(manifest_metric_sample(id).is_some());
+    let store = region.access_layer.object_store().clone();
+    let dir = crate::manifest::storage::manifest_dir(&region.access_layer.build_region_dir(id));
+    engine
+        .handle_request(id, RegionRequest::Close(RegionCloseRequest::default()))
+        .await
+        .unwrap();
+    assert_eq!(manifest_metric_sample(id), None);
+    let entries = store.list(&dir).await.unwrap();
+    let mut corrupted = 0;
+    for entry in entries {
+        if entry.metadata().is_file() {
+            store.write(entry.path(), "invalid manifest").await.unwrap();
+            corrupted += 1;
+        }
+    }
+    assert!(corrupted > 0);
+    assert!(
+        engine
+            .handle_request(
+                id,
+                RegionRequest::Open(RegionOpenRequest {
+                    engine: String::new(),
+                    table_dir,
+                    options: HashMap::new(),
+                    skip_wal_replay: true,
+                    path_type: PathType::Bare,
+                    checkpoint: None,
+                    requirements: Default::default(),
+                })
+            )
+            .await
+            .is_err()
+    );
+    assert_eq!(manifest_metric_sample(id), None);
+    engine.stop().await.unwrap();
+}
+
+/// Reads a real running compaction even while its owning worker is blocked.
+#[tokio::test]
+async fn test_inspect_compaction_tasks() {
+    #[derive(Default)]
+    struct InspectionListener {
+        compaction: CompactionListener,
+        block_write: AtomicBool,
+        write_blocked: Notify,
+        release_write: Notify,
+    }
+
+    #[async_trait]
+    impl EventListener for InspectionListener {
+        async fn on_merge_ssts_finished(&self, region_id: RegionId) {
+            self.compaction.on_merge_ssts_finished(region_id).await;
+        }
+
+        async fn on_write_wal_end(&self) {
+            if self.block_write.swap(false, Ordering::Relaxed) {
+                self.write_blocked.notify_one();
+                self.release_write.notified().await;
+            }
+        }
+    }
+
+    struct Release(Arc<InspectionListener>);
+
+    impl Drop for Release {
+        fn drop(&mut self) {
+            self.0.release_write.notify_one();
+            self.0.compaction.wake();
+        }
+    }
+
+    let listener = Arc::new(InspectionListener::default());
+    let release = Release(listener.clone());
+    let mut env = TestEnv::with_prefix("inspect-compaction")
+        .await
+        .with_node_id(42);
+    let engine = env
+        .create_engine_with(
+            MitoConfig {
+                min_compaction_interval: Duration::from_secs(3600),
+                ..Default::default()
+            },
+            None,
+            Some(listener.clone()),
+            None,
+        )
+        .await;
+    let region_id = RegionId::new(123, 1);
+    let request = CreateRequestBuilder::new()
+        .insert_option("compaction.type", "twcs")
+        .insert_option("compaction.twcs.trigger_file_num", "100")
+        .build();
+    let schema = rows_schema(&request);
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+    assert!(
+        engine
+            .inspect_compaction_tasks(&[])
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    for _ in 0..2 {
+        put_rows(
+            &engine,
+            region_id,
+            Rows {
+                schema: schema.clone(),
+                rows: build_rows(0, 2),
+            },
+        )
+        .await;
+        flush_region(&engine, region_id, None).await;
+    }
+    let compact = {
+        let engine = engine.clone();
+        tokio::spawn(async move {
+            engine
+                .handle_request(
+                    region_id,
+                    RegionRequest::Compact(RegionCompactRequest {
+                        options: Options::StrictWindow(StrictWindow {
+                            window_seconds: 3600,
+                        }),
+                        ..Default::default()
+                    }),
+                )
+                .await
+                .unwrap()
+        })
+    };
+    tokio::time::timeout(
+        Duration::from_secs(20),
+        listener.compaction.wait_handle_finished(),
+    )
+    .await
+    .unwrap();
+    let tasks = tokio::time::timeout(
+        Duration::from_secs(10),
+        engine.inspect_compaction_tasks(&[]),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(tasks.len(), 1);
+    let task = &tasks[0];
+    assert_eq!(task.region_id, region_id);
+    assert_eq!(task.table_id, region_id.table_id());
+    assert_eq!(task.node_id, Some(42));
+    assert_eq!(task.state.as_ref(), "running");
+    assert_eq!(task.phase.as_ref(), "executing");
+    assert_eq!(task.trigger_type.as_ref(), "manual");
+
+    let context = SessionContext::new();
+    context
+        .register_table(
+            "compaction_tasks",
+            Arc::new(EmptyTable::new(
+                CompactionTaskEntry::schema().arrow_schema().clone(),
+            )),
+        )
+        .unwrap();
+    for (column, value) in [("node_id", 42), ("region_id", region_id.as_u64())] {
+        for (predicate, expected_count) in [
+            (format!("{column} = {value}"), 1),
+            (format!("{column} = {}", value + 1), 0),
+            (format!("{value} = {column}"), 1),
+            (format!("{} = {column}", value + 1), 0),
+            (format!("{value} <= {column}"), 1),
+            (format!("{value} < {column}"), 0),
+        ] {
+            let sql = format!("SELECT * FROM compaction_tasks WHERE {predicate}");
+            let state = context.state();
+            let plan = state.create_logical_plan(&sql).await.unwrap();
+            let optimized = state.optimize(&plan).unwrap();
+            let mut filters = Vec::new();
+            optimized
+                .apply(|plan| {
+                    if let LogicalPlan::Filter(filter) = plan {
+                        filters.push(filter.predicate.clone());
+                    }
+                    Ok(TreeNodeRecursion::Continue)
+                })
+                .unwrap();
+            assert_eq!(filters.len(), 1, "{sql}");
+            let mut has_decimal_cast = false;
+            filters[0]
+                .apply(|expr| {
+                    if let Expr::Cast(cast) = expr {
+                        has_decimal_cast |= matches!(cast.expr.as_ref(), Expr::Column(_))
+                            && cast.field.data_type() == &DataType::Decimal128(20, 0);
+                    }
+                    Ok(TreeNodeRecursion::Continue)
+                })
+                .unwrap();
+            assert!(!has_decimal_cast, "{sql}: {}", filters[0]);
+
+            // The engine must prune these predicates without a residual SQL filter.
+            let actual = engine.inspect_compaction_tasks(&filters).await.unwrap();
+            assert_eq!(actual.len(), expected_count, "{sql}");
+            if let Some(actual) = actual.first() {
+                assert_eq!(actual.task_id, task.task_id, "{sql}");
+                assert_eq!(actual.region_id, region_id, "{sql}");
+                assert_eq!(actual.node_id, Some(42), "{sql}");
+            }
+        }
+    }
+    // This hook runs on the region worker, unlike the background compaction gate.
+    listener.block_write.store(true, Ordering::Relaxed);
+    let write = {
+        let engine = engine.clone();
+        tokio::spawn(async move {
+            put_rows(
+                &engine,
+                region_id,
+                Rows {
+                    schema,
+                    rows: build_rows(2, 3),
+                },
+            )
+            .await;
+        })
+    };
+    tokio::time::timeout(Duration::from_secs(10), listener.write_blocked.notified())
+        .await
+        .unwrap();
+    let blocked_worker_tasks = tokio::time::timeout(
+        Duration::from_secs(10),
+        engine.inspect_compaction_tasks(&[]),
+    )
+    .await
+    .expect("inspection must not wait for the blocked region worker")
+    .unwrap();
+    assert_eq!(blocked_worker_tasks.len(), 1);
+    assert_eq!(blocked_worker_tasks[0].task_id, task.task_id);
+    assert_eq!(blocked_worker_tasks[0].region_id, region_id);
+    assert_eq!(blocked_worker_tasks[0].state.as_ref(), "running");
+    assert!(!write.is_finished());
+
+    drop(release);
+    tokio::time::timeout(Duration::from_secs(10), write)
+        .await
+        .unwrap()
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(20), compact)
+        .await
+        .unwrap()
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while !engine
+            .inspect_compaction_tasks(&[])
+            .await
+            .unwrap()
+            .is_empty()
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    engine.stop().await.unwrap();
+}
+
+/// Exercises cancellation through Handle before and after the commit boundary.
+#[rstest]
+#[case(false)]
+#[case(true)]
+#[tokio::test]
+async fn test_cancel_compaction_task(#[case] commit_gate: bool) {
+    fn cancel_request(task_id: &str) -> RegionRequest {
+        RegionRequest::CancelCompaction(store_api::region_request::RegionCancelCompactionRequest {
+            task_id: task_id.to_string(),
+        })
+    }
+
+    struct CancellationListener {
+        commit_gate: bool,
+        gate: CompactionListener,
+    }
+    #[async_trait]
+    impl EventListener for CancellationListener {
+        async fn on_merge_ssts_finished(&self, region_id: RegionId) {
+            if !self.commit_gate {
+                self.gate.on_merge_ssts_finished(region_id).await;
+            }
+        }
+        async fn on_compaction_commit_begin(&self, region_id: RegionId) {
+            if self.commit_gate {
+                self.gate.on_merge_ssts_finished(region_id).await;
+            }
+        }
+    }
+    struct Release(Arc<CancellationListener>);
+    impl Drop for Release {
+        fn drop(&mut self) {
+            self.0.gate.wake();
+        }
+    }
+    let listener = Arc::new(CancellationListener {
+        commit_gate,
+        gate: CompactionListener::default(),
+    });
+    let release = Release(listener.clone());
+    let mut env = TestEnv::with_prefix("cancel-compaction-task").await;
+    let engine = env
+        .create_engine_with(
+            MitoConfig {
+                min_compaction_interval: Duration::from_secs(3600),
+                ..Default::default()
+            },
+            None,
+            Some(listener.clone()),
+            None,
+        )
+        .await;
+    let region_id = RegionId::new(124, 1);
+    let request = CreateRequestBuilder::new()
+        .insert_option("compaction.type", "twcs")
+        .insert_option("compaction.twcs.trigger_file_num", "100")
+        .build();
+    let schema = rows_schema(&request);
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+    for _ in 0..2 {
+        put_rows(
+            &engine,
+            region_id,
+            Rows {
+                schema: schema.clone(),
+                rows: build_rows(0, 2),
+            },
+        )
+        .await;
+        flush_region(&engine, region_id, None).await;
+    }
+    let compact = {
+        let engine = engine.clone();
+        tokio::spawn(async move {
+            engine
+                .handle_request(
+                    region_id,
+                    RegionRequest::Compact(RegionCompactRequest {
+                        options: Options::StrictWindow(StrictWindow {
+                            window_seconds: 3600,
+                        }),
+                        ..Default::default()
+                    }),
+                )
+                .await
+        })
+    };
+    tokio::time::timeout(
+        Duration::from_secs(20),
+        listener.gate.wait_handle_finished(),
+    )
+    .await
+    .unwrap();
+    let tasks = engine.inspect_compaction_tasks(&[]).await.unwrap();
+    assert_eq!(tasks.len(), 1);
+    assert_eq!(
+        engine
+            .handle_request(region_id, cancel_request("stale"))
+            .await
+            .unwrap()
+            .affected_rows,
+        0
+    );
+    for _ in 0..2 {
+        let actual = tokio::time::timeout(
+            Duration::from_secs(10),
+            engine.handle_request(region_id, cancel_request(&tasks[0].task_id)),
+        )
+        .await
+        .unwrap();
+        if commit_gate {
+            assert_eq!(
+                actual.unwrap_err().status_code(),
+                StatusCode::InvalidArguments
+            );
+        } else {
+            assert_eq!(actual.unwrap().affected_rows, 1);
+        }
+    }
+    assert_eq!(
+        engine.inspect_compaction_tasks(&[]).await.unwrap()[0]
+            .state
+            .as_ref(),
+        if commit_gate { "running" } else { "cancelling" }
+    );
+    drop(release);
+    let result = tokio::time::timeout(Duration::from_secs(20), compact)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(result.is_err(), !commit_gate);
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while !engine
+            .inspect_compaction_tasks(&[])
+            .await
+            .unwrap()
+            .is_empty()
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        engine
+            .handle_request(region_id, cancel_request(&tasks[0].task_id))
+            .await
+            .unwrap()
+            .affected_rows,
+        0
+    );
+    engine.stop().await.unwrap();
 }

@@ -48,7 +48,6 @@ common-stat.workspace = true
 common-telemetry.workspace = true
 common-time.workspace = true
 common-version.workspace = true
-dashmap.workspace = true
 datafusion.workspace = true
 datafusion-expr.workspace = true
 datatypes.workspace = true

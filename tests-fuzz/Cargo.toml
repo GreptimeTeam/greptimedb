@@ -59,6 +59,7 @@ sql = { workspace = true }
 sqlparser.workspace = true
 sqlx = { workspace = true, features = [
     "mysql",
+    "mysql-rsa",
     "chrono",
 ] }
 store-api = { workspace = true }

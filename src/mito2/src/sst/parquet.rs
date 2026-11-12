@@ -20,19 +20,22 @@ use std::sync::Arc;
 use api::v1::SemanticType;
 use common_base::readable_size::ReadableSize;
 use datatypes::json::JsonSettings;
-use parquet::basic::{Compression, ZstdLevel};
+use datatypes::schema::ColumnEncoding;
+use parquet::basic::{Compression, Encoding, ZstdLevel};
 use parquet::file::metadata::ParquetMetaData;
 use parquet::file::properties::{DEFAULT_DICTIONARY_PAGE_SIZE_LIMIT, WriterPropertiesBuilder};
 use parquet::schema::types::ColumnPath;
 use snafu::ResultExt;
 use store_api::metadata::RegionMetadataRef;
 use store_api::mito_engine_options::FloatFieldEncoding;
+use store_api::storage::consts::{OP_TYPE_COLUMN_NAME, SEQUENCE_COLUMN_NAME};
 use store_api::storage::{ColumnId, FileId};
 
 use crate::error::{CompressionOptionsSnafu, Result, WriteParquetSnafu};
 use crate::sst::DEFAULT_WRITE_BUFFER_SIZE;
 use crate::sst::file::FileTimeRange;
 use crate::sst::index::IndexOutput;
+use crate::sst::parquet::parallel_writer::EncodeRuntime;
 
 pub mod file_range;
 pub mod flat_format;
@@ -42,6 +45,7 @@ pub(crate) mod index_reader;
 pub(crate) mod index_writer;
 pub(crate) mod json_align;
 pub mod metadata;
+pub mod parallel_writer;
 pub mod prefilter;
 pub mod push_decoder;
 pub mod read_columns;
@@ -92,6 +96,24 @@ pub const DEFAULT_ROW_GROUP_SIZE: usize = 100 * 1024;
 pub(crate) const COLUMN_INDEX_TRUNCATE_LENGTH: Option<usize> =
     parquet::file::properties::DEFAULT_COLUMN_INDEX_TRUNCATE_LENGTH;
 
+/// Applies the encodings of the time index and internal columns shared by every SST writer.
+pub(crate) fn apply_internal_column_encoding(
+    builder: WriterPropertiesBuilder,
+    metadata: &RegionMetadataRef,
+) -> WriterPropertiesBuilder {
+    let ts_col = ColumnPath::new(vec![
+        metadata.time_index_column().column_schema.name.clone(),
+    ]);
+    let seq_col = ColumnPath::new(vec![SEQUENCE_COLUMN_NAME.to_string()]);
+    let op_type_col = ColumnPath::new(vec![OP_TYPE_COLUMN_NAME.to_string()]);
+    builder
+        .set_column_encoding(seq_col.clone(), Encoding::DELTA_BINARY_PACKED)
+        .set_column_dictionary_enabled(seq_col, false)
+        .set_column_encoding(ts_col.clone(), Encoding::DELTA_BINARY_PACKED)
+        .set_column_dictionary_enabled(ts_col, false)
+        .set_column_compression(op_type_col, Compression::UNCOMPRESSED)
+}
+
 /// Applies the per-column options declared with `COMPRESSION WITH (...)`.
 pub(crate) fn apply_column_compression(
     mut builder: WriterPropertiesBuilder,
@@ -109,6 +131,15 @@ pub(crate) fn apply_column_compression(
             continue;
         };
         let path = ColumnPath::new(vec![column.column_schema.name.clone()]);
+        if let Some(encoding) = options.encoding {
+            let encoding = match encoding {
+                ColumnEncoding::Plain => Encoding::PLAIN,
+                ColumnEncoding::DeltaBinaryPacked => Encoding::DELTA_BINARY_PACKED,
+            };
+            builder = builder
+                .set_column_dictionary_enabled(path.clone(), false)
+                .set_column_encoding(path.clone(), encoding);
+        }
         if let Some(level) = options.level {
             let level = ZstdLevel::try_new(level).context(WriteParquetSnafu)?;
             builder = builder.set_column_compression(path.clone(), Compression::ZSTD(level));
@@ -161,6 +192,11 @@ pub struct WriteOptions {
     pub max_file_size: Option<usize>,
     /// Encoding policy for direct floating-point field columns.
     pub float_field_encoding: FloatFieldEncoding,
+    /// Maximum number of blocking tasks that encode the columns of a row group.
+    /// Values below 2 encode on the writing task.
+    pub encode_parallelism: usize,
+    /// Runtime whose blocking pool runs the parallel column encoding.
+    pub encode_runtime: EncodeRuntime,
 }
 
 impl Default for WriteOptions {
@@ -170,6 +206,8 @@ impl Default for WriteOptions {
             row_group_size: DEFAULT_ROW_GROUP_SIZE,
             max_file_size: None,
             float_field_encoding: FloatFieldEncoding::default(),
+            encode_parallelism: 1,
+            encode_runtime: EncodeRuntime::default(),
         }
     }
 }
@@ -463,7 +501,8 @@ mod tests {
         }
     }
 
-    struct NoopIndexBuilder;
+    /// Builds an indexer with no enabled indexes for SST writer tests.
+    pub(crate) struct NoopIndexBuilder;
 
     #[async_trait::async_trait]
     impl IndexerBuilder for NoopIndexBuilder {
@@ -475,6 +514,54 @@ mod tests {
         ) -> Indexer {
             Indexer::default()
         }
+    }
+
+    #[tokio::test]
+    async fn test_parallel_encoding_writes_identical_file() {
+        let mut env = TestEnv::new().await;
+        let object_store = env.init_object_store_manager();
+        let metadata = Arc::new(sst_region_metadata());
+        let mut contents = Vec::new();
+        for encode_parallelism in [1, 3] {
+            let handle = sst_file_handle(0, 1000);
+            let file_path = FixedPathProvider {
+                region_file_id: handle.file_id(),
+            };
+            let path = file_path.build_sst_file_path(handle.file_id());
+            let source = new_flat_source_from_record_batches(vec![
+                new_record_batch_by_range(&["a", "d"], 0, 60),
+                new_record_batch_by_range(&["b", "f"], 0, 40),
+                new_record_batch_by_range(&["b", "h"], 100, 200),
+            ]);
+            let write_opts = WriteOptions {
+                row_group_size: 50,
+                encode_parallelism,
+                ..Default::default()
+            };
+
+            let mut metrics = Metrics::new(WriteType::Flush);
+            let mut writer = ParquetWriter::new_with_object_store(
+                object_store.clone(),
+                metadata.clone(),
+                IndexConfig::default(),
+                NoopIndexBuilder,
+                file_path,
+                &mut metrics,
+            )
+            .await;
+            let info = writer
+                .write_all_flat(source, None, &write_opts)
+                .await
+                .unwrap()
+                .remove(0);
+            assert_eq!(200, info.num_rows);
+            assert_eq!(4, info.num_row_groups);
+            contents.push(object_store.read(&path).await.unwrap().to_vec());
+        }
+        assert!(
+            contents[0] == contents[1],
+            "parallel encoding changed the SST"
+        );
     }
 
     #[tokio::test]
@@ -619,22 +706,21 @@ mod tests {
             ranges
         };
 
-        // Cache 4 row groups.
+        // Every byte block touched by the four row groups is retained. Blocks
+        // are shared across row groups, while file identity remains isolated.
+        let pages = cache.parquet_page_cache().unwrap();
         for i in 0..4 {
-            let lookup = cache
-                .get_page_ranges(handle.file_id().file_id(), i, &get_ranges(i))
-                .unwrap();
-            assert!(lookup.is_fully_cached());
+            for range in get_ranges(i) {
+                for page in range.start / crate::cache::parquet_page::PAGE_SIZE
+                    ..=(range.end - 1) / crate::cache::parquet_page::PAGE_SIZE
+                {
+                    assert!(pages.contains(handle.file_id(), page).await);
+                }
+            }
         }
-        let missing_range = 0..10;
-        let lookup = cache
-            .get_page_ranges(
-                handle.file_id().file_id(),
-                5,
-                std::slice::from_ref(&missing_range),
-            )
-            .unwrap();
-        assert_eq!(vec![0..10], lookup.missing_ranges);
+        let other =
+            crate::sst::file::RegionFileId::new(handle.file_id().region_id(), FileId::random());
+        assert!(!pages.contains(other, 0).await);
     }
 
     #[tokio::test]
@@ -883,7 +969,7 @@ mod tests {
         async fn write(
             values: &[Vec<u8>],
             compression: Option<CompressionOptions>,
-        ) -> (usize, usize) {
+        ) -> (usize, usize, bool) {
             let mut metadata = (*build_test_binary_test_region_metadata()).clone();
             if let Some(options) = compression {
                 let column = &mut metadata.column_metadatas[1];
@@ -961,16 +1047,16 @@ mod tests {
             let pages = builder.metadata().offset_index().unwrap()[0][field]
                 .page_locations()
                 .len();
-            let size = builder
-                .metadata()
-                .row_group(0)
-                .column(field)
-                .compressed_size() as usize;
-            (size, pages)
+            let chunk = builder.metadata().row_group(0).column(field);
+            (
+                chunk.compressed_size() as usize,
+                pages,
+                chunk.dictionary_page_offset().is_some(),
+            )
         }
 
-        let (default_size, default_pages) = write(&values, None).await;
-        let (level_size, level_pages) = write(
+        let (default_size, default_pages, default_dict) = write(&values, None).await;
+        let (level_size, level_pages, _) = write(
             &values,
             Some(CompressionOptions {
                 level: Some(19),
@@ -978,10 +1064,18 @@ mod tests {
             }),
         )
         .await;
-        let (_, pages) = write(
+        let (_, pages, _) = write(
             &values,
             Some(CompressionOptions {
                 page_size: Some(ReadableSize::kb(64)),
+                ..Default::default()
+            }),
+        )
+        .await;
+        let (_, _, plain_dict) = write(
+            &values,
+            Some(CompressionOptions {
+                encoding: Some(ColumnEncoding::Plain),
                 ..Default::default()
             }),
         )
@@ -991,6 +1085,8 @@ mod tests {
         assert_eq!(default_pages, level_pages);
         assert!(level_size < default_size, "{level_size} >= {default_size}");
         assert!(pages > default_pages, "{pages} <= {default_pages}");
+        assert!(default_dict);
+        assert!(!plain_dict);
     }
 
     #[tokio::test]
@@ -1395,6 +1491,48 @@ mod tests {
         );
     }
 
+    async fn assert_inverted_and_bloom_artifacts(
+        manager: &crate::sst::index::puffin_manager::SstPuffinManager,
+        region_id: RegionId,
+        info: &SstInfo,
+    ) {
+        use crate::sst::file::{IndexType, RegionFileId, RegionIndexId};
+        use index::bloom_filter::reader::{BloomFilterReader, BloomFilterReaderImpl};
+        use index::inverted_index::format::reader::{InvertedIndexBlobReader, InvertedIndexReader};
+        use puffin::puffin_manager::{PuffinManager, PuffinReader};
+
+        let columns = |kind| {
+            info.index_metadata
+                .entries
+                .iter()
+                .filter(|entry| entry.kind.index_type() == kind)
+                .filter_map(|entry| entry.column_id)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(columns(IndexType::InvertedIndex), vec![0]);
+        assert_eq!(columns(IndexType::BloomFilterIndex), vec![1]);
+        let reader = manager
+            .reader(&RegionIndexId::new(
+                RegionFileId::new(region_id, info.file_id),
+                info.index_metadata.version,
+            ))
+            .await
+            .unwrap();
+        let blob = reader.blob("greptime-inverted-index-v1").await.unwrap();
+        assert!(blob.metadata().length > 0);
+        let inverted = InvertedIndexBlobReader::new(blob.reader().await.unwrap());
+        let metadata = inverted.metadata(None).await.unwrap();
+        assert_eq!(metadata.total_row_count, 200);
+        assert_eq!(
+            metadata.metas.keys().cloned().collect::<Vec<_>>(),
+            vec!["0".to_string()]
+        );
+        let blob = reader.blob("greptime-bloom-filter-v1-1").await.unwrap();
+        assert!(blob.metadata().length > 0);
+        let bloom = BloomFilterReaderImpl::new(blob.reader().await.unwrap());
+        assert_eq!(bloom.metadata(None).await.unwrap().row_count, 200);
+    }
+
     #[tokio::test]
     async fn test_write_read_with_index() {
         let mut env = TestEnv::new().await;
@@ -1422,6 +1560,7 @@ mod tests {
         let intermediate_manager = env.get_intermediate_manager();
 
         let indexer_builder = IndexerBuilderImpl {
+            index_build_inputs: None,
             build_type: IndexBuildType::Flush,
             metadata: metadata.clone(),
             puffin_manager,
@@ -1433,9 +1572,11 @@ mod tests {
                     ..Default::default()
                 },
             },
-            inverted_index_config: Default::default(),
-            fulltext_index_config: Default::default(),
-            bloom_filter_index_config: Default::default(),
+            registry: Arc::new(crate::sst::index::registry::IndexRegistry::new(
+                Default::default(),
+                Default::default(),
+                Default::default(),
+            )),
         };
 
         let mut metrics = Metrics::new(WriteType::Flush);
@@ -1458,13 +1599,13 @@ mod tests {
         assert!(info.file_size > 0);
         assert!(info.index_metadata.file_size > 0);
 
-        assert!(info.index_metadata.inverted_index.index_size > 0);
-        assert_eq!(info.index_metadata.inverted_index.row_count, 200);
-        assert_eq!(info.index_metadata.inverted_index.columns, vec![0]);
-
-        assert!(info.index_metadata.bloom_filter.index_size > 0);
-        assert_eq!(info.index_metadata.bloom_filter.row_count, 200);
-        assert_eq!(info.index_metadata.bloom_filter.columns, vec![1]);
+        assert_inverted_and_bloom_artifacts(
+            &env.get_puffin_manager()
+                .build(object_store.clone(), file_path.clone()),
+            metadata.region_id,
+            &info,
+        )
+        .await;
 
         assert_eq!(
             (
@@ -1483,7 +1624,7 @@ mod tests {
                 file_size: info.file_size,
                 max_row_group_uncompressed_size: info.max_row_group_uncompressed_size,
                 available_indexes: info.index_metadata.build_available_indexes(),
-                indexes: info.index_metadata.build_indexes(),
+                indexes: info.index_metadata.build_indexes().unwrap(),
                 index_file_size: info.index_metadata.file_size,
                 index_version: 0,
                 num_row_groups: info.num_row_groups,
@@ -1966,6 +2107,7 @@ mod tests {
         let intermediate_manager = env.get_intermediate_manager();
 
         IndexerBuilderImpl {
+            index_build_inputs: None,
             build_type: IndexBuildType::Flush,
             metadata,
             puffin_manager,
@@ -1977,9 +2119,11 @@ mod tests {
                     ..Default::default()
                 },
             },
-            inverted_index_config: Default::default(),
-            fulltext_index_config: Default::default(),
-            bloom_filter_index_config: Default::default(),
+            registry: Arc::new(crate::sst::index::registry::IndexRegistry::new(
+                Default::default(),
+                Default::default(),
+                Default::default(),
+            )),
         }
     }
 
@@ -2024,7 +2168,7 @@ mod tests {
                 file_size: info.file_size,
                 max_row_group_uncompressed_size: info.max_row_group_uncompressed_size,
                 available_indexes: info.index_metadata.build_available_indexes(),
-                indexes: info.index_metadata.build_indexes(),
+                indexes: info.index_metadata.build_indexes().unwrap(),
                 index_file_size: info.index_metadata.file_size,
                 index_version: 0,
                 num_row_groups: info.num_row_groups,
@@ -2085,6 +2229,7 @@ mod tests {
         let intermediate_manager = env.get_intermediate_manager();
 
         let indexer_builder = IndexerBuilderImpl {
+            index_build_inputs: None,
             build_type: IndexBuildType::Flush,
             metadata: metadata.clone(),
             puffin_manager,
@@ -2096,9 +2241,11 @@ mod tests {
                     ..Default::default()
                 },
             },
-            inverted_index_config: Default::default(),
-            fulltext_index_config: Default::default(),
-            bloom_filter_index_config: Default::default(),
+            registry: Arc::new(crate::sst::index::registry::IndexRegistry::new(
+                Default::default(),
+                Default::default(),
+                Default::default(),
+            )),
         };
 
         let mut metrics = Metrics::new(WriteType::Flush);
@@ -2121,13 +2268,13 @@ mod tests {
         assert!(info.file_size > 0);
         assert!(info.index_metadata.file_size > 0);
 
-        assert!(info.index_metadata.inverted_index.index_size > 0);
-        assert_eq!(info.index_metadata.inverted_index.row_count, 200);
-        assert_eq!(info.index_metadata.inverted_index.columns, vec![0]);
-
-        assert!(info.index_metadata.bloom_filter.index_size > 0);
-        assert_eq!(info.index_metadata.bloom_filter.row_count, 200);
-        assert_eq!(info.index_metadata.bloom_filter.columns, vec![1]);
+        assert_inverted_and_bloom_artifacts(
+            &env.get_puffin_manager()
+                .build(object_store.clone(), file_path.clone()),
+            metadata.region_id,
+            &info,
+        )
+        .await;
 
         assert_eq!(
             (
@@ -3058,7 +3205,7 @@ mod tests {
             metadata.clone(),
         );
 
-        let mut info = write_flat_sst(
+        let info = write_flat_sst(
             object_store.clone(),
             metadata.clone(),
             indexer_builder,
@@ -3071,12 +3218,49 @@ mod tests {
         assert!(info.file_size > 0);
         assert!(info.index_metadata.file_size > 0);
 
-        // Verify fulltext indexes were created
-        assert!(info.index_metadata.fulltext_index.index_size > 0);
-        assert_eq!(info.index_metadata.fulltext_index.row_count, 200);
-        // text_bloom (column_id 1) and text_tantivy (column_id 2)
-        info.index_metadata.fulltext_index.columns.sort_unstable();
-        assert_eq!(info.index_metadata.fulltext_index.columns, vec![1, 2]);
+        // Verify both persisted backends, not just their output descriptors.
+        use crate::sst::file::{RegionFileId, RegionIndexId};
+        use crate::sst::index::kind::IndexKind;
+        use index::bloom_filter::reader::{BloomFilterReader, BloomFilterReaderImpl};
+        use puffin::puffin_manager::{PuffinManager, PuffinReader};
+        let mut columns = info
+            .index_metadata
+            .entries
+            .iter()
+            .filter(|entry| entry.kind == IndexKind::Fulltext)
+            .filter_map(|entry| entry.column_id)
+            .collect::<Vec<_>>();
+        columns.sort_unstable();
+        assert_eq!(columns, vec![1, 2]);
+        let manager = env
+            .get_puffin_manager()
+            .build(object_store.clone(), file_path.clone());
+        let reader = manager
+            .reader(&RegionIndexId::new(
+                RegionFileId::new(metadata.region_id, info.file_id),
+                info.index_metadata.version,
+            ))
+            .await
+            .unwrap();
+        let footer = reader.metadata().await.unwrap();
+        for key in [
+            "greptime-fulltext-index-bloom-v2-1",
+            "greptime-fulltext-index-v1-2",
+        ] {
+            assert!(
+                footer
+                    .blobs
+                    .iter()
+                    .any(|blob| blob.blob_type == key && blob.length > 0)
+            );
+        }
+        let blob = reader
+            .blob("greptime-fulltext-index-bloom-v2-1")
+            .await
+            .unwrap();
+        let bloom = BloomFilterReaderImpl::new(blob.reader().await.unwrap());
+        assert_eq!(bloom.metadata(None).await.unwrap().row_count, 200);
+        // The following query assertions exercise both backends against all 200 rows.
 
         assert_eq!(
             (

@@ -39,8 +39,6 @@ use crate::schedule::CancellableTaskState;
 use crate::sst::file::UncommittedSsts;
 use crate::worker::WorkerListener;
 
-pub const MAX_PARALLEL_COMPACTION: usize = 1;
-
 /// One local atomic unit. The scheduler owns request waiters and sibling units.
 pub(crate) struct CompactionTask {
     pub(crate) state: CancellableTaskState,
@@ -73,6 +71,7 @@ impl Debug for CompactionTask {
 impl CompactionTask {
     /// Executes one unit and retains its resources until worker apply or failure acknowledgement.
     pub(crate) async fn run(&mut self) {
+        self.state.mark_started();
         let start = std::time::Instant::now();
         let result = std::panic::AssertUnwindSafe(self.run_once())
             .catch_unwind()

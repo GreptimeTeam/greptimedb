@@ -43,6 +43,7 @@ use crate::query_id::QueryId;
 use crate::session_config::{
     InvalidConfigValueSnafu, PGByteaOutputValue, PGDateOrder, PGDateTimeStyle, PGIntervalStyle,
 };
+use crate::write_progress::WriteProgress;
 use crate::{MutableInner, ReadPreference};
 
 /// Which logical metric tables this request's selector may discover, decided by the frontend
@@ -105,6 +106,8 @@ pub struct QueryContext {
     sql_dialect: Arc<dyn Dialect + Send + Sync>,
     #[builder(default)]
     extensions: HashMap<String, String>,
+    #[builder(setter(skip))]
+    query_options_snapshotted: bool,
     /// The configuration parameter are used to store the parameters that are set by the user
     #[builder(default)]
     configuration_parameter: Arc<ConfigurationVariables>,
@@ -120,6 +123,12 @@ pub struct QueryContext {
     /// Process-local admission for one database in this request. Never sent over the wire.
     #[builder(setter(skip))]
     admitted_write: Option<(String, String)>,
+    /// Process-local storage acknowledgements; never accepted from a wire context.
+    #[builder(setter(skip))]
+    write_progress: Option<Arc<WriteProgress>>,
+    /// Preserve storage acknowledgements for protocol-level partial-write accounting.
+    #[builder(setter(skip))]
+    confirmed_writes: bool,
     /// Process id for managing on-going queries
     #[builder(default)]
     process_id: u32,
@@ -330,6 +339,32 @@ impl From<&QueryContext> for api::v1::QueryContext {
 }
 
 impl QueryContext {
+    pub fn write_progress(&self) -> Option<&Arc<WriteProgress>> {
+        self.write_progress.as_ref()
+    }
+
+    pub fn set_write_progress(&mut self, progress: Arc<WriteProgress>) {
+        self.write_progress = Some(progress);
+    }
+
+    /// Forks this context to retain storage acknowledgements for partial write accounting.
+    ///
+    /// Insertion APIs returning `Output` may return `Ok` while carrying storage errors
+    /// in `Output.meta.write_completions`, even on synchronous write paths. Callers must
+    /// await `Output::write_progress()` and inspect both its acknowledged row count and
+    /// its `error` before treating the write as successful.
+    pub fn with_confirmed_writes(&self) -> Self {
+        let mut ctx = self.fork();
+        ctx.confirmed_writes = true;
+        ctx
+    }
+
+    /// Whether insertion outputs retain storage acknowledgements and may defer errors.
+    /// See [`Self::with_confirmed_writes`] for the caller's completion-handling contract.
+    pub fn confirmed_writes(&self) -> bool {
+        self.confirmed_writes
+    }
+
     /// Forks this context with an independent snapshot of mutable session data.
     ///
     /// Unlike [`Clone`], changes to the schema, user, timezone, and other fields
@@ -478,6 +513,24 @@ impl QueryContext {
         self.mutable_session_data.write().unwrap().read_preference = read_preference;
     }
 
+    /// Returns the latest procedure ID recorded in this Session.
+    pub fn last_procedure_id(&self) -> Option<String> {
+        self.mutable_session_data
+            .read()
+            .unwrap()
+            .last_procedure_id
+            .clone()
+    }
+
+    /// Records a procedure ID after successful statement execution and
+    /// construction of its ID result.
+    ///
+    /// Recording precedes `post_execute` hooks and protocol transmission, which
+    /// may still fail. It does not confirm that the client received the ID.
+    pub fn set_last_procedure_id(&self, procedure_id: String) {
+        self.mutable_session_data.write().unwrap().last_procedure_id = Some(procedure_id);
+    }
+
     pub fn current_user(&self) -> UserInfoRef {
         self.mutable_session_data.read().unwrap().user_info.clone()
     }
@@ -517,6 +570,71 @@ impl QueryContext {
 
     pub fn extensions(&self) -> HashMap<String, String> {
         self.extensions.clone()
+    }
+
+    /// Returns normalized query options from the request over session defaults.
+    pub fn effective_query_options(
+        &self,
+    ) -> Result<HashMap<String, String>, crate::session_config::Error> {
+        let mut request_options = HashMap::new();
+        for (key, value) in &self.extensions {
+            if crate::hints::is_reserved_extension_key(key) {
+                continue;
+            }
+            // Older Frontends and Flownodes forward `query_parallelism=0` (their
+            // "use the server default" encoding) untouched inside the wire
+            // query context, so accept it as unset instead of failing the
+            // query on the Datanode side. The canonical
+            // `query.parallelism = 0` stays rejected.
+            if key.eq_ignore_ascii_case("query_parallelism") && value == "0" {
+                continue;
+            }
+            // Wire decoding preserves legacy frontend nonzero values; public entry points enforce the limit.
+            if let Some((canonical, normalized)) =
+                crate::query_options::parse_query_option(key, value, u16::MAX)?
+            {
+                if request_options
+                    .get(&canonical)
+                    .is_some_and(|previous| previous != &normalized)
+                {
+                    return crate::session_config::InvalidConfigValueSnafu {
+                        name: key,
+                        value,
+                        hint: "Conflicting aliases for the same query option",
+                    }
+                    .fail();
+                }
+                request_options.insert(canonical, normalized);
+            }
+        }
+        let mut effective = if self.query_options_snapshotted {
+            HashMap::new()
+        } else {
+            self.configuration_parameter.query_options()
+        };
+        effective.extend(request_options);
+        Ok(effective)
+    }
+
+    /// Creates a per-query immutable option snapshot while retaining shared mutable session data.
+    pub fn query_option_snapshot(&self) -> Result<Self, crate::session_config::Error> {
+        let mut snapshot = self.clone();
+        let options = snapshot.effective_query_options()?;
+        snapshot
+            .extensions
+            .retain(|key, _| crate::query_options::canonical_query_option_name(key).is_none());
+        // Older Datanodes only understand the legacy `query_parallelism` hint key, so
+        // mirror the canonical parallelism override for the wire format while keeping
+        // the canonical key for in-process consumers.
+        let legacy_parallelism = options
+            .get("query.parallelism")
+            .map(|parallelism| ("query_parallelism".to_string(), parallelism.clone()));
+        snapshot.extensions.extend(options);
+        if let Some((key, value)) = legacy_parallelism {
+            snapshot.extensions.entry(key).or_insert(value);
+        }
+        snapshot.query_options_snapshotted = true;
+        Ok(snapshot)
     }
 
     /// Default to double quote and fallback to back quote
@@ -714,6 +832,7 @@ impl QueryContextBuilder {
                 .sql_dialect
                 .unwrap_or_else(|| Arc::new(GreptimeDbDialect {})),
             extensions,
+            query_options_snapshotted: false,
             configuration_parameter: self
                 .configuration_parameter
                 .unwrap_or_else(|| Arc::new(ConfigurationVariables::default())),
@@ -721,6 +840,8 @@ impl QueryContextBuilder {
             batching_enabled: self.batching_enabled.unwrap_or_default(),
             admitted_write: None,
             metric_discovery_scope: MetricDiscoveryScope::default(),
+            write_progress: None,
+            confirmed_writes: false,
             logical_batching_enabled: self.logical_batching_enabled.unwrap_or_default(),
             process_id: self.process_id.unwrap_or_default(),
             conn_info: self.conn_info.unwrap_or_default(),
@@ -779,7 +900,7 @@ pub struct ConfigurationVariables {
     postgres_bytea_output: ArcSwap<PGByteaOutputValue>,
     pg_datestyle_format: ArcSwap<(PGDateTimeStyle, PGDateOrder)>,
     pg_intervalstyle_format: ArcSwap<PGIntervalStyle>,
-    allow_query_fallback: ArcSwap<bool>,
+    query_options: RwLock<HashMap<String, String>>,
 }
 
 impl Clone for ConfigurationVariables {
@@ -788,7 +909,7 @@ impl Clone for ConfigurationVariables {
             postgres_bytea_output: ArcSwap::new(self.postgres_bytea_output.load().clone()),
             pg_datestyle_format: ArcSwap::new(self.pg_datestyle_format.load().clone()),
             pg_intervalstyle_format: ArcSwap::new(self.pg_intervalstyle_format.load().clone()),
-            allow_query_fallback: ArcSwap::new(self.allow_query_fallback.load().clone()),
+            query_options: RwLock::new(self.query_options.read().unwrap().clone()),
         }
     }
 }
@@ -823,11 +944,43 @@ impl ConfigurationVariables {
     }
 
     pub fn allow_query_fallback(&self) -> bool {
-        **self.allow_query_fallback.load()
+        self.query_options().get("query.allow_query_fallback") == Some(&"true".to_string())
     }
 
     pub fn set_allow_query_fallback(&self, allow: bool) {
-        self.allow_query_fallback.swap(Arc::new(allow));
+        self.query_options
+            .write()
+            .unwrap()
+            .insert("query.allow_query_fallback".to_string(), allow.to_string());
+    }
+
+    /// Validates and stores one canonicalized per-session query option.
+    pub fn set_query_option(
+        &self,
+        key: &str,
+        value: &str,
+    ) -> Result<(), crate::session_config::Error> {
+        let (canonical, normalized) = crate::query_options::parse_query_option(
+            key,
+            value,
+            crate::query_options::MAX_PUBLIC_PARALLELISM,
+        )?
+        .ok_or_else(|| crate::session_config::Error::InvalidConfigValue {
+            name: key.to_string(),
+            value: value.to_string(),
+            hint: "Not a supported query option".to_string(),
+            location: snafu::Location::new(file!(), line!(), column!()),
+        })?;
+        self.query_options
+            .write()
+            .unwrap()
+            .insert(canonical, normalized);
+        Ok(())
+    }
+
+    /// Returns the session's canonical query option overrides.
+    pub fn query_options(&self) -> HashMap<String, String> {
+        self.query_options.read().unwrap().clone()
     }
 }
 
@@ -839,6 +992,37 @@ mod test {
 
     use crate::Session;
     use crate::context::{Channel, *};
+
+    #[test]
+    fn test_query_parallelism_wire_accepts_legacy_value() {
+        let mut context = QueryContext::with(DEFAULT_CATALOG_NAME, "public");
+        context.set_extension("query_parallelism", "2048");
+
+        assert_eq!(
+            context
+                .effective_query_options()
+                .unwrap()
+                .get("query.parallelism"),
+            Some(&"2048".to_string())
+        );
+    }
+
+    #[test]
+    fn test_set_query_parallelism_public_limit() {
+        let context = QueryContext::with(DEFAULT_CATALOG_NAME, "public");
+        assert!(
+            context
+                .configuration_parameter()
+                .set_query_option("query.parallelism", "1025")
+                .is_err()
+        );
+        assert!(
+            context
+                .configuration_parameter()
+                .set_query_option("query.parallelism", "1024")
+                .is_ok()
+        );
+    }
 
     #[test]
     fn test_session() {

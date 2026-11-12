@@ -28,8 +28,8 @@ pub(crate) use json::parse_json2_type_and_options;
 pub use json::parse_json2_type_hint_path;
 use snafu::{OptionExt, ResultExt, ensure};
 use sqlparser::ast::{
-    ColumnOption, ColumnOptionDef, DataType, Expr, KeyOrIndexDisplay, NullsDistinctOption,
-    PrimaryKeyConstraint, UniqueConstraint,
+    ColumnOption, ColumnOptionDef, DataType, Expr, FunctionArg, FunctionArgExpr, FunctionArguments,
+    KeyOrIndexDisplay, NullsDistinctOption, PrimaryKeyConstraint, UniqueConstraint,
 };
 use sqlparser::dialect::keywords::Keyword;
 use sqlparser::keywords::ALL_KEYWORDS;
@@ -1298,6 +1298,17 @@ fn ensure_one_expr(expr: &Expr, columns: &[&Column]) -> Result<()> {
                     ),
                 }
             );
+            Ok(())
+        }
+        // The function and its argument shape are validated when the rule is converted.
+        Expr::Function(function) => {
+            if let FunctionArguments::List(args) = &function.args {
+                for arg in &args.args {
+                    if let FunctionArg::Unnamed(FunctionArgExpr::Expr(expr)) = arg {
+                        ensure_one_expr(expr, columns)?;
+                    }
+                }
+            }
             Ok(())
         }
         Expr::Value(_) => Ok(()),

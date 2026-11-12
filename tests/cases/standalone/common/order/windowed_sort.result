@@ -61,6 +61,7 @@ SELECT * FROM test ORDER BY t LIMIT 5;
 -- SQLNESS REPLACE (metrics.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
 -- SQLNESS REPLACE num_ranges=\d+ num_ranges=REDACTED
+-- SQLNESS REPLACE \\?"(dyn_filters|time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
 EXPLAIN ANALYZE SELECT * FROM test ORDER BY t LIMIT 5;
 
 +-+-+-+
@@ -71,7 +72,7 @@ EXPLAIN ANALYZE SELECT * FROM test ORDER BY t LIMIT 5;
 |_|_|_|
 | 1_| 0_|_SortPreservingMergeExec: [t@1 ASC NULLS LAST], fetch=5 REDACTED
 |_|_|_SortExec: TopK(fetch=5), expr=[t@1 ASC NULLS LAST], preserve_partitioning=[true] REDACTED
-|_|_|_SeqScan: region=REDACTED, "partition_count":{"count":4, "mem_ranges":1, "files":3, "file_ranges":3} REDACTED
+|_|_|_SeqScan: region=REDACTED, "partition_count":{"count":4, "mem_ranges":1, "files":3, "file_ranges":3}, "projection": ["i", "t"], "dyn_filters":REDACTED
 |_|_|_|
 |_|_| Total rows: 5_|
 +-+-+-+
@@ -94,6 +95,7 @@ SELECT * FROM test ORDER BY t DESC LIMIT 5;
 -- SQLNESS REPLACE (metrics.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
 -- SQLNESS REPLACE num_ranges=\d+ num_ranges=REDACTED
+-- SQLNESS REPLACE \\?"(dyn_filters|time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
 EXPLAIN ANALYZE SELECT * FROM test ORDER BY t DESC LIMIT 5;
 
 +-+-+-+
@@ -104,7 +106,7 @@ EXPLAIN ANALYZE SELECT * FROM test ORDER BY t DESC LIMIT 5;
 |_|_|_|
 | 1_| 0_|_SortPreservingMergeExec: [t@1 DESC], fetch=5 REDACTED
 |_|_|_SortExec: TopK(fetch=5), expr=[t@1 DESC], preserve_partitioning=[true] REDACTED
-|_|_|_SeqScan: region=REDACTED, "partition_count":{"count":4, "mem_ranges":1, "files":3, "file_ranges":3} REDACTED
+|_|_|_SeqScan: region=REDACTED, "partition_count":{"count":4, "mem_ranges":1, "files":3, "file_ranges":3}, "projection": ["i", "t"], "dyn_filters":REDACTED
 |_|_|_|
 |_|_| Total rows: 5_|
 +-+-+-+
@@ -127,6 +129,7 @@ SELECT * FROM test where i > 2 ORDER BY t LIMIT 4;
 -- SQLNESS REPLACE (metrics.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
 -- SQLNESS REPLACE num_ranges=\d+ num_ranges=REDACTED
+-- SQLNESS REPLACE \\?"(dyn_filters|time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
 EXPLAIN ANALYZE SELECT * FROM test where i > 2 ORDER BY t LIMIT 4;
 
 +-+-+-+
@@ -138,7 +141,7 @@ EXPLAIN ANALYZE SELECT * FROM test where i > 2 ORDER BY t LIMIT 4;
 | 1_| 0_|_SortPreservingMergeExec: [t@1 ASC NULLS LAST], fetch=4 REDACTED
 |_|_|_SortExec: TopK(fetch=4), expr=[t@1 ASC NULLS LAST], preserve_partitioning=[true] REDACTED
 |_|_|_FilterExec: i@0 > 2 REDACTED
-|_|_|_SeqScan: region=REDACTED, "partition_count":{"count":4, "mem_ranges":1, "files":3, "file_ranges":3} REDACTED
+|_|_|_SeqScan: region=REDACTED, "partition_count":{"count":4, "mem_ranges":1, "files":3, "file_ranges":3}, "projection": ["i", "t"], "filters": ["i > Int32(2)"], "dyn_filters":REDACTED
 |_|_|_|
 |_|_| Total rows: 4_|
 +-+-+-+
@@ -161,6 +164,7 @@ SELECT * FROM test where i > 2 ORDER BY t DESC LIMIT 4;
 -- SQLNESS REPLACE (metrics.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
 -- SQLNESS REPLACE num_ranges=\d+ num_ranges=REDACTED
+-- SQLNESS REPLACE \\?"(dyn_filters|time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
 EXPLAIN ANALYZE SELECT * FROM test where i > 2 ORDER BY t DESC LIMIT 4;
 
 +-+-+-+
@@ -172,7 +176,7 @@ EXPLAIN ANALYZE SELECT * FROM test where i > 2 ORDER BY t DESC LIMIT 4;
 | 1_| 0_|_SortPreservingMergeExec: [t@1 DESC], fetch=4 REDACTED
 |_|_|_SortExec: TopK(fetch=4), expr=[t@1 DESC], preserve_partitioning=[true] REDACTED
 |_|_|_FilterExec: i@0 > 2 REDACTED
-|_|_|_SeqScan: region=REDACTED, "partition_count":{"count":4, "mem_ranges":1, "files":3, "file_ranges":3} REDACTED
+|_|_|_SeqScan: region=REDACTED, "partition_count":{"count":4, "mem_ranges":1, "files":3, "file_ranges":3}, "projection": ["i", "t"], "filters": ["i > Int32(2)"], "dyn_filters":REDACTED
 |_|_|_|
 |_|_| Total rows: 4_|
 +-+-+-+
@@ -195,6 +199,7 @@ SELECT * FROM test where t > 8 ORDER BY t DESC LIMIT 4;
 -- SQLNESS REPLACE (metrics.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
 -- SQLNESS REPLACE num_ranges=\d+ num_ranges=REDACTED
+-- SQLNESS REPLACE \\?"(dyn_filters|time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
 EXPLAIN ANALYZE SELECT * FROM test where t > 8 ORDER BY t DESC LIMIT 4;
 
 +-+-+-+
@@ -205,7 +210,7 @@ EXPLAIN ANALYZE SELECT * FROM test where t > 8 ORDER BY t DESC LIMIT 4;
 |_|_|_|
 | 1_| 0_|_SortPreservingMergeExec: [t@1 DESC], fetch=4 REDACTED
 |_|_|_SortExec: TopK(fetch=4), expr=[t@1 DESC], preserve_partitioning=[true] REDACTED
-|_|_|_SeqScan: region=REDACTED, "partition_count":{"count":2, "mem_ranges":1, "files":1, "file_ranges":1} REDACTED
+|_|_|_SeqScan: region=REDACTED, "partition_count":{"count":2, "mem_ranges":1, "files":1, "file_ranges":1}, "projection": ["i", "t"], "filters": ["t > TimestampMillisecond(8, None)"], "dyn_filters":REDACTED
 |_|_|_|
 |_|_| Total rows: 4_|
 +-+-+-+
@@ -277,6 +282,7 @@ SELECT * FROM test_pk ORDER BY t LIMIT 5;
 -- SQLNESS REPLACE (metrics.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
 -- SQLNESS REPLACE num_ranges=\d+ num_ranges=REDACTED
+-- SQLNESS REPLACE \\?"(dyn_filters|time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
 EXPLAIN ANALYZE SELECT * FROM test_pk ORDER BY t LIMIT 5;
 
 +-+-+-+
@@ -287,7 +293,7 @@ EXPLAIN ANALYZE SELECT * FROM test_pk ORDER BY t LIMIT 5;
 |_|_|_|
 | 1_| 0_|_SortPreservingMergeExec: [t@2 ASC NULLS LAST], fetch=5 REDACTED
 |_|_|_SortExec: TopK(fetch=5), expr=[t@2 ASC NULLS LAST], preserve_partitioning=[true] REDACTED
-|_|_|_SeqScan: region=REDACTED, "partition_count":{"count":4, "mem_ranges":1, "files":3, "file_ranges":3} REDACTED
+|_|_|_SeqScan: region=REDACTED, "partition_count":{"count":4, "mem_ranges":1, "files":3, "file_ranges":3}, "projection": ["pk", "i", "t"], "dyn_filters":REDACTED
 |_|_|_|
 |_|_| Total rows: 5_|
 +-+-+-+
@@ -299,6 +305,7 @@ EXPLAIN ANALYZE SELECT * FROM test_pk ORDER BY t LIMIT 5;
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
 -- SQLNESS REPLACE (files.*) REDACTED
 -- SQLNESS REPLACE num_ranges=\d+ num_ranges=REDACTED
+-- SQLNESS REPLACE \\?"(dyn_filters|time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
 EXPLAIN ANALYZE VERBOSE SELECT * FROM test_pk ORDER BY t LIMIT 5;
 
 +-+-+-+
@@ -332,6 +339,7 @@ SELECT * FROM test_pk ORDER BY t DESC LIMIT 5;
 -- SQLNESS REPLACE (metrics.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
 -- SQLNESS REPLACE num_ranges=\d+ num_ranges=REDACTED
+-- SQLNESS REPLACE \\?"(dyn_filters|time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
 EXPLAIN ANALYZE SELECT * FROM test_pk ORDER BY t DESC LIMIT 5;
 
 +-+-+-+
@@ -342,7 +350,7 @@ EXPLAIN ANALYZE SELECT * FROM test_pk ORDER BY t DESC LIMIT 5;
 |_|_|_|
 | 1_| 0_|_SortPreservingMergeExec: [t@2 DESC], fetch=5 REDACTED
 |_|_|_SortExec: TopK(fetch=5), expr=[t@2 DESC], preserve_partitioning=[true] REDACTED
-|_|_|_SeqScan: region=REDACTED, "partition_count":{"count":4, "mem_ranges":1, "files":3, "file_ranges":3} REDACTED
+|_|_|_SeqScan: region=REDACTED, "partition_count":{"count":4, "mem_ranges":1, "files":3, "file_ranges":3}, "projection": ["pk", "i", "t"], "dyn_filters":REDACTED
 |_|_|_|
 |_|_| Total rows: 5_|
 +-+-+-+
@@ -366,6 +374,7 @@ SELECT * FROM test_pk where pk > 7 ORDER BY t LIMIT 5;
 -- SQLNESS REPLACE (metrics.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
 -- SQLNESS REPLACE num_ranges=\d+ num_ranges=REDACTED
+-- SQLNESS REPLACE \\?"(dyn_filters|time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
 EXPLAIN ANALYZE SELECT * FROM test_pk where pk > 7 ORDER BY t LIMIT 5;
 
 +-+-+-+
@@ -376,7 +385,7 @@ EXPLAIN ANALYZE SELECT * FROM test_pk where pk > 7 ORDER BY t LIMIT 5;
 |_|_|_|
 | 1_| 0_|_SortPreservingMergeExec: [t@2 ASC NULLS LAST], fetch=5 REDACTED
 |_|_|_SortExec: TopK(fetch=5), expr=[t@2 ASC NULLS LAST], preserve_partitioning=[true] REDACTED
-|_|_|_SeqScan: region=REDACTED, "partition_count":{"count":4, "mem_ranges":1, "files":3, "file_ranges":3} REDACTED
+|_|_|_SeqScan: region=REDACTED, "partition_count":{"count":4, "mem_ranges":1, "files":3, "file_ranges":3}, "projection": ["pk", "i", "t"], "filters": ["pk > Int32(7)"], "dyn_filters":REDACTED
 |_|_|_|
 |_|_| Total rows: 5_|
 +-+-+-+
@@ -388,6 +397,7 @@ EXPLAIN ANALYZE SELECT * FROM test_pk where pk > 7 ORDER BY t LIMIT 5;
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
 -- SQLNESS REPLACE (files.*) REDACTED
 -- SQLNESS REPLACE num_ranges=\d+ num_ranges=REDACTED
+-- SQLNESS REPLACE \\?"(dyn_filters|time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
 EXPLAIN ANALYZE VERBOSE SELECT * FROM test_pk where pk > 7 ORDER BY t LIMIT 5;
 
 +-+-+-+

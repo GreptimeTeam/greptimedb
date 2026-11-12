@@ -77,6 +77,20 @@ pub(crate) struct Record {
     pub(crate) payload: Bytes,
 }
 
+/// The region whose segment holds the release records of an object, as a
+/// single entry whose payload [`encode_releases`] writes. It is an ordinary
+/// segment, so a reader that predates release records reads the object as
+/// any other; no region is ever assigned this id.
+pub(crate) const RELEASE_REGION_ID: RegionId = RegionId::from_u64(u64::MAX);
+
+/// A release record: no entry of the region with an id at or below
+/// `entry_id` is needed any more, `u64::MAX` releasing the region in full.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Release {
+    pub(crate) region_id: RegionId,
+    pub(crate) entry_id: u64,
+}
+
 /// Footer entry describing the segment of one region.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct FooterEntry {
@@ -468,6 +482,51 @@ pub(crate) fn decode_segment(bytes: &[u8], entry: &FooterEntry) -> Result<Vec<Re
         }
     );
     Ok(records)
+}
+
+/// Encodes release records, ordered by region and at most one per region, as
+/// the payload of the entry of [`RELEASE_REGION_ID`]: their count, then the
+/// region id and the entry id of each.
+pub(crate) fn encode_releases(releases: &BTreeMap<RegionId, u64>) -> Bytes {
+    let mut output = BytesMut::with_capacity(4 + releases.len() * 16);
+    output.put_u32(releases.len() as u32);
+    for (region_id, entry_id) in releases {
+        output.put_u64(region_id.as_u64());
+        output.put_u64(*entry_id);
+    }
+    output.freeze()
+}
+
+/// Decodes the payload [`encode_releases`] writes.
+pub(crate) fn decode_releases(payload: &[u8]) -> Result<Vec<Release>> {
+    let mut reader = Reader::new(payload);
+    let count = reader.u32("release records")? as usize;
+    ensure!(
+        count > 0 && reader.remaining_len() == count * 16,
+        CorruptedWalObjectSnafu {
+            reason: format!(
+                "release records declare {count} records in {} bytes",
+                reader.remaining_len()
+            ),
+        }
+    );
+    let mut releases = Vec::<Release>::with_capacity(count);
+    for _ in 0..count {
+        let region_id = RegionId::from_u64(reader.u64("release records")?);
+        ensure!(
+            releases
+                .last()
+                .is_none_or(|last| last.region_id < region_id),
+            CorruptedWalObjectSnafu {
+                reason: format!("release records are not strictly ordered at region {region_id}"),
+            }
+        );
+        releases.push(Release {
+            region_id,
+            entry_id: reader.u64("release records")?,
+        });
+    }
+    Ok(releases)
 }
 
 /// Lower bound on the length of an object: header, a footer holding only its
@@ -1136,6 +1195,86 @@ mod tests {
             assert_eq!(footer, encoded.footer);
             assert_eq!(fixture.len() as u64, object_len(&encoded.footer));
         }
+    }
+
+    /// An object with an entry of region (1, 1) and the release records of
+    /// regions (2, 1) and (3, 0), frozen under `tests/compatibility`.
+    const FIXTURE_RELEASE: &[u8] =
+        include_bytes!("../../../../tests/compatibility/wal/object_store/release_record.wal");
+
+    fn release_fixture_records() -> Vec<Record> {
+        let releases = BTreeMap::from([
+            (RegionId::new(2, 1), (2 << 20) | 1),
+            (RegionId::new(3, 0), u64::MAX),
+        ]);
+        [
+            (RegionId::new(1, 1), Bytes::from_static(b"a1")),
+            (RELEASE_REGION_ID, encode_releases(&releases)),
+        ]
+        .into_iter()
+        .map(|(region_id, payload)| Record {
+            region_id,
+            entry_id: (3 << 20) | 1,
+            payload,
+        })
+        .collect()
+    }
+
+    #[test]
+    fn test_format_matches_release_record_fixture() {
+        let header = Header {
+            object_seq: 3,
+            epoch: 2,
+            prev: Some(ChainLink {
+                object_seq: 2,
+                epoch: 2,
+            }),
+            reclaim_boundary: 1,
+        };
+        let encoded = encode_object(header.clone(), &release_fixture_records()).unwrap();
+        assert_eq!(FIXTURE_RELEASE, encoded.bytes.as_ref());
+
+        // The object is a version 1 object whose last segment holds the
+        // release records, so a reader that predates them decodes it.
+        assert_eq!([0, 1], FIXTURE_RELEASE[8..10]);
+        let decoded = decode_object(FIXTURE_RELEASE).unwrap();
+        assert_eq!(header, decoded.header);
+        assert_eq!(release_fixture_records(), decoded.records);
+        assert_eq!(
+            vec![
+                Release {
+                    region_id: RegionId::new(2, 1),
+                    entry_id: (2 << 20) | 1,
+                },
+                Release {
+                    region_id: RegionId::new(3, 0),
+                    entry_id: u64::MAX,
+                },
+            ],
+            decode_releases(&decoded.records[1].payload).unwrap()
+        );
+    }
+
+    #[test]
+    fn test_format_rejects_invalid_release_records() {
+        let one = BTreeMap::from([(RegionId::new(1, 1), 1)]);
+        let encoded = encode_releases(&one);
+        for (payload, reason) in [
+            (&[0, 0, 0, 0][..], "declare 0 records in 0 bytes"),
+            (
+                &encoded[..encoded.len() - 1],
+                "declare 1 records in 15 bytes",
+            ),
+        ] {
+            assert_corrupted(decode_releases(payload), reason);
+        }
+        let mut unordered = encode_releases(&BTreeMap::from([
+            (RegionId::new(1, 1), 1),
+            (RegionId::new(1, 2), 1),
+        ]))
+        .to_vec();
+        unordered[4..12].copy_from_slice(&RegionId::new(1, 2).as_u64().to_be_bytes());
+        assert_corrupted(decode_releases(&unordered), "not strictly ordered");
     }
 
     fn footer_ids(entry: &FooterEntry) -> (u64, u64, u32) {

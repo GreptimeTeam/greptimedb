@@ -76,7 +76,9 @@ async fn download_files(url: &str, path: &str) {
         .get(url)
         .send()
         .await
-        .expect("Failed to send download request");
+        .expect("Failed to send download request")
+        .error_for_status()
+        .unwrap_or_else(|e| panic!("Failed to download {url}: {e}"));
     let len = resp.content_length();
     let mut stream = resp.bytes_stream();
     let mut size_downloaded = 0;
@@ -111,7 +113,11 @@ fn decompress(archive: &str, dest: &str) {
 ///
 /// * `version` - The version of the binary to download. i.e. "v0.9.5"
 pub async fn pull_binary(version: &str) {
-    let os = std::env::consts::OS;
+    // Release assets name macOS builds `darwin`.
+    let os = match std::env::consts::OS {
+        "macos" => "darwin",
+        os => os,
+    };
     let arch = match std::env::consts::ARCH {
         "x86_64" => "amd64",
         "aarch64" => "arm64",

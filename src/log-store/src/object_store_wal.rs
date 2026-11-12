@@ -51,11 +51,19 @@
 //! The reclaim boundary of an object states that every object with a lower
 //! sequence was fully flushed when the object was sealed, so the chain need
 //! not reach below it. Every present object below the boundary of the last
-//! indexed object is deleted, on the chain or not.
+//! indexed object is deleted, on the chain or not. A region that is dropped,
+//! or whose entries are all made obsolete, is released: a release record of
+//! the region goes into an object sealed at once, as the single entry of a
+//! segment of a reserved region id, so the object keeps format version 1.
+//! Recovery reads those segments of the chain and seeds the obsolete
+//! watermarks from them, so a store opened later collects the objects of a
+//! region that is never opened again.
 //!
 //! Recovery lists the objects, reads and verifies only the header, trailer and
 //! footer of each, and indexes the footers of the chain in sequence order to
-//! rebuild the object catalog, which rejects a sequence it already holds.
+//! rebuild the object catalog, which rejects a sequence it already holds. Of
+//! the segments it reads only those of release records, and one that does not
+//! decode fails recovery.
 //! Segments are read and checksummed only when a read decodes them; a segment
 //! that does not decode is fetched once more and then skipped as a hole of its
 //! region or fails the read, as `on_corrupted_segment` says.
@@ -63,12 +71,26 @@
 //! Entry ids are object-sequence-major, see [`entry_id`]: the high bits of an
 //! id name the object that holds the entry, the low bits its position among
 //! the entries of its region in that object.
+//!
+//! Remote recovery uses [`ObjectStoreWalReaders`] to share a read-only reader
+//! per source prefix. Listing an upper bound reads no object indexes; preparing
+//! a range refreshes the listing and reuses cached indexes. Known last-entry
+//! bounds anchor their own chains, while listed bounds use the complete-chain
+//! selection of startup recovery with an additional maximum-epoch check.
+//! Neither path opens a writable store or modifies the source. The caller owns
+//! the lifetime of pending recovery ranges and
+//! publishes progress only after a successful read.
 
 mod batch;
 mod catalog;
 mod format;
+mod history;
+mod index;
 mod io;
+mod prefetch;
+mod reader;
 mod store;
 
 pub use batch::entry_id;
+pub use reader::{NodeWalPrefix, ObjectStoreWalReader, ObjectStoreWalReaders, WalReadUpperBound};
 pub use store::{ObjectStoreLogStore, WalHole};

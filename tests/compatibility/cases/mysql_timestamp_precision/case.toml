@@ -1,0 +1,8 @@
+name = "mysql_timestamp_precision"
+reason = "MySQL timestamp results must use at most microseconds while stored nanoseconds survive restart (issue #9828)."
+introduced_by = "issue #9828"
+topologies = ["standalone", "distributed"]
+from_range = ["*"]
+to_range = [">=v1.4.0-alpha.0"]
+features = ["table", "mysql", "timestamp"]
+owner = "servers"

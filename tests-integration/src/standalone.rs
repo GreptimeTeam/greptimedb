@@ -19,7 +19,6 @@ use cache::{
     build_datanode_layered_cache_registry, build_fundamental_cache_registry,
     with_default_composite_cache_registry,
 };
-use catalog::information_schema::NoopInformationExtension;
 use catalog::kvbackend::KvBackendCatalogManagerBuilder;
 use catalog::process_manager::ProcessManager;
 use common_base::Plugins;
@@ -55,7 +54,10 @@ use frontend::service_config::{BatcherOptions, PendingRowsBatcherOptions};
 use meta_srv::metasrv::{FLOW_ID_SEQ, TABLE_ID_SEQ};
 use servers::grpc::GrpcOptions;
 use standalone::options::StandaloneOptions;
-use standalone::{StandaloneDatanodeManager, StandaloneRepartitionProcedureFactory};
+use standalone::{
+    StandaloneDatanodeManager, StandaloneInformationExtension,
+    StandaloneRepartitionProcedureFactory,
+};
 
 use crate::test_util::{self, StorageType, TestGuard, create_tmp_dir_and_datanode_opts};
 
@@ -92,6 +94,7 @@ pub struct GreptimeDbStandaloneBuilder {
     table_batcher: BatcherOptions,
     mito_config: Option<mito2::config::MitoConfig>,
     query_options: query::options::QueryOptions,
+    pipeline_options: pipeline::PipelineOptions,
 }
 
 impl GreptimeDbStandaloneBuilder {
@@ -114,6 +117,7 @@ impl GreptimeDbStandaloneBuilder {
             table_batcher: BatcherOptions::default(),
             mito_config: None,
             query_options: query::options::QueryOptions::default(),
+            pipeline_options: pipeline::PipelineOptions::default(),
         }
     }
 
@@ -128,6 +132,13 @@ impl GreptimeDbStandaloneBuilder {
     #[must_use]
     pub fn with_mito_config(mut self, config: mito2::config::MitoConfig) -> Self {
         self.mito_config = Some(config);
+        self
+    }
+
+    /// Configures pipeline compilation and caching for this test instance.
+    #[must_use]
+    pub fn with_pipeline_options(mut self, options: pipeline::PipelineOptions) -> Self {
+        self.pipeline_options = options;
         self
     }
 
@@ -234,8 +245,12 @@ impl GreptimeDbStandaloneBuilder {
             .build(),
         );
 
+        let information_extension = Arc::new(StandaloneInformationExtension::new(
+            datanode.region_server(),
+            procedure_manager.clone(),
+        ));
         let catalog_manager = KvBackendCatalogManagerBuilder::new(
-            Arc::new(NoopInformationExtension),
+            information_extension.clone(),
             kv_backend.clone(),
             cache_registry.clone(),
         )
@@ -253,6 +268,9 @@ impl GreptimeDbStandaloneBuilder {
             Arc::new(frontend_client),
         );
         let flownode = Arc::new(flow_builder.build().await.unwrap());
+        information_extension
+            .set_flow_engine(flownode.flow_engine())
+            .await;
 
         let node_manager = Arc::new(StandaloneDatanodeManager {
             region_server: datanode.region_server(),
@@ -290,6 +308,9 @@ impl GreptimeDbStandaloneBuilder {
         let repartition_procedure_factory = Arc::new(StandaloneRepartitionProcedureFactory);
         let ddl_manager = Arc::new(DdlManager::new(
             DdlContext {
+                affinity_resolver: None,
+                affinity_fallback: Default::default(),
+                peer_alloc_context_provider: None,
                 node_manager: node_manager.clone(),
                 cache_invalidator: cache_registry.clone(),
                 memory_region_keeper: Arc::new(MemoryRegionKeeper::default()),
@@ -400,6 +421,7 @@ impl GreptimeDbStandaloneBuilder {
             event_recorder: self.event_recorder_options.clone(),
             auto_create_table: self.auto_create_table,
             query: self.query_options.clone(),
+            pipeline: self.pipeline_options.clone(),
             pending_rows_batcher: PendingRowsBatcherOptions {
                 logical_table: self.logical_batcher.clone(),
                 table: self.table_batcher.clone(),

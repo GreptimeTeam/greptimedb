@@ -28,8 +28,8 @@ use tokio::sync::mpsc::Sender;
 
 use crate::access_layer::{AccessLayer, AccessLayerRef};
 use crate::cache::CacheManager;
-use crate::compaction::CompactionScheduler;
 use crate::compaction::memory_manager::new_compaction_memory_manager;
+use crate::compaction::{CompactionCoordinator, CompactionScheduler};
 use crate::config::MitoConfig;
 use crate::error::Result;
 use crate::flush::FlushScheduler;
@@ -101,10 +101,20 @@ impl SchedulerEnv {
         request_sender: Sender<WorkerRequestWithTime>,
         config: MitoConfig,
     ) -> CompactionScheduler {
-        let scheduler = self.get_scheduler();
+        // Admission capacity and runner count must agree; derive both from the
+        // configured compaction concurrency unless a test injects an executor.
+        let coordinator = match &self.scheduler {
+            Some(scheduler) => Arc::new(CompactionCoordinator::new(
+                scheduler.clone(),
+                config.max_background_compactions,
+            )),
+            None => Arc::new(CompactionCoordinator::new_local(
+                config.max_background_compactions,
+            )),
+        };
 
         CompactionScheduler::new(
-            scheduler,
+            coordinator,
             request_sender,
             Arc::new(CacheManager::default()),
             Arc::new(config),
@@ -145,14 +155,17 @@ impl SchedulerEnv {
                     checkpoint_distance: 10,
                     remove_file_options: Default::default(),
                     manifest_cache: None,
+                    conditional_publication: false,
                 },
                 FormatType::PrimaryKey,
+                false,
                 &Default::default(),
             )
             .await
             .unwrap(),
             RegionRoleState::Leader(RegionLeaderState::Writable),
             None,
+            Default::default(),
         ))
     }
 
@@ -163,6 +176,12 @@ impl SchedulerEnv {
     }
 }
 
+/// Collects scheduled jobs without polling or dropping them.
+///
+/// It counts submissions for scheduling assertions only. A retained job is never
+/// run or released, so any shutdown path that waits for admitted work to drain
+/// cannot make progress; use a real [`LocalScheduler`] for drain and shutdown
+/// coverage.
 #[derive(Default)]
 pub struct VecScheduler {
     jobs: Mutex<Vec<Job>>,

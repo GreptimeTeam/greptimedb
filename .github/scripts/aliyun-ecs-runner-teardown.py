@@ -32,8 +32,8 @@ Two modes:
   runner by name. Both steps are idempotent and best-effort; a missing
   instance or runner is not an error.
 - Sweep (scheduled janitor): delete every instance tagged as managed by
-  query-regression CI whose creation time is older than its tagged TTL (or
-  the given fallback TTL for untagged instances), and
+  query-regression CI in the requested repository whose creation time is older
+  than its tagged TTL (or the fallback TTL for instances without a TTL tag), and
   deregister the matching runners. This is the safety net for runs whose
   teardown job never executed.
 """
@@ -162,7 +162,7 @@ def delete_instance(client, instance_id: str, region_id: str | None = None) -> b
 
 
 def list_managed_instances(
-    client, region_id: str
+    client, region_id: str, repo: str
 ) -> list[tuple[str, str, str, str | None]]:
     from alibabacloud_ecs20140526 import models as ecs_models
 
@@ -175,6 +175,9 @@ def list_managed_instances(
                 ecs_models.DescribeInstancesRequestTag(
                     key=provision.MANAGED_BY_TAG_KEY,
                     value=provision.MANAGED_BY_TAG_VALUE,
+                ),
+                ecs_models.DescribeInstancesRequestTag(
+                    key=provision.REPO_TAG_KEY, value=repo
                 )
             ],
             max_results=100,
@@ -201,7 +204,7 @@ def list_managed_instances(
 
 
 def sweep(client, region_id: str, repo: str, github_token: str, ttl: timedelta) -> int:
-    instances = list_managed_instances(client, region_id)
+    instances = list_managed_instances(client, region_id, repo)
     print(f"Found {len(instances)} managed instance(s) in {region_id}", flush=True)
     expired = expired_instance_names(instances, datetime.now(timezone.utc), ttl)
     ok = True
@@ -227,7 +230,7 @@ def main() -> int:
     parser.add_argument(
         "--sweep",
         action="store_true",
-        help="Janitor mode: delete all managed instances older than --sweep-ttl-hours.",
+        help="Janitor mode: delete expired managed instances tagged for --repo.",
     )
     parser.add_argument("--sweep-ttl-hours", type=float, default=SWEEP_TTL.total_seconds() / 3600)
     args = parser.parse_args()

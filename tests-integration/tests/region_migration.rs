@@ -1224,7 +1224,7 @@ impl Selector for ConstNodeSelector {
     async fn select(
         &self,
         _ctx: &Self::Context,
-        _opts: SelectorOptions,
+        _opts: SelectorOptions<'_>,
     ) -> MetaResult<Self::Output> {
         Ok(self.peers.clone())
     }

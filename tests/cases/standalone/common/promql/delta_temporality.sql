@@ -34,6 +34,7 @@ TQL EVAL (180, 180, '1m') rate(delta_temporality[3m]);
 -- SQLNESS REPLACE input_partitions=\d+ input_partitions=REDACTED
 -- SQLNESS REPLACE "partition_count":\{(.*?)\} "partition_count":REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE \\?"(dyn_filters|time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
 TQL ANALYZE (180, 180, '1m') rate(delta_temporality[3m]);
 
 -- The reserved temporality marker treats NULL as the absent cumulative state.

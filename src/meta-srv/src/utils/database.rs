@@ -182,6 +182,7 @@ mod tests {
                 memory_usage_bytes: 0,
                 hostname: String::new(),
                 env_vars: Default::default(),
+                schedulable: None,
             }])
         }
 

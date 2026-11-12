@@ -17,9 +17,10 @@ use std::sync::Arc;
 
 use index::bloom_filter::applier::InListPredicate;
 use index::inverted_index::search::predicate::{Predicate, RangePredicate};
+use index::target::IndexTarget;
 use moka::notification::RemovalCause;
 use moka::sync::Cache;
-use store_api::storage::{ColumnId, FileId};
+use store_api::storage::FileId;
 
 use crate::metrics::{CACHE_BYTES, CACHE_EVICTION, CACHE_HIT, CACHE_MISS};
 use crate::sst::index::fulltext_index::applier::builder::{
@@ -122,17 +123,17 @@ pub enum PredicateKey {
 
 impl PredicateKey {
     /// Creates a new fulltext index key.
-    pub fn new_fulltext(predicates: Arc<BTreeMap<ColumnId, FulltextRequest>>) -> Self {
+    pub fn new_fulltext(predicates: Arc<BTreeMap<IndexTarget, FulltextRequest>>) -> Self {
         Self::Fulltext(FulltextIndexKey::new(predicates))
     }
 
     /// Creates a new bloom filter key.
-    pub fn new_bloom(predicates: Arc<BTreeMap<ColumnId, Vec<InListPredicate>>>) -> Self {
+    pub fn new_bloom(predicates: Arc<BTreeMap<IndexTarget, Vec<InListPredicate>>>) -> Self {
         Self::Bloom(BloomFilterKey::new(predicates))
     }
 
     /// Creates a new inverted index key.
-    pub fn new_inverted(predicates: Arc<BTreeMap<ColumnId, Vec<Predicate>>>) -> Self {
+    pub fn new_inverted(predicates: Arc<BTreeMap<IndexTarget, Vec<Predicate>>>) -> Self {
         Self::Inverted(InvertedIndexKey::new(predicates))
     }
 
@@ -155,17 +156,18 @@ impl PredicateKey {
 /// Key for fulltext index queries.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
 pub struct FulltextIndexKey {
-    predicates: Arc<BTreeMap<ColumnId, FulltextRequest>>,
+    predicates: Arc<BTreeMap<IndexTarget, FulltextRequest>>,
     mem_usage: usize,
 }
 
 impl FulltextIndexKey {
     /// Creates a new fulltext index key with the given predicates.
     /// Calculates memory usage based on the size of queries and terms.
-    pub fn new(predicates: Arc<BTreeMap<ColumnId, FulltextRequest>>) -> Self {
+    pub fn new(predicates: Arc<BTreeMap<IndexTarget, FulltextRequest>>) -> Self {
         let mem_usage = predicates
-            .values()
-            .map(|request| {
+            .iter()
+            .map(|(target, request)| {
+                let target_size = target.approx_mem_size();
                 let query_size = request
                     .queries
                     .iter()
@@ -181,7 +183,7 @@ impl FulltextIndexKey {
                     .iter()
                     .map(|like| like.pattern.len() + size_of::<FulltextLike>())
                     .sum::<usize>();
-                query_size + term_size + like_size
+                target_size + query_size + term_size + like_size
             })
             .sum();
         Self {
@@ -194,21 +196,24 @@ impl FulltextIndexKey {
 /// Key for bloom filter queries.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
 pub struct BloomFilterKey {
-    predicates: Arc<BTreeMap<ColumnId, Vec<InListPredicate>>>,
+    predicates: Arc<BTreeMap<IndexTarget, Vec<InListPredicate>>>,
     mem_usage: usize,
 }
 
 impl BloomFilterKey {
     /// Creates a new bloom filter key with the given predicates.
     /// Calculates memory usage based on the size of predicate lists.
-    pub fn new(predicates: Arc<BTreeMap<ColumnId, Vec<InListPredicate>>>) -> Self {
+    pub fn new(predicates: Arc<BTreeMap<IndexTarget, Vec<InListPredicate>>>) -> Self {
         let mem_usage = predicates
-            .values()
-            .map(|predicates| {
-                predicates
-                    .iter()
-                    .map(|predicate| predicate.list.iter().map(|list| list.len()).sum::<usize>())
-                    .sum::<usize>()
+            .iter()
+            .map(|(target, predicates)| {
+                target.approx_mem_size()
+                    + predicates
+                        .iter()
+                        .map(|predicate| {
+                            predicate.list.iter().map(|list| list.len()).sum::<usize>()
+                        })
+                        .sum::<usize>()
             })
             .sum();
         Self {
@@ -221,27 +226,28 @@ impl BloomFilterKey {
 /// Key for inverted index queries.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
 pub struct InvertedIndexKey {
-    predicates: Arc<BTreeMap<ColumnId, Vec<Predicate>>>,
+    predicates: Arc<BTreeMap<IndexTarget, Vec<Predicate>>>,
     mem_usage: usize,
 }
 
 impl InvertedIndexKey {
     /// Creates a new inverted index key with the given predicates.
     /// Calculates memory usage based on the type and size of predicates.
-    pub fn new(predicates: Arc<BTreeMap<ColumnId, Vec<Predicate>>>) -> Self {
+    pub fn new(predicates: Arc<BTreeMap<IndexTarget, Vec<Predicate>>>) -> Self {
         let mem_usage = predicates
-            .values()
-            .map(|predicates| {
-                predicates
-                    .iter()
-                    .map(|predicate| match predicate {
-                        Predicate::InList(predicate) => {
-                            predicate.list.iter().map(|list| list.len()).sum::<usize>()
-                        }
-                        Predicate::Range(_) => size_of::<RangePredicate>(),
-                        Predicate::RegexMatch(predicate) => predicate.pattern.len(),
-                    })
-                    .sum::<usize>()
+            .iter()
+            .map(|(target, predicates)| {
+                target.approx_mem_size()
+                    + predicates
+                        .iter()
+                        .map(|predicate| match predicate {
+                            Predicate::InList(predicate) => {
+                                predicate.list.iter().map(|list| list.len()).sum::<usize>()
+                            }
+                            Predicate::Range(_) => size_of::<RangePredicate>(),
+                            Predicate::RegexMatch(predicate) => predicate.pattern.len(),
+                        })
+                        .sum::<usize>()
             })
             .sum();
 
@@ -290,6 +296,28 @@ mod tests {
         FulltextQuery, FulltextRequest, FulltextTerm,
     };
     use crate::sst::parquet::row_selection::RowGroupSelection;
+
+    #[test]
+    fn test_inverted_cache_separates_json_paths() {
+        let key = |path: &str| {
+            PredicateKey::new_inverted(Arc::new(BTreeMap::from([(
+                IndexTarget::new_json_path(1, vec![path.into()]).unwrap(),
+                vec![Predicate::Range(RangePredicate {
+                    range: Range {
+                        lower: None,
+                        upper: None,
+                    },
+                })],
+            )])))
+        };
+        let a = key("a");
+        let b = key("b");
+        let cache = IndexResultCache::new(10000);
+        let file = FileId::random();
+        cache.put(a.clone(), file, Arc::new(RowGroupSelection::new(10, 10)));
+        assert!(cache.get(&a, file).is_some());
+        assert!(cache.get(&b, file).is_none());
+    }
 
     #[test]
     fn test_cache_basic_operations() {
@@ -350,7 +378,7 @@ mod tests {
             terms: vec![],
             likes: vec![],
         };
-        predicates1.insert(1, request1);
+        predicates1.insert(IndexTarget::ColumnId(1), request1);
         let key1 = PredicateKey::new_fulltext(Arc::new(predicates1));
         let selection1 = Arc::new(RowGroupSelection::default());
 
@@ -365,7 +393,7 @@ mod tests {
             terms: vec![],
             likes: vec![],
         };
-        predicates2.insert(1, request2);
+        predicates2.insert(IndexTarget::ColumnId(1), request2);
         let key2 = PredicateKey::new_fulltext(Arc::new(predicates2));
         let selection2 = Arc::new(RowGroupSelection::default());
 
@@ -436,7 +464,7 @@ mod tests {
             }],
             likes: vec![],
         };
-        predicates1.insert(1, request1);
+        predicates1.insert(IndexTarget::ColumnId(1), request1);
         let key1 = PredicateKey::new_fulltext(Arc::new(predicates1));
         let selection1 = Arc::new(RowGroupSelection::new(100, 250));
         let weight1 =
@@ -452,7 +480,7 @@ mod tests {
         let predicate2 = BloomInListPredicate {
             list: BTreeSet::from([b"test1".to_vec(), b"test2".to_vec()]),
         };
-        predicates2.insert(1, vec![predicate2]);
+        predicates2.insert(IndexTarget::ColumnId(1), vec![predicate2]);
         let key2 = PredicateKey::new_bloom(Arc::new(predicates2));
         let selection2 = Arc::new(RowGroupSelection::from_row_ids(
             [1, 2, 3].into_iter().collect(),
@@ -475,7 +503,7 @@ mod tests {
                 upper: None,
             },
         });
-        predicates3.insert(1, vec![predicate3]);
+        predicates3.insert(IndexTarget::ColumnId(1), vec![predicate3]);
         let key3 = PredicateKey::new_inverted(Arc::new(predicates3));
         let selection3 = Arc::new(RowGroupSelection::from_row_ranges(
             vec![(0, vec![5..15])],

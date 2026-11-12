@@ -23,6 +23,7 @@ pub mod batcher;
 pub mod configurator;
 pub(crate) mod elasticsearch;
 pub mod error;
+pub mod exemplar;
 pub mod grpc;
 
 mod hint_headers;

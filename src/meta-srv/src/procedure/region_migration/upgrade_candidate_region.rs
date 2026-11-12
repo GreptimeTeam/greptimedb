@@ -309,19 +309,21 @@ impl UpgradeCandidateRegion {
         let mut retry = 0;
         let mut upgraded = false;
 
+        // If using Kafka WAL, hold a read lock on each topic for all attempts to prevent WAL
+        // pruning during the upgrade. Acquire once: re-acquiring a held read lock on retry
+        // queues behind a waiting `WalPruneProcedure` writer, which waits on the first guard.
         let mut guards = Vec::with_capacity(topics.len());
+        for topic in &topics {
+            guards.push(
+                procedure_ctx
+                    .provider
+                    .acquire_lock(&(RemoteWalLock::Read(topic.clone()).into()))
+                    .await,
+            );
+        }
+
         loop {
             let timer = Instant::now();
-            // If using Kafka WAL, acquire a read lock on the topic to prevent WAL pruning during the upgrade.
-            for topic in &topics {
-                guards.push(
-                    procedure_ctx
-                        .provider
-                        .acquire_lock(&(RemoteWalLock::Read(topic.clone()).into()))
-                        .await,
-                );
-            }
-
             if let Err(err) = self.upgrade_region(ctx).await {
                 retry += 1;
                 ctx.update_operations_elapsed(timer);
@@ -854,5 +856,207 @@ mod tests {
         let (next, _) = state.next(&mut ctx, &procedure_ctx).await.unwrap();
         let update_metadata = next.as_any().downcast_ref::<UpdateMetadata>().unwrap();
         assert_matches!(update_metadata, UpdateMetadata::Rollback);
+    }
+}
+
+/// Regression tests for a deadlock between the upgrade step's per-retry `RemoteWalLock::Read`
+/// (now acquired once before the retry loop) and `WalPruneProcedure`'s `RemoteWalLock::Write`
+/// on the same topic.
+///
+/// Mirrors a datanode rolling restart: failover sends the upgrade instruction to a candidate
+/// datanode that never answers, the mailbox times out (retryable), and the periodic WAL prune
+/// for the region's topic starts while the upgrade is waiting. Both procedures share one
+/// `ContextProvider`, as they do inside metasrv's procedure manager.
+///
+/// Requires a Kafka broker: `GT_KAFKA_ENDPOINTS=127.0.0.1:9092`.
+#[cfg(test)]
+mod wal_prune_deadlock_tests {
+    use std::assert_matches;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use common_meta::key::table_route::TableRouteValue;
+    use common_meta::key::test_utils::new_test_table_info;
+    use common_meta::peer::Peer;
+    use common_meta::region_registry::LeaderRegionRegistry;
+    use common_meta::rpc::router::{Region, RegionRoute};
+    use common_meta::wal_provider::{RegionWalOptions, build_kafka_client};
+    use common_procedure::Procedure;
+    use common_wal::config::kafka::common::KafkaConnectionConfig;
+    use common_wal::maybe_skip_kafka_integration_test;
+    use common_wal::options::KafkaWalOptions;
+    use common_wal::test_util::get_kafka_endpoints;
+    use store_api::storage::RegionId;
+    use tokio::time::timeout;
+
+    use super::*;
+    use crate::procedure::region_migration::test_util::{TestingEnv, new_procedure_context};
+    use crate::procedure::region_migration::{
+        ContextFactory, PersistentContext, RegionMigrationTriggerReason,
+    };
+    use crate::procedure::wal_prune::{Context as WalPruneContext, WalPruneProcedure};
+
+    struct Scenario {
+        env: TestingEnv,
+        ctx: Context,
+        topic: String,
+        upgrade_instructions: Arc<AtomicUsize>,
+    }
+
+    /// One region on a Kafka topic, failing over to a datanode that receives the upgrade
+    /// instruction but never replies (it is restarting).
+    async fn setup(name: &str) -> Scenario {
+        let topic = format!("{name}_{}", uuid::Uuid::new_v4());
+        let region_id = RegionId::new(1024, 1);
+        let persistent_ctx = PersistentContext::new(
+            vec![("greptime".into(), "public".into())],
+            Peer::empty(1),
+            Peer::empty(2),
+            vec![region_id],
+            // The migration timeout; the first upgrade attempt consumes all of it.
+            Duration::from_millis(1000),
+            RegionMigrationTriggerReason::Failover,
+        );
+        let to_peer_id = persistent_ctx.to_peer.id;
+
+        let mut env = TestingEnv::new();
+        let ctx = env.context_factory().new_context(persistent_ctx);
+        let region_routes = vec![RegionRoute {
+            region: Region::new_test(region_id),
+            leader_peer: Some(ctx.persistent_ctx.from_peer.clone()),
+            follower_peers: vec![ctx.persistent_ctx.to_peer.clone()],
+            ..Default::default()
+        }];
+        let wal_options = RegionWalOptions::from([(
+            region_id.region_number(),
+            WalOptions::Kafka(KafkaWalOptions::new(topic.clone())),
+        )]);
+        ctx.table_metadata_manager
+            .create_table_metadata(
+                new_test_table_info(region_id.table_id()),
+                TableRouteValue::physical(region_routes),
+                wal_options,
+            )
+            .await
+            .unwrap();
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+        env.mailbox_context()
+            .insert_heartbeat_response_receiver(Channel::Datanode(to_peer_id), tx)
+            .await;
+        let upgrade_instructions = Arc::new(AtomicUsize::new(0));
+        let counter = upgrade_instructions.clone();
+        common_runtime::spawn_global(async move {
+            while let Some(Ok(_)) = rx.recv().await {
+                counter.fetch_add(1, Ordering::SeqCst);
+            }
+        });
+
+        Scenario {
+            env,
+            ctx,
+            topic,
+            upgrade_instructions,
+        }
+    }
+
+    async fn wait_for_first_instruction(counter: &AtomicUsize) {
+        timeout(Duration::from_secs(5), async {
+            while counter.load(Ordering::SeqCst) == 0 {
+                sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_upgrade_retry_does_not_deadlock_with_wal_prune() {
+        maybe_skip_kafka_integration_test!();
+        let Scenario {
+            env,
+            mut ctx,
+            topic,
+            upgrade_instructions,
+        } = setup("upgrade_wal_prune_deadlock").await;
+        // Metasrv shares one provider (and dynamic key lock) across all procedures.
+        let procedure_ctx = new_procedure_context();
+
+        let migration_procedure_ctx = procedure_ctx.clone();
+        let migration = tokio::spawn(async move {
+            let mut state = Box::<UpgradeCandidateRegion>::default();
+            state.next(&mut ctx, &migration_procedure_ctx).await
+        });
+        // The upgrade step now holds `RemoteWalLock::Read(topic)` and waits on the datanode.
+        wait_for_first_instruction(&upgrade_instructions).await;
+
+        // The periodic WAL prune for the region's topic starts.
+        let client = build_kafka_client(&KafkaConnectionConfig {
+            broker_endpoints: get_kafka_endpoints(),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+        client
+            .controller_client()
+            .unwrap()
+            .create_topic(&topic, 1, 1, 5000)
+            .await
+            .unwrap();
+        let mut wal_prune = WalPruneProcedure::new(
+            WalPruneContext {
+                client: Arc::new(client),
+                table_metadata_manager: env.table_metadata_manager().clone(),
+                leader_region_registry: Arc::new(LeaderRegionRegistry::new()),
+            },
+            None,
+            topic,
+            0,
+            false,
+        );
+        let wal_prune_procedure_ctx = procedure_ctx.clone();
+        let wal_prune =
+            tokio::spawn(async move { wal_prune.execute(&wal_prune_procedure_ctx).await });
+
+        // The mailbox times out after ~1s (retryable). The retry keeps the read lock it already
+        // holds, fails fast with `ExceededDeadline`, and the migration rolls back. Releasing the
+        // read lock then lets the queued WAL prune run.
+        let (next, _) = timeout(Duration::from_secs(10), migration)
+            .await
+            .expect("upgrade step should not deadlock")
+            .unwrap()
+            .unwrap();
+        let update_metadata = next.as_any().downcast_ref::<UpdateMetadata>().unwrap();
+        assert_matches!(update_metadata, UpdateMetadata::Rollback);
+        assert_eq!(1, upgrade_instructions.load(Ordering::SeqCst));
+
+        timeout(Duration::from_secs(10), wal_prune)
+            .await
+            .expect("WAL prune should not deadlock")
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_upgrade_retry_without_wal_prune_rolls_back() {
+        maybe_skip_kafka_integration_test!();
+        let Scenario {
+            mut ctx,
+            upgrade_instructions,
+            ..
+        } = setup("upgrade_wal_prune_control").await;
+        let procedure_ctx = new_procedure_context();
+
+        let mut state = Box::<UpgradeCandidateRegion>::default();
+        let (next, _) = timeout(
+            Duration::from_secs(10),
+            state.next(&mut ctx, &procedure_ctx),
+        )
+        .await
+        .expect("upgrade step should finish without WAL prune")
+        .unwrap();
+        let update_metadata = next.as_any().downcast_ref::<UpdateMetadata>().unwrap();
+        assert_matches!(update_metadata, UpdateMetadata::Rollback);
+        assert_eq!(1, upgrade_instructions.load(Ordering::SeqCst));
     }
 }

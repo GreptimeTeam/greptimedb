@@ -291,8 +291,9 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Failed to handle query"))]
+    #[snafu(display("Failed to handle query, addr: {}", addr))]
     HandleQuery {
+        addr: String,
         source: common_meta::error::Error,
         #[snafu(implicit)]
         location: Location,

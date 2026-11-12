@@ -45,10 +45,6 @@ ALTER TABLE build_index_restart_test MODIFY COLUMN msg SET FULLTEXT INDEX;
 
 ADMIN BUILD_INDEX('build_index_restart_test');
 
--- ALTER may already schedule an async schema-change rebuild. If ADMIN BUILD_INDEX
--- races with it, the manual task can be duplicate-aborted immediately while the
--- schema-change task is still finishing, so wait before checking query visibility.
--- SQLNESS SLEEP 1s
 -- Fulltext index built, verify via fulltext query
 SELECT msg FROM build_index_restart_test WHERE MATCHES(msg, 'fox') ORDER BY ts;
 
@@ -66,6 +62,8 @@ WHERE table_id = (
 )
 AND index_type LIKE 'fulltext%';
 
+-- Distributed region statistics come from datanode heartbeats.
+-- SQLNESS SLEEP 1s
 -- Fulltext index size is reported after the build
 SELECT index_size FROM INFORMATION_SCHEMA.REGION_STATISTICS
 WHERE table_id = (
@@ -96,7 +94,6 @@ AND index_type LIKE 'fulltext%';
 -- Run ADMIN BUILD_INDEX again (idempotency)
 ADMIN BUILD_INDEX('build_index_restart_test');
 
--- SQLNESS SLEEP 1s
 -- Fulltext query still works after idempotent rebuild
 SELECT msg FROM build_index_restart_test WHERE MATCHES(msg, 'fox') ORDER BY ts;
 

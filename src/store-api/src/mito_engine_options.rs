@@ -29,6 +29,9 @@ pub const MERGE_MODE_KEY: &str = "merge_mode";
 pub const TTL_KEY: &str = "ttl";
 /// Option key for the per-table auto flush interval.
 pub const AUTO_FLUSH_INTERVAL_KEY: &str = "auto_flush_interval";
+/// Per-table override for each compaction output's decode and encode parallelism.
+pub const COMPACTION_EXPERIMENTAL_OUTPUT_PARALLELISM: &str =
+    "compaction.experimental_output_parallelism";
 /// Option key for compaction type.
 pub const COMPACTION_TYPE: &str = "compaction.type";
 /// Option key for forcing compaction options override.
@@ -166,6 +169,7 @@ pub fn is_mito_engine_option_key(key: &str) -> bool {
             "ttl",
             WRITE_BUFFER_SIZE_KEY,
             AUTO_FLUSH_INTERVAL_KEY,
+            COMPACTION_EXPERIMENTAL_OUTPUT_PARALLELISM,
             "storage",
             "index.inverted_index.ignore_column_ids",
             "index.inverted_index.segment_row_count",
@@ -178,7 +182,7 @@ pub fn is_mito_engine_option_key(key: &str) -> bool {
             MEMTABLE_PARTITION_TREE_INDEX_MAX_KEYS_PER_SHARD,
             MEMTABLE_PARTITION_TREE_DATA_FREEZE_THRESHOLD,
             MEMTABLE_PARTITION_TREE_FORK_DICTIONARY_BYTES,
-            // We don't allow to create a mito table with sparse primary key encoding directly.
+            crate::metric_engine_consts::PRIMARY_KEY_ENCODING,
             APPEND_MODE_KEY,
             MERGE_MODE_KEY,
             SST_FORMAT_KEY,
@@ -200,6 +204,9 @@ mod tests {
         assert!(is_mito_engine_option_key("ttl"));
         assert!(is_mito_engine_option_key("write_buffer_size"));
         assert!(is_mito_engine_option_key("auto_flush_interval"));
+        assert!(is_mito_engine_option_key(
+            "compaction.experimental_output_parallelism"
+        ));
         assert!(is_mito_engine_option_key("compaction.type"));
         assert!(is_mito_engine_option_key("compaction.override"));
         assert!(is_mito_engine_option_key(

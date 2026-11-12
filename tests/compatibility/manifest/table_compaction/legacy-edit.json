@@ -1,0 +1,29 @@
+{
+  "actions": [{
+    "Edit": {
+      "files_to_add": [
+        {
+          "region_id": 4294967297,
+          "file_id": "4b220a70-2b03-4641-9687-b65d94641208",
+          "time_range": [{"value": 0, "unit": "Millisecond"}, {"value": 10, "unit": "Millisecond"}],
+          "level": 0,
+          "file_size": 100,
+          "sequence": 7
+        },
+        {
+          "region_id": 4294967297,
+          "file_id": "4b220a70-2b03-4641-9687-b65d94641209",
+          "time_range": [{"value": 0, "unit": "Millisecond"}, {"value": 10, "unit": "Millisecond"}],
+          "level": 1,
+          "file_size": 100,
+          "sequence": 8
+        }
+      ],
+      "files_to_remove": [],
+      "compaction_time_window": "1h",
+      "flushed_entry_id": 5,
+      "flushed_sequence": 8,
+      "committed_sequence": 8
+    }
+  }]
+}

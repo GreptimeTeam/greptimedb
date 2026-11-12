@@ -108,10 +108,19 @@ impl SemanticIndex {
         serde_json::to_string(&BTreeMap::from([(schema, &self.tables)])).ok()
     }
 
-    fn merge_from(&mut self, other: &SemanticIndex) {
+    pub(crate) fn merge_from(&mut self, other: &SemanticIndex) {
         for (table, scalars) in &other.tables {
             for (key, value) in scalars {
                 self.record_scalar(table, key, value);
+            }
+        }
+    }
+
+    /// Moves a metric's metadata on its first accepted output for this table.
+    pub(crate) fn merge_table_from(&mut self, other: &mut SemanticIndex, table: &str) {
+        if let Some(scalars) = other.tables.remove(table) {
+            for (key, value) in scalars {
+                self.record_scalar(table, key, &value);
             }
         }
     }

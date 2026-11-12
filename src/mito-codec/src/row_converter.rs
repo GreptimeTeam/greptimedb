@@ -175,24 +175,35 @@ pub fn build_primary_key_codec_with_fields(
 /// Finds the checked boundary of an Option<String>, shared by Dense and Sparse.
 /// This validates framing, not UTF-8; consumers decoding strings validate UTF-8.
 pub(crate) fn encoded_string_len(bytes: &[u8]) -> memcomparable::Result<usize> {
+    encoded_string_info::<false>(bytes).map(|(len, _)| len)
+}
+
+/// Checks string framing and optionally detects ASCII in the same pass.
+/// Framing-only readers compile out payload inspection and ignore the ASCII result.
+pub(crate) fn encoded_string_info<const CHECK_ASCII: bool>(
+    bytes: &[u8],
+) -> memcomparable::Result<(usize, bool)> {
     match bytes.first().copied().ok_or(memcomparable::Error::Eof)? {
-        0 => return Ok(1),
+        0 => return Ok((1, true)),
         1 => {}
         marker => return Err(memcomparable::Error::InvalidTagEncoding(marker as usize)),
     }
     match bytes.get(1).copied().ok_or(memcomparable::Error::Eof)? {
-        0 => return Ok(2),
+        0 => return Ok((2, true)),
         1 => {}
         marker => return Err(memcomparable::Error::InvalidBytesEncoding(marker)),
     }
-    let mut end = 2;
-    loop {
-        let chunk = bytes.get(end..end + 9).ok_or(memcomparable::Error::Eof)?;
-        end += 9;
-        match chunk[8] {
-            1..=8 => return Ok(end),
+    let mut ascii_bits = 0_u64;
+    for (index, chunk) in bytes[2..].as_chunks::<9>().0.iter().enumerate() {
+        let [word @ .., marker] = *chunk;
+        if CHECK_ASCII {
+            ascii_bits |= u64::from_ne_bytes(word);
+        }
+        match marker {
+            1..=8 => return Ok((2 + (index + 1) * 9, ascii_bits & 0x8080_8080_8080_8080 == 0)),
             9 => {}
             marker => return Err(memcomparable::Error::InvalidBytesEncoding(marker)),
         }
     }
+    Err(memcomparable::Error::Eof)
 }

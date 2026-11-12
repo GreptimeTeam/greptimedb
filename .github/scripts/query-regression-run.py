@@ -21,10 +21,13 @@ import argparse
 import json
 import os
 import re
+import shlex
 import signal
 import socket
 import subprocess
+import sys
 import time
+import uuid
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
@@ -130,6 +133,7 @@ class RunTarget:
     datanode_http_port: int
     datanode_data_dir: Path
     frontend_config: Path | None = None
+    containerized: bool = False
 
 
 def allocate_ports(n: int) -> list[int]:
@@ -151,6 +155,7 @@ def make_target(
     root: Path,
     ports: list[int],
     frontend_config: Path | None = None,
+    containerized: bool = False,
 ) -> RunTarget:
     work_dir = root / name
     return RunTarget(
@@ -167,6 +172,7 @@ def make_target(
         datanode_http_port=ports[3],
         datanode_data_dir=work_dir / "datanode-0" / "data",
         frontend_config=frontend_config,
+        containerized=containerized,
     )
 
 
@@ -258,7 +264,11 @@ def stop_component(
     procs: dict[tuple[str, str], subprocess.Popen[bytes]],
 ) -> None:
     proc = procs.pop((target.name, name), None)
-    if proc is None or proc.poll() is not None:
+    if proc is None:
+        return
+    if proc.poll() is not None:
+        if target.containerized and proc.returncode != 0:
+            raise RuntimeError(f"Docker target {target.name}/{name} exited with {proc.returncode}")
         return
     try:
         os.killpg(proc.pid, signal.SIGTERM)
@@ -272,6 +282,8 @@ def stop_component(
         except ProcessLookupError:
             return
         proc.wait(timeout=20)
+    if target.containerized and proc.returncode not in (0, 128 + signal.SIGTERM):
+        raise RuntimeError(f"Docker target {target.name}/{name} cleanup failed: {proc.returncode}")
 
 
 def restart_component(
@@ -284,9 +296,15 @@ def restart_component(
 
 
 def stop_all(targets: list[RunTarget], procs: dict[tuple[str, str], subprocess.Popen[bytes]]) -> None:
+    errors = []
     for target in reversed(targets):
         for name in ("frontend", "datanode", "metasrv"):
-            stop_component(target, name, procs)
+            try:
+                stop_component(target, name, procs)
+            except Exception as err:
+                errors.append(err)
+    if errors:
+        raise RuntimeError(f"component cleanup failed: {errors}") from errors[0]
 
 
 def load_plan(fixture_generator: Path, case_path: Path) -> dict[str, Any]:
@@ -313,8 +331,8 @@ def run_direct_case(
 ) -> int:
     ports = allocate_ports(16)
     targets = [
-        make_target("base", base_bin, work_dir, ports[:8]),
-        make_target("candidate", candidate_bin, work_dir, ports[8:]),
+        make_target("base", base_bin, work_dir, ports[:8], containerized=bool(getattr(args, "base_image", ""))),
+        make_target("candidate", candidate_bin, work_dir, ports[8:], containerized=bool(getattr(args, "candidate_image", ""))),
     ]
     for target in targets:
         if target.work_dir.exists() and any(target.work_dir.iterdir()):
@@ -407,6 +425,7 @@ def run_remote_case(
             work_dir,
             ports[:8],
             work_dir / "base" / "frontend-prom-store.toml",
+            containerized=bool(getattr(args, "base_image", "")),
         ),
         make_target(
             "candidate",
@@ -414,6 +433,7 @@ def run_remote_case(
             work_dir,
             ports[8:],
             work_dir / "candidate" / "frontend-prom-store.toml",
+            containerized=bool(getattr(args, "candidate_image", "")),
         ),
     ]
     for target in targets:
@@ -495,8 +515,8 @@ def run_otlp_case(
         raise ValueError("--otelgen-bin is required for otlp_trace_load")
     ports = allocate_ports(16)
     targets = [
-        make_target("base", base_bin, work_dir, ports[:8]),
-        make_target("candidate", candidate_bin, work_dir, ports[8:]),
+        make_target("base", base_bin, work_dir, ports[:8], containerized=bool(getattr(args, "base_image", ""))),
+        make_target("candidate", candidate_bin, work_dir, ports[8:], containerized=bool(getattr(args, "candidate_image", ""))),
     ]
     for target in targets:
         if target.work_dir.exists() and any(target.work_dir.iterdir()):
@@ -634,6 +654,106 @@ def write_failed_report(work_dir: Path, case_path: Path, error: Exception) -> No
     )
 
 
+def docker_target(image: str, root: Path, command: list[str]) -> int:
+    """Expose an image as a binary, including read-bench subcommands.
+
+    The caller terminates a process group. Keep Docker clients in separate
+    sessions so cleanup can stop the container before SST inspection starts.
+    """
+    name = f"query-regression-{uuid.uuid4().hex}"
+
+    def interrupted(signum, _frame):
+        raise SystemExit(128 + signum)
+
+    previous = {sig: signal.signal(sig, interrupted) for sig in (signal.SIGTERM, signal.SIGINT)}
+    try:
+        subprocess.run([
+            "docker", "create", "--name", name, "--network", "host",
+            "--user", f"{os.getuid()}:{os.getgid()}",
+            "--volume", f"{root}:{root}", "--workdir", str(root),
+            "--entrypoint", "/greptime/bin/greptime", image, *command,
+        ], check=True, stdout=subprocess.DEVNULL, start_new_session=True)
+        attached = subprocess.run(
+            ["docker", "start", "--attach", name], check=False, start_new_session=True,
+        )
+        if attached.returncode != 0:
+            return attached.returncode
+        # docker start's status is not the contract for the container's exit code.
+        result = subprocess.run(
+            ["docker", "inspect", "--format", "{{.State.ExitCode}}", name],
+            check=True, capture_output=True, text=True, start_new_session=True,
+        )
+        return int(result.stdout.strip())
+    finally:
+        for sig in previous:
+            signal.signal(sig, signal.SIG_IGN)
+        try:
+            subprocess.run(
+                ["docker", "stop", "--time", "5", name], check=False,
+                stdout=subprocess.DEVNULL, timeout=8, start_new_session=True,
+            )
+        except subprocess.TimeoutExpired:
+            # Force-removal below still waits for the container to stop.
+            pass
+        finally:
+            try:
+                subprocess.run(
+                    ["docker", "rm", "--force", "--volumes", name], check=True,
+                    stdout=subprocess.DEVNULL, timeout=5, start_new_session=True,
+                )
+            finally:
+                for sig, handler in previous.items():
+                    signal.signal(sig, handler)
+
+
+def prepare_targets(args: argparse.Namespace) -> dict[str, Any]:
+    """Resolve images once and create binary-compatible launchers for all cases."""
+    metadata = {}
+    images = {}
+    for name in ("base", "candidate"):
+        image = getattr(args, f"{name}_image")
+        ref = getattr(args, f"{name}_ref")
+        if not image:
+            metadata[name] = {"kind": "source", "ref": os.environ.get(f"VERIFIED_{name.upper()}_SHA") or ref}
+            continue
+        if sys.platform != "linux":
+            raise ValueError("Docker targets require Linux host networking and a local Docker daemon")
+        if image.startswith("-") or any(c.isspace() for c in image):
+            raise ValueError(f"invalid {name} image reference: {image!r}")
+        if image not in images:
+            result = subprocess.run(
+                ["docker", "image", "inspect", image], check=False, capture_output=True, text=True,
+            )
+            if result.returncode != 0:
+                subprocess.run(["docker", "pull", image], check=True)
+                result = subprocess.run(
+                    ["docker", "image", "inspect", image], check=True, capture_output=True, text=True,
+                )
+            images[image] = json.loads(result.stdout)[0]
+        info = images[image]
+        image_id = info["Id"]
+        if not re.fullmatch(r"sha256:[0-9a-f]{64}", image_id):
+            raise ValueError(f"invalid Docker image ID: {image_id!r}")
+        args.work_dir = args.work_dir.resolve()
+        if ":" in str(args.work_dir):
+            raise ValueError("Docker target work directory cannot contain ':'")
+        launchers = args.work_dir / ".targets"
+        launchers.mkdir(parents=True, exist_ok=True)
+        launcher = launchers / name
+        command = [sys.executable, str(Path(__file__).resolve()),
+                   "docker-target", image_id, str(args.work_dir)]
+        launcher.write_text("#!/bin/sh\nexec " + shlex.join(command) + ' "$@"\n', encoding="utf-8")
+        launcher.chmod(0o755)
+        setattr(args, f"{name}_bin", launcher)
+        setattr(args, f"{name}_ref", f"{image} ({image_id})")
+        metadata[name] = {
+            "kind": "docker", "image": image, "image_id": image_id,
+            "repo_digests": info.get("RepoDigests", []),
+            "network": "host", "user": f"{os.getuid()}:{os.getgid()}",
+        }
+    return metadata
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--cases", action="append", help="'all', 'heavy', or comma/space separated case paths")
@@ -663,6 +783,8 @@ def main() -> int:
     parser.add_argument("--base-ref", default=os.environ.get("BASE_REF", ""))
     parser.add_argument("--candidate-ref", default=os.environ.get("CANDIDATE_REF", ""))
     parser.add_argument("--github-output", default=os.environ.get("GITHUB_OUTPUT"))
+    parser.add_argument("--base-image", default=os.environ.get("BASE_IMAGE", ""))
+    parser.add_argument("--candidate-image", default=os.environ.get("CANDIDATE_IMAGE", ""))
     args = parser.parse_args()
     try:
         cases = split_cases(args.cases or [os.environ.get("CASE_PATHS", "all")])
@@ -671,6 +793,12 @@ def main() -> int:
         append_github_output(args.github_output, 1)
         return 0
 
+    preparation_error = None
+    metadata = {}
+    try:
+        metadata = prepare_targets(args)
+    except Exception as err:
+        preparation_error = err
     reports: list[Path] = []
     status = 0
     for case in cases:
@@ -678,11 +806,18 @@ def main() -> int:
         work_dir = args.work_dir / case_slug(case_path)
         reports.append(work_dir / "query-regression-report.json")
         try:
+            if preparation_error is not None:
+                raise preparation_error
             case_status = run_case(args, case_path, work_dir)
         except Exception as err:  # noqa: BLE001 - preserve an aggregate report for the summary step
             print(f"error: query regression case {case_path}: {err}", flush=True)
             write_failed_report(work_dir, case_path, err)
             case_status = 1
+        report_path = reports[-1]
+        if (args.base_image or args.candidate_image) and report_path.exists():
+            report = json.loads(report_path.read_text(encoding="utf-8"))
+            report["execution_targets"] = metadata
+            report_path.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
         if case_status != 0:
             status = case_status or 1
 
@@ -695,4 +830,6 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    if len(sys.argv) > 1 and sys.argv[1] == "docker-target":
+        raise SystemExit(docker_target(sys.argv[2], Path(sys.argv[3]), sys.argv[4:]))
     raise SystemExit(main())

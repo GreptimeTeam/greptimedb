@@ -354,7 +354,11 @@ mod tests {
         builder.primary_key_encoding(encoding);
         for (id, name, ty) in columns {
             builder.push_column_metadata(ColumnMetadata {
-                column_schema: ColumnSchema::new((*name).to_string(), ty.clone(), true),
+                column_schema: ColumnSchema::new(
+                    (*name).to_string(),
+                    ty.clone(),
+                    !ReservedColumnId::is_reserved(*id),
+                ),
                 semantic_type: SemanticType::Tag,
                 column_id: *id,
             });
@@ -440,6 +444,16 @@ mod tests {
     #[test]
     fn test_decode_sparse_primary_key() {
         let columns = vec![
+            (
+                ReservedColumnId::table_id(),
+                "__table_id",
+                ConcreteDataType::uint32_datatype(),
+            ),
+            (
+                ReservedColumnId::tsid(),
+                "__tsid",
+                ConcreteDataType::uint64_datatype(),
+            ),
             (10, "k0", ConcreteDataType::string_datatype()),
             (11, "k1", ConcreteDataType::string_datatype()),
         ];

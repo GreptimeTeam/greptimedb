@@ -19,6 +19,7 @@ use std::collections::HashMap;
 use std::fmt::{Debug, Display};
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use api::greptime_proto::v1::meta::{GrantedRegion as PbGrantedRegion, RegionRole as PbRegionRole};
 use api::region::RegionResponse;
@@ -27,6 +28,7 @@ use common_error::ext::BoxedError;
 use common_recordbatch::adapter::RegionQueryStatCounters;
 use common_recordbatch::{EmptyRecordBatchStream, QueryMemoryTracker, SendableRecordBatchStream};
 use common_time::Timestamp;
+use datafusion_execution::memory_pool::{MemoryPool, UnboundedMemoryPool};
 use datafusion_physical_plan::metrics::ExecutionPlanMetricsSet;
 use datafusion_physical_plan::{DisplayAs, DisplayFormatType, PhysicalExpr};
 use datatypes::schema::SchemaRef;
@@ -34,15 +36,16 @@ use datatypes::series::SeriesOrdering;
 use datatypes::series::frame::LabelDecodeSpec;
 use datatypes::series::raw::RawSeriesChunk;
 use datatypes::series::samples::SeriesSchema;
+use futures::FutureExt;
 use futures::Stream;
-use futures::future::join_all;
+use futures::future::{BoxFuture, join_all};
 use serde::{Deserialize, Serialize};
 use tokio::sync::Semaphore;
 
 use crate::logstore::entry;
 use crate::metadata::RegionMetadataRef;
 use crate::region_request::{
-    BatchRegionDdlRequest, RegionCatchupRequest, RegionOpenRequest, RegionRequest,
+    BatchRegionDdlRequest, RegionCatchupRequest, RegionOpenRequest, RegionPutRequest, RegionRequest,
 };
 use crate::storage::{ColumnId, FileId, RegionId, ScanRequest, SequenceNumber};
 
@@ -53,7 +56,7 @@ pub enum SettableRegionRoleState {
     DowngradingLeader,
     /// Exit staging mode and return to normal leader state. Only allowed from staging state.
     Leader,
-    /// Enter staging mode. Region remains writable but disables checkpoint and compaction. Only allowed from normal leader state.
+    /// Enter staging mode. Region remains writable but disables checkpoint, compaction and flush. Only allowed from normal leader state.
     StagingLeader,
 }
 
@@ -90,6 +93,7 @@ pub struct SetRegionRoleStateRequest {
 #[derive(Debug, PartialEq, Eq)]
 pub enum SetRegionRoleStateSuccess {
     File,
+    Relational,
     Mito {
         last_entry_id: entry::Id,
     },
@@ -103,6 +107,11 @@ impl SetRegionRoleStateSuccess {
     /// Returns a [SetRegionRoleStateSuccess::File].
     pub fn file() -> Self {
         Self::File
+    }
+
+    /// Returns a [SetRegionRoleStateSuccess::Relational].
+    pub fn relational() -> Self {
+        Self::Relational
     }
 
     /// Returns a [SetRegionRoleStateSuccess::Mito] with the `last_entry_id`.
@@ -123,7 +132,7 @@ impl SetRegionRoleStateSuccess {
     /// Returns the last entry id of the region.
     pub fn last_entry_id(&self) -> Option<entry::Id> {
         match self {
-            SetRegionRoleStateSuccess::File => None,
+            SetRegionRoleStateSuccess::File | SetRegionRoleStateSuccess::Relational => None,
             SetRegionRoleStateSuccess::Mito { last_entry_id } => Some(*last_entry_id),
             SetRegionRoleStateSuccess::Metric { last_entry_id, .. } => Some(*last_entry_id),
         }
@@ -132,7 +141,7 @@ impl SetRegionRoleStateSuccess {
     /// Returns the last entry id of the metadata of the region.
     pub fn metadata_last_entry_id(&self) -> Option<entry::Id> {
         match self {
-            SetRegionRoleStateSuccess::File => None,
+            SetRegionRoleStateSuccess::File | SetRegionRoleStateSuccess::Relational => None,
             SetRegionRoleStateSuccess::Mito { .. } => None,
             SetRegionRoleStateSuccess::Metric {
                 metadata_last_entry_id,
@@ -321,7 +330,8 @@ pub struct ScannerProperties {
     /// The target partitions of the scanner. 0 indicates using the number of partitions as target partitions.
     target_partitions: usize,
 
-    /// Whether the scanner is scanning a logical region.
+    /// Whether the scanner reads one logical metric region, including a physical
+    /// metric region constrained by a table-ID filter.
     logical_region: bool,
 
     /// Region id that should receive query-load metrics for this scanner.
@@ -395,7 +405,8 @@ impl ScannerProperties {
         self.total_rows_is_exact
     }
 
-    /// Returns whether the scanner is scanning a logical region.
+    /// Returns whether the scanner reads one logical metric region, including a
+    /// physical metric region constrained by a table-ID filter.
     pub fn is_logical_region(&self) -> bool {
         self.logical_region
     }
@@ -409,7 +420,7 @@ impl ScannerProperties {
         }
     }
 
-    /// Sets whether the scanner is reading a logical region.
+    /// Sets whether the scanner reads one logical metric region.
     pub fn set_logical_region(&mut self, logical_region: bool) {
         self.logical_region = logical_region;
     }
@@ -467,10 +478,23 @@ impl PrepareRequest {
 }
 
 /// Necessary context of the query for the scanner.
-#[derive(Clone, Default)]
+/// Direct callers should create one context per scan and reuse it across partitions.
+/// The default pool is unbounded; cloning the context shares its pool.
+#[derive(Clone)]
 pub struct QueryScanContext {
     /// Whether the query is EXPLAIN ANALYZE VERBOSE.
     pub explain_verbose: bool,
+    /// Executing node's query runtime pool, shared by all partitions of this scan.
+    pub memory_pool: Arc<dyn MemoryPool>,
+}
+
+impl Default for QueryScanContext {
+    fn default() -> Self {
+        Self {
+            explain_verbose: false,
+            memory_pool: Arc::new(UnboundedMemoryPool::default()),
+        }
+    }
 }
 
 /// A tag bound to a physical column in the scan's metadata snapshot.
@@ -735,7 +759,8 @@ pub trait RegionScanner: Debug + DisplayAs + Send {
     /// The default is a no-op and does not make inherently one-shot sources replayable.
     fn reset_state(&mut self) {}
 
-    /// Sets whether the scanner is reading a logical region.
+    /// Sets whether the scanner reads one logical metric region, including a
+    /// physical metric region constrained by a table-ID filter.
     fn set_logical_region(&mut self, logical_region: bool);
 
     /// Sets the region id that should receive query-load metrics.
@@ -750,6 +775,13 @@ pub type RegionScannerRef = Box<dyn RegionScanner>;
 
 pub type BatchResponses = Vec<(RegionId, Result<RegionResponse, BoxedError>)>;
 
+/// A response of [`RegionEngine::handle_batch_put_requests`] and the region of each put it
+/// answers for.
+pub type BatchPutResponse = (
+    Vec<RegionId>,
+    BoxFuture<'static, Result<RegionResponse, BoxedError>>,
+);
+
 /// Represents the statistics of a region.
 #[derive(Debug, Deserialize, Serialize, Default)]
 pub struct RegionStatistic {
@@ -763,7 +795,10 @@ pub struct RegionStatistic {
     pub memtable_size: u64,
     /// The size of WAL in bytes.
     pub wal_size: u64,
-    /// The size of manifest in bytes.
+    /// Stored bytes of the latest observed manifest checkpoint and subsequent deltas,
+    /// compressed when enabled. Excludes staging manifests, `_last_checkpoint`, and
+    /// superseded files still present on disk. This is a logical recovery-size estimate,
+    /// not the physical directory usage; observation failures can leave it incomplete.
     pub manifest_size: u64,
     /// The size of SST data files owned by this region in bytes.
     ///
@@ -784,6 +819,14 @@ pub struct RegionStatistic {
     #[serde(default)]
     /// The total bytes written of the region since region opened.
     pub written_bytes: u64,
+    /// Total ingested Parquet bytes since the region opened.
+    /// Currently counts only committed flush output.
+    ///
+    /// Excludes index files, compaction and imported SSTs.
+    /// Resets when the region instance is recreated; manifest replay does not increment it.
+    /// Accepts the legacy `flushed_parquet_bytes` key; upgrade metasrv before datanodes.
+    #[serde(default, alias = "flushed_parquet_bytes")]
+    pub ingested_parquet_bytes: u64,
     /// The total query CPU time of the region since region opened.
     ///
     /// Unit: nanoseconds.
@@ -1054,6 +1097,63 @@ mod tests {
     }
 
     #[test]
+    fn region_statistic_flush_bytes_compatibility() {
+        let legacy_bytes = br#"{
+            "num_rows": 1,
+            "memtable_size": 2,
+            "wal_size": 3,
+            "manifest_size": 4,
+            "sst_size": 5,
+            "sst_num": 6,
+            "index_size": 7,
+            "manifest": {
+                "Mito": {
+                    "manifest_version": 8,
+                    "flushed_entry_id": 9,
+                    "file_removed_cnt": 10
+                }
+            },
+            "written_bytes": 11
+        }"#;
+        let mut statistic = RegionStatistic::deserialize_from_slice(legacy_bytes).unwrap();
+        assert_eq!(statistic.ingested_parquet_bytes, 0);
+        statistic.ingested_parquet_bytes = 1234;
+        let encoded = statistic.serialize_to_vec().unwrap();
+        let decoded = RegionStatistic::deserialize_from_slice(&encoded).unwrap();
+        assert_eq!(decoded.ingested_parquet_bytes, 1234);
+        let legacy: serde_json::Value = serde_json::from_slice(legacy_bytes).unwrap();
+        let mut current: serde_json::Value = serde_json::from_slice(&encoded).unwrap();
+        assert_eq!(current["ingested_parquet_bytes"], 1234);
+        assert!(current.get("flushed_parquet_bytes").is_none());
+        let mut old_wire = current.clone();
+        let bytes = old_wire
+            .as_object_mut()
+            .unwrap()
+            .remove("ingested_parquet_bytes")
+            .unwrap();
+        old_wire["flushed_parquet_bytes"] = bytes;
+        assert_eq!(
+            serde_json::from_value::<RegionStatistic>(old_wire)
+                .unwrap()
+                .ingested_parquet_bytes,
+            1234
+        );
+        for (key, value) in legacy.as_object().unwrap() {
+            assert_eq!(&current[key], value);
+        }
+        current
+            .as_object_mut()
+            .unwrap()
+            .remove("ingested_parquet_bytes");
+        assert_eq!(
+            serde_json::from_value::<RegionStatistic>(current)
+                .unwrap()
+                .ingested_parquet_bytes,
+            0
+        );
+    }
+
+    #[test]
     fn region_statistic_deserializes_without_query_stats() {
         let statistic: RegionStatistic = serde_json::from_value(json!({
             "num_rows": 1,
@@ -1219,7 +1319,10 @@ pub struct MitoCopyRegionFromRequest {
 
 #[derive(Debug, Clone)]
 pub struct MitoCopyRegionFromResponse {
-    /// The file ids that were copied from the source region to the target region.
+    /// Source SST IDs installed in the target by this copy. Shared references may
+    /// be installed without copying their physical objects. If no new references
+    /// need installation, returns the source IDs already present in the target.
+    /// This is not a count or inventory of physical object transfers.
     pub copied_file_ids: Vec<FileId>,
 }
 
@@ -1275,6 +1378,35 @@ pub trait RegionEngine: Send + Sync {
         }
 
         Ok(join_all(tasks).await)
+    }
+
+    /// Handles the puts of one request into regions of this engine and returns the responses
+    /// to await on their own, each with the region of every put it answers for: two puts to one
+    /// region are two entries.
+    ///
+    /// The default handles each put with [`handle_request`](Self::handle_request) and answers
+    /// each put on its own. An engine that writes several puts together may answer them with
+    /// one response whose affected rows count all of them.
+    fn handle_batch_put_requests(
+        self: Arc<Self>,
+        requests: Vec<(RegionId, RegionPutRequest)>,
+    ) -> Vec<BatchPutResponse>
+    where
+        Self: 'static,
+    {
+        requests
+            .into_iter()
+            .map(|(region_id, request)| {
+                let engine = self.clone();
+                let response = async move {
+                    engine
+                        .handle_request(region_id, RegionRequest::Put(request))
+                        .await
+                }
+                .boxed();
+                (vec![region_id], response)
+            })
+            .collect()
     }
 
     async fn handle_batch_ddl_requests(
@@ -1339,6 +1471,21 @@ pub trait RegionEngine: Send + Sync {
     /// the region as readonly doesn't guarantee that write operations in progress will not
     /// take effect.
     fn set_region_role(&self, region_id: RegionId, role: RegionRole) -> Result<(), BoxedError>;
+
+    /// Sets [RegionRole] for a region from a lease the metasrv grants until `deadline`, in reply
+    /// to a heartbeat sent at `sent_at`. Returns false if the engine ignores a Leader lease because
+    /// the region was downgraded or (re)opened after `sent_at`.
+    ///
+    /// The region must not acknowledge a write whose WAL append completes at or after the
+    /// deadline of its latest Leader or StagingLeader lease. Leases of other roles do not extend
+    /// that deadline.
+    fn set_region_role_with_lease(
+        &self,
+        region_id: RegionId,
+        role: RegionRole,
+        sent_at: Instant,
+        deadline: Instant,
+    ) -> Result<bool, BoxedError>;
 
     /// Syncs the region manifest to the given manifest version.
     async fn sync_region(

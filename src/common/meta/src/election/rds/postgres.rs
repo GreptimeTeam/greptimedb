@@ -122,7 +122,9 @@ impl<'a> ElectionSqlFactory<'a> {
     }
 
     fn step_down_sql(&self) -> String {
-        format!("SELECT pg_advisory_unlock({})", self.lock_id)
+        // Campaigning repeatedly acquires the same session-level lock. Release
+        // every acquisition when stepping down, not just the most recent one.
+        "SELECT pg_advisory_unlock_all()".to_string()
     }
 
     fn put_value_with_lease_sql(&self) -> String {
@@ -179,6 +181,9 @@ impl<'a> ElectionSqlFactory<'a> {
 }
 
 /// PgClient for election.
+///
+/// The session is dedicated to election and candidate registration. It must not
+/// hold unrelated advisory locks, as stepping down releases all session locks.
 pub struct ElectionPgClient {
     current: Option<deadpool::managed::Object<Manager>>,
     pool: Pool,
@@ -1280,6 +1285,24 @@ mod tests {
             _ => panic!("Expected LeaderChangeMessage::Elected"),
         }
 
+        // Lease timestamps have millisecond precision. Wait for the database
+        // clock to advance before checking that renewal extends the lease.
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                let current = leader_pg_election
+                    .get_value_with_lease(&leader_pg_election.election_key())
+                    .await
+                    .unwrap()
+                    .unwrap();
+                if current.current > lease.current {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .unwrap();
+
         // Step 2: As a leader, renew the lease.
         let res = leader_pg_election
             .pg_client
@@ -1482,6 +1505,145 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_step_down_releases_reentrant_lock() {
+        maybe_skip_postgres_integration_test!();
+        let table_name = "test_step_down_reentrant_lock_greptime_metakv";
+        let store_key_prefix = uuid::Uuid::new_v4().to_string();
+        let lock_id = 28323;
+        let other_lock_id = 28324;
+        let timeout = Duration::from_secs(10);
+        let mut elections = Vec::new();
+        for leader_value in ["leader", "follower"] {
+            // Keep both sessions alive so idle timeout cannot hide a leaked lock.
+            let client = create_postgres_client(Some(table_name), timeout, Duration::ZERO, timeout)
+                .await
+                .unwrap();
+            let (tx, _) = broadcast::channel(100);
+            elections.push(PgElection {
+                leader_value: leader_value.to_string(),
+                pg_client: RwLock::new(client),
+                is_leader: AtomicBool::new(false),
+                leader_infancy: AtomicBool::new(false),
+                leader_watcher: tx,
+                store_key_prefix: store_key_prefix.clone(),
+                candidate_lease_ttl: timeout,
+                meta_lease_ttl: timeout,
+                sql_set: ElectionSqlFactory::new(lock_id, None, table_name).build(),
+            });
+        }
+        let leader = &elections[0];
+        let follower = &elections[1];
+        let mut leader_changes = leader.subscribe_leader_change();
+        let other_lock_sql = format!("SELECT pg_try_advisory_lock({other_lock_id})");
+        let other_unlock_sql = format!("SELECT pg_advisory_unlock({other_lock_id})");
+        let leader_pid: i32 = leader
+            .pg_client
+            .read()
+            .await
+            .query("SELECT pg_backend_pid()", &[])
+            .await
+            .unwrap()[0]
+            .get(0);
+
+        for acquisitions in [1, 3, 1000] {
+            // Repeat the same acquisition performed on every campaign iteration.
+            for _ in 0..acquisitions {
+                let rows = leader
+                    .pg_client
+                    .read()
+                    .await
+                    .query(&leader.sql_set.campaign, &[])
+                    .await
+                    .unwrap();
+                assert!(rows[0].get::<_, bool>(0));
+            }
+            leader.leader_action().await.unwrap();
+            assert_matches!(
+                leader_changes.try_recv().unwrap(),
+                LeaderChangeMessage::Elected(_)
+            );
+            let rows = follower
+                .pg_client
+                .read()
+                .await
+                .query(&follower.sql_set.campaign, &[])
+                .await
+                .unwrap();
+            assert!(!rows[0].get::<_, bool>(0));
+            follower.follower_action().await.unwrap();
+
+            // An unrelated lock in another session must survive the demotion.
+            let rows = follower
+                .pg_client
+                .read()
+                .await
+                .query(&other_lock_sql, &[])
+                .await
+                .unwrap();
+            assert!(rows[0].get::<_, bool>(0));
+
+            // Expire the lease explicitly instead of relying on scheduling delays.
+            let key = leader.election_key();
+            let lease = leader.get_value_with_lease(&key).await.unwrap().unwrap();
+            leader
+                .update_value_with_lease(&key, &lease.origin, &leader.leader_value, Duration::ZERO)
+                .await
+                .unwrap();
+            leader.leader_action().await.unwrap();
+            assert!(!leader.is_leader());
+            assert!(leader.get_value_with_lease(&key).await.unwrap().is_none());
+            assert_matches!(
+                leader_changes.try_recv().unwrap(),
+                LeaderChangeMessage::StepDown(_)
+            );
+            assert!(leader_changes.try_recv().is_err());
+            let current_pid: i32 = leader
+                .pg_client
+                .read()
+                .await
+                .query("SELECT pg_backend_pid()", &[])
+                .await
+                .unwrap()[0]
+                .get(0);
+            assert_eq!(leader_pid, current_pid);
+
+            let rows = leader
+                .pg_client
+                .read()
+                .await
+                .query(&other_lock_sql, &[])
+                .await
+                .unwrap();
+            assert!(!rows[0].get::<_, bool>(0));
+            let rows = follower
+                .pg_client
+                .read()
+                .await
+                .query(&follower.sql_set.campaign, &[])
+                .await
+                .unwrap();
+            assert!(
+                rows[0].get::<_, bool>(0),
+                "lock still held after {acquisitions} acquisitions"
+            );
+            let rows = follower
+                .pg_client
+                .read()
+                .await
+                .query(&other_unlock_sql, &[])
+                .await
+                .unwrap();
+            assert!(rows[0].get::<_, bool>(0));
+            follower.leader_action().await.unwrap();
+            assert!(follower.is_leader());
+            let lease = follower.get_value_with_lease(&key).await.unwrap().unwrap();
+            assert_eq!(follower.leader_value, lease.leader_value);
+            follower.step_down().await.unwrap();
+        }
+        drop_table(leader, table_name).await;
+    }
+
+    #[tokio::test]
     async fn test_follower_action() {
         maybe_skip_postgres_integration_test!();
         common_telemetry::init_default_ut_logging();
@@ -1619,11 +1781,48 @@ mod tests {
             store_key_prefix: uuid,
             candidate_lease_ttl,
             meta_lease_ttl,
-            sql_set: ElectionSqlFactory::new(28321, None, table_name).build(),
+            sql_set: ElectionSqlFactory::new(28325, None, table_name).build(),
         };
+        let follower_client = create_postgres_client(
+            None,
+            execution_timeout,
+            idle_session_timeout,
+            statement_timeout,
+        )
+        .await
+        .unwrap();
+        for _ in 0..3 {
+            let rows = leader_pg_election
+                .pg_client
+                .read()
+                .await
+                .query(&leader_pg_election.sql_set.campaign, &[])
+                .await
+                .unwrap();
+            assert!(rows[0].get::<_, bool>(0));
+        }
         leader_pg_election.is_leader.store(true, Ordering::Relaxed);
         leader_pg_election.reset_campaign().await;
         assert!(!leader_pg_election.is_leader());
+        // Closing the old session is asynchronous. Wait until its locks are released.
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let rows = follower_client
+                    .query(&leader_pg_election.sql_set.campaign, &[])
+                    .await
+                    .unwrap();
+                if rows[0].get::<_, bool>(0) {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        follower_client
+            .query(&leader_pg_election.sql_set.step_down, &[])
+            .await
+            .unwrap();
         drop_table(&leader_pg_election, table_name).await;
     }
 

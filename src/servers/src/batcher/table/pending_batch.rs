@@ -15,8 +15,11 @@
 use std::sync::Arc;
 
 use arrow::record_batch::RecordBatch;
+use common_error::ext::BoxedError;
+use common_query::WriteProgress;
 use operator::error::Error;
 use session::context::QueryContextRef;
+use snafu::IntoError;
 use table::metadata::TableInfoRef;
 use tokio::sync::{OwnedSemaphorePermit, oneshot};
 
@@ -25,8 +28,9 @@ pub(in crate::batcher::table) struct PendingBatch {
     pub table_info: TableInfoRef,
     pub batch: RecordBatch,
     pub ctx: QueryContextRef,
-    pub response_tx: oneshot::Sender<Result<(), Arc<Error>>>,
+    pub response_tx: oneshot::Sender<WriteProgress>,
     pub _permit: Arc<OwnedSemaphorePermit>,
+    pub _completion: Option<session::write_progress::PendingWrite>,
 }
 
 pub(in crate::batcher::table) fn notify_batches(
@@ -34,7 +38,16 @@ pub(in crate::batcher::table) fn notify_batches(
     result: Result<(), Arc<Error>>,
 ) {
     for batch in batches {
-        let _ = batch.response_tx.send(result.clone());
+        let progress = match &result {
+            Ok(()) => WriteProgress {
+                affected_rows: batch.batch.num_rows(),
+                error: None,
+            },
+            Err(error) => WriteProgress::failed(BoxedError::new(
+                operator::error::BatchFlushSnafu.into_error(error.clone()),
+            )),
+        };
+        let _ = batch.response_tx.send(progress);
     }
 }
 
@@ -59,6 +72,7 @@ mod tests {
                 let (response_tx, response_rx) = oneshot::channel();
                 let schema = Arc::new(Schema::new(vec![Field::new("a", DataType::Int32, false)]));
                 batches.push(PendingBatch {
+                    _completion: None,
                     table_info: Arc::new(new_test_table_info(1, "t", [0].into_iter())),
                     batch: RecordBatch::try_new(
                         schema,
@@ -83,12 +97,11 @@ mod tests {
             notify_batches(batches, if fail { Err(error.clone()) } else { Ok(()) });
             assert_eq!(3, semaphore.available_permits());
             for receiver in receivers {
-                match receiver.await.unwrap() {
-                    Ok(()) => assert!(!fail),
-                    Err(actual) => {
-                        assert!(fail);
-                        assert!(Arc::ptr_eq(&error, &actual));
-                    }
+                let progress = receiver.await.unwrap();
+                assert_eq!(progress.error.is_some(), fail);
+                assert_eq!(progress.affected_rows, if fail { 0 } else { 1 });
+                if let Some(error) = progress.error {
+                    assert!(error.to_string().contains("test flush failure"));
                 }
             }
         }

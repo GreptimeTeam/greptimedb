@@ -51,6 +51,7 @@ Mito2 data region. Queries against a physical region pass straight through.
 ## Public surface
 
 - Entry: `MetricEngine` in `src/metric-engine/src/engine.rs`, built via `try_new(mito, config)`.
+- `MetricEngine::put_regions_batch` returns each physical group's outcome with its input indices; a failed group does not stop other groups.
 - Trait: `impl RegionEngine for MetricEngine` (name = `"metric"`).
 - Depends on `mito2`, `store-api`, and `mito-codec` (sparse primary key codec).
 

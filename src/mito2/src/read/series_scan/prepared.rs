@@ -26,7 +26,9 @@ use api::v1::SemanticType;
 use common_error::ext::BoxedError;
 use common_recordbatch::filter::SimpleFilterEvaluator;
 use common_time::Timestamp;
-use datafusion::execution::memory_pool::{MemoryConsumer, MemoryReservation};
+use datafusion::execution::memory_pool::{
+    MemoryConsumer, MemoryPool, MemoryReservation, UnboundedMemoryPool,
+};
 use datafusion_expr::{Expr, utils::split_conjunction};
 use datatypes::arrow::array::{
     Array, ArrayRef, BinaryArray, BooleanArray, DictionaryArray, StringArray, UInt32Array,
@@ -148,6 +150,14 @@ fn same_labels(left: &RawLabelSource, right: &RawLabelSource) -> bool {
 ///
 /// Returns whether every assigned source can be read from columnar artifacts. `false` is not an
 /// error: the caller scans those sources with the ordinary reader instead.
+/// TODO(narthex-merge): the columnar series path does not receive
+/// `QueryScanContext::memory_pool` yet, so it is not accounted against
+/// `scan_memory_limit`. Thread the request pool through `ScanInput` when this path is
+/// wired into the shared scan memory accounting (main's #9101).
+fn unaccounted_scan_pool() -> Arc<dyn MemoryPool> {
+    Arc::new(UnboundedMemoryPool::default())
+}
+
 pub(crate) fn validate_inputs(context: &StreamContext, ranges: &[PartitionRange]) -> Result<bool> {
     collect_inputs(context, ranges).map(|inputs| inputs.is_some())
 }
@@ -417,8 +427,8 @@ impl ColumnarPreparedSource {
         preparation_metrics
             .counts
             .insert("prepare_series_indexes", indexes.len() as u64);
-        let reservation =
-            MemoryConsumer::new("ColumnarPreparedSource").register(&input.scan_memory_pool);
+        let scan_pool = unaccounted_scan_pool();
+        let reservation = MemoryConsumer::new("ColumnarPreparedSource").register(&scan_pool);
         let started = Instant::now();
         let mut raw = raw;
         let sample_schema = sample_merge_schema(&context, &mut raw)?;
@@ -605,9 +615,9 @@ impl ColumnarPreparedSource {
                             ))
                         })
                         .collect::<Result<Vec<_>>>()?;
+                    let scan_pool = unaccounted_scan_pool();
                     let owner = Arc::new(
-                        MemoryConsumer::new("ColumnarSeriesLabelBatch")
-                            .register(&input.scan_memory_pool),
+                        MemoryConsumer::new("ColumnarSeriesLabelBatch").register(&scan_pool),
                     );
                     let label_batch =
                         SeriesLabelBatch::try_new(retained.clone(), columns, owner.clone())
@@ -774,7 +784,8 @@ impl PreparedSeriesSource for ColumnarPreparedSource {
                 let reader = reader.clone();
                 let sample_schema = sample_schema.clone();
                 sources.push(Box::pin(async_stream::try_stream! {
-                    let reservation = MemoryConsumer::new("ColumnarSamplesRead").register(&context.input.scan_memory_pool);
+                    let scan_pool = unaccounted_scan_pool();
+                    let reservation = MemoryConsumer::new("ColumnarSamplesRead").register(&scan_pool);
                     // Account for the selection retained by the samples reader, including
                     // B-tree node overhead, before allocating it. The exact-key selection and
                     // the coarse identifiers the reader derives from it both live for the
@@ -803,7 +814,7 @@ impl PreparedSeriesSource for ColumnarPreparedSource {
                     let mut stage_metrics = crate::metrics::ColumnarReadMetrics::default();
                     let mut batches = reader.read(SamplesReadRequest {
                         projection: sample_projection(&reader.schema(), &context),
-                        memory_pool: Some(context.input.scan_memory_pool.clone()),
+                        memory_pool: Some(unaccounted_scan_pool()),
                         keys: Some(keys),
                         start,
                         end,

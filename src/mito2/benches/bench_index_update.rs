@@ -33,7 +33,9 @@ use datatypes::arrow::datatypes::UInt32Type;
 use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::data_type::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, SkippingIndexOptions};
+use index::target::IndexTarget;
 use mito_codec::row_converter::SparsePrimaryKeyCodec;
+use mito2::sst::index::IndexBuildType;
 use mito2::sst::index::intermediate::IntermediateManager;
 use mito2::sst::{FlatSchemaOptions, to_flat_sst_arrow_schema};
 use mito2::test_util::bench_util::{BloomFilterIndexer, InvertedIndexer};
@@ -59,7 +61,8 @@ fn input(shape: &Shape) -> (RegionMetadataRef, HashSet<ColumnId>, RecordBatch) {
     let mut pk = vec![ReservedColumnId::table_id(), ReservedColumnId::tsid()];
     let mut inverted_columns = HashSet::new();
     let mut add_tag = |id, name: String, data_type, indexed| {
-        let mut schema = ColumnSchema::new(name, data_type, true).with_inverted_index(false);
+        let mut schema = ColumnSchema::new(name, data_type, !ReservedColumnId::is_reserved(id))
+            .with_inverted_index(false);
         if indexed && shape.inverted {
             inverted_columns.insert(id);
         }
@@ -240,12 +243,22 @@ fn bench_index_update(c: &mut Criterion) {
                                 intermediate.clone(),
                                 None,
                                 NonZeroUsize::new(SEGMENT_ROWS).unwrap(),
-                                inverted_columns.clone(),
+                                inverted_columns
+                                    .iter()
+                                    .copied()
+                                    .map(IndexTarget::ColumnId)
+                                    .collect(),
                             )
                         });
                         let mut bloom = if shape.bloom {
-                            BloomFilterIndexer::new(file_id, &metadata, intermediate.clone(), None)
-                                .unwrap()
+                            BloomFilterIndexer::new(
+                                file_id,
+                                &metadata,
+                                intermediate.clone(),
+                                None,
+                                IndexBuildType::Flush,
+                            )
+                            .unwrap()
                         } else {
                             None
                         };

@@ -13,6 +13,13 @@
 // limitations under the License.
 
 use std::collections::HashMap;
+#[cfg(test)]
+use std::sync::Arc;
+
+#[cfg(test)]
+use common_procedure::{Context, ContextProvider, ProcedureId, ProcedureState};
+#[cfg(test)]
+use common_procedure_test::MockContextProvider;
 
 use api::v1::meta::mailbox_message::Payload;
 use api::v1::meta::{HeartbeatResponse, MailboxMessage};
@@ -411,4 +418,68 @@ pub async fn update_in_memory_region_flushed_entry_id(
     leader_region_registry.batch_put(key_values);
 
     Ok(())
+}
+
+/// Returns a receiver whose initial result is visible to [`common_procedure::watcher::wait`].
+#[cfg(test)]
+pub fn procedure_state_receiver(
+    state: ProcedureState,
+) -> tokio::sync::watch::Receiver<ProcedureState> {
+    let (tx, rx) = tokio::sync::watch::channel(ProcedureState::Running);
+    tx.send(state).unwrap();
+    rx
+}
+
+/// Returns an execution context that resolves child state receivers by procedure id.
+#[cfg(test)]
+pub fn procedure_context_with_receivers(
+    receivers: HashMap<ProcedureId, tokio::sync::watch::Receiver<ProcedureState>>,
+) -> Context {
+    Context {
+        procedure_id: ProcedureId::random(),
+        provider: Arc::new(ProcedureStateReceiverProvider {
+            receivers,
+            inner: MockContextProvider::default(),
+        }),
+        event_context: None,
+    }
+}
+
+#[cfg(test)]
+struct ProcedureStateReceiverProvider {
+    receivers: HashMap<ProcedureId, tokio::sync::watch::Receiver<ProcedureState>>,
+    inner: MockContextProvider,
+}
+
+#[cfg(test)]
+#[async_trait::async_trait]
+impl ContextProvider for ProcedureStateReceiverProvider {
+    async fn procedure_state(
+        &self,
+        procedure_id: ProcedureId,
+    ) -> common_procedure::Result<Option<ProcedureState>> {
+        self.inner.procedure_state(procedure_id).await
+    }
+
+    async fn procedure_state_receiver(
+        &self,
+        procedure_id: ProcedureId,
+    ) -> common_procedure::Result<Option<tokio::sync::watch::Receiver<ProcedureState>>> {
+        Ok(self.receivers.get(&procedure_id).cloned())
+    }
+
+    async fn try_put_poison(
+        &self,
+        key: &common_procedure::PoisonKey,
+        procedure_id: ProcedureId,
+    ) -> common_procedure::Result<()> {
+        self.inner.try_put_poison(key, procedure_id).await
+    }
+
+    async fn acquire_lock(
+        &self,
+        key: &common_procedure::StringKey,
+    ) -> common_procedure::local::DynamicKeyLockGuard {
+        self.inner.acquire_lock(key).await
+    }
 }

@@ -57,9 +57,7 @@ use tracing::Span;
 
 use crate::analyze::DistAnalyzeExec;
 pub use crate::datafusion::planner::DfContextProviderAdapter;
-use crate::dist_plan::{
-    DistPlannerOptions, MergeScanLogicalPlan, RemoteDynFilterReceiverInjectorRef,
-};
+use crate::dist_plan::{MergeScanLogicalPlan, RemoteDynFilterReceiverInjectorRef};
 use crate::error::{
     CatalogSnafu, CreateRecordBatchSnafu, MissingTableMutationHandlerSnafu,
     MissingTimestampColumnSnafu, QueryExecutionSnafu, Result, TableMutationSnafu,
@@ -171,7 +169,8 @@ impl DatafusionQueryEngine {
         plan: LogicalPlan,
         query_ctx: QueryContextRef,
     ) -> Result<Output> {
-        let mut ctx = self.engine_context(query_ctx.clone());
+        let mut ctx = self.engine_context(query_ctx)?;
+        let query_ctx = ctx.query_ctx();
         let plan = if let Some(receiver_injector) =
             self.plugins.get::<RemoteDynFilterReceiverInjectorRef>()
         {
@@ -261,14 +260,47 @@ impl DatafusionQueryEngine {
                 }
             }
             WriteOp::Delete => {
+                // Read-only system tables may have no time index; reject DELETE before key lookup.
+                ensure!(
+                    !is_readonly_table(&table_name.schema, &table_name.table),
+                    TableReadOnlySnafu {
+                        table: table_name.table.to_string(),
+                    }
+                );
+                let table_info = table.table_info();
+                let table_schema = table.schema();
+                let ts_column = table_schema.timestamp_column().with_context(|| {
+                    MissingTimestampColumnSnafu {
+                        table_name: table_info.name.clone(),
+                    }
+                })?;
+                let key_indices = stream
+                    .schema()
+                    .column_schemas()
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, column)| {
+                        ts_column.name == column.name
+                            || table_info
+                                .meta
+                                .row_key_column_names()
+                                .any(|name| name == &column.name)
+                    })
+                    .map(|(index, _)| index)
+                    .collect::<Vec<_>>();
                 while let Some(batch) = stream.next().await {
-                    let batch = batch.context(CreateRecordBatchSnafu)?;
+                    // The input plan already evaluated WHERE; storage deletes need only keys/time.
+                    // Project before vector conversion because JSON2's logical Struct is a placeholder.
+                    let batch = batch
+                        .context(CreateRecordBatchSnafu)?
+                        .try_project(&key_indices)
+                        .context(CreateRecordBatchSnafu)?;
                     let column_vectors = batch
                         .column_vectors(&table_name.to_string(), table.schema())
                         .map_err(BoxedError::new)
                         .context(QueryExecutionSnafu)?;
                     affected_rows += self
-                        .delete(&table_name, &table, column_vectors, query_ctx.clone())
+                        .delete(&table_name, column_vectors, query_ctx.clone())
                         .await?;
                 }
             }
@@ -284,36 +316,12 @@ impl DatafusionQueryEngine {
     async fn delete(
         &self,
         table_name: &ResolvedTableReference,
-        table: &TableRef,
         column_vectors: HashMap<String, VectorRef>,
         query_ctx: QueryContextRef,
     ) -> Result<usize> {
         let catalog_name = table_name.catalog.to_string();
         let schema_name = table_name.schema.to_string();
         let table_name = table_name.table.to_string();
-        let table_schema = table.schema();
-
-        ensure!(
-            !is_readonly_table(&schema_name, &table_name),
-            TableReadOnlySnafu { table: table_name }
-        );
-
-        let ts_column = table_schema
-            .timestamp_column()
-            .map(|x| &x.name)
-            .with_context(|| MissingTimestampColumnSnafu {
-                table_name: table_name.clone(),
-            })?;
-
-        let table_info = table.table_info();
-        let rowkey_columns = table_info
-            .meta
-            .row_key_column_names()
-            .collect::<Vec<&String>>();
-        let column_vectors = column_vectors
-            .into_iter()
-            .filter(|x| &x.0 == ts_column || rowkey_columns.contains(&&x.0))
-            .collect::<HashMap<_, _>>();
 
         let request = DeleteRequest {
             catalog_name,
@@ -579,53 +587,14 @@ impl QueryEngine for DatafusionQueryEngine {
         self.state.read_table(table).map_err(Into::into)
     }
 
-    fn engine_context(&self, query_ctx: QueryContextRef) -> QueryEngineContext {
+    fn engine_context(&self, query_ctx: QueryContextRef) -> Result<QueryEngineContext> {
         let mut state = self.state.session_state();
+        let query_ctx = self.state.apply_query_options(&mut state, query_ctx)?;
         state.config_mut().set_extension(query_ctx.clone());
         state.config_mut().set_extension(self.state.clone());
-        // note that hints in "x-greptime-hints" is automatically parsed
-        // and set to query context's extension, so we can get it from query context.
-        if let Some(parallelism) = query_ctx.extension(QUERY_PARALLELISM_HINT) {
-            if let Ok(n) = parallelism.parse::<u64>() {
-                if n > 0 {
-                    let new_cfg = state.config().clone().with_target_partitions(n as usize);
-                    *state.config_mut() = new_cfg;
-                }
-            } else {
-                common_telemetry::warn!(
-                    "Failed to parse query_parallelism: {}, using default value",
-                    parallelism
-                );
-            }
-        }
-
         // configure execution options
         state.config_mut().options_mut().execution.time_zone =
             Some(query_ctx.timezone().to_string());
-
-        // usually it's impossible to have both `set variable` set by sql client and
-        // hint in header by grpc client, so only need to deal with them separately
-        if query_ctx.configuration_parameter().allow_query_fallback() {
-            state
-                .config_mut()
-                .options_mut()
-                .extensions
-                .insert(DistPlannerOptions {
-                    allow_query_fallback: true,
-                });
-        } else if let Some(fallback) = query_ctx.extension(QUERY_FALLBACK_HINT) {
-            // also check the query context for fallback hint
-            // if it is set, we will enable the fallback
-            if fallback.to_lowercase().parse::<bool>().unwrap_or(false) {
-                state
-                    .config_mut()
-                    .options_mut()
-                    .extensions
-                    .insert(DistPlannerOptions {
-                        allow_query_fallback: true,
-                    });
-            }
-        }
 
         state
             .config_mut()
@@ -681,7 +650,7 @@ impl QueryEngine for DatafusionQueryEngine {
             }
         }
 
-        QueryEngineContext::new(state, query_ctx)
+        Ok(QueryEngineContext::new(state, query_ctx))
     }
 
     fn engine_state(&self) -> &QueryEngineState {
@@ -1342,7 +1311,7 @@ mod tests {
             .as_any()
             .downcast_ref::<DatafusionQueryEngine>()
             .unwrap();
-        let engine_ctx = engine.engine_context(QueryContext::arc());
+        let engine_ctx = engine.engine_context(QueryContext::arc()).unwrap();
         let state = engine_ctx.state();
 
         let schema = Arc::new(datatypes::schema::Schema::new(vec![ColumnSchema::new(
@@ -1402,7 +1371,7 @@ mod tests {
             .as_any()
             .downcast_ref::<DatafusionQueryEngine>()
             .unwrap();
-        let engine_ctx = engine.engine_context(QueryContext::arc());
+        let engine_ctx = engine.engine_context(QueryContext::arc()).unwrap();
         let state = engine_ctx.state();
 
         assert!(
@@ -1571,6 +1540,15 @@ mod tests {
             _ctx: session::context::QueryContextRef,
         ) -> common_query::error::Result<common_base::AffectedRows> {
             unimplemented!("unexpected compact_region")
+        }
+
+        async fn cancel_region_compaction(
+            &self,
+            _region_id: store_api::storage::RegionId,
+            _task_id: String,
+            _ctx: session::context::QueryContextRef,
+        ) -> common_query::error::Result<common_base::AffectedRows> {
+            unimplemented!("unexpected cancel_region_compaction")
         }
 
         async fn discard_unflushed_data(

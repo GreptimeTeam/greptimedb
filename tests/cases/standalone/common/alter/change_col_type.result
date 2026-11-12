@@ -341,6 +341,41 @@ SELECT * FROM ts_widen_part ORDER BY ts;
 | b    | 2.0 | 2024-01-02T00:00:00.000250 |
 +------+-----+----------------------------+
 
+-- force the rows into SSTs so scans read old-unit data through the widened
+-- schema of a time-index-partitioned table (https://github.com/GreptimeTeam/greptimedb/issues/9747)
+ADMIN FLUSH_TABLE('ts_widen_part');
+
++------------------------------------+
+| ADMIN FLUSH_TABLE('ts_widen_part') |
++------------------------------------+
+| 0                                  |
++------------------------------------+
+
+SELECT * FROM ts_widen_part ORDER BY ts;
+
++------+-----+----------------------------+
+| host | val | ts                         |
++------+-----+----------------------------+
+| a    | 1.0 | 2024-01-01T23:59:59.500    |
+| b    | 2.0 | 2024-01-02T00:00:00.000250 |
++------+-----+----------------------------+
+
+SELECT * FROM ts_widen_part WHERE ts >= '2024-01-02 00:00:00' ORDER BY ts;
+
++------+-----+----------------------------+
+| host | val | ts                         |
++------+-----+----------------------------+
+| b    | 2.0 | 2024-01-02T00:00:00.000250 |
++------+-----+----------------------------+
+
+SELECT * FROM ts_widen_part WHERE ts < '2024-01-02 00:00:00' ORDER BY ts;
+
++------+-----+-------------------------+
+| host | val | ts                      |
++------+-----+-------------------------+
+| a    | 1.0 | 2024-01-01T23:59:59.500 |
++------+-----+-------------------------+
+
 DROP TABLE ts_widen_part;
 
 Affected Rows: 0
@@ -383,6 +418,73 @@ DESCRIBE ts_overflow;
 +--------+---------------------+-----+------+---------+---------------+
 
 DROP TABLE ts_overflow;
+
+Affected Rows: 0
+
+-- Issue 9454: persisted partition bounds keep their original unit. Widening the
+-- time index unit must be rejected before any region is altered when a persisted
+-- bound overflows the new unit.
+CREATE TABLE ts_bound_overflow (host STRING, ts TIMESTAMP TIME INDEX)
+PARTITION ON COLUMNS (ts) (
+  ts < '2024-01-01 00:00:00',
+  ts >= '2024-01-01 00:00:00' AND ts < '3000-01-01 00:00:00',
+  ts >= '3000-01-01 00:00:00'
+);
+
+Affected Rows: 0
+
+INSERT INTO ts_bound_overflow VALUES ("a", "2024-06-01 12:00:00");
+
+Affected Rows: 1
+
+-- 3000-01-01 fits milliseconds but overflows nanoseconds, so the widening is
+-- rejected before any region is altered.
+-- SQLNESS REPLACE \d+\(\d+,\s+\d+\) REDACTED
+ALTER TABLE ts_bound_overflow MODIFY COLUMN ts TIMESTAMP_NS;
+
+Error: 1004(InvalidArguments), Partition expression of region REDACTED is incompatible with the altered column 'ts': the persisted bound can no longer be compared with the new column type TimestampNanosecond
+
+-- The rejected ALTER leaves the schema and the stored data unchanged.
+DESCRIBE ts_bound_overflow;
+
++--------+----------------------+-----+------+---------+---------------+
+| Column | Type                 | Key | Null | Default | Semantic Type |
++--------+----------------------+-----+------+---------+---------------+
+| host   | String               |     | YES  |         | FIELD         |
+| ts     | TimestampMillisecond | PRI | NO   |         | TIMESTAMP     |
++--------+----------------------+-----+------+---------+---------------+
+
+SELECT * FROM ts_bound_overflow ORDER BY ts;
+
++------+---------------------+
+| host | ts                  |
++------+---------------------+
+| a    | 2024-06-01T12:00:00 |
++------+---------------------+
+
+-- Widening to microseconds keeps every persisted bound representable.
+ALTER TABLE ts_bound_overflow MODIFY COLUMN ts TIMESTAMP_US;
+
+Affected Rows: 0
+
+DESCRIBE ts_bound_overflow;
+
++--------+----------------------+-----+------+---------+---------------+
+| Column | Type                 | Key | Null | Default | Semantic Type |
++--------+----------------------+-----+------+---------+---------------+
+| host   | String               |     | YES  |         | FIELD         |
+| ts     | TimestampMicrosecond | PRI | NO   |         | TIMESTAMP     |
++--------+----------------------+-----+------+---------+---------------+
+
+SELECT * FROM ts_bound_overflow ORDER BY ts;
+
++------+---------------------+
+| host | ts                  |
++------+---------------------+
+| a    | 2024-06-01T12:00:00 |
++------+---------------------+
+
+DROP TABLE ts_bound_overflow;
 
 Affected Rows: 0
 

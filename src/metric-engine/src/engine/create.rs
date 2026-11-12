@@ -14,7 +14,7 @@
 
 mod extract_new_columns;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use api::v1::SemanticType;
 use common_query::native_histogram::is_native_histogram_value_type;
@@ -266,7 +266,7 @@ impl MetricEngineInner {
         };
 
         // Finds new columns to add to physical region
-        let mut new_column_names = HashSet::new();
+        let mut new_column_indices = HashMap::new();
         let mut new_columns = Vec::new();
 
         let index_option = {
@@ -282,7 +282,7 @@ impl MetricEngineInner {
             extract_new_columns(
                 &requests,
                 physical_columns,
-                &mut new_column_names,
+                &mut new_column_indices,
                 &mut new_columns,
             )?;
             region_state.options().index
@@ -319,11 +319,16 @@ impl MetricEngineInner {
             )
         });
 
-        let new_add_columns = new_column_names.iter().map(|name| {
+        let new_add_columns = new_column_indices.keys().map(|name| {
             // Safety: previous steps ensure the physical region exist
             let column_metadata = *physical_schema_map.get(name).unwrap();
             (name.to_string(), column_metadata.clone())
         });
+        // The data region has the new columns, whatever happens to the metadata write.
+        self.state
+            .write()
+            .unwrap()
+            .add_physical_columns(data_region_id, new_add_columns);
 
         extension_return_value.insert(
             ALTER_PHYSICAL_EXTENSION_KEY.to_string(),
@@ -335,11 +340,10 @@ impl MetricEngineInner {
             .add_logical_regions(physical_region_id, true, logical_region_columns)
             .await?;
 
-        {
-            let mut state = self.state.write().unwrap();
-            state.add_physical_columns(data_region_id, new_add_columns);
-            state.add_logical_regions(physical_region_id, logical_regions.clone());
-        }
+        self.state
+            .write()
+            .unwrap()
+            .add_logical_regions(physical_region_id, logical_regions.clone());
         for logical_region_id in logical_regions {
             self.metadata_region
                 .open_logical_region(logical_region_id)

@@ -44,19 +44,27 @@ struct NodeAddressEpochs {
     saved_epoch: Option<u64>,
 }
 
+/// The outcome of a successful address save.
+pub(crate) struct SavedAddress<T> {
+    pub(crate) output: T,
+    /// An earlier save of this epoch failed or was cancelled, but its write
+    /// may still have reached the store.
+    pub(crate) retried: bool,
+}
+
 impl NodeAddressUpdater {
-    /// Saves a new or previously failed epoch. Returns true only when this call
-    /// saved the address, or false when the heartbeat is stale or already saved.
+    /// Saves a new or previously failed epoch. Returns `None` when the
+    /// heartbeat is stale or already saved.
     /// Cache invalidation is separate and does not affect acknowledgement.
-    pub(crate) async fn update_if_needed<F, Fut>(
+    pub(crate) async fn update_if_needed<T, F, Fut>(
         &self,
         node: (Role, u64),
         epoch: u64,
         save: F,
-    ) -> Result<bool>
+    ) -> Result<Option<SavedAddress<T>>>
     where
         F: FnOnce() -> Fut,
-        Fut: Future<Output = Result<()>>,
+        Fut: Future<Output = Result<T>>,
     {
         // Never retain a DashMap guard across await, even while waiting for a
         // different node: its entry may live in the same shard.
@@ -66,34 +74,43 @@ impl NodeAddressUpdater {
         };
         let mut state = state.lock().await;
         if state.seen_epoch.is_some_and(|seen| epoch < seen) || state.saved_epoch == Some(epoch) {
-            return Ok(false);
+            return Ok(None);
         }
 
         // Seeing an epoch rejects stale heartbeats, but only a successful save
         // suppresses retries of that same epoch. Cancellation also leaves it retryable.
+        let retried = state.seen_epoch == Some(epoch);
         state.seen_epoch = Some(epoch);
-        save().await?;
+        let output = save().await?;
         state.saved_epoch = Some(epoch);
-        Ok(true)
+        Ok(Some(SavedAddress { output, retried }))
     }
 }
 
-/// Persists an address through the leader cache.
-pub(crate) async fn save_node_address(ctx: &Context, key: Vec<u8>, peer: Peer) -> Result<()> {
+/// Persists an address through the leader cache and returns the one it
+/// replaced, treating an undecodable value as absent.
+pub(crate) async fn save_node_address(
+    ctx: &Context,
+    key: Vec<u8>,
+    peer: Peer,
+) -> Result<Option<NodeAddressValue>> {
     let address = NodeAddressValue::new(peer);
     let value = address
         .try_as_raw_value()
         .context(InvalidNodeInfoFormatSnafu)?;
-    ctx.leader_cached_kv_backend
+    let resp = ctx
+        .leader_cached_kv_backend
         .put(PutRequest {
             key,
             value,
-            prev_kv: false,
+            prev_kv: true,
         })
         .await
         .context(KvBackendSnafu)?;
     info!("Successfully updated node address: {:?}", address.peer);
-    Ok(())
+    Ok(resp
+        .prev_kv
+        .and_then(|kv| NodeAddressValue::try_from_raw_value(&kv.value).ok()))
 }
 
 /// Preserves the existing best-effort notification behavior. Notification
@@ -127,7 +144,7 @@ mod tests {
         let key = (Role::Datanode, 1);
         assert!(
             updater
-                .update_if_needed(key, 2, || async {
+                .update_if_needed::<(), _, _>(key, 2, || async {
                     crate::error::UnexpectedSnafu {
                         violated: "injected save failure",
                     }
@@ -137,32 +154,36 @@ mod tests {
                 .is_err()
         );
         assert!(
-            !updater
-                .update_if_needed(key, 1, || async {
+            updater
+                .update_if_needed::<(), _, _>(key, 1, || async {
                     panic!("stale heartbeat must not save");
                 })
                 .await
                 .unwrap()
+                .is_none()
         );
         assert!(
             updater
                 .update_if_needed(key, 2, || async { Ok(()) })
                 .await
                 .unwrap()
+                .is_some_and(|saved| saved.retried)
         );
         assert!(
-            !updater
-                .update_if_needed(key, 2, || async {
+            updater
+                .update_if_needed::<(), _, _>(key, 2, || async {
                     panic!("successful epoch must not save again");
                 })
                 .await
                 .unwrap()
+                .is_none()
         );
         assert!(
             updater
                 .update_if_needed(key, 3, || async { Ok(()) })
                 .await
                 .unwrap()
+                .is_some_and(|saved| !saved.retried)
         );
     }
 
@@ -190,6 +211,7 @@ mod tests {
             .await
             .unwrap()
             .unwrap()
+            .is_some()
         );
     }
 
@@ -248,6 +270,7 @@ mod tests {
                                         })
                                         .await
                                         .unwrap()
+                                        .is_some()
                                 );
                             }
                         })
@@ -256,18 +279,19 @@ mod tests {
                         progress_tx.send(()).unwrap();
                         finish.notified().await;
                         timeout(Duration::from_secs(2), async {
-                            assert!(first.await.unwrap().unwrap());
-                            assert!(second.await.unwrap().unwrap());
+                            assert!(first.await.unwrap().unwrap().is_some());
+                            assert!(second.await.unwrap().unwrap().is_some());
                         })
                         .await
                         .unwrap();
                         assert!(
-                            !updater
-                                .update_if_needed((Role::Datanode, 1), 1, || async {
+                            updater
+                                .update_if_needed::<(), _, _>((Role::Datanode, 1), 1, || async {
                                     panic!("old epoch must not overwrite a newer one");
                                 })
                                 .await
                                 .unwrap()
+                                .is_none()
                         );
                     });
             }

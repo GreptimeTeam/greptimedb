@@ -16,6 +16,7 @@ provided through handler traits, mostly implemented by `frontend`.
 | HTTP | `src/servers/src/http.rs`, `src/servers/src/http/` | Routes, middleware, protocol endpoints, output formats |
 | SQL protocols | `src/servers/src/mysql.rs`, `src/servers/src/mysql/`, `src/servers/src/postgres.rs`, `src/servers/src/postgres/` | MySQL/PostgreSQL servers and type conversion |
 | Observability protocols | `src/servers/src/prom_remote_write/`, `src/servers/src/prometheus.rs`, `src/servers/src/otlp/`, `src/servers/src/otel_arrow.rs` | Prometheus and OpenTelemetry conversion |
+| Exemplars | `src/servers/src/exemplar/`, `src/servers/src/exemplar.rs`, `src/servers/src/http/prom_store/exemplar.rs` | Shared row contract, millisecond query API, completion-aware metric/exemplar writes |
 | Resources / TLS | `src/servers/src/request_memory_limiter.rs`, `src/servers/src/tls.rs`, `src/servers/src/addrs.rs` | Memory admission, TLS, listener addresses |
 
 ## Change coupling
@@ -43,6 +44,8 @@ cargo nextest run -p servers
 Keep protocol translation here and permissions/database behavior in frontend.
 Async table batching returns storage-completion futures with its early
 acknowledgements. Keep completion reporting independent of the caller's lifetime.
+Remote-write v2 keeps decoder reservations and per-request progress through queued
+writes; error responses drain those writes before reporting partial counts.
 Logical-table physical flushes retain partition columns in Arrow RPC payloads and
 pass all region writes to the operator write dispatcher together; the dispatcher
 owns peer resolution and retries. See `batcher/logical_table/region_write.rs`.

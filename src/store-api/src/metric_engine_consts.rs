@@ -41,6 +41,8 @@ pub const METRIC_ENGINE_NAME: &str = "metric";
 
 pub const FILE_ENGINE_NAME: &str = "file";
 
+pub const RELATIONAL_ENGINE_NAME: &str = "relational";
+
 /// Metadata key present in the `CREATE TABLE ... WITH ()` clause. This key is
 /// used to identify the table is a physical metric table. E.g.:
 /// ```sql

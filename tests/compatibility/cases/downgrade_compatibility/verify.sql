@@ -11,3 +11,5 @@ ORDER BY ts, host;
 SELECT ts, msg FROM t_fulltext_bloom_v2_downgrade WHERE msg @@ 'hello_world' ORDER BY ts;
 
 SELECT ts, msg FROM t_fulltext_bloom_v2_downgrade WHERE msg @@ '错误error日志' ORDER BY ts;
+
+SELECT ts, span_id, ts_end FROM t_column_encoding_downgrade ORDER BY ts;

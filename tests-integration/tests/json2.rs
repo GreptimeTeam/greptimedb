@@ -220,7 +220,10 @@ async fn test_json2_multi_row_insert() {
             i,
             json
         );
-        conn.execute(sql.as_str()).await.unwrap();
+        // Safety: the SQL is built from test-local identifiers and payloads only.
+        conn.execute(sqlx::AssertSqlSafe(sql.as_str()))
+            .await
+            .unwrap();
     }
 
     assert_eq!(
@@ -237,9 +240,8 @@ async fn create_json2_table(
     table_name: &str,
     merge_threshold: usize,
 ) -> sqlx::Result<()> {
-    conn.execute(
-        format!(
-            r#"
+    let sql = format!(
+        r#"
 CREATE TABLE {table_name} (
     ts TIMESTAMP TIME INDEX,
     host STRING PRIMARY KEY,
@@ -252,10 +254,9 @@ CREATE TABLE {table_name} (
     'memtable.bulk.encode_row_threshold' = '1000000'
 )
 "#
-        )
-        .as_str(),
-    )
-    .await?;
+    );
+    // Safety: the SQL is built from test-local identifiers only.
+    conn.execute(sqlx::AssertSqlSafe(sql.as_str())).await?;
     Ok(())
 }
 
@@ -263,9 +264,8 @@ async fn create_json2_compaction_table(
     conn: &mut MySqlConnection,
     table_name: &str,
 ) -> sqlx::Result<()> {
-    conn.execute(
-        format!(
-            r#"
+    let sql = format!(
+        r#"
 CREATE TABLE {table_name} (
     ts TIMESTAMP TIME INDEX,
     host STRING PRIMARY KEY,
@@ -279,17 +279,15 @@ CREATE TABLE {table_name} (
     'memtable.bulk.encode_bytes_threshold' = '100000000'
 )
 "#
-        )
-        .as_str(),
-    )
-    .await?;
+    );
+    // Safety: the SQL is built from test-local identifiers only.
+    conn.execute(sqlx::AssertSqlSafe(sql.as_str())).await?;
     Ok(())
 }
 
 async fn query_json2_rows(conn: &mut MySqlConnection, table_name: &str) -> sqlx::Result<Json2Rows> {
-    let rows = sqlx::query(
-        format!(
-            r#"
+    let sql = format!(
+        r#"
 SELECT
     host,
     j.payload.id::STRING AS payload_id,
@@ -299,11 +297,11 @@ SELECT
 FROM {table_name}
 ORDER BY ts
 "#
-        )
-        .as_str(),
-    )
-    .fetch_all(conn)
-    .await?;
+    );
+    // Safety: the SQL is built from test-local identifiers only.
+    let rows = sqlx::query(sqlx::AssertSqlSafe(sql.as_str()))
+        .fetch_all(conn)
+        .await?;
 
     Ok(rows
         .into_iter()
@@ -320,9 +318,12 @@ ORDER BY ts
 }
 
 async fn count_table_rows(conn: &mut MySqlConnection, table_name: &str) -> sqlx::Result<i64> {
-    let row = sqlx::query(format!("SELECT COUNT(*) AS count FROM {table_name}").as_str())
-        .fetch_one(conn)
-        .await?;
+    // Safety: the SQL is built from test-local identifiers only.
+    let row = sqlx::query(sqlx::AssertSqlSafe(
+        format!("SELECT COUNT(*) AS count FROM {table_name}").as_str(),
+    ))
+    .fetch_one(conn)
+    .await?;
     Ok(row.get("count"))
 }
 

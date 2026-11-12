@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::collections::HashMap;
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::time::Duration;
 
 use api::greptime_proto::io::prometheus::write::v2 as write_v2;
@@ -303,6 +304,95 @@ fn bench_prom_v1_vs_v2_decode(c: &mut Criterion) {
     }
 }
 
+/// Exercises the production v2 decoder, including validation and row allocation.
+#[allow(clippy::print_stderr)]
+fn bench_prom_v2_histograms(c: &mut Criterion) {
+    use write_v2::histogram::{Count, ZeroCount};
+
+    let mut group = c.benchmark_group("prom_rw_v2_histograms");
+    group.sample_size(50);
+    group.measurement_time(Duration::from_secs(5));
+
+    for (name, points_per_series, buckets, float, custom) in [
+        ("int_1k_series_1_point_8_buckets", 1, 8, false, false),
+        ("int_1k_series_10_points_8_buckets", 10, 8, false, false),
+        ("int_1k_series_1_point_128_buckets", 1, 128, false, false),
+        ("float_1k_series_1_point_8_buckets", 1, 8, true, false),
+        ("float_1k_series_10_points_8_buckets", 10, 8, true, false),
+        ("custom_1k_series_1_point_8_buckets", 1, 8, false, true),
+    ] {
+        let (_, mut request) = generate_sample_workload(1_000, points_per_series, 8);
+        for series in &mut request.timeseries {
+            series.histograms = series
+                .samples
+                .drain(..)
+                .map(|sample| {
+                    let mut histogram = write_v2::Histogram {
+                        schema: if custom { -53 } else { 0 },
+                        timestamp: sample.timestamp,
+                        start_timestamp: sample.timestamp - 1_000,
+                        sum: buckets as f64,
+                        positive_spans: vec![write_v2::BucketSpan {
+                            offset: 0,
+                            length: buckets,
+                        }],
+                        ..Default::default()
+                    };
+                    if float {
+                        histogram.count = Some(Count::CountFloat(buckets as f64));
+                        histogram.zero_count = Some(ZeroCount::ZeroCountFloat(0.0));
+                        histogram.positive_counts = vec![1.0; buckets as usize];
+                    } else {
+                        histogram.count = Some(Count::CountInt(buckets as u64));
+                        histogram.zero_count = Some(ZeroCount::ZeroCountInt(0));
+                        histogram.positive_deltas = vec![0; buckets as usize];
+                        histogram.positive_deltas[0] = 1;
+                    }
+                    if custom {
+                        histogram.custom_values = (1..buckets).map(f64::from).collect();
+                    }
+                    histogram
+                })
+                .collect();
+        }
+        let bytes = request.encode_to_vec();
+        let expected_rows = (1_000 * points_per_series) as u64;
+        let (samples, mut histograms, sample_count, histogram_count) =
+            remote_write_v2::decode_uncompressed_write_requests(&bytes).unwrap();
+        assert!(samples.is_empty());
+        assert_eq!(sample_count, 0);
+        assert_eq!(histogram_count, expected_rows);
+        assert_eq!(
+            histograms
+                .iter()
+                .map(|insert| insert.rows.as_ref().unwrap().rows.len() as u64)
+                .sum::<u64>(),
+            expected_rows
+        );
+        // Stable table order makes before/after output fingerprints comparable.
+        histograms.sort_unstable_by(|a, b| a.table_name.cmp(&b.table_name));
+        let mut fingerprint = DefaultHasher::new();
+        for insert in &histograms {
+            insert.encode_to_vec().hash(&mut fingerprint);
+        }
+        eprintln!(
+            "{name}: {} bytes, {expected_rows} rows, fingerprint {:016x}",
+            bytes.len(),
+            fingerprint.finish()
+        );
+        drop(histograms);
+        group.throughput(Throughput::Elements(expected_rows));
+        group.bench_with_input(BenchmarkId::from_parameter(name), &bytes, |b, bytes| {
+            b.iter(|| {
+                black_box(
+                    remote_write_v2::decode_uncompressed_write_requests(black_box(bytes)).unwrap(),
+                );
+            });
+        });
+    }
+    group.finish();
+}
+
 /// Benchmark comparing UTF-8 string validation (`decode_string`) vs
 /// direct byte-level Prometheus label name validation (`decode_label_name`).
 fn bench_label_name_validation(c: &mut Criterion) {
@@ -395,6 +485,7 @@ criterion_group!(
     benches,
     bench_decode_prom_request,
     bench_prom_v1_vs_v2_decode,
+    bench_prom_v2_histograms,
     bench_label_name_validation,
     bench_utf8_validation
 );

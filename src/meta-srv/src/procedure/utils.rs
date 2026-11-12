@@ -356,11 +356,13 @@ pub mod mock {
                     status: Some(PbStatus {
                         status_code: 0,
                         err_msg: String::default(),
+                        ..Default::default()
                     }),
                 }),
                 affected_rows: 0,
                 extensions: Default::default(),
                 metadata: Vec::new(),
+                failures: Vec::new(),
             })
         }
     }
@@ -535,6 +537,9 @@ pub mod test_data {
             Arc::new(SequenceBuilder::new("test", kv_backend).build()),
         ));
         DdlContext {
+            peer_alloc_context_provider: None,
+            affinity_fallback: Default::default(),
+            affinity_resolver: None,
             node_manager,
             cache_invalidator: Arc::new(MetasrvCacheInvalidator::new(
                 mailbox,

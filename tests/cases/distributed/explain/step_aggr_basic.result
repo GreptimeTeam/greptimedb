@@ -74,6 +74,7 @@ FROM
 -- might write to different partitions
 -- SQLNESS REPLACE "partition_count":\{(.*?)\} "partition_count":REDACTED
 -- SQLNESS REPLACE (Hash.*) REDACTED
+-- SQLNESS REPLACE \\?"(dyn_filters|time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
 EXPLAIN ANALYZE
 SELECT
     count(i)
@@ -92,17 +93,17 @@ FROM
 | 1_| 0_|_AggregateExec: mode=Final, gby=[], aggr=[__count_state(integers.i)] REDACTED
 |_|_|_CoalescePartitionsExec REDACTED
 |_|_|_AggregateExec: mode=Partial, gby=[], aggr=[__count_state(integers.i)] REDACTED
-|_|_|_SeqScan: region=REDACTED, "partition_count":REDACTED REDACTED
+|_|_|_SeqScan: region=REDACTED, "partition_count":REDACTED, "projection": ["i"], "filters": ["host < Utf8(\"550-A\") OR host IS NULL"], "time_range":REDACTED
 |_|_|_|
 | 1_| 1_|_AggregateExec: mode=Final, gby=[], aggr=[__count_state(integers.i)] REDACTED
 |_|_|_CoalescePartitionsExec REDACTED
 |_|_|_AggregateExec: mode=Partial, gby=[], aggr=[__count_state(integers.i)] REDACTED
-|_|_|_SeqScan: region=REDACTED, "partition_count":REDACTED REDACTED
+|_|_|_SeqScan: region=REDACTED, "partition_count":REDACTED, "projection": ["i"], "filters": ["host >= Utf8(\"550-A\") AND (host < Utf8(\"550-W\") OR host IS NULL)"], "time_range":REDACTED
 |_|_|_|
 | 1_| 2_|_AggregateExec: mode=Final, gby=[], aggr=[__count_state(integers.i)] REDACTED
 |_|_|_CoalescePartitionsExec REDACTED
 |_|_|_AggregateExec: mode=Partial, gby=[], aggr=[__count_state(integers.i)] REDACTED
-|_|_|_SeqScan: region=REDACTED, "partition_count":REDACTED REDACTED
+|_|_|_SeqScan: region=REDACTED, "partition_count":REDACTED, "projection": ["i"], "filters": ["host >= Utf8(\"550-W\")"], "time_range":REDACTED
 |_|_|_|
 |_|_| Total rows: 1_|
 +-+-+-+
@@ -172,6 +173,7 @@ ORDER BY
 -- might write to different partitions
 -- SQLNESS REPLACE "partition_count":\{(.*?)\} "partition_count":REDACTED
 -- SQLNESS REPLACE (Hash.*) REDACTED
+-- SQLNESS REPLACE \\?"(dyn_filters|time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
 EXPLAIN ANALYZE
 SELECT
     ts,
@@ -198,17 +200,17 @@ ORDER BY
 | 1_| 0_|_AggregateExec: mode=FinalPartitioned, gby=[ts@0 as ts], aggr=[__count_state(integers.i)] REDACTED
 |_|_|_RepartitionExec: partitioning=REDACTED
 |_|_|_AggregateExec: mode=Partial, gby=[ts@1 as ts], aggr=[__count_state(integers.i)] REDACTED
-|_|_|_SeqScan: region=REDACTED, "partition_count":REDACTED REDACTED
+|_|_|_SeqScan: region=REDACTED, "partition_count":REDACTED, "projection": ["i", "ts"], "filters": ["host < Utf8(\"550-A\") OR host IS NULL"], "time_range":REDACTED
 |_|_|_|
 | 1_| 1_|_AggregateExec: mode=FinalPartitioned, gby=[ts@0 as ts], aggr=[__count_state(integers.i)] REDACTED
 |_|_|_RepartitionExec: partitioning=REDACTED
 |_|_|_AggregateExec: mode=Partial, gby=[ts@1 as ts], aggr=[__count_state(integers.i)] REDACTED
-|_|_|_SeqScan: region=REDACTED, "partition_count":REDACTED REDACTED
+|_|_|_SeqScan: region=REDACTED, "partition_count":REDACTED, "projection": ["i", "ts"], "filters": ["host >= Utf8(\"550-A\") AND (host < Utf8(\"550-W\") OR host IS NULL)"], "time_range":REDACTED
 |_|_|_|
 | 1_| 2_|_AggregateExec: mode=FinalPartitioned, gby=[ts@0 as ts], aggr=[__count_state(integers.i)] REDACTED
 |_|_|_RepartitionExec: partitioning=REDACTED
 |_|_|_AggregateExec: mode=Partial, gby=[ts@1 as ts], aggr=[__count_state(integers.i)] REDACTED
-|_|_|_SeqScan: region=REDACTED, "partition_count":REDACTED REDACTED
+|_|_|_SeqScan: region=REDACTED, "partition_count":REDACTED, "projection": ["i", "ts"], "filters": ["host >= Utf8(\"550-W\")"], "time_range":REDACTED
 |_|_|_|
 |_|_| Total rows: 4_|
 +-+-+-+
@@ -280,6 +282,7 @@ ORDER BY
 -- might write to different partitions
 -- SQLNESS REPLACE "partition_count":\{(.*?)\} "partition_count":REDACTED
 -- SQLNESS REPLACE (Hash.*) REDACTED
+-- SQLNESS REPLACE \\?"(dyn_filters|time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
 EXPLAIN ANALYZE
 SELECT
     date_bin('1 hour' :: INTERVAL, ts) as time_window,
@@ -307,17 +310,17 @@ ORDER BY
 | 1_| 0_|_AggregateExec: mode=FinalPartitioned, gby=[date_bin(Utf8("1 hour"),integers.ts)@0 as date_bin(Utf8("1 hour"),integers.ts)], aggr=[__count_state(integers.i)] REDACTED
 |_|_|_RepartitionExec: partitioning=REDACTED
 |_|_|_AggregateExec: mode=Partial, gby=[date_bin(IntervalMonthDayNano { months: 0, days: 0, nanoseconds: 3600000000000 }, ts@1) as date_bin(Utf8("1 hour"),integers.ts)], aggr=[__count_state(integers.i)] REDACTED
-|_|_|_SeqScan: region=REDACTED, "partition_count":REDACTED REDACTED
+|_|_|_SeqScan: region=REDACTED, "partition_count":REDACTED, "projection": ["i", "ts"], "filters": ["host < Utf8(\"550-A\") OR host IS NULL"], "time_range":REDACTED
 |_|_|_|
 | 1_| 1_|_AggregateExec: mode=FinalPartitioned, gby=[date_bin(Utf8("1 hour"),integers.ts)@0 as date_bin(Utf8("1 hour"),integers.ts)], aggr=[__count_state(integers.i)] REDACTED
 |_|_|_RepartitionExec: partitioning=REDACTED
 |_|_|_AggregateExec: mode=Partial, gby=[date_bin(IntervalMonthDayNano { months: 0, days: 0, nanoseconds: 3600000000000 }, ts@1) as date_bin(Utf8("1 hour"),integers.ts)], aggr=[__count_state(integers.i)] REDACTED
-|_|_|_SeqScan: region=REDACTED, "partition_count":REDACTED REDACTED
+|_|_|_SeqScan: region=REDACTED, "partition_count":REDACTED, "projection": ["i", "ts"], "filters": ["host >= Utf8(\"550-A\") AND (host < Utf8(\"550-W\") OR host IS NULL)"], "time_range":REDACTED
 |_|_|_|
 | 1_| 2_|_AggregateExec: mode=FinalPartitioned, gby=[date_bin(Utf8("1 hour"),integers.ts)@0 as date_bin(Utf8("1 hour"),integers.ts)], aggr=[__count_state(integers.i)] REDACTED
 |_|_|_RepartitionExec: partitioning=REDACTED
 |_|_|_AggregateExec: mode=Partial, gby=[date_bin(IntervalMonthDayNano { months: 0, days: 0, nanoseconds: 3600000000000 }, ts@1) as date_bin(Utf8("1 hour"),integers.ts)], aggr=[__count_state(integers.i)] REDACTED
-|_|_|_SeqScan: region=REDACTED, "partition_count":REDACTED REDACTED
+|_|_|_SeqScan: region=REDACTED, "partition_count":REDACTED, "projection": ["i", "ts"], "filters": ["host >= Utf8(\"550-W\")"], "time_range":REDACTED
 |_|_|_|
 |_|_| Total rows: 4_|
 +-+-+-+
@@ -397,6 +400,7 @@ ORDER BY
 -- might write to different partitions
 -- SQLNESS REPLACE "partition_count":\{(.*?)\} "partition_count":REDACTED
 -- SQLNESS REPLACE (Hash.*) REDACTED
+-- SQLNESS REPLACE \\?"(dyn_filters|time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
 EXPLAIN ANALYZE
 SELECT
     ts::BIGINT + 1,
@@ -426,17 +430,17 @@ ORDER BY
 | 1_| 0_|_AggregateExec: mode=FinalPartitioned, gby=[integers.ts + Int64(1)@0 as integers.ts + Int64(1), integers.i / Int64(2)@1 as integers.i / Int64(2)], aggr=[__count_state(integers.i)] REDACTED
 |_|_|_RepartitionExec: partitioning=REDACTED
 |_|_|_AggregateExec: mode=Partial, gby=[CAST(ts@1 AS Int64) + 1 as integers.ts + Int64(1), i@0 / 2 as integers.i / Int64(2)], aggr=[__count_state(integers.i)] REDACTED
-|_|_|_SeqScan: region=REDACTED, "partition_count":REDACTED REDACTED
+|_|_|_SeqScan: region=REDACTED, "partition_count":REDACTED, "projection": ["i", "ts"], "filters": ["host < Utf8(\"550-A\") OR host IS NULL"], "time_range":REDACTED
 |_|_|_|
 | 1_| 1_|_AggregateExec: mode=FinalPartitioned, gby=[integers.ts + Int64(1)@0 as integers.ts + Int64(1), integers.i / Int64(2)@1 as integers.i / Int64(2)], aggr=[__count_state(integers.i)] REDACTED
 |_|_|_RepartitionExec: partitioning=REDACTED
 |_|_|_AggregateExec: mode=Partial, gby=[CAST(ts@1 AS Int64) + 1 as integers.ts + Int64(1), i@0 / 2 as integers.i / Int64(2)], aggr=[__count_state(integers.i)] REDACTED
-|_|_|_SeqScan: region=REDACTED, "partition_count":REDACTED REDACTED
+|_|_|_SeqScan: region=REDACTED, "partition_count":REDACTED, "projection": ["i", "ts"], "filters": ["host >= Utf8(\"550-A\") AND (host < Utf8(\"550-W\") OR host IS NULL)"], "time_range":REDACTED
 |_|_|_|
 | 1_| 2_|_AggregateExec: mode=FinalPartitioned, gby=[integers.ts + Int64(1)@0 as integers.ts + Int64(1), integers.i / Int64(2)@1 as integers.i / Int64(2)], aggr=[__count_state(integers.i)] REDACTED
 |_|_|_RepartitionExec: partitioning=REDACTED
 |_|_|_AggregateExec: mode=Partial, gby=[CAST(ts@1 AS Int64) + 1 as integers.ts + Int64(1), i@0 / 2 as integers.i / Int64(2)], aggr=[__count_state(integers.i)] REDACTED
-|_|_|_SeqScan: region=REDACTED, "partition_count":REDACTED REDACTED
+|_|_|_SeqScan: region=REDACTED, "partition_count":REDACTED, "projection": ["i", "ts"], "filters": ["host >= Utf8(\"550-W\")"], "time_range":REDACTED
 |_|_|_|
 |_|_| Total rows: 8_|
 +-+-+-+
@@ -522,6 +526,7 @@ FROM
 -- might write to different partitions
 -- SQLNESS REPLACE "partition_count":\{(.*?)\} "partition_count":REDACTED
 -- SQLNESS REPLACE (Hash.*) REDACTED
+-- SQLNESS REPLACE \\?"(dyn_filters|time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
 EXPLAIN ANALYZE
 SELECT
     uddsketch_calc(0.5, uddsketch_merge(128, 0.01, udd_state)) as udd_result,
@@ -542,17 +547,17 @@ FROM
 | 1_| 0_|_AggregateExec: mode=Final, gby=[], aggr=[__uddsketch_merge_state(Int64(128),Float64(0.01),sink_table.udd_state), __hll_merge_state(sink_table.hll_state)] REDACTED
 |_|_|_CoalescePartitionsExec REDACTED
 |_|_|_AggregateExec: mode=Partial, gby=[], aggr=[__uddsketch_merge_state(Int64(128),Float64(0.01),sink_table.udd_state), __hll_merge_state(sink_table.hll_state)] REDACTED
-|_|_|_SeqScan: region=REDACTED, "partition_count":REDACTED REDACTED
+|_|_|_SeqScan: region=REDACTED, "partition_count":REDACTED, "projection": ["udd_state", "hll_state"], "filters": ["host < Utf8(\"550-A\") OR host IS NULL"], "time_range":REDACTED
 |_|_|_|
 | 1_| 1_|_AggregateExec: mode=Final, gby=[], aggr=[__uddsketch_merge_state(Int64(128),Float64(0.01),sink_table.udd_state), __hll_merge_state(sink_table.hll_state)] REDACTED
 |_|_|_CoalescePartitionsExec REDACTED
 |_|_|_AggregateExec: mode=Partial, gby=[], aggr=[__uddsketch_merge_state(Int64(128),Float64(0.01),sink_table.udd_state), __hll_merge_state(sink_table.hll_state)] REDACTED
-|_|_|_SeqScan: region=REDACTED, "partition_count":REDACTED REDACTED
+|_|_|_SeqScan: region=REDACTED, "partition_count":REDACTED, "projection": ["udd_state", "hll_state"], "filters": ["host >= Utf8(\"550-A\") AND (host < Utf8(\"550-W\") OR host IS NULL)"], "time_range":REDACTED
 |_|_|_|
 | 1_| 2_|_AggregateExec: mode=Final, gby=[], aggr=[__uddsketch_merge_state(Int64(128),Float64(0.01),sink_table.udd_state), __hll_merge_state(sink_table.hll_state)] REDACTED
 |_|_|_CoalescePartitionsExec REDACTED
 |_|_|_AggregateExec: mode=Partial, gby=[], aggr=[__uddsketch_merge_state(Int64(128),Float64(0.01),sink_table.udd_state), __hll_merge_state(sink_table.hll_state)] REDACTED
-|_|_|_SeqScan: region=REDACTED, "partition_count":REDACTED REDACTED
+|_|_|_SeqScan: region=REDACTED, "partition_count":REDACTED, "projection": ["udd_state", "hll_state"], "filters": ["host >= Utf8(\"550-W\")"], "time_range":REDACTED
 |_|_|_|
 |_|_| Total rows: 1_|
 +-+-+-+

@@ -62,11 +62,12 @@ def row(query, metric, old, new, compatible, reason):
                 improvement_percent=delta, status='comparable' if delta is not None else reason)
 
 
-def agent(root):
+def agent(root, storage="file"):
+    candidate, baseline = (root, root / "baseline") if storage == "file" else (root / "s3", root / "baseline/s3")
     def load(r):
         return read(r / 'greptimedb-1/greptimedb-1/measured-summary.json')
-    a, b = load(root / 'baseline'), load(root)
-    finished = [r / 'greptimedb-1/exit-code.txt' for r in (root / 'baseline', root)]
+    a, b = load(baseline), load(candidate)
+    finished = [r / 'greptimedb-1/exit-code.txt' for r in (baseline, candidate)]
     compatible = (all(p.is_file() and p.read_text().strip() == '0' for p in finished)
                   and a.get('passed') is True and b.get('passed') is True
                   and same(a, b, ('contract_sha256', 'data_profile', 'query_window', 'warmup_runs', 'measured_runs')))
@@ -81,8 +82,9 @@ def agent(root):
     return rows
 
 
-def traces(root):
-    a, b = (read(r / 'runs/greptimedb/run.json') for r in (root / 'baseline', root))
+def traces(root, storage="file"):
+    candidate, baseline = (root, root / "baseline") if storage == "file" else (root / "s3", root / "baseline/s3")
+    a, b = (read(r / 'runs/greptimedb/run.json') for r in (baseline, candidate))
     compatible = (a.get('success') is True and b.get('success') is True
                   and same(a, b, ('expected', 'protocol', 'audit_expected', 'corpus'))
                   and same(a.get('execution', {}), b.get('execution', {}),
@@ -110,18 +112,22 @@ def traces(root):
     return rows
 
 
-def long_range(root):
+def long_range(root, storage="file"):
+    names = ("greptimedb-baseline", "greptimedb") if storage == "file" else ("greptimedb-s3-baseline", "greptimedb-s3")
+    def target_root(name):
+        nested = root / "o11ybench" / ("o11ybench-" + name)
+        return nested if nested.exists() else root
     rows = []
-    manifest = read(root / 'run-manifest.json')
+    manifests = {name: read(target_root(name) / 'run-manifest.json') for name in names}
     healthy = all(
-        all(field in (manifest.get(phase, {}).get(target, {}).get('docker', {}) if phase == 'post_load_results'
-                      else manifest.get(phase, {}).get(target, {})).get('state', '').split()
+        all(field in (manifests[target].get(phase, {}).get(target, {}).get('docker', {}) if phase == 'post_load_results'
+                      else manifests[target].get(phase, {}).get(target, {})).get('state', '').split()
             for field in ('Running=true', 'ExitCode=0', 'OOMKilled=false'))
         for phase in ('post_load_results', 'post_query_results')
-        for target in ('greptimedb-baseline', 'greptimedb'))
+        for target in names)
     for mode in ('serial', 'concurrent-duration-c1', 'concurrent-duration-c4'):
-        a, b = (read(root / name / 'results-vmbench-long-range' / (mode + '-summary.json'))
-                for name in ('greptimedb-baseline', 'greptimedb'))
+        a, b = (read(target_root(name) / name / 'results-vmbench-long-range' / (mode + '-summary.json'))
+                for name in names)
         fields = ('workload', 'query_file_sha256', 'start', 'end', 'step', 'profile', 'data_duration',
                   'scrape_interval', 'cache_policy_effective', 'mode', 'connection_mode', 'request_timeout_seconds')
         fields += ('tries', 'warmup_runs') if mode == 'serial' else ('concurrency', 'duration_seconds', 'warmup_seconds')
@@ -178,7 +184,13 @@ def main():
         parser.error('report requires --root and --kind')
     document = {'kind': args.kind, 'baseline_tag': os.environ.get('BASELINE_GREPTIMEDB_TAG', ''),
                 'candidate_tag': os.environ.get('GREPTIMEDB_TAG', ''),
-                'rows': {'agent': agent, 'traces': traces, 'long-range': long_range}[args.kind](args.root)}
+                'rows': []}
+    mode = os.environ.get('GREPTIMEDB_STORAGE', 'file')
+    for storage in (['file', 's3'] if mode == 'both' else [mode]):
+        rows = {'agent': agent, 'traces': traces, 'long-range': long_range}[args.kind](args.root, storage)
+        for item in rows:
+            item['query'] = storage.upper() + '/' + item['query']
+        document['rows'].extend(rows)
     text = render(document)
     # Preserve partial comparisons even if a target failed before creating output.
     args.root.mkdir(parents=True, exist_ok=True)

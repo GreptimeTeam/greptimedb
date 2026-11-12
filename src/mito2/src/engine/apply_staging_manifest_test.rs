@@ -861,6 +861,7 @@ async fn test_apply_staging_manifest_change_edit_different_columns_fails_with_fo
                     flushed_entry_id: None,
                     flushed_sequence: None,
                     committed_sequence: None,
+                    wal_recovery: Default::default(),
                 }),
             ]),
             true,

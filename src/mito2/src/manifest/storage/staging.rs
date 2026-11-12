@@ -23,7 +23,7 @@ use store_api::ManifestVersion;
 use crate::error::{OpenDalSnafu, Result};
 use crate::manifest::storage::delta::DeltaStorage;
 use crate::manifest::storage::size_tracker::NoopTracker;
-use crate::manifest::storage::utils::sort_manifests;
+use crate::manifest::storage::utils::{sort_manifests, write_and_put_cache};
 use crate::manifest::storage::{file_version, is_delta_file};
 
 /// A simple blob storage for arbitrary binary data in the staging directory.
@@ -79,10 +79,7 @@ impl StagingBlobStorage {
             self.object_store.info().root(),
             bytes.len()
         );
-        self.object_store
-            .write(&path, bytes)
-            .await
-            .context(OpenDalSnafu)?;
+        write_and_put_cache(&self.object_store, None, &path, bytes).await?;
         Ok(())
     }
 
@@ -222,13 +219,75 @@ impl StagingStorage {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Arc, Mutex};
+
     use common_datasource::compression::CompressionType;
     use common_test_util::temp_dir::create_temp_dir;
     use futures::TryStreamExt;
+    use object_store::layers::mock::{MockLayerBuilder, ObservedWriter, WriterObservations, oio};
     use object_store::services::Fs;
     use object_store::{ErrorKind, ObjectStore};
 
-    use super::{StagingStorage, staging_blob_path, staging_manifest_path};
+    use super::{StagingBlobStorage, StagingStorage, staging_blob_path, staging_manifest_path};
+
+    // A test-only per-write limit, not a storage provider's default limit.
+    const WRITE_LIMIT: usize = 64 * 1024 * 1024;
+
+    struct LimitedWriter {
+        inner: oio::Writer,
+    }
+
+    impl oio::Write for LimitedWriter {
+        async fn write(&mut self, bytes: object_store::Buffer) -> object_store::Result<()> {
+            if bytes.len() > WRITE_LIMIT {
+                return Err(object_store::Error::new(
+                    ErrorKind::Unexpected,
+                    "test write size limit exceeded",
+                ));
+            }
+            self.inner.write(bytes).await
+        }
+
+        async fn close(&mut self) -> object_store::Result<object_store::layers::mock::Metadata> {
+            self.inner.close().await
+        }
+
+        async fn abort(&mut self) -> object_store::Result<()> {
+            self.inner.abort().await
+        }
+    }
+
+    #[tokio::test]
+    async fn test_staging_blob_put_chunked() {
+        let tmp_dir = create_temp_dir("test_staging_blob_put_chunked");
+        let observations = Arc::new(Mutex::new(WriterObservations::default()));
+        let captured = observations.clone();
+        let layer = MockLayerBuilder::default()
+            .writer_factory(Arc::new(move |_, _, inner| {
+                Box::new(ObservedWriter::new(
+                    Box::new(LimitedWriter { inner }),
+                    captured.clone(),
+                ))
+            }))
+            .build()
+            .unwrap();
+        let store = ObjectStore::new(Fs::default().root(&tmp_dir.path().to_string_lossy()))
+            .unwrap()
+            .layer(layer);
+        let storage = StagingBlobStorage::new("staging/blob/".to_string(), store);
+
+        for size in [17, WRITE_LIMIT, WRITE_LIMIT + 17] {
+            let bytes = (0..size).map(|i| (i % 251) as u8).collect::<Vec<_>>();
+            *observations.lock().unwrap() = WriterObservations::default();
+            storage.put("manifest", bytes.clone()).await.unwrap();
+            assert_eq!(storage.get("manifest").await.unwrap(), bytes);
+            let observed = observations.lock().unwrap();
+            assert_eq!(observed.write_sizes.iter().sum::<usize>(), size);
+            assert!(observed.write_sizes.iter().all(|size| *size <= WRITE_LIMIT));
+            assert_eq!(observed.write_sizes.len(), size.div_ceil(WRITE_LIMIT));
+            assert_eq!(observed.close_calls, 1);
+        }
+    }
 
     #[test]
     fn test_staging_path() {

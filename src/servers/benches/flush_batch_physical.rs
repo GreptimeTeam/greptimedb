@@ -21,9 +21,11 @@ use arrow::datatypes::{DataType as ArrowDataType, Field, Schema as ArrowSchema, 
 use arrow::record_batch::RecordBatch;
 use async_trait::async_trait;
 use catalog::error::Result as CatalogResult;
+use common_query::WriteProgress;
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{ColumnSchema as DtColumnSchema, Schema as DtSchema};
+use operator::write_dispatcher::TrackedWrite;
 use partition::error::Result as PartitionResult;
 use partition::partition::{PartitionRule, PartitionRuleRef, RegionMask};
 use servers::batcher::logical_table::{
@@ -102,7 +104,19 @@ struct BenchWriteDispatcher;
 #[async_trait]
 impl PhysicalFlushWriteDispatcher for BenchWriteDispatcher {
     async fn dispatch(&self, _requests: Vec<RegionRequest>) -> error::Result<usize> {
-        Ok(0)
+        unreachable!()
+    }
+
+    async fn dispatch_tracked(
+        &self,
+        requests: Vec<TrackedWrite>,
+        inputs: usize,
+    ) -> Vec<WriteProgress> {
+        let mut progress = vec![WriteProgress::default(); inputs];
+        for owner in requests.into_iter().flat_map(|write| write.owners) {
+            progress[owner].affected_rows += 1;
+        }
+        progress
     }
 }
 
@@ -229,7 +243,7 @@ fn bench_flush_batch_physical(c: &mut Criterion) {
             |b, batches| {
                 b.iter(|| {
                     rt.block_on(async {
-                        flush_batch_physical(
+                        let affected_rows = flush_batch_physical(
                             batches,
                             "phy",
                             &ctx,
@@ -239,6 +253,7 @@ fn bench_flush_batch_physical(c: &mut Criterion) {
                         )
                         .await
                         .unwrap();
+                        assert_eq!(affected_rows, num_tables * rows_per_table);
                     });
                 });
             },
@@ -256,7 +271,7 @@ fn bench_flush_batch_physical(c: &mut Criterion) {
             |b, batches| {
                 b.iter(|| {
                     rt.block_on(async {
-                        flush_batch_physical(
+                        let affected_rows = flush_batch_physical(
                             batches,
                             "phy",
                             &ctx,
@@ -266,6 +281,7 @@ fn bench_flush_batch_physical(c: &mut Criterion) {
                         )
                         .await
                         .unwrap();
+                        assert_eq!(affected_rows, num_tables * rows_per_table);
                     });
                 });
             },

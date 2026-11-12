@@ -14,6 +14,7 @@
 
 use std::collections::HashMap;
 use std::fmt::{Display, Formatter, Write};
+use std::ops::ControlFlow;
 
 use common_catalog::consts::FILE_ENGINE;
 use datatypes::json::{JSON2_DEFAULT_MAX_AUTO_EXPANDED_PATHS, JsonSettings};
@@ -22,7 +23,7 @@ use datatypes::schema::{CompressionOptions, FulltextOptions, SkippingIndexOption
 use itertools::Itertools;
 use serde::Serialize;
 use snafu::ResultExt;
-use sqlparser::ast::{ColumnOptionDef, DataType, Expr};
+use sqlparser::ast::{ColumnOptionDef, DataType, Expr, visit_expressions_mut};
 use sqlparser_derive::{Visit, VisitMut};
 
 use crate::ast::{ColumnDef, Ident, ObjectName};
@@ -200,6 +201,33 @@ impl Display for Json2Options {
             }
             f.write_char(' ')?;
             write_data_type(f, &hint.data_type)?;
+            if let Some(options) = &hint.skipping_index {
+                write!(
+                    f,
+                    " SKIPPING INDEX WITH (granularity = '{}', false_positive_rate = '{}', type = '{}')",
+                    options.granularity,
+                    options.false_positive_rate(),
+                    options.index_type
+                )?;
+            }
+            if let Some(options) = &hint.fulltext_index
+                && options.enable
+            {
+                write!(
+                    f,
+                    " FULLTEXT INDEX WITH (analyzer = '{}', case_sensitive = '{}', backend = '{}'",
+                    options.analyzer, options.case_sensitive, options.backend
+                )?;
+                if options.backend == datatypes::schema::FulltextBackend::Bloom {
+                    write!(
+                        f,
+                        ", granularity = '{}', false_positive_rate = '{}'",
+                        options.granularity,
+                        options.false_positive_rate()
+                    )?;
+                }
+                f.write_char(')')?;
+            }
             if hint.inverted_index {
                 f.write_str(" INVERTED INDEX")?;
             }
@@ -218,6 +246,8 @@ impl Json2Options {
                     path: hint.path.clone(),
                     data_type: sql_data_type_to_concrete_data_type(&hint.data_type)?,
                     inverted_index: hint.inverted_index,
+                    skipping_index: hint.skipping_index.clone(),
+                    fulltext_index: hint.fulltext_index.clone(),
                 })
             })
             .collect::<Result<Vec<_>>>()?;
@@ -233,6 +263,10 @@ pub struct JsonTypeHint {
     pub path: Vec<String>,
     pub data_type: DataType,
     pub inverted_index: bool,
+    /// Skipping index options for this hinted path.
+    pub skipping_index: Option<SkippingIndexOptions>,
+    /// Fulltext index options for a string hinted path.
+    pub fulltext_index: Option<FulltextOptions>,
 }
 
 impl Column {
@@ -353,6 +387,8 @@ impl ColumnExtensions {
                     path: hint.path,
                     data_type,
                     inverted_index: hint.inverted_index,
+                    skipping_index: hint.skipping_index,
+                    fulltext_index: hint.fulltext_index,
                 })
             })
             .collect::<Result<Vec<_>>>()?;
@@ -395,11 +431,17 @@ pub struct Partitions {
 }
 
 impl Partitions {
-    /// set quotes to all [Ident]s from column list
+    /// Sets quotes to all column [Ident]s, in the column list and in the expressions.
     pub fn set_quote(&mut self, quote_style: char) {
         self.column_list
             .iter_mut()
             .for_each(|c| c.quote_style = Some(quote_style));
+        let _ = visit_expressions_mut(&mut self.exprs, |expr| {
+            if let Expr::Identifier(ident) = expr {
+                ident.quote_style = Some(quote_style);
+            }
+            ControlFlow::<()>::Continue(())
+        });
     }
 }
 
@@ -811,6 +853,8 @@ mod tests {
                 path: vec!["x".repeat(8192)],
                 data_type: DataType::Text,
                 inverted_index: true,
+                skipping_index: None,
+                fulltext_index: None,
             }],
         });
         assert!(!create.consume_sql_size_budget(&mut 4096));
@@ -831,6 +875,8 @@ mod tests {
                 path: vec![path.into()],
                 data_type: DataType::Text,
                 inverted_index: false,
+                skipping_index: None,
+                fulltext_index: None,
             }],
         };
         assert_eq!(
@@ -1156,26 +1202,36 @@ ENGINE=mito
                     path: vec!["i".to_string()],
                     data_type: ConcreteDataType::int64_datatype(),
                     inverted_index: false,
+                    skipping_index: None,
+                    fulltext_index: None,
                 },
                 DatatypeJsonTypeHint {
                     path: vec!["f".to_string()],
                     data_type: ConcreteDataType::float64_datatype(),
                     inverted_index: false,
+                    skipping_index: None,
+                    fulltext_index: None,
                 },
                 DatatypeJsonTypeHint {
                     path: vec!["u".to_string()],
                     data_type: ConcreteDataType::uint64_datatype(),
                     inverted_index: false,
+                    skipping_index: None,
+                    fulltext_index: None,
                 },
                 DatatypeJsonTypeHint {
                     path: vec!["s".to_string()],
                     data_type: ConcreteDataType::string_datatype(),
                     inverted_index: false,
+                    skipping_index: None,
+                    fulltext_index: None,
                 },
                 DatatypeJsonTypeHint {
                     path: vec!["b".to_string()],
                     data_type: ConcreteDataType::boolean_datatype(),
                     inverted_index: false,
+                    skipping_index: None,
+                    fulltext_index: None,
                 },
             ],
             None,
@@ -1202,6 +1258,8 @@ ENGINE=mito
                 path: vec!["u".to_string()],
                 data_type: ConcreteDataType::date_datatype(),
                 inverted_index: false,
+                skipping_index: None,
+                fulltext_index: None,
             }],
             None,
         )

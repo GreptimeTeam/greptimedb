@@ -94,7 +94,10 @@ pub(crate) async fn migrate_region(
                 .await?;
 
             match pid {
-                Some(pid) => Ok(Value::from(pid)),
+                Some(pid) => {
+                    query_ctx.set_last_procedure_id(pid.clone());
+                    Ok(Value::from(pid))
+                }
                 None => Ok(Value::Null),
             }
         }
@@ -184,7 +187,10 @@ mod tests {
     #[tokio::test]
     async fn test_migrate_region() {
         let factory: ScalarFunctionFactory = MigrateRegionFunction::factory().into();
-        let provider = factory.provide(FunctionContext::mock());
+        let context = FunctionContext::mock();
+        let query_ctx = context.query_ctx.clone();
+        query_ctx.set_last_procedure_id("previous-id".to_string());
+        let provider = factory.provide(context);
         let f = provider.as_async().unwrap();
 
         let func_args = datafusion::logical_expr::ScalarFunctionArgs {
@@ -203,6 +209,7 @@ mod tests {
             config_options: Arc::new(datafusion_common::config::ConfigOptions::default()),
         };
         let result = f.invoke_async_with_args(func_args).await.unwrap();
+        assert_eq!(query_ctx.last_procedure_id().as_deref(), Some("test_pid"));
 
         match result {
             ColumnarValue::Array(array) => {

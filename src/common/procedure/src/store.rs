@@ -22,7 +22,7 @@ use snafu::ResultExt;
 
 use crate::error::{Result, ToJsonSnafu};
 pub(crate) use crate::store::state_store::StateStoreRef;
-use crate::{ProcedureContext, ProcedureId};
+use crate::{ProcedureContext, ProcedureId, SubprocedureRecovery};
 
 pub mod poison_store;
 pub mod state_store;
@@ -50,6 +50,9 @@ pub struct ProcedureMessage {
     pub data: String,
     /// Parent procedure id.
     pub parent_id: Option<ProcedureId>,
+    /// Recovery policy for a child submission, ignored for root procedures.
+    #[serde(default, skip_serializing_if = "SubprocedureRecovery::is_discard")]
+    pub subprocedure_recovery: SubprocedureRecovery,
     /// Current step.
     pub step: u32,
     /// Errors raised during the procedure.
@@ -111,6 +114,7 @@ impl ProcedureStore {
         .await
     }
 
+    #[cfg(test)]
     pub(crate) async fn store_procedure_with_context(
         &self,
         procedure_id: ProcedureId,
@@ -124,14 +128,24 @@ impl ProcedureStore {
             type_name,
             data,
             parent_id,
+            subprocedure_recovery: SubprocedureRecovery::Discard,
             step,
             error: None,
             context,
         };
+        self.store_procedure_message(procedure_id, &message).await
+    }
+
+    /// Persists a procedure checkpoint with its recovery policy and submission context.
+    pub(crate) async fn store_procedure_message(
+        &self,
+        procedure_id: ProcedureId,
+        message: &ProcedureMessage,
+    ) -> Result<()> {
         let key = ParsedKey {
             prefix: &self.proc_path,
             procedure_id,
-            step,
+            step: message.step,
             key_type: KeyType::Step,
         }
         .to_string();
@@ -486,6 +500,7 @@ mod tests {
             type_name: "TestMessage".to_string(),
             data: "no parent id".to_string(),
             parent_id: None,
+            subprocedure_recovery: SubprocedureRecovery::Discard,
             step: 4,
             error: None,
             context: ProcedureContext::default(),
@@ -527,6 +542,20 @@ mod tests {
         )
         .unwrap();
         assert_eq!(legacy.context, ProcedureContext::default());
+    }
+
+    #[test]
+    fn test_subprocedure_recovery_serialization() {
+        let legacy = r#"{"type_name":"TestMessage","data":"checkpoint","parent_id":null,"step":4}"#;
+        let mut message: ProcedureMessage = serde_json::from_str(legacy).unwrap();
+        assert_eq!(message.subprocedure_recovery, SubprocedureRecovery::Discard);
+        assert_eq!(serde_json::to_string(&message).unwrap(), legacy);
+        message.subprocedure_recovery = SubprocedureRecovery::Detach;
+        let json = serde_json::to_string(&message).unwrap();
+        assert_eq!(
+            serde_json::from_str::<ProcedureMessage>(&json).unwrap(),
+            message
+        );
     }
 
     struct MockProcedure {
@@ -589,6 +618,7 @@ mod tests {
             type_name: "MockProcedure".to_string(),
             data: "test store procedure".to_string(),
             parent_id: None,
+            subprocedure_recovery: SubprocedureRecovery::Discard,
             step: 0,
             error: None,
             context: ProcedureContext::default(),
@@ -638,6 +668,7 @@ mod tests {
             type_name,
             data,
             parent_id: None,
+            subprocedure_recovery: SubprocedureRecovery::Discard,
             step: 1,
             error: None,
             context: ProcedureContext::default(),

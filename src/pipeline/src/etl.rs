@@ -42,8 +42,8 @@ use crate::etl::transform::transformer::greptime::{
 };
 use crate::tablesuffix::TableSuffixTemplate;
 use crate::{
-    ContextOpt, GreptimeTransformer, IdentityTimeIndex, PipelineContext, SchemaInfo,
-    unwrap_or_continue_if_err,
+    ContextOpt, GreptimeTransformer, IdentityTimeIndex, PipelineContext, PipelineOptions,
+    SchemaInfo, unwrap_or_continue_if_err,
 };
 
 const DESCRIPTION: &str = "description";
@@ -60,6 +60,11 @@ pub enum Content<'a> {
 }
 
 pub fn parse(input: &Content) -> Result<Pipeline> {
+    parse_with_options(input, &PipelineOptions::default())
+}
+
+/// Parses a pipeline using the server's compilation policy.
+pub fn parse_with_options(input: &Content, options: &PipelineOptions) -> Result<Pipeline> {
     match input {
         Content::Yaml(str) => {
             let docs = YamlLoader::load_from_str(str).context(YamlLoadSnafu)?;
@@ -73,7 +78,7 @@ pub fn parse(input: &Content) -> Result<Pipeline> {
             let doc_version = (&doc[DOC_VERSION]).try_into()?;
 
             let processors = if let Some(v) = doc[PROCESSORS].as_vec() {
-                v.try_into()?
+                Processors::from_yaml(v, options.allow_vrl_host_access)?
             } else {
                 Processors::default()
             };

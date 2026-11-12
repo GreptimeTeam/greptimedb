@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+mod inspect;
+
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -27,18 +29,23 @@ use datafusion_expr::{LogicalPlan, TableSource};
 use futures::TryStreamExt;
 use session::context::QueryContextRef;
 use snafu::{OptionExt, ResultExt};
+use store_api::compaction_task::CompactionTaskEntry;
 use store_api::region_info::RegionInfoEntry;
 use store_api::sst_entry::{ManifestSstEntry, PuffinIndexMetaEntry, StorageSstEntry};
 use store_api::storage::RegionId;
 
 use crate::error::{DataFusionSnafu, ListStorageSstsSnafu, Result, UnexpectedSnafu};
 use crate::region_server::RegionServer;
+use crate::region_server::catalog::inspect::{
+    CompactionTasksSource, InspectTable, ManifestSstSource,
+};
 
 /// Reserved internal table kinds used.
 /// These are recognized by reserved table names and mapped to providers.
 #[allow(clippy::enum_variant_names)]
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Copy)]
 enum InternalTableKind {
+    InspectCompactionTasks,
     InspectSstManifest,
     InspectSstStorage,
     InspectSstIndexMeta,
@@ -48,6 +55,9 @@ enum InternalTableKind {
 impl InternalTableKind {
     /// Determine if the name is a reserved internal table (case-insensitive).
     pub fn from_table_name(name: &str) -> Option<Self> {
+        if name.eq_ignore_ascii_case(CompactionTaskEntry::reserved_table_name_for_inspection()) {
+            return Some(Self::InspectCompactionTasks);
+        }
         if name.eq_ignore_ascii_case(ManifestSstEntry::reserved_table_name_for_inspection()) {
             return Some(Self::InspectSstManifest);
         }
@@ -66,6 +76,7 @@ impl InternalTableKind {
     /// Return the `TableProvider` for the internal table.
     pub async fn table_provider(&self, server: &RegionServer) -> Result<Arc<dyn TableProvider>> {
         match self {
+            Self::InspectCompactionTasks => server.inspect_compaction_tasks_provider().await,
             Self::InspectSstManifest => server.inspect_sst_manifest_provider().await,
             Self::InspectSstStorage => server.inspect_sst_storage_provider().await,
             Self::InspectSstIndexMeta => server.inspect_sst_index_meta_provider().await,
@@ -75,7 +86,21 @@ impl InternalTableKind {
 }
 
 impl RegionServer {
-    /// Expose SSTs listed in Manifest as an in-memory table for inspection.
+    /// Exposes current scheduler state through the shared lazy inspection provider.
+    pub async fn inspect_compaction_tasks_provider(&self) -> Result<Arc<dyn TableProvider>> {
+        let mito = {
+            let guard = self.inner.mito_engine.read().unwrap();
+            guard.as_ref().cloned().context(UnexpectedSnafu {
+                violated: "mito engine not available",
+            })?
+        };
+
+        Ok(Arc::new(InspectTable::new(Arc::new(
+            CompactionTasksSource::new(mito),
+        ))))
+    }
+
+    /// Exposes manifest SSTs through a lazy table with metadata predicate pruning.
     pub async fn inspect_sst_manifest_provider(&self) -> Result<Arc<dyn TableProvider>> {
         let mito = {
             let guard = self.inner.mito_engine.read().unwrap();
@@ -84,14 +109,9 @@ impl RegionServer {
             })?
         };
 
-        let entries = mito.all_ssts_from_manifest().await;
-        let schema = ManifestSstEntry::schema().arrow_schema().clone();
-        let batch = ManifestSstEntry::to_record_batch(&entries)
-            .map_err(DataFusionError::from)
-            .context(DataFusionSnafu)?;
-
-        let table = MemTable::try_new(schema, vec![vec![batch]]).context(DataFusionSnafu)?;
-        Ok(Arc::new(table))
+        Ok(Arc::new(InspectTable::new(Arc::new(
+            ManifestSstSource::new(mito),
+        ))))
     }
 
     /// Expose SSTs found in storage as an in-memory table for inspection.
@@ -355,6 +375,9 @@ impl TreeNodeRewriter for NameAwareDataSourceInjector {
 
 #[cfg(test)]
 mod tests {
+    mod compaction;
+    mod manifest;
+
     use std::sync::Arc;
 
     use datafusion::catalog::MemTable as DfMemTable;

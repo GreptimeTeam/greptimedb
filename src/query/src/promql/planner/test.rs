@@ -8577,6 +8577,46 @@ async fn ignoring_absent_label_keeps_tsid_binary_join() {
 }
 
 #[tokio::test]
+async fn or_on_operand_with_matching_modifier_keeps_resolvable_time_index() {
+    // An operand of `or` derives its result labels from a matching modifier (`on(...)`,
+    // `ignoring(...)`, `group_left`/`group_right`), so the projected plan mixes qualifiers: the
+    // labels are `lhs.<label>` while the time index keeps the right operand's qualifier
+    // (`rhs.<time index>`). `or` must resolve that time index against the operand schema instead
+    // of reusing the qualifier of its first field.
+    for expr in [
+        "sum by (tag_0) (some_metric) or on (tag_0) \
+         sum by (tag_0) (some_metric) / ignoring(tag_1) group_left() sum by (tag_0) (some_metric)",
+        "sum by (tag_0) (some_metric) or on (tag_0) \
+         sum by (tag_0) (some_metric) / ignoring(tag_2) sum by (tag_0) (some_metric)",
+    ] {
+        let eval_stmt = build_eval_stmt(expr);
+        let table_provider = build_test_table_provider_with_tsid(
+            &[(DEFAULT_SCHEMA_NAME.to_string(), "some_metric".to_string())],
+            3,
+            1,
+        )
+        .await;
+        let plan =
+            PromPlanner::stmt_to_plan(table_provider, &eval_stmt, &build_query_engine_state())
+                .await
+                .unwrap_or_else(|err| panic!("{expr}: {err}"));
+
+        let schema = plan.schema();
+        // The test table's time index column; the plan must carry it exactly once.
+        let time_index_columns = schema
+            .fields()
+            .iter()
+            .filter(|field| field.name() == "timestamp")
+            .count();
+        assert_eq!(1, time_index_columns, "{expr}: {schema:?}");
+        assert!(
+            schema.fields().iter().any(|field| field.name() == "tag_0"),
+            "{expr}: {schema:?}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn range_function_keeps_tsid_for_absent_ignoring_binary_join() {
     let eval_stmt = build_eval_stmt("rate(some_metric[5m]) / ignoring(missing) some_alt_metric");
 
@@ -11513,6 +11553,143 @@ async fn subquery_rejects_a_child_window_out_of_the_representable_range() {
     assert_eq!(err.status_code(), StatusCode::InvalidArguments, "{err}");
 }
 
+/// `@` on a subquery pins its evaluation instant, like `@` on a range selector: Prometheus folds
+/// the anchor into the subquery offset (`setOffsetForAtModifier`) and treats the subquery as
+/// step-invariant, so every step reports the window `(anchor - offset - range, anchor - offset]`.
+/// See <https://github.com/GreptimeTeam/greptimedb/issues/9411>.
+///
+/// The probe samples are at 0s..60s every 10s with values 1..7, on the 10s subquery grid.
+#[tokio::test]
+async fn subquery_at_modifier_pins_the_evaluation_instant() {
+    // The issue reproducer: `@ 60` folds `(40s, 60s]` -- the points 50s and 60s, 6 + 7 -- at every
+    // step, the same as the range selector form `m[20s] @ 60`.
+    for query in [
+        "sum_over_time(subquery_offset_probe[20s] @ 60)",
+        "sum_over_time(subquery_offset_probe[20s:10s] @ 60)",
+        "sum_over_time(subquery_offset_probe[20s:10s] @ end())",
+    ] {
+        assert_eq!(
+            run_subquery_offset_probe(query, 30, 60, 30).await,
+            vec![(30_000, 13.0), (60_000, 13.0)],
+            "{query}"
+        );
+    }
+    // `@ start()` folds `(10s, 30s]` -- 3 + 4 -- at every step.
+    assert_eq!(
+        run_subquery_offset_probe(
+            "sum_over_time(subquery_offset_probe[20s:10s] @ start())",
+            30,
+            60,
+            30
+        )
+        .await,
+        vec![(30_000, 7.0), (60_000, 7.0)],
+    );
+    // `offset` is applied relative to the anchor: `@ 60 offset 30s` folds `(10s, 30s]`, in either
+    // order of the modifiers.
+    for query in [
+        "sum_over_time(subquery_offset_probe[20s:10s] @ 60 offset 30s)",
+        "sum_over_time(subquery_offset_probe[20s:10s] offset 30s @ 60)",
+    ] {
+        assert_eq!(
+            run_subquery_offset_probe(query, 30, 60, 30).await,
+            vec![(30_000, 7.0), (60_000, 7.0)],
+            "{query}"
+        );
+    }
+    // An instant query evaluated away from the anchor still folds the anchored window.
+    assert_eq!(
+        run_subquery_offset_probe(
+            "sum_over_time(subquery_offset_probe[20s:10s] @ 60)",
+            0,
+            0,
+            1
+        )
+        .await,
+        vec![(0, 13.0)],
+    );
+    // An anchor whose window starts before the first sample: `@ 0` folds `(-20s, 0s]`, where only
+    // the point 0s has a sample.
+    assert_eq!(
+        run_subquery_offset_probe(
+            "sum_over_time(subquery_offset_probe[20s:10s] @ 0)",
+            30,
+            60,
+            30
+        )
+        .await,
+        vec![(30_000, 1.0), (60_000, 1.0)],
+    );
+    // `predict_linear` is not promoted as a whole, so it consumes the window replayed by the
+    // subquery itself; that window holds the same points as the range selector form.
+    let anchored = run_subquery_offset_probe(
+        "predict_linear(subquery_offset_probe[20s:10s] @ 60, 0)",
+        30,
+        60,
+        30,
+    )
+    .await;
+    assert_eq!(anchored.len(), 2, "{anchored:?}");
+    assert_eq!(
+        anchored,
+        run_subquery_offset_probe(
+            "predict_linear(subquery_offset_probe[20s] @ 60, 0)",
+            30,
+            60,
+            30
+        )
+        .await,
+    );
+}
+
+/// An anchored subquery evaluates its child over the anchored window only, not over the whole
+/// outer evaluation range, and an anchor that cannot be represented in milliseconds is rejected.
+#[tokio::test]
+async fn subquery_at_modifier_scans_only_the_anchored_window() {
+    let plan = plan_subquery_offset_probe(
+        "sum_over_time(subquery_offset_probe[20s:10s] @ 60)",
+        0,
+        100_000,
+        30,
+    )
+    .await
+    .unwrap();
+    let plan_str = plan.display_indent_schema().to_string();
+    // The child grid is the points 50s and 60s of `(40s, 60s]`.
+    assert!(
+        plan_str.contains("PromInstantManipulate: range=[50000..60000]"),
+        "{plan_str}"
+    );
+    // The subquery is folded once, at the start of the evaluation, and only the outer replay spans
+    // the evaluation range.
+    assert!(
+        plan_str.contains("PromRangeManipulate: req range=[0..0]"),
+        "{plan_str}"
+    );
+    assert!(
+        plan_str.contains("subquery_offset_probe.timestamp <= TimestampMillisecond(60000, None)"),
+        "the child must not be evaluated over the outer range:\n{plan_str}"
+    );
+
+    #[cfg(not(windows))]
+    {
+        let err = plan_subquery_offset_probe(
+            "sum_over_time(subquery_offset_probe[20s:10s] @ 1e16)",
+            0,
+            60,
+            30,
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("Timestamp out of range for the `@` modifier"),
+            "{err}"
+        );
+        assert_eq!(err.status_code(), StatusCode::InvalidArguments);
+    }
+}
+
 #[tokio::test]
 async fn test_hash_join() {
     let mut eval_stmt = EvalStmt {
@@ -12033,6 +12210,29 @@ async fn only_equals_is_supported_for_special_matcher() {
             PromPlanner::stmt_to_plan(table_provider, &eval_stmt, &build_query_engine_state())
                 .await;
         assert!(plan.is_err(), "query: {:?}", query);
+    }
+}
+
+#[tokio::test]
+async fn scatter_time_filter_many_evaluation_points() {
+    for function in ["increase", "sum_over_time"] {
+        for window in ["1h", "2h", "3h"] {
+            let query = format!("sum({function}(some_metric[{window}]))");
+            let eval_stmt = EvalStmt {
+                expr: parser::parse(&query).unwrap(),
+                start: UNIX_EPOCH,
+                end: UNIX_EPOCH + Duration::from_secs(30 * 24 * 3600 + 1800),
+                interval: Duration::from_secs(2 * 3600),
+                lookback_delta: Duration::from_secs(300),
+            };
+            let provider = build_test_table_provider(
+                &[(DEFAULT_SCHEMA_NAME.to_string(), "some_metric".to_string())],
+                1,
+                1,
+            )
+            .await;
+            build_optimized_promql_plan(provider, &eval_stmt).await;
+        }
     }
 }
 

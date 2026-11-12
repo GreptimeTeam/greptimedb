@@ -1,0 +1,85 @@
+SELECT ts, host, val FROM dense_keys ORDER BY ts;
+
++-------------------------+------+-----+
+| ts                      | host | val |
++-------------------------+------+-----+
+| 1970-01-01T00:00:00.001 | api  | 1.5 |
+| 1970-01-01T00:00:00.002 |      | 2.5 |
++-------------------------+------+-----+
+
+SELECT ts, host, val FROM logical_keys ORDER BY ts;
+
++-------------------------+------+-----+
+| ts                      | host | val |
++-------------------------+------+-----+
+| 1970-01-01T00:00:00.001 | api  | 3.5 |
+| 1970-01-01T00:00:00.002 |      | 4.5 |
++-------------------------+------+-----+
+
+INSERT INTO dense_keys (ts, host, val) VALUES (3, 'new', 5.5);
+
+Affected Rows: 1
+
+INSERT INTO logical_keys (ts, host, val) VALUES (3, 'new', 6.5);
+
+Affected Rows: 1
+
+ADMIN FLUSH_TABLE('dense_keys');
+
++---------------------------------+
+| ADMIN FLUSH_TABLE('dense_keys') |
++---------------------------------+
+| 0                               |
++---------------------------------+
+
+ADMIN FLUSH_TABLE('metric_keys');
+
++----------------------------------+
+| ADMIN FLUSH_TABLE('metric_keys') |
++----------------------------------+
+| 0                                |
++----------------------------------+
+
+SELECT COUNT(*) FROM dense_keys;
+
++----------+
+| count(*) |
++----------+
+| 3        |
++----------+
+
+SELECT COUNT(*) FROM logical_keys;
+
++----------+
+| count(*) |
++----------+
+| 3        |
++----------+
+
+-- New OTLP writes retain the historical infinity label across upgrade.
+INSERT INTO otlp_upgrade_bucket VALUES (30000, 'inf', 3), (40000, 'inf', 4);
+
+Affected Rows: 2
+
+SELECT greptime_timestamp, le, greptime_value FROM otlp_upgrade_bucket ORDER BY greptime_timestamp;
+
++---------------------+-----+----------------+
+| greptime_timestamp  | le  | greptime_value |
++---------------------+-----+----------------+
+| 1970-01-01T00:00:10 | inf | 1.0            |
+| 1970-01-01T00:00:20 | inf | 2.0            |
+| 1970-01-01T00:00:30 | inf | 3.0            |
+| 1970-01-01T00:00:40 | inf | 4.0            |
++---------------------+-----+----------------+
+
+-- SQLNESS SORT_RESULT 3 1
+TQL EVAL (10, 40, '10s') otlp_upgrade_bucket{le="inf"};
+
++---------------------+-----+----------------+
+| greptime_timestamp  | le  | greptime_value |
++---------------------+-----+----------------+
+| 1970-01-01T00:00:10 | inf | 1.0            |
+| 1970-01-01T00:00:20 | inf | 2.0            |
+| 1970-01-01T00:00:30 | inf | 3.0            |
+| 1970-01-01T00:00:40 | inf | 4.0            |
++---------------------+-----+----------------+

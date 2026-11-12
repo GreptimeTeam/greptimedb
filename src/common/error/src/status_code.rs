@@ -45,6 +45,8 @@ pub enum StatusCode {
     DeadlineExceeded = 1008,
     /// Service got suspended for various reason. For example, resources exceed limit.
     Suspended = 1009,
+    /// One or more entries failed; inspect per-entry results before retrying.
+    PartialFailure = 1010,
     // ====== End of common status code ================
 
     // ====== Begin of SQL related status code =========
@@ -150,7 +152,8 @@ impl StatusCode {
             | StatusCode::RuntimeResourcesExhausted
             | StatusCode::External => true,
 
-            StatusCode::Success
+            StatusCode::PartialFailure
+            | StatusCode::Success
             | StatusCode::Unsupported
             | StatusCode::InvalidArguments
             | StatusCode::InvalidSyntax
@@ -300,7 +303,7 @@ macro_rules! define_into_tonic_status {
 pub fn status_to_tonic_code(status_code: StatusCode) -> Code {
     match status_code {
         StatusCode::Success => Code::Ok,
-        StatusCode::Unknown | StatusCode::External => Code::Unknown,
+        StatusCode::Unknown | StatusCode::External | StatusCode::PartialFailure => Code::Unknown,
         StatusCode::Unsupported => Code::Unimplemented,
         StatusCode::Unexpected
         | StatusCode::IllegalState

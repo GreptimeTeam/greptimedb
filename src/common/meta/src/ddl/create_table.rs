@@ -165,7 +165,10 @@ impl CreateTableProcedure {
             return Ok(Status::done_with_output(table_id));
         }
 
-        self.data.state = CreateTableState::DatanodeCreateRegions;
+        let alloc_context = match &self.context.peer_alloc_context_provider {
+            Some(provider) => provider.build(&self.data.query_context).await?,
+            None => PeerAllocContext::default(),
+        };
         let TableMetadata {
             table_id,
             table_route,
@@ -173,14 +176,10 @@ impl CreateTableProcedure {
         } = self
             .context
             .table_metadata_allocator
-            .create_with_context(
-                &self.data.task,
-                &PeerAllocContext {
-                    extensions: self.data.query_context.extensions.clone(),
-                },
-            )
+            .create_with_context(&self.data.task, &alloc_context)
             .await?;
         self.set_allocated_metadata(table_id, table_route, region_wal_options);
+        self.data.state = CreateTableState::DatanodeCreateRegions;
 
         Ok(Status::executing(true))
     }

@@ -26,10 +26,7 @@ impl InvertedIndexApplierBuilder<'_> {
         if inlist.negated {
             return Ok(());
         }
-        let Some(column_name) = Self::column_name(&inlist.expr) else {
-            return Ok(());
-        };
-        let Some((column_id, data_type)) = self.column_id_and_type(column_name)? else {
+        let Some((target, data_type)) = self.expr_to_index_target(&inlist.expr)? else {
             return Ok(());
         };
 
@@ -46,7 +43,7 @@ impl InvertedIndexApplierBuilder<'_> {
                 .insert(Self::encode_lit(lit, data_type.clone())?);
         }
 
-        self.add_predicate(column_id, Predicate::InList(predicate));
+        self.add_predicate(target, Predicate::InList(predicate));
         Ok(())
     }
 }
@@ -86,7 +83,10 @@ mod tests {
 
         builder.collect_inlist(&in_list).unwrap();
 
-        let predicates = builder.output.get(&1).unwrap();
+        let predicates = builder
+            .output
+            .get(&index::target::IndexTarget::ColumnId(1))
+            .unwrap();
         assert_eq!(predicates.len(), 1);
         assert_eq!(
             predicates[0],
@@ -142,7 +142,10 @@ mod tests {
 
         builder.collect_inlist(&in_list).unwrap();
 
-        let predicates = builder.output.get(&3).unwrap();
+        let predicates = builder
+            .output
+            .get(&index::target::IndexTarget::ColumnId(3))
+            .unwrap();
         assert_eq!(predicates.len(), 1);
         assert_eq!(
             predicates[0],

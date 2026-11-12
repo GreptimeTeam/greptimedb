@@ -1,0 +1,72 @@
+-- A duplicate row set for one series (same tags, same timestamp) is what an append-mode
+-- region legitimately keeps, and what a retried write leaves behind. Prometheus sample
+-- identity is (series, timestamp), so its range functions can never see two samples at one
+-- timestamp; GreptimeDB must not let them see one either.
+--
+-- Two samples per window, each written twice. The window is (0, 60s] with the first sample at
+-- 29.6s and the last at 59.6s, so the pre-fix arithmetic is visible in the results below:
+--   duplicates: n=4, average interval 10s, threshold 11s, leading gap clamped to 5s
+--               factor = (30 + 5 + 0.4) / 30 = 1.18  => increase 2 * 1.18 = 2.36
+--   deduplicated: n=2, average interval 30s, threshold 33s, leading gap kept at 29.6s
+--               factor = (30 + 29.6 + 0.4) / 30 = 2    => increase 2 * 2 = 4
+CREATE TABLE duplicate_samples (
+    ts TIMESTAMP TIME INDEX,
+    greptime_value DOUBLE,
+    series STRING PRIMARY KEY
+) engine=mito with('append_mode'='true');
+
+INSERT INTO duplicate_samples VALUES
+    (29600, 100.0, 'a'),
+    (29600, 100.0, 'a'),
+    (59600, 102.0, 'a'),
+    (59600, 102.0, 'a');
+
+-- Counting duplicate entries would report 4 samples for a window that holds two.
+TQL EVAL (60, 60, '1m') count_over_time(duplicate_samples[1m]);
+
+-- Both extrapolated functions must keep the same leading extrapolation.
+TQL EVAL (60, 60, '1m') increase(duplicate_samples[1m]);
+TQL EVAL (60, 60, '1m') delta(duplicate_samples[1m]);
+TQL EVAL (60, 60, '1m') rate(duplicate_samples[1m]);
+
+-- The last two samples are 30s apart, not two entries of one timestamp.
+TQL EVAL (60, 60, '1m') idelta(duplicate_samples[1m]);
+TQL EVAL (60, 60, '1m') irate(duplicate_samples[1m]);
+
+-- A duplicate row whose value differs from the first write is the same sample updated. One sample
+-- remains for that timestamp, and it carries the value a deduplicating read would return, so the
+-- later write wins: the window holds 101 and 104, giving an observed delta of 3 and an
+-- extrapolation factor of 2, hence 6. Keeping the stale 100 would instead report 8.
+CREATE TABLE duplicate_samples_conflict (
+    ts TIMESTAMP TIME INDEX,
+    greptime_value DOUBLE,
+    series STRING PRIMARY KEY
+) engine=mito with('append_mode'='true');
+
+INSERT INTO duplicate_samples_conflict VALUES
+    (29600, 100.0, 'a'),
+    (29600, 101.0, 'a'),
+    (59600, 104.0, 'a');
+
+TQL EVAL (60, 60, '1m') count_over_time(duplicate_samples_conflict[1m]);
+TQL EVAL (60, 60, '1m') increase(duplicate_samples_conflict[1m]);
+
+-- A deduplicating region keeps its single row, so ordinary tables are unaffected.
+CREATE TABLE duplicate_samples_deduped (
+    ts TIMESTAMP TIME INDEX,
+    greptime_value DOUBLE,
+    series STRING PRIMARY KEY
+);
+
+INSERT INTO duplicate_samples_deduped VALUES
+    (29600, 100.0, 'a'),
+    (29600, 100.0, 'a'),
+    (59600, 102.0, 'a'),
+    (59600, 102.0, 'a');
+
+TQL EVAL (60, 60, '1m') count_over_time(duplicate_samples_deduped[1m]);
+TQL EVAL (60, 60, '1m') increase(duplicate_samples_deduped[1m]);
+
+DROP TABLE duplicate_samples;
+DROP TABLE duplicate_samples_conflict;
+DROP TABLE duplicate_samples_deduped;

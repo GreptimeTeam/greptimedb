@@ -206,6 +206,14 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Failed to coerce partition expr against the schema"))]
+    CoercePartitionExpr {
+        #[snafu(source)]
+        error: datafusion_common::error::DataFusionError,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Partition expr value is not supported: {:?}", value))]
     UnsupportedPartitionExprValue {
         value: Value,
@@ -275,6 +283,7 @@ impl ErrorExt for Error {
             Error::UnexpectedColumnType { .. } => StatusCode::Internal,
             Error::ToDFSchema { .. } => StatusCode::Internal,
             Error::CreatePhysicalExpr { .. } => StatusCode::Internal,
+            Error::CoercePartitionExpr { .. } => StatusCode::Internal,
             Error::UnsupportedPartitionExprValue { .. } => StatusCode::InvalidArguments,
             Error::ConvertPartitionExprValue { .. } => StatusCode::InvalidArguments,
         }
