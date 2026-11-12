@@ -93,7 +93,7 @@ fn is_current(
         && edit
             .files_to_remove
             .iter()
-            .all(|file| manifest.files.get(&file.file_id) == Some(file))
+            .all(|file| manifest.files.get(&file.file_id).map(AsRef::as_ref) == Some(file))
 }
 
 fn validate_files(
@@ -139,7 +139,7 @@ fn validate_files(
                 && file.level == 0
                 && outputs.insert(file.file_id)
                 && !manifest.files.contains_key(&file.file_id)
-                && file.partition_expr == partition
+                && file.partition_expr.as_deref() == partition.as_ref()
                 && file.preserve_row_sequence == trusted
                 && file.sequence == sequence),
         InvalidRequestSnafu {

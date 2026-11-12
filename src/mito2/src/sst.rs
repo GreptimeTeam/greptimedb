@@ -42,6 +42,7 @@ use crate::error::{InvalidNativeHistogramFieldIdSnafu, InvalidNativeHistogramSub
 use crate::sst::parquet::flat_format::time_index_column_index;
 
 pub mod file;
+pub(crate) mod file_metadata;
 pub mod file_purger;
 pub mod file_ref;
 pub mod index;

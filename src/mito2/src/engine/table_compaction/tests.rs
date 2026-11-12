@@ -254,7 +254,7 @@ async fn test_partial_success_can_retry_both_regions_without_duplicate_files() {
         let region = engine.get_region(id).unwrap();
         let manifest = region.manifest_ctx.manifest().await;
         assert_eq!(1, manifest.files.len());
-        assert_eq!(&output, &manifest.files[&output.file_id]);
+        assert_eq!(&output, manifest.files[&output.file_id].as_ref());
         assert_eq!(3, row_count(&engine, id).await);
     }
 }
@@ -563,7 +563,10 @@ async fn test_indexed_output_with_real_index_object_publishes() {
             .unwrap()
     );
     let manifest = region.manifest_ctx.manifest().await;
-    assert_eq!(Some(&output), manifest.files.get(&output.file_id));
+    assert_eq!(
+        Some(&output),
+        manifest.files.get(&output.file_id).map(AsRef::as_ref)
+    );
     assert_eq!(3, row_count(&engine, region_id).await);
 }
 
@@ -653,7 +656,10 @@ async fn test_preserve_row_sequence_option_drives_output_admission() {
             .unwrap()
     );
     let manifest = region.manifest_ctx.manifest().await;
-    assert_eq!(Some(&output), manifest.files.get(&output.file_id));
+    assert_eq!(
+        Some(&output),
+        manifest.files.get(&output.file_id).map(AsRef::as_ref)
+    );
     assert_eq!(3, row_count(&engine, region_id).await);
 }
 
@@ -1041,7 +1047,10 @@ async fn test_multiple_outputs_verify_notify_once_and_release_footers(#[case] wi
     let manifest = region.manifest_ctx.manifest().await;
     assert_eq!(outputs.len(), manifest.files.len());
     for output in &outputs {
-        assert_eq!(Some(output), manifest.files.get(&output.file_id));
+        assert_eq!(
+            Some(output),
+            manifest.files.get(&output.file_id).map(AsRef::as_ref)
+        );
     }
     assert_eq!(6, row_count(&engine, region_id).await);
 }

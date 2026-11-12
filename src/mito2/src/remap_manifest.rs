@@ -436,7 +436,7 @@ mod tests {
             num_rows: 100,
             num_row_groups: 1,
             sequence: NonZeroU64::new(1),
-            partition_expr,
+            partition_expr: partition_expr.map(Arc::new),
             num_series: 1,
             ..Default::default()
         }
@@ -454,7 +454,7 @@ mod tests {
         for _ in 0..num_files {
             let file_id = FileId::random();
             let file_meta = create_file_meta(region_id, file_id, partition_expr.clone());
-            files.insert(file_id, file_meta);
+            files.insert(file_id, Arc::new(file_meta));
         }
 
         RegionManifest {
@@ -646,10 +646,12 @@ mod tests {
         let file_meta = create_file_meta(old_region_id_1, shared_file_id, None);
 
         let mut manifest_1 = create_manifest(old_region_id_1, 0, None, 100, 200);
-        manifest_1.files.insert(shared_file_id, file_meta.clone());
+        manifest_1
+            .files
+            .insert(shared_file_id, Arc::new(file_meta.clone()));
 
         let mut manifest_2 = create_manifest(old_region_id_2, 0, None, 100, 200);
-        manifest_2.files.insert(shared_file_id, file_meta);
+        manifest_2.files.insert(shared_file_id, Arc::new(file_meta));
 
         let mut old_manifests = HashMap::new();
         old_manifests.insert(old_region_id_1, manifest_1);

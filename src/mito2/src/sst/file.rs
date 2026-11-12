@@ -74,7 +74,7 @@ where
 
 /// Custom serde functions for partition_expr field in FileMeta
 fn serialize_partition_expr<S>(
-    partition_expr: &Option<PartitionExpr>,
+    partition_expr: &Option<Arc<PartitionExpr>>,
     serializer: S,
 ) -> Result<S::Ok, S::Error>
 where
@@ -91,7 +91,9 @@ where
     }
 }
 
-fn deserialize_partition_expr<'de, D>(deserializer: D) -> Result<Option<PartitionExpr>, D::Error>
+fn deserialize_partition_expr<'de, D>(
+    deserializer: D,
+) -> Result<Option<Arc<PartitionExpr>>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
@@ -106,7 +108,9 @@ where
                 Ok(None)
             } else {
                 // Parse the JSON string to PartitionExpr
-                PartitionExpr::from_json_str(&json_str).map_err(D::Error::custom)
+                PartitionExpr::from_json_str(&json_str)
+                    .map(|expr| expr.map(Arc::new))
+                    .map_err(D::Error::custom)
             }
         }
     }
@@ -231,6 +235,9 @@ pub(crate) fn overlaps(l: &FileTimeRange, r: &FileTimeRange) -> bool {
     r_start <= l_end
 }
 
+/// Shared immutable metadata of an SST file.
+pub type FileMetaRef = Arc<FileMeta>;
+
 /// Metadata of a SST file.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(default)]
@@ -298,7 +305,7 @@ pub struct FileMeta {
         serialize_with = "serialize_partition_expr",
         deserialize_with = "deserialize_partition_expr"
     )]
-    pub partition_expr: Option<PartitionExpr>,
+    pub partition_expr: Option<Arc<PartitionExpr>>,
     /// Number of series in the file.
     ///
     /// The number is 0 if the series number is not available.
@@ -634,7 +641,12 @@ pub(crate) fn known_max_input_sequence<'a>(
 
 impl FileHandle {
     /// Creates a new logical SST reference. Index replacements must reuse its lifetime.
-    pub fn new(meta: FileMeta, file_purger: FilePurgerRef) -> FileHandle {
+    pub fn new(meta: impl Into<FileMetaRef>, file_purger: FilePurgerRef) -> FileHandle {
+        let meta = meta.into();
+        let meta = match file_purger.file_ref_manager() {
+            Some(manager) => manager.file_metadata.intern(meta),
+            None => meta,
+        };
         let pk_range = meta.primary_key_range();
         FileHandle {
             inner: Arc::new(FileHandleInner::new(meta, file_purger, pk_range)),
@@ -648,12 +660,21 @@ impl FileHandle {
         primary_key_range: Option<(Bytes, Bytes)>,
     ) -> FileHandle {
         FileHandle {
-            inner: Arc::new(FileHandleInner::new(meta, file_purger, primary_key_range)),
+            inner: Arc::new(FileHandleInner::new(
+                meta.into(),
+                file_purger,
+                primary_key_range,
+            )),
         }
     }
 
     /// Replaces an index metadata view without splitting the underlying SST lifetime.
-    pub(crate) fn with_updated_index(&self, meta: FileMeta) -> Self {
+    pub(crate) fn with_updated_index(&self, meta: impl Into<FileMetaRef>) -> Self {
+        let meta = meta.into();
+        let meta = match &self.inner.lifetime.file_ref_manager {
+            Some(manager) => manager.file_metadata.intern(meta),
+            None => meta,
+        };
         debug_assert_eq!(self.file_id(), meta.file_id());
         let primary_key_range = meta
             .primary_key_range()
@@ -770,12 +791,18 @@ impl FileHandle {
             .primary_key_range
             .read()
             .unwrap()
-            .aligned(mapper.schema_version())
+            .as_deref()
+            .and_then(|range| range.aligned(mapper.schema_version()))
         {
             return range.clone();
         }
         // Recheck under the write lock: another snapshot may have replaced the cached schema.
-        let aligned = self.inner.primary_key_range.write().unwrap().align(mapper);
+        let mut cached_range = self.inner.primary_key_range.write().unwrap();
+        if cached_range.is_none() {
+            let raw = self.inner.meta.primary_key_range()?;
+            *cached_range = Some(Box::new(PrimaryKeyRange::Raw(raw)));
+        }
+        let aligned = cached_range.as_deref_mut()?.align(mapper);
         match aligned {
             Ok(range) => range,
             Err(err) => {
@@ -788,15 +815,22 @@ impl FileHandle {
 
     /// Returns original statistics for metadata hydration, never schema-aligned bounds.
     pub fn raw_primary_key_range(&self) -> Option<(Bytes, Bytes)> {
-        self.inner.primary_key_range.read().unwrap().raw().cloned()
+        self.inner
+            .primary_key_range
+            .read()
+            .unwrap()
+            .as_deref()
+            .map(PrimaryKeyRange::raw)
+            .cloned()
+            .or_else(|| self.inner.meta.primary_key_range())
     }
 
     pub(crate) fn set_primary_key_range(&self, primary_key_range: (Bytes, Bytes)) {
         // SST contents are immutable. Hydrate missing raw statistics without
         // replacing the source of already cached schema views.
         let mut range = self.inner.primary_key_range.write().unwrap();
-        if matches!(*range, PrimaryKeyRange::Missing) {
-            *range = PrimaryKeyRange::Raw(primary_key_range);
+        if range.is_none() && self.inner.meta.primary_key_range().is_none() {
+            *range = Some(Box::new(PrimaryKeyRange::Raw(primary_key_range)));
         }
     }
 }
@@ -806,7 +840,6 @@ type PrimaryKeyBounds = (Bytes, Bytes);
 /// A single-slot cache shared by file handles. Always retain the source bounds so
 /// older snapshots and changed defaults can realign without interpreting padded values as stored.
 enum PrimaryKeyRange {
-    Missing,
     Raw(PrimaryKeyBounds),
     Aligned {
         raw: PrimaryKeyBounds,
@@ -816,10 +849,9 @@ enum PrimaryKeyRange {
 }
 
 impl PrimaryKeyRange {
-    fn raw(&self) -> Option<&PrimaryKeyBounds> {
+    fn raw(&self) -> &PrimaryKeyBounds {
         match self {
-            Self::Missing => None,
-            Self::Raw(raw) | Self::Aligned { raw, .. } => Some(raw),
+            Self::Raw(raw) | Self::Aligned { raw, .. } => raw,
         }
     }
 
@@ -841,9 +873,7 @@ impl PrimaryKeyRange {
         if let Some(bounds) = self.aligned(mapper.schema_version()) {
             return Ok(bounds.clone());
         }
-        let Some(raw) = self.raw().cloned() else {
-            return Ok(None);
-        };
+        let raw = self.raw().clone();
         let aligned = mapper.map(raw.clone());
         // Failed mappings also occupy the cache, so repeated hits don't repeat the warning.
         *self = Self::Aligned {
@@ -859,9 +889,9 @@ impl PrimaryKeyRange {
 ///
 /// Contains meta of the file, and other mutable info like whether the file is compacting.
 struct FileHandleInner {
-    meta: FileMeta,
+    meta: FileMetaRef,
     compacting: AtomicBool,
-    primary_key_range: RwLock<PrimaryKeyRange>,
+    primary_key_range: RwLock<Option<Box<PrimaryKeyRange>>>,
     lifetime: Arc<SstLifetime>,
 }
 
@@ -875,7 +905,7 @@ impl Drop for FileHandleInner {
 
 impl FileHandleInner {
     fn new(
-        meta: FileMeta,
+        meta: FileMetaRef,
         file_purger: FilePurgerRef,
         primary_key_range: Option<(Bytes, Bytes)>,
     ) -> Self {
@@ -890,19 +920,21 @@ impl FileHandleInner {
     }
 
     fn with_lifetime(
-        meta: FileMeta,
+        meta: FileMetaRef,
         lifetime: Arc<SstLifetime>,
         primary_key_range: Option<(Bytes, Bytes)>,
     ) -> Self {
         if let Some(manager) = &lifetime.file_ref_manager {
             manager.register_file(&meta);
         }
+        // Raw bounds already in metadata need no per-handle cache until alignment.
+        let primary_key_range = primary_key_range
+            .filter(|range| meta.primary_key_range().as_ref() != Some(range))
+            .map(|range| Box::new(PrimaryKeyRange::Raw(range)));
         Self {
             meta,
             compacting: AtomicBool::new(false),
-            primary_key_range: RwLock::new(
-                primary_key_range.map_or(PrimaryKeyRange::Missing, PrimaryKeyRange::Raw),
-            ),
+            primary_key_range: RwLock::new(primary_key_range),
             lifetime,
         }
     }
@@ -912,7 +944,7 @@ impl FileHandleInner {
 /// Independent logical references (for example, copied regions) do not share this guard.
 struct SstLifetime {
     /// Latest metadata ensures final purge includes indexes newer than the last reader's view.
-    meta: Mutex<FileMeta>,
+    meta: Mutex<FileMetaRef>,
     deleted: AtomicBool,
     file_purger: FilePurgerRef,
     /// Tracks each metadata view's readers independently for object-store index GC.
@@ -923,7 +955,7 @@ impl Drop for SstLifetime {
     fn drop(&mut self) {
         if self.deleted.load(Ordering::Acquire) {
             self.file_purger
-                .purge_file(self.meta.get_mut().unwrap().clone());
+                .purge_file(self.meta.get_mut().unwrap().as_ref().clone());
         }
     }
 }
@@ -1199,6 +1231,54 @@ mod tests {
 
     use super::*;
 
+    #[test]
+    fn test_shared_metadata_keeps_independent_lifetimes() {
+        let meta = Arc::new(FileMeta::default());
+        let purger = Arc::new(crate::sst::file_purger::NoopFilePurger);
+        let first = FileHandle::new(meta.clone(), purger.clone());
+        let second = FileHandle::new(meta.clone(), purger);
+        assert!(Arc::ptr_eq(&meta, &first.inner.meta));
+        assert!(Arc::ptr_eq(
+            &meta,
+            &first.inner.lifetime.meta.lock().unwrap()
+        ));
+        assert!(!Arc::ptr_eq(&first.inner.lifetime, &second.inner.lifetime));
+        assert!(first.inner.primary_key_range.read().unwrap().is_none());
+        first.mark_deleted();
+        assert!(!second.is_deleted());
+
+        let mut updated = meta.as_ref().clone();
+        updated.index_version = 1;
+        let updated = Arc::new(updated);
+        let replacement = second.with_updated_index(updated.clone());
+        assert_eq!(second.meta_ref().index_version, 0);
+        assert_eq!(replacement.meta_ref().index_version, 1);
+        assert!(Arc::ptr_eq(
+            &replacement.inner.lifetime,
+            &second.inner.lifetime
+        ));
+        assert!(Arc::ptr_eq(
+            &updated,
+            &second.inner.lifetime.meta.lock().unwrap()
+        ));
+    }
+
+    #[test]
+    fn test_raw_metadata_bounds_do_not_allocate_a_cache() {
+        let bounds = (Bytes::from_static(b"a"), Bytes::from_static(b"z"));
+        let meta = FileMeta {
+            primary_key_min: Some(bounds.0.clone()),
+            primary_key_max: Some(bounds.1.clone()),
+            ..Default::default()
+        };
+        let handle = FileHandle::new(meta, Arc::new(crate::sst::file_purger::NoopFilePurger));
+        assert_eq!(Some(bounds.clone()), handle.raw_primary_key_range());
+        assert!(handle.inner.primary_key_range.read().unwrap().is_none());
+        handle.set_primary_key_range((Bytes::from_static(b"b"), Bytes::from_static(b"y")));
+        assert_eq!(Some(bounds), handle.raw_primary_key_range());
+        assert!(handle.inner.primary_key_range.read().unwrap().is_none());
+    }
+
     fn create_file_meta(file_id: FileId, level: Level) -> FileMeta {
         FileMeta {
             region_id: 0.into(),
@@ -1341,7 +1421,7 @@ mod tests {
             num_rows: 0,
             num_row_groups: 0,
             sequence: None,
-            partition_expr: Some(partition_expr.clone()),
+            partition_expr: Some(Arc::new(partition_expr.clone())),
             num_series: 0,
             ..Default::default()
         };

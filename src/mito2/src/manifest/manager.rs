@@ -40,11 +40,14 @@ use crate::manifest::storage::{
 };
 use crate::metrics::MANIFEST_OP_ELAPSED;
 use crate::region::{ManifestStats, RegionLeaderState, RegionRoleState};
+use crate::sst::file_metadata::FileMetadataPoolRef;
 use crate::sst::{FormatType, file};
 
 /// Options for [RegionManifestManager].
 #[derive(Debug, Clone)]
 pub struct RegionManifestOptions {
+    /// Shares immutable file metadata with runtime readers in this engine.
+    pub(crate) file_metadata: FileMetadataPoolRef,
     /// Directory to store manifest.
     pub manifest_dir: String,
     pub object_store: ObjectStore,
@@ -64,6 +67,7 @@ impl RegionManifestOptions {
     /// Creates a new [RegionManifestOptions] with the given region directory, object store, and configuration.
     pub fn new(config: &MitoConfig, region_dir: &str, object_store: &ObjectStore) -> Self {
         RegionManifestOptions {
+            file_metadata: Default::default(),
             manifest_dir: manifest_dir(region_dir),
             object_store: object_store.clone(),
             // We don't allow users to set the compression algorithm as we use it as a file suffix.
@@ -162,6 +166,7 @@ pub struct RemoveFileOptions {
 /// ```
 #[derive(Debug)]
 pub struct RegionManifestManager {
+    file_metadata: FileMetadataPoolRef,
     store: ManifestObjectStore,
     last_version: Arc<AtomicU64>,
     checkpointer: Checkpointer,
@@ -195,6 +200,7 @@ impl RegionManifestManager {
         )
         .with_conditional_publication(options.conditional_publication)?;
         let manifest_version = stats.manifest_version.clone();
+        let file_metadata = options.file_metadata.clone();
 
         info!(
             "Creating region manifest in {} with metadata {:?}, flushed_entry_id: {}",
@@ -202,7 +208,8 @@ impl RegionManifestManager {
         );
 
         let version = MIN_VERSION;
-        let mut manifest_builder = RegionManifestBuilder::default();
+        let mut manifest_builder =
+            RegionManifestBuilder::default().with_file_metadata(file_metadata.clone());
         // set the initial metadata.
         manifest_builder.apply_change(
             version,
@@ -251,6 +258,7 @@ impl RegionManifestManager {
             .removed_files
             .update_file_removed_cnt_to_stats(stats);
         let manager = Self {
+            file_metadata,
             store,
             last_version: manifest_version,
             checkpointer,
@@ -285,6 +293,7 @@ impl RegionManifestManager {
         )
         .with_conditional_publication(options.conditional_publication)?;
         let manifest_version = stats.manifest_version.clone();
+        let file_metadata = options.file_metadata.clone();
 
         // recover from storage
         // construct manifest builder
@@ -309,6 +318,9 @@ impl RegionManifestManager {
             );
             RegionManifestBuilder::default()
         };
+
+        manifest_builder = manifest_builder.with_file_metadata(file_metadata.clone());
+        manifest_builder.intern_files();
 
         let replay_start_version = version;
         info!(
@@ -381,6 +393,7 @@ impl RegionManifestManager {
             open_start.elapsed(),
         );
         let manager = Self {
+            file_metadata,
             store,
             last_version: manifest_version,
             checkpointer,
@@ -496,7 +509,8 @@ impl RegionManifestManager {
 
         debug_assert_eq!(manifests.first().unwrap().0, last_version + 1);
         let mut manifest_builder =
-            RegionManifestBuilder::with_checkpoint(Some(self.manifest.as_ref().clone()));
+            RegionManifestBuilder::with_checkpoint(Some(self.manifest.as_ref().clone()))
+                .with_file_metadata(self.file_metadata.clone());
 
         for (manifest_version, raw_action_list) in manifests {
             let action_list = RegionMetaActionList::decode(&raw_action_list)?;
@@ -559,7 +573,9 @@ impl RegionManifestManager {
             }
             .fail();
         };
-        let builder = RegionManifestBuilder::with_checkpoint(checkpoint.checkpoint);
+        let mut builder = RegionManifestBuilder::with_checkpoint(checkpoint.checkpoint)
+            .with_file_metadata(self.file_metadata.clone());
+        builder.intern_files();
         let manifest = builder.try_build()?;
         let last_version = self.set_version(manifest.manifest_version);
         manifest
@@ -649,6 +665,8 @@ impl RegionManifestManager {
             } else {
                 RegionManifestBuilder::with_checkpoint(Some(self.manifest.as_ref().clone()))
             };
+
+        manifest_builder = manifest_builder.with_file_metadata(self.file_metadata.clone());
 
         for action in action_list.actions {
             match action {

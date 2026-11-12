@@ -149,6 +149,7 @@ impl SchedulerEnv {
                 metadata,
                 0,
                 RegionManifestOptions {
+                    file_metadata: Default::default(),
                     manifest_dir: "".to_string(),
                     object_store: self.access_layer.object_store().clone(),
                     compress_type: CompressionType::Uncompressed,

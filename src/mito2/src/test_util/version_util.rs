@@ -121,7 +121,8 @@ impl VersionControlBuilder {
                 sequence: NonZeroU64::new(start_ms as u64),
                 partition_expr: match &self.metadata.partition_expr {
                     Some(json_str) => partition::expr::PartitionExpr::from_json_str(json_str)
-                        .expect("partition expression should be valid JSON"),
+                        .expect("partition expression should be valid JSON")
+                        .map(Arc::new),
                     None => None,
                 },
                 ..Default::default()
@@ -209,7 +210,8 @@ pub(crate) fn apply_edit(
                 sequence: NonZeroU64::new(*start_ms as u64),
                 partition_expr: match &version_control.current().version.metadata.partition_expr {
                     Some(json_str) => partition::expr::PartitionExpr::from_json_str(json_str)
-                        .expect("partition expression should be valid JSON"),
+                        .expect("partition expression should be valid JSON")
+                        .map(Arc::new),
                     None => None,
                 },
                 ..Default::default()

@@ -142,6 +142,11 @@ Tests live next to the code as `*_test.rs` (e.g. `src/mito2/src/engine/flush_tes
   `All` removes all data; `ByTimeRanges` removes fully contained files. Other
   regions/readers still protect the shared objects. Stale compaction results must
   not reinstate truncated inputs.
+- Manifest and runtime file views share immutable `FileMetaRef` values. The engine-local
+  metadata pool compares complete metadata before sharing; file identity alone is insufficient.
+  Partition expressions are pooled by table and complete expression content, so historical
+  SST partition rules remain distinct after repartition.
+  Index replacement preserves old readers and updates the lifetime guard to the newest metadata.
 - Local compaction units use the snapshot-free `CompactionContext`. Retaining a
   full `CompactionRegion` in a unit pins other units' inputs and delays SST purge.
 - Candidate waiting history is owned by the region scheduler (`scheduler/history.rs`).

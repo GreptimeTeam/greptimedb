@@ -42,7 +42,8 @@ use crate::manifest::action::{
 use crate::sst::FormatType;
 use crate::sst::file::FileMeta;
 use crate::test_util::{
-    CreateRequestBuilder, TestEnv, build_rows, build_rows_for_key, put_rows, rows_schema,
+    CreateRequestBuilder, TestEnv, build_rows, build_rows_for_key, put_rows, reopen_region,
+    rows_schema,
 };
 
 fn range_expr(col_name: &str, start: i64, end: i64) -> PartitionExpr {
@@ -666,11 +667,11 @@ async fn test_apply_staging_manifest_success_with_format(flat_format: bool) {
     let file_id = FileId::random();
     new_manifest_1.files.insert(
         file_id,
-        FileMeta {
+        Arc::new(FileMeta {
             region_id,
             file_id,
             ..Default::default()
-        },
+        }),
     );
     blob_store
         .put(
@@ -1134,6 +1135,32 @@ async fn test_split_repartition_causes_duplicate_data() {
     assert_eq!(manifest_1.files.len(), source_file_count);
     assert_eq!(manifest_2.files.len(), source_file_count);
 
+    let file_id = *source_manifest.files.keys().next().unwrap();
+    let historical_expr = source_manifest.files[&file_id]
+        .partition_expr
+        .as_ref()
+        .unwrap();
+    for (region, manifest) in [
+        (&target_region_1, &manifest_1),
+        (&target_region_2, &manifest_2),
+    ] {
+        let meta = &manifest.files[&file_id];
+        assert_eq!(Some(&source_partition_expr), meta.partition_expr.as_deref());
+        assert!(Arc::ptr_eq(
+            historical_expr,
+            meta.partition_expr.as_ref().unwrap()
+        ));
+        let version = region.version();
+        let handle = version
+            .ssts
+            .levels()
+            .iter()
+            .flat_map(|level| level.files())
+            .find(|file| file.file_id() == meta.file_id())
+            .unwrap();
+        assert!(std::ptr::eq(meta.as_ref(), handle.meta_ref()));
+    }
+
     // Verify duplication via Scan.
     let scan_request = ScanRequest::default();
     let stream = engine
@@ -1179,6 +1206,43 @@ async fn test_split_repartition_causes_duplicate_data() {
         "actual: {}",
         batches.pretty_print().unwrap()
     );
+    // Independent manifest recovery must preserve the SST's historical expression.
+    for region_id in [target_region_id_1, target_region_id_2] {
+        reopen_region(
+            &engine,
+            region_id,
+            "test".to_string(),
+            true,
+            Default::default(),
+        )
+        .await;
+    }
+    let recovered_1 = engine
+        .get_region(target_region_id_1)
+        .unwrap()
+        .manifest_ctx
+        .manifest()
+        .await;
+    let recovered_2 = engine
+        .get_region(target_region_id_2)
+        .unwrap()
+        .manifest_ctx
+        .manifest()
+        .await;
+    assert!(Arc::ptr_eq(
+        recovered_1.files[&file_id].partition_expr.as_ref().unwrap(),
+        recovered_2.files[&file_id].partition_expr.as_ref().unwrap(),
+    ));
+    assert_eq!(
+        Some(&source_partition_expr),
+        recovered_2.files[&file_id].partition_expr.as_deref()
+    );
+    let stream = engine
+        .scan_to_stream(target_region_id_2, ScanRequest::default())
+        .await
+        .unwrap();
+    let recovered_batches = RecordBatches::try_collect(stream).await.unwrap();
+    assert_eq!(expected, recovered_batches.pretty_print().unwrap());
 }
 
 #[tokio::test]
@@ -1330,6 +1394,18 @@ async fn test_merge_repartition_data_integrity() {
         source_1_file_count + source_2_file_count,
         "After applying staging manifest, target region should have all files"
     );
+
+    // A table-scoped pool must preserve both source partition expressions after merge.
+    for source in [&source_manifest_1, &source_manifest_2] {
+        for (file_id, source_meta) in &source.files {
+            let imported = &manifest.files[file_id];
+            assert_eq!(source_meta.partition_expr, imported.partition_expr);
+            assert!(Arc::ptr_eq(
+                source_meta.partition_expr.as_ref().unwrap(),
+                imported.partition_expr.as_ref().unwrap(),
+            ));
+        }
+    }
 
     let scan_request = ScanRequest::default();
     let stream = engine

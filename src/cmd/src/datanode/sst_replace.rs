@@ -161,7 +161,7 @@ impl SstReplaceCommand {
         let new_num_row_groups = parquet_meta.num_row_groups() as u64;
         validate_replacement(&old_file, new_num_rows, new_num_row_groups)?;
 
-        let mut new_file = old_file.clone();
+        let mut new_file = old_file.as_ref().clone();
         new_file.file_size = new_file_size;
         new_file.num_rows = new_num_rows;
         new_file.num_row_groups = new_num_row_groups;

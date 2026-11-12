@@ -762,7 +762,7 @@ async fn test_staging_exit_success_with_manifests_with_format(flat_format: bool)
             .edit_region(
                 region_id,
                 RegionEdit {
-                    files_to_add: vec![file],
+                    files_to_add: vec![file.as_ref().clone()],
                     files_to_remove: vec![],
                     timestamp_ms: None,
                     compaction_time_window: None,
@@ -892,7 +892,7 @@ async fn test_staging_exit_success_with_manifests_with_format(flat_format: bool)
             .unwrap()
             .clone();
         let mut overridden = original.clone();
-        overridden.file_size = u64::MAX - 1;
+        Arc::make_mut(&mut overridden).file_size = u64::MAX - 1;
         for metadata in [overridden, original.clone()] {
             region
                 .manifest_ctx
@@ -901,7 +901,7 @@ async fn test_staging_exit_success_with_manifests_with_format(flat_format: bool)
                 .await
                 .update(
                     RegionMetaActionList::new(vec![RegionMetaAction::Edit(RegionEdit {
-                        files_to_add: vec![metadata.clone()],
+                        files_to_add: vec![metadata.as_ref().clone()],
                         files_to_remove: vec![],
                         timestamp_ms: None,
                         compaction_time_window: None,
@@ -1618,7 +1618,7 @@ async fn put_range_skip_wal(
 /// Returns one of the files in the region's manifest.
 async fn first_file(region: &MitoRegionRef) -> FileMeta {
     let manifest = region.manifest_ctx.manifest().await;
-    manifest.files.values().next().unwrap().clone()
+    manifest.files.values().next().unwrap().as_ref().clone()
 }
 
 fn edit_adding(file: FileMeta) -> RegionEdit {

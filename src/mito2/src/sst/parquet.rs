@@ -1632,7 +1632,8 @@ mod tests {
                 sequence: None,
                 partition_expr: match &metadata.partition_expr {
                     Some(json_str) => partition::expr::PartitionExpr::from_json_str(json_str)
-                        .expect("partition expression should be valid JSON"),
+                        .expect("partition expression should be valid JSON")
+                        .map(Arc::new),
                     None => None,
                 },
                 num_series: 0,
@@ -2176,7 +2177,8 @@ mod tests {
                 sequence: None,
                 partition_expr: match &metadata.partition_expr {
                     Some(json_str) => partition::expr::PartitionExpr::from_json_str(json_str)
-                        .expect("partition expression should be valid JSON"),
+                        .expect("partition expression should be valid JSON")
+                        .map(Arc::new),
                     None => None,
                 },
                 num_series: 0,

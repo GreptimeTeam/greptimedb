@@ -116,7 +116,11 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 return;
             }
 
-            let files_to_add = staging_manifest.files.values().cloned().collect::<Vec<_>>();
+            let files_to_add = staging_manifest
+                .files
+                .values()
+                .map(|meta| meta.as_ref().clone())
+                .collect::<Vec<_>>();
             let edit = RegionEdit {
                 files_to_add,
                 files_to_remove: vec![],

@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
+
 use store_api::region_engine::RegionEngine;
 use store_api::region_request::RegionRequest;
 use store_api::storage::{FileId, RegionId};
@@ -230,7 +232,7 @@ async fn test_shared_reclassification_requires_add_only() {
     assert_eq!(LEVEL_SHARED, installed.files[&source.file_id].level);
     assert!(region.version().ssts.levels()[0].files.is_empty());
     assert_eq!(
-        &installed.files[&source.file_id],
+        installed.files[&source.file_id].as_ref(),
         region.version().ssts.levels()[SHARED_LEVEL_SLOT].files[&source.file_id].meta_ref()
     );
     reopen_region(
@@ -248,7 +250,7 @@ async fn test_shared_reclassification_requires_add_only() {
     );
     assert!(reopened.version().ssts.levels()[0].files.is_empty());
     assert_eq!(
-        &installed.files[&source.file_id],
+        installed.files[&source.file_id].as_ref(),
         reopened.version().ssts.levels()[SHARED_LEVEL_SLOT].files[&source.file_id].meta_ref()
     );
     assert_eq!(expected_rows, scan().await);
@@ -446,7 +448,13 @@ async fn test_truncate_shared_references_preserves_other_readers(#[case] truncat
         .files()
         .map(|file| (file.file_id().file_id(), file.meta_ref().clone()))
         .collect::<std::collections::HashMap<_, _>>();
-    assert_eq!(expected, visible);
+    assert_eq!(
+        expected
+            .iter()
+            .map(|(id, meta)| (*id, meta.as_ref().clone()))
+            .collect::<HashMap<_, _>>(),
+        visible
+    );
     let old_rows = RecordBatches::try_collect(old_reader).await.unwrap();
     assert_eq!(
         6,

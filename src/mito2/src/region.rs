@@ -1037,7 +1037,11 @@ impl MitoRegion {
 
         file_ids
             .iter()
-            .map(|file_id| manifest_files.get(file_id).cloned())
+            .map(|file_id| {
+                manifest_files
+                    .get(file_id)
+                    .map(|meta| meta.as_ref().clone())
+            })
             .collect::<Vec<_>>()
     }
 
@@ -1071,9 +1075,16 @@ impl MitoRegion {
                     .into_iter()
                     .chain(staging_files)
                     .collect::<std::collections::HashMap<_, _>>();
-                merged.into_values().collect()
+                merged
+                    .into_values()
+                    .map(|meta| meta.as_ref().clone())
+                    .collect()
             }
-            None => manifest.files.values().cloned().collect(),
+            None => manifest
+                .files
+                .values()
+                .map(|meta| meta.as_ref().clone())
+                .collect(),
         };
 
         (files, version)
@@ -1494,7 +1505,12 @@ impl ManifestContext {
             ));
         }
 
-        if manifest.files.get(&source.file_meta.file_id) != Some(&source.file_meta) {
+        if manifest
+            .files
+            .get(&source.file_meta.file_id)
+            .map(AsRef::as_ref)
+            != Some(&source.file_meta)
+        {
             return Ok(IndexPublication::Stale(
                 IndexPublicationStale::SourceChanged,
             ));
@@ -1681,7 +1697,7 @@ impl ManifestContext {
                             .is_none_or(|current| current.level != file::LEVEL_SHARED)
                 }) && edit.files_to_add.iter().all(|file| {
                     manifest.files.get(&file.file_id).is_none_or(|current| {
-                        current.level != file::LEVEL_SHARED || current == file
+                        current.level != file::LEVEL_SHARED || current.as_ref() == file
                     })
                 }),
                 InvalidRequestSnafu {
@@ -2459,6 +2475,7 @@ mod tests {
             metadata.clone(),
             0,
             RegionManifestOptions {
+                file_metadata: Default::default(),
                 manifest_dir: "".to_string(),
                 object_store: env.access_layer.object_store().clone(),
                 compress_type: CompressionType::Uncompressed,
@@ -2748,7 +2765,8 @@ mod tests {
                 .manifest()
                 .await
                 .files
-                .get(&source.file_id),
+                .get(&source.file_id)
+                .map(AsRef::as_ref),
             Some(&newer_committed)
         );
     }
@@ -2809,7 +2827,10 @@ mod tests {
 
         let manifest = region.manifest_ctx.manifest().await;
         assert_eq!(manifest.metadata.schema_version, old_schema_version + 1);
-        assert_eq!(manifest.files.get(&source_meta.file_id), Some(&source_meta));
+        assert_eq!(
+            manifest.files.get(&source_meta.file_id).map(AsRef::as_ref),
+            Some(&source_meta)
+        );
     }
 
     #[tokio::test]
@@ -3018,6 +3039,7 @@ mod tests {
                 version_control.current().version.metadata.clone(),
                 0,
                 RegionManifestOptions {
+                    file_metadata: Default::default(),
                     manifest_dir: "".to_string(),
                     object_store: env.access_layer.object_store().clone(),
                     compress_type: CompressionType::Uncompressed,
@@ -3089,6 +3111,7 @@ mod tests {
             metadata.clone(),
             0,
             RegionManifestOptions {
+                file_metadata: Default::default(),
                 manifest_dir: "".to_string(),
                 object_store: access_layer.object_store().clone(),
                 compress_type: CompressionType::Uncompressed,

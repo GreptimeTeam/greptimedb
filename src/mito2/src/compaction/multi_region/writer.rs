@@ -195,7 +195,7 @@ impl<'a> TargetWriter<'a> {
             num_rows: info.num_rows as u64,
             num_row_groups: info.num_row_groups,
             sequence: self.sequence,
-            partition_expr,
+            partition_expr: partition_expr.map(Arc::new),
             num_series: info.num_series,
             primary_key_min: range.as_ref().map(|(min, _)| min.clone()),
             primary_key_max: range.map(|(_, max)| max),

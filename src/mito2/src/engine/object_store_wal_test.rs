@@ -1100,7 +1100,7 @@ async fn test_edit_conflict_reloads_region() {
         .clone();
     let added = FileMeta {
         file_id: FileId::random(),
-        ..flushed
+        ..flushed.as_ref().clone()
     };
     let region_dir = region_dir_from_table_dir(&table_dir, region_id, PathType::Bare);
     let version = next_manifest_version(&old).await;
@@ -1149,7 +1149,7 @@ async fn test_reload_ignores_edit_of_replaced_instance() {
         .clone();
     let file = |file_id| FileMeta {
         file_id,
-        ..flushed.clone()
+        ..flushed.as_ref().clone()
     };
     let added = file(FileId::random());
 
@@ -1348,7 +1348,7 @@ async fn test_end_of_staging_conflict_reloads_region() {
         .await
         .unwrap();
     engine
-        .edit_region(region_id, edit_files(vec![file], vec![]))
+        .edit_region(region_id, edit_files(vec![file.as_ref().clone()], vec![]))
         .await
         .unwrap();
     let region_dir = region_dir_from_table_dir(&table_dir, region_id, PathType::Bare);

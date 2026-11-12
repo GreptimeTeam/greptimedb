@@ -15,6 +15,7 @@
 //! Defines [RegionMetaAction] related structs and [RegionCheckpoint].
 
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::Utc;
@@ -30,7 +31,8 @@ use crate::error::{RegionMetadataNotFoundSnafu, Result, SerdeJsonSnafu, Utf8Snaf
 use crate::manifest::manager::RemoveFileOptions;
 use crate::region::ManifestStats;
 use crate::sst::FormatType;
-use crate::sst::file::{self, FileMeta};
+use crate::sst::file::{self, FileMeta, FileMetaRef};
+use crate::sst::file_metadata::FileMetadataPoolRef;
 use crate::wal::EntryId;
 
 /// Actions that can be applied to region manifest.
@@ -217,7 +219,7 @@ pub struct RegionManifest {
     /// Metadata of the region.
     pub metadata: RegionMetadataRef,
     /// SST files.
-    pub files: HashMap<FileId, FileMeta>,
+    pub files: HashMap<FileId, FileMetaRef>,
     /// Removed files, which are not in the current manifest but may still be kept for a while.
     /// This is a list of (set of files, timestamp) pairs, where the timestamp is the time when
     /// the files are removed from manifest. The timestamp is in milliseconds since unix epoch.
@@ -308,8 +310,9 @@ impl RegionManifest {
 
 #[derive(Debug, Default)]
 pub struct RegionManifestBuilder {
+    file_metadata: Option<FileMetadataPoolRef>,
     metadata: Option<RegionMetadataRef>,
-    files: HashMap<FileId, FileMeta>,
+    files: HashMap<FileId, FileMetaRef>,
     pub removed_files: RemovedFilesRecord,
     flushed_entry_id: EntryId,
     flushed_sequence: SequenceNumber,
@@ -324,11 +327,26 @@ pub struct RegionManifestBuilder {
 }
 
 impl RegionManifestBuilder {
+    /// Sets the engine's metadata pool. Existing snapshots already share their entries.
+    pub(crate) fn with_file_metadata(mut self, pool: FileMetadataPoolRef) -> Self {
+        self.file_metadata = Some(pool);
+        self
+    }
+
+    /// Deduplicates entries recovered independently from a checkpoint.
+    pub(crate) fn intern_files(&mut self) {
+        if let Some(pool) = &self.file_metadata {
+            for meta in self.files.values_mut() {
+                *meta = pool.intern(meta.clone());
+            }
+        }
+    }
+
     fn removed_file(&self, file: &FileMeta) -> RemovedFile {
         let index_version = self
             .files
             .get(&file.file_id)
-            .and_then(FileMeta::index_version)
+            .and_then(|meta| meta.index_version())
             .or_else(|| file.index_version());
         RemovedFile::File(file.file_id, index_version)
     }
@@ -337,6 +355,7 @@ impl RegionManifestBuilder {
     pub fn with_checkpoint(checkpoint: Option<RegionManifest>) -> Self {
         if let Some(s) = checkpoint {
             Self {
+                file_metadata: None,
                 metadata: Some(s.metadata),
                 files: s.files,
                 removed_files: s.removed_files,
@@ -392,6 +411,11 @@ impl RegionManifestBuilder {
 
         let mut removed_files = vec![];
         for file in edit.files_to_add {
+            let file = Arc::new(file);
+            let file = match &self.file_metadata {
+                Some(pool) => pool.intern(file),
+                None => file,
+            };
             if let Some(old_file) = self.files.insert(file.file_id, file.clone())
                 && let Some(old_index) = old_file.index_version()
                 && !old_file.is_index_up_to_date(&file)
@@ -480,7 +504,7 @@ impl RegionManifestBuilder {
         }
     }
 
-    pub fn files(&self) -> &HashMap<FileId, FileMeta> {
+    pub fn files(&self) -> &HashMap<FileId, FileMetaRef> {
         &self.files
     }
 

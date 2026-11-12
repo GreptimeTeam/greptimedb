@@ -1457,7 +1457,7 @@ impl ScanInput {
             self.region_partition_expr.as_ref(),
             file.meta_ref().partition_expr.as_ref(),
         ) {
-            (Some(region_expr), Some(file_expr)) => region_expr == file_expr,
+            (Some(region_expr), Some(file_expr)) => region_expr == file_expr.as_ref(),
             _ => false,
         }
     }
@@ -2619,7 +2619,7 @@ mod tests {
                     FileHandle::new(
                         FileMeta {
                             num_rows: 1,
-                            partition_expr,
+                            partition_expr: partition_expr.map(Arc::new),
                             ..Default::default()
                         },
                         Arc::new(crate::sst::file_purger::NoopFilePurger),

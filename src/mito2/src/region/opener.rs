@@ -394,6 +394,7 @@ impl RegionOpener {
                 .with_conditional_publication(
                     options.requires_conditional_manifest_publication(self.node_lease.is_enabled()),
                 );
+        region_manifest_options.file_metadata = self.file_ref_manager.file_metadata.clone();
         // Set manifest cache if available
         region_manifest_options.manifest_cache = self
             .cache_manager
@@ -530,6 +531,7 @@ impl RegionOpener {
                     region_options
                         .requires_conditional_manifest_publication(self.node_lease.is_enabled()),
                 );
+        region_manifest_options.file_metadata = self.file_ref_manager.file_metadata.clone();
         // Set manifest cache if available
         region_manifest_options.manifest_cache = self
             .cache_manager
