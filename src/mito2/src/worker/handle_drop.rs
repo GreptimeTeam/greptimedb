@@ -214,6 +214,10 @@ where
         self.index_build_scheduler
             .on_region_dropped(region_id)
             .await;
+        // Release the dropped region's series-index build coalescing state.
+        if let Some(state) = &self.series_index_task_state {
+            state.release_region(region_id);
+        }
     }
 }
 

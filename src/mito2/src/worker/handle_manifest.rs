@@ -480,6 +480,10 @@ impl<S: LogStore> RegionWorkerLoop<S> {
     /// The build runs on the worker's series-index task, so it never blocks the region worker.
     /// It is best effort: a disabled, busy, or stopped task must never fail the edit or flush that
     /// installed the SSTs.
+    ///
+    /// Submissions coalesce per region: while a build for the region is queued or running, a
+    /// submission only marks the region dirty, and that pass's completion queues one follow-up
+    /// covering every submission that arrived meanwhile.
     pub(crate) fn submit_series_index_build(&self, region: &MitoRegionRef) {
         // The worker only creates this state when `experimental_enable_series_index` is on, the
         // same gate `handle_build_series_index_request` and periodic maintenance rely on.
@@ -487,8 +491,16 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             return;
         };
         let region_id = region.region_id;
-        let receiver = match state.try_reconcile(region.clone()) {
-            Ok(receiver) => receiver,
+        let receiver = match state.try_reconcile_coalesced(region.clone()) {
+            Ok(Some(receiver)) => receiver,
+            Ok(None) => {
+                // A queued or running pass already covers this submission.
+                debug!(
+                    "Coalesced series-index build with a queued pass, region: {}",
+                    region_id
+                );
+                return;
+            }
             Err(error) => {
                 // A busy queue or a stopped task is expected under load or during shutdown.
                 debug!(

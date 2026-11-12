@@ -35,6 +35,8 @@ pub const PARTITION_LABEL: &str = "partition";
 pub const STAGING_TYPE: &str = "index_staging";
 /// Recycle bin type label.
 pub const RECYCLE_TYPE: &str = "recycle_bin";
+/// Series-scan SST coverage outcome label.
+pub const SERIES_SCAN_COVERAGE_LABEL: &str = "coverage";
 
 // Write metrics.
 lazy_static! {
@@ -238,6 +240,40 @@ lazy_static! {
         "Number of SSTs to scan in a scan task",
         vec![1.0, 4.0, 8.0, 16.0, 32.0, 64.0, 256.0, 1024.0],
     ).unwrap();
+    /// How far artifact coverage lags the newest assigned source, observed once per series
+    /// preparation that has to read at least one source as raw rows.
+    ///
+    /// The value is `now - end of the newest time range among the raw sources`, in seconds. It is
+    /// a histogram rather than a gauge because concurrent preparations disagree on it and the
+    /// distribution, not a last-writer value, answers "are artifacts keeping up".
+    pub static ref SERIES_SCAN_UNCOVERED_AGE: Histogram = register_histogram!(
+        "greptime_mito_series_scan_uncovered_age_seconds",
+        "Age of the newest timestamp still read as raw rows in a series preparation",
+        // 1s ~ ~46h
+        exponential_buckets(1.0, 4.0, 10).unwrap(),
+    ).unwrap();
+    /// Series scans by SST coverage outcome: whether the assigned SSTs could be read from
+    /// artifacts, and why not when they could not.
+    ///
+    /// `all_native` means every assigned SST is completely carried, so the scan reads artifacts
+    /// plus any memtable. The other labels name the reason the whole scan kept the ordinary
+    /// reader, so "no acceleration" is never confused with a mixed read: this path never mixes an
+    /// SST read from artifacts with another SST read as raw rows.
+    pub static ref SERIES_SCAN_SST_COVERAGE: IntCounterVec = register_int_counter_vec!(
+        "greptime_mito_series_scan_sst_coverage",
+        "Series scans by SST coverage outcome",
+        &[SERIES_SCAN_COVERAGE_LABEL],
+    )
+    .unwrap();
+    /// Series scans whose assignment includes a memtable range.
+    ///
+    /// Counted apart from the coverage outcome on purpose: a memtable is expected under writes and
+    /// never forces the ordinary reader, so it must not be read as "no artifact acceleration".
+    pub static ref SERIES_SCAN_WITH_MEMTABLE: IntCounter = register_int_counter!(
+        "greptime_mito_series_scan_with_memtable",
+        "Series scans whose assignment includes a memtable range",
+    )
+    .unwrap();
     /// Histogram for the number of rows returned per query.
     pub static ref READ_ROWS_RETURN: Histogram = register_histogram!(
         "greptime_mito_read_rows_return",
@@ -360,6 +396,24 @@ lazy_static! {
         "greptime_mito_series_index_file_operation_total",
         "series-index file operations",
         &["index_type", "operation", "result"],
+    ).unwrap();
+    /// Background build submissions that a queued or running pass already covers.
+    ///
+    /// Every increment is one flush/ingest-triggered build that was folded into the pass already
+    /// owning the region instead of being queued again.
+    pub static ref SERIES_INDEX_BUILD_COALESCED: IntCounter = register_int_counter!(
+        "greptime_mito_series_index_build_coalesced_total",
+        "series-index build submissions coalesced into a queued or running pass",
+    ).unwrap();
+    /// Series-index passes that a dirty region queued after finishing a pass.
+    ///
+    /// `result="submitted"` means exactly one follow-up pass was queued, `result="dropped"` means
+    /// the follow-up could not be queued (full queue or stopped task); the region is then left to
+    /// the next periodic maintenance pass.
+    pub static ref SERIES_INDEX_RECONCILE_FOLLOW_UP_TOTAL: IntCounterVec = register_int_counter_vec!(
+        "greptime_mito_series_index_reconcile_follow_up_total",
+        "series-index follow-up passes queued for a dirty region",
+        &["result"],
     ).unwrap();
     /// Number of stale index publications rejected at each publication stage.
     pub static ref INDEX_PUBLICATION_STALE_TOTAL: IntCounterVec =
