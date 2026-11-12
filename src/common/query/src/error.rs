@@ -218,6 +218,27 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display(
+        "Remote dynamic filter predicate cannot be represented on the wire: {}",
+        reason
+    ))]
+    DynFilterUnsupported {
+        reason: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+}
+
+impl Error {
+    /// Whether the error says the predicate has no wire form, so the filter must not be
+    /// published to remote regions.
+    ///
+    /// Transport never rewrites an unsupported dynamic predicate to `true`, so producers
+    /// answer this error by skipping the payload and keeping the query running.
+    pub fn is_dyn_filter_unsupported(&self) -> bool {
+        matches!(self, Error::DynFilterUnsupported { .. })
+    }
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -250,6 +271,9 @@ impl ErrorExt for Error {
             | Error::InvalidColumnPrefix { .. } => StatusCode::InvalidArguments,
 
             Error::DynFilterPayloadTooLarge { .. } => StatusCode::PlanQuery,
+            // An unrepresentable dynamic predicate is a transport limitation, not a
+            // server failure: producers skip the filter and the query keeps running.
+            Error::DynFilterUnsupported { .. } => StatusCode::Unsupported,
 
             Error::ConvertDfRecordBatchStream { source, .. } => source.status_code(),
 
@@ -392,6 +416,15 @@ mod tests {
         assert_eq!(
             datafusion_status_code::<Error>(&direct_error, Some(StatusCode::Internal)),
             StatusCode::PlanQuery
+        );
+
+        let unsupported_error = DataFusionError::External(Box::new(Error::DynFilterUnsupported {
+            reason: "no wire form".to_string(),
+            location: Location::default(),
+        }));
+        assert_eq!(
+            datafusion_status_code::<Error>(&unsupported_error, Some(StatusCode::Internal)),
+            StatusCode::Unsupported
         );
 
         let boundary_error =

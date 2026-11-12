@@ -23,7 +23,7 @@ use std::sync::Arc;
 use api::v1::region::RegionRequestHeader;
 use datafusion::arrow::array::{Array, ArrayRef, StringArray};
 use datafusion::execution::TaskContext;
-use datafusion::physical_expr::expressions::{Column, InListExpr, Literal, lit};
+use datafusion::physical_expr::expressions::{Column, InListExpr, Literal};
 use datafusion::physical_expr::{conjunction, split_conjunction};
 use datafusion::physical_plan::joins::HashTableLookupExpr;
 use datafusion::physical_plan::{ExecutionPlan, PhysicalExpr};
@@ -50,7 +50,9 @@ pub use self::initial_remote_dyn_filter_reg::{
     INITIAL_REMOTE_DYN_FILTER_REGISTRATIONS_EXTENSION_KEY, InitialDynFilterReg,
     InitialDynFilterRegs, InitialDynFilterSnapshot,
 };
-use crate::error::{DynFilterPayloadTooLargeSnafu, Error as CommonQueryError};
+use crate::error::{
+    DynFilterPayloadTooLargeSnafu, DynFilterUnsupportedSnafu, Error as CommonQueryError,
+};
 
 pub const DYN_FILTER_PROTOCOL_VERSION: u32 = 1;
 /// Shared raw protobuf byte budget for remote dynamic filter payloads.
@@ -97,36 +99,39 @@ impl DynFilterPayload {
     /// `NULL`-free build keys — see [`HashTableLookupExpr::build_key_membership`]).
     /// There is no per-node substitution, so nothing is ever rewritten in place.
     ///
-    /// # Top-level conjunctive fallback
+    /// # Top-level conjunctive retention
     ///
-    /// If a lookup has no such key list (accessor limitation) or the serialized
-    /// predicate does not fit `max_payload_bytes`, the payload does **not** become the
-    /// whole `true` right away. [`split_conjunction`] splits the original expression,
-    /// and a top-level conjunct is retained only when its whole subtree is free of both
-    /// [`HashTableLookupExpr`] and [`InListExpr`]. Retained conjuncts are encoded again
-    /// under the same budget, and dropping an `AND` term can only widen a predicate, so
-    /// the result still never drops a row the producer would keep:
+    /// If a lookup has no such key list (accessor limitation) or the serialized predicate
+    /// does not fit `max_payload_bytes`, [`split_conjunction`] splits the original
+    /// expression, and a top-level conjunct is retained only when its whole subtree is free
+    /// of both [`HashTableLookupExpr`] and [`InListExpr`]. Retained conjuncts are encoded
+    /// again under the same budget, and dropping an `AND` term can only widen a predicate,
+    /// so the result still never drops a row the producer would keep:
     ///
     /// - `bounds AND lookup` -> `bounds`;
-    /// - `bounds AND oversized IN (...)` -> `bounds`;
-    /// - `NOT lookup` -> `true` (the only conjunct carries the membership);
-    /// - `CASE` / `OR` over membership -> `true` (same reason: a membership is never
-    ///   rewritten inside `NOT`, `CASE` or `OR`, the whole conjunct is dropped).
+    /// - `bounds AND oversized IN (...)` -> `bounds`.
     ///
-    /// When no conjunct can be retained, or the retained ones still do not fit the
-    /// budget, the payload is the whole `true`, which prunes nothing and can never drop
-    /// a row the producer would keep.
+    /// # No `true` fallback
+    ///
+    /// Transport never rewrites a dynamic predicate to `true`, because doing so would make
+    /// a region believe the producer published a filter it never published. When no
+    /// conjunct can be retained (`NOT lookup`, `CASE` / `OR` over a membership) the
+    /// predicate is reported as [`CommonQueryError::DynFilterUnsupported`], and when the
+    /// retained conjuncts still do not fit `max_payload_bytes` the payload is reported as
+    /// [`CommonQueryError::DynFilterPayloadTooLarge`]. Producers answer both errors by not
+    /// publishing the filter, which leaves the query running with local dynamic filtering.
     pub fn from_datafusion_expr(
         expr: &Arc<dyn PhysicalExpr>,
         max_payload_bytes: usize,
     ) -> DataFusionResult<Self> {
         match encode_bounded_physical_expr_to_bytes(expr, max_payload_bytes) {
-            Ok(Some(bytes)) => Ok(Self::Datafusion(bytes)),
+            Ok(bytes) => Ok(Self::Datafusion(bytes)),
             // The predicate cannot be shipped as it stands: either a lookup has no key
             // list, or the frame does not fit the budget. Keep the widest *safe* part of
-            // the predicate instead of giving up on all of it.
-            Ok(None) | Err(CommonQueryError::DynFilterPayloadTooLarge { .. }) => {
-                fall_back_to_retained_conjuncts(expr, max_payload_bytes)
+            // the predicate instead of publishing an always-true filter.
+            Err(CommonQueryError::DynFilterUnsupported { .. })
+            | Err(CommonQueryError::DynFilterPayloadTooLarge { .. }) => {
+                retain_membership_free_conjuncts(expr, max_payload_bytes)
             }
             Err(error) => Err(DataFusionError::from(error)),
         }
@@ -170,13 +175,15 @@ fn encode_physical_expr_to_bytes(expr: &Arc<dyn PhysicalExpr>) -> DataFusionResu
 struct BoundedPhysicalExprEncoder {
     max_payload_bytes: usize,
     encoded_bytes: Cell<usize>,
-    /// Set when a runtime lookup has no serializable key list.
+    /// Set when the encoding aborted on a runtime lookup that has no serializable key
+    /// list.
     ///
-    /// The encoder still writes a `true` placeholder so the tree stays well formed, but
-    /// the produced bytes are discarded: the caller drops the membership-bearing
-    /// top-level conjuncts of the original expression instead of rewriting individual
-    /// nodes.
-    unrepresentable: Cell<bool>,
+    /// The abort travels out as an ordinary [`DataFusionError`], which would lose the
+    /// typed dynamic filter error on the way, so the flag is what lets
+    /// `encode_bounded_physical_expr_to_bytes` rebuild
+    /// [`CommonQueryError::DynFilterUnsupported`]. No placeholder is ever encoded in its
+    /// place.
+    unsupported: Cell<bool>,
 }
 
 impl BoundedPhysicalExprEncoder {
@@ -184,7 +191,7 @@ impl BoundedPhysicalExprEncoder {
         Self {
             max_payload_bytes,
             encoded_bytes: Cell::new(0),
-            unrepresentable: Cell::new(false),
+            unsupported: Cell::new(false),
         }
     }
 
@@ -208,21 +215,20 @@ impl BoundedPhysicalExprEncoder {
     /// node against the payload budget.
     ///
     /// The decision only looks at the lookup itself: if DataFusion can hand out the
-    /// single-column `Utf8` build-key list it is written as `key IN (...)`; otherwise
-    /// the payload is marked unrepresentable. `Err` (including the payload budget
-    /// error) aborts the whole payload.
+    /// single-column `Utf8` build-key list it is written as `key IN (...)`; otherwise the
+    /// whole payload aborts as unsupported. A lookup is a real predicate that DataFusion
+    /// only degrades to `true` in its own proto encoder, so this transport must not write
+    /// any substitute for it.
     fn membership_to_proto(
         &self,
         lookup: &HashTableLookupExpr,
         codec: &dyn PhysicalExtensionCodec,
     ) -> DataFusionResult<PhysicalExprNode> {
         let Some(membership) = RemoteMembership::from_lookup(lookup, self.max_payload_bytes) else {
-            self.unrepresentable.set(true);
-            return self.encode_true(codec);
+            return Err(self.abort_unsupported_lookup());
         };
         let Some(literals) = utf8_list_literals(&membership.values) else {
-            self.unrepresentable.set(true);
-            return self.encode_true(codec);
+            return Err(self.abort_unsupported_lookup());
         };
 
         let before_children = self.encoded_bytes.get();
@@ -245,19 +251,15 @@ impl BoundedPhysicalExprEncoder {
         self.finish(before_children, proto)
     }
 
-    /// Encodes the `true` placeholder for a lookup without a key list.
+    /// Aborts the payload because the wire has no form for `lookup`.
     ///
-    /// This is the same degradation DataFusion's own `try_to_proto` applies. It is only
-    /// ever used together with [`Self::unrepresentable`], which makes the caller discard
-    /// the whole encoded payload in favour of the membership-free top-level conjuncts.
-    fn encode_true(
-        &self,
-        codec: &dyn PhysicalExtensionCodec,
-    ) -> DataFusionResult<PhysicalExprNode> {
-        let before_children = self.encoded_bytes.get();
-        let literal = lit(true);
-        let proto = serialize_physical_expr_with_converter(&literal, codec, self)?;
-        self.finish(before_children, proto)
+    /// The returned error only carries the abort; [`Self::unsupported`] is what the caller
+    /// reads to rebuild the typed dynamic filter error.
+    fn abort_unsupported_lookup(&self) -> DataFusionError {
+        self.unsupported.set(true);
+        DataFusionError::NotImplemented(
+            "hash table lookup has no UTF-8 build-key membership to encode".to_string(),
+        )
     }
 }
 
@@ -311,43 +313,53 @@ impl PhysicalProtoConverterExtension for BoundedPhysicalExprEncoder {
 
 /// Encodes `expr` for the remote wire under `max_payload_bytes`.
 ///
-/// Returns `Ok(None)` when the predicate holds a lookup whose key list cannot be
-/// serialized, which the caller answers with the top-level conjunctive fallback.
+/// Returns the typed [`CommonQueryError::DynFilterUnsupported`] when the predicate holds a
+/// lookup whose key list cannot be serialized, and
+/// [`CommonQueryError::DynFilterPayloadTooLarge`] when the frame does not fit the budget.
+/// The caller answers both with [`retain_membership_free_conjuncts`]; neither is ever
+/// replaced with `true`.
 fn encode_bounded_physical_expr_to_bytes(
     expr: &Arc<dyn PhysicalExpr>,
     max_payload_bytes: usize,
-) -> Result<Option<Vec<u8>>, CommonQueryError> {
+) -> Result<Vec<u8>, CommonQueryError> {
     let codec = DefaultPhysicalExtensionCodec {};
     let encoder = BoundedPhysicalExprEncoder::new(max_payload_bytes);
     let proto = encoder.physical_expr_to_proto(expr, &codec);
+    let unsupported = encoder.unsupported.get();
     // The encoder stops at the node that went over budget, so this reports the size
-    // error unwrapped and the caller can recognize the fallback case.
+    // error unwrapped instead of the wrapped DataFusion error.
     validate_payload_size(encoder.encoded_bytes.get(), max_payload_bytes)?;
-    let proto = proto.map_err(CommonQueryError::from)?;
-    if encoder.unrepresentable.get() {
-        return Ok(None);
+    if unsupported {
+        return Err(DynFilterUnsupportedSnafu {
+            reason: "the predicate holds a hash table lookup without a UTF-8 build-key \
+                     membership",
+        }
+        .build());
     }
-    Ok(Some(proto.encode_to_vec()))
+    Ok(proto.map_err(CommonQueryError::from)?.encode_to_vec())
 }
 
-/// Fallback for a predicate that cannot be shipped as it stands.
+/// Keeps the membership-free top-level conjuncts of a predicate that cannot be shipped as
+/// it stands.
 ///
-/// Tries the membership-free top-level conjuncts first and only degrades to the whole
-/// `true` when there are none, or when they still do not fit `max_payload_bytes`.
-fn fall_back_to_retained_conjuncts(
+/// Dropping an `AND` term can only widen a predicate, so the retained payload still never
+/// drops a row the producer would keep. When no conjunct can be retained the predicate is
+/// reported as [`CommonQueryError::DynFilterUnsupported`], and when the retained conjuncts
+/// still do not fit `max_payload_bytes` as
+/// [`CommonQueryError::DynFilterPayloadTooLarge`]: transport never substitutes `true`.
+fn retain_membership_free_conjuncts(
     expr: &Arc<dyn PhysicalExpr>,
     max_payload_bytes: usize,
 ) -> DataFusionResult<DynFilterPayload> {
     match encode_retained_conjuncts_to_bytes(expr, max_payload_bytes) {
         Ok(Some(bytes)) => Ok(DynFilterPayload::Datafusion(bytes)),
-        // Nothing safe to keep, or the kept conjuncts still do not fit: ship `true`,
-        // which prunes nothing and can never drop a row the producer would keep.
-        Ok(None) | Err(CommonQueryError::DynFilterPayloadTooLarge { .. }) => {
-            let bytes = encode_physical_expr_to_bytes(&lit(true))?;
-            validate_payload_size(bytes.len(), max_payload_bytes).map_err(DataFusionError::from)?;
-            Ok(DynFilterPayload::Datafusion(bytes))
+        Ok(None) => Err(DynFilterUnsupportedSnafu {
+            reason: "the predicate carries a dynamic filter membership that has no wire \
+                     form and no membership-free top-level conjunct to keep",
         }
-        Err(error) => Err(DataFusionError::from(error)),
+        .build()
+        .into()),
+        Err(error) => Err(error.into()),
     }
 }
 
@@ -361,7 +373,7 @@ fn fall_back_to_retained_conjuncts(
 ///
 /// The retained terms are encoded again under the same `max_payload_bytes`, so a caller
 /// supplied budget still bounds the frame. Returns `Ok(None)` when no conjunct can be
-/// retained, which the caller answers with the whole `true` fallback.
+/// retained, which the caller reports as unsupported.
 fn encode_retained_conjuncts_to_bytes(
     expr: &Arc<dyn PhysicalExpr>,
     max_payload_bytes: usize,
@@ -375,14 +387,14 @@ fn encode_retained_conjuncts_to_bytes(
     if retained.is_empty() {
         return Ok(None);
     }
-    encode_bounded_physical_expr_to_bytes(&conjunction(retained), max_payload_bytes)
+    encode_bounded_physical_expr_to_bytes(&conjunction(retained), max_payload_bytes).map(Some)
 }
 
 /// Whether the whole subtree of `expr` holds a membership operator.
 ///
 /// This is a "whole conjunct" test on purpose: a conjunct that reaches a
 /// [`HashTableLookupExpr`] (runtime lookup) or an [`InListExpr`] (its wire form) anywhere
-/// is dropped by the fallback instead of being rewritten around the membership.
+/// is dropped by the retention instead of being rewritten around the membership.
 fn carries_membership(expr: &Arc<dyn PhysicalExpr>) -> DataFusionResult<bool> {
     let mut found = false;
     expr.apply(|node| {
@@ -483,6 +495,51 @@ fn validate_payload_size(
     );
 
     Ok(())
+}
+
+/// Asserts the predicate is reported as having no wire form instead of becoming `true`.
+#[cfg(test)]
+fn assert_unsupported(error: DataFusionError) {
+    assert_typed_dyn_filter_error(error, "DynFilterUnsupported", |error| {
+        matches!(error, CommonQueryError::DynFilterUnsupported { .. })
+    });
+}
+
+/// Asserts the retained payload still exceeds the caller-supplied budget.
+#[cfg(test)]
+fn assert_too_large(error: DataFusionError) {
+    assert_typed_dyn_filter_error(error, "DynFilterPayloadTooLarge", |error| {
+        matches!(error, CommonQueryError::DynFilterPayloadTooLarge { .. })
+    });
+}
+
+#[cfg(test)]
+fn assert_typed_dyn_filter_error(
+    error: DataFusionError,
+    expected: &str,
+    matches_error: impl Fn(&CommonQueryError) -> bool,
+) {
+    let DataFusionError::External(error) = error else {
+        panic!("expected external common query error, got: {error:?}");
+    };
+    let typed = error
+        .downcast_ref::<CommonQueryError>()
+        .unwrap_or_else(|| panic!("expected external {expected}, got: {error:?}"));
+    assert!(matches_error(typed), "expected {expected}, got: {error:?}");
+}
+
+/// Whether `error` reports a dynamic filter predicate the wire cannot represent.
+///
+/// Transport never rewrites a predicate to `true`, so every producer answers this error by
+/// not publishing the filter (or its initial snapshot) and continuing the query.
+pub fn is_dyn_filter_unsupported(error: &DataFusionError) -> bool {
+    matches!(
+        error,
+        DataFusionError::External(source)
+            if source
+                .downcast_ref::<CommonQueryError>()
+                .is_some_and(CommonQueryError::is_dyn_filter_unsupported)
+    )
 }
 
 fn validate_supported_payload_expr(expr: &Arc<dyn PhysicalExpr>) -> DataFusionResult<()> {
@@ -746,8 +803,8 @@ mod tests {
         assert!(matches!(err, DataFusionError::Plan(_)));
     }
 
-    /// A hand-built lookup has no build lease, hence no key list: the encoder cannot
-    /// write it, which forces the top-level conjunctive fallback.
+    /// A hand-built lookup has no build lease, hence no key list: the wire cannot
+    /// represent it, so the encoder aborts unless a membership-free conjunct can be kept.
     fn unrepresentable_lookup(key: &Arc<dyn PhysicalExpr>) -> Arc<dyn PhysicalExpr> {
         Arc::new(HashTableLookupExpr::new(
             vec![Arc::clone(key)],
@@ -772,7 +829,8 @@ mod tests {
     #[test]
     fn dyn_filter_payload_unconvertible_lookup_keeps_integer_bounds() {
         // `bounds AND lookup` where the lookup has no key list: only the
-        // membership-bearing conjunct is dropped, so the integer bounds still travel.
+        // membership-bearing conjunct is dropped, so the integer bounds still travel as a
+        // regular payload instead of an always-true filter or an error.
         let schema = Arc::new(Schema::new(vec![Field::new(
             "device_id",
             DataType::Int32,
@@ -797,12 +855,13 @@ mod tests {
             unrepresentable_lookup(&device_id),
         )) as Arc<dyn PhysicalExpr>;
 
-        assert!(
-            encode_bounded_physical_expr_to_bytes(&expr, 1024)
-                .unwrap()
-                .is_none()
-        );
+        // The predicate itself has no wire form: the lookup has no key list.
+        assert!(matches!(
+            encode_bounded_physical_expr_to_bytes(&expr, 1024),
+            Err(CommonQueryError::DynFilterUnsupported { .. })
+        ));
 
+        // Keeping the membership-free top-level conjuncts turns it into a normal payload.
         let decoded = decode_at(&expr, &schema, 1024);
         let display = decoded.to_string();
         assert!(
@@ -825,7 +884,7 @@ mod tests {
     #[test]
     fn dyn_filter_payload_top_level_and_drops_only_membership_conjuncts() {
         // One bounds conjunct next to an unsupported membership (here: a lookup without
-        // a key list, plus an `IN` list that is itself representable): the fallback keeps
+        // a key list, plus an `IN` list that is itself representable): retention keeps
         // the bounds and drops every top-level conjunct that carries a membership.
         let schema = Arc::new(Schema::new(vec![Field::new(
             "device_id",
@@ -885,9 +944,10 @@ mod tests {
     }
 
     #[test]
-    fn dyn_filter_payload_negated_unconvertible_lookup_falls_back_to_whole_true() {
-        // `NOT lookup` is a single top-level conjunct and it carries the membership, so
-        // the whole conjunct is dropped instead of being rewritten to `NOT true`.
+    fn dyn_filter_payload_negated_unconvertible_lookup_is_unsupported() {
+        // `NOT lookup` is a single top-level conjunct that carries the membership, so
+        // there is nothing safe to keep. Transport must not encode `NOT true` (or `true`)
+        // in its place: the predicate is reported as unsupported.
         let schema = Arc::new(Schema::new(vec![Field::new(
             "device_id",
             DataType::Int32,
@@ -897,15 +957,14 @@ mod tests {
         let not_lookup =
             Arc::new(NotExpr::new(unrepresentable_lookup(&device_id))) as Arc<dyn PhysicalExpr>;
 
-        let decoded = decode_at(&not_lookup, &schema, 1024);
-        assert_eq!(decoded.to_string(), "true");
-        assert!(!contains_expr::<HashTableLookupExpr>(&decoded));
+        assert_unsupported(DynFilterPayload::from_datafusion_expr(&not_lookup, 1024).unwrap_err());
     }
 
     #[test]
-    fn dyn_filter_payload_membership_under_or_falls_back_to_whole_true() {
+    fn dyn_filter_payload_membership_under_or_is_unsupported() {
         // `bound OR lookup` is a single top-level conjunct that carries the membership:
-        // rewriting it to `bound OR true` would be nothing but `true`, so it is dropped.
+        // rewriting it to `bound OR true` would be nothing but `true`, and keeping only
+        // the bound would *narrow* the predicate, so it is reported as unsupported.
         let schema = Arc::new(Schema::new(vec![Field::new(
             "device_id",
             DataType::Int32,
@@ -923,9 +982,7 @@ mod tests {
             unrepresentable_lookup(&device_id),
         )) as Arc<dyn PhysicalExpr>;
 
-        let decoded = decode_at(&expr, &schema, 1024);
-        assert_eq!(decoded.to_string(), "true");
-        assert!(!contains_expr::<HashTableLookupExpr>(&decoded));
+        assert_unsupported(DynFilterPayload::from_datafusion_expr(&expr, 1024).unwrap_err());
     }
 
     #[test]
@@ -982,13 +1039,11 @@ mod tests {
             encode_physical_expr_to_bytes(&bounds).unwrap()
         );
 
-        // A budget that does not even fit the retained bounds still gives up entirely:
-        // nothing that cannot be shipped may narrow the predicate.
+        // A budget that does not even fit the retained bounds is reported as too large:
+        // nothing that cannot be shipped may be replaced with `true`.
         let true_size = encode_physical_expr_to_bytes(&lit(true)).unwrap().len();
         assert!(true_size < bounds_size);
-        let decoded = decode_at(&expr, &schema, true_size);
-        assert_eq!(decoded.to_string(), "true");
-        assert!(!contains_expr::<InListExpr>(&decoded));
+        assert_too_large(DynFilterPayload::from_datafusion_expr(&expr, true_size).unwrap_err());
     }
 
     #[test]
@@ -1013,9 +1068,7 @@ mod tests {
             .encode_to_vec();
 
         assert_eq!(
-            encode_bounded_physical_expr_to_bytes(&expr, expected.len())
-                .unwrap()
-                .unwrap(),
+            encode_bounded_physical_expr_to_bytes(&expr, expected.len()).unwrap(),
             expected
         );
         assert!(matches!(
@@ -1084,7 +1137,7 @@ mod tests {
 /// The tests above build `HashTableLookupExpr` by hand, which always has
 /// `build_lease = None`. These tests run an actual `HashJoinExec` so DataFusion
 /// publishes lookups backed by a real build lease, which is the only way to prove that
-/// the key list (and its fallback path) actually works.
+/// the key list (and the membership-free conjunct retention) actually works.
 ///
 /// Most remote predicates are checked twice: structurally (what the payload contains)
 /// and by **evaluating** the producer predicate and the decoded predicate on the same
@@ -1097,12 +1150,12 @@ mod remote_membership_tests {
     use std::collections::BTreeMap;
 
     use datafusion::arrow::array::{
-        ArrayRef, BooleanArray, Float64Array, Int32Array, StringDictionaryBuilder,
+        ArrayRef, BooleanArray, Float64Array, Int32Array, StringArray, StringDictionaryBuilder,
     };
     use datafusion::arrow::datatypes::{DataType, Field, Int32Type, Schema};
     use datafusion::arrow::record_batch::RecordBatch;
     use datafusion::physical_expr::expressions::{
-        BinaryExpr, CaseExpr, Column, InListExpr, IsNullExpr, Literal, NotExpr,
+        BinaryExpr, CaseExpr, Column, InListExpr, IsNullExpr, Literal, NotExpr, lit,
     };
     use datafusion::physical_plan::PhysicalExpr;
     use datafusion::physical_plan::joins::{HashExpr, HashTableLookupExpr};
@@ -1441,7 +1494,7 @@ mod remote_membership_tests {
     #[tokio::test]
     async fn bounds_survive_unrepresentable_integer_lookup() {
         // Integer keys are not a single-column `Utf8` membership, so this real lookup has
-        // no wire form. The fallback keeps the top-level bounds and drops the lookup
+        // no wire form. Retention keeps the top-level bounds and drops the lookup
         // conjunct, so the decoded predicate only ever gets wider.
         let schema = one_column_schema("k", DataType::Int32);
         let k = key("k", 0);
@@ -1491,7 +1544,7 @@ mod remote_membership_tests {
         assert!(!has_expr::<InListExpr>(&decoded), "{display}");
 
         // The producer and the decoded predicate agree on every row the producer kept and
-        // only diverge on the non-member `4`, where the fallback widens.
+        // only diverge on the non-member `4`, where the retained payload widens.
         let batch = RecordBatch::try_new(
             Arc::clone(&schema),
             vec![Arc::new(Int32Array::from(vec![1, 2, 3, 4, 5, 10])) as ArrayRef],
@@ -1511,7 +1564,7 @@ mod remote_membership_tests {
     #[tokio::test]
     async fn small_budget_keeps_bounds_and_drops_real_membership() {
         // A real `Utf8` lookup next to integer bounds, shipped under a caller-supplied
-        // limit that fits only the bounds: the fallback drops the membership conjunct and
+        // limit that fits only the bounds: retention drops the membership conjunct and
         // still sends the bounds, which can only widen the producer predicate.
         let probe_schema = Arc::new(Schema::new(vec![
             Field::new("trace_id", DataType::Utf8, true),
@@ -1681,6 +1734,68 @@ mod remote_membership_tests {
         );
     }
 
+    #[tokio::test]
+    async fn null_build_keys_keep_only_the_safe_bounds() {
+        // The key-list accessor requires `NULL`-free build keys, so a build side with a
+        // `NULL` key has no membership. This producer shape is `bounds AND lookup`: the
+        // bounds DataFusion derived from the non-`NULL` keys are retained, and the lookup
+        // is dropped instead of the predicate being replaced with `true`.
+        let schema = one_column_schema("trace_id", DataType::Utf8);
+        let trace_id = key("trace_id", 0);
+        let build_values: ArrayRef = Arc::new(StringArray::from(vec![
+            Some("trace-a"),
+            None,
+            Some("trace-b"),
+        ]));
+        let filter = run_real_hash_join(
+            1,
+            Arc::clone(&schema),
+            Arc::clone(&schema),
+            partitions(&schema, vec![vec![build_values]]),
+            partitions(&schema, vec![vec![utf8(&["trace-a", "trace-b", "miss"])]]),
+            vec![(Arc::clone(&trace_id), Arc::clone(&trace_id))],
+        )
+        .await;
+        assert!(has_expr::<HashTableLookupExpr>(&filter.expr));
+        let producer = filter.expr.to_string();
+        assert!(producer.contains(">= trace-a"), "{producer}");
+        assert!(producer.contains("<= trace-b"), "{producer}");
+
+        let decoded = decode(
+            &filter.expr,
+            &filter.probe_schema,
+            REMOTE_DYN_FILTER_PAYLOAD_MAX_BYTES,
+        );
+        let display = decoded.to_string();
+        assert!(!has_expr::<HashTableLookupExpr>(&decoded), "{display}");
+        assert!(!has_expr::<InListExpr>(&decoded), "{display}");
+        assert!(display.contains(">= trace-a"), "{display}");
+        assert!(display.contains("<= trace-b"), "{display}");
+        assert_ne!(display, "true", "transport must not widen to `true`");
+
+        // The retained conjuncts are the producer bounds verbatim.
+        let bounds = split_conjunction(&filter.expr)
+            .into_iter()
+            .filter(|conjunct| !has_expr::<HashTableLookupExpr>(conjunct))
+            .cloned()
+            .collect::<Vec<_>>();
+        assert_eq!(
+            encode_physical_expr_to_bytes(&decoded).unwrap(),
+            encode_physical_expr_to_bytes(&conjunction(bounds)).unwrap()
+        );
+
+        // Widening only: every build key row the producer kept is still kept.
+        let rows = ["trace-a", "trace-b", "miss"]
+            .map(ToString::to_string)
+            .to_vec();
+        let batch = evaluation_batch(&schema, &rows);
+        let (original_selected, decoded_selected) =
+            assert_fail_open(&filter.expr, &decoded, &batch);
+        assert_eq!(original_selected, vec![true, true, false]);
+        assert!(decoded_selected[0], "build key row must stay selected");
+        assert!(decoded_selected[1], "build key row must stay selected");
+    }
+
     /// `NOT lookup` becomes `NOT (key IN (...))`.
     ///
     /// This narrow contract is about **positive pruning**: the membership is the build
@@ -1727,7 +1842,7 @@ mod remote_membership_tests {
     }
 
     #[tokio::test]
-    async fn membership_falls_back_for_unsupported_float_composite_and_dictionary_keys() {
+    async fn unsupported_float_composite_and_dictionary_keys_keep_only_safe_conjuncts() {
         // Float64 keys: the key-list accessor only exposes a single `Utf8` column.
         let float_schema = one_column_schema("k", DataType::Float64);
         let float_on = key("k", 0);
@@ -1753,15 +1868,16 @@ mod remote_membership_tests {
         )
         .await;
         assert!(has_expr::<HashTableLookupExpr>(&float_filter.expr));
-        let decoded = decode(
-            &float_filter.expr,
-            &float_filter.probe_schema,
-            REMOTE_DYN_FILTER_PAYLOAD_MAX_BYTES,
-        );
         // The partitioned producer publishes a per-partition `CASE`, so the only
-        // top-level conjunct carries the membership and is dropped: whole `true`.
-        assert_eq!(decoded.to_string(), "true");
-        assert!(!has_expr::<HashTableLookupExpr>(&decoded));
+        // top-level conjunct carries the membership and there is nothing safe to keep:
+        // the predicate is reported as unsupported instead of becoming `true`.
+        assert_unsupported(
+            DynFilterPayload::from_datafusion_expr(
+                &float_filter.expr,
+                REMOTE_DYN_FILTER_PAYLOAD_MAX_BYTES,
+            )
+            .unwrap_err(),
+        );
 
         // Composite (two-column) keys: not a single-column membership. Both columns
         // take part in the hash partitioning, exactly like a real two-key join.
@@ -1795,14 +1911,14 @@ mod remote_membership_tests {
         )
         .await;
         assert!(has_expr::<HashTableLookupExpr>(&composite_filter.expr));
-        let decoded = decode(
-            &composite_filter.expr,
-            &composite_filter.probe_schema,
-            REMOTE_DYN_FILTER_PAYLOAD_MAX_BYTES,
+        // Same per-partition `CASE` shape as the float case: unsupported, not `true`.
+        assert_unsupported(
+            DynFilterPayload::from_datafusion_expr(
+                &composite_filter.expr,
+                REMOTE_DYN_FILTER_PAYLOAD_MAX_BYTES,
+            )
+            .unwrap_err(),
         );
-        // Same per-partition `CASE` shape as the float case: whole `true`.
-        assert_eq!(decoded.to_string(), "true");
-        assert!(!has_expr::<HashTableLookupExpr>(&decoded));
 
         // Dictionary keys: not a plain `Utf8` key column.
         let dict_type = DataType::Dictionary(Box::new(DataType::Int32), Box::new(DataType::Utf8));
@@ -1828,7 +1944,7 @@ mod remote_membership_tests {
             REMOTE_DYN_FILTER_PAYLOAD_MAX_BYTES,
         );
         // Dictionary keys are not a plain `Utf8` key column either. This producer shape
-        // is a flat `bounds AND lookup`, so the fallback keeps the bounds conjunct that
+        // is a flat `bounds AND lookup`, so retention keeps the bounds conjunct that
         // DataFusion itself published and drops only the membership.
         let display = decoded.to_string();
         assert!(!has_expr::<HashTableLookupExpr>(&decoded), "{display}");
@@ -1883,7 +1999,7 @@ mod remote_membership_tests {
     }
 
     #[tokio::test]
-    async fn over_budget_payload_falls_back_to_whole_payload_true() {
+    async fn over_budget_membership_case_is_unsupported() {
         let schema = one_column_schema("trace_id", DataType::Utf8);
         // Long values so the membership lists dominate the payload.
         let long = "t".repeat(256);
@@ -1916,26 +2032,18 @@ mod remote_membership_tests {
         assert_eq!(case.when_then_expr().len(), 3);
 
         // The whole predicate is one top-level `CASE` conjunct that carries the
-        // membership, so a budget that only fits `true` drops it entirely: membership is
-        // never rewritten inside `CASE`, and nothing can become narrower.
+        // membership, so a budget that only fits `true` has nothing safe to keep:
+        // membership is never rewritten inside `CASE` and the payload is an explicit
+        // error instead of an always-true filter.
         let true_size = encode_physical_expr_to_bytes(&lit(true)).unwrap().len();
         assert!(true_size < REMOTE_DYN_FILTER_PAYLOAD_MAX_BYTES);
-        let decoded = decode(&filter.expr, &filter.probe_schema, true_size);
-        assert_eq!(decoded.to_string(), "true");
-
-        let mut rows = values.clone();
-        rows.push("miss-not-a-member".to_string());
-        let batch = evaluation_batch(&schema, &rows);
-        let (original_selected, decoded_selected) =
-            assert_fail_open(&filter.expr, &decoded, &batch);
-        for row in 0..values.len() {
-            assert!(original_selected[row]);
-            assert!(decoded_selected[row]);
-        }
+        assert_unsupported(
+            DynFilterPayload::from_datafusion_expr(&filter.expr, true_size).unwrap_err(),
+        );
     }
 
     #[test]
-    fn over_budget_payload_never_narrows_a_negation() {
+    fn over_budget_negation_is_unsupported() {
         let schema = Arc::new(Schema::new(vec![Field::new("host", DataType::Utf8, false)]));
         let host = Arc::new(Column::new("host", 0)) as Arc<dyn PhysicalExpr>;
         let long = "h".repeat(256);
@@ -1949,17 +2057,11 @@ mod remote_membership_tests {
             .unwrap(),
         ) as Arc<dyn PhysicalExpr>;
         // `NOT (host IN (...))`: dropping the list in place would evaluate `NOT true`
-        // = false and drop every row.
+        // = false and drop every row, so the whole predicate is unsupported.
         let not_in = Arc::new(NotExpr::new(Arc::clone(&in_list))) as Arc<dyn PhysicalExpr>;
         let true_size = encode_physical_expr_to_bytes(&lit(true)).unwrap().len();
 
-        let decoded = decode(&not_in, &schema, true_size);
-        assert_eq!(decoded.to_string(), "true");
-
-        let batch = utf8_batch(&schema, &["h-other", &format!("{long}-00")]);
-        let (original_selected, decoded_selected) = assert_fail_open(&not_in, &decoded, &batch);
-        assert_eq!(original_selected, vec![true, false]);
-        assert_eq!(decoded_selected, vec![true, true]);
+        assert_unsupported(DynFilterPayload::from_datafusion_expr(&not_in, true_size).unwrap_err());
     }
 
     #[tokio::test]
@@ -2001,8 +2103,10 @@ mod remote_membership_tests {
             "HashExpr routing seed must survive the wire"
         );
 
-        // A payload of plain `true` — the whole-payload fallback, and what the previous
-        // encoder shipped for every lookup — is still readable.
+        // Receivers still accept a plain `true` payload: an older sender could publish one,
+        // and a producer may legitimately publish `true` itself. This transport no longer
+        // synthesizes `true` as an encoding fallback, so the decode-side compatibility stays
+        // while the encode-side fallback is gone.
         let legacy_bytes = encode_physical_expr_to_bytes(&lit(true)).unwrap();
         assert!(legacy_bytes.len() < bytes.len());
         let legacy_decoded = DynFilterPayload::Datafusion(legacy_bytes)

@@ -18,7 +18,9 @@ use std::sync::{Arc, Mutex, RwLock, Weak};
 use std::time::Duration;
 
 use api::v1::region::{RemoteDynFilterUnregister, RemoteDynFilterUpdate};
-use common_query::request::{DynFilterPayload, REMOTE_DYN_FILTER_PAYLOAD_MAX_BYTES};
+use common_query::request::{
+    DynFilterPayload, REMOTE_DYN_FILTER_PAYLOAD_MAX_BYTES, is_dyn_filter_unsupported,
+};
 use common_runtime::spawn_global;
 use common_telemetry::{debug, warn};
 use datafusion_physical_expr::PhysicalExpr;
@@ -420,6 +422,15 @@ async fn fanout_snapshot_for_query(
                     .with_label_values(&["unsupported"])
                     .inc();
                 warn!("Ignored unsupported remote dynamic filter producer payload");
+                return true;
+            }
+            Err(error) if is_dyn_filter_unsupported(&error) => {
+                // Transport never rewrites a predicate to `true`: an unsupported snapshot is
+                // skipped for this generation, and later generations may still be shipped.
+                REMOTE_DYN_FILTER_ENCODE_TOTAL
+                    .with_label_values(&["unsupported"])
+                    .inc();
+                warn!(error; "Ignored remote dynamic filter snapshot without a wire form");
                 return true;
             }
             Err(error) => {
@@ -828,7 +839,10 @@ mod tests {
     use async_trait::async_trait;
     use common_meta::peer::Peer;
     use common_query::request::QueryRequest;
-    use datafusion_physical_expr::expressions::{Column, lit};
+    use datafusion::execution::TaskContext;
+    use datafusion::physical_plan::joins::join_hash_map::JoinHashMapU32;
+    use datafusion::physical_plan::joins::{HashTableLookupExpr, Map, SeededRandomState};
+    use datafusion_physical_expr::expressions::{Column, NotExpr, lit};
     use session::ReadPreference;
     use uuid::Uuid;
 
@@ -1007,6 +1021,42 @@ mod tests {
             .collect();
 
         Arc::new(DynamicFilterPhysicalExpr::new(children, lit(true) as _))
+    }
+
+    /// `NOT lookup` over a hand-built lookup: no key list, and no membership-free conjunct.
+    fn unsupported_lookup_predicate() -> Arc<dyn PhysicalExpr> {
+        let column = Arc::new(Column::new("host", 0)) as Arc<dyn PhysicalExpr>;
+        let lookup = Arc::new(HashTableLookupExpr::new(
+            vec![Arc::clone(&column)],
+            SeededRandomState::with_seed(0),
+            Arc::new(Map::HashMap(Box::new(JoinHashMapU32::with_capacity(0)))),
+            "hash_lookup".to_string(),
+            None,
+        )) as Arc<dyn PhysicalExpr>;
+
+        Arc::new(NotExpr::new(lookup)) as Arc<dyn PhysicalExpr>
+    }
+
+    fn host_schema() -> Arc<arrow_schema::Schema> {
+        Arc::new(arrow_schema::Schema::new(vec![arrow_schema::Field::new(
+            "host",
+            arrow_schema::DataType::Utf8,
+            true,
+        )]))
+    }
+
+    /// Decodes a recorded update the way a region receiver does.
+    fn decode_recorded_payload(
+        update: &RecordedUpdate,
+        schema: &Arc<arrow_schema::Schema>,
+    ) -> Arc<dyn PhysicalExpr> {
+        DynFilterPayload::Datafusion(update.payload.clone())
+            .decode_datafusion_expr(
+                &TaskContext::default(),
+                schema,
+                REMOTE_DYN_FILTER_PAYLOAD_MAX_BYTES,
+            )
+            .unwrap()
     }
 
     #[test]
@@ -1338,6 +1388,101 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn fanout_skips_unsupported_producer_snapshot() {
+        let query_id = test_query_id(11);
+        let registry = Arc::new(QueryDynFilterRegistry::new(query_id));
+        let filter = test_dyn_filter(&["host"]);
+        let filter_id = test_filter_id(1);
+        let entry = match registry.register_remote_dyn_filter(filter_id.clone(), filter.clone()) {
+            EntryRegistration::Inserted(entry) => entry,
+            other => panic!("unexpected registration result: {other:?}"),
+        };
+        let subscriber = Subscriber::new(RegionId::new(1024, 7), test_target(1));
+        assert_eq!(
+            registry.register_subscriber(&filter_id, subscriber),
+            SubscriberRegistration::Added
+        );
+
+        let handler = Arc::new(RecordingRegionQueryHandler::default());
+        let handler_ref = handler.clone() as RegionQueryHandlerRef;
+
+        // `NOT lookup` has no wire form and no membership-free conjunct: transport must
+        // not rewrite it to `true`, so this generation is skipped instead of published.
+        filter.update(unsupported_lookup_predicate() as _).unwrap();
+        registry
+            .fanout_snapshot(&handler_ref, &entry, filter.as_ref(), false)
+            .await;
+        assert!(
+            handler.updates().is_empty(),
+            "unsupported snapshots must not reach region subscribers"
+        );
+
+        // A representable generation is still published, and the skipped one does not
+        // stop the fanout.
+        filter.update(lit(false) as _).unwrap();
+        registry
+            .fanout_snapshot(&handler_ref, &entry, filter.as_ref(), false)
+            .await;
+        assert_eq!(handler.updates().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn fanout_publishes_producer_supplied_true_after_restrictive_generation() {
+        let query_id = test_query_id(12);
+        let registry = Arc::new(QueryDynFilterRegistry::new(query_id));
+        let filter = test_dyn_filter(&["host"]);
+        let filter_id = test_filter_id(1);
+        let entry = match registry.register_remote_dyn_filter(filter_id.clone(), filter.clone()) {
+            EntryRegistration::Inserted(entry) => entry,
+            other => panic!("unexpected registration result: {other:?}"),
+        };
+        let subscriber = Subscriber::new(RegionId::new(1024, 7), test_target(1));
+        assert_eq!(
+            registry.register_subscriber(&filter_id, subscriber),
+            SubscriberRegistration::Added
+        );
+
+        let handler = Arc::new(RecordingRegionQueryHandler::default());
+        let handler_ref = handler.clone() as RegionQueryHandlerRef;
+        let schema = host_schema();
+        let receiver = Arc::new(DynamicFilterPhysicalExpr::new(
+            vec![Arc::new(Column::new("host", 0)) as _],
+            lit(true) as _,
+        ));
+
+        // A restrictive generation reaches the region and is applied there.
+        filter.update(lit(false) as _).unwrap();
+        registry
+            .fanout_snapshot(&handler_ref, &entry, filter.as_ref(), false)
+            .await;
+        let updates = handler.updates();
+        assert_eq!(updates.len(), 1);
+        let restrictive = decode_recorded_payload(&updates[0], &schema);
+        assert_eq!(restrictive.to_string(), "false");
+        receiver.update(restrictive).unwrap();
+        let restrictive_generation = receiver.snapshot_generation();
+        assert_eq!(receiver.current().unwrap().to_string(), "false");
+
+        // A `true` the *producer* itself publishes is a real predicate, not the removed
+        // synthesized fallback: it is published, decoded and applied as usual.
+        filter.update(lit(true) as _).unwrap();
+        registry
+            .fanout_snapshot(&handler_ref, &entry, filter.as_ref(), false)
+            .await;
+        let updates = handler.updates();
+        assert_eq!(updates.len(), 2);
+        assert!(updates[1].generation > updates[0].generation);
+        let widened = decode_recorded_payload(&updates[1], &schema);
+        assert_eq!(widened.to_string(), "true");
+        receiver.update(widened).unwrap();
+        assert!(
+            receiver.snapshot_generation() > restrictive_generation,
+            "the receiver generation must advance for a producer-supplied `true`"
+        );
+        assert_eq!(receiver.current().unwrap().to_string(), "true");
+    }
+
+    #[tokio::test]
     async fn fanout_task_waits_for_dynamic_filter_notifications() {
         let query_id = test_query_id(3);
         let manager = Arc::new(DynFilterRegistryManager::default());
@@ -1587,6 +1732,51 @@ mod tests {
 
         drop(lease);
         handler.wait_for_unregister_count(1).await;
+        wait_for_registry_drop(registry_weak).await;
+    }
+
+    #[tokio::test]
+    async fn fanout_task_skips_unsupported_final_generation_and_cleans_up() {
+        let query_id = test_query_id(13);
+        let manager = Arc::new(DynFilterRegistryManager::default());
+        let lease = manager.acquire_lease(query_id);
+        let registry_weak = Arc::downgrade(lease.registry.as_ref().unwrap());
+        let filter = test_dyn_filter(&["host"]);
+        let filter_id = test_filter_id(1);
+        let _ = lease
+            .registry()
+            .register_remote_dyn_filter(filter_id.clone(), filter.clone());
+        let subscriber = Subscriber::new(RegionId::new(1024, 7), test_target(1));
+        assert_eq!(
+            lease.registry().register_subscriber(&filter_id, subscriber),
+            SubscriberRegistration::Added
+        );
+
+        let handler = Arc::new(RecordingRegionQueryHandler::default());
+        lease.ensure_fanout_task(handler.clone() as RegionQueryHandlerRef);
+
+        // The supported initial generation installs a predicate on the region.
+        handler.wait_for_update_count(1).await;
+        assert_eq!(
+            decode_recorded_payload(&handler.updates()[0], &host_schema()).to_string(),
+            "true"
+        );
+
+        // The final generation has no wire form: transport must not synthesize `true`, so
+        // no update RPC is emitted for it, and the fanout still cleans up exactly once.
+        filter.update(unsupported_lookup_predicate() as _).unwrap();
+        filter.mark_complete();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        drop(lease);
+        handler.wait_for_unregister_count(1).await;
+
+        assert_eq!(
+            handler.updates().len(),
+            1,
+            "the unsupported final generation must not reach regions"
+        );
+        assert_eq!(handler.unregisters().len(), 1);
         wait_for_registry_drop(registry_weak).await;
     }
 
