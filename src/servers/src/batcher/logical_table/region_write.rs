@@ -151,9 +151,11 @@ impl PhysicalFlushPartitionProvider for PartitionManagerPhysicalFlushAdapter {
         &self,
         table_info: &TableInfo,
     ) -> partition::error::Result<(PartitionRuleRef, HashMap<u32, Option<u64>>)> {
-        self.partition_manager
+        let partition = self
+            .partition_manager
             .find_table_partition_rule(table_info)
-            .await
+            .await?;
+        Ok((partition.rule, partition.versions))
     }
 }
 

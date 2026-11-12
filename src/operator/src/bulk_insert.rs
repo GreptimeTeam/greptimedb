@@ -14,11 +14,11 @@
 
 use std::collections::HashSet;
 
+use api::v1::ArrowIpc;
 use api::v1::flow::{DirtyWindowRequest, DirtyWindowRequests};
 use api::v1::region::{
     BulkInsertRequest, RegionRequest, RegionRequestHeader, bulk_insert_request, region_request,
 };
-use api::v1::{ArrowIpc, PartitionExprVersion};
 use arrow::compute;
 use arrow::record_batch::RecordBatch;
 use bytes::Bytes;
@@ -178,16 +178,12 @@ impl Inserter {
         let partition_timer = metrics::HANDLE_BULK_INSERT_ELAPSED
             .with_label_values(&["partition"])
             .start_timer();
-        let (partition_rule, partition_versions) = self
-            .partition_manager
-            .find_table_partition_rule(&table_info)
+        let partitioner = TablePartitioner::try_new(&self.partition_manager, &table_info)
             .await
-            .context(error::InvalidPartitionSnafu)?;
+            .context(error::SplitInsertSnafu)?;
 
         // find partitions for each row in the record batch
-        let region_masks = partition_rule
-            .split_record_batch(&record_batch)
-            .context(error::SplitInsertSnafu)?;
+        let region_masks = partitioner.split_record_batch(&record_batch)?;
         partition_timer.observe_duration();
 
         // fast path: only one region.
@@ -199,10 +195,7 @@ impl Inserter {
             // SAFETY: region masks length checked
             let (region_number, _) = region_masks.into_iter().next().unwrap();
             let region_id = RegionId::new(table_id, region_number);
-            let partition_expr_version = partition_versions
-                .get(&region_number)
-                .copied()
-                .unwrap_or_default();
+            let partition_expr_version = partitioner.version(region_number);
             let request = RegionRequest {
                 header: Some(RegionRequestHeader {
                     tracing_context: TracingContext::from_current_span().to_w3c(),
@@ -211,8 +204,7 @@ impl Inserter {
                 body: Some(region_request::Body::BulkInsert(BulkInsertRequest {
                     skip_wal,
                     region_id: region_id.as_u64(),
-                    partition_expr_version: partition_expr_version
-                        .map(|value| PartitionExprVersion { value }),
+                    partition_expr_version,
                     aligned_schema_version: None,
                     body: Some(bulk_insert_request::Body::ArrowIpc(ArrowIpc {
                         schema: schema_bytes.clone(),
@@ -267,10 +259,7 @@ impl Inserter {
             if mask.select_none() {
                 continue;
             }
-            let partition_expr_version = partition_versions
-                .get(&region_id.region_number())
-                .copied()
-                .unwrap_or_default();
+            let partition_expr_version = partitioner.version(region_id.region_number());
             let peer = peers
                 .remove(&region_id)
                 .context(partition::error::FindLeaderSnafu {
@@ -333,8 +322,7 @@ impl Inserter {
                         body: Some(region_request::Body::BulkInsert(BulkInsertRequest {
                             skip_wal,
                             region_id: region_id.as_u64(),
-                            partition_expr_version: partition_expr_version
-                                .map(|value| PartitionExprVersion { value }),
+                            partition_expr_version,
                             aligned_schema_version: None,
                             body: Some(bulk_insert_request::Body::ArrowIpc(ArrowIpc {
                                 schema: schema_bytes,

@@ -347,11 +347,11 @@ async fn test_logical_split_rows_rejects_physical_only_partition_column() {
         .await
         .unwrap();
 
-    let (partition_rule, _) = partition_manager
+    let partition = partition_manager
         .find_table_partition_rule(&logical_table_info)
         .await
         .unwrap();
-    assert_eq!(&["a"], partition_rule.partition_columns());
+    assert_eq!(&["a"], partition.rule.partition_columns());
 
     let error = partition_manager
         .split_rows(
@@ -467,15 +467,17 @@ async fn test_partition_routing_with_empty_default_expression() {
         )])
         .unwrap();
         for table_info in [&info, &logical_info] {
-            let (rule, _) = manager.find_table_partition_rule(table_info).await.unwrap();
+            let partition = manager.find_table_partition_rule(table_info).await.unwrap();
             for (host, expected) in hosts.into_iter().zip(expected_regions) {
                 assert_eq!(
-                    rule.find_region(&[host.map(value).unwrap_or(Value::Null)])
+                    partition
+                        .rule
+                        .find_region(&[host.map(value).unwrap_or(Value::Null)])
                         .unwrap(),
                     expected
                 );
             }
-            let splits = rule.split_record_batch(&batch).unwrap();
+            let splits = partition.rule.split_record_batch(&batch).unwrap();
             assert_eq!(splits.len(), target_count as usize + 1);
             for (region, mask) in splits {
                 let selected = mask
