@@ -1281,6 +1281,35 @@ mod test {
     }
 
     #[tokio::test]
+    async fn range_from_derived_query_without_time_index_err() {
+        let queries = [
+            (
+                r#"SELECT ts, avg(value) RANGE '5m'
+                FROM (SELECT now() AS ts, 1.0 AS value)
+                ALIGN '1h' BY (1)"#,
+                "Cannot find time index column in table fields:[ts, value], metadata:{}",
+            ),
+            (
+                r#"SELECT tmp.ts, avg(tmp.value) RANGE '5m'
+                FROM (SELECT now() AS ts, 1.0 AS value) AS tmp
+                ALIGN '1h' BY (1)"#,
+                "Cannot find time index column in table fields:[tmp.ts, tmp.value], metadata:{}",
+            ),
+            (
+                r#"WITH tmp AS (SELECT now() AS ts, 1.0 AS value)
+                SELECT ts, avg(value) RANGE '5m'
+                FROM tmp
+                ALIGN '1h' BY (1)"#,
+                "Cannot find time index column in table fields:[tmp.ts, tmp.value], metadata:{}",
+            ),
+        ];
+
+        for (query, expected) in queries {
+            assert_eq!(do_query(query).await.unwrap_err().to_string(), expected);
+        }
+    }
+
+    #[tokio::test]
     async fn range_from_derived_query_without_by_err() {
         let queries = [
             r#"SELECT timestamp, tag_0, avg(field_0) RANGE '5m'
