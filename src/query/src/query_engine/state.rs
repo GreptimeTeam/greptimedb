@@ -110,11 +110,6 @@ pub struct QueryEngineState {
     experimental_native_promql: bool,
     /// Whether this engine plans distributed statements.
     with_dist_planner: bool,
-    /// The partition rule this engine plans regions with, when it has one.
-    ///
-    /// It is the only source of "how many regions serve this table's read", and a planner that has
-    /// to place a node which cannot be placed in more than one region asks it before choosing.
-    partition_rule_manager: Option<PartitionRuleManagerRef>,
 }
 
 impl fmt::Debug for QueryEngineState {
@@ -336,7 +331,6 @@ impl QueryEngineState {
             plugins,
             experimental_native_promql: options.experimental_native_promql,
             with_dist_planner,
-            partition_rule_manager,
             scalar_functions: Arc::new(RwLock::new(HashMap::new())),
         })
     }
@@ -545,14 +539,6 @@ impl QueryEngineState {
     /// Whether this engine plans distributed statements.
     pub(crate) fn with_dist_planner(&self) -> bool {
         self.with_dist_planner
-    }
-
-    /// The partition rule this engine plans regions with, when it has one.
-    ///
-    /// Read by a planner that has to know how many regions hold a table's rows before it can say
-    /// whether one region holds everything its plan reads.
-    pub(crate) fn partition_rule_manager(&self) -> Option<&PartitionRuleManagerRef> {
-        self.partition_rule_manager.as_ref()
     }
 
     pub fn catalog_manager(&self) -> &CatalogManagerRef {
@@ -952,7 +938,7 @@ mod tests {
         let raw_plan = DfLogicalPlan::Extension(Extension {
             node: Arc::new(raw),
         });
-        for (disjoint, needs_router) in [(true, false), (false, true)] {
+        for (disjoint, needs_router) in [(true, true), (false, true)] {
             let fused = FusedSeries::try_new(
                 Arc::from("metric"),
                 tree.clone(),
@@ -990,10 +976,12 @@ mod tests {
                 "disjoint={disjoint}: {analyzed}"
             );
             if let Some(router) = child.downcast_ref::<SeriesRepartitionExec>() {
-                assert_eq!(
+                // A router by the raw primary key reconciles interleaved frames into contiguous
+                // series; the ordering below it is whatever the region's read declared.
+                assert!(matches!(
                     series_frame_ordering(router.children()[0].schema().as_ref()).unwrap(),
-                    SeriesOrdering::Interleaved
-                );
+                    SeriesOrdering::Contiguous | SeriesOrdering::Interleaved
+                ));
             }
             assert_eq!(
                 series_frame_ordering(child.schema().as_ref()).unwrap(),

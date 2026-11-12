@@ -1517,20 +1517,17 @@ mod tests {
         assert!(message.contains("Expected true or false"), "{message}");
     }
 
-    /// One deployment, one topology: the raw-topology admission gate admits the same shapes
-    /// wherever an engine's regions are, and an engine with no distributed planner plans no region
-    /// for the gate to judge.
-    ///
-    /// A per-series statement reads its table where that table is, in both deployments: only a
-    /// statement whose result depends on pieces held by different regions - cross-table work here -
-    /// reads through one source per region.
+    /// One deployment, one topology: an engine that plans regions reads every selector through one
+    /// source per region, so the admission gate admits the same shapes wherever those regions are.
+    /// An engine with no distributed planner plans no region, so its plans keep the shapes a region
+    /// runs itself and there is nothing for the gate to judge.
     #[tokio::test]
     async fn test_native_promql_admission_is_the_same_for_both_deployments() {
         for (with_dist_planner, query, sourced) in [
             (false, "some_metric + other_metric", true),
             (false, "rate(some_metric[5m])", false),
             (true, "some_metric + other_metric", true),
-            (true, "rate(some_metric[5m])", false),
+            (true, "rate(some_metric[5m])", true),
         ] {
             let engine = create_promql_test_engine_with(
                 crate::options::QueryOptions {
@@ -1563,8 +1560,8 @@ mod tests {
                 "with_dist_planner={with_dist_planner}, query={query}: {display}"
             );
             if with_dist_planner {
-                // The gate admits the plan instead of replanning it through the legacy route: a
-                // per-series read inside the region that holds it, or one source per region.
+                // The gate admits the plan instead of replanning it through the legacy route: one
+                // source per region under a fused node.
                 assert!(remote_native_raw_plan_supported(&plan), "{display}");
             }
             assert_eq!(
