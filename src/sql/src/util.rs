@@ -43,6 +43,9 @@ use crate::statements::tql::Tql;
 
 const SCHEMA_MATCHER: &str = "__schema__";
 const DATABASE_MATCHER: &str = "__database__";
+/// The table PromQL `info` reads when its label selector names no info metric. The planner
+/// decides the same thing in `query`'s `info_input`, and the two have to agree.
+const DEFAULT_INFO_METRIC: &str = "target_info";
 
 /// Format an [ObjectName] without any quote of its idents.
 pub fn format_raw_object_name(name: &ObjectName) -> String {
@@ -479,6 +482,32 @@ fn extract_tables_from_prom_expr(expr: &PromExpr, names: &mut HashSet<ObjectName
     struct TableCollector<'a> {
         names: &'a mut HashSet<ObjectName>,
         complete: bool,
+        /// The label selectors of `info` calls that name no metric. Their call has already
+        /// recorded the table they read, and the walk reaches them after it.
+        default_info_selectors: Vec<*const PromVectorSelector>,
+    }
+
+    impl TableCollector<'_> {
+        /// `info` reads [`DEFAULT_INFO_METRIC`] when its label selector is absent or carries no
+        /// `__name__` matcher, a table that appears nowhere in the expression.
+        fn visit_info(&mut self, args: &[Box<PromExpr>]) -> bool {
+            match args.get(1).map(|labels| labels.as_ref()) {
+                None => {}
+                Some(PromExpr::VectorSelector(labels))
+                    if labels.name.is_none()
+                        && labels.matchers.find_matchers(METRIC_NAME).is_empty() =>
+                {
+                    self.default_info_selectors.push(labels);
+                }
+                // Names its own metric, or is not a selector at all: the walk reads it.
+                Some(_) => return true,
+            }
+            self.names
+                .insert(ObjectName(vec![ObjectNamePart::Identifier(Ident::new(
+                    DEFAULT_INFO_METRIC,
+                ))]));
+            true
+        }
     }
 
     impl ExprVisitor for TableCollector<'_> {
@@ -486,8 +515,19 @@ fn extract_tables_from_prom_expr(expr: &PromExpr, names: &mut HashSet<ObjectName
 
         fn pre_visit(&mut self, expr: &PromExpr) -> std::result::Result<bool, Self::Error> {
             self.complete &= match expr {
+                PromExpr::VectorSelector(selector)
+                    if self
+                        .default_info_selectors
+                        .iter()
+                        .any(|seen| std::ptr::eq(*seen, selector)) =>
+                {
+                    true
+                }
                 PromExpr::VectorSelector(selector) => {
                     extract_metric_name_from_vector_selector(selector, self.names)
+                }
+                PromExpr::Call(call) if call.func.name == "info" => {
+                    self.visit_info(&call.args.args)
                 }
                 PromExpr::MatrixSelector(PromMatrixSelector { vs, .. }) => {
                     extract_metric_name_from_vector_selector(vs, self.names)
@@ -502,6 +542,7 @@ fn extract_tables_from_prom_expr(expr: &PromExpr, names: &mut HashSet<ObjectName
     let mut collector = TableCollector {
         names,
         complete: true,
+        default_info_selectors: Vec::new(),
     };
     let _ = walk_expr(&mut collector, expr);
     collector.complete
@@ -780,6 +821,19 @@ TQL EVAL (now() - '15s'::interval, now(), '5s') count_values("status_code", {__n
             (r#"{__name__=~"cpu.*"}"#, false, vec![]),
             (r#"{__name__=~"cpu.*" or job="api"}"#, false, vec![]),
             (r#"cpu{__schema__=~"private.*"}"#, false, vec![]),
+            // `info` reads `target_info` unless its label selector names the info metric.
+            ("info(cpu)", true, vec!["cpu", "target_info"]),
+            (
+                r#"info(cpu, {version="v1"})"#,
+                true,
+                vec!["cpu", "target_info"],
+            ),
+            (
+                r#"info(cpu, {__name__="build_info", version="v1"})"#,
+                true,
+                vec!["build_info", "cpu"],
+            ),
+            (r#"info(cpu, {__name__=~".+_info"})"#, false, vec!["cpu"]),
         ];
 
         for (promql, expected_complete, expected_tables) in testcases {
