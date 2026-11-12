@@ -1528,6 +1528,14 @@ impl ManifestContext {
         self.manifest_manager.read().await.has_update().await
     }
 
+    /// Waits for the in-flight checkpoint of a stopped manager, without holding the manifest
+    /// lock. A stopped manager starts no checkpoint, so this instance no longer writes the
+    /// manifest directory afterwards.
+    pub(crate) async fn wait_for_checkpoint_after_stop(&self) {
+        let done = self.manifest_manager.read().await.pending_checkpoint_done();
+        done.await;
+    }
+
     /// Returns the current region role state.
     pub(crate) fn current_state(&self) -> RegionRoleState {
         self.state.load()
