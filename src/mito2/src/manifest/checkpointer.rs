@@ -250,6 +250,13 @@ impl Checkpointer {
     }
 
     #[cfg(test)]
+    pub(crate) fn abort_checkpoint_task(&self) {
+        if let Some(handle) = &self.checkpoint_task {
+            handle.abort();
+        }
+    }
+
+    #[cfg(test)]
     pub(crate) fn pending_checkpoint_wait_started(&self) -> Arc<Notify> {
         self.pending_checkpoint_wait_started.clone()
     }
