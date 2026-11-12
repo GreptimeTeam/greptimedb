@@ -439,6 +439,12 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
                 return false;
             }
         };
+        let (catalog, schema) = if let Some(database) = database {
+            let (catalog, schema) = parse_optional_catalog_and_schema_from_db_string(database);
+            (catalog.unwrap_or_else(|| self.session.catalog()), schema)
+        } else {
+            (self.session.catalog(), self.session.schema())
+        };
         // if not specified then **greptime** will be used
         let username = String::from_utf8_lossy(username);
 
@@ -458,13 +464,6 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
                 let Ok(token) = std::str::from_utf8(token) else {
                     warn!("Bearer token is not valid UTF-8");
                     return false;
-                };
-                let catalog = if let Some(database) = database {
-                    parse_optional_catalog_and_schema_from_db_string(database)
-                        .0
-                        .unwrap_or_else(|| self.session.catalog())
-                } else {
-                    self.session.catalog()
                 };
                 user_provider
                     .authenticate_bearer_token(token, &catalog)
@@ -490,17 +489,13 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
             };
             match result {
                 Ok(userinfo) => {
-                    // An explicit handshake database is authorized by on_init. Without
-                    // one, the session already exposes its default catalog and schema.
-                    if database.is_none()
-                        && let Err(e) = user_provider
-                            .authorize(&self.session.catalog(), &self.session.schema(), &userinfo)
-                            .await
-                    {
+                    // on_init writes an ERR packet without aborting the handshake.
+                    // Reject here so opensrv closes the connection before its command loop.
+                    if let Err(e) = user_provider.authorize(&catalog, &schema, &userinfo).await {
                         METRIC_AUTH_FAILURE
                             .with_label_values(&[e.status_code().as_ref()])
                             .inc();
-                        warn!(e; "Failed to authorize the default MySQL database");
+                        warn!(e; "Failed to authorize the MySQL handshake database");
                         return false;
                     }
                     user_info = Some(userinfo);
@@ -517,6 +512,19 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
         let user_info =
             user_info.unwrap_or_else(|| auth::userinfo_by_name(Some(username.to_string())));
 
+        match self.query_handler.is_valid_schema(&catalog, &schema).await {
+            Ok(true) => {}
+            Ok(false) => {
+                warn!("Unknown MySQL handshake database");
+                return false;
+            }
+            Err(error) => {
+                warn!(error; "Failed to validate the MySQL handshake database");
+                return false;
+            }
+        }
+        self.session.set_catalog(catalog);
+        self.session.set_schema(schema);
         self.session.set_user_info(user_info);
 
         true
@@ -1056,8 +1064,8 @@ mod tests {
             unimplemented!()
         }
 
-        async fn is_valid_schema(&self, _: &str, _: &str) -> Result<bool> {
-            Ok(true)
+        async fn is_valid_schema(&self, _: &str, schema: &str) -> Result<bool> {
+            Ok(schema != "missing")
         }
     }
 
@@ -1069,6 +1077,42 @@ mod tests {
             1,
             1024,
         )
+    }
+
+    #[tokio::test]
+    async fn test_handshake_rejects_unauthorized_or_missing_database() {
+        for (allowed, database, accepted) in [
+            ("allowed", None, false),
+            ("allowed", Some("denied"), false),
+            ("allowed", Some("allowed"), true),
+            ("missing", Some("missing"), false),
+            ("public", None, true),
+        ] {
+            let mut shim = create_shim();
+            shim.user_provider = Some(Arc::new(auth::tests::MockUserProvider {
+                schema: allowed.to_string(),
+                ..Default::default()
+            }));
+            let result =
+                <MysqlInstanceShim as AsyncMysqlShim<tokio::io::Sink>>::authenticate_with_database(
+                    &shim,
+                    MysqlAuthMethod::CLEAR_PASSWORD_PLUGIN,
+                    b"greptime",
+                    &[],
+                    b"greptime\0",
+                    database.map(str::as_bytes),
+                )
+                .await;
+            assert_eq!(accepted, result, "{allowed}: {database:?}");
+            assert_eq!(
+                if accepted {
+                    database.unwrap_or("public")
+                } else {
+                    "public"
+                },
+                shim.session.schema()
+            );
+        }
     }
 
     #[tokio::test]

@@ -463,7 +463,10 @@ async fn test_bearer_token_auth_over_clear_password() -> Result<()> {
             let value: u32 = connection.query_first("SELECT 1").await.unwrap().unwrap();
             assert_eq!(1, value);
             assert_eq!(1, provider.authentications.load(Ordering::Relaxed));
-            assert_eq!(1, provider.authorizations.load(Ordering::Relaxed));
+            assert_eq!(
+                1 + usize::from(database.is_some()),
+                provider.authorizations.load(Ordering::Relaxed)
+            );
             connection.disconnect().await.unwrap();
             server.shutdown().await?;
         }

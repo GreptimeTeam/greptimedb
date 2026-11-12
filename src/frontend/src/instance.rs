@@ -396,6 +396,18 @@ impl Instance {
             }
             _ => {
                 query_interceptor.pre_execute(Some(&stmt), None, query_ctx.clone())?;
+                if let Statement::Use(schema) = &stmt
+                    && let Some(provider) = self.plugins.get::<auth::UserProviderRef>()
+                {
+                    provider
+                        .authorize(
+                            query_ctx.current_catalog(),
+                            schema,
+                            &query_ctx.current_user(),
+                        )
+                        .await
+                        .context(PermissionSnafu)?;
+                }
                 if let Statement::Copy(sql::statements::copy::Copy::CopyDatabase(
                     CopyDatabase::From(arg),
                 )) = &stmt
@@ -3473,6 +3485,77 @@ mod tests {
             .unwrap();
         assert_eq!(axum::http::StatusCode::FORBIDDEN, response.status());
 
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_sql_use_authorizes_before_changing_schema() -> TestResult<()> {
+        struct SchemaProvider;
+        #[async_trait::async_trait]
+        impl auth::UserProvider for SchemaProvider {
+            fn name(&self) -> &str {
+                "schema-test"
+            }
+            async fn authenticate(
+                &self,
+                _: auth::Identity<'_>,
+                _: auth::Password<'_>,
+            ) -> auth::error::Result<UserInfoRef> {
+                unreachable!("the request already has an authenticated user")
+            }
+            async fn authorize(
+                &self,
+                _: &str,
+                schema: &str,
+                _: &UserInfoRef,
+            ) -> auth::error::Result<()> {
+                if schema == "public" {
+                    Ok(())
+                } else {
+                    auth::error::PermissionDeniedSnafu.fail()
+                }
+            }
+        }
+        let plugins = Plugins::new();
+        plugins.insert::<auth::UserProviderRef>(Arc::new(SchemaProvider));
+        let catalog =
+            catalog::memory::MemoryCatalogManager::new_with_table(test_table(1024, "source")?);
+        catalog
+            .register_schema_sync(catalog::RegisterSchemaRequest {
+                catalog: "greptime".to_string(),
+                schema: "denied".to_string(),
+            })
+            .unwrap();
+        let instance = test_instance_with_catalog_manager(
+            catalog,
+            test_table(1025, "target")?,
+            plugins,
+            None,
+            Arc::new(NoopProcedureExecutor),
+        )
+        .await?;
+        for sql in [
+            "Use denied",
+            " USE denied",
+            "/* switch */ USE denied",
+            "USE public; Use denied",
+        ] {
+            let ctx = QueryContext::arc();
+            let results = instance.do_query_inner(sql, ctx.clone()).await;
+            assert_eq!(
+                StatusCode::PermissionDenied,
+                results.last().unwrap().as_ref().unwrap_err().status_code(),
+                "{sql}"
+            );
+            assert_eq!("public", ctx.current_schema());
+        }
+        assert!(
+            instance
+                .do_query_inner("USE public", QueryContext::arc())
+                .await
+                .remove(0)
+                .is_ok()
+        );
         Ok(())
     }
 
