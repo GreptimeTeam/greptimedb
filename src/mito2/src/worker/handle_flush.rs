@@ -57,7 +57,7 @@ impl StagingRegions {
         regions.insert(region.region_id, Arc::downgrade(region));
         let mut usage = 0;
         regions.retain(|_, region| match region.upgrade() {
-            Some(region) if region.is_staging_or_staged_edit() => {
+            Some(region) if region.in_staging_session() => {
                 usage += region_memtable_usage(&region.version());
                 true
             }

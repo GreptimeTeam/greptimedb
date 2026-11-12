@@ -190,6 +190,34 @@ impl EventListener for StallListener {
     }
 }
 
+/// Counts write stalls, for tests that wait for more than one.
+#[derive(Default)]
+pub struct CountingStallListener {
+    count: AtomicUsize,
+    notify: Notify,
+}
+
+impl CountingStallListener {
+    /// Waits until the engine has stalled writes at least `expected` times.
+    pub async fn wait_for_count(&self, expected: usize) {
+        loop {
+            let notified = self.notify.notified();
+            if self.count.load(Ordering::Relaxed) >= expected {
+                return;
+            }
+            notified.await;
+        }
+    }
+}
+
+#[async_trait]
+impl EventListener for CountingStallListener {
+    fn on_write_stall(&self) {
+        self.count.fetch_add(1, Ordering::Relaxed);
+        self.notify.notify_waiters();
+    }
+}
+
 /// Blocks a flush at its begin event until the worker requests flush cancellation.
 ///
 /// Tests use this gate to ensure a flush is active before submitting a lifecycle DDL.
