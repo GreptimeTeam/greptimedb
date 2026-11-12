@@ -3694,10 +3694,13 @@ mod tests {
             ),
             ("COPY physical TO '/unused.parquet'", "physical", true),
         ] {
-            assert_permission_denied(
+            assert_eq!(
+                StatusCode::PermissionDenied,
                 instance
                     .check_sql_permission(&parse_one_sql(sql), &QueryContext::arc())
-                    .await,
+                    .await
+                    .unwrap_err()
+                    .status_code(),
             );
             assert_action_checked(
                 &checker,
