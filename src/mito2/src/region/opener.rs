@@ -56,7 +56,7 @@ use crate::error::{
     ObjectStoreNotFoundSnafu, RegionCorruptedSnafu, Result, StaleLogEntrySnafu,
 };
 use crate::lease::NodeLease;
-use crate::manifest::action::RegionManifest;
+use crate::manifest::action::{RegionManifest, cap_wal_release};
 use crate::manifest::manager::{RegionManifestManager, RegionManifestOptions};
 use crate::memtable::bulk::part::BulkPart;
 use crate::memtable::time_partition::TimePartitions;
@@ -627,10 +627,13 @@ impl RegionOpener {
             .max(flushed_entry_id);
         let topic_latest_entry_id = if !self.skip_wal_replay {
             check_wal_history(wal, &provider, &version_control.current().version).await?;
+            let node_id = self.file_ref_manager.node_id();
+            let replay_start = replay_from_entry_id.max(manifest.wal_replay_start(node_id));
             info!(
-                "Start replaying memtable at replay_from_entry_id: {} for region {}, manifest version: {}, flushed entry id: {}, elapsed: {:?}",
-                replay_from_entry_id,
+                "Start replaying memtable at replay_start: {} for region {}, replay_from_entry_id: {}, manifest version: {}, flushed entry id: {}, elapsed: {:?}",
+                replay_start,
                 region_id,
+                replay_from_entry_id,
                 manifest.manifest_version,
                 flushed_entry_id,
                 now.elapsed()
@@ -639,7 +642,8 @@ impl RegionOpener {
                 &provider,
                 wal_entry_reader,
                 region_id,
-                replay_from_entry_id,
+                replay_start,
+                cap_wal_release(&manifest.pending_tails, node_id, replay_start),
                 &version_control,
                 config.allow_stale_entries,
                 on_region_opened,
@@ -813,6 +817,7 @@ pub(crate) fn version_builder_from_manifest(
         .truncated_entry_id(manifest.truncated_entry_id)
         .compaction_time_window(manifest.compaction_time_window)
         .options(region_options)
+        .pending_tails(manifest.pending_tails.clone())
 }
 
 /// Updates region options by persistent options.
@@ -972,12 +977,15 @@ pub(crate) async fn check_wal_history<S: LogStore>(
         .await
 }
 
-/// Replays the mutations from WAL and inserts mutations to memtable of given region.
+/// Replays the mutations from WAL and inserts mutations to memtable of given region,
+/// then releases the WAL up to `release_entry_id`.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn replay_memtable<F>(
     provider: &Provider,
     mut wal_entry_reader: Box<dyn WalEntryReader>,
     region_id: RegionId,
     flushed_entry_id: EntryId,
+    release_entry_id: EntryId,
     version_control: &VersionControlRef,
     allow_stale_entries: bool,
     on_region_opened: F,
@@ -1072,7 +1080,7 @@ where
 
     // TODO(weny): We need to update `flushed_entry_id` in the region manifest
     // to avoid reading potentially incomplete entries in the future.
-    (on_region_opened)(region_id, flushed_entry_id, provider).await?;
+    (on_region_opened)(region_id, release_entry_id, provider).await?;
 
     let series_count = version_control.current().series_count();
     info!(
@@ -1115,7 +1123,7 @@ impl RegionLoadCacheTask {
             for level in version.ssts.levels() {
                 for file_handle in level.files.values() {
                     let file_meta = file_handle.meta_ref();
-                    if file_meta.exists_index() {
+                    if file_meta.has_downloadable_index() {
                         let puffin_key = IndexKey::new(
                             file_meta.region_id,
                             file_meta.file_id,
@@ -1539,6 +1547,8 @@ mod tests {
             compaction_time_window: None,
             sst_format,
             append_mode: None,
+            pending_tails: Default::default(),
+            handoff_floors: Default::default(),
         }
     }
 
@@ -1745,6 +1755,95 @@ mod tests {
         writer.close().unwrap();
 
         parquet_bytes
+    }
+
+    #[rstest::rstest]
+    #[case::known_size(7, true)]
+    #[case::unknown_size(0, false)]
+    #[tokio::test]
+    async fn test_preload_column_only_index(
+        #[case] index_file_size: u64,
+        #[case] expected_cached: bool,
+    ) {
+        use store_api::region_engine::RegionEngine;
+        use store_api::region_request::RegionRequest;
+
+        use crate::manifest::action::RegionEdit;
+        use crate::sst::file::{ColumnIndexMetadata, IndexType};
+        use crate::test_util::CreateRequestBuilder;
+
+        let mut env = TestEnv::new().await;
+        let engine = env.create_engine(Default::default()).await;
+        let region_id = RegionId::new(1, 1);
+        engine
+            .handle_request(
+                region_id,
+                RegionRequest::Create(CreateRequestBuilder::new().build()),
+            )
+            .await
+            .unwrap();
+        let region = engine.get_region(region_id).unwrap();
+        let write_cache = env
+            .create_write_cache(
+                ObjectStore::new(Memory::default()).unwrap(),
+                ReadableSize::mb(1),
+            )
+            .await;
+        let meta = FileMeta {
+            region_id,
+            file_id: FileId::random(),
+            index_file_size,
+            index_version: 3,
+            indexes: vec![ColumnIndexMetadata {
+                column_id: 0,
+                created_indexes: smallvec::smallvec![IndexType::HllIndex],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        assert!(meta.available_indexes.is_empty());
+        assert!(meta.exists_index());
+        assert_eq!(meta.index_version(), Some(3));
+        let key = IndexKey::new(region_id, meta.file_id, FileType::Puffin(3));
+        let path = crate::sst::location::index_file_path(
+            region.access_layer.table_dir(),
+            meta.index_id(),
+            region.access_layer.path_type(),
+        );
+        region
+            .access_layer
+            .object_store()
+            .write(&path, b"payload".as_slice())
+            .await
+            .unwrap();
+        region.version_control.apply_edit(
+            Some(RegionEdit {
+                files_to_add: vec![meta],
+                ..Default::default()
+            }),
+            &[],
+            region.file_purger.clone(),
+        );
+
+        super::RegionLoadCacheTask::new(region)
+            .fill_cache(&write_cache.file_cache())
+            .await;
+        let file_cache = write_cache.file_cache();
+        assert_eq!(file_cache.contains_key(&key), expected_cached);
+        let cached_path = file_cache.cache_file_path(key);
+        if expected_cached {
+            assert_eq!(
+                file_cache
+                    .local_store()
+                    .read(&cached_path)
+                    .await
+                    .unwrap()
+                    .to_vec(),
+                b"payload"
+            );
+        } else {
+            assert!(!file_cache.local_store().exists(&cached_path).await.unwrap());
+        }
     }
 
     #[tokio::test]

@@ -76,6 +76,7 @@ impl<S> RegionWorkerLoop<S> {
         let indexer_builder_ref = Arc::new(IndexerBuilderImpl {
             build_type: build_type.clone(),
             metadata: snapshot.metadata.clone(),
+            index_build_inputs: None,
             registry: Arc::new(crate::sst::index::registry::IndexRegistry::new(
                 self.config.inverted_index.clone(),
                 self.config.fulltext_index.clone(),
@@ -399,6 +400,7 @@ impl<S> RegionWorkerLoop<S> {
                     flushed_entry_id: None,
                     committed_sequence: None,
                     compaction_time_window: None,
+                    wal_recovery: Default::default(),
                 }),
                 &[],
                 region.file_purger.clone(),

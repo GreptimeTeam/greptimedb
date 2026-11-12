@@ -27,11 +27,12 @@ use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use common_telemetry::info;
+use snafu::ensure;
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::{RegionId, SequenceNumber};
 
-use crate::error::Result;
-use crate::manifest::action::{RegionEdit, TruncateKind};
+use crate::error::{RegionPendingTailsSnafu, Result};
+use crate::manifest::action::{PendingTail, RegionEdit, TruncateKind};
 use crate::memtable::time_partition::TimePartitions;
 use crate::memtable::version::{MemtableVersion, MemtableVersionRef};
 use crate::memtable::{MemtableBuilderRef, MemtableId};
@@ -399,6 +400,24 @@ pub(crate) struct Version {
     pub(crate) compaction_time_window: Option<Duration>,
     /// Options of the region.
     pub(crate) options: RegionOptions,
+    /// WAL ranges the region still has to recover.
+    pub(crate) pending_tails: Vec<PendingTail>,
+}
+
+impl Version {
+    pub(crate) fn has_pending_tails(&self) -> bool {
+        !self.pending_tails.is_empty()
+    }
+
+    pub(crate) fn ensure_no_pending_tails(&self) -> Result<()> {
+        ensure!(
+            !self.has_pending_tails(),
+            RegionPendingTailsSnafu {
+                region_id: self.metadata.region_id,
+            }
+        );
+        Ok(())
+    }
 }
 
 pub(crate) type VersionRef = Arc<Version>;
@@ -413,6 +432,7 @@ pub(crate) struct VersionBuilder {
     truncated_entry_id: Option<EntryId>,
     compaction_time_window: Option<Duration>,
     options: RegionOptions,
+    pending_tails: Vec<PendingTail>,
 }
 
 impl VersionBuilder {
@@ -427,6 +447,7 @@ impl VersionBuilder {
             truncated_entry_id: None,
             compaction_time_window: None,
             options: RegionOptions::default(),
+            pending_tails: Vec::new(),
         }
     }
 
@@ -441,6 +462,7 @@ impl VersionBuilder {
             truncated_entry_id: version.truncated_entry_id,
             compaction_time_window: version.compaction_time_window,
             options: version.options.clone(),
+            pending_tails: version.pending_tails.clone(),
         }
     }
 
@@ -489,6 +511,11 @@ impl VersionBuilder {
         self
     }
 
+    pub(crate) fn pending_tails(mut self, pending_tails: Vec<PendingTail>) -> Self {
+        self.pending_tails = pending_tails;
+        self
+    }
+
     /// Apply edit to the builder.
     pub(crate) fn apply_edit(mut self, edit: RegionEdit, file_purger: FilePurgerRef) -> Self {
         if let Some(entry_id) = edit.flushed_entry_id {
@@ -499,6 +526,9 @@ impl VersionBuilder {
         }
         if let Some(window) = edit.compaction_time_window {
             self.compaction_time_window = Some(window);
+        }
+        if let Some(pending_tails) = edit.wal_recovery.pending_tails {
+            self.pending_tails = pending_tails;
         }
         if !edit.files_to_add.is_empty() || !edit.files_to_remove.is_empty() {
             let mut ssts = (*self.ssts).clone();
@@ -573,6 +603,7 @@ impl VersionBuilder {
             truncated_entry_id: self.truncated_entry_id,
             compaction_time_window,
             options: self.options,
+            pending_tails: self.pending_tails,
         }
     }
 }
@@ -621,6 +652,7 @@ mod tests {
                     flushed_entry_id: None,
                     flushed_sequence: None,
                     committed_sequence: Some(sequence),
+                    wal_recovery: Default::default(),
                 }),
                 &[],
                 builder.file_purger(),

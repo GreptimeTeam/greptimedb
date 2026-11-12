@@ -12,9 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::BTreeMap;
 #[cfg(test)]
 use std::collections::HashMap;
+use std::collections::{BTreeMap, HashSet};
 use std::env;
 use std::fmt::Display;
 use std::net::SocketAddr;
@@ -31,7 +31,7 @@ use client::{Client, Database};
 use common_base::Plugins;
 use common_catalog::consts::MIN_USER_TABLE_ID;
 use common_config::Configurable;
-use common_event_recorder::EventRecorderOptions;
+use common_event_recorder::{EventRecorderOptions, EventTypeFilter};
 #[cfg(test)]
 use common_meta::DatanodeId;
 use common_meta::key::TableMetadataManager;
@@ -172,7 +172,8 @@ impl MockInstanceImpl {
         }
     }
 
-    /// Creates a standalone instance or a three-datanode cluster using local storage.
+    /// Creates a standalone instance or a three-datanode cluster using local
+    /// storage, with the event recorder disabled.
     pub async fn new(name: &str, distributed: bool) -> Self {
         let name = format!(
             "{name}_{}",
@@ -188,12 +189,18 @@ impl MockInstanceImpl {
             Self::Distributed(
                 GreptimeDbClusterBuilder::new(&name)
                     .await
+                    .with_event_recorder_options(disabled_event_recorder_options())
                     .with_datanodes(3)
                     .build(false)
                     .await,
             )
         } else {
-            Self::Standalone(GreptimeDbStandaloneBuilder::new(&name).build().await)
+            Self::Standalone(
+                GreptimeDbStandaloneBuilder::new(&name)
+                    .with_event_recorder_options(disabled_event_recorder_options())
+                    .build()
+                    .await,
+            )
         }
     }
 
@@ -337,6 +344,14 @@ impl StorageType {
 pub fn test_event_recorder_options() -> EventRecorderOptions {
     EventRecorderOptions {
         flush_interval: Duration::from_millis(100),
+        ..Default::default()
+    }
+}
+
+/// Event recorder options that record no events, for tests that count WAL writes.
+pub fn disabled_event_recorder_options() -> EventRecorderOptions {
+    EventRecorderOptions {
+        event_types: Arc::new(EventTypeFilter::Only(HashSet::new())),
         ..Default::default()
     }
 }

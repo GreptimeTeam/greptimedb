@@ -234,6 +234,7 @@ impl RegionManifestManager {
                 flushed_entry_id: Some(flushed_entry_id),
                 flushed_sequence: None,
                 committed_sequence: None,
+                wal_recovery: Default::default(),
             }));
         }
 
@@ -400,6 +401,11 @@ impl RegionManifestManager {
     /// Returns whether the manager has stopped accepting updates.
     pub(crate) fn is_stopped(&self) -> bool {
         self.stopped
+    }
+
+    /// Returns whether deltas are published by conditional create.
+    pub(crate) fn is_conditional_publication(&self) -> bool {
+        self.store.is_conditional_publication()
     }
 
     /// Installs the manifest changes from the current version to the target version (inclusive).
@@ -1067,6 +1073,7 @@ mod test {
                         flushed_entry_id: None,
                         flushed_sequence: None,
                         committed_sequence: None,
+                        wal_recovery: Default::default(),
                     })]),
                     false,
                 )

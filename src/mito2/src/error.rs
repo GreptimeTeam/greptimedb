@@ -212,6 +212,12 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Engine is stopped"))]
+    EngineStopped {
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Failed to recv result"))]
     Recv {
         #[snafu(source)]
@@ -725,6 +731,13 @@ pub enum Error {
 
     #[snafu(display("Region {} rejects writes while in staging", region_id))]
     RejectWriteInStaging {
+        region_id: RegionId,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Region {} still has WAL tails to recover", region_id))]
+    RegionPendingTails {
         region_id: RegionId,
         #[snafu(implicit)]
         location: Location,
@@ -1550,6 +1563,7 @@ impl Error {
             | Error::RegionState { .. }
             | Error::RegionTruncated { .. }
             | Error::RegionStopped { .. }
+            | Error::RegionLeaseExpired { .. }
             | Error::SerdeJson { .. }
             | Error::CompressObject { .. } => false,
             Error::OpenDal { error, .. } => !matches!(
@@ -1643,6 +1657,7 @@ impl ErrorExt for Error {
             | RegionMetadataNotFound { .. }
             | Join { .. }
             | WorkerStopped { .. }
+            | EngineStopped { .. }
             | Recv { .. }
             | DecodeWal { .. }
             | ComputeArrow { .. }
@@ -1693,6 +1708,7 @@ impl ErrorExt for Error {
             InvalidRegionRequest { source, .. } => source.status_code(),
             RegionState { .. } | UpdateManifest { .. } => StatusCode::RegionNotReady,
             RegionLeaseExpired { .. } | UnacknowledgedWrite { .. } => StatusCode::RegionNotReady,
+            RegionPendingTails { .. } => StatusCode::RegionNotReady,
             JsonOptions { .. } => StatusCode::InvalidArguments,
             EmptyRegionDir { .. } | EmptyManifestDir { .. } => StatusCode::RegionNotFound,
             ConvertValue { source, .. } => source.status_code(),
@@ -1805,6 +1821,7 @@ impl ErrorExt for Error {
             | UpdateManifest { .. }
             | RegionStopped { .. }
             | RegionBusy { .. }
+            | RegionPendingTails { .. }
             | ManualCompactionAlreadyRunning { .. }
             | FlushableRegionState { .. }
             | ManifestDeltaNotFound { .. }
@@ -2028,6 +2045,10 @@ mod tests {
             reason: "manifest applicability check rejected the edit",
         }
         .build();
+        assert!(!error.may_have_persisted_manifest_update());
+
+        // A commit refused before its PUT because the Leader deadline has passed.
+        let error = RegionLeaseExpiredSnafu { region_id }.build();
         assert!(!error.may_have_persisted_manifest_update());
 
         // This can be raised while applying an edit after its manifest file was saved.

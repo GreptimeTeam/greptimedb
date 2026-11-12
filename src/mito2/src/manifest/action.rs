@@ -14,7 +14,7 @@
 
 //! Defines [RegionMetaAction] related structs and [RegionCheckpoint].
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::time::Duration;
 
 use chrono::Utc;
@@ -95,6 +95,62 @@ pub struct RegionEdit {
     pub flushed_entry_id: Option<EntryId>,
     pub flushed_sequence: Option<SequenceNumber>,
     pub committed_sequence: Option<SequenceNumber>,
+    #[serde(flatten)]
+    pub wal_recovery: WalRecoveryEdit,
+}
+
+/// Changes an edit makes to the WAL ranges the region still has to recover.
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq)]
+pub struct WalRecoveryEdit {
+    /// The new [RegionManifest::pending_tails], whose segments of each node keep the
+    /// order and bounds described there. `None` keeps them unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_tails: Option<Vec<PendingTail>>,
+    /// Replaces the handoff floor of one node.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub handoff_floor: Option<HandoffFloor>,
+}
+
+/// WAL entries of one node in `(after, upto]` that the region still has to recover.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct PendingTail {
+    /// Id of the datanode whose WAL holds the entries.
+    pub node_id: u64,
+    pub after: EntryId,
+    pub upto: EntryId,
+    pub upto_kind: UptoKind,
+}
+
+/// Where the upper bound of a [PendingTail] comes from.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum UptoKind {
+    /// The last entry id the node reported, which names an entry that can be replayed.
+    Reported,
+    /// An upper bound found by listing the WAL objects of the node, which may name no entry.
+    Listed,
+}
+
+/// Entries of a node at or below `entry_id` are never recovered from its WAL, except
+/// those in a pending tail of the node.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HandoffFloor {
+    pub node_id: u64,
+    pub entry_id: EntryId,
+}
+
+/// Caps a release of the WAL of node `node_id` at `entry_id`, so that it keeps every
+/// pending tail of the node.
+pub(crate) fn cap_wal_release(
+    pending_tails: &[PendingTail],
+    node_id: Option<u64>,
+    entry_id: EntryId,
+) -> EntryId {
+    pending_tails
+        .iter()
+        .filter(|tail| Some(tail.node_id) == node_id)
+        .map(|tail| tail.after)
+        .fold(entry_id, EntryId::min)
 }
 
 impl RegionEdit {
@@ -191,6 +247,38 @@ pub struct RegionManifest {
     /// Whether the region is in append mode.
     #[serde(default)]
     pub append_mode: Option<bool>,
+    /// WAL ranges the region still has to recover, in the order they were added.
+    ///
+    /// The segments of one node are increasing and do not overlap, and each has
+    /// `after < upto`: a new segment of a node takes as `after` the largest of the
+    /// flushed entry id, the `upto`s of the node's existing segments and its handoff
+    /// floor, and is added only if that is below its `upto`. So the entries of a node
+    /// between two of its segments are flushed or at or below a handoff floor of the
+    /// node, and need no replay.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pending_tails: Vec<PendingTail>,
+    /// The [HandoffFloor] of each node, removed once the flushed entry id reaches it.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub handoff_floors: BTreeMap<u64, EntryId>,
+}
+
+impl RegionManifest {
+    /// Returns the entry id after which node `node_id` replays its WAL when it opens
+    /// the region. Entries up to it are flushed, left to the pending tails, or below
+    /// the handoff floor of the node.
+    ///
+    /// Entries of the node in `(after, upto]` of one of its tails belong to that tail.
+    /// Whoever adds a tail ensures that every entry id the node allocates afterwards is
+    /// above the tail's `upto`, so no later write of the node falls in a skipped range.
+    pub(crate) fn wal_replay_start(&self, node_id: Option<u64>) -> EntryId {
+        let floor = node_id.and_then(|node_id| self.handoff_floors.get(&node_id).copied());
+        self.pending_tails
+            .iter()
+            .filter(|tail| Some(tail.node_id) == node_id)
+            .map(|tail| tail.upto)
+            .chain(floor)
+            .fold(self.flushed_entry_id, EntryId::max)
+    }
 }
 
 #[cfg(test)]
@@ -204,6 +292,8 @@ impl PartialEq for RegionManifest {
             && self.truncated_entry_id == other.truncated_entry_id
             && self.compaction_time_window == other.compaction_time_window
             && self.committed_sequence == other.committed_sequence
+            && self.pending_tails == other.pending_tails
+            && self.handoff_floors == other.handoff_floors
     }
 }
 
@@ -229,6 +319,8 @@ pub struct RegionManifestBuilder {
     committed_sequence: Option<SequenceNumber>,
     sst_format: FormatType,
     append_mode: Option<bool>,
+    pending_tails: Vec<PendingTail>,
+    handoff_floors: BTreeMap<u64, EntryId>,
 }
 
 impl RegionManifestBuilder {
@@ -256,6 +348,8 @@ impl RegionManifestBuilder {
                 committed_sequence: s.committed_sequence,
                 sst_format: s.sst_format,
                 append_mode: s.append_mode,
+                pending_tails: s.pending_tails,
+                handoff_floors: s.handoff_floors,
             }
         } else {
             Default::default()
@@ -335,6 +429,12 @@ impl RegionManifestBuilder {
         if let Some(window) = edit.compaction_time_window {
             self.compaction_time_window = Some(window);
         }
+        if let Some(pending_tails) = edit.wal_recovery.pending_tails {
+            self.pending_tails = pending_tails;
+        }
+        if let Some(floor) = edit.wal_recovery.handoff_floor {
+            self.handoff_floors.insert(floor.node_id, floor.entry_id);
+        }
     }
 
     pub fn apply_truncate(&mut self, manifest_version: ManifestVersion, truncate: RegionTruncate) {
@@ -389,8 +489,11 @@ impl RegionManifestBuilder {
         self.metadata.is_some()
     }
 
-    pub fn try_build(self) -> Result<RegionManifest> {
+    pub fn try_build(mut self) -> Result<RegionManifest> {
         let metadata = self.metadata.context(RegionMetadataNotFoundSnafu)?;
+        // A floor at or below the flushed entry id no longer raises the replay start.
+        self.handoff_floors
+            .retain(|_, floor| *floor > self.flushed_entry_id);
         Ok(RegionManifest {
             metadata,
             files: self.files,
@@ -403,6 +506,8 @@ impl RegionManifestBuilder {
             compaction_time_window: self.compaction_time_window,
             sst_format: self.sst_format,
             append_mode: self.append_mode,
+            pending_tails: self.pending_tails,
+            handoff_floors: self.handoff_floors,
         })
     }
 }
@@ -597,6 +702,7 @@ impl RegionMetaActionList {
             flushed_entry_id: None,
             flushed_sequence: None,
             committed_sequence: None,
+            wal_recovery: Default::default(),
         };
         let mut partition_expr_change = None;
         let mut region_change = None;
@@ -655,6 +761,7 @@ impl RegionMetaActionList {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
 
     use common_time::Timestamp;
 
@@ -663,6 +770,51 @@ mod tests {
     // These tests are used to ensure backward compatibility of manifest files.
     // DO NOT modify the serialized string when they fail, check if your
     // modification to manifest-related structs is compatible with older manifests.
+    #[test]
+    fn test_sketch_index_manifest_fixture() {
+        use crate::sst::file::IndexType;
+
+        // Frozen persisted names. Keep this fixture unchanged when extending the format.
+        let fixture = r#"{"actions":[{"Edit":{"files_to_add":[{
+                "region_id":0,"file_id":"bc5896ec-e4d8-4017-a80d-f2de73188d55",
+                "time_range":[{"value":0,"unit":"Millisecond"},{"value":1,"unit":"Millisecond"}],
+                "level":0,"index_version":7,"index_file_size":128,
+                "available_indexes":["InvertedIndex","HllIndex","KllIndex","MgIndex"],
+                "indexes":[{"column_id":3,"created_indexes":["InvertedIndex","HllIndex","KllIndex","MgIndex"]}]
+            }],"files_to_remove":[],"compaction_time_window":null}}]}"#;
+        let actions = RegionMetaActionList::decode(fixture.as_bytes()).unwrap();
+        let RegionMetaAction::Edit(edit) = &actions.actions[0] else {
+            panic!("expected a file edit");
+        };
+        assert_eq!(actions.actions.len(), 1);
+        assert_eq!(edit.files_to_add.len(), 1);
+        let file = &edit.files_to_add[0];
+        let expected = [
+            IndexType::InvertedIndex,
+            IndexType::HllIndex,
+            IndexType::KllIndex,
+            IndexType::MgIndex,
+        ];
+        assert_eq!(file.available_indexes.as_slice(), expected);
+        assert_eq!(file.indexes.len(), 1);
+        assert_eq!(file.indexes[0].column_id, 3);
+        assert_eq!(file.indexes[0].created_indexes.as_slice(), expected);
+        assert_eq!(file.index_version(), Some(7));
+        assert_eq!(file.index_file_size, 128);
+        let encoded = actions.encode().unwrap();
+        assert_eq!(RegionMetaActionList::decode(&encoded).unwrap(), actions);
+        let encoded: serde_json::Value = serde_json::from_slice(&encoded).unwrap();
+        let names = serde_json::json!(["InvertedIndex", "HllIndex", "KllIndex", "MgIndex"]);
+        assert_eq!(
+            encoded["actions"][0]["Edit"]["files_to_add"][0]["available_indexes"],
+            names
+        );
+        assert_eq!(
+            encoded["actions"][0]["Edit"]["files_to_add"][0]["indexes"][0]["created_indexes"],
+            names
+        );
+    }
+
     #[test]
     fn test_region_action_compatibility() {
         let region_edit = r#"{
@@ -946,6 +1098,8 @@ mod tests {
             },
             sst_format: FormatType::PrimaryKey,
             append_mode: None,
+            pending_tails: Default::default(),
+            handoff_floors: Default::default(),
         };
 
         let json = serde_json::to_string(&manifest).unwrap();
@@ -981,6 +1135,7 @@ mod tests {
                 flushed_entry_id: None,
                 flushed_sequence: None,
                 committed_sequence: None,
+                wal_recovery: Default::default(),
             },
         );
         builder.apply_edit(
@@ -993,6 +1148,7 @@ mod tests {
                 flushed_entry_id: None,
                 flushed_sequence: None,
                 committed_sequence: None,
+                wal_recovery: Default::default(),
             },
         );
 
@@ -1012,6 +1168,7 @@ mod tests {
                 flushed_entry_id: None,
                 flushed_sequence: None,
                 committed_sequence: None,
+                wal_recovery: Default::default(),
             },
         );
         builder.apply_truncate(
@@ -1126,6 +1283,8 @@ mod tests {
                 compaction_time_window: None,
                 sst_format: FormatType::PrimaryKey,
                 append_mode: None,
+                pending_tails: Default::default(),
+                handoff_floors: Default::default(),
             }
         );
 
@@ -1141,6 +1300,8 @@ mod tests {
             compaction_time_window: None,
             sst_format: FormatType::PrimaryKey,
             append_mode: None,
+            pending_tails: Default::default(),
+            handoff_floors: Default::default(),
         };
         let json = serde_json::to_string(&new_manifest).unwrap();
         let old_from_new: RegionManifestV1 = serde_json::from_str(&json).unwrap();
@@ -1185,6 +1346,7 @@ mod tests {
                 flushed_entry_id: None,
                 flushed_sequence: None,
                 committed_sequence: None,
+                wal_recovery: Default::default(),
             },
             new_from_old
         );
@@ -1198,6 +1360,7 @@ mod tests {
             flushed_entry_id: None,
             flushed_sequence: None,
             committed_sequence: None,
+            wal_recovery: Default::default(),
         };
 
         let new_json = serde_json::to_string(&new).unwrap();
@@ -1357,5 +1520,274 @@ mod tests {
                 .files
                 .contains(&RemovedFile::File(file_id, None))
         );
+    }
+
+    fn tail(node_id: u64, after: EntryId, upto: EntryId) -> PendingTail {
+        PendingTail {
+            node_id,
+            after,
+            upto,
+            upto_kind: UptoKind::Reported,
+        }
+    }
+
+    fn wal_recovery_edit(
+        flushed_entry_id: Option<EntryId>,
+        wal_recovery: WalRecoveryEdit,
+    ) -> RegionEdit {
+        RegionEdit {
+            files_to_add: vec![],
+            files_to_remove: vec![],
+            timestamp_ms: None,
+            compaction_time_window: None,
+            flushed_entry_id,
+            flushed_sequence: None,
+            committed_sequence: None,
+            wal_recovery,
+        }
+    }
+
+    fn manifest_builder() -> RegionManifestBuilder {
+        let mut builder = RegionManifestBuilder::default();
+        builder.apply_change(
+            0,
+            RegionChange {
+                metadata: Arc::new(crate::manifest::tests::utils::basic_region_metadata()),
+                sst_format: FormatType::PrimaryKey,
+                append_mode: None,
+            },
+        );
+        builder
+    }
+
+    #[test]
+    fn test_pending_tails_change_only_when_set() {
+        let mut builder = manifest_builder();
+        builder.apply_edit(
+            1,
+            wal_recovery_edit(
+                None,
+                WalRecoveryEdit {
+                    pending_tails: Some(vec![tail(1, 10, 20)]),
+                    handoff_floor: None,
+                },
+            ),
+        );
+        builder.apply_edit(2, wal_recovery_edit(Some(5), WalRecoveryEdit::default()));
+        assert_eq!(builder.pending_tails, vec![tail(1, 10, 20)]);
+
+        builder.apply_edit(
+            3,
+            wal_recovery_edit(
+                None,
+                WalRecoveryEdit {
+                    pending_tails: Some(vec![]),
+                    handoff_floor: None,
+                },
+            ),
+        );
+        assert!(builder.pending_tails.is_empty());
+    }
+
+    #[test]
+    fn test_flushed_entry_id_drops_reached_floors_and_keeps_tails() {
+        let mut builder = manifest_builder();
+        for (node_id, entry_id) in [(1, 20), (2, 30)] {
+            builder.apply_edit(
+                1,
+                wal_recovery_edit(
+                    None,
+                    WalRecoveryEdit {
+                        pending_tails: Some(vec![tail(1, 10, 20)]),
+                        handoff_floor: Some(HandoffFloor { node_id, entry_id }),
+                    },
+                ),
+            );
+        }
+        builder.apply_edit(2, wal_recovery_edit(Some(20), WalRecoveryEdit::default()));
+
+        let manifest = builder.try_build().unwrap();
+        assert_eq!(manifest.pending_tails, vec![tail(1, 10, 20)]);
+        assert_eq!(manifest.handoff_floors, BTreeMap::from([(2, 30)]));
+    }
+
+    #[test]
+    fn test_truncate_drops_reached_floors() {
+        let mut builder = manifest_builder();
+        builder.apply_edit(
+            1,
+            wal_recovery_edit(
+                None,
+                WalRecoveryEdit {
+                    pending_tails: None,
+                    handoff_floor: Some(HandoffFloor {
+                        node_id: 1,
+                        entry_id: 20,
+                    }),
+                },
+            ),
+        );
+        builder.apply_truncate(
+            2,
+            RegionTruncate {
+                region_id: RegionId::new(1, 1),
+                kind: TruncateKind::All {
+                    truncated_entry_id: 20,
+                    truncated_sequence: 20,
+                },
+                timestamp_ms: None,
+            },
+        );
+
+        assert!(builder.try_build().unwrap().handoff_floors.is_empty());
+    }
+
+    #[test]
+    fn test_wal_replay_start() {
+        let mut builder = manifest_builder();
+        // Node 1 was handed off at 40 after its first tail, so its second tail starts
+        // there and entries in (20, 40] belong to no tail.
+        builder.apply_edit(
+            1,
+            wal_recovery_edit(
+                Some(10),
+                WalRecoveryEdit {
+                    pending_tails: Some(vec![tail(1, 10, 20), tail(2, 30, 60), tail(1, 40, 50)]),
+                    handoff_floor: Some(HandoffFloor {
+                        node_id: 1,
+                        entry_id: 40,
+                    }),
+                },
+            ),
+        );
+        builder.apply_edit(
+            2,
+            wal_recovery_edit(
+                None,
+                WalRecoveryEdit {
+                    pending_tails: None,
+                    handoff_floor: Some(HandoffFloor {
+                        node_id: 3,
+                        entry_id: 40,
+                    }),
+                },
+            ),
+        );
+        let manifest = builder.try_build().unwrap();
+
+        assert_eq!(manifest.wal_replay_start(Some(1)), 50);
+        assert_eq!(manifest.wal_replay_start(Some(2)), 60);
+        assert_eq!(manifest.wal_replay_start(Some(3)), 40);
+        assert_eq!(manifest.wal_replay_start(Some(4)), 10);
+        assert_eq!(manifest.wal_replay_start(None), 10);
+    }
+
+    #[test]
+    fn test_cap_wal_release() {
+        let tails = [tail(1, 20, 25), tail(2, 5, 60), tail(1, 30, 40)];
+
+        assert_eq!(cap_wal_release(&tails, Some(1), 50), 20);
+        assert_eq!(cap_wal_release(&tails, Some(1), 10), 10);
+        assert_eq!(cap_wal_release(&tails, Some(3), 50), 50);
+        assert_eq!(cap_wal_release(&tails, None, 50), 50);
+    }
+
+    const PENDING_TAILS_DELTA: &str =
+        include_str!("../../../../tests/compatibility/manifest/pending_tails/delta.json");
+    const PENDING_TAILS_CHECKPOINT: &str =
+        include_str!("../../../../tests/compatibility/manifest/pending_tails/checkpoint.json");
+
+    fn fixture_pending_tails() -> Vec<PendingTail> {
+        vec![
+            tail(1, 1 << 32, (1 << 32) + 5),
+            PendingTail {
+                upto_kind: UptoKind::Listed,
+                ..tail(2, 2 << 32, 3 << 32)
+            },
+        ]
+    }
+
+    #[test]
+    fn test_pending_tails_fixtures() {
+        let delta = PENDING_TAILS_DELTA.trim_end();
+        let actions = RegionMetaActionList::decode(delta.as_bytes()).unwrap();
+        let [RegionMetaAction::Edit(edit)] = actions.actions.as_slice() else {
+            panic!("unexpected actions: {actions:?}");
+        };
+        let expected = WalRecoveryEdit {
+            pending_tails: Some(fixture_pending_tails()),
+            handoff_floor: Some(HandoffFloor {
+                node_id: 3,
+                entry_id: 4 << 32,
+            }),
+        };
+        assert_eq!(edit.wal_recovery, expected);
+        assert_eq!(actions.encode().unwrap(), delta.as_bytes());
+
+        let checkpoint = PENDING_TAILS_CHECKPOINT.trim_end();
+        let decoded = RegionCheckpoint::decode(checkpoint.as_bytes()).unwrap();
+        let manifest = decoded.checkpoint.as_ref().unwrap();
+        assert_eq!(manifest.pending_tails, fixture_pending_tails());
+        assert_eq!(manifest.handoff_floors, BTreeMap::from([(3, 4 << 32)]));
+        let encoded: serde_json::Value =
+            serde_json::from_slice(&decoded.encode().unwrap()).unwrap();
+        let frozen: serde_json::Value = serde_json::from_str(checkpoint).unwrap();
+        for key in ["pending_tails", "handoff_floors"] {
+            assert_eq!(encoded["checkpoint"][key], frozen["checkpoint"][key]);
+        }
+    }
+
+    /// Checks the fixtures against the shapes before pending tails were added.
+    #[test]
+    fn test_pending_tails_old_shape_compat() {
+        #[derive(Serialize, Deserialize)]
+        struct OldRegionEdit {
+            files_to_add: Vec<FileMeta>,
+            files_to_remove: Vec<FileMeta>,
+            #[serde(default)]
+            timestamp_ms: Option<i64>,
+            #[serde(with = "humantime_serde")]
+            compaction_time_window: Option<Duration>,
+            flushed_entry_id: Option<EntryId>,
+            flushed_sequence: Option<SequenceNumber>,
+            committed_sequence: Option<SequenceNumber>,
+        }
+
+        #[derive(Serialize, Deserialize)]
+        struct OldRegionManifest {
+            metadata: RegionMetadataRef,
+            files: HashMap<FileId, FileMeta>,
+            #[serde(default)]
+            removed_files: RemovedFilesRecord,
+            flushed_entry_id: EntryId,
+            flushed_sequence: SequenceNumber,
+            committed_sequence: Option<SequenceNumber>,
+            manifest_version: ManifestVersion,
+            truncated_entry_id: Option<EntryId>,
+            #[serde(with = "humantime_serde")]
+            compaction_time_window: Option<Duration>,
+            #[serde(default)]
+            sst_format: FormatType,
+            #[serde(default)]
+            append_mode: Option<bool>,
+        }
+
+        let delta: serde_json::Value = serde_json::from_str(PENDING_TAILS_DELTA).unwrap();
+        let old_edit: OldRegionEdit =
+            serde_json::from_value(delta["actions"][0]["Edit"].clone()).unwrap();
+        assert_eq!(old_edit.committed_sequence, Some((1 << 40) + 5));
+        let old_json = serde_json::to_string(&old_edit).unwrap();
+        let edit: RegionEdit = serde_json::from_str(&old_json).unwrap();
+        assert_eq!(edit.wal_recovery, WalRecoveryEdit::default());
+        assert_eq!(serde_json::to_string(&edit).unwrap(), old_json);
+
+        let checkpoint: serde_json::Value = serde_json::from_str(PENDING_TAILS_CHECKPOINT).unwrap();
+        let old_manifest: OldRegionManifest =
+            serde_json::from_value(checkpoint["checkpoint"].clone()).unwrap();
+        assert_eq!(old_manifest.flushed_entry_id, 1 << 32);
+        let old_json = serde_json::to_string(&old_manifest).unwrap();
+        let manifest: RegionManifest = serde_json::from_str(&old_json).unwrap();
+        assert!(manifest.pending_tails.is_empty() && manifest.handoff_floors.is_empty());
+        assert_eq!(serde_json::to_string(&manifest).unwrap(), old_json);
     }
 }

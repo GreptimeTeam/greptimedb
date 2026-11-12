@@ -57,8 +57,9 @@ use crate::access_layer::AccessLayerRef;
 use crate::compaction::CompactionStateRef;
 use crate::engine::region_hook::{PendingManifestHook, RegionHookRef};
 use crate::error::{
-    FlushableRegionStateSnafu, InvalidPartitionExprSnafu, InvalidRequestSnafu, RegionNotFoundSnafu,
-    RegionStateSnafu, RegionTruncatedSnafu, Result, UnexpectedSnafu, UpdateManifestSnafu,
+    Error, FlushableRegionStateSnafu, InvalidPartitionExprSnafu, InvalidRequestSnafu,
+    RegionBusySnafu, RegionLeaseExpiredSnafu, RegionNotFoundSnafu, RegionStateSnafu,
+    RegionTruncatedSnafu, Result, UnexpectedSnafu, UpdateManifestSnafu,
 };
 use crate::lease::{Deadline, NodeLease};
 use crate::manifest::action::{
@@ -568,6 +569,18 @@ impl MitoRegion {
     ) -> Result<()> {
         let mut manager: RwLockWriteGuard<'_, RegionManifestManager> =
             self.manifest_ctx.manifest_manager.write().await;
+        // Another writer advanced the manifest of a region waiting for a reload, so a migration
+        // from its last entry id could skip the rows still in its memtable.
+        if matches!(
+            state,
+            SettableRegionRoleState::Follower | SettableRegionRoleState::DowngradingLeader
+        ) && self.manifest_ctx.is_reload_pending()
+        {
+            return RegionBusySnafu {
+                region_id: self.region_id,
+            }
+            .fail();
+        }
         let current_state = self.state();
         let mut wait_for_checkpoint = false;
 
@@ -1263,13 +1276,9 @@ pub(crate) struct ManifestContext {
     /// The state of the region. The region checks the state before updating
     /// manifest.
     state: AtomicCell<RegionRoleState>,
-    /// When the region last began a downgrade. A promotion issued before it does not apply. The
-    /// lock covers comparing or raising it and the role change.
-    ///
-    /// It starts at creation time, so promotions issued before the region was opened or reopened
-    /// do not apply. A context that replaces this one is created after the worker loop closes or
-    /// reopens the region, so after its last downgrade began.
-    downgrade_started_at: Mutex<Instant>,
+    /// Decides whether a promotion to Leader applies. The lock covers checking or changing it and
+    /// the role change.
+    promotion_fence: Mutex<PromotionFence>,
     /// Deadline of the region's latest Leader or StagingLeader lease from the metasrv, which is how
     /// long the Leader role stays valid. The engine extends it from those leases, and writes check
     /// it.
@@ -1295,7 +1304,10 @@ impl ManifestContext {
         ManifestContext {
             manifest_manager: tokio::sync::RwLock::new(manager),
             state: AtomicCell::new(state),
-            downgrade_started_at: Mutex::new(Instant::now()),
+            promotion_fence: Mutex::new(PromotionFence {
+                downgrade_started_at: Instant::now(),
+                reload_pending: false,
+            }),
             leader_deadline: Deadline::default(),
             node_lease,
             staging_partition_info: Mutex::new(None),
@@ -1509,6 +1521,7 @@ impl ManifestContext {
             flushed_entry_id: None,
             committed_sequence: None,
             compaction_time_window: None,
+            wal_recovery: Default::default(),
         };
         let action_list = RegionMetaActionList::with_action(RegionMetaAction::Edit(edit));
         let manifest_version = self.update_and_fire(manager, action_list, false).await?;
@@ -1542,12 +1555,26 @@ impl ManifestContext {
         // checkpoint barrier.
         let allow_checkpoint = !is_staging
             && self.state.load() != RegionRoleState::Leader(RegionLeaderState::Downgrading);
-        let version = manager
-            .update_with_verification(action_list, is_staging, allow_checkpoint, || {
-                self.is_leader_lease_expired()
-            })
-            .await
-            .inspect_err(|e| error!(e; "Failed to update manifest, region_id: {}", region_id))?;
+        // A writer past its Leader deadline may no longer hold the region, so it sends nothing.
+        let result = if manager.is_conditional_publication() && self.is_leader_lease_expired() {
+            RegionLeaseExpiredSnafu { region_id }.fail()
+        } else {
+            manager
+                .update_with_verification(action_list, is_staging, allow_checkpoint, || {
+                    self.is_leader_lease_expired()
+                })
+                .await
+        };
+        let version = match result {
+            Ok(version) => version,
+            Err(e) => {
+                error!(e; "Failed to update manifest, region_id: {}", region_id);
+                if matches!(e, Error::ManifestVersionConflict { .. }) {
+                    self.fence_for_reload(manager, region_id).await;
+                }
+                return Err(e);
+            }
+        };
 
         Ok(PendingManifestHook::new(
             region_id,
@@ -1561,6 +1588,32 @@ impl ManifestContext {
     /// Returns whether the region's Leader deadline has passed. No deadline counts as passed.
     fn is_leader_lease_expired(&self) -> bool {
         self.node_lease.now() >= self.leader_deadline.get()
+    }
+
+    /// Fences a region whose manifest another writer has advanced, under the caller's manifest
+    /// lock: later commits fail, and the region stays a Follower that no promotion changes until
+    /// the worker replaces it with an instance reloaded from the new manifest.
+    pub(crate) async fn fence_for_reload(
+        &self,
+        manager: &mut RegionManifestManager,
+        region_id: RegionId,
+    ) {
+        manager.stop().await;
+        // Marked before the role change, so a promotion in between cannot make it writable again.
+        self.promotion_fence.lock().unwrap().reload_pending = true;
+        self.set_role(RegionRole::Follower, region_id);
+        warn!("Region {region_id} is fenced until it is reloaded");
+    }
+
+    /// Returns whether the region waits for a reload, see [Self::fence_for_reload].
+    pub(crate) fn is_reload_pending(&self) -> bool {
+        self.promotion_fence.lock().unwrap().reload_pending
+    }
+
+    /// Ignores the promotions issued before now. The worker calls it on a reloaded instance when
+    /// it replaces the old one, whose time a downgrade during the reload raised instead.
+    pub(crate) fn ignore_earlier_promotions(&self) {
+        self.promotion_fence.lock().unwrap().downgrade_started_at = Instant::now();
     }
 
     /// Updates the manifest using a caller-held write lock, releases the lock,
@@ -1686,14 +1739,14 @@ impl ManifestContext {
 
     /// Raises the downgrade start time to now, then marks the region downgrading.
     pub(crate) fn begin_downgrade(&self, region_id: RegionId) {
-        let mut downgrade_started_at = self.downgrade_started_at.lock().unwrap();
-        *downgrade_started_at = Instant::now();
+        let mut fence = self.promotion_fence.lock().unwrap();
+        fence.downgrade_started_at = Instant::now();
         self.set_role(RegionRole::DowngradingLeader, region_id);
     }
 
-    /// Promotes the region to a writable leader unless a downgrade started after `issued_at`.
-    /// Returns false if the promotion is ignored for that reason; otherwise the role changes as
-    /// [`Self::set_role`] allows.
+    /// Promotes the region to a writable leader unless a downgrade started after `issued_at` or
+    /// the region waits for a reload. Returns false if the promotion is ignored for one of these
+    /// reasons; otherwise the role changes as [`Self::set_role`] allows.
     pub(crate) fn promote_unless_downgrade_started_after(
         &self,
         issued_at: Instant,
@@ -1703,8 +1756,21 @@ impl ManifestContext {
         if self.state.load() == RegionRoleState::Leader(RegionLeaderState::Writable) {
             return true;
         }
-        let downgrade_started_at = self.downgrade_started_at.lock().unwrap();
-        if issued_at < *downgrade_started_at {
+        let fence = self.promotion_fence.lock().unwrap();
+        issued_at >= fence.downgrade_started_at
+            && self.promote_unless_reload_pending(&fence, region_id)
+    }
+
+    /// Promotes a region that caught up to a writable leader. Returns false if the region waits
+    /// for a reload.
+    pub(crate) fn promote_after_catchup(&self, region_id: RegionId) -> bool {
+        let fence = self.promotion_fence.lock().unwrap();
+        self.promote_unless_reload_pending(&fence, region_id)
+    }
+
+    /// Promotes the region unless it waits for a reload. The caller holds the fence lock.
+    fn promote_unless_reload_pending(&self, fence: &PromotionFence, region_id: RegionId) -> bool {
+        if fence.reload_pending {
             return false;
         }
         self.set_role(RegionRole::Leader, region_id);
@@ -1886,6 +1952,21 @@ impl ManifestContext {
 }
 
 pub(crate) type ManifestContextRef = Arc<ManifestContext>;
+
+/// The state that decides whether a promotion to Leader applies.
+#[derive(Debug)]
+struct PromotionFence {
+    /// When the region last began a downgrade. A promotion issued before it does not apply.
+    ///
+    /// It starts at creation time, so promotions issued before the region was opened or reopened
+    /// do not apply. A context that replaces this one after a close or reopen is created after
+    /// its last downgrade began. A reloaded one is created while this one is still registered, so
+    /// it raises the time when it replaces this one.
+    downgrade_started_at: Instant,
+    /// Whether another writer advanced the manifest, so this instance stays a Follower until a
+    /// reload replaces it.
+    reload_pending: bool,
+}
 
 /// Regions indexed by ids.
 #[derive(Debug, Default)]
@@ -2526,6 +2607,7 @@ mod tests {
             flushed_entry_id: None,
             flushed_sequence: None,
             committed_sequence: None,
+            wal_recovery: Default::default(),
         }
     }
 
@@ -2533,7 +2615,7 @@ mod tests {
     async fn test_promoting_writable_leader_takes_no_lock() {
         let env = SchedulerEnv::new().await;
         let region = Arc::new(build_test_region(&env).await);
-        let _downgrade_started_at = region.manifest_ctx.downgrade_started_at.lock().unwrap();
+        let _promotion_fence = region.manifest_ctx.promotion_fence.lock().unwrap();
         let (tx, rx) = std::sync::mpsc::channel();
         let promoted = region.clone();
         std::thread::spawn(move || {
@@ -2567,6 +2649,7 @@ mod tests {
             flushed_entry_id: None,
             flushed_sequence: None,
             committed_sequence: None,
+            wal_recovery: Default::default(),
         }));
 
         region

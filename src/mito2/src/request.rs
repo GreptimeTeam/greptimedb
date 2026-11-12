@@ -1145,6 +1145,15 @@ pub(crate) enum BackgroundNotify {
     EnterStaging(EnterStagingResult),
     /// Copy region result.
     CopyRegionFromFinished(CopyRegionFromFinished),
+    /// A commit outside the worker fenced the region until it is reloaded.
+    RegionFenced,
+    /// The reload of a fenced region has finished.
+    RegionReloaded {
+        /// The instance the reload replaces.
+        old: MitoRegionRef,
+        /// The reloaded instance.
+        result: Result<MitoRegionRef>,
+    },
 }
 
 /// Notifies a flush job is finished.
@@ -1173,16 +1182,20 @@ impl FlushFinished {
             sender.send(Ok(0));
         }
     }
-}
 
-impl OnFailure for FlushFinished {
-    fn on_failure(&mut self, err: Error) {
-        let err = Arc::new(err);
+    /// Marks the flush job as failed with an error that other waiters share.
+    pub(crate) fn on_shared_failure(&mut self, err: Arc<Error>) {
         for sender in self.senders.drain(..) {
             sender.send(Err(err.clone()).context(FlushRegionSnafu {
                 region_id: self.region_id,
             }));
         }
+    }
+}
+
+impl OnFailure for FlushFinished {
+    fn on_failure(&mut self, err: Error) {
+        self.on_shared_failure(Arc::new(err));
     }
 }
 
@@ -1373,10 +1386,19 @@ impl Waiters {
     }
 }
 
+/// Transient execution semantics; this is never serialized into the manifest.
+#[derive(Debug)]
+pub(crate) enum RegionEditKind {
+    Import,
+    #[cfg(feature = "enterprise")]
+    Compaction(Box<crate::engine::table_compaction::PublicationContext>),
+}
+
 /// Request to edit a region directly.
 #[derive(Debug)]
 pub(crate) struct RegionEditRequest {
     pub(crate) region_id: RegionId,
+    pub(crate) kind: RegionEditKind,
     pub(crate) edit: RegionEdit,
     /// Whether to preload SST files into the write cache.
     pub(crate) preload_sst_cache: bool,
@@ -1398,6 +1420,7 @@ impl RegionEditRequest {
             region_id,
             edit,
             preload_sst_cache,
+            kind: RegionEditKind::Import,
             waiters: Waiters::one(waiter),
             staging_partition_expr: None,
         }

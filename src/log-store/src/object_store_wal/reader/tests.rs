@@ -19,6 +19,7 @@ use bytes::Bytes;
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_wal::config::object_store::ObjectStoreWalConfig;
+use futures::TryStreamExt;
 use object_store::services::Memory;
 use store_api::logstore::LogStore;
 
@@ -68,6 +69,9 @@ struct ObservedIo {
     io: ObjectStoreIo,
     gets: Mutex<BTreeMap<u64, usize>>,
     lists: Mutex<Vec<u64>>,
+    /// Objects deleted after every `list_from`, as a store collecting them
+    /// before the reader reads their indexes would.
+    vanishing: Mutex<Vec<u64>>,
     gate: Option<Arc<Semaphore>>,
     active: AtomicUsize,
     peak: AtomicUsize,
@@ -112,7 +116,12 @@ impl WalObjectRead for ObservedIo {
 
     async fn list_from(&self, seq: u64) -> Result<Vec<ListedObject>> {
         self.lists.lock().unwrap().push(seq);
-        self.io.list_from(seq).await
+        let listed = self.io.list_from(seq).await?;
+        let vanishing = self.vanishing.lock().unwrap().clone();
+        for seq in vanishing {
+            self.io.delete(seq).await?;
+        }
+        Ok(listed)
     }
 
     fn object_path(&self, seq: u64) -> String {
@@ -133,6 +142,7 @@ fn observed(io: ObjectStoreIo, gate: Option<Arc<Semaphore>>) -> Arc<ObservedIo> 
         io,
         gets: Mutex::new(BTreeMap::new()),
         lists: Mutex::new(Vec::new()),
+        vanishing: Mutex::new(Vec::new()),
         gate,
         active: AtomicUsize::new(0),
         peak: AtomicUsize::new(0),
@@ -875,4 +885,88 @@ async fn test_changed_listing_metadata_refetches_index() {
         .unwrap();
     assert_eq!(catalog.region_max_entry_id(region()), Some(entry_id(1, 2)));
     assert_eq!(observed.gets.lock().unwrap()[&1], before + 1);
+}
+
+/// Writes the chain 0..=3, whose objects 2 and 3 carry reclaim boundary 2.
+async fn put_reclaimed_chain(io: &ObjectStoreIo) {
+    put(io, 0, 1, None, 0, &[]).await;
+    put(io, 1, 1, Some((0, 1)), 0, &[record(1, 1)]).await;
+    put(io, 2, 1, Some((1, 1)), 2, &[record(2, 1)]).await;
+    put(io, 3, 1, Some((2, 1)), 2, &[record(3, 1)]).await;
+}
+
+fn both_bounds() -> [WalReadUpperBound; 2] {
+    [
+        WalReadUpperBound::LastEntry(entry_id(3, 1)),
+        WalReadUpperBound::Listed(entry_id(3, POSITION_LIMIT - 1)),
+    ]
+}
+
+#[tokio::test]
+async fn test_objects_vanished_below_reclaim_boundary_are_skipped() {
+    for upper in both_bounds() {
+        let (_, io, observed, reader) = fixture();
+        put_reclaimed_chain(&io).await;
+        *observed.vanishing.lock().unwrap() = vec![0, 1];
+        assert_eq!(
+            collect(&reader, entry_id(1, 1), upper).await.unwrap(),
+            expected(&[record(2, 1), record(3, 1)]),
+            "{upper:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_chain_object_vanished_at_reclaim_boundary_fails() {
+    for upper in both_bounds() {
+        let (_, io, observed, reader) = fixture();
+        put_reclaimed_chain(&io).await;
+        // Without object 2 a listed read would select the complete chain
+        // ending at object 1. Its epoch is the newest and its entries end at
+        // `after`, so unless the vanished object 2 fails the read, it succeeds
+        // with no entries.
+        *observed.vanishing.lock().unwrap() = vec![2];
+        let error = collect(&reader, entry_id(1, 1), upper).await.unwrap_err();
+        assert!(index::is_not_found(&error), "{upper:?}: {error:?}");
+    }
+}
+
+#[tokio::test]
+async fn test_unreadable_object_below_reclaim_boundary_fails() {
+    for upper in both_bounds() {
+        let (store, io, _, reader) = fixture();
+        put_reclaimed_chain(&io).await;
+        // Object 1 is listed in both modes and lies below boundary 2, but a
+        // corrupted header is not a vanished object.
+        let mut bytes = io.get(1).await.unwrap().to_vec();
+        bytes[0] ^= 1;
+        store.write(&io.object_path(1), bytes).await.unwrap();
+        let error = collect(&reader, entry_id(1, 1), upper).await.unwrap_err();
+        let Error::ObjectStoreWal { source, .. } = &error else {
+            panic!("{upper:?}: {error:?}");
+        };
+        assert!(
+            matches!(source.as_ref(), Error::InvalidWalObject { path, .. } if *path == io.object_path(1)),
+            "{upper:?}: {error:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_listed_range_fails_when_later_epoch_object_vanishes() {
+    let (_, io, observed, reader) = fixture();
+    put(&io, 0, 1, None, 0, &[]).await;
+    put(&io, 1, 1, Some((0, 1)), 0, &[record(1, 1)]).await;
+    // The newer epoch's object is off the selected chain. Skipping it would
+    // hide its epoch from the comparison.
+    put(&io, 5, 4, Some((3, 4)), 0, &[]).await;
+    *observed.vanishing.lock().unwrap() = vec![5];
+    let error = collect(
+        &reader,
+        0,
+        WalReadUpperBound::Listed(entry_id(5, POSITION_LIMIT - 1)),
+    )
+    .await
+    .unwrap_err();
+    assert!(index::is_not_found(&error), "{error:?}");
 }

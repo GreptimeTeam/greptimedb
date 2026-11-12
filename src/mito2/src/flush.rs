@@ -220,6 +220,8 @@ pub enum FlushReason {
     EngineFull,
     /// Region reaches its write buffer threshold.
     RegionFull,
+    /// Flush to relieve retained WAL pressure.
+    WalPressure,
     /// Manual flush.
     Manual,
     /// Flush to alter table.
@@ -533,6 +535,7 @@ impl RegionFlushTask {
             flushed_entry_id: Some(version_data.last_entry_id),
             flushed_sequence: Some(version_data.committed_sequence),
             committed_sequence: None,
+            wal_recovery: Default::default(),
         };
         info!("Applying {edit:?} to region {}", self.region_id);
 
@@ -850,6 +853,7 @@ impl RegionFlushTask {
             .map(|f| f == FormatType::Flat)
             .unwrap_or(self.engine_config.default_flat_format);
         SstWriteRequest {
+            index_build_inputs: None,
             op_type: OperationType::Flush,
             metadata: version.metadata.clone(),
             source,
@@ -1940,6 +1944,7 @@ mod tests {
                     flushed_entry_id: None,
                     flushed_sequence: None,
                     committed_sequence: None,
+                    wal_recovery: Default::default(),
                 },
                 memtables_to_remove: smallvec![],
             }),
@@ -2194,6 +2199,7 @@ mod tests {
                 flushed_entry_id: None,
                 flushed_sequence: None,
                 committed_sequence: None,
+                wal_recovery: Default::default(),
             }),
             &[0],
             builder.file_purger(),
@@ -2502,6 +2508,7 @@ mod tests {
                 flushed_entry_id: None,
                 flushed_sequence: None,
                 committed_sequence: None,
+                wal_recovery: Default::default(),
             }),
             &[0],
             builder.file_purger(),
@@ -2576,6 +2583,7 @@ mod tests {
                 flushed_entry_id: None,
                 flushed_sequence: None,
                 committed_sequence: None,
+                wal_recovery: Default::default(),
             }),
             &[0],
             builder.file_purger(),

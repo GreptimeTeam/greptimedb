@@ -157,6 +157,7 @@ use std::fmt::Debug;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use parquet::file::metadata::ParquetMetaData;
 use store_api::ManifestVersion;
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::RegionId;
@@ -269,6 +270,13 @@ pub struct SstFileInfo<'a> {
     pub file_meta: &'a FileMeta,
 }
 
+/// Externally produced SST with its verified footer. Index-builder statistics
+/// are deliberately absent: they cannot be reconstructed from FileMeta.
+pub struct VerifiedSstFileInfo<'a> {
+    pub file_meta: &'a FileMeta,
+    pub footer: &'a Arc<ParquetMetaData>,
+}
+
 /// Hook for observing region mutations in mito2.
 ///
 /// Implementations can be registered via the `Plugins` system:
@@ -313,6 +321,21 @@ pub trait RegionHook: Send + Sync + Debug {
     ) -> Result<HashSet<RegionFileId>> {
         let _ = (access, files);
         Ok(HashSet::new())
+    }
+
+    /// Called for verified table-compaction outputs before manifest publication.
+    /// Unlike `on_sst_files_written`, this carries actual remote footers without
+    /// fabricating unavailable index-builder statistics. Retries may repeat it;
+    /// no manifest lock is held and implementations must be idempotent. Publication
+    /// may still fail after this callback; it is not a publication acknowledgement.
+    /// Use `on_manifest_updated` to observe a successful manifest commit.
+    async fn on_sst_files_verified(
+        &self,
+        region_id: RegionId,
+        region_metadata: &RegionMetadataRef,
+        files: &[VerifiedSstFileInfo<'_>],
+    ) {
+        let _ = (region_id, region_metadata, files);
     }
 
     /// Called after the region manifest is successfully committed to the **live**

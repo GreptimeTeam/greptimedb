@@ -105,6 +105,7 @@ impl<'a> TargetWriter<'a> {
         bloom.mem_threshold_on_create = self.index_threshold(bloom.mem_threshold_on_create());
         let source = output_projection(self.target, source, self.context.cancellation.clone())?;
         Ok(SstWriteRequest {
+            index_build_inputs: None,
             op_type: OperationType::Compact,
             metadata: self.target.metadata.clone(),
             source,
@@ -182,7 +183,9 @@ impl<'a> TargetWriter<'a> {
             region_id: self.target.metadata.region_id,
             file_id: info.file_id,
             time_range: info.time_range,
-            level: 1,
+            // Region-local L0: window merges and semantic folding stay with
+            // ordinary region compaction.
+            level: 0,
             file_size: info.file_size,
             max_row_group_uncompressed_size: info.max_row_group_uncompressed_size,
             available_indexes: info.index_metadata.build_available_indexes(),

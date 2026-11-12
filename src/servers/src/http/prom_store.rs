@@ -26,6 +26,8 @@ use axum::http::{Extensions, HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::IntoResponse;
 use axum_extra::TypedHeader;
 use common_catalog::consts::DEFAULT_SCHEMA_NAME;
+use common_error::ext::BoxedError;
+use common_memory_manager::OnExhaustedPolicy;
 use common_query::prelude::GREPTIME_PHYSICAL_TABLE;
 use common_telemetry::tracing;
 use mime_guess::mime;
@@ -246,12 +248,27 @@ async fn remote_write_v1(
                 )
             })?;
         memory_limiter.check_request_fits(bytes, body_reserved_bytes)?;
-        let reservation = Arc::new(
+        // Holding body permits while waiting for expansion can stall concurrent requests.
+        let reservation = Arc::new(if body_reserved_bytes > 0 {
+            memory_limiter.try_acquire(bytes).ok_or_else(|| {
+                let source = common_memory_manager::Error::MemoryLimitExceeded {
+                    requested_bytes: bytes,
+                    limit_bytes: memory_limiter.limit_bytes(),
+                };
+                // Wait-policy contention must remain retryable by Remote Write senders.
+                match memory_limiter.policy() {
+                    OnExhaustedPolicy::Wait { .. } => {
+                        error::OtherSnafu.into_error(BoxedError::new(source))
+                    }
+                    OnExhaustedPolicy::Fail => error::MemoryLimitExceededSnafu.into_error(source),
+                }
+            })?
+        } else {
             memory_limiter
                 .acquire(bytes)
                 .await
-                .map_err(prom_remote_write::map_memory_acquire_timeout)?,
-        );
+                .map_err(prom_remote_write::map_memory_acquire_timeout)?
+        });
         let mut ctx = query_ctx.fork();
         ctx.set_write_progress(Arc::new(
             session::write_progress::WriteProgress::with_reservation(reservation),
@@ -542,7 +559,7 @@ async fn preflight_prometheus_rows(
     }
     operator::insert::admit_row_insert_batches(batches)
         .await
-        .map_err(common_error::ext::BoxedError::new)
+        .map_err(BoxedError::new)
         .context(error::ExecuteGrpcQuerySnafu)?;
     Ok(())
 }
@@ -971,7 +988,6 @@ mod tests {
     use axum::body::Body;
     use axum::http::Request;
     use axum::{Router, middleware, routing};
-    use common_memory_manager::OnExhaustedPolicy;
     use common_query::Output;
     use pipeline::GreptimePipelineParams;
     use session::context::{QueryContext, QueryContextRef};
@@ -1461,13 +1477,117 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn test_exemplar_v1_concurrent_body_reservations() {
+        use api::prom_store::remote;
+
+        use crate::http::{HttpOptions, HttpServerBuilder};
+
+        let wire = remote::WriteRequest {
+            timeseries: vec![remote::TimeSeries {
+                labels: vec![
+                    remote::Label {
+                        name: "__name__".into(),
+                        value: "metric".into(),
+                    },
+                    remote::Label {
+                        name: "job".into(),
+                        value: "api".into(),
+                    },
+                ],
+                exemplars: vec![remote::Exemplar::default()],
+                ..Default::default()
+            }],
+            ..Default::default()
+        }
+        .encode_to_vec();
+        let body = Bytes::from(crate::prom_store::snappy_compress(&wire).unwrap());
+        let body_length = body.len();
+        let request = |body: Body| {
+            Request::post("/v1/prometheus/write")
+                .header(header::CONTENT_TYPE, "application/x-protobuf")
+                .header(header::CONTENT_ENCODING, DEFAULT_ENCODING)
+                .header(header::CONTENT_LENGTH, body_length)
+                .body(body)
+                .unwrap()
+        };
+
+        for policy in [OnExhaustedPolicy::default(), OnExhaustedPolicy::Fail] {
+            // Each request fits alone: 1 KiB for its body and 5 KiB for exemplar rows.
+            let limiter = ServerMemoryLimiter::new(6 * 1024, policy);
+            let handler = Arc::new(ExemplarMemoryHandler {
+                limiter: limiter.clone(),
+                progress: Mutex::new(None),
+            });
+            let server = HttpServerBuilder::new(HttpOptions::default())
+                .with_memory_limiter(limiter.clone())
+                .with_prom_handler(
+                    handler.clone(),
+                    None,
+                    true,
+                    PromValidationMode::Strict,
+                    None,
+                )
+                .build();
+            let app = server.build(server.make_app()).unwrap();
+            let single = app
+                .clone()
+                .oneshot(request(Body::from(body.clone())))
+                .await
+                .unwrap();
+            assert_eq!(single.status(), StatusCode::NO_CONTENT);
+            drop(handler.progress.lock().unwrap().take());
+            assert_eq!(limiter.used_bytes(), 0);
+
+            let (send_body, receive_body) = tokio::sync::oneshot::channel();
+            let delayed_body = body.clone();
+            let mut second = Box::pin(app.clone().oneshot(request(Body::from_stream(
+                futures::stream::once(async move {
+                    receive_body.await.unwrap();
+                    Ok::<_, std::io::Error>(delayed_body)
+                }),
+            ))));
+            assert!(futures::poll!(second.as_mut()).is_pending());
+            assert_eq!(limiter.used_bytes(), 1024);
+
+            let started = tokio::time::Instant::now();
+            let mut first = Box::pin(app.clone().oneshot(request(Body::from(body.clone()))));
+            let first_poll = futures::poll!(first.as_mut());
+            assert!(handler.progress.lock().unwrap().is_none());
+            send_body.send(()).unwrap();
+            let (first, second) = match first_poll {
+                std::task::Poll::Ready(first) => (first, second.await),
+                std::task::Poll::Pending => futures::join!(first, second),
+            };
+            assert_eq!(
+                first.unwrap().status(),
+                match policy {
+                    OnExhaustedPolicy::Wait { .. } => StatusCode::INTERNAL_SERVER_ERROR,
+                    OnExhaustedPolicy::Fail => StatusCode::TOO_MANY_REQUESTS,
+                }
+            );
+            assert_eq!(second.unwrap().status(), StatusCode::NO_CONTENT);
+            assert_eq!(started.elapsed(), Duration::ZERO);
+            assert!(handler.progress.lock().unwrap().take().is_some());
+            assert_eq!(limiter.used_bytes(), 0);
+
+            let retry = app
+                .oneshot(request(Body::from(body.clone())))
+                .await
+                .unwrap();
+            assert_eq!(retry.status(), StatusCode::NO_CONTENT);
+            assert!(handler.progress.lock().unwrap().take().is_some());
+            assert_eq!(limiter.used_bytes(), 0);
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn test_exemplar_row_memory_is_charged_and_retained() {
         use api::greptime_proto::io::prometheus::write::v2;
         use api::prom_store::remote;
 
         use crate::http::{HttpOptions, HttpServerBuilder};
 
-        for version in [1, 2] {
+        for (version, holds_body) in [(1, false), (1, true), (2, true)] {
             for policy in [OnExhaustedPolicy::Fail, OnExhaustedPolicy::default()] {
                 for (distinct_tags, contended, expire) in [
                     (true, false, false),
@@ -1543,7 +1663,15 @@ mod tests {
                             None,
                         )
                         .build();
-                    let response = server.build(server.make_app()).unwrap().oneshot(
+                    let app = if holds_body {
+                        server.build(server.make_app()).unwrap()
+                    } else {
+                        // Exercise waiting without transport-owned permits.
+                        server
+                            .make_app()
+                            .layer(Extension(QueryContext::with("greptime", "public")))
+                    };
+                    let response = app.oneshot(
                         Request::post("/v1/prometheus/write")
                             .header(header::CONTENT_TYPE, content_type)
                             .header(header::CONTENT_ENCODING, DEFAULT_ENCODING)
@@ -1554,27 +1682,33 @@ mod tests {
                     );
                     let started = tokio::time::Instant::now();
                     tokio::pin!(response);
-                    if contended && matches!(policy, OnExhaustedPolicy::Wait { .. }) {
+                    let fail_fast = version == 1
+                        && holds_body
+                        && contended
+                        && matches!(policy, OnExhaustedPolicy::Wait { .. });
+                    if contended && matches!(policy, OnExhaustedPolicy::Wait { .. }) && !fail_fast {
                         assert!(futures::poll!(response.as_mut()).is_pending());
                         if !expire {
                             drop(occupied.take());
                         }
                     }
                     let response = response.await.unwrap();
-                    let timed_out = expire && matches!(policy, OnExhaustedPolicy::Wait { .. });
+                    let timed_out =
+                        expire && matches!(policy, OnExhaustedPolicy::Wait { .. }) && !fail_fast;
                     let rejected = distinct_tags
                         || timed_out
+                        || fail_fast
                         || (contended && matches!(policy, OnExhaustedPolicy::Fail));
                     assert_eq!(
                         response.status(),
-                        if timed_out {
+                        if timed_out || fail_fast {
                             StatusCode::INTERNAL_SERVER_ERROR
                         } else if rejected {
                             StatusCode::TOO_MANY_REQUESTS
                         } else {
                             StatusCode::NO_CONTENT
                         },
-                        "version={version}, distinct={distinct_tags}, contended={contended}, expire={expire}, policy={policy:?}"
+                        "version={version}, holds_body={holds_body}, distinct={distinct_tags}, contended={contended}, expire={expire}, policy={policy:?}"
                     );
                     if let OnExhaustedPolicy::Wait { timeout } = policy
                         && timed_out

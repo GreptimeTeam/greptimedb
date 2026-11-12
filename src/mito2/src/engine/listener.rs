@@ -31,6 +31,12 @@ pub trait EventListener: Send + Sync {
     /// Notifies the background opener after the worker acknowledges region registration.
     async fn on_region_open_registered(&self, _region_id: RegionId) {}
 
+    /// Notifies the listener before the worker replaces a fenced region with its reload.
+    async fn on_region_reload_swap(&self, _region_id: RegionId) {}
+
+    /// Notifies the listener before a catchup reopens the region.
+    async fn on_catchup_reopen_begin(&self, _region_id: RegionId) {}
+
     /// Notifies the listener that a region is flushed successfully.
     fn on_flush_success(&self, region_id: RegionId) {
         let _ = region_id;
@@ -46,6 +52,9 @@ pub trait EventListener: Send + Sync {
     async fn on_flush_begin(&self, region_id: RegionId) {
         let _ = region_id;
     }
+
+    /// Observes scheduler admission after a worker handles a WAL pressure snapshot.
+    fn on_wal_pressure_checked(&self, _region_id: RegionId, _flush_requested: bool) {}
 
     /// Notifies the listener after a flush becomes non-cancellable and before commit.
     async fn on_flush_commit_begin(&self, _region_id: RegionId) {}

@@ -548,7 +548,10 @@ mod tests {
 
     #[rstest::rstest]
     #[tokio::test]
-    async fn test_file_purge_with_index(#[values(0, LEVEL_SHARED)] level: u8) {
+    async fn test_file_purge_with_index(
+        #[values(0, LEVEL_SHARED)] level: u8,
+        #[values(false, true)] sketch_only: bool,
+    ) {
         let env = PurgeTestEnv::new().await;
         let object_store = env.layer.object_store();
         let sst_file_id = env.file_id;
@@ -575,10 +578,18 @@ mod tests {
                     level,
                     file_size: 4096,
                     max_row_group_uncompressed_size: 4096,
-                    available_indexes: SmallVec::from_iter([IndexType::InvertedIndex]),
+                    available_indexes: if sketch_only {
+                        SmallVec::new()
+                    } else {
+                        SmallVec::from_iter([IndexType::InvertedIndex])
+                    },
                     indexes: vec![ColumnIndexMetadata {
                         column_id: 0,
-                        created_indexes: SmallVec::from_iter([IndexType::InvertedIndex]),
+                        created_indexes: SmallVec::from_iter([if sketch_only {
+                            IndexType::HllIndex
+                        } else {
+                            IndexType::InvertedIndex
+                        }]),
                         ..Default::default()
                     }],
                     index_file_size: 4096,
@@ -591,6 +602,14 @@ mod tests {
                     ..Default::default()
                 },
                 file_purger,
+            );
+            assert!(handle.meta_ref().exists_index());
+            assert_eq!(handle.meta_ref().available_indexes.is_empty(), sketch_only);
+            assert_eq!(
+                handle.meta_ref().indexes[0]
+                    .created_indexes
+                    .contains(&IndexType::HllIndex),
+                sketch_only
             );
             // Shared SSTs and their indexes require global GC even after local release.
             handle.mark_deleted();

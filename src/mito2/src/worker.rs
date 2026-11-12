@@ -28,7 +28,10 @@ mod handle_flush;
 mod handle_manifest;
 mod handle_open;
 mod handle_rebuild_index;
+mod handle_reload;
 mod handle_remap;
+#[cfg(feature = "enterprise")]
+mod handle_table_compaction;
 mod handle_truncate;
 mod handle_write;
 
@@ -260,13 +263,14 @@ impl WorkerGroup {
             .then(|| Arc::new(Semaphore::new(config.gc.max_concurrent_gc_job)));
         let node_lease = Arc::new(NodeLease::default());
         let staging_regions = StagingRegionsRef::default();
+        let wal = Wal::new(log_store);
 
         let workers = (0..config.num_workers)
             .map(|id| {
                 WorkerStarter {
                     id: id as WorkerId,
                     config: config.clone(),
-                    log_store: log_store.clone(),
+                    wal: wal.clone(),
                     object_store_manager: object_store_manager.clone(),
                     write_buffer_manager: write_buffer_manager.clone(),
                     index_build_job_pool: index_build_job_pool.clone(),
@@ -533,12 +537,13 @@ impl WorkerGroup {
             .then(|| Arc::new(Semaphore::new(config.gc.max_concurrent_gc_job)));
         let node_lease = Arc::new(NodeLease::default());
         let staging_regions = StagingRegionsRef::default();
+        let wal = Wal::new(log_store);
         let workers = (0..config.num_workers)
             .map(|id| {
                 WorkerStarter {
                     id: id as WorkerId,
                     config: config.clone(),
-                    log_store: log_store.clone(),
+                    wal: wal.clone(),
                     object_store_manager: object_store_manager.clone(),
                     write_buffer_manager: write_buffer_manager.clone(),
                     index_build_job_pool: index_build_job_pool.clone(),
@@ -652,7 +657,7 @@ pub(crate) fn worker_init_check_delay() -> Duration {
 struct WorkerStarter<S> {
     id: WorkerId,
     config: Arc<MitoConfig>,
-    log_store: Arc<S>,
+    wal: Wal<S>,
     object_store_manager: ObjectStoreManagerRef,
     write_buffer_manager: WriteBufferManagerRef,
     compact_job_pool: Arc<CompactionCoordinator>,
@@ -738,7 +743,8 @@ impl<S: LogStore> WorkerStarter<S> {
             opening_regions: opening_regions.clone(),
             sender: sender.clone(),
             receiver,
-            wal: Wal::new(self.log_store),
+            wal_flush_receiver: self.wal.subscribe_flush_candidates(),
+            wal: self.wal,
             object_store_manager: self.object_store_manager.clone(),
             running: running.clone(),
             memtable_builder_provider: MemtableBuilderProvider::new(
@@ -1065,6 +1071,8 @@ struct RegionWorkerLoop<S> {
     receiver: Receiver<WorkerRequestWithTime>,
     /// WAL of the engine.
     wal: Wal<S>,
+    /// Shared WAL pressure candidates, independently of memory-pressure wakeups.
+    wal_flush_receiver: watch::Receiver<Arc<[RegionId]>>,
     /// Manages object stores for manifest and SSTs.
     object_store_manager: ObjectStoreManagerRef,
     /// Whether the worker thread is still running.
@@ -1217,6 +1225,30 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                         self.handle_stalled_requests().await;
                         continue;
                     }
+                }
+                result = self.wal_flush_receiver.changed() => {
+                    if result.is_err() {
+                        break;
+                    }
+                    let candidates = self.wal_flush_receiver.borrow_and_update().clone();
+                    if let Err(e) = self.flush_for_wal_pressure(&candidates) {
+                        error!(e; "Failed to flush regions under WAL pressure");
+                    }
+                    #[cfg(any(test, feature = "test"))]
+                    if let Some(listener) = &self.listener.listener {
+                        for &region_id in candidates.iter() {
+                            if self.regions.get_region(region_id).is_some() {
+                                listener.on_wal_pressure_checked(
+                                    region_id,
+                                    self.flush_scheduler.is_flush_requested(region_id),
+                                );
+                            }
+                        }
+                    }
+                    // Notifications reset the loop's sleep, so they must also
+                    // check periodic work even when the candidate list is empty.
+                    self.handle_periodical_tasks();
+                    continue;
                 }
                 _ = &mut sleep => {
                     // Timeout. Checks periodical tasks.
@@ -1498,13 +1530,21 @@ impl<S: LogStore> RegionWorkerLoop<S> {
 
         self.last_periodical_check_millis = self.time_provider.current_time_millis();
 
+        self.wal
+            .refresh_flush_candidates(self.last_periodical_check_millis, CHECK_REGION_INTERVAL);
         if let Err(e) = self.flush_periodically() {
             error!(e; "Failed to flush regions periodically");
+        }
+        // Retries the reloads that failed, and starts those no notification started.
+        for region in self.regions.list_regions() {
+            self.maybe_reload_region(region.region_id);
         }
     }
 
     /// Handles region background request
     async fn handle_background_notify(&mut self, region_id: RegionId, notify: BackgroundNotify) {
+        // A reload that fails for good would otherwise restart itself forever.
+        let is_reload_result = matches!(notify, BackgroundNotify::RegionReloaded { .. });
         match notify {
             BackgroundNotify::RegionOpened { region, registered } => {
                 self.register_region(region);
@@ -1564,6 +1604,14 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             BackgroundNotify::CopyRegionFromFinished(req) => {
                 self.handle_copy_region_from_finished(req)
             }
+            BackgroundNotify::RegionFenced => {}
+            BackgroundNotify::RegionReloaded { old, result } => {
+                self.handle_region_reloaded(region_id, old, result).await
+            }
+        }
+        // A commit that found a newer manifest fenced the region before its job reported here.
+        if !is_reload_result {
+            self.maybe_reload_region(region_id);
         }
     }
 
@@ -1589,6 +1637,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             let sweep_older_than = self.config.gc.unknown_file_lingering_time;
             #[cfg(feature = "hdfs-object-store")]
             let sweep_limiter = self.sweep_limiter.clone();
+            let request_sender = self.sender.clone();
             // We need to do this in background as we need the manifest lock.
             common_runtime::spawn_global(async move {
                 match region.set_role_state_gracefully(region_role_state).await {
@@ -1616,6 +1665,8 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                         ));
                     }
                 }
+                // The call commits outside the worker when it ends staging or backfills metadata.
+                handle_reload::notify_if_fenced(&request_sender, &region).await;
             });
         } else {
             let _ = sender.send(SetRegionRoleStateResponse::NotFound);
@@ -1666,6 +1717,22 @@ impl WorkerListener {
         #[cfg(any(test, feature = "test"))]
         if let Some(listener) = &self.listener {
             listener.on_region_open_registered(_region_id).await;
+        }
+    }
+
+    /// The worker is about to replace a fenced region with its reload.
+    pub(crate) async fn on_region_reload_swap(&self, _region_id: RegionId) {
+        #[cfg(any(test, feature = "test"))]
+        if let Some(listener) = &self.listener {
+            listener.on_region_reload_swap(_region_id).await;
+        }
+    }
+
+    /// A catchup is about to reopen the region.
+    pub(crate) async fn on_catchup_reopen_begin(&self, _region_id: RegionId) {
+        #[cfg(any(test, feature = "test"))]
+        if let Some(listener) = &self.listener {
+            listener.on_catchup_reopen_begin(_region_id).await;
         }
     }
 

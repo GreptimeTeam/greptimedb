@@ -102,10 +102,10 @@ pub struct MultiRegionCompactionStats {
 
 /// Complete per-target outputs, including explicit empty partitions.
 pub struct MultiRegionCompactionOutput {
-    /// Output files, initially assigned to level 1 (L1).
+    /// Output files, already assigned to region-local L0.
     ///
-    /// The caller owns publication and must set [FileMeta::level] before
-    /// publishing if its intended output level differs from L1.
+    /// Window merging and semantic folding stay with ordinary region compaction,
+    /// which runs after publication; the caller does not adjust the level.
     pub files: BTreeMap<RegionId, Vec<FileMeta>>,
     /// Complete footer/index statistics for target hook delivery; not fabricated from FileMeta.
     pub sst_infos: BTreeMap<RegionId, Vec<SstInfo>>,

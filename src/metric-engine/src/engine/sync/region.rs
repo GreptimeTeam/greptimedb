@@ -122,6 +122,7 @@ impl MetricEngineInner {
             flushed_entry_id: None,
             flushed_sequence: None,
             committed_sequence: None,
+            wal_recovery: Default::default(),
         };
         self.mito
             .edit_region(target_metadata_region_id, edit)

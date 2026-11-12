@@ -700,6 +700,7 @@ async fn test_index_build_uses_physical_file_region_and_logical_manifest_region(
                 flushed_entry_id: None,
                 flushed_sequence: None,
                 committed_sequence: None,
+                wal_recovery: Default::default(),
             },
         )
         .await

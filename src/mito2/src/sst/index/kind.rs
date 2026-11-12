@@ -16,30 +16,78 @@
 
 use crate::sst::file::IndexType;
 
-/// Index implementations supplied by the storage engine.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub(crate) enum IndexKind {
+/// An index implementation known to the storage engine or supplied by a plugin.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum IndexKind {
+    /// Inverted index.
     Inverted,
+    /// Full-text index.
     Fulltext,
+    /// Bloom filter index.
     Bloom,
+    /// An index whose implementation is supplied by the embedding application.
+    Extension(ExtensionIndexKind),
+}
+
+/// Extension algorithm identities; implementations remain outside mito2.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum ExtensionIndexKind {
+    /// HyperLogLog distinct-value estimate.
+    Hll,
+    /// KLL rank estimate.
+    Kll,
+    /// Misra–Gries frequency estimate.
+    Mg,
+}
+
+impl ExtensionIndexKind {
+    /// Known extension algorithms checked by operation-level provider validation.
+    pub const ALL: [Self; 3] = [Self::Hll, Self::Kll, Self::Mg];
+
+    /// Column metadata key that requires this algorithm's provider.
+    pub const fn required_metadata_key(self) -> &'static str {
+        match self {
+            Self::Hll => datatypes::schema::HLL_KEY,
+            Self::Kll => datatypes::schema::KLL_KEY,
+            Self::Mg => datatypes::schema::MG_KEY,
+        }
+    }
+
+    /// Stable label used by index diagnostics and metrics.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Hll => "hll_index",
+            Self::Kll => "kll_index",
+            Self::Mg => "mg_index",
+        }
+    }
 }
 
 impl IndexKind {
     /// Stable label used by the existing index metrics.
-    pub(crate) const fn as_str(self) -> &'static str {
+    pub const fn as_str(self) -> &'static str {
         match self {
             Self::Inverted => "inverted_index",
             Self::Fulltext => "fulltext_index",
             Self::Bloom => "bloom_filter_index",
+            Self::Extension(kind) => kind.as_str(),
         }
     }
 
     /// Returns the identity recorded in file and column index metadata.
-    pub(crate) fn index_type(self) -> IndexType {
+    pub fn index_type(self) -> IndexType {
         match self {
             Self::Inverted => IndexType::InvertedIndex,
             Self::Fulltext => IndexType::FulltextIndex,
             Self::Bloom => IndexType::BloomFilterIndex,
+            Self::Extension(ExtensionIndexKind::Hll) => IndexType::HllIndex,
+            Self::Extension(ExtensionIndexKind::Kll) => IndexType::KllIndex,
+            Self::Extension(ExtensionIndexKind::Mg) => IndexType::MgIndex,
         }
+    }
+
+    /// Whether this kind is implemented by the storage engine.
+    pub fn is_builtin(self) -> bool {
+        !matches!(self, Self::Extension(_))
     }
 }

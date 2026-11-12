@@ -130,6 +130,7 @@ async fn sparse_and_materialized_tags_produce_identical_indexes() {
     let mut options = IndexOptions::default();
     options.inverted_index.segment_row_count = 3;
     let builder = IndexerBuilderImpl {
+        index_build_inputs: None,
         build_type: IndexBuildType::Flush,
         metadata: metadata.clone(),
         puffin_manager: puffin.clone(),

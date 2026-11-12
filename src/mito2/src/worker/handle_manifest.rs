@@ -35,6 +35,7 @@ use crate::error::{
 };
 use crate::manifest::action::{
     RegionChange, RegionEdit, RegionMetaAction, RegionMetaActionList, RegionTruncate, TruncateKind,
+    WalRecoveryEdit,
 };
 use crate::memtable::MemtableBuilderProvider;
 use crate::metrics::WRITE_CACHE_INFLIGHT_DOWNLOAD;
@@ -44,8 +45,8 @@ use crate::region::version::VersionControlRef;
 use crate::region::{MitoRegionRef, RegionLeaderState, RegionRoleState};
 use crate::request::{
     BackgroundNotify, BuildIndexRequest, DiscardUnflushedResult, OptionOutputTx,
-    RegionChangeResult, RegionEditRequest, RegionEditResult, RegionSyncRequest, TruncateResult,
-    WorkerRequest, WorkerRequestWithTime,
+    RegionChangeResult, RegionEditKind, RegionEditRequest, RegionEditResult, RegionSyncRequest,
+    TruncateResult, WorkerRequest, WorkerRequestWithTime,
 };
 use crate::sst::index::IndexBuildType;
 use crate::sst::{file, location};
@@ -98,7 +99,11 @@ impl RegionEditQueue {
     }
 
     fn dequeue(&mut self) -> Option<RegionEditRequest> {
-        fn can_merge(edit: &RegionEdit) -> bool {
+        fn can_merge(request: &RegionEditRequest) -> bool {
+            if !matches!(request.kind, RegionEditKind::Import) {
+                return false;
+            }
+            let edit = &request.edit;
             // Only the `RegionEdit`:
             // 1. contains the "raw" (file without a sequence) files to add,
             // 2. and no `committed_sequence`,
@@ -115,17 +120,15 @@ impl RegionEditQueue {
                 && edit.flushed_entry_id.is_none()
                 && edit.flushed_sequence.is_none()
                 && edit.committed_sequence.is_none()
+                && edit.wal_recovery == WalRecoveryEdit::default()
         }
 
         let mut merged = self.requests.pop_front()?;
-        if !can_merge(&merged.edit) {
+        if !can_merge(&merged) {
             return Some(merged);
         }
 
-        while let Some(request) = self
-            .requests
-            .pop_front_if(|request| can_merge(&request.edit))
-        {
+        while let Some(request) = self.requests.pop_front_if(|request| can_merge(request)) {
             merged.edit.files_to_add.extend(request.edit.files_to_add);
             merged.waiters.merge(request.waiters);
         }
@@ -363,12 +366,20 @@ impl<S: LogStore> RegionWorkerLoop<S> {
 
         let RegionEditRequest {
             region_id: _,
+            kind,
             mut edit,
             waiters,
             preload_sst_cache,
             staging_partition_expr: _,
         } = request;
-        if let Err(error) = prepare_region_edit(&region, &mut edit) {
+        #[cfg(feature = "enterprise")]
+        if matches!(kind, RegionEditKind::Compaction(_)) && region.is_staging() {
+            waiters.reply_with(|| RegionBusySnafu { region_id }.fail());
+            return RegionEditDispatch::Rejected;
+        }
+        if matches!(kind, RegionEditKind::Import)
+            && let Err(error) = prepare_region_edit(&region, &mut edit)
+        {
             let error = Arc::new(error);
             waiters.reply_with(|| Err(error.clone()).context(EditRegionSnafu { region_id }));
             return RegionEditDispatch::Rejected;
@@ -397,15 +408,24 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         // Now the region is in editing state.
         // Updates manifest in background.
         common_runtime::spawn_global(async move {
-            let result = edit_region(
-                &region,
-                edit.clone(),
-                cache_manager,
-                listener,
-                is_staging,
-                preload_sst_cache,
-            )
-            .await
+            let result = match kind {
+                RegionEditKind::Import => {
+                    edit_region(
+                        &region,
+                        edit.clone(),
+                        cache_manager,
+                        listener,
+                        is_staging,
+                        preload_sst_cache,
+                    )
+                    .await
+                }
+                #[cfg(feature = "enterprise")]
+                RegionEditKind::Compaction(context) => {
+                    crate::worker::handle_table_compaction::publish(&region, &context, edit.clone())
+                        .await
+                }
+            }
             .map_err(Arc::new);
             let notify = WorkerRequest::Background {
                 region_id,
@@ -466,13 +486,12 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             });
             return;
         }
-        let requires_reopen = edit_result.result.is_err()
-            && region
-                .manifest_ctx
-                .manifest_manager
-                .read()
-                .await
-                .is_stopped();
+        // A region waiting for a reload recovers its files when the reload replaces it. A fence
+        // stops the manager and sets the mark under the manifest lock, so read both under it.
+        let requires_reopen = edit_result.result.is_err() && {
+            let manager = region.manifest_ctx.manifest_manager.read().await;
+            manager.is_stopped() && !region.manifest_ctx.is_reload_pending()
+        };
         if let Err(error) = &edit_result.result
             && requires_reopen
         {
@@ -693,6 +712,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 flushed_entry_id: Some(discarded_entry_id),
                 flushed_sequence: Some(discarded_sequence),
                 committed_sequence: None,
+                wal_recovery: Default::default(),
             };
             let action_list = RegionMetaActionList::with_action(RegionMetaAction::Edit(edit));
             let result = match durability_barrier.wait(discarded_entry_id).await {
@@ -906,7 +926,7 @@ async fn edit_region(
             let remote_path =
                 location::sst_file_path(layer.table_dir(), file_meta.file_id(), layer.path_type());
 
-            let is_index_exist = file_meta.exists_index();
+            let has_downloadable_index = file_meta.has_downloadable_index();
             let index_file_size = file_meta.index_file_size();
 
             let index_file_index_key = IndexKey::new(
@@ -940,12 +960,8 @@ async fn edit_region(
                             PageIndexPolicy::Optional,
                         )
                         .await;
-
-                    if matches!(parquet_cached, Ok(true)) {
-                        listener.on_file_cache_filled(index_key.file_id);
-                    }
                 }
-                if is_index_exist {
+                if has_downloadable_index {
                     // also download puffin file
                     if let Err(err) = write_cache
                         .download(
@@ -963,6 +979,9 @@ async fn edit_region(
                 }
 
                 WRITE_CACHE_INFLIGHT_DOWNLOAD.sub(1);
+                if matches!(parquet_cached, Ok(true)) {
+                    listener.on_file_cache_filled(index_key.file_id);
+                }
             });
         }
     }

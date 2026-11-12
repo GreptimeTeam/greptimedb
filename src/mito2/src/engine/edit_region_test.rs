@@ -33,13 +33,15 @@ use store_api::region_request::{
 use store_api::storage::{FileId, RegionId};
 use tokio::sync::{Barrier, mpsc, oneshot};
 
+use crate::cache::file_cache::{FileType, IndexKey};
 use crate::config::MitoConfig;
 use crate::engine::MitoEngine;
 use crate::engine::listener::EventListener;
 use crate::manifest::action::RegionEdit;
 use crate::region::{MitoRegionRef, RegionLeaderState, RegionRoleState};
 use crate::request::{RegionEditRequest, WorkerRequest};
-use crate::sst::file::FileMeta;
+use crate::sst::file::{ColumnIndexMetadata, FileMeta, IndexType};
+use crate::sst::location;
 use crate::test_util::{CreateRequestBuilder, TestEnv, build_rows, rows_schema};
 use crate::time_provider::mock::MockTimeProvider;
 
@@ -135,6 +137,7 @@ async fn test_edit_region_schedule_compaction_with_format(
         flushed_entry_id: None,
         flushed_sequence: None,
         committed_sequence: None,
+        wal_recovery: Default::default(),
     };
     engine
         .edit_region(region.region_id, new_edit(&[0, 10, 50, 80]))
@@ -171,13 +174,15 @@ async fn test_edit_region_schedule_compaction_with_format(
     }
 }
 
+#[rstest::rstest]
+#[case::without_index(None)]
+#[case::known_index_size(Some(7))]
+#[case::unknown_index_size(Some(0))]
 #[tokio::test]
-async fn test_edit_region_fill_cache() {
-    test_edit_region_fill_cache_with_format(false).await;
-    test_edit_region_fill_cache_with_format(true).await;
-}
-
-async fn test_edit_region_fill_cache_with_format(flat_format: bool) {
+async fn test_edit_region_fill_cache(
+    #[values(false, true)] flat_format: bool,
+    #[case] index_file_size: Option<u64>,
+) {
     let mut env = TestEnv::new().await;
 
     struct EditRegionListener {
@@ -229,19 +234,40 @@ async fn test_edit_region_fill_cache_with_format(flat_format: bool) {
         .await
         .unwrap();
 
-    let edit = RegionEdit {
-        files_to_add: vec![FileMeta {
-            region_id: region.region_id,
-            file_id,
-            level: 0,
+    let mut meta = FileMeta {
+        region_id,
+        file_id,
+        index_version: 3,
+        ..Default::default()
+    };
+    if let Some(size) = index_file_size {
+        meta.index_file_size = size;
+        meta.indexes.push(ColumnIndexMetadata {
+            column_id: 0,
+            created_indexes: smallvec::smallvec![IndexType::HllIndex],
             ..Default::default()
-        }],
+        });
+    }
+    let index_path = location::index_file_path(
+        region.table_dir(),
+        meta.index_id(),
+        region.access_layer.path_type(),
+    );
+    region
+        .access_layer
+        .object_store()
+        .write(&index_path, b"payload".as_slice())
+        .await
+        .unwrap();
+    let edit = RegionEdit {
+        files_to_add: vec![meta],
         files_to_remove: vec![],
         timestamp_ms: None,
         compaction_time_window: None,
         flushed_entry_id: None,
         flushed_sequence: None,
         committed_sequence: None,
+        wal_recovery: Default::default(),
     };
     engine.edit_region(region.region_id, edit).await.unwrap();
 
@@ -251,6 +277,21 @@ async fn test_edit_region_fill_cache_with_format(flat_format: bool) {
         .unwrap()
         .unwrap();
     assert_eq!(file_id, actual);
+    // The listener runs after both download attempts, including the skipped-index path.
+    let cache_manager = engine.cache_manager();
+    let file_cache = cache_manager.write_cache().unwrap().file_cache();
+    let index_key = IndexKey::new(region_id, file_id, FileType::Puffin(3));
+    let expected_cached = index_file_size.is_some_and(|size| size > 0);
+    assert_eq!(file_cache.contains_key(&index_key), expected_cached);
+    let path = file_cache.cache_file_path(index_key);
+    if expected_cached {
+        assert_eq!(
+            file_cache.local_store().read(&path).await.unwrap().to_vec(),
+            b"payload"
+        );
+    } else {
+        assert!(!file_cache.local_store().exists(&path).await.unwrap());
+    }
 }
 
 #[tokio::test]
@@ -736,6 +777,7 @@ fn test_region_edit(region_id: RegionId, file_id: FileId) -> RegionEdit {
         flushed_entry_id: None,
         flushed_sequence: None,
         committed_sequence: None,
+        wal_recovery: Default::default(),
     }
 }
 
@@ -825,6 +867,7 @@ async fn test_edit_region_concurrently_with_format(flat_format: bool) {
                     flushed_entry_id: None,
                     flushed_sequence: None,
                     committed_sequence: None,
+                    wal_recovery: Default::default(),
                 };
                 engine
                     .edit_region(self.region.region_id, edit)

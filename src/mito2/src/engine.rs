@@ -63,6 +63,8 @@ mod open_test;
 #[cfg(test)]
 mod parallel_test;
 #[cfg(test)]
+pub(crate) mod pending_tail_test;
+#[cfg(test)]
 mod projection_test;
 #[cfg(test)]
 mod prune_test;
@@ -85,6 +87,8 @@ mod skip_wal_test;
 mod staging_test;
 #[cfg(test)]
 mod sync_test;
+#[cfg(feature = "enterprise")]
+pub mod table_compaction;
 #[cfg(test)]
 mod truncate_test;
 
@@ -101,7 +105,7 @@ mod puffin_index;
 
 use std::any::Any;
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::time::Instant;
 
 use api::region::RegionResponse;
@@ -152,14 +156,14 @@ use crate::compaction::CompactionState;
 use crate::config::{MitoConfig, ScanMemoryMode};
 use crate::engine::puffin_index::{IndexEntryContext, collect_index_entries_from_puffin};
 use crate::error::{
-    IncrementalQueryStaleSnafu, InvalidRequestSnafu, JoinSnafu, MitoManifestInfoSnafu, RecvSnafu,
-    RegionNotFoundSnafu, Result, SequenceRangeUnsupportedSnafu, SerdeJsonSnafu,
-    SerializeColumnMetadataSnafu, SnapshotFenceStaleSnafu,
+    EngineStoppedSnafu, IncrementalQueryStaleSnafu, InvalidRequestSnafu, JoinSnafu,
+    MitoManifestInfoSnafu, RecvSnafu, RegionNotFoundSnafu, Result, SequenceRangeUnsupportedSnafu,
+    SerdeJsonSnafu, SerializeColumnMetadataSnafu, SnapshotFenceStaleSnafu,
 };
 #[cfg(feature = "enterprise")]
 use crate::extension::BoxedExtensionRangeProviderFactory;
 use crate::gc::GcLimiterRef;
-use crate::manifest::action::RegionEdit;
+use crate::manifest::action::{RegionEdit, WalRecoveryEdit};
 use crate::memtable::MemtableStats;
 use crate::metrics::{
     HANDLE_REQUEST_ELAPSED, SCAN_MEMORY_EXHAUSTED_TOTAL, SCAN_MEMORY_USAGE_BYTES,
@@ -270,7 +274,7 @@ impl<'a, S: LogStore> MitoEngineBuilder<'a, S> {
         let inner = EngineInner {
             workers,
             config,
-            wal_raw_entry_reader,
+            wal_raw_entry_reader: RwLock::new(Some(wal_raw_entry_reader)),
             scan_memory_tracker,
             region_hook,
             #[cfg(feature = "enterprise")]
@@ -586,6 +590,7 @@ impl MitoEngine {
             .context(RegionNotFoundSnafu { region_id })?;
 
         let version = region.version();
+        version.ensure_no_pending_tails()?;
         let memtable_stats = version
             .memtables
             .list_memtables()
@@ -841,6 +846,7 @@ fn is_valid_region_edit(edit: &RegionEdit) -> bool {
                 ..
             }
         )
+        && edit.wal_recovery == WalRecoveryEdit::default()
 }
 
 /// Inner struct of [MitoEngine].
@@ -849,8 +855,9 @@ struct EngineInner {
     workers: WorkerGroup,
     /// Config of the engine.
     config: Arc<MitoConfig>,
-    /// The Wal raw entry reader.
-    wal_raw_entry_reader: Arc<dyn RawEntryReader>,
+    /// The Wal raw entry reader. `None` once the engine is stopped, so that it no longer holds
+    /// the log store and the owner of the log store can close it.
+    wal_raw_entry_reader: RwLock<Option<Arc<dyn RawEntryReader>>>,
     /// Memory tracker for table scans.
     scan_memory_tracker: QueryMemoryTracker,
     /// The region hook (if any) registered via plugins; exposed for the GC worker
@@ -903,7 +910,19 @@ impl EngineInner {
 
     /// Stop the inner engine.
     async fn stop(&self) -> Result<()> {
-        self.workers.stop().await
+        self.workers.stop().await?;
+        // Release the log store once the workers no longer use it.
+        let _ = self.wal_raw_entry_reader.write().unwrap().take();
+        Ok(())
+    }
+
+    /// Returns the Wal raw entry reader, or an error once the engine is stopped.
+    fn wal_raw_entry_reader(&self) -> Result<Arc<dyn RawEntryReader>> {
+        self.wal_raw_entry_reader
+            .read()
+            .unwrap()
+            .clone()
+            .context(EngineStoppedSnafu)
     }
 
     fn find_region(&self, region_id: RegionId) -> Result<MitoRegionRef> {
@@ -934,7 +953,7 @@ impl EngineInner {
         let provider = Provider::kafka_provider(topic);
         let (distributor, entry_receivers) = build_wal_entry_distributor_and_receivers(
             provider.clone(),
-            self.wal_raw_entry_reader.clone(),
+            self.wal_raw_entry_reader()?,
             &region_ids,
             DEFAULT_ENTRY_RECEIVER_BUFFER_SIZE,
         );
@@ -1030,7 +1049,7 @@ impl EngineInner {
             .collect::<Vec<_>>();
         let (distributor, entry_receivers) = build_wal_entry_distributor_and_receivers(
             provider.clone(),
-            self.wal_raw_entry_reader.clone(),
+            self.wal_raw_entry_reader()?,
             &region_ids,
             DEFAULT_ENTRY_RECEIVER_BUFFER_SIZE,
         );
@@ -1172,6 +1191,7 @@ impl EngineInner {
         });
         let version_data = region.version_control.current();
         let version = version_data.version;
+        version.ensure_no_pending_tails()?;
 
         if request.snapshot_on_scan && request.memtable_max_sequence.is_none() {
             request.memtable_max_sequence = Some(version_data.committed_sequence);
@@ -1300,7 +1320,8 @@ impl EngineInner {
         scan_region
     }
 
-    /// Converts the [`RegionRole`].
+    /// Converts the [`RegionRole`]. Unlike lease and catchup promotions, a conversion to Leader
+    /// does not check whether the region waits for a reload.
     fn set_region_role(&self, region_id: RegionId, role: RegionRole) -> Result<()> {
         let region = self.find_region(region_id)?;
         region.set_role(role);
@@ -1813,7 +1834,7 @@ impl MitoEngine {
                 )
                 .await?,
                 config,
-                wal_raw_entry_reader,
+                wal_raw_entry_reader: RwLock::new(Some(wal_raw_entry_reader)),
                 scan_memory_tracker,
                 region_hook: None,
                 #[cfg(feature = "enterprise")]
@@ -1889,6 +1910,7 @@ mod tests {
             flushed_entry_id: None,
             flushed_sequence: None,
             committed_sequence: None,
+            wal_recovery: Default::default(),
         };
         assert!(is_valid_region_edit(&edit));
 
@@ -1901,6 +1923,7 @@ mod tests {
             flushed_entry_id: None,
             flushed_sequence: None,
             committed_sequence: None,
+            wal_recovery: Default::default(),
         };
         assert!(!is_valid_region_edit(&edit));
 
@@ -1913,6 +1936,7 @@ mod tests {
             flushed_entry_id: None,
             flushed_sequence: None,
             committed_sequence: None,
+            wal_recovery: Default::default(),
         };
         assert!(is_valid_region_edit(&edit));
 
@@ -1925,6 +1949,7 @@ mod tests {
             flushed_entry_id: None,
             flushed_sequence: None,
             committed_sequence: None,
+            wal_recovery: Default::default(),
         };
         assert!(is_valid_region_edit(&edit));
 
@@ -1937,6 +1962,7 @@ mod tests {
             flushed_entry_id: None,
             flushed_sequence: None,
             committed_sequence: None,
+            wal_recovery: Default::default(),
         };
         assert!(!is_valid_region_edit(&edit));
         let edit = RegionEdit {
@@ -1947,6 +1973,7 @@ mod tests {
             flushed_entry_id: Some(1),
             flushed_sequence: None,
             committed_sequence: None,
+            wal_recovery: Default::default(),
         };
         assert!(!is_valid_region_edit(&edit));
         let edit = RegionEdit {
@@ -1957,6 +1984,21 @@ mod tests {
             flushed_entry_id: None,
             flushed_sequence: Some(1),
             committed_sequence: None,
+            wal_recovery: Default::default(),
+        };
+        assert!(!is_valid_region_edit(&edit));
+        let edit = RegionEdit {
+            files_to_add: vec![FileMeta::default()],
+            files_to_remove: vec![],
+            timestamp_ms: None,
+            compaction_time_window: None,
+            flushed_entry_id: None,
+            flushed_sequence: None,
+            committed_sequence: None,
+            wal_recovery: WalRecoveryEdit {
+                pending_tails: Some(vec![]),
+                handoff_floor: None,
+            },
         };
         assert!(!is_valid_region_edit(&edit));
     }

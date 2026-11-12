@@ -25,6 +25,7 @@ snapshot isolation). It implements the `RegionEngine` trait from `store-api`.
 | `flush` | `src/mito2/src/flush.rs` | `FlushScheduler`, `WriteBufferManager`, memtable → SST |
 | `compaction` | `src/mito2/src/compaction/` | Compaction scheduler (`scheduler.rs` + `scheduler/`), TWCS picker, strict-window manual picker, compactor, memory control |
 | `compaction/multi_region` | `src/mito2/src/compaction/multi_region.rs` | Enterprise lossless routing by a captured table partition rule; selected SSTs to per-region outputs, without manifest publication |
+| `engine/table_compaction` | `src/mito2/src/engine/table_compaction.rs` | Enterprise conditional publication of table-compaction results: shared-input snapshot, verified-output checks, and the manifest-locked swap of shared inputs for L0 outputs |
 | `access_layer` | `src/mito2/src/access_layer.rs` | SST read/write over the object store |
 | `sst` | `src/mito2/src/sst/` | Parquet format, file metadata, index layout |
 | `series_index` | `src/mito2/src/series_index/` | Series index writer/searcher, bucket planning, catalogs, worker-owned reconciliation (`maintenance.rs`), shared approximate usage (`task.rs`), catalogs, and index lifecycle |
@@ -82,7 +83,8 @@ pending. DDL cancellation retains its existing scheduling fence and priority.
   follower replay. Keep it backward compatible. Compaction task state does not
   belong in the manifest; publication uses ordinary file edits after locked input
   checks. Shared SSTs require Enterprise capability. Compatibility fixtures:
-  `tests/compatibility/manifest/table_compaction/`.
+  `tests/compatibility/manifest/table_compaction/` and
+  `tests/compatibility/manifest/pending_tails/`.
 - **SST/Parquet layout** (`sst/`): readers must stay compatible with existing files.
 - **Series-index disk limit**: tasks estimate usage from entry sizes in open-region snapshots
   and defer new builds when the shared estimate is full. Cleanup still prunes obsolete
@@ -111,8 +113,25 @@ Tests live next to the code as `*_test.rs` (e.g. `src/mito2/src/engine/flush_tes
   depend on this. Do not change assignment lightly.
 - Manifest version is monotonic — never reset or skip it.
 - In regions whose writes require a lease and whose WAL is the object store WAL,
-  each manifest version has one fixed object name and only one writer can create
-  it (`manifest/storage.rs`).
+  each manifest version has one fixed object name, created conditionally. A late
+  create can succeed again once checkpoint cleanup frees the name, so a commit
+  checks its result (`ensure_version_not_checkpointed` in `manifest/storage.rs`).
+- In those regions a commit after the region's Leader deadline sends nothing, and a version
+  conflict fences the region (`ManifestContext::fence_for_reload`): no lease or catchup promotes
+  it until the worker swaps in an instance reloaded from the new manifest
+  (`worker/handle_reload.rs`). Never await a worker sender while holding a manifest guard.
+- Pending tails (`RegionManifest::pending_tails`) are WAL ranges a region still has
+  to recover; the flushed entry id never prunes them. Opening a region replays its
+  WAL after `RegionManifest::wal_replay_start`. The WAL releases at open and after
+  a flush stay below this node's tails (`cap_wal_release`); truncate, drop, offline
+  cleanup and catchup release without that cap. Handoff floors are dropped once the
+  flushed entry id reaches them, in `RegionManifestBuilder::try_build`. While a
+  region has pending tails, scans and memtable/SST stats fail with
+  `RegionPendingTails`, and so do truncate, entering staging, a repartition flush,
+  a close with `flush_on_close`, and every ALTER other than adding nullable columns
+  without a default or changing options; compaction pauses. These checks run
+  before any region state changes. Full-listing GC skips a region that has pending
+  tails or whose manifest `has_update()` reports newer, or fails to check.
 - Lock ordering: take the manifest lock before updating `version_control`; the
   reverse deadlocks against concurrent flush/compaction.
 - All region I/O runs on tokio workers; never `block_on` inside a worker.

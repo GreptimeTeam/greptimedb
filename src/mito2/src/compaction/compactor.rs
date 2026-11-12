@@ -452,6 +452,7 @@ impl CompactionContext {
             flushed_entry_id: None,
             flushed_sequence: None,
             committed_sequence: None,
+            wal_recovery: Default::default(),
         };
 
         let action_list = RegionMetaActionList::with_action(RegionMetaAction::Edit(edit.clone()));
@@ -652,6 +653,7 @@ impl SstMerger for DefaultSstMerger {
             .access_layer
             .write_sst(
                 SstWriteRequest {
+                    index_build_inputs: None,
                     op_type: OperationType::Compact,
                     metadata: region_metadata.clone(),
                     source,
@@ -1144,6 +1146,7 @@ mod tests {
                         compaction_time_window: None,
                         flushed_entry_id: None,
                         flushed_sequence: None,
+                        wal_recovery: Default::default(),
                     })),
                     false,
                 )
