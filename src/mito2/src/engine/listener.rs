@@ -739,14 +739,20 @@ mod tests {
     async fn test_flush_failed_listener_counts_failures() {
         let listener = FlushFailedListener::default();
         let region_id = RegionId::new(1024, 0);
-        let mut wait = Box::pin(listener.wait_for_count(2));
-        assert!(futures::poll!(&mut wait).is_pending());
+        // Both waiters are pending when the failures arrive, so both must be woken.
+        let mut first = Box::pin(listener.wait_for_count(2));
+        let mut second = Box::pin(listener.wait_for_count(2));
+        assert!(futures::poll!(&mut first).is_pending());
+        assert!(futures::poll!(&mut second).is_pending());
         listener.on_flush_failed(region_id);
-        assert!(futures::poll!(&mut wait).is_pending());
+        assert!(futures::poll!(&mut first).is_pending());
+        assert!(futures::poll!(&mut second).is_pending());
         listener.on_flush_failed(region_id);
-        tokio::time::timeout(Duration::from_secs(3), wait)
-            .await
-            .unwrap();
+        for wait in [first, second] {
+            tokio::time::timeout(Duration::from_secs(3), wait)
+                .await
+                .unwrap();
+        }
         assert_eq!(2, listener.failure_count());
 
         // Thresholds already reached complete without another failure.
