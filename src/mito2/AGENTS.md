@@ -146,6 +146,8 @@ Tests live next to the code as `*_test.rs` (e.g. `src/mito2/src/engine/flush_tes
   metadata interner compares complete metadata before sharing; file identity alone is insufficient.
   Partition expressions are shared by table and complete expression content, so historical
   SST partition rules remain distinct after repartition.
+  Idle maintenance sweeps weak entries and shrinks storage on the shared blocking runtime;
+  it must also reclaim metadata after delayed readers leave, without requiring new writes.
   Index replacement preserves old readers and updates the lifetime guard to the newest metadata.
 - Local compaction units use the snapshot-free `CompactionContext`. Retaining a
   full `CompactionRegion` in a unit pins other units' inputs and delays SST purge.

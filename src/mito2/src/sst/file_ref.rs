@@ -23,7 +23,7 @@ use crate::error::Result;
 use crate::metrics::GC_REF_FILE_CNT;
 use crate::region::MitoRegionRef;
 use crate::sst::file::FileMeta;
-use crate::sst::file_metadata::FileMetadataInternerRef;
+use crate::sst::file_metadata::{FileMetadataInterner, FileMetadataInternerRef};
 
 /// File references grouped by their physical source region.
 #[derive(Debug, Clone, Default)]
@@ -52,7 +52,7 @@ impl FileReferenceManager {
         Self {
             node_id,
             files_per_region: Default::default(),
-            file_metadata_interner: Default::default(),
+            file_metadata_interner: FileMetadataInterner::new(),
             gc_enabled: false,
         }
     }
@@ -62,7 +62,7 @@ impl FileReferenceManager {
         Self {
             node_id,
             files_per_region: Default::default(),
-            file_metadata_interner: Default::default(),
+            file_metadata_interner: FileMetadataInterner::new(),
             gc_enabled,
         }
     }

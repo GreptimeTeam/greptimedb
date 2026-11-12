@@ -15,8 +15,10 @@
 //! Sharing of immutable SST metadata across manifests and runtime readers.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use common_cache::WeakInterner;
+use common_telemetry::error;
 use partition::expr::PartitionExpr;
 use store_api::storage::TableId;
 
@@ -32,6 +34,31 @@ pub(crate) struct FileMetadataInterner {
 pub(crate) type FileMetadataInternerRef = Arc<FileMetadataInterner>;
 
 impl FileMetadataInterner {
+    /// Starts idle maintenance without retaining the interner between passes.
+    pub(crate) fn new() -> FileMetadataInternerRef {
+        let interner = Arc::new(Self::default());
+        let weak = Arc::downgrade(&interner);
+        common_runtime::spawn_global(async move {
+            loop {
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                let Some(interner) = weak.upgrade() else {
+                    return;
+                };
+                // Sweeping and geometric capacity reductions run on the shared
+                // blocking runtime, outside region workers and async I/O tasks.
+                if let Err(err) = common_runtime::spawn_blocking_global(move || {
+                    interner.files.run_pending_tasks();
+                    interner.expressions.run_pending_tasks();
+                })
+                .await
+                {
+                    error!(err; "Failed to maintain SST metadata interner");
+                }
+            }
+        });
+        interner
+    }
+
     /// Normalizes exclusively owned metadata before publishing it to readers.
     /// Shared inputs remain immutable: expression deduplication must not deep-clone
     /// indexes merely to replace an equivalent expression.
@@ -63,6 +90,57 @@ mod tests {
 
     use super::*;
     use crate::sst::file::FileMeta;
+
+    #[tokio::test]
+    async fn test_idle_maintenance_after_delayed_reader_release() {
+        let manager = crate::sst::file_ref::FileReferenceManager::new(None);
+        let interner = manager.file_metadata_interner.clone();
+        drop(manager);
+        let values: Vec<_> = (0..4096)
+            .map(|_| {
+                interner.intern(Arc::new(FileMeta {
+                    region_id: RegionId::new(1, 1),
+                    file_id: FileId::random(),
+                    partition_expr: Some(Arc::new(
+                        partition::expr::col("tag").lt(datatypes::value::Value::UInt32(10)),
+                    )),
+                    ..Default::default()
+                }))
+            })
+            .collect();
+        let reader = values[0].clone();
+        drop(values);
+        // Keep a reader through a maintenance pass, then release it without any
+        // new intern() call. The periodic task must reclaim both indexes.
+        common_runtime::spawn_blocking_global({
+            let interner = interner.clone();
+            move || {
+                interner.files.run_pending_tasks();
+                interner.expressions.run_pending_tasks();
+            }
+        })
+        .await
+        .unwrap();
+        assert!(!interner.files.is_empty());
+        assert!(!interner.expressions.is_empty());
+        drop(reader);
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !interner.files.is_empty() || !interner.expressions.is_empty() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("idle maintenance should reclaim retired metadata without new writes");
+        let weak = Arc::downgrade(&interner);
+        drop(interner);
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while weak.upgrade().is_some() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("maintenance must not keep its owner alive");
+    }
 
     #[test]
     fn test_metadata_views_and_recovered_copies() {

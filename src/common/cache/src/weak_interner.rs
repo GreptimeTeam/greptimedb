@@ -19,13 +19,15 @@ use std::sync::{Arc, Mutex, Weak};
 use smallvec::SmallVec;
 
 const SHARD_COUNT: usize = 32;
+const MAINTENANCE_BUCKETS_PER_SHARD: usize = 1024;
 
 /// Shares equal immutable values without keeping their payloads alive.
 ///
 /// Keys select candidate buckets; equality of values determines sharing. Keys must
 /// not own the payload being interned. Live entries are never evicted. Each call
-/// sweeps one bucket in its shard, so inactive shards retain only weak references
-/// until used again or dropped. No guards or callbacks escape this abstraction.
+/// sweeps one bucket in its shard. Owners must periodically call
+/// [`Self::run_pending_tasks`] even when idle: weak references retain the inline
+/// allocation after the payload is dropped. No guards or callbacks escape this abstraction.
 #[derive(Debug)]
 pub struct WeakInterner<K, V> {
     shards: [Mutex<Entries<K, V>>; SHARD_COUNT],
@@ -47,6 +49,34 @@ impl<K, V> Default for WeakInterner<K, V> {
 }
 
 impl<K: Clone + Eq + Hash, V: Eq> WeakInterner<K, V> {
+    /// Sweeps a bounded number of buckets per shard and releases oversized storage.
+    ///
+    /// Repeated calls eventually visit every bucket without requiring new interning.
+    /// Only one shard is locked at a time. Capacity reductions can rehash that shard,
+    /// so owners should schedule maintenance off their latency-sensitive paths.
+    pub fn run_pending_tasks(&self) {
+        for shard in &self.shards {
+            // As in intern(), poison recovery cannot invalidate weak ownership.
+            let mut entries = shard.lock().unwrap_or_else(|err| err.into_inner());
+            for _ in 0..entries.sweep.len().min(MAINTENANCE_BUCKETS_PER_SHARD) {
+                entries.sweep_one();
+            }
+            entries.shrink_if_needed();
+        }
+    }
+
+    /// Whether the index has no entries, including uncollected weak references.
+    /// This is an observation, not a barrier against concurrent interning.
+    pub fn is_empty(&self) -> bool {
+        self.shards.iter().all(|shard| {
+            shard
+                .lock()
+                .unwrap_or_else(|err| err.into_inner())
+                .values
+                .is_empty()
+        })
+    }
+
     /// Returns the live equal value, or registers the supplied allocation.
     /// Publication and lookup are atomic within the key's shard. Implementations
     /// of Hash, Eq and Drop must not reenter this interner or acquire external locks.
@@ -80,6 +110,24 @@ struct Entries<K, V> {
 }
 
 impl<K: Eq + Hash, V> Entries<K, V> {
+    fn shrink_if_needed(&mut self) {
+        let len = self.values.len();
+        if len == 0 {
+            // clear()/remove() retain capacity, including the old Arc allocations'
+            // indexing overhead after a large region has been closed or truncated.
+            self.values = HashMap::new();
+            self.sweep = VecDeque::new();
+            return;
+        }
+        // Geometric hysteresis avoids reallocating for every retired file.
+        if self.values.capacity() > len.saturating_mul(4) {
+            self.values.shrink_to(len.saturating_mul(2));
+        }
+        if self.sweep.capacity() > len.saturating_mul(4) {
+            self.sweep.shrink_to(len.saturating_mul(2));
+        }
+    }
+
     fn sweep_one(&mut self) {
         let Some(key) = self.sweep.pop_front() else {
             return;
@@ -127,6 +175,49 @@ mod tests {
             &values[0],
             &interner.intern(1, Arc::new(String::from("same")))
         ));
+    }
+
+    #[test]
+    fn test_bulk_release_without_further_interning() {
+        let interner = WeakInterner::default();
+        let values: Vec<_> = (0..65_536)
+            .map(|key| interner.intern(key, Arc::new([0_u8; 280])))
+            .collect();
+        // Readers can outlive region retirement. Maintenance must preserve their
+        // canonical entries and collect them on a later pass after they leave.
+        let reader = values[0].clone();
+        drop(values);
+        for _ in 0..128 {
+            interner.run_pending_tasks();
+        }
+        let mut count = 0;
+        for shard in &interner.shards {
+            let entries = shard.lock().unwrap();
+            count += entries.values.len();
+            if entries.values.is_empty() {
+                assert_eq!(entries.values.capacity(), 0);
+                assert_eq!(entries.sweep.capacity(), 0);
+            } else {
+                assert_eq!(entries.values.len(), 1);
+                assert!(entries.values.capacity() <= 4);
+                assert!(entries.sweep.capacity() <= 4);
+                assert!(Arc::ptr_eq(
+                    &reader,
+                    &entries.values[&0][0].upgrade().unwrap()
+                ));
+            }
+        }
+        assert_eq!(count, 1);
+        drop(reader);
+        for _ in 0..128 {
+            interner.run_pending_tasks();
+        }
+        assert!(interner.is_empty());
+        for shard in &interner.shards {
+            let entries = shard.lock().unwrap();
+            assert_eq!(entries.values.capacity(), 0);
+            assert_eq!(entries.sweep.capacity(), 0);
+        }
     }
 
     #[test]
