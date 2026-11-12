@@ -527,7 +527,8 @@ async fn test_checkpoint_bypass_in_staging_mode() {
     );
 
     // The end of staging commits all of them as the next version.
-    assert_eq!(manager.commit_staged(|| false).await.unwrap(), version + 1);
+    let (committed_version, _) = manager.commit_staged(|| false).await.unwrap();
+    assert_eq!(committed_version, version + 1);
 
     // Wait for potential checkpoint
     while manager.checkpointer().is_doing_checkpoint() {

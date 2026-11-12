@@ -714,7 +714,8 @@ impl RegionManifestManager {
         Ok(version)
     }
 
-    /// Commits the staged actions as one version and clears them. Returns the version.
+    /// Commits the staged actions as one version and clears them. Returns the version and the
+    /// committed actions.
     ///
     /// If the commit fails with an error that may have written it, its encoded bytes are kept:
     /// the next call commits the same bytes, and no other action is staged until the staged
@@ -722,7 +723,7 @@ impl RegionManifestManager {
     pub(crate) async fn commit_staged(
         &mut self,
         must_verify: impl FnOnce() -> bool,
-    ) -> Result<ManifestVersion> {
+    ) -> Result<(ManifestVersion, RegionMetaActionList)> {
         let _t = MANIFEST_OP_ELAPSED
             .with_label_values(&["update"])
             .start_timer();
@@ -738,18 +739,19 @@ impl RegionManifestManager {
             Some(bytes) => bytes.clone(),
             None => self.staged.list.encode()?,
         };
-        // The staged actions stay until the commit succeeds, for a retry.
+        // A copy builds the new manifest; the staged list itself goes back for the region version.
         let result = self
             .commit(self.staged.list.actions.clone(), &bytes, true, must_verify)
             .await;
-        match &result {
-            Ok(_) => self.clear_staged(),
-            Err(e) if e.may_have_persisted_manifest_update() => {
-                self.staged.attempted = Some(bytes);
-            }
-            Err(_) => {}
+        if let Err(e) = &result
+            && e.may_have_persisted_manifest_update()
+        {
+            self.staged.attempted = Some(bytes);
         }
-        result
+        let version = result?;
+        let committed = std::mem::take(&mut self.staged.list);
+        self.clear_staged();
+        Ok((version, committed))
     }
 
     /// Returns the staged actions, or `None` if nothing is staged.

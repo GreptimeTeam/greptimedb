@@ -410,7 +410,7 @@ async fn test_staged_commit_retry_writes_same_content() {
     );
 
     // The retry writes the same content, so it recognizes its own landed write.
-    assert_eq!(1, manager.commit_staged(|| false).await.unwrap());
+    assert_eq!(1, manager.commit_staged(|| false).await.unwrap().0);
     assert!(manager.staged_actions().is_none());
     assert!(manager.manifest().files.contains_key(&imported));
 }

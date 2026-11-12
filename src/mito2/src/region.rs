@@ -1189,9 +1189,9 @@ impl MitoRegion {
             }
         );
 
-        let (staged_partition_expr_change, staged_change, staged_edit) =
-            staged_actions.clone().split_region_change_and_edit();
-        if let Some(change) = &staged_change {
+        if let Some(RegionMetaAction::Change(change)) =
+            staged_actions.actions.iter().find(|a| a.is_change())
+        {
             // In staging exit we only allow metadata-only updates. A `Change`
             // action is accepted only when column definitions are unchanged;
             // otherwise it is treated as a schema change and rejected.
@@ -1205,14 +1205,16 @@ impl MitoRegion {
         }
 
         let ending_started_at = self.manifest_ctx.begin_ending_staging(self.region_id)?;
-        let result = self.manifest_ctx.commit_staged_locked(manager).await;
-        if let Ok(pending) = &result {
+        let mut result = self.manifest_ctx.commit_staged_locked(manager).await;
+        if let Ok((pending, committed)) = &mut result {
             info!(
                 "Successfully committed staged manifests for region {}, new version: {}",
                 self.region_id,
                 pending.version()
             );
             // Apply the committed changes to in-memory version control
+            let (staged_partition_expr_change, staged_change, staged_edit) =
+                std::mem::take(committed).split_region_change_and_edit();
             if let Some(change) = staged_partition_expr_change {
                 let mut new_metadata = self.version().metadata.as_ref().clone();
                 new_metadata.set_partition_expr(change.partition_expr);
@@ -1224,6 +1226,7 @@ impl MitoRegion {
             self.version_control
                 .apply_edit(Some(staged_edit), &[], self.file_purger.clone());
         }
+        let result = result.map(|(pending, _)| pending);
         let next_state =
             self.manifest_ctx
                 .finish_ending_staging(self.region_id, ending_started_at, &result);
@@ -1689,45 +1692,42 @@ impl ManifestContext {
         ))
     }
 
-    /// Commits the staged actions of `manager` as one version under a caller-held write lock,
-    /// and returns a [`PendingManifestHook`] to [`fire`](PendingManifestHook::fire) after
-    /// dropping the lock.
+    /// Commits the staged actions of `manager` as one version under a caller-held write lock.
+    /// Returns a [`PendingManifestHook`] to [`fire`](PendingManifestHook::fire) after dropping
+    /// the lock, and the committed actions.
     pub(crate) async fn commit_staged_locked(
         &self,
         manager: &mut RegionManifestManager,
-    ) -> Result<PendingManifestHook> {
+    ) -> Result<(PendingManifestHook, RegionMetaActionList)> {
         let region_id = manager.manifest().metadata.region_id;
-        // Copied before the commit clears them, so the hook still sees what was written.
-        let actions_for_hook = self
-            .hook
-            .as_ref()
-            .and_then(|_| manager.staged_actions().cloned());
-        let version = self
+        let (version, committed) = self
             .commit_locked(manager, async |manager| {
                 manager
                     .commit_staged(|| self.is_leader_lease_expired())
                     .await
             })
             .await?;
+        let actions_for_hook = self.hook.as_ref().map(|_| committed.clone());
 
-        Ok(PendingManifestHook::new(
+        let pending = PendingManifestHook::new(
             region_id,
             actions_for_hook,
             version,
             self.hook.clone(),
             false,
-        ))
+        );
+        Ok((pending, committed))
     }
 
     /// Runs the manifest commit `commit` under a caller-held write lock. A writer past its
     /// Leader deadline may no longer hold the region, so in conditional publication it sends
     /// nothing; a commit that finds a newer manifest fences the region (see
     /// [Self::fence_for_reload]).
-    async fn commit_locked(
+    async fn commit_locked<T>(
         &self,
         manager: &mut RegionManifestManager,
-        commit: impl AsyncFnOnce(&mut RegionManifestManager) -> Result<ManifestVersion>,
-    ) -> Result<ManifestVersion> {
+        commit: impl AsyncFnOnce(&mut RegionManifestManager) -> Result<T>,
+    ) -> Result<T> {
         let region_id = manager.manifest().metadata.region_id;
         let result = if manager.is_conditional_publication() && self.is_leader_lease_expired() {
             RegionLeaseExpiredSnafu { region_id }.fail()
