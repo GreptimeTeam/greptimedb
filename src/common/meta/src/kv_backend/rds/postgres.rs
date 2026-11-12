@@ -36,13 +36,13 @@ use crate::error::{
     CreatePostgresPoolSnafu, GetPostgresConnectionSnafu, LoadTlsCertificateSnafu,
     PostgresExecutionSnafu, PostgresTlsConfigSnafu, PostgresTransactionSnafu, Result,
 };
-use crate::kv_backend::KvBackendRef;
 use crate::kv_backend::rds::{
     Executor, ExecutorFactory, ExecutorImpl, KvQueryExecutor, RDS_STORE_OP_BATCH_DELETE,
     RDS_STORE_OP_BATCH_GET, RDS_STORE_OP_BATCH_PUT, RDS_STORE_OP_RANGE_DELETE,
     RDS_STORE_OP_RANGE_QUERY, RDS_STORE_TXN_RETRY_COUNT, RdsStore, Transaction,
     ensure_rustls_crypto_provider_installed,
 };
+use crate::kv_backend::{ClosableKvBackendRef, KvBackendRef};
 use crate::rpc::KeyValue;
 use crate::rpc::store::{
     BatchDeleteRequest, BatchDeleteResponse, BatchGetRequest, BatchGetResponse, BatchPutRequest,
@@ -850,7 +850,9 @@ impl PgStore {
                 .context(CreatePostgresPoolSnafu)?,
         };
 
-        Self::with_pg_pool(pool, None, table_name, max_txn_ops, false).await
+        let backend: KvBackendRef =
+            Self::with_pg_pool(pool, None, table_name, max_txn_ops, false).await?;
+        Ok(backend)
     }
 
     /// Create [PgStore] impl of [KvBackendRef] from url (backward compatibility).
@@ -858,14 +860,14 @@ impl PgStore {
         Self::with_url_and_tls(url, table_name, max_txn_ops, None).await
     }
 
-    /// Create [PgStore] impl of [KvBackendRef] from [deadpool_postgres::Pool] with optional schema.
+    /// Create [PgStore] impl of [ClosableKvBackendRef] from [deadpool_postgres::Pool] with optional schema.
     pub async fn with_pg_pool(
         pool: Pool,
         schema_name: Option<&str>,
         table_name: &str,
         max_txn_ops: usize,
         auto_create_schema: bool,
-    ) -> Result<KvBackendRef> {
+    ) -> Result<ClosableKvBackendRef> {
         // Ensure the postgres metadata backend is ready to use.
         let client = match pool.get().await {
             Ok(client) => client,

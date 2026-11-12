@@ -167,30 +167,33 @@ impl StoreConfig {
                 BackendImpl::PostgresStore => {
                     let table_name = &self.meta_table_name;
                     let tls_config = self.tls_config();
-                    Ok(meta_srv::utils::postgres::build_postgres_kv_backend(
-                        store_addrs,
-                        None,
-                        tls_config,
-                        self.meta_schema_name.as_deref(),
-                        table_name,
-                        max_txn_ops,
-                        self.auto_create_schema,
-                    )
-                    .await
-                    .map_err(BoxedError::new)?)
+                    let backend: KvBackendRef =
+                        meta_srv::utils::postgres::build_postgres_kv_backend(
+                            store_addrs,
+                            None,
+                            tls_config,
+                            self.meta_schema_name.as_deref(),
+                            table_name,
+                            max_txn_ops,
+                            self.auto_create_schema,
+                        )
+                        .await
+                        .map_err(BoxedError::new)?;
+                    Ok(backend)
                 }
                 #[cfg(feature = "mysql_kvbackend")]
                 BackendImpl::MysqlStore => {
                     let table_name = &self.meta_table_name;
                     let tls_config = self.tls_config();
-                    Ok(meta_srv::utils::mysql::build_mysql_kv_backend(
+                    let backend: KvBackendRef = meta_srv::utils::mysql::build_mysql_kv_backend(
                         store_addrs,
                         tls_config.as_ref(),
                         table_name,
                         max_txn_ops,
                     )
                     .await
-                    .map_err(BoxedError::new)?)
+                    .map_err(BoxedError::new)?;
+                    Ok(backend)
                 }
                 #[cfg(not(test))]
                 BackendImpl::MemoryStore => {
