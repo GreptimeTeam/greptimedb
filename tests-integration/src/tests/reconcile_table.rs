@@ -609,7 +609,7 @@ async fn test_reconcile_table_preserves_column_order_and_pk_order() {
     // varies between builds.
     let output = execute_sql(&frontend, "SHOW CREATE TABLE q8").await;
     let formatted = output.data.pretty_print().await;
-    let normalized = formatted.replace('`', "").replace('"', "").to_lowercase();
+    let normalized = formatted.replace(['`', '"'], "").to_lowercase();
 
     let column_section = normalized
         .split("primary key")
@@ -628,7 +628,7 @@ async fn test_reconcile_table_preserves_column_order_and_pk_order() {
         .split("primary key")
         .nth(1)
         .expect("primary key section missing");
-    let key_normalized = key_section.replace(' ', "").replace('\n', "");
+    let key_normalized = key_section.replace([' ', '\n'], "");
     assert!(
         key_normalized.contains("(b,a)"),
         "expected PRIMARY KEY (b, a), got:\n{formatted}"
