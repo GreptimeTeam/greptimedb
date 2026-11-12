@@ -148,6 +148,8 @@ Tests live next to the code as `*_test.rs` (e.g. `src/mito2/src/engine/flush_tes
   SST partition rules remain distinct after repartition.
   Interned references reclaim entries and unused tree nodes on final release, including
   delayed readers, without a maintenance task or new writes.
+  Manifest consumers receive the interner directly. Scrape-time entry counts use weak
+  references and do not add maintenance tasks or retain engine storage.
   Index replacement preserves old readers and updates the lifetime guard to the newest metadata.
 - Local compaction units use the snapshot-free `CompactionContext`. Retaining a
   full `CompactionRegion` in a unit pins other units' inputs and delays SST purge.

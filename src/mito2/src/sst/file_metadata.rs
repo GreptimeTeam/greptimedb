@@ -25,6 +25,7 @@ use partition::expr::PartitionExpr;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use store_api::storage::TableId;
 
+use crate::metrics::file_metadata::FILE_METADATA_COLLECTOR;
 use crate::sst::file::{FileMeta, FileMetaRef, RegionFileId};
 
 const SHARD_COUNT: usize = 32;
@@ -147,14 +148,39 @@ impl<'de, T: Ord + Deserialize<'de>> Deserialize<'de> for MetadataRef<T> {
 
 /// Engine-local sharing. File and expression operations never hold nested locks.
 /// The final registered reference removes its entry and releases unused tree nodes.
+pub struct FileMetadataInterner {
+    inner: Arc<FileMetadataInternerState>,
+}
+
+/// Shared storage observed through weak references by the metrics collector.
 #[derive(Default)]
-pub(crate) struct FileMetadataInterner {
+pub(crate) struct FileMetadataInternerState {
     files: [OrdInterner<ScopedMetadata<FileMeta>>; SHARD_COUNT],
     expressions: [OrdInterner<ScopedMetadata<PartitionExpr>>; SHARD_COUNT],
     hasher: RandomState,
 }
 
-pub(crate) type FileMetadataInternerRef = Arc<FileMetadataInterner>;
+/// Shared engine-local metadata interner.
+pub type FileMetadataInternerRef = Arc<FileMetadataInterner>;
+
+impl Default for FileMetadataInterner {
+    fn default() -> Self {
+        let inner = Arc::new(FileMetadataInternerState::default());
+        FILE_METADATA_COLLECTOR.register(&inner);
+        Self { inner }
+    }
+}
+
+impl FileMetadataInternerState {
+    /// Counts registered values, not runtime views or allocations outside this interner.
+    /// Each shard exposes its tree length without traversing entries.
+    pub(crate) fn entry_counts(&self) -> (usize, usize) {
+        (
+            self.files.iter().map(OrdInterner::len).sum(),
+            self.expressions.iter().map(OrdInterner::len).sum(),
+        )
+    }
+}
 
 impl Debug for FileMetadataInterner {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -164,7 +190,8 @@ impl Debug for FileMetadataInterner {
 }
 
 impl FileMetadataInterner {
-    pub(crate) fn new() -> FileMetadataInternerRef {
+    /// Creates an interner with automatic reclamation and scrape-time metrics.
+    pub fn new() -> FileMetadataInternerRef {
         Arc::new(Self::default())
     }
 
@@ -174,9 +201,9 @@ impl FileMetadataInterner {
     pub(crate) fn intern_in_place(&self, meta: &mut FileMetaRef) {
         if let Some(expr) = &meta.partition_expr {
             let table_id = meta.region_id.table_id();
-            let shard = self.hasher.hash_one(table_id) as usize % SHARD_COUNT;
+            let shard = self.inner.hasher.hash_one(table_id) as usize % SHARD_COUNT;
             let shared = MetadataRef(MetadataRefInner::Interned(
-                self.expressions[shard].intern_sized(ScopedMetadata {
+                self.inner.expressions[shard].intern_sized(ScopedMetadata {
                     table_id,
                     value: expr.as_arc().clone(),
                 }),
@@ -186,13 +213,13 @@ impl FileMetadataInterner {
             }
         }
         let key = RegionFileId::new(meta.region_id, meta.file_id);
-        let shard = self.hasher.hash_one(key) as usize % SHARD_COUNT;
-        *meta = MetadataRef(MetadataRefInner::Interned(self.files[shard].intern_sized(
-            ScopedMetadata {
+        let shard = self.inner.hasher.hash_one(key) as usize % SHARD_COUNT;
+        *meta = MetadataRef(MetadataRefInner::Interned(
+            self.inner.files[shard].intern_sized(ScopedMetadata {
                 table_id: meta.region_id.table_id(),
                 value: meta.as_arc().clone(),
-            },
-        )));
+            }),
+        ));
     }
 
     /// Shares only fully equal metadata; file identity alone is insufficient.
@@ -232,11 +259,17 @@ mod tests {
         let reader = values[0].clone();
         drop(values);
         assert_eq!(
-            interner.files.iter().map(OrdInterner::len).sum::<usize>(),
+            interner
+                .inner
+                .files
+                .iter()
+                .map(OrdInterner::len)
+                .sum::<usize>(),
             1
         );
         assert_eq!(
             interner
+                .inner
                 .expressions
                 .iter()
                 .map(OrdInterner::len)
@@ -247,8 +280,8 @@ mod tests {
         assert!(MetadataRef::ptr_eq(&reader, &recovered));
         drop(recovered);
         drop(reader);
-        assert!(interner.files.iter().all(OrdInterner::is_empty));
-        assert!(interner.expressions.iter().all(OrdInterner::is_empty));
+        assert!(interner.inner.files.iter().all(OrdInterner::is_empty));
+        assert!(interner.inner.expressions.iter().all(OrdInterner::is_empty));
     }
 
     #[test]
@@ -338,15 +371,22 @@ mod tests {
     #[test]
     fn test_concurrent_publication_and_retirement() {
         let interner = FileMetadataInterner::new();
+        let collector = crate::metrics::file_metadata::FileMetadataCollector::default();
+        collector.register(&interner.inner);
         let barrier = std::sync::Barrier::new(8);
         std::thread::scope(|scope| {
             let workers: Vec<_> = (0..8)
                 .map(|_| {
                     let interner = &interner;
                     let barrier = &barrier;
+                    let collector = &collector;
                     scope.spawn(move || {
                         barrier.wait();
                         for i in 0..1000 {
+                            if i % 64 == 0 {
+                                use prometheus::core::Collector;
+                                assert_eq!(collector.collect().len(), 1);
+                            }
                             let meta = FileMeta {
                                 region_id: RegionId::new(1, 1),
                                 file_size: i % 16,
@@ -372,8 +412,8 @@ mod tests {
                 worker.join().unwrap();
             }
         });
-        assert!(interner.files.iter().all(OrdInterner::is_empty));
-        assert!(interner.expressions.iter().all(OrdInterner::is_empty));
+        assert!(interner.inner.files.iter().all(OrdInterner::is_empty));
+        assert!(interner.inner.expressions.iter().all(OrdInterner::is_empty));
     }
 
     #[test]
@@ -385,5 +425,83 @@ mod tests {
         assert!(!MetadataRef::ptr_eq(&left, &right));
         drop(first);
         assert_eq!(*left, *right);
+    }
+    #[test]
+    fn test_scrape_counts_distinct_values_and_releases_sources() {
+        use std::collections::BTreeMap;
+
+        use crate::metrics::file_metadata::FileMetadataCollector;
+
+        let collector = FileMetadataCollector::default();
+        let registry = prometheus::Registry::new();
+        registry.register(Box::new(collector.clone())).unwrap();
+        let counts = || {
+            let families = registry.gather();
+            assert_eq!(families.len(), 1);
+            assert_eq!(
+                families[0].name(),
+                "greptime_mito_sst_metadata_interner_entries"
+            );
+            families[0]
+                .get_metric()
+                .iter()
+                .map(|metric| {
+                    assert_eq!(metric.get_label().len(), 1);
+                    let label = &metric.get_label()[0];
+                    assert_eq!(label.name(), "type");
+                    (
+                        label.value().to_string(),
+                        metric.get_gauge().value() as usize,
+                    )
+                })
+                .collect::<BTreeMap<_, _>>()
+        };
+        let expected = |files, expressions| {
+            BTreeMap::from([
+                ("file".to_string(), files),
+                ("partition_expr".to_string(), expressions),
+            ])
+        };
+        assert_eq!(counts(), expected(0, 0));
+        let first = FileMetadataInterner::default();
+        let second = FileMetadataInterner::new();
+        collector.register(&first.inner);
+        collector.register(&second.inner);
+        let make_meta = || FileMeta {
+            region_id: RegionId::new(1, 1),
+            partition_expr: Some(
+                partition::expr::col("tag")
+                    .lt(datatypes::value::Value::UInt32(10))
+                    .into(),
+            ),
+            ..Default::default()
+        };
+        let value = first.intern(make_meta().into());
+        let view = first.intern(make_meta().into());
+        let other_engine = second.intern(make_meta().into());
+        let changed = first.intern(
+            FileMeta {
+                file_size: 1,
+                ..make_meta()
+            }
+            .into(),
+        );
+        // Views deduplicate, content versions and engine scopes do not.
+        assert_eq!(counts(), expected(3, 2));
+        drop(value);
+        drop(changed);
+        drop(other_engine);
+        assert_eq!(counts(), expected(1, 1));
+        drop(view);
+        assert_eq!(counts(), expected(0, 0));
+
+        let reader = first.intern(make_meta().into());
+        let weak = Arc::downgrade(&first.inner);
+        drop(first);
+        drop(second);
+        assert!(weak.upgrade().is_none());
+        // Counts describe registered entries in live interners, not detached readers.
+        assert_eq!(counts(), expected(0, 0));
+        assert_eq!(reader.region_id, RegionId::new(1, 1));
     }
 }

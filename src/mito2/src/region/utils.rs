@@ -32,7 +32,7 @@ use crate::manifest::manager::{RegionManifestManager, RegionManifestOptions};
 use crate::region::opener::get_object_store;
 use crate::region::options::RegionOptions;
 use crate::sst::file::{RegionFileId, RegionIndexId};
-use crate::sst::file_ref::FileReferenceManagerRef;
+use crate::sst::file_metadata::FileMetadataInternerRef;
 use crate::sst::location;
 
 /// A loader for loading metadata from a region dir.
@@ -41,7 +41,7 @@ pub struct RegionMetadataLoader {
     config: Arc<MitoConfig>,
     object_store_manager: ObjectStoreManagerRef,
     lease_enabled: bool,
-    file_ref_manager: FileReferenceManagerRef,
+    file_metadata_interner: FileMetadataInternerRef,
 }
 
 impl RegionMetadataLoader {
@@ -50,13 +50,13 @@ impl RegionMetadataLoader {
         config: Arc<MitoConfig>,
         object_store_manager: ObjectStoreManagerRef,
         lease_enabled: bool,
-        file_ref_manager: FileReferenceManagerRef,
+        file_metadata_interner: FileMetadataInternerRef,
     ) -> Self {
         Self {
             config,
             object_store_manager,
             lease_enabled,
-            file_ref_manager,
+            file_metadata_interner,
         }
     }
 
@@ -81,7 +81,7 @@ impl RegionMetadataLoader {
             &self.config,
             region_dir,
             &object_store,
-            &self.file_ref_manager,
+            self.file_metadata_interner.clone(),
         )
         .with_conditional_publication(
             region_options.requires_conditional_manifest_publication(self.lease_enabled),

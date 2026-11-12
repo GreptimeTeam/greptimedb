@@ -41,7 +41,6 @@ use crate::manifest::storage::{
 use crate::metrics::MANIFEST_OP_ELAPSED;
 use crate::region::{ManifestStats, RegionLeaderState, RegionRoleState};
 use crate::sst::file_metadata::FileMetadataInternerRef;
-use crate::sst::file_ref::FileReferenceManager;
 use crate::sst::{FormatType, file};
 
 /// Options for [RegionManifestManager].
@@ -70,10 +69,10 @@ impl RegionManifestOptions {
         config: &MitoConfig,
         region_dir: &str,
         object_store: &ObjectStore,
-        file_ref_manager: &FileReferenceManager,
+        file_metadata_interner: FileMetadataInternerRef,
     ) -> Self {
         RegionManifestOptions {
-            file_metadata_interner: file_ref_manager.file_metadata_interner.clone(),
+            file_metadata_interner,
             manifest_dir: manifest_dir(region_dir),
             object_store: object_store.clone(),
             // We don't allow users to set the compression algorithm as we use it as a file suffix.
