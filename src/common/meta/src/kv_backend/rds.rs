@@ -26,7 +26,7 @@ use crate::error::{Error, RdsTransactionRetryFailedSnafu, Result, UnexpectedSnaf
 use crate::kv_backend::txn::{
     Compare, Txn as KvTxn, TxnOp, TxnOpResponse, TxnResponse as KvTxnResponse,
 };
-use crate::kv_backend::{KvBackend, TxnService};
+use crate::kv_backend::{ClosableKvBackend, KvBackend, TxnService};
 use crate::metrics::METRIC_META_TXN_REQUEST;
 use crate::rpc::KeyValue;
 use crate::rpc::store::{
@@ -582,6 +582,22 @@ where
 
     fn max_txn_ops(&self) -> usize {
         self.max_txn_ops
+    }
+}
+
+#[async_trait::async_trait]
+impl<T, S, R> ClosableKvBackend for RdsStore<T, S, R>
+where
+    R: 'static,
+    Self: KvQueryExecutor<T> + Send + Sync,
+    T: Executor + 'static,
+    S: ExecutorFactory<T> + 'static,
+{
+    async fn close(&self) -> Result<()> {
+        // The store only holds a reference-counted connection pool, which is
+        // released together with the last backend handle. There is no explicit
+        // shutdown step for the pool itself.
+        Ok(())
     }
 }
 

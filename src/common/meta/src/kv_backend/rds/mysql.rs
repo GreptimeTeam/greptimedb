@@ -27,13 +27,13 @@ use strum::AsRefStr;
 use crate::error::{
     CreateMySqlPoolSnafu, MySqlExecutionSnafu, MySqlTransactionSnafu, Result, UnexpectedSnafu,
 };
-use crate::kv_backend::KvBackendRef;
 use crate::kv_backend::rds::{
     Executor, ExecutorFactory, ExecutorImpl, KvQueryExecutor, RDS_STORE_OP_BATCH_DELETE,
     RDS_STORE_OP_BATCH_GET, RDS_STORE_OP_BATCH_PUT, RDS_STORE_OP_RANGE_DELETE,
     RDS_STORE_OP_RANGE_QUERY, RDS_STORE_TXN_RETRY_COUNT, RdsStore, Transaction,
     ensure_rustls_crypto_provider_installed,
 };
+use crate::kv_backend::{ClosableKvBackendRef, KvBackendRef};
 use crate::rpc::KeyValue;
 use crate::rpc::store::{
     BatchDeleteRequest, BatchDeleteResponse, BatchGetRequest, BatchGetResponse, BatchPutRequest,
@@ -637,15 +637,16 @@ impl MySqlStore {
         let pool = MySqlPool::connect(url)
             .await
             .context(CreateMySqlPoolSnafu)?;
-        Self::with_mysql_pool(pool, table_name, max_txn_ops).await
+        let backend: KvBackendRef = Self::with_mysql_pool(pool, table_name, max_txn_ops).await?;
+        Ok(backend)
     }
 
-    /// Create [MySqlStore] impl of [KvBackendRef] from [sqlx::Pool<MySql>].
+    /// Create [MySqlStore] impl of [ClosableKvBackendRef] from [sqlx::Pool<MySql>].
     pub async fn with_mysql_pool(
         pool: Pool<MySql>,
         table_name: &str,
         max_txn_ops: usize,
-    ) -> Result<KvBackendRef> {
+    ) -> Result<ClosableKvBackendRef> {
         // This step ensures the mysql metadata backend is ready to use.
         // We check if greptime_metakv table exists, and we will create a new table
         // if it does not exist.

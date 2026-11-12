@@ -14,7 +14,7 @@
 
 use common_meta::election::ElectionRef;
 use common_meta::election::rds::mysql::{ElectionMysqlClient, MySqlElection};
-use common_meta::kv_backend::KvBackendRef;
+use common_meta::kv_backend::ClosableKvBackendRef;
 use common_meta::kv_backend::rds::MySqlStore;
 use common_telemetry::info;
 use servers::tls::{TlsMode, TlsOption};
@@ -88,7 +88,7 @@ pub async fn create_mysql_pool(
     Ok(pool)
 }
 
-/// Builds a MySQL-backed metadata [`KvBackendRef`].
+/// Builds a MySQL-backed metadata [`ClosableKvBackendRef`].
 ///
 /// * `store_addrs` - MySQL connection URLs; only the first address is used.
 /// * `tls_config` - optional TLS settings for the MySQL connection.
@@ -99,7 +99,7 @@ pub async fn build_mysql_kv_backend(
     tls_config: Option<&TlsOption>,
     table_name: &str,
     max_txn_ops: usize,
-) -> Result<KvBackendRef> {
+) -> Result<ClosableKvBackendRef> {
     let pool = create_mysql_pool(store_addrs, tls_config).await?;
     MySqlStore::with_mysql_pool(pool, table_name, max_txn_ops)
         .await
