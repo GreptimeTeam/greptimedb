@@ -21,6 +21,9 @@ use serde_json::{Map, Value, json};
 
 use crate::query_regression_runner::model::{Measurement, Query, QueryResult, Scenario, Table};
 use crate::query_regression_runner::plan::{load_plan, normalize_scenario};
+use crate::query_regression_runner::plan_assert::{
+    SCAN_METRIC_THRESHOLDS, compile_plan_checks, enforce_plan_assertions,
+};
 use crate::query_regression_runner::sql::{http_post_prom_range_query, http_post_sql, sql_ident};
 use crate::query_regression_runner::{MeasureArgs, Result};
 
@@ -45,6 +48,9 @@ pub(super) async fn run_measure(args: MeasureArgs) -> Result<()> {
         .ok_or("fixture plan has no scenario")?;
     let scenario: Scenario = serde_json::from_value(scenario_value.clone())?;
     let (tables, configured_queries) = normalize_scenario(scenario)?;
+    for query in &configured_queries {
+        compile_plan_checks(query)?;
+    }
 
     let client = Client::builder()
         .timeout(Duration::from_secs_f64(args.http_timeout))
@@ -102,6 +108,7 @@ fn target_report(name: &str, http_port: u16, result: QueryResult) -> Value {
         "validation": result.validation,
         "validation_errors": result.validation_errors,
         "measurements": result.measurements,
+        "first_execution": result.first_execution,
         "status": status,
     })
 }
@@ -144,6 +151,7 @@ async fn run_target(
             warmup: 0,
             iterations: 1,
             thresholds: Map::new(),
+            plan_checks: Default::default(),
         });
     }
 
@@ -178,6 +186,7 @@ async fn run_target(
             "response": first.get("response"),
         }));
     }
+    let first_execution = Some(first.clone());
     validation.push(first);
 
     let mut measurements = Vec::with_capacity(queries.len());
@@ -235,6 +244,7 @@ async fn run_target(
         validation,
         validation_errors,
         measurements,
+        first_execution,
         status: if failed { "failed" } else { "ok" }.to_string(),
     }
 }
@@ -369,17 +379,20 @@ fn enforce_thresholds(
             };
             results.push(result);
         }
-        for key in thresholds
-            .keys()
-            .filter(|key| *key != "max_candidate_latency_regression_pct")
-        {
+        for key in thresholds.keys().filter(|key| {
+            key.as_str() != "max_candidate_latency_regression_pct"
+                && !SCAN_METRIC_THRESHOLDS
+                    .iter()
+                    .any(|(supported, _)| supported == key)
+        }) {
             results.push(json!({"query": candidate_measurement.name, "threshold": key, "status": "failed", "reason": "unsupported threshold"}));
         }
     }
+    results.extend(enforce_plan_assertions(queries, base, candidate)?);
     Ok(results)
 }
 
-fn value_as_f64(value: &Value) -> Result<f64> {
+pub(super) fn value_as_f64(value: &Value) -> Result<f64> {
     value.as_f64().ok_or_else(|| {
         io::Error::new(io::ErrorKind::InvalidData, "threshold must be numeric").into()
     })
@@ -445,6 +458,7 @@ mod tests {
                 ("max_candidate_latency_regression_pct".to_string(), json!(0)),
                 ("other".to_string(), json!(1)),
             ]),
+            plan_checks: Default::default(),
         };
         let measurement = |median| Measurement {
             name: Some("q".to_string()),
@@ -459,12 +473,14 @@ mod tests {
             validation: vec![],
             validation_errors: vec![],
             measurements: vec![measurement(Some(0.0))],
+            first_execution: None,
             status: "ok".to_string(),
         };
         let candidate = QueryResult {
             validation: vec![],
             validation_errors: vec![],
             measurements: vec![measurement(Some(1.0))],
+            first_execution: None,
             status: "ok".to_string(),
         };
         let results = enforce_thresholds(&[query], &base, &candidate).unwrap();

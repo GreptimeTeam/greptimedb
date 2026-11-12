@@ -1,30 +1,62 @@
-# Dynamic-membership JOIN latency non-regression case (logs probe x traces build).
+# Dynamic-membership JOIN regression case (traces build x logs probe).
 #
-# This is latency regression coverage only, using the default main behavior as
-# the base. It cannot assert page or region pruning bytes: the harness compares
-# base/candidate median latency and reports EXPLAIN ANALYZE text, not scan-page
-# counters. The candidate build therefore has to include the dynamic-membership
-# prefilter features for those features to be exercised at all; a candidate
-# without them passes this case trivially, so the case protects the framework
-# path from latency regressions rather than proving the optimization fired.
+# The case gates two independent properties of the candidate build:
 #
-# Shape (single region, one SST, timestamp-major: one row per second):
-# - dyn_filter_traces (build side, aliased b): 642 in-window rows carrying the
-#   membership keys trace0..trace641; every later row is unique noise.
+# 1. Membership plan/store gate (`[scenario.queries.plan_checks]` plus the scan
+#    metric thresholds below). The candidate must push the build-side membership
+#    set into the probe scan as a dynamic filter, the probe SST scan must show
+#    the membership list (`trace_id@N IN (SET) (...)`), and it must actually read
+#    less: the store bytes fetched for the cold execution and the rows decoded
+#    from SST must stay far below a full 1M-row scan. A candidate that lost the
+#    dynamic-membership prefilter (for example a build without #10340/#10341)
+#    still returns the same 1,926 rows after reading a full row group or the
+#    whole SST, so a latency threshold alone would let it pass.
+#
+#    Assertions gate the candidate only: the base target is the control and may
+#    be a build without the optimization. Base values are still reported as
+#    `base_actual` diagnostics.
+#
+# 2. Latency non-regression: the candidate median latency may not regress by more
+#    than 30% against the base.
+#
+# Shape (single region, one SST per table, timestamp-major: one row per second):
+# - dyn_filter_traces (build side, aliased b): the query window selects the first
+#   642 rows, which carry the membership keys trace0..trace641. Every later row is
+#   outside the build window and carries trace_noise* values.
 # - dyn_filter_logs (probe side, aliased p): 1,000,000 rows, of which 1,926
-#   (3 x 642) carry a build key and the remaining 998,074 rows are unique
-#   noise that can never match. The 13-day probe window covers every probe row,
-#   so the trace_id membership check is the only selective predicate and a
-#   build/candidate latency difference comes from JOIN-side membership work.
+#   (3 x 642) carry a build key and the remaining 998,074 rows are unique noise
+#   that can never match. The 13-day probe window covers every probe row, so the
+#   trace_id membership check is the only selective predicate.
+# - Both trace_id columns are sorted, so the membership keys and the noise keys
+#   occupy disjoint lexicographic ranges ("noise..." < "trace..."). Row-group
+#   min/max statistics make 49 of the 50 probe row groups prunable once the
+#   membership set arrives, which is exactly the work the gate measures.
 # - The projection reads six DOUBLE fields plus the JOIN key on the probe side,
-#   so page-level filtering that drops non-matching pages also drops real
-#   projection work instead of only row counts.
+#   so dropping non-matching row groups also drops real page reads instead of
+#   only row counts.
 # - query_parallelism = 3 pins the frontend query engine parallelism so the
 #   comparison is not dominated by core-autoscaled scan parallelism.
+#
+# Two details make the case exercise the membership path at all:
+# - This DataFusion version collects the LEFT hash join input as the build side,
+#   so the large probe table is the right operand. With the tables swapped the
+#   1M-row table would be built and the dynamic filter would prune only the 642
+#   small-side rows.
+# - A 642-key build side is larger than
+#   `hash_join_inlist_pushdown_max_distinct_values` (150 by default), so the join
+#   produces a hash-lookup dynamic filter that cannot be serialized. Scans can
+#   only be told min/max bounds plus `true`; recovering the actual
+#   `trace_id@N IN (SET) (...)` list over the wire is exactly what #10341 adds.
+#   The plan checks therefore require the recovered membership list and forbid
+#   the bounds-only `AND true` shape, so a candidate without #10341 fails here
+#   even though its query result is identical. Measured on this fixture: the
+#   #10340+#10341 candidate reports 3 `trace_id@N IN (SET)` matches, while the
+#   build in this worktree (which lacks the #10341 wire recovery) reports 0
+#   matches, one `AND true` filter, and 20,642 decoded SST rows instead of 2,568.
 
 [case]
 name = "dyn_filter_join"
-description = "Dynamic-membership JOIN latency non-regression over 642 build keys and 1M probe rows"
+description = "Dynamic-membership JOIN plan/store gate plus latency non-regression over 642 build keys and 1M probe rows"
 
 [scenario]
 kind = "direct_readable_sst"
@@ -135,9 +167,42 @@ series_layout = "timestamp_major"
 [[scenario.queries]]
 name = "dyn_membership_join_explain_analyze"
 kind = "sql"
-query = "EXPLAIN ANALYZE VERBOSE SELECT count(*), sum(p.f1 + p.f2 + p.f3 + p.f4 + p.f5 + p.f6) FROM dyn_filter_logs p JOIN dyn_filter_traces b ON p.trace_id = b.trace_id WHERE p.ts >= '2024-01-01 00:00:00+0000'::TIMESTAMP AND p.ts < '2024-01-14 00:00:00+0000'::TIMESTAMP AND b.ts >= '2024-01-01 00:00:00+0000'::TIMESTAMP AND b.ts < '2024-01-01 00:10:42+0000'::TIMESTAMP"
+query = "EXPLAIN ANALYZE VERBOSE SELECT count(*), sum(p.f1 + p.f2 + p.f3 + p.f4 + p.f5 + p.f6) FROM dyn_filter_traces b JOIN dyn_filter_logs p ON p.trace_id = b.trace_id WHERE p.ts >= '2024-01-01 00:00:00+0000'::TIMESTAMP AND p.ts < '2024-01-14 00:00:00+0000'::TIMESTAMP AND b.ts >= '2024-01-01 00:00:00+0000'::TIMESTAMP AND b.ts < '2024-01-01 00:10:42+0000'::TIMESTAMP"
 warmup = 2
 iterations = 7
 
+# The probe scan must show the join dynamic filter with the pushed-down
+# membership list, and must not show a shape that disables membership: an
+# unresolved `DynamicFilter [ empty ]`, a fully degraded `DynamicFilter [ true ]`
+# (oversized payload or hash-lookup fallback), or bounds that lost the list
+# (`... AND true ]`).
+[scenario.queries.plan_checks]
+require = ["DynamicFilter", 'trace_id@\d+\s+IN\s+\(']
+forbid = ['DynamicFilter \[ empty \]', 'DynamicFilter \[ true \]', 'DynamicFilter \[[^\n]*\bAND true\b']
+
 [scenario.queries.thresholds]
+# Candidate-only latency non-regression against the base.
 max_candidate_latency_regression_pct = 30
+
+# Rows decoded from SST (`num_sst_rows`), summed over both table scans, taken as
+# the maximum over the cold execution and the measured iterations.
+# Measured on this fixture with the #10340+#10341 stack: 2,568 (the 1,926
+# matching probe rows plus the 642 build rows). Controls measured on the same
+# fixture: 20,642 for a candidate without #10341 (membership is not recovered, so
+# one complete 20,000-row probe row group is decoded) and 1,000,000 for a probe
+# scan without any dynamic filter. 8 Ki rows keeps 3.2x headroom above the
+# target value while still failing both controls.
+max_candidate_num_sst_rows = 8192
+
+# Bytes fetched from the object store (`page_size_to_fetch_store`), summed over
+# both table scans and every region/partition entry. Only the cold execution
+# reports it: later iterations are served from the Mito page cache.
+# Measured on this fixture: 192 KiB cold for both the #10340+#10341 candidate and
+# the build without #10341 (128 KiB for the two probe pages plus 64 KiB for the
+# build scan), versus 3.94 MiB for a probe scan without any dynamic filter.
+# Row-group pruning already limits store reads for the bounds-only control, so
+# this counter is a full-scan / runaway-I/O ceiling here, not the membership
+# discriminator: the plan checks and `max_candidate_num_sst_rows` gate the
+# recovery. 1 MiB is 5.3x above the observed value and 3.9x below the
+# unfiltered scan.
+max_candidate_page_size_to_fetch_store_bytes = 1048576

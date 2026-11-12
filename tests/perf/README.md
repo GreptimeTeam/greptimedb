@@ -350,7 +350,7 @@ The outer driver currently supports `direct_readable_sst`,
 
 ## Metrics
 
-Primary gates should compare query work rather than plan text:
+Primary gates compare query work rather than free-form plan text:
 
 - scanned files / file ranges
 - scanned rows or row groups
@@ -359,8 +359,94 @@ Primary gates should compare query work rather than plan text:
 - query latency median/p95
 - output row count as a sanity check
 
-Plan details such as pushed filters are useful diagnostics, but should not be the
-main pass/fail signal.
+Plan text on its own is still a poor latency gate: it says nothing about how much
+work the plan avoids. But a case that exists to protect one optimization has the
+opposite problem. A candidate that silently lost the optimization returns the
+same rows with the same result, so a latency-only threshold can pass by accident.
+Such cases must additionally declare the plan shape and the scan work they
+require (see below), otherwise the case does not gate anything.
+
+## Plan and scan-metric assertions
+
+`[[scenario.queries]]` accepts two declarative gates next to `warmup`,
+`iterations`, and `[scenario.queries.thresholds]`:
+
+```toml
+[[scenario.queries]]
+name = "dyn_membership_join"
+kind = "sql"
+query = "EXPLAIN ANALYZE VERBOSE SELECT ..."
+
+[scenario.queries.plan_checks]
+# Unanchored regular expressions over the `plan` rows of the analyze response.
+# Each `require` pattern must match at least once and each `forbid` pattern must
+# not match at all.
+require = ["DynamicFilter", 'trace_id@\d+\s+IN\s+\(']
+forbid = [
+  'DynamicFilter \[ empty \]',
+  'DynamicFilter \[ true \]',
+  'DynamicFilter \[[^\n]*\bAND true\b',
+]
+
+[scenario.queries.thresholds]
+max_candidate_latency_regression_pct = 30
+# Absolute upper bounds on totals of the named scan counters in the plan text.
+max_candidate_page_size_to_fetch_store_bytes = 1048576
+max_candidate_num_sst_rows = 8192
+```
+
+Semantics:
+
+- **Candidate only.** Assertions gate the candidate. The base target is the
+  control and is allowed to lack the optimization; gating on it would fail every
+  PR that introduces a feature. Base values are still reported on each entry as
+  `base_actual` so a reviewer can see "base read 30 MB, candidate read 1.5 MB".
+- **Plan patterns.** `require`/`forbid` entries are compiled with the `regex`
+  crate and matched against the plan rows of the last measured execution of the
+  query (the cold pre-warmup execution is the fallback). Each result reports
+  `actual` (match count), `limit` (`1` for `require`, `0` for `forbid`), and
+  `status`, so a failure names the pattern that was expected or forbidden.
+  Invalid patterns and unknown `plan_checks` keys fail the run before any
+  measurement starts.
+- **Scan-metric thresholds.** Each key totals one region-scan counter over
+  every region, partition, and plan row:
+  - `max_candidate_page_size_to_fetch_store_bytes` totals
+    `page_size_to_fetch_store` (bytes read from the object store).
+  - `max_candidate_num_sst_rows` totals `num_sst_rows` (rows decoded from SST
+    after I/O and prefiltering).
+  - `max_candidate_rows_before_filter` totals `rows_before_filter`. This counts
+    every row of the scanned files *before* row-group pruning, so it only drops
+    when the scan avoids files entirely; prefer `num_sst_rows` for "fewer rows
+    read" gates.
+
+  A metric that does not appear in the plan text is a failure, not a pass,
+  because a response that never reported the counter cannot have honored the
+  gate. Values are bytes and rows, so they can be calibrated from a fixture's
+  geometry (`rows_per_sst`, row-group size, projected columns) plus headroom,
+  not only from one noisy sample. When a degraded candidate would still prune to
+  one row group, set the rows bound below `row_group_size` (plus the build-side
+  rows) so that control fails too; a byte bound cannot separate such a control
+  because both read the same surviving pages.
+- **Cold plus warm executions.** Mito serves repeated scans from its page cache,
+  so warm iterations report little or no `page_size_to_fetch_store`. Metric
+  assertions therefore take the maximum value seen in the cold pre-warmup
+  execution and in every measured iteration. Without the cold sample a case
+  would pass even when the candidate read the whole SST on the first run. Note
+  that the outer driver retries `measure` once when it fails; the retried report
+  has a warm page cache, so a store-byte gate fails with a missing metric
+  instead of a byte count. That is a failure either way, but rerun the case when
+  the first attempt failed for an unrelated reason.
+- **Failure propagation.** Entries live in the report `thresholds` array with
+  `query`, `target`, `threshold`, `actual`, `limit`, and `status`, so any
+  `failed` entry fails the case exactly like a latency regression. The PR
+  comment renders them next to the query in the summary table.
+
+Metric thresholds are absolute constants per case, not base-relative
+percentages: their job is "the optimization is present and the scan is still
+narrow", and a base-relative bound would pass whenever both targets are equally
+slow. Keep a base-vs-candidate latency threshold as the separate performance
+gate. `tests/perf/query_cases/dyn_filter_join/case.toml` is the reference
+example and documents where its numbers come from.
 
 ## Runner lifecycle
 

@@ -23,6 +23,7 @@ mod measure;
 mod model;
 mod otlp;
 mod plan;
+mod plan_assert;
 mod remote;
 mod sql;
 

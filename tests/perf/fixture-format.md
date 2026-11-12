@@ -86,6 +86,59 @@ encoded primary key ascending, timestamp ascending, and sequence descending, as
 required by the Mito Parquet writer; sorting preserves every generated column and
 row, including deterministic-wave values.
 
+### Query plan and scan-metric assertions
+
+A query whose purpose is to protect one optimizer feature must assert that the
+feature ran. `EXPLAIN ANALYZE VERBOSE` responses carry the physical plan of every
+stage, so the case can declare the plan shape and the scan counters it requires:
+
+```toml
+[[scenario.queries]]
+name = "dyn_membership_join"
+kind = "sql"
+query = "EXPLAIN ANALYZE VERBOSE SELECT ..."
+warmup = 2
+iterations = 7
+
+[scenario.queries.plan_checks]
+require = ["DynamicFilter", 'trace_id@\d+\s+IN\s+\(']
+forbid = [
+  'DynamicFilter \[ empty \]',
+  'DynamicFilter \[ true \]',
+  'DynamicFilter \[[^\n]*\bAND true\b',
+]
+
+[scenario.queries.thresholds]
+max_candidate_latency_regression_pct = 30
+max_candidate_page_size_to_fetch_store_bytes = 1048576
+max_candidate_num_sst_rows = 8192
+```
+
+`plan_checks.require` and `plan_checks.forbid` are unanchored regular
+expressions over the concatenated `plan` rows of the analyze response. `require`
+patterns must match at least once, `forbid` patterns must not match at all, and
+unknown keys are rejected so a typo cannot silently disable a gate.
+
+The scan-metric thresholds are absolute upper bounds on totals collected from
+the same plan text: `max_candidate_page_size_to_fetch_store_bytes` totals
+`page_size_to_fetch_store`, `max_candidate_num_sst_rows` totals `num_sst_rows`,
+and `max_candidate_rows_before_filter` totals `rows_before_filter` (rows before
+row-group pruning, so prefer `num_sst_rows` when the case prunes row groups). A
+metric that does not appear in the plan text fails the assertion instead of
+passing trivially. Values are taken as the maximum across the cold pre-warmup
+execution and every measured iteration, because warm scans are served from the
+Mito page cache and report no store reads.
+
+Forbid patterns should match the fallback shapes precisely. A pattern such as
+`DynamicFilter \[ [^\]]*\btrue\b` over-matches: the probe plan line also
+contains unrelated JSON such as `"flat_format": true` after the filter, and a
+membership list itself contains `]`, so bracket-limited patterns stop early.
+
+All plan and scan-metric assertions gate the candidate only. The base target is
+the control and may lack the optimization; its values are reported as
+`base_actual` diagnostics. Results appear in the report `thresholds` array with
+`query`, `target`, `threshold`, `actual`, `limit`, and `status`.
+
 ### String field columns and `dense_string`
 
 `type = "STRING"` with `semantic = "field"` is a plain UTF-8 column, not a tag
