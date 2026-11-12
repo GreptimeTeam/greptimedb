@@ -58,13 +58,15 @@ pub(crate) fn should_replay_tails(region: &MitoRegion) -> bool {
 
 /// Replays the pending tails of a region into SSTs and publishes them in one manifest edit.
 ///
-/// Each round reads the tails in order and writes the rows of each into its own chunks of
-/// SSTs, since an SST can give all its rows its largest sequence. The edit adds the SSTs, clears
-/// the tails and advances the flushed entry id and sequence. Another node's listed tail is
-/// only a bound, so until the region receives a Leader lease after a catchup made it
-/// writable, the edit keeps its unread part, which a second edit clears once a lease
-/// arrives. A failed round is retried after a back-off for as long as [should_replay_tails]
-/// holds. The task always reports its end to the worker.
+/// Each round reads the tails in order and writes each into its own SSTs: an SST can give all its
+/// rows its largest sequence, so in an SST shared with a later tail, an earlier tail's rows would
+/// take the later tail's sequence and outrank rows that a leader between the two tails flushed. A
+/// tail's 64 MiB chunks only bound memory: writes accepted during the replay already take sequences
+/// above every tail's. The edit adds the SSTs, clears the tails and advances the flushed entry id
+/// and sequence. Another node's listed tail is only a bound, so until the region receives a Leader
+/// lease after a catchup made it writable, the edit keeps its unread part, which a second edit
+/// clears once a lease arrives. A failed round is retried after a back-off while
+/// [should_replay_tails] holds. The task always reports its end to the worker.
 pub(crate) struct TailReplayTask<S> {
     pub(crate) region: MitoRegionRef,
     /// Id of this node, whose tails are read from `wal`.
