@@ -25,7 +25,6 @@ use axum::extract::{Json, Query, State};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::{Extension, Form};
-use common_catalog::parse_catalog_and_schema_from_db_string;
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_plugins::GREPTIME_EXEC_WRITE_COST;
@@ -49,6 +48,7 @@ use crate::error::{
     CollectRecordbatchSnafu, FailedToParseQuerySnafu, InvalidQuerySnafu, Result,
     log_error_if_necessary,
 };
+use crate::http::authorize::select_database;
 use crate::http::header::collect_plan_metrics;
 use crate::http::result::arrow_result::ArrowResponse;
 use crate::http::result::csv_result::CsvResponse;
@@ -135,29 +135,6 @@ struct AnalyzeStreamBodyState {
     // abort the worker instead of leaving an owned query stream detached.
     _worker: AnalyzeStreamWorkerGuard,
     done: bool,
-}
-
-async fn select_database(
-    query_ctx: &mut QueryContext,
-    db: Option<&str>,
-    user_provider: Option<&UserProviderRef>,
-) -> auth::error::Result<()> {
-    let Some(db) = db else {
-        return Ok(());
-    };
-    let (catalog, schema) = parse_catalog_and_schema_from_db_string(db);
-    if catalog == query_ctx.current_catalog() && schema == query_ctx.current_schema() {
-        return Ok(());
-    }
-    // Middleware authorized the initial scope; form and query parameters can change it.
-    if let Some(provider) = user_provider {
-        provider
-            .authorize(&catalog, &schema, &query_ctx.current_user())
-            .await?;
-    }
-    query_ctx.set_current_catalog(&catalog);
-    query_ctx.set_current_schema(&schema);
-    Ok(())
 }
 
 /// Handler to execute sql
@@ -1125,6 +1102,7 @@ mod tests {
     use snafu::IntoError;
 
     use super::*;
+    use crate::http::authorize::tests::ScopedUserProvider;
     use crate::query_handler::sql::SqlQueryHandler;
 
     struct TestSqlQueryHandler {
@@ -1173,47 +1151,6 @@ mod tests {
         }
     }
 
-    struct ScopedUserProvider;
-
-    #[async_trait]
-    impl auth::UserProvider for ScopedUserProvider {
-        fn name(&self) -> &str {
-            "scoped-test"
-        }
-
-        async fn authenticate(
-            &self,
-            _: auth::Identity<'_>,
-            _: auth::Password<'_>,
-        ) -> auth::error::Result<auth::UserInfoRef> {
-            Ok(auth::userinfo_by_name(Some("reader".to_string())))
-        }
-
-        async fn authorize(
-            &self,
-            catalog: &str,
-            schema: &str,
-            _: &auth::UserInfoRef,
-        ) -> auth::error::Result<()> {
-            if catalog == "greptime" && schema == "public" {
-                Ok(())
-            } else {
-                auth::error::PermissionDeniedSnafu.fail()
-            }
-        }
-
-        async fn auth_bearer_token(
-            &self,
-            _: &str,
-            catalog: &str,
-            schema: &str,
-        ) -> auth::error::Result<auth::UserInfoRef> {
-            let user = auth::userinfo_by_name(Some("reader".to_string()));
-            self.authorize(catalog, schema, &user).await?;
-            Ok(user)
-        }
-    }
-
     #[tokio::test]
     async fn test_sql_endpoints_authorize_effective_database() {
         use axum::http::{Request, StatusCode as HttpStatusCode};
@@ -1246,17 +1183,16 @@ mod tests {
                         crate::http::authorize::AuthState::new(Some(Arc::new(ScopedUserProvider))),
                         crate::http::authorize::check_http_auth,
                     ));
+                let mut request = Request::builder()
+                    .method(method)
+                    .uri(format!("{path}{query}"))
+                    .header("authorization", authorization)
+                    .header("content-type", "application/x-www-form-urlencoded");
+                if !query.contains("%64") {
+                    request = request.header("x-greptime-db-name", "public");
+                }
                 let response = app
-                    .oneshot(
-                        Request::builder()
-                            .method(method)
-                            .uri(format!("{path}{query}"))
-                            .header("authorization", authorization)
-                            .header("x-greptime-db-name", "public")
-                            .header("content-type", "application/x-www-form-urlencoded")
-                            .body(axum::body::Body::from(body))
-                            .unwrap(),
-                    )
+                    .oneshot(request.body(axum::body::Body::from(body)).unwrap())
                     .await
                     .unwrap();
                 assert_eq!(
@@ -1277,11 +1213,15 @@ mod tests {
             .await
             .unwrap();
         assert_eq!("public", ctx.current_schema());
+        let failures = crate::metrics::METRIC_AUTH_FAILURE
+            .with_label_values(&[StatusCode::PermissionDenied.as_ref()]);
+        let before = failures.get();
         assert!(
             select_database(&mut ctx, Some("denied"), Some(&provider))
                 .await
                 .is_err()
         );
+        assert!(failures.get() > before);
         assert_eq!("public", ctx.current_schema());
         select_database(&mut ctx, Some("other"), None)
             .await

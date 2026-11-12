@@ -30,7 +30,7 @@ use common_time::Timezone;
 use common_time::timezone::parse_timezone;
 use headers::Header;
 use serde::Serialize;
-use session::context::QueryContextBuilder;
+use session::context::{QueryContext, QueryContextBuilder};
 use snafu::{OptionExt, ResultExt, ensure};
 
 use crate::error::{
@@ -180,6 +180,34 @@ pub async fn inner_auth<B>(
             Err(err_response(e))
         }
     }
+}
+
+pub(crate) async fn select_database(
+    query_ctx: &mut QueryContext,
+    db: Option<&str>,
+    user_provider: Option<&UserProviderRef>,
+) -> auth::error::Result<()> {
+    let Some(db) = db else {
+        return Ok(());
+    };
+    let (catalog, schema) = parse_catalog_and_schema_from_db_string(db);
+    if catalog == query_ctx.current_catalog() && schema == query_ctx.current_schema() {
+        return Ok(());
+    }
+    // Middleware authorized the initial scope; form and query parameters can change it.
+    if let Some(provider) = user_provider
+        && let Err(error) = provider
+            .authorize(&catalog, &schema, &query_ctx.current_user())
+            .await
+    {
+        crate::metrics::METRIC_AUTH_FAILURE
+            .with_label_values(&[error.status_code().as_ref()])
+            .inc();
+        return Err(error);
+    }
+    query_ctx.set_current_catalog(&catalog);
+    query_ctx.set_current_schema(&schema);
+    Ok(())
 }
 
 pub async fn check_http_auth(
@@ -456,12 +484,53 @@ fn extract_influxdb_user_from_query(query: &str) -> (Option<&str>, Option<&str>)
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::assert_matches;
 
     use common_base::secrets::ExposeSecret;
 
     use super::*;
+
+    pub(crate) struct ScopedUserProvider;
+
+    #[async_trait::async_trait]
+    impl auth::UserProvider for ScopedUserProvider {
+        fn name(&self) -> &str {
+            "scoped-test"
+        }
+
+        async fn authenticate(
+            &self,
+            _: auth::Identity<'_>,
+            _: auth::Password<'_>,
+        ) -> auth::error::Result<auth::UserInfoRef> {
+            Ok(auth::userinfo_by_name(Some("reader".to_string())))
+        }
+
+        async fn authorize(
+            &self,
+            catalog: &str,
+            schema: &str,
+            _: &auth::UserInfoRef,
+        ) -> auth::error::Result<()> {
+            if catalog == "greptime" && matches!(schema, "public" | "%64enied") {
+                Ok(())
+            } else {
+                auth::error::PermissionDeniedSnafu.fail()
+            }
+        }
+
+        async fn auth_bearer_token(
+            &self,
+            _: &str,
+            catalog: &str,
+            schema: &str,
+        ) -> auth::error::Result<auth::UserInfoRef> {
+            let user = auth::userinfo_by_name(Some("reader".to_string()));
+            self.authorize(catalog, schema, &user).await?;
+            Ok(user)
+        }
+    }
 
     #[test]
     fn test_need_auth() {
