@@ -368,7 +368,7 @@ fn build_gcs_connection(
 fn build_azblob_connection(storage: &ObjectStoreConfig) -> (String, Vec<Option<String>>) {
     let account_name = expose_optional_secret(&storage.azblob.azblob_account_name);
     let account_key = expose_optional_secret(&storage.azblob.azblob_account_key);
-    let sas_token = storage.azblob.azblob_sas_token.clone();
+    let sas_token = expose_optional_secret(&storage.azblob.azblob_sas_token);
 
     let mut options = Vec::new();
     if let Some(account_name) = &account_name {
@@ -520,7 +520,7 @@ mod tests {
             azblob: PrefixedAzblobConnection {
                 azblob_account_name: Some(SecretString::from("account".to_string())),
                 azblob_account_key: Some(SecretString::from("key".to_string())),
-                azblob_sas_token: Some("sig=secret-token".to_string()),
+                azblob_sas_token: Some("sig=secret-token".to_string().into()),
                 ..Default::default()
             },
             ..Default::default()

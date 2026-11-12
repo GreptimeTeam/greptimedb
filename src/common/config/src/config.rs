@@ -130,37 +130,9 @@ pub trait Configurable: Serialize + DeserializeOwned + Default + Sized {
         None
     }
 
-    /// Serializes the configuration for diagnostics, redacting credentials.
-    /// Use serde serialization directly when the output must retain credentials.
+    /// Serialize the configuration to a TOML string.
     fn to_toml(&self) -> Result<String> {
-        let mut value = toml::Value::try_from(self).context(TomlFormatSnafu)?;
-        redact_credentials(&mut value);
-        toml::to_string(&value).context(TomlFormatSnafu)
-    }
-}
-
-fn redact_credentials(value: &mut toml::Value) {
-    match value {
-        toml::Value::Table(table) => {
-            for (key, value) in table {
-                match key.as_str() {
-                    "password" | "sas_token" => {
-                        *value = toml::Value::String("[REDACTED]".to_string());
-                    }
-                    // Exporters accept arbitrary header names for authentication.
-                    "otlp_headers" => {
-                        if let toml::Value::Table(headers) = value {
-                            for (_, value) in headers.iter_mut() {
-                                *value = toml::Value::String("[REDACTED]".to_string());
-                            }
-                        }
-                    }
-                    _ => redact_credentials(value),
-                }
-            }
-        }
-        toml::Value::Array(values) => values.iter_mut().for_each(redact_credentials),
-        _ => {}
+        toml::to_string(&self).context(TomlFormatSnafu)
     }
 }
 
@@ -192,67 +164,6 @@ mod tests {
         fn env_list_keys() -> Option<&'static [&'static str]> {
             Some(&["meta_client.metasrv_addrs"])
         }
-    }
-
-    #[test]
-    fn test_diagnostic_credentials_are_redacted() {
-        use common_wal::config::kafka::common::KafkaClientSaslConfig;
-        use object_store::config::AzblobConnection;
-
-        #[derive(Default, Serialize, Deserialize)]
-        struct DiagnosticConfig {
-            sasl: Vec<KafkaClientSaslConfig>,
-            storage: AzblobConnection,
-            logging: LoggingOptions,
-        }
-        impl Configurable for DiagnosticConfig {}
-
-        let config = DiagnosticConfig {
-            sasl: vec![
-                KafkaClientSaslConfig::Plain {
-                    username: "alice".to_string(),
-                    password: "plain-secret".to_string(),
-                },
-                KafkaClientSaslConfig::ScramSha256 {
-                    username: "alice".to_string(),
-                    password: "scram256-secret".to_string(),
-                },
-                KafkaClientSaslConfig::ScramSha512 {
-                    username: "alice".to_string(),
-                    password: "scram512-secret".to_string(),
-                },
-            ],
-            storage: AzblobConnection {
-                sas_token: Some("sas-secret".to_string()),
-                ..Default::default()
-            },
-            logging: LoggingOptions {
-                otlp_headers: [("x-api-key".to_string(), "header-secret".to_string())].into(),
-                ..Default::default()
-            },
-        };
-        let diagnostic = config.to_toml().unwrap();
-        let serialized = toml::to_string(&config).unwrap();
-        for secret in [
-            "plain-secret",
-            "scram256-secret",
-            "scram512-secret",
-            "sas-secret",
-            "header-secret",
-        ] {
-            assert!(!diagnostic.contains(secret));
-            assert!(serialized.contains(secret));
-        }
-        let value: toml::Value = toml::from_str(&diagnostic).unwrap();
-        assert_eq!(value["sasl"][0]["username"].as_str(), Some("alice"));
-        assert_eq!(
-            value["logging"]["otlp_headers"]["x-api-key"].as_str(),
-            Some("[REDACTED]")
-        );
-        let restored: DiagnosticConfig = toml::from_str(&serialized).unwrap();
-        assert_eq!(restored.sasl, config.sasl);
-        assert_eq!(restored.storage.sas_token, config.storage.sas_token);
-        assert_eq!(restored.logging.otlp_headers, config.logging.otlp_headers);
     }
 
     #[test]

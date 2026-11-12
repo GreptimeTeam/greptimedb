@@ -293,7 +293,7 @@ impl StorageExport for AzblobBackend {
         ];
 
         if let Some(sas_token) = &self.config.azblob_sas_token {
-            connection_options.push(format!("SAS_TOKEN='{}'", sas_token));
+            connection_options.push(format!("SAS_TOKEN='{}'", sas_token.expose_secret()));
         }
 
         let connection_str = format!(" CONNECTION ({})", connection_options.join(", "));
