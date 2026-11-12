@@ -18,7 +18,7 @@ use std::sync::{Arc, Mutex, RwLock, Weak};
 use std::time::Duration;
 
 use api::v1::region::{RemoteDynFilterUnregister, RemoteDynFilterUpdate};
-use common_query::request::{DynFilterPayload, REMOTE_DYN_FILTER_PAYLOAD_MAX_BYTES};
+use common_query::request::{DynFilterPayload, REMOTE_DYN_FILTER_PAYLOAD_NO_APP_CAP};
 use common_runtime::spawn_global;
 use common_telemetry::{debug, warn};
 use datafusion_physical_expr::PhysicalExpr;
@@ -407,7 +407,7 @@ async fn fanout_snapshot_for_query(
 
     let payload = match DynFilterPayload::from_datafusion_expr(
         &current,
-        REMOTE_DYN_FILTER_PAYLOAD_MAX_BYTES,
+        REMOTE_DYN_FILTER_PAYLOAD_NO_APP_CAP,
     ) {
         Ok(DynFilterPayload::Datafusion(payload)) => {
             REMOTE_DYN_FILTER_ENCODE_TOTAL
@@ -1347,7 +1347,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fanout_skips_oversized_generation_and_keeps_later_generations() {
+    async fn fanout_sends_large_generation_without_an_application_cap() {
         let query_id = test_query_id(4);
         let registry = Arc::new(QueryDynFilterRegistry::new(query_id));
         let filter = test_dyn_filter(&["host"]);
@@ -1364,35 +1364,27 @@ mod tests {
         let handler = Arc::new(RecordingRegionQueryHandler::default());
         let handler_ref = handler.clone() as RegionQueryHandlerRef;
 
-        // A payload within the budget is fanned out.
+        // A small payload is fanned out.
         registry
             .fanout_snapshot(&handler_ref, &entry, filter.as_ref(), false)
             .await;
         assert_eq!(handler.updates().len(), 1);
         let small_generation = filter.snapshot_generation();
 
-        // An over-budget payload is skipped instead of being degraded to `true`.
+        // A payload over the removed 512 KiB application cap is fanned out too: only the
+        // gRPC max message size (and memory) bounds it, so fanout must not drop it here.
         filter
-            .update(lit(ScalarValue::Utf8(Some(
-                "x".repeat(REMOTE_DYN_FILTER_PAYLOAD_MAX_BYTES + 1),
-            ))) as _)
+            .update(lit(ScalarValue::Utf8(Some("x".repeat(1024 * 1024)))) as _)
             .unwrap();
-        let oversized_generation = filter.snapshot_generation();
-        assert!(oversized_generation > small_generation);
-        registry
-            .fanout_snapshot(&handler_ref, &entry, filter.as_ref(), false)
-            .await;
-        assert_eq!(handler.updates().len(), 1);
-
-        // Fanout keeps running, so the next generation that fits reaches subscribers.
-        filter.update(lit(false) as _).unwrap();
+        let large_generation = filter.snapshot_generation();
+        assert!(large_generation > small_generation);
         registry
             .fanout_snapshot(&handler_ref, &entry, filter.as_ref(), false)
             .await;
         let updates = handler.updates();
         assert_eq!(updates.len(), 2);
-        assert_eq!(updates[1].generation, filter.snapshot_generation());
-        assert!(updates[1].generation > oversized_generation);
+        assert_eq!(updates[1].generation, large_generation);
+        assert!(updates[1].payload.len() > 512 * 1024);
     }
 
     #[tokio::test]

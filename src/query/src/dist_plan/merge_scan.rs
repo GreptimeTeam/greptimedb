@@ -2031,7 +2031,7 @@ mod tests {
                         arrow_schema::DataType::Boolean,
                         false,
                     )]),
-                    common_query::request::REMOTE_DYN_FILTER_PAYLOAD_MAX_BYTES,
+                    common_query::request::REMOTE_DYN_FILTER_PAYLOAD_NO_APP_CAP,
                 )
                 .unwrap()
                 .to_string(),
@@ -3323,7 +3323,7 @@ mod tests {
     }
 
     #[test]
-    fn remote_dyn_filter_preflight_keeps_parent_filter_when_initial_snapshot_is_oversized() {
+    fn remote_dyn_filter_preflight_keeps_large_initial_snapshot_without_an_application_cap() {
         let exec = remote_dyn_filter_test_exec(
             Arc::new(TestRegionQueryHandler::default()),
             QueryContext::arc(),
@@ -3334,7 +3334,7 @@ mod tests {
         ));
         dyn_filter
             .update(physical_lit(datafusion_common::ScalarValue::Utf8(Some(
-                "x".repeat(common_query::request::REMOTE_DYN_FILTER_PAYLOAD_MAX_BYTES + 1),
+                "x".repeat(1024 * 1024),
             ))) as _)
             .unwrap();
 
@@ -3352,10 +3352,11 @@ mod tests {
             )
             .unwrap();
 
-        // The snapshot cannot be encoded, so nothing is registered remotely and the parent
-        // filter stays in the plan: results stay correct without remote pruning.
-        assert!(exec.captured_remote_dyn_filters().is_empty());
-        assert!(matches!(propagation.filters.as_slice(), [PushedDown::No]));
+        // The snapshot is larger than the removed 512 KiB application cap but still
+        // encodable, so the filter is captured and pushed down: gRPC's max message size (and
+        // memory) is the only bound.
+        assert_eq!(exec.captured_remote_dyn_filters().len(), 1);
+        assert!(matches!(propagation.filters.as_slice(), [PushedDown::Yes]));
     }
 
     #[test]
