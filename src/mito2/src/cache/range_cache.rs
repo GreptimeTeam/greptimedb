@@ -31,7 +31,7 @@ use crate::read::range_cache::{RangeScanCacheKey, RangeScanCacheValue};
 use crate::sst::file::FileHandle;
 
 /// Admission, not a queue: excess distinct misses keep using ordinary scans.
-const MAX_IN_FLIGHT_RANGES: usize = 32;
+const MAX_IN_FLIGHT_RANGES: usize = 1024;
 
 type SharedResult = Option<Arc<RangeCacheDelivery>>;
 
