@@ -37,7 +37,9 @@ use object_store::services::Memory;
 use rstest::rstest;
 use store_api::logstore::LogStore;
 use store_api::logstore::provider::Provider;
-use store_api::region_engine::{RegionEngine, RegionRole, SettableRegionRoleState};
+use store_api::region_engine::{
+    RegionEngine, RegionManifestInfo, RegionRole, SettableRegionRoleState,
+};
 use store_api::region_request::{
     PathType, RegionAlterRequest, RegionCatchupRequest, RegionCloseRequest, RegionDropRequest,
     RegionRequest, RegionTruncateRequest,
@@ -56,7 +58,9 @@ use crate::engine::pending_tail_test::{
     add_field, commit_edit, pending_tails_edit, set_pending_tails,
 };
 use crate::error::Error;
-use crate::manifest::action::{PendingTail, RegionEdit, UptoKind};
+use crate::manifest::action::{
+    PendingTail, RegionEdit, RegionMetaAction, RegionMetaActionList, UptoKind,
+};
 use crate::manifest::storage::delta_file;
 use crate::region::RegionLeaderState;
 use crate::region::version::VersionRef;
@@ -1026,6 +1030,62 @@ async fn test_tail_commit_checks_role_and_tails_under_lock(#[case] demote: bool)
     assert_eq!(1, region.listener.commits());
     assert_eq!(demote, region.has_pending_tails());
     assert_eq!(0, region.stored_ssts().await);
+}
+
+/// A commit notice that arrives after a sync rebuilt the version from a later manifest does
+/// not bring back the tails that manifest cleared.
+#[tokio::test]
+async fn test_late_tail_commit_notice_keeps_synced_tails() {
+    let region = TestRegion::new("tail-replay-late-notice", false, None).await;
+    let replayed = vec![remote_tail(0, 10, UptoKind::Listed)];
+    let shrunk = vec![remote_tail(5, 10, UptoKind::Listed)];
+    // A sync expects a follower with empty memtables.
+    flush_region(&region.engine, region.region_id, None).await;
+    region.reopen_with_tails(shrunk.clone()).await;
+    // A new leader clears the tails, and this node syncs its manifest.
+    let mito_region = region.engine.get_region(region.region_id).unwrap();
+    let version = next_manifest_version(&mito_region).await;
+    let clear =
+        RegionMetaActionList::with_action(RegionMetaAction::Edit(pending_tails_edit(vec![])));
+    let store = region.env.get_object_store().unwrap();
+    publish_delta(
+        &store,
+        &region.region_dir(),
+        version,
+        encode_delta(clear).await,
+    )
+    .await;
+    let manifest_info = RegionManifestInfo::mito(version, 0, 0);
+    region
+        .engine
+        .sync_region(region.region_id, manifest_info.into())
+        .await
+        .unwrap();
+    assert!(!region.has_pending_tails());
+
+    // The notice of the replay that left `shrunk` arrives after the sync.
+    let notify = BackgroundNotify::TailReplayCommitted {
+        region: mito_region,
+        edit: pending_tails_edit(shrunk),
+        tails: replayed,
+    };
+    let request = WorkerRequest::Background {
+        region_id: region.region_id,
+        notify,
+    };
+    let workers = &region.engine.inner.workers;
+    workers
+        .submit_to_worker(region.region_id, request)
+        .await
+        .unwrap();
+    // The worker handles the notice before this request, which keeps the version.
+    region
+        .engine
+        .set_region_role_state_gracefully(region.region_id, SettableRegionRoleState::Follower)
+        .await
+        .unwrap();
+
+    assert!(!region.has_pending_tails());
 }
 
 /// Parks every listing of the WAL of [REMOTE_NODE_ID] once `stall` is set, and counts them.

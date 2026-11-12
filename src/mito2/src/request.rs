@@ -58,7 +58,7 @@ use crate::error::{
     Result, UnexpectedSnafu,
 };
 use crate::flush::FlushReason;
-use crate::manifest::action::{RegionEdit, TruncateKind};
+use crate::manifest::action::{PendingTail, RegionEdit, TruncateKind};
 use crate::memtable::MemtableId;
 use crate::memtable::bulk::part::BulkPart;
 use crate::metrics::COMPACTION_ELAPSED_TOTAL;
@@ -1165,6 +1165,8 @@ pub(crate) enum BackgroundNotify {
         region: MitoRegionRef,
         /// The published edit.
         edit: RegionEdit,
+        /// The tails the replay read, which the manifest recorded when the edit was published.
+        tails: Vec<PendingTail>,
     },
     /// A tail replay ended.
     TailReplayEnded,

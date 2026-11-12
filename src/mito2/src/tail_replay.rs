@@ -338,7 +338,12 @@ impl<S: LogStore> TailReplayTask<S> {
                     );
                     self.release_wal().await;
                     let region = self.region.clone();
-                    let notify = BackgroundNotify::TailReplayCommitted { region, edit };
+                    let tails = tails.to_vec();
+                    let notify = BackgroundNotify::TailReplayCommitted {
+                        region,
+                        edit,
+                        tails,
+                    };
                     notify_worker(&self.flush_task.request_sender, region_id, notify).await;
                     return Ok(true);
                 }

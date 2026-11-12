@@ -23,7 +23,7 @@ use tokio::sync::mpsc::Sender;
 
 use crate::config::IndexBuildMode;
 use crate::flush::FlushReason;
-use crate::manifest::action::RegionEdit;
+use crate::manifest::action::{PendingTail, RegionEdit};
 use crate::region::{MitoRegion, MitoRegionRef};
 use crate::request::{BackgroundNotify, BuildIndexRequest, OptionOutputTx, WorkerRequestWithTime};
 use crate::schedule::CancellableTaskState;
@@ -65,16 +65,23 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         }
     }
 
-    /// Applies a published tail replay unless its instance was replaced by one that loaded it.
+    /// Applies a published tail replay unless its instance was replaced, or its version no
+    /// longer records `tails`, the tails it replayed, because a sync rebuilt it from a later
+    /// manifest.
     pub(crate) async fn handle_tail_replay_committed(
         &mut self,
         region_id: RegionId,
         region: MitoRegionRef,
         edit: RegionEdit,
+        tails: Vec<PendingTail>,
     ) {
         let registered = self.regions.get_region(region_id);
         if !registered.is_some_and(|registered| Arc::ptr_eq(&registered, &region)) {
             info!("Region {region_id} changed after its tails were published");
+            return;
+        }
+        if region.version().pending_tails != tails {
+            info!("Region {region_id} no longer records the replayed tails, skipping their edit");
             return;
         }
         // A truncate uses the last entry id, which must not be below the flushed entry id.
