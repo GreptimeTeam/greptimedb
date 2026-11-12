@@ -78,6 +78,18 @@ fn max_membership_values(max_payload_bytes: usize) -> usize {
     max_payload_bytes / MIN_ENCODED_LITERAL_BYTES
 }
 
+/// Frame size reported for a payload refused because it does not fit the budget.
+///
+/// A refused payload is never materialized, so there is no measured frame length. The
+/// error reports the largest lower bound that is known instead: the price of the literals
+/// the refused membership would have written (`lower_bound`), or - when nothing about the
+/// shape is known - one byte over the budget. Either way the number is genuinely above
+/// `max_payload_bytes`; it is a bound, never a measurement, and it is only used for
+/// diagnostics.
+fn refused_payload_size(lower_bound: usize, max_payload_bytes: usize) -> usize {
+    lower_bound.max(max_payload_bytes.saturating_add(1))
+}
+
 /// Serialized predicate payload for remote dynamic filter updates.
 ///
 /// The payload is tagged in JSON so receivers can reject unsupported encodings
@@ -148,12 +160,20 @@ impl DynFilterPayload {
     /// # No `true` fallback
     ///
     /// Transport never rewrites a dynamic predicate to `true`, because doing so would make
-    /// a region believe the producer published a filter it never published. When no
-    /// conjunct can be retained (`NOT lookup`, `CASE` / `OR` over a membership) the
-    /// predicate is reported as [`CommonQueryError::DynFilterUnsupported`], and when the
-    /// retained conjuncts still do not fit `max_payload_bytes` the payload is reported as
-    /// [`CommonQueryError::DynFilterPayloadTooLarge`]. Producers answer both errors by not
-    /// publishing the filter, which leaves the query running with local dynamic filtering.
+    /// a region believe the producer published a filter it never published. The two
+    /// refusals stay distinct so callers can tell a shape problem from a size problem:
+    ///
+    /// - [`CommonQueryError::DynFilterUnsupported`]: no conjunct can be retained because
+    ///   every one of them holds a lookup with no UTF-8 key list (`NOT lookup`, `CASE` /
+    ///   `OR` over such a membership). The wire has no form for the predicate.
+    /// - [`CommonQueryError::DynFilterPayloadTooLarge`]: the predicate is representable but
+    ///   does not fit `max_payload_bytes` - either a key list itself exceeds the budget, or
+    ///   the retained conjuncts still do not fit. An over-budget key list is never reported
+    ///   as unsupported; it is a size refusal and uses
+    ///   [`ConjunctRetention::OverBudget`].
+    ///
+    /// Producers answer both errors by not publishing that generation, which leaves the
+    /// query running with local dynamic filtering.
     pub fn from_datafusion_expr(
         expr: &Arc<dyn PhysicalExpr>,
         max_payload_bytes: usize,
@@ -242,6 +262,14 @@ struct BoundedPhysicalExprEncoder {
     /// [`CommonQueryError::DynFilterUnsupported`]. No placeholder is ever encoded in its
     /// place.
     unsupported: Cell<bool>,
+    /// Set to the reported frame size when the encoding aborted because a build-key
+    /// membership does not fit `max_payload_bytes`.
+    ///
+    /// This is a size refusal, not a shape one, so
+    /// `encode_bounded_physical_expr_to_bytes` rebuilds
+    /// [`CommonQueryError::DynFilterPayloadTooLarge`] from it instead of reporting the
+    /// predicate as having no wire form.
+    over_budget: Cell<Option<usize>>,
 }
 
 impl BoundedPhysicalExprEncoder {
@@ -250,6 +278,7 @@ impl BoundedPhysicalExprEncoder {
             max_payload_bytes,
             encoded_bytes: Cell::new(0),
             unsupported: Cell::new(false),
+            over_budget: Cell::new(None),
         }
     }
 
@@ -274,24 +303,35 @@ impl BoundedPhysicalExprEncoder {
     ///
     /// The decision only looks at the lookup itself: if DataFusion can hand out the
     /// single-column `Utf8` build-key list it is written as `key IN (...)`; otherwise the
-    /// whole payload aborts as unsupported. A lookup is a real predicate that DataFusion
-    /// only degrades to `true` in its own proto encoder, so this transport must not write
-    /// any substitute for it.
+    /// whole payload aborts. A lookup is a real predicate that DataFusion only degrades to
+    /// `true` in its own proto encoder, so this transport must not write any substitute for
+    /// it, and the abort keeps the two reasons apart: no key list at all (unsupported) is
+    /// not the same thing as a key list that exceeds the budget (too large).
     fn membership_to_proto(
         &self,
         lookup: &HashTableLookupExpr,
         codec: &dyn PhysicalExtensionCodec,
     ) -> DataFusionResult<PhysicalExprNode> {
-        let Some(membership) = RemoteMembership::from_lookup(lookup, self.max_payload_bytes) else {
-            return Err(self.abort_unsupported_lookup());
+        let membership = match RemoteMembership::from_lookup(lookup, self.max_payload_bytes) {
+            Ok(membership) => membership,
+            // A lookup without a key list has no wire form at all: that is a shape
+            // refusal, not a size one.
+            Err(MembershipRefusal::NoKeyList) => return Err(self.abort_unsupported_lookup()),
+            // The key list exists but does not fit the budget: report it as a size
+            // refusal so it is not counted as "no wire form".
+            Err(MembershipRefusal::OverBudget { build_keys }) => {
+                return Err(self.abort_over_budget_membership(build_keys));
+            }
         };
         // The count bound is enforced once more before any literal exists, so a build side
-        // larger than the budget can hold is never materialized.
+        // larger than the budget can hold is never materialized. This cannot fail for any
+        // other reason here: the accessor already guaranteed a non-empty, `NULL`-free
+        // `Utf8` list, so a refusal is again a size refusal.
         let Some(literals) = utf8_list_literals(
             &membership.values,
             max_membership_values(self.max_payload_bytes),
         ) else {
-            return Err(self.abort_unsupported_lookup());
+            return Err(self.abort_over_budget_membership(membership.values.len()));
         };
 
         let before_children = self.encoded_bytes.get();
@@ -329,6 +369,23 @@ impl BoundedPhysicalExprEncoder {
         self.unsupported.set(true);
         DataFusionError::NotImplemented(
             "hash table lookup has no UTF-8 build-key membership to encode".to_string(),
+        )
+    }
+
+    /// Aborts the payload because a build-key membership does not fit `max_payload_bytes`.
+    ///
+    /// This is a *size* refusal, never a "no wire form" one, so the caller rebuilds
+    /// [`CommonQueryError::DynFilterPayloadTooLarge`] from [`Self::over_budget`] instead of
+    /// [`CommonQueryError::DynFilterUnsupported`]. `build_keys` is the number of build keys
+    /// the refused list would have written; every one of them costs at least
+    /// [`MIN_ENCODED_LITERAL_BYTES`], so that product is a real lower bound of the frame.
+    fn abort_over_budget_membership(&self, build_keys: usize) -> DataFusionError {
+        self.over_budget.set(Some(refused_payload_size(
+            build_keys.saturating_mul(MIN_ENCODED_LITERAL_BYTES),
+            self.max_payload_bytes,
+        )));
+        DataFusionError::NotImplemented(
+            "hash table lookup build-key membership exceeds the payload budget".to_string(),
         )
     }
 }
@@ -385,7 +442,9 @@ impl PhysicalProtoConverterExtension for BoundedPhysicalExprEncoder {
 ///
 /// Returns the typed [`CommonQueryError::DynFilterUnsupported`] when the predicate holds a
 /// lookup whose key list cannot be serialized, and
-/// [`CommonQueryError::DynFilterPayloadTooLarge`] when the frame does not fit the budget.
+/// [`CommonQueryError::DynFilterPayloadTooLarge`] when the frame (or a build-key
+/// membership) does not fit the budget. The two refusals stay distinct: an over-budget
+/// membership is a size refusal and is never reported as a predicate without a wire form.
 /// The caller answers both with [`retain_membership_free_conjuncts`]; neither is ever
 /// replaced with `true`.
 fn encode_bounded_physical_expr_to_bytes(
@@ -395,6 +454,15 @@ fn encode_bounded_physical_expr_to_bytes(
     let codec = DefaultPhysicalExtensionCodec {};
     let encoder = BoundedPhysicalExprEncoder::new(max_payload_bytes);
     let proto = encoder.physical_expr_to_proto(expr, &codec);
+    // A build-key membership that exceeds the budget is a size refusal even though the
+    // frame that would have held it is never materialized.
+    if let Some(payload_size_bytes) = encoder.over_budget.get() {
+        return Err(DynFilterPayloadTooLargeSnafu {
+            payload_size_bytes,
+            max_payload_bytes,
+        }
+        .build());
+    }
     let unsupported = encoder.unsupported.get();
     // The encoder stops at the node that went over budget, so this reports the size
     // error unwrapped instead of the wrapped DataFusion error.
@@ -426,11 +494,15 @@ enum ConjunctRetention {
 /// drops a row the producer would keep. `retention` decides which conjuncts have to go. It
 /// only widens as far as it has to: when the narrow retention leaves conjuncts that still do
 /// not fit `max_payload_bytes`, the [`InListExpr`]-bearing ones are dropped as well, because
-/// a static `IN` list is the node most likely to be the oversized one. When no conjunct can
-/// be retained the predicate is reported as
-/// [`CommonQueryError::DynFilterUnsupported`], and when even the widest retention does not
-/// fit as [`CommonQueryError::DynFilterPayloadTooLarge`]: transport never substitutes
-/// `true`.
+/// a static `IN` list is the node most likely to be the oversized one.
+///
+/// The refusal keeps the two reasons apart instead of folding them into "no wire form":
+/// nothing retained under [`ConjunctRetention::UnrepresentableLookup`] means the wire
+/// really has no form for the predicate
+/// ([`CommonQueryError::DynFilterUnsupported`]), while nothing retained under
+/// [`ConjunctRetention::OverBudget`] (or a retained payload that still does not fit) is a
+/// size refusal ([`CommonQueryError::DynFilterPayloadTooLarge`]). Transport never
+/// substitutes `true` for either.
 fn retain_membership_free_conjuncts(
     expr: &Arc<dyn PhysicalExpr>,
     max_payload_bytes: usize,
@@ -438,12 +510,24 @@ fn retain_membership_free_conjuncts(
 ) -> DataFusionResult<DynFilterPayload> {
     match encode_retained_conjuncts_to_bytes(expr, max_payload_bytes, retention) {
         Ok(Some(bytes)) => Ok(DynFilterPayload::Datafusion(bytes)),
-        Ok(None) => Err(DynFilterUnsupportedSnafu {
-            reason: "the predicate carries a dynamic filter membership that has no wire \
-                     form and no membership-free top-level conjunct to keep",
-        }
-        .build()
-        .into()),
+        // Nothing could be retained. Which refusal that is depends on *why* the conjuncts
+        // had to go, and the two must not be mixed up: an over-budget predicate is
+        // representable, it only does not fit.
+        Ok(None) => Err(match retention {
+            ConjunctRetention::UnrepresentableLookup => DynFilterUnsupportedSnafu {
+                reason: "every top-level conjunct of the predicate holds a hash table \
+                         lookup without a UTF-8 build-key membership, so the wire has no \
+                         form for it",
+            }
+            .build()
+            .into(),
+            ConjunctRetention::OverBudget => DynFilterPayloadTooLargeSnafu {
+                payload_size_bytes: refused_payload_size(0, max_payload_bytes),
+                max_payload_bytes,
+            }
+            .build()
+            .into(),
+        }),
         Err(CommonQueryError::DynFilterPayloadTooLarge { .. })
             if matches!(retention, ConjunctRetention::UnrepresentableLookup) =>
         {
@@ -463,7 +547,9 @@ fn retain_membership_free_conjuncts(
 ///
 /// The retained terms are encoded again under the same `max_payload_bytes`, so a caller
 /// supplied budget still bounds the frame. Returns `Ok(None)` when no conjunct can be
-/// retained, which the caller reports as unsupported.
+/// retained; the caller decides which typed refusal that is from `retention`, because an
+/// empty retention caused by an unrepresentable lookup is not the same thing as an empty
+/// retention caused by the budget.
 fn encode_retained_conjuncts_to_bytes(
     expr: &Arc<dyn PhysicalExpr>,
     max_payload_bytes: usize,
@@ -518,7 +604,7 @@ struct RemoteMembership {
 }
 
 impl RemoteMembership {
-    /// Key-list membership of `lookup`, or `None` when it has no such form.
+    /// Key-list membership of `lookup`, or the reason it cannot be written.
     ///
     /// The count bound handed to DataFusion is derived from the byte budget (see
     /// [`max_membership_values`]) instead of being a policy constant, and the byte bound
@@ -532,14 +618,47 @@ impl RemoteMembership {
     /// (integer/float/decimal/dictionary/unknown), and `NULL`-containing or empty build
     /// keys — and [`utf8_list_literals`] re-checks everything it materializes. Those are
     /// accessor and materialization limitations, not encoder policy.
-    fn from_lookup(lookup: &HashTableLookupExpr, max_payload_bytes: usize) -> Option<Self> {
-        let membership = lookup
-            .build_key_membership(max_membership_values(max_payload_bytes), max_payload_bytes)?;
-        Some(Self {
-            key: Arc::clone(membership.key()),
-            values: Arc::clone(membership.values()),
-        })
+    ///
+    /// The accessor folds its shape and size checks into one `None`, so a key list that
+    /// exists but exceeds the bounds is told apart by asking again with the bounds lifted:
+    /// only a list that exists at all can be refused for its size, and a size refusal must
+    /// not be reported as a predicate without a wire form (it is
+    /// [`CommonQueryError::DynFilterPayloadTooLarge`], not
+    /// [`CommonQueryError::DynFilterUnsupported`]).
+    fn from_lookup(
+        lookup: &HashTableLookupExpr,
+        max_payload_bytes: usize,
+    ) -> Result<Self, MembershipRefusal> {
+        match lookup
+            .build_key_membership(max_membership_values(max_payload_bytes), max_payload_bytes)
+        {
+            Some(membership) => Ok(Self {
+                key: Arc::clone(membership.key()),
+                values: Arc::clone(membership.values()),
+            }),
+            None => Err(match lookup.build_key_membership(usize::MAX, usize::MAX) {
+                Some(unbounded) => MembershipRefusal::OverBudget {
+                    build_keys: unbounded.values().len(),
+                },
+                None => MembershipRefusal::NoKeyList,
+            }),
+        }
     }
+}
+
+/// Why a lookup's build-key membership cannot be written as `probe_key IN (...)`.
+///
+/// The two reasons are answered differently: [`Self::NoKeyList`] means the wire has no
+/// form for the node, while [`Self::OverBudget`] means the membership is real but too
+/// large for the payload budget, which the encoder reports as a size refusal.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MembershipRefusal {
+    /// The lookup has no single-column `Utf8` build-key list at all: no build lease,
+    /// composite key, unsupported key type, or an empty / `NULL`-containing build side.
+    NoKeyList,
+    /// The build-key list exists but exceeds the caller's bounds. `build_keys` is how many
+    /// literals it would have written, measured from the unbounded accessor.
+    OverBudget { build_keys: usize },
 }
 
 /// Materializes the `IN` list literals for a build-key membership.
@@ -547,7 +666,9 @@ impl RemoteMembership {
 /// This is the authoritative value check: the list is only built for a non-empty,
 /// `NULL`-free, non-dictionary `Utf8` array of at most `max_values` entries. `max_values`
 /// is checked *before* a [`Literal`] is created for every build key, so an over-large
-/// build side is refused instead of being materialized and then measured.
+/// build side is refused instead of being materialized and then measured. The caller has
+/// already been through [`RemoteMembership::from_lookup`], so a refusal here can only be
+/// the count bound and is reported as a size refusal, not as a missing wire form.
 fn utf8_list_literals(values: &ArrayRef, max_values: usize) -> Option<Vec<Arc<dyn PhysicalExpr>>> {
     let values = values.as_any().downcast_ref::<StringArray>()?;
     if values.is_empty() || values.null_count() != 0 || values.len() > max_values {
@@ -630,8 +751,12 @@ fn assert_typed_dyn_filter_error(
 
 /// Whether `error` reports a dynamic filter predicate the wire cannot represent.
 ///
-/// Transport never rewrites a predicate to `true`, so every producer answers this error by
-/// not publishing the filter (or its initial snapshot) and continuing the query.
+/// Transport never rewrites a producer predicate to `true`, so a producer answers this
+/// error by not shipping the producer predicate and keeping the query running. Callers
+/// that keep a long-lived region-side predicate treat it as an invalidation trigger: the
+/// stale predicate is replaced by an explicit `true` reset (see
+/// `remote_dyn_filter_registry`), so a producer that later widens its filter cannot be
+/// pruned away by it.
 pub fn is_dyn_filter_unsupported(error: &DataFusionError) -> bool {
     matches!(
         error,
@@ -639,6 +764,29 @@ pub fn is_dyn_filter_unsupported(error: &DataFusionError) -> bool {
             if source
                 .downcast_ref::<CommonQueryError>()
                 .is_some_and(CommonQueryError::is_dyn_filter_unsupported)
+    )
+}
+
+/// Whether `error` reports a dynamic filter payload that exceeded `max_payload_bytes`.
+///
+/// This is the other refusal [`DynFilterPayload::from_datafusion_expr`] reports, next to
+/// [`is_dyn_filter_unsupported`]: the predicate exists and is representable, but even the
+/// retained top-level conjuncts do not fit the budget. It is *not* a "no wire form" case
+/// and must not be reported as one. Like the unsupported case it is answered by not
+/// shipping the producer predicate (the query keeps running) and never by narrowing or
+/// rewriting it; a caller that keeps a long-lived region predicate publishes the explicit
+/// `true` reset instead, so a stale, narrower predicate cannot prune rows the producer
+/// still keeps.
+pub fn is_dyn_filter_payload_too_large(error: &DataFusionError) -> bool {
+    matches!(
+        error,
+        DataFusionError::External(source)
+            if source
+                .downcast_ref::<CommonQueryError>()
+                .is_some_and(|error| matches!(
+                    error,
+                    CommonQueryError::DynFilterPayloadTooLarge { .. }
+                ))
     )
 }
 
@@ -1317,25 +1465,46 @@ mod tests {
     }
 
     #[test]
-    fn membership_value_bound_is_derived_from_the_byte_budget() {
-        // One list entry costs at least `MIN_ENCODED_LITERAL_BYTES` on the wire, so the
-        // count bound is the budget divided by that floor: never the raw byte count (the
-        // old behaviour) and never an encoder-side policy cap.
+    fn membership_value_bound_really_bounds_what_the_byte_budget_holds() {
+        // The count bound has to be *real*, not a restatement of its own formula: a
+        // payload of `B` bytes can never hold more than `B / MIN_ENCODED_LITERAL_BYTES`
+        // list literals. Prove it by encoding one literal more than the bound and checking
+        // that the resulting frame really exceeds `B`.
+        let budget = 512;
+        let bound = max_membership_values(budget);
+        assert!(bound > 1, "the bound must leave room for a real list");
+        let schema = Schema::new(vec![Field::new("host", DataType::Utf8, true)]);
+        let minimal_in_list = |values: usize| {
+            Arc::new(
+                InListExpr::try_new(
+                    Arc::new(Column::new("host", 0)),
+                    (0..values).map(|_| lit("")).collect(),
+                    false,
+                    &schema,
+                )
+                .unwrap(),
+            ) as Arc<dyn PhysicalExpr>
+        };
+
+        let over_bound = encode_physical_expr_to_bytes(&minimal_in_list(bound + 1)).unwrap();
+        assert!(
+            over_bound.len() > budget,
+            "{} literals must not fit a {budget}-byte budget, but the frame is {} bytes",
+            bound + 1,
+            over_bound.len()
+        );
+        // The same payload is refused by the bounded encoder, so the derived bound and the
+        // encoder agree on where the budget ends.
+        assert!(matches!(
+            encode_bounded_physical_expr_to_bytes(&minimal_in_list(bound + 1), budget),
+            Err(CommonQueryError::DynFilterPayloadTooLarge { .. })
+        ));
+        // The floor the bound is derived from must hold for the cheapest literal there is.
         let cheapest = encode_physical_expr_to_bytes(&lit("")).unwrap().len();
         assert!(
             cheapest >= MIN_ENCODED_LITERAL_BYTES,
             "floor must hold for the cheapest literal, got {cheapest} bytes"
         );
-        assert_eq!(
-            max_membership_values(REMOTE_DYN_FILTER_PAYLOAD_MAX_BYTES),
-            REMOTE_DYN_FILTER_PAYLOAD_MAX_BYTES / MIN_ENCODED_LITERAL_BYTES
-        );
-        assert!(
-            max_membership_values(REMOTE_DYN_FILTER_PAYLOAD_MAX_BYTES)
-                < REMOTE_DYN_FILTER_PAYLOAD_MAX_BYTES,
-            "the count bound must be tighter than the raw byte budget"
-        );
-        assert_eq!(max_membership_values(64), 64 / MIN_ENCODED_LITERAL_BYTES);
     }
 
     #[test]
@@ -1907,7 +2076,15 @@ mod remote_membership_tests {
             max_membership_values(budget) < values.len(),
             "the derived count bound must stay below the build side size"
         );
-        assert!(RemoteMembership::from_lookup(lookup, budget).is_none());
+        // The refusal is reported as a *size* refusal, not as a predicate without a wire
+        // form: the key list exists, it just does not fit this budget.
+        assert!(
+            matches!(
+                RemoteMembership::from_lookup(lookup, budget),
+                Err(MembershipRefusal::OverBudget { build_keys }) if build_keys == values.len()
+            ),
+            "an over-large build key list must be refused as over budget"
+        );
 
         // Nothing of the 1024-key membership reaches the payload.
         let decoded = decode(&filter.expr, &filter.probe_schema, budget);
@@ -2231,7 +2408,7 @@ mod remote_membership_tests {
     }
 
     #[tokio::test]
-    async fn over_budget_membership_case_is_unsupported() {
+    async fn over_budget_membership_case_is_a_size_refusal() {
         let schema = one_column_schema("trace_id", DataType::Utf8);
         // Long values so the membership lists dominate the payload.
         let long = "t".repeat(256);
@@ -2266,16 +2443,17 @@ mod remote_membership_tests {
         // The whole predicate is one top-level `CASE` conjunct that carries the
         // membership, so a budget that only fits `true` has nothing safe to keep:
         // membership is never rewritten inside `CASE` and the payload is an explicit
-        // error instead of an always-true filter.
+        // error instead of an always-true filter. The predicates *are* representable, they
+        // only do not fit, so the refusal is a size one and not "no wire form".
         let true_size = encode_physical_expr_to_bytes(&lit(true)).unwrap().len();
         assert!(true_size < REMOTE_DYN_FILTER_PAYLOAD_MAX_BYTES);
-        assert_unsupported(
+        assert_too_large(
             DynFilterPayload::from_datafusion_expr(&filter.expr, true_size).unwrap_err(),
         );
     }
 
     #[test]
-    fn over_budget_negation_is_unsupported() {
+    fn over_budget_negation_is_a_size_refusal() {
         let schema = Arc::new(Schema::new(vec![Field::new("host", DataType::Utf8, false)]));
         let host = Arc::new(Column::new("host", 0)) as Arc<dyn PhysicalExpr>;
         let long = "h".repeat(256);
@@ -2289,11 +2467,12 @@ mod remote_membership_tests {
             .unwrap(),
         ) as Arc<dyn PhysicalExpr>;
         // `NOT (host IN (...))`: dropping the list in place would evaluate `NOT true`
-        // = false and drop every row, so the whole predicate is unsupported.
+        // = false and drop every row, so the whole conjunct is dropped. Nothing is left
+        // to ship and the predicate itself is representable, so the refusal is a size one.
         let not_in = Arc::new(NotExpr::new(Arc::clone(&in_list))) as Arc<dyn PhysicalExpr>;
         let true_size = encode_physical_expr_to_bytes(&lit(true)).unwrap().len();
 
-        assert_unsupported(DynFilterPayload::from_datafusion_expr(&not_in, true_size).unwrap_err());
+        assert_too_large(DynFilterPayload::from_datafusion_expr(&not_in, true_size).unwrap_err());
     }
 
     #[tokio::test]
