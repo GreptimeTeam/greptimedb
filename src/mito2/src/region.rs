@@ -101,8 +101,11 @@ pub enum RegionLeaderState {
     Staging,
     /// The region is entering staging mode. - write requests will be stalled.
     EnteringStaging,
-    /// The region is committing its staged edits to end staging mode. - write requests will be
-    /// stalled, and role changes wait for the commit.
+    /// The region is committing its staged edits in `end_staging`. Writes stall until
+    /// `StagingEnded` has the worker handle them, after the region leaves this state. `set_role`
+    /// ignores role changes, since `leave_ending_staging` works out the next state from the
+    /// commit result, a downgrade begun meanwhile and the Leader lease. Graceful role changes
+    /// wait for the manifest lock, which `end_staging` holds until the region leaves.
     EndingStaging,
     /// The region is altering.
     Altering,
@@ -129,6 +132,13 @@ impl RegionRoleState {
             RegionRoleState::Leader(leader_state) => Some(leader_state),
             RegionRoleState::Follower => None,
         }
+    }
+
+    /// Returns whether the region is staging or ending staging. A staged edit belongs to the
+    /// session too, which only [MitoRegion::in_staging_session] can tell.
+    pub(crate) fn in_staging_session(self) -> bool {
+        self == Self::Leader(RegionLeaderState::Staging)
+            || self == Self::Leader(RegionLeaderState::EndingStaging)
     }
 
     pub(crate) fn as_str(&self) -> &'static str {
@@ -389,15 +399,15 @@ impl MitoRegion {
 
     /// Returns whether the region should abort index building.
     pub(crate) fn should_abort_index(&self) -> bool {
-        matches!(
-            self.manifest_ctx.state.load(),
-            RegionRoleState::Follower
-                | RegionRoleState::Leader(RegionLeaderState::Dropping)
-                | RegionRoleState::Leader(RegionLeaderState::Truncating)
-                | RegionRoleState::Leader(RegionLeaderState::Downgrading)
-                | RegionRoleState::Leader(RegionLeaderState::Staging)
-                | RegionRoleState::Leader(RegionLeaderState::EndingStaging)
-        )
+        let state = self.manifest_ctx.state.load();
+        state.in_staging_session()
+            || matches!(
+                state,
+                RegionRoleState::Follower
+                    | RegionRoleState::Leader(RegionLeaderState::Dropping)
+                    | RegionRoleState::Leader(RegionLeaderState::Truncating)
+                    | RegionRoleState::Leader(RegionLeaderState::Downgrading)
+            )
     }
 
     /// Returns whether the region is downgrading.
@@ -413,13 +423,11 @@ impl MitoRegion {
         self.manifest_ctx.state.load() == RegionRoleState::Leader(RegionLeaderState::Staging)
     }
 
-    /// Returns whether the region is in staging mode, counting a staged edit in progress and the
-    /// end of staging.
-    pub(crate) fn is_staging_or_staged_edit(&self) -> bool {
+    /// Returns whether the region is in a staging session: staging, ending staging, or in a
+    /// staged edit.
+    pub(crate) fn in_staging_session(&self) -> bool {
         match self.manifest_ctx.state.load() {
-            RegionRoleState::Leader(
-                RegionLeaderState::Staging | RegionLeaderState::EndingStaging,
-            ) => true,
+            state if state.in_staging_session() => true,
             RegionRoleState::Leader(RegionLeaderState::Editing) => {
                 self.manifest_ctx.staging_partition_info().is_some()
             }
@@ -473,9 +481,7 @@ impl MitoRegion {
     pub(crate) fn region_role(&self) -> RegionRole {
         match self.state() {
             RegionRoleState::Follower => RegionRole::Follower,
-            RegionRoleState::Leader(
-                RegionLeaderState::Staging | RegionLeaderState::EndingStaging,
-            ) => RegionRole::StagingLeader,
+            state if state.in_staging_session() => RegionRole::StagingLeader,
             RegionRoleState::Leader(RegionLeaderState::Downgrading) => {
                 RegionRole::DowngradingLeader
             }
@@ -552,7 +558,7 @@ impl MitoRegion {
     /// Leaves staging without committing it, abandoning a staged edit in progress.
     ///
     /// You should call this method in the worker loop, which is what restores the state of an
-    /// edit, and only when [Self::is_staging_or_staged_edit] holds.
+    /// edit, and only when [Self::in_staging_session] holds.
     pub(crate) fn abort_staging(&self) {
         let aborted = self
             .manifest_ctx
@@ -952,7 +958,7 @@ impl MitoRegion {
                 (manager.manifest(), manager.staging_manifest())
             };
             // A region that left staging without a commit may still hold its staged files.
-            let staging = staging.filter(|_| self.is_staging_or_staged_edit());
+            let staging = staging.filter(|_| self.in_staging_session());
             let normal_files = manifest.files.values().map(|meta| (false, meta));
             let staging_files = staging.iter().flat_map(|s| s.files.values()).map(|meta| (true, meta));
             for (index, (is_staging, meta)) in normal_files.chain(staging_files).enumerate() {
@@ -1058,22 +1064,20 @@ impl MitoRegion {
             .collect::<Vec<_>>()
     }
 
-    /// Returns all live SST file metas and the current manifest version from
-    /// the region manifest, merging both the normal and staging manifests.
+    /// Returns all live SST file metas and the normal manifest version, merging in the staging
+    /// manifest while the region is in a staging session.
     ///
-    /// While the region is in staging mode (e.g. during region copy/migration),
-    /// the authoritative live file set lives in the staging manifest, so this
-    /// method merges both — matching the semantics of [`manifest_sst_entries`].
-    ///
-    /// The returned manifest version is the normal manifest version: staged
-    /// actions take no version.
+    /// In a staging session (e.g. during region copy/migration), the authoritative live file set
+    /// lives in the staging manifest, so this method merges both — matching the semantics of
+    /// [`manifest_sst_entries`]. Outside a session it ignores staged files, since a region that
+    /// left staging may still hold them.
     pub async fn all_manifest_files(&self) -> (Vec<FileMeta>, ManifestVersion) {
         let manifest = self.manifest_ctx.manifest().await;
         let staging = self
             .manifest_ctx
             .staging_manifest()
             .await
-            .filter(|_| self.is_staging_or_staged_edit())
+            .filter(|_| self.in_staging_session())
             .map(|m| m.files.clone());
 
         let files = match staging {
@@ -1093,10 +1097,11 @@ impl MitoRegion {
     }
 
     /// Commits the staged edits as one manifest version and ends staging (see
-    /// [Self::end_staging_locked]) under the manifest write lock `manager`. After dropping the
-    /// lock it awaits `drain_stalled_writes`, which has the worker handle the writes it stalled
-    /// meanwhile, then clears the staging directory. Returns the receipt of the commit, as
-    /// [Self::end_staging_locked] does.
+    /// [Self::end_staging_locked]) under the manifest write lock `manager`, then drops the lock,
+    /// awaits `drain_stalled_writes` and clears the staging directory. The drain waits for the
+    /// worker to handle the writes it stalled, and the worker may be waiting for the lock, so the
+    /// drain is never awaited under the lock.
+    /// Returns the receipt of the commit, as [Self::end_staging_locked] does.
     pub(crate) async fn end_staging(
         &self,
         mut manager: RwLockWriteGuard<'_, RegionManifestManager>,
@@ -1117,7 +1122,7 @@ impl MitoRegion {
     /// open again by now) or a new staging has begun.
     async fn clear_ended_staging(&self) {
         let mut manager = self.manifest_ctx.manifest_manager.write().await;
-        if manager.is_stopped() || self.is_enter_staging() || self.is_staging_or_staged_edit() {
+        if manager.is_stopped() || self.is_enter_staging() || self.in_staging_session() {
             return;
         }
         if let Err(e) = manager.clear_staging_manifest_and_dir().await {
@@ -1129,7 +1134,7 @@ impl MitoRegion {
     ///
     /// The caller must hold the manifest write lock and pass it via `manager`. The commit runs in
     /// [RegionLeaderState::EndingStaging], which stalls writes and holds role changes back (see
-    /// [ManifestContext::finish_ending_staging] for the state it leaves for). If the region stays
+    /// [ManifestContext::leave_ending_staging] for the state it leaves for). If the region stays
     /// staging, its staged edits are kept for a retry and the error is retryable; otherwise they
     /// are dropped.
     ///
@@ -1224,9 +1229,10 @@ impl MitoRegion {
         let result = result.map(|(pending, _)| pending);
         let next_state =
             self.manifest_ctx
-                .finish_ending_staging(self.region_id, ending_started_at, &result);
+                .leave_ending_staging(self.region_id, ending_started_at, &result);
         if next_state != RegionRoleState::Leader(RegionLeaderState::Staging) {
-            // Only a retry in staging commits the staged actions.
+            // Only a retry commits the staged actions. The listings gate on the state and do not
+            // rely on this.
             manager.unset_staging_manifest();
         }
 
@@ -1438,7 +1444,7 @@ impl ManifestContext {
     /// - Follower if the Leader lease has expired;
     /// - Writable if the commit succeeded;
     /// - Staging otherwise, keeping the staging partition info for a retry.
-    pub(crate) fn finish_ending_staging<T>(
+    pub(crate) fn leave_ending_staging<T>(
         &self,
         region_id: RegionId,
         ending_started_at: Instant,
@@ -3195,7 +3201,7 @@ mod tests {
                 ctx.state.load(),
                 RegionRoleState::Leader(RegionLeaderState::EndingStaging)
             );
-            let state = ctx.finish_ending_staging(region_id, started, result);
+            let state = ctx.leave_ending_staging(region_id, started, result);
             // Only a return to staging keeps the partition info for the retry.
             assert_eq!(ctx.staging_partition_info().is_some(), state == staging);
             state

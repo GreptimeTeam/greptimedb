@@ -2451,7 +2451,7 @@ async fn test_writes_wait_while_staging_ends(#[case] downgrade: bool) {
     }
     region
         .manifest_ctx
-        .finish_ending_staging(region_id, started, &Ok::<(), Error>(()));
+        .leave_ending_staging(region_id, started, &Ok::<(), Error>(()));
     let (drained, wait) = tokio::sync::oneshot::channel();
     engine
         .inner
@@ -2501,7 +2501,7 @@ async fn test_writes_after_staging_ends_wait_for_stalled_writes() {
     // stalled put, waits behind it.
     region
         .manifest_ctx
-        .finish_ending_staging(region_id, started, &Ok::<(), Error>(()));
+        .leave_ending_staging(region_id, started, &Ok::<(), Error>(()));
     let delete_engine = engine.clone();
     let rows = Rows {
         schema: delete_rows_schema(&CreateRequestBuilder::new().build()),
@@ -2553,6 +2553,6 @@ async fn test_migration_flush_retries_while_staging_ends() {
 
     region
         .manifest_ctx
-        .finish_ending_staging(region_id, started, &Ok::<(), Error>(()));
+        .leave_ending_staging(region_id, started, &Ok::<(), Error>(()));
     assert_eq!(0, migration_flush().await.unwrap().affected_rows);
 }

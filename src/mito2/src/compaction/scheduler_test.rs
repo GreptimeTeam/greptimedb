@@ -45,7 +45,7 @@ use crate::engine::pending_tail_test::{pending_tails_edit, tail};
 use crate::error::InvalidSchedulerStateSnafu;
 use crate::manifest::manager::{RegionManifestManager, RegionManifestOptions};
 use crate::metrics::COMPACTION_MEMORY_REJECTED;
-use crate::region::ManifestContext;
+use crate::region::{ManifestContext, RegionLeaderState, RegionRoleState};
 use crate::request::{BackgroundNotify, CompactionUnitNotification, OutputTx, WorkerRequest};
 use crate::schedule::CancellableTaskState;
 use crate::schedule::remote_job_scheduler::{RemoteJob, RemoteJobSchedulerRef};

@@ -180,7 +180,7 @@ pub struct RegionManifestManager {
 /// staging ends.
 #[derive(Debug, Default)]
 struct StagedActions {
-    list: RegionMetaActionList,
+    actions: RegionMetaActionList,
     /// Encoded bytes of an end commit that may have been written. A retry commits the same bytes,
     /// and no other action is appended while they are kept.
     attempted: Option<Vec<u8>>,
@@ -189,9 +189,9 @@ struct StagedActions {
 impl StagedActions {
     /// Returns whether `action_list` only adds files that are already staged, as a retried
     /// import does.
-    fn contains_import(&self, action_list: &RegionMetaActionList) -> bool {
+    fn only_adds_staged_files(&self, action_list: &RegionMetaActionList) -> bool {
         let staged: HashSet<_> = self
-            .list
+            .actions
             .actions
             .iter()
             .flat_map(|action| match action {
@@ -610,6 +610,9 @@ impl RegionManifestManager {
 
     /// Updates the manifest. Returns the current manifest version number.
     ///
+    /// With `is_staging`, the actions are staged in memory: they take no version and write
+    /// nothing until [Self::commit_staged] commits them when staging ends.
+    ///
     /// The caller has no Leader deadline to show that its commit returned in time, so a normal
     /// commit under conditional publication is always verified and starts no checkpoint.
     pub async fn update(
@@ -622,9 +625,6 @@ impl RegionManifestManager {
     }
 
     /// Updates the manifest. Returns the current manifest version number.
-    ///
-    /// With `is_staging`, the actions are staged in memory: they take no version and write
-    /// nothing until [Self::commit_staged] commits them when staging ends.
     ///
     /// `allow_checkpoint` tells whether a normal commit may start a checkpoint. `must_verify` is
     /// evaluated after the save returns, for a normal commit under conditional publication. If it
@@ -737,26 +737,25 @@ impl RegionManifestManager {
 
         let bytes = match &self.staged.attempted {
             Some(bytes) => bytes.clone(),
-            None => self.staged.list.encode()?,
+            None => self.staged.actions.encode()?,
         };
         // A copy builds the new manifest; the staged list itself goes back for the region version.
-        let result = self
-            .commit(self.staged.list.actions.clone(), &bytes, true, must_verify)
-            .await;
+        let actions = self.staged.actions.actions.clone();
+        let result = self.commit(actions, &bytes, true, must_verify).await;
         if let Err(e) = &result
             && e.may_have_persisted_manifest_update()
         {
             self.staged.attempted = Some(bytes);
         }
         let version = result?;
-        let committed = std::mem::take(&mut self.staged.list);
+        let committed = std::mem::take(&mut self.staged.actions);
         self.clear_staged();
         Ok((version, committed))
     }
 
     /// Returns the staged actions, or `None` if nothing is staged.
     pub(crate) fn staged_actions(&self) -> Option<&RegionMetaActionList> {
-        (!self.staged.list.actions.is_empty()).then_some(&self.staged.list)
+        (!self.staged.actions.actions.is_empty()).then_some(&self.staged.actions)
     }
 
     /// Stages `action_list` in memory.
@@ -765,7 +764,7 @@ impl RegionManifestManager {
             // A kept end commit must be retried with the same content: a retried import of
             // files that are already staged changes nothing, and nothing else is staged.
             ensure!(
-                self.staged.contains_import(&action_list),
+                self.staged.only_adds_staged_files(&action_list),
                 RegionBusySnafu {
                     region_id: self.manifest.metadata.region_id,
                 }
@@ -782,7 +781,7 @@ impl RegionManifestManager {
             action_list.actions.iter().cloned(),
         );
         self.staging_manifest = Some(Arc::new(manifest_builder.try_build()?));
-        self.staged.list.actions.extend(action_list.actions);
+        self.staged.actions.actions.extend(action_list.actions);
         Ok(())
     }
 

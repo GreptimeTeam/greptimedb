@@ -298,8 +298,7 @@ impl<S> RegionWorkerLoop<S> {
 
     /// Schedule compaction for the region if necessary.
     pub(crate) async fn schedule_compaction(&mut self, region: &MitoRegionRef) {
-        if region.is_staging_or_staged_edit() || region.is_enter_staging() || region.is_truncating()
-        {
+        if region.in_staging_session() || region.is_enter_staging() || region.is_truncating() {
             info!(
                 "Region {} is staging, entering staging, or truncating, skip compaction",
                 region.region_id

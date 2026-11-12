@@ -51,8 +51,8 @@ use crate::error::{
     CompactionCancelledSnafu, Error, ManualCompactionAlreadyRunningSnafu, RegionClosedSnafu,
     RegionDroppedSnafu, RegionTruncatedSnafu, Result, UnsupportedOperationSnafu,
 };
+use crate::region::ManifestContextRef;
 use crate::region::version::VersionControlRef;
-use crate::region::{ManifestContextRef, RegionLeaderState, RegionRoleState};
 use crate::request::{DdlRequest, OptionOutputTx, SenderDdlRequest, WorkerRequestWithTime};
 use crate::schedule::RequestCancelResult;
 use crate::worker::WorkerListener;
@@ -569,10 +569,7 @@ impl CompactionScheduler {
             return Ok(false);
         }
         let current_state = manifest_ctx.current_state();
-        if matches!(
-            current_state,
-            RegionRoleState::Leader(RegionLeaderState::Staging | RegionLeaderState::EndingStaging)
-        ) {
+        if current_state.in_staging_session() {
             info!(
                 "Skipping compaction for region {} in staging mode, options: {:?}",
                 region_id, compact_options
