@@ -1814,6 +1814,14 @@ impl WorkerListener {
         }
     }
 
+    /// A tail replay checks for a Leader lease while it waits.
+    pub(crate) fn on_tail_lease_check(&self, _region_id: RegionId) {
+        #[cfg(any(test, feature = "test"))]
+        if let Some(listener) = &self.listener {
+            listener.on_tail_lease_check(_region_id);
+        }
+    }
+
     /// A round of tail replay failed.
     pub(crate) fn on_tail_replay_failed(&self, _region_id: RegionId, _error: &crate::error::Error) {
         #[cfg(any(test, feature = "test"))]

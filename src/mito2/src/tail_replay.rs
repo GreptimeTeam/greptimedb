@@ -263,6 +263,7 @@ impl<S: LogStore> TailReplayTask<S> {
         let region_id = self.region.region_id;
         info!("Region {region_id} waits for a Leader lease to clear its unread listed tails");
         while self.region.can_replay_tails() {
+            self.flush_task.listener.on_tail_lease_check(region_id);
             if self.region.manifest_ctx.leader_lease_received() {
                 return true;
             }
