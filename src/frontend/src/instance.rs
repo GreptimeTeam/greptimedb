@@ -571,6 +571,11 @@ impl Instance {
             )
             .context(PermissionSnafu)?;
 
+        // Database COPY needs the full table set before table-target authorization.
+        if matches!(stmt, Statement::Copy(Copy::CopyDatabase(_))) {
+            return Ok(());
+        }
+
         let targets = match extract_tables_from_statement_checked(stmt) {
             Some(tables) => PermissionTableTargets::resolved(
                 tables
@@ -594,11 +599,7 @@ impl Instance {
             .context(ExternalSnafu)?;
         if matches!(
             stmt,
-            Statement::Copy(
-                Copy::CopyTable(CopyTable::To(_))
-                    | Copy::CopyDatabase(CopyDatabase::To(_))
-                    | Copy::CopyQueryTo(_)
-            )
+            Statement::Copy(Copy::CopyTable(CopyTable::To(_)) | Copy::CopyQueryTo(_))
         ) {
             // COPY retains its write permission requirement and also reads source data.
             self.check_table_permission(query_ctx, PermissionReq::Action(COPY_TO), targets.clone())
@@ -3559,7 +3560,6 @@ mod tests {
             for sql in [
                 "COPY source TO '/unused.parquet'",
                 "COPY (SELECT * FROM source) TO '/unused.parquet'",
-                "COPY DATABASE public TO '/unused/'",
             ] {
                 let result = instance
                     .check_sql_permission(&parse_one_sql(sql), &ctx)
