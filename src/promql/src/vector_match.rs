@@ -37,6 +37,7 @@ use datatypes::series::{Label, SeriesLabels};
 use crate::functions::{NativeHistogramAdd, NativeHistogramSub};
 use crate::grid_series::{GridSample, GridSeriesBuilder, METADATA_LABELS, external, owned};
 use crate::histogram_eval::float_histogram::FloatHistogram;
+use crate::map::{ArithmeticOp, ComparisonOp};
 
 #[cfg(test)]
 mod tests;
@@ -87,30 +88,45 @@ pub enum BinaryOp {
     Le,
 }
 
+/// What a [`BinaryOp`] computes: arithmetic over two values or a comparison of them.
+#[derive(Clone, Copy, Debug)]
+pub enum BinaryKind {
+    Arithmetic(ArithmeticOp),
+    Comparison(ComparisonOp),
+}
+
 impl BinaryOp {
+    /// The kernel operation this operator names. Every path that evaluates a binary operator, the
+    /// broadcast of a scalar and a constant fold included, reads it from here, so they cannot
+    /// disagree about which operator is which or about what it computes.
+    pub fn kind(self) -> BinaryKind {
+        match self {
+            Self::Add => BinaryKind::Arithmetic(ArithmeticOp::Add),
+            Self::Sub => BinaryKind::Arithmetic(ArithmeticOp::Subtract),
+            Self::Mul => BinaryKind::Arithmetic(ArithmeticOp::Multiply),
+            Self::Div => BinaryKind::Arithmetic(ArithmeticOp::Divide),
+            Self::Mod => BinaryKind::Arithmetic(ArithmeticOp::Modulo),
+            Self::Pow => BinaryKind::Arithmetic(ArithmeticOp::Power),
+            Self::Atan2 => BinaryKind::Arithmetic(ArithmeticOp::Atan2),
+            Self::Eq => BinaryKind::Comparison(ComparisonOp::Equal),
+            Self::Ne => BinaryKind::Comparison(ComparisonOp::NotEqual),
+            Self::Gt => BinaryKind::Comparison(ComparisonOp::Greater),
+            Self::Lt => BinaryKind::Comparison(ComparisonOp::Less),
+            Self::Ge => BinaryKind::Comparison(ComparisonOp::GreaterEqual),
+            Self::Le => BinaryKind::Comparison(ComparisonOp::LessEqual),
+        }
+    }
+
     fn is_comparison(self) -> bool {
-        matches!(
-            self,
-            Self::Eq | Self::Ne | Self::Gt | Self::Lt | Self::Ge | Self::Le
-        )
+        matches!(self.kind(), BinaryKind::Comparison(_))
     }
 
     /// The value and whether a comparison holds, as Prometheus `vectorElemBinop` computes them.
+    #[inline]
     fn apply(self, lhs: f64, rhs: f64) -> (f64, bool) {
-        match self {
-            Self::Add => (lhs + rhs, true),
-            Self::Sub => (lhs - rhs, true),
-            Self::Mul => (lhs * rhs, true),
-            Self::Div => (lhs / rhs, true),
-            Self::Mod => (lhs % rhs, true),
-            Self::Pow => (lhs.powf(rhs), true),
-            Self::Atan2 => (lhs.atan2(rhs), true),
-            Self::Eq => (lhs, lhs == rhs),
-            Self::Ne => (lhs, lhs != rhs),
-            Self::Gt => (lhs, lhs > rhs),
-            Self::Lt => (lhs, lhs < rhs),
-            Self::Ge => (lhs, lhs >= rhs),
-            Self::Le => (lhs, lhs <= rhs),
+        match self.kind() {
+            BinaryKind::Arithmetic(op) => (op.calculate(lhs, rhs), true),
+            BinaryKind::Comparison(op) => (lhs, op.apply(lhs, rhs)),
         }
     }
 }
