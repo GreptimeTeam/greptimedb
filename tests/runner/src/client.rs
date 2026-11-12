@@ -123,8 +123,12 @@ impl MultiProtocolClient {
         }
     }
 
-    /// Execute a query on the GreptimeDB server.
-    pub async fn grpc_query(&mut self, query: &str) -> Result<Output, client::Error> {
+    /// Execute a query on the GreptimeDB server, carrying `hints` as the request query context.
+    pub async fn grpc_query(
+        &mut self,
+        query: &str,
+        hints: &[(&str, &str)],
+    ) -> Result<Output, client::Error> {
         let query_str = query.trim().to_lowercase();
         if query_str.starts_with("use ") {
             // use [db]
@@ -153,7 +157,11 @@ impl MultiProtocolClient {
             self.grpc_client.set_timezone(timezone);
             Ok(Output::new_with_affected_rows(0))
         } else {
-            let mut result = self.grpc_client.sql(&query).await;
+            let mut result = if hints.is_empty() {
+                self.grpc_client.sql(&query).await
+            } else {
+                self.grpc_client.sql_with_hint(&query, hints).await
+            };
             if let Ok(Output {
                 data: OutputData::Stream(stream),
                 ..

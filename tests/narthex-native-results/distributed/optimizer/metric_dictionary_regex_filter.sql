@@ -1,0 +1,1 @@
+../../../cases/distributed/optimizer/metric_dictionary_regex_filter.sql

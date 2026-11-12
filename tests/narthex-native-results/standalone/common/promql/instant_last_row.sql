@@ -1,0 +1,1 @@
+../../../../cases/standalone/common/promql/instant_last_row.sql

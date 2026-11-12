@@ -1,0 +1,1 @@
+../../../../cases/standalone/common/promql/math.sql

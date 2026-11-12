@@ -1,0 +1,64 @@
+create table count_total (
+    ts timestamp time index,
+    tag_a string,
+    tag_b string,
+    val double,
+    primary key (tag_a, tag_b),
+);
+
+Affected Rows: 0
+
+-- if `RangeManipulate` can be encoded/decoded correctly in substrait, the following queries should pass
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE (partitioning.*) REDACTED
+tql explain (0, 100, '1s') 
+    max_over_time(increase(count_total{
+      tag_a="ffa",
+    }[1h])[12h:1h]);
+
++---------------+-----------------------------------------------------------------------------------------------------------------------------------------------------+
+| plan_type     | plan                                                                                                                                                |
++---------------+-----------------------------------------------------------------------------------------------------------------------------------------------------+
+| logical_plan  | FusedSeries                                                                                                                                         |
+|               | native_tree=[                                                                                                                                       |
+|               | Window: max_over_time [43200000ms] offset 0 anchor - on grid 0/1000x101                                                                             |
+|               |   Input: evaluated samples source=0, contiguous                                                                                                     |
+|               | ]                                                                                                                                                   |
+|               |   FusedSeries: (output: series_frame)                                                                                                               |
+|               | native_tree=[                                                                                                                                       |
+|               | Window: increase [3600000ms] offset 0 anchor - on grid -39600000/3600000x12                                                                         |
+|               |   Input: raw samples source=0, contiguous                                                                                                           |
+|               | ]                                                                                                                                                   |
+|               |     MergeScan [is_placeholder=false, remote_input=[                                                                                                 |
+|               | RawSeriesSource: metric=count_total, tags=[tag_a, tag_b], fields=[val]                                                                              |
+|               |   TableScan: count_total, partial_filters=[tag_a = Utf8("ffa"), ts > TimestampMillisecond(-43200000, None) AND ts <= TimestampMillisecond(0, None)] |
+|               | ]]                                                                                                                                                  |
+| physical_plan | FusedSeriesExec                                                                                                                                     |
+|               | native_tree=[                                                                                                                                       |
+|               | Window: max_over_time [43200000ms] offset 0 anchor - on grid 0/1000x101                                                                             |
+|               |   Input: evaluated samples source=0, contiguous                                                                                                     |
+|               | ]                                                                                                                                                   |
+|               |   FusedSeriesExec: (output: series_frame)                                                                                                           |
+|               | native_tree=[                                                                                                                                       |
+|               | Window: increase [3600000ms] offset 0 anchor - on grid -39600000/3600000x12                                                                         |
+|               |   Input: raw samples source=0, contiguous                                                                                                           |
+|               | ]                                                                                                                                                   |
+|               |     CooperativeExec                                                                                                                                 |
+|               |       MergeScanExec: REDACTED
+|               |                                                                                                                                                     |
++---------------+-----------------------------------------------------------------------------------------------------------------------------------------------------+
+
+tql eval (0, 100, '1s') 
+    max_over_time(increase(count_total{
+      tag_a="ffa",
+    }[1h])[12h:1h]);
+
++----+-----+-------+-------+
+| ts | val | tag_a | tag_b |
++----+-----+-------+-------+
++----+-----+-------+-------+
+
+drop table count_total;
+
+Affected Rows: 0
+

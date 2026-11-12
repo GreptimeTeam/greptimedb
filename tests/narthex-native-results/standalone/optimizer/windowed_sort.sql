@@ -1,0 +1,1 @@
+../../../cases/standalone/optimizer/windowed_sort.sql
