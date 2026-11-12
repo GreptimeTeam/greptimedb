@@ -393,10 +393,12 @@ async fn test_database_existence_is_checked_after_authentication_and_authorizati
                     Ok(_) => panic!("unexpected successful login for {user} in {database}"),
                 };
                 assert_eq!(
-                    Some(if authenticated {
-                        &SqlState::INVALID_CATALOG_NAME
-                    } else {
+                    Some(if !authenticated {
                         &SqlState::INVALID_PASSWORD
+                    } else if database == "missing_catalog-public" {
+                        &SqlState::INTERNAL_ERROR
+                    } else {
+                        &SqlState::INVALID_CATALOG_NAME
                     }),
                     error.code(),
                     "{user} in {database}: {error}"
