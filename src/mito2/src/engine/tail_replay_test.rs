@@ -704,7 +704,7 @@ async fn test_direct_promotion_counts_as_leader_lease() {
     // Setting a leader to Leader promotes nothing, so it is no lease.
     region.promote();
     let mito_region = region.engine.get_region(region.region_id).unwrap();
-    assert!(mito_region.manifest_ctx.is_writable_by_catchup());
+    assert!(!mito_region.manifest_ctx.leader_lease_received());
 
     region
         .engine

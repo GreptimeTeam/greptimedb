@@ -2020,10 +2020,10 @@ impl ManifestContext {
         }
     }
 
-    /// Returns whether a catchup made the region writable and no Leader lease of a heartbeat
-    /// sent after it applied since.
-    pub(crate) fn is_writable_by_catchup(&self) -> bool {
-        self.catchup_promoted_at.load(Ordering::Relaxed) != 0
+    /// Returns whether a Leader lease of a heartbeat sent after the last catchup promotion applied,
+    /// or no catchup promoted the region.
+    pub(crate) fn leader_lease_received(&self) -> bool {
+        self.catchup_promoted_at.load(Ordering::Relaxed) == 0
     }
 
     /// Sets the [`RegionRole`].
@@ -2899,10 +2899,10 @@ mod tests {
         assert!(manifest_ctx.promote_after_catchup(region.region_id));
 
         assert!(manifest_ctx.promote_unless_downgrade_started_after(sent_before, region.region_id));
-        assert!(manifest_ctx.is_writable_by_catchup());
+        assert!(!manifest_ctx.leader_lease_received());
         let sent_after = std::time::Instant::now();
         assert!(manifest_ctx.promote_unless_downgrade_started_after(sent_after, region.region_id));
-        assert!(!manifest_ctx.is_writable_by_catchup());
+        assert!(manifest_ctx.leader_lease_received());
     }
 
     #[tokio::test]

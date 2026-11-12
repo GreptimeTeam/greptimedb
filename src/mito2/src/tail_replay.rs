@@ -121,7 +121,7 @@ impl<S: LogStore> TailReplayTask<S> {
                 return Err(e);
             }
         };
-        let lease_received = !self.region.manifest_ctx.is_writable_by_catchup();
+        let lease_received = self.region.manifest_ctx.leader_lease_received();
         let remaining = tails
             .iter()
             .zip(&last_entry_ids)
@@ -242,7 +242,7 @@ impl<S: LogStore> TailReplayTask<S> {
         let region_id = self.region.region_id;
         info!("Region {region_id} waits for a Leader lease to clear its unread listed tails");
         while self.region.can_replay_tails() {
-            if !self.region.manifest_ctx.is_writable_by_catchup() {
+            if self.region.manifest_ctx.leader_lease_received() {
                 return true;
             }
             if !self.sleep(LEASE_CHECK_INTERVAL).await {
