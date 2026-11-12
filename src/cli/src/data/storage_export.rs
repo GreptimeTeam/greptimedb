@@ -313,9 +313,9 @@ impl StorageExport for AzblobBackend {
         mask_secrets(
             sql.to_string(),
             &[
+                expose_optional_secret(&self.config.azblob_sas_token),
                 expose_optional_secret(&self.config.azblob_account_name),
                 expose_optional_secret(&self.config.azblob_account_key),
-                expose_optional_secret(&self.config.azblob_sas_token),
             ],
         )
     }
@@ -377,6 +377,7 @@ mod tests {
     fn test_azblob_export_masks_sas_token() {
         let backend = AzblobBackend {
             config: PrefixedAzblobConnection {
+                azblob_account_name: Some("sig".to_string().into()),
                 azblob_sas_token: Some("sig=secret-token".to_string().into()),
                 ..Default::default()
             },
