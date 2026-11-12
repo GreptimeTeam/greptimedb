@@ -582,7 +582,6 @@ impl Instance {
                                 &info.schema_name,
                                 &info.name,
                             )
-                            .with_physical_metric_table(info.is_physical_table())
                         })
                         .collect(),
                 );
@@ -592,12 +591,8 @@ impl Instance {
                     targets.clone(),
                 )
                 .context(PermissionSnafu)?;
-                self.check_table_permission(
-                    &ctx,
-                    PermissionReq::Action(auth::PermissionAction::read("database.export")),
-                    targets,
-                )
-                .context(PermissionSnafu)?;
+                self.check_table_permission(&ctx, PermissionReq::Action(COPY_TO), targets)
+                    .context(PermissionSnafu)?;
                 self.statement_executor
                     .copy_database_to_tables(req, tables, ctx)
                     .await
@@ -674,11 +669,7 @@ impl Instance {
             .context(ExternalSnafu)?;
         if matches!(
             stmt,
-            Statement::Copy(
-                Copy::CopyTable(CopyTable::To(_))
-                    | Copy::CopyDatabase(CopyDatabase::To(_))
-                    | Copy::CopyQueryTo(_)
-            )
+            Statement::Copy(Copy::CopyTable(CopyTable::To(_)) | Copy::CopyQueryTo(_))
         ) {
             // COPY retains its write permission requirement and also reads source data.
             self.check_table_permission(query_ctx, PermissionReq::Action(COPY_TO), targets.clone())
@@ -2880,13 +2871,55 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_copy_database_authorizes_all_tables_before_data_access() -> TestResult<()> {
-        for (table, direction) in [
-            (test_table(1024, "denied")?, "TO"),
-            (test_table(1024, "denied")?, "FROM"),
-            (test_physical_table(1024, "physical")?, "FROM"),
-            (test_table(1024, "source")?, "TO"),
-            (test_table(1024, "source")?, "FROM"),
+    async fn test_copy_database_enforces_read_and_write_targets() -> TestResult<()> {
+        struct DatabaseCopyAcl {
+            reject_read: bool,
+        }
+        impl PermissionChecker for DatabaseCopyAcl {
+            fn check_permission(
+                &self,
+                _: UserInfoRef,
+                _: PermissionReq,
+            ) -> auth::error::Result<PermissionResp> {
+                Ok(PermissionResp::Allow)
+            }
+            fn check_permission_with_table_targets(
+                &self,
+                _: UserInfoRef,
+                req: PermissionReq,
+                targets: PermissionTableTargets,
+            ) -> auth::error::Result<PermissionResp> {
+                let applies = match req {
+                    PermissionReq::Action(action) => action == COPY_TO && self.reject_read,
+                    PermissionReq::SqlStatement(Statement::Copy(Copy::CopyDatabase(_))) => {
+                        !self.reject_read
+                    }
+                    _ => false,
+                };
+                let PermissionTableTargets::Resolved(targets) = targets else {
+                    return Ok(PermissionResp::Reject);
+                };
+                Ok(
+                    if applies
+                        && targets.iter().any(|target| {
+                            target.table == "denied" || target.is_physical_metric_table
+                        })
+                    {
+                        PermissionResp::Reject
+                    } else {
+                        PermissionResp::Allow
+                    },
+                )
+            }
+        }
+        for (table, direction, reject_read) in [
+            (test_table(1024, "denied")?, "TO", true),
+            (test_table(1024, "denied")?, "TO", false),
+            (test_table(1024, "denied")?, "FROM", false),
+            (test_physical_table(1024, "physical")?, "FROM", false),
+            (test_table(1024, "source")?, "TO", true),
+            (test_table(1024, "source")?, "TO", false),
+            (test_table(1024, "source")?, "FROM", false),
         ] {
             let dir = common_test_util::temp_dir::create_temp_dir("copy_database_permissions");
             let name = table.table_info().name.clone();
@@ -2901,13 +2934,12 @@ mod tests {
                 })
                 .unwrap();
             if direction == "FROM" {
-                // Invalid source data must never be read before all destinations are authorized.
                 std::fs::write(dir.path().join("allowed.parquet"), b"not parquet").unwrap();
                 std::fs::write(dir.path().join(format!("{name}.parquet")), b"not parquet").unwrap();
             }
             let kv = Arc::new(MemoryKvBackend::new());
             let plugins = Plugins::new();
-            plugins.insert::<PermissionCheckerRef>(Arc::new(RejectUnresolvedPermissionChecker));
+            plugins.insert::<PermissionCheckerRef>(Arc::new(DatabaseCopyAcl { reject_read }));
             let instance = FrontendBuilder::new(
                 FrontendOptions::default(),
                 kv.clone(),
@@ -3207,6 +3239,7 @@ mod tests {
                     panic!("unresolved export")
                 };
                 if req.is_readonly() {
+                    assert!(matches!(req, PermissionReq::Action(action) if action == COPY_TO));
                     // The first table is readable; the later table has only write access.
                     Ok(if tables.iter().any(|t| t.table == "target") {
                         PermissionResp::Reject
@@ -3707,7 +3740,6 @@ mod tests {
             for sql in [
                 "COPY source TO '/unused.parquet'",
                 "COPY (SELECT * FROM source) TO '/unused.parquet'",
-                "COPY DATABASE public TO '/unused/'",
             ] {
                 let result = instance
                     .check_sql_permission(&parse_one_sql(sql), &ctx)

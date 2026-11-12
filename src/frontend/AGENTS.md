@@ -43,6 +43,11 @@ including caches owned by pipeline and protocol handlers.
 - **SQL query** (`instance.rs`): `do_query_inner` handles parsing, interceptors,
   permission checks, timeout/cancellation, and delegates planning/execution to
   `StatementExecutor`. Distributed scans enter through `region_query.rs`.
+- **COPY DATABASE** (`instance.rs`, `instance/export_database.rs`): capture export
+  tables or prepare import requests, authorize the complete resolved target set,
+  then execute that same set. Export checks both SQL write permission and
+  `COPY_TO` read permission; import permission failures must not be swallowed by
+  `continue_on_error`.
 - **Exemplar query** (`instance/exemplar.rs`): authorize all selector branches
   before calling `PromQueryInterceptor::pre_execute_exemplars` for each resolved
   exemplar table, with that table's schema context, before scanning it.
