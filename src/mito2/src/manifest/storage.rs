@@ -219,8 +219,7 @@ impl ManifestObjectStore {
             manifest_cache.clone(),
             delta_tracker,
         );
-        let staging_storage =
-            StagingStorage::new(path.clone(), object_store.clone(), compress_type);
+        let staging_storage = StagingStorage::new(path.clone(), object_store.clone());
 
         Self {
             object_store,
@@ -263,21 +262,15 @@ impl ManifestObjectStore {
         &self.path
     }
 
-    /// Returns an iterator of manifests from normal or staging directory.
+    /// Returns an iterator of manifests.
     ///
-    /// `start_after` is forwarded to the non-staging lister to skip entries
-    /// whose name is lexicographically less than or equal to it. It is
-    /// ignored for the staging directory.
+    /// `start_after` is forwarded to the lister to skip entries whose name is
+    /// lexicographically less than or equal to it.
     pub(crate) async fn manifest_lister(
         &self,
-        is_staging: bool,
         start_after: Option<&str>,
     ) -> Result<Option<Lister>> {
-        if is_staging {
-            self.staging_storage.manifest_lister().await
-        } else {
-            self.delta_storage.manifest_lister(start_after).await
-        }
+        self.delta_storage.manifest_lister(start_after).await
     }
 
     /// Fetches manifests in range [start_version, end_version).
@@ -411,15 +404,8 @@ impl ManifestObjectStore {
     }
 
     /// Save the delta manifest file.
-    pub async fn save(
-        &mut self,
-        version: ManifestVersion,
-        bytes: &[u8],
-        is_staging: bool,
-    ) -> Result<()> {
-        if is_staging {
-            self.staging_storage.save(version, bytes).await
-        } else if self.conditional_publication {
+    pub async fn save(&mut self, version: ManifestVersion, bytes: &[u8]) -> Result<()> {
+        if self.conditional_publication {
             self.delta_storage.save_conditional(version, bytes).await
         } else {
             self.delta_storage.save(version, bytes).await
@@ -521,11 +507,6 @@ impl ManifestObjectStore {
         self.size_tracker.retain_after(version);
     }
 
-    /// Fetch all staging manifest files and return them as (version, action_list) pairs.
-    pub async fn fetch_staging_manifests(&self) -> Result<Vec<(ManifestVersion, Vec<u8>)>> {
-        self.staging_storage.fetch_manifests().await
-    }
-
     /// Clear all staging manifest files.
     pub async fn clear_staging_manifests(&mut self) -> Result<()> {
         self.staging_storage.clear().await
@@ -583,7 +564,6 @@ impl ManifestObjectStore {
     pub(crate) fn set_compress_type(&mut self, compress_type: CompressionType) {
         self.checkpoint_storage.set_compress_type(compress_type);
         self.delta_storage.set_compress_type(compress_type);
-        self.staging_storage.set_compress_type(compress_type);
     }
 }
 
@@ -649,7 +629,7 @@ mod tests {
     async fn test_manifest_log_store_case(mut log_store: ManifestObjectStore) {
         for v in 0..5 {
             log_store
-                .save(v, format!("hello, {v}").as_bytes(), false)
+                .save(v, format!("hello, {v}").as_bytes())
                 .await
                 .unwrap();
         }
@@ -726,7 +706,7 @@ mod tests {
         log_store.set_compress_type(CompressionType::Uncompressed);
         for v in 0..5 {
             log_store
-                .save(v, format!("hello, {v}").as_bytes(), false)
+                .save(v, format!("hello, {v}").as_bytes())
                 .await
                 .unwrap();
         }
@@ -746,7 +726,7 @@ mod tests {
         // write compressed data to stimulate compress algorithm take effect
         for v in 5..10 {
             log_store
-                .save(v, format!("hello, {v}").as_bytes(), false)
+                .save(v, format!("hello, {v}").as_bytes())
                 .await
                 .unwrap();
         }
@@ -803,7 +783,7 @@ mod tests {
         log_store.set_compress_type(CompressionType::Uncompressed);
         for v in 0..5 {
             log_store
-                .save(v, format!("hello, {v}").as_bytes(), false)
+                .save(v, format!("hello, {v}").as_bytes())
                 .await
                 .unwrap();
         }
@@ -844,7 +824,7 @@ mod tests {
         // write 5 manifest files
         for v in 0..5 {
             log_store
-                .save(v, format!("hello, {v}").as_bytes(), false)
+                .save(v, format!("hello, {v}").as_bytes())
                 .await
                 .unwrap();
         }
@@ -903,7 +883,7 @@ mod tests {
     async fn test_scan_with_start_after_case(mut log_store: ManifestObjectStore) {
         for v in 0..10 {
             log_store
-                .save(v, format!("hello, {v}").as_bytes(), false)
+                .save(v, format!("hello, {v}").as_bytes())
                 .await
                 .unwrap();
         }
@@ -1024,7 +1004,7 @@ mod tests {
         if matches!(payload, PayloadKind::Checkpoint { .. }) {
             store.save_checkpoint(3, data).await.unwrap();
         } else {
-            store.save(3, data, false).await.unwrap();
+            store.save(3, data).await.unwrap();
         }
         let encoded = remote.read(&key).await.unwrap().to_vec();
         if source == CacheSource::LegacyDecoded {

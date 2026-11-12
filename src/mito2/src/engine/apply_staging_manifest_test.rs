@@ -18,6 +18,7 @@ use std::{assert_matches, fs};
 
 use api::v1::Rows;
 use api::v1::region::{StrictWindow, compact_request};
+use common_error::ext::{ErrorExt, RetryHint};
 use common_function::utils::partition_expr_version;
 use common_recordbatch::RecordBatches;
 use datatypes::arrow::array::{AsArray, UInt64Array};
@@ -42,7 +43,8 @@ use crate::manifest::action::{
 use crate::sst::FormatType;
 use crate::sst::file::FileMeta;
 use crate::test_util::{
-    CreateRequestBuilder, TestEnv, build_rows, build_rows_for_key, put_rows, rows_schema,
+    CreateRequestBuilder, DeltaFaults, TestEnv, build_rows, build_rows_for_key, put_rows,
+    reopen_region, rows_schema,
 };
 
 fn range_expr(col_name: &str, start: i64, end: i64) -> PartitionExpr {
@@ -609,6 +611,16 @@ async fn test_apply_staging_manifest_success_with_format(flat_format: bool) {
     assert_eq!(manifest.files.len(), 0);
     let staging_manifest = region.manifest_ctx.staging_manifest().await.unwrap();
     assert_eq!(staging_manifest.files.len(), 0);
+    // A delta that an older binary left in the staging directory goes when staging ends.
+    let data_home = env.data_home();
+    let region_dir = format!("{}/data/test/1_0000000002", data_home.display());
+    let staging_manifest_dir = format!("{}/staging/manifest", region_dir);
+    fs::create_dir_all(&staging_manifest_dir).unwrap();
+    fs::write(
+        format!("{staging_manifest_dir}/00000000000000000001.json"),
+        "{}",
+    )
+    .unwrap();
 
     engine
         .handle_request(
@@ -638,9 +650,6 @@ async fn test_apply_staging_manifest_success_with_format(flat_format: bool) {
     // The staging partition expr should be cleared.
     assert!(region.manifest_ctx.staging_partition_info().is_none());
     // The staging manifest directory should be empty.
-    let data_home = env.data_home();
-    let region_dir = format!("{}/data/test/1_0000000001", data_home.display());
-    let staging_manifest_dir = format!("{}/staging/manifest", region_dir);
     let staging_files = fs::read_dir(&staging_manifest_dir)
         .map(|entries| {
             entries
@@ -1357,5 +1366,146 @@ async fn test_merge_repartition_data_integrity() {
         expected,
         "actual: {}",
         batches.pretty_print().unwrap()
+    );
+}
+
+/// The end commit fails after its delta landed (a lost response) or before. The retry writes the
+/// same delta at the next version, and a reopen sees one commit.
+#[rstest::rstest]
+#[case::landed(true)]
+#[case::not_landed(false)]
+#[tokio::test]
+async fn test_apply_staging_manifest_retries_failed_commit(#[case] landed: bool) {
+    let faults = DeltaFaults::default();
+    let mut env = TestEnv::with_prefix("apply-failed-commit")
+        .await
+        .with_mock_layer(faults.layer());
+    let engine = env.create_engine(MitoConfig::default()).await;
+    let region_id = RegionId::new(2, 2);
+    let request = CreateRequestBuilder::new().build();
+    let table_dir = request.table_dir.clone();
+    let schema = rows_schema(&request);
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+    put_rows(
+        &engine,
+        region_id,
+        Rows {
+            schema,
+            rows: build_rows(0, 3),
+        },
+    )
+    .await;
+    engine
+        .handle_request(region_id, RegionRequest::Flush(Default::default()))
+        .await
+        .unwrap();
+    let partition_expr = range_expr("tag_0", 0, 50).as_json_str().unwrap();
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::EnterStaging(EnterStagingRequest {
+                partition_directive: StagingPartitionDirective::UpdatePartitionExpr(
+                    partition_expr.clone(),
+                ),
+            }),
+        )
+        .await
+        .unwrap();
+    let remap_result = engine
+        .remap_manifests(RemapManifestsRequest {
+            region_id,
+            input_regions: vec![region_id],
+            region_mapping: [(region_id, vec![region_id])].into_iter().collect(),
+            new_partition_exprs: [(region_id, partition_expr.clone())].into_iter().collect(),
+        })
+        .await
+        .unwrap();
+    let apply = || {
+        RegionRequest::ApplyStagingManifest(ApplyStagingManifestRequest {
+            partition_expr: partition_expr.clone(),
+            central_region_id: region_id,
+            manifest_path: remap_result.manifest_paths[&region_id].clone(),
+        })
+    };
+    let region = engine.get_region(region_id).unwrap();
+    let version = region.manifest_ctx.manifest_version().await;
+
+    if landed {
+        faults.lose_next_response();
+    } else {
+        faults.fail_next_write();
+    }
+    // The region stays staging and keeps its edits for a retry.
+    let err = engine.handle_request(region_id, apply()).await.unwrap_err();
+    assert_eq!(RetryHint::Retryable, err.retry_hint());
+    assert!(region.is_staging());
+    // Until the retry, another edit is refused without closing the region.
+    let edit = RegionEdit {
+        files_to_add: vec![FileMeta {
+            region_id,
+            file_id: FileId::random(),
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    let err = engine.edit_region(region_id, edit).await.unwrap_err();
+    assert_eq!(RetryHint::Retryable, err.retry_hint());
+    assert!(region.is_staging());
+    assert!(
+        !region
+            .manifest_ctx
+            .manifest_manager
+            .read()
+            .await
+            .is_stopped()
+    );
+
+    // The retry writes the same delta at the next version.
+    engine.handle_request(region_id, apply()).await.unwrap();
+    assert!(!region.is_staging());
+    let committed = region.manifest_ctx.manifest().await;
+    assert_eq!(version + 2, committed.manifest_version);
+    assert_eq!(
+        Some(partition_expr.as_str()),
+        committed.metadata.partition_expr.as_deref()
+    );
+    let deltas = region
+        .manifest_ctx
+        .manifest_manager
+        .read()
+        .await
+        .store()
+        .fetch_manifests(version + 1, version + 3)
+        .await
+        .unwrap();
+    if landed {
+        assert_eq!(
+            vec![version + 1, version + 2],
+            deltas.iter().map(|(v, _)| *v).collect::<Vec<_>>()
+        );
+        assert_eq!(deltas[0].1, deltas[1].1);
+    } else {
+        assert_eq!(
+            vec![version + 2],
+            deltas.iter().map(|(v, _)| *v).collect::<Vec<_>>()
+        );
+    }
+
+    // A reopen replays the deltas as one commit.
+    reopen_region(&engine, region_id, table_dir, true, Default::default()).await;
+    let reopened = engine
+        .get_region(region_id)
+        .unwrap()
+        .manifest_ctx
+        .manifest()
+        .await;
+    assert_eq!(version + 2, reopened.manifest_version);
+    assert_eq!(committed.files, reopened.files);
+    assert_eq!(
+        committed.metadata.partition_expr,
+        reopened.metadata.partition_expr
     );
 }
