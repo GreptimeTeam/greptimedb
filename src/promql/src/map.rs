@@ -493,6 +493,7 @@ fn go_min(x: f64, y: f64) -> f64 {
 
 impl ArithmeticOp {
     /// Prometheus `vectorElemBinop` for two floats.
+    #[inline]
     pub fn calculate(self, left: f64, right: f64) -> f64 {
         match self {
             Self::Add => left + right,

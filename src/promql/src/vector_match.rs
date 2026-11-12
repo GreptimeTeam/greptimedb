@@ -96,9 +96,10 @@ pub enum BinaryKind {
 }
 
 impl BinaryOp {
-    /// The kernel operation this operator names. Every path that evaluates a binary operator, the
-    /// broadcast of a scalar and a constant fold included, reads it from here, so they cannot
-    /// disagree about which operator is which or about what it computes.
+    /// The kernel operation this operator names. Every path that evaluates a binary operator over
+    /// two floats, the broadcast of a scalar and a constant fold included, reads it from here, so
+    /// they cannot disagree about which operator is which or about what it computes.
+    #[inline]
     pub fn kind(self) -> BinaryKind {
         match self {
             Self::Add => BinaryKind::Arithmetic(ArithmeticOp::Add),
@@ -117,7 +118,7 @@ impl BinaryOp {
         }
     }
 
-    fn is_comparison(self) -> bool {
+    pub fn is_comparison(self) -> bool {
         matches!(self.kind(), BinaryKind::Comparison(_))
     }
 

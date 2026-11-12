@@ -199,6 +199,7 @@ impl ComparisonOp {
     /// answer the kernel would compute: NaN satisfies only `NotEqual`, and signed zeros compare
     /// equal. Defining the six rules a second time is how the folded number and the evaluated one
     /// would start to disagree.
+    #[inline]
     pub fn apply(self, left: f64, right: f64) -> bool {
         match self {
             Self::Equal => left == right,
