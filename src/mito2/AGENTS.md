@@ -145,7 +145,8 @@ Tests live next to the code as `*_test.rs` (e.g. `src/mito2/src/engine/flush_tes
   tails must raise the committed sequence to theirs, or writes accepted during the replay
   lose to replayed rows. This node's later entry ids must be above every tail's `upto`, and
   its unflushed entries at or below one must be in its own tails, or the tail commit's
-  flushed entry id skips them. Replays have no admission or concurrency limit.
+  flushed entry id skips them. Replays have no admission or concurrency limit. Their SSTs
+  build indexes as flushed ones (`IndexBuildType::Flush`), under `create_on_flush`.
 - Lock ordering: take the manifest lock before updating `version_control`; the
   reverse deadlocks against concurrent flush/compaction.
 - All region I/O runs on tokio workers; never `block_on` inside a worker.
@@ -175,6 +176,7 @@ Tests live next to the code as `*_test.rs` (e.g. `src/mito2/src/engine/flush_tes
   trigger in `worker/handle_flush.rs` must skip them: background triggers test `is_writable()`
   and `is_staging()`, a flush request `is_flushable()` and `is_staging()` (`is_writable()` and
   `is_flushable()` are false while ending staging). `handle_close` leaves staging first.
+  Tail replays never run for them: entering staging fails while tails are pending.
 
 ## Maintenance contract
 
