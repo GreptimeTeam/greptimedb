@@ -22,13 +22,18 @@
 //! `iceberg_hash_bounds(n)` prints the breakpoints of an equal-width n-bucket
 //! split, ready to paste into `PARTITION ON COLUMNS`. It only formats the
 //! numbers; it does not create or change partitions.
+//!
+//! `iceberg_hash_breakpoints(v1, v2, ...)` hashes the given constant values
+//! (any order, one shared hashable type) and prints them sorted, for building
+//! buckets around known key values instead of around equal widths.
 
 use std::fmt;
 
+use datafusion::arrow::array::ArrayRef;
 use datafusion::arrow::datatypes::DataType;
 use datafusion_common::{DataFusionError, ScalarValue};
 use datafusion_expr::{ColumnarValue, ScalarFunctionArgs, Signature, Volatility};
-use partition::function::{IcebergHash, iceberg_hash_udf};
+use partition::function::{IcebergHash, iceberg_hash_udf, iceberg_hash_values};
 
 use crate::function::Function;
 use crate::function_registry::FunctionRegistry;
@@ -175,6 +180,129 @@ impl fmt::Display for IcebergHashBoundsFunction {
     }
 }
 
+/// `iceberg_hash_breakpoints(v1, v2, ...)`: the sorted, comma separated hash
+/// values of the given constant values, as `INT32` literals.
+///
+/// The values do not need to be sorted; the output is. Every value must be a
+/// hashable constant of one shared type, exactly like the values a partition
+/// rule compares the hashed column against. NULL values hash to NULL and are
+/// dropped, and so is an empty argument list, so the output never contains a
+/// NULL entry: those inputs are rejected as unusable breakpoints.
+#[derive(Debug)]
+pub(crate) struct IcebergHashBreakpointsFunction {
+    signature: Signature,
+}
+
+impl Default for IcebergHashBreakpointsFunction {
+    fn default() -> Self {
+        Self {
+            signature: Signature::variadic_any(Volatility::Immutable),
+        }
+    }
+}
+
+impl IcebergHashBreakpointsFunction {
+    pub fn register(registry: &FunctionRegistry) {
+        registry.register_scalar(Self::default());
+    }
+
+    /// Hashes the scalar arguments into sorted breakpoints, or an error when
+    /// the arguments cannot form a usable breakpoint list.
+    fn breakpoints(&self, args: &ScalarFunctionArgs) -> datafusion_common::Result<String> {
+        if args.args.is_empty() {
+            return Err(DataFusionError::Execution(format!(
+                "{} expects at least one value, got none",
+                self.name()
+            )));
+        }
+        let mut scalars: Vec<i32> = Vec::with_capacity(args.args.len());
+        for (position, arg) in args.args.iter().enumerate() {
+            let scalar = match arg {
+                ColumnarValue::Scalar(scalar) => scalar,
+                ColumnarValue::Array(_) => {
+                    return Err(DataFusionError::Execution(format!(
+                        "{} expects constant values, not a column (argument {})",
+                        self.name(),
+                        position + 1
+                    )));
+                }
+            };
+            let hashed = if scalar.is_null() {
+                // A NULL hash can never match a comparison bound, so a NULL
+                // value cannot be a breakpoint. Reject it instead of silently
+                // dropping it: the user asked for that value's breakpoint.
+                return Err(DataFusionError::Execution(format!(
+                    "{} cannot use NULL as a breakpoint (argument {}): NULL rows fall in the lowest bucket",
+                    self.name(),
+                    position + 1
+                )));
+            } else {
+                into_hashed_scalar(self.name(), position + 1, scalar)?
+            };
+            scalars.push(hashed);
+        }
+        scalars.sort_unstable();
+        scalars.dedup();
+        Ok(scalars
+            .iter()
+            .map(i32::to_string)
+            .collect::<Vec<_>>()
+            .join(", "))
+    }
+}
+
+impl Function for IcebergHashBreakpointsFunction {
+    fn name(&self) -> &str {
+        "iceberg_hash_breakpoints"
+    }
+
+    fn return_type(&self, _input_types: &[DataType]) -> datafusion_common::Result<DataType> {
+        Ok(DataType::Utf8)
+    }
+
+    fn signature(&self) -> &Signature {
+        &self.signature
+    }
+
+    fn invoke_with_args(
+        &self,
+        args: ScalarFunctionArgs,
+    ) -> datafusion_common::Result<ColumnarValue> {
+        Ok(ColumnarValue::Scalar(ScalarValue::Utf8(Some(
+            self.breakpoints(&args)?,
+        ))))
+    }
+}
+
+impl fmt::Display for IcebergHashBreakpointsFunction {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("ICEBERG_HASH_BREAKPOINTS")
+    }
+}
+
+/// Hashes one constant by evaluating it through the shared array form, so the
+/// value goes through exactly the code a partition rule evaluates.
+fn into_hashed_scalar(
+    name: &str,
+    position: usize,
+    scalar: &ScalarValue,
+) -> datafusion_common::Result<i32> {
+    let array: ArrayRef = scalar.to_array()?;
+    let hashed = iceberg_hash_values(array.as_ref()).map_err(|error| {
+        DataFusionError::Execution(format!("{name} argument {position}: {error}"))
+    })?;
+    let value = ScalarValue::try_from_array(&hashed, 0)?;
+    match value {
+        ScalarValue::Int32(Some(hashed)) => Ok(hashed),
+        ScalarValue::Int32(None) => Err(DataFusionError::Execution(format!(
+            "{name} argument {position}: NULL hash"
+        ))),
+        other => Err(DataFusionError::Execution(format!(
+            "{name} argument {position}: unexpected hash {other:?}"
+        ))),
+    }
+}
+
 /// Formats the breakpoints of `buckets` equal-width ranges over `INT32`:
 /// `bi = i32::MIN + floor(i * 2^32 / buckets)`.
 ///
@@ -205,6 +333,7 @@ mod tests {
 
     use datafusion::arrow::array::{Array, AsArray, Int64Array};
     use datafusion::arrow::datatypes::{DataType, Field, Int32Type};
+    use datatypes::value::Value;
 
     use super::*;
     use crate::function_registry::FUNCTION_REGISTRY;
@@ -338,6 +467,112 @@ mod tests {
     }
 
     #[test]
+    fn test_breakpoints_sorts_and_dedups() {
+        let function = IcebergHashBreakpointsFunction::default();
+        assert_eq!(function.name(), "iceberg_hash_breakpoints");
+        assert_eq!(
+            function.return_type(&[DataType::Utf8]).unwrap(),
+            DataType::Utf8
+        );
+
+        // Unsorted strings: 'iceberg', 'a', and 'iceberg' again (dedup).
+        let bounds = invoke(
+            &function,
+            vec![
+                ColumnarValue::Scalar(ScalarValue::Utf8(Some("iceberg".to_string()))),
+                ColumnarValue::Scalar(ScalarValue::Utf8(Some("a".to_string()))),
+                ColumnarValue::Scalar(ScalarValue::Utf8(Some("iceberg".to_string()))),
+            ],
+            1,
+            DataType::Utf8,
+        );
+        let iceberg = IcebergHash::evaluate_value(&Value::String("iceberg".into()))
+            .unwrap()
+            .as_i64()
+            .unwrap() as i32;
+        let a = IcebergHash::evaluate_value(&Value::String("a".into()))
+            .unwrap()
+            .as_i64()
+            .unwrap() as i32;
+        let expected = match (iceberg, a) {
+            (min, max) if min < max => format!("{min}, {max}"),
+            (min, max) => format!("{max}, {min}"),
+        };
+        assert_eq!(into_scalar(bounds), ScalarValue::Utf8(Some(expected)));
+
+        // Integers hash as longs and mix with the same rules.
+        let bounds = invoke(
+            &function,
+            vec![
+                ColumnarValue::Scalar(ScalarValue::Int64(Some(34))),
+                ColumnarValue::Scalar(ScalarValue::Int32(Some(-1))),
+                ColumnarValue::Scalar(ScalarValue::UInt8(Some(0))),
+            ],
+            1,
+            DataType::Utf8,
+        );
+        assert_eq!(
+            into_scalar(bounds),
+            ScalarValue::Utf8(Some(format!(
+                "{}, {}, {}",
+                IcebergHash::evaluate_value(&Value::Int32(-1))
+                    .unwrap()
+                    .as_i64()
+                    .unwrap() as i32,
+                IcebergHash::evaluate_value(&Value::UInt8(0))
+                    .unwrap()
+                    .as_i64()
+                    .unwrap() as i32,
+                IcebergHash::evaluate_value(&Value::Int64(34))
+                    .unwrap()
+                    .as_i64()
+                    .unwrap() as i32,
+            )))
+        );
+    }
+
+    #[test]
+    fn test_breakpoints_rejects_invalid_input() {
+        let function = IcebergHashBreakpointsFunction::default();
+        let call = |args: Vec<ColumnarValue>| {
+            function.invoke_with_args(ScalarFunctionArgs {
+                args,
+                arg_fields: vec![],
+                number_rows: 1,
+                return_field: Arc::new(Field::new("result", DataType::Utf8, true)),
+                config_options: Arc::new(Default::default()),
+            })
+        };
+
+        // Empty list cannot form a breakpoint list.
+        let err = call(vec![]).unwrap_err().to_string();
+        assert!(err.contains("at least one value"), "{err}");
+
+        // NULL can never be a breakpoint: it falls in the lowest bucket.
+        let err = call(vec![
+            ColumnarValue::Scalar(ScalarValue::Utf8(Some("a".to_string()))),
+            ColumnarValue::Scalar(ScalarValue::Null),
+        ])
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("cannot use NULL as a breakpoint"), "{err}");
+
+        // A column cannot be hashed at planning time.
+        let err = call(vec![ColumnarValue::Array(Arc::new(Int64Array::from(
+            vec![34_i64],
+        )))])
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("constant values, not a column"), "{err}");
+
+        // Unsupported value type names the shared hash error.
+        let err = call(vec![ColumnarValue::Scalar(ScalarValue::Float64(Some(1.0)))])
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("does not support type"), "{err}");
+    }
+
+    #[test]
     fn test_bounds_rejects_invalid_input() {
         let function = IcebergHashBoundsFunction::default();
         let call = |arg: ColumnarValue| {
@@ -390,12 +625,16 @@ mod tests {
         let ctx = SessionContext::new();
         ctx.register_udf(create_udf(Arc::new(IcebergHashFunction::default())));
         ctx.register_udf(create_udf(Arc::new(IcebergHashBoundsFunction::default())));
+        ctx.register_udf(create_udf(Arc::new(
+            IcebergHashBreakpointsFunction::default(),
+        )));
 
         let batches = ctx
             .sql(
                 "SELECT iceberg_hash('iceberg') AS h, iceberg_hash(34) AS i, \
                  iceberg_hash(NULL) AS n, iceberg_hash_bounds(4) AS b, \
-                 iceberg_hash_bounds(CAST(4 AS SMALLINT)) AS sb",
+                 iceberg_hash_bounds(CAST(4 AS SMALLINT)) AS sb, \
+                 iceberg_hash_breakpoints('iceberg', 34) AS bp",
             )
             .await
             .unwrap()
@@ -421,11 +660,20 @@ mod tests {
             batches[0].column(4).as_string::<i32>().value(0),
             "-1073741824, 0, 1073741824"
         );
+        // Sorted hash values of 'iceberg' (1210000089) and 34 (2017239379).
+        assert_eq!(
+            batches[0].column(5).as_string::<i32>().value(0),
+            "1210000089, 2017239379"
+        );
     }
 
     #[test]
     fn test_hash_functions_are_registered() {
-        for name in ["iceberg_hash", "iceberg_hash_bounds"] {
+        for name in [
+            "iceberg_hash",
+            "iceberg_hash_bounds",
+            "iceberg_hash_breakpoints",
+        ] {
             assert!(
                 FUNCTION_REGISTRY.get_function(name).is_some(),
                 "{name} is not registered"
