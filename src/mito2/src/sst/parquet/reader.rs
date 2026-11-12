@@ -3280,19 +3280,36 @@ mod tests {
         reader_builder: &RowGroupReaderBuilder,
         row_group_idx: usize,
     ) -> crate::sst::parquet::prefilter::PrefilterResult {
+        execute_test_prefilter_with_metrics(reader_builder, row_group_idx)
+            .await
+            .0
+    }
+
+    /// Runs one prefilter pass over a whole row group and keeps the fetch metrics of that
+    /// pass, so a test can tell a pass that read the row group from one served by the
+    /// prefilter-result cache.
+    async fn execute_test_prefilter_with_metrics(
+        reader_builder: &RowGroupReaderBuilder,
+        row_group_idx: usize,
+    ) -> (
+        crate::sst::parquet::prefilter::PrefilterResult,
+        ParquetFetchMetrics,
+    ) {
+        let fetch_metrics = ParquetFetchMetrics::default();
         let prefilter_builder = reader_builder.prefilter_builder.as_ref().unwrap();
         let mut prefilter_ctx = prefilter_builder.build(row_group_idx);
-        execute_prefilter(
+        let result = execute_prefilter(
             &mut prefilter_ctx,
             reader_builder,
             &RowGroupBuildContext {
                 row_group_idx,
                 row_selection: None,
-                fetch_metrics: None,
+                fetch_metrics: Some(&fetch_metrics),
             },
         )
         .await
-        .unwrap()
+        .unwrap();
+        (result, fetch_metrics)
     }
 
     /// A dynamic filter starts as `true` and is published after the plan and the reader
@@ -3381,6 +3398,132 @@ mod tests {
 
         assert_eq!(incoming, result.refined_selection);
         assert_eq!(0, result.filtered_rows);
+    }
+
+    /// With the prefilter-result cache enabled, a static predicate keeps its cached mask
+    /// while a producer republishes a dynamic filter.
+    ///
+    /// The static `ts` predicate is cacheable, so the row selection it produces is written
+    /// to the cache and reused. The dynamic membership is not: each pass evaluates the
+    /// generation it snapshotted, a newer publication replaces the previous membership
+    /// instead of replaying a cached mask, and disabling the filter leaves no stale mask
+    /// behind. Only the static mask is reused, and the rows the pass keeps stay the rows
+    /// the static predicate and the current membership keep.
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_prefilter_result_cache_keeps_static_mask_but_not_dynamic_mask() {
+        let producer_schema = dynamic_producer_schema();
+        let handle = new_test_dynamic_filter();
+        let cache = CacheStrategy::EnableAll(Arc::new(
+            CacheManager::builder()
+                .prefilter_result_cache_size(1024)
+                .build(),
+        ));
+        // `ts >= 1` keeps the last two of the three rows, and the row group's time index
+        // statistics cannot prove it, so it stays a cacheable prefilter entry. The dynamic
+        // filter reads another column, so the cached static mask is the only way a later
+        // pass can skip reading `ts`.
+        let static_predicate =
+            col("ts").gt_eq(lit(ScalarValue::TimestampMillisecond(Some(1), None)));
+        let predicate = Predicate::with_dyn_filters(vec![static_predicate], vec![handle.clone()]);
+        let (reader_builder, _) = prefilter_test_builder_with(
+            ObjectStore::new(Memory::default()).unwrap(),
+            3,
+            1,
+            PageIndexPolicy::Skip,
+            None,
+            predicate.clone(),
+            cache,
+        )
+        .await;
+
+        // Pass 1: membership A keeps row 1. This pass writes the static mask to the cache.
+        publish_membership(&handle, &producer_schema, vec![1]);
+        let (result, metrics) = execute_test_prefilter_with_metrics(&reader_builder, 0).await;
+        assert_eq!(
+            RowSelection::from(vec![
+                RowSelector::skip(1),
+                RowSelector::select(1),
+                RowSelector::skip(1),
+            ]),
+            result.refined_selection,
+            "the pass keeps the row membership A keeps"
+        );
+        assert_eq!(2, result.filtered_rows);
+        assert!(
+            metrics.data.lock().unwrap().pages_to_fetch_store > 0,
+            "the first pass has to read the row group"
+        );
+
+        // Pass 2: publishing membership B keeps row 2. A pass that replayed a cached mask
+        // would still keep row 1.
+        publish_membership(&handle, &producer_schema, vec![2]);
+        let (result, _) = execute_test_prefilter_with_metrics(&reader_builder, 0).await;
+        assert_eq!(
+            RowSelection::from(vec![RowSelector::skip(2), RowSelector::select(1)]),
+            result.refined_selection,
+            "the new membership must apply instead of the cached static-only selection"
+        );
+        assert_eq!(2, result.filtered_rows);
+
+        // Pass 3: a wider membership keeps every row, so only the cached static mask
+        // prunes. A stale mask of A or B would still drop row 1 or row 2.
+        publish_membership(&handle, &producer_schema, vec![0, 1, 2]);
+        let (result, metrics) = execute_test_prefilter_with_metrics(&reader_builder, 0).await;
+        assert_eq!(
+            RowSelection::from(vec![RowSelector::skip(1), RowSelector::select(2)]),
+            result.refined_selection,
+            "no mask of a superseded membership may survive"
+        );
+        assert_eq!(1, result.filtered_rows);
+        assert!(
+            metrics.data.lock().unwrap().pages_to_fetch_store > 0,
+            "the dynamic filter still reads its column"
+        );
+
+        // Pass 4: the producer republishes its `true` placeholder, which disables the
+        // dynamic filter for this row group. The pass then prunes nothing dynamically and
+        // reads no page at all: the static mask comes from the cache.
+        handle.update(physical_lit(true)).unwrap();
+        let (result, metrics) = execute_test_prefilter_with_metrics(&reader_builder, 0).await;
+        assert_eq!(
+            RowSelection::from(vec![RowSelector::skip(1), RowSelector::select(2)]),
+            result.refined_selection,
+            "a disabled dynamic filter keeps the rows the static predicate keeps"
+        );
+        assert_eq!(1, result.filtered_rows);
+        assert_eq!(
+            0,
+            metrics.data.lock().unwrap().pages_to_fetch_store,
+            "the static mask must come from the cache"
+        );
+
+        // The rows those selections promise are the rows the projected reader returns.
+        let (batches, _) =
+            read_test_row_group(&reader_builder, 0, Some(result.refined_selection)).await;
+        assert_eq!(vec![1, 2], test_field_values(&batches));
+
+        // Control: the same predicate (the shared handle still holds the `true` placeholder)
+        // without a cache reads the row group and keeps the same rows, so the pass above
+        // was a cache hit rather than a skipped read.
+        let (control, _) = prefilter_test_builder_with(
+            ObjectStore::new(Memory::default()).unwrap(),
+            3,
+            1,
+            PageIndexPolicy::Skip,
+            None,
+            predicate,
+            CacheStrategy::Disabled,
+        )
+        .await;
+        let (result, metrics) = execute_test_prefilter_with_metrics(&control, 0).await;
+        assert_eq!(
+            RowSelection::from(vec![RowSelector::skip(1), RowSelector::select(2)]),
+            result.refined_selection
+        );
+        assert!(
+            metrics.data.lock().unwrap().pages_to_fetch_store > 0,
+            "the uncached control reads the row group"
+        );
     }
 
     /// The prefilter of the expression a real `HashJoin` publishes keeps exactly the rows

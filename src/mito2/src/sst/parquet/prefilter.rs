@@ -1081,9 +1081,25 @@ impl PrefilterMasks {
     ///   Arbitrary independently mutable nested expressions are not promised, and nothing
     ///   here compares two generations: a newer publication is simply re-evaluated by the
     ///   next pass, while the live filter above the scan stays authoritative.
+    ///
+    /// # Why a stale mask is dropped instead of retained
+    ///
+    /// For a monotone tightening producer such as `TopK`, the newer expression accepts a
+    /// subset of the rows the snapshotted one accepts, so keeping the older mask would
+    /// stay correct and prune more. Nothing observable here tells that producer apart from
+    /// one whose next publication widens, reverses, or rewrites its expression, and
+    /// keeping a mask across such a publication would return rows the live filter rejects.
+    /// A mask whose generation moved on is therefore treated as untrusted rather than
+    /// assumed safe: the mask is dropped, the incoming selection of the row group is kept,
+    /// and the next prefilter pass evaluates the new expression from scratch. Retaining a
+    /// stale mask needs an explicit monotone/tightening contract published by the producer
+    /// next to its generation; no producer exposes one today, so it can be added together
+    /// with the producer that relies on it.
     fn commit(self, prefilter_ctx: &PrefilterContext) -> Option<BooleanBuffer> {
         let mut mask = self.static_mask;
         for (idx, dynamic_mask) in self.dynamic_masks {
+            // The producer moved on. Keeping this mask would assume the new expression only
+            // tightens the snapshotted one, which nothing here proves.
             if !prefilter_ctx.dynamic_snapshot_is_current(idx) {
                 continue;
             }
@@ -1563,7 +1579,9 @@ mod tests {
 
     use bytes::Bytes;
     use common_recordbatch::filter::{SimpleFilterEvaluator, batch_filter};
-    use datafusion::physical_plan::expressions::{Column, DynamicFilterPhysicalExpr};
+    use datafusion::physical_plan::expressions::{
+        Column, DynamicFilterPhysicalExpr, lit as physical_lit,
+    };
     use datafusion_common::ScalarValue;
     use datafusion_expr::{col, lit};
     use datatypes::arrow::array::{
@@ -2218,6 +2236,102 @@ mod tests {
                 ..
             }]
         ));
+    }
+
+    /// A generation change discards the dynamic mask even when the new expression is a
+    /// monotone tightening of the snapshotted one.
+    ///
+    /// A `TopK` only ever tightens its threshold, so the mask of the generation a pass
+    /// snapshotted would still be implied by the newer expression and keeping it would
+    /// prune more. Nothing here can tell such a producer apart from one whose next
+    /// publication widens, so a mask from a superseded generation is treated as untrusted
+    /// and dropped: the row group keeps its incoming selection and the next pass evaluates
+    /// the new expression from scratch.
+    #[test]
+    fn test_commit_discards_dynamic_mask_after_monotone_tightening_publication() {
+        let metadata: RegionMetadataRef = Arc::new(sst_region_metadata());
+        let read_format = FlatReadFormat::new(
+            metadata.clone(),
+            ReadColumns::new(metadata.column_metadatas.iter().map(|c| c.column_id)),
+            None,
+            "memtable",
+            false,
+        )
+        .unwrap();
+        let producer_schema = Arc::new(Schema::new(vec![Field::new(
+            "field_0",
+            DataType::UInt64,
+            true,
+        )]));
+        let publish = |members: Vec<u64>| {
+            let expr = col("field_0").in_list(members.into_iter().map(lit).collect(), false);
+            Predicate::to_physical_expr(&expr, &producer_schema).unwrap()
+        };
+        let key = Arc::new(Column::new("field_0", 0)) as Arc<dyn PhysicalExpr>;
+        // The producer starts from `{1, 2}` and only ever tightens the membership below.
+        let handle = Arc::new(DynamicFilterPhysicalExpr::new(
+            vec![key],
+            physical_lit(true),
+        ));
+        handle.update(publish(vec![1, 2])).unwrap();
+
+        // A prefilter pass of three rows that snapshots the current generation.
+        let new_context = || {
+            let filter =
+                PhysicalFilterContext::new_dynamic(&metadata, None, &read_format, &handle).unwrap();
+            let snapshot = filter.capture_dynamic_snapshot();
+            PrefilterContext {
+                pk_filter: None,
+                filters: Vec::new(),
+                physical_filters: vec![filter],
+                dynamic_snapshots: vec![snapshot],
+                schema_version: metadata.schema_version,
+                pk_filter_expr_strs: None,
+                arrow_schema: read_format.arrow_schema().clone(),
+                proven_simple_filters: Vec::new(),
+            }
+        };
+        let mask_bits = |mask: BooleanBuffer| mask.iter().collect::<Vec<bool>>();
+        let keep_all = BooleanBuffer::new_set(3);
+        // `{1, 2}` keeps rows 1 and 2 of the three rows the pass read.
+        let membership_12 = BooleanBuffer::from(vec![false, true, true]);
+
+        let context = new_context();
+        let committed = PrefilterMasks {
+            static_mask: Some(keep_all.clone()),
+            dynamic_masks: vec![(0, membership_12.clone())],
+            rows: 3,
+        }
+        .commit(&context);
+        assert_eq!(
+            vec![false, true, true],
+            mask_bits(committed.unwrap()),
+            "a mask of the snapshotted generation is committed"
+        );
+
+        // Tightening `{1, 2}` to `{2}` supersedes the generation the pass snapshotted.
+        handle.update(publish(vec![2])).unwrap();
+        let committed = PrefilterMasks {
+            static_mask: Some(keep_all.clone()),
+            dynamic_masks: vec![(0, membership_12.clone())],
+            rows: 3,
+        }
+        .commit(&context);
+        assert_eq!(
+            vec![true, true, true],
+            mask_bits(committed.unwrap()),
+            "the superseded mask must be dropped, not retained as a tightening"
+        );
+
+        // The next pass snapshots the tightened generation and prunes with it.
+        let context = new_context();
+        let committed = PrefilterMasks {
+            static_mask: Some(keep_all),
+            dynamic_masks: vec![(0, BooleanBuffer::from(vec![false, false, true]))],
+            rows: 3,
+        }
+        .commit(&context);
+        assert_eq!(vec![false, false, true], mask_bits(committed.unwrap()));
     }
 
     #[test]
