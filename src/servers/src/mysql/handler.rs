@@ -495,7 +495,13 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
                         METRIC_AUTH_FAILURE
                             .with_label_values(&[e.status_code().as_ref()])
                             .inc();
-                        warn!(e; "Failed to authorize MySQL handshake for user {} in {}.{}", username, catalog, schema);
+                        if e.status_code().should_log_error() {
+                            error!(e; user = userinfo.username(), protocol = "mysql", catalog = %catalog,
+                                schema = %schema, "Handshake database authorization failed");
+                        } else {
+                            warn!(user = userinfo.username(), protocol = "mysql", catalog = %catalog,
+                                schema = %schema, reason = %e.status_code(), "Handshake database authorization denied");
+                        }
                         return false;
                     }
                     user_info = Some(userinfo);
@@ -725,7 +731,7 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
                 .with_label_values(&[e.status_code().as_ref()])
                 .inc();
             if e.status_code().should_log_error() {
-                error!(user = user_info.username(), protocol = "mysql", catalog = %catalog, schema = %schema,
+                error!(e; user = user_info.username(), protocol = "mysql", catalog = %catalog, schema = %schema,
                     client_addr = ?self.session.conn_info().client_addr, reason = %e.status_code(),
                     "Database selection authorization failed");
             } else {

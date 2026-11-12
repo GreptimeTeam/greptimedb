@@ -35,6 +35,13 @@ impl SetVariables {
             return None;
         }
 
+        if let [Expr::Identifier(value)] = self.value.as_slice()
+            && value.quote_style.is_none()
+            && value.value.eq_ignore_ascii_case("default")
+        {
+            return Some(vec!["$user".to_string(), "public".to_string()]);
+        }
+
         self.value
             .iter()
             .map(|value| match value {
@@ -102,6 +109,9 @@ SET delayed_insert_timeout = 300"#,
     fn test_search_path() {
         for (sql, expected) in [
             ("SET search_path TO public", Some(vec!["public"])),
+            ("SET search_path TO DEFAULT", Some(vec!["$user", "public"])),
+            (r#"SET search_path TO "default""#, Some(vec!["default"])),
+            ("SET search_path TO 'default'", Some(vec!["default"])),
             ("SET SEARCH_PATH TO 'private'", Some(vec!["private"])),
             ("SET search_path TO \"quoted\"", Some(vec!["quoted"])),
             ("SET \"search_path\" TO private", Some(vec!["private"])),

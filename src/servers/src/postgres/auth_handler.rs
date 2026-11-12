@@ -137,7 +137,7 @@ impl PgUserProviderSource {
             Err(e) => {
                 record_auth_failure(e.status_code());
                 if e.status_code().should_log_error() {
-                    error!(user = user_info.username(), protocol = "postgres", catalog = %catalog,
+                    error!(e; user = user_info.username(), protocol = "postgres", catalog = %catalog,
                         schema = %schema, client_addr = login.host(), reason = %e.status_code(), "Startup database authorization failed");
                 } else {
                     warn!(user = user_info.username(), protocol = "postgres", catalog = %catalog,

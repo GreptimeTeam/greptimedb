@@ -495,7 +495,7 @@ impl StatementExecutor {
             Statement::ShowCreateView(show) => self.show_create_view(show, query_ctx).await,
             #[cfg(feature = "enterprise")]
             Statement::ShowCreateTrigger(show) => self.show_create_trigger(show, query_ctx).await,
-            Statement::SetVariables(set_var) => self.set_variables(set_var, query_ctx).await,
+            Statement::SetVariables(set_var) => self.set_variables(set_var, query_ctx),
             Statement::ShowVariables(show_variable) => self.show_variable(show_variable, query_ctx),
             Statement::Comment(stmt) => self.comment(stmt, query_ctx).await,
             Statement::ShowColumns(show_columns) => {
@@ -539,11 +539,6 @@ impl StatementExecutor {
     ) -> Result<Output> {
         let mut selected = String::new();
         for schema in schemas {
-            let schema = if schema == "$user" {
-                query_ctx.current_user().username().to_string()
-            } else {
-                schema
-            };
             if !schema.is_empty()
                 && self
                     .catalog_manager
@@ -566,14 +561,10 @@ impl StatementExecutor {
             catalog = query_ctx.current_catalog(), schema = %selected, previous_schema,
             process_id = query_ctx.process_id(), empty_path = selected.is_empty(),
             "Search path schema selected");
-        Ok(Output::new_with_record_batches(RecordBatches::empty()))
+        Ok(Output::new_with_affected_rows(0))
     }
 
-    async fn set_variables(
-        &self,
-        set_var: SetVariables,
-        query_ctx: QueryContextRef,
-    ) -> Result<Output> {
+    fn set_variables(&self, set_var: SetVariables, query_ctx: QueryContextRef) -> Result<Output> {
         let variable = sql::ast::object_name_to_string_unquoted(&set_var.variable);
         let var_name = variable.to_uppercase();
 
@@ -640,17 +631,10 @@ impl StatementExecutor {
                 }
             },
             "SEARCH_PATH" => {
-                if query_ctx.channel() == Channel::Postgres {
-                    let search_path = set_var.search_path().context(NotSupportedSnafu {
-                        feat: "Unsupported search path in set variable statement",
-                    })?;
-                    self.set_search_path(search_path, query_ctx).await?;
-                } else {
-                    return NotSupportedSnafu {
-                        feat: format!("Unsupported set variable {}", var_name),
-                    }
-                    .fail();
+                return NotSupportedSnafu {
+                    feat: "search_path must be resolved and authorized by the frontend",
                 }
+                .fail();
             }
             _ => {
                 if query_ctx.channel() == Channel::Postgres || query_ctx.channel() == Channel::Mysql

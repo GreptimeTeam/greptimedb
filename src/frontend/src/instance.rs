@@ -3649,6 +3649,7 @@ mod tests {
         assert_eq!("public", ctx.current_schema());
         for (sql, expected) in [
             ("SET search_path TO denied, public", "public"),
+            ("SET search_path TO DEFAULT", "admin"),
             ("SET search_path TO allowed_missing, allowed", "allowed"),
             (
                 "SET search_path TO denied, allowed_missing, public",
@@ -3668,60 +3669,19 @@ mod tests {
             ));
             ctx.set_current_user(Arc::new(AdminUserInfo));
             let results = instance.do_query_inner(sql, ctx.clone()).await;
-            assert!(results.iter().all(Result::is_ok), "{sql}: {results:?}");
+            assert!(
+                results.iter().all(|result| matches!(
+                    result,
+                    Ok(Output {
+                        data: OutputData::AffectedRows(0),
+                        ..
+                    })
+                )),
+                "{sql}: {results:?}"
+            );
             assert_eq!(expected, ctx.current_schema(), "{sql}");
-            if expected.is_empty() {
-                // The old public schema contains source; an empty path cannot resolve it.
-                assert!(
-                    instance
-                        .do_query_inner("SELECT * FROM source", ctx.clone())
-                        .await
-                        .remove(0)
-                        .is_err()
-                );
-                assert!(
-                    instance
-                        .do_query_inner("SELECT 1", ctx.clone())
-                        .await
-                        .remove(0)
-                        .is_ok()
-                );
-                let output = instance.do_query_inner("SELECT current_schema() IS NULL AS empty, current_schemas(false) AS schemas", ctx.clone()).await.remove(0).unwrap();
-                let printed = output.data.pretty_print().await;
-                assert!(
-                    printed.contains("true") && printed.contains("[]"),
-                    "{printed}"
-                );
-                let error = instance
-                    .do_query_inner(
-                        "CREATE TABLE no_schema (ts TIMESTAMP TIME INDEX)",
-                        ctx.clone(),
-                    )
-                    .await
-                    .remove(0)
-                    .unwrap_err();
-                assert!(
-                    matches!(error, Error::TableOperation {
-                    source: operator::error::Error::SchemaNotFound { ref schema_info, .. }, ..
-                } if schema_info.is_empty()),
-                    "{error:?}"
-                );
-                assert!(
-                    instance
-                        .do_query_inner("USE public", ctx.clone())
-                        .await
-                        .remove(0)
-                        .is_ok()
-                );
-                assert!(
-                    instance
-                        .do_query_inner("SELECT * FROM source", ctx)
-                        .await
-                        .remove(0)
-                        .is_ok()
-                );
-            }
         }
+
         let ctx = Arc::new(QueryContext::with_channel(
             "greptime",
             "public",
@@ -3736,12 +3696,144 @@ mod tests {
                 .is_ok()
         );
         assert_eq!("public", ctx.current_schema());
+        assert!(
+            instance
+                .do_query_inner("SET search_path TO DEFAULT", ctx.clone())
+                .await
+                .remove(0)
+                .is_ok()
+        );
+        assert_eq!("public", ctx.current_schema());
         let error = instance
             .do_query_inner("SET search_path TO backend_error, allowed", ctx.clone())
             .await
             .remove(0)
             .unwrap_err();
         assert_eq!(StatusCode::Unexpected, error.status_code());
+        assert_eq!("public", ctx.current_schema());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_empty_search_path_statements() -> TestResult<()> {
+        let instance = test_instance_with_plugins(
+            test_table(1024, "source")?,
+            test_table(1025, "target")?,
+            Plugins::new(),
+        )
+        .await?;
+        let ctx = Arc::new(QueryContext::with_channel(
+            "greptime",
+            "public",
+            Channel::Postgres,
+        ));
+        instance
+            .do_query_inner("SET search_path TO ''", ctx.clone())
+            .await
+            .remove(0)
+            .unwrap();
+        let tables = instance
+            .do_query_inner("SHOW TABLES", ctx.clone())
+            .await
+            .remove(0)
+            .unwrap()
+            .data
+            .pretty_print()
+            .await;
+        assert!(
+            !tables.contains("source") && !tables.contains("target"),
+            "{tables}"
+        );
+        let error = instance
+            .do_query_inner("INSERT INTO source VALUES (1, 0)", ctx.clone())
+            .await
+            .remove(0)
+            .unwrap_err();
+        assert!(
+            matches!(error, Error::TableOperation { source: operator::error::Error::TableNotFound { ref table_name, .. }, .. } if table_name == "greptime..source"),
+            "{error:?}"
+        );
+        for sql in [
+            "CREATE TABLE no_schema (ts TIMESTAMP TIME INDEX)",
+            "ALTER TABLE source ADD COLUMN no_schema_column INT",
+            "CREATE VIEW no_schema_view AS SELECT 1 AS n",
+            "CREATE FLOW no_schema_flow SINK TO sink AS SELECT * FROM public.source",
+            "CREATE FLOW no_schema_flow SINK TO public.sink AS SELECT * FROM source",
+        ] {
+            let error = instance
+                .do_query_inner(sql, ctx.clone())
+                .await
+                .remove(0)
+                .unwrap_err();
+            assert!(
+                matches!(error, Error::TableOperation { source: operator::error::Error::SchemaNotFound { ref schema_info, .. }, .. } if schema_info.is_empty()),
+                "{sql}: {error:?}"
+            );
+        }
+
+        for sql in ["SELECT * FROM source", "DELETE FROM source"] {
+            assert!(
+                instance
+                    .do_query_inner(sql, ctx.clone())
+                    .await
+                    .remove(0)
+                    .is_err(),
+                "{sql}"
+            );
+        }
+        let output = instance
+            .do_query_inner(
+                "SELECT current_schema() IS NULL AS empty, current_schemas(false) AS schemas",
+                ctx.clone(),
+            )
+            .await
+            .remove(0)
+            .unwrap();
+        let printed = output.data.pretty_print().await;
+        assert!(
+            printed.contains("true") && printed.contains("[]"),
+            "{printed}"
+        );
+        let output = instance
+            .do_query_inner("DROP TABLE IF EXISTS source", ctx.clone())
+            .await
+            .remove(0)
+            .unwrap();
+        assert!(matches!(output.data, OutputData::AffectedRows(0)));
+        instance
+            .do_query_inner("USE public", ctx.clone())
+            .await
+            .remove(0)
+            .unwrap();
+        assert!(
+            instance
+                .do_query_inner("SELECT * FROM source", ctx)
+                .await
+                .remove(0)
+                .is_ok()
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_operator_rejects_search_path_without_frontend() -> TestResult<()> {
+        let instance = test_instance_with_plugins(
+            test_table(1024, "source")?,
+            test_table(1025, "target")?,
+            Plugins::new(),
+        )
+        .await?;
+        let ctx = Arc::new(QueryContext::with_channel(
+            "greptime",
+            "public",
+            Channel::Postgres,
+        ));
+        let error = instance
+            .statement_executor
+            .execute_sql(parse_one_sql("SET search_path TO denied"), ctx.clone())
+            .await
+            .unwrap_err();
+        assert!(matches!(error, operator::error::Error::NotSupported { .. }));
         assert_eq!("public", ctx.current_schema());
         Ok(())
     }
