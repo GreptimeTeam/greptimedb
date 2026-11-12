@@ -2033,6 +2033,36 @@ async fn test_edit_returns_to_staging_after_staging_leader_role() {
 }
 
 #[tokio::test]
+async fn test_staged_files_not_listed_after_leaving_staging() {
+    let mut env = TestEnv::new().await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+    let region_id = RegionId::new(1024, 0);
+    let request = CreateRequestBuilder::new().build();
+    let schema = rows_schema(&request);
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+    put_range(&engine, region_id, &schema, (0, 3)).await;
+    flush_region(&engine, region_id, None).await;
+    enter_staging(&engine, region_id).await;
+    let region = engine.get_region(region_id).unwrap();
+    let file = FileMeta {
+        file_id: FileId::random(),
+        ..first_file(&region).await
+    };
+    spawn_edit(&engine, region_id, file).await.unwrap().unwrap();
+    assert_eq!(2, region.manifest_sst_entries().await.len());
+    assert_eq!(2, region.all_manifest_files().await.0.len());
+
+    // Leaving staging without a commit keeps the staged file out of a later Leader's listing.
+    region.set_role(RegionRole::Follower);
+    region.set_role(RegionRole::Leader);
+    assert_eq!(1, region.manifest_sst_entries().await.len());
+    assert_eq!(1, region.all_manifest_files().await.0.len());
+}
+
+#[tokio::test]
 async fn test_close_time_flush_rejects_queued_and_late_edits() {
     let mut env = TestEnv::new().await;
     let listener = Arc::new(RequestCountListener::default());

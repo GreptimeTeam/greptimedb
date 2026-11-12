@@ -893,6 +893,8 @@ async fn test_end_of_staging_after_deadline_sends_nothing() {
     assert!(!store.exists(&delta).await.unwrap());
     assert!(region.is_follower());
     assert!(!region.manifest_ctx.is_reload_pending());
+    // The staged edit leaves with staging.
+    assert!(region.manifest_ctx.staging_manifest().await.is_none());
 }
 
 #[tokio::test]

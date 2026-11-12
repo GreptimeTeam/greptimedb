@@ -951,6 +951,8 @@ impl MitoRegion {
                 let manager = self.manifest_ctx.manifest_manager.read().await;
                 (manager.manifest(), manager.staging_manifest())
             };
+            // A region that left staging without a commit may still hold its staged files.
+            let staging = staging.filter(|_| self.is_staging_or_staged_edit());
             let normal_files = manifest.files.values().map(|meta| (false, meta));
             let staging_files = staging.iter().flat_map(|s| s.files.values()).map(|meta| (true, meta));
             for (index, (is_staging, meta)) in normal_files.chain(staging_files).enumerate() {
@@ -1071,6 +1073,7 @@ impl MitoRegion {
             .manifest_ctx
             .staging_manifest()
             .await
+            .filter(|_| self.is_staging_or_staged_edit())
             .map(|m| (m.files.clone(), m.manifest_version));
 
         let version = staging
@@ -1132,7 +1135,8 @@ impl MitoRegion {
     /// The caller must hold the manifest write lock and pass it via `manager`. The commit runs in
     /// [RegionLeaderState::EndingStaging], which stalls writes and holds role changes back (see
     /// [ManifestContext::finish_ending_staging] for the state it leaves for). If the region stays
-    /// staging, its staged edits are kept for a retry and the error is retryable.
+    /// staging, its staged edits are kept for a retry and the error is retryable; otherwise they
+    /// are dropped.
     ///
     /// Returns `Ok(None)` when there was nothing to commit.
     ///
@@ -1223,6 +1227,10 @@ impl MitoRegion {
         let next_state =
             self.manifest_ctx
                 .finish_ending_staging(self.region_id, ending_started_at, &result);
+        if next_state != RegionRoleState::Leader(RegionLeaderState::Staging) {
+            // Only a retry in staging commits the staged actions.
+            manager.unset_staging_manifest();
+        }
 
         match result {
             // A retry of the request commits the kept edits.

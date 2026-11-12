@@ -925,7 +925,7 @@ impl RegionManifestManager {
         &self.checkpointer
     }
 
-    /// Clears the staged actions after entering staging failed.
+    /// Clears the staged actions.
     pub(crate) fn unset_staging_manifest(&mut self) {
         self.clear_staged();
     }
