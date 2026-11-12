@@ -1157,7 +1157,7 @@ pub(crate) enum BackgroundNotify {
 }
 
 impl BackgroundNotify {
-    /// Whether handling this notification can release a region control turn.
+    /// Whether the worker dispatches pending requests after handling this notification.
     ///
     /// Dispatch consumes queued requests and can determine their terminal errors. A fenced
     /// region must let reload reject its old requests as not found, rather than dispatching
@@ -1173,8 +1173,10 @@ impl BackgroundNotify {
             | Self::CompactionFinished(_)
             | Self::CompactionFailed(_)
             | Self::RegionChange(_)
-            | Self::RegionEdit(_)
             | Self::EnterStaging(_) => true,
+            // Edit completion dispatches before scheduling compaction, after stalled writes.
+            // A completion from an old instance must not dispatch the new instance's queue.
+            Self::RegionEdit(_) => false,
             Self::RegionOpened { .. }
             | Self::IndexBuildFinished(_)
             | Self::IndexBuildStopped(_)

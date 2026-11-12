@@ -234,8 +234,6 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         // Handles the stalled requests.
         self.handle_region_stalled_requests(&change_result.region_id, true)
             .await;
-        self.dispatch_pending_region_requests(change_result.region_id)
-            .await;
     }
 
     /// Handles region sync request.
@@ -599,6 +597,8 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 .await;
         }
 
+        // Edit completion owns dispatch: stalled writes precede queued edits, and queued
+        // controls precede compaction. Early returns either retire waiters or ignore an old instance.
         self.dispatch_pending_region_requests(edit_result.region_id)
             .await;
 
@@ -616,6 +616,10 @@ impl<S: LogStore> RegionWorkerLoop<S> {
     }
 
     /// Whether an existing scheduler owns the control turn for this region.
+    ///
+    /// Running ordinary and repartition flushes retain concurrency with edits through the
+    /// existing manifest synchronization. Only pending DDLs and close-time flushes retain
+    /// the flush scheduler's control turn.
     fn scheduler_owns_control_turn(&self, region_id: RegionId) -> bool {
         self.flush_scheduler.has_pending_ddls(region_id)
             || self.compaction_scheduler.blocks_region_edits(region_id)
@@ -661,6 +665,8 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 true
             }
             DdlRequest::Close(request) if !region.is_staging_or_staged_edit() => {
+                // Another Close can take queued closes and reply without executing their
+                // handlers, so reject invalid flush-on-close requests before that handoff.
                 !self.flush_scheduler.has_close_time_flush(ddl.region_id)
                     && !(request.flush_on_close && version.has_pending_tails())
                     && handle_close::close_needs_flush(region, request)

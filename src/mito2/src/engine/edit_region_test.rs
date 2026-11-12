@@ -1288,6 +1288,95 @@ async fn submit_control(
 }
 
 #[tokio::test]
+async fn test_edit_retirement_rejects_pending_requests() {
+    use crate::request::DdlRequest;
+    use store_api::region_request::RegionFlushRequest;
+
+    let mut env = TestEnv::new().await;
+    let engine = env
+        .create_engine(MitoConfig {
+            num_workers: 1,
+            schedule_compaction_after_edit: false,
+            ..Default::default()
+        })
+        .await;
+    let region_id = RegionId::new(1, 1);
+    let other_id = RegionId::new(1, 2);
+    for id in [region_id, other_id] {
+        engine
+            .handle_request(
+                id,
+                RegionRequest::Create(CreateRequestBuilder::new().build()),
+            )
+            .await
+            .unwrap();
+    }
+    let region = engine.get_region(region_id).unwrap();
+    let mut guard = region.manifest_ctx.manifest_manager.write().await;
+    let e = engine.clone();
+    let edit = tokio::spawn(async move {
+        e.edit_region(region_id, test_region_edit(region_id, FileId::random()))
+            .await
+    });
+    wait_until_region_is_in_editing(&region).await;
+    let mut flush = submit_control(
+        &engine,
+        region_id,
+        DdlRequest::Flush(RegionFlushRequest::default()),
+    )
+    .await;
+    let (sender, queued_edit) = oneshot::channel();
+    engine
+        .inner
+        .workers
+        .submit_to_worker(
+            region_id,
+            WorkerRequest::EditRegion(RegionEditRequest::new(
+                region_id,
+                test_region_edit(region_id, FileId::random()),
+                true,
+                sender,
+            )),
+        )
+        .await
+        .unwrap();
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        crate::test_util::flush_region(&engine, other_id, None),
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        flush.try_recv(),
+        Err(oneshot::error::TryRecvError::Empty)
+    ));
+
+    // A stopped manager without reload pending forces edit completion to retire the region
+    // and return early. Its queued requests must finish without another dispatch notification.
+    guard.stop().await;
+    drop(guard);
+    tokio::time::timeout(Duration::from_secs(5), edit)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap_err();
+    let error = tokio::time::timeout(Duration::from_secs(5), flush)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap_err();
+    assert_eq!(StatusCode::RegionNotFound, error.status_code());
+    let error = tokio::time::timeout(Duration::from_secs(5), queued_edit)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap_err();
+    assert_eq!(StatusCode::RegionNotFound, error.status_code());
+    assert!(!engine.is_region_exists(region_id));
+    engine.stop().await.unwrap();
+}
+
+#[tokio::test]
 async fn test_repartition_flush_waits_for_region_edit() {
     use crate::request::DdlRequest;
     use store_api::region_request::{RegionFlushReason, RegionFlushRequest};
