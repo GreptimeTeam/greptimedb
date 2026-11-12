@@ -847,25 +847,36 @@ async fn pending_checkpoint_done_waits_until_the_task_ends(#[case] abort: bool) 
         .await
         .expect("checkpoint cleanup did not start");
 
-    let mut done = Box::pin(manager.pending_checkpoint_done());
+    // Two waiters stay on their own tasks until the checkpoint ends; a third is cancelled.
+    let waiters = [
+        manager.pending_checkpoint_done(),
+        manager.pending_checkpoint_done(),
+    ]
+    .map(tokio::spawn);
     let mut cancelled = Box::pin(manager.pending_checkpoint_done());
-    let both = futures::future::join(&mut done, &mut cancelled);
     assert!(
-        tokio::time::timeout(Duration::from_millis(100), both)
+        tokio::time::timeout(Duration::from_millis(100), &mut cancelled)
             .await
             .is_err(),
         "the wait ended before the checkpoint cleanup"
     );
     drop(cancelled);
+    assert!(
+        waiters.iter().all(|waiter| !waiter.is_finished()),
+        "the wait ended before the checkpoint cleanup"
+    );
     // The cleanup stays blocked in the abort case, so only the abort can end the task.
     if abort {
         manager.checkpointer().abort_checkpoint_task();
     } else {
         blocker.release();
     }
-    tokio::time::timeout(Duration::from_secs(5), done)
-        .await
-        .expect("the wait did not end with the checkpoint task");
+    for waiter in waiters {
+        tokio::time::timeout(Duration::from_secs(5), waiter)
+            .await
+            .expect("the wait did not end with the checkpoint task")
+            .unwrap();
+    }
     tokio::time::timeout(Duration::ZERO, manager.pending_checkpoint_done())
         .await
         .expect("a wait after the checkpoint task ended did not return at once");
