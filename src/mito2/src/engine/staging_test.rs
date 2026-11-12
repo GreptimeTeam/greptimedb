@@ -53,7 +53,8 @@ use crate::config::MitoConfig;
 use crate::engine::MitoEngine;
 use crate::engine::basic_test::build_bulk_insert_request;
 use crate::engine::listener::{
-    CountingStallListener, EventListener, FlushListener, NotifyEnterStagingResultListener,
+    CountingStallListener, EventListener, FlushFailedListener, FlushListener,
+    NotifyEnterStagingResultListener,
 };
 use crate::error::Error;
 use crate::flush::WriteBufferManager;
@@ -2158,8 +2159,11 @@ async fn test_stale_staging_edit_rejected_after_close_time_flush_fails() {
         }))
         .build()
         .unwrap();
+    let listener = Arc::new(FlushFailedListener::default());
     let mut env = TestEnv::new().await.with_mock_layer(mock_layer);
-    let engine = env.create_engine(MitoConfig::default()).await;
+    let engine = env
+        .create_engine_with(MitoConfig::default(), None, Some(listener.clone()), None)
+        .await;
     let region_id = RegionId::new(1024, 0);
     let request = CreateRequestBuilder::new().build();
     let schema = rows_schema(&request);
@@ -2180,6 +2184,10 @@ async fn test_stale_staging_edit_rejected_after_close_time_flush_fails() {
         )
         .await
         .unwrap_err();
+    // The close returns before the worker handles its failed flush; edits stay busy until then.
+    tokio::time::timeout(Duration::from_secs(3), listener.wait())
+        .await
+        .unwrap();
 
     // The close failed, so the region is open, writable and no longer in staging.
     let region = engine.get_region(region_id).unwrap();

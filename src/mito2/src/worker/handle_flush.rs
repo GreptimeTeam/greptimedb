@@ -103,6 +103,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         // Handle stalled requests.
         self.handle_stalled_requests().await;
         self.dispatch_pending_region_requests(region_id).await;
+        self.listener.on_flush_failed(region_id);
     }
 
     /// Checks whether the engine reaches flush threshold. If so, finds regions in this

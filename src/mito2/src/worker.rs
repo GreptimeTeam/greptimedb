@@ -1789,6 +1789,14 @@ impl WorkerListener {
         let _ = region_id;
     }
 
+    /// The worker has handled a failed flush.
+    pub(crate) fn on_flush_failed(&self, _region_id: RegionId) {
+        #[cfg(any(test, feature = "test"))]
+        if let Some(listener) = &self.listener {
+            listener.on_flush_failed(_region_id);
+        }
+    }
+
     /// Engine is stalled.
     pub(crate) fn on_write_stall(&self) {
         #[cfg(any(test, feature = "test"))]

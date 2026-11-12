@@ -42,6 +42,9 @@ pub trait EventListener: Send + Sync {
         let _ = region_id;
     }
 
+    /// Notifies the listener after the worker handles a failed flush of the region.
+    fn on_flush_failed(&self, _region_id: RegionId) {}
+
     /// Notifies the listener that the engine is stalled.
     fn on_write_stall(&self) {}
 
@@ -215,6 +218,28 @@ impl EventListener for CountingStallListener {
     fn on_write_stall(&self) {
         self.count.fetch_add(1, Ordering::Relaxed);
         self.notify.notify_waiters();
+    }
+}
+
+/// Listener to watch failed flushes.
+#[derive(Default)]
+pub struct FlushFailedListener {
+    notify: Notify,
+}
+
+impl FlushFailedListener {
+    /// Waits until the worker handles a failed flush.
+    pub async fn wait(&self) {
+        self.notify.notified().await;
+    }
+}
+
+#[async_trait]
+impl EventListener for FlushFailedListener {
+    fn on_flush_failed(&self, region_id: RegionId) {
+        info!("Region {} flush failed", region_id);
+
+        self.notify.notify_one();
     }
 }
 
