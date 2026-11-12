@@ -1133,6 +1133,14 @@ impl PendingDdls {
         self.0.contains_key(&region_id)
     }
 
+    fn has_close(&self, region_id: RegionId) -> bool {
+        self.0.get(&region_id).is_some_and(|queue| {
+            queue
+                .iter()
+                .any(|ddl| matches!(ddl.request, DdlRequest::Close(_)))
+        })
+    }
+
     fn has_enter_staging(&self, region_id: RegionId) -> bool {
         self.0.get(&region_id).is_some_and(|queue| {
             queue
