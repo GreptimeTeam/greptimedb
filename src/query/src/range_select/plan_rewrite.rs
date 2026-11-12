@@ -588,11 +588,9 @@ impl RangePlanRewriter {
                     Ok(table_source) => table_source,
                     Err(error) => {
                         // `TableNotExist` here usually means the qualifier now refers to a derived
-                        // input instead of a base table. We can still salvage the time index from
-                        // field metadata, but only when such metadata is present.
-                        if matches!(&error, catalog::error::Error::TableNotExist { .. })
-                            && metadata_time_index_expr.is_some()
-                        {
+                        // input instead of a base table. Skip it and let the checks below take the
+                        // time index from field metadata or report `TimeIndexNotFound`.
+                        if matches!(&error, catalog::error::Error::TableNotExist { .. }) {
                             continue;
                         }
                         return Err(error).context(CatalogSnafu);
