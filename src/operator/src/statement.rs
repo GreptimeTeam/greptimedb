@@ -632,7 +632,7 @@ impl StatementExecutor {
             },
             "SEARCH_PATH" => {
                 return NotSupportedSnafu {
-                    feat: "search_path must be resolved and authorized by the frontend",
+                    feat: "Unsupported search_path assignment",
                 }
                 .fail();
             }

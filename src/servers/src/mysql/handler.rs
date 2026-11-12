@@ -528,7 +528,8 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
                 return false;
             }
             Err(error) => {
-                warn!(error; "Failed to validate MySQL handshake database {}.{} for user {}", catalog, schema, username);
+                error!(error; user = username, protocol = "mysql", catalog = %catalog,
+                    schema = %schema, "Failed to validate MySQL handshake database");
                 return false;
             }
         }
