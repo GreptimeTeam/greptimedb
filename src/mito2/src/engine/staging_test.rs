@@ -2195,6 +2195,7 @@ async fn test_stale_staging_edit_rejected_after_close_time_flush_fails() {
     let stale_expr = float_range_expr("field_0", 0., 100.).as_json_str().unwrap();
     // The flush task replies before the worker clears its close-time flush state.
     // Wait for that notification before checking the stale staging identity.
+    // The busy check precedes the identity check, so retrying cannot hide a missed rejection.
     let result = tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             let result =
