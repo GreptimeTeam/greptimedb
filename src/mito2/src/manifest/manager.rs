@@ -168,8 +168,6 @@ pub struct RegionManifestManager {
     last_version: Arc<AtomicU64>,
     checkpointer: Checkpointer,
     manifest: Arc<RegionManifest>,
-    /// The manifest with the staged actions applied, while any are staged.
-    staging_manifest: Option<Arc<RegionManifest>>,
     /// Actions of a staging region, committed as one version when staging ends.
     staged: StagedActions,
     stats: ManifestStats,
@@ -181,6 +179,8 @@ pub struct RegionManifestManager {
 #[derive(Debug, Default)]
 struct StagedActions {
     actions: RegionMetaActionList,
+    /// The manifest with `actions` applied, while any are staged.
+    view: Option<Arc<RegionManifest>>,
     /// Encoded bytes of an end commit that may have been written. A retry commits the same bytes,
     /// and no other action is appended while they are kept.
     attempted: Option<Vec<u8>>,
@@ -288,7 +288,6 @@ impl RegionManifestManager {
             last_version: manifest_version,
             checkpointer,
             manifest: Arc::new(manifest),
-            staging_manifest: None,
             staged: StagedActions::default(),
             stats: stats.clone(),
             stopped: false,
@@ -419,7 +418,6 @@ impl RegionManifestManager {
             last_version: manifest_version,
             checkpointer,
             manifest: Arc::new(manifest),
-            staging_manifest: None,
             staged: StagedActions::default(),
             stats: stats.clone(),
             stopped: false,
@@ -748,8 +746,7 @@ impl RegionManifestManager {
             self.staged.attempted = Some(bytes);
         }
         let version = result?;
-        let committed = std::mem::take(&mut self.staged.actions);
-        self.clear_staged();
+        let committed = std::mem::take(&mut self.staged).actions;
         Ok((version, committed))
     }
 
@@ -772,7 +769,7 @@ impl RegionManifestManager {
             return Ok(());
         }
 
-        let base = self.staging_manifest.as_ref().unwrap_or(&self.manifest);
+        let base = self.staged.view.as_ref().unwrap_or(&self.manifest);
         let mut manifest_builder =
             RegionManifestBuilder::with_checkpoint(Some(base.as_ref().clone()));
         self.apply_actions(
@@ -780,7 +777,7 @@ impl RegionManifestManager {
             self.last_version(),
             action_list.actions.iter().cloned(),
         );
-        self.staging_manifest = Some(Arc::new(manifest_builder.try_build()?));
+        self.staged.view = Some(Arc::new(manifest_builder.try_build()?));
         self.staged.actions.actions.extend(action_list.actions);
         Ok(())
     }
@@ -818,7 +815,6 @@ impl RegionManifestManager {
 
     /// Clears the staged actions.
     fn clear_staged(&mut self) {
-        self.staging_manifest = None;
         self.staged = StagedActions::default();
     }
 
@@ -843,9 +839,9 @@ impl RegionManifestManager {
         self.manifest.clone()
     }
 
-    /// Retrieves the current [RegionManifest].
+    /// Returns the manifest with the staged actions applied, or `None` if nothing is staged.
     pub fn staging_manifest(&self) -> Option<Arc<RegionManifest>> {
-        self.staging_manifest.clone()
+        self.staged.view.clone()
     }
 
     /// Returns total manifest size.
