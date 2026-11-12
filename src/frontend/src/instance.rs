@@ -4884,6 +4884,8 @@ mod tests {
             (test_table(1024, "denied")?, "TO"),
             (test_table(1024, "denied")?, "FROM"),
             (test_physical_table(1024, "physical")?, "FROM"),
+            (test_table(1024, "source")?, "TO"),
+            (test_table(1024, "source")?, "FROM"),
         ] {
             let dir = common_test_util::temp_dir::create_temp_dir("copy_database_permissions");
             let name = table.table_info().name.clone();
@@ -4929,12 +4931,16 @@ mod tests {
                 .do_query_inner(&sql, QueryContext::arc())
                 .await
                 .remove(0);
-            assert_eq!(
-                StatusCode::PermissionDenied,
-                result.unwrap_err().status_code()
-            );
-            if direction == "TO" {
-                assert_eq!(0, std::fs::read_dir(dir.path()).unwrap().count());
+            if name == "source" {
+                assert!(result.is_ok(), "{result:?}");
+            } else {
+                assert_eq!(
+                    StatusCode::PermissionDenied,
+                    result.unwrap_err().status_code()
+                );
+                if direction == "TO" {
+                    assert_eq!(0, std::fs::read_dir(dir.path()).unwrap().count());
+                }
             }
         }
         Ok(())
