@@ -866,6 +866,16 @@ experimental_memory_pool_policy = "fair"
         );
     }
 
+    /// The native PromQL route is opt-in, and both halves of the gate must stay shut by
+    /// default: the engine-wide option here, and the per-request
+    /// `query.experimental_native_promql` extension (see
+    /// `promql::planner::native_promql_requested`). Flipping this default would expose the
+    /// native route to every query that happens to set the extension.
+    #[test]
+    fn test_native_promql_is_off_by_default() {
+        assert!(!QueryOptions::default().experimental_native_promql);
+    }
+
     #[test]
     fn test_parse_invalid_spill_option_values() {
         for toml_str in [
