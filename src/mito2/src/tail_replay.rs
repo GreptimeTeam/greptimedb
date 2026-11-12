@@ -411,7 +411,8 @@ impl<S: LogStore> TailReplayTask<S> {
     }
 }
 
-async fn notify_worker(
+/// Sends `notify` about the region `region_id` to its worker.
+pub(crate) async fn notify_worker(
     sender: &Sender<WorkerRequestWithTime>,
     region_id: RegionId,
     notify: BackgroundNotify,

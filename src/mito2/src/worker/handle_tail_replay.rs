@@ -25,12 +25,10 @@ use crate::config::IndexBuildMode;
 use crate::flush::FlushReason;
 use crate::manifest::action::RegionEdit;
 use crate::region::{MitoRegion, MitoRegionRef};
-use crate::request::{
-    BackgroundNotify, BuildIndexRequest, OptionOutputTx, WorkerRequest, WorkerRequestWithTime,
-};
+use crate::request::{BackgroundNotify, BuildIndexRequest, OptionOutputTx, WorkerRequestWithTime};
 use crate::schedule::CancellableTaskState;
 use crate::sst::index::IndexBuildType;
-use crate::tail_replay::{TailReplayTask, should_replay_tails};
+use crate::tail_replay::{TailReplayTask, notify_worker, should_replay_tails};
 use crate::worker::RegionWorkerLoop;
 
 impl<S: LogStore> RegionWorkerLoop<S> {
@@ -121,11 +119,6 @@ pub(crate) fn notify_writable(sender: &Sender<WorkerRequestWithTime>, region: &M
     let sender = sender.clone();
     let region_id = region.region_id;
     common_runtime::spawn_global(async move {
-        let _ = sender
-            .send(WorkerRequestWithTime::new(WorkerRequest::Background {
-                region_id,
-                notify: BackgroundNotify::RegionBecameWritable,
-            }))
-            .await;
+        notify_worker(&sender, region_id, BackgroundNotify::RegionBecameWritable).await;
     });
 }
