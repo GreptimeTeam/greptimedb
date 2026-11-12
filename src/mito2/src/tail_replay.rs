@@ -342,6 +342,7 @@ impl<S: LogStore> TailReplayTask<S> {
                 }
                 Ok(TailPublication::Busy) => {}
                 Ok(TailPublication::Stale) => {
+                    info!("Region {region_id} changed its role or tails, dropping the replay");
                     uncommitted.cleanup().await;
                     return Ok(false);
                 }
