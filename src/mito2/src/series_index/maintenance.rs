@@ -268,7 +268,7 @@ async fn build_index_version(
             let width = i64::try_from(requested_bucket_width.as_secs())
                 .unwrap_or(i64::MAX)
                 .max(1);
-            group_files_into_series_buckets(&files, width, width)
+            group_files_into_series_buckets(files, width, width)
         }
         (true, None) => {
             debug!(
