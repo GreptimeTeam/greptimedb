@@ -886,6 +886,13 @@ pub fn show_query_option(
             .to_string()
         }
         "query.parallelism" => context.state().config().target_partitions().to_string(),
+        "query.experimental_native_promql" => context
+            .state()
+            .config_options()
+            .extensions
+            .get::<crate::options::NativePromqlExtension>()
+            .is_some_and(|options| options.enabled)
+            .to_string(),
         "datafusion.optimizer.filter_null_join_keys"
             if context
                 .state()
@@ -1655,13 +1662,14 @@ mod test {
     use table::TableRef;
     use table::test_util::MemTable;
 
-    use super::{describe_column_type_name, show_variable};
+    use super::{describe_column_type_name, show_query_option, show_variable};
     use crate::error;
     use crate::error::Result;
     use crate::sql::{
         DESCRIBE_TABLE_OUTPUT_SCHEMA, NO_STR, SEMANTIC_TYPE_FIELD, SEMANTIC_TYPE_TIME_INDEX,
         YES_STR, describe_table,
     };
+    use crate::{QueryEngine, QueryEngineFactory};
 
     #[test]
     fn test_describe_table_multiple_columns() -> Result<()> {
@@ -1761,6 +1769,116 @@ mod test {
         );
         assert!(exec_show_variable("TIME ZONE", "Asia/Shanghai").is_err());
         assert!(exec_show_variable("SYSTEM TIME ZONE", "Asia/Shanghai").is_err());
+    }
+
+    const NATIVE_PROMQL: &str = "query.experimental_native_promql";
+
+    /// `SHOW query.experimental_native_promql` reports the effective value: the request, over the
+    /// session `SET`, over the engine-wide default.
+    #[test]
+    fn test_show_experimental_native_promql_reports_the_effective_value() {
+        let default_engine = native_promql_engine(false);
+        let enabled_engine = native_promql_engine(true);
+
+        // Nothing is stated per query, so the engine default answers.
+        for (engine, expected) in [(&default_engine, "false"), (&enabled_engine, "true")] {
+            let query_ctx = Arc::new(QueryContextBuilder::default().build());
+            assert_eq!(
+                expected,
+                exec_show_native_promql(engine.as_ref(), query_ctx)
+            );
+        }
+
+        // A session `SET`, read back before and after it changes.
+        let query_ctx = Arc::new(QueryContextBuilder::default().build());
+        query_ctx
+            .configuration_parameter()
+            .set_query_option(NATIVE_PROMQL, "true")
+            .unwrap();
+        assert_eq!(
+            "true",
+            exec_show_native_promql(default_engine.as_ref(), query_ctx.clone())
+        );
+        query_ctx
+            .configuration_parameter()
+            .set_query_option(NATIVE_PROMQL, "false")
+            .unwrap();
+        assert_eq!(
+            "false",
+            exec_show_native_promql(default_engine.as_ref(), query_ctx)
+        );
+
+        // A request value over a session value, which is what the view planner sets when it pins
+        // the route off for one statement.
+        let mut request = QueryContextBuilder::default().build();
+        request
+            .configuration_parameter()
+            .set_query_option(NATIVE_PROMQL, "true")
+            .unwrap();
+        request.set_extension(NATIVE_PROMQL, "false");
+        assert_eq!(
+            "false",
+            exec_show_native_promql(enabled_engine.as_ref(), Arc::new(request))
+        );
+    }
+
+    /// Sessions keep their own value.
+    #[test]
+    fn test_show_experimental_native_promql_is_isolated_between_sessions() {
+        let engine = native_promql_engine(false);
+        let configured = QueryContextBuilder::default().build();
+        configured
+            .configuration_parameter()
+            .set_query_option(NATIVE_PROMQL, "true")
+            .unwrap();
+        let plain = QueryContextBuilder::default().build();
+
+        assert_eq!(
+            "true",
+            exec_show_native_promql(engine.as_ref(), Arc::new(configured))
+        );
+        assert_eq!(
+            "false",
+            exec_show_native_promql(engine.as_ref(), Arc::new(plain))
+        );
+    }
+
+    /// A query engine that only states the native route option.
+    fn native_promql_engine(experimental_native_promql: bool) -> crate::QueryEngineRef {
+        QueryEngineFactory::new(
+            catalog::memory::MemoryCatalogManager::with_default_setup(),
+            None,
+            None,
+            None,
+            None,
+            false,
+            crate::options::QueryOptions {
+                experimental_native_promql,
+                ..Default::default()
+            },
+        )
+        .query_engine()
+    }
+
+    /// Runs `SHOW query.experimental_native_promql` and returns the one value it reports.
+    fn exec_show_native_promql(
+        engine: &dyn QueryEngine,
+        query_ctx: Arc<session::context::QueryContext>,
+    ) -> String {
+        let stmt = ShowVariables {
+            variable: ObjectName::from(vec![
+                Ident::new("query"),
+                Ident::new("experimental_native_promql"),
+            ]),
+        };
+        let output = show_query_option(stmt, query_ctx, engine)
+            .unwrap()
+            .expect("the native route option is a supported query option");
+        let OutputData::RecordBatches(record) = output.data else {
+            unreachable!("SHOW answers record batches")
+        };
+        let record = record.take().first().cloned().unwrap();
+        record.iter_column_as_string(0).next().unwrap().unwrap()
     }
 
     fn exec_show_variable(variable: &str, tz: &str) -> Result<String> {

@@ -85,26 +85,24 @@ use crate::promql::native_compile::{
 use crate::promql::planner::{DEFAULT_FIELD_COLUMN, DEFAULT_TIME_INDEX_COLUMN, PromPlanner};
 use crate::query_engine::QueryEngineState;
 
-/// The query-context key that turns the native fused-series route on for one query.
+/// The query option that turns the native fused-series route on for one query.
 ///
-/// Named after the engine-wide option it mirrors ([`QueryOptions::experimental_native_promql`]),
-/// and read exactly the way the other per-query override in this crate is read
-/// ([`remote_dyn_filter_pushdown_enabled_from_extensions`]): a query-context extension, which a
-/// client can set per request over the HTTP hints header or as a gRPC context key. The engine-wide
-/// option is applied while building query-engine state; this planner reads the per-query request
-/// extension at the call site; see [`native_promql_requested`].
+/// Named after the engine-wide option it mirrors ([`QueryOptions::experimental_native_promql`]), it
+/// is a query option like the others in this crate: a client states it per request (the HTTP hints
+/// header, a gRPC context key) or per session (`SET query.experimental_native_promql = ...`), and
+/// the engine-wide option is the default. The three resolve in that order where the query options
+/// snapshot is applied, and the planner reads the resulting
+/// [`NativePromqlExtension`](crate::options::NativePromqlExtension) rather than this key.
 ///
 /// [`QueryOptions::experimental_native_promql`]: crate::options::QueryOptions::experimental_native_promql
-/// [`remote_dyn_filter_pushdown_enabled_from_extensions`]:
-///     crate::options::remote_dyn_filter_pushdown_enabled_from_extensions
 pub const NATIVE_PROMQL_EXTENSION_KEY: &str = "query.experimental_native_promql";
 
-/// Whether `query_ctx` asks for the native fused-series route.
+/// Whether the query options of one query ask for the native fused-series route.
 ///
-/// The route is off unless the query asks for it, so a query that says nothing keeps the plan the
-/// existing planner builds. The value is compared literally (`true` in any case) rather than through
-/// a shared boolean parser: an unrecognized value leaves the route off, which is the same plan as
-/// the flag never having been read, so a typo costs a slow query and never a wrong one.
+/// Read from the query options snapshot the query is planned with, so a per-request value and a
+/// session `SET` arrive here alike, already normalized: this compares literally (`true` in any
+/// case) rather than parsing again, because a value that is not a boolean never reaches the
+/// snapshot.
 pub(crate) fn native_promql_requested(query_ctx: &QueryContextRef) -> bool {
     query_ctx
         .extension(NATIVE_PROMQL_EXTENSION_KEY)
@@ -5013,8 +5011,8 @@ mod tests {
     }
 
     #[test]
-    fn native_promql_requested_rejects_false_and_unrecognized_values() {
-        for value in ["false", "FALSE", "yes", "1", " true ", ""] {
+    fn native_promql_requested_rejects_false_values() {
+        for value in ["false", "FALSE", "False"] {
             let query_ctx = Arc::new(
                 QueryContextBuilder::default()
                     .set_extension(NATIVE_PROMQL_EXTENSION_KEY.to_string(), value.to_string())

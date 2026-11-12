@@ -1372,15 +1372,11 @@ impl Instance {
         expr: &promql_parser::parser::Expr,
         query_ctx: &mut QueryContextRef,
     ) -> server_error::Result<()> {
-        // Discovery scope is consumed by the native PromQL route only. The extension
-        // is deliberately opt-in, matching `native_promql_requested` in query's planner.
-        if !query_ctx
-            .extension(query::promql::planner::NATIVE_PROMQL_EXTENSION_KEY)
-            .is_some_and(|value| value.eq_ignore_ascii_case("true"))
-        {
-            Arc::make_mut(query_ctx).set_metric_discovery_scope(MetricDiscoveryScope::Unrestricted);
-            return Ok(());
-        }
+        // Discovery scope is read by the native PromQL route only, but it has to bound discovery
+        // under every combination of query options: the route is on when a request hint, a session
+        // `SET` or the engine default asks for it. Re-deriving that here would be a second source
+        // of truth next to the query engine's option resolution, so the bound is computed whenever
+        // the checker authorizes per table, whether or not this query ends up native.
         let checker = self.plugins.get::<PermissionCheckerRef>();
         if !checker.as_ref().uses_table_targets() {
             Arc::make_mut(query_ctx).set_metric_discovery_scope(MetricDiscoveryScope::Unrestricted);
@@ -2120,7 +2116,9 @@ mod tests {
         DashboardHandler, JaegerQueryHandler, LogQueryHandler, PipelineHandler, PipelineHandlerRef,
         PromStoreProtocolHandler,
     };
-    use session::context::{Channel, ConnInfo, QueryContext, QueryContextBuilder};
+    use session::context::{
+        Channel, ConnInfo, MetricDiscoveryScope, QueryContext, QueryContextBuilder,
+    };
     use snafu::{Location, Snafu};
     use sql::dialect::GreptimeDbDialect;
     use store_api::data_source::DataSource;
@@ -4099,6 +4097,169 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(StatusCode::PermissionDenied, err.status_code());
+
+        Ok(())
+    }
+
+    /// The canonical name of the option that turns the native PromQL route on.
+    const NATIVE_PROMQL_OPTION: &str = "query.experimental_native_promql";
+
+    /// A frontend whose `public` schema holds two metric-engine logical tables, `cpu_usage` and
+    /// `target`, with `checker` as its permission checker.
+    async fn test_metric_discovery_instance(checker: PermissionCheckerRef) -> TestResult<Instance> {
+        let plugins = Plugins::new();
+        plugins.insert::<PermissionCheckerRef>(checker);
+        test_instance_with_plugins_and_metric_names(
+            test_logical_table(1024, "cpu_usage")?,
+            test_logical_table(1025, "target")?,
+            plugins,
+            None,
+        )
+        .await
+    }
+
+    /// An expression that has to be answered by discovering the schema's metric tables: it names
+    /// no exact metric, only a name matcher.
+    fn discovery_metric_expr() -> promql_parser::parser::Expr {
+        promql_parser::parser::parse(r#"{__name__=~"cpu.*"}"#).unwrap()
+    }
+
+    /// The tables a bounded scope allows, sorted so a test can state them.
+    fn allowed_tables(scope: &MetricDiscoveryScope) -> Vec<String> {
+        let MetricDiscoveryScope::Allowed(allowed) = scope else {
+            panic!("expected a table-bounded discovery scope, got {scope:?}");
+        };
+        let mut tables = allowed
+            .iter()
+            .map(|target| target.table.clone())
+            .collect::<Vec<_>>();
+        tables.sort_unstable();
+        tables
+    }
+
+    /// A session `SET` turns the native route on without any request hint, so the scope has to be
+    /// bounded by the caller's grants in exactly that case too.
+    #[tokio::test]
+    async fn test_discovery_scope_bounds_a_session_enabled_native_route() -> TestResult<()> {
+        let instance =
+            test_metric_discovery_instance(Arc::new(RejectUnresolvedPermissionChecker)).await?;
+        let mut ctx = test_query_ctx(1);
+        ctx.configuration_parameter()
+            .set_query_option(NATIVE_PROMQL_OPTION, "true")
+            .unwrap();
+        assert!(
+            ctx.extension(NATIVE_PROMQL_OPTION).is_none(),
+            "a session SET is not a request hint"
+        );
+
+        instance
+            .prepare_metric_discovery_scope(&discovery_metric_expr(), &mut ctx)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            vec!["cpu_usage".to_string(), "target".to_string()],
+            allowed_tables(ctx.metric_discovery_scope())
+        );
+
+        Ok(())
+    }
+
+    /// The engine default can turn the route on with nothing stated per request or per session.
+    /// The scope is computed without consulting that default, and is still bounded.
+    #[tokio::test]
+    async fn test_discovery_scope_bounds_a_route_the_engine_default_could_enable() -> TestResult<()>
+    {
+        let instance =
+            test_metric_discovery_instance(Arc::new(RejectUnresolvedPermissionChecker)).await?;
+        let mut ctx = test_query_ctx(1);
+        assert!(ctx.extension(NATIVE_PROMQL_OPTION).is_none());
+        assert_eq!(
+            None,
+            ctx.effective_query_options()
+                .unwrap()
+                .get(NATIVE_PROMQL_OPTION),
+            "nothing states the option here"
+        );
+
+        instance
+            .prepare_metric_discovery_scope(&discovery_metric_expr(), &mut ctx)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            vec!["cpu_usage".to_string(), "target".to_string()],
+            allowed_tables(ctx.metric_discovery_scope())
+        );
+        assert!(
+            ctx.extension(NATIVE_PROMQL_OPTION).is_none(),
+            "computing the scope must not state the option"
+        );
+
+        Ok(())
+    }
+
+    /// A checker that decides without table targets needs no bound: there is nothing to narrow.
+    #[tokio::test]
+    async fn test_discovery_scope_stays_unrestricted_without_table_targets() -> TestResult<()> {
+        let instance =
+            test_metric_discovery_instance(Arc::new(TargetIndependentPermissionChecker::default()))
+                .await?;
+        let mut ctx = test_query_ctx(1);
+
+        instance
+            .prepare_metric_discovery_scope(&discovery_metric_expr(), &mut ctx)
+            .await
+            .unwrap();
+
+        assert!(
+            matches!(
+                ctx.metric_discovery_scope(),
+                MetricDiscoveryScope::Unrestricted
+            ),
+            "got {:?}",
+            ctx.metric_discovery_scope()
+        );
+
+        Ok(())
+    }
+
+    /// A query that states the option nowhere is planned with the engine default. Bounding its
+    /// discovery scope must leave that decision untouched: the scope is the only thing this
+    /// function changes, and the route reads the option, not the scope.
+    ///
+    /// The routing itself is asserted where the plan is built
+    /// (`query::planner`'s `test_plan_pql_native_route_follows_query_options` covers the
+    /// "nothing stated, engine default off" case): a catalog of plain in-memory tables cannot plan
+    /// a discovery expression natively, so a frontend-level plan assertion would only restate the
+    /// legacy planner's own rejections.
+    #[tokio::test]
+    async fn test_discovery_scope_does_not_state_the_native_option() -> TestResult<()> {
+        let instance =
+            test_metric_discovery_instance(Arc::new(RejectUnresolvedPermissionChecker)).await?;
+        let mut ctx = test_query_ctx(1);
+        assert!(ctx.extension(NATIVE_PROMQL_OPTION).is_none());
+
+        instance
+            .prepare_metric_discovery_scope(&discovery_metric_expr(), &mut ctx)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            vec!["cpu_usage".to_string(), "target".to_string()],
+            allowed_tables(ctx.metric_discovery_scope())
+        );
+        assert!(
+            ctx.extension(NATIVE_PROMQL_OPTION).is_none(),
+            "computing the scope must not state the option"
+        );
+        assert_eq!(
+            None,
+            ctx.effective_query_options()
+                .unwrap()
+                .get(NATIVE_PROMQL_OPTION),
+            "the route stays on the engine default"
+        );
 
         Ok(())
     }
