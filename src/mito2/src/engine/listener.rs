@@ -221,24 +221,28 @@ impl EventListener for CountingStallListener {
     }
 }
 
-/// Listener to watch failed flushes.
+/// Counts failed flushes the worker has handled, for tests that wait for them.
 #[derive(Default)]
 pub struct FlushFailedListener {
+    count: AtomicUsize,
     notify: Notify,
-    failure_count: AtomicUsize,
 }
 
 impl FlushFailedListener {
-    /// Waits until the worker has handled at least `times` failed flushes.
-    pub async fn wait_failure_count(&self, times: usize) {
-        while self.failure_count.load(Ordering::Relaxed) < times {
-            self.notify.notified().await;
+    /// Waits until the worker has handled at least `expected` failed flushes.
+    pub async fn wait_for_count(&self, expected: usize) {
+        loop {
+            let notified = self.notify.notified();
+            if self.count.load(Ordering::Relaxed) >= expected {
+                return;
+            }
+            notified.await;
         }
     }
 
     /// Returns the number of failed flushes the worker has handled.
     pub fn failure_count(&self) -> usize {
-        self.failure_count.load(Ordering::Relaxed)
+        self.count.load(Ordering::Relaxed)
     }
 }
 
@@ -247,8 +251,8 @@ impl EventListener for FlushFailedListener {
     fn on_flush_failed(&self, region_id: RegionId) {
         info!("Region {} flush failed", region_id);
 
-        self.failure_count.fetch_add(1, Ordering::Relaxed);
-        self.notify.notify_one();
+        self.count.fetch_add(1, Ordering::Relaxed);
+        self.notify.notify_waiters();
     }
 }
 
@@ -735,7 +739,7 @@ mod tests {
     async fn test_flush_failed_listener_counts_failures() {
         let listener = FlushFailedListener::default();
         let region_id = RegionId::new(1024, 0);
-        let mut wait = Box::pin(listener.wait_failure_count(2));
+        let mut wait = Box::pin(listener.wait_for_count(2));
         assert!(futures::poll!(&mut wait).is_pending());
         listener.on_flush_failed(region_id);
         assert!(futures::poll!(&mut wait).is_pending());
@@ -746,8 +750,8 @@ mod tests {
         assert_eq!(2, listener.failure_count());
 
         // Thresholds already reached complete without another failure.
-        for times in [1, 2] {
-            tokio::time::timeout(Duration::from_secs(3), listener.wait_failure_count(times))
+        for expected in [1, 2] {
+            tokio::time::timeout(Duration::from_secs(3), listener.wait_for_count(expected))
                 .await
                 .unwrap();
         }

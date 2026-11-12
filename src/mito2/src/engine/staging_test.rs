@@ -2186,7 +2186,7 @@ async fn test_stale_staging_edit_rejected_after_close_time_flush_fails() {
         .unwrap_err();
     // The close can return before the worker handles its failed flush, which clears the
     // close-time flush that rejects edits as busy.
-    tokio::time::timeout(Duration::from_secs(3), listener.wait_failure_count(1))
+    tokio::time::timeout(Duration::from_secs(3), listener.wait_for_count(1))
         .await
         .unwrap();
 
