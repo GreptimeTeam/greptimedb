@@ -33,7 +33,7 @@ use crate::request::OptionOutputTx;
 use crate::temp_file_sweeper;
 use crate::wal::entry_distributor::WalEntryReceiver;
 use crate::worker::RegionWorkerLoop;
-use crate::worker::handle_apply_staging::drain_ended_staging;
+use crate::worker::drain_ended_staging;
 
 impl<S: LogStore> RegionWorkerLoop<S> {
     pub(crate) async fn handle_catchup_request(
