@@ -1594,6 +1594,10 @@ pub fn selector_result_cache_hit() {
 #[derive(Default)]
 pub struct CacheManagerBuilder {
     sst_meta_cache_size: u64,
+    /// Reserves a quarter of `sst_meta_cache_size` for the native-reader metadata tier.
+    /// Only enabled when the columnar series-index format is configured; otherwise the
+    /// decoded tier keeps main's full half of the budget.
+    enable_columnar_meta_cache: bool,
     disable_sst_meta_cache_on_write: bool,
     vector_cache_size: u64,
     page_cache_size: u64,
@@ -1612,6 +1616,12 @@ impl CacheManagerBuilder {
     /// Sets meta cache size.
     pub fn sst_meta_cache_size(mut self, bytes: u64) -> Self {
         self.sst_meta_cache_size = bytes;
+        self
+    }
+
+    /// Enables the native-reader metadata tier, funded by a quarter of `sst_meta_cache_size`.
+    pub fn enable_columnar_meta_cache(mut self, enable: bool) -> Self {
+        self.enable_columnar_meta_cache = enable;
         self
     }
 
@@ -1704,7 +1714,11 @@ impl CacheManagerBuilder {
         // typed decoded cache cannot hold; it takes a quarter of the same budget so the total
         // still matches the configured size. Re-unify the tiers once the loader accounting is
         // shared, and move this to a dedicated config knob instead of splitting the reservation.
-        let columnar_meta_capacity = self.sst_meta_cache_size / 4;
+        let columnar_meta_capacity = if self.enable_columnar_meta_cache {
+            self.sst_meta_cache_size / 4
+        } else {
+            0
+        };
         let decoded_meta_capacity = self.sst_meta_cache_size / 2 - columnar_meta_capacity;
         let sst_meta_cache = (compact_meta_capacity != 0).then(|| {
             Cache::builder()
@@ -2530,7 +2544,19 @@ mod tests {
 
     #[test]
     fn test_sst_meta_cache_splits_capacity() {
+        // Default (columnar format off): main's split, the native-reader tier is not created.
         let cache = CacheManager::builder().sst_meta_cache_size(101).build();
+        assert_eq!(
+            50,
+            cache.sst_decoded_meta_cache.as_ref().unwrap().capacity()
+        );
+        assert!(cache.columnar_meta_cache.is_none());
+
+        // Columnar format on: a quarter of the budget funds the native-reader tier.
+        let cache = CacheManager::builder()
+            .sst_meta_cache_size(101)
+            .enable_columnar_meta_cache(true)
+            .build();
 
         assert_eq!(
             Some(51),

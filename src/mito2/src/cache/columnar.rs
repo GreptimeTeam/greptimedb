@@ -203,7 +203,10 @@ mod tests {
     #[case::stripe_collision(true)]
     #[tokio::test]
     async fn backpressured_load_does_not_block_other_readers(#[case] different_key: bool) {
-        let manager = CacheManager::builder().sst_meta_cache_size(8192).build();
+        let manager = CacheManager::builder()
+            .sst_meta_cache_size(8192)
+            .enable_columnar_meta_cache(true)
+            .build();
         let strategy = CacheStrategy::EnableAll(Arc::new(manager));
         let cache = strategy.columnar_metadata(FileId::random()).unwrap();
         let identity = "generation/part/page";
@@ -279,7 +282,10 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn concurrent_misses_share_the_admitted_value() {
         let strategy = CacheStrategy::EnableAll(Arc::new(
-            CacheManager::builder().sst_meta_cache_size(8192).build(),
+            CacheManager::builder()
+                .sst_meta_cache_size(8192)
+                .enable_columnar_meta_cache(true)
+                .build(),
         ));
         let cache = strategy.columnar_metadata(FileId::random()).unwrap();
         let barrier = Arc::new(tokio::sync::Barrier::new(64));
