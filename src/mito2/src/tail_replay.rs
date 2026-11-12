@@ -239,6 +239,8 @@ impl<S: LogStore> TailReplayTask<S> {
     /// Waits until the region receives a Leader lease. Returns false if the region stops being
     /// a writable, altering or editing leader, or the task is cancelled, first.
     async fn wait_for_leader_lease(&self) -> bool {
+        let region_id = self.region.region_id;
+        info!("Region {region_id} waits for a Leader lease to clear its unread listed tails");
         while self.region.is_replay_leader() {
             if !self.region.manifest_ctx.is_writable_by_catchup() {
                 return true;
