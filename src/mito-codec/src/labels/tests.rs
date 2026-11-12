@@ -23,6 +23,7 @@ use store_api::metadata::{ColumnMetadata, RegionMetadata, RegionMetadataBuilder}
 use store_api::region_engine::BoundTag;
 use store_api::region_engine::RawLabelSource;
 use store_api::storage::RegionId;
+use store_api::storage::consts::ReservedColumnId;
 
 use crate::row_converter::{
     DensePrimaryKeyCodec, PrimaryKeyCodec, SortField, SparsePrimaryKeyCodec,
@@ -45,6 +46,26 @@ fn metadata(
         column_id: 0,
     });
     let mut primary_key = Vec::new();
+    // main's `fix!: enforce sparse primary key schema` requires sparse primary keys to start
+    // with `(__table_id, __tsid)`, and every primary-key column id must exist in the schema.
+    if encoding == PrimaryKeyEncoding::Sparse {
+        builder.push_column_metadata(ColumnMetadata {
+            column_schema: ColumnSchema::new(
+                "__table_id",
+                ConcreteDataType::uint32_datatype(),
+                false,
+            ),
+            semantic_type: SemanticType::Tag,
+            column_id: ReservedColumnId::table_id(),
+        });
+        builder.push_column_metadata(ColumnMetadata {
+            column_schema: ColumnSchema::new("__tsid", ConcreteDataType::uint64_datatype(), false),
+            semantic_type: SemanticType::Tag,
+            column_id: ReservedColumnId::tsid(),
+        });
+        primary_key.push(ReservedColumnId::table_id());
+        primary_key.push(ReservedColumnId::tsid());
+    }
     for (id, name, data_type) in tags {
         builder.push_column_metadata(ColumnMetadata {
             column_schema: ColumnSchema::new(*name, data_type.clone(), true),
