@@ -192,11 +192,11 @@ impl Checkpointer {
 
     fn do_checkpoint(&mut self, checkpoint: RegionCheckpoint) {
         let inner = self.inner.clone();
-        let (done, done_receiver) = watch::channel(());
+        let (done_sender, done_receiver) = watch::channel(());
         self.checkpoint_done = Some(done_receiver);
         self.checkpoint_task = Some(common_runtime::spawn_global(async move {
             // The sender is dropped however the task ends, which closes the channel.
-            let _done = done;
+            let _done_sender = done_sender;
             inner.do_checkpoint(checkpoint).await;
         }));
     }
@@ -207,14 +207,17 @@ impl Checkpointer {
     /// so the caller can await it without holding the manifest lock.
     pub(crate) fn pending_checkpoint_done(&self) -> impl Future<Output = ()> + Send + use<> {
         let done = self.checkpoint_done.clone();
+        let region_id = self.inner.region_id();
         #[cfg(test)]
         let wait_started = self.pending_checkpoint_wait_started.clone();
         async move {
-            let Some(mut done) = done else {
+            // The channel is closed once the task has ended.
+            let Some(mut done) = done.filter(|receiver| receiver.has_changed().is_ok()) else {
                 return;
             };
             #[cfg(test)]
             wait_started.notify_one();
+            info!("Waiting for the pending checkpoint of region {}", region_id);
             // Nothing is ever sent, so this returns once the task drops the sender.
             let _ = done.changed().await;
         }

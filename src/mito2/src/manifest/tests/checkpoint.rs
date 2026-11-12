@@ -829,7 +829,7 @@ async fn completed_checkpoint_is_reaped_before_scheduling_the_next_one() {
 }
 
 #[rstest::rstest]
-#[case::cleanup_finishes(false)]
+#[case::cleanup_finished(false)]
 #[case::task_aborted(true)]
 #[tokio::test]
 async fn pending_checkpoint_done_waits_until_the_task_ends(#[case] abort: bool) {

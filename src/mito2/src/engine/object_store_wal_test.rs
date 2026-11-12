@@ -1093,9 +1093,9 @@ async fn test_reload_waits_for_held_upload() {
 }
 
 #[tokio::test]
-async fn test_reload_waits_for_checkpoint_of_fenced_instance() {
+async fn test_reload_waits_for_running_checkpoint() {
     let (blocker, layer) = CheckpointTaskBlocker::block_last_checkpoint_write();
-    let mut env = TestEnv::with_prefix("reload-waits-for-checkpoint")
+    let mut env = TestEnv::with_prefix("reload-waits-for-running-checkpoint")
         .await
         .with_mock_layer(layer);
     let region_id = RegionId::new(1, 1);
