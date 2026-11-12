@@ -16,6 +16,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use auth::{PermissionTableTarget, PermissionTableTargets};
+use catalog::process_manager::{QueryStatement as CatalogQueryStatement, SlowQueryTimer};
 use common_base::cancellation::CancellableFuture;
 use common_catalog::consts::METRICS_EXEMPLARS_TABLE;
 use common_error::ext::BoxedError;
@@ -101,13 +102,27 @@ impl Instance {
             self.check_query_target_permission(PermissionTableTargets::resolved(targets), &local)
                 .await?;
         }
+        let raw_query = format!(
+            "query_exemplars({}, start_ns={}, end_ns={})",
+            query.expression, query.bounds.0, query.bounds.1
+        );
+        let slow_query_timer = self.slow_query_options.enable.then(|| {
+            SlowQueryTimer::new(
+                CatalogQueryStatement::Plan(raw_query.clone()),
+                ctx.current_schema(),
+                self.slow_query_options.threshold,
+                self.slow_query_options.sample_ratio,
+                self.slow_query_options.record_type,
+                self.slow_query_recorder.clone(),
+            )
+        });
         let ticket = self.process_manager.register_query(
             ctx.current_catalog().to_string(),
             groups.keys().cloned().collect(),
-            format!("query_exemplars({})", query.expression),
+            raw_query,
             ctx.conn_info().to_string(),
             Some(ctx.process_id()),
-            None,
+            slow_query_timer,
         );
         let cancellation = ticket.cancellation_handle.clone();
         let future = async {
