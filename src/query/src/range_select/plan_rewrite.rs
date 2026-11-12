@@ -776,8 +776,13 @@ mod test {
     use catalog::RegisterTableRequest;
     use catalog::memory::MemoryCatalogManager;
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+    use common_function::function::FunctionContext;
+    use common_function::function_registry::FUNCTION_REGISTRY;
+    use common_query::test_util::DummyDecoder;
     use common_time::IntervalYearMonth;
-    use datafusion_expr::{BinaryExpr, Literal, Operator, UserDefinedLogicalNodeCore};
+    use datafusion::functions_aggregate::expr_fn::avg;
+    use datafusion_common::TableReference;
+    use datafusion_expr::{BinaryExpr, Literal, Operator, UserDefinedLogicalNodeCore, col};
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::{ColumnSchema, Schema};
     use session::context::{QueryContext, QueryContextBuilder};
@@ -1307,6 +1312,99 @@ mod test {
                 "Range Query: Cannot infer default BY columns from derived range query input"
             );
         }
+    }
+
+    #[test]
+    fn range_rewrite_deep_union_all() {
+        // Regression for #9356: release builds poll queries on 2 MiB worker stacks.
+        std::thread::Builder::new()
+            .stack_size(2 * 1024 * 1024)
+            .spawn(|| {
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap()
+                    .block_on(async {
+                        let engine = create_test_engine().await;
+                        let table_provider = || {
+                            DfTableSourceProvider::new(
+                                engine.engine_state().catalog_manager().clone(),
+                                false,
+                                QueryContext::arc(),
+                                DummyDecoder::arc(),
+                                false,
+                            )
+                        };
+                        // Construct the plans of 400 branches joined by `UNION ALL` directly
+                        // to isolate this rewrite from other planner passes.
+                        let union_all = |select: LogicalPlan| {
+                            let mut builder = LogicalPlanBuilder::from(select.clone());
+                            for _ in 1..400 {
+                                builder = builder.union(select.clone()).unwrap();
+                            }
+                            builder
+                        };
+
+                        // `SELECT 1 AS a UNION ALL ...`
+                        let select = LogicalPlanBuilder::empty(true)
+                            .project(vec![1.lit().alias("a")])
+                            .unwrap()
+                            .build()
+                            .unwrap();
+                        let plan = RangePlanRewriter::new(table_provider(), QueryContext::arc())
+                            .rewrite(union_all(select).build().unwrap())
+                            .await
+                            .unwrap();
+                        assert!(matches!(plan, LogicalPlan::Union(_)));
+
+                        // `SELECT timestamp, tag_0, avg(field_0) RANGE '5m' FROM
+                        // (SELECT timestamp, tag_0, field_0 FROM test UNION ALL ...) ALIGN '1h' BY (tag_0)`
+                        let source = table_provider()
+                            .resolve_table(TableReference::bare("test"))
+                            .await
+                            .unwrap();
+                        let select = LogicalPlanBuilder::scan("test", source, None)
+                            .unwrap()
+                            .project(vec![col("timestamp"), col("tag_0"), col("field_0")])
+                            .unwrap()
+                            .build()
+                            .unwrap();
+                        let range_fn = FUNCTION_REGISTRY
+                            .get_function("range_fn")
+                            .unwrap()
+                            .provide(FunctionContext::default())
+                            .call(vec![
+                                Expr::Column(Column::from_name("avg(field_0)")),
+                                "5m".lit(),
+                                "".lit(),
+                                "1".lit(),
+                                col("tag_0"),
+                                "1h".lit(),
+                                "".lit(),
+                            ]);
+                        let plan = union_all(select)
+                            .aggregate(
+                                vec![col("tag_0"), col("timestamp")],
+                                vec![avg(col("field_0"))],
+                            )
+                            .unwrap()
+                            .project(vec![col("timestamp"), col("tag_0"), range_fn])
+                            .unwrap()
+                            .build()
+                            .unwrap();
+                        let plan = RangePlanRewriter::new(table_provider(), QueryContext::arc())
+                            .rewrite(plan)
+                            .await
+                            .unwrap();
+                        let LogicalPlan::Extension(extension) = plan else {
+                            panic!("expected RangeSelect rewrite output");
+                        };
+                        assert!(extension.node.as_any().is::<RangeSelect>());
+                    })
+            })
+            .unwrap()
+            .join()
+            .unwrap();
     }
 
     #[tokio::test]
