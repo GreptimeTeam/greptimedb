@@ -1074,15 +1074,10 @@ impl MitoRegion {
             .staging_manifest()
             .await
             .filter(|_| self.is_staging_or_staged_edit())
-            .map(|m| (m.files.clone(), m.manifest_version));
-
-        let version = staging
-            .as_ref()
-            .map(|(_, v)| *v)
-            .unwrap_or(manifest.manifest_version);
+            .map(|m| m.files.clone());
 
         let files = match staging {
-            Some((staging_files, _)) => {
+            Some(staging_files) => {
                 let merged = manifest
                     .files
                     .clone()
@@ -1094,7 +1089,7 @@ impl MitoRegion {
             None => manifest.files.values().cloned().collect(),
         };
 
-        (files, version)
+        (files, manifest.manifest_version)
     }
 
     /// Commits the staged edits as one manifest version and ends staging (see

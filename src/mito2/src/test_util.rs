@@ -275,7 +275,7 @@ impl DeltaFaults {
         let faults = self.clone();
         MockLayerBuilder::default()
             .writer_factory(Arc::new(move |path, _args, inner| {
-                if !is_delta_file(path.rsplit('/').next().unwrap_or(path)) {
+                if !is_delta_file(path.rsplit('/').next().unwrap_or_default()) {
                     inner
                 } else if faults.fail_write.swap(false, Ordering::Relaxed) {
                     Box::new(FailedWriter)
