@@ -2685,7 +2685,7 @@ fn refuses_modifier(modifier: Option<&BinModifier>) -> bool {
 /// expression was found, which is the useful half of the refusal.
 ///
 /// Arithmetic is [`ArithmeticOp::calculate`]'s and nothing else's: that is where Prometheus'
-/// semantics for `%`, `^` and `atan2` live, the last two through `go_math`, so defining them again
+/// semantics for `%`, `^` and `atan2` live, so defining them again
 /// here would be a second answer for the two to disagree over. An operator with no
 /// [`ArithmeticOp`] — a comparison, `and`, `or`, `unless` — is not arithmetic and does not fold.
 /// Visible to the planner, which asks whether a statement's value is a constant before binding it.

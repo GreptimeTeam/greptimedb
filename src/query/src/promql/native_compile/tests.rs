@@ -1317,12 +1317,9 @@ fn the_supported_math_functions_map_to_their_kernels() {
 }
 
 /// The constants a function folds are folded by the kernel's own arithmetic, not by a second copy of
-/// it: `%` keeps the sign of its left operand and `^` is `go_math`'s power. Both numbers below are
-/// ones a hand-written copy would get wrong: a Euclidean modulo folds `-7 % 3` to 2, `*` folds the
-/// power to about 9.8e8, and Rust's own `f64::powf` folds it to 3.623449445683154e291 where the
-/// kernel gives 3.6234491766672406e291, because `go_math::pow` accumulates error by repeated
-/// squaring as Go's `math.Pow` does. That is the point: the compiler must not disagree with the
-/// kernel about what an operator means.
+/// it. Both numbers below are ones a hand-written copy would get wrong: a Euclidean modulo folds
+/// `-7 % 3` to 2, and `*` in place of `^` folds the power to about 9.8e8. That is the point: the
+/// compiler must not disagree with the kernel about what an operator means.
 #[test]
 fn the_constant_fold_is_the_kernels_arithmetic() {
     // Go's `math.Mod` gives -1 for `-7 % 3`; a Euclidean modulo would give 2.
@@ -1340,11 +1337,8 @@ fn the_constant_fold_is_the_kernels_arithmetic() {
     };
     assert_eq!(min, -1.0, "`-7 % 3` did not fold with `math.Mod`'s sign");
 
-    // `1.0000006850274261 ^ 9.80019037e8` is a power over a base barely above one: as multiplication
-    // it would be about 9.8e8, and it is neither a comparison nor a set operator, which fold nothing
-    // at all. It is also the case `go_math` keeps its own `pow` for: Go's repeated squaring
-    // accumulates error the standard library's `pow` does not, so the two disagree well above the
-    // last bit and a fold that hand-wrote `powf` binds a different number here.
+    // A power over a base barely above one: as multiplication it would be about 9.8e8, and it is
+    // neither a comparison nor a set operator, which fold nothing at all.
     let tree = compile(
         &eval_stmt("round(x, 1.0000006850274261 ^ 9.80019037e8)"),
         raw_schema(),
@@ -1360,8 +1354,9 @@ fn the_constant_fold_is_the_kernels_arithmetic() {
         );
     };
     assert_eq!(
-        nearest, 3.6234491766672406e291,
-        "`1.0000006850274261 ^ 9.80019037e8` did not fold with `go_math`'s power"
+        nearest,
+        promql::map::ArithmeticOp::Power.calculate(1.0000006850274261, 9.80019037e8),
+        "`1.0000006850274261 ^ 9.80019037e8` did not fold as a power"
     );
 }
 
