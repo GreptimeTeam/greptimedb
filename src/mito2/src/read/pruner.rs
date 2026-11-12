@@ -193,9 +193,12 @@ pub struct PrunerOptions {
     ///
     /// The flag is baked into the cached [`FileRangeBuilder`], so it belongs to
     /// the whole scan. All partitions sharing this pruner must agree on it.
-    /// Two-stage series scans disable this prefilter: candidate discovery applies
-    /// tag predicates, then the data phase calls [`FileRange::precise_filter_flat`]
-    /// with tag filtering skipped so the predicates are applied exactly once.
+    /// Two-stage series scans disable this prefilter because candidate discovery already
+    /// narrowed the assignment by tag predicate, so running it again would only repeat
+    /// that work. This is a pruning-hint trade only: the assigned series are
+    /// `(table_id, tsid)` hashes, so a series that collides with an assigned one shares
+    /// its identifier without matching the predicate, and the data phase still applies
+    /// the tag predicates through [`FileRange::precise_filter_flat`].
     pub enable_predicate_prefilter: bool,
 }
 

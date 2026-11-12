@@ -63,8 +63,9 @@ use crate::read::series_scan::{RawScanPreparation, raw};
 use crate::read::stream::ScanBatch;
 use crate::series_index::artifact::ArtifactFormat;
 use crate::series_index::format::{
-    self, FormatReader, SamplesFormatReader, SamplesReadRequest, SeriesReadRequest,
+    self, FormatReader, SamplesBatch, SamplesFormatReader, SamplesReadRequest, SeriesReadRequest,
 };
+use crate::series_index::identity::ExactSeriesKey;
 use crate::series_index::{MetricSeriesId, ROW_COUNT_COLUMN};
 
 fn invalid(reason: impl Into<String>) -> Error {
@@ -313,65 +314,16 @@ fn predicate_conjuncts(predicate: Option<&Predicate>) -> Vec<&Expr> {
 }
 
 struct Candidate {
+    /// Coarse prefix of the exact key; only a hash, never identity.
     id: MetricSeriesId,
+    /// The one owned key allocation: the region-qualified exact key.
     key: Buffer,
+    /// The canonical sparse key, a view of `key`'s bytes. This is the identity every
+    /// comparison and sample attribution uses, so it is stored once rather than once per
+    /// representation.
     merge_key: Buffer,
     tags: HashMap<u32, Option<String>>,
     metric: Option<SeriesLabels>,
-    metadata_row: Option<(Arc<RecordBatch>, usize)>,
-}
-
-/// Checks every physical tag before retaining only rows that introduce new identities.
-fn compact_candidate_batch(
-    batch: &RecordBatch,
-    candidates: &BTreeMap<MetricSeriesId, Candidate>,
-    tags: &[(u32, String)],
-) -> Result<RecordBatch> {
-    let table = batch
-        .column_by_name(DATA_SCHEMA_TABLE_ID_COLUMN_NAME)
-        .and_then(|a| a.as_any().downcast_ref::<UInt32Array>())
-        .ok_or_else(|| invalid("invalid table ID column"))?;
-    let tsid = batch
-        .column_by_name(DATA_SCHEMA_TSID_COLUMN_NAME)
-        .and_then(|a| a.as_any().downcast_ref::<UInt64Array>())
-        .ok_or_else(|| invalid("invalid TSID column"))?;
-    let mut new_rows = HashMap::new();
-    let mut selected = Vec::new();
-    for row in 0..batch.num_rows() {
-        let id = MetricSeriesId {
-            table_id: table.value(row),
-            tsid: tsid.value(row),
-        };
-        let previous = candidates
-            .get(&id)
-            .and_then(|c| c.metadata_row.as_ref())
-            .map(|(batch, row)| (batch.as_ref(), *row))
-            .or_else(|| new_rows.get(&id).map(|row| (batch, *row)));
-        if let Some((previous, previous_row)) = previous {
-            for (_, name) in tags {
-                let current = batch
-                    .column_by_name(name)
-                    .and_then(|a| a.as_any().downcast_ref::<StringArray>())
-                    .ok_or_else(|| invalid("invalid series tag array"))?;
-                let previous = previous
-                    .column_by_name(name)
-                    .and_then(|a| a.as_any().downcast_ref::<StringArray>())
-                    .ok_or_else(|| invalid("incompatible duplicate label metadata"))?;
-                if previous.is_null(previous_row) != current.is_null(row)
-                    || (!current.is_null(row) && previous.value(previous_row) != current.value(row))
-                {
-                    return Err(invalid("conflicting labels for the same table ID and TSID"));
-                }
-            }
-        } else {
-            new_rows.insert(id, row);
-            selected.push(row as u64);
-        }
-    }
-    if selected.len() == batch.num_rows() {
-        return Ok(batch.clone());
-    }
-    take_record_batch(batch, &UInt64Array::from(selected)).context(ComputeArrowSnafu)
 }
 
 struct ColumnarPreparedSource {
@@ -475,7 +427,8 @@ impl ColumnarPreparedSource {
         preparation_metrics.counts.insert("prepare_batch_series", 0);
         let direct_labels = sample_schema.is_some();
         let conjuncts = predicate_conjuncts(input.predicate_group().predicate());
-        let mut candidates = BTreeMap::<MetricSeriesId, Candidate>::new();
+        let mut retained_rows = 0_usize;
+        let mut candidates = BTreeMap::<ExactSeriesKey, Candidate>::new();
         for id in indexes {
             let timer = preparation_metrics.timer("columnar_prepare_series_open_wall");
             let reader = crate::series_index::columnar::reader::ColumnarReader::open_cached(
@@ -554,11 +507,6 @@ impl ColumnarPreparedSource {
                     .or_default() += batch.num_rows() as u64;
                 let started = Instant::now();
                 let mut duplicate_rows = 0_u64;
-                if direct_labels {
-                    let rows = batch.num_rows();
-                    batch = compact_candidate_batch(&batch, &candidates, &tags)?;
-                    duplicate_rows = (rows - batch.num_rows()) as u64;
-                }
                 let table = batch
                     .column_by_name(DATA_SCHEMA_TABLE_ID_COLUMN_NAME)
                     .ok_or_else(|| invalid("missing table ID column"))?
@@ -583,7 +531,60 @@ impl ColumnarPreparedSource {
                         Ok((*id, strings))
                     })
                     .collect::<Result<Vec<_>>>()?;
-                let shared_batch = direct_labels.then(|| Arc::new(batch.clone()));
+                // Identity is the exact canonical sparse key. `tsid` is a hash, so rows
+                // that differ only in labels are different series and must both survive:
+                // re-encoding the artifact's own tags reproduces the SST key byte for byte.
+                let codec = SparsePrimaryKeyCodec::schemaless();
+                let mut offsets = mito_codec::row_converter::SparseOffsetsCache::new();
+                let mut identity = Vec::new();
+                let mut previous: Option<Vec<u8>> = None;
+                let mut fresh = Vec::<(ExactSeriesKey, usize)>::new();
+                let mut encoded_key_bytes = 0_u64;
+                for row in 0..batch.num_rows() {
+                    identity.clear();
+                    codec
+                        .encode_internal(table.value(row), tsid.value(row), &mut identity)
+                        .map_err(|e| invalid(e.to_string()))?;
+                    codec
+                        .encode_to_vec(
+                            tag_arrays.iter().map(|(id, strings)| {
+                                (
+                                    *id,
+                                    if strings.is_null(row) {
+                                        ValueRef::Null
+                                    } else {
+                                        ValueRef::String(strings.value(row))
+                                    },
+                                )
+                            }),
+                            &mut identity,
+                        )
+                        .map_err(|e| invalid(e.to_string()))?;
+                    encoded_key_bytes += identity.len() as u64;
+                    // Adjacent duplicates are the common case and never allocate a key.
+                    if previous.as_deref() == Some(identity.as_slice())
+                        || candidates.contains_key(identity.as_slice())
+                    {
+                        duplicate_rows += 1;
+                        continue;
+                    }
+                    let key = ExactSeriesKey::from_sparse_key(&identity, &mut offsets)?;
+                    previous = Some(identity.clone());
+                    fresh.push((key, row));
+                }
+                // Retain only rows that introduce a new identity; the retained batch backs
+                // both explicit labels and the metadata rows of direct-label candidates.
+                let retained = if fresh.len() == batch.num_rows() {
+                    batch.clone()
+                } else {
+                    let selected: Vec<u64> = fresh.iter().map(|(_, row)| *row as u64).collect();
+                    take_record_batch(&batch, &UInt64Array::from(selected))
+                        .context(ComputeArrowSnafu)?
+                };
+                if direct_labels {
+                    // Only explicit-label chunks retain a batch to resolve labels from.
+                    retained_rows += retained.num_rows();
+                }
                 let label_batch = if direct_labels {
                     let RawLabelSource::PrimaryKey { logical_tags, .. } = &labels else {
                         return Err(invalid("expected bound labels"));
@@ -597,7 +598,7 @@ impl ColumnarPreparedSource {
                                 .ok_or_else(|| invalid("missing bound tag"))?;
                             Ok((
                                 tag.name.clone(),
-                                batch
+                                retained
                                     .schema()
                                     .index_of(&name.1)
                                     .map_err(|e| invalid(e.to_string()))?,
@@ -609,7 +610,7 @@ impl ColumnarPreparedSource {
                             .register(&input.scan_memory_pool),
                     );
                     let label_batch =
-                        SeriesLabelBatch::try_new(batch.clone(), columns, owner.clone())
+                        SeriesLabelBatch::try_new(retained.clone(), columns, owner.clone())
                             .map_err(|e| invalid(e.to_string()))?;
                     owner
                         .try_grow(label_batch.estimated_size())
@@ -618,56 +619,9 @@ impl ColumnarPreparedSource {
                 } else {
                     None
                 };
-                let mut encoded_key_bytes = 0_u64;
                 let mut tag_values = 0_u64;
                 let mut batch_series = 0_u64;
-                for row in 0..batch.num_rows() {
-                    let id = MetricSeriesId {
-                        table_id: table.value(row),
-                        tsid: tsid.value(row),
-                    };
-                    // The flat merger still needs the compact sparse ID prefix.
-                    // Explicit-label chunks use a region-qualified identity below.
-                    let mut key = if direct_labels {
-                        metadata.region_id.as_u64().to_be_bytes().to_vec()
-                    } else {
-                        Vec::new()
-                    };
-                    let identity_prefix_len = key.len();
-                    let codec = SparsePrimaryKeyCodec::schemaless();
-                    codec
-                        .encode_internal(id.table_id, id.tsid, &mut key)
-                        .map_err(|e| invalid(e.to_string()))?;
-                    let merge_key_len = key.len() - identity_prefix_len;
-                    if !direct_labels {
-                        codec
-                            .encode_to_vec(
-                                tag_arrays.iter().map(|(id, strings)| {
-                                    (
-                                        *id,
-                                        if strings.is_null(row) {
-                                            ValueRef::Null
-                                        } else {
-                                            ValueRef::String(strings.value(row))
-                                        },
-                                    )
-                                }),
-                                &mut key,
-                            )
-                            .map_err(|e| invalid(e.to_string()))?;
-                        encoded_key_bytes += key.len() as u64;
-                    }
-                    if let Some(previous) = candidates.get(&id) {
-                        duplicate_rows += 1;
-                        if previous.key.as_slice() != key.as_slice() {
-                            return Err(invalid(
-                                "conflicting labels for the same table ID and TSID",
-                            ));
-                        }
-                        continue;
-                    }
-                    // Encode borrowed Arrow strings first. Duplicate identities still undergo
-                    // the full label-conflict check, without allocating another owned tag map.
+                for (retained_row, (exact, row)) in fresh.into_iter().enumerate() {
                     let mut values = HashMap::new();
                     if !direct_labels {
                         values.reserve(tag_arrays.len());
@@ -679,6 +633,24 @@ impl ColumnarPreparedSource {
                         }
                     }
                     tag_values += values.len() as u64;
+                    // `merge_key` is always the exact key bytes. Explicit-label chunks keep
+                    // the region-qualified form as their `key`, so `primary_key` stays
+                    // region-scoped while identity and ordering stay exact.
+                    let key = if direct_labels {
+                        let mut buffer = Vec::with_capacity(8 + exact.bytes().len());
+                        buffer.extend_from_slice(&metadata.region_id.as_u64().to_be_bytes());
+                        buffer.extend_from_slice(exact.bytes());
+                        Buffer::from(buffer)
+                    } else {
+                        Buffer::from(exact.bytes().to_vec())
+                    };
+                    let merge_key = if direct_labels {
+                        key.slice_with_length(8, exact.bytes().len())
+                    } else {
+                        key.clone()
+                    };
+                    // The exact key is stored once: `merge_key` is a view of `key`, so the
+                    // reservation charges the single key allocation the candidate retains.
                     let bytes = key.len()
                         + values.values().flatten().map(String::len).sum::<usize>()
                         + values.capacity() * (std::mem::size_of::<(u32, Option<String>)>() + 16)
@@ -696,24 +668,22 @@ impl ColumnarPreparedSource {
                             SeriesLabels::from_batch(
                                 Some(metric_name.clone()),
                                 label_batch.clone(),
-                                row,
+                                retained_row,
                             )
                             .map_err(|e| invalid(e.to_string()))?,
                         )
                     } else {
                         None
                     };
-                    let key = Buffer::from(key);
-                    let merge_key = key.slice_with_length(identity_prefix_len, merge_key_len);
+                    let id = exact.id();
                     candidates.insert(
-                        id,
+                        exact,
                         Candidate {
                             id,
                             key,
                             merge_key,
                             tags: values,
                             metric,
-                            metadata_row: shared_batch.as_ref().map(|batch| (batch.clone(), row)),
                         },
                     );
                 }
@@ -740,6 +710,9 @@ impl ColumnarPreparedSource {
         preparation_metrics
             .counts
             .insert("prepare_unique_series", candidates.len() as u64);
+        preparation_metrics
+            .counts
+            .insert("prepare_retained_rows", retained_rows as u64);
         let mut candidates: Vec<_> = candidates.into_values().collect();
         candidates.sort_unstable_by(|a, b| a.key.as_slice().cmp(b.key.as_slice()));
         preparation_metrics.add_elapsed("columnar_prepare_sort", started.elapsed());
@@ -802,48 +775,59 @@ impl PreparedSeriesSource for ColumnarPreparedSource {
                 let sample_schema = sample_schema.clone();
                 sources.push(Box::pin(async_stream::try_stream! {
                     let reservation = MemoryConsumer::new("ColumnarSamplesRead").register(&context.input.scan_memory_pool);
-                    // Account for the ID selection retained by the samples reader, including
-                    // B-tree node overhead, before allocating it.
-                    let selection_bytes = range.len() * (std::mem::size_of::<MetricSeriesId>() + 64);
+                    // Account for the selection retained by the samples reader, including
+                    // B-tree node overhead, before allocating it. The exact-key selection and
+                    // the coarse identifiers the reader derives from it both live for the
+                    // lifetime of the sample stream.
+                    let selection_bytes = candidates[range.clone()]
+                        .iter()
+                        .map(|candidate| {
+                            std::mem::size_of::<ExactSeriesKey>()
+                                + candidate.merge_key.len()
+                                + std::mem::size_of::<MetricSeriesId>()
+                                + 64
+                        })
+                        .sum::<usize>();
                     reservation.try_grow(selection_bytes).context(crate::error::ScanMemoryExhaustedSnafu)?;
-                    let ids = candidates[range.clone()].iter().map(|c| c.id).collect::<BTreeSet<_>>();
+                    // Exact ownership: a block is read only when its own key is selected,
+                    // never because a colliding partner shares the identifier. Coarse
+                    // pruning bounds are derived from these keys inside the reader.
+                    // The keys are built from the one key the candidate retains, so the
+                    // selection costs one owned copy per series rather than a second copy
+                    // alongside every candidate.
+                    let mut offsets = mito_codec::row_converter::SparseOffsetsCache::new();
+                    let keys = candidates[range.clone()]
+                        .iter()
+                        .map(|c| ExactSeriesKey::from_sparse_key(c.merge_key.as_slice(), &mut offsets))
+                        .collect::<Result<BTreeSet<_>>>()?;
                     let mut stage_metrics = crate::metrics::ColumnarReadMetrics::default();
                     let mut batches = reader.read(SamplesReadRequest {
                         projection: sample_projection(&reader.schema(), &context),
                         memory_pool: Some(context.input.scan_memory_pool.clone()),
-                        ids: Some(ids),
+                        keys: Some(keys),
                         start,
                         end,
                         ..Default::default()
                     })?;
-                    while let Some(batch) = batches.try_next().await? {
-                        let tables = batch.column_by_name(DATA_SCHEMA_TABLE_ID_COLUMN_NAME)
-                            .and_then(|a| a.as_any().downcast_ref::<UInt32Array>())
-                            .ok_or_else(|| invalid("missing or invalid sample table ID column"))?;
-                        let tsids = batch.column_by_name(DATA_SCHEMA_TSID_COLUMN_NAME)
-                            .and_then(|a| a.as_any().downcast_ref::<UInt64Array>())
-                            .ok_or_else(|| invalid("missing or invalid sample TSID column"))?;
-                        let mut offset = 0;
-                        while offset < batch.num_rows() {
-                            let id = MetricSeriesId { table_id: tables.value(offset), tsid: tsids.value(offset) };
-                            // Sparse keys begin with the order-preserving table ID/TSID prefix.
-                            let ordinal = candidates[range.clone()].binary_search_by_key(&id, |c| c.id)
-                                .map_err(|_| invalid("sample contains an unselected series"))? + range.start;
-                            let mut end = offset + 1;
-                            while end < batch.num_rows() && tables.value(end) == id.table_id && tsids.value(end) == id.tsid {
-                                end += 1;
-                            }
-                            let started = std::time::Instant::now();
-                            let flat = sample_to_flat(batch.slice(offset, end - offset), &candidates[ordinal], &context, sample_schema.as_ref())?;
-                            let flat = filter_visibility(flat, &context)?;
-                            stage_metrics.add_elapsed("columnar_sample_adapt", started.elapsed());
-                            offset = end;
-                            if flat.num_rows() == 0 { continue; }
-                            let bytes = flat.get_array_memory_size();
-                            reservation.try_grow(bytes).context(crate::error::ScanMemoryExhaustedSnafu)?;
-                            yield flat;
-                            reservation.shrink(bytes);
-                        }
+                    while let Some(samples) = batches.try_next().await? {
+                        // A block belongs to exactly one series, so the reader returns its
+                        // exact key once and the whole batch is attributed at once.
+                        let SamplesBatch { batch, key } = samples;
+                        let ordinal = candidates[range.clone()]
+                            .binary_search_by(|candidate| {
+                                candidate.merge_key.as_slice().cmp(key.bytes())
+                            })
+                            .map_err(|_| invalid("sample contains an unselected series"))?
+                            + range.start;
+                        let started = std::time::Instant::now();
+                        let flat = sample_to_flat(batch, &candidates[ordinal], &context, sample_schema.as_ref())?;
+                        let flat = filter_visibility(flat, &context)?;
+                        stage_metrics.add_elapsed("columnar_sample_adapt", started.elapsed());
+                        if flat.num_rows() == 0 { continue; }
+                        let bytes = flat.get_array_memory_size();
+                        reservation.try_grow(bytes).context(crate::error::ScanMemoryExhaustedSnafu)?;
+                        yield flat;
+                        reservation.shrink(bytes);
                     }
                 }));
             }
@@ -1122,7 +1106,8 @@ fn filter_visibility(batch: RecordBatch, context: &StreamContext) -> Result<Reco
 }
 
 /// The mapper includes projected and residual-filter columns. Identity/time and
-/// merge visibility columns are always needed by the native source adapter.
+/// merge visibility columns are always needed by the native source adapter. The exact
+/// series key is not projected: the samples reader returns it once per batch.
 fn sample_projection(
     schema: &datatypes::arrow::datatypes::Schema,
     context: &StreamContext,
@@ -1132,7 +1117,10 @@ fn sample_projection(
         .fields()
         .iter()
         .enumerate()
-        .filter(|(index, field)| *index < 5 || input.index_of(field.name()).is_ok())
+        .filter(|(index, field)| {
+            field.name() != store_api::storage::consts::PRIMARY_KEY_COLUMN_NAME
+                && (*index < 5 || input.index_of(field.name()).is_ok())
+        })
         .map(|(_, field)| field.name().clone())
         .collect()
 }

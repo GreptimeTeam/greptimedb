@@ -298,6 +298,271 @@ async fn aggregation_projection_and_independent_reads() {
     assert!(reader.read(req).is_err());
 }
 
+/// Reads every series row as `(tsid, row count, tag_0)` in artifact order.
+async fn read_rows(
+    format: &ColumnarSeriesFormat,
+    store: &ObjectStore,
+    handle: SeriesIndexFileHandle,
+) -> Vec<(u64, u64, String)> {
+    let batches = format
+        .reader(store.clone(), handle)
+        .await
+        .unwrap()
+        .read(request(&[TSID_COLUMN, ROW_COUNT_COLUMN, "tag_0"]))
+        .unwrap()
+        .try_collect::<Vec<_>>()
+        .await
+        .unwrap();
+    let mut rows = Vec::new();
+    for batch in &batches {
+        let ids = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<UInt64Array>()
+            .unwrap();
+        let counts = batch
+            .column(1)
+            .as_any()
+            .downcast_ref::<UInt64Array>()
+            .unwrap();
+        let labels = batch
+            .column(2)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        for row in 0..batch.num_rows() {
+            rows.push((
+                ids.value(row),
+                counts.value(row),
+                labels.value(row).to_owned(),
+            ));
+        }
+    }
+    rows
+}
+
+/// Publishes a writer that was created from the returned `entry`.
+async fn handle_of(
+    store: &ObjectStore,
+    mut entry: SeriesIndexEntry,
+    writer: Box<dyn crate::series_index::format::FormatWriter>,
+) -> SeriesIndexFileHandle {
+    let artifact = writer.finish().await.unwrap();
+    entry.file_size = artifact.file_size;
+    entry.artifact = Some(artifact);
+    let (purger, _) = series_index_channel(store.clone());
+    SeriesIndexFileHandle::new(metadata().region_id, entry, purger)
+}
+
+/// The captured failure pair: two distinct series with one `table_id`/`tsid` whose
+/// timestamps restart. The old writer folded the partner into the first series' row
+/// and kept the first series' labels; both rows and both label sets must survive.
+#[tokio::test]
+async fn colliding_tsids_are_retained_not_merged() {
+    let store = store();
+    let meta = metadata();
+    let format = ColumnarSeriesFormat::default();
+    let first = new_sparse_primary_key(&["host-020078", "z"], &meta, 1, 7);
+    let partner = new_sparse_primary_key(&["host-029838", "z"], &meta, 1, 7);
+    for dictionary in [false, true] {
+        let entry = entry();
+        let mut writer = format
+            .writer(meta.clone(), store.clone(), &entry)
+            .await
+            .unwrap();
+        for timestamp in [100, 200] {
+            writer
+                .write(&batch(
+                    &[first.clone(), first.clone()],
+                    dictionary,
+                    timestamp,
+                ))
+                .await
+                .unwrap();
+        }
+        // The partner restarts its timestamps and shares the tsid.
+        for timestamp in [100, 200] {
+            writer
+                .write(&batch(
+                    &[partner.clone(), partner.clone()],
+                    dictionary,
+                    timestamp,
+                ))
+                .await
+                .unwrap();
+        }
+        let handle = handle_of(&store, entry, writer).await;
+        // Two batches of two rows per series: both rows and both label sets survive,
+        // and each series keeps its own count.
+        assert_eq!(
+            read_rows(&format, &store, handle).await,
+            vec![
+                (7, 4, "host-020078".to_owned()),
+                (7, 4, "host-029838".to_owned()),
+            ]
+        );
+    }
+}
+
+/// Many distinct keys under one forced tsid, through both primary-key inputs.
+#[tokio::test]
+async fn many_distinct_keys_under_one_tsid_are_retained() {
+    let store = store();
+    let meta = metadata();
+    let format = ColumnarSeriesFormat::default();
+    let keys: Vec<_> = (0..16)
+        .map(|index| {
+            let label = format!("host-{index:06}");
+            new_sparse_primary_key(&[label.as_str(), "z"], &meta, 1, 5)
+        })
+        .collect();
+    for dictionary in [false, true] {
+        let entry = entry();
+        let mut writer = format
+            .writer(meta.clone(), store.clone(), &entry)
+            .await
+            .unwrap();
+        writer.write(&batch(&keys, dictionary, 0)).await.unwrap();
+        let handle = handle_of(&store, entry, writer).await;
+        let rows = read_rows(&format, &store, handle).await;
+        assert_eq!(rows.len(), keys.len());
+        for (index, row) in rows.iter().enumerate() {
+            assert_eq!(*row, (5, 1, format!("host-{index:06}")));
+        }
+    }
+}
+
+/// Distinct identifiers keep every series, with or without a collision in the input.
+#[tokio::test]
+async fn distinct_identifiers_keep_every_series() {
+    let store = store();
+    let meta = metadata();
+    let format = ColumnarSeriesFormat::default();
+    let keys: Vec<_> = (0..16)
+        .map(|tsid| new_sparse_primary_key(&["a", "x"], &meta, 1, tsid))
+        .collect();
+    for dictionary in [false, true] {
+        let handle = build(&format, &store, &[batch(&keys, dictionary, 0)]).await;
+        let rows = read_rows(&format, &store, handle).await;
+        assert_eq!(rows.len(), keys.len());
+        for (tsid, row) in rows.iter().enumerate() {
+            assert_eq!(*row, (tsid as u64, 1, "a".to_owned()));
+        }
+    }
+}
+
+/// One exact series continuing across input batches, blocks, leaves and parts keeps
+/// aggregating into a single row with its labels.
+#[tokio::test]
+async fn same_exact_series_continues_across_batches_leaves_and_parts() {
+    let store = store();
+    let meta = metadata();
+    // One row per block, one descriptor per leaf, two leaves per root.
+    let format = ColumnarSeriesFormat {
+        block_rows: 1,
+        page_bytes: 64,
+        root_capacity: 2,
+        compression: Compression::None,
+        ..Default::default()
+    };
+    let anchor = new_sparse_primary_key(&["a", "x"], &meta, 1, 0);
+    let rest: Vec<_> = (1..5)
+        .map(|tsid| new_sparse_primary_key(&["a", "x"], &meta, 1, tsid))
+        .collect();
+    let mut entry = entry();
+    let mut writer = format
+        .writer(meta.clone(), store.clone(), &entry)
+        .await
+        .unwrap();
+    for timestamp in [100, 200, 300] {
+        writer
+            .write(&batch(&[anchor.clone(), anchor.clone()], false, timestamp))
+            .await
+            .unwrap();
+    }
+    for (index, key) in rest.iter().enumerate() {
+        writer
+            .write(&batch(std::slice::from_ref(key), true, 100 + index as i64))
+            .await
+            .unwrap();
+    }
+    let artifact = writer.finish().await.unwrap();
+    entry.file_size = artifact.file_size;
+    entry.artifact = Some(artifact);
+    let (purger, _) = series_index_channel(store.clone());
+    let handle = SeriesIndexFileHandle::new(meta.region_id, entry, purger);
+    assert!(manifest(&store, &handle).await.files.len() > 1);
+    let batches = format
+        .reader(store.clone(), handle)
+        .await
+        .unwrap()
+        .read(request(&[TSID_COLUMN, ROW_COUNT_COLUMN, "tag_0"]))
+        .unwrap()
+        .try_collect::<Vec<_>>()
+        .await
+        .unwrap();
+    let mut rows = Vec::new();
+    for batch in &batches {
+        let ids = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<UInt64Array>()
+            .unwrap();
+        let counts = batch
+            .column(1)
+            .as_any()
+            .downcast_ref::<UInt64Array>()
+            .unwrap();
+        let labels = batch
+            .column(2)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        for row in 0..batch.num_rows() {
+            rows.push((
+                ids.value(row),
+                counts.value(row),
+                labels.value(row).to_owned(),
+            ));
+        }
+    }
+    assert_eq!(
+        rows[0],
+        (0, 6, "a".to_owned()),
+        "the anchor series aggregates across batches"
+    );
+    assert_eq!(rows.len(), 5);
+    for (index, row) in rows[1..].iter().enumerate() {
+        assert_eq!(*row, ((index + 1) as u64, 1, "a".to_owned()));
+    }
+}
+
+/// Regressions in sparse-key order are refused instead of opening a second row for
+/// a series that was already emitted.
+#[tokio::test]
+async fn out_of_order_series_are_refused() {
+    let store = store();
+    let meta = metadata();
+    let format = ColumnarSeriesFormat::default();
+    let first = new_sparse_primary_key(&["a", "x"], &meta, 1, 1);
+    let second = new_sparse_primary_key(&["a", "x"], &meta, 1, 2);
+    let mut writer = format
+        .writer(meta.clone(), store.clone(), &entry())
+        .await
+        .unwrap();
+    writer
+        .write(&batch(&[first.clone(), second], false, 0))
+        .await
+        .unwrap();
+    let error = writer
+        .write(&batch(&[first], false, 1))
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("not sorted by primary key"), "{error}");
+    writer.abort().await.unwrap();
+}
+
 #[tokio::test]
 async fn inconsistent_object_sizes_are_rejected() {
     let store = store();

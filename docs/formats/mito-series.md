@@ -1,7 +1,17 @@
 # Mito columnar series format
 
 This document specifies the version 1 on-disk layout, encodings, ordering rules,
-and validation limits for series-index artifacts. For samples, see
+and validation limits for series-index artifacts. The version number stays 1: the
+exact-identity change is enforced by the mandatory `identity_encoding` manifest
+discriminator, not by a version bump.
+
+Rows are keyed by the exact series identity. A row is one distinct canonical
+sparse primary key, so two series that share `(table_id, tsid)` are two rows with
+their own labels. An artifact written before exact identity has the same version
+number and may contain an already merged row that cannot be told apart from a
+complete one; nothing else in the artifact distinguishes them. A manifest that
+does not carry `identity_encoding` is therefore rejected, and its artifact rebuilt
+from SSTs; there is no dual reader. For samples, see
 [Mito columnar samples format](mito-samples.md).
 
 ## Artifact manifest
@@ -25,6 +35,7 @@ One immutable artifact owns the following objects under a unique generation:
 | --- | --- |
 | `format` | String `columnar-series` |
 | `version` | Integer 1 |
+| `identity_encoding` | String `exact-sparse-key`; required, never defaulted, and the only thing that separates exact-identity artifacts from older ones |
 | `region_id` | Physical region ID |
 | `generation` | Index UUID, using the existing `FileId` serialization |
 | `tags` | Ordered objects with `column_id` and `name`; all are nullable UTF-8 |
@@ -101,11 +112,15 @@ as an independent encoded and compressed chunk, then continue with the next
 block. Chunks have no inline header: their locations, lengths, codecs, and
 checksums are recorded in the later [metadata pages](#metadata-pages).
 
-`(__table_id, __tsid)` is the complete identifier **under the current uniqueness
-assumption**. Equal TSIDs in different tables are distinct. Records are ordered
-lexicographically by this pair and identifiers do not repeat after aggregation.
-There is no stored `__primary_key` column. Different label sets may hash to the
-same TSID within a table; version 1 stores no collision discriminator.
+`(__table_id, __tsid)` is the coarse, hash-based prefix of the identity, not the
+identity. Equal TSIDs in different tables are distinct, and different label sets
+inside one table may hash to the same TSID. Records are ordered by the canonical
+sparse key, which groups equal prefixes together, and a record repeats only for
+the same exact key. The block's `first`/`last` identifier bounds stay coarse, so
+they overlap for colliding series and only ever over-select.
+
+There is no stored `__primary_key` column: identity is reconstructed by encoding
+the record's own tags in the artifact order, which reproduces the SST key.
 
 The row count records input rows aggregated for each identifier. Tags are constant
 for that identifier under the uniqueness assumption. The count is not necessarily

@@ -287,14 +287,23 @@ async fn build_index_version(
                 .await
                 .context(crate::error::OpenDalSnafu)?;
         }
-        // Manual builds must repair schema changes even when SST coverage is unchanged.
-        if manual
-            && reusable
+        // Columnar artifacts must be revalidated even when SST coverage is unchanged:
+        // an artifact written under another identity encoding, or with a stale tag
+        // schema, is structurally valid and ordered, so only opening it tells them
+        // apart. An unreadable artifact is rebuilt, never reused and never an error.
+        if reusable
             && selected_format == ArtifactFormat::ColumnarSeries
             && let Some(backend) = &formats.index
         {
-            let reader = backend.reader(store.clone(), handle.clone()).await?;
-            reusable = format::validate_series_schema(&reader.schema(), &version.metadata).is_ok();
+            // An artifact written under another identity encoding, or with a stale tag
+            // schema, is structurally valid and ordered, so only opening it tells them
+            // apart. An unreadable artifact is rebuilt, never reused and never an error.
+            reusable = match backend.reader(store.clone(), handle.clone()).await {
+                Ok(reader) => {
+                    format::validate_series_schema(&reader.schema(), &version.metadata).is_ok()
+                }
+                Err(_) => false,
+            };
         }
         if !reusable {
             unusable.insert(entry.index_uuid);
@@ -315,10 +324,15 @@ async fn build_index_version(
                     .await
                     .context(crate::error::OpenDalSnafu)?;
             }
-            if manual && reusable && backend.format() == ArtifactFormat::ColumnarSamples {
-                let reader = backend.reader(store.clone(), handle.clone()).await?;
-                reusable =
-                    format::validate_sample_schema(&reader.schema(), &version.metadata).is_ok();
+            // Same rule as series indexes: coverage, object existence and format name
+            // cannot prove that a samples artifact was written with exact identity.
+            if reusable && backend.format() == ArtifactFormat::ColumnarSamples {
+                reusable = match backend.reader(store.clone(), handle.clone()).await {
+                    Ok(reader) => {
+                        format::validate_sample_schema(&reader.schema(), &version.metadata).is_ok()
+                    }
+                    Err(_) => false,
+                };
             }
             if reusable {
                 reusable_samples.insert(*id);

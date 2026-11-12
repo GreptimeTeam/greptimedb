@@ -35,6 +35,7 @@ use crate::error::Result;
 use crate::series_index::artifact::{ArtifactFormat, SamplesFileHandle};
 use crate::series_index::columnar::{invalid, require, unsupported};
 use crate::series_index::format::{FormatWriter, SamplesFormat, SamplesFormatReader};
+use crate::series_index::identity::IdentityEncoding;
 use crate::series_index::{MetricSeriesId, TABLE_ID_COLUMN, TSID_COLUMN};
 
 const VERSION: u32 = 1;
@@ -44,6 +45,8 @@ const MAX_FIELDS: usize = 1024;
 const BLOCK_BYTES: usize = 256 * 1024;
 const SEQUENCE: &str = "__sequence";
 const OPERATION: &str = "__op_type";
+/// Output column naming the exact series key that owns each returned sample row.
+const PRIMARY_KEY: &str = store_api::storage::consts::PRIMARY_KEY_COLUMN_NAME;
 
 /// Internal packing knobs; the backend is disabled unless selected explicitly.
 #[derive(Debug, Clone)]
@@ -151,6 +154,8 @@ struct Part {
 struct Manifest {
     format: ArtifactFormat,
     version: u32,
+    /// Mandatory discriminator; see [`IdentityEncoding`]. Never defaulted on read.
+    identity_encoding: IdentityEncoding,
     region_id: u64,
     source_file_id: FileId,
     generation: FileId,
@@ -185,7 +190,13 @@ impl Manifest {
             (1..=MAX_FIELDS).contains(&self.fields.len()),
             "invalid samples field count",
         )?;
-        let mut names = HashSet::from([TABLE_ID_COLUMN, TSID_COLUMN, SEQUENCE, OPERATION]);
+        let mut names = HashSet::from([
+            TABLE_ID_COLUMN,
+            TSID_COLUMN,
+            SEQUENCE,
+            OPERATION,
+            PRIMARY_KEY,
+        ]);
         require(
             names.insert(&self.timestamp.name),
             "duplicate samples timestamp name",
@@ -221,7 +232,16 @@ impl Manifest {
         fields.extend(self.fields.iter().map(|f| {
             crate::sst::with_field_id(Field::new(&f.name, DataType::Float64, true), f.column_id)
         }));
+        // Appended after the data fields so stored row indices stay stable. The column is the
+        // artifact's exact-identity marker: readers attribute every row of a batch by the key
+        // they return with it and never project this column.
+        fields.push(Field::new(PRIMARY_KEY, DataType::Binary, false));
         Arc::new(Schema::new(fields))
+    }
+
+    /// Index of the exact series key column in [`Self::schema`].
+    fn primary_key_index(&self) -> usize {
+        5 + self.fields.len()
     }
 }
 

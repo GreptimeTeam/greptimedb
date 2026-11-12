@@ -531,8 +531,14 @@ async fn series_index_store_from_config(
     Ok(Some(store))
 }
 
-/// Bump when the rebuildable local index layout becomes incompatible.
-const SERIES_INDEX_CACHE_VERSION: &str = "2";
+/// Marks the rebuildable local index layout, and resets the store when it changes.
+///
+/// This branch is experimental and has no deployments, so it pins the token at `1`: a
+/// cache written by any other build is discarded on startup and rebuilt from the SSTs.
+/// Artifacts are additionally rejected on open when they lack the mandatory
+/// `identity_encoding` discriminator, so a stale artifact is never served even if the
+/// reset did not happen (a read that precedes it, or an artifact outside this cache).
+const SERIES_INDEX_CACHE_VERSION: &str = "1";
 
 /// Resets incompatible caches before any worker or reader can use their catalogs.
 async fn initialize_series_index_cache(store: &ObjectStore) -> Result<()> {

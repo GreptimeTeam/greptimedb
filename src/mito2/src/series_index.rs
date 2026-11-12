@@ -25,6 +25,7 @@ pub(crate) mod columnar;
 pub(crate) mod format;
 #[cfg(test)]
 mod format_tests;
+pub(crate) mod identity;
 mod maintenance;
 mod purger;
 pub(crate) mod samples;

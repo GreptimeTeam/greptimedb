@@ -213,11 +213,11 @@ impl Block {
         let last = c.u64()?;
         let rows = c.u32()?;
         let count = c.u32()? as usize;
+        // `first`/`last` are the coarse `(table_id, tsid)` prefix, so several rows may
+        // share one identifier when their exact keys differ. Only their order is fixed,
+        // so the count is bounded by the block limit and not by the identifier span.
         require(
-            rows > 0
-                && rows as usize <= codec::COLUMN_LIMIT / 8
-                && first <= last
-                && u64::from(rows - 1) <= last - first,
+            rows > 0 && rows as usize <= codec::COLUMN_LIMIT / 8 && first <= last,
             "invalid series block bounds/count",
         )?;
         require(
@@ -363,8 +363,11 @@ impl Page {
                 for _ in 0..count {
                     let block = Block::decode(&mut c, names, payload_end, &mut end)?;
                     if let Some(previous) = blocks.last() {
+                        // Bounds are the coarse `(table_id, tsid)` prefix and stay
+                        // conservative: two blocks may share one prefix when their exact
+                        // keys differ, so equality is allowed and only ever over-selects.
                         require(
-                            previous.last_id() < block.first_id(),
+                            previous.last_id() <= block.first_id(),
                             "unordered series blocks",
                         )?;
                     }
@@ -390,7 +393,10 @@ impl Page {
                         .validate(end, reference.payload.offset, true)?;
                     end = child.payload.end()?;
                     if let Some(previous) = children.last() {
-                        require(previous.last < child.first, "unordered series child ranges")?;
+                        require(
+                            previous.last <= child.first,
+                            "unordered series child ranges",
+                        )?;
                     }
                     children.push(child);
                 }

@@ -28,7 +28,7 @@ use object_store::ObjectStore;
 use snafu::ResultExt;
 
 use crate::cache::columnar::{self as metadata_cache, MetadataCache};
-use crate::error::{NewRecordBatchSnafu, OpenDalSnafu, RecordBatchSnafu, Result, SerdeJsonSnafu};
+use crate::error::{NewRecordBatchSnafu, OpenDalSnafu, RecordBatchSnafu, Result};
 use crate::metrics::ColumnarReadMetrics;
 use crate::series_index::artifact::ArtifactFormat;
 use crate::series_index::columnar::codec::{self, Dictionary};
@@ -37,6 +37,7 @@ use crate::series_index::columnar::{
     MANIFEST_LIMIT, Manifest, VERSION, invalid, require, unsupported,
 };
 use crate::series_index::format::{FormatReader, SeriesReadRequest};
+use crate::series_index::identity::IdentityEncoding;
 use crate::series_index::{
     MetricSeriesId, ROW_COUNT_COLUMN, SeriesIndexFileHandle, TABLE_ID_COLUMN, TSID_COLUMN,
 };
@@ -114,9 +115,22 @@ impl ColumnarReader {
             "series manifest exceeds size limit",
         )?;
         let bytes = read_range(&store, &path, 0, length).await?;
-        let manifest: Manifest = serde_json::from_slice(&bytes).context(SerdeJsonSnafu)?;
+        // A manifest that the current format cannot read predates exact identity or is
+        // corrupt; either way it must never be reused.
+        let manifest: Manifest = serde_json::from_slice(&bytes).map_err(|error| {
+            invalid(format!(
+                "series manifest is not readable; rebuild the index: {error}"
+            ))
+        })?;
         if manifest.version != VERSION {
             return Err(unsupported("series manifest version"));
+        }
+        // Old artifacts can be structurally valid and perfectly ordered, so identity
+        // encoding is the only thing that keeps their lost labels out of reads.
+        if manifest.identity_encoding != IdentityEncoding::CURRENT_SERIES_INDEX {
+            return Err(unsupported(
+                "series manifest identity encoding; rebuild the series index",
+            ));
         }
         require(
             manifest.format == ArtifactFormat::ColumnarSeries
@@ -155,7 +169,8 @@ impl ColumnarReader {
                 "invalid series part entry",
             )?;
             if let Some(last) = previous {
-                require(last < part.first, "unordered series parts")?;
+                // Coarse bounds may touch when two colliding series straddle a part.
+                require(last <= part.first, "unordered series parts")?;
             }
             previous = Some(part.last);
             let part_path = manifest.part_path(part.part_id);
@@ -479,10 +494,12 @@ async fn load_column_chunk(
     let result = if integer {
         let values = codec::decode_integers(&bytes, rows)?;
         if column.name == TSID_COLUMN {
+            // Rows are ordered by exact key, so their coarse TSIDs are non-decreasing:
+            // a distinct series may repeat its partner's TSID.
             require(
                 values.first() == Some(&first)
                     && values.last() == Some(&last)
-                    && values.windows(2).all(|v| v[0] < v[1]),
+                    && values.windows(2).all(|v| v[0] <= v[1]),
                 "invalid series TSID ordering/bounds",
             )?;
         } else {

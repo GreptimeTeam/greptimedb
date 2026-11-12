@@ -1883,6 +1883,127 @@ async fn check_two_phase_series_scan(
     }
 }
 
+/// Runs one two-phase series scan over `filters` and returns `(tag_0, field_0, ts)` per row.
+async fn two_phase_sparse_rows(
+    engine: &crate::engine::MitoEngine,
+    region_id: RegionId,
+    filters: Vec<datafusion_expr::Expr>,
+) -> Vec<(String, u64, i64)> {
+    let request = ScanRequest {
+        distribution: Some(TimeSeriesDistribution::PerSeries),
+        filters,
+        ..Default::default()
+    };
+    let Scanner::Series(mut scanner) = engine.scanner(region_id, request).await.unwrap() else {
+        panic!("sparse PerSeries request must use SeriesScan");
+    };
+    assert_eq!("two_phase", scanner.mode());
+    let ranges = scanner
+        .properties()
+        .partitions
+        .iter()
+        .flatten()
+        .copied()
+        .collect::<Vec<_>>();
+    scanner
+        .prepare(
+            PrepareRequest::default()
+                .with_ranges(vec![ranges])
+                .with_target_partitions(1),
+        )
+        .unwrap();
+    let metrics_set = ExecutionPlanMetricsSet::default();
+    let context = store_api::region_engine::QueryScanContext::default();
+    let batches = scanner
+        .scan_partition(&context, &metrics_set, 0)
+        .unwrap()
+        .try_collect::<Vec<_>>()
+        .await
+        .unwrap();
+    let mut rows = Vec::new();
+    for batch in batches {
+        let tags = batch.column_by_name("tag_0").unwrap();
+        let fields = batch
+            .column_by_name("field_0")
+            .unwrap()
+            .as_primitive::<UInt64Type>();
+        let timestamps = batch
+            .column_by_name("ts")
+            .unwrap()
+            .as_primitive::<TimestampMillisecondType>();
+        for row in 0..batch.num_rows() {
+            rows.push((
+                datatypes::arrow_array::string_array_value_at_index(tags, row)
+                    .unwrap()
+                    .to_string(),
+                fields.value(row),
+                timestamps.value(row),
+            ));
+        }
+    }
+    rows.sort();
+    rows
+}
+
+/// `tsid` is a hash, so two series that share one are still two series. Candidate discovery
+/// collapses them into a single identifier, so the data read must apply the tag predicates
+/// instead of trusting the assignment as an exact series name.
+#[tokio::test]
+async fn test_two_phase_series_scan_never_reads_a_colliding_partner() {
+    let mut env = TestEnv::with_prefix("test_two_phase_colliding_series").await;
+    let engine = env
+        .create_engine(MitoConfig {
+            experimental_series_scan_v2: true,
+            ..Default::default()
+        })
+        .await;
+    let region_id = RegionId::new(1, 1);
+    let (metadata, row_schema) = create_two_phase_sparse_region(&engine, region_id).await;
+    let rows = [
+        // One tsid, two label sets.
+        (
+            new_sparse_primary_key(&["host-a", "x"], &metadata, 10, 7),
+            1000,
+            1,
+        ),
+        (
+            new_sparse_primary_key(&["host-b", "x"], &metadata, 10, 7),
+            2000,
+            2,
+        ),
+        // A distinct tsid collides with nothing.
+        (
+            new_sparse_primary_key(&["host-c", "x"], &metadata, 10, 8),
+            3000,
+            3,
+        ),
+    ];
+    put_sparse_rows(&engine, region_id, &row_schema, rows.to_vec()).await;
+    test_util::flush_region(&engine, region_id, None).await;
+
+    // Selecting one owner must never return the colliding partner's rows.
+    assert_eq!(
+        vec![("host-a".to_string(), 1, 1000)],
+        two_phase_sparse_rows(&engine, region_id, vec![col("tag_0").eq(lit("host-a"))]).await
+    );
+    // A series without a collision still answers its own selection.
+    assert_eq!(
+        vec![("host-c".to_string(), 3, 3000)],
+        two_phase_sparse_rows(&engine, region_id, vec![col("tag_0").eq(lit("host-c"))]).await
+    );
+    // Without a predicate the path still serves the whole assignment, colliding partner
+    // included: the fix applies the predicates rather than disabling the scan.
+    assert_eq!(
+        vec![
+            ("host-a".to_string(), 1, 1000),
+            ("host-b".to_string(), 2, 2000),
+            ("host-c".to_string(), 3, 3000),
+        ],
+        two_phase_sparse_rows(&engine, region_id, Vec::new()).await
+    );
+    engine.stop().await.unwrap();
+}
+
 /// Scans all partitions in round-robin fashion and returns rows sorted by (tag, ts).
 /// Also asserts that each series appears in only one partition.
 async fn collect_partition_rows_round_robin(
