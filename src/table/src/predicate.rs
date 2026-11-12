@@ -15,6 +15,7 @@
 use std::sync::Arc;
 
 use arc_swap::ArcSwap;
+use chrono::{Datelike, Months, NaiveDate};
 use common_telemetry::{debug, warn};
 use common_time::Timestamp;
 use common_time::range::TimestampRange;
@@ -355,6 +356,14 @@ fn extract_from_binary_expr(
     op: &Operator,
     right: &Expr,
 ) -> Option<TimestampRange> {
+    // `date_trunc(unit, ts_col) <op> literal` does not compare the time index
+    // directly, so it needs its own extraction rule.
+    if let Some(range) =
+        extract_from_date_trunc_comparison(ts_col_name, ts_col_unit, left, op, right)
+    {
+        return Some(range);
+    }
+
     match op {
         Operator::Eq => get_timestamp_filter(ts_col_name, left, right)
             .and_then(|(ts, _)| ts.convert_to(ts_col_unit))
@@ -447,6 +456,184 @@ fn get_timestamp_filter(ts_col_name: &str, left: &Expr, right: &Expr) -> Option<
     scalar_value_to_timestamp(lit, None).map(|t| (t, reverse))
 }
 
+/// Granularity of a `date_trunc` call. Mirrors the units accepted by
+/// DataFusion's `date_trunc`, which parses the unit case-insensitively.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DateTruncUnit {
+    Microsecond,
+    Millisecond,
+    Second,
+    Minute,
+    Hour,
+    Day,
+    Week,
+    Month,
+    Quarter,
+    Year,
+}
+
+impl DateTruncUnit {
+    fn parse(unit: &str) -> Option<Self> {
+        match unit.to_ascii_lowercase().as_str() {
+            "microsecond" => Some(Self::Microsecond),
+            "millisecond" => Some(Self::Millisecond),
+            "second" => Some(Self::Second),
+            "minute" => Some(Self::Minute),
+            "hour" => Some(Self::Hour),
+            "day" => Some(Self::Day),
+            "week" => Some(Self::Week),
+            "month" => Some(Self::Month),
+            "quarter" => Some(Self::Quarter),
+            "year" => Some(Self::Year),
+            _ => None,
+        }
+    }
+
+    /// Width of one bucket in nanoseconds for fixed-width units. Returns `None`
+    /// for calendar units, whose width depends on where the bucket falls.
+    fn fixed_width_in_nanos(&self) -> Option<i64> {
+        const SECOND: i64 = 1_000_000_000;
+        Some(match self {
+            Self::Microsecond => 1_000,
+            Self::Millisecond => 1_000_000,
+            Self::Second => SECOND,
+            Self::Minute => 60 * SECOND,
+            Self::Hour => 60 * 60 * SECOND,
+            Self::Day => 24 * 60 * 60 * SECOND,
+            Self::Week => 7 * 24 * 60 * 60 * SECOND,
+            Self::Month | Self::Quarter | Self::Year => return None,
+        })
+    }
+}
+
+/// Matches `date_trunc(<unit literal>, <ts_col>)` and returns the unit.
+/// Returns `None` for any other shape, so unrelated expressions keep their
+/// existing extraction result.
+fn date_trunc_unit_of(expr: &Expr, ts_col_name: &str) -> Option<DateTruncUnit> {
+    let Expr::ScalarFunction(scalar_function) = expr else {
+        return None;
+    };
+    let func_name = scalar_function.func.name();
+    if !func_name.eq_ignore_ascii_case("date_trunc") {
+        return None;
+    }
+    // DataFusion's `date_trunc` takes exactly `(unit, timestamp)`: there is no
+    // three-argument (timezone) form to handle.
+    let [unit, timestamp] = scalar_function.args.as_slice() else {
+        return None;
+    };
+    let Expr::Literal(unit, _) = unit else {
+        return None;
+    };
+    let unit = match unit {
+        ScalarValue::Utf8(Some(unit))
+        | ScalarValue::Utf8View(Some(unit))
+        | ScalarValue::LargeUtf8(Some(unit)) => unit,
+        _ => return None,
+    };
+    let unit = DateTruncUnit::parse(unit)?;
+    // Any other argument says nothing about the time index.
+    match timestamp {
+        Expr::Column(column) if column.name == ts_col_name => Some(unit),
+        _ => None,
+    }
+}
+
+/// Extracts the time range implied by `date_trunc(unit, ts) <op> literal`
+/// (also accepts the literal on the left-hand side).
+///
+/// # Range math
+///
+/// Let `f(ts) = date_trunc(unit, ts)`, so `f(ts) <= ts < next_boundary(f(ts))`.
+/// GreptimeDB's time index is a timezone-less `Timestamp` interpreted as UTC,
+/// which matches the UTC semantics `date_trunc` applies to timestamps without
+/// timezone metadata.
+///
+/// - `f >= b` and `f > b` imply `ts >= b`, so `b` is used as an inclusive
+///   lower bound (rounding up can only widen the range).
+/// - `f <= b` and `f < b` imply `ts < next_boundary_after(b)`, the first bucket
+///   boundary strictly after `b`. This is exact for `<=` and over-approximates
+///   `<` by at most one bucket, which only widens the extracted range.
+/// - `f = b` implies the bucket `[b, next_boundary_after(b))`.
+///
+/// Everything else (`!=`, non-literal bound, non-time-index column, unsupported
+/// unit, ...) returns `None` so the caller falls back to its previous behavior.
+fn extract_from_date_trunc_comparison(
+    ts_col_name: &str,
+    ts_col_unit: TimeUnit,
+    left: &Expr,
+    op: &Operator,
+    right: &Expr,
+) -> Option<TimestampRange> {
+    // Normalize to `date_trunc(...) <op> literal`.
+    let (unit, lit, op) = match (left, right) {
+        (expr, Expr::Literal(lit, _)) => (date_trunc_unit_of(expr, ts_col_name)?, lit, *op),
+        (Expr::Literal(lit, _), expr) => (
+            date_trunc_unit_of(expr, ts_col_name)?,
+            lit,
+            // `None` for operators that are not order comparisons, and those
+            // are not supported below anyway.
+            op.swap()?,
+        ),
+        _ => return None,
+    };
+
+    return_none_if_utf8!(lit);
+    let bound = scalar_value_to_timestamp(lit, None)?;
+
+    match op {
+        Operator::Gt | Operator::GtEq => bound
+            .convert_to_ceil(ts_col_unit)
+            .map(TimestampRange::from_start),
+        Operator::Lt | Operator::LtEq => date_trunc_next_boundary_after(bound, unit, ts_col_unit)
+            .map(|end| TimestampRange::until_end(end, false)),
+        Operator::Eq => {
+            let start = bound.convert_to_ceil(ts_col_unit)?;
+            let end = date_trunc_next_boundary_after(bound, unit, ts_col_unit)?;
+            TimestampRange::new(start, end)
+        }
+        _ => None,
+    }
+}
+
+/// Returns an exclusive upper bound for `date_trunc(unit, ts) <= bound`, rounded
+/// up to `ts_col_unit`.
+///
+/// Fixed-width units use `bound + one bucket`, which is safe even when `bound`
+/// is not aligned to a bucket boundary; calendar units compute the first instant
+/// of the next bucket exactly. Rounding up (and adding a whole bucket for an
+/// unaligned `bound`) can only widen the extracted range: the result never cuts
+/// off a row that satisfies the filter.
+fn date_trunc_next_boundary_after(
+    bound: Timestamp,
+    unit: DateTruncUnit,
+    ts_col_unit: TimeUnit,
+) -> Option<Timestamp> {
+    if let Some(width) = unit.fixed_width_in_nanos() {
+        // Adding one bucket width is safe even when `bound` is not aligned to a
+        // bucket boundary.
+        let nanos = bound
+            .convert_to(TimeUnit::Nanosecond)?
+            .value()
+            .checked_add(width)?;
+        return Timestamp::new(nanos, TimeUnit::Nanosecond).convert_to_ceil(ts_col_unit);
+    }
+
+    // Calendar units: the width depends on the month, so compute the first
+    // instant of the next bucket in the UTC calendar.
+    let date = bound.to_chrono_datetime()?.date();
+    let (first_month, months_per_bucket) = match unit {
+        DateTruncUnit::Month => (date.month(), 1),
+        DateTruncUnit::Quarter => (((date.month() - 1) / 3) * 3 + 1, 3),
+        DateTruncUnit::Year => (1, 12),
+        _ => return None,
+    };
+    let bucket_start =
+        NaiveDate::from_ymd_opt(date.year(), first_month, 1)?.and_hms_opt(0, 0, 0)?;
+    let next = bucket_start.checked_add_months(Months::new(months_per_bucket))?;
+    Timestamp::from_chrono_datetime(next)?.convert_to_ceil(ts_col_unit)
+}
+
 fn extract_from_between_expr(
     ts_col_name: &str,
     ts_col_unit: TimeUnit,
@@ -455,14 +642,35 @@ fn extract_from_between_expr(
     low: &Expr,
     high: &Expr,
 ) -> Option<TimestampRange> {
+    if *negated {
+        return None;
+    }
+
+    if let Some(unit) = date_trunc_unit_of(expr, ts_col_name) {
+        // `date_trunc(unit, ts) BETWEEN low AND high` covers
+        // `[low, next_boundary_after(high))`. A side that cannot be extracted
+        // widens to `min_to_max`, mirroring the plain column case below.
+        let (Expr::Literal(low, _), Expr::Literal(high, _)) = (low, high) else {
+            return None;
+        };
+        return_none_if_utf8!(low);
+        return_none_if_utf8!(high);
+
+        let start = scalar_value_to_timestamp(low, None)
+            .and_then(|ts| ts.convert_to_ceil(ts_col_unit))
+            .map_or_else(TimestampRange::min_to_max, TimestampRange::from_start);
+        let end = scalar_value_to_timestamp(high, None)
+            .and_then(|ts| date_trunc_next_boundary_after(ts, unit, ts_col_unit))
+            .map_or_else(TimestampRange::min_to_max, |ts| {
+                TimestampRange::until_end(ts, false)
+            });
+        return Some(start.and(&end));
+    }
+
     let Expr::Column(col) = expr else {
         return None;
     };
     if col.name != ts_col_name {
-        return None;
-    }
-
-    if *negated {
         return None;
     }
 
@@ -692,6 +900,298 @@ mod tests {
         check_build_predicate(
             col("ts").lt_eq(lit(ScalarValue::TimestampSecond(Some(1), None))),
             TimestampRange::until_end(Timestamp::new_millisecond(1000), true),
+        );
+    }
+
+    /// Builds `date_trunc(<unit>, <ts_col>)` from the real DataFusion UDF, so the
+    /// shape under test matches what the planner produces.
+    fn date_trunc_expr(unit: &str, ts_col: &str) -> Expr {
+        datafusion::functions::datetime::date_trunc().call(vec![
+            lit(ScalarValue::Utf8(Some(unit.to_string()))),
+            col(ts_col),
+        ])
+    }
+
+    /// A UTC instant in millisecond unit, the unit used by the tests below.
+    fn utc_ms(year: i32, month: u32, day: u32, hour: u32, minute: u32, second: u32) -> Timestamp {
+        Timestamp::from_chrono_datetime(
+            NaiveDate::from_ymd_opt(year, month, day)
+                .unwrap()
+                .and_hms_opt(hour, minute, second)
+                .unwrap(),
+        )
+        .unwrap()
+        .convert_to(TimeUnit::Millisecond)
+        .unwrap()
+    }
+
+    fn ts_ms(ts: Timestamp) -> Expr {
+        lit(ScalarValue::TimestampMillisecond(Some(ts.value()), None))
+    }
+
+    fn check_date_trunc_predicate(expr: Expr, expect: TimestampRange) {
+        assert_eq!(
+            expect,
+            build_time_range_predicate("ts", TimeUnit::Millisecond, &[expr])
+        );
+    }
+
+    #[test]
+    fn test_date_trunc_minute_comparisons() {
+        let b = utc_ms(2024, 5, 15, 0, 0, 0);
+        let next_minute = utc_ms(2024, 5, 15, 0, 1, 0);
+
+        // date_trunc('minute', ts) >= b
+        check_date_trunc_predicate(
+            date_trunc_expr("minute", "ts").gt_eq(ts_ms(b)),
+            TimestampRange::from_start(b),
+        );
+        // date_trunc('minute', ts) > b: `b` stays a safe inclusive lower bound.
+        check_date_trunc_predicate(
+            date_trunc_expr("minute", "ts").gt(ts_ms(b)),
+            TimestampRange::from_start(b),
+        );
+        // b <= date_trunc('minute', ts)
+        check_date_trunc_predicate(
+            ts_ms(b).lt_eq(date_trunc_expr("minute", "ts")),
+            TimestampRange::from_start(b),
+        );
+        // b < date_trunc('minute', ts)
+        check_date_trunc_predicate(
+            ts_ms(b).lt(date_trunc_expr("minute", "ts")),
+            TimestampRange::from_start(b),
+        );
+
+        // date_trunc('minute', ts) < b
+        check_date_trunc_predicate(
+            date_trunc_expr("minute", "ts").lt(ts_ms(b)),
+            TimestampRange::until_end(next_minute, false),
+        );
+        // date_trunc('minute', ts) <= b
+        check_date_trunc_predicate(
+            date_trunc_expr("minute", "ts").lt_eq(ts_ms(b)),
+            TimestampRange::until_end(next_minute, false),
+        );
+        // b > date_trunc('minute', ts)
+        check_date_trunc_predicate(
+            ts_ms(b).gt(date_trunc_expr("minute", "ts")),
+            TimestampRange::until_end(next_minute, false),
+        );
+        // b >= date_trunc('minute', ts)
+        check_date_trunc_predicate(
+            ts_ms(b).gt_eq(date_trunc_expr("minute", "ts")),
+            TimestampRange::until_end(next_minute, false),
+        );
+    }
+
+    #[test]
+    fn test_date_trunc_minute_eq() {
+        let b = utc_ms(2024, 5, 15, 0, 0, 0);
+        let expect = TimestampRange::new(b, utc_ms(2024, 5, 15, 0, 1, 0)).unwrap();
+        check_date_trunc_predicate(date_trunc_expr("minute", "ts").eq(ts_ms(b)), expect);
+        // The literal may also be on the left-hand side.
+        check_date_trunc_predicate(ts_ms(b).eq(date_trunc_expr("minute", "ts")), expect);
+    }
+
+    #[test]
+    fn test_date_trunc_between() {
+        let low = utc_ms(2024, 5, 15, 0, 0, 0);
+        let high = utc_ms(2024, 5, 15, 0, 2, 0);
+        // [low, high + one minute).
+        check_date_trunc_predicate(
+            date_trunc_expr("minute", "ts").between(ts_ms(low), ts_ms(high)),
+            TimestampRange::new(low, utc_ms(2024, 5, 15, 0, 3, 0)).unwrap(),
+        );
+    }
+
+    #[test]
+    fn test_date_trunc_and_with_time_range() {
+        let start = utc_ms(2024, 5, 15, 0, 0, 0);
+        let end = utc_ms(2024, 5, 17, 0, 0, 0);
+        // The day-truncated lower bound and an ordinary time range are combined with AND.
+        check_date_trunc_predicate(
+            date_trunc_expr("day", "ts")
+                .gt_eq(ts_ms(start))
+                .and(col("ts").lt(ts_ms(end))),
+            TimestampRange::new(start, end).unwrap(),
+        );
+    }
+
+    #[test]
+    fn test_date_trunc_neq_returns_none() {
+        let b = utc_ms(2024, 5, 15, 0, 0, 0);
+        check_date_trunc_predicate(
+            date_trunc_expr("day", "ts").not_eq(ts_ms(b)),
+            TimestampRange::min_to_max(),
+        );
+    }
+
+    #[test]
+    fn test_date_trunc_not_between_returns_none() {
+        let b = utc_ms(2024, 5, 15, 0, 0, 0);
+        let not_between = Expr::Between(Between {
+            expr: Box::new(date_trunc_expr("day", "ts")),
+            negated: true,
+            low: Box::new(ts_ms(b)),
+            high: Box::new(ts_ms(b)),
+        });
+        check_date_trunc_predicate(not_between, TimestampRange::min_to_max());
+    }
+
+    #[test]
+    fn test_date_trunc_day_week_upper_bound() {
+        // A bound that is not aligned to a bucket: the exclusive end is widened
+        // by one bucket (a superset of the satisfying rows, never narrower).
+        let b = utc_ms(2023, 12, 31, 12, 0, 0);
+        check_date_trunc_predicate(
+            date_trunc_expr("day", "ts").lt_eq(ts_ms(b)),
+            TimestampRange::until_end(utc_ms(2024, 1, 1, 12, 0, 0), false),
+        );
+
+        // A week is a fixed 7 days, so a mid-week bound is widened by a week.
+        let b = utc_ms(2023, 12, 27, 6, 0, 0);
+        check_date_trunc_predicate(
+            date_trunc_expr("week", "ts").lt(ts_ms(b)),
+            TimestampRange::until_end(utc_ms(2024, 1, 3, 6, 0, 0), false),
+        );
+    }
+
+    #[test]
+    fn test_date_trunc_month_quarter_year_upper_bound() {
+        // month: first instant of the next calendar month (December -> January).
+        let b = utc_ms(2023, 12, 15, 10, 30, 0);
+        check_date_trunc_predicate(
+            date_trunc_expr("month", "ts").lt_eq(ts_ms(b)),
+            TimestampRange::until_end(utc_ms(2024, 1, 1, 0, 0, 0), false),
+        );
+
+        // quarter: 2023-11-15 belongs to Q4, which ends at 2024-01-01.
+        let b = utc_ms(2023, 11, 15, 10, 30, 0);
+        check_date_trunc_predicate(
+            date_trunc_expr("quarter", "ts").lt(ts_ms(b)),
+            TimestampRange::until_end(utc_ms(2024, 1, 1, 0, 0, 0), false),
+        );
+
+        // year: 2023 ends at 2024-01-01.
+        let b = utc_ms(2023, 6, 1, 8, 0, 0);
+        check_date_trunc_predicate(
+            date_trunc_expr("year", "ts").lt_eq(ts_ms(b)),
+            TimestampRange::until_end(utc_ms(2024, 1, 1, 0, 0, 0), false),
+        );
+
+        // An upper bound inside the last month of the representable range must
+        // not overflow into a wrong bound: it is simply not extracted.
+        let huge = lit(ScalarValue::TimestampNanosecond(Some(i64::MAX), None));
+        assert_eq!(
+            None,
+            extract_time_range_from_expr(
+                "ts",
+                TimeUnit::Nanosecond,
+                &date_trunc_expr("year", "ts").lt_eq(huge)
+            )
+        );
+    }
+
+    #[test]
+    fn test_date_trunc_upper_bound_is_superset() {
+        // For an unaligned bound the exact first bucket boundary after `b` is the
+        // next midnight; the extracted end must not be earlier than that.
+        let b = utc_ms(2024, 5, 15, 12, 0, 0);
+        let range = build_time_range_predicate(
+            "ts",
+            TimeUnit::Millisecond,
+            &[date_trunc_expr("day", "ts").lt(ts_ms(b))],
+        );
+
+        assert!(*range.end() >= Some(utc_ms(2024, 5, 16, 0, 0, 0)));
+        // Rows admitted by the filter stay inside the extracted range.
+        assert!(range.contains(&utc_ms(2024, 5, 15, 23, 59, 59)));
+        assert!(range.contains(&utc_ms(2024, 5, 15, 12, 0, 1)));
+        // A row of the following day is definitely outside.
+        assert!(!range.contains(&utc_ms(2024, 5, 17, 0, 0, 0)));
+    }
+
+    #[test]
+    fn test_date_trunc_eq_matches_exact_bucket() {
+        // An aligned bound extracts exactly the bucket of that day, so the range
+        // is not narrower than the hand-computed set of matching rows.
+        let day = utc_ms(2024, 5, 15, 0, 0, 0);
+        let next_day = utc_ms(2024, 5, 16, 0, 0, 0);
+        let range = build_time_range_predicate(
+            "ts",
+            TimeUnit::Millisecond,
+            &[date_trunc_expr("day", "ts").eq(ts_ms(day))],
+        );
+
+        assert_eq!(TimestampRange::new(day, next_day).unwrap(), range);
+        assert!(range.contains(&utc_ms(2024, 5, 15, 0, 0, 0)));
+        assert!(range.contains(&utc_ms(2024, 5, 15, 23, 59, 59)));
+        assert!(!range.contains(&next_day));
+        assert!(!range.contains(&utc_ms(2024, 5, 14, 23, 59, 59)));
+    }
+
+    #[test]
+    fn test_date_trunc_uppercase_unit() {
+        let day = utc_ms(2024, 5, 15, 0, 0, 0);
+        // DataFusion parses the unit case-insensitively, so `'DAY'` behaves like `'day'`.
+        check_date_trunc_predicate(
+            date_trunc_expr("DAY", "ts").eq(ts_ms(day)),
+            TimestampRange::new(day, utc_ms(2024, 5, 16, 0, 0, 0)).unwrap(),
+        );
+    }
+
+    #[test]
+    fn test_date_trunc_unsupported_shapes_return_none() {
+        let b = utc_ms(2024, 5, 15, 0, 0, 0);
+
+        // Truncating a column that is not the time index.
+        check_date_trunc_predicate(
+            date_trunc_expr("day", "other_ts").gt_eq(ts_ms(b)),
+            TimestampRange::min_to_max(),
+        );
+
+        // Truncating an expression rather than the bare column.
+        let truncated_expr = datafusion::functions::datetime::date_trunc().call(vec![
+            lit(ScalarValue::Utf8(Some("day".to_string()))),
+            date_trunc_expr("hour", "ts"),
+        ]);
+        check_date_trunc_predicate(truncated_expr.gt_eq(ts_ms(b)), TimestampRange::min_to_max());
+
+        // A non-literal unit.
+        let dynamic_unit =
+            datafusion::functions::datetime::date_trunc().call(vec![col("unit"), col("ts")]);
+        check_date_trunc_predicate(dynamic_unit.gt_eq(ts_ms(b)), TimestampRange::min_to_max());
+
+        // An unknown unit.
+        check_date_trunc_predicate(
+            date_trunc_expr("fortnight", "ts").gt_eq(ts_ms(b)),
+            TimestampRange::min_to_max(),
+        );
+
+        // Three arguments: this DataFusion version has no timezone form.
+        let three_args = datafusion::functions::datetime::date_trunc().call(vec![
+            lit(ScalarValue::Utf8(Some("day".to_string()))),
+            col("ts"),
+            lit(ScalarValue::Utf8(Some("UTC".to_string()))),
+        ]);
+        check_date_trunc_predicate(three_args.gt_eq(ts_ms(b)), TimestampRange::min_to_max());
+
+        // A non-literal bound.
+        check_date_trunc_predicate(
+            date_trunc_expr("day", "ts").gt_eq(col("t2")),
+            TimestampRange::min_to_max(),
+        );
+
+        // A string-typed bound is left to the type-conversion rule.
+        check_date_trunc_predicate(
+            date_trunc_expr("day", "ts").gt_eq(lit("2024-05-15")),
+            TimestampRange::min_to_max(),
+        );
+
+        // BETWEEN with a non-literal side is not extracted.
+        check_date_trunc_predicate(
+            date_trunc_expr("day", "ts").between(col("t2"), col("t3")),
+            TimestampRange::min_to_max(),
         );
     }
 
