@@ -102,7 +102,91 @@ pub fn redact_connection(connection: &str) -> String {
     }
 }
 
-fn redact_relational_options(encoded: &str) -> String {
+/// Redacts passwords of connection DSNs embedded in arbitrary text such as raw
+/// SQL, parser error messages, or token dumps. Text without a `scheme://` DSN is
+/// returned unchanged.
+pub fn redact_connection_in_text(text: &str) -> String {
+    const REDACTED: &str = "REDACTED";
+    let mut output = String::with_capacity(text.len());
+    let bytes = text.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        match find_subslice(bytes, index, b"://") {
+            Some(scheme_end) => {
+                let mut start = scheme_end;
+                while start > index && is_scheme_char(bytes[start - 1]) {
+                    start -= 1;
+                }
+                output.push_str(&text[index..start]);
+
+                let host_start = scheme_end + 3;
+                let end = find_connection_end(bytes, host_start);
+                let authority_end = bytes[host_start..end]
+                    .iter()
+                    .position(|&b| matches!(b, b'/' | b'?' | b'#'))
+                    .map(|p| host_start + p)
+                    .unwrap_or(end);
+                let at = bytes[host_start..authority_end]
+                    .iter()
+                    .rposition(|&b| b == b'@')
+                    .map(|p| host_start + p);
+
+                match at.and_then(|at| {
+                    bytes[host_start..at]
+                        .iter()
+                        .rposition(|&b| b == b':')
+                        .map(|colon| (at, host_start + colon))
+                }) {
+                    Some((at, colon)) => {
+                        output.push_str(&text[start..=colon]);
+                        output.push_str(REDACTED);
+                        output.push_str(&text[at..end]);
+                    }
+                    None => output.push_str(&text[start..end]),
+                }
+                index = end;
+            }
+            None => {
+                output.push_str(&text[index..]);
+                break;
+            }
+        }
+    }
+    output
+}
+
+fn is_scheme_char(c: u8) -> bool {
+    c.is_ascii_alphanumeric() || matches!(c, b'+' | b'-' | b'.')
+}
+
+fn find_subslice(haystack: &[u8], from: usize, needle: &[u8]) -> Option<usize> {
+    if needle.is_empty() {
+        return None;
+    }
+    haystack[from..]
+        .windows(needle.len())
+        .position(|window| window == needle)
+        .map(|pos| from + pos)
+}
+
+fn find_connection_end(bytes: &[u8], from: usize) -> usize {
+    let mut end = from;
+    while end < bytes.len() {
+        let c = bytes[end];
+        if c.is_ascii_whitespace()
+            || matches!(
+                c,
+                b'\'' | b'"' | b',' | b';' | b'(' | b')' | b'<' | b'>' | b'`'
+            )
+        {
+            break;
+        }
+        end += 1;
+    }
+    end
+}
+
+pub fn redact_relational_options(encoded: &str) -> String {
     serde_json::from_str::<RelationalOptions>(encoded)
         .ok()
         .and_then(|opts| serde_json::to_string(&opts.redacted()).ok())
@@ -959,6 +1043,41 @@ mod tests {
         );
         // Unparsable input is fully redacted.
         assert_eq!(redact_connection("not-a-url"), "REDACTED");
+    }
+
+    #[test]
+    fn test_redact_connection_in_text() {
+        assert_eq!(
+            redact_connection_in_text(
+                "CREATE EXTERNAL TABLE t (...) ENGINE=relational \
+                 WITH(connection='mysql://user:secret@127.0.0.1:3306/db', remote_table='sample')"
+            ),
+            "CREATE EXTERNAL TABLE t (...) ENGINE=relational \
+             WITH(connection='mysql://user:REDACTED@127.0.0.1:3306/db', remote_table='sample')"
+        );
+        assert_eq!(
+            redact_connection_in_text("Expected =, found: mysql://user:secret@127.0.0.1:3306/db"),
+            "Expected =, found: mysql://user:REDACTED@127.0.0.1:3306/db"
+        );
+        assert_eq!(
+            redact_connection_in_text("postgresql://user:secret@host:5432/db?sslmode=require"),
+            "postgresql://user:REDACTED@host:5432/db?sslmode=require"
+        );
+        // A DSN without a password, or a non-DSN, is left unchanged.
+        assert_eq!(
+            redact_connection_in_text("mysql://host/db"),
+            "mysql://host/db"
+        );
+        assert_eq!(
+            redact_connection_in_text("mysql://host/db?email=a@b.com"),
+            "mysql://host/db?email=a@b.com"
+        );
+        assert_eq!(redact_connection_in_text("SELECT 1"), "SELECT 1");
+        // Multiple DSNs are all redacted.
+        assert_eq!(
+            redact_connection_in_text("mysql://a:one@h1/db1 and mysql://b:two@h2/db2"),
+            "mysql://a:REDACTED@h1/db1 and mysql://b:REDACTED@h2/db2"
+        );
     }
 
     #[test]

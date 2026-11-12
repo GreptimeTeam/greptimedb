@@ -36,8 +36,9 @@ use sql::statements::{self, OptionMap, concrete_data_type_to_sql_data_type};
 use store_api::metric_engine_consts::{is_metric_engine, is_metric_engine_internal_column};
 use table::metadata::{TableInfoRef, TableMeta};
 use table::requests::{
-    COMMENT_KEY as TABLE_COMMENT_KEY, FILE_TABLE_META_KEY, RELATIONAL_META_KEY, SKIP_WAL_KEY,
-    TTL_KEY, WRITE_BUFFER_SIZE_KEY,
+    COMMENT_KEY as TABLE_COMMENT_KEY, FILE_TABLE_META_KEY, RELATIONAL_CONNECTION_KEY,
+    RELATIONAL_META_KEY, RELATIONAL_REMOTE_TABLE_KEY, RelationalOptions, SKIP_WAL_KEY, TTL_KEY,
+    WRITE_BUFFER_SIZE_KEY,
 };
 
 use crate::error::{
@@ -70,6 +71,15 @@ fn create_sql_options(table_meta: &TableMeta, schema_options: Option<SchemaOptio
         .filter(|(k, _)| k != &FILE_TABLE_META_KEY && k != &RELATIONAL_META_KEY)
     {
         options.insert(k.clone(), v.clone());
+    }
+    if let Some(encoded) = table_opts.extra_options.get(RELATIONAL_META_KEY)
+        && let Ok(opts) = serde_json::from_str::<RelationalOptions>(encoded)
+    {
+        options.insert_redacted(
+            RELATIONAL_CONNECTION_KEY.to_string(),
+            opts.redacted().connection,
+        );
+        options.insert(RELATIONAL_REMOTE_TABLE_KEY.to_string(), opts.remote_table);
     }
     if table_opts.skip_wal {
         options.insert(SKIP_WAL_KEY.to_string(), true.to_string());
@@ -301,7 +311,8 @@ mod tests {
     use datatypes::schema::{FulltextOptions, Schema, SchemaRef, SkippingIndexOptions};
     use table::metadata::*;
     use table::requests::{
-        FILE_TABLE_FORMAT_KEY, FILE_TABLE_LOCATION_KEY, FILE_TABLE_META_KEY, TableOptions,
+        FILE_TABLE_FORMAT_KEY, FILE_TABLE_LOCATION_KEY, FILE_TABLE_META_KEY,
+        RELATIONAL_CONNECTION_KEY, RELATIONAL_REMOTE_TABLE_KEY, TableOptions,
     };
 
     use super::*;
@@ -569,5 +580,53 @@ WITH(
         let str_map = opts.to_str_map();
         assert!(!str_map.contains_key(RELATIONAL_META_KEY));
         assert!(str_map.contains_key(FILE_TABLE_LOCATION_KEY));
+        assert_eq!(
+            str_map.get(RELATIONAL_CONNECTION_KEY),
+            Some(&"mysql://user:REDACTED@127.0.0.1:3306/db")
+        );
+        assert_eq!(str_map.get(RELATIONAL_REMOTE_TABLE_KEY), Some(&"sample"));
+    }
+
+    #[test]
+    fn test_show_create_external_relational_table_sql() {
+        let table_schema = SchemaRef::new(Schema::new(vec![]));
+        let table_name = "system_metrics";
+        let mut options: TableOptions = Default::default();
+        let _ = options.extra_options.insert(
+            RELATIONAL_META_KEY.to_string(),
+            "{\"connection\":\"mysql://user:secret@127.0.0.1:3306/db\",\"remote_table\":\"sample\"}"
+                .to_string(),
+        );
+        let meta = TableMetaBuilder::empty()
+            .schema(table_schema)
+            .primary_key_indices(vec![])
+            .engine("relational".to_string())
+            .next_column_id(0)
+            .options(options)
+            .created_on(Default::default())
+            .build()
+            .unwrap();
+
+        let info = Arc::new(
+            TableInfoBuilder::default()
+                .table_id(1024)
+                .table_version(0 as TableVersion)
+                .name(table_name)
+                .schema_name("public".to_string())
+                .catalog_name("greptime".to_string())
+                .desc(None)
+                .table_type(TableType::Base)
+                .meta(meta)
+                .build()
+                .unwrap(),
+        );
+
+        let stmt = create_table_stmt(&info, None, '"').unwrap();
+        let sql = format!("{stmt}");
+        assert!(sql.contains("CREATE EXTERNAL TABLE"));
+        assert!(sql.contains("ENGINE=relational"));
+        assert!(sql.contains("connection = 'mysql://user:REDACTED@127.0.0.1:3306/db'"));
+        assert!(sql.contains("remote_table = 'sample'"));
+        assert!(!sql.contains("secret"));
     }
 }

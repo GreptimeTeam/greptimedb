@@ -80,6 +80,12 @@ impl OptionMap {
         }
     }
 
+    /// Inserts an already-redacted value as a plain option, bypassing the secret
+    /// masker so it is rendered verbatim in generated SQL.
+    pub fn insert_redacted(&mut self, key: String, value: String) {
+        self.options.insert(key, value.into());
+    }
+
     pub fn get(&self, k: &str) -> Option<&str> {
         if let Some(value) = self.options.get(k) {
             value.as_string()
