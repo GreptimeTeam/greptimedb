@@ -669,7 +669,9 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 // handlers, so reject invalid flush-on-close requests before that handoff.
                 !self.flush_scheduler.has_close_time_flush(ddl.region_id)
                     && !(request.flush_on_close && version.has_pending_tails())
-                    && handle_close::close_needs_flush(region, request)
+                    // A later close cannot bypass an earlier close's flush requirement.
+                    && (handle_close::close_needs_flush(region, request)
+                        || self.pending_ddls.has_close(ddl.region_id))
             }
             _ => false,
         }

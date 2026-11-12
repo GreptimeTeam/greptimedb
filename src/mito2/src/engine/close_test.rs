@@ -278,8 +278,14 @@ async fn test_engine_close_region_flush_on_close_while_flushing() {
     assert_eq!(6, batches.iter().map(|b| b.num_rows()).sum::<usize>());
 }
 
+#[rstest::rstest]
+#[case::skip_wal(true, [false, false])]
+#[case::flush_on_close(false, [true, false])]
 #[tokio::test]
-async fn test_repeated_close_during_edit_preserves_skip_wal_rows() {
+async fn test_repeated_close_during_edit_preserves_flush_requirement(
+    #[case] skip_wal: bool,
+    #[case] flush_on_close: [bool; 2],
+) {
     use crate::manifest::action::RegionEdit;
     use crate::region::{RegionLeaderState, RegionRoleState};
     use crate::request::{DdlRequest, SenderDdlRequest, WorkerRequest};
@@ -313,7 +319,7 @@ async fn test_repeated_close_during_edit_preserves_skip_wal_rows() {
                 },
                 hint: None,
                 partition_expr_version: None,
-                skip_wal: true,
+                skip_wal,
             }),
         )
         .await
@@ -344,7 +350,7 @@ async fn test_repeated_close_during_edit_preserves_skip_wal_rows() {
     .await
     .unwrap();
     let mut closes = Vec::new();
-    for _ in 0..2 {
+    for flush_on_close in flush_on_close {
         let (sender, receiver) = tokio::sync::oneshot::channel();
         engine
             .inner
@@ -354,7 +360,7 @@ async fn test_repeated_close_during_edit_preserves_skip_wal_rows() {
                 WorkerRequest::Ddl(SenderDdlRequest {
                     region_id,
                     sender: sender.into(),
-                    request: DdlRequest::Close(RegionCloseRequest::default()),
+                    request: DdlRequest::Close(RegionCloseRequest { flush_on_close }),
                 }),
             )
             .await
@@ -390,6 +396,8 @@ async fn test_repeated_close_during_edit_preserves_skip_wal_rows() {
         );
     }
     assert!(!engine.is_region_exists(region_id));
+    // WAL replay could hide a skipped flush after reopening. Check the committed SST first.
+    assert!(!region.manifest_ctx.manifest().await.files.is_empty());
     crate::test_util::reopen_region(&engine, region_id, create.table_dir, true, create.options)
         .await;
     let stream = engine
