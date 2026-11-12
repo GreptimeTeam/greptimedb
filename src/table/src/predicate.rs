@@ -501,6 +501,14 @@ fn extract_from_in_list_expr(
     if list.is_empty() {
         return Some(TimestampRange::empty());
     }
+    // A list with any non-literal item (e.g. `ts IN (1, 2, 3, 4, other_ts)`) makes the
+    // literal-only envelope unsound: the non-literal item may match any timestamp, so a
+    // range built from the literals alone can be narrower than the filter's satisfying set
+    // and the scan would prune rows that satisfy the predicate. `InList` survives above
+    // DataFusion's inline threshold, so abandon the whole `IN` instead of narrowing.
+    if !list.iter().all(|expr| matches!(expr, Expr::Literal(_, _))) {
+        return None;
+    }
     let mut init_range = TimestampRange::empty();
     for expr in list {
         if let Expr::Literal(scalar, _) = expr {
@@ -692,6 +700,44 @@ mod tests {
         check_build_predicate(
             col("ts").lt_eq(lit(ScalarValue::TimestampSecond(Some(1), None))),
             TimestampRange::until_end(Timestamp::new_millisecond(1000), true),
+        );
+    }
+
+    #[test]
+    fn test_in_list_with_non_literal_item_is_not_extracted() {
+        // `ts IN (10ms, v)`: the non-literal item can match any timestamp, so the whole
+        // list must be abandoned instead of being narrowed to the literal's range.
+        check_build_predicate(
+            col("ts").in_list(
+                vec![
+                    lit(ScalarValue::TimestampMillisecond(Some(10), None)),
+                    col("v"),
+                ],
+                false,
+            ),
+            TimestampRange::min_to_max(),
+        );
+
+        // A lone non-literal item is just as unsound.
+        check_build_predicate(
+            col("ts").in_list(vec![col("v")], false),
+            TimestampRange::min_to_max(),
+        );
+
+        // All-literal lists still extract the envelope covering every listed value.
+        check_build_predicate(
+            col("ts").in_list(
+                vec![
+                    lit(ScalarValue::TimestampMillisecond(Some(10), None)),
+                    lit(ScalarValue::TimestampMillisecond(Some(20), None)),
+                ],
+                false,
+            ),
+            TimestampRange::new(
+                Timestamp::new_millisecond(10),
+                Timestamp::new_millisecond(21),
+            )
+            .unwrap(),
         );
     }
 
