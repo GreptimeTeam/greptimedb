@@ -29,13 +29,20 @@ pub const INSERT_SKIP_WAL_HINT: &str = "insert_skip_wal";
 pub const READ_PREFERENCE_HINT: &str = "read_preference";
 pub const READ_PREFERENCE_EXTENSION_KEY: &str = "query.read_preference";
 pub const EXPERIMENTAL_DIST_JOIN_EXTENSION_KEY: &str = "query.experimental_dist_join";
-pub const RESERVED_EXTENSION_KEYS: [&str; 6] = [
+/// Reserved and internal only: the nesting depth of a remote (region) read.
+///
+/// It is written by the code that dispatches region reads (see `MergeScanExec`) and
+/// by the datanode entry points that admit them, never by a user facing hint or
+/// query option.
+pub const REMOTE_READ_DEPTH_EXTENSION_KEY: &str = "query.remote_read_depth";
+pub const RESERVED_EXTENSION_KEYS: [&str; 7] = [
     REMOTE_QUERY_ID_EXTENSION_KEY,
     INITIAL_REMOTE_DYN_FILTER_REGISTRATIONS_EXTENSION_KEY,
     SUPPORT_FLIGHT_METRICS_BEFORE_BATCH_EXTENSION_KEY,
     LIVE_ANALYZE_METRICS_EXTENSION_KEY,
     READ_PREFERENCE_EXTENSION_KEY,
     EXPERIMENTAL_DIST_JOIN_EXTENSION_KEY,
+    REMOTE_READ_DEPTH_EXTENSION_KEY,
 ];
 
 /// Deprecated, use `HINTS_KEY` instead.
@@ -70,6 +77,7 @@ mod tests {
             LIVE_ANALYZE_METRICS_EXTENSION_KEY
         ));
         assert!(is_reserved_extension_key(READ_PREFERENCE_EXTENSION_KEY));
+        assert!(is_reserved_extension_key(REMOTE_READ_DEPTH_EXTENSION_KEY));
         assert!(!is_reserved_extension_key(READ_PREFERENCE_HINT));
     }
 }
