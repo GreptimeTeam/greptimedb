@@ -1331,7 +1331,7 @@ impl EngineInner {
         region.set_role(role);
         if role == RegionRole::Leader && !was_leader {
             // No lease comes for a direct promotion, so it counts as one. A leader is not promoted.
-            region.manifest_ctx.note_leader_lease(Instant::now());
+            region.manifest_ctx.record_leader_lease(Instant::now());
         }
         self.notify_if_became_writable(&region, was_writable);
         Ok(())
@@ -1340,7 +1340,7 @@ impl EngineInner {
     /// Asks the worker to replay the pending tails of `region` if a role change made it
     /// writable. The worker may already have started an ALTER or an edit of the region.
     fn notify_if_became_writable(&self, region: &MitoRegion, was_writable: bool) {
-        if !was_writable && region.is_replay_leader() {
+        if !was_writable && region.can_replay_tails() {
             self.workers.notify_writable(region);
         }
     }

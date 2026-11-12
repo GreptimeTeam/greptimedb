@@ -245,7 +245,7 @@ impl TestRegion {
     async fn start_replay(&self) {
         let request = WorkerRequest::Background {
             region_id: self.region_id,
-            notify: BackgroundNotify::RegionWritable,
+            notify: BackgroundNotify::RegionBecameWritable,
         };
         self.engine
             .inner
@@ -493,7 +493,7 @@ async fn test_remote_tail_fails_on_log_store_reading_no_other_node() {
     set_pending_tails(&engine, region_id, tails.clone()).await;
 
     // The Raft engine log store cannot read another node's WAL.
-    let notify = BackgroundNotify::RegionWritable;
+    let notify = BackgroundNotify::RegionBecameWritable;
     let request = WorkerRequest::Background { region_id, notify };
     let workers = &engine.inner.workers;
     workers.submit_to_worker(region_id, request).await.unwrap();

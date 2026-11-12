@@ -42,7 +42,7 @@ use crate::sst::file::{FileMeta, UncommittedSsts};
 use crate::wal::{EntryId, Wal};
 
 /// Memtable usage at which replayed rows are written to SSTs.
-const CHUNK_BYTES: usize = 64 * 1024 * 1024;
+const CHUNK_MEMTABLE_USAGE: usize = 64 * 1024 * 1024;
 /// Delay before the first retry of a failed round or an unfinished commit.
 const MIN_BACKOFF: Duration = Duration::from_secs(1);
 /// Longest delay between retries.
@@ -50,10 +50,10 @@ const MAX_BACKOFF: Duration = Duration::from_secs(30);
 /// How often a replay checks whether the region received a Leader lease.
 const LEASE_CHECK_INTERVAL: Duration = Duration::from_millis(500);
 
-/// Returns whether the pending tails of `region` are to be replayed: it has some and is a
-/// [replay leader](MitoRegion::is_replay_leader).
+/// Returns whether the pending tails of `region` are to be replayed: it has some and
+/// [can replay them](MitoRegion::can_replay_tails).
 pub(crate) fn should_replay_tails(region: &MitoRegion) -> bool {
-    region.is_replay_leader() && region.version().has_pending_tails()
+    region.can_replay_tails() && region.version().has_pending_tails()
 }
 
 /// Replays the pending tails of a region into SSTs and publishes them in one manifest edit.
@@ -126,7 +126,7 @@ impl<S: LogStore> TailReplayTask<S> {
             .iter()
             .zip(&last_entry_ids)
             .filter_map(|(tail, last_entry_id)| {
-                self.remaining(tail, *last_entry_id, lease_received)
+                self.remaining_tail(tail, *last_entry_id, lease_received)
             })
             .collect::<Vec<_>>();
         if !files.is_empty() || remaining != tails {
@@ -172,7 +172,7 @@ impl<S: LogStore> TailReplayTask<S> {
     /// Returns what stays recorded of `tail` after a replay read it up to `last_entry_id`.
     /// Only another node's listed tail stays, from its last entry read, and only until the
     /// region receives a Leader lease.
-    fn remaining(
+    fn remaining_tail(
         &self,
         tail: &PendingTail,
         last_entry_id: Option<EntryId>,
@@ -206,7 +206,7 @@ impl<S: LogStore> TailReplayTask<S> {
             let mut entries = self
                 .unless_cancelled(self.wal.read_tail(provider, region_id, self.node_id, tail))
                 .await?;
-            let mut chunk = self.new_chunk();
+            let mut chunk = self.new_chunk_version();
             let mut last_entry_id = None;
             while let Some((entry_id, entry)) = self.unless_cancelled(entries.try_next()).await? {
                 if entry_id > tail.upto {
@@ -214,9 +214,9 @@ impl<S: LogStore> TailReplayTask<S> {
                 }
                 replay_entry(provider, region_id, &chunk, entry, entry_id).await?;
                 last_entry_id = Some(entry_id);
-                if chunk.current().version.memtables.mutable_usage() >= CHUNK_BYTES {
-                    files.extend(self.write_chunk(&chunk, uncommitted).await?);
-                    chunk = self.new_chunk();
+                if chunk.current().version.memtables.mutable_usage() >= CHUNK_MEMTABLE_USAGE {
+                    files.extend(self.write_chunk_ssts(&chunk, uncommitted).await?);
+                    chunk = self.new_chunk_version();
                 }
                 if entry_id == tail.upto {
                     break;
@@ -230,7 +230,7 @@ impl<S: LogStore> TailReplayTask<S> {
                     entry_id: tail.upto,
                 }
             );
-            files.extend(self.write_chunk(&chunk, uncommitted).await?);
+            files.extend(self.write_chunk_ssts(&chunk, uncommitted).await?);
             last_entry_ids.push(last_entry_id);
         }
         Ok((files, last_entry_ids))
@@ -241,7 +241,7 @@ impl<S: LogStore> TailReplayTask<S> {
     async fn wait_for_leader_lease(&self) -> bool {
         let region_id = self.region.region_id;
         info!("Region {region_id} waits for a Leader lease to clear its unread listed tails");
-        while self.region.is_replay_leader() {
+        while self.region.can_replay_tails() {
             if !self.region.manifest_ctx.is_writable_by_catchup() {
                 return true;
             }
@@ -252,8 +252,8 @@ impl<S: LogStore> TailReplayTask<S> {
         false
     }
 
-    /// Returns an empty memtable for replayed rows, outside the region's version.
-    fn new_chunk(&self) -> VersionControlRef {
+    /// Returns a scratch version with an empty memtable for one chunk of replayed rows.
+    fn new_chunk_version(&self) -> VersionControlRef {
         let version = self.region.version();
         let mutable = TimePartitions::new(
             version.metadata.clone(),
@@ -269,7 +269,7 @@ impl<S: LogStore> TailReplayTask<S> {
     }
 
     /// Writes the rows of `chunk` to SSTs.
-    async fn write_chunk(
+    async fn write_chunk_ssts(
         &self,
         chunk: &VersionControl,
         uncommitted: &UncommittedSsts,
@@ -320,7 +320,7 @@ impl<S: LogStore> TailReplayTask<S> {
                     );
                     self.release_wal().await;
                     let region = self.region.clone();
-                    let notify = BackgroundNotify::TailsCommitted { region, edit };
+                    let notify = BackgroundNotify::TailReplayCommitted { region, edit };
                     notify_worker(&self.flush_task.request_sender, region_id, notify).await;
                     return Ok(true);
                 }

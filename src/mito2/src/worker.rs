@@ -1660,9 +1660,10 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             BackgroundNotify::RegionReloaded { old, result } => {
                 self.handle_region_reloaded(region_id, old, result).await
             }
-            BackgroundNotify::RegionWritable => self.maybe_replay_tails(region_id),
-            BackgroundNotify::TailsCommitted { region, edit } => {
-                self.handle_tails_committed(region_id, region, edit).await
+            BackgroundNotify::RegionBecameWritable => self.maybe_replay_tails(region_id),
+            BackgroundNotify::TailReplayCommitted { region, edit } => {
+                self.handle_tail_replay_committed(region_id, region, edit)
+                    .await
             }
             BackgroundNotify::TailReplayEnded => self.handle_tail_replay_ended(region_id),
         }

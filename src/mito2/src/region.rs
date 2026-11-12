@@ -446,9 +446,9 @@ impl MitoRegion {
         self.manifest_ctx.state.load() == RegionRoleState::Leader(RegionLeaderState::Truncating)
     }
 
-    /// Returns whether the region replays pending tails: a leader that is Writable, Altering or
+    /// Returns whether the region can replay pending tails: a leader that is Writable, Altering or
     /// Editing. A region with pending tails cannot enter staging; a downgrading one is leaving.
-    pub(crate) fn is_replay_leader(&self) -> bool {
+    pub(crate) fn can_replay_tails(&self) -> bool {
         matches!(
             self.manifest_ctx.state.load(),
             RegionRoleState::Leader(
@@ -1965,14 +1965,14 @@ impl ManifestContext {
     ) -> bool {
         // A writable leader needs no change; a staging leader is promoted below.
         if self.state.load() == RegionRoleState::Leader(RegionLeaderState::Writable) {
-            self.note_leader_lease(issued_at);
+            self.record_leader_lease(issued_at);
             return true;
         }
         let fence = self.promotion_fence.lock().unwrap();
         if issued_at < fence.downgrade_started_at {
             return false;
         }
-        self.note_leader_lease(issued_at);
+        self.record_leader_lease(issued_at);
         self.promote_unless_reload_pending(&fence, region_id, false)
     }
 
@@ -2008,7 +2008,7 @@ impl ManifestContext {
     /// [Self::promote_unless_downgrade_started_after] does not check, and the lease of the next
     /// heartbeat counts instead. It reads one atomic, since every lease of a writable leader
     /// comes here.
-    pub(crate) fn note_leader_lease(&self, issued_at: Instant) {
+    pub(crate) fn record_leader_lease(&self, issued_at: Instant) {
         let promoted_at = self.catchup_promoted_at.load(Ordering::Relaxed);
         if promoted_at != 0 && lease_nanos(issued_at) >= promoted_at {
             let _ = self.catchup_promoted_at.compare_exchange(

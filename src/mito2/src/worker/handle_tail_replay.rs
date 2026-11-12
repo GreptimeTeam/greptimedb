@@ -68,7 +68,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
     }
 
     /// Applies a published tail replay unless its instance was replaced by one that loaded it.
-    pub(crate) async fn handle_tails_committed(
+    pub(crate) async fn handle_tail_replay_committed(
         &mut self,
         region_id: RegionId,
         region: MitoRegionRef,
@@ -124,7 +124,7 @@ pub(crate) fn notify_writable(sender: &Sender<WorkerRequestWithTime>, region: &M
         let _ = sender
             .send(WorkerRequestWithTime::new(WorkerRequest::Background {
                 region_id,
-                notify: BackgroundNotify::RegionWritable,
+                notify: BackgroundNotify::RegionBecameWritable,
             }))
             .await;
     });

@@ -1158,9 +1158,9 @@ pub(crate) enum BackgroundNotify {
         result: Result<MitoRegionRef>,
     },
     /// The region became writable and may have pending tails to replay.
-    RegionWritable,
+    RegionBecameWritable,
     /// A tail replay published its result in the manifest.
-    TailsCommitted {
+    TailReplayCommitted {
         /// The instance the replay ran for.
         region: MitoRegionRef,
         /// The published edit.
