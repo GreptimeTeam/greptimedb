@@ -35,9 +35,7 @@ use crate::manifest::action::{
 use crate::memtable::time_partition::TimePartitions;
 use crate::region::opener::replay_entry;
 use crate::region::version::{VersionBuilder, VersionControl, VersionControlRef};
-use crate::region::{
-    MitoRegion, MitoRegionRef, RegionLeaderState, RegionRoleState, TailPublication,
-};
+use crate::region::{MitoRegion, MitoRegionRef, TailPublication};
 use crate::request::{BackgroundNotify, WorkerRequest, WorkerRequestWithTime};
 use crate::schedule::CancellableTaskState;
 use crate::sst::file::{FileMeta, UncommittedSsts};
@@ -53,19 +51,9 @@ const MAX_BACKOFF: Duration = Duration::from_secs(30);
 const LEASE_CHECK_INTERVAL: Duration = Duration::from_millis(500);
 
 /// Returns whether the pending tails of `region` are to be replayed: it has some and is a
-/// leader that is writable, altering or applying an edit.
+/// [replay leader](MitoRegion::is_replay_leader).
 pub(crate) fn should_replay_tails(region: &MitoRegion) -> bool {
-    is_replaying_leader(region) && region.version().has_pending_tails()
-}
-
-/// Returns whether `region` is a leader that is writable, altering or applying an edit.
-pub(crate) fn is_replaying_leader(region: &MitoRegion) -> bool {
-    matches!(
-        region.state(),
-        RegionRoleState::Leader(
-            RegionLeaderState::Writable | RegionLeaderState::Altering | RegionLeaderState::Editing
-        )
-    )
+    region.is_replay_leader() && region.version().has_pending_tails()
 }
 
 /// Replays the pending tails of a region into SSTs and publishes them in one manifest edit.
@@ -251,7 +239,7 @@ impl<S: LogStore> TailReplayTask<S> {
     /// Waits until the region receives a Leader lease. Returns false if the region stops being
     /// a writable, altering or editing leader, or the task is cancelled, first.
     async fn wait_for_leader_lease(&self) -> bool {
-        while is_replaying_leader(&self.region) {
+        while self.region.is_replay_leader() {
             if !self.region.manifest_ctx.is_writable_by_catchup() {
                 return true;
             }

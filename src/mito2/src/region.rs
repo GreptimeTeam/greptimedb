@@ -446,6 +446,19 @@ impl MitoRegion {
         self.manifest_ctx.state.load() == RegionRoleState::Leader(RegionLeaderState::Truncating)
     }
 
+    /// Returns whether the region replays pending tails: a leader that is Writable, Altering or
+    /// Editing. A region with pending tails cannot enter staging; a downgrading one is leaving.
+    pub(crate) fn is_replay_leader(&self) -> bool {
+        matches!(
+            self.manifest_ctx.state.load(),
+            RegionRoleState::Leader(
+                RegionLeaderState::Writable
+                    | RegionLeaderState::Altering
+                    | RegionLeaderState::Editing
+            )
+        )
+    }
+
     pub fn region_id(&self) -> RegionId {
         self.region_id
     }
