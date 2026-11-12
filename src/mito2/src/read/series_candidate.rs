@@ -21,7 +21,7 @@ use std::time::Instant;
 
 use async_stream::try_stream;
 use datafusion::execution::memory_pool::{MemoryConsumer, MemoryPool};
-use datafusion::physical_expr::{LexOrdering, PhysicalSortExpr};
+use datafusion::physical_expr::{LexOrdering, PhysicalExpr, PhysicalSortExpr};
 use datafusion::physical_plan::expressions::Column;
 use datafusion::physical_plan::metrics::{BaselineMetrics, ExecutionPlanMetricsSet, MetricBuilder};
 use datafusion::physical_plan::sorts::streaming_merge::StreamingMergeBuilder;
@@ -64,6 +64,7 @@ use crate::sst::parquet::prefilter::{
 };
 use crate::sst::parquet::reader::ReaderMetrics;
 use crate::sst::parquet::row_group::ParquetFetchMetrics;
+use common_recordbatch::filter::batch_filter;
 
 /// Builds candidate metric series from the ranges assigned to a [`SeriesScan`](super::series_scan::SeriesScan).
 pub(crate) struct SeriesCandidateScanner {
@@ -427,6 +428,7 @@ impl SeriesCandidateRangeBuilder {
                 &self.part_metrics,
                 index,
                 time_range,
+                &[],
             )));
         }
 
@@ -464,23 +466,57 @@ impl SeriesCandidateRangeBuilder {
 
 /// Reads only the encoded primary keys of one assigned memtable range.
 ///
-/// The memtable reader yields ordinary flat batches, and the payload is projected away
-/// immediately: the stream carries one binary key column, so a caller can discover series without
-/// retaining any sample data.
+/// The stream carries one binary key column, so a caller can discover series without retaining any
+/// sample data.
+///
+/// Exception, stated rather than hidden: the memtable range, not this function, decides the
+/// projection, and `ScanInput` fixes it when the range builders are built, so a key-only read of a
+/// memtable range is not available without a second builder set. Each batch is therefore produced
+/// with the scan's payload columns and reduced to its key column here, which costs one transient
+/// flat batch per memtable range per preparation. Nothing is retained past the batch that produced
+/// it, so a prepared source still holds no payload from discovery.
+///
+/// `filters` are the conjuncts the range builder did not apply itself: a memtable range only
+/// evaluates the simple filters it recognises, so a regex, `NOT` or `OR` shape reaching the keys
+/// this way would leak series the scan must not answer. They run over the flat batch, which is why
+/// the payload columns are materialized here.
 pub(crate) fn mem_primary_key_stream(
     stream_ctx: &Arc<StreamContext>,
     part_metrics: &PartitionMetrics,
     index: RowGroupIndex,
     time_range: FileTimeRange,
+    filters: &[Arc<dyn PhysicalExpr>],
 ) -> BoxedRecordBatchStream {
     let metadata = stream_ctx.input.region_metadata().clone();
-    let raw = scan_flat_mem_ranges(stream_ctx.clone(), part_metrics.clone(), index, time_range);
+    let raw = Box::pin(scan_flat_mem_ranges(
+        stream_ctx.clone(),
+        part_metrics.clone(),
+        index,
+        time_range,
+    ));
+    let raw: BoxedRecordBatchStream = if filters.is_empty() {
+        raw
+    } else {
+        let filters = filters.to_vec();
+        Box::pin(try_stream! {
+            let mut raw = raw;
+            while let Some(mut batch) = raw.try_next().await? {
+                for filter in &filters {
+                    batch = batch_filter(&batch, filter)
+                        .map_err(|error| UnexpectedSnafu { reason: error.to_string() }.build())?;
+                }
+                if batch.num_rows() > 0 {
+                    yield batch;
+                }
+            }
+        })
+    };
     let filter = build_primary_key_filter(
         &metadata,
         None,
         stream_ctx.input.predicate_group().predicate(),
     );
-    candidate_primary_key_stream(Box::pin(raw), filter)
+    candidate_primary_key_stream(raw, filter)
 }
 
 /// Reads only the encoded primary keys of one assigned SST.

@@ -147,26 +147,31 @@ struct SeriesPreflight {
     columnar_fields_supported: bool,
     /// Inputs a columnar read may serve, captured from this scanner's pinned snapshot.
     selection: prepared::SelectedInputs,
-    /// Builds the file ranges of the sources no selected artifact covers.
-    ///
-    /// The prepared reader reads those sources itself, so it needs the same range builders the
-    /// ordinary scan uses; they are pinned here, once per preflight.
-    raw_pruner: Arc<PartitionPruner>,
 }
 
 /// Whether the columnar prepared reader answers this scan.
 ///
 /// Both entries answer completely, so this rule chooses *how* a scan reads, never *what* it
-/// returns: under the gate the prepared reader takes the artifact rows and the raw rows of every
-/// source no selected artifact covers, and outside it the ordinary scan reads every assigned
-/// source. Readiness is therefore no part of this rule - a region with no artifact at all still
-/// answers from its sources - only the gate and the field shape the prepared reader can serve
-/// are. The preflight answer and the preparation gate both call this rule, so a scan that planned
-/// the prepared read can never be declined at execution, and a scan that fell back to the ordinary
-/// reader can never claim artifacts.
-fn prepared_reader_serves(columnar_gate: bool, columnar_fields_supported: bool) -> bool {
-    // The prepared reader serves `Float64` fields only.
-    columnar_gate && columnar_fields_supported
+/// returns: under the gate the prepared reader takes the artifact rows and the raw rows of the
+/// assigned memtables, and outside it - or when artifact coverage of the assigned SSTs cannot be
+/// proven - the ordinary scan reads every assigned source. Readiness never changes the *answer*:
+/// both routes return every assigned row, including a region with no artifact at all. It does
+/// change which *route* reads it, and that is the only thing this rule decides, together with the
+/// gate and the field shape the prepared reader can serve. The preflight answer and the preparation
+/// gate both call this rule, so a scan that planned the prepared read can never be declined at
+/// execution, and a scan that fell back to the ordinary reader can never claim artifacts.
+fn prepared_reader_serves(
+    columnar_gate: bool,
+    columnar_fields_supported: bool,
+    selection: &prepared::SelectedInputs,
+) -> bool {
+    // The prepared reader serves `Float64` fields only. This implementation deliberately does not
+    // mix SST read formats within one scan, so a capture whose SST set is not carried completely
+    // keeps the whole scan on the ordinary reader: a complexity choice, not a correctness claim
+    // about mixing, and never a narrower answer. Samples building is already incremental for
+    // uncovered SSTs (`series_index/maintenance.rs`), so this fallback must not grow into a
+    // samples-build redesign - it exists only to keep the SST read rule simple.
+    columnar_gate && columnar_fields_supported && selection.sst_coverage_complete
 }
 
 struct CandidateReceiver {
@@ -464,20 +469,21 @@ impl SeriesScan {
                 .start_timer();
             let selection =
                 prepared::select_inputs(&self.stream_ctx, &ranges).map_err(BoxedError::new)?;
-            // The prepared reader reads the sources no selected artifact covers itself, through the
-            // same range builders the ordinary scan uses, so this pruner needs reference counts for
-            // the assignment. Repeated preflights of one scanner accumulate them, which only ever
-            // delays releasing a cached range builder the scan owns.
-            self.pruner.add_partition_ranges(&ranges);
-            // The capture keeps the whole assignment whether or not it is ready: artifacts where
-            // they apply and raw rows for the sources no selected artifact covers.
+            // Two outcomes are reported separately: a memtable source is expected under writes and
+            // says nothing about coverage, while the SST outcome says whether this scan could use
+            // artifacts at all, and why not when it could not.
+            crate::metrics::SERIES_SCAN_SST_COVERAGE
+                .with_label_values(&[selection.sst_coverage_outcome()])
+                .inc();
+            if !selection.raw_sources.is_empty() {
+                crate::metrics::SERIES_SCAN_WITH_MEMTABLE.inc();
+            }
             selection
         } else {
             prepared::SelectedInputs::default()
         };
-        let raw_pruner = Arc::new(PartitionPruner::new(self.pruner.clone(), &ranges));
         let prepared_columnar =
-            prepared_reader_serves(self.uses_columnar(), columnar_fields_supported);
+            prepared_reader_serves(self.uses_columnar(), columnar_fields_supported, &selection);
         let schema = Arc::new(SeriesSchema {
             fields: specs.into(),
             eval_grid: None,
@@ -545,7 +551,6 @@ impl SeriesScan {
             },
             columnar_fields_supported,
             selection,
-            raw_pruner,
         }))
     }
 
@@ -577,10 +582,14 @@ impl SeriesScan {
             };
             // The same rule the preflight used, so the answer the caller planned with is the one
             // this gate gives.
-            if !prepared_reader_serves(columnar_gate, preflight.columnar_fields_supported) {
-                // Unsupported field types, or a region outside the gate: the caller keeps the
-                // ordinary scan, which answers just as completely from the same sources.
-                // Readiness never causes this.
+            if !prepared_reader_serves(
+                columnar_gate,
+                preflight.columnar_fields_supported,
+                &preflight.selection,
+            ) {
+                // Unsupported field types, a region outside the gate, or a capture whose
+                // completeness cannot be proven: the caller keeps the ordinary scan, which answers
+                // completely from the same sources. Readiness never causes this.
                 return Ok(None);
             }
             state
@@ -589,7 +598,6 @@ impl SeriesScan {
                     preflight.selection,
                     labels,
                     preflight.raw,
-                    preflight.raw_pruner,
                     metrics,
                 )
                 .await
@@ -999,12 +1007,13 @@ impl RegionScanner for SeriesScan {
         let Some(mut preflight) = self.prepare_raw_scan(labels)? else {
             return Ok(false);
         };
-        Ok(
-            prepared_reader_serves(self.uses_columnar(), preflight.columnar_fields_supported)
-                && prepared::sample_merge_schema(&self.stream_ctx, &mut preflight.raw)
-                    .map_err(BoxedError::new)?
-                    .is_some(),
-        )
+        Ok(prepared_reader_serves(
+            self.uses_columnar(),
+            preflight.columnar_fields_supported,
+            &preflight.selection,
+        ) && prepared::sample_merge_schema(&self.stream_ctx, &mut preflight.raw)
+            .map_err(BoxedError::new)?
+            .is_some())
     }
 
     fn scan_series_partition(
@@ -1017,7 +1026,11 @@ impl RegionScanner for SeriesScan {
         let Some(preflight) = self.prepare_raw_scan(label_source)? else {
             return Ok(None);
         };
-        if prepared_reader_serves(self.uses_columnar(), preflight.columnar_fields_supported) {
+        if prepared_reader_serves(
+            self.uses_columnar(),
+            preflight.columnar_fields_supported,
+            &preflight.selection,
+        ) {
             let partitions = self.properties.num_partitions().max(1);
             if partition >= partitions {
                 return Err(BoxedError::new(
@@ -1057,10 +1070,11 @@ impl RegionScanner for SeriesScan {
                 Box::pin(stream),
             )));
         }
-        // Only two shapes reach the ordinary scan: a region outside the columnar gate, and a
-        // selection the prepared reader cannot serve because a field type is not `Float64`. A
-        // gated region with nothing ready is served above, as an empty stream declaring the
-        // planned schema and labels, so it never falls back to the Parquet rows.
+        // Three shapes reach the ordinary scan, all of them complete: a region outside the
+        // columnar gate, a selection the prepared reader cannot serve because a field type is not
+        // `Float64`, and an assignment whose SSTs are not all carried by artifacts. The first two
+        // never have a native answer; the third deliberately does not mix artifact and raw SST
+        // reads, so it is read here in one pass instead of being narrowed.
         let metrics = new_partition_metrics(
             &self.stream_ctx,
             ctx.explain_verbose,

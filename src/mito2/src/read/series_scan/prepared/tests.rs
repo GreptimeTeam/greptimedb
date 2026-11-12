@@ -78,8 +78,8 @@ async fn fixture_with_format(
 
 /// A columnar fixture whose flushed rows carry the given timestamps.
 ///
-/// Distinct timestamps keep a frame read valid without dedup, which a test that reads the prepared
-/// source in append mode needs.
+/// Distinct timestamps keep a frame read valid without dedup, which a test that drives the prepared
+/// source through a merge without dedup needs.
 async fn fixture_with_timestamps(
     format: SelectedFormat,
     experimental_series_scan_v2: bool,
@@ -376,10 +376,19 @@ async fn region_scan(region: &MitoRegionRef) -> SeriesScan {
 
 /// A series scan over the region's live state in `format`, which decides its reader.
 async fn region_scan_with_format(region: &MitoRegionRef, format: SelectedFormat) -> SeriesScan {
+    region_scan_with_request(region, format, per_series_request()).await
+}
+
+/// A series scan over the region's live state for one request, so a test can filter it.
+async fn region_scan_with_request(
+    region: &MitoRegionRef,
+    format: SelectedFormat,
+    request: ScanRequest,
+) -> SeriesScan {
     let scan_region = crate::read::scan_region::ScanRegion::new(
         region.version_control.current().version,
         region.access_layer.clone(),
-        per_series_request(),
+        request,
         crate::cache::CacheStrategy::Disabled,
     )
     .with_series_index(Some(SeriesIndexReadContext {
@@ -705,16 +714,16 @@ async fn two_phase_raw_scan_preserves_key_then_time_order() {
         scanner.raw_series_ordering().unwrap()
     );
     let declared = scanner.raw_series_schema(&binding).unwrap().unwrap();
+    // Nothing is carried, so this plan reads the ordinary path and declares key-encoded labels.
+    assert!(!scanner.raw_series_has_explicit_labels(&binding).unwrap());
     assert!(
-        scanner.raw_series_has_explicit_labels(&binding).unwrap(),
-        "a gated region plans explicit labels in both coverage states"
+        scanner
+            .prepare_series(&ctx, &metrics, &binding)
+            .await
+            .unwrap()
+            .is_none(),
+        "an uncovered assignment keeps the ordinary reader"
     );
-    let uncovered = scanner
-        .prepare_series(&ctx, &metrics, &binding)
-        .await
-        .unwrap()
-        .expect("a gated region serves its sources instead of declining");
-    assert_eq!(4, uncovered.num_series());
     let mut uncovered_total = 0;
     for partition in 0..2 {
         let stream = scanner
@@ -832,14 +841,16 @@ async fn native_scan_answers_completely_with_and_without_coverage(#[case] v2: bo
         uncovered,
         all_raw_samples(raw_scanner.as_ref(), &ctx, &metrics, &binding, ordering).await
     );
-    // No coverage prepares the complete answer from raw rows instead of an empty source.
-    let unready = raw_scanner
-        .prepare_series(&ctx, &metrics, &binding)
-        .await
-        .unwrap()
-        .expect("a gated region serves its sources instead of declining");
-    assert_eq!(1, unready.num_series());
-    assert_eq!(uncovered, prepared_samples(&unready).await);
+    // No coverage keeps the whole scan on the ordinary reader, so the prepared entry declines and
+    // the rows above are the complete answer.
+    assert!(
+        raw_scanner
+            .prepare_series(&ctx, &metrics, &binding)
+            .await
+            .unwrap()
+            .is_none(),
+        "an uncovered assignment keeps the ordinary reader"
+    );
 
     build(&engine, &region).await;
     // A partial-day query still uses grouped samples when other sources were time-pruned.
@@ -1302,7 +1313,6 @@ async fn ordinal_range_batches_sample_requests_and_pushes_time_bounds() {
         raw: source.raw.clone(),
         sample_schema: source.sample_schema.clone(),
         candidates: source.candidates.clone(),
-        pruner: source.pruner.clone(),
         metrics: source.metrics.clone(),
         reservation: source.reservation.clone(),
         samples: Arc::new(
@@ -1668,25 +1678,29 @@ async fn preflight_rejects_unsupported_assignments_without_artifact_io() {
 
     let scan = SeriesScan::new(context.input, false);
     let binding = labels(scan.metadata());
-    // The raw path stays available and preparation answers with the whole assignment: a gated
-    // region never declines the native read, and missing sample coverage no longer empties it.
+    // The raw path stays available, and preparation declines the artifact read because no assigned
+    // SST is carried: the ordinary reader answers the whole assignment.
     assert!(scan.raw_series_schema(&binding).unwrap().is_some());
-    let source = scan
-        .prepare_series(
-            &QueryScanContext::default(),
-            &ExecutionPlanMetricsSet::new(),
-            &binding,
-        )
-        .await
-        .unwrap()
-        .expect("the gate is on, so preparation never declines");
-    assert_eq!(1, source.num_series());
+    let ctx = QueryScanContext::default();
+    let metrics = ExecutionPlanMetricsSet::new();
+    assert!(
+        scan.prepare_series(&ctx, &metrics, &binding)
+            .await
+            .unwrap()
+            .is_none(),
+        "a selection with no sample coverage keeps the ordinary reader"
+    );
     assert_eq!(
         vec![
             (series_key(10, 0), 1000, 1.0),
             (series_key(10, 0), 2000, 1.0),
         ],
-        prepared_rows(&source).await
+        {
+            let mut rows =
+                all_raw_rows(&scan, &ctx, &metrics, &binding, SeriesOrdering::KeyThenTime).await;
+            rows.sort_unstable_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+            rows
+        }
     );
     // Missing coverage means no artifact may be opened, so these rows can only be raw rows.
     assert!(reads.lock().unwrap().is_empty());
@@ -2943,19 +2957,16 @@ fn selection(scan: &SeriesScan) -> SelectedInputs {
     select_inputs(&scan.stream_ctx, &ranges).unwrap()
 }
 
-/// Asserts that the only sources no artifact covers are memtable ranges.
+/// Asserts that the memtable is the only source read as raw rows, which is the one mixing the
+/// prepared reader performs.
 fn assert_only_memtable_raw(selected: &SelectedInputs) {
     assert!(
         !selected.raw_sources.is_empty(),
         "an assigned memtable is read as raw rows"
     );
     assert!(
-        selected
-            .raw_sources
-            .iter()
-            .all(|source| matches!(source, RawSource::Mem { .. })),
-        "a ready SST is carried by its artifact: {:?}",
-        selected.raw_sources
+        selected.sst_coverage_complete,
+        "every assigned SST is carried by its artifact"
     );
 }
 
@@ -3060,13 +3071,124 @@ fn file_id_at(region: &MitoRegionRef, start: i64) -> FileId {
         .file_id()
 }
 
-/// A region whose older sources are covered while a newer SST is not still answers completely:
-/// the covered sources come from the artifact, the uncovered one from its own raw rows.
+/// Answers "is the memtable read as raw rows, and do repeated ordinal reads repeat raw work": a
+/// preparation with an assigned memtable reports its raw sources and every raw stream it opens,
+/// while a fully carried assignment reports no raw source and opens no raw stream.
+///
+/// The counters are process-wide, so every assertion is a monotone bound: parallel tests in this
+/// binary also read raw sources, and only the tested preparation's own selection makes its
+/// contribution exact (the increment site iterates exactly `selection.raw_sources`).
 #[tokio::test]
-async fn native_preparation_serves_the_whole_assignment() {
+async fn preparation_reports_raw_sources_and_raw_scans() {
+    let (_env, engine, region) = fixture().await;
+    // Every flushed source is covered, so only the memtable row has to be read as raw rows.
+    build(&engine, &region).await;
+    write(&engine, &region, 0, 3000, Some(4.0)).await;
+
+    let scan = region_scan(&region).await;
+    let selected = selection(&scan);
+    assert!(
+        selected.sst_coverage_complete,
+        "the flushed SST is carried by its artifact"
+    );
+    // The memtable is the one source no artifact carries, so it is the one raw source.
+    assert_eq!(1, selected.raw_sources.len());
+    assert!(!selected.all_ready);
+
+    let raw_source_count = |kind: &'static str| {
+        crate::metrics::COLUMNAR_READ_COUNT
+            .with_label_values(&[kind])
+            .get()
+    };
+    let sources_before = raw_source_count("prepare_raw_sources");
+    let scans_before = raw_source_count("read_raw_sources");
+    let ages_before = crate::metrics::SERIES_SCAN_UNCOVERED_AGE.get_sample_count();
+
+    let binding = labels(scan.metadata());
+    let ctx = QueryScanContext::default();
+    let metrics = ExecutionPlanMetricsSet::new();
+    let source = scan
+        .prepare_series(&ctx, &metrics, &binding)
+        .await
+        .unwrap()
+        .expect("the whole assignment is served natively");
+    let rows = prepared_rows(&source).await;
+    assert!(rows.iter().any(|(_, time, _)| *time == 3000));
+
+    assert!(
+        raw_source_count("prepare_raw_sources") > sources_before,
+        "a preparation with a raw source counts it"
+    );
+    assert!(
+        raw_source_count("read_raw_sources") > scans_before,
+        "reading the prepared source scans its raw source"
+    );
+    assert!(
+        crate::metrics::SERIES_SCAN_UNCOVERED_AGE.get_sample_count() > ages_before,
+        "an uncovered source records how far coverage lags it"
+    );
+
+    // A second ordinal read repeats the raw scan: repeated per-ordinal work is visible.
+    let scans_before = raw_source_count("read_raw_sources");
+    let _ = prepared_rows(&source).await;
+    assert!(raw_source_count("read_raw_sources") > scans_before);
+
+    engine.stop().await.unwrap();
+}
+
+/// A fully covered assignment reads no raw source at all, so the raw-source and raw-scan counters
+/// stay untouched by it.
+#[tokio::test]
+async fn covered_preparation_reports_no_raw_source() {
     let (_env, engine, region) = fixture().await;
     build(&engine, &region).await;
-    // The three older sources are covered by this snapshot; it is restored at the end.
+
+    let (store, _reads) = recording_store(&region);
+    let mut scan = scanner(&region, store);
+    scan.prepare(
+        PrepareRequest::default().with_ranges(vec![scan.properties.partitions[0].clone()]),
+    )
+    .unwrap();
+    let selected = selection(&scan);
+    assert!(selected.all_ready);
+    // The raw-scan counter is incremented by iterating exactly this list, so an empty list cannot
+    // contribute to it, and one preparation cannot report a raw source it does not have.
+    assert!(selected.raw_sources.is_empty());
+
+    let binding = labels(scan.metadata());
+    let ctx = QueryScanContext::default();
+    let metrics = ExecutionPlanMetricsSet::new();
+    let source = scan
+        .prepare_series(&ctx, &metrics, &binding)
+        .await
+        .unwrap()
+        .expect("the whole assignment is served natively");
+    assert!(!prepared_rows(&source).await.is_empty());
+    assert!(
+        scan.prepared
+            .source
+            .get()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .selection
+            .raw_sources
+            .is_empty()
+    );
+
+    engine.stop().await.unwrap();
+}
+
+/// A region whose older sources are covered while a newer SST is not still answers completely:
+/// the covered sources come from the artifact, the uncovered one from its own raw rows.
+/// One assigned SST without a complete artifact takes the whole scan to the ordinary reader: the
+/// answer is complete, and no artifact is opened beside it, because this path never mixes an SST
+/// read from artifacts with another SST read as raw rows.
+#[tokio::test]
+async fn native_scan_keeps_the_ordinary_reader_for_a_partly_covered_sst_set() {
+    let (_env, engine, region) = fixture().await;
+    build(&engine, &region).await;
+    // The three older sources are covered by this snapshot; it is restored below.
     let covered = region.series_index_version();
     // This SST is flushed after the build, so it carries no columnar artifact: the three older
     // sources are ready while this one is not.
@@ -3078,7 +3200,7 @@ async fn native_preparation_serves_the_whole_assignment() {
     // this one stays uncovered.
     crate::series_index::tests::drain_series_index_builds(&engine, &region).await;
     region.series_index_version_control.publish(covered);
-    let (store, _reads) = recording_store(&region);
+    let (store, reads) = recording_store(&region);
     let mut scan = scanner(&region, store);
     scan.prepare(
         PrepareRequest::default().with_ranges(vec![scan.properties.partitions[0].clone()]),
@@ -3088,53 +3210,46 @@ async fn native_preparation_serves_the_whole_assignment() {
     assert!(!selected.all_ready);
     assert_eq!(3, selected.ready_files.len());
     assert_eq!(1, selected.sample_artifacts.len());
-    // Exactly one assigned source no selected artifact covers, so exactly one is read as raw rows.
-    assert_eq!(1, selected.raw_sources.len());
-    assert!(
-        selected
-            .raw_sources
-            .iter()
-            .all(|source| matches!(source, RawSource::File { .. }))
-    );
+    // One uncovered SST is enough: the SST set is not carried, so nothing is read as raw SST rows.
+    assert!(!selected.sst_coverage_complete);
+    assert!(selected.raw_sources.is_empty());
 
     let binding = labels(scan.metadata());
     let ctx = QueryScanContext::default();
     let metrics = ExecutionPlanMetricsSet::new();
-    let source = scan
-        .prepare_series(&ctx, &metrics, &binding)
-        .await
-        .unwrap()
-        .expect("the whole assignment is served natively");
-    // The unready SST contributes its row too: coverage decides how a row is read, never whether
-    // it is visible.
-    let native = prepared_rows(&source).await;
+    assert!(
+        scan.prepare_series(&ctx, &metrics, &binding)
+            .await
+            .unwrap()
+            .is_none(),
+        "a partly covered SST set keeps the ordinary reader"
+    );
+    // The unready SST contributes its row too: coverage decides how rows are read, never whether
+    // they are visible.
+    let mut rows = all_raw_rows(&scan, &ctx, &metrics, &binding, SeriesOrdering::KeyThenTime).await;
+    rows.sort_unstable_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
     assert_eq!(
         vec![
             (series_key(10, 0), 1000, 1.0),
             (series_key(10, 0), 2000, 1.0),
             (series_key(10, 0), 3000, 4.0),
         ],
-        native
+        rows
     );
-    assert_eq!(1, source.num_series());
-    // The legacy reader returns exactly the same rows from the same sources.
+    // The legacy reader over the same assignment answers the same rows.
     let legacy = scanner_with_format(
         &region,
         region.series_index_store.clone().unwrap(),
         SelectedFormat::Legacy,
     );
-    assert_eq!(native, legacy_rows(&legacy).await);
-
-    // The raw entry of the gated scanner serves the same rows through the same prepared source.
-    assert!(scan.raw_series_schema(&binding).unwrap().is_some());
-    let mut raw = all_raw_rows(&scan, &ctx, &metrics, &binding, SeriesOrdering::KeyThenTime).await;
-    raw.sort_unstable_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
-    assert_eq!(native, raw);
+    assert_eq!(rows, legacy_rows(&legacy).await);
+    // No artifact was opened: the answer came from the assigned sources themselves.
+    assert!(reads.lock().unwrap().is_empty());
     engine.stop().await.unwrap();
 }
 
-/// Nothing is published here, so no artifact accelerates anything: the answer still comes from
-/// every assigned source, and no artifact is opened.
+/// Nothing is published here, so no artifact accelerates anything: the whole scan keeps the
+/// ordinary reader, the answer is complete, and no artifact is opened.
 #[tokio::test]
 async fn native_preparation_without_artifacts_answers_completely() {
     let (_env, engine, region) = fixture().await;
@@ -3148,20 +3263,23 @@ async fn native_preparation_without_artifacts_answers_completely() {
     assert!(selected.ready_files.is_empty());
     assert!(selected.sample_artifacts.is_empty());
     assert!(selected.series_indexes.is_empty());
+    assert!(!selected.sst_coverage_complete);
     assert!(!selected.all_ready);
 
     let binding = labels(scan.metadata());
     let ctx = QueryScanContext::default();
     let metrics = ExecutionPlanMetricsSet::new();
-    // The gate is on, so the answer is the assignment itself rather than an empty source.
-    let source = scan
-        .prepare_series(&ctx, &metrics, &binding)
-        .await
-        .unwrap()
-        .expect("a gated region serves its sources instead of declining");
-    assert_eq!(1, source.num_series());
-    assert!(same_labels(source.label_source(), &binding));
-    let native = prepared_rows(&source).await;
+    // No assigned SST is carried, so the scan is answered by the ordinary reader.
+    assert!(
+        scan.prepare_series(&ctx, &metrics, &binding)
+            .await
+            .unwrap()
+            .is_none(),
+        "an unbuilt SST set keeps the ordinary reader"
+    );
+    let mut native =
+        all_raw_rows(&scan, &ctx, &metrics, &binding, SeriesOrdering::KeyThenTime).await;
+    native.sort_unstable_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
     assert_eq!(
         vec![
             (series_key(10, 0), 1000, 1.0),
@@ -3176,7 +3294,7 @@ async fn native_preparation_without_artifacts_answers_completely() {
         SelectedFormat::Legacy,
     );
     assert_eq!(native, legacy_rows(&legacy).await);
-    // No artifact was opened: no coverage changes how the rows are read, never which rows return.
+    // No artifact was opened: coverage changes how the rows are read, never which rows return.
     assert!(reads.lock().unwrap().is_empty());
     engine.stop().await.unwrap();
 }
@@ -3212,13 +3330,15 @@ async fn native_preparation_serves_an_assigned_memtable() {
         )
         .await
     );
-    let uncovered = scanner
-        .prepare_series(&ctx, &metrics, &binding)
-        .await
-        .unwrap()
-        .expect("a gated region serves its sources instead of declining");
-    assert_eq!(1, uncovered.num_series());
-    assert_eq!(expected, prepared_samples(&uncovered).await);
+    // No assigned SST is carried yet, so the whole scan keeps the ordinary reader.
+    assert!(
+        scanner
+            .prepare_series(&ctx, &metrics, &binding)
+            .await
+            .unwrap()
+            .is_none(),
+        "an unbuilt SST set keeps the ordinary reader"
+    );
 
     // Ready SSTs come from the artifact and the assigned memtable from its own rows: same answer.
     build(&engine, &region).await;
@@ -3250,8 +3370,8 @@ async fn native_preparation_serves_an_assigned_memtable() {
     engine.stop().await.unwrap();
 }
 
-/// Nothing is published here, so the native entry has no artifact at all; it still answers with
-/// every assigned source, including the memtable-only series.
+/// Nothing is published here, so every assigned SST is uncovered and the scan keeps the ordinary
+/// reader; the series that exists only in the memtable is still part of the complete answer.
 #[tokio::test]
 async fn native_scan_serves_a_series_that_exists_only_in_the_memtable() {
     let (_env, engine, region) = fixture().await;
@@ -3261,51 +3381,31 @@ async fn native_scan_serves_a_series_that_exists_only_in_the_memtable() {
     let selected = selection(&scan);
     assert!(selected.ready_files.is_empty());
     assert!(selected.series_indexes.is_empty());
-    // The three flushed SSTs and the assigned memtable are all read as raw sources.
-    assert_eq!(
-        3,
-        selected
-            .raw_sources
-            .iter()
-            .filter(|source| matches!(source, RawSource::File { .. }))
-            .count()
-    );
-    assert!(
-        selected
-            .raw_sources
-            .iter()
-            .any(|source| matches!(source, RawSource::Mem { .. })),
-        "an assigned memtable is part of the answer, not a reason to narrow it"
-    );
+    assert!(!selected.sst_coverage_complete);
+    // The memtable stays a raw source, but no SST joins it: an uncovered SST takes the whole scan
+    // to the ordinary reader instead of being read raw beside an artifact.
+    assert_eq!(1, selected.raw_sources.len());
 
     let binding = labels(scan.metadata());
     let ctx = QueryScanContext::default();
     let metrics = ExecutionPlanMetricsSet::new();
-    let source = scan
-        .prepare_series(&ctx, &metrics, &binding)
-        .await
-        .unwrap()
-        .expect("the native entry serves the whole assignment");
-    assert_eq!(2, source.num_series());
+    assert!(
+        scan.prepare_series(&ctx, &metrics, &binding)
+            .await
+            .unwrap()
+            .is_none(),
+        "an uncovered SST set keeps the ordinary reader"
+    );
+    // The ordinary reader answers with both series, including the memtable-only one.
+    let mut rows = all_raw_rows(&scan, &ctx, &metrics, &binding, SeriesOrdering::KeyThenTime).await;
+    rows.sort_unstable_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
     assert_eq!(
         vec![
-            (
-                vec!["tag_0=a".to_string(), "tag_1=x".to_string()],
-                1000,
-                1.0
-            ),
-            (
-                vec!["tag_0=a".to_string(), "tag_1=x".to_string()],
-                2000,
-                1.0
-            ),
-            (
-                vec!["tag_0=a".to_string(), "tag_1=y".to_string()],
-                3000,
-                4.0
-            ),
+            (series_key(10, 0), 1000, 1.0),
+            (series_key(10, 0), 2000, 1.0),
+            (series_key(10, 1), 3000, 4.0),
         ],
-        labelled_rows(&prepared_chunks(&source).await)
+        rows
     );
     engine.stop().await.unwrap();
 }
@@ -3371,13 +3471,17 @@ async fn native_scan_applies_memtable_deletes_and_overwrites_to_artifact_rows() 
 }
 
 /// A selected grouped artifact already carries the rows of every source it lists, including a
-/// source with no covering series index. That source must not also be read as raw rows, in query
-/// or append mode.
+/// source with no covering series index. That source must not also be read as raw rows, in the
+/// query path or in a dedup-free merge.
+///
+/// The prepared entry rejects append assignments at planning (`read/series_scan.rs`,
+/// `prepare_raw_scan`), so this is not a claim of append support: the dedup-free merge is driven
+/// through the prepared source directly to prove the single-read property without a dedup stage
+/// that could hide a duplicated source.
 #[tokio::test]
-async fn native_scan_reads_a_source_a_grouped_artifact_already_carries_once() {
-    // Distinct flushed timestamps keep the append-mode frame read valid: that mode has no dedup,
-    // so two artifact rows at one timestamp would break the strictly increasing timestamp contract
-    // for reasons unrelated to source coverage.
+async fn prepared_read_path_reads_a_source_a_grouped_artifact_already_carries_once() {
+    // Distinct flushed timestamps keep the dedup-free frame read valid, so a row that appears twice
+    // can only come from the source attribution under test.
     let (_env, engine, region) =
         fixture_with_timestamps(SelectedFormat::Columnar, false, &[1000, 2000]).await;
     // A later bucket in the same UTC day shares the day's grouped sample artifact with the older
@@ -3387,44 +3491,24 @@ async fn native_scan_reads_a_source_a_grouped_artifact_already_carries_once() {
     build(&engine, &region).await;
     region.series_index_version_control.publish(Arc::default());
     build(&engine, &region).await;
-    let unindexed = file_id_at(&region, 200_000);
-
     let mut input = scan_input(
         &region,
         region.series_index_store.clone().unwrap(),
         SelectedFormat::Columnar,
         (0..region.version().metadata.column_metadatas.len()).collect(),
     );
-    // A source whose sequence the published bucket cannot prove is not covered by it, so this
-    // source has no covering series index while the grouped artifact still lists it.
-    let mut files = input.files.clone();
-    for file in &mut files {
-        if file.file_id().file_id() == unindexed {
-            let mut meta = file.meta_ref().clone();
-            meta.sequence = None;
-            *file = crate::sst::file::FileHandle::new(meta, region.file_purger.clone());
-        }
-    }
-    input.files = files;
+    input.files = input.files.clone();
     let mut scan = SeriesScan::new(input, false);
     scan.prepare(
         PrepareRequest::default().with_ranges(vec![scan.properties.partitions[0].clone()]),
     )
     .unwrap();
     let selected = selection(&scan);
-    assert_eq!(2, selected.ready_files.len());
+    assert_eq!(3, selected.ready_files.len());
     assert_eq!(1, selected.sample_artifacts.len());
-    // The partition is by artifact source coverage, never by readiness: the unready source is
-    // already carried, so reading it again would duplicate every one of its rows.
-    assert!(
-        !selected.raw_sources.iter().any(|source| match source {
-            RawSource::File { index } => {
-                scan.stream_ctx.input.files[*index].file_id().file_id() == unindexed
-            }
-            RawSource::Mem { .. } => false,
-        }),
-        "a selected grouped artifact already carries this source"
-    );
+    // Every assigned source is carried by the selected group, so no SST is read beside it and every
+    // one of its rows can only come from the artifact.
+    assert!(selected.sst_coverage_complete);
     assert!(selected.raw_sources.is_empty());
 
     let binding = labels(scan.metadata());
@@ -3438,9 +3522,10 @@ async fn native_scan_reads_a_source_a_grouped_artifact_already_carries_once() {
     let query = prepared_samples(&source).await;
     assert_eq!(vec![(1000, 1.0), (2000, 1.0), (200_000, 2.0)], query);
 
-    // Append mode has no dedup to repair a duplicated source, so the same partition must hold
-    // there too. The native entry declines append mode at planning, so the test drives the
-    // prepared source itself.
+    // A dedup-free merge cannot repair a source that is read twice, so the same attribution must
+    // hold without a dedup stage. The prepared entry declines append assignments at planning, so
+    // the test drives the prepared source with an append-mode scan input itself; this asserts the
+    // single-read path, not support for append mode.
     let append_ctx = Arc::new(StreamContext::seq_scan_ctx(scan_input_with_append(
         &region,
         region.series_index_store.clone().unwrap(),
@@ -3467,7 +3552,6 @@ async fn native_scan_reads_a_source_a_grouped_artifact_already_carries_once() {
         append_selection,
         binding.clone(),
         preflight.raw,
-        preflight.raw_pruner,
         metrics,
     )
     .await
@@ -3476,8 +3560,261 @@ async fn native_scan_reads_a_source_a_grouped_artifact_already_carries_once() {
     assert_eq!(
         query,
         prepared_samples(&append_source).await,
-        "append mode has no dedup to repair a source that is read twice"
+        "a dedup-free merge cannot repair a source that is read twice"
     );
+    engine.stop().await.unwrap();
+}
+
+/// A windowed group artifact that carries only some UTC days of a source cannot be mixed with the
+/// rest of that source, so the whole scan keeps the ordinary reader: the answer is complete and no
+/// artifact is opened beside it.
+///
+/// The catalog is built by hand because the on-disk builder only leaves this shape behind when a
+/// later day's group has not been built yet: one day-zero group that lists a source whose rows also
+/// live in a later day.
+#[tokio::test]
+async fn native_scan_keeps_the_ordinary_reader_for_a_partly_carried_source() {
+    const LATER: i64 = 86_400_000;
+    let (_env, engine, region) = fixture().await;
+    // One source whose only row is in the later UTC day.
+    write_with_tags(&engine, &region, 1, LATER + 700, Some(4.0), &["a", "y"]).await;
+    flush_region(&engine, region.region_id, None).await;
+    let later_source = file_id_at(&region, LATER + 700);
+    build(&engine, &region).await;
+
+    // Rebuild the catalog so the day-zero group claims that source for both days (as the builder
+    // records it when it consumes the source's whole content) while only its day-zero artifact is
+    // published. The source's later-day rows are then carried by nothing.
+    let (purger, _purges) =
+        crate::series_index::series_index_channel(region.series_index_store.clone().unwrap());
+    let current = region.series_index_version();
+    let mut version = SeriesIndexVersion {
+        samples: current.samples.clone(),
+        range_indexes: current.range_indexes.clone(),
+        series_indexes: current.series_indexes.clone(),
+        index_buckets: current.index_buckets.clone(),
+    };
+    version.samples = version
+        .samples
+        .iter()
+        .filter(|(_, handle)| handle.entry().window == Some(0))
+        .map(|(id, handle)| {
+            let mut entry = handle.entry().clone();
+            entry.source_file_ids.push(later_source);
+            entry.source_windows.insert(later_source, vec![0, 1]);
+            (
+                *id,
+                crate::series_index::artifact::SamplesFileHandle::new(
+                    handle.file_id(),
+                    entry,
+                    purger.clone(),
+                ),
+            )
+        })
+        .collect();
+    region
+        .series_index_version_control
+        .publish(Arc::new(version));
+
+    let (store, reads) = recording_store(&region);
+    let mut input = scan_input(
+        &region,
+        store,
+        SelectedFormat::Columnar,
+        (0..region.version().metadata.column_metadatas.len()).collect(),
+    );
+    input.files = input.files.clone();
+    let mut scan = SeriesScan::new(input, false);
+    scan.prepare(
+        PrepareRequest::default().with_ranges(vec![scan.properties.partitions[0].clone()]),
+    )
+    .unwrap();
+    let selected = selection(&scan);
+    assert_eq!(3, selected.ready_files.len());
+    assert!(
+        !selected.sst_coverage_complete,
+        "the published group carries only the first day of that source"
+    );
+    // No SST is read raw: one partly carried source keeps the whole scan on the ordinary reader,
+    // which is also why a row can neither be duplicated nor missed.
+    assert!(selected.raw_sources.is_empty());
+
+    let binding = labels(scan.metadata());
+    let ctx = QueryScanContext::default();
+    let metrics = ExecutionPlanMetricsSet::new();
+    assert!(
+        scan.prepare_series(&ctx, &metrics, &binding)
+            .await
+            .unwrap()
+            .is_none(),
+        "an unprovable capture keeps the ordinary reader"
+    );
+    let mut rows = all_raw_rows(&scan, &ctx, &metrics, &binding, SeriesOrdering::KeyThenTime).await;
+    rows.sort_unstable_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+    assert_eq!(
+        vec![
+            (series_key(10, 0), 1000, 1.0),
+            (series_key(10, 0), 2000, 1.0),
+            (series_key(10, 1), LATER + 700, 4.0),
+        ],
+        rows,
+        "the later day of the partly carried source must be answered exactly once"
+    );
+    // No artifact was read: the answer came from the assigned sources themselves.
+    assert!(reads.lock().unwrap().is_empty());
+    engine.stop().await.unwrap();
+}
+
+/// A source without a covering series index makes the SST set uncovered, so the whole scan keeps
+/// the ordinary reader: no artifact is opened, and the series only that source holds is still
+/// served exactly once.
+#[tokio::test]
+async fn native_scan_keeps_the_ordinary_reader_for_a_source_without_a_series_index() {
+    let (_env, engine, region) =
+        fixture_with_timestamps(SelectedFormat::Columnar, false, &[1000, 2000]).await;
+    // This series lives only in the later source, so nothing else can name it.
+    write_with_tags(&engine, &region, 1, 200_000, Some(2.0), &["a", "y"]).await;
+    flush_region(&engine, region.region_id, None).await;
+    build(&engine, &region).await;
+    region.series_index_version_control.publish(Arc::default());
+    build(&engine, &region).await;
+    let unindexed = file_id_at(&region, 200_000);
+
+    let (store, reads) = recording_store(&region);
+    let mut input = scan_input(
+        &region,
+        store,
+        SelectedFormat::Columnar,
+        (0..region.version().metadata.column_metadatas.len()).collect(),
+    );
+    // A source whose sequence the published bucket cannot prove has no covering series index, so
+    // the assignment is not covered even though the grouped artifact still lists its rows.
+    let mut files = input.files.clone();
+    for file in &mut files {
+        if file.file_id().file_id() == unindexed {
+            let mut meta = file.meta_ref().clone();
+            meta.sequence = None;
+            *file = crate::sst::file::FileHandle::new(meta, region.file_purger.clone());
+        }
+    }
+    input.files = files;
+    let mut scan = SeriesScan::new(input, false);
+    scan.prepare(
+        PrepareRequest::default().with_ranges(vec![scan.properties.partitions[0].clone()]),
+    )
+    .unwrap();
+    let selected = selection(&scan);
+    assert_eq!(2, selected.ready_files.len());
+    assert_eq!(1, selected.sample_artifacts.len());
+    // A source an artifact carries but nothing names is still uncovered: the scan keeps the
+    // ordinary reader instead of reading some SSTs natively and this one raw.
+    assert!(!selected.sst_coverage_complete);
+    assert!(selected.raw_sources.is_empty());
+
+    let binding = labels(scan.metadata());
+    let ctx = QueryScanContext::default();
+    let metrics = ExecutionPlanMetricsSet::new();
+    assert!(
+        scan.prepare_series(&ctx, &metrics, &binding)
+            .await
+            .unwrap()
+            .is_none(),
+        "an uncovered SST set keeps the ordinary reader"
+    );
+    let mut rows = all_raw_rows(&scan, &ctx, &metrics, &binding, SeriesOrdering::KeyThenTime).await;
+    rows.sort_unstable_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+    assert_eq!(
+        vec![
+            (series_key(10, 0), 1000, 1.0),
+            (series_key(10, 0), 2000, 1.0),
+            (series_key(10, 1), 200_000, 2.0),
+        ],
+        rows,
+        "the uncovered source's only series must appear exactly once"
+    );
+    // No artifact was opened: the answer came from the assigned sources themselves.
+    assert!(reads.lock().unwrap().is_empty());
+    engine.stop().await.unwrap();
+}
+
+/// A series that exists only in the memtable and does not match the tag predicate must not be
+/// answered, and its matching sibling in the same memtable must stay.
+///
+/// The prepared reader resolves labels after the merge, so `sample_merge_schema` drops the tag-only
+/// conjuncts from the downstream residuals and discovery has to apply them. Which shapes that costs
+/// depends on the pruning filter: `=~` and `=`, `!=`, ranges, `AND`/`OR` and `IsNull` are already
+/// evaluated against the encoded key, while a unary `NOT` (and anything else the simple predicate
+/// cannot represent, such as `IN` lists or multi-column comparisons) is not, so discovery applies
+/// the whole tag-only conjunct set itself.
+#[tokio::test]
+async fn native_scan_applies_tag_predicates_to_memtable_only_series() {
+    let (_env, engine, region) = fixture().await;
+    // Every flushed source is carried, so the scan reads artifacts plus the assigned memtable.
+    build(&engine, &region).await;
+    // Two siblings exist only in the memtable: one matches `tag_1 = x`, the other does not.
+    write_with_tags(&engine, &region, 1, 3000, Some(4.0), &["a", "x"]).await;
+    write_with_tags(&engine, &region, 2, 3000, Some(5.0), &["a", "y"]).await;
+
+    let cases = [
+        (
+            "=~ '^x$'",
+            datafusion_expr::binary_expr(
+                col("tag_1"),
+                datafusion_expr::Operator::RegexMatch,
+                lit("^x$"),
+            ),
+            2,
+            vec![
+                (series_key(10, 0), 1000, 1.0),
+                (series_key(10, 0), 2000, 1.0),
+                (series_key(10, 1), 3000, 4.0),
+            ],
+        ),
+        (
+            "NOT tag_1 = 'x'",
+            Expr::Not(Box::new(col("tag_1").eq(lit("x")))),
+            1,
+            vec![(series_key(10, 2), 3000, 5.0)],
+        ),
+    ];
+    for (label, filter, expected_series, expected) in cases {
+        let mut request = per_series_request();
+        request.filters.push(filter);
+        // The engine path keeps the assigned memtable in the capture.
+        let scan =
+            region_scan_with_request(&region, SelectedFormat::Columnar, request.clone()).await;
+        let selected = selection(&scan);
+        assert!(selected.sst_coverage_complete, "{label}");
+        assert_only_memtable_raw(&selected);
+
+        let binding = labels(scan.metadata());
+        let source = scan
+            .prepare_series(
+                &QueryScanContext::default(),
+                &ExecutionPlanMetricsSet::new(),
+                &binding,
+            )
+            .await
+            .unwrap()
+            .expect("the carried SSTs are served beside the memtable");
+        assert_eq!(
+            expected_series,
+            source.num_series(),
+            "{label}: only matching series are candidates"
+        );
+        let native = prepared_rows(&source).await;
+        assert_eq!(
+            expected, native,
+            "{label}: a memtable series that does not match must not be answered"
+        );
+        // The ordinary reader answers the same rows, which is the completeness oracle.
+        assert_eq!(
+            native,
+            legacy_rows(&region_scan_with_request(&region, SelectedFormat::Legacy, request).await)
+                .await,
+            "{label}: native must equal legacy"
+        );
+    }
     engine.stop().await.unwrap();
 }
 
@@ -3576,9 +3913,8 @@ fn per_series_request() -> ScanRequest {
     }
 }
 
-/// A partially covered region with an assigned memtable answers completely: the covered SSTs come
-/// from the artifact, the uncovered SST and the memtable from their own rows, and the legacy reader
-/// returns the same rows from the same sources.
+/// A partially covered region answers completely through the ordinary reader: one uncovered SST
+/// takes the whole scan there, no artifact is mixed in, and the legacy reader agrees.
 #[tokio::test]
 async fn raw_scan_answers_completely_with_and_without_artifacts() {
     let (_env, engine, region) = fixture().await;
@@ -3601,10 +3937,10 @@ async fn raw_scan_answers_completely_with_and_without_artifacts() {
     let binding = labels(scanner.metadata());
     let ctx = QueryScanContext::default();
     let metrics = ExecutionPlanMetricsSet::new();
-    // Planning keeps the raw path available; only the served subset narrowed.
+    // Planning keeps the raw path available; the assignment decides which reader answers it.
     assert!(scanner.raw_series_schema(&binding).unwrap().is_some());
-    // Every assigned source contributes: the covered SSTs from the artifact, the uncovered SST and
-    // the memtable from their own rows.
+    // Every assigned source contributes, because the uncovered SST keeps the scan on the ordinary
+    // reader rather than letting it read the covered SSTs from an artifact.
     let expected = vec![
         (series_key(10, 0), 1000, 1.0),
         (series_key(10, 0), 2000, 1.0),
@@ -3623,13 +3959,16 @@ async fn raw_scan_answers_completely_with_and_without_artifacts() {
         .await,
         "the raw entry must serve every assigned source"
     );
-    // The native entry serves the very same rows, and so does the legacy reader.
-    let native = scanner
-        .prepare_series(&ctx, &metrics, &binding)
-        .await
-        .unwrap()
-        .expect("the whole assignment is prepared");
-    assert_eq!(expected, prepared_rows(&native).await);
+    // The prepared entry declines a partly covered SST set, so the rows above can only have come
+    // from the ordinary reader, which the legacy route confirms.
+    assert!(
+        scanner
+            .prepare_series(&ctx, &metrics, &binding)
+            .await
+            .unwrap()
+            .is_none(),
+        "a partly covered SST set keeps the ordinary reader"
+    );
     let legacy = region_scan_with_format(&region, SelectedFormat::Legacy).await;
     assert_eq!(expected, legacy_rows(&legacy).await);
     engine.stop().await.unwrap();
@@ -3736,13 +4075,8 @@ async fn raw_scan_outside_the_columnar_gate_still_reads_every_source() {
     engine.stop().await.unwrap();
 }
 
-/// A columnar region with no coverage at all answers with an empty native stream.
-///
-/// The gate is on, so the raw entry never reads the ordinary scan: the SST rows are not served
-/// before their artifacts exist. The empty answer still declares the planned schema, label
-/// representation and ordering, so planning and execution agree in both states.
-/// An unbuilt region answers completely too: the raw entry declares its schema, labels and
-/// ordering before any row exists, and then serves every assigned source's rows.
+/// An unbuilt region answers completely: the raw entry declares its schema, labels and ordering
+/// before any row exists, then keeps the ordinary reader and serves every assigned source's rows.
 #[tokio::test]
 async fn raw_scan_without_artifacts_answers_completely() {
     let (_env, engine, region) = fixture().await;
@@ -3760,8 +4094,8 @@ async fn raw_scan_without_artifacts_answers_completely() {
     let ordering = scanner.raw_series_ordering().unwrap();
     assert_eq!(SeriesOrdering::KeyThenTime, ordering);
     assert!(
-        scanner.raw_series_has_explicit_labels(&binding).unwrap(),
-        "a gated region plans explicit labels before anything is ready"
+        !scanner.raw_series_has_explicit_labels(&binding).unwrap(),
+        "an uncovered assignment keeps the ordinary path, which declares key-encoded labels"
     );
     let stream = scanner
         .scan_series_partition(&ctx, &metrics, 0, &binding)
@@ -3782,13 +4116,15 @@ async fn raw_scan_without_artifacts_answers_completely() {
             .collect::<Vec<_>>(),
         "an unbuilt region still answers with every assigned row"
     );
-    let source = scanner
-        .prepare_series(&ctx, &metrics, &binding)
-        .await
-        .unwrap()
-        .expect("the gate is on, so preparation never declines");
-    assert_eq!(1, source.num_series());
-    assert_eq!(complete, prepared_samples(&source).await);
+    // No assigned SST is carried, so the scan is served by the ordinary reader.
+    assert!(
+        scanner
+            .prepare_series(&ctx, &metrics, &binding)
+            .await
+            .unwrap()
+            .is_none(),
+        "an unbuilt SST set keeps the ordinary reader"
+    );
     let legacy = region_scan_with_format(&region, SelectedFormat::Legacy).await;
     assert_eq!(complete, legacy_samples(&legacy).await);
     engine.stop().await.unwrap();
@@ -3809,10 +4145,9 @@ async fn raw_scan_returns_exactly_the_native_rows_after_publication() {
     let ctx = QueryScanContext::default();
     let metrics = ExecutionPlanMetricsSet::new();
     let declared = scanner.raw_series_schema(&binding).unwrap().unwrap();
-    assert!(
-        scanner.raw_series_has_explicit_labels(&binding).unwrap(),
-        "the plan declares explicit labels before the first build too"
-    );
+    // No assigned SST is carried yet, so this plan reads the ordinary path, whose labels are
+    // encoded in the key; the declaration still matches what its stream carries.
+    assert!(!scanner.raw_series_has_explicit_labels(&binding).unwrap());
     drop(scanner);
 
     build(&engine, &region).await;
@@ -3821,6 +4156,8 @@ async fn raw_scan_returns_exactly_the_native_rows_after_publication() {
         .await
         .unwrap();
     let binding = labels(scanner.metadata());
+    // Once every SST is carried the same query plans the prepared reader, which resolves explicit
+    // labels; the schema it declares is unchanged.
     assert!(scanner.raw_series_has_explicit_labels(&binding).unwrap());
     assert_eq!(
         declared.fields,
@@ -3982,23 +4319,36 @@ async fn grouped_samples_serve_rows_of_a_source_without_a_series_index() {
     assert_eq!(3, selected.ready_files.len());
     assert_eq!(1, selected.series_indexes.len());
     assert_eq!(1, selected.sample_artifacts.len());
+    // One source has no covering series index, so the SST set is not carried.
+    assert!(!selected.sst_coverage_complete);
+    assert!(selected.raw_sources.is_empty());
 
     let binding = labels(scan.metadata());
-    let source = scan
-        .prepare_series(
-            &QueryScanContext::default(),
-            &ExecutionPlanMetricsSet::new(),
-            &binding,
-        )
-        .await
-        .unwrap()
-        .expect("the covering source keeps the grouped artifact eligible");
-    // The 200_000 row belongs to the unindexed source and is still a live row of the discovered
-    // series: readiness must never narrow `allowed` to the ready files.
-    assert_eq!(
-        vec![(1000, 1.0), (2000, 1.0), (200_000, 2.0)],
-        prepared_samples(&source).await
+    let ctx = QueryScanContext::default();
+    let metrics = ExecutionPlanMetricsSet::new();
+    assert!(
+        scan.prepare_series(&ctx, &metrics, &binding)
+            .await
+            .unwrap()
+            .is_none(),
+        "an uncovered SST set keeps the ordinary reader"
     );
+    // The row of the unindexed source is still a live row and must be answered exactly once.
+    let complete = vec![(1000, 1.0), (2000, 1.0), (200_000, 2.0)];
+    assert_eq!(
+        complete,
+        all_raw_samples(&scan, &ctx, &metrics, &binding, SeriesOrdering::KeyThenTime).await
+    );
+    let legacy = SeriesScan::new(
+        scan_input(
+            &region,
+            region.series_index_store.clone().unwrap(),
+            SelectedFormat::Legacy,
+            (0..region.version().metadata.column_metadatas.len()).collect(),
+        ),
+        false,
+    );
+    assert_eq!(complete, legacy_samples(&legacy).await);
     engine.stop().await.unwrap();
 }
 
@@ -4059,19 +4409,22 @@ async fn replaced_source_invalidates_the_grouped_artifact() {
             .contains(&day_zero.file_id().file_id())
     );
 
+    assert!(!selected.sst_coverage_complete);
     let binding = labels(scan.metadata());
-    let source = scan
-        .prepare_series(
-            &QueryScanContext::default(),
-            &ExecutionPlanMetricsSet::new(),
-            &binding,
-        )
-        .await
-        .unwrap()
-        .expect("the separately covered source stays served");
-    // The surviving sources are all served: the separately covered later day from its artifact and
-    // the remaining day-zero sources from their own raw rows.
-    let native = prepared_rows(&source).await;
+    let ctx = QueryScanContext::default();
+    let metrics = ExecutionPlanMetricsSet::new();
+    assert!(
+        scan.prepare_series(&ctx, &metrics, &binding)
+            .await
+            .unwrap()
+            .is_none(),
+        "the replaced snapshot is not covered by its artifacts"
+    );
+    // The surviving sources are all served by the ordinary reader, which never opens the
+    // invalidated generation.
+    let mut native =
+        all_raw_rows(&scan, &ctx, &metrics, &binding, SeriesOrdering::KeyThenTime).await;
+    native.sort_unstable_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
     assert_eq!(
         vec![
             (series_key(10, 0), 1000, 1.0),
@@ -4325,8 +4678,8 @@ async fn time_pruned_group_source_stays_eligible() {
         .expect("a time-pruned source keeps the group eligible");
     assert_eq!(vec![(2000, 1.0)], prepared_samples(&source).await);
 
-    // Control: without those sources the same assignment has no artifact at all, so its rows come
-    // from the assigned source itself, and the answer is unchanged.
+    // Control: without those sources the same assignment has no artifact at all, so the whole scan
+    // keeps the ordinary reader and the answer is unchanged.
     let mut control = SeriesScan::new(make_input(false, SelectedFormat::Columnar), false);
     control
         .prepare(
@@ -4336,15 +4689,28 @@ async fn time_pruned_group_source_stays_eligible() {
     let control_selected = selection(&control);
     assert!(control_selected.ready_files.is_empty());
     assert!(control_selected.sample_artifacts.is_empty());
-    assert!(!control_selected.raw_sources.is_empty());
+    assert!(!control_selected.sst_coverage_complete);
+    assert!(control_selected.raw_sources.is_empty());
     let binding = labels(control.metadata());
-    let uncovered = control
-        .prepare_series(&ctx, &metrics, &binding)
+    assert!(
+        control
+            .prepare_series(&ctx, &metrics, &binding)
+            .await
+            .unwrap()
+            .is_none(),
+        "an uncovered assignment keeps the ordinary reader"
+    );
+    assert_eq!(
+        vec![(2000, 1.0)],
+        all_raw_samples(
+            &control,
+            &ctx,
+            &metrics,
+            &binding,
+            SeriesOrdering::KeyThenTime
+        )
         .await
-        .unwrap()
-        .expect("an uncovered gated assignment is served from its sources");
-    assert_eq!(1, uncovered.num_series());
-    assert_eq!(vec![(2000, 1.0)], prepared_samples(&uncovered).await);
+    );
     let legacy = SeriesScan::new(make_input(false, SelectedFormat::Legacy), false);
     assert_eq!(vec![(2000, 1.0)], legacy_samples(&legacy).await);
     engine.stop().await.unwrap();
