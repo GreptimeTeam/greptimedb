@@ -490,7 +490,7 @@ pub(super) async fn run_direct_sst(args: DirectArgs) {
             remap_sst_file(&obj_store_dir, &table_dir, region_id, info.file_id, file_id);
             files.insert(
                 file_id,
-                file_meta_from_sst_info(&info, region_id, file_id, sequence),
+                Arc::new(file_meta_from_sst_info(&info, region_id, file_id, sequence)),
             );
         }
     }

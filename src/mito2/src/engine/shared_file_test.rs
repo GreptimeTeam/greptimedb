@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#[cfg(feature = "enterprise")]
 use std::collections::HashMap;
 
 use store_api::region_engine::RegionEngine;
