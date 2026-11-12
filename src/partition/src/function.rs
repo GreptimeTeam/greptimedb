@@ -129,6 +129,8 @@ fn is_signed_integer(data_type: &ConcreteDataType) -> bool {
 
 fn iceberg_hash_array(array: &dyn Array) -> datafusion_common::Result<ArrayRef> {
     let hashes: Int32Array = match array.data_type() {
+        // `iceberg_hash(NULL)` reaches here as an untyped null.
+        DataType::Null => Int32Array::from(vec![None; array.len()]),
         DataType::Utf8 => array
             .as_string::<i32>()
             .iter()

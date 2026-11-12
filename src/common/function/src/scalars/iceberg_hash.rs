@@ -145,13 +145,17 @@ impl Function for IcebergHashBoundsFunction {
         let buckets = match value {
             ScalarValue::Int64(Some(v)) => *v,
             ScalarValue::Int32(Some(v)) => i64::from(*v),
-            ScalarValue::UInt32(Some(v)) => i64::from(*v),
+            ScalarValue::Int16(Some(v)) => i64::from(*v),
+            ScalarValue::Int8(Some(v)) => i64::from(*v),
             ScalarValue::UInt64(Some(v)) => i64::try_from(*v).map_err(|_| {
                 DataFusionError::Execution(format!(
                     "{} bucket count is too large: {v}",
                     self.name()
                 ))
             })?,
+            ScalarValue::UInt32(Some(v)) => i64::from(*v),
+            ScalarValue::UInt16(Some(v)) => i64::from(*v),
+            ScalarValue::UInt8(Some(v)) => i64::from(*v),
             other => {
                 return Err(DataFusionError::Execution(format!(
                     "{} expects an integer bucket count, got {other:?}",
@@ -249,6 +253,15 @@ mod tests {
         );
         assert_eq!(into_scalar(hashed), ScalarValue::Int32(Some(1210000089)));
 
+        // An untyped NULL reaches the UDF as ScalarValue::Null.
+        let untyped_null = invoke(
+            &function,
+            vec![ColumnarValue::Scalar(ScalarValue::Null)],
+            1,
+            DataType::Int32,
+        );
+        assert_eq!(into_scalar(untyped_null), ScalarValue::Int32(None));
+
         // Integers hash as Iceberg longs, and NULL hashes to NULL.
         let array = invoke(
             &function,
@@ -296,6 +309,30 @@ mod tests {
                 into_scalar(bounds),
                 ScalarValue::Utf8(Some(expected.to_string())),
                 "buckets: {buckets}"
+            );
+        }
+
+        // Every integer width is a constant count; small widths must not be
+        // rejected as non-integer input.
+        for buckets in [
+            ScalarValue::Int8(Some(4)),
+            ScalarValue::Int16(Some(4)),
+            ScalarValue::UInt8(Some(4)),
+            ScalarValue::UInt16(Some(4)),
+            ScalarValue::UInt32(Some(4)),
+            ScalarValue::UInt64(Some(4)),
+        ] {
+            let label = format!("{buckets:?}");
+            let bounds = invoke(
+                &function,
+                vec![ColumnarValue::Scalar(buckets)],
+                1,
+                DataType::Utf8,
+            );
+            assert_eq!(
+                into_scalar(bounds),
+                ScalarValue::Utf8(Some("-1073741824, 0, 1073741824".to_string())),
+                "scalar: {label}"
             );
         }
     }
@@ -355,7 +392,11 @@ mod tests {
         ctx.register_udf(create_udf(Arc::new(IcebergHashBoundsFunction::default())));
 
         let batches = ctx
-            .sql("SELECT iceberg_hash('iceberg') AS h, iceberg_hash(34) AS i, iceberg_hash_bounds(4) AS b")
+            .sql(
+                "SELECT iceberg_hash('iceberg') AS h, iceberg_hash(34) AS i, \
+                 iceberg_hash(NULL) AS n, iceberg_hash_bounds(4) AS b, \
+                 iceberg_hash_bounds(CAST(4 AS SMALLINT)) AS sb",
+            )
             .await
             .unwrap()
             .collect()
@@ -371,8 +412,13 @@ mod tests {
             batches[0].column(1).as_primitive::<Int32Type>().value(0),
             2017239379
         );
+        assert!(batches[0].column(2).as_primitive::<Int32Type>().is_null(0));
         assert_eq!(
-            batches[0].column(2).as_string::<i32>().value(0),
+            batches[0].column(3).as_string::<i32>().value(0),
+            "-1073741824, 0, 1073741824"
+        );
+        assert_eq!(
+            batches[0].column(4).as_string::<i32>().value(0),
             "-1073741824, 0, 1073741824"
         );
     }
