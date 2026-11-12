@@ -20,7 +20,7 @@ use std::sync::Arc;
 
 use api::v1::region::RegionRequestHeader;
 use datafusion::execution::TaskContext;
-use datafusion::physical_expr::expressions::{Column, InListExpr, lit};
+use datafusion::physical_expr::expressions::{Column, lit};
 use datafusion::physical_plan::joins::HashTableLookupExpr;
 use datafusion::physical_plan::{ExecutionPlan, PhysicalExpr};
 use datafusion_common::tree_node::{Transformed, TreeNode, TreeNodeRecursion};
@@ -74,21 +74,21 @@ impl DynFilterPayload {
     ///
     /// Runtime-only hash lookup predicates are degraded to `true` before encoding so
     /// serializable min/max bounds around them can still be shipped to remote scans.
-    /// If the full serializable predicate is still larger than `max_payload_bytes`, large
-    /// membership predicates (`IN (...)`) are also degraded to `true` as a bounds-only fallback.
+    ///
+    /// The predicate is encoded once against `max_payload_bytes`. A predicate that does not
+    /// fit is not degraded to a weaker `true`/bounds-only payload: the error
+    /// `CommonQueryError::DynFilterPayloadTooLarge` is returned instead, and the caller
+    /// decides whether to drop that pushdown (or that fanout generation).
+    ///
+    /// `REMOTE_DYN_FILTER_PAYLOAD_MAX_BYTES` is the current hard cap. Making the budget
+    /// configurable/policy-driven is a follow-up; callers must not lower or raise it here.
     pub fn from_datafusion_expr(
         expr: &Arc<dyn PhysicalExpr>,
         max_payload_bytes: usize,
     ) -> DataFusionResult<Self> {
-        match encode_remote_dyn_filter_expr(expr, max_payload_bytes, false) {
-            Ok(bytes) => Ok(Self::Datafusion(bytes)),
-            Err(CommonQueryError::DynFilterPayloadTooLarge { .. }) => {
-                encode_remote_dyn_filter_expr(expr, max_payload_bytes, true)
-                    .map(Self::Datafusion)
-                    .map_err(DataFusionError::from)
-            }
-            Err(error) => Err(DataFusionError::from(error)),
-        }
+        encode_remote_dyn_filter_expr(expr, max_payload_bytes)
+            .map(Self::Datafusion)
+            .map_err(DataFusionError::from)
     }
 
     /// Decodes a DataFusion dynamic filter payload against the provided input schema.
@@ -184,7 +184,7 @@ fn encode_bounded_physical_expr_to_bytes(
         encoded_bytes: Cell::new(0),
     };
     let proto = encoder.physical_expr_to_proto(expr, &codec);
-    // Preserve the size error so the caller can retry with bounds only.
+    // Preserve the size error so the caller can drop this pushdown/generation.
     validate_payload_size(encoder.encoded_bytes.get(), max_payload_bytes)?;
     Ok(proto.map_err(CommonQueryError::from)?.encode_to_vec())
 }
@@ -192,19 +192,16 @@ fn encode_bounded_physical_expr_to_bytes(
 fn encode_remote_dyn_filter_expr(
     expr: &Arc<dyn PhysicalExpr>,
     max_payload_bytes: usize,
-    bounds_only: bool,
 ) -> Result<Vec<u8>, CommonQueryError> {
-    let expr = portable_remote_dyn_filter_expr(Arc::clone(expr), bounds_only)
-        .map_err(CommonQueryError::from)?;
+    let expr = portable_remote_dyn_filter_expr(Arc::clone(expr)).map_err(CommonQueryError::from)?;
     encode_bounded_physical_expr_to_bytes(&expr, max_payload_bytes)
 }
 
 fn portable_remote_dyn_filter_expr(
     expr: Arc<dyn PhysicalExpr>,
-    bounds_only: bool,
 ) -> DataFusionResult<Arc<dyn PhysicalExpr>> {
     expr.transform_up(|node| {
-        if node.is::<HashTableLookupExpr>() || (bounds_only && node.is::<InListExpr>()) {
+        if node.is::<HashTableLookupExpr>() {
             Ok(Transformed::yes(lit(true)))
         } else {
             Ok(Transformed::no(node))
@@ -543,7 +540,7 @@ mod tests {
     }
 
     #[test]
-    fn dyn_filter_payload_oversized_inlist_falls_back_to_bounds() {
+    fn dyn_filter_payload_oversized_inlist_returns_payload_too_large() {
         let schema = Arc::new(Schema::new(vec![Field::new(
             "device_id",
             DataType::Int32,
@@ -573,21 +570,15 @@ mod tests {
         ) as Arc<dyn PhysicalExpr>;
         let expr = Arc::new(BinaryExpr::new(Arc::clone(&bounds), Operator::And, in_list))
             as Arc<dyn PhysicalExpr>;
-        let bounds_only = portable_remote_dyn_filter_expr(Arc::clone(&expr), true).unwrap();
-        let bounds_only_size = encode_physical_expr_to_bytes(&bounds_only).unwrap().len();
+        // The bounds-only predicate would fit in the budget, but the predicate is no longer
+        // degraded to it: the payload is rejected instead.
+        let bounds_size = encode_physical_expr_to_bytes(&bounds).unwrap().len();
         let full_size = encode_physical_expr_to_bytes(&expr).unwrap().len();
-        assert!(full_size > bounds_only_size);
+        assert!(full_size > bounds_size);
 
-        let payload = DynFilterPayload::from_datafusion_expr(&expr, bounds_only_size).unwrap();
-        let decoded = payload
-            .decode_datafusion_expr(&TaskContext::default(), &schema, bounds_only_size)
-            .unwrap();
+        let err = DynFilterPayload::from_datafusion_expr(&expr, bounds_size).unwrap_err();
 
-        assert!(!contains_expr::<InListExpr>(&decoded));
-        let decoded_display = decoded.to_string();
-        assert!(decoded_display.contains("device_id"));
-        assert!(decoded_display.contains(">="));
-        assert!(decoded_display.contains("<="));
+        assert_payload_too_large(&err);
     }
 
     #[test]
@@ -652,6 +643,22 @@ mod tests {
 
         let err = DynFilterPayload::from_datafusion_expr(&expr, 1).unwrap_err();
 
+        assert_payload_too_large(&err);
+    }
+
+    #[test]
+    fn dyn_filter_payload_rejects_oversized_payload_at_the_hard_cap() {
+        // A predicate slightly over the shared hard cap must fail instead of shrinking.
+        let expr: Arc<dyn PhysicalExpr> = lit("x".repeat(REMOTE_DYN_FILTER_PAYLOAD_MAX_BYTES));
+
+        let err =
+            DynFilterPayload::from_datafusion_expr(&expr, REMOTE_DYN_FILTER_PAYLOAD_MAX_BYTES)
+                .unwrap_err();
+
+        assert_payload_too_large(&err);
+    }
+
+    fn assert_payload_too_large(err: &DataFusionError) {
         let DataFusionError::External(error) = err else {
             panic!("expected external common query error, got: {err:?}");
         };

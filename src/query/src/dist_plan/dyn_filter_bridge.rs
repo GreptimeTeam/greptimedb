@@ -36,6 +36,7 @@ use crate::dist_plan::filter_id::build_remote_dyn_filter_id;
 use crate::dist_plan::{
     FilterId, QueryDynFilterRegistry, RemoteDynFilterProducerId, Subscriber, SubscriberRegistration,
 };
+use crate::metrics::REMOTE_DYN_FILTER_ENCODE_TOTAL;
 use crate::region_query::RegionQueryTarget;
 
 #[derive(Debug, Clone)]
@@ -103,7 +104,7 @@ pub(crate) fn capture_remote_dyn_filters_for_pushdown(
                 captured_dyn_filters.push(captured_dyn_filter);
             }
             Err(error) => {
-                common_telemetry::warn!(error; "Remote dyn filter is not pushed down because initial registration cannot be built");
+                common_telemetry::warn!(error; "Remote dyn filter is not pushed down because its initial registration or snapshot cannot be built");
                 pushed_down.push(PushedDown::No);
             }
         }
@@ -132,11 +133,9 @@ pub(crate) fn capture_remote_dyn_filters_for_pushdown(
 /// built only from columns and literals, so it becomes a plain predicate once the
 /// subqueries are resolved.
 ///
-/// Filters containing `IN` lists are rejected: an oversized payload replaces `IN` with
-/// `true`, which only widens a conjunction but can narrow an arbitrary predicate such as
-/// `(host IN (...)) = false`.
-// TODO(dennis): make the bounds-only fallback in `DynFilterPayload` replace only `IN` lists
-// in conjunctive positions, then drop this restriction.
+/// Filters containing `IN` lists are rejected to keep the forwarded predicate a plain
+/// column/literal combination. An oversized payload is no longer degraded: encoding fails
+/// and the remote dynamic filter pushdown is dropped instead of shipping `IN (...) = true`.
 fn is_scalar_subquery_filter(filter: &Arc<dyn PhysicalExpr>) -> bool {
     let mut has_scalar_subquery = false;
     let mut supported = true;
@@ -296,7 +295,7 @@ fn build_captured_dyn_filter(
 
     Ok(CapturedDynFilter {
         filter_id,
-        initial_registration: attach_initial_snapshot(initial_registration, &alive_dyn_filter),
+        initial_registration: attach_initial_snapshot(initial_registration, &alive_dyn_filter)?,
         alive_dyn_filter,
         scalar_subquery_filter: None,
     })
@@ -315,44 +314,54 @@ fn validate_initial_registrations_for_pushdown(
 fn attach_initial_snapshot(
     initial_registration: InitialDynFilterReg,
     alive_dyn_filter: &DynamicFilterPhysicalExpr,
-) -> InitialDynFilterReg {
-    let Some(initial_snapshot) = initial_snapshot(alive_dyn_filter) else {
-        return initial_registration;
+) -> Result<InitialDynFilterReg> {
+    let Some(initial_snapshot) = initial_snapshot(alive_dyn_filter)? else {
+        return Ok(initial_registration);
     };
 
-    initial_registration.with_initial_snapshot(initial_snapshot)
+    Ok(initial_registration.with_initial_snapshot(initial_snapshot))
 }
 
+/// Builds the initial snapshot for a captured remote dynamic filter.
+///
+/// Returns `Ok(None)` only when the producer predicate cannot be read at all; the
+/// registration is then sent without a snapshot and later fanout updates still apply.
+/// A predicate that cannot be encoded (for example because it exceeds the payload budget)
+/// is an error, so the caller can drop this pushdown instead of silently shipping no filter.
 fn initial_snapshot(
     alive_dyn_filter: &DynamicFilterPhysicalExpr,
-) -> Option<InitialDynFilterSnapshot> {
+) -> Result<Option<InitialDynFilterSnapshot>> {
     let generation = alive_dyn_filter.snapshot_generation();
     let current = match alive_dyn_filter.current() {
         Ok(current) => current,
         Err(error) => {
             common_telemetry::warn!(error; "Failed to read remote dyn filter initial snapshot");
-            return None;
+            return Ok(None);
         }
     };
 
-    let payload = match DynFilterPayload::from_datafusion_expr(
-        &current,
-        REMOTE_DYN_FILTER_PAYLOAD_MAX_BYTES,
-    ) {
-        Ok(payload) => payload,
-        Err(error) => {
-            common_telemetry::warn!(error; "Failed to encode remote dyn filter initial snapshot");
-            return None;
-        }
-    };
+    let payload =
+        match DynFilterPayload::from_datafusion_expr(&current, REMOTE_DYN_FILTER_PAYLOAD_MAX_BYTES)
+        {
+            Ok(payload) => payload,
+            Err(error) => {
+                // The payload is not degraded to `true`/bounds-only, so this pushdown must be
+                // dropped by the caller: keeping it would prune with a weaker predicate than
+                // the plan assumes.
+                REMOTE_DYN_FILTER_ENCODE_TOTAL
+                    .with_label_values(&["error"])
+                    .inc();
+                return Err(error.context("Failed to encode remote dyn filter initial snapshot"));
+            }
+        };
 
     // Current DataFusion exposes `wait_complete()`, but no non-blocking completion getter.
     let is_complete = false;
-    Some(InitialDynFilterSnapshot::new(
+    Ok(Some(InitialDynFilterSnapshot::new(
         payload,
         generation,
         is_complete,
-    ))
+    )))
 }
 
 fn build_initial_dyn_filter_regs_for_region(
@@ -384,10 +393,16 @@ pub(crate) fn query_context_with_refreshed_initial_dyn_filter_regs(
         captured_dyn_filters
             .iter()
             .map(|captured| {
+                // Refresh is best-effort: keep the optimization-time snapshot when the live
+                // predicate cannot be encoded so the query is never failed here.
                 attach_initial_snapshot(
                     captured.initial_registration.clone(),
                     &captured.alive_dyn_filter,
                 )
+                .unwrap_or_else(|error| {
+                    common_telemetry::warn!(error; "Failed to refresh remote dyn filter initial snapshot; keeping the optimization-time snapshot");
+                    captured.initial_registration.clone()
+                })
             })
             .collect(),
     );
@@ -899,6 +914,28 @@ mod tests {
         );
 
         assert_eq!(pushed_down(&pushdown), vec![false, false]);
+        assert!(pushdown.captured_dyn_filters.is_empty());
+    }
+
+    #[test]
+    fn capture_remote_dyn_filters_for_pushdown_rejects_oversized_initial_snapshot() {
+        // A single predicate that cannot be encoded within the payload budget on its own.
+        let parent_filters = vec![test_dyn_filter_with_snapshot_payload(
+            "host",
+            0,
+            REMOTE_DYN_FILTER_PAYLOAD_MAX_BYTES + 1,
+        )
+            as Arc<dyn datafusion::physical_plan::PhysicalExpr>];
+
+        let pushdown = capture_remote_dyn_filters_for_pushdown(
+            test_remote_dyn_filter_producer_id(42),
+            0,
+            &[],
+            parent_filters,
+        );
+
+        // The pushdown is dropped so the parent filter keeps pruning locally.
+        assert_eq!(pushed_down(&pushdown), vec![false]);
         assert!(pushdown.captured_dyn_filters.is_empty());
     }
 

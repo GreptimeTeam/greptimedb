@@ -3323,6 +3323,42 @@ mod tests {
     }
 
     #[test]
+    fn remote_dyn_filter_preflight_keeps_parent_filter_when_initial_snapshot_is_oversized() {
+        let exec = remote_dyn_filter_test_exec(
+            Arc::new(TestRegionQueryHandler::default()),
+            QueryContext::arc(),
+        );
+        let dyn_filter = Arc::new(DynamicFilterPhysicalExpr::new(
+            vec![Arc::new(Column::new("host", 0)) as Arc<_>],
+            physical_lit(true) as _,
+        ));
+        dyn_filter
+            .update(physical_lit(datafusion_common::ScalarValue::Utf8(Some(
+                "x".repeat(common_query::request::REMOTE_DYN_FILTER_PAYLOAD_MAX_BYTES + 1),
+            ))) as _)
+            .unwrap();
+
+        let propagation = exec
+            .handle_child_pushdown_result(
+                FilterPushdownPhase::Post,
+                ChildPushdownResult {
+                    parent_filters: vec![ChildFilterPushdownResult {
+                        filter: dyn_filter as Arc<dyn datafusion_physical_expr::PhysicalExpr>,
+                        child_results: vec![PushedDown::Yes],
+                    }],
+                    self_filters: Vec::new(),
+                },
+                &ConfigOptions::new(),
+            )
+            .unwrap();
+
+        // The snapshot cannot be encoded, so nothing is registered remotely and the parent
+        // filter stays in the plan: results stay correct without remote pruning.
+        assert!(exec.captured_remote_dyn_filters().is_empty());
+        assert!(matches!(propagation.filters.as_slice(), [PushedDown::No]));
+    }
+
+    #[test]
     fn scan_output_bytes_uses_plan_name() {
         let metrics = RecordBatchMetrics {
             plan_metrics: vec![PlanMetrics {
