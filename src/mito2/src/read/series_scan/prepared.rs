@@ -61,7 +61,7 @@ use crate::read::range::RowGroupIndex;
 use crate::read::scan_region::StreamContext;
 use crate::read::scan_util::PartitionMetrics;
 use crate::read::seq_scan::SeqScan;
-use crate::read::series_scan::{RawScanPreparation, SeriesInputMode, raw};
+use crate::read::series_scan::{RawScanPreparation, raw};
 use crate::read::stream::ScanBatch;
 use crate::series_index::artifact::ArtifactFormat;
 use crate::series_index::format::{
@@ -88,10 +88,8 @@ impl Preparation {
     /// Prepares the scanner-wide source for the caller's captured [`SelectedInputs`].
     ///
     /// The cache holds at most one source per scanner, so the first preparation wins. A later
-    /// caller may only reuse it when its label binding and its selection are identical: a raw
-    /// all-ready capture and a native ready-subset capture describe the same inputs exactly when
-    /// `all_ready` holds, and a different capture means a different assignment.
-    #[allow(clippy::too_many_arguments)]
+    /// caller may only reuse it when its label binding and its selection are identical: the
+    /// capture is the single answer, and a different capture means a different assignment.
     pub(crate) async fn prepare(
         &self,
         context: Arc<StreamContext>,
@@ -100,7 +98,6 @@ impl Preparation {
         raw: RawScanPreparation,
         pruner: Arc<PartitionPruner>,
         metrics: PartitionMetrics,
-        mode: SeriesInputMode,
     ) -> std::result::Result<Arc<dyn PreparedSeriesSource>, BoxedError> {
         // Per caller, including time awaiting another partition's shared preparation.
         // This overlaps prepare_wall and must not be added to its component timings.
@@ -128,14 +125,11 @@ impl Preparation {
             )));
         }
         if source.selection != expected_selection {
-            return Err(BoxedError::new(invalid(match mode {
-                // The raw path's preflight promised every assigned source, so a source prepared
-                // from another selection cannot answer it.
-                SeriesInputMode::Raw => "columnar series coverage changed after series preparation",
-                // Native preparation is served its own capture, so unready inputs are never an
-                // error here; a different capture can only come from another assignment.
-                SeriesInputMode::Native => "series preparation selection changed",
-            })));
+            // Every entry serves its own capture, so a different capture can only come from
+            // another assignment.
+            return Err(BoxedError::new(invalid(
+                "series preparation selection changed",
+            )));
         }
         Ok(source.clone())
     }
@@ -187,8 +181,11 @@ pub(crate) struct SelectedInputs {
     /// Their rows are read by the ordinary flat readers and merged with the artifact rows, so an
     /// assigned memtable or an unbuilt SST narrows which artifacts are used, never the answer.
     pub(crate) raw_sources: Vec<RawSource>,
-    /// Whether every assigned source is columnar-ready, which is the raw path's all-or-nothing
-    /// answer. Vacuously `true` for an empty assignment.
+    /// Whether every assigned source is columnar-ready, so no raw source has to be read.
+    ///
+    /// This is an optimisation report, never a visibility decision: a `false` capture answers
+    /// exactly like a `true` one, only with more sources read as raw rows. Vacuously `true` for an
+    /// empty assignment.
     pub(crate) all_ready: bool,
 }
 
@@ -216,11 +213,12 @@ pub(crate) enum RawSource {
 
 /// Validates the pinned assignments and coverage without opening artifacts.
 ///
-/// Returns whether every assigned source can be read from columnar artifacts. `false` is not an
-/// error: the caller scans those sources with the ordinary reader instead.
+/// Returns whether every assigned source can be read from columnar artifacts, which is a report
+/// about artifact coverage only: an incomplete capture is not an error and not a narrower answer,
+/// because its uncovered sources are read as raw rows.
 ///
-/// Test-only: the production entries capture the whole selection with [`select_inputs`] and answer
-/// with [`selection_serves`](super::selection_serves), which also needs the ready subset.
+/// Test-only: the production entries capture the whole selection with [`select_inputs`] and serve
+/// it from [`ColumnarPreparedSource`], so readiness no longer decides whether a source is read.
 #[cfg(test)]
 pub(crate) fn validate_inputs(context: &StreamContext, ranges: &[PartitionRange]) -> Result<bool> {
     select_inputs(context, ranges).map(|inputs| inputs.all_ready)
@@ -231,7 +229,10 @@ pub(crate) fn validate_inputs(context: &StreamContext, ranges: &[PartitionRange]
 /// Every assignment is validated before any readiness answer, so a malformed assignment is never
 /// masked by an earlier unready one. `allowed` joins every assigned SST with the sources the query
 /// pruned by time only, and is computed once: a grouped artifact may carry rows of a pruned source
-/// that are still live rows of a discovered series, so a ready subset must never narrow it.
+/// that are still live rows of a discovered series, so the ready files must never narrow it.
+///
+/// Selection decides how a scan reads, never what it returns: the artifacts a read may use, and
+/// the assigned sources it must read itself because no selected artifact carries their rows.
 pub(crate) fn select_inputs(
     context: &StreamContext,
     ranges: &[PartitionRange],
@@ -357,6 +358,11 @@ pub(crate) fn select_inputs(
     // need not have a covering series index of its own. Reading such a source again would emit
     // each of its rows twice, which append mode cannot deduplicate. Everything no selected
     // artifact covers is read as raw rows instead.
+    //
+    // Known limitation: the partition is per source, so a source a windowed group artifact
+    // carries for only some UTC days counts as carried. Its rows outside those days are not read
+    // as raw rows and stay invisible; a per-row partition would need artifact day metadata at row
+    // granularity, which is the price of never emitting a row twice.
     let carried: Vec<_> = index
         .version
         .samples
@@ -581,6 +587,11 @@ fn raw_source_index(context: &StreamContext, source: &RawSource) -> RowGroupInde
 /// ordinal read stays independent. The keys are the SST's own sparse encoding, so a series found
 /// here has the same identity, ordering, and labels an artifact discovery would give it, and one
 /// found by both is still a single candidate.
+///
+/// Known limitation: candidates come from the covering series indexes and from these uncovered
+/// sources only, so a series that exists *solely* in an SST a selected artifact covers but that has
+/// no series index of its own is not discovered, and its artifact rows stay invisible. Enumerating
+/// the keys a samples artifact carries would close that gap.
 #[allow(clippy::too_many_arguments)]
 async fn discover_raw_series(
     context: &Arc<StreamContext>,
@@ -725,6 +736,10 @@ impl ColumnarPreparedSource {
             "prepare_series_indexes",
             selection.series_indexes.len() as u64,
         );
+        // Whether this preparation had full artifact coverage, so no raw source had to be read.
+        preparation_metrics
+            .counts
+            .insert("prepare_all_ready", u64::from(selection.all_ready));
         let reservation =
             MemoryConsumer::new("ColumnarPreparedSource").register(&input.scan_memory_pool);
         let started = Instant::now();

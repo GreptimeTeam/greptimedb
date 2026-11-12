@@ -11820,18 +11820,18 @@ async fn native_promql_columnar_fused_series_matches_legacy() {
     assert_eq!(matched_rows, vec![(120_000, "b".to_string(), 80.0)]);
 }
 
-/// Nothing published: the native route answers the ready subset, which is empty here, while the
-/// existing plan answers every row. A flush plus a build covers the same samples, and then the
-/// native route answers exactly what the existing plan answers.
+/// Nothing published: the native route still answers every row, exactly like the existing plan.
+/// Artifacts accelerate a read, they never decide visibility, so a memtable or an unindexed SST
+/// contributes its rows through the raw sources the prepared reader merges in.
 ///
-/// That triple — zero native rows, the fused node still running, and the existing plan answering
-/// everything — is what pins "unpublished data is invisible". It is not an absence of coverage: a
-/// reintroduced fallback would answer rows here and fail this test.
+/// That pair — the fused node running and both routes answering the same complete sums — is what
+/// pins "publication is an optimisation". A reader that narrowed itself to published artifacts
+/// would answer fewer rows here and fail this test, before and after the build below.
 #[rstest]
 #[case::memtable("memtable", false)]
 #[case::unindexed_sst("unindexed_sst", true)]
 #[tokio::test(flavor = "multi_thread")]
-async fn native_promql_columnar_unpublished_float64_is_invisible_until_a_build(
+async fn native_promql_columnar_unpublished_float64_matches_legacy_with_and_without_artifacts(
     #[case] stage: &str,
     #[case] flush: bool,
 ) {
@@ -11875,8 +11875,8 @@ async fn native_promql_columnar_unpublished_float64_is_invisible_until_a_build(
         .await;
     }
     // The 2m window at t = 120s holds both samples of each series, so the complete answer is
-    // 10 + 30 = 40 for `a` and 20 + 60 = 80 for `b`. No artifact carries them yet, so the ready
-    // subset is empty and the native route answers no rows at all.
+    // 10 + 30 = 40 for `a` and 20 + 60 = 80 for `b`. No artifact carries them yet, so the native
+    // route reads whichever sources hold them and answers the same rows.
     let complete = vec![
         (120_000, "a".to_string(), 40.0),
         (120_000, "b".to_string(), 80.0),
@@ -11892,33 +11892,23 @@ async fn native_promql_columnar_unpublished_float64_is_invisible_until_a_build(
     // Drained first, so the counter below describes execution, not planning; `take` requires the
     // fused node to have run.
     let plan = observer.take();
-    if flush {
-        // A flush publishes an SST and queues the build that covers it, so by the time this query
-        // plans, the ready subset is either still empty or already complete. Both are that
-        // moment's ready subset, and both are what the artifacts carry; which one was observed is
-        // logged, because a slow runner may see the second.
-        common_telemetry::info!(
-            "{stage}: first native answer after a flush, before any build barrier: {native_rows:?}"
-        );
-        assert!(
-            native_rows.is_empty() || native_rows == complete,
-            "{stage}: the fused route must answer the ready subset, found {native_rows:?}"
-        );
-    } else {
-        // A memtable is never converted into an artifact, so nothing is ready: the fused node runs
-        // and answers no series at all.
-        assert!(
-            native_rows.is_empty(),
-            "{stage}: an assigned memtable is not part of the ready subset, found {native_rows:?}"
-        );
-    }
+    // Whether the rows sit in a memtable or in an SST no build has covered yet, the fused route
+    // answers them all: readiness chooses the reader, never the answer.
+    assert_eq!(
+        native_rows, complete,
+        "{stage}: the fused route answers every row without any artifact"
+    );
     assert_eq!(
         native_output_values(plan.as_ref()),
-        if native_rows.is_empty() { 0 } else { 2 },
+        2,
         "{stage}: the fused route reports one value per series it answers"
     );
-    // Flush the samples and cover them with a build: the rows the ready subset lacked were delayed
-    // by publication, not lost, and both routes now answer the same complete sums.
+    assert_eq!(
+        native_rows, legacy_rows,
+        "{stage}: both routes answer the same rows without any artifact"
+    );
+    // Flush the samples and cover them with a build: coverage adds an acceleration, and both
+    // routes still answer the same complete sums.
     execute_all(
         &instance,
         &format!("ADMIN FLUSH_TABLE('{PHYSICAL}'); ADMIN BUILD_SERIES_INDEX('{PHYSICAL}');"),
@@ -11950,15 +11940,15 @@ async fn native_promql_columnar_unpublished_float64_is_invisible_until_a_build(
     );
 }
 
-/// An index over the first SST only. The native route answers the ready subset — the samples the
-/// published artifacts carry — while the existing plan answers every row: the later samples sit in
-/// an assigned memtable, or in an SST that no build has covered yet, and neither is part of the
-/// ready subset. A flush plus a build covers them too, so those rows were delayed, not lost.
+/// An index over the first SST only. The native route answers every row exactly like the existing
+/// plan: the indexed SST comes from its artifact, while the later samples — in an assigned memtable
+/// or in an SST no build has covered yet — are read from their own sources. A flush plus a build
+/// covers them too, which changes the reader and not the answer.
 #[rstest]
 #[case::partial_memtable("partial_memtable", false)]
 #[case::partial_sst("partial_sst", true)]
 #[tokio::test(flavor = "multi_thread")]
-async fn native_promql_columnar_partial_index_serves_the_ready_subset(
+async fn native_promql_columnar_partial_index_matches_legacy_with_and_without_artifacts(
     #[case] stage: &str,
     #[case] flush: bool,
 ) {
@@ -11997,8 +11987,8 @@ async fn native_promql_columnar_partial_index_serves_the_ready_subset(
     .await;
     if flush {
         // The newer rows leave the memtable, but no build covers the SST they land in: a flush
-        // queues its own build, so the ready subset may or may not include that SST by the time
-        // the query below plans.
+        // queues its own build, so the artifact may or may not include that SST by the time the
+        // query below plans. Neither state changes which rows are visible.
         execute_all(
             &instance,
             &format!("ADMIN FLUSH_TABLE('{PHYSICAL}');"),
@@ -12006,16 +11996,11 @@ async fn native_promql_columnar_partial_index_serves_the_ready_subset(
         )
         .await;
     }
-    // The 2m window at t = 120s holds both samples of a series, so the existing plan answers
-    // 10 + 30 = 40 for `a` and 20 + 60 = 80 for `b`, while the ready subset holds only the samples
-    // of the indexed first SST: 10 for `a` and 20 for `b`.
+    // The 2m window at t = 120s holds both samples of a series, so both routes answer
+    // 10 + 30 = 40 for `a` and 20 + 60 = 80 for `b`, whatever the artifacts cover.
     let complete = vec![
         (120_000, "a".to_string(), 40.0),
         (120_000, "b".to_string(), 80.0),
-    ];
-    let ready_subset = vec![
-        (120_000, "a".to_string(), 10.0),
-        (120_000, "b".to_string(), 20.0),
     ];
     let sql = format!("TQL EVAL (120, 120, '1m') sum_over_time({TABLE}[2m])");
     // Legacy off first, so a red native query is about the fused route.
@@ -12031,32 +12016,23 @@ async fn native_promql_columnar_partial_index_serves_the_ready_subset(
     // Drained first, so the counter below describes execution, not planning; `take` requires the
     // fused node to have run.
     let plan = observer.take();
-    if flush {
-        // A flush installs an SST and queues the build covering it, so this answer is either the
-        // indexed first SST alone or that SST plus the freshly built second one. Both are the ready
-        // subset of their moment; which one was observed is logged, because a slow runner may see
-        // the second.
-        common_telemetry::info!(
-            "{stage}: first native answer after a flush, before any build barrier: {native_rows:?}"
-        );
-        assert!(
-            native_rows == ready_subset || native_rows == complete,
-            "{stage}: the fused route must answer the ready subset, found {native_rows:?}"
-        );
-    } else {
-        // An assigned memtable is not part of the ready subset.
-        assert_eq!(
-            native_rows, ready_subset,
-            "{stage}: the fused route answers the indexed SST and nothing else"
-        );
-    }
+    // The indexed SST's samples come from its artifact and the newer ones from the memtable or the
+    // unindexed SST, so the fused route answers the complete sum in both cases.
+    assert_eq!(
+        native_rows, complete,
+        "{stage}: the fused route answers the indexed SST and the rows no artifact covers"
+    );
     assert_eq!(
         native_output_values(plan.as_ref()),
         2,
         "{stage}: two values, one per series"
     );
-    // Flush the newer samples and cover them with a build: the rows the ready subset lacked reach
-    // the fused route, and both routes answer the same complete sums.
+    assert_eq!(
+        native_rows, legacy_rows,
+        "{stage}: both routes answer the same rows with a partial index"
+    );
+    // Flush the newer samples and cover them with a build: coverage adds an acceleration, and both
+    // routes still answer the same complete sums.
     execute_all(
         &instance,
         &format!("ADMIN FLUSH_TABLE('{PHYSICAL}'); ADMIN BUILD_SERIES_INDEX('{PHYSICAL}');"),
