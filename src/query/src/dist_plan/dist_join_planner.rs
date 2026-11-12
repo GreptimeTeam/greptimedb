@@ -33,8 +33,8 @@ use datafusion_common::config::ConfigOptions;
 use datafusion_common::tree_node::{Transformed, TreeNode, TreeNodeRewriter};
 use datafusion_expr::utils::{can_hash, find_valid_equijoin_key_pair, split_conjunction};
 use datafusion_expr::{
-    Expr, ExprSchemable, Join, JoinType, LogicalPlan, Operator, Projection, TableScan,
-    UserDefinedLogicalNodeCore,
+    Expr, ExprSchemable, Join, JoinConstraint, JoinType, LogicalPlan, Operator, Projection,
+    TableScan, UserDefinedLogicalNodeCore,
 };
 use datafusion_optimizer::analyzer::AnalyzerRule;
 use datatypes::extension::json::is_json2_extension_type;
@@ -354,6 +354,13 @@ impl NestedBroadcastJoinRewriter<'_> {
         // Only `INNER` equi-joins of two distributed scans are handled, everything else
         // keeps the existing distributed plan.
         if join.join_type != JoinType::Inner || join.on.is_empty() {
+            return None;
+        }
+
+        // The pinned DataFusion Substrait producer rejects `JoinConstraint::Using`, so a
+        // rewritten payload would fail to encode on the frontend and make a previously
+        // executable query fail. Keep `USING` joins local.
+        if join.join_constraint != JoinConstraint::On {
             return None;
         }
 
@@ -1072,6 +1079,24 @@ mod tests {
         .unwrap();
 
         assert!(restore_join_schema(swapped, original_schema).is_none());
+    }
+
+    /// `JOIN ... USING` is executable locally, but the pinned Substrait producer rejects
+    /// `JoinConstraint::Using`, so the rewritten payload could not be encoded. The rewrite
+    /// must leave the join in place.
+    #[test]
+    fn nested_broadcast_join_does_not_rewrite_using_constraint() {
+        let plan = distributed_join_plan();
+        let LogicalPlan::Join(join) = &plan else {
+            panic!("expected a join on top, got: {plan}");
+        };
+        let using_plan = LogicalPlan::Join(Join {
+            join_constraint: JoinConstraint::Using,
+            ..join.clone()
+        });
+        let result = rewrite(using_plan.clone());
+
+        assert_eq!(using_plan.to_string(), result.to_string());
     }
 
     /// Only `INNER` joins are rewritten.
