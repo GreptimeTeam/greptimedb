@@ -80,7 +80,7 @@ pub(crate) struct TailReplayTask<S> {
 impl<S: LogStore> TailReplayTask<S> {
     pub(crate) async fn run(self) {
         let region_id = self.region.region_id;
-        let _ended = EndNotifier {
+        let _ended = TailReplayEndGuard {
             sender: self.flush_task.request_sender.clone(),
             region_id,
         };
@@ -430,12 +430,12 @@ pub(crate) async fn notify_worker(
 }
 
 /// Reports the end of a tail replay to the worker, however the task ends.
-struct EndNotifier {
+struct TailReplayEndGuard {
     sender: Sender<WorkerRequestWithTime>,
     region_id: RegionId,
 }
 
-impl Drop for EndNotifier {
+impl Drop for TailReplayEndGuard {
     fn drop(&mut self) {
         let sender = self.sender.clone();
         let region_id = self.region_id;
