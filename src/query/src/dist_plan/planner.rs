@@ -290,7 +290,7 @@ impl DistExtensionPlanner {
         if !eligible_remote_plan(remote_plan) {
             return None;
         }
-        let Ok(Some(table)) = self
+        let table = match self
             .catalog_manager
             .table(
                 &table_name.catalog_name,
@@ -299,8 +299,19 @@ impl DistExtensionPlanner {
                 None,
             )
             .await
-        else {
-            return None;
+        {
+            Ok(Some(table)) => table,
+            // An unknown table is not a grouped-read candidate. The ordinary path reports the
+            // missing metadata itself, so nothing is lost here.
+            Ok(None) => return None,
+            Err(error) => {
+                common_telemetry::warn!(
+                    error;
+                    "Grouped read keeps the ordinary path because the metadata of {} cannot be read",
+                    table_name
+                );
+                return None;
+            }
         };
         let table_id = table.table_info().table_id();
         // A logical table whose regions belong to another physical table (e.g. a logical metric
@@ -320,9 +331,10 @@ impl DistExtensionPlanner {
             {
                 Ok(target) => target,
                 Err(error) => {
-                    debug!(
-                        "Grouped read keeps the ordinary path because region {} has no target: {}",
-                        region_id, error
+                    common_telemetry::warn!(
+                        error;
+                        "Grouped read keeps the ordinary path because region {} has no target",
+                        region_id
                     );
                     return None;
                 }
@@ -343,9 +355,15 @@ impl DistExtensionPlanner {
         // materializing any leaf. This both bounds request memory and lets a byte-heavy template
         // shrink the chunk instead of building an oversized GroupRead first.
         let table_name_for_plan = nested_plan_table(remote_plan)?;
-        let Ok(nested) = encode_nested_plan(remote_plan) else {
-            debug!("Grouped read keeps the ordinary path because its regional plan cannot encode");
-            return None;
+        let nested = match encode_nested_plan(remote_plan) {
+            Ok(nested) => nested,
+            Err(error) => {
+                common_telemetry::warn!(
+                    error;
+                    "Grouped read keeps the ordinary path because its regional plan cannot be encoded"
+                );
+                return None;
+            }
         };
         let max_regions_by_payload =
             max_regions_for_group_read_payload(nested.len(), table_name_for_plan.table_name.len());
@@ -362,8 +380,9 @@ impl DistExtensionPlanner {
             for chunk in regions.chunks(chunk_limit) {
                 match DatanodeReadGroup::try_new(target.clone(), chunk.to_vec()) {
                     Ok(group) => frozen.push(group),
-                    Err(reason) => {
-                        debug!("Grouped read keeps the ordinary path: {}", reason);
+                    Err(error) => {
+                        // A refused group is a rule or budget decision, not a failure.
+                        debug!("Grouped read keeps the ordinary path: {error}");
                         return None;
                     }
                 }
@@ -381,19 +400,20 @@ impl DistExtensionPlanner {
                 remote_plan.schema().clone(),
             ) {
                 Ok(envelope) => envelope,
-                Err(reason) => {
-                    debug!(
-                        "Grouped read keeps the ordinary path because its envelope cannot be built:                          {reason}"
+                Err(error) => {
+                    common_telemetry::warn!(
+                        error;
+                        "Grouped read keeps the ordinary path because its envelope cannot be built"
                     );
                     return None;
                 }
             };
             let encoded = match DFLogicalSubstraitConvertor.encode(&envelope, DefaultSerializer) {
                 Ok(encoded) => encoded,
-                Err(reason) => {
-                    debug!(
-                        "Grouped read keeps the ordinary path because its envelope cannot be \
-                         encoded: {reason}"
+                Err(error) => {
+                    common_telemetry::warn!(
+                        error;
+                        "Grouped read keeps the ordinary path because its envelope cannot be encoded"
                     );
                     return None;
                 }

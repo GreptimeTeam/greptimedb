@@ -55,7 +55,11 @@ impl SerializerRegistry for DefaultSerializer {
             let merge_scan = node
                 .as_any()
                 .downcast_ref::<MergeScanLogicalPlan>()
-                .expect("Failed to downcast to MergeScanLogicalPlan");
+                .ok_or_else(|| {
+                    DataFusionError::Internal(
+                        "a MergeScan node did not downcast to MergeScanLogicalPlan".to_string(),
+                    )
+                })?;
 
             let input = merge_scan.input();
             let is_placeholder = merge_scan.is_placeholder();
@@ -73,15 +77,20 @@ impl SerializerRegistry for DefaultSerializer {
             let grouped = node
                 .as_any()
                 .downcast_ref::<GroupReadPlan>()
-                .expect("Failed to downcast to GroupReadPlan");
+                .ok_or_else(|| {
+                    DataFusionError::Internal(
+                        "a GroupRead node did not downcast to GroupReadPlan".to_string(),
+                    )
+                })?;
             // The root carries the payload bytes it was built with: the datanode validates them,
             // so a malformed envelope reaches it to be rejected instead of failing to encode.
             Ok(grouped.payload_bytes().to_vec())
         } else if node.name() == RegionPlan::name() {
-            let region = node
-                .as_any()
-                .downcast_ref::<RegionPlan>()
-                .expect("Failed to downcast to RegionPlan");
+            let region = node.as_any().downcast_ref::<RegionPlan>().ok_or_else(|| {
+                DataFusionError::Internal(
+                    "a RegionPlan node did not downcast to RegionPlan".to_string(),
+                )
+            })?;
             Ok(region.payload_bytes().to_vec())
         } else {
             ExtensionSerializer.serialize_logical_plan(node)

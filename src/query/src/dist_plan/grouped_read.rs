@@ -29,6 +29,7 @@
 //! Ordinary plans are left untouched: a datanode peeks only at the root before constructing a
 //! region-scoped decoder.
 
+use std::any::Any;
 use std::cmp::Ordering;
 use std::collections::BTreeSet;
 use std::fmt;
@@ -36,7 +37,10 @@ use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use common_error::ext::BoxedError;
+use common_error::ext::{BoxedError, ErrorExt, RetryHint};
+use common_error::status_code::StatusCode;
+use common_macro::stack_trace_debug;
+use common_query::error::datafusion_status_code;
 use datafusion::common::Result as DataFusionResult;
 use datafusion::datasource::DefaultTableSource;
 use datafusion::execution::context::SessionState;
@@ -47,6 +51,7 @@ use datafusion_expr::{
 };
 use prost::Message;
 use serde::{Deserialize, Serialize};
+use snafu::{IntoError, Location, ResultExt, Snafu};
 use store_api::storage::RegionId;
 use substrait::substrait_proto_df::proto::{Plan, Rel, plan_rel, read_rel, rel, set_rel::SetOp};
 use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
@@ -90,6 +95,102 @@ pub const MAX_REGION_PLAN_DEPTH: usize = 32;
 /// Upper bound on the `UnionAll` nesting depth of one grouped-read combine tree.
 pub const MAX_GROUP_READ_UNION_DEPTH: usize = 32;
 
+/// Why a grouped-read envelope, a `RegionPlan` or one of their decode steps failed.
+///
+/// `Malformed` carries a rule violation of the narrow grouped-read wire; every codec failure
+/// keeps its own `source` so a caller can still tell an unparsable wire from a well-formed one
+/// that breaks a rule.
+#[derive(Snafu)]
+#[snafu(visibility(pub))]
+#[stack_trace_debug]
+pub enum GroupReadError {
+    #[snafu(display("invalid grouped read request: {reason}"))]
+    Malformed {
+        reason: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+    #[snafu(display(
+        "unsupported `{GROUP_READ_NAME}` version {version}, this build reads version \
+         {GROUP_READ_VERSION}"
+    ))]
+    UnsupportedVersion {
+        version: u32,
+        #[snafu(implicit)]
+        location: Location,
+    },
+    // Codec errors are foreign errors that do not implement `StackError`, so they are named
+    // `error` and stay attached as the snafu source instead of being stringified away.
+    #[snafu(display("cannot encode grouped read metadata: {error}"))]
+    EncodeJson {
+        #[snafu(source)]
+        error: serde_json::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+    #[snafu(display("cannot decode grouped read metadata: {error}"))]
+    DecodeJson {
+        #[snafu(source)]
+        error: serde_json::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+    #[snafu(display("cannot decode a grouped read plan: {error}"))]
+    DecodeProto {
+        #[snafu(source)]
+        error: prost::DecodeError,
+        #[snafu(implicit)]
+        location: Location,
+    },
+    #[snafu(display("cannot combine the region plans of a grouped read: {error}"))]
+    Combine {
+        #[snafu(source)]
+        error: DataFusionError,
+        #[snafu(implicit)]
+        location: Location,
+    },
+    #[snafu(display("cannot resolve the plan of region {region_id}: {source}"))]
+    Resolve {
+        region_id: RegionId,
+        source: BoxedError,
+        #[snafu(implicit)]
+        location: Location,
+    },
+}
+
+impl ErrorExt for GroupReadError {
+    fn status_code(&self) -> StatusCode {
+        use GroupReadError::*;
+
+        match self {
+            Malformed { .. } | DecodeJson { .. } | DecodeProto { .. } => {
+                StatusCode::InvalidArguments
+            }
+            UnsupportedVersion { .. } => StatusCode::Unsupported,
+            // Producing a wire this build cannot encode is our failure, not the caller's.
+            EncodeJson { .. } => StatusCode::Internal,
+            // Combining decoded region plans runs a DataFusion builder again, so keep whatever
+            // the plan builder reported instead of blaming the request.
+            Combine { error, .. } => {
+                datafusion_status_code::<Self>(error, Some(StatusCode::Internal))
+            }
+            Resolve { source, .. } => source.status_code(),
+        }
+    }
+
+    fn retry_hint(&self) -> RetryHint {
+        match self {
+            // A region whose plan cannot be resolved is a per-region failure; its hint decides.
+            Self::Resolve { source, .. } => source.retry_hint(),
+            _ => RetryHint::NonRetryable,
+        }
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
 /// Conservative bytes one RegionPlan contributes after JSON encoding.
 ///
 /// A `Vec<u8>` is serialized as a JSON number array, so the worst case is four characters per
@@ -114,20 +215,29 @@ pub fn max_regions_for_group_read_payload(nested_plan_len: usize, table_name_len
         .min(MAX_GROUP_READ_REGIONS)
 }
 
-fn check_region_list(region_ids: &[u64]) -> std::result::Result<(), String> {
+fn check_region_list(region_ids: &[u64]) -> Result<(), GroupReadError> {
     if region_ids.is_empty() {
-        return Err("a grouped read names no region".to_string());
+        return MalformedSnafu {
+            reason: "a grouped read names no region".to_string(),
+        }
+        .fail();
     }
     if region_ids.len() > MAX_GROUP_READ_REGIONS {
-        return Err(format!(
-            "a grouped read names {} regions, above the {MAX_GROUP_READ_REGIONS} bound",
-            region_ids.len()
-        ));
+        return MalformedSnafu {
+            reason: format!(
+                "a grouped read names {} regions, above the {MAX_GROUP_READ_REGIONS} bound",
+                region_ids.len()
+            ),
+        }
+        .fail();
     }
     let mut seen = std::collections::BTreeSet::new();
     for region_id in region_ids {
         if !seen.insert(*region_id) {
-            return Err(format!("region {region_id} is named twice"));
+            return MalformedSnafu {
+                reason: format!("region {region_id} is named twice"),
+            }
+            .fail();
         }
     }
     Ok(())
@@ -147,7 +257,7 @@ impl GroupReadPayload {
         region_ids: Vec<u64>,
         table_id: u32,
         table_name: String,
-    ) -> std::result::Result<Self, String> {
+    ) -> Result<Self, GroupReadError> {
         let payload = Self {
             version: GROUP_READ_VERSION,
             region_ids,
@@ -187,75 +297,89 @@ impl GroupReadPayload {
         self.region_ids.first().copied().map(RegionId::from_u64)
     }
 
-    pub fn encode(&self) -> std::result::Result<Vec<u8>, String> {
+    pub fn encode(&self) -> Result<Vec<u8>, GroupReadError> {
         self.validate_shape()?;
-        let encoded = serde_json::to_vec(self)
-            .map_err(|error| format!("cannot serialize grouped read payload: {error}"))?;
+        let encoded = serde_json::to_vec(self).context(EncodeJsonSnafu)?;
         if encoded.len() > MAX_GROUP_READ_PAYLOAD_BYTES {
-            return Err(format!(
-                "grouped read metadata is {} bytes, above the {MAX_GROUP_READ_PAYLOAD_BYTES} \
-                 byte bound",
-                encoded.len()
-            ));
+            return MalformedSnafu {
+                reason: format!(
+                    "grouped read metadata is {} bytes, above the {MAX_GROUP_READ_PAYLOAD_BYTES} \
+                     byte bound",
+                    encoded.len()
+                ),
+            }
+            .fail();
         }
         Ok(encoded)
     }
 
-    pub fn decode(bytes: &[u8]) -> std::result::Result<Self, GroupReadEnvelopeError> {
+    pub fn decode(bytes: &[u8]) -> Result<Self, GroupReadError> {
         if bytes.len() > MAX_GROUP_READ_PAYLOAD_BYTES {
-            return Err(GroupReadEnvelopeError::Malformed(format!(
-                "grouped read metadata is {} bytes, above the {MAX_GROUP_READ_PAYLOAD_BYTES} \
-                 byte bound",
-                bytes.len()
-            )));
+            return MalformedSnafu {
+                reason: format!(
+                    "grouped read metadata is {} bytes, above the {MAX_GROUP_READ_PAYLOAD_BYTES} \
+                     byte bound",
+                    bytes.len()
+                ),
+            }
+            .fail();
         }
-        let payload: Self = serde_json::from_slice(bytes).map_err(|error| {
-            GroupReadEnvelopeError::Malformed(format!(
-                "cannot parse grouped read metadata: {error}"
-            ))
-        })?;
+        let payload: Self = serde_json::from_slice(bytes).context(DecodeJsonSnafu)?;
         if payload.version != GROUP_READ_VERSION {
-            return Err(GroupReadEnvelopeError::UnsupportedVersion(payload.version));
+            return UnsupportedVersionSnafu {
+                version: payload.version,
+            }
+            .fail();
         }
-        payload
-            .validate_shape()
-            .map_err(GroupReadEnvelopeError::Malformed)?;
+        payload.validate_shape()?;
         Ok(payload)
     }
 
-    fn validate_shape(&self) -> std::result::Result<(), String> {
+    fn validate_shape(&self) -> Result<(), GroupReadError> {
         if self.version != GROUP_READ_VERSION {
-            return Err(format!(
-                "unsupported grouped read version {}, this build reads version {}",
-                self.version, GROUP_READ_VERSION
-            ));
+            return UnsupportedVersionSnafu {
+                version: self.version,
+            }
+            .fail();
         }
         check_region_list(&self.region_ids)?;
         if self.table_name.is_empty() {
-            return Err("a grouped read names no table".to_string());
+            return MalformedSnafu {
+                reason: "a grouped read names no table".to_string(),
+            }
+            .fail();
         }
         if self.table_id == 0 {
-            return Err("a grouped read names no logical table id".to_string());
+            return MalformedSnafu {
+                reason: "a grouped read names no logical table id".to_string(),
+            }
+            .fail();
         }
         Ok(())
     }
 
-    pub fn validate_for_request(&self, anchor: RegionId) -> std::result::Result<(), String> {
+    pub fn validate_for_request(&self, anchor: RegionId) -> Result<(), GroupReadError> {
         self.validate_shape()?;
         if !self.region_ids.contains(&anchor.as_u64()) {
-            return Err(format!(
-                "the request anchor region {anchor} is not one of the grouped regions {:?}",
-                self.region_ids
-            ));
+            return MalformedSnafu {
+                reason: format!(
+                    "the request anchor region {anchor} is not one of the grouped regions {:?}",
+                    self.region_ids
+                ),
+            }
+            .fail();
         }
         for region_id in &self.region_ids {
             let region = RegionId::from_u64(*region_id);
             if region.table_id() != self.table_id {
-                return Err(format!(
-                    "region {region} belongs to table {}, but the grouped read names table {}",
-                    region.table_id(),
-                    self.table_id
-                ));
+                return MalformedSnafu {
+                    reason: format!(
+                        "region {region} belongs to table {}, but the grouped read names table {}",
+                        region.table_id(),
+                        self.table_id
+                    ),
+                }
+                .fail();
             }
         }
         Ok(())
@@ -265,20 +389,26 @@ impl GroupReadPayload {
     ///
     /// A member must be named by the payload and its region must belong to the payload's table;
     /// duplicates are checked by the caller so it can keep one set across members.
-    fn validate_region_member(&self, region_id: RegionId) -> std::result::Result<(), String> {
+    fn validate_region_member(&self, region_id: RegionId) -> Result<(), GroupReadError> {
         self.validate_shape()?;
         if !self.region_ids.contains(&region_id.as_u64()) {
-            return Err(format!(
-                "region {region_id} is not one of the grouped regions {:?}",
-                self.region_ids
-            ));
+            return MalformedSnafu {
+                reason: format!(
+                    "region {region_id} is not one of the grouped regions {:?}",
+                    self.region_ids
+                ),
+            }
+            .fail();
         }
         if region_id.table_id() != self.table_id {
-            return Err(format!(
-                "region {region_id} belongs to table {}, but the grouped read names table {}",
-                region_id.table_id(),
-                self.table_id
-            ));
+            return MalformedSnafu {
+                reason: format!(
+                    "region {region_id} belongs to table {}, but the grouped read names table {}",
+                    region_id.table_id(),
+                    self.table_id
+                ),
+            }
+            .fail();
         }
         Ok(())
     }
@@ -290,9 +420,12 @@ pub struct RegionPlanPayload {
 }
 
 impl RegionPlanPayload {
-    pub fn try_new(region_id: RegionId, plan: Vec<u8>) -> std::result::Result<Self, String> {
+    pub fn try_new(region_id: RegionId, plan: Vec<u8>) -> Result<Self, GroupReadError> {
         if plan.is_empty() {
-            return Err("a RegionPlan carries no plan".to_string());
+            return MalformedSnafu {
+                reason: "a RegionPlan carries no plan".to_string(),
+            }
+            .fail();
         }
         Ok(Self {
             region_id: region_id.as_u64(),
@@ -308,57 +441,42 @@ impl RegionPlanPayload {
         &self.plan
     }
 
-    pub fn encode(&self) -> std::result::Result<Vec<u8>, String> {
-        let encoded = serde_json::to_vec(self)
-            .map_err(|error| format!("cannot serialize RegionPlan payload: {error}"))?;
+    pub fn encode(&self) -> Result<Vec<u8>, GroupReadError> {
+        let encoded = serde_json::to_vec(self).context(EncodeJsonSnafu)?;
         if encoded.len() > MAX_GROUP_READ_PAYLOAD_BYTES {
-            return Err(format!(
-                "a RegionPlan payload is {} bytes, above the {MAX_GROUP_READ_PAYLOAD_BYTES} \
-                 byte bound",
-                encoded.len()
-            ));
+            return MalformedSnafu {
+                reason: format!(
+                    "a RegionPlan payload is {} bytes, above the {MAX_GROUP_READ_PAYLOAD_BYTES} \
+                     byte bound",
+                    encoded.len()
+                ),
+            }
+            .fail();
         }
         Ok(encoded)
     }
 
-    pub fn decode(bytes: &[u8]) -> std::result::Result<Self, String> {
+    pub fn decode(bytes: &[u8]) -> Result<Self, GroupReadError> {
         if bytes.len() > MAX_GROUP_READ_PAYLOAD_BYTES {
-            return Err(format!(
-                "a RegionPlan payload is {} bytes, above the {MAX_GROUP_READ_PAYLOAD_BYTES} \
-                 byte bound",
-                bytes.len()
-            ));
+            return MalformedSnafu {
+                reason: format!(
+                    "a RegionPlan payload is {} bytes, above the {MAX_GROUP_READ_PAYLOAD_BYTES} \
+                     byte bound",
+                    bytes.len()
+                ),
+            }
+            .fail();
         }
-        let payload: Self = serde_json::from_slice(bytes)
-            .map_err(|error| format!("cannot parse RegionPlan payload: {error}"))?;
+        let payload: Self = serde_json::from_slice(bytes).context(DecodeJsonSnafu)?;
         if payload.plan.is_empty() {
-            return Err("a RegionPlan carries no plan".to_string());
+            return MalformedSnafu {
+                reason: "a RegionPlan carries no plan".to_string(),
+            }
+            .fail();
         }
         Ok(payload)
     }
 }
-
-/// Why a serialized request is not a usable grouped-read envelope.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum GroupReadEnvelopeError {
-    UnsupportedVersion(u32),
-    Malformed(String),
-}
-
-impl fmt::Display for GroupReadEnvelopeError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::UnsupportedVersion(version) => write!(
-                f,
-                "unsupported `{GROUP_READ_NAME}` version {version}, this build reads \
-                 version {GROUP_READ_VERSION}"
-            ),
-            Self::Malformed(reason) => write!(f, "malformed grouped read envelope: {reason}"),
-        }
-    }
-}
-
-impl std::error::Error for GroupReadEnvelopeError {}
 
 /// Whether `needle` occurs in `haystack`.
 fn contains_marker(haystack: &[u8], needle: &[u8]) -> bool {
@@ -371,9 +489,7 @@ fn contains_marker(haystack: &[u8], needle: &[u8]) -> bool {
 ///
 /// Only a unique `GroupRead` `ExtensionSingleRel` root is ours. An old append-only root leaf is
 /// rejected explicitly so an old producer cannot be mistaken for an ordinary plan.
-pub fn peek_group_read_envelope(
-    plan: &[u8],
-) -> std::result::Result<Option<GroupReadPayload>, GroupReadEnvelopeError> {
+pub fn peek_group_read_envelope(plan: &[u8]) -> Result<Option<GroupReadPayload>, GroupReadError> {
     // Cheap pre-filter: an ordinary remote plan never carries either marker name, so most requests
     // are answered without paying for a full protobuf decode. `RegionPlan` is included so a bare
     // region leaf at the root is still rejected as a malformed grouped read instead of being
@@ -404,10 +520,13 @@ pub fn peek_group_read_envelope(
             )
         });
         if has_group_read {
-            return Err(GroupReadEnvelopeError::Malformed(format!(
-                "a GroupRead request must have exactly one root relation, found {}",
-                decoded.relations.len()
-            )));
+            return MalformedSnafu {
+                reason: format!(
+                    "a GroupRead request must have exactly one root relation, found {}",
+                    decoded.relations.len()
+                ),
+            }
+            .fail();
         }
         return Ok(None);
     }
@@ -435,10 +554,13 @@ pub fn peek_group_read_envelope(
                 return Ok(None);
             };
             if detail.type_url == GROUP_READ_NAME || detail.type_url == REGION_PLAN_NAME {
-                return Err(GroupReadEnvelopeError::Malformed(format!(
-                    "`{}` is not a valid root relation in grouped-read version {}",
-                    detail.type_url, GROUP_READ_VERSION
-                )));
+                return MalformedSnafu {
+                    reason: format!(
+                        "`{}` is not a valid root relation in grouped-read version {}",
+                        detail.type_url, GROUP_READ_VERSION
+                    ),
+                }
+                .fail();
             }
             Ok(None)
         }
@@ -456,10 +578,7 @@ pub struct GroupReadPlan {
 }
 
 impl GroupReadPlan {
-    pub fn try_new(
-        payload: GroupReadPayload,
-        input: LogicalPlan,
-    ) -> std::result::Result<Self, String> {
+    pub fn try_new(payload: GroupReadPayload, input: LogicalPlan) -> Result<Self, GroupReadError> {
         let payload_bytes = payload.encode()?;
         Ok(Self {
             payload_bytes,
@@ -593,7 +712,7 @@ impl RegionPlan {
         region_id: RegionId,
         plan_bytes: Vec<u8>,
         schema: DFSchemaRef,
-    ) -> std::result::Result<Self, String> {
+    ) -> Result<Self, GroupReadError> {
         let payload = RegionPlanPayload::try_new(region_id, plan_bytes)?;
         let payload_bytes = payload.encode()?;
         Ok(Self {
@@ -708,7 +827,11 @@ pub fn encode_nested_plan(plan: &LogicalPlan) -> DataFusionResult<Vec<u8>> {
 /// dropping/formatting the plan. Balanced unions keep the tree depth logarithmic.
 fn union_balanced(mut plans: Vec<LogicalPlan>, table_name: &str) -> DataFusionResult<LogicalPlan> {
     if plans.len() == 1 {
-        return Ok(plans.pop().unwrap());
+        return plans.pop().ok_or_else(|| {
+            DataFusionError::Internal(
+                "a grouped read combine tree has one plan but popped none".to_string(),
+            )
+        });
     }
     let right = plans.split_off(plans.len() / 2);
     let left = union_balanced(plans, table_name)?;
@@ -757,7 +880,7 @@ pub fn build_group_read_plan_from_nested(
     }
     // The datanode re-runs this pre-check before decoding anything; refusing to produce a wire
     // the consumer must reject keeps the producer and consumer on the same narrow contract.
-    preflight_region_plan(nested).map_err(DataFusionError::Plan)?;
+    preflight_region_plan(nested).map_err(|error| DataFusionError::Plan(error.to_string()))?;
     let estimated = estimated_region_plan_json_bytes(nested.len())
         .saturating_mul(regions.len())
         .saturating_add(table_name.len())
@@ -771,7 +894,7 @@ pub fn build_group_read_plan_from_nested(
     let mut plans = Vec::with_capacity(regions.len());
     for region in regions {
         let leaf = RegionPlan::try_new(*region, nested.to_vec(), schema.clone())
-            .map_err(DataFusionError::Plan)?;
+            .map_err(|error| DataFusionError::Plan(error.to_string()))?;
         plans.push(leaf.into_logical_plan());
     }
     let union = union_balanced(plans, &table_name)?;
@@ -780,7 +903,8 @@ pub fn build_group_read_plan_from_nested(
         table_id,
         table_name,
     );
-    let node = GroupReadPlan::try_new(payload, union).map_err(DataFusionError::Plan)?;
+    let node = GroupReadPlan::try_new(payload, union)
+        .map_err(|error| DataFusionError::Plan(error.to_string()))?;
     Ok(node.into_logical_plan())
 }
 
@@ -876,18 +1000,22 @@ pub fn validate_region_plan(
     payload: &GroupReadPayload,
     region_id: RegionId,
     plan: &LogicalPlan,
-) -> std::result::Result<(), String> {
+) -> Result<(), GroupReadError> {
     payload.validate_region_member(region_id)?;
     if plan_has_forbidden_nodes(plan) {
-        return Err(format!(
-            "region {region_id} decoded a plan with a subquery or DML node"
-        ));
+        return MalformedSnafu {
+            reason: format!("region {region_id} decoded a plan with a subquery or DML node"),
+        }
+        .fail();
     }
     let Some(scan) = single_table_scan(plan) else {
-        return Err(format!(
-            "region {region_id} decoded a plan that is not a single ordinary table read: `{}`",
-            plan.display_indent()
-        ));
+        return MalformedSnafu {
+            reason: format!(
+                "region {region_id} decoded a plan that is not a single ordinary table read: `{}`",
+                plan.display_indent()
+            ),
+        }
+        .fail();
     };
     validate_region_scan(payload, region_id, scan)
 }
@@ -897,45 +1025,63 @@ fn validate_region_scan(
     payload: &GroupReadPayload,
     region_id: RegionId,
     scan: &datafusion_expr::TableScan,
-) -> std::result::Result<(), String> {
+) -> Result<(), GroupReadError> {
     let Some(source) = scan.source.downcast_ref::<DefaultTableSource>() else {
-        return Err(format!("region {region_id} does not read a table provider"));
+        return MalformedSnafu {
+            reason: format!("region {region_id} does not read a table provider"),
+        }
+        .fail();
     };
     let scan_table = scan.table_name.table();
     if scan_table != payload.table_name.as_str() {
-        return Err(format!(
-            "region {region_id} reads table `{scan_table}`, but the grouped read names `{}`",
-            payload.table_name
-        ));
+        return MalformedSnafu {
+            reason: format!(
+                "region {region_id} reads table `{scan_table}`, but the grouped read names `{}`",
+                payload.table_name
+            ),
+        }
+        .fail();
     }
     // The datanode resolves every name to the region provider, so the provider itself is the
     // only identity that matters. Inspection, reserved and other logical sources are not it.
     if let Some(provider) = source.table_provider.downcast_ref::<DummyTableProvider>() {
         let metadata = provider.region_metadata();
         if metadata.region_id != region_id {
-            return Err(format!(
-                "region {region_id} decoded the provider of region {}",
-                metadata.region_id
-            ));
+            return MalformedSnafu {
+                reason: format!(
+                    "region {region_id} decoded the provider of region {}",
+                    metadata.region_id
+                ),
+            }
+            .fail();
         }
         if metadata.region_id.table_id() != payload.table_id {
-            return Err(format!(
-                "region {region_id} decoded a provider of table {}, but the grouped read names \
-                 table {}",
-                metadata.region_id.table_id(),
-                payload.table_id
-            ));
+            return MalformedSnafu {
+                reason: format!(
+                    "region {region_id} decoded a provider of table {}, but the grouped read \
+                     names table {}",
+                    metadata.region_id.table_id(),
+                    payload.table_id
+                ),
+            }
+            .fail();
         }
         return Ok(());
     }
-    Err(format!(
-        "region {region_id} decoded a provider that is not the bound region provider"
-    ))
+    MalformedSnafu {
+        reason: format!(
+            "region {region_id} decoded a provider that is not the bound region provider"
+        ),
+    }
+    .fail()
 }
 
 fn expr_has_subquery(expr: &Expr) -> bool {
     let mut found = false;
-    expr.apply(|expr| {
+    // The visitor below never returns an error today, so a failure here would be a new
+    // DataFusion behavior. Treat it as "contains a forbidden node": an expression this check
+    // cannot walk must keep the ordinary path instead of being accepted as eligible.
+    let walked = expr.apply(|expr| {
         if matches!(
             expr,
             Expr::ScalarSubquery(_)
@@ -948,9 +1094,11 @@ fn expr_has_subquery(expr: &Expr) -> bool {
         } else {
             Ok(TreeNodeRecursion::Continue)
         }
-    })
-    .unwrap();
-    found
+    });
+    match walked {
+        Ok(_) => found,
+        Err(_) => true,
+    }
 }
 
 fn plan_has_forbidden_nodes(plan: &LogicalPlan) -> bool {
@@ -989,20 +1137,31 @@ fn rel_kind_name(rel: &rel::RelType) -> &'static str {
 }
 
 /// Returns the single root relation of a serialized plan.
-fn plan_root_rel(plan: &Plan) -> std::result::Result<&Rel, String> {
+fn plan_root_rel(plan: &Plan) -> Result<&Rel, GroupReadError> {
     if plan.relations.len() != 1 {
-        return Err(format!(
-            "a plan must have exactly one root relation, found {}",
-            plan.relations.len()
-        ));
+        return MalformedSnafu {
+            reason: format!(
+                "a plan must have exactly one root relation, found {}",
+                plan.relations.len()
+            ),
+        }
+        .fail();
     }
     match plan.relations[0].rel_type.as_ref() {
         Some(plan_rel::RelType::Rel(root)) => Ok(root),
-        Some(plan_rel::RelType::Root(root)) => root
-            .input
-            .as_ref()
-            .ok_or_else(|| "the plan root relation is empty".to_string()),
-        None => Err("the plan has no root relation".to_string()),
+        Some(plan_rel::RelType::Root(root)) => {
+            let Some(input) = root.input.as_ref() else {
+                return MalformedSnafu {
+                    reason: "the plan root relation is empty".to_string(),
+                }
+                .fail();
+            };
+            Ok(input)
+        }
+        None => MalformedSnafu {
+            reason: "the plan has no root relation".to_string(),
+        }
+        .fail(),
     }
 }
 
@@ -1010,25 +1169,30 @@ fn plan_root_rel(plan: &Plan) -> std::result::Result<&Rel, String> {
 ///
 /// The production wire only carries a single-table `Read` under `Project` and `Filter` nodes.
 /// Checking the raw proto tree first bounds the work a malformed wire can make a decoder do.
-pub fn preflight_region_plan(plan_bytes: &[u8]) -> std::result::Result<(), String> {
-    let plan = Plan::decode(plan_bytes)
-        .map_err(|error| format!("cannot parse a RegionPlan plan: {error}"))?;
+pub fn preflight_region_plan(plan_bytes: &[u8]) -> Result<(), GroupReadError> {
+    let plan = Plan::decode(plan_bytes).context(DecodeProtoSnafu)?;
     let root = plan_root_rel(&plan)?;
     let mut nodes = 0usize;
     check_region_rel(root, 1, &mut nodes)
 }
 
-fn check_region_rel(rel: &Rel, depth: usize, nodes: &mut usize) -> std::result::Result<(), String> {
+fn check_region_rel(rel: &Rel, depth: usize, nodes: &mut usize) -> Result<(), GroupReadError> {
     if depth > MAX_REGION_PLAN_DEPTH {
-        return Err(format!(
-            "a RegionPlan plan is deeper than the {MAX_REGION_PLAN_DEPTH} node bound"
-        ));
+        return MalformedSnafu {
+            reason: format!(
+                "a RegionPlan plan is deeper than the {MAX_REGION_PLAN_DEPTH} node bound"
+            ),
+        }
+        .fail();
     }
     *nodes += 1;
     if *nodes > MAX_REGION_PLAN_NODES {
-        return Err(format!(
-            "a RegionPlan plan has more than the {MAX_REGION_PLAN_NODES} node bound"
-        ));
+        return MalformedSnafu {
+            reason: format!(
+                "a RegionPlan plan has more than the {MAX_REGION_PLAN_NODES} node bound"
+            ),
+        }
+        .fail();
     }
     match rel.rel_type.as_ref() {
         Some(rel::RelType::Read(read)) => {
@@ -1038,66 +1202,41 @@ fn check_region_rel(rel: &Rel, depth: usize, nodes: &mut usize) -> std::result::
             ) {
                 Ok(())
             } else {
-                Err("a RegionPlan plan may only read one named table".to_string())
+                MalformedSnafu {
+                    reason: "a RegionPlan plan may only read one named table".to_string(),
+                }
+                .fail()
             }
         }
         Some(rel::RelType::Project(project)) => {
-            let input = project
-                .input
-                .as_ref()
-                .ok_or_else(|| "a RegionPlan projection has no input".to_string())?;
+            let Some(input) = project.input.as_ref() else {
+                return MalformedSnafu {
+                    reason: "a RegionPlan projection has no input".to_string(),
+                }
+                .fail();
+            };
             check_region_rel(input, depth + 1, nodes)
         }
         Some(rel::RelType::Filter(filter)) => {
-            let input = filter
-                .input
-                .as_ref()
-                .ok_or_else(|| "a RegionPlan filter has no input".to_string())?;
+            let Some(input) = filter.input.as_ref() else {
+                return MalformedSnafu {
+                    reason: "a RegionPlan filter has no input".to_string(),
+                }
+                .fail();
+            };
             check_region_rel(input, depth + 1, nodes)
         }
-        Some(other) => Err(format!(
-            "a RegionPlan plan may only contain Read, Projection and Filter nodes, found {}",
-            rel_kind_name(other)
-        )),
-        None => Err("a RegionPlan plan has an empty relation".to_string()),
-    }
-}
-
-/// Why a `GroupRead` request could not be decoded into an executable plan.
-#[derive(Debug)]
-pub enum GroupReadDecodeError {
-    /// The envelope, the combine tree or one region plan is not well formed.
-    Malformed(String),
-    /// Resolving one region plan against its region catalog failed.
-    Resolve {
-        region_id: RegionId,
-        source: BoxedError,
-    },
-}
-
-impl fmt::Display for GroupReadDecodeError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Malformed(reason) => write!(f, "{reason}"),
-            Self::Resolve { region_id, source } => {
-                write!(f, "cannot resolve the plan of region {region_id}: {source}")
-            }
+        Some(other) => MalformedSnafu {
+            reason: format!(
+                "a RegionPlan plan may only contain Read, Projection and Filter nodes, found {}",
+                rel_kind_name(other)
+            ),
         }
-    }
-}
-
-impl std::error::Error for GroupReadDecodeError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Self::Malformed(_) => None,
-            Self::Resolve { source, .. } => Some(source),
+        .fail(),
+        None => MalformedSnafu {
+            reason: "a RegionPlan plan has an empty relation".to_string(),
         }
-    }
-}
-
-impl From<String> for GroupReadDecodeError {
-    fn from(reason: String) -> Self {
-        Self::Malformed(reason)
+        .fail(),
     }
 }
 
@@ -1123,84 +1262,110 @@ pub async fn decode_group_read_request(
     _state: &SessionState,
     payload: GroupReadPayload,
     resolver: &dyn RegionPlanResolver,
-) -> std::result::Result<LogicalPlan, GroupReadDecodeError> {
-    let plan = Plan::decode(plan_bytes)
-        .map_err(|error| format!("cannot parse GroupRead request: {error}"))?;
+) -> Result<LogicalPlan, GroupReadError> {
+    let plan = Plan::decode(plan_bytes).context(DecodeProtoSnafu)?;
     let root = plan_root_rel(&plan)?;
     let input = match root.rel_type.as_ref() {
         Some(rel::RelType::ExtensionSingle(single)) => {
-            let detail = single
-                .detail
-                .as_ref()
-                .ok_or_else(|| "the GroupRead root has no detail".to_string())?;
+            let Some(detail) = single.detail.as_ref() else {
+                return MalformedSnafu {
+                    reason: "the GroupRead root has no detail".to_string(),
+                }
+                .fail();
+            };
             if detail.type_url != GROUP_READ_NAME {
-                return Err(GroupReadDecodeError::Malformed(format!(
-                    "a GroupRead request root must be the `{GROUP_READ_NAME}` marker, found `{}`",
-                    detail.type_url
-                )));
+                return MalformedSnafu {
+                    reason: format!(
+                        "a GroupRead request root must be the `{GROUP_READ_NAME}` marker, found \
+                         `{}`",
+                        detail.type_url
+                    ),
+                }
+                .fail();
             }
-            let root_payload = GroupReadPayload::decode(detail.value.as_ref())
-                .map_err(|error| error.to_string())?;
+            // A metadata this build cannot read is a decode failure, not a rule violation, so
+            // keep the codec error and its position in the request.
+            let root_payload = GroupReadPayload::decode(detail.value.as_ref())?;
             if root_payload != payload {
-                return Err(GroupReadDecodeError::Malformed(
-                    "the root marker and the intercepted metadata differ".to_string(),
-                ));
+                return MalformedSnafu {
+                    reason: "the root marker and the intercepted metadata differ".to_string(),
+                }
+                .fail();
             }
-            single
-                .input
-                .as_ref()
-                .ok_or_else(|| "the GroupRead root has no combine tree".to_string())?
+            let Some(input) = single.input.as_ref() else {
+                return MalformedSnafu {
+                    reason: "the GroupRead root has no combine tree".to_string(),
+                }
+                .fail();
+            };
+            input
         }
         Some(other) => {
-            return Err(GroupReadDecodeError::Malformed(format!(
-                "a GroupRead request root must be the `{GROUP_READ_NAME}` marker, found {}",
-                rel_kind_name(other)
-            )));
+            return MalformedSnafu {
+                reason: format!(
+                    "a GroupRead request root must be the `{GROUP_READ_NAME}` marker, found {}",
+                    rel_kind_name(other)
+                ),
+            }
+            .fail();
         }
         None => {
-            return Err(GroupReadDecodeError::Malformed(
-                "the request root relation is empty".to_string(),
-            ));
+            return MalformedSnafu {
+                reason: "the request root relation is empty".to_string(),
+            }
+            .fail();
         }
     };
 
     let leaves = group_read_leaf_rels(input)?;
     if leaves.len() > MAX_GROUP_READ_REGIONS {
-        return Err(GroupReadDecodeError::Malformed(format!(
-            "a grouped read names {} regions, above the {MAX_GROUP_READ_REGIONS} bound",
-            leaves.len()
-        )));
+        return MalformedSnafu {
+            reason: format!(
+                "a grouped read names {} regions, above the {MAX_GROUP_READ_REGIONS} bound",
+                leaves.len()
+            ),
+        }
+        .fail();
     }
     // First pass: check every member and bound its raw plan before any decoder runs.
     let mut members = Vec::with_capacity(leaves.len());
     let mut seen = BTreeSet::new();
     for leaf in leaves {
         let Some(rel::RelType::ExtensionLeaf(leaf_rel)) = leaf.rel_type.as_ref() else {
-            return Err(GroupReadDecodeError::Malformed(format!(
-                "a GroupRead member must be a RegionPlan leaf, found {}",
-                leaf.rel_type
-                    .as_ref()
-                    .map(rel_kind_name)
-                    .unwrap_or("an empty relation")
-            )));
+            return MalformedSnafu {
+                reason: format!(
+                    "a GroupRead member must be a RegionPlan leaf, found {}",
+                    leaf.rel_type
+                        .as_ref()
+                        .map(rel_kind_name)
+                        .unwrap_or("an empty relation")
+                ),
+            }
+            .fail();
         };
-        let detail = leaf_rel
-            .detail
-            .as_ref()
-            .ok_or_else(|| "a RegionPlan leaf has no detail".to_string())?;
+        let Some(detail) = leaf_rel.detail.as_ref() else {
+            return MalformedSnafu {
+                reason: "a RegionPlan leaf has no detail".to_string(),
+            }
+            .fail();
+        };
         if detail.type_url != REGION_PLAN_NAME {
-            return Err(GroupReadDecodeError::Malformed(format!(
-                "unexpected extension leaf `{}` in a GroupRead combine tree",
-                detail.type_url
-            )));
+            return MalformedSnafu {
+                reason: format!(
+                    "unexpected extension leaf `{}` in a GroupRead combine tree",
+                    detail.type_url
+                ),
+            }
+            .fail();
         }
         let leaf_payload = RegionPlanPayload::decode(detail.value.as_ref())?;
         let region_id = leaf_payload.region_id();
         payload.validate_region_member(region_id)?;
         if !seen.insert(region_id.as_u64()) {
-            return Err(GroupReadDecodeError::Malformed(format!(
-                "region {region_id} appears more than once in the combine tree"
-            )));
+            return MalformedSnafu {
+                reason: format!("region {region_id} appears more than once in the combine tree"),
+            }
+            .fail();
         }
         preflight_region_plan(leaf_payload.plan())?;
         members.push((region_id, leaf_payload));
@@ -1211,10 +1376,13 @@ pub async fn decode_group_read_request(
         .copied()
         .collect::<BTreeSet<_>>();
     if seen != expected {
-        return Err(GroupReadDecodeError::Malformed(format!(
-            "the combine tree does not name the grouped regions exactly once: consumed {seen:?}, \
-             expected {expected:?}"
-        )));
+        return MalformedSnafu {
+            reason: format!(
+                "the combine tree does not name the grouped regions exactly once: consumed \
+                 {seen:?}, expected {expected:?}"
+            ),
+        }
+        .fail();
     }
     // Second pass: decode each preflighted member and accept only its bound region provider.
     let mut plans = Vec::with_capacity(members.len());
@@ -1223,30 +1391,29 @@ pub async fn decode_group_read_request(
         let plan = resolver
             .resolve_region_plan(region_id, leaf_payload.plan())
             .await
-            .map_err(|source| GroupReadDecodeError::Resolve { region_id, source })?;
+            .map_err(|source| ResolveSnafu { region_id }.into_error(source))?;
         validate_region_plan(&payload, region_id, &plan)?;
         let schema = plan.schema().clone();
         match expected_schema.as_ref() {
             Some(expected) if expected != &schema => {
-                return Err(GroupReadDecodeError::Malformed(format!(
-                    "region {region_id} decodes to a different output schema"
-                )));
+                return MalformedSnafu {
+                    reason: format!("region {region_id} decodes to a different output schema"),
+                }
+                .fail();
             }
             Some(_) => {}
             None => expected_schema = Some(schema),
         }
         plans.push(plan);
     }
-    union_balanced(plans, payload.table_name()).map_err(|error| {
-        GroupReadDecodeError::Malformed(format!("cannot combine region plans: {error}"))
-    })
+    union_balanced(plans, payload.table_name()).context(CombineSnafu)
 }
 
 /// Returns the `RegionPlan` leaves directly below the `GroupRead` marker.
 ///
 /// The builder balances a large union into a tree, so the combine tree is a `UnionAll` tree whose
 /// leaves are exactly the region plans; nothing else may appear in it.
-fn group_read_leaf_rels(input: &Rel) -> std::result::Result<Vec<&Rel>, String> {
+fn group_read_leaf_rels(input: &Rel) -> Result<Vec<&Rel>, GroupReadError> {
     let mut leaves = Vec::new();
     collect_group_read_leaves(input, 1, &mut leaves)?;
     Ok(leaves)
@@ -1256,24 +1423,35 @@ fn collect_group_read_leaves<'a>(
     rel: &'a Rel,
     depth: usize,
     leaves: &mut Vec<&'a Rel>,
-) -> std::result::Result<(), String> {
+) -> Result<(), GroupReadError> {
     if depth > MAX_GROUP_READ_UNION_DEPTH {
-        return Err(format!(
-            "a GroupRead combine tree is deeper than the {MAX_GROUP_READ_UNION_DEPTH} UnionAll \
-             bound"
-        ));
+        return MalformedSnafu {
+            reason: format!(
+                "a GroupRead combine tree is deeper than the {MAX_GROUP_READ_UNION_DEPTH} UnionAll \
+                 bound"
+            ),
+        }
+        .fail();
     }
     match rel.rel_type.as_ref() {
         Some(rel::RelType::Set(set)) => {
-            let op = SetOp::try_from(set.op)
-                .map_err(|_| format!("unknown set operator {} in a GroupRead", set.op))?;
+            let Ok(op) = SetOp::try_from(set.op) else {
+                return MalformedSnafu {
+                    reason: format!("unknown set operator {} in a GroupRead", set.op),
+                }
+                .fail();
+            };
             if op != SetOp::UnionAll {
-                return Err(format!(
-                    "a GroupRead combine tree must be UnionAll, found {op:?}"
-                ));
+                return MalformedSnafu {
+                    reason: format!("a GroupRead combine tree must be UnionAll, found {op:?}"),
+                }
+                .fail();
             }
             if set.inputs.is_empty() {
-                return Err("a GroupRead combine tree names no RegionPlan".to_string());
+                return MalformedSnafu {
+                    reason: "a GroupRead combine tree names no RegionPlan".to_string(),
+                }
+                .fail();
             }
             for input in &set.inputs {
                 collect_group_read_leaves(input, depth + 1, leaves)?;
@@ -1283,18 +1461,27 @@ fn collect_group_read_leaves<'a>(
         // A single-region grouped read degrades to one bare `RegionPlan` leaf.
         Some(rel::RelType::ExtensionLeaf(_)) => {
             if leaves.len() >= MAX_GROUP_READ_REGIONS {
-                return Err(format!(
-                    "a grouped read names more than the {MAX_GROUP_READ_REGIONS} region bound"
-                ));
+                return MalformedSnafu {
+                    reason: format!(
+                        "a grouped read names more than the {MAX_GROUP_READ_REGIONS} region bound"
+                    ),
+                }
+                .fail();
             }
             leaves.push(rel);
             Ok(())
         }
-        Some(other) => Err(format!(
-            "a GroupRead combine tree must be UnionAll(RegionPlan...), found {}",
-            rel_kind_name(other)
-        )),
-        None => Err("the GroupRead root input is empty".to_string()),
+        Some(other) => MalformedSnafu {
+            reason: format!(
+                "a GroupRead combine tree must be UnionAll(RegionPlan...), found {}",
+                rel_kind_name(other)
+            ),
+        }
+        .fail(),
+        None => MalformedSnafu {
+            reason: "the GroupRead root input is empty".to_string(),
+        }
+        .fail(),
     }
 }
 
@@ -1310,20 +1497,29 @@ impl DatanodeReadGroup {
     pub fn try_new(
         target: RegionQueryTarget,
         regions: Vec<RegionId>,
-    ) -> std::result::Result<Self, String> {
+    ) -> Result<Self, GroupReadError> {
         if regions.is_empty() {
-            return Err("a grouped read group names no region".to_string());
+            return MalformedSnafu {
+                reason: "a grouped read group names no region".to_string(),
+            }
+            .fail();
         }
         if regions.len() > MAX_GROUP_READ_REGIONS {
-            return Err(format!(
-                "group {target:?} names {} regions, above the {MAX_GROUP_READ_REGIONS} bound",
-                regions.len()
-            ));
+            return MalformedSnafu {
+                reason: format!(
+                    "group {target:?} names {} regions, above the {MAX_GROUP_READ_REGIONS} bound",
+                    regions.len()
+                ),
+            }
+            .fail();
         }
         let mut seen = std::collections::BTreeSet::new();
         for region_id in &regions {
             if !seen.insert(*region_id) {
-                return Err(format!("group {target:?} names region {region_id} twice"));
+                return MalformedSnafu {
+                    reason: format!("group {target:?} names region {region_id} twice"),
+                }
+                .fail();
             }
         }
         Ok(Self { target, regions })
@@ -1590,7 +1786,11 @@ mod tests {
             serde_json::from_slice(&payload.encode().unwrap()).unwrap();
         value["version"] = serde_json::json!(2);
         let error = GroupReadPayload::decode(&serde_json::to_vec(&value).unwrap()).unwrap_err();
-        assert_eq!(GroupReadEnvelopeError::UnsupportedVersion(2), error);
+        assert!(
+            matches!(error, GroupReadError::UnsupportedVersion { version: 2, .. }),
+            "{error}"
+        );
+        assert_eq!(error.status_code(), StatusCode::Unsupported);
     }
 
     #[test]
@@ -1913,7 +2113,9 @@ mod tests {
             .await
             .unwrap_err();
         let (region_id, source) = match error {
-            GroupReadDecodeError::Resolve { region_id, source } => (region_id, source),
+            GroupReadError::Resolve {
+                region_id, source, ..
+            } => (region_id, source),
             other => panic!("a resolver failure must stay a resolve error: {other}"),
         };
         assert!(
@@ -1935,11 +2137,11 @@ mod tests {
 
         let too_many = encode_nested_plan(&filtered_scan(MAX_REGION_PLAN_NODES)).unwrap();
         let error = preflight_region_plan(&too_many).unwrap_err();
-        assert!(error.contains("node bound"), "{error}");
+        assert!(error.to_string().contains("node bound"), "{error}");
 
         let too_deep = encode_nested_plan(&filtered_scan(MAX_REGION_PLAN_DEPTH + 1)).unwrap();
         let error = preflight_region_plan(&too_deep).unwrap_err();
-        assert!(error.contains("node bound"), "{error}");
+        assert!(error.to_string().contains("node bound"), "{error}");
     }
 
     #[test]
@@ -1951,7 +2153,7 @@ mod tests {
             .build()
             .unwrap();
         let error = preflight_region_plan(&encode_nested_plan(&aggregate).unwrap()).unwrap_err();
-        assert!(error.contains("may only contain"), "{error}");
+        assert!(error.to_string().contains("may only contain"), "{error}");
 
         let join = LogicalPlanBuilder::from(project_scan())
             .cross_join(
@@ -1965,7 +2167,7 @@ mod tests {
             .build()
             .unwrap();
         let error = preflight_region_plan(&encode_nested_plan(&join).unwrap()).unwrap_err();
-        assert!(error.contains("may only contain"), "{error}");
+        assert!(error.to_string().contains("may only contain"), "{error}");
     }
 
     #[test]
@@ -2029,7 +2231,7 @@ mod tests {
             },
         ));
         let error = peek_group_read_envelope(&leaf_root.encode_to_vec()).unwrap_err();
-        assert!(matches!(error, GroupReadEnvelopeError::Malformed(_)));
+        assert!(matches!(error, GroupReadError::Malformed { .. }), "{error}");
     }
 
     #[test]

@@ -61,7 +61,7 @@ use mito2::engine::{MITO_ENGINE_NAME, MitoEngine};
 use prost::Message;
 use query::QueryEngineRef;
 use query::dist_plan::{
-    GROUP_READ_VERSION, GroupReadEnvelopeError, GroupReadPayload, GroupReadPlan,
+    GROUP_READ_VERSION, GroupReadError, GroupReadPayload, GroupReadPlan,
     MAX_GROUP_READ_PAYLOAD_BYTES, encode_nested_plan, peek_group_read_envelope,
 };
 pub use query::dummy_catalog::{
@@ -300,7 +300,7 @@ impl RegionServer {
         // decoded normally, including extensions this grouped-read peek does not recognize.
         let grouped = match peek_group_read_envelope(&request.plan) {
             Ok(payload) => payload,
-            Err(GroupReadEnvelopeError::UnsupportedVersion(version)) => {
+            Err(GroupReadError::UnsupportedVersion { version, .. }) => {
                 return NotYetImplementedSnafu {
                     what: format!(
                         "GroupRead version {version}, this datanode reads version \
@@ -309,8 +309,11 @@ impl RegionServer {
                 }
                 .fail();
             }
-            Err(GroupReadEnvelopeError::Malformed(reason)) => {
-                return InvalidQueryRequestSnafu { reason }.fail();
+            Err(error) => {
+                return InvalidQueryRequestSnafu {
+                    reason: error.to_string(),
+                }
+                .fail();
             }
         };
         let anchor = RegionId::from_u64(request.region_id);
@@ -421,12 +424,12 @@ impl RegionServer {
         let grouped = match peek_local_group_read(&request.plan) {
             Some(payload) => {
                 // The grouped-read consumer only reads the wire envelope, so this local request
-                // takes the same decode path a remote one takes.
+                // takes the same decode path a remote one takes. Failing to encode a plan this
+                // server already decoded is a server-side failure, so keep the DataFusion error
+                // and its status instead of reporting a malformed request.
                 let plan_bytes = encode_nested_plan(&request.plan).map_err(|error| {
-                    InvalidQueryRequestSnafu {
-                        reason: format!("cannot encode the local GroupRead request: {error}"),
-                    }
-                    .build()
+                    HandleRegionRequestSnafu { region_id }
+                        .into_error(BoxedError::new(common_query::error::Error::from(error)))
                 })?;
                 // Reject a request this server cannot serve before it occupies limiter capacity.
                 validate_group_read_request(region_id, plan_bytes.len(), &payload)?;
@@ -1578,9 +1581,12 @@ fn validate_group_read_request(
     plan_len: usize,
     payload: &GroupReadPayload,
 ) -> Result<()> {
-    payload
-        .validate_for_request(anchor)
-        .map_err(|reason| InvalidQueryRequestSnafu { reason }.build())?;
+    payload.validate_for_request(anchor).map_err(|error| {
+        InvalidQueryRequestSnafu {
+            reason: error.to_string(),
+        }
+        .build()
+    })?;
     if plan_len > MAX_GROUP_READ_PAYLOAD_BYTES {
         return InvalidQueryRequestSnafu {
             reason: format!(

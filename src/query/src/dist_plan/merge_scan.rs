@@ -366,44 +366,42 @@ impl Drop for SubscriberRollbackGuard<'_> {
 
 /// Why one datanode group's grouped read was discarded in favor of one request per region.
 ///
-/// Both reasons describe a datanode that cannot serve the grouped envelope (for example an older
-/// datanode that does not know it, or one that refuses the grouped plan at planning time). They
-/// are expected during a rolling upgrade and must not fail the query.
+/// A grouped attempt is speculative: an older datanode may reject the envelope, but a transport
+/// failure or a stream error before the first batch also lands here. These failures are expected
+/// enough during a rolling upgrade that they must not fail the query; after the first batch an
+/// error is propagated instead of replayed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(usize)]
 enum GroupedFallbackReason {
     /// The grouped `do_get` itself failed.
-    DoGet,
+    DoGetFailed = 0,
     /// The grouped stream failed on its first poll, before producing any batch.
-    FirstPoll,
+    FirstPollFailed = 1,
 }
 
 impl GroupedFallbackReason {
-    /// Stable counter label; dashboards rely on these exact values.
-    fn label(self) -> &'static str {
-        match self {
-            Self::DoGet => "do_get",
-            Self::FirstPoll => "first_poll",
-        }
-    }
-
+    /// Number of distinct reasons; one slot per reason in the test counter.
     #[cfg(test)]
-    fn test_index(self) -> usize {
+    const COUNT: usize = 2;
+
+    /// Stable counter label; dashboards rely on these exact values.
+    fn as_label(self) -> &'static str {
         match self {
-            Self::DoGet => 0,
-            Self::FirstPoll => 1,
+            Self::DoGetFailed => "do_get",
+            Self::FirstPollFailed => "first_poll",
         }
     }
 }
 
 fn record_merge_scan_grouped_fallback(reason: GroupedFallbackReason) {
     MERGE_SCAN_GROUPED_FALLBACKS_TOTAL
-        .with_label_values(&[reason.label()])
+        .with_label_values(&[reason.as_label()])
         .inc();
 
     #[cfg(test)]
     TEST_MERGE_SCAN_GROUPED_FALLBACKS.with(|counts| {
         let mut values = counts.get();
-        values[reason.test_index()] += 1;
+        values[reason as usize] += 1;
         counts.set(values);
     });
 }
@@ -413,7 +411,8 @@ thread_local! {
     // Prometheus counters are process-global and tests run concurrently. This
     // companion counter is incremented at the exact production increment site
     // and is scoped to the polling test thread, making delta assertions stable.
-    static TEST_MERGE_SCAN_GROUPED_FALLBACKS: Cell<[u64; 2]> = const { Cell::new([0, 0]) };
+    static TEST_MERGE_SCAN_GROUPED_FALLBACKS: Cell<[u64; 2]> =
+        const { Cell::new([0; GroupedFallbackReason::COUNT]) };
 }
 
 #[cfg(test)]
@@ -1320,9 +1319,11 @@ impl MergeScanExec {
                     }
                     Err(error) => {
                         drop(subscriber_rollback.take());
-                        record_merge_scan_grouped_fallback(GroupedFallbackReason::DoGet);
-                        common_telemetry::debug!(
-                            error = %error,
+                        record_merge_scan_grouped_fallback(GroupedFallbackReason::DoGetFailed);
+                        // An expected fallback during a rolling upgrade: warn, never fail the
+                        // query. The datanode error is kept as a field so its source survives.
+                        common_telemetry::warn!(
+                            error;
                             "Grouped read of datanode group anchored at region {}, with {} regions, failed before its first batch; falling back to per-region reads",
                             anchor,
                             group.regions().len()
@@ -1430,10 +1431,13 @@ impl MergeScanExec {
                                     // Discard it and read its regions one by one instead.
                                     drop(subscriber_rollback.take());
                                     record_merge_scan_grouped_fallback(
-                                        GroupedFallbackReason::FirstPoll,
+                                        GroupedFallbackReason::FirstPollFailed,
                                     );
-                                    common_telemetry::debug!(
-                                        error = %error,
+                                    // An expected fallback during a rolling upgrade: warn, never
+                                    // fail the query. The datanode error is kept as a field so its
+                                    // source survives.
+                                    common_telemetry::warn!(
+                                        error;
                                         "Grouped read of datanode group anchored at region {}, with {} regions, failed before its first batch; falling back to per-region reads",
                                         anchor,
                                         group.regions().len()
@@ -2915,6 +2919,21 @@ mod tests {
             .downcast_ref::<Int64Array>()
             .unwrap();
         (0..column.len()).map(|index| column.value(index)).collect()
+    }
+
+    /// The fallback labels are a dashboard contract and must not drift.
+    #[test]
+    fn grouped_fallback_reason_labels_are_stable() {
+        assert_eq!("do_get", GroupedFallbackReason::DoGetFailed.as_label());
+        assert_eq!(
+            "first_poll",
+            GroupedFallbackReason::FirstPollFailed.as_label()
+        );
+        // The test counter indexes itself by the discriminant, so every reason must stay inside
+        // the counter.
+        assert_eq!(0, GroupedFallbackReason::DoGetFailed as usize);
+        assert_eq!(1, GroupedFallbackReason::FirstPollFailed as usize);
+        assert_eq!(2, GroupedFallbackReason::COUNT);
     }
 
     /// A grouped read whose request fails must read every region one by one instead.

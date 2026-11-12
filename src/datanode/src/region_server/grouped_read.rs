@@ -36,7 +36,7 @@ use datafusion_expr::LogicalPlan;
 use datatypes::schema::{Schema, SchemaRef};
 use futures::Stream;
 use query::dist_plan::{
-    GROUP_READ_CONTEXT_EXTENSION, GroupReadDecodeError, GroupReadPayload, RegionPlanResolver,
+    GROUP_READ_CONTEXT_EXTENSION, GroupReadError, GroupReadPayload, RegionPlanResolver,
     decode_group_read_request,
 };
 use session::context::QueryContextRef;
@@ -100,14 +100,15 @@ impl RegionServer {
         let plan = decode_group_read_request(&plan_bytes, engine_ctx.state(), payload, &resolver)
             .await
             .map_err(|error| match error {
-                GroupReadDecodeError::Malformed(reason) => {
-                    InvalidQueryRequestSnafu { reason }.build()
-                }
                 // Keep the resolver's status code and retry hint: a region whose plan cannot be
                 // resolved is a per-region failure, not a malformed request.
-                GroupReadDecodeError::Resolve { region_id, source } => {
-                    HandleRegionRequestSnafu { region_id }.into_error(source)
+                GroupReadError::Resolve {
+                    region_id, source, ..
+                } => HandleRegionRequestSnafu { region_id }.into_error(source),
+                other => InvalidQueryRequestSnafu {
+                    reason: other.to_string(),
                 }
+                .build(),
             })?;
 
         let mut guards = Vec::with_capacity(region_ids.len());
