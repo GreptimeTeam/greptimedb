@@ -40,7 +40,7 @@ use std::time::{Duration, SystemTime};
 use async_stream::stream;
 use async_trait::async_trait;
 use auth::{
-    PROMQL_QUERY, PermissionAction, PermissionChecker, PermissionCheckerRef, PermissionReq,
+    COPY_TO, PROMQL_QUERY, PermissionChecker, PermissionCheckerRef, PermissionReq,
     PermissionTableTarget, PermissionTableTargets,
 };
 use catalog::CatalogManagerRef;
@@ -601,12 +601,8 @@ impl Instance {
             )
         ) {
             // COPY retains its write permission requirement and also reads source data.
-            self.check_table_permission(
-                query_ctx,
-                PermissionReq::Action(PermissionAction::read("copy.to")),
-                targets.clone(),
-            )
-            .context(PermissionSnafu)?;
+            self.check_table_permission(query_ctx, PermissionReq::Action(COPY_TO), targets.clone())
+                .context(PermissionSnafu)?;
         }
         self.check_table_permission(query_ctx, PermissionReq::SqlStatement(stmt), targets)
             .context(PermissionSnafu)?;

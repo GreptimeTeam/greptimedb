@@ -32,7 +32,7 @@ pub use common::{
     userinfo_by_name, validate_mysql_native_password_verifier,
 };
 pub use permission::{
-    ALL_ACTIONS, AccessMode, DASHBOARD_DELETE, DASHBOARD_QUERY, DASHBOARD_SAVE,
+    ALL_ACTIONS, AccessMode, COPY_TO, DASHBOARD_DELETE, DASHBOARD_QUERY, DASHBOARD_SAVE,
     DefaultPermissionChecker, INFLUXDB_WRITE, JAEGER_QUERY, LOG_QUERY, LOG_WRITE, OPENTSDB_WRITE,
     OTLP_WRITE, PIPELINE_DELETE, PIPELINE_INSERT, PIPELINE_QUERY, PROM_STORE_READ,
     PROM_STORE_WRITE, PROMQL_QUERY, PermissionAction, PermissionChecker, PermissionReq,
