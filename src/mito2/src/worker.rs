@@ -1756,6 +1756,8 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             }
             BackgroundNotify::TailReplayEnded => self.handle_tail_replay_ended(region_id),
         }
+        // Completion handlers may return early after releasing their scheduler. Dispatch
+        // here covers those paths as well as their normal completion.
         if should_dispatch_pending {
             self.dispatch_pending_region_requests(region_id).await;
         }
