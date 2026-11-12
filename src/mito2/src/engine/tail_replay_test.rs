@@ -609,6 +609,36 @@ async fn test_missing_reported_object_fails_until_restored() {
 }
 
 #[tokio::test]
+async fn test_failed_round_deletes_chunks_of_earlier_tails() {
+    let region = TestRegion::new("tail-replay-failed-round", false, None).await;
+    let last = region.write_remote_rows(region.region_id, 6, 9).await;
+    region
+        .reopen_with_tails(vec![
+            own_tail(0, region.entries[1], UptoKind::Reported),
+            remote_tail(0, last, UptoKind::Reported),
+        ])
+        .await;
+    let objects = region
+        .wal_store
+        .list(&format!("{}/objects/", remote_prefix()))
+        .await
+        .unwrap();
+    let path = objects[objects.len() - 1].path().to_string();
+    let bytes = region.wal_store.read(&path).await.unwrap();
+    region.wal_store.delete(&path).await.unwrap();
+
+    region.catchup().await;
+    // The round wrote the own tail's chunk before the remote read failed.
+    wait_until(|| region.listener.failed()).await;
+    assert_eq!(0, region.stored_ssts().await);
+    region.wal_store.write(&path, bytes).await.unwrap();
+    region.wait_until_replayed().await;
+
+    assert_eq!(2, region.stored_ssts().await);
+    assert_eq!(9, count_rows(&region.engine, region.region_id).await);
+}
+
+#[tokio::test]
 async fn test_remote_listed_tail_shrinks_until_leader_lease() {
     let region = TestRegion::new("tail-replay-remote-listed", false, None).await;
     let last = region.write_remote_rows(region.region_id, 6, 9).await;
@@ -742,6 +772,25 @@ async fn test_direct_promotion_counts_as_leader_lease() {
         .unwrap();
     region.promote();
     region.wait_until_replayed().await;
+}
+
+#[tokio::test]
+async fn test_leased_first_round_clears_remote_listed_tail() {
+    let region = TestRegion::new("tail-replay-leased-listed", false, None).await;
+    region.write_remote_rows(region.region_id, 6, 9).await;
+    let upto = region.remote_listed_bound().await;
+    region
+        .reopen_with_tails(vec![remote_tail(0, upto, UptoKind::Listed)])
+        .await;
+    let mito_region = region.engine.get_region(region.region_id).unwrap();
+    let version = next_manifest_version(&mito_region).await;
+
+    // A direct promotion counts as a lease, so no commit keeps part of the tail.
+    region.promote();
+    region.wait_until_replayed().await;
+
+    assert_eq!(version + 1, next_manifest_version(&mito_region).await);
+    assert_eq!(9, count_rows(&region.engine, region.region_id).await);
 }
 
 #[tokio::test]
@@ -1216,6 +1265,85 @@ async fn test_stalled_remote_read_ends_when_region_stops(#[case] stop_engine: bo
     }
 
     wait_until(|| replaying.strong_count() == 0).await;
+}
+
+/// Reopens the follower `region` as a new instance, through a catchup that finds a manifest
+/// version another writer published.
+async fn replace_follower(region: &TestRegion) {
+    let mito_region = region.engine.get_region(region.region_id).unwrap();
+    let store = region.env.get_object_store().unwrap();
+    let version = next_manifest_version(&mito_region).await;
+    publish_delta(
+        &store,
+        &region.region_dir(),
+        version,
+        encode_delta(nop_action()).await,
+    )
+    .await;
+    let catchup = RegionRequest::Catchup(RegionCatchupRequest::default());
+    region
+        .engine
+        .handle_request(region.region_id, catchup)
+        .await
+        .unwrap();
+    assert!(is_replaced(&region.engine, &mito_region));
+}
+
+#[tokio::test]
+async fn test_replacing_region_cancels_its_replay() {
+    let stall = Arc::new(AtomicBool::new(false));
+    let stalled = Arc::new(AtomicUsize::new(0));
+    let layer = stall_remote_listings(stall.clone(), stalled.clone());
+    let region = TestRegion::with_wal_layer("tail-replay-replaced", false, None, Some(layer)).await;
+    let last = region.write_remote_rows(region.region_id, 6, 9).await;
+    region
+        .reopen_with_tails(vec![remote_tail(0, last, UptoKind::Reported)])
+        .await;
+    stall.store(true, Ordering::Relaxed);
+    region.promote();
+    wait_until(|| stalled.load(Ordering::Relaxed) > 0).await;
+    let replaying = Arc::downgrade(&region.engine.get_region(region.region_id).unwrap());
+
+    region
+        .engine
+        .set_region_role(region.region_id, RegionRole::Follower)
+        .unwrap();
+    replace_follower(&region).await;
+
+    wait_until(|| replaying.strong_count() == 0).await;
+}
+
+#[tokio::test]
+async fn test_commit_notice_of_replaced_instance_changes_nothing() {
+    let region = TestRegion::new("tail-replay-replaced-notice", false, None).await;
+    let tails = vec![own_tail(0, region.entries[1], UptoKind::Reported)];
+    region.reopen_with_tails(tails.clone()).await;
+    let old = region.engine.get_region(region.region_id).unwrap();
+    replace_follower(&region).await;
+
+    let notify = BackgroundNotify::TailReplayCommitted {
+        region: old.clone(),
+        edit: pending_tails_edit(vec![]),
+        tails: tails.clone(),
+    };
+    let request = WorkerRequest::Background {
+        region_id: region.region_id,
+        notify,
+    };
+    let workers = &region.engine.inner.workers;
+    workers
+        .submit_to_worker(region.region_id, request)
+        .await
+        .unwrap();
+    // The worker handles the notice before this request, which keeps the version.
+    region
+        .engine
+        .set_region_role_state_gracefully(region.region_id, SettableRegionRoleState::Follower)
+        .await
+        .unwrap();
+
+    assert_eq!(tails, old.version().pending_tails);
+    assert_eq!(tails, region.version().pending_tails);
 }
 
 /// Moves a writable leader to `busy`, Altering or Editing.
