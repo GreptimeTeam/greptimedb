@@ -1648,7 +1648,7 @@ mod remote_membership_tests {
         // The producer predicate really holds a runtime-only lookup...
         assert!(has_expr::<HashTableLookupExpr>(&filter.expr));
 
-        // ...and it is written as one literal per build key, with no encoder-side cap.
+        // ...and it is written as one literal per build key within the payload budget.
         let decoded = decode(
             &filter.expr,
             &filter.probe_schema,
