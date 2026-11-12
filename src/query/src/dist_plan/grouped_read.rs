@@ -49,8 +49,8 @@ use datafusion_common::{DFSchemaRef, DataFusionError};
 use datafusion_expr::{
     Expr, Extension, LogicalPlan, LogicalPlanBuilder, UserDefinedLogicalNodeCore,
 };
+use greptime_proto::substrait_extension::{GroupRead as PbGroupRead, RegionPlan as PbRegionPlan};
 use prost::Message;
-use serde::{Deserialize, Serialize};
 use snafu::{IntoError, Location, ResultExt, Snafu};
 use store_api::storage::RegionId;
 use substrait::substrait_proto_df::proto::{Plan, Rel, plan_rel, read_rel, rel, set_rel::SetOp};
@@ -121,21 +121,7 @@ pub enum GroupReadError {
     },
     // Codec errors are foreign errors that do not implement `StackError`, so they are named
     // `error` and stay attached as the snafu source instead of being stringified away.
-    #[snafu(display("cannot encode grouped read metadata: {error}"))]
-    EncodeJson {
-        #[snafu(source)]
-        error: serde_json::Error,
-        #[snafu(implicit)]
-        location: Location,
-    },
-    #[snafu(display("cannot decode grouped read metadata: {error}"))]
-    DecodeJson {
-        #[snafu(source)]
-        error: serde_json::Error,
-        #[snafu(implicit)]
-        location: Location,
-    },
-    #[snafu(display("cannot decode a grouped read plan: {error}"))]
+    #[snafu(display("cannot decode grouped read payload/plan: {error}"))]
     DecodeProto {
         #[snafu(source)]
         error: prost::DecodeError,
@@ -163,12 +149,8 @@ impl ErrorExt for GroupReadError {
         use GroupReadError::*;
 
         match self {
-            Malformed { .. } | DecodeJson { .. } | DecodeProto { .. } => {
-                StatusCode::InvalidArguments
-            }
+            Malformed { .. } | DecodeProto { .. } => StatusCode::InvalidArguments,
             UnsupportedVersion { .. } => StatusCode::Unsupported,
-            // Producing a wire this build cannot encode is our failure, not the caller's.
-            EncodeJson { .. } => StatusCode::Internal,
             // Combining decoded region plans runs a DataFusion builder again, so keep whatever
             // the plan builder reported instead of blaming the request.
             Combine { error, .. } => {
@@ -191,17 +173,18 @@ impl ErrorExt for GroupReadError {
     }
 }
 
-/// Conservative bytes one RegionPlan contributes after JSON encoding.
+/// Conservative bytes one `RegionPlan` message contributes to the serialized request.
 ///
-/// A `Vec<u8>` is serialized as a JSON number array, so the worst case is four characters per
-/// byte. The fixed framing covers field names, region id and container punctuation.
-fn estimated_region_plan_json_bytes(nested_plan_len: usize) -> usize {
-    nested_plan_len.saturating_mul(4).saturating_add(160)
+/// The `bytes plan` field is copied verbatim, so its own length dominates; the fixed framing
+/// covers the extended-varint length prefix, the region id varint, the substrait extension
+/// wrapper around the message and the safety margin.
+fn estimated_region_plan_proto_bytes(nested_plan_len: usize) -> usize {
+    nested_plan_len.saturating_add(64)
 }
 
 /// Maximum RegionPlan leaves that fit the request budget for one shared regional template.
 pub fn max_regions_for_group_read_payload(nested_plan_len: usize, table_name_len: usize) -> usize {
-    let per_region = estimated_region_plan_json_bytes(nested_plan_len).saturating_add(16);
+    let per_region = estimated_region_plan_proto_bytes(nested_plan_len).saturating_add(16);
     if per_region == 0 {
         return MAX_GROUP_READ_REGIONS;
     }
@@ -244,7 +227,10 @@ fn check_region_list(region_ids: &[u64]) -> Result<(), GroupReadError> {
 }
 
 /// Metadata of the `GroupRead` root marker.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+///
+/// The wire form is [`PbGroupRead`]; this type keeps the validated Rust API the rest of the
+/// engine works with.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct GroupReadPayload {
     version: u32,
     region_ids: Vec<u64>,
@@ -297,9 +283,32 @@ impl GroupReadPayload {
         self.region_ids.first().copied().map(RegionId::from_u64)
     }
 
+    /// The proto message this payload travels as.
+    pub fn to_proto(&self) -> PbGroupRead {
+        PbGroupRead {
+            version: self.version,
+            region_ids: self.region_ids.clone(),
+            table_id: self.table_id,
+            table_name: self.table_name.clone(),
+        }
+    }
+
+    /// Rebuilds a payload from its proto message without validating it.
+    ///
+    /// `decode` runs the shape and version checks afterwards, so a malformed message still reaches
+    /// its own rejection instead of being silently repaired here.
+    pub fn from_proto(payload: PbGroupRead) -> Self {
+        Self {
+            version: payload.version,
+            region_ids: payload.region_ids,
+            table_id: payload.table_id,
+            table_name: payload.table_name,
+        }
+    }
+
     pub fn encode(&self) -> Result<Vec<u8>, GroupReadError> {
         self.validate_shape()?;
-        let encoded = serde_json::to_vec(self).context(EncodeJsonSnafu)?;
+        let encoded = self.to_proto().encode_to_vec();
         if encoded.len() > MAX_GROUP_READ_PAYLOAD_BYTES {
             return MalformedSnafu {
                 reason: format!(
@@ -324,7 +333,8 @@ impl GroupReadPayload {
             }
             .fail();
         }
-        let payload: Self = serde_json::from_slice(bytes).context(DecodeJsonSnafu)?;
+        let proto = PbGroupRead::decode(bytes).context(DecodeProtoSnafu)?;
+        let payload = Self::from_proto(proto);
         if payload.version != GROUP_READ_VERSION {
             return UnsupportedVersionSnafu {
                 version: payload.version,
@@ -413,7 +423,11 @@ impl GroupReadPayload {
         Ok(())
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+/// One region-scoped plan leaf's metadata.
+///
+/// The wire form is [`PbRegionPlan`]; this type keeps the validated Rust API the rest of the
+/// engine works with.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct RegionPlanPayload {
     region_id: u64,
     plan: Vec<u8>,
@@ -441,8 +455,24 @@ impl RegionPlanPayload {
         &self.plan
     }
 
+    /// The proto message this payload travels as.
+    pub fn to_proto(&self) -> PbRegionPlan {
+        PbRegionPlan {
+            region_id: self.region_id,
+            plan: self.plan.clone(),
+        }
+    }
+
+    /// Rebuilds a payload from its proto message without validating it.
+    pub fn from_proto(payload: PbRegionPlan) -> Self {
+        Self {
+            region_id: payload.region_id,
+            plan: payload.plan,
+        }
+    }
+
     pub fn encode(&self) -> Result<Vec<u8>, GroupReadError> {
-        let encoded = serde_json::to_vec(self).context(EncodeJsonSnafu)?;
+        let encoded = self.to_proto().encode_to_vec();
         if encoded.len() > MAX_GROUP_READ_PAYLOAD_BYTES {
             return MalformedSnafu {
                 reason: format!(
@@ -467,7 +497,8 @@ impl RegionPlanPayload {
             }
             .fail();
         }
-        let payload: Self = serde_json::from_slice(bytes).context(DecodeJsonSnafu)?;
+        let proto = PbRegionPlan::decode(bytes).context(DecodeProtoSnafu)?;
+        let payload = Self::from_proto(proto);
         if payload.plan.is_empty() {
             return MalformedSnafu {
                 reason: "a RegionPlan carries no plan".to_string(),
@@ -881,7 +912,7 @@ pub fn build_group_read_plan_from_nested(
     // The datanode re-runs this pre-check before decoding anything; refusing to produce a wire
     // the consumer must reject keeps the producer and consumer on the same narrow contract.
     preflight_region_plan(nested).map_err(|error| DataFusionError::Plan(error.to_string()))?;
-    let estimated = estimated_region_plan_json_bytes(nested.len())
+    let estimated = estimated_region_plan_proto_bytes(nested.len())
         .saturating_mul(regions.len())
         .saturating_add(table_name.len())
         .saturating_add(128);
@@ -1782,10 +1813,9 @@ mod tests {
         .unwrap();
         assert_eq!(1, payload.version());
 
-        let mut value: serde_json::Value =
-            serde_json::from_slice(&payload.encode().unwrap()).unwrap();
-        value["version"] = serde_json::json!(2);
-        let error = GroupReadPayload::decode(&serde_json::to_vec(&value).unwrap()).unwrap_err();
+        let mut proto = PbGroupRead::decode(payload.encode().unwrap().as_slice()).unwrap();
+        proto.version = 2;
+        let error = GroupReadPayload::decode(&proto.encode_to_vec()).unwrap_err();
         assert!(
             matches!(error, GroupReadError::UnsupportedVersion { version: 2, .. }),
             "{error}"
@@ -2305,11 +2335,13 @@ mod tests {
 
     #[test]
     fn builder_rejects_cumulative_budget() {
+        // The estimate is per-region protobuf framing over the encoded template, so the padding is
+        // sized to make a hundred such leaves cross the payload budget.
         let bulky = LogicalPlanBuilder::from(project_scan())
             .project(vec![
                 col("ts"),
                 col("v"),
-                lit("x".repeat(30 * 1024)).alias("padding"),
+                lit("x".repeat(96 * 1024)).alias("padding"),
             ])
             .unwrap()
             .build()

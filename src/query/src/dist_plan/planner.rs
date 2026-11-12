@@ -351,7 +351,7 @@ impl DistExtensionPlanner {
         if !grouped_read_has_batch(&groups) {
             return None;
         }
-        // Encode the regional template once and estimate the per-RegionPlan JSON growth before
+        // Encode the regional template once and estimate the per-RegionPlan payload growth before
         // materializing any leaf. This both bounds request memory and lets a byte-heavy template
         // shrink the chunk instead of building an oversized GroupRead first.
         let table_name_for_plan = nested_plan_table(remote_plan)?;
@@ -1141,9 +1141,10 @@ mod tests {
         assert_eq!(five, grouped_low[0].regions());
 
         // Many individually valid small leaves still exceed the payload budget cumulatively. The
-        // planner must shrink the chunk before materializing the oversized UnionAll.
+        // planner must shrink the chunk before materializing the oversized UnionAll. The padding is
+        // sized against the per-region protobuf estimate over the encoded template.
         let bulky = LogicalPlanBuilder::from(plan.clone())
-            .filter(df_col("host").eq(lit("x".repeat(30 * 1024))))
+            .filter(df_col("host").eq(lit("x".repeat(96 * 1024))))
             .unwrap()
             .build()
             .unwrap();
@@ -1167,9 +1168,10 @@ mod tests {
         );
 
         // An envelope over the payload budget is a planning fallback. It must not be selected
-        // and then fail after the frontend has already handed the group to a datanode.
+        // and then fail after the frontend has already handed the group to a datanode. One
+        // regional template above the whole budget cannot be chunked into a valid envelope.
         let oversized = LogicalPlanBuilder::from(plan.clone())
-            .filter(df_col("host").eq(lit("x".repeat(MAX_GROUP_READ_PAYLOAD_BYTES / 2 + 4096))))
+            .filter(df_col("host").eq(lit("x".repeat(MAX_GROUP_READ_PAYLOAD_BYTES + 4096))))
             .unwrap()
             .build()
             .unwrap();

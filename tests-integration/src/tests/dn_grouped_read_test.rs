@@ -45,6 +45,7 @@ use datanode::error::{Error as DatanodeError, Result as DatanodeResult};
 use datatypes::arrow::array::AsArray;
 use datatypes::arrow::datatypes::UInt64Type;
 use futures::StreamExt;
+use greptime_proto::substrait_extension::{GroupRead as PbGroupRead, RegionPlan as PbRegionPlan};
 use meta_srv::metasrv::SelectTarget;
 use meta_srv::selector::round_robin::RoundRobinSelector;
 use query::dist_plan::{
@@ -646,7 +647,7 @@ async fn grouped_read_rdf_and_rejections() {
     );
 
     let anchor_missing = mutate_payload(&bytes, |payload| {
-        payload["region_ids"] = serde_json::json!([own_regions[0].as_u64()]);
+        payload.region_ids = vec![own_regions[0].as_u64()];
     });
     assert_rejected(
         "an anchor outside the named regions",
@@ -658,8 +659,7 @@ async fn grouped_read_rdf_and_rejections() {
             .await,
     );
     let duplicate = mutate_payload(&bytes, |payload| {
-        payload["region_ids"] =
-            serde_json::json!([own_regions[0].as_u64(), own_regions[0].as_u64()]);
+        payload.region_ids = vec![own_regions[0].as_u64(), own_regions[0].as_u64()];
     });
     assert_rejected(
         "a duplicated region",
@@ -668,7 +668,7 @@ async fn grouped_read_rdf_and_rejections() {
             .await,
     );
     let wrong_table = mutate_payload(&bytes, |payload| {
-        payload["table_id"] = serde_json::json!(info.table_id() + 1);
+        payload.table_id = info.table_id() + 1;
     });
     assert_rejected(
         "a table id that does not match the regions",
@@ -680,7 +680,7 @@ async fn grouped_read_rdf_and_rejections() {
             .await,
     );
     let misnamed = mutate_payload(&bytes, |payload| {
-        payload["table_name"] = serde_json::json!("greptime.public.another_table");
+        payload.table_name = "greptime.public.another_table".to_string();
     });
     assert_rejected(
         "a table name that does not match the nested plan",
@@ -689,7 +689,7 @@ async fn grouped_read_rdf_and_rejections() {
             .await,
     );
     let unsupported_version = mutate_payload(&bytes, |payload| {
-        payload["version"] = serde_json::json!(999);
+        payload.version = 999;
     });
     assert_rejected(
         "an unsupported envelope version",
@@ -1047,14 +1047,14 @@ fn encode(plan: &datafusion_expr::LogicalPlan) -> Vec<u8> {
 
 /// Rebuilds a valid envelope with mutated GroupRead metadata, so a datanode's rejection can be
 /// observed without touching the combine tree.
-fn mutate_payload(bytes: &[u8], mutate: impl FnOnce(&mut serde_json::Value)) -> Vec<u8> {
+fn mutate_payload(bytes: &[u8], mutate: impl FnOnce(&mut PbGroupRead)) -> Vec<u8> {
     use prost::Message;
     use substrait::substrait_proto_df::proto::{Plan, plan_rel, rel};
 
     let payload = peek_group_read_envelope(bytes).unwrap().unwrap();
-    let mut value: serde_json::Value = serde_json::from_slice(&payload.encode().unwrap()).unwrap();
-    mutate(&mut value);
-    let value = serde_json::to_vec(&value).unwrap();
+    let mut proto = payload.to_proto();
+    mutate(&mut proto);
+    let value = proto.encode_to_vec();
 
     let mut plan = Plan::decode(bytes).unwrap();
     let relation = plan.relations.first_mut().unwrap();
@@ -1079,14 +1079,9 @@ fn mutate_region_plans(bytes: &[u8], regional_plan: &[u8]) -> Vec<u8> {
             rel::RelType::ExtensionLeaf(leaf) => {
                 let detail = leaf.detail.as_mut().unwrap();
                 if detail.type_url == query::dist_plan::REGION_PLAN_NAME {
-                    let payload =
-                        query::dist_plan::RegionPlanPayload::decode(&detail.value).unwrap();
-                    let payload = query::dist_plan::RegionPlanPayload::try_new(
-                        payload.region_id(),
-                        regional_plan.to_vec(),
-                    )
-                    .unwrap();
-                    detail.value = payload.encode().unwrap().into();
+                    let mut payload = PbRegionPlan::decode(detail.value.as_ref()).unwrap();
+                    payload.plan = regional_plan.to_vec();
+                    detail.value = payload.encode_to_vec().into();
                 }
             }
             rel::RelType::ExtensionSingle(single) => {
