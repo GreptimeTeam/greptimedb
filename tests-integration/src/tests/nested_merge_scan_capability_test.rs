@@ -25,6 +25,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
+use std::time::Duration;
 
 use api::v1::region::{QueryRequest, RegionRequestHeader};
 use common_query::Output;
@@ -128,6 +129,78 @@ async fn test_nested_merge_scan_capability_join_across_datanodes() {
         "frontend result differs:\n{reference}"
     );
     assert_cross_datanode_region_query(&cluster, &remote_datanodes, &baseline_requests);
+}
+
+/// A single datanode that owns both the probe and the build regions must still serve the
+/// nested read of its own outer stream when the concurrent read limiter is enabled. Sharing
+/// one semaphore would deadlock: the outer read holds its permit until its stream ends, and
+/// the stream only ends after the nested read it waits for gets a permit.
+///
+/// `max_concurrent_queries = 1` gives the ordinary and the nested lane one permit each, so the
+/// query below only completes if the nested read does not compete with its own outer read.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_nested_merge_scan_completes_on_one_datanode_with_query_limiter() {
+    common_telemetry::init_default_ut_logging();
+
+    let cluster = GreptimeDbClusterBuilder::new(
+        "test_nested_merge_scan_completes_on_one_datanode_with_query_limiter",
+    )
+    .await
+    // The inner region read of the nested plan is a datanode to datanode request, so the
+    // datanode must be reachable at the address it registers in metasrv.
+    .with_real_datanode_grpc_addr(true)
+    .with_datanodes(1)
+    .with_datanode_max_concurrent_queries(1)
+    .build(false)
+    .await;
+    let frontend = cluster.fe_instance().clone();
+
+    prepare_tables(&frontend).await;
+
+    let probe_leaders = region_leaders(&frontend, PROBE_TABLE).await;
+    let build_leaders = region_leaders(&frontend, BUILD_TABLE).await;
+    let single_datanode = datanodes(&probe_leaders);
+    assert_eq!(
+        1,
+        single_datanode.len(),
+        "expected the regions of {PROBE_TABLE} on the only datanode, actual region leaders: \
+         {probe_leaders:?}"
+    );
+    assert_eq!(
+        single_datanode,
+        datanodes(&build_leaders),
+        "the build regions must live on the same datanode as the probe regions, actual region \
+         leaders: {build_leaders:?}"
+    );
+    assert!(
+        cluster
+            .datanode_options
+            .iter()
+            .all(|opts| opts.max_concurrent_queries == 1),
+        "the test must run with the datanode read limiter saturated at one permit per lane"
+    );
+
+    let query_ctx = query_ctx();
+    let nested_plan = nested_plan(&frontend, &query_ctx).await;
+    let plan = encode(&nested_plan);
+
+    // The outer read holds an ordinary permit while this collects the whole stream, so the
+    // nested read of the same datanode must be admitted by the nested lane.
+    let rows = run_nested_queries(&cluster, &probe_leaders, &plan, &query_ctx).await;
+    let actual_rows = multiset(rows);
+    assert_eq!(
+        expected_join_rows(),
+        actual_rows,
+        "the nested plan must complete on one datanode under the query limiter"
+    );
+
+    // The limiter must be fully recovered afterwards: a second identical query still completes.
+    let rows = run_nested_queries(&cluster, &probe_leaders, &plan, &query_ctx).await;
+    assert_eq!(
+        expected_join_rows(),
+        multiset(rows),
+        "the permits of the first query must be recovered"
+    );
 }
 
 /// Volatile SMALL-side values are materialized once per query and broadcast to BIG regions.
@@ -1269,7 +1342,7 @@ fn nested_plan_of(probe: &LogicalPlan, build: LogicalPlan) -> LogicalPlan {
     info!("probe side of the nested plan:\n{probe}");
     info!("build side of the nested plan:\n{build}");
 
-    let inner = MergeScanLogicalPlan::new(build, false, Default::default()).into_logical_plan();
+    let inner = MergeScanLogicalPlan::new(build, false).into_logical_plan();
     let plan = LogicalPlanBuilder::from(probe.clone())
         .join(
             inner,
