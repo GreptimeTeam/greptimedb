@@ -53,12 +53,15 @@ pub struct FrontendOptions {
     /// even if a request sets the `auto_create_table` hint to `true`. When `true`
     /// (default), the per-request hint still applies. Default: `true`.
     pub auto_create_table: bool,
-    /// Shared quota for write bodies/messages and estimated ordinary-table batch conversion memory.
+    /// Shared quota for write bodies/messages, retained decoder memory, and estimated
+    /// ordinary-table batch conversion memory. A batch must fit alongside its request's
+    /// existing reservations; only additional memory is acquired.
     /// Set to 0 to disable the limit. Default: "0" (unlimited)
     pub max_in_flight_write_bytes: ReadableSize,
     /// Policy when write bytes quota is exhausted.
     /// Options: "wait" (default, 10s), "wait(<duration>)", "fail"
-    /// Table-batch conversion never waits for additional memory; contention remains retryable.
+    /// Table-batch conversion never waits for additional memory. Under a wait policy,
+    /// temporary contention returns a retryable error; requests that cannot fit are rejected.
     pub write_bytes_exhausted_policy: OnExhaustedPolicy,
     pub http: HttpOptions,
     pub grpc: GrpcOptions,
