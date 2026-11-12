@@ -38,6 +38,7 @@ use crate::scalars::expression::ExpressionFunction;
 use crate::scalars::hll_count::HllCalcFunction;
 use crate::scalars::iceberg_hash::{
     IcebergHashBoundsFunction, IcebergHashBreakpointsFunction, IcebergHashFunction,
+    IcebergHashRangesSqlFunction,
 };
 use crate::scalars::ip::IpFunctions;
 use crate::scalars::json::JsonFunction;
@@ -233,6 +234,7 @@ pub static FUNCTION_REGISTRY: LazyLock<Arc<FunctionRegistry>> = LazyLock::new(||
     IcebergHashFunction::register(&function_registry);
     IcebergHashBoundsFunction::register(&function_registry);
     IcebergHashBreakpointsFunction::register(&function_registry);
+    IcebergHashRangesSqlFunction::register(&function_registry);
 
     // Full text search function
     MatchesFunction::register(&function_registry);
