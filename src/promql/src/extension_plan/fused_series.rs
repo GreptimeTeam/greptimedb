@@ -333,20 +333,6 @@ pub struct FusedSeries {
     /// That a node is the producer cannot be read off its tree - the merge is at its root - so it is
     /// stated here by the caller that built the boundary.
     canonical_producer: bool,
-    /// Whether the read below this node is proven to be confined to one region.
-    ///
-    /// A canonical producer's router collects the pieces of one label set from exactly the input
-    /// partitions it runs on, so where those partitions are decides whether its answer covers a
-    /// label set or one region's share of it. The planner is where that is known: it counts the
-    /// regions that can serve the statement's reads, and a read one region serves whole is the only
-    /// placement a producer may claim inside a region. The fact is carried here, and never derived
-    /// from the children, because the children of a proven single-region read can still be sources -
-    /// a canonical cut wraps its inputs in sources independently of how the scan was chosen - and
-    /// such a producer is admitted on the proof alone.
-    ///
-    /// It is a plan property and not part of the node's encoding: [`FusedSeries::serialize`] writes
-    /// the bytes it always has, and a node read back from them carries no proof.
-    single_region_read: bool,
 }
 
 fn canonical_evaluated_local_prefix(node: &NativeNode) -> bool {
@@ -640,7 +626,6 @@ impl FusedSeries {
             output_schema,
             format,
             canonical_producer: false,
-            single_region_read: false,
         })
     }
 
@@ -679,7 +664,6 @@ impl FusedSeries {
             output_schema,
             format: FusedOutputFormat::SeriesFrame,
             canonical_producer: true,
-            single_region_read: false,
         })
     }
 
@@ -693,24 +677,6 @@ impl FusedSeries {
     /// Whether this node is the partition-local producer of a canonical boundary.
     pub fn is_canonical_producer(&self) -> bool {
         self.canonical_producer
-    }
-
-    /// Whether the read below this node was proven to stay inside one region.
-    ///
-    /// The proof is the planner's, taken from the regions that can serve the statement's reads; an
-    /// unproven read is not one region, so a node that was not told otherwise answers `false` here
-    /// and keeps the placement it has above the regions.
-    pub fn reads_single_region(&self) -> bool {
-        self.single_region_read
-    }
-
-    /// States that the read below this node is proven to stay inside one region.
-    ///
-    /// Only a canonical producer consults it, and only the planner that counted the regions can
-    /// state it; see [`FusedSeries::single_region_read`].
-    pub fn with_single_region_read(mut self, single_region_read: bool) -> Self {
-        self.single_region_read = single_region_read;
-        self
     }
 
     /// The PromQL text this node was compiled from.
@@ -907,6 +873,22 @@ impl FusedSeries {
                         (input, label_source, ordering)
                     };
                     let count = input.properties().partitioning.partition_count();
+                    // A per-series tree reads each raw series on its own, so its width is a choice:
+                    // route the raw frames by their stored key up to the width this execution was
+                    // asked for, and each series still lands on exactly one owner.
+                    if !normalize
+                        && count < target_partitions.unwrap_or(count).max(1)
+                        && matching_policy.is_none()
+                    {
+                        let width = target_partitions.unwrap_or(count).max(1);
+                        let input = Arc::new(SeriesRepartitionExec::try_new_with_routing(
+                            input,
+                            width,
+                            SeriesRouting::RawPrimaryKey,
+                        )?) as Arc<dyn ExecutionPlan>;
+                        let ordering = series_frame_ordering(input.schema().as_ref())?;
+                        return Ok((input, RawLabelSource::Explicit, ordering));
+                    }
                     if normalize && count != 1 {
                         let input = Arc::new(SeriesRepartitionExec::try_new(input, 1)?)
                             as Arc<dyn ExecutionPlan>;
@@ -1150,7 +1132,6 @@ impl UserDefinedLogicalNodeCore for FusedSeries {
             output_schema: Arc::clone(&self.output_schema),
             format: self.format,
             canonical_producer: self.canonical_producer,
-            single_region_read: self.single_region_read,
         })
     }
 }
@@ -1164,7 +1145,6 @@ impl PartialEq for FusedSeries {
             && self.output_schema == other.output_schema
             && self.format == other.format
             && self.canonical_producer == other.canonical_producer
-            && self.single_region_read == other.single_region_read
     }
 }
 
@@ -1179,7 +1159,6 @@ impl Hash for FusedSeries {
         self.tree.hash(state);
         self.format.hash(state);
         self.canonical_producer.hash(state);
-        self.single_region_read.hash(state);
     }
 }
 
@@ -1205,10 +1184,6 @@ impl PartialOrd for FusedSeries {
             ord => return Some(ord),
         }
         match self.canonical_producer.cmp(&other.canonical_producer) {
-            Ordering::Equal => {}
-            ord => return Some(ord),
-        }
-        match self.single_region_read.cmp(&other.single_region_read) {
             Ordering::Equal => {}
             ord => return Some(ord),
         }

@@ -76,7 +76,6 @@ use session::context::{MetricDiscoveryScope, QueryContextRef};
 use snafu::ResultExt;
 use store_api::metric_engine_consts::{DATA_SCHEMA_TABLE_ID_COLUMN_NAME, METRIC_ENGINE_NAME};
 use store_api::region_engine::RawLabelSource;
-use table::TableRef;
 
 use crate::promql::error::{DataFusionPlanningSnafu, Result};
 use crate::promql::native_compile::{
@@ -110,62 +109,6 @@ pub(crate) fn native_promql_requested(query_ctx: &QueryContextRef) -> bool {
     query_ctx
         .extension(NATIVE_PROMQL_EXTENSION_KEY)
         .is_some_and(|value| value.eq_ignore_ascii_case("true"))
-}
-
-/// Whether a plan built here is split into a frontend plan over regions read through sources.
-///
-/// Two facts decide it and neither is about how a region's half travels. One is the engine's: an
-/// engine that plans no distributed statement plans no region at all, so there is no region
-/// boundary to place a node above and its plans keep the shapes a region runs itself. The other is
-/// the statement's, and it is passed in - `source_backed` says the node this plan is built for has
-/// to run above the regions:
-///
-/// - ordinary per-series work never does. A region answers its own series of one table, so a tree
-///   that reads each series on its own runs where its scan is, in every deployment, and keeps the
-///   scan's width.
-/// - a canonical boundary does when the pieces of one label set can be spread over regions: its
-///   producer merges only what its own input partitions hold, so the collection has to happen above
-///   every region, and one [`RawSeriesSource`] per region is what names those contributions.
-fn plans_over_region_sources(query_engine_state: &QueryEngineState, source_backed: bool) -> bool {
-    query_engine_state.with_dist_planner() && source_backed
-}
-
-/// How many regions can serve one prepared input's rows, or `None` when that cannot be
-/// established.
-///
-/// The count is every route of the physical table the logical table is served through, which is
-/// what the dist planner places its work over: `find_physical_table_route_with_id` resolves a
-/// logical table - a metric logical table included - to the physical table behind it and answers
-/// its whole route, so a table with no physical table behind it answers its own.
-///
-/// The count is deliberately the route and not a partition rule's writable partitions. A route
-/// marked ignore-all-writes still serves reads - repartition keeps the routes of the regions it is
-/// deallocating - so a partition rule's writable partitions can number one while several regions
-/// answer the read, and a node placed on that count would collect a label set's pieces from one
-/// region's share of them. Every route is one region that serves the read; nothing is filtered
-/// here.
-///
-/// `None` says the read cannot be shown to stay inside one region: there is no partition rule to
-/// ask, or the route of that table could not be read. A table with no route to read is one region
-/// only when it declares no partition column, since a partition is what would make it several.
-async fn read_region_count(
-    query_engine_state: &QueryEngineState,
-    table: &TableRef,
-) -> Option<usize> {
-    let table_info = table.table_info();
-    let Some(partition_rule_manager) = query_engine_state.partition_rule_manager() else {
-        return table_info
-            .meta
-            .partition_column_names()
-            .next()
-            .is_none()
-            .then_some(1);
-    };
-    let (_, physical_table_route) = partition_rule_manager
-        .find_physical_table_route_with_id(table_info.table_id())
-        .await
-        .ok()?;
-    Some(physical_table_route.region_routes.len())
 }
 
 /// Whether this executable plan is the native raw PromQL topology, the one plan shape whose
@@ -226,11 +169,6 @@ type PreparedInput = (
     // `split_series`: whether that partition splits one series across regions, which a bare scan
     // cannot reconcile. A partition on tags keeps every series whole in one region.
     bool,
-    // `one_region`: whether this occurrence's read is proven to be served by one region. Its own
-    // scan carries nothing of this either - it is the physical table's route that answers it, see
-    // [`read_region_count`] - and an input whose count cannot be established is not one region, so
-    // a node that needs every piece of a label set keeps the placement above the regions.
-    bool,
 );
 
 /// A fully placed native operand and the evaluated layout its frame carries.
@@ -274,7 +212,6 @@ impl PromPlanner {
     #[allow(clippy::too_many_arguments)]
     async fn prepare_one_scan(
         &mut self,
-        query_engine_state: &QueryEngineState,
         matchers: Matchers,
         under_rate_or_increase: bool,
         logical_scan_id: &mut Option<u32>,
@@ -447,11 +384,6 @@ impl PromPlanner {
         } else {
             return Ok(None);
         }
-        // How many regions can serve this occurrence's rows, asked of the physical table's route
-        // rather than inferred from `partitioned`: a partition rule can put a table split along a
-        // partition column in one region, and a table with no partition column is one region
-        // whatever the deployment. Only a count of exactly one is a proof.
-        let one_region = read_region_count(query_engine_state, &table).await == Some(1);
         Ok(Some((
             input,
             series_schema,
@@ -460,7 +392,6 @@ impl PromPlanner {
             tags,
             partitioned,
             split_series,
-            one_region,
         )))
     }
 
@@ -1010,7 +941,6 @@ impl PromPlanner {
                     // makes the whole input partitioned.
                     let mut discovered_partitioned = false;
                     let mut discovered_split_series = false;
-                    let mut discovered_one_region = true;
                     for table in metrics {
                         self.ctx.table_name = Some(table.table_info().name.clone());
                         if self.setup_context().await?.is_some() {
@@ -1024,10 +954,8 @@ impl PromPlanner {
                             mut tags,
                             partitioned,
                             split_series,
-                            one_region,
                         )) = self
                             .prepare_one_scan(
-                                query_engine_state,
                                 matchers.clone(),
                                 *under_rate_or_increase,
                                 &mut logical_scan_id,
@@ -1042,7 +970,6 @@ impl PromPlanner {
                         discovered_split_series |= split_series;
                         // The union reads every discovered metric, so the whole input stays inside
                         // one region only when every metric it reads does.
-                        discovered_one_region &= one_region;
                         let Some(metric) = metric else {
                             return Ok(None);
                         };
@@ -1122,7 +1049,6 @@ impl PromPlanner {
                         tags,
                         discovered_partitioned,
                         discovered_split_series,
-                        discovered_one_region,
                     ));
                     continue;
                 }
@@ -1136,7 +1062,6 @@ impl PromPlanner {
                 }
                 let Some(one) = self
                     .prepare_one_scan(
-                        query_engine_state,
                         matchers,
                         *under_rate_or_increase,
                         &mut logical_scan_id,
@@ -1225,7 +1150,7 @@ impl PromPlanner {
             prepared[index].1 = Arc::clone(&schema);
         }
         // A real input names the output's time index and, on one table, binds every scan.
-        let Some((_, _, metric, time, tags, _, _, _)) = prepared
+        let Some((_, _, metric, time, tags, _, _)) = prepared
             .iter()
             .find(|(scan, ..)| !is_empty_discovered_input(scan))
             .or_else(|| prepared.first())
@@ -1300,7 +1225,7 @@ impl PromPlanner {
             ))
             .context(DataFusionPlanningSnafu);
         }
-        for (index, (compiled_input, (scan, _, _, time, _, _, _, _))) in
+        for (index, (compiled_input, (scan, _, _, time, _, _, _))) in
             compiled.inputs.iter().zip(prepared.iter_mut()).enumerate()
         {
             if compiled_input.source_index != index {
@@ -1403,7 +1328,7 @@ impl PromPlanner {
         }
         let source_tags = prepared
             .iter()
-            .map(|(_, _, _, _, tags, _, _, _)| tags.clone())
+            .map(|(_, _, _, _, tags, _, _)| tags.clone())
             .collect::<Vec<_>>();
         // The complete runtime label set of each input: a scan bound to one metric names every
         // series it hands over, so `__name__` is one of its labels even though it is not a tag
@@ -1414,7 +1339,7 @@ impl PromPlanner {
         // source declares it.
         let runtime_source_tags = prepared
             .iter()
-            .map(|(_, _, metric, _, tags, _, _, _)| {
+            .map(|(_, _, metric, _, tags, _, _)| {
                 let mut tags = tags.clone();
                 if metric.is_some() && !tags.iter().any(|tag| tag == METRIC_NAME) {
                     tags.push(METRIC_NAME.to_string());
@@ -1441,18 +1366,6 @@ impl PromPlanner {
             Err(_) => return Ok(None),
         };
         let root = tree.root();
-        // Whether one region serves everything the plan below reads. It is a fact about the tables
-        // this statement names and the routes they are served through, not about the deployment: a
-        // table split along a partition column is several regions in every deployment, a table with
-        // no partition column is one, and a read whose count could not be established is not one
-        // region.
-        //
-        // What it places is the canonical boundary, and only that. A per-series tree needs no such
-        // fact - one region's rows are a series' rows, and a series that never leaves its region is
-        // answered there - while a canonical producer merges the pieces of one label set and its
-        // router collects them from exactly the partitions it runs on, so it may run inside a
-        // region only when that region is the only one holding a piece.
-        let single_region_read = prepared.iter().all(|input| input.7);
         // The placement facts the split and the segmentation below are chosen from, and the same
         // facts that say whether one node can run over the scans at all.
         let per_partition = region_local_segment(root);
@@ -1467,15 +1380,6 @@ impl PromPlanner {
         // above them reads every occurrence's contribution, so the metric-id fact this used to turn
         // on is not what admission turns on.
         let multi_input = selectors.len() > 1;
-        // A canonical boundary whose read is not proven to stay inside one region has to collect
-        // the pieces of a label set from every region, and one source per region is what names
-        // those contributions. This term is about that boundary and nothing else: a tree without a
-        // canonical merge claims no label-set answer, so it is left with the conditions below, which
-        // are about the scans it reads and not about how many regions hold them.
-        let canonical_boundary_over_sources = plans_over_region_sources(
-            query_engine_state,
-            contains_canonical_merge(root) && !single_region_read,
-        );
         // A region runs one node over its own scans only when the table it reads is not split into
         // regions and the tree's root is per-partition work: a partitioned table's region reads
         // neither the other scans nor the fragments another region holds, and a whole-vector
@@ -1485,10 +1389,9 @@ impl PromPlanner {
         // A read that spans regions is planned above them, so each occurrence reads through its
         // own source. A read one region holds entire needs none: the region runs the tree over its
         // own scans, at the widths it would use anyway.
-        let spans_regions = plans_over_region_sources(query_engine_state, !single_region_read);
+        let spans_regions = query_engine_state.with_dist_planner();
         let per_source_inputs = cross_table
             || spans_regions
-            || canonical_boundary_over_sources
             || (multi_input
                 && (any_partitioned
                     || required_placement
@@ -1505,13 +1408,13 @@ impl PromPlanner {
             .collect::<Vec<_>>();
         let per_source = prepared
             .iter()
-            .map(|(_, _, metric, time_index, tags, _, _, _)| {
+            .map(|(_, _, metric, time_index, tags, _, _)| {
                 (metric.clone(), time_index.clone(), tags.clone())
             })
             .collect::<Vec<_>>();
         let children = prepared
             .into_iter()
-            .map(|(scan, schema, metric, _, tags, _, split_series, _)| {
+            .map(|(scan, schema, metric, _, tags, _, split_series)| {
                 // A discovered selector already carries its own sources: a single metric is one
                 // `RawSeriesSource`, several are a `Union` of them, and each names the metric it
                 // reads. Wrapping either again would nest a source in a source.
@@ -1576,7 +1479,7 @@ impl PromPlanner {
         //
         // A tree with no canonical merge claims no label-set answer, so it is untouched: a
         // per-series query on a partitioned table keeps fusing.
-        if !canonical_boundary_over_sources && any_partitioned && contains_canonical_merge(root) {
+        if !spans_regions && any_partitioned && contains_canonical_merge(root) {
             return Ok(None);
         }
         // The kind the tree's root answers with, which every output column follows. It is not the
@@ -1683,7 +1586,6 @@ impl PromPlanner {
                 &metric,
                 format,
                 root_kind,
-                single_region_read,
             )
         {
             return Ok(Some(native_planned(
@@ -1789,7 +1691,6 @@ impl PromPlanner {
                 // ordinary per-series cut stays regional wherever the regions are, and it is the
                 // canonical boundary that the region count places.
                 any_split_series || (per_source_inputs && any_partitioned),
-                single_region_read,
             )?;
             if let Some(plan) = plan {
                 return Ok(Some(native_planned(
@@ -1964,18 +1865,8 @@ impl PromPlanner {
 fn empty_discovered_input(time_index: String) -> Result<PreparedInput> {
     let schema = empty_discovered_series_schema();
     let input = empty_discovered_frame(&schema)?;
-    // No table stands behind this input, so no region splits it along a partition column, and no
-    // region holds its rows either: it reads none, which one region covers.
-    Ok((
-        input,
-        schema,
-        None,
-        time_index,
-        Vec::new(),
-        false,
-        false,
-        true,
-    ))
+    // No table stands behind this input, so no region splits it along a partition column.
+    Ok((input, schema, None, time_index, Vec::new(), false, false))
 }
 
 fn empty_discovered_frame(schema: &SeriesSchema) -> Result<LogicalPlan> {
@@ -2382,7 +2273,6 @@ fn canonical_boundary_stages(
     metric: &Option<Arc<str>>,
     format: FusedOutputFormat,
     root_kind: FieldKind,
-    single_region_read: bool,
 ) -> Option<(LogicalPlan, Vec<String>)> {
     let NativeExpr::Merge { input } = &tree.root().expr else {
         return None;
@@ -2421,8 +2311,7 @@ fn canonical_boundary_stages(
         },
         children.to_vec(),
     )
-    .ok()?
-    .with_single_region_read(single_region_read);
+    .ok()?;
     let producer = LogicalPlan::Extension(Extension {
         node: Arc::new(producer),
     });
@@ -2496,7 +2385,6 @@ fn build_evaluated_segment(
     grid: &Arc<EvalGrid>,
     time_index: &str,
     root_kind: FieldKind,
-    single_region_read: bool,
 ) -> Option<(LogicalPlan, Vec<String>)> {
     let mut sources = Vec::new();
     collect_segment_inputs(node, &mut sources);
@@ -2559,7 +2447,6 @@ fn build_evaluated_segment(
             &None,
             FusedOutputFormat::SeriesFrame,
             root_kind,
-            single_region_read,
         )?;
         return Some((plan, tags));
     }
@@ -2706,7 +2593,6 @@ fn segment_tree(
     canonical_segmentation: bool,
     root_kind: FieldKind,
     remote_raw_boundary: bool,
-    single_region_read: bool,
 ) -> Result<Option<LogicalPlan>> {
     // Only a tree the analyzer gathers is worth splitting: its per-series prefixes then run where
     // their input is read. A window over an evaluated input can need that split even where
@@ -2793,7 +2679,6 @@ fn segment_tree(
                     canonical_segmentation,
                     root_kind,
                     remote_raw_boundary,
-                    single_region_read,
                 )?;
                 match plan {
                     Some(plan) => {
@@ -2829,7 +2714,6 @@ fn segment_tree(
                     grid,
                     time_index,
                     root_kind,
-                    single_region_read,
                 )
             });
             let Some((plan, cut_tags)) = built else {
@@ -2905,7 +2789,6 @@ fn segment_tree(
             metric,
             format,
             root_kind,
-            single_region_read,
         )
         .map(|(plan, _)| plan));
     }
@@ -3785,49 +3668,9 @@ mod tests {
         ArrowDataType, ArrowTimeUnit, FieldKind, METRIC_NAME, NATIVE_PROMQL_EXTENSION_KEY,
         NativeType, PromPlanner, aggregate_reads_histogram, collect_selectors_with_set_operations,
         cut_segments, fused_output_schema, independent_scan_pair, native_promql_requested,
-        native_raw_plan_bounds_region_reads, plans_over_region_sources, reads_across_series,
-        region_local_segment, scan_time_filter,
+        native_raw_plan_bounds_region_reads, reads_across_series, region_local_segment,
+        scan_time_filter,
     };
-
-    /// The source-backed topology needs both facts it is built from: an engine that plans regions,
-    /// and a node that has to run above them. Neither substitutes for the other - an engine with no
-    /// distributed planner plans no region to be above, and a node that reads its own region's rows
-    /// has nothing to collect from the others - so the two are a conjunction and not a replacement.
-    #[test]
-    fn plans_over_region_sources_follows_the_distributed_planner() {
-        use catalog::memory::new_memory_catalog_manager;
-        use common_base::Plugins;
-
-        use crate::options::QueryOptions;
-        use crate::query_engine::QueryEngineState;
-
-        for with_dist_planner in [false, true] {
-            let state = QueryEngineState::try_new(
-                new_memory_catalog_manager().unwrap(),
-                None,
-                None,
-                None,
-                None,
-                None,
-                with_dist_planner,
-                Plugins::default(),
-                QueryOptions::default(),
-            )
-            .unwrap();
-            assert_eq!(state.with_dist_planner(), with_dist_planner);
-            for source_backed in [false, true] {
-                assert_eq!(
-                    plans_over_region_sources(&state, source_backed),
-                    with_dist_planner && source_backed,
-                    "with_dist_planner={with_dist_planner}, source_backed={source_backed}"
-                );
-                assert_eq!(
-                    plans_over_region_sources(&state.clone(), source_backed),
-                    with_dist_planner && source_backed
-                );
-            }
-        }
-    }
 
     #[test]
     fn native_raw_region_read_budget_needs_the_native_topology() {
