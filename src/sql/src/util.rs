@@ -43,9 +43,26 @@ use crate::statements::tql::Tql;
 
 const SCHEMA_MATCHER: &str = "__schema__";
 const DATABASE_MATCHER: &str = "__database__";
-/// The table PromQL `info` reads when its label selector names no info metric. The planner
-/// decides the same thing in `query`'s `info_input`, and the two have to agree.
+const FIELD_MATCHER: &str = "__field__";
+/// The table PromQL `info` reads when its label selector names no info metric.
 const DEFAULT_INFO_METRIC: &str = "target_info";
+
+/// Whether `labels`, the second argument of PromQL `info`, selects the default info metric in the
+/// current schema: data label matchers only, with no name, modifier or `or`.
+///
+/// The planner accepts exactly this shape for the default metric in `query`'s `info_input`, and
+/// the two have to agree: a shape claimed here that the planner later reads differently would be
+/// authorized as the wrong table.
+pub fn reads_default_info_metric(labels: &PromVectorSelector) -> bool {
+    labels.name.is_none()
+        && labels.offset.is_none()
+        && labels.at.is_none()
+        && labels.matchers.or_matchers.is_empty()
+        && labels.matchers.matchers.iter().all(|matcher| {
+            ![METRIC_NAME, FIELD_MATCHER, SCHEMA_MATCHER, DATABASE_MATCHER]
+                .contains(&matcher.name.as_str())
+        })
+}
 
 /// Format an [ObjectName] without any quote of its idents.
 pub fn format_raw_object_name(name: &ObjectName) -> String {
@@ -488,18 +505,16 @@ fn extract_tables_from_prom_expr(expr: &PromExpr, names: &mut HashSet<ObjectName
     }
 
     impl TableCollector<'_> {
-        /// `info` reads [`DEFAULT_INFO_METRIC`] when its label selector is absent or carries no
-        /// `__name__` matcher, a table that appears nowhere in the expression.
+        /// `info` reads [`DEFAULT_INFO_METRIC`], a table that appears nowhere in the expression,
+        /// when its label selector is absent or [`reads_default_info_metric`].
         fn visit_info(&mut self, args: &[Box<PromExpr>]) -> bool {
             match args.get(1).map(|labels| labels.as_ref()) {
                 None => {}
-                Some(PromExpr::VectorSelector(labels))
-                    if labels.name.is_none()
-                        && labels.matchers.find_matchers(METRIC_NAME).is_empty() =>
-                {
+                Some(PromExpr::VectorSelector(labels)) if reads_default_info_metric(labels) => {
                     self.default_info_selectors.push(labels);
                 }
-                // Names its own metric, or is not a selector at all: the walk reads it.
+                // Anything else is left to the walk: it records a metric the selector names and
+                // reports every other shape as unresolved.
                 Some(_) => return true,
             }
             self.names
@@ -834,6 +849,18 @@ TQL EVAL (now() - '15s'::interval, now(), '5s') count_values("status_code", {__n
                 vec!["build_info", "cpu"],
             ),
             (r#"info(cpu, {__name__=~".+_info"})"#, false, vec!["cpu"]),
+            // Shapes the planner declines stay unresolved instead of claiming `target_info`.
+            (
+                r#"info(cpu, {__schema__="private", version="v1"})"#,
+                false,
+                vec!["cpu"],
+            ),
+            (r#"info(cpu, {version="v1"} offset 1m)"#, false, vec!["cpu"]),
+            (
+                r#"info(cpu, {version="v1" or version="v2"})"#,
+                false,
+                vec!["cpu"],
+            ),
         ];
 
         for (promql, expected_complete, expected_tables) in testcases {
