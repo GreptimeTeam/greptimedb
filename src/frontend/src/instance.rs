@@ -3489,6 +3489,43 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_copy_export_read_action_has_source_targets() -> TestResult<()> {
+        let checker = Arc::new(RejectEndpointPermissionChecker::default());
+        let plugins = Plugins::new();
+        plugins.insert::<PermissionCheckerRef>(checker.clone());
+        let instance = test_instance_with_plugins(
+            test_table(1024, "source")?,
+            test_physical_table(1025, "physical")?,
+            plugins,
+        )
+        .await?;
+        for (sql, name, physical) in [
+            ("COPY source TO '/unused.parquet'", "source", false),
+            (
+                "COPY (SELECT * FROM source) TO '/unused.parquet'",
+                "source",
+                false,
+            ),
+            ("COPY physical TO '/unused.parquet'", "physical", true),
+        ] {
+            assert_permission_denied(
+                instance
+                    .check_sql_permission(&parse_one_sql(sql), &QueryContext::arc())
+                    .await,
+            );
+            assert_action_checked(
+                &checker,
+                COPY_TO,
+                Some(PermissionTableTargets::resolved(vec![
+                    PermissionTableTarget::new("greptime", "public", name)
+                        .with_physical_metric_table(physical),
+                ])),
+            );
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn test_copy_export_requires_read_and_write_permission() -> TestResult<()> {
         use auth::UserProvider;
 
