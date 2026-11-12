@@ -325,6 +325,7 @@ impl<S> RegionWorkerLoop<S> {
                 self.stalling_count.add(1);
                 WRITE_STALL_TOTAL.inc();
                 self.stalled_requests.push(sender_req);
+                self.listener.on_write_stall();
                 continue;
             }
 
@@ -381,12 +382,13 @@ impl<S> RegionWorkerLoop<S> {
                             region.region_id,
                             region.state()
                         );
-                        if state == RegionRoleState::Leader(RegionLeaderState::EndingStaging) {
-                            self.stalled_requests.add_staging_drain(region_id);
-                        }
                         self.stalling_count.add(1);
                         WRITE_STALL_TOTAL.inc();
                         self.stalled_requests.push(sender_req);
+                        if state == RegionRoleState::Leader(RegionLeaderState::EndingStaging) {
+                            self.stalled_requests.add_staging_drain(region_id);
+                            self.listener.on_write_stall();
+                        }
                         continue;
                     }
                     RegionRoleState::Leader(RegionLeaderState::EnteringStaging) => {
@@ -501,6 +503,7 @@ impl<S> RegionWorkerLoop<S> {
                 self.stalling_count.add(1);
                 WRITE_STALL_TOTAL.inc();
                 self.stalled_requests.push_bulk(bulk_req);
+                self.listener.on_write_stall();
                 continue;
             }
 
@@ -547,12 +550,13 @@ impl<S> RegionWorkerLoop<S> {
                             region.region_id,
                             region.state()
                         );
-                        if state == RegionRoleState::Leader(RegionLeaderState::EndingStaging) {
-                            self.stalled_requests.add_staging_drain(region_id);
-                        }
                         self.stalling_count.add(1);
                         WRITE_STALL_TOTAL.inc();
                         self.stalled_requests.push_bulk(bulk_req);
+                        if state == RegionRoleState::Leader(RegionLeaderState::EndingStaging) {
+                            self.stalled_requests.add_staging_drain(region_id);
+                            self.listener.on_write_stall();
+                        }
                         continue;
                     }
                     state => {

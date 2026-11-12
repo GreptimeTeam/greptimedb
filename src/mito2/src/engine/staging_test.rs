@@ -51,13 +51,15 @@ use store_api::storage::{FileId, RegionId, ScanRequest};
 
 use crate::config::MitoConfig;
 use crate::engine::MitoEngine;
-use crate::engine::listener::{EventListener, FlushListener, NotifyEnterStagingResultListener};
+use crate::engine::basic_test::build_bulk_insert_request;
+use crate::engine::listener::{
+    CountingStallListener, EventListener, FlushListener, NotifyEnterStagingResultListener,
+};
 use crate::error::Error;
 use crate::flush::WriteBufferManager;
 use crate::manifest::action::{
     RegionChange, RegionEdit, RegionMetaAction, RegionMetaActionList, RegionPartitionExprChange,
 };
-use crate::metrics::WRITE_STALL_TOTAL;
 use crate::region::{MitoRegionRef, RegionLeaderState, RegionRoleState};
 use crate::request::{BackgroundNotify, RegionEditRequest, WorkerRequest};
 use crate::sst::FormatType;
@@ -2413,13 +2415,15 @@ async fn test_close_after_end_of_staging_is_queued_keeps_committed_result() {
 #[tokio::test]
 async fn test_writes_wait_while_staging_ends(#[case] downgrade: bool) {
     let mut env = TestEnv::new().await;
-    let engine = env.create_engine(MitoConfig::default()).await;
+    let listener = Arc::new(CountingStallListener::default());
+    let engine = env
+        .create_engine_with(MitoConfig::default(), None, Some(listener.clone()), None)
+        .await;
     let region_id = RegionId::new(1024, 0);
     let (schema, _) = create_staging_region(&engine, region_id).await;
     let region = engine.get_region(region_id).unwrap();
     let started = region.manifest_ctx.begin_ending_staging(region_id).unwrap();
 
-    let stalls = WRITE_STALL_TOTAL.get();
     let put_engine = engine.clone();
     let put = tokio::spawn(async move {
         put_engine
@@ -2437,13 +2441,7 @@ async fn test_writes_wait_while_staging_ends(#[case] downgrade: bool) {
             )
             .await
     });
-    tokio::time::timeout(Duration::from_secs(5), async {
-        while WRITE_STALL_TOTAL.get() == stalls {
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .expect("the write was not stalled");
+    wait_for_stalls(&listener, 1).await;
     assert!(region.version().memtables.is_empty());
 
     if downgrade {
@@ -2452,20 +2450,7 @@ async fn test_writes_wait_while_staging_ends(#[case] downgrade: bool) {
     region
         .manifest_ctx
         .leave_ending_staging(region_id, started, &Ok::<(), Error>(()));
-    let (drained, wait) = tokio::sync::oneshot::channel();
-    engine
-        .inner
-        .workers
-        .submit_to_worker(
-            region_id,
-            WorkerRequest::Background {
-                region_id,
-                notify: BackgroundNotify::StagingEnded(drained),
-            },
-        )
-        .await
-        .unwrap();
-    wait.await.unwrap();
+    send_staging_ended(&engine, region_id).await;
 
     // The drained write sees the state that the end of staging left: a downgrade refuses it.
     let result = put.await.unwrap();
@@ -2476,26 +2461,21 @@ async fn test_writes_wait_while_staging_ends(#[case] downgrade: bool) {
 #[tokio::test]
 async fn test_writes_after_staging_ends_wait_for_stalled_writes() {
     let mut env = TestEnv::new().await;
-    let engine = env.create_engine(MitoConfig::default()).await;
+    let listener = Arc::new(CountingStallListener::default());
+    let engine = env
+        .create_engine_with(MitoConfig::default(), None, Some(listener.clone()), None)
+        .await;
     let region_id = RegionId::new(1024, 0);
     let (schema, _) = create_staging_region(&engine, region_id).await;
     let region = engine.get_region(region_id).unwrap();
     let started = region.manifest_ctx.begin_ending_staging(region_id).unwrap();
-    let stalls = WRITE_STALL_TOTAL.get();
-    let wait_for_stalls = |n| {
-        tokio::time::timeout(Duration::from_secs(5), async move {
-            while WRITE_STALL_TOTAL.get() < stalls + n {
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-        })
-    };
     let put_engine = engine.clone();
     let rows = Rows {
         schema,
         rows: build_rows(0, 3),
     };
     let put = tokio::spawn(async move { put_rows(&put_engine, region_id, rows).await });
-    wait_for_stalls(1).await.unwrap();
+    wait_for_stalls(&listener, 1).await;
 
     // A delete of the same rows that arrives after staging ended, before the worker drains the
     // stalled put, waits behind it.
@@ -2508,7 +2488,57 @@ async fn test_writes_after_staging_ends_wait_for_stalled_writes() {
         rows: build_delete_rows(0, 3),
     };
     let delete = tokio::spawn(async move { delete_rows(&delete_engine, region_id, rows).await });
-    wait_for_stalls(2).await.unwrap();
+    wait_for_stalls(&listener, 2).await;
+    send_staging_ended(&engine, region_id).await;
+    put.await.unwrap();
+    delete.await.unwrap();
+
+    assert_eq!(0, count_rows(&engine, region_id).await);
+}
+
+#[tokio::test]
+async fn test_bulk_writes_after_staging_ends_wait_for_stalled_writes() {
+    let mut env = TestEnv::new().await;
+    let listener = Arc::new(CountingStallListener::default());
+    let engine = env
+        .create_engine_with(MitoConfig::default(), None, Some(listener.clone()), None)
+        .await;
+    let region_id = RegionId::new(1024, 0);
+    create_staging_region(&engine, region_id).await;
+    let region = engine.get_region(region_id).unwrap();
+    let started = region.manifest_ctx.begin_ending_staging(region_id).unwrap();
+    let bulk_insert = |num_rows| {
+        let engine = engine.clone();
+        let request = RegionRequest::BulkInserts(build_bulk_insert_request(region_id, num_rows));
+        tokio::spawn(async move { engine.handle_request(region_id, request).await })
+    };
+    let first = bulk_insert(3);
+    wait_for_stalls(&listener, 1).await;
+
+    // A bulk write that arrives after staging ended, before the worker drains the stalled one,
+    // waits behind it.
+    region
+        .manifest_ctx
+        .leave_ending_staging(region_id, started, &Ok::<(), Error>(()));
+    let second = bulk_insert(5);
+    wait_for_stalls(&listener, 2).await;
+    assert!(region.version().memtables.is_empty());
+    send_staging_ended(&engine, region_id).await;
+    first.await.unwrap().unwrap();
+    second.await.unwrap().unwrap();
+
+    assert_eq!(5, count_rows(&engine, region_id).await);
+}
+
+/// Waits until the engine of `listener` has stalled writes `n` times.
+async fn wait_for_stalls(listener: &CountingStallListener, n: usize) {
+    tokio::time::timeout(Duration::from_secs(5), listener.wait_for_count(n))
+        .await
+        .expect("the writes were not stalled");
+}
+
+/// Has the worker handle the writes it stalled while the region was ending staging.
+async fn send_staging_ended(engine: &MitoEngine, region_id: RegionId) {
     let (drained, wait) = tokio::sync::oneshot::channel();
     engine
         .inner
@@ -2523,10 +2553,6 @@ async fn test_writes_after_staging_ends_wait_for_stalled_writes() {
         .await
         .unwrap();
     wait.await.unwrap();
-    put.await.unwrap();
-    delete.await.unwrap();
-
-    assert_eq!(0, count_rows(&engine, region_id).await);
 }
 
 #[tokio::test]
@@ -2548,6 +2574,7 @@ async fn test_migration_flush_retries_while_staging_ends() {
     };
 
     let started = region.manifest_ctx.begin_ending_staging(region_id).unwrap();
+    assert_eq!(Some(RegionRole::StagingLeader), engine.role(region_id));
     let error = migration_flush().await.unwrap_err();
     assert_eq!(RetryHint::Retryable, error.retry_hint());
 

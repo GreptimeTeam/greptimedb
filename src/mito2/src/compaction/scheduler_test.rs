@@ -2314,8 +2314,11 @@ async fn test_scheduler_env_submits_compactions_to_injected_executor() {
     assert_eq!(1, injected.num_jobs());
 }
 
+#[rstest::rstest]
+#[case::staging(RegionLeaderState::Staging)]
+#[case::ending_staging(RegionLeaderState::EndingStaging)]
 #[tokio::test]
-async fn test_compaction_bypass_in_staging_mode() {
+async fn test_compaction_bypass_in_staging_mode(#[case] state: RegionLeaderState) {
     let env = SchedulerEnv::new().await;
     let (tx, _rx) = mpsc::channel(4);
     let mut scheduler = env.mock_compaction_scheduler(tx);
@@ -2346,7 +2349,7 @@ async fn test_compaction_bypass_in_staging_mode() {
         .unwrap();
         Arc::new(ManifestContext::new(
             manager,
-            RegionRoleState::Leader(RegionLeaderState::Staging),
+            RegionRoleState::Leader(state),
             None,
             Default::default(),
         ))
