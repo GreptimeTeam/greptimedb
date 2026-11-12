@@ -90,6 +90,8 @@ including caches owned by pipeline and protocol handlers.
   Reserve exemplar expansion with the transport's memory limiter before building
   rows; retain the permit through `WriteProgress` until writes complete.
   Expansion must not wait while the request holds transport memory permits.
+  Confirm source metric writes before inserting their exemplars; unrelated
+  metric writes remain concurrent and their completions must still be observed.
 
 - **Logical-table batching** (`instance/logical_batcher.rs`): `Services` initializes
   one shared batcher for opted-in HTTP Prom and OTLP metric-engine

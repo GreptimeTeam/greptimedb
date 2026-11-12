@@ -297,18 +297,34 @@ impl OpenTelemetryProtocolHandler for Instance {
                 .await
                 .map_err(BoxedError::new)
                 .context(error::ExecuteGrpcQuerySnafu);
-            let source_ready = prepared.is_ok();
-            let sources = prepared
-                .as_ref()
-                .map(|request| request.source_tables().cloned().collect::<Vec<_>>())
-                .unwrap_or_default();
-            let (metric_output, other_output, exemplar_output) = tokio::join!(
+            let mut exemplar_output = Ok(Output::new_with_affected_rows(0));
+            let (metric_progress, other_output) = tokio::join!(
                 async {
-                    self.inserter
-                        .handle_prepared_metric_inserts(prepared?, confirmed.clone())
+                    let prepared = prepared?;
+                    let sources = prepared.source_tables().cloned().collect::<Vec<_>>();
+                    let output = self
+                        .inserter
+                        .handle_prepared_metric_inserts(prepared, confirmed.clone())
                         .await
                         .map_err(BoxedError::new)
-                        .context(error::ExecuteGrpcQuerySnafu)
+                        .context(error::ExecuteGrpcQuerySnafu)?;
+                    outcome.write_cost += output.meta.cost;
+                    // Successful insertion outputs can still carry storage failures.
+                    let progress = output.write_progress().await;
+                    if progress.error.is_none() {
+                        exemplar_output = self
+                            .inserter
+                            .handle_exemplar_inserts(
+                                exemplars,
+                                confirmed.clone(),
+                                &self.statement_executor,
+                                &sources,
+                            )
+                            .await
+                            .map_err(BoxedError::new)
+                            .context(error::ExecuteGrpcQuerySnafu);
+                    }
+                    Ok::<_, error::Error>(progress)
                 },
                 async {
                     if other.is_empty() {
@@ -322,25 +338,12 @@ impl OpenTelemetryProtocolHandler for Instance {
                         .await
                     }
                 },
-                async {
-                    // Failed source preparation must not bind exemplars to a later replacement table.
-                    if !source_ready {
-                        return Ok(Output::new_with_affected_rows(0));
-                    }
-                    self.inserter
-                        .handle_exemplar_inserts(
-                            exemplars,
-                            confirmed.clone(),
-                            &self.statement_executor,
-                            &sources,
-                        )
-                        .await
-                        .map_err(BoxedError::new)
-                        .context(error::ExecuteGrpcQuerySnafu)
-                },
             );
-            let mut progress = common_query::WriteProgress::default();
-            for output in [metric_output, other_output, exemplar_output] {
+            let mut progress = match metric_progress {
+                Ok(progress) => progress,
+                Err(error) => common_query::WriteProgress::failed(BoxedError::new(error)),
+            };
+            for output in [other_output, exemplar_output] {
                 match output {
                     Ok(output) => {
                         outcome.write_cost += output.meta.cost;

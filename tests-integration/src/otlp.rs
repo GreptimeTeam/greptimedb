@@ -1923,8 +1923,9 @@ WITH(
         }
     }
 
+    #[rstest::rstest]
     #[tokio::test(flavor = "multi_thread")]
-    async fn test_exemplar_otlp_memory_wait_and_lifetime() {
+    async fn test_exemplar_otlp_memory_wait_and_lifetime(#[values(false, true)] gate_source: bool) {
         use common_memory_manager::OnExhaustedPolicy;
         use servers::request_memory_limiter::ServerMemoryLimiter;
 
@@ -2052,12 +2053,32 @@ WITH(
                 timeout: Duration::from_secs(10),
             },
         );
+        let mut request = exemplar_metric_request(2);
+        for (index, metric) in request.resource_metrics[0].scope_metrics[0]
+            .metrics
+            .iter_mut()
+            .enumerate()
+        {
+            let Some(metric::Data::Gauge(gauge)) = &mut metric.data else {
+                unreachable!()
+            };
+            let point = &mut gauge.data_points[0];
+            point.time_unix_nano = 120_000_000_000;
+            point.exemplars[0].time_unix_nano = point.time_unix_nano;
+            if index == 1 {
+                point.exemplars.clear();
+            }
+        }
         let table = instance
             .catalog_manager()
             .table(
                 DEFAULT_CATALOG_NAME,
                 "public",
-                METRICS_EXEMPLARS_TABLE,
+                if gate_source {
+                    "exemplar_memory_0"
+                } else {
+                    METRICS_EXEMPLARS_TABLE
+                },
                 None,
             )
             .await
@@ -2071,6 +2092,7 @@ WITH(
             .region_routes[0]
             .region
             .id;
+        let region_id = RegionId::new(table.table_info().table_id(), region_id.region_number());
         for cancel in [false, true] {
             let (started_tx, started_rx) = oneshot::channel();
             let (release_tx, release_rx) = oneshot::channel();
@@ -2109,6 +2131,18 @@ WITH(
             let released = limiter.acquire(limit).await.unwrap();
             drop(released);
             assert_eq!(limiter.used_bytes(), 0);
+            if gate_source {
+                for sql in [
+                    format!(
+                        "SELECT COUNT(*)=0 FROM {METRICS_EXEMPLARS_TABLE} WHERE CAST(greptime_timestamp AS BIGINT)=120000000000"
+                    ),
+                    "SELECT COUNT(*)=1 FROM exemplar_memory_1".into(),
+                ] {
+                    assert_trace_v2_query(&instance, &sql, ctx.clone())
+                        .await
+                        .unwrap();
+                }
+            }
         }
     }
 
