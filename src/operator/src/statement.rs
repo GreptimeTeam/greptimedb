@@ -522,7 +522,11 @@ impl StatementExecutor {
             SchemaNotFoundSnafu { schema_info: &db }
         );
 
+        let previous_schema = query_ctx.current_schema();
         query_ctx.set_current_schema(&db);
+        debug!(user = query_ctx.current_user().username(), protocol = %query_ctx.channel(),
+            catalog, schema = %db, previous_schema, process_id = query_ctx.process_id(),
+            "Database selected");
 
         Ok(Output::new_with_record_batches(RecordBatches::empty()))
     }
@@ -550,9 +554,18 @@ impl StatementExecutor {
                 selected = schema;
                 break;
             }
+            debug!(user = query_ctx.current_user().username(), protocol = %query_ctx.channel(),
+                catalog = query_ctx.current_catalog(), schema = %schema,
+                process_id = query_ctx.process_id(), reason = "schema_not_found",
+                "Skipping unavailable search_path candidate");
         }
         // An empty effective path must not retain access to the previous schema.
+        let previous_schema = query_ctx.current_schema();
         query_ctx.set_current_schema(&selected);
+        debug!(user = query_ctx.current_user().username(), protocol = %query_ctx.channel(),
+            catalog = query_ctx.current_catalog(), schema = %selected, previous_schema,
+            process_id = query_ctx.process_id(), empty_path = selected.is_empty(),
+            "Search path schema selected");
         Ok(Output::new_with_record_batches(RecordBatches::empty()))
     }
 

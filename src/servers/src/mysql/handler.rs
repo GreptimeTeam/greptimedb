@@ -529,6 +529,9 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
         self.session.set_catalog(catalog);
         self.session.set_schema(schema);
         self.session.set_user_info(user_info);
+        debug!(user = self.session.user_info().username(), protocol = "mysql",
+            catalog = %self.session.catalog(), schema = %self.session.schema(),
+            client_addr = ?self.session.conn_info().client_addr, "Handshake database selected");
 
         true
     }
@@ -721,6 +724,15 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
             METRIC_AUTH_FAILURE
                 .with_label_values(&[e.status_code().as_ref()])
                 .inc();
+            if e.status_code().should_log_error() {
+                error!(user = user_info.username(), protocol = "mysql", catalog = %catalog, schema = %schema,
+                    client_addr = ?self.session.conn_info().client_addr, reason = %e.status_code(),
+                    "Database selection authorization failed");
+            } else {
+                warn!(user = user_info.username(), protocol = "mysql", catalog = %catalog, schema = %schema,
+                    previous_schema = %self.session.schema(), client_addr = ?self.session.conn_info().client_addr,
+                    reason = %e.status_code(), "Database selection denied");
+            }
             return w
                 .error(
                     ErrorKind::ER_DBACCESS_DENIED_ERROR,
@@ -735,6 +747,9 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
             .is_valid_schema(&catalog, &schema)
             .await?
         {
+            debug!(user = user_info.username(), protocol = "mysql", catalog = %catalog, schema = %schema,
+                client_addr = ?self.session.conn_info().client_addr, reason = "schema_not_found",
+                "Database selection failed");
             return w
                 .error(
                     ErrorKind::ER_WRONG_DB_NAME,
@@ -744,10 +759,15 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
                 .map_err(|e| e.into());
         }
 
+        let previous_catalog = self.session.catalog();
+        let previous_schema = self.session.schema();
         if catalog_from_db.is_some() {
             self.session.set_catalog(catalog)
         }
         self.session.set_schema(schema);
+        debug!(user = user_info.username(), protocol = "mysql", catalog = %self.session.catalog(),
+            schema = %self.session.schema(), previous_catalog, previous_schema,
+            client_addr = ?self.session.conn_info().client_addr, "Database selected");
 
         w.ok().await.map_err(|e| e.into())
     }

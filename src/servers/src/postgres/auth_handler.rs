@@ -24,6 +24,7 @@ use async_trait::async_trait;
 use common_catalog::parse_catalog_and_schema_from_db_string;
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
+use common_telemetry::{debug, error, warn};
 use common_time::Timezone;
 use futures::{Sink, SinkExt};
 use pgwire::api::auth::StartupHandler;
@@ -135,6 +136,13 @@ impl PgUserProviderSource {
         {
             Err(e) => {
                 record_auth_failure(e.status_code());
+                if e.status_code().should_log_error() {
+                    error!(user = user_info.username(), protocol = "postgres", catalog = %catalog,
+                        schema = %schema, client_addr = login.host(), reason = %e.status_code(), "Startup database authorization failed");
+                } else {
+                    warn!(user = user_info.username(), protocol = "postgres", catalog = %catalog,
+                        schema = %schema, client_addr = login.host(), reason = %e.status_code(), "Startup database authorization denied");
+                }
                 Err(PgWireError::ApiError(Box::new(AuthSnafu.into_error(e))))
             }
             Ok(()) => Ok(()),
@@ -232,6 +240,9 @@ where
     if let Some(current_schema) = client.metadata().get(super::METADATA_SCHEMA) {
         session.set_schema(current_schema.clone());
     }
+    debug!(user = session.user_info().username(), protocol = "postgres",
+        catalog = %session.catalog(), schema = %session.schema(),
+        client_addr = ?session.conn_info().client_addr, "Handshake database selected");
 }
 
 enum MechanismSelection {
@@ -461,6 +472,9 @@ where
         {
             return Ok(true);
         }
+        debug!(protocol = "postgres", user = ?client.metadata().get(super::METADATA_USER),
+            catalog = %catalog, schema = %schema, reason = "schema_not_found",
+            "Startup database validation failed");
         format!("Database not found: {db}")
     } else {
         "Database not specified".to_owned()

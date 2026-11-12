@@ -62,7 +62,7 @@ use common_query::Output;
 use common_recordbatch::RecordBatchStreamWrapper;
 use common_recordbatch::error::StreamTimeoutSnafu;
 use common_telemetry::logging::SlowQueryOptions;
-use common_telemetry::{debug, error, tracing};
+use common_telemetry::{debug, error, tracing, warn};
 use datafusion::dataframe::DataFrame;
 use datafusion::physical_plan::ExecutionPlan;
 use datafusion_expr::LogicalPlan;
@@ -425,6 +425,10 @@ impl Instance {
                                             | common_error::status_code::StatusCode::AccessDenied
                                     ) =>
                                 {
+                                    debug!(user = user.username(), protocol = %query_ctx.channel(),
+                                        catalog = query_ctx.current_catalog(), schema = %schema,
+                                        process_id = query_ctx.process_id(), reason = %error.status_code(),
+                                        "Skipping unauthorized search_path candidate");
                                     continue;
                                 }
                                 Err(error) => return Err(error).context(PermissionSnafu),
@@ -440,15 +444,25 @@ impl Instance {
                 }
                 if let Statement::Use(schema) = &stmt
                     && let Some(provider) = self.plugins.get::<auth::UserProviderRef>()
-                {
-                    provider
+                    && let Err(error) = provider
                         .authorize(
                             query_ctx.current_catalog(),
                             schema,
                             &query_ctx.current_user(),
                         )
                         .await
-                        .context(PermissionSnafu)?;
+                {
+                    if matches!(
+                        error.status_code(),
+                        common_error::status_code::StatusCode::PermissionDenied
+                            | common_error::status_code::StatusCode::AccessDenied
+                    ) {
+                        warn!(user = query_ctx.current_user().username(), protocol = %query_ctx.channel(),
+                                catalog = query_ctx.current_catalog(), schema = %schema,
+                                previous_schema = %query_ctx.current_schema(), process_id = query_ctx.process_id(),
+                                reason = %error.status_code(), "Database selection denied");
+                    }
+                    return Err(error).context(PermissionSnafu);
                 }
                 if let Statement::Copy(sql::statements::copy::Copy::CopyDatabase(
                     CopyDatabase::From(arg),
@@ -836,7 +850,9 @@ impl Instance {
                         }
                         Err(e) => {
                             if e.status_code().should_log_error() {
-                                error!(e; "Failed to execute query: {stmt}");
+                                error!(e; user = query_ctx.current_user().username(), protocol = %query_ctx.channel(),
+                                    catalog = query_ctx.current_catalog(), schema = %query_ctx.current_schema(),
+                                    process_id = query_ctx.process_id(), "Failed to execute query: {stmt}");
                             } else {
                                 debug!("Failed to execute query: {stmt}, {e}");
                             }
