@@ -62,8 +62,8 @@ use crate::manifest::action::{
     PendingTail, RegionEdit, RegionMetaAction, RegionMetaActionList, UptoKind,
 };
 use crate::manifest::storage::delta_file;
-use crate::region::RegionLeaderState;
 use crate::region::version::VersionRef;
+use crate::region::{MitoRegion, RegionLeaderState};
 use crate::request::{BackgroundNotify, WorkerRequest};
 use crate::sst::location::region_dir_from_table_dir;
 use crate::test_util::{
@@ -1017,14 +1017,22 @@ async fn test_tail_commit_checks_role_and_tails_under_lock(#[case] demote: bool)
     wait_until(|| region.listener.commits() == 1).await;
 
     if demote {
+        // The replay waits for the manifest lock while the region is demoted: a read held
+        // here queues its write, which then fails a further read.
+        let mito_region = region.engine.get_region(region.region_id).unwrap();
+        let manager = &mito_region.manifest_ctx.manifest_manager;
+        let reading = manager.read().await;
+        region.listener.hold_from(0);
+        wait_until(|| manager.try_read().is_err()).await;
         region
             .engine
             .set_region_role(region.region_id, RegionRole::Follower)
             .unwrap();
+        drop(reading);
     } else {
         set_pending_tails(&region.engine, region.region_id, vec![]).await;
+        region.listener.hold_from(0);
     }
-    region.listener.hold_from(0);
     wait_until(|| region.listener.ended() == 1).await;
 
     assert_eq!(1, region.listener.commits());
@@ -1144,9 +1152,21 @@ async fn test_stalled_remote_read_ends_when_region_stops(#[case] stop_engine: bo
     wait_until(|| replaying.strong_count() == 0).await;
 }
 
+/// Moves a writable leader to `busy`, Altering or Editing.
+fn set_busy(region: &MitoRegion, busy: RegionLeaderState) {
+    match busy {
+        RegionLeaderState::Altering => region.set_altering(),
+        _ => region.set_editing(RegionLeaderState::Writable),
+    }
+    .unwrap();
+}
+
+#[rstest]
+#[case::altering(RegionLeaderState::Altering)]
+#[case::editing(RegionLeaderState::Editing)]
 #[tokio::test]
-async fn test_replay_backs_off_while_altering() {
-    let region = TestRegion::new("tail-replay-altering", false, None).await;
+async fn test_replay_backs_off_while_busy(#[case] busy: RegionLeaderState) {
+    let region = TestRegion::new("tail-replay-busy", false, None).await;
     region
         .reopen_with_tails(vec![own_tail(0, region.entries[1], UptoKind::Reported)])
         .await;
@@ -1155,17 +1175,17 @@ async fn test_replay_backs_off_while_altering() {
     wait_until(|| region.listener.commits() == 1).await;
     let chunks = region.stored_sst_names().await;
     let mito_region = region.engine.get_region(region.region_id).unwrap();
-    mito_region.set_altering().unwrap();
+    set_busy(&mito_region, busy);
 
     region.listener.hold_from(0);
     wait_until(|| region.listener.commits() == 2).await;
     assert!(region.has_pending_tails());
-    mito_region.switch_state_to_writable(RegionLeaderState::Altering);
+    mito_region.switch_state_to_writable(busy);
     region.wait_until_replayed().await;
 
     assert_eq!(6, count_rows(&region.engine, region.region_id).await);
     assert!(!region.listener.failed());
-    // The retries commit the chunks written before the ALTER.
+    // The retries commit the chunks written before the region became busy.
     assert_eq!(chunks, region.stored_sst_names().await);
 }
 
@@ -1187,22 +1207,53 @@ async fn test_replay_round_keeps_no_flushed_memtables() {
     region.wait_until_replayed().await;
 }
 
+#[rstest]
+#[case::altering(RegionLeaderState::Altering)]
+#[case::editing(RegionLeaderState::Editing)]
 #[tokio::test]
-async fn test_promotion_replays_tails_of_region_altered_meanwhile() {
-    let region = TestRegion::new("tail-replay-promote-altering", false, None).await;
+async fn test_promotion_replays_tails_of_region_busy_meanwhile(#[case] busy: RegionLeaderState) {
+    let region = TestRegion::new("tail-replay-promote-busy", false, None).await;
     region
         .reopen_with_tails(vec![own_tail(0, region.entries[1], UptoKind::Reported)])
         .await;
-    // The worker starts an ALTER between the promotion and its check of the new role.
+    // The worker starts an ALTER or an edit between the promotion and its check of the role.
     let mito_region = region.engine.get_region(region.region_id).unwrap();
     mito_region.set_role(RegionRole::Leader);
-    mito_region.set_altering().unwrap();
+    set_busy(&mito_region, busy);
     region
         .engine
         .inner
         .notify_if_became_writable(&mito_region, false);
 
     wait_until(|| region.listener.commits() > 0).await;
-    mito_region.switch_state_to_writable(RegionLeaderState::Altering);
+    mito_region.switch_state_to_writable(busy);
     region.wait_until_replayed().await;
+}
+
+#[tokio::test]
+async fn test_triggers_during_replay_start_no_second_one() {
+    let region = TestRegion::new("tail-replay-repeated-trigger", false, None).await;
+    region
+        .reopen_with_tails(vec![own_tail(0, region.entries[1], UptoKind::Reported)])
+        .await;
+    region.listener.hold_from(1);
+    region.promote();
+    wait_until(|| region.listener.commits() == 1).await;
+    // Every replay task holds the region.
+    let mito_region = region.engine.get_region(region.region_id).unwrap();
+    let holders = Arc::strong_count(&mito_region);
+
+    region.start_replay().await;
+    region.start_replay().await;
+    // The worker handles both triggers before this request, which leaves the region writable.
+    region
+        .engine
+        .set_region_role_state_gracefully(region.region_id, SettableRegionRoleState::Leader)
+        .await
+        .unwrap();
+    assert_eq!(holders, Arc::strong_count(&mito_region));
+
+    region.listener.hold_from(0);
+    region.wait_until_replayed().await;
+    assert_eq!(1, region.listener.commits());
 }
