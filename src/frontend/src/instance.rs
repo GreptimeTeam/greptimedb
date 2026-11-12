@@ -3681,7 +3681,7 @@ mod tests {
         plugins.insert::<PermissionCheckerRef>(checker.clone());
         let instance = test_instance_with_plugins(
             test_table(1024, "source")?,
-            test_physical_table(1025, "physical")?,
+            test_physical_table(1025, "target")?,
             plugins,
         )
         .await?;
@@ -3692,7 +3692,7 @@ mod tests {
                 "source",
                 false,
             ),
-            ("COPY physical TO '/unused.parquet'", "physical", true),
+            ("COPY target TO '/unused.parquet'", "target", true),
         ] {
             assert_eq!(
                 StatusCode::PermissionDenied,
