@@ -210,6 +210,7 @@ pub struct GreptimeDbClusterBuilder {
     local_file_access: LocalFileAccess,
     event_recorder_options: EventRecorderOptions,
     real_datanode_grpc_addr: bool,
+    datanode_max_concurrent_queries: Option<usize>,
 }
 
 impl GreptimeDbClusterBuilder {
@@ -249,6 +250,7 @@ impl GreptimeDbClusterBuilder {
             local_file_access: LocalFileAccess::default(),
             event_recorder_options: EventRecorderOptions::default(),
             real_datanode_grpc_addr: false,
+            datanode_max_concurrent_queries: None,
         }
     }
 
@@ -353,6 +355,14 @@ impl GreptimeDbClusterBuilder {
     #[must_use]
     pub fn with_real_datanode_grpc_addr(mut self, real_datanode_grpc_addr: bool) -> Self {
         self.real_datanode_grpc_addr = real_datanode_grpc_addr;
+        self
+    }
+
+    /// Enables the datanode concurrent read limiter with `max_concurrent_queries`
+    /// permits per admission lane (ordinary and nested reads each get their own lane).
+    #[must_use]
+    pub fn with_datanode_max_concurrent_queries(mut self, max_concurrent_queries: usize) -> Self {
+        self.datanode_max_concurrent_queries = Some(max_concurrent_queries);
         self
     }
 
@@ -505,6 +515,9 @@ impl GreptimeDbClusterBuilder {
                         .unwrap()
                         .to_string(),
                 );
+            }
+            if let Some(max_concurrent_queries) = self.datanode_max_concurrent_queries {
+                opts.max_concurrent_queries = max_concurrent_queries;
             }
             opts.node_id = Some(datanode_id);
             if self.real_datanode_grpc_addr {

@@ -659,6 +659,16 @@ impl MergeScanExec {
         let read_preference = self.query_ctx.read_preference();
         let explain_verbose = self.query_ctx.explain_verbose();
         let live_analyze_metrics = explain_verbose && self.query_ctx.live_analyze_metrics_enabled();
+        // The nesting depth of the reads this plan dispatches. It is not incremented here:
+        // every datanode entry point increments the depth of the reads a request
+        // dispatches, so the frontend's outer reads carry 0 while the reads of a
+        // `MergeScanExec` running inside a datanode carry the depth of that datanode's
+        // request plus one. Depth 0 keeps the datanode admission lane of an outer read
+        // disjoint from the nested lane, see `RegionServerParallelism`.
+        let remote_read_depth = self
+            .query_ctx
+            .remote_read_depth()
+            .map_err(|error| DataFusionError::External(Box::new(error)))?;
         let remote_dyn_filter_registry_lease = acquire_remote_dyn_filter_registry_lease(
             context.as_ref(),
             &query_ctx,
@@ -725,6 +735,10 @@ impl MergeScanExec {
                     region_id,
                     &captured_remote_dyn_filters,
                 );
+                // The depth is written into the request context next to every other
+                // extension, so that remote dynamic filter registrations and the depth
+                // travel together and the datanode can pick the matching admission lane.
+                region_query_ctx.set_remote_read_depth(remote_read_depth);
                 if live_analyze_metrics {
                     let remote_query_id = region_query_ctx.remote_query_id().map(str::to_string);
                     if let Some(remote_query_id) = remote_query_id {
@@ -2100,6 +2114,73 @@ mod tests {
         drop(lease);
     }
 
+    /// Every region request carries the current execution depth of the plan, unchanged:
+    /// the increment happens on the datanode entry that serves the request.
+    #[tokio::test]
+    async fn to_stream_records_current_remote_read_depth_without_incrementing() {
+        for (incoming, expected) in [(None, "0"), (Some("0"), "0"), (Some("1"), "1")] {
+            let handler = Arc::new(DepthRecordingRegionQueryHandler::default());
+            let mut query_ctx = QueryContext::arc().as_ref().clone();
+            if let Some(incoming) = incoming {
+                query_ctx
+                    .set_extension(session::context::REMOTE_READ_DEPTH_EXTENSION_KEY, incoming);
+            }
+            let query_ctx = Arc::new(query_ctx);
+            let state = query_engine_state(handler.clone());
+            let plan = LogicalPlanBuilder::empty(true)
+                .project(vec![lit(1i32).alias("col1")])
+                .unwrap()
+                .build()
+                .unwrap();
+            let schema = plan.schema().as_arrow().clone();
+            let exec = MergeScanExec::new(
+                &SessionStateBuilder::new().build(),
+                TableName::new("catalog", "schema", "table"),
+                vec![RegionId::new(1024, 1)],
+                plan,
+                &schema,
+                handler.clone(),
+                query_ctx.clone(),
+                1,
+                None,
+                false,
+            )
+            .unwrap();
+
+            let stream = exec
+                .to_stream(task_context_with_engine_state(state, query_ctx), 0)
+                .unwrap();
+            stream.try_collect::<Vec<_>>().await.unwrap();
+
+            assert_eq!(
+                vec![Some(expected.to_string())],
+                handler.depths(),
+                "incoming depth {incoming:?} must be recorded as {expected}"
+            );
+        }
+    }
+
+    /// An unreadable depth must fail the read instead of being silently sent as depth 0.
+    #[tokio::test]
+    async fn to_stream_rejects_malformed_remote_read_depth() {
+        let handler = Arc::new(DepthRecordingRegionQueryHandler::default());
+        let mut query_ctx = QueryContext::arc().as_ref().clone();
+        query_ctx.set_extension(session::context::REMOTE_READ_DEPTH_EXTENSION_KEY, "abc");
+        let query_ctx = Arc::new(query_ctx);
+        let state = query_engine_state(handler.clone());
+        let exec = remote_dyn_filter_test_exec(handler.clone(), query_ctx.clone());
+
+        let error = exec
+            .to_stream(task_context_with_engine_state(state, query_ctx), 0)
+            .err()
+            .expect("the malformed depth must fail the read");
+        assert!(
+            error.to_string().contains("Invalid remote read depth"),
+            "unexpected error: {error}"
+        );
+        assert!(handler.depths().is_empty());
+    }
+
     #[tokio::test]
     async fn immediate_eof_do_get_receives_refreshed_remote_dyn_filter_snapshot() {
         let handler = Arc::new(ImmediateEofRegionQueryHandler::default());
@@ -2573,6 +2654,67 @@ mod tests {
                 .map(|serialized| InitialDynFilterRegs::from_extension_value(&serialized).unwrap())
                 .unwrap();
             *self.registrations.lock().unwrap() = Some(registrations);
+            Ok(empty_record_batch_stream(&request))
+        }
+
+        async fn handle_remote_dyn_filter_update(
+            &self,
+            _target: &crate::region_query::RegionQueryTarget,
+            _query_id: String,
+            _update: api::v1::region::RemoteDynFilterUpdate,
+        ) -> crate::error::Result<()> {
+            Ok(())
+        }
+
+        async fn handle_remote_dyn_filter_unregister(
+            &self,
+            _target: &crate::region_query::RegionQueryTarget,
+            _query_id: String,
+            _unregister: api::v1::region::RemoteDynFilterUnregister,
+        ) -> crate::error::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// Records the reserved remote read depth of every dispatched region request.
+    #[derive(Default)]
+    struct DepthRecordingRegionQueryHandler {
+        depths: Mutex<Vec<Option<String>>>,
+    }
+
+    impl DepthRecordingRegionQueryHandler {
+        fn depths(&self) -> Vec<Option<String>> {
+            self.depths.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait]
+    impl RegionQueryHandler for DepthRecordingRegionQueryHandler {
+        async fn select_target(
+            &self,
+            _read_preference: ReadPreference,
+            _region_id: RegionId,
+        ) -> crate::error::Result<crate::region_query::RegionQueryTarget> {
+            Ok(test_target(1))
+        }
+
+        async fn do_get(
+            &self,
+            _target: &crate::region_query::RegionQueryTarget,
+            request: common_query::request::QueryRequest,
+        ) -> crate::error::Result<common_recordbatch::SendableRecordBatchStream> {
+            self.depths.lock().unwrap().push(
+                request
+                    .header
+                    .as_ref()
+                    .and_then(|header| header.query_context.as_ref())
+                    .and_then(|query_context| {
+                        query_context
+                            .extensions
+                            .get(session::context::REMOTE_READ_DEPTH_EXTENSION_KEY)
+                            .cloned()
+                    }),
+            );
             Ok(empty_record_batch_stream(&request))
         }
 
