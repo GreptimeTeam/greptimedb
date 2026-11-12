@@ -254,9 +254,10 @@ impl Checkpointer {
 
     #[cfg(test)]
     pub(crate) fn abort_checkpoint_task(&self) {
-        if let Some(handle) = &self.checkpoint_task {
-            handle.abort();
-        }
+        self.checkpoint_task
+            .as_ref()
+            .expect("checkpoint task must exist")
+            .abort();
     }
 
     #[cfg(test)]

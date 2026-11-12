@@ -848,12 +848,15 @@ async fn pending_checkpoint_done_waits_until_the_task_ends(#[case] abort: bool) 
         .expect("checkpoint cleanup did not start");
 
     let mut done = Box::pin(manager.pending_checkpoint_done());
+    let mut cancelled = Box::pin(manager.pending_checkpoint_done());
+    let both = futures::future::join(&mut done, &mut cancelled);
     assert!(
-        tokio::time::timeout(Duration::from_millis(100), &mut done)
+        tokio::time::timeout(Duration::from_millis(100), both)
             .await
             .is_err(),
         "the wait ended before the checkpoint cleanup"
     );
+    drop(cancelled);
     // The cleanup stays blocked in the abort case, so only the abort can end the task.
     if abort {
         manager.checkpointer().abort_checkpoint_task();
@@ -863,6 +866,9 @@ async fn pending_checkpoint_done_waits_until_the_task_ends(#[case] abort: bool) 
     tokio::time::timeout(Duration::from_secs(5), done)
         .await
         .expect("the wait did not end with the checkpoint task");
+    tokio::time::timeout(Duration::ZERO, manager.pending_checkpoint_done())
+        .await
+        .expect("a wait after the checkpoint task ended did not return at once");
 }
 
 /// Panics on the first delete, which a checkpoint issues in its cleanup.
