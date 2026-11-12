@@ -1,0 +1,1 @@
+../../../cases/distributed/common/promql/histogram_multi_partition.sql

@@ -1,0 +1,1 @@
+../../../../cases/standalone/common/tql/binary_operator.sql

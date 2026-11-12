@@ -1,0 +1,1297 @@
+CREATE TABLE IF NOT EXISTS aggr_optimize_not (
+  a STRING NULL,
+  b STRING NULL,
+  c STRING NULL,
+  d STRING NULL,
+  greptime_timestamp TIMESTAMP(3) NOT NULL,
+  greptime_value DOUBLE NULL,
+  TIME INDEX (greptime_timestamp),
+  PRIMARY KEY (a, b, c, d)
+) PARTITION ON COLUMNS (a, b, c) (a < 'b', a >= 'b',);
+
+Affected Rows: 0
+
+-- Case 0: group by columns are the same as partition columns.
+-- This query shouldn't push down aggregation even if group by columns are partitioned.
+-- because sort is already pushed down.
+-- If it does, it will cause a wrong result.
+-- explain at 0s, 5s and 10s. No point at 0s.
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE (Hash.*) REDACTED
+tql explain (1752591864, 1752592164, '30s') max by (a, b, c) (max_over_time(aggr_optimize_not [2m]));
+
++---------------+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| plan_type     | plan                                                                                                                                                                                 |
++---------------+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| logical_plan  | FusedSeries                                                                                                                                                                          |
+|               | native_tree=[                                                                                                                                                                        |
+|               | Aggregate: max by [a, b, c] final                                                                                                                                                    |
+|               |   Input: aggregate state                                                                                                                                                             |
+|               | ]                                                                                                                                                                                    |
+|               |   FusedSeries: (output: series_frame)                                                                                                                                                |
+|               | native_tree=[                                                                                                                                                                        |
+|               | Aggregate: max by [a, b, c] partial                                                                                                                                                  |
+|               |   Window: max_over_time [120000ms] offset 0 anchor - on grid 1752591864000/30000x11                                                                                                  |
+|               |     Input: raw samples source=0, contiguous                                                                                                                                          |
+|               | ]                                                                                                                                                                                    |
+|               |     MergeScan [is_placeholder=false, remote_input=[                                                                                                                                  |
+|               | RawSeriesSource: metric=aggr_optimize_not, tags=[a, b, c, d], fields=[greptime_value]                                                                                                |
+|               |   TableScan: aggr_optimize_not, partial_filters=[greptime_timestamp > TimestampMillisecond(1752591744000, None) AND greptime_timestamp <= TimestampMillisecond(1752592164000, None)] |
+|               | ]]                                                                                                                                                                                   |
+| physical_plan | FusedSeriesExec                                                                                                                                                                      |
+|               | native_tree=[                                                                                                                                                                        |
+|               | Aggregate: max by [a, b, c] final                                                                                                                                                    |
+|               |   Input: aggregate state                                                                                                                                                             |
+|               | ]                                                                                                                                                                                    |
+|               |   SeriesRepartitionExec: outputs=4, input_partitions=2                                                                                                                               |
+|               |     FusedSeriesExec: (output: series_frame)                                                                                                                                          |
+|               | native_tree=[                                                                                                                                                                        |
+|               | Aggregate: max by [a, b, c] partial                                                                                                                                                  |
+|               |   Window: max_over_time [120000ms] offset 0 anchor - on grid 1752591864000/30000x11                                                                                                  |
+|               |     Input: raw samples source=0, contiguous                                                                                                                                          |
+|               | ]                                                                                                                                                                                    |
+|               |       MergeScanExec: REDACTED
+|               |                                                                                                                                                                                      |
++---------------+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+
+-- SQLNESS REPLACE (metrics.*) REDACTED
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (Hash.*) REDACTED
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE \\?"(dyn_filters|time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
+tql analyze (1752591864, 1752592164, '30s') max by (a, b, c) (max_over_time(aggr_optimize_not [2m]));
+
++-+-+-+
+| stage | node | plan_|
++-+-+-+
+| 0_| 0_|_FusedSeriesExec REDACTED
+|_|_|_native_tree=[_|
+|_|_|_Aggregate: max by [a, b, c] final, REDACTED
+|_|_|_Input: aggregate state_|
+|_|_|_]_|
+|_|_|_SeriesRepartitionExec REDACTED
+|_|_|_FusedSeriesExec: (output: series_frame) REDACTED
+|_|_|_native_tree=[_|
+|_|_|_Aggregate: max by [a, b, c] partial, REDACTED
+|_|_|_Window: max_over_time [120000ms] offset 0 anchor - on grid 1752591864000/30000x11_|
+|_|_|_Input: raw samples source=0, contiguous_|
+|_|_|_]_|
+|_|_|_MergeScanExec: REDACTED
+|_|_|_|
+| 1_| 0_|_SeriesRepartitionExec REDACTED
+|_|_|_RawSeriesSourceExec REDACTED
+|_|_|_CooperativeExec REDACTED
+|_|_|_SeriesScanExec: source=primary_key, fields=1, partitions=4 REDACTED
+|_|_|_|
+| 1_| 1_|_SeriesRepartitionExec REDACTED
+|_|_|_RawSeriesSourceExec REDACTED
+|_|_|_CooperativeExec REDACTED
+|_|_|_SeriesScanExec: source=primary_key, fields=1, partitions=4 REDACTED
+|_|_|_|
+|_|_| Total rows: 0_|
++-+-+-+
+
+-- Case 1: group by columns are prefix of partition columns.
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE (Hash.*) REDACTED
+tql explain (1752591864, 1752592164, '30s') sum by (a, b) (max_over_time(aggr_optimize_not [2m]));
+
++---------------+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| plan_type     | plan                                                                                                                                                                                 |
++---------------+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| logical_plan  | FusedSeries                                                                                                                                                                          |
+|               | native_tree=[                                                                                                                                                                        |
+|               | Aggregate: sum by [a, b] final                                                                                                                                                       |
+|               |   Input: aggregate state                                                                                                                                                             |
+|               | ]                                                                                                                                                                                    |
+|               |   FusedSeries: (output: series_frame)                                                                                                                                                |
+|               | native_tree=[                                                                                                                                                                        |
+|               | Aggregate: sum by [a, b] partial                                                                                                                                                     |
+|               |   Window: max_over_time [120000ms] offset 0 anchor - on grid 1752591864000/30000x11                                                                                                  |
+|               |     Input: raw samples source=0, contiguous                                                                                                                                          |
+|               | ]                                                                                                                                                                                    |
+|               |     MergeScan [is_placeholder=false, remote_input=[                                                                                                                                  |
+|               | RawSeriesSource: metric=aggr_optimize_not, tags=[a, b, c, d], fields=[greptime_value]                                                                                                |
+|               |   TableScan: aggr_optimize_not, partial_filters=[greptime_timestamp > TimestampMillisecond(1752591744000, None) AND greptime_timestamp <= TimestampMillisecond(1752592164000, None)] |
+|               | ]]                                                                                                                                                                                   |
+| physical_plan | FusedSeriesExec                                                                                                                                                                      |
+|               | native_tree=[                                                                                                                                                                        |
+|               | Aggregate: sum by [a, b] final                                                                                                                                                       |
+|               |   Input: aggregate state                                                                                                                                                             |
+|               | ]                                                                                                                                                                                    |
+|               |   SeriesRepartitionExec: outputs=4, input_partitions=2                                                                                                                               |
+|               |     FusedSeriesExec: (output: series_frame)                                                                                                                                          |
+|               | native_tree=[                                                                                                                                                                        |
+|               | Aggregate: sum by [a, b] partial                                                                                                                                                     |
+|               |   Window: max_over_time [120000ms] offset 0 anchor - on grid 1752591864000/30000x11                                                                                                  |
+|               |     Input: raw samples source=0, contiguous                                                                                                                                          |
+|               | ]                                                                                                                                                                                    |
+|               |       MergeScanExec: REDACTED
+|               |                                                                                                                                                                                      |
++---------------+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+
+-- SQLNESS REPLACE (metrics.*) REDACTED
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (Hash.*) REDACTED
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE \\?"(dyn_filters|time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
+tql analyze (1752591864, 1752592164, '30s') sum by (a, b) (max_over_time(aggr_optimize_not [2m]));
+
++-+-+-+
+| stage | node | plan_|
++-+-+-+
+| 0_| 0_|_FusedSeriesExec REDACTED
+|_|_|_native_tree=[_|
+|_|_|_Aggregate: sum by [a, b] final, REDACTED
+|_|_|_Input: aggregate state_|
+|_|_|_]_|
+|_|_|_SeriesRepartitionExec REDACTED
+|_|_|_FusedSeriesExec: (output: series_frame) REDACTED
+|_|_|_native_tree=[_|
+|_|_|_Aggregate: sum by [a, b] partial, REDACTED
+|_|_|_Window: max_over_time [120000ms] offset 0 anchor - on grid 1752591864000/30000x11_|
+|_|_|_Input: raw samples source=0, contiguous_|
+|_|_|_]_|
+|_|_|_MergeScanExec: REDACTED
+|_|_|_|
+| 1_| 0_|_SeriesRepartitionExec REDACTED
+|_|_|_RawSeriesSourceExec REDACTED
+|_|_|_CooperativeExec REDACTED
+|_|_|_SeriesScanExec: source=primary_key, fields=1, partitions=4 REDACTED
+|_|_|_|
+| 1_| 1_|_SeriesRepartitionExec REDACTED
+|_|_|_RawSeriesSourceExec REDACTED
+|_|_|_CooperativeExec REDACTED
+|_|_|_SeriesScanExec: source=primary_key, fields=1, partitions=4 REDACTED
+|_|_|_|
+|_|_| Total rows: 0_|
++-+-+-+
+
+-- Case 2: group by columns are prefix of partition columns.
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE (Hash.*) REDACTED
+tql explain (1752591864, 1752592164, '30s') avg by (a) (max_over_time(aggr_optimize_not [2m]));
+
++---------------+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| plan_type     | plan                                                                                                                                                                                 |
++---------------+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| logical_plan  | FusedSeries                                                                                                                                                                          |
+|               | native_tree=[                                                                                                                                                                        |
+|               | Aggregate: avg by [a] final                                                                                                                                                          |
+|               |   Input: aggregate state                                                                                                                                                             |
+|               | ]                                                                                                                                                                                    |
+|               |   FusedSeries: (output: series_frame)                                                                                                                                                |
+|               | native_tree=[                                                                                                                                                                        |
+|               | Aggregate: avg by [a] partial                                                                                                                                                        |
+|               |   Window: max_over_time [120000ms] offset 0 anchor - on grid 1752591864000/30000x11                                                                                                  |
+|               |     Input: raw samples source=0, contiguous                                                                                                                                          |
+|               | ]                                                                                                                                                                                    |
+|               |     MergeScan [is_placeholder=false, remote_input=[                                                                                                                                  |
+|               | RawSeriesSource: metric=aggr_optimize_not, tags=[a, b, c, d], fields=[greptime_value]                                                                                                |
+|               |   TableScan: aggr_optimize_not, partial_filters=[greptime_timestamp > TimestampMillisecond(1752591744000, None) AND greptime_timestamp <= TimestampMillisecond(1752592164000, None)] |
+|               | ]]                                                                                                                                                                                   |
+| physical_plan | FusedSeriesExec                                                                                                                                                                      |
+|               | native_tree=[                                                                                                                                                                        |
+|               | Aggregate: avg by [a] final                                                                                                                                                          |
+|               |   Input: aggregate state                                                                                                                                                             |
+|               | ]                                                                                                                                                                                    |
+|               |   SeriesRepartitionExec: outputs=4, input_partitions=2                                                                                                                               |
+|               |     FusedSeriesExec: (output: series_frame)                                                                                                                                          |
+|               | native_tree=[                                                                                                                                                                        |
+|               | Aggregate: avg by [a] partial                                                                                                                                                        |
+|               |   Window: max_over_time [120000ms] offset 0 anchor - on grid 1752591864000/30000x11                                                                                                  |
+|               |     Input: raw samples source=0, contiguous                                                                                                                                          |
+|               | ]                                                                                                                                                                                    |
+|               |       MergeScanExec: REDACTED
+|               |                                                                                                                                                                                      |
++---------------+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+
+-- SQLNESS REPLACE (metrics.*) REDACTED
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (Hash.*) REDACTED
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE \\?"(dyn_filters|time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
+tql analyze (1752591864, 1752592164, '30s') avg by (a) (max_over_time(aggr_optimize_not [2m]));
+
++-+-+-+
+| stage | node | plan_|
++-+-+-+
+| 0_| 0_|_FusedSeriesExec REDACTED
+|_|_|_native_tree=[_|
+|_|_|_Aggregate: avg by [a] final, REDACTED
+|_|_|_Input: aggregate state_|
+|_|_|_]_|
+|_|_|_SeriesRepartitionExec REDACTED
+|_|_|_FusedSeriesExec: (output: series_frame) REDACTED
+|_|_|_native_tree=[_|
+|_|_|_Aggregate: avg by [a] partial, REDACTED
+|_|_|_Window: max_over_time [120000ms] offset 0 anchor - on grid 1752591864000/30000x11_|
+|_|_|_Input: raw samples source=0, contiguous_|
+|_|_|_]_|
+|_|_|_MergeScanExec: REDACTED
+|_|_|_|
+| 1_| 0_|_SeriesRepartitionExec REDACTED
+|_|_|_RawSeriesSourceExec REDACTED
+|_|_|_CooperativeExec REDACTED
+|_|_|_SeriesScanExec: source=primary_key, fields=1, partitions=4 REDACTED
+|_|_|_|
+| 1_| 1_|_SeriesRepartitionExec REDACTED
+|_|_|_RawSeriesSourceExec REDACTED
+|_|_|_CooperativeExec REDACTED
+|_|_|_SeriesScanExec: source=primary_key, fields=1, partitions=4 REDACTED
+|_|_|_|
+|_|_| Total rows: 0_|
++-+-+-+
+
+-- Case 3: group by columns are superset of partition columns.
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE (Hash.*) REDACTED
+tql explain (1752591864, 1752592164, '30s') count by (a, b, c, d) (max_over_time(aggr_optimize_not [2m]));
+
++---------------+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| plan_type     | plan                                                                                                                                                                                 |
++---------------+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| logical_plan  | FusedSeries                                                                                                                                                                          |
+|               | native_tree=[                                                                                                                                                                        |
+|               | Aggregate: count by [a, b, c, d] final                                                                                                                                               |
+|               |   Input: aggregate state                                                                                                                                                             |
+|               | ]                                                                                                                                                                                    |
+|               |   FusedSeries: (output: series_frame)                                                                                                                                                |
+|               | native_tree=[                                                                                                                                                                        |
+|               | Aggregate: count by [a, b, c, d] partial                                                                                                                                             |
+|               |   Window: max_over_time [120000ms] offset 0 anchor - on grid 1752591864000/30000x11                                                                                                  |
+|               |     Input: raw samples source=0, contiguous                                                                                                                                          |
+|               | ]                                                                                                                                                                                    |
+|               |     MergeScan [is_placeholder=false, remote_input=[                                                                                                                                  |
+|               | RawSeriesSource: metric=aggr_optimize_not, tags=[a, b, c, d], fields=[greptime_value]                                                                                                |
+|               |   TableScan: aggr_optimize_not, partial_filters=[greptime_timestamp > TimestampMillisecond(1752591744000, None) AND greptime_timestamp <= TimestampMillisecond(1752592164000, None)] |
+|               | ]]                                                                                                                                                                                   |
+| physical_plan | FusedSeriesExec                                                                                                                                                                      |
+|               | native_tree=[                                                                                                                                                                        |
+|               | Aggregate: count by [a, b, c, d] final                                                                                                                                               |
+|               |   Input: aggregate state                                                                                                                                                             |
+|               | ]                                                                                                                                                                                    |
+|               |   SeriesRepartitionExec: outputs=4, input_partitions=2                                                                                                                               |
+|               |     FusedSeriesExec: (output: series_frame)                                                                                                                                          |
+|               | native_tree=[                                                                                                                                                                        |
+|               | Aggregate: count by [a, b, c, d] partial                                                                                                                                             |
+|               |   Window: max_over_time [120000ms] offset 0 anchor - on grid 1752591864000/30000x11                                                                                                  |
+|               |     Input: raw samples source=0, contiguous                                                                                                                                          |
+|               | ]                                                                                                                                                                                    |
+|               |       MergeScanExec: REDACTED
+|               |                                                                                                                                                                                      |
++---------------+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+
+-- SQLNESS REPLACE (metrics.*) REDACTED
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (Hash.*) REDACTED
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE \\?"(dyn_filters|time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
+tql analyze (1752591864, 1752592164, '30s') count by (a, b, c, d) (max_over_time(aggr_optimize_not [2m]));
+
++-+-+-+
+| stage | node | plan_|
++-+-+-+
+| 0_| 0_|_FusedSeriesExec REDACTED
+|_|_|_native_tree=[_|
+|_|_|_Aggregate: count by [a, b, c, d] final, REDACTED
+|_|_|_Input: aggregate state_|
+|_|_|_]_|
+|_|_|_SeriesRepartitionExec REDACTED
+|_|_|_FusedSeriesExec: (output: series_frame) REDACTED
+|_|_|_native_tree=[_|
+|_|_|_Aggregate: count by [a, b, c, d] partial, REDACTED
+|_|_|_Window: max_over_time [120000ms] offset 0 anchor - on grid 1752591864000/30000x11_|
+|_|_|_Input: raw samples source=0, contiguous_|
+|_|_|_]_|
+|_|_|_MergeScanExec: REDACTED
+|_|_|_|
+| 1_| 0_|_SeriesRepartitionExec REDACTED
+|_|_|_RawSeriesSourceExec REDACTED
+|_|_|_CooperativeExec REDACTED
+|_|_|_SeriesScanExec: source=primary_key, fields=1, partitions=4 REDACTED
+|_|_|_|
+| 1_| 1_|_SeriesRepartitionExec REDACTED
+|_|_|_RawSeriesSourceExec REDACTED
+|_|_|_CooperativeExec REDACTED
+|_|_|_SeriesScanExec: source=primary_key, fields=1, partitions=4 REDACTED
+|_|_|_|
+|_|_| Total rows: 0_|
++-+-+-+
+
+-- Case 4: group by columns are not prefix of partition columns.
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE (Hash.*) REDACTED
+tql explain (1752591864, 1752592164, '30s') min by (b, c, d) (max_over_time(aggr_optimize_not [2m]));
+
++---------------+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| plan_type     | plan                                                                                                                                                                                 |
++---------------+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| logical_plan  | FusedSeries                                                                                                                                                                          |
+|               | native_tree=[                                                                                                                                                                        |
+|               | Aggregate: min by [b, c, d] final                                                                                                                                                    |
+|               |   Input: aggregate state                                                                                                                                                             |
+|               | ]                                                                                                                                                                                    |
+|               |   FusedSeries: (output: series_frame)                                                                                                                                                |
+|               | native_tree=[                                                                                                                                                                        |
+|               | Aggregate: min by [b, c, d] partial                                                                                                                                                  |
+|               |   Window: max_over_time [120000ms] offset 0 anchor - on grid 1752591864000/30000x11                                                                                                  |
+|               |     Input: raw samples source=0, contiguous                                                                                                                                          |
+|               | ]                                                                                                                                                                                    |
+|               |     MergeScan [is_placeholder=false, remote_input=[                                                                                                                                  |
+|               | RawSeriesSource: metric=aggr_optimize_not, tags=[a, b, c, d], fields=[greptime_value]                                                                                                |
+|               |   TableScan: aggr_optimize_not, partial_filters=[greptime_timestamp > TimestampMillisecond(1752591744000, None) AND greptime_timestamp <= TimestampMillisecond(1752592164000, None)] |
+|               | ]]                                                                                                                                                                                   |
+| physical_plan | FusedSeriesExec                                                                                                                                                                      |
+|               | native_tree=[                                                                                                                                                                        |
+|               | Aggregate: min by [b, c, d] final                                                                                                                                                    |
+|               |   Input: aggregate state                                                                                                                                                             |
+|               | ]                                                                                                                                                                                    |
+|               |   SeriesRepartitionExec: outputs=4, input_partitions=2                                                                                                                               |
+|               |     FusedSeriesExec: (output: series_frame)                                                                                                                                          |
+|               | native_tree=[                                                                                                                                                                        |
+|               | Aggregate: min by [b, c, d] partial                                                                                                                                                  |
+|               |   Window: max_over_time [120000ms] offset 0 anchor - on grid 1752591864000/30000x11                                                                                                  |
+|               |     Input: raw samples source=0, contiguous                                                                                                                                          |
+|               | ]                                                                                                                                                                                    |
+|               |       MergeScanExec: REDACTED
+|               |                                                                                                                                                                                      |
++---------------+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+
+-- SQLNESS REPLACE (metrics.*) REDACTED
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (Hash.*) REDACTED
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE \\?"(dyn_filters|time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
+tql analyze (1752591864, 1752592164, '30s') min by (b, c, d) (max_over_time(aggr_optimize_not [2m]));
+
++-+-+-+
+| stage | node | plan_|
++-+-+-+
+| 0_| 0_|_FusedSeriesExec REDACTED
+|_|_|_native_tree=[_|
+|_|_|_Aggregate: min by [b, c, d] final, REDACTED
+|_|_|_Input: aggregate state_|
+|_|_|_]_|
+|_|_|_SeriesRepartitionExec REDACTED
+|_|_|_FusedSeriesExec: (output: series_frame) REDACTED
+|_|_|_native_tree=[_|
+|_|_|_Aggregate: min by [b, c, d] partial, REDACTED
+|_|_|_Window: max_over_time [120000ms] offset 0 anchor - on grid 1752591864000/30000x11_|
+|_|_|_Input: raw samples source=0, contiguous_|
+|_|_|_]_|
+|_|_|_MergeScanExec: REDACTED
+|_|_|_|
+| 1_| 0_|_SeriesRepartitionExec REDACTED
+|_|_|_RawSeriesSourceExec REDACTED
+|_|_|_CooperativeExec REDACTED
+|_|_|_SeriesScanExec: source=primary_key, fields=1, partitions=4 REDACTED
+|_|_|_|
+| 1_| 1_|_SeriesRepartitionExec REDACTED
+|_|_|_RawSeriesSourceExec REDACTED
+|_|_|_CooperativeExec REDACTED
+|_|_|_SeriesScanExec: source=primary_key, fields=1, partitions=4 REDACTED
+|_|_|_|
+|_|_| Total rows: 0_|
++-+-+-+
+
+-- Case 5: a simple sum
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE (Hash.*) REDACTED
+tql explain sum(aggr_optimize_not);
+
++---------------+--------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| plan_type     | plan                                                                                                                                                               |
++---------------+--------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| logical_plan  | FusedSeries                                                                                                                                                        |
+|               | native_tree=[                                                                                                                                                      |
+|               | Aggregate: sum by [] final                                                                                                                                         |
+|               |   Input: aggregate state                                                                                                                                           |
+|               | ]                                                                                                                                                                  |
+|               |   FusedSeries: (output: series_frame)                                                                                                                              |
+|               | native_tree=[                                                                                                                                                      |
+|               | Aggregate: sum by [] partial                                                                                                                                       |
+|               |   Instant: lookback 300000ms offset 0 on grid 0/300000x1                                                                                                           |
+|               |     Input: raw samples source=0, contiguous                                                                                                                        |
+|               | ]                                                                                                                                                                  |
+|               |     MergeScan [is_placeholder=false, remote_input=[                                                                                                                |
+|               | RawSeriesSource: metric=aggr_optimize_not, tags=[a, b, c, d], fields=[greptime_value]                                                                              |
+|               |   TableScan: aggr_optimize_not, partial_filters=[greptime_timestamp > TimestampMillisecond(-300000, None) AND greptime_timestamp <= TimestampMillisecond(0, None)] |
+|               | ]]                                                                                                                                                                 |
+| physical_plan | FusedSeriesExec                                                                                                                                                    |
+|               | native_tree=[                                                                                                                                                      |
+|               | Aggregate: sum by [] final                                                                                                                                         |
+|               |   Input: aggregate state                                                                                                                                           |
+|               | ]                                                                                                                                                                  |
+|               |   SeriesRepartitionExec: outputs=1, input_partitions=2                                                                                                             |
+|               |     FusedSeriesExec: (output: series_frame)                                                                                                                        |
+|               | native_tree=[                                                                                                                                                      |
+|               | Aggregate: sum by [] partial                                                                                                                                       |
+|               |   Instant: lookback 300000ms offset 0 on grid 0/300000x1                                                                                                           |
+|               |     Input: raw samples source=0, contiguous                                                                                                                        |
+|               | ]                                                                                                                                                                  |
+|               |       MergeScanExec: REDACTED
+|               |                                                                                                                                                                    |
++---------------+--------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+
+-- SQLNESS REPLACE (metrics.*) REDACTED
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (Hash.*) REDACTED
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE \\?"(dyn_filters|time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
+tql analyze sum(aggr_optimize_not);
+
++-+-+-+
+| stage | node | plan_|
++-+-+-+
+| 0_| 0_|_FusedSeriesExec REDACTED
+|_|_|_native_tree=[_|
+|_|_|_Aggregate: sum by [] final, REDACTED
+|_|_|_Input: aggregate state_|
+|_|_|_]_|
+|_|_|_SeriesRepartitionExec REDACTED
+|_|_|_FusedSeriesExec: (output: series_frame) REDACTED
+|_|_|_native_tree=[_|
+|_|_|_Aggregate: sum by [] partial, REDACTED
+|_|_|_Instant: lookback 300000ms offset 0 on grid 0/300000x1_|
+|_|_|_Input: raw samples source=0, contiguous_|
+|_|_|_]_|
+|_|_|_MergeScanExec: REDACTED
+|_|_|_|
+| 1_| 0_|_SeriesRepartitionExec REDACTED
+|_|_|_RawSeriesSourceExec REDACTED
+|_|_|_CooperativeExec REDACTED
+|_|_|_SeriesScanExec: source=primary_key, fields=1, partitions=4 REDACTED
+|_|_|_|
+| 1_| 1_|_SeriesRepartitionExec REDACTED
+|_|_|_RawSeriesSourceExec REDACTED
+|_|_|_CooperativeExec REDACTED
+|_|_|_SeriesScanExec: source=primary_key, fields=1, partitions=4 REDACTED
+|_|_|_|
+|_|_| Total rows: 0_|
++-+-+-+
+
+-- TODO(discord9): more cases for aggr push down interacting with partitioning&tql
+CREATE TABLE IF NOT EXISTS aggr_optimize_not_count (
+  a STRING NULL,
+  b STRING NULL,
+  c STRING NULL,
+  d STRING NULL,
+  greptime_timestamp TIMESTAMP(3) NOT NULL,
+  greptime_value DOUBLE NULL,
+  TIME INDEX (greptime_timestamp),
+  PRIMARY KEY (a, b, c, d)
+) PARTITION ON COLUMNS (a, b, c) (a < 'b', a >= 'b',);
+
+Affected Rows: 0
+
+-- Case 6: Test average rate (sum/count like)
+-- Populate both partitions on both sides so the join cannot short-circuit on
+-- empty input and omit remote ANALYZE plans depending on execution timing.
+INSERT INTO aggr_optimize_not VALUES
+  ('a', 'b', 'c', 'd', 1752591840000, 10),
+  ('a', 'b', 'c', 'd', 1752591860000, 20),
+  ('c', 'b', 'c', 'd', 1752591840000, 30),
+  ('c', 'b', 'c', 'd', 1752591860000, 40);
+
+Affected Rows: 4
+
+INSERT INTO aggr_optimize_not_count VALUES
+  ('a', 'b', 'c', 'd', 1752591840000, 1),
+  ('a', 'b', 'c', 'd', 1752591860000, 2),
+  ('c', 'b', 'c', 'd', 1752591840000, 3),
+  ('c', 'b', 'c', 'd', 1752591860000, 4);
+
+Affected Rows: 4
+
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE (Hash.*) REDACTED
+tql explain (1752591864, 1752592164, '30s') sum by (a, b, c) (rate(aggr_optimize_not [2m])) / sum by (a, b, c) (rate(aggr_optimize_not_count [2m]));
+
++---------------+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| plan_type     | plan                                                                                                                                                                                       |
++---------------+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| logical_plan  | FusedSeries                                                                                                                                                                                |
+|               | native_tree=[                                                                                                                                                                              |
+|               | Binary: / ignoring [] one-to-one                                                                                                                                                           |
+|               |   Aggregate: sum by [a, b, c] complete                                                                                                                                                     |
+|               |     Input: evaluated samples source=0, contiguous                                                                                                                                          |
+|               |   Aggregate: sum by [a, b, c] complete                                                                                                                                                     |
+|               |     Input: evaluated samples source=1, contiguous                                                                                                                                          |
+|               | ]                                                                                                                                                                                          |
+|               |   FusedSeries: (output: series_frame)                                                                                                                                                      |
+|               | native_tree=[                                                                                                                                                                              |
+|               | Window: rate [120000ms] offset 0 anchor - on grid 1752591864000/30000x11                                                                                                                   |
+|               |   Input: raw samples source=0, contiguous                                                                                                                                                  |
+|               | ]                                                                                                                                                                                          |
+|               |     MergeScan [is_placeholder=false, remote_input=[                                                                                                                                        |
+|               | RawSeriesSource: metric=aggr_optimize_not, tags=[a, b, c, d], fields=[greptime_value]                                                                                                      |
+|               |   TableScan: aggr_optimize_not, partial_filters=[greptime_timestamp > TimestampMillisecond(1752591744000, None) AND greptime_timestamp <= TimestampMillisecond(1752592164000, None)]       |
+|               | ]]                                                                                                                                                                                         |
+|               |   FusedSeries: (output: series_frame)                                                                                                                                                      |
+|               | native_tree=[                                                                                                                                                                              |
+|               | Window: rate [120000ms] offset 0 anchor - on grid 1752591864000/30000x11                                                                                                                   |
+|               |   Input: raw samples source=0, contiguous                                                                                                                                                  |
+|               | ]                                                                                                                                                                                          |
+|               |     MergeScan [is_placeholder=false, remote_input=[                                                                                                                                        |
+|               | RawSeriesSource: metric=aggr_optimize_not_count, tags=[a, b, c, d], fields=[greptime_value]                                                                                                |
+|               |   TableScan: aggr_optimize_not_count, partial_filters=[greptime_timestamp > TimestampMillisecond(1752591744000, None) AND greptime_timestamp <= TimestampMillisecond(1752592164000, None)] |
+|               | ]]                                                                                                                                                                                         |
+| physical_plan | FusedSeriesExec                                                                                                                                                                            |
+|               | native_tree=[                                                                                                                                                                              |
+|               | Binary: / ignoring [] one-to-one                                                                                                                                                           |
+|               |   Aggregate: sum by [a, b, c] complete                                                                                                                                                     |
+|               |     Input: evaluated samples source=0, contiguous                                                                                                                                          |
+|               |   Aggregate: sum by [a, b, c] complete                                                                                                                                                     |
+|               |     Input: evaluated samples source=1, contiguous                                                                                                                                          |
+|               | ]                                                                                                                                                                                          |
+|               |   SeriesRepartitionExec: outputs=1, input_partitions=2                                                                                                                                     |
+|               |     FusedSeriesExec: (output: series_frame)                                                                                                                                                |
+|               | native_tree=[                                                                                                                                                                              |
+|               | Window: rate [120000ms] offset 0 anchor - on grid 1752591864000/30000x11                                                                                                                   |
+|               |   Input: raw samples source=0, contiguous                                                                                                                                                  |
+|               | ]                                                                                                                                                                                          |
+|               |       MergeScanExec: REDACTED
+|               |   SeriesRepartitionExec: outputs=1, input_partitions=2                                                                                                                                     |
+|               |     FusedSeriesExec: (output: series_frame)                                                                                                                                                |
+|               | native_tree=[                                                                                                                                                                              |
+|               | Window: rate [120000ms] offset 0 anchor - on grid 1752591864000/30000x11                                                                                                                   |
+|               |   Input: raw samples source=0, contiguous                                                                                                                                                  |
+|               | ]                                                                                                                                                                                          |
+|               |       MergeScanExec: REDACTED
+|               |                                                                                                                                                                                            |
++---------------+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+
+-- SQLNESS REPLACE (metrics.*) REDACTED
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (Hash.*) REDACTED
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE \\?"(dyn_filters|time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
+tql analyze (1752591864, 1752592164, '30s') sum by (a, b, c) (rate(aggr_optimize_not [2m])) / sum by (a, b, c) (rate(aggr_optimize_not_count [2m]));
+
++-+-+-+
+| stage | node | plan_|
++-+-+-+
+| 0_| 0_|_FusedSeriesExec REDACTED
+|_|_|_native_tree=[_|
+|_|_|_Binary: / ignoring [] one-to-one, REDACTED
+|_|_|_Aggregate: sum by [a, b, c] complete, REDACTED
+|_|_|_Input: evaluated samples source=0, contiguous, REDACTED
+|_|_|_Aggregate: sum by [a, b, c] complete, REDACTED
+|_|_|_Input: evaluated samples source=1, contiguous, REDACTED
+|_|_|_]_|
+|_|_|_SeriesRepartitionExec REDACTED
+|_|_|_FusedSeriesExec: (output: series_frame) REDACTED
+|_|_|_native_tree=[_|
+|_|_|_Window: rate [120000ms] offset 0 anchor - on grid 1752591864000/30000x11, REDACTED
+|_|_|_Input: raw samples source=0, contiguous, REDACTED
+|_|_|_]_|
+|_|_|_MergeScanExec: REDACTED
+|_|_|_SeriesRepartitionExec REDACTED
+|_|_|_FusedSeriesExec: (output: series_frame) REDACTED
+|_|_|_native_tree=[_|
+|_|_|_Window: rate [120000ms] offset 0 anchor - on grid 1752591864000/30000x11, REDACTED
+|_|_|_Input: raw samples source=0, contiguous, REDACTED
+|_|_|_]_|
+|_|_|_MergeScanExec: REDACTED
+|_|_|_|
+| 1_| 0_|_SeriesRepartitionExec REDACTED
+|_|_|_RawSeriesSourceExec REDACTED
+|_|_|_CooperativeExec REDACTED
+|_|_|_SeriesScanExec: source=primary_key, fields=1, partitions=4 REDACTED
+|_|_|_|
+| 1_| 1_|_SeriesRepartitionExec REDACTED
+|_|_|_RawSeriesSourceExec REDACTED
+|_|_|_CooperativeExec REDACTED
+|_|_|_SeriesScanExec: source=primary_key, fields=1, partitions=4 REDACTED
+|_|_|_|
+| 1_| 0_|_SeriesRepartitionExec REDACTED
+|_|_|_RawSeriesSourceExec REDACTED
+|_|_|_CooperativeExec REDACTED
+|_|_|_SeriesScanExec: source=primary_key, fields=1, partitions=4 REDACTED
+|_|_|_|
+| 1_| 1_|_SeriesRepartitionExec REDACTED
+|_|_|_RawSeriesSourceExec REDACTED
+|_|_|_CooperativeExec REDACTED
+|_|_|_SeriesScanExec: source=primary_key, fields=1, partitions=4 REDACTED
+|_|_|_|
+|_|_| Total rows: 8_|
++-+-+-+
+
+-- Case 7: aggregate without sort should be pushed down. This one push down for include all partition columns.
+TRUNCATE TABLE aggr_optimize_not;
+
+Affected Rows: 0
+
+TRUNCATE TABLE aggr_optimize_not_count;
+
+Affected Rows: 0
+
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE (Hash.*) REDACTED
+EXPLAIN
+SELECT
+  min(greptime_value)
+FROM
+  aggr_optimize_not
+GROUP BY
+  a,
+  b,
+  c;
+
++---------------+----------------------------------------------------------------------------------------------------------------------------------------+
+| plan_type     | plan                                                                                                                                   |
++---------------+----------------------------------------------------------------------------------------------------------------------------------------+
+| logical_plan  | MergeScan [is_placeholder=false, remote_input=[                                                                                        |
+|               | Projection: min(aggr_optimize_not.greptime_value)                                                                                      |
+|               |   Aggregate: groupBy=[[aggr_optimize_not.a, aggr_optimize_not.b, aggr_optimize_not.c]], aggr=[[min(aggr_optimize_not.greptime_value)]] |
+|               |     TableScan: aggr_optimize_not                                                                                                       |
+|               | ]]                                                                                                                                     |
+| physical_plan | CooperativeExec                                                                                                                        |
+|               |   MergeScanExec: REDACTED
+|               |                                                                                                                                        |
++---------------+----------------------------------------------------------------------------------------------------------------------------------------+
+
+-- SQLNESS REPLACE (metrics.*) REDACTED
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (Hash.*) REDACTED
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE \\?"(dyn_filters|time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
+EXPLAIN ANALYZE
+SELECT
+  min(greptime_value)
+FROM
+  aggr_optimize_not
+GROUP BY
+  a,
+  b,
+  c;
+
++-+-+-+
+| stage | node | plan_|
++-+-+-+
+| 0_| 0_|_CooperativeExec REDACTED
+|_|_|_MergeScanExec: REDACTED
+|_|_|_|
+| 1_| 0_|_ProjectionExec: expr=[min(aggr_optimize_not.greptime_value)@3 as min(aggr_optimize_not.greptime_value)] REDACTED
+|_|_|_AggregateExec: mode=FinalPartitioned, gby=[a@0 as a, b@1 as b, c@2 as c], aggr=[min(aggr_optimize_not.greptime_value)] REDACTED
+|_|_|_RepartitionExec: partitioning=REDACTED
+|_|_|_AggregateExec: mode=Partial, gby=[a@0 as a, b@1 as b, c@2 as c], aggr=[min(aggr_optimize_not.greptime_value)] REDACTED
+|_|_|_SeqScan: region=REDACTED, "partition_count":{"count":0, "mem_ranges":0, "files":0, "file_ranges":0}, "projection": ["a", "b", "c", "greptime_value"], "filters": ["a < Utf8(\"b\") OR a IS NULL"], "time_range":REDACTED
+|_|_|_|
+| 1_| 1_|_ProjectionExec: expr=[min(aggr_optimize_not.greptime_value)@3 as min(aggr_optimize_not.greptime_value)] REDACTED
+|_|_|_AggregateExec: mode=FinalPartitioned, gby=[a@0 as a, b@1 as b, c@2 as c], aggr=[min(aggr_optimize_not.greptime_value)] REDACTED
+|_|_|_RepartitionExec: partitioning=REDACTED
+|_|_|_AggregateExec: mode=Partial, gby=[a@0 as a, b@1 as b, c@2 as c], aggr=[min(aggr_optimize_not.greptime_value)] REDACTED
+|_|_|_SeqScan: region=REDACTED, "partition_count":{"count":0, "mem_ranges":0, "files":0, "file_ranges":0}, "projection": ["a", "b", "c", "greptime_value"], "filters": ["a >= Utf8(\"b\")"], "time_range":REDACTED
+|_|_|_|
+|_|_| Total rows: 0_|
++-+-+-+
+
+-- Case 8: aggregate without sort should be pushed down. This one push down for include all partition columns then some
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE (Hash.*) REDACTED
+EXPLAIN
+SELECT
+  min(greptime_value)
+FROM
+  aggr_optimize_not
+GROUP BY
+  a,
+  b,
+  c,
+  d;
+
++---------------+-------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| plan_type     | plan                                                                                                                                                        |
++---------------+-------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| logical_plan  | MergeScan [is_placeholder=false, remote_input=[                                                                                                             |
+|               | Projection: min(aggr_optimize_not.greptime_value)                                                                                                           |
+|               |   Aggregate: groupBy=[[aggr_optimize_not.a, aggr_optimize_not.b, aggr_optimize_not.c, aggr_optimize_not.d]], aggr=[[min(aggr_optimize_not.greptime_value)]] |
+|               |     TableScan: aggr_optimize_not                                                                                                                            |
+|               | ]]                                                                                                                                                          |
+| physical_plan | CooperativeExec                                                                                                                                             |
+|               |   MergeScanExec: REDACTED
+|               |                                                                                                                                                             |
++---------------+-------------------------------------------------------------------------------------------------------------------------------------------------------------+
+
+-- SQLNESS REPLACE (metrics.*) REDACTED
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (Hash.*) REDACTED
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE \\?"(dyn_filters|time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
+EXPLAIN ANALYZE
+SELECT
+  min(greptime_value)
+FROM
+  aggr_optimize_not
+GROUP BY
+  a,
+  b,
+  c,
+  d;
+
++-+-+-+
+| stage | node | plan_|
++-+-+-+
+| 0_| 0_|_CooperativeExec REDACTED
+|_|_|_MergeScanExec: REDACTED
+|_|_|_|
+| 1_| 0_|_ProjectionExec: expr=[min(aggr_optimize_not.greptime_value)@4 as min(aggr_optimize_not.greptime_value)] REDACTED
+|_|_|_AggregateExec: mode=FinalPartitioned, gby=[a@0 as a, b@1 as b, c@2 as c, d@3 as d], aggr=[min(aggr_optimize_not.greptime_value)] REDACTED
+|_|_|_RepartitionExec: partitioning=REDACTED
+|_|_|_AggregateExec: mode=Partial, gby=[a@0 as a, b@1 as b, c@2 as c, d@3 as d], aggr=[min(aggr_optimize_not.greptime_value)] REDACTED
+|_|_|_SeqScan: region=REDACTED, "partition_count":{"count":0, "mem_ranges":0, "files":0, "file_ranges":0}, "projection": ["a", "b", "c", "d", "greptime_value"], "filters": ["a < Utf8(\"b\") OR a IS NULL"], "time_range":REDACTED
+|_|_|_|
+| 1_| 1_|_ProjectionExec: expr=[min(aggr_optimize_not.greptime_value)@4 as min(aggr_optimize_not.greptime_value)] REDACTED
+|_|_|_AggregateExec: mode=FinalPartitioned, gby=[a@0 as a, b@1 as b, c@2 as c, d@3 as d], aggr=[min(aggr_optimize_not.greptime_value)] REDACTED
+|_|_|_RepartitionExec: partitioning=REDACTED
+|_|_|_AggregateExec: mode=Partial, gby=[a@0 as a, b@1 as b, c@2 as c, d@3 as d], aggr=[min(aggr_optimize_not.greptime_value)] REDACTED
+|_|_|_SeqScan: region=REDACTED, "partition_count":{"count":0, "mem_ranges":0, "files":0, "file_ranges":0}, "projection": ["a", "b", "c", "d", "greptime_value"], "filters": ["a >= Utf8(\"b\")"], "time_range":REDACTED
+|_|_|_|
+|_|_| Total rows: 0_|
++-+-+-+
+
+-- Case 9: aggregate without sort should be pushed down. This one push down for step aggr push down.
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE (Hash.*) REDACTED
+EXPLAIN
+SELECT
+  min(greptime_value)
+FROM
+  aggr_optimize_not
+GROUP BY
+  a,
+  b;
+
++---------------+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| plan_type     | plan                                                                                                                                                                            |
++---------------+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| logical_plan  | Projection: min(aggr_optimize_not.greptime_value)                                                                                                                               |
+|               |   Aggregate: groupBy=[[aggr_optimize_not.a, aggr_optimize_not.b]], aggr=[[__min_merge(__min_state(aggr_optimize_not.greptime_value)) AS min(aggr_optimize_not.greptime_value)]] |
+|               |     MergeScan [is_placeholder=false, remote_input=[                                                                                                                             |
+|               | Aggregate: groupBy=[[aggr_optimize_not.a, aggr_optimize_not.b]], aggr=[[__min_state(aggr_optimize_not.greptime_value)]]                                                         |
+|               |   TableScan: aggr_optimize_not                                                                                                                                                  |
+|               | ]]                                                                                                                                                                              |
+| physical_plan | ProjectionExec: expr=[min(aggr_optimize_not.greptime_value)@2 as min(aggr_optimize_not.greptime_value)]                                                                         |
+|               |   AggregateExec: mode=FinalPartitioned, gby=[a@0 as a, b@1 as b], aggr=[__min_merge(__min_state(aggr_optimize_not.greptime_value)) as min(aggr_optimize_not.greptime_value)]    |
+|               |     RepartitionExec: partitioning=REDACTED
+|               |       AggregateExec: mode=Partial, gby=[a@0 as a, b@1 as b], aggr=[__min_merge(__min_state(aggr_optimize_not.greptime_value)) as min(aggr_optimize_not.greptime_value)]         |
+|               |         RepartitionExec: partitioning=REDACTED
+|               |           MergeScanExec: REDACTED
+|               |                                                                                                                                                                                 |
++---------------+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+
+-- SQLNESS REPLACE (metrics.*) REDACTED
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (Hash.*) REDACTED
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE \\?"(dyn_filters|time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
+EXPLAIN ANALYZE
+SELECT
+  min(greptime_value)
+FROM
+  aggr_optimize_not
+GROUP BY
+  a,
+  b;
+
++-+-+-+
+| stage | node | plan_|
++-+-+-+
+| 0_| 0_|_ProjectionExec: expr=[min(aggr_optimize_not.greptime_value)@2 as min(aggr_optimize_not.greptime_value)] REDACTED
+|_|_|_AggregateExec: mode=FinalPartitioned, gby=[a@0 as a, b@1 as b], aggr=[__min_merge(__min_state(aggr_optimize_not.greptime_value)) as min(aggr_optimize_not.greptime_value)] REDACTED
+|_|_|_RepartitionExec: partitioning=REDACTED
+|_|_|_AggregateExec: mode=Partial, gby=[a@0 as a, b@1 as b], aggr=[__min_merge(__min_state(aggr_optimize_not.greptime_value)) as min(aggr_optimize_not.greptime_value)] REDACTED
+|_|_|_RepartitionExec: partitioning=REDACTED
+|_|_|_MergeScanExec: REDACTED
+|_|_|_|
+| 1_| 0_|_AggregateExec: mode=FinalPartitioned, gby=[a@0 as a, b@1 as b], aggr=[__min_state(aggr_optimize_not.greptime_value)] REDACTED
+|_|_|_RepartitionExec: partitioning=REDACTED
+|_|_|_AggregateExec: mode=Partial, gby=[a@0 as a, b@1 as b], aggr=[__min_state(aggr_optimize_not.greptime_value)] REDACTED
+|_|_|_SeqScan: region=REDACTED, "partition_count":{"count":0, "mem_ranges":0, "files":0, "file_ranges":0}, "projection": ["a", "b", "greptime_value"], "filters": ["a < Utf8(\"b\") OR a IS NULL"], "time_range":REDACTED
+|_|_|_|
+| 1_| 1_|_AggregateExec: mode=FinalPartitioned, gby=[a@0 as a, b@1 as b], aggr=[__min_state(aggr_optimize_not.greptime_value)] REDACTED
+|_|_|_RepartitionExec: partitioning=REDACTED
+|_|_|_AggregateExec: mode=Partial, gby=[a@0 as a, b@1 as b], aggr=[__min_state(aggr_optimize_not.greptime_value)] REDACTED
+|_|_|_SeqScan: region=REDACTED, "partition_count":{"count":0, "mem_ranges":0, "files":0, "file_ranges":0}, "projection": ["a", "b", "greptime_value"], "filters": ["a >= Utf8(\"b\")"], "time_range":REDACTED
+|_|_|_|
+|_|_| Total rows: 0_|
++-+-+-+
+
+-- Case 10: aggregate without sort should be pushed down. This one push down for step aggr push down with complex aggr
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE (Hash.*) REDACTED
+EXPLAIN
+SELECT
+  min(greptime_value) + max(greptime_value)
+FROM
+  aggr_optimize_not
+GROUP BY
+  a,
+  b;
+
++---------------+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| plan_type     | plan                                                                                                                                                                                                                                                                                 |
++---------------+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| logical_plan  | Projection: min(aggr_optimize_not.greptime_value) + max(aggr_optimize_not.greptime_value)                                                                                                                                                                                            |
+|               |   Aggregate: groupBy=[[aggr_optimize_not.a, aggr_optimize_not.b]], aggr=[[__min_merge(__min_state(aggr_optimize_not.greptime_value)) AS min(aggr_optimize_not.greptime_value), __max_merge(__max_state(aggr_optimize_not.greptime_value)) AS max(aggr_optimize_not.greptime_value)]] |
+|               |     MergeScan [is_placeholder=false, remote_input=[                                                                                                                                                                                                                                  |
+|               | Aggregate: groupBy=[[aggr_optimize_not.a, aggr_optimize_not.b]], aggr=[[__min_state(aggr_optimize_not.greptime_value), __max_state(aggr_optimize_not.greptime_value)]]                                                                                                               |
+|               |   TableScan: aggr_optimize_not                                                                                                                                                                                                                                                       |
+|               | ]]                                                                                                                                                                                                                                                                                   |
+| physical_plan | ProjectionExec: expr=[min(aggr_optimize_not.greptime_value)@2 + max(aggr_optimize_not.greptime_value)@3 as min(aggr_optimize_not.greptime_value) + max(aggr_optimize_not.greptime_value)]                                                                                            |
+|               |   AggregateExec: mode=FinalPartitioned, gby=[a@0 as a, b@1 as b], aggr=[__min_merge(__min_state(aggr_optimize_not.greptime_value)) as min(aggr_optimize_not.greptime_value), __max_merge(__max_state(aggr_optimize_not.greptime_value)) as max(aggr_optimize_not.greptime_value)]    |
+|               |     RepartitionExec: partitioning=REDACTED
+|               |       AggregateExec: mode=Partial, gby=[a@0 as a, b@1 as b], aggr=[__min_merge(__min_state(aggr_optimize_not.greptime_value)) as min(aggr_optimize_not.greptime_value), __max_merge(__max_state(aggr_optimize_not.greptime_value)) as max(aggr_optimize_not.greptime_value)]         |
+|               |         RepartitionExec: partitioning=REDACTED
+|               |           MergeScanExec: REDACTED
+|               |                                                                                                                                                                                                                                                                                      |
++---------------+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+
+-- SQLNESS REPLACE (metrics.*) REDACTED
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (Hash.*) REDACTED
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE \\?"(dyn_filters|time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
+EXPLAIN ANALYZE
+SELECT
+  min(greptime_value) + max(greptime_value)
+FROM
+  aggr_optimize_not
+GROUP BY
+  a,
+  b;
+
++-+-+-+
+| stage | node | plan_|
++-+-+-+
+| 0_| 0_|_ProjectionExec: expr=[min(aggr_optimize_not.greptime_value)@2 + max(aggr_optimize_not.greptime_value)@3 as min(aggr_optimize_not.greptime_value) + max(aggr_optimize_not.greptime_value)] REDACTED
+|_|_|_AggregateExec: mode=FinalPartitioned, gby=[a@0 as a, b@1 as b], aggr=[__min_merge(__min_state(aggr_optimize_not.greptime_value)) as min(aggr_optimize_not.greptime_value), __max_merge(__max_state(aggr_optimize_not.greptime_value)) as max(aggr_optimize_not.greptime_value)] REDACTED
+|_|_|_RepartitionExec: partitioning=REDACTED
+|_|_|_AggregateExec: mode=Partial, gby=[a@0 as a, b@1 as b], aggr=[__min_merge(__min_state(aggr_optimize_not.greptime_value)) as min(aggr_optimize_not.greptime_value), __max_merge(__max_state(aggr_optimize_not.greptime_value)) as max(aggr_optimize_not.greptime_value)] REDACTED
+|_|_|_RepartitionExec: partitioning=REDACTED
+|_|_|_MergeScanExec: REDACTED
+|_|_|_|
+| 1_| 0_|_AggregateExec: mode=FinalPartitioned, gby=[a@0 as a, b@1 as b], aggr=[__min_state(aggr_optimize_not.greptime_value), __max_state(aggr_optimize_not.greptime_value)] REDACTED
+|_|_|_RepartitionExec: partitioning=REDACTED
+|_|_|_AggregateExec: mode=Partial, gby=[a@0 as a, b@1 as b], aggr=[__min_state(aggr_optimize_not.greptime_value), __max_state(aggr_optimize_not.greptime_value)] REDACTED
+|_|_|_SeqScan: region=REDACTED, "partition_count":{"count":0, "mem_ranges":0, "files":0, "file_ranges":0}, "projection": ["a", "b", "greptime_value"], "filters": ["a < Utf8(\"b\") OR a IS NULL"], "time_range":REDACTED
+|_|_|_|
+| 1_| 1_|_AggregateExec: mode=FinalPartitioned, gby=[a@0 as a, b@1 as b], aggr=[__min_state(aggr_optimize_not.greptime_value), __max_state(aggr_optimize_not.greptime_value)] REDACTED
+|_|_|_RepartitionExec: partitioning=REDACTED
+|_|_|_AggregateExec: mode=Partial, gby=[a@0 as a, b@1 as b], aggr=[__min_state(aggr_optimize_not.greptime_value), __max_state(aggr_optimize_not.greptime_value)] REDACTED
+|_|_|_SeqScan: region=REDACTED, "partition_count":{"count":0, "mem_ranges":0, "files":0, "file_ranges":0}, "projection": ["a", "b", "greptime_value"], "filters": ["a >= Utf8(\"b\")"], "time_range":REDACTED
+|_|_|_|
+|_|_| Total rows: 0_|
++-+-+-+
+
+-- Case 11: aggregate with subquery
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE (Hash.*) REDACTED
+EXPLAIN
+SELECT
+  a,
+  min(greptime_value)
+FROM
+  (
+    SELECT
+      a,
+      b,
+      greptime_value
+    FROM
+      aggr_optimize_not
+    ORDER BY
+      a,
+      b
+  )
+GROUP BY
+  a;
+
++---------------+------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| plan_type     | plan                                                                                                                                                             |
++---------------+------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| logical_plan  | Aggregate: groupBy=[[aggr_optimize_not.a]], aggr=[[__min_merge(__min_state(aggr_optimize_not.greptime_value)) AS min(aggr_optimize_not.greptime_value)]]         |
+|               |   MergeScan [is_placeholder=false, remote_input=[                                                                                                                |
+|               | Aggregate: groupBy=[[aggr_optimize_not.a]], aggr=[[__min_state(aggr_optimize_not.greptime_value)]]                                                               |
+|               |   Projection: aggr_optimize_not.a, aggr_optimize_not.b, aggr_optimize_not.greptime_value                                                                         |
+|               |     TableScan: aggr_optimize_not                                                                                                                                 |
+|               | ]]                                                                                                                                                               |
+| physical_plan | AggregateExec: mode=FinalPartitioned, gby=[a@0 as a], aggr=[__min_merge(__min_state(aggr_optimize_not.greptime_value)) as min(aggr_optimize_not.greptime_value)] |
+|               |   RepartitionExec: partitioning=REDACTED
+|               |     AggregateExec: mode=Partial, gby=[a@0 as a], aggr=[__min_merge(__min_state(aggr_optimize_not.greptime_value)) as min(aggr_optimize_not.greptime_value)]      |
+|               |       RepartitionExec: partitioning=REDACTED
+|               |         MergeScanExec: REDACTED
+|               |                                                                                                                                                                  |
++---------------+------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+
+-- SQLNESS REPLACE (metrics.*) REDACTED
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (Hash.*) REDACTED
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE \\?"(dyn_filters|time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
+EXPLAIN ANALYZE
+SELECT
+  a,
+  min(greptime_value)
+FROM
+  (
+    SELECT
+      a,
+      b,
+      greptime_value
+    FROM
+      aggr_optimize_not
+    ORDER BY
+      a,
+      b
+  )
+GROUP BY
+  a;
+
++-+-+-+
+| stage | node | plan_|
++-+-+-+
+| 0_| 0_|_AggregateExec: mode=FinalPartitioned, gby=[a@0 as a], aggr=[__min_merge(__min_state(aggr_optimize_not.greptime_value)) as min(aggr_optimize_not.greptime_value)] REDACTED
+|_|_|_RepartitionExec: partitioning=REDACTED
+|_|_|_AggregateExec: mode=Partial, gby=[a@0 as a], aggr=[__min_merge(__min_state(aggr_optimize_not.greptime_value)) as min(aggr_optimize_not.greptime_value)] REDACTED
+|_|_|_RepartitionExec: partitioning=REDACTED
+|_|_|_MergeScanExec: REDACTED
+|_|_|_|
+| 1_| 0_|_AggregateExec: mode=FinalPartitioned, gby=[a@0 as a], aggr=[__min_state(aggr_optimize_not.greptime_value)] REDACTED
+|_|_|_RepartitionExec: partitioning=REDACTED
+|_|_|_AggregateExec: mode=Partial, gby=[a@0 as a], aggr=[__min_state(aggr_optimize_not.greptime_value)] REDACTED
+|_|_|_SeqScan: region=REDACTED, "partition_count":{"count":0, "mem_ranges":0, "files":0, "file_ranges":0}, "projection": ["a", "greptime_value"], "filters": ["a < Utf8(\"b\") OR a IS NULL"], "time_range":REDACTED
+|_|_|_|
+| 1_| 1_|_AggregateExec: mode=FinalPartitioned, gby=[a@0 as a], aggr=[__min_state(aggr_optimize_not.greptime_value)] REDACTED
+|_|_|_RepartitionExec: partitioning=REDACTED
+|_|_|_AggregateExec: mode=Partial, gby=[a@0 as a], aggr=[__min_state(aggr_optimize_not.greptime_value)] REDACTED
+|_|_|_SeqScan: region=REDACTED, "partition_count":{"count":0, "mem_ranges":0, "files":0, "file_ranges":0}, "projection": ["a", "greptime_value"], "filters": ["a >= Utf8(\"b\")"], "time_range":REDACTED
+|_|_|_|
+|_|_| Total rows: 0_|
++-+-+-+
+
+drop table aggr_optimize_not_count;
+
+Affected Rows: 0
+
+drop table aggr_optimize_not;
+
+Affected Rows: 0
+
+--
+-- Additional test cases for step aggregation pushdown
+--
+CREATE TABLE step_aggr_extended (
+    pk_col_1 STRING,
+    pk_col_2 BIGINT,
+    val_col_1 BIGINT,
+    val_col_2 STRING,
+    val_col_3 BIGINT,
+    ts TIMESTAMP TIME INDEX,
+    PRIMARY KEY(pk_col_1, pk_col_2)
+) PARTITION ON COLUMNS (pk_col_1) (
+    pk_col_1 < 'f',
+    pk_col_1 >= 'f'
+);
+
+Affected Rows: 0
+
+INSERT INTO step_aggr_extended VALUES
+    ('a', 1, 100, 'v1', 10, 1672531200000),
+    ('a', 2, 200, 'v2', NULL, 1672531201000),
+    ('g', 1, 300, 'v1', 30, 1672531202000),
+    ('g', 2, 400, 'v2', 40, 1672531203000),
+    ('a', 3, 100, 'v3', 10, 1672531204000),
+    ('g', 3, 300, 'v3', 30, 1672531205000),
+    ('h', 4, 500, NULL, 50, 1672531206000);
+
+Affected Rows: 7
+
+-- Case 12: GROUP BY includes a mix of partition key and non-partition key.
+-- `pk_col_1` is a partition key, `pk_col_2` is not.
+-- This should pushdown entire aggregation to datanodes since it's partitioned by `pk_col_1`.
+-- Expected: Full pushdown of aggregation to datanodes.
+SELECT pk_col_1, pk_col_2, sum(val_col_1) FROM step_aggr_extended GROUP BY pk_col_1, pk_col_2 ORDER BY pk_col_1, pk_col_2;
+
++----------+----------+-----------------------------------+
+| pk_col_1 | pk_col_2 | sum(step_aggr_extended.val_col_1) |
++----------+----------+-----------------------------------+
+| a        | 1        | 100                               |
+| a        | 2        | 200                               |
+| a        | 3        | 100                               |
+| g        | 1        | 300                               |
+| g        | 2        | 400                               |
+| g        | 3        | 300                               |
+| h        | 4        | 500                               |
++----------+----------+-----------------------------------+
+
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE (Hash.*) REDACTED
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+EXPLAIN SELECT pk_col_1, pk_col_2, sum(val_col_1) FROM step_aggr_extended GROUP BY pk_col_1, pk_col_2 ORDER BY pk_col_1, pk_col_2;
+
++-+-+
+| plan_type_| plan_|
++-+-+
+| logical_plan_| MergeSort: step_aggr_extended.pk_col_1 ASC NULLS LAST, step_aggr_extended.pk_col_2 ASC NULLS LAST_|
+|_|_MergeScan [is_placeholder=false, remote_input=[_|
+|_| Sort: step_aggr_extended.pk_col_1 ASC NULLS LAST, step_aggr_extended.pk_col_2 ASC NULLS LAST_|
+|_|_Projection: step_aggr_extended.pk_col_1, step_aggr_extended.pk_col_2, sum(step_aggr_extended.val_col_1)_|
+|_|_Aggregate: groupBy=[[step_aggr_extended.pk_col_1, step_aggr_extended.pk_col_2]], aggr=[[sum(step_aggr_extended.val_col_1)]] |
+|_|_TableScan: step_aggr_extended_|
+|_| ]]_|
+| physical_plan | MergeSortExec: [pk_col_1@0 ASC NULLS LAST, pk_col_2@1 ASC NULLS LAST]_|
+|_|_MergeScanExec: REDACTED
+|_|_|
++-+-+
+
+-- Case 13: COUNT(DISTINCT) aggregation.
+-- `DISTINCT` aggregation is more complex and requires a two-phase distinct calculation in a distributed environment. Currently not supported for pushdown.
+-- Expected: datanode only do table scan, actual aggregation happens on frontend.
+SELECT COUNT(DISTINCT val_col_1) FROM step_aggr_extended;
+
++----------------------------------------------+
+| count(DISTINCT step_aggr_extended.val_col_1) |
++----------------------------------------------+
+| 5                                            |
++----------------------------------------------+
+
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE (Hash.*) REDACTED
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+EXPLAIN SELECT COUNT(DISTINCT val_col_1) FROM step_aggr_extended;
+
++-+-+
+| plan_type_| plan_|
++-+-+
+| logical_plan_| Projection: count(alias1) AS count(DISTINCT step_aggr_extended.val_col_1)_|
+|_|_Aggregate: groupBy=[[]], aggr=[[count(alias1)]]_|
+|_|_Aggregate: groupBy=[[step_aggr_extended.val_col_1 AS alias1]], aggr=[[]]_|
+|_|_MergeScan [is_placeholder=false, remote_input=[_|
+|_| Projection: step_aggr_extended.val_col_1_|
+|_|_TableScan: step_aggr_extended_|
+|_| ]]_|
+| physical_plan | ProjectionExec: expr=[count(alias1)@0 as count(DISTINCT step_aggr_extended.val_col_1)]_|
+|_|_AggregateExec: mode=Final, gby=[], aggr=[count(alias1)]_|
+|_|_CoalescePartitionsExec_|
+|_|_AggregateExec: mode=Partial, gby=[], aggr=[count(alias1)]_|
+|_|_AggregateExec: mode=FinalPartitioned, gby=[alias1@0 as alias1], aggr=[]_|
+|_|_RepartitionExec: partitioning=REDACTED
+|_|_AggregateExec: mode=Partial, gby=[val_col_1@0 as alias1], aggr=[]_|
+|_|_RepartitionExec: partitioning=REDACTED
+|_|_MergeScanExec: REDACTED
+|_|_|
++-+-+
+
+-- Case 14: Aggregation with a HAVING clause.
+-- The `HAVING` clause filters results after aggregation.
+-- Expected: The `HAVING` filter should be applied on the frontend after the final aggregation is complete, not pushed down to datanodes.
+SELECT pk_col_2, sum(val_col_1) FROM step_aggr_extended GROUP BY pk_col_2 HAVING sum(val_col_1) > 300 ORDER BY pk_col_2;
+
++----------+-----------------------------------+
+| pk_col_2 | sum(step_aggr_extended.val_col_1) |
++----------+-----------------------------------+
+| 1        | 400                               |
+| 2        | 600                               |
+| 3        | 400                               |
+| 4        | 500                               |
++----------+-----------------------------------+
+
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE (Hash.*) REDACTED
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+EXPLAIN SELECT pk_col_2, sum(val_col_1) FROM step_aggr_extended GROUP BY pk_col_2 HAVING sum(val_col_1) > 300 ORDER BY pk_col_2;
+
++-+-+
+| plan_type_| plan_|
++-+-+
+| logical_plan_| Sort: step_aggr_extended.pk_col_2 ASC NULLS LAST_|
+|_|_Filter: sum(step_aggr_extended.val_col_1) > Int64(300)_|
+|_|_Aggregate: groupBy=[[step_aggr_extended.pk_col_2]], aggr=[[__sum_merge(__sum_state(step_aggr_extended.val_col_1)) AS sum(step_aggr_extended.val_col_1)]]_|
+|_|_MergeScan [is_placeholder=false, remote_input=[_|
+|_| Aggregate: groupBy=[[step_aggr_extended.pk_col_2]], aggr=[[__sum_state(step_aggr_extended.val_col_1)]]_|
+|_|_TableScan: step_aggr_extended_|
+|_| ]]_|
+| physical_plan | SortPreservingMergeExec: [pk_col_2@0 ASC NULLS LAST]_|
+|_|_SortExec: expr=[pk_col_2@0 ASC NULLS LAST], preserve_partitioning=[true]_|
+|_|_FilterExec: sum(step_aggr_extended.val_col_1)@1 > 300_|
+|_|_AggregateExec: mode=FinalPartitioned, gby=[pk_col_2@0 as pk_col_2], aggr=[__sum_merge(__sum_state(step_aggr_extended.val_col_1)) as sum(step_aggr_extended.val_col_1)] |
+|_|_RepartitionExec: partitioning=REDACTED
+|_|_AggregateExec: mode=Partial, gby=[pk_col_2@0 as pk_col_2], aggr=[__sum_merge(__sum_state(step_aggr_extended.val_col_1)) as sum(step_aggr_extended.val_col_1)]_|
+|_|_RepartitionExec: partitioning=REDACTED
+|_|_MergeScanExec: REDACTED
+|_|_|
++-+-+
+
+-- Case 15: Aggregation on a column with NULL values.
+-- `SUM` should ignore NULLs. `COUNT(val_col_2)` should count non-nulls, `COUNT(*)` should count all rows.
+-- Expected: Correct aggregation results, proving NULLs are handled properly in a distributed context.
+SELECT SUM(val_col_3), COUNT(val_col_2), COUNT(val_col_3), COUNT(*) FROM step_aggr_extended;
+
++-----------------------------------+-------------------------------------+-------------------------------------+----------+
+| sum(step_aggr_extended.val_col_3) | count(step_aggr_extended.val_col_2) | count(step_aggr_extended.val_col_3) | count(*) |
++-----------------------------------+-------------------------------------+-------------------------------------+----------+
+| 170                               | 6                                   | 6                                   | 7        |
++-----------------------------------+-------------------------------------+-------------------------------------+----------+
+
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE (Hash.*) REDACTED
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+EXPLAIN SELECT SUM(val_col_3), COUNT(val_col_2), COUNT(val_col_3), COUNT(*) FROM step_aggr_extended;
+
++-+-+
+| plan_type_| plan_|
++-+-+
+| logical_plan_| Projection: sum(step_aggr_extended.val_col_3), count(step_aggr_extended.val_col_2), count(step_aggr_extended.val_col_3), count(Int64(1)) AS count(*)_|
+|_|_Aggregate: groupBy=[[]], aggr=[[__sum_merge(__sum_state(step_aggr_extended.val_col_3)) AS sum(step_aggr_extended.val_col_3), __count_merge(__count_state(step_aggr_extended.val_col_2)) AS count(step_aggr_extended.val_col_2), __count_merge(__count_state(step_aggr_extended.val_col_3)) AS count(step_aggr_extended.val_col_3), __count_merge(__count_state(step_aggr_extended.ts)) AS count(Int64(1))]]_|
+|_|_MergeScan [is_placeholder=false, remote_input=[_|
+|_| Aggregate: groupBy=[[]], aggr=[[__sum_state(step_aggr_extended.val_col_3), __count_state(step_aggr_extended.val_col_2), __count_state(step_aggr_extended.val_col_3), __count_state(step_aggr_extended.ts)]]_|
+|_|_TableScan: step_aggr_extended_|
+|_| ]]_|
+| physical_plan | ProjectionExec: expr=[sum(step_aggr_extended.val_col_3)@0 as sum(step_aggr_extended.val_col_3), count(step_aggr_extended.val_col_2)@1 as count(step_aggr_extended.val_col_2), count(step_aggr_extended.val_col_3)@2 as count(step_aggr_extended.val_col_3), count(Int64(1))@3 as count(*)]_|
+|_|_AggregateExec: mode=Final, gby=[], aggr=[__sum_merge(__sum_state(step_aggr_extended.val_col_3)) as sum(step_aggr_extended.val_col_3), __count_merge(__count_state(step_aggr_extended.val_col_2)) as count(step_aggr_extended.val_col_2), __count_merge(__count_state(step_aggr_extended.val_col_3)) as count(step_aggr_extended.val_col_3), __count_merge(__count_state(step_aggr_extended.ts)) as count(Int64(1))]_|
+|_|_CoalescePartitionsExec_|
+|_|_AggregateExec: mode=Partial, gby=[], aggr=[__sum_merge(__sum_state(step_aggr_extended.val_col_3)) as sum(step_aggr_extended.val_col_3), __count_merge(__count_state(step_aggr_extended.val_col_2)) as count(step_aggr_extended.val_col_2), __count_merge(__count_state(step_aggr_extended.val_col_3)) as count(step_aggr_extended.val_col_3), __count_merge(__count_state(step_aggr_extended.ts)) as count(Int64(1))] |
+|_|_RepartitionExec: partitioning=REDACTED
+|_|_MergeScanExec: REDACTED
+|_|_|
++-+-+
+
+-- Case 16: Aggregation on STRING columns.
+-- `MIN` and `MAX` can operate on strings.
+-- Expected: Correct lexicographical min/max results.
+SELECT MIN(pk_col_1), MAX(val_col_2) FROM step_aggr_extended;
+
++----------------------------------+-----------------------------------+
+| min(step_aggr_extended.pk_col_1) | max(step_aggr_extended.val_col_2) |
++----------------------------------+-----------------------------------+
+| a                                | v3                                |
++----------------------------------+-----------------------------------+
+
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE (Hash.*) REDACTED
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+EXPLAIN SELECT MIN(pk_col_1), MAX(val_col_2) FROM step_aggr_extended;
+
++-+-+
+| plan_type_| plan_|
++-+-+
+| logical_plan_| Aggregate: groupBy=[[]], aggr=[[__min_merge(__min_state(step_aggr_extended.pk_col_1)) AS min(step_aggr_extended.pk_col_1), __max_merge(__max_state(step_aggr_extended.val_col_2)) AS max(step_aggr_extended.val_col_2)]]_|
+|_|_MergeScan [is_placeholder=false, remote_input=[_|
+|_| Aggregate: groupBy=[[]], aggr=[[__min_state(CAST(step_aggr_extended.pk_col_1 AS Utf8)), __max_state(step_aggr_extended.val_col_2)]]_|
+|_|_TableScan: step_aggr_extended_|
+|_| ]]_|
+| physical_plan | AggregateExec: mode=Final, gby=[], aggr=[__min_merge(__min_state(step_aggr_extended.pk_col_1)) as min(step_aggr_extended.pk_col_1), __max_merge(__max_state(step_aggr_extended.val_col_2)) as max(step_aggr_extended.val_col_2)]_|
+|_|_CoalescePartitionsExec_|
+|_|_AggregateExec: mode=Partial, gby=[], aggr=[__min_merge(__min_state(step_aggr_extended.pk_col_1)) as min(step_aggr_extended.pk_col_1), __max_merge(__max_state(step_aggr_extended.val_col_2)) as max(step_aggr_extended.val_col_2)] |
+|_|_RepartitionExec: partitioning=REDACTED
+|_|_MergeScanExec: REDACTED
+|_|_|
++-+-+
+
+-- Case 17: Aggregation on an empty input set.
+-- `WHERE` clause filters out all rows.
+-- Expected: Aggregation should return correct default values (e.g., COUNT is 0, SUM is NULL).
+SELECT SUM(val_col_1), COUNT(*) FROM step_aggr_extended WHERE pk_col_1 = 'non_existent';
+
++-----------------------------------+----------+
+| sum(step_aggr_extended.val_col_1) | count(*) |
++-----------------------------------+----------+
+|                                   | 0        |
++-----------------------------------+----------+
+
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE (Hash.*) REDACTED
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+EXPLAIN SELECT SUM(val_col_1), COUNT(*) FROM step_aggr_extended WHERE pk_col_1 = 'non_existent';
+
++-+-+
+| plan_type_| plan_|
++-+-+
+| logical_plan_| Projection: sum(step_aggr_extended.val_col_1), count(Int64(1)) AS count(*)_|
+|_|_Aggregate: groupBy=[[]], aggr=[[__sum_merge(__sum_state(step_aggr_extended.val_col_1)) AS sum(step_aggr_extended.val_col_1), __count_merge(__count_state(step_aggr_extended.ts)) AS count(Int64(1))]]_|
+|_|_MergeScan [is_placeholder=false, remote_input=[_|
+|_| Aggregate: groupBy=[[]], aggr=[[__sum_state(step_aggr_extended.val_col_1), __count_state(step_aggr_extended.ts)]]_|
+|_|_Filter: step_aggr_extended.pk_col_1 = CAST(Utf8("non_existent") AS Dictionary(UInt32, Utf8))_|
+|_|_TableScan: step_aggr_extended, partial_filters=[step_aggr_extended.pk_col_1 = CAST(Utf8("non_existent") AS Dictionary(UInt32, Utf8))]_|
+|_| ]]_|
+| physical_plan | ProjectionExec: expr=[sum(step_aggr_extended.val_col_1)@0 as sum(step_aggr_extended.val_col_1), count(Int64(1))@1 as count(*)]_|
+|_|_AggregateExec: mode=Final, gby=[], aggr=[__sum_merge(__sum_state(step_aggr_extended.val_col_1)) as sum(step_aggr_extended.val_col_1), __count_merge(__count_state(step_aggr_extended.ts)) as count(Int64(1))]_|
+|_|_CoalescePartitionsExec_|
+|_|_AggregateExec: mode=Partial, gby=[], aggr=[__sum_merge(__sum_state(step_aggr_extended.val_col_1)) as sum(step_aggr_extended.val_col_1), __count_merge(__count_state(step_aggr_extended.ts)) as count(Int64(1))] |
+|_|_RepartitionExec: partitioning=REDACTED
+|_|_MergeScanExec: REDACTED
+|_|_|
++-+-+
+
+DROP TABLE step_aggr_extended;
+
+Affected Rows: 0
+

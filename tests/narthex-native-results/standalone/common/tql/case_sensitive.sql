@@ -1,0 +1,1 @@
+../../../../cases/standalone/common/tql/case_sensitive.sql

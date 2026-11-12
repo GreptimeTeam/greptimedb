@@ -1,0 +1,1 @@
+../../../cases/standalone/tql-explain-analyze/tsid_column.sql
