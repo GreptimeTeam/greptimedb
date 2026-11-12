@@ -23,7 +23,8 @@ use std::sync::Arc;
 use api::v1::region::RegionRequestHeader;
 use datafusion::arrow::array::{Array, ArrayRef, StringArray};
 use datafusion::execution::TaskContext;
-use datafusion::physical_expr::expressions::{Column, Literal, lit};
+use datafusion::physical_expr::expressions::{Column, InListExpr, Literal, lit};
+use datafusion::physical_expr::{conjunction, split_conjunction};
 use datafusion::physical_plan::joins::HashTableLookupExpr;
 use datafusion::physical_plan::{ExecutionPlan, PhysicalExpr};
 use datafusion_common::tree_node::{TreeNode, TreeNodeRecursion};
@@ -94,24 +95,38 @@ impl DynFilterPayload {
     ///
     /// The conversion is decided by the lookup alone (single-column `Utf8`, non-empty,
     /// `NULL`-free build keys — see [`HashTableLookupExpr::build_key_membership`]).
-    /// There is no analysis of where the lookup sits in the tree, and no per-node
-    /// substitution. If a lookup has no such key list (accessor limitation) or the
-    /// serialized predicate does not fit `max_payload_bytes`, the **whole payload**
-    /// falls back to `true`, which prunes nothing and can never drop a row the
-    /// producer would keep.
+    /// There is no per-node substitution, so nothing is ever rewritten in place.
+    ///
+    /// # Top-level conjunctive fallback
+    ///
+    /// If a lookup has no such key list (accessor limitation) or the serialized
+    /// predicate does not fit `max_payload_bytes`, the payload does **not** become the
+    /// whole `true` right away. [`split_conjunction`] splits the original expression,
+    /// and a top-level conjunct is retained only when its whole subtree is free of both
+    /// [`HashTableLookupExpr`] and [`InListExpr`]. Retained conjuncts are encoded again
+    /// under the same budget, and dropping an `AND` term can only widen a predicate, so
+    /// the result still never drops a row the producer would keep:
+    ///
+    /// - `bounds AND lookup` -> `bounds`;
+    /// - `bounds AND oversized IN (...)` -> `bounds`;
+    /// - `NOT lookup` -> `true` (the only conjunct carries the membership);
+    /// - `CASE` / `OR` over membership -> `true` (same reason: a membership is never
+    ///   rewritten inside `NOT`, `CASE` or `OR`, the whole conjunct is dropped).
+    ///
+    /// When no conjunct can be retained, or the retained ones still do not fit the
+    /// budget, the payload is the whole `true`, which prunes nothing and can never drop
+    /// a row the producer would keep.
     pub fn from_datafusion_expr(
         expr: &Arc<dyn PhysicalExpr>,
         max_payload_bytes: usize,
     ) -> DataFusionResult<Self> {
         match encode_bounded_physical_expr_to_bytes(expr, max_payload_bytes) {
             Ok(Some(bytes)) => Ok(Self::Datafusion(bytes)),
+            // The predicate cannot be shipped as it stands: either a lookup has no key
+            // list, or the frame does not fit the budget. Keep the widest *safe* part of
+            // the predicate instead of giving up on all of it.
             Ok(None) | Err(CommonQueryError::DynFilterPayloadTooLarge { .. }) => {
-                // Whole-payload fallback: no membership to ship, so ship the widest
-                // predicate there is instead of rewriting parts of the tree.
-                let bytes = encode_physical_expr_to_bytes(&lit(true))?;
-                validate_payload_size(bytes.len(), max_payload_bytes)
-                    .map_err(DataFusionError::from)?;
-                Ok(Self::Datafusion(bytes))
+                fall_back_to_retained_conjuncts(expr, max_payload_bytes)
             }
             Err(error) => Err(DataFusionError::from(error)),
         }
@@ -158,8 +173,9 @@ struct BoundedPhysicalExprEncoder {
     /// Set when a runtime lookup has no serializable key list.
     ///
     /// The encoder still writes a `true` placeholder so the tree stays well formed, but
-    /// the produced bytes are discarded: the caller replaces the **whole** payload with
-    /// `true` rather than rewriting individual nodes.
+    /// the produced bytes are discarded: the caller drops the membership-bearing
+    /// top-level conjuncts of the original expression instead of rewriting individual
+    /// nodes.
     unrepresentable: Cell<bool>,
 }
 
@@ -232,8 +248,8 @@ impl BoundedPhysicalExprEncoder {
     /// Encodes the `true` placeholder for a lookup without a key list.
     ///
     /// This is the same degradation DataFusion's own `try_to_proto` applies. It is only
-    /// ever used together with [`Self::unrepresentable`], which makes the caller drop
-    /// the whole encoded payload in favour of `true`.
+    /// ever used together with [`Self::unrepresentable`], which makes the caller discard
+    /// the whole encoded payload in favour of the membership-free top-level conjuncts.
     fn encode_true(
         &self,
         codec: &dyn PhysicalExtensionCodec,
@@ -296,7 +312,7 @@ impl PhysicalProtoConverterExtension for BoundedPhysicalExprEncoder {
 /// Encodes `expr` for the remote wire under `max_payload_bytes`.
 ///
 /// Returns `Ok(None)` when the predicate holds a lookup whose key list cannot be
-/// serialized, which the caller answers with the whole-payload `true` fallback.
+/// serialized, which the caller answers with the top-level conjunctive fallback.
 fn encode_bounded_physical_expr_to_bytes(
     expr: &Arc<dyn PhysicalExpr>,
     max_payload_bytes: usize,
@@ -312,6 +328,72 @@ fn encode_bounded_physical_expr_to_bytes(
         return Ok(None);
     }
     Ok(Some(proto.encode_to_vec()))
+}
+
+/// Fallback for a predicate that cannot be shipped as it stands.
+///
+/// Tries the membership-free top-level conjuncts first and only degrades to the whole
+/// `true` when there are none, or when they still do not fit `max_payload_bytes`.
+fn fall_back_to_retained_conjuncts(
+    expr: &Arc<dyn PhysicalExpr>,
+    max_payload_bytes: usize,
+) -> DataFusionResult<DynFilterPayload> {
+    match encode_retained_conjuncts_to_bytes(expr, max_payload_bytes) {
+        Ok(Some(bytes)) => Ok(DynFilterPayload::Datafusion(bytes)),
+        // Nothing safe to keep, or the kept conjuncts still do not fit: ship `true`,
+        // which prunes nothing and can never drop a row the producer would keep.
+        Ok(None) | Err(CommonQueryError::DynFilterPayloadTooLarge { .. }) => {
+            let bytes = encode_physical_expr_to_bytes(&lit(true))?;
+            validate_payload_size(bytes.len(), max_payload_bytes).map_err(DataFusionError::from)?;
+            Ok(DynFilterPayload::Datafusion(bytes))
+        }
+        Err(error) => Err(DataFusionError::from(error)),
+    }
+}
+
+/// Encodes the top-level conjuncts of `expr` that carry no membership.
+///
+/// [`split_conjunction`] hands out the top-level `AND` terms of the original
+/// expression; a term is retained only when its whole subtree is free of both
+/// [`HashTableLookupExpr`] and [`InListExpr`]. Membership nested inside `NOT`, `CASE` or
+/// `OR` therefore drops that whole conjunct instead of being rewritten in place, so the
+/// payload only ever loses top-level `AND` terms, which can only widen a predicate.
+///
+/// The retained terms are encoded again under the same `max_payload_bytes`, so a caller
+/// supplied budget still bounds the frame. Returns `Ok(None)` when no conjunct can be
+/// retained, which the caller answers with the whole `true` fallback.
+fn encode_retained_conjuncts_to_bytes(
+    expr: &Arc<dyn PhysicalExpr>,
+    max_payload_bytes: usize,
+) -> Result<Option<Vec<u8>>, CommonQueryError> {
+    let mut retained = Vec::new();
+    for conjunct in split_conjunction(expr) {
+        if !carries_membership(conjunct)? {
+            retained.push(Arc::clone(conjunct));
+        }
+    }
+    if retained.is_empty() {
+        return Ok(None);
+    }
+    encode_bounded_physical_expr_to_bytes(&conjunction(retained), max_payload_bytes)
+}
+
+/// Whether the whole subtree of `expr` holds a membership operator.
+///
+/// This is a "whole conjunct" test on purpose: a conjunct that reaches a
+/// [`HashTableLookupExpr`] (runtime lookup) or an [`InListExpr`] (its wire form) anywhere
+/// is dropped by the fallback instead of being rewritten around the membership.
+fn carries_membership(expr: &Arc<dyn PhysicalExpr>) -> DataFusionResult<bool> {
+    let mut found = false;
+    expr.apply(|node| {
+        if node.is::<HashTableLookupExpr>() || node.is::<InListExpr>() {
+            found = true;
+            Ok(TreeNodeRecursion::Stop)
+        } else {
+            Ok(TreeNodeRecursion::Continue)
+        }
+    })?;
+    Ok(found)
 }
 
 /// Build-key list of one hash lookup, written as `probe_key IN (value, ...)`.
@@ -516,7 +598,7 @@ mod tests {
     use base64::Engine;
     use base64::prelude::BASE64_STANDARD;
     use datafusion::arrow::datatypes::{DataType, Field, Schema};
-    use datafusion::physical_expr::expressions::{BinaryExpr, Column, InListExpr, lit};
+    use datafusion::physical_expr::expressions::{BinaryExpr, Column, InListExpr, NotExpr, lit};
     use datafusion::physical_plan::expressions::col;
     use datafusion::physical_plan::joins::join_hash_map::JoinHashMapU32;
     use datafusion::physical_plan::joins::{HashTableLookupExpr, Map, SeededRandomState};
@@ -664,10 +746,33 @@ mod tests {
         assert!(matches!(err, DataFusionError::Plan(_)));
     }
 
+    /// A hand-built lookup has no build lease, hence no key list: the encoder cannot
+    /// write it, which forces the top-level conjunctive fallback.
+    fn unrepresentable_lookup(key: &Arc<dyn PhysicalExpr>) -> Arc<dyn PhysicalExpr> {
+        Arc::new(HashTableLookupExpr::new(
+            vec![Arc::clone(key)],
+            SeededRandomState::with_seed(0),
+            Arc::new(Map::HashMap(Box::new(JoinHashMapU32::with_capacity(0)))),
+            "hash_lookup".to_string(),
+            None,
+        )) as Arc<dyn PhysicalExpr>
+    }
+
+    fn decode_at(
+        expr: &Arc<dyn PhysicalExpr>,
+        schema: &Arc<Schema>,
+        max_payload_bytes: usize,
+    ) -> Arc<dyn PhysicalExpr> {
+        DynFilterPayload::from_datafusion_expr(expr, max_payload_bytes)
+            .unwrap()
+            .decode_datafusion_expr(&TaskContext::default(), schema, max_payload_bytes)
+            .unwrap()
+    }
+
     #[test]
-    fn dyn_filter_payload_unconvertible_lookup_falls_back_to_whole_payload_true() {
-        // A hand-built lookup has no build lease, so it has no key list: the payload
-        // falls back as a whole instead of rewriting the bounds around it.
+    fn dyn_filter_payload_unconvertible_lookup_keeps_integer_bounds() {
+        // `bounds AND lookup` where the lookup has no key list: only the
+        // membership-bearing conjunct is dropped, so the integer bounds still travel.
         let schema = Arc::new(Schema::new(vec![Field::new(
             "device_id",
             DataType::Int32,
@@ -679,15 +784,18 @@ mod tests {
             Operator::GtEq,
             lit(10i32),
         )) as Arc<dyn PhysicalExpr>;
-        let lookup = Arc::new(HashTableLookupExpr::new(
-            vec![Arc::clone(&device_id)],
-            SeededRandomState::with_seed(0),
-            Arc::new(Map::HashMap(Box::new(JoinHashMapU32::with_capacity(0)))),
-            "hash_lookup".to_string(),
-            None,
+        let upper_bound = Arc::new(BinaryExpr::new(
+            Arc::clone(&device_id),
+            Operator::LtEq,
+            lit(20i32),
         )) as Arc<dyn PhysicalExpr>;
-        let expr =
-            Arc::new(BinaryExpr::new(lower_bound, Operator::And, lookup)) as Arc<dyn PhysicalExpr>;
+        let bounds = Arc::new(BinaryExpr::new(lower_bound, Operator::And, upper_bound))
+            as Arc<dyn PhysicalExpr>;
+        let expr = Arc::new(BinaryExpr::new(
+            Arc::clone(&bounds),
+            Operator::And,
+            unrepresentable_lookup(&device_id),
+        )) as Arc<dyn PhysicalExpr>;
 
         assert!(
             encode_bounded_physical_expr_to_bytes(&expr, 1024)
@@ -695,17 +803,133 @@ mod tests {
                 .is_none()
         );
 
-        let payload = DynFilterPayload::from_datafusion_expr(&expr, 1024).unwrap();
-        let decoded = payload
-            .decode_datafusion_expr(&TaskContext::default(), &schema, 1024)
-            .unwrap();
+        let decoded = decode_at(&expr, &schema, 1024);
+        let display = decoded.to_string();
+        assert!(
+            display.contains(">= 10"),
+            "lower bound must survive: {display}"
+        );
+        assert!(
+            display.contains("<= 20"),
+            "upper bound must survive: {display}"
+        );
+        assert!(!contains_expr::<HashTableLookupExpr>(&decoded), "{display}");
+        assert!(!contains_expr::<InListExpr>(&decoded), "{display}");
+        // Both bounds are copied verbatim: no `AND` term was rewritten in place.
+        assert_eq!(
+            encode_physical_expr_to_bytes(&decoded).unwrap(),
+            encode_physical_expr_to_bytes(&bounds).unwrap()
+        );
+    }
 
+    #[test]
+    fn dyn_filter_payload_top_level_and_drops_only_membership_conjuncts() {
+        // One bounds conjunct next to an unsupported membership (here: a lookup without
+        // a key list, plus an `IN` list that is itself representable): the fallback keeps
+        // the bounds and drops every top-level conjunct that carries a membership.
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "device_id",
+            DataType::Int32,
+            false,
+        )]));
+        let device_id = col("device_id", &schema).unwrap();
+        let lower_bound = Arc::new(BinaryExpr::new(
+            Arc::clone(&device_id),
+            Operator::GtEq,
+            lit(10i32),
+        )) as Arc<dyn PhysicalExpr>;
+        let upper_bound = Arc::new(BinaryExpr::new(
+            Arc::clone(&device_id),
+            Operator::LtEq,
+            lit(20i32),
+        )) as Arc<dyn PhysicalExpr>;
+        let bounds = Arc::new(BinaryExpr::new(
+            Arc::clone(&lower_bound),
+            Operator::And,
+            Arc::clone(&upper_bound),
+        )) as Arc<dyn PhysicalExpr>;
+        let in_list = Arc::new(
+            InListExpr::try_new(
+                Arc::clone(&device_id),
+                (10..20).map(lit).collect(),
+                false,
+                &schema,
+            )
+            .unwrap(),
+        ) as Arc<dyn PhysicalExpr>;
+        let expr = Arc::new(BinaryExpr::new(
+            Arc::new(BinaryExpr::new(
+                Arc::clone(&bounds),
+                Operator::And,
+                unrepresentable_lookup(&device_id),
+            )) as Arc<dyn PhysicalExpr>,
+            Operator::And,
+            in_list,
+        )) as Arc<dyn PhysicalExpr>;
+
+        let decoded = decode_at(&expr, &schema, REMOTE_DYN_FILTER_PAYLOAD_MAX_BYTES);
+        let display = decoded.to_string();
+        assert!(display.contains(">= 10"), "{display}");
+        assert!(display.contains("<= 20"), "{display}");
+        assert!(!contains_expr::<InListExpr>(&decoded), "{display}");
+        assert!(!contains_expr::<HashTableLookupExpr>(&decoded), "{display}");
+        assert_eq!(
+            split_conjunction(&decoded).len(),
+            2,
+            "only the two bounds survive: {display}"
+        );
+        assert_eq!(
+            encode_physical_expr_to_bytes(&decoded).unwrap(),
+            encode_physical_expr_to_bytes(&bounds).unwrap()
+        );
+    }
+
+    #[test]
+    fn dyn_filter_payload_negated_unconvertible_lookup_falls_back_to_whole_true() {
+        // `NOT lookup` is a single top-level conjunct and it carries the membership, so
+        // the whole conjunct is dropped instead of being rewritten to `NOT true`.
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "device_id",
+            DataType::Int32,
+            false,
+        )]));
+        let device_id = col("device_id", &schema).unwrap();
+        let not_lookup =
+            Arc::new(NotExpr::new(unrepresentable_lookup(&device_id))) as Arc<dyn PhysicalExpr>;
+
+        let decoded = decode_at(&not_lookup, &schema, 1024);
         assert_eq!(decoded.to_string(), "true");
         assert!(!contains_expr::<HashTableLookupExpr>(&decoded));
     }
 
     #[test]
-    fn dyn_filter_payload_over_budget_falls_back_to_whole_payload_true() {
+    fn dyn_filter_payload_membership_under_or_falls_back_to_whole_true() {
+        // `bound OR lookup` is a single top-level conjunct that carries the membership:
+        // rewriting it to `bound OR true` would be nothing but `true`, so it is dropped.
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "device_id",
+            DataType::Int32,
+            false,
+        )]));
+        let device_id = col("device_id", &schema).unwrap();
+        let lower_bound = Arc::new(BinaryExpr::new(
+            Arc::clone(&device_id),
+            Operator::GtEq,
+            lit(10i32),
+        )) as Arc<dyn PhysicalExpr>;
+        let expr = Arc::new(BinaryExpr::new(
+            lower_bound,
+            Operator::Or,
+            unrepresentable_lookup(&device_id),
+        )) as Arc<dyn PhysicalExpr>;
+
+        let decoded = decode_at(&expr, &schema, 1024);
+        assert_eq!(decoded.to_string(), "true");
+        assert!(!contains_expr::<HashTableLookupExpr>(&decoded));
+    }
+
+    #[test]
+    fn dyn_filter_payload_over_budget_keeps_bounds() {
         let schema = Arc::new(Schema::new(vec![Field::new(
             "device_id",
             DataType::Int32,
@@ -722,9 +946,12 @@ mod tests {
             Operator::LtEq,
             lit(8255i32),
         )) as Arc<dyn PhysicalExpr>;
-        let bounds = Arc::new(BinaryExpr::new(lower_bound, Operator::And, upper_bound))
-            as Arc<dyn PhysicalExpr>;
-        let in_list = Arc::new(
+        let bounds = Arc::new(BinaryExpr::new(
+            Arc::clone(&lower_bound),
+            Operator::And,
+            Arc::clone(&upper_bound),
+        )) as Arc<dyn PhysicalExpr>;
+        let oversized_in = Arc::new(
             InListExpr::try_new(
                 Arc::clone(&device_id),
                 (8192..8256).map(lit).collect(),
@@ -733,17 +960,33 @@ mod tests {
             )
             .unwrap(),
         ) as Arc<dyn PhysicalExpr>;
-        let expr = Arc::new(BinaryExpr::new(Arc::clone(&bounds), Operator::And, in_list))
-            as Arc<dyn PhysicalExpr>;
-        // The smallest budget that can still carry a payload: only `true` fits.
-        let true_size = encode_physical_expr_to_bytes(&lit(true)).unwrap().len();
+        let expr = Arc::new(BinaryExpr::new(
+            Arc::clone(&bounds),
+            Operator::And,
+            oversized_in,
+        )) as Arc<dyn PhysicalExpr>;
 
-        // Nothing is dropped from the payload node by node: over budget means "ship
-        // `true`", so the predicate keeps every row the producer kept.
-        let payload = DynFilterPayload::from_datafusion_expr(&expr, true_size).unwrap();
-        let decoded = payload
-            .decode_datafusion_expr(&TaskContext::default(), &schema, true_size)
-            .unwrap();
+        // A caller-supplied limit that fits the bounds but not the oversized `IN` list:
+        // the membership conjunct is dropped and the bounds are encoded under the same
+        // budget.
+        let bounds_size = encode_physical_expr_to_bytes(&bounds).unwrap().len();
+        assert!(encode_bounded_physical_expr_to_bytes(&expr, bounds_size).is_err());
+
+        let decoded = decode_at(&expr, &schema, bounds_size);
+        let display = decoded.to_string();
+        assert!(display.contains(">= 8192"), "{display}");
+        assert!(display.contains("<= 8255"), "{display}");
+        assert!(!contains_expr::<InListExpr>(&decoded), "{display}");
+        assert_eq!(
+            encode_physical_expr_to_bytes(&decoded).unwrap(),
+            encode_physical_expr_to_bytes(&bounds).unwrap()
+        );
+
+        // A budget that does not even fit the retained bounds still gives up entirely:
+        // nothing that cannot be shipped may narrow the predicate.
+        let true_size = encode_physical_expr_to_bytes(&lit(true)).unwrap().len();
+        assert!(true_size < bounds_size);
+        let decoded = decode_at(&expr, &schema, true_size);
         assert_eq!(decoded.to_string(), "true");
         assert!(!contains_expr::<InListExpr>(&decoded));
     }
@@ -853,7 +1096,9 @@ mod tests {
 mod remote_membership_tests {
     use std::collections::BTreeMap;
 
-    use datafusion::arrow::array::{ArrayRef, BooleanArray, Float64Array, StringDictionaryBuilder};
+    use datafusion::arrow::array::{
+        ArrayRef, BooleanArray, Float64Array, Int32Array, StringDictionaryBuilder,
+    };
     use datafusion::arrow::datatypes::{DataType, Field, Int32Type, Schema};
     use datafusion::arrow::record_batch::RecordBatch;
     use datafusion::physical_expr::expressions::{
@@ -1194,6 +1439,156 @@ mod remote_membership_tests {
     }
 
     #[tokio::test]
+    async fn bounds_survive_unrepresentable_integer_lookup() {
+        // Integer keys are not a single-column `Utf8` membership, so this real lookup has
+        // no wire form. The fallback keeps the top-level bounds and drops the lookup
+        // conjunct, so the decoded predicate only ever gets wider.
+        let schema = one_column_schema("k", DataType::Int32);
+        let k = key("k", 0);
+        let filter = run_real_hash_join(
+            1,
+            Arc::clone(&schema),
+            Arc::clone(&schema),
+            partitions(
+                &schema,
+                vec![vec![Arc::new(Int32Array::from(vec![1, 2, 3])) as ArrayRef]],
+            ),
+            partitions(
+                &schema,
+                vec![vec![
+                    Arc::new(Int32Array::from(vec![1, 2, 3, 4, 5, 10])) as ArrayRef
+                ]],
+            ),
+            vec![(Arc::clone(&k), Arc::clone(&k))],
+        )
+        .await;
+        let lookup = find_expr::<HashTableLookupExpr>(&filter.expr).expect("real lookup");
+
+        let lower_bound = Arc::new(BinaryExpr::new(Arc::clone(&k), Operator::GtEq, lit(2i32)))
+            as Arc<dyn PhysicalExpr>;
+        let upper_bound = Arc::new(BinaryExpr::new(Arc::clone(&k), Operator::LtEq, lit(4i32)))
+            as Arc<dyn PhysicalExpr>;
+        let bounds = Arc::new(BinaryExpr::new(lower_bound, Operator::And, upper_bound))
+            as Arc<dyn PhysicalExpr>;
+        let expr = Arc::new(BinaryExpr::new(Arc::clone(&bounds), Operator::And, lookup))
+            as Arc<dyn PhysicalExpr>;
+
+        let decoded = decode(
+            &expr,
+            &filter.probe_schema,
+            REMOTE_DYN_FILTER_PAYLOAD_MAX_BYTES,
+        );
+        let display = decoded.to_string();
+        assert!(
+            display.contains(">= 2"),
+            "lower bound must survive: {display}"
+        );
+        assert!(
+            display.contains("<= 4"),
+            "upper bound must survive: {display}"
+        );
+        assert!(!has_expr::<HashTableLookupExpr>(&decoded), "{display}");
+        assert!(!has_expr::<InListExpr>(&decoded), "{display}");
+
+        // The producer and the decoded predicate agree on every row the producer kept and
+        // only diverge on the non-member `4`, where the fallback widens.
+        let batch = RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![Arc::new(Int32Array::from(vec![1, 2, 3, 4, 5, 10])) as ArrayRef],
+        )
+        .unwrap();
+        let (original_selected, decoded_selected) = assert_fail_open(&expr, &decoded, &batch);
+        assert_eq!(
+            original_selected,
+            vec![false, true, true, false, false, false]
+        );
+        assert_eq!(
+            decoded_selected,
+            vec![false, true, true, true, false, false]
+        );
+    }
+
+    #[tokio::test]
+    async fn small_budget_keeps_bounds_and_drops_real_membership() {
+        // A real `Utf8` lookup next to integer bounds, shipped under a caller-supplied
+        // limit that fits only the bounds: the fallback drops the membership conjunct and
+        // still sends the bounds, which can only widen the producer predicate.
+        let probe_schema = Arc::new(Schema::new(vec![
+            Field::new("trace_id", DataType::Utf8, true),
+            Field::new("k", DataType::Int32, true),
+        ]));
+        let build_schema = one_column_schema("trace_id", DataType::Utf8);
+        let long = "t".repeat(256);
+        let values = (0..24)
+            .map(|i| format!("{long}-{i:02}"))
+            .collect::<Vec<_>>();
+        let borrowed = values.iter().map(String::as_str).collect::<Vec<_>>();
+        let build_key = key("trace_id", 0);
+        let probe_key = key("trace_id", 0);
+        let filter = run_real_hash_join(
+            1,
+            Arc::clone(&build_schema),
+            Arc::clone(&probe_schema),
+            partitions(&build_schema, vec![vec![utf8(&borrowed)]]),
+            partitions(
+                &probe_schema,
+                vec![vec![
+                    utf8(&borrowed),
+                    Arc::new(Int32Array::from(vec![0i32; values.len()])) as ArrayRef,
+                ]],
+            ),
+            vec![(Arc::clone(&build_key), Arc::clone(&probe_key))],
+        )
+        .await;
+        let lookup = find_expr::<HashTableLookupExpr>(&filter.expr).expect("real lookup");
+
+        let k = key("k", 1);
+        let lower_bound = Arc::new(BinaryExpr::new(Arc::clone(&k), Operator::GtEq, lit(2i32)))
+            as Arc<dyn PhysicalExpr>;
+        let upper_bound = Arc::new(BinaryExpr::new(Arc::clone(&k), Operator::LtEq, lit(5i32)))
+            as Arc<dyn PhysicalExpr>;
+        let bounds = Arc::new(BinaryExpr::new(lower_bound, Operator::And, upper_bound))
+            as Arc<dyn PhysicalExpr>;
+        let expr = Arc::new(BinaryExpr::new(Arc::clone(&bounds), Operator::And, lookup))
+            as Arc<dyn PhysicalExpr>;
+
+        // Only the bounds fit: the membership of 24 long keys is far beyond this budget.
+        let bounds_size = encode_physical_expr_to_bytes(&bounds).unwrap().len();
+        let decoded = decode(&expr, &filter.probe_schema, bounds_size);
+        let display = decoded.to_string();
+        assert!(
+            display.contains(">= 2"),
+            "lower bound must survive: {display}"
+        );
+        assert!(
+            display.contains("<= 5"),
+            "upper bound must survive: {display}"
+        );
+        assert!(!has_expr::<HashTableLookupExpr>(&decoded), "{display}");
+        assert!(!has_expr::<InListExpr>(&decoded), "{display}");
+
+        // Evaluation: a member inside the bounds is kept by both, a member outside the
+        // bounds is dropped by both, and only the non-member is widened.
+        let trace_ids = vec![
+            values[0].as_str(),
+            values[1].as_str(),
+            "miss-not-a-member",
+            values[2].as_str(),
+        ];
+        let batch = RecordBatch::try_new(
+            Arc::clone(&probe_schema),
+            vec![
+                utf8(&trace_ids),
+                Arc::new(Int32Array::from(vec![2i32, 6, 3, 5])) as ArrayRef,
+            ],
+        )
+        .unwrap();
+        let (original_selected, decoded_selected) = assert_fail_open(&expr, &decoded, &batch);
+        assert_eq!(original_selected, vec![true, false, false, true]);
+        assert_eq!(decoded_selected, vec![true, false, true, true]);
+    }
+
+    #[tokio::test]
     async fn real_642_key_hash_join_becomes_exact_642_literal_in() {
         let (schema, filter, values) = real_join_with_keys(642).await;
         assert_eq!(values.len(), 642);
@@ -1332,7 +1727,7 @@ mod remote_membership_tests {
     }
 
     #[tokio::test]
-    async fn membership_falls_back_to_whole_payload_true_for_float_composite_and_dictionary_keys() {
+    async fn membership_falls_back_for_unsupported_float_composite_and_dictionary_keys() {
         // Float64 keys: the key-list accessor only exposes a single `Utf8` column.
         let float_schema = one_column_schema("k", DataType::Float64);
         let float_on = key("k", 0);
@@ -1363,6 +1758,8 @@ mod remote_membership_tests {
             &float_filter.probe_schema,
             REMOTE_DYN_FILTER_PAYLOAD_MAX_BYTES,
         );
+        // The partitioned producer publishes a per-partition `CASE`, so the only
+        // top-level conjunct carries the membership and is dropped: whole `true`.
         assert_eq!(decoded.to_string(), "true");
         assert!(!has_expr::<HashTableLookupExpr>(&decoded));
 
@@ -1403,6 +1800,7 @@ mod remote_membership_tests {
             &composite_filter.probe_schema,
             REMOTE_DYN_FILTER_PAYLOAD_MAX_BYTES,
         );
+        // Same per-partition `CASE` shape as the float case: whole `true`.
         assert_eq!(decoded.to_string(), "true");
         assert!(!has_expr::<HashTableLookupExpr>(&decoded));
 
@@ -1429,8 +1827,20 @@ mod remote_membership_tests {
             &dict_filter.probe_schema,
             REMOTE_DYN_FILTER_PAYLOAD_MAX_BYTES,
         );
-        assert_eq!(decoded.to_string(), "true");
-        assert!(!has_expr::<HashTableLookupExpr>(&decoded));
+        // Dictionary keys are not a plain `Utf8` key column either. This producer shape
+        // is a flat `bounds AND lookup`, so the fallback keeps the bounds conjunct that
+        // DataFusion itself published and drops only the membership.
+        let display = decoded.to_string();
+        assert!(!has_expr::<HashTableLookupExpr>(&decoded), "{display}");
+        assert!(!has_expr::<InListExpr>(&decoded), "{display}");
+        assert!(
+            display.contains(">="),
+            "lower bound must survive: {display}"
+        );
+        assert!(
+            display.contains("<="),
+            "upper bound must survive: {display}"
+        );
     }
 
     #[tokio::test]
@@ -1505,8 +1915,9 @@ mod remote_membership_tests {
         let case = decoded.downcast_ref::<CaseExpr>().expect("CASE preserved");
         assert_eq!(case.when_then_expr().len(), 3);
 
-        // A budget that only fits `true` gives up on the whole payload instead of
-        // dropping membership node by node, so nothing can become narrower.
+        // The whole predicate is one top-level `CASE` conjunct that carries the
+        // membership, so a budget that only fits `true` drops it entirely: membership is
+        // never rewritten inside `CASE`, and nothing can become narrower.
         let true_size = encode_physical_expr_to_bytes(&lit(true)).unwrap().len();
         assert!(true_size < REMOTE_DYN_FILTER_PAYLOAD_MAX_BYTES);
         let decoded = decode(&filter.expr, &filter.probe_schema, true_size);
