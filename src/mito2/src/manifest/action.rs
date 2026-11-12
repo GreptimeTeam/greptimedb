@@ -15,7 +15,6 @@
 //! Defines [RegionMetaAction] related structs and [RegionCheckpoint].
 
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::Utc;
@@ -419,7 +418,7 @@ impl RegionManifestBuilder {
 
         let mut removed_files = vec![];
         for file in edit.files_to_add {
-            let file = Arc::new(file);
+            let file = FileMetaRef::from(file);
             let file = self.file_metadata_interner.intern(file);
             if let Some(old_file) = self.files.insert(file.file_id, file.clone())
                 && let Some(old_index) = old_file.index_version()
@@ -793,6 +792,8 @@ mod tests {
     use std::sync::Arc;
 
     use common_time::Timestamp;
+
+    use crate::sst::file_metadata::MetadataRef;
 
     use super::*;
 
@@ -1595,14 +1596,17 @@ mod tests {
         let expr = partition::expr::col("tag").lt(datatypes::value::Value::UInt32(10));
         let mut allocations = HashMap::new();
         for _ in 0..4 {
-            let meta = Arc::new(FileMeta {
+            let meta = FileMetaRef::from(FileMeta {
                 region_id: RegionId::new(1, 1),
                 file_id: FileId::random(),
                 indexes: vec![crate::sst::file::ColumnIndexMetadata::default()],
-                partition_expr: Some(Arc::new(expr.clone())),
+                partition_expr: Some(expr.clone().into()),
                 ..Default::default()
             });
-            allocations.insert(meta.file_id, (Arc::as_ptr(&meta), meta.indexes.as_ptr()));
+            allocations.insert(
+                meta.file_id,
+                (std::ptr::from_ref(meta.as_ref()), meta.indexes.as_ptr()),
+            );
             checkpoint.files.insert(meta.file_id, meta);
         }
         let interner = Arc::new(crate::sst::file_metadata::FileMetadataInterner::default());
@@ -1620,9 +1624,9 @@ mod tests {
         for meta in manifest.files.values() {
             assert_eq!(
                 allocations[&meta.file_id],
-                (Arc::as_ptr(meta), meta.indexes.as_ptr())
+                (std::ptr::from_ref(meta.as_ref()), meta.indexes.as_ptr())
             );
-            assert!(Arc::ptr_eq(
+            assert!(MetadataRef::ptr_eq(
                 expression,
                 meta.partition_expr.as_ref().unwrap()
             ));
@@ -1632,7 +1636,7 @@ mod tests {
             .try_build()
             .unwrap();
         for (id, meta) in &manifest.files {
-            assert!(Arc::ptr_eq(meta, &recovered.files[id]));
+            assert!(MetadataRef::ptr_eq(meta, &recovered.files[id]));
         }
     }
 

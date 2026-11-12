@@ -722,7 +722,7 @@ impl SstMerger for DefaultSstMerger {
                     num_rows: sst_info.num_rows as u64,
                     num_row_groups: sst_info.num_row_groups,
                     sequence: sequence_metadata.file_sequence,
-                    partition_expr: partition_expr.clone().map(Arc::new),
+                    partition_expr: partition_expr.clone().map(Into::into),
                     num_series: sst_info.num_series,
                     primary_key_min,
                     primary_key_max,

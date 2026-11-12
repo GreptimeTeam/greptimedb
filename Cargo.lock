@@ -2350,7 +2350,6 @@ dependencies = [
  "futures",
  "moka",
  "prometheus 0.14.0",
- "smallvec",
  "tokio",
 ]
 
@@ -7247,6 +7246,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0d762194228a2f1c11063e46e32e5acb96e66e906382b9eb5441f2e0504bbd5a"
 
 [[package]]
+name = "intern-arc"
+version = "0.6.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2fe5735fd955e619f30a5257c8ce5234354cbe72d8a04a24414c9004125f02b2"
+dependencies = [
+ "loom",
+ "once_cell",
+ "parking_lot 0.12.4",
+]
+
+[[package]]
 name = "inventory"
 version = "0.3.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8834,6 +8844,7 @@ dependencies = [
  "humantime",
  "humantime-serde",
  "index",
+ "intern-arc",
  "itertools 0.14.0",
  "lazy_static",
  "log-store",
@@ -9730,6 +9741,9 @@ name = "once_cell"
 version = "1.21.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
+dependencies = [
+ "parking_lot_core 0.9.11",
+]
 
 [[package]]
 name = "once_cell_polyfill"

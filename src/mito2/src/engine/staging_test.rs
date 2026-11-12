@@ -891,9 +891,9 @@ async fn test_staging_exit_success_with_manifests_with_format(flat_format: bool)
             .next()
             .unwrap()
             .clone();
-        let mut overridden = original.clone();
-        Arc::make_mut(&mut overridden).file_size = u64::MAX - 1;
-        for metadata in [overridden, original.clone()] {
+        let mut overridden = original.as_ref().clone();
+        overridden.file_size = u64::MAX - 1;
+        for metadata in [overridden.into(), original.clone()] {
             region
                 .manifest_ctx
                 .manifest_manager

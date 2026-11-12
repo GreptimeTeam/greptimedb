@@ -2619,7 +2619,7 @@ mod tests {
                     FileHandle::new(
                         FileMeta {
                             num_rows: 1,
-                            partition_expr: partition_expr.map(Arc::new),
+                            partition_expr: partition_expr.map(Into::into),
                             ..Default::default()
                         },
                         Arc::new(crate::sst::file_purger::NoopFilePurger),

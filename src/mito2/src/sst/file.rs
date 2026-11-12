@@ -38,8 +38,9 @@ use crate::access_layer::AccessLayerRef;
 use crate::cache::CacheManagerRef;
 use crate::cache::file_cache::{FileType, IndexKey};
 use crate::region::options::IndexOptions;
+use crate::sst::file_metadata::MetadataRef;
 use crate::sst::file_purger::FilePurgerRef;
-use crate::sst::file_ref::FileReferenceManagerRef;
+use crate::sst::file_ref::{FileReferenceManager, FileReferenceManagerRef};
 use crate::sst::index::fulltext_index::FULLTEXT_BLOOM_VERSION;
 use crate::sst::location;
 use crate::sst::parquet::SstInfo;
@@ -74,7 +75,7 @@ where
 
 /// Custom serde functions for partition_expr field in FileMeta
 fn serialize_partition_expr<S>(
-    partition_expr: &Option<Arc<PartitionExpr>>,
+    partition_expr: &Option<PartitionExprRef>,
     serializer: S,
 ) -> Result<S::Ok, S::Error>
 where
@@ -91,9 +92,7 @@ where
     }
 }
 
-fn deserialize_partition_expr<'de, D>(
-    deserializer: D,
-) -> Result<Option<Arc<PartitionExpr>>, D::Error>
+fn deserialize_partition_expr<'de, D>(deserializer: D) -> Result<Option<PartitionExprRef>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
@@ -109,7 +108,7 @@ where
             } else {
                 // Parse the JSON string to PartitionExpr
                 PartitionExpr::from_json_str(&json_str)
-                    .map(|expr| expr.map(Arc::new))
+                    .map(|expr| expr.map(PartitionExprRef::from))
                     .map_err(D::Error::custom)
             }
         }
@@ -236,10 +235,13 @@ pub(crate) fn overlaps(l: &FileTimeRange, r: &FileTimeRange) -> bool {
 }
 
 /// Shared immutable metadata of an SST file.
-pub type FileMetaRef = Arc<FileMeta>;
+pub type FileMetaRef = MetadataRef<FileMeta>;
+
+/// Shared immutable partition expression.
+pub type PartitionExprRef = MetadataRef<PartitionExpr>;
 
 /// Metadata of a SST file.
-#[derive(Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct FileMeta {
     /// Region that created the file. The region id may not be the id of the current region.
@@ -305,7 +307,7 @@ pub struct FileMeta {
         serialize_with = "serialize_partition_expr",
         deserialize_with = "deserialize_partition_expr"
     )]
-    pub partition_expr: Option<Arc<PartitionExpr>>,
+    pub partition_expr: Option<PartitionExprRef>,
     /// Number of series in the file.
     ///
     /// The number is 0 if the series number is not available.
@@ -411,7 +413,7 @@ impl Debug for FileMeta {
 }
 
 /// Type of index.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum IndexType {
     /// Inverted index.
     InvertedIndex,
@@ -438,7 +440,7 @@ pub enum IndexType {
 /// This is primarily used for:
 /// - Manual index building in asynchronous index construction mode
 /// - Verifying index consistency between files and region metadata
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct ColumnIndexMetadata {
     /// The column ID this index metadata applies to.
@@ -902,13 +904,15 @@ impl FileHandleInner {
         primary_key_range: Option<(Bytes, Bytes)>,
     ) -> Self {
         let file_ref_manager = file_purger.file_ref_manager();
+        // Normalize expressions while metadata is still exclusively owned.
+        let meta = Self::register_metadata(meta, file_ref_manager.as_deref());
         let lifetime = Arc::new(SstLifetime {
             meta: Mutex::new(meta.clone()),
             deleted: AtomicBool::new(false),
             file_purger,
             file_ref_manager,
         });
-        Self::with_lifetime(meta, lifetime, primary_key_range)
+        Self::from_registered_metadata(meta, lifetime, primary_key_range)
     }
 
     fn with_lifetime(
@@ -916,14 +920,27 @@ impl FileHandleInner {
         lifetime: Arc<SstLifetime>,
         primary_key_range: Option<(Bytes, Bytes)>,
     ) -> Self {
-        let meta = if let Some(manager) = &lifetime.file_ref_manager {
+        let meta = Self::register_metadata(meta, lifetime.file_ref_manager.as_deref());
+        *lifetime.meta.lock().unwrap() = meta.clone();
+        Self::from_registered_metadata(meta, lifetime, primary_key_range)
+    }
+
+    /// Every runtime view is interned before it enters the reference registry.
+    fn register_metadata(meta: FileMetaRef, manager: Option<&FileReferenceManager>) -> FileMetaRef {
+        if let Some(manager) = manager {
             let meta = manager.file_metadata_interner.intern(meta);
             manager.register_file(&meta);
             meta
         } else {
             meta
-        };
-        *lifetime.meta.lock().unwrap() = meta.clone();
+        }
+    }
+
+    fn from_registered_metadata(
+        meta: FileMetaRef,
+        lifetime: Arc<SstLifetime>,
+        primary_key_range: Option<(Bytes, Bytes)>,
+    ) -> Self {
         // Raw bounds already in metadata need no per-handle cache until alignment.
         let primary_key_range = primary_key_range
             .filter(|range| meta.primary_key_range().as_ref() != Some(range))
@@ -1230,12 +1247,12 @@ mod tests {
 
     #[test]
     fn test_shared_metadata_keeps_independent_lifetimes() {
-        let meta = Arc::new(FileMeta::default());
+        let meta = FileMetaRef::from(FileMeta::default());
         let purger = Arc::new(crate::sst::file_purger::NoopFilePurger);
         let first = FileHandle::new(meta.clone(), purger.clone());
         let second = FileHandle::new(meta.clone(), purger);
-        assert!(Arc::ptr_eq(&meta, &first.inner.meta));
-        assert!(Arc::ptr_eq(
+        assert!(FileMetaRef::ptr_eq(&meta, &first.inner.meta));
+        assert!(FileMetaRef::ptr_eq(
             &meta,
             &first.inner.lifetime.meta.lock().unwrap()
         ));
@@ -1246,7 +1263,7 @@ mod tests {
 
         let mut updated = meta.as_ref().clone();
         updated.index_version = 1;
-        let updated = Arc::new(updated);
+        let updated = FileMetaRef::from(updated);
         let replacement = second.with_updated_index(updated.clone());
         assert_eq!(second.meta_ref().index_version, 0);
         assert_eq!(replacement.meta_ref().index_version, 1);
@@ -1254,9 +1271,42 @@ mod tests {
             &replacement.inner.lifetime,
             &second.inner.lifetime
         ));
-        assert!(Arc::ptr_eq(
+        assert!(FileMetaRef::ptr_eq(
             &updated,
             &second.inner.lifetime.meta.lock().unwrap()
+        ));
+    }
+
+    #[test]
+    fn test_runtime_handles_share_partition_expressions() {
+        #[derive(Debug)]
+        struct TrackedPurger(FileReferenceManagerRef);
+
+        impl crate::sst::file_purger::FilePurger for TrackedPurger {
+            fn purge_file(&self, _: FileMeta) {}
+
+            fn file_ref_manager(&self) -> Option<FileReferenceManagerRef> {
+                Some(self.0.clone())
+            }
+        }
+
+        let purger = Arc::new(TrackedPurger(Arc::new(FileReferenceManager::new(None))));
+        let handles: Vec<_> = (0..2)
+            .map(|_| {
+                FileHandle::new(
+                    FileMeta {
+                        region_id: RegionId::new(1, 1),
+                        file_id: FileId::random(),
+                        partition_expr: Some(col("tag").lt(Value::UInt32(10)).into()),
+                        ..Default::default()
+                    },
+                    purger.clone(),
+                )
+            })
+            .collect();
+        assert!(PartitionExprRef::ptr_eq(
+            handles[0].meta_ref().partition_expr.as_ref().unwrap(),
+            handles[1].meta_ref().partition_expr.as_ref().unwrap(),
         ));
     }
 
@@ -1418,7 +1468,7 @@ mod tests {
             num_rows: 0,
             num_row_groups: 0,
             sequence: None,
-            partition_expr: Some(Arc::new(partition_expr.clone())),
+            partition_expr: Some(partition_expr.clone().into()),
             num_series: 0,
             ..Default::default()
         };

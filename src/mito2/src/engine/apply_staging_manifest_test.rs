@@ -41,6 +41,7 @@ use crate::manifest::action::{
 };
 use crate::sst::FormatType;
 use crate::sst::file::FileMeta;
+use crate::sst::file_metadata::MetadataRef;
 use crate::test_util::{
     CreateRequestBuilder, TestEnv, build_rows, build_rows_for_key, put_rows, reopen_region,
     rows_schema,
@@ -667,7 +668,7 @@ async fn test_apply_staging_manifest_success_with_format(flat_format: bool) {
     let file_id = FileId::random();
     new_manifest_1.files.insert(
         file_id,
-        Arc::new(FileMeta {
+        crate::sst::file::FileMetaRef::from(FileMeta {
             region_id,
             file_id,
             ..Default::default()
@@ -1146,7 +1147,7 @@ async fn test_split_repartition_causes_duplicate_data() {
     ] {
         let meta = &manifest.files[&file_id];
         assert_eq!(Some(&source_partition_expr), meta.partition_expr.as_deref());
-        assert!(Arc::ptr_eq(
+        assert!(MetadataRef::ptr_eq(
             historical_expr,
             meta.partition_expr.as_ref().unwrap()
         ));
@@ -1229,7 +1230,7 @@ async fn test_split_repartition_causes_duplicate_data() {
         .manifest_ctx
         .manifest()
         .await;
-    assert!(Arc::ptr_eq(
+    assert!(MetadataRef::ptr_eq(
         recovered_1.files[&file_id].partition_expr.as_ref().unwrap(),
         recovered_2.files[&file_id].partition_expr.as_ref().unwrap(),
     ));
@@ -1400,7 +1401,7 @@ async fn test_merge_repartition_data_integrity() {
         for (file_id, source_meta) in &source.files {
             let imported = &manifest.files[file_id];
             assert_eq!(source_meta.partition_expr, imported.partition_expr);
-            assert!(Arc::ptr_eq(
+            assert!(MetadataRef::ptr_eq(
                 source_meta.partition_expr.as_ref().unwrap(),
                 imported.partition_expr.as_ref().unwrap(),
             ));

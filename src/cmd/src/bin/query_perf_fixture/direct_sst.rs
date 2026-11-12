@@ -34,7 +34,7 @@ use mito2::config::IndexConfig;
 use mito2::manifest::action::{RegionCheckpoint, RegionManifest, RemovedFilesRecord};
 use mito2::memtable::sort_primary_key_record_batch;
 use mito2::read::FlatSource;
-use mito2::sst::file::{FileMeta, RegionFileId};
+use mito2::sst::file::{FileMeta, FileMetaRef, RegionFileId};
 use mito2::sst::index::{Indexer, IndexerBuilder};
 use mito2::sst::parquet::writer::ParquetWriter;
 use mito2::sst::parquet::{SstInfo, WriteOptions};
@@ -490,7 +490,7 @@ pub(super) async fn run_direct_sst(args: DirectArgs) {
             remap_sst_file(&obj_store_dir, &table_dir, region_id, info.file_id, file_id);
             files.insert(
                 file_id,
-                Arc::new(file_meta_from_sst_info(&info, region_id, file_id, sequence)),
+                FileMetaRef::from(file_meta_from_sst_info(&info, region_id, file_id, sequence)),
             );
         }
     }

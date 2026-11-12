@@ -12,11 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Shared memory caches and weak interning primitives.
+//! Shared memory caches.
 
 mod cache;
 mod sync_cache;
-mod weak_interner;
 
 pub mod metrics;
 pub mod page;
@@ -24,4 +23,3 @@ pub mod paged;
 
 pub use cache::{Cache, RemovalCause};
 pub use sync_cache::SyncCache;
-pub use weak_interner::WeakInterner;

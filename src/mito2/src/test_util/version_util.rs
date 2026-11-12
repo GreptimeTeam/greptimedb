@@ -122,7 +122,7 @@ impl VersionControlBuilder {
                 partition_expr: match &self.metadata.partition_expr {
                     Some(json_str) => partition::expr::PartitionExpr::from_json_str(json_str)
                         .expect("partition expression should be valid JSON")
-                        .map(Arc::new),
+                        .map(Into::into),
                     None => None,
                 },
                 ..Default::default()
@@ -211,7 +211,7 @@ pub(crate) fn apply_edit(
                 partition_expr: match &version_control.current().version.metadata.partition_expr {
                     Some(json_str) => partition::expr::PartitionExpr::from_json_str(json_str)
                         .expect("partition expression should be valid JSON")
-                        .map(Arc::new),
+                        .map(Into::into),
                     None => None,
                 },
                 ..Default::default()

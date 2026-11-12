@@ -13,7 +13,6 @@ common-base.workspace = true
 futures.workspace = true
 moka = { workspace = true, features = ["future", "sync"] }
 prometheus.workspace = true
-smallvec.workspace = true
 
 [dev-dependencies]
 async-trait.workspace = true
