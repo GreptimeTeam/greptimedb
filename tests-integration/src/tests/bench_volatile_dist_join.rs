@@ -135,23 +135,23 @@ async fn bench_volatile_dist_join() {
     let latencies_c = measure(&frontend, &sql, &ctx_c, "C (materialized broadcast)").await;
 
     // Report
-    println!("\n=== Volatile-side broadcast join latency comparison ===");
-    println!("BIG: 10K rows (4 partitions across 2 DNs), SMALL: 50 rows");
-    println!("Warmup: {WARMUP}, Iterations: {ITERATIONS}");
-    println!();
+    eprintln!("\n=== Volatile-side broadcast join latency comparison ===");
+    eprintln!("BIG: 10K rows (4 partitions across 2 DNs), SMALL: 50 rows");
+    eprintln!("Warmup: {WARMUP}, Iterations: {ITERATIONS}");
+    eprintln!();
     report("A (FE join)", &latencies_a);
     report("C (materialized broadcast)", &latencies_c);
-    println!();
+    eprintln!();
 
     if !latencies_a.is_empty() && !latencies_c.is_empty() {
         let median_a = median(&latencies_a);
         let median_c = median(&latencies_c);
         let speedup = median_a / median_c;
-        println!("Median speedup (A/C): {speedup:.2}x");
+        eprintln!("Median speedup (A/C): {speedup:.2}x");
         if speedup > 1.0 {
-            println!("C is faster than A");
+            eprintln!("C is faster than A");
         } else {
-            println!("A is faster than C (materialization overhead dominates at this scale)");
+            eprintln!("A is faster than C (materialization overhead dominates at this scale)");
         }
     }
 }
@@ -211,15 +211,15 @@ fn median(values: &[f64]) -> f64 {
 
 fn report(label: &str, latencies: &[f64]) {
     if latencies.is_empty() {
-        println!("{label}: no samples");
+        eprintln!("{label}: no samples");
         return;
     }
     let m = median(latencies);
     let min = latencies.iter().copied().fold(f64::INFINITY, f64::min);
     let max = latencies.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-    println!("{label}:");
-    println!("  median: {m:.1}ms");
-    println!("  min:    {min:.1}ms");
-    println!("  max:    {max:.1}ms");
-    println!("  samples: {:?}", latencies);
+    eprintln!("{label}:");
+    eprintln!("  median: {m:.1}ms");
+    eprintln!("  min:    {min:.1}ms");
+    eprintln!("  max:    {max:.1}ms");
+    eprintln!("  samples: {:?}", latencies);
 }
