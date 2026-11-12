@@ -869,6 +869,100 @@ mod tests {
         assert!(err.contains("expects (column, buckets)"), "{err}");
     }
 
+    /// Functions that share a signature must stay distinct `ScalarUDF`s:
+    /// DataFusion compares expressions structurally, and treating `isnull` and
+    /// `iceberg_hash` as the same function corrupted `GROUP BY` planning
+    /// (`rebase_expr` matched `isnull(x)` against the grouped
+    /// `iceberg_hash(x)`).
+    #[test]
+    fn test_same_signature_functions_stay_distinct() {
+        use std::collections::HashSet;
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+
+        use datafusion::prelude::col;
+
+        let provide = |name: &str| {
+            FUNCTION_REGISTRY
+                .get_function(name)
+                .unwrap_or_else(|| panic!("{name} is not registered"))
+                .provide(crate::function::FunctionContext::default())
+        };
+        let isnull = provide("isnull");
+        let hash = provide("iceberg_hash");
+        let bounds = provide("iceberg_hash_bounds");
+
+        // All three share `Signature::any(1, Immutable)` but are not equal.
+        assert!(isnull != hash);
+        assert!(isnull != bounds);
+        assert!(hash != bounds);
+        assert_ne!(
+            isnull.call(vec![col("x")]),
+            hash.call(vec![col("x")]),
+            "isnull(x) and iceberg_hash(x) must not compare equal"
+        );
+
+        let hash_of = |udf: &datafusion::logical_expr::ScalarUDF| {
+            let mut hasher = DefaultHasher::new();
+            udf.hash(&mut hasher);
+            hasher.finish()
+        };
+        // Equal objects keep hashing equally, so the registry still finds them.
+        let hash_again = provide("iceberg_hash");
+        assert_eq!(hash, hash_again);
+        assert_eq!(hash_of(&hash), hash_of(&hash_again));
+        // Distinct functions remain separable keys in hash-based containers.
+        let udfs: HashSet<_> = [isnull, hash, bounds].into_iter().collect();
+        assert_eq!(3, udfs.len());
+    }
+
+    /// `isnull` and `iceberg_hash` share a signature; grouping by one while
+    /// selecting the other must still plan (regression for the identity bug).
+    #[tokio::test]
+    async fn test_group_by_with_same_signature_functions() {
+        use datafusion::arrow::array::{ArrayRef, Int64Array};
+        use datafusion::arrow::record_batch::RecordBatch;
+        use datafusion::prelude::SessionContext;
+
+        use crate::function::FunctionContext;
+
+        let ctx = SessionContext::new();
+        for name in ["isnull", "iceberg_hash"] {
+            let udf = FUNCTION_REGISTRY
+                .get_function(name)
+                .unwrap()
+                .provide(FunctionContext::default());
+            ctx.register_udf(udf);
+        }
+        ctx.register_batch(
+            "t",
+            RecordBatch::try_from_iter([(
+                "x",
+                Arc::new(Int64Array::from(vec![Some(34), None])) as ArrayRef,
+            )])
+            .unwrap(),
+        )
+        .unwrap();
+
+        for sql in [
+            "SELECT isnull(x) FROM t GROUP BY x, iceberg_hash(x)",
+            "SELECT iceberg_hash(x) FROM t GROUP BY x, isnull(x)",
+        ] {
+            let batches = ctx
+                .sql(sql)
+                .await
+                .unwrap_or_else(|error| panic!("{sql} must plan: {error}"))
+                .collect()
+                .await
+                .unwrap_or_else(|error| panic!("{sql} must execute: {error}"));
+            assert_eq!(
+                2,
+                batches.iter().map(|batch| batch.num_rows()).sum::<usize>(),
+                "{sql}"
+            );
+        }
+    }
+
     /// Both functions must resolve and run through a plain SQL session, not just
     /// through the [Function] trait.
     #[tokio::test]
