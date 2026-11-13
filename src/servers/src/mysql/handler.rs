@@ -151,6 +151,124 @@ impl MysqlInstanceShim {
         }
     }
 
+    async fn authenticate_handshake_user(
+        &self,
+        auth_plugin: &str,
+        username: &str,
+        salt: &[u8],
+        auth_data: &[u8],
+        catalog: &str,
+    ) -> Option<auth::UserInfoRef> {
+        let Some(user_provider) = &self.user_provider else {
+            return Some(auth::userinfo_by_name(Some(username.to_string())));
+        };
+        let addr = self
+            .session
+            .conn_info()
+            .client_addr
+            .map(|addr| addr.to_string());
+        let result = if username == BEARER_TOKEN_USER {
+            if auth_plugin != MysqlAuthMethod::CLEAR_PASSWORD_PLUGIN {
+                warn!("Bearer-token MySQL authentication requires mysql_clear_password");
+                return None;
+            }
+            let token = auth_data.strip_suffix(&[0]).unwrap_or(auth_data);
+            let Ok(token) = std::str::from_utf8(token) else {
+                warn!("Bearer token is not valid UTF-8");
+                return None;
+            };
+            user_provider
+                .authenticate_bearer_token(token, catalog)
+                .await
+        } else {
+            let user_id = Identity::UserId(username, addr.as_deref());
+            let password = match auth_plugin {
+                MysqlAuthMethod::NATIVE_PASSWORD_PLUGIN => {
+                    Password::MysqlNativePassword(auth_data, salt)
+                }
+                MysqlAuthMethod::CLEAR_PASSWORD_PLUGIN => {
+                    // The raw bytes received could be represented in C-like string, ended in '\0'.
+                    // We must "trim" it to get the real password string.
+                    let password = auth_data.strip_suffix(&[0]).unwrap_or(auth_data);
+                    Password::PlainText(String::from_utf8_lossy(password).to_string().into())
+                }
+                other => {
+                    error!("Unsupported mysql auth plugin: {}", other);
+                    return None;
+                }
+            };
+            user_provider.authenticate(user_id, password).await
+        };
+        match result {
+            Ok(user_info) => Some(user_info),
+            Err(error) => {
+                METRIC_AUTH_FAILURE
+                    .with_label_values(&[error.status_code().as_ref()])
+                    .inc();
+                warn!(error; "Failed to auth");
+                None
+            }
+        }
+    }
+
+    // on_init can write an ERR without ending the handshake. Validate here before
+    // publishing the authenticated session or entering opensrv's command loop.
+    async fn select_handshake_database(
+        &self,
+        catalog: &str,
+        schema: String,
+        user_info: &auth::UserInfoRef,
+        explicit_database: bool,
+    ) -> Option<String> {
+        if let Some(provider) = &self.user_provider
+            && let Err(error) = provider.authorize(catalog, &schema, user_info).await
+        {
+            let denied = matches!(
+                error.status_code(),
+                common_error::status_code::StatusCode::AccessDenied
+                    | common_error::status_code::StatusCode::PermissionDenied
+            );
+            if !explicit_database && denied {
+                debug!(user = user_info.username(), protocol = "mysql", catalog, schema = %schema,
+                    reason = %error.status_code(),
+                    "Default database not authorized; starting without a selected database");
+                return Some(String::new());
+            }
+            METRIC_AUTH_FAILURE
+                .with_label_values(&[error.status_code().as_ref()])
+                .inc();
+            if denied {
+                warn!(user = user_info.username(), protocol = "mysql", catalog, schema = %schema,
+                    reason = %error.status_code(), "Handshake database authorization denied");
+            } else {
+                error!(error; user = user_info.username(), protocol = "mysql", catalog, schema = %schema,
+                    "Handshake database authorization failed");
+            }
+            return None;
+        }
+        if !explicit_database && schema.is_empty() {
+            return Some(schema);
+        }
+        match self.query_handler.is_valid_schema(catalog, &schema).await {
+            Ok(true) => Some(schema),
+            Ok(false) if !explicit_database => {
+                debug!(user = user_info.username(), protocol = "mysql", catalog, schema = %schema,
+                    "Default database does not exist; starting without a selected database");
+                Some(String::new())
+            }
+            Ok(false) => {
+                warn!(user = user_info.username(), protocol = "mysql", catalog, schema = %schema,
+                    "Unknown MySQL handshake database");
+                None
+            }
+            Err(error) => {
+                error!(error; user = user_info.username(), protocol = "mysql", catalog, schema = %schema,
+                    "Failed to validate MySQL handshake database");
+                None
+            }
+        }
+    }
+
     /// Describe the statement
     async fn do_describe(
         &self,
@@ -439,7 +557,7 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
                 return false;
             }
         };
-        let (catalog, mut schema) = if let Some(database) = database {
+        let (catalog, schema) = if let Some(database) = database {
             let (catalog, schema) = parse_optional_catalog_and_schema_from_db_string(database);
             (catalog.unwrap_or_else(|| self.session.catalog()), schema)
         } else {
@@ -448,110 +566,18 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
         // if not specified then **greptime** will be used
         let username = String::from_utf8_lossy(username);
 
-        let mut user_info = None;
-        let addr = self
-            .session
-            .conn_info()
-            .client_addr
-            .map(|addr| addr.to_string());
-        if let Some(user_provider) = &self.user_provider {
-            let result = if username.as_ref() == BEARER_TOKEN_USER {
-                if auth_plugin != MysqlAuthMethod::CLEAR_PASSWORD_PLUGIN {
-                    warn!("Bearer-token MySQL authentication requires mysql_clear_password");
-                    return false;
-                }
-                let token = auth_data.strip_suffix(&[0]).unwrap_or(auth_data);
-                let Ok(token) = std::str::from_utf8(token) else {
-                    warn!("Bearer token is not valid UTF-8");
-                    return false;
-                };
-                user_provider
-                    .authenticate_bearer_token(token, &catalog)
-                    .await
-            } else {
-                let user_id = Identity::UserId(&username, addr.as_deref());
-                let password = match auth_plugin {
-                    MysqlAuthMethod::NATIVE_PASSWORD_PLUGIN => {
-                        Password::MysqlNativePassword(auth_data, salt)
-                    }
-                    MysqlAuthMethod::CLEAR_PASSWORD_PLUGIN => {
-                        // The raw bytes received could be represented in C-like string, ended in '\0'.
-                        // We must "trim" it to get the real password string.
-                        let password = auth_data.strip_suffix(&[0]).unwrap_or(auth_data);
-                        Password::PlainText(String::from_utf8_lossy(password).to_string().into())
-                    }
-                    other => {
-                        error!("Unsupported mysql auth plugin: {}", other);
-                        return false;
-                    }
-                };
-                user_provider.authenticate(user_id, password).await
-            };
-            match result {
-                Ok(userinfo) => {
-                    // on_init writes an ERR packet without aborting the handshake.
-                    // Reject here so opensrv closes the connection before its command loop.
-                    if let Err(e) = user_provider.authorize(&catalog, &schema, &userinfo).await {
-                        let denied = matches!(
-                            e.status_code(),
-                            common_error::status_code::StatusCode::AccessDenied
-                                | common_error::status_code::StatusCode::PermissionDenied
-                        );
-                        if database.is_none() && denied {
-                            debug!(user = userinfo.username(), protocol = "mysql", catalog = %catalog,
-                                schema = %schema, reason = %e.status_code(),
-                                "Default database not authorized; starting without a selected database");
-                            schema.clear();
-                        } else {
-                            METRIC_AUTH_FAILURE
-                                .with_label_values(&[e.status_code().as_ref()])
-                                .inc();
-                            if denied {
-                                warn!(user = userinfo.username(), protocol = "mysql", catalog = %catalog,
-                                    schema = %schema, reason = %e.status_code(), "Handshake database authorization denied");
-                            } else {
-                                error!(e; user = userinfo.username(), protocol = "mysql", catalog = %catalog,
-                                    schema = %schema, "Handshake database authorization failed");
-                            }
-                            return false;
-                        }
-                    }
-                    user_info = Some(userinfo);
-                }
-                Err(e) => {
-                    METRIC_AUTH_FAILURE
-                        .with_label_values(&[e.status_code().as_ref()])
-                        .inc();
-                    warn!(e; "Failed to auth");
-                    return false;
-                }
-            };
-        }
-        let user_info =
-            user_info.unwrap_or_else(|| auth::userinfo_by_name(Some(username.to_string())));
-
-        if database.is_some() || !schema.is_empty() {
-            match self.query_handler.is_valid_schema(&catalog, &schema).await {
-                Ok(true) => {}
-                Ok(false) if database.is_none() => {
-                    debug!(user = %username, protocol = "mysql", catalog = %catalog,
-                        schema = %schema, "Default database does not exist; starting without a selected database");
-                    schema.clear();
-                }
-                Ok(false) => {
-                    warn!(
-                        "Unknown MySQL handshake database {}.{} for user {}",
-                        catalog, schema, username
-                    );
-                    return false;
-                }
-                Err(error) => {
-                    error!(error; user = %username, protocol = "mysql", catalog = %catalog,
-                    schema = %schema, "Failed to validate MySQL handshake database");
-                    return false;
-                }
-            }
-        }
+        let Some(user_info) = self
+            .authenticate_handshake_user(auth_plugin, &username, salt, auth_data, &catalog)
+            .await
+        else {
+            return false;
+        };
+        let Some(schema) = self
+            .select_handshake_database(&catalog, schema, &user_info, database.is_some())
+            .await
+        else {
+            return false;
+        };
         self.session.set_catalog(catalog);
         self.session.set_schema(schema);
         self.session.set_user_info(user_info);

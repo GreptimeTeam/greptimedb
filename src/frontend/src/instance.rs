@@ -30,6 +30,7 @@ mod otlp;
 pub mod prom_store;
 mod promql;
 mod region_query;
+mod schema_selection;
 
 use std::collections::HashSet;
 use std::pin::Pin;
@@ -62,7 +63,7 @@ use common_query::Output;
 use common_recordbatch::RecordBatchStreamWrapper;
 use common_recordbatch::error::StreamTimeoutSnafu;
 use common_telemetry::logging::SlowQueryOptions;
-use common_telemetry::{debug, error, tracing, warn};
+use common_telemetry::{debug, error, tracing};
 use datafusion::dataframe::DataFrame;
 use datafusion::physical_plan::ExecutionPlan;
 use datafusion_expr::LogicalPlan;
@@ -90,7 +91,6 @@ use servers::prometheus_handler::{
 use servers::query_handler::sql::SqlQueryHandler;
 use session::context::{Channel, QueryContextRef};
 use session::table_name::table_idents_to_full_name;
-use snafu::IntoError;
 use snafu::prelude::*;
 use sql::ast::ObjectNamePartExt;
 use sql::dialect::Dialect;
@@ -401,69 +401,11 @@ impl Instance {
                     && query_ctx.channel() == Channel::Postgres
                     && let Some(schemas) = set.search_path()
                 {
-                    let mut authorized = Vec::with_capacity(schemas.len());
-                    let provider = self.plugins.get::<auth::UserProviderRef>();
-                    let user = query_ctx.current_user();
-                    for schema in schemas {
-                        let schema = if schema == "$user" {
-                            user.username().to_string()
-                        } else {
-                            schema
-                        };
-                        if schema.is_empty() {
-                            continue;
-                        }
-                        if let Some(provider) = &provider {
-                            match provider
-                                .authorize(query_ctx.current_catalog(), &schema, &user)
-                                .await
-                            {
-                                Ok(()) => {}
-                                Err(error)
-                                    if matches!(
-                                        error.status_code(),
-                                        common_error::status_code::StatusCode::PermissionDenied
-                                            | common_error::status_code::StatusCode::AccessDenied
-                                    ) =>
-                                {
-                                    debug!(user = user.username(), protocol = %query_ctx.channel(),
-                                        catalog = query_ctx.current_catalog(), schema = %schema,
-                                        process_id = query_ctx.process_id(), reason = %error.status_code(),
-                                        "Skipping unauthorized search_path candidate");
-                                    continue;
-                                }
-                                Err(error) => return Err(error).context(PermissionSnafu),
-                            }
-                        }
-                        authorized.push(schema);
-                    }
-                    return self
-                        .statement_executor
-                        .set_search_path(authorized, query_ctx)
-                        .await
-                        .context(TableOperationSnafu);
+                    return self.set_search_path(schemas, query_ctx).await;
                 }
-                if let Statement::Use(schema) = &stmt
-                    && let Some(provider) = self.plugins.get::<auth::UserProviderRef>()
-                    && let Err(error) = provider
-                        .authorize(
-                            query_ctx.current_catalog(),
-                            schema,
-                            &query_ctx.current_user(),
-                        )
-                        .await
-                {
-                    if matches!(
-                        error.status_code(),
-                        common_error::status_code::StatusCode::PermissionDenied
-                            | common_error::status_code::StatusCode::AccessDenied
-                    ) {
-                        warn!(user = query_ctx.current_user().username(), protocol = %query_ctx.channel(),
-                                catalog = query_ctx.current_catalog(), schema = %schema,
-                                previous_schema = %query_ctx.current_schema(), process_id = query_ctx.process_id(),
-                                reason = %error.status_code(), "Database selection denied");
-                    }
-                    return Err(error).context(PermissionSnafu);
+                if let Statement::Use(schema) = &stmt {
+                    self.authorize_database(query_ctx.current_catalog(), schema, &query_ctx)
+                        .await?;
                 }
                 if let Statement::Copy(sql::statements::copy::Copy::CopyDatabase(
                     CopyDatabase::From(arg),
@@ -625,116 +567,6 @@ fn attach_timeout(
 }
 
 impl Instance {
-    // A database-less MySQL login has no authorized default scope. Resolve explicit
-    // scopes before planning, including PREPARE, without assigning one to the session.
-    async fn check_unselected_mysql_database(
-        &self,
-        stmt: &Statement,
-        query_ctx: &QueryContextRef,
-    ) -> Result<()> {
-        if query_ctx.channel() != Channel::Mysql || !query_ctx.current_schema().is_empty() {
-            return Ok(());
-        }
-        let no_database = || {
-            error::ExternalSnafu.into_error(BoxedError::new(
-                session::SessionError::NoDatabaseSelected {},
-            ))
-        };
-        let mut stmt = stmt;
-        while let Statement::Explain(explain) = stmt {
-            stmt = &explain.statement;
-        }
-        let mut scopes = HashSet::new();
-        let tables = extract_tables_from_statement_checked(stmt).ok_or_else(no_database)?;
-        for table in tables {
-            let (catalog, schema, _) = table_idents_to_full_name(&table, query_ctx)
-                .map_err(BoxedError::new)
-                .context(ExternalSnafu)?;
-            if schema.is_empty() {
-                return Err(no_database());
-            }
-            scopes.insert((catalog, schema));
-        }
-        let database = match stmt {
-            Statement::ShowTables(show) => Some(show.database.as_deref()),
-            Statement::ShowTableStatus(show) => Some(show.database.as_deref()),
-            Statement::ShowViews(show) => Some(show.database.as_deref()),
-            _ => None,
-        };
-        if let Some(database) = database {
-            let schema = database
-                .filter(|schema| !schema.is_empty())
-                .ok_or_else(no_database)?;
-            scopes.insert((query_ctx.current_catalog().to_string(), schema.to_string()));
-        }
-        let database_name = match stmt {
-            Statement::CreateDatabase(create) => Some(&create.name),
-            Statement::AlterDatabase(alter) => Some(alter.database_name()),
-            Statement::DropDatabase(drop) => Some(drop.name()),
-            Statement::ShowCreateDatabase(show) => Some(&show.database_name),
-            Statement::Copy(sql::statements::copy::Copy::CopyDatabase(copy)) => Some(match copy {
-                CopyDatabase::To(args) | CopyDatabase::From(args) => &args.database_name,
-            }),
-            _ => None,
-        };
-        if let Some(name) = database_name {
-            let scope = match &name.0[..] {
-                [schema] => (
-                    query_ctx.current_catalog().to_string(),
-                    schema.to_string_unquoted(),
-                ),
-                [catalog, schema] => (catalog.to_string_unquoted(), schema.to_string_unquoted()),
-                _ => {
-                    return InvalidSqlSnafu {
-                        err_msg: format!("Invalid database name: {name}"),
-                    }
-                    .fail();
-                }
-            };
-            if scope.1.is_empty() {
-                return Err(no_database());
-            }
-            scopes.insert(scope);
-        }
-        if scopes.is_empty()
-            && !matches!(
-                stmt,
-                Statement::Query(_)
-                    | Statement::Use(_)
-                    | Statement::SetVariables(_)
-                    | Statement::ShowVariables(_)
-                    | Statement::ShowDatabases(_)
-                    | Statement::ShowCharset(_)
-                    | Statement::ShowCollation(_)
-                    | Statement::ShowStatus(_)
-                    | Statement::ShowProcesslist(_)
-                    | Statement::Kill(_)
-            )
-        {
-            return Err(no_database());
-        }
-        if let Some(provider) = self.plugins.get::<auth::UserProviderRef>() {
-            for (catalog, schema) in scopes {
-                if let Err(error) = provider
-                    .authorize(&catalog, &schema, &query_ctx.current_user())
-                    .await
-                {
-                    if matches!(
-                        error.status_code(),
-                        common_error::status_code::StatusCode::PermissionDenied
-                            | common_error::status_code::StatusCode::AccessDenied
-                    ) {
-                        warn!(user = query_ctx.current_user().username(), protocol = "mysql",
-                            catalog = %catalog, schema = %schema, reason = %error.status_code(),
-                            "Database access denied without a selected database");
-                    }
-                    return Err(error).context(PermissionSnafu);
-                }
-            }
-        }
-        Ok(())
-    }
-
     async fn check_sql_permission(
         &self,
         stmt: &Statement,

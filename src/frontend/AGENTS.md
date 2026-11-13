@@ -27,6 +27,7 @@ remote datanodes via `operator`/`client`.
 | `instance` | `src/frontend/src/instance.rs` | `Instance`: the core handler; implements `SqlQueryHandler`, `PrometheusHandler`, etc. |
 | `instance/builder` | `src/frontend/src/instance/builder.rs` | `FrontendBuilder` assembles `Instance` from its dependencies |
 | `instance/grpc` | `src/frontend/src/instance/grpc.rs` | `GrpcQueryHandler`: insert/delete/query/promql over gRPC |
+| `instance/schema_selection` | `src/frontend/src/instance/schema_selection.rs` | SQL database selection and authorization for sessions without a selected schema |
 | `instance/region_query` | `src/frontend/src/instance/region_query.rs` | Routes distributed region reads to datanodes |
 | `instance/exemplar` | `src/frontend/src/instance/exemplar.rs` | Resolves and authorizes selector branches before bounded exemplar-table scans |
 | `instance/*` | `src/frontend/src/instance/` | Per-protocol handlers (`influxdb.rs`, `promql.rs`, `otlp/`, `jaeger.rs`, `logs.rs`, `prom_store.rs`, ...) |
