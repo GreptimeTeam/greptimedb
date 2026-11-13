@@ -10,6 +10,7 @@ workspace = true
 [dependencies]
 api.workspace = true
 async-trait.workspace = true
+auth.workspace = true
 catalog.workspace = true
 client.workspace = true
 common-base.workspace = true

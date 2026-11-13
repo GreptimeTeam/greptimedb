@@ -24,6 +24,7 @@ use base64::engine::general_purpose::STANDARD as BASE64;
 use common_catalog::parse_catalog_and_schema_from_db_string;
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
+use common_telemetry::{debug, error, warn};
 use common_time::Timezone;
 use futures::{Sink, SinkExt};
 use pgwire::api::auth::StartupHandler;
@@ -199,6 +200,13 @@ impl PgLoginVerifier {
                 METRIC_AUTH_FAILURE
                     .with_label_values(&[e.status_code().as_ref()])
                     .inc();
+                if e.status_code().should_log_error() {
+                    error!(e; user = user_info.username(), protocol = "postgres", catalog = %catalog,
+                        schema = %schema, client_addr = %login.host, reason = %e.status_code(), "Startup database authorization failed");
+                } else {
+                    warn!(user = user_info.username(), protocol = "postgres", catalog = %catalog,
+                        schema = %schema, client_addr = %login.host, reason = %e.status_code(), "Startup database authorization denied");
+                }
                 Err(AuthSnafu.into_error(e))
             }
             Ok(()) => Ok(()),
@@ -216,6 +224,10 @@ where
     if let Some(current_schema) = client.metadata().get(super::METADATA_SCHEMA) {
         session.set_schema(current_schema.clone());
     }
+
+    debug!(user = session.user_info().username(), protocol = "postgres",
+        catalog = %session.catalog(), schema = %session.schema(),
+        client_addr = ?session.conn_info().client_addr, "Handshake database selected");
 
     // pass generated process id and secret key to client, this information will
     // be sent to postgres client for query cancellation.
@@ -250,18 +262,18 @@ impl StartupHandler for PostgresServerHandlerInner {
 
                 auth::save_startup_parameters_to_metadata(client, startup);
 
-                // check if db is valid
-                match resolve_db_info(client, self.query_handler.clone()).await? {
-                    DbResolution::Resolved(catalog, schema) => {
-                        let metadata = client.metadata_mut();
-                        let _ = metadata.insert(super::METADATA_CATALOG.to_owned(), catalog);
-                        let _ = metadata.insert(super::METADATA_SCHEMA.to_owned(), schema);
-                    }
-                    DbResolution::NotFound(msg) => {
-                        send_error(client, PgErrorCode::Ec3D000.to_err_info(msg)).await?;
-                        return Ok(());
-                    }
-                }
+                let Some(db) = client.metadata().get(super::METADATA_DATABASE) else {
+                    send_error(
+                        client,
+                        PgErrorCode::Ec3D000.to_err_info("Database not specified".to_owned()),
+                    )
+                    .await?;
+                    return Ok(());
+                };
+                let (catalog, schema) = parse_catalog_and_schema_from_db_string(db);
+                let metadata = client.metadata_mut();
+                let _ = metadata.insert(super::METADATA_CATALOG.to_owned(), catalog);
+                let _ = metadata.insert(super::METADATA_SCHEMA.to_owned(), schema);
 
                 // try to set TimeZone
                 if let Some(tz) = client.metadata().get("TimeZone") {
@@ -311,6 +323,9 @@ impl StartupHandler for PostgresServerHandlerInner {
                         }
                     }
                 } else {
+                    if !check_database_exists(client, &self.query_handler).await? {
+                        return Ok(());
+                    }
                     self.session.set_user_info(userinfo_by_name(
                         client.metadata().get(super::METADATA_USER).cloned(),
                     ));
@@ -325,7 +340,15 @@ impl StartupHandler for PostgresServerHandlerInner {
                     .await?
                 {
                     PgAuthenticationResult::Continue => {}
-                    PgAuthenticationResult::Success(user_info) => {
+                    PgAuthenticationResult::Success(user_info, final_message) => {
+                        if !check_database_exists(client, &self.query_handler).await? {
+                            return Ok(());
+                        }
+                        if let Some(message) = final_message {
+                            client
+                                .send(PgWireBackendMessage::Authentication(message))
+                                .await?;
+                        }
                         self.session.set_user_info(user_info);
                         set_client_info(client, &self.session);
                         auth::finish_authentication(client, self.param_provider.as_ref()).await?;
@@ -343,7 +366,7 @@ impl StartupHandler for PostgresServerHandlerInner {
 
 enum PgAuthenticationResult {
     Continue,
-    Success(UserInfoRef),
+    Success(UserInfoRef, Option<Authentication>),
     Failed,
 }
 
@@ -379,7 +402,7 @@ impl PostgresServerHandlerInner {
                 let pwd = pwd.into_password()?;
                 drop(state);
                 match self.login_verifier.auth(login_info, &pwd.password).await {
-                    Ok(Some(user_info)) => Ok(PgAuthenticationResult::Success(user_info)),
+                    Ok(Some(user_info)) => Ok(PgAuthenticationResult::Success(user_info, None)),
                     Ok(None) | Err(_) => Ok(PgAuthenticationResult::Failed),
                 }
             }
@@ -480,14 +503,12 @@ impl PostgresServerHandlerInner {
                         return Ok(PgAuthenticationResult::Failed);
                     }
 
-                    client
-                        .send(PgWireBackendMessage::Authentication(
-                            Authentication::SASLFinal(
-                                format!("v={}", BASE64.encode(server_signature)).into(),
-                            ),
-                        ))
-                        .await?;
-                    PgAuthenticationResult::Success(user_info)
+                    PgAuthenticationResult::Success(
+                        user_info,
+                        Some(Authentication::SASLFinal(
+                            format!("v={}", BASE64.encode(server_signature)).into(),
+                        )),
+                    )
                 };
                 Ok(Self::record_scram_failure(result))
             }
@@ -587,34 +608,37 @@ where
     .await
 }
 
-enum DbResolution {
-    Resolved(String, String),
-    NotFound(String),
-}
-
-/// A function extracted to resolve lifetime and readability issues:
-async fn resolve_db_info<C>(
+async fn check_database_exists<C>(
     client: &mut C,
-    query_handler: ServerSqlQueryHandlerRef,
-) -> PgWireResult<DbResolution>
+    query_handler: &ServerSqlQueryHandlerRef,
+) -> PgWireResult<bool>
 where
-    C: ClientInfo + Unpin + Send,
+    C: ClientInfo + Sink<PgWireBackendMessage> + Unpin + Send,
+    C::Error: Debug,
+    PgWireError: From<<C as Sink<PgWireBackendMessage>>::Error>,
 {
-    let db_ref = client.metadata().get(super::METADATA_DATABASE);
-    if let Some(db) = db_ref {
+    let db = client.metadata().get(super::METADATA_DATABASE);
+    let error = if let Some(db) = db {
         let (catalog, schema) = parse_catalog_and_schema_from_db_string(db);
-        if query_handler
-            .is_valid_schema(&catalog, &schema)
-            .await
-            .map_err(convert_err)?
-        {
-            Ok(DbResolution::Resolved(catalog, schema))
-        } else {
-            Ok(DbResolution::NotFound(format!("Database not found: {db}")))
+        match query_handler.is_valid_schema(&catalog, &schema).await {
+            Ok(true) => return Ok(true),
+            Ok(false) => {}
+            Err(error) => {
+                let mut error_info: ErrorInfo = convert_err(error).into();
+                error_info.severity = "FATAL".to_string();
+                send_error(client, error_info).await?;
+                return Ok(false);
+            }
         }
+        debug!(protocol = "postgres", user = ?client.metadata().get(super::METADATA_USER),
+            catalog = %catalog, schema = %schema, reason = "schema_not_found",
+            "Startup database validation failed");
+        format!("Database not found: {db}")
     } else {
-        Ok(DbResolution::NotFound("Database not specified".to_owned()))
-    }
+        "Database not specified".to_owned()
+    };
+    send_error(client, PgErrorCode::Ec3D000.to_err_info(error)).await?;
+    Ok(false)
 }
 
 #[cfg(test)]

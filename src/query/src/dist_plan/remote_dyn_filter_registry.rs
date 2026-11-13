@@ -18,11 +18,14 @@ use std::sync::{Arc, Mutex, RwLock, Weak};
 use std::time::Duration;
 
 use api::v1::region::{RemoteDynFilterUnregister, RemoteDynFilterUpdate};
-use common_query::request::{DynFilterPayload, REMOTE_DYN_FILTER_PAYLOAD_MAX_BYTES};
+use common_query::request::{
+    DynFilterPayload, REMOTE_DYN_FILTER_PAYLOAD_MAX_BYTES, is_dyn_filter_payload_too_large,
+    is_dyn_filter_unsupported,
+};
 use common_runtime::spawn_global;
 use common_telemetry::{debug, warn};
 use datafusion_physical_expr::PhysicalExpr;
-use datafusion_physical_expr::expressions::DynamicFilterPhysicalExpr;
+use datafusion_physical_expr::expressions::{DynamicFilterPhysicalExpr, lit};
 use session::query_id::QueryId;
 use store_api::storage::RegionId;
 use tokio::sync::{Notify, watch};
@@ -381,6 +384,20 @@ async fn run_entry_fanout(
     unregister_entry_once_for_query(&region_query_handler, query_id, &entry).await;
 }
 
+/// Publishes one producer snapshot to every subscriber of `entry`.
+///
+/// # Explicit `true` reset instead of a stale predicate
+///
+/// A generation the wire cannot carry (a predicate with no wire form, or one that stays
+/// over budget after top-level conjunct retention) is **not** skipped any more: the
+/// subscriber would keep the previous, usually narrower predicate, and a producer that
+/// then widens its filter would have rows pruned away by that stale predicate. Such a
+/// generation is instead published as a literal-`true` payload at the same generation, so
+/// the region drops the stale predicate.
+///
+/// This reset is an explicit invalidation, not a serialization fallback: the producer
+/// expression is never rewritten and no predicate is ever *narrowed* on the way out. The
+/// query keeps running in every case; nothing in here returns an error.
 async fn fanout_snapshot_for_query(
     query_id: QueryId,
     region_query_handler: &RegionQueryHandlerRef,
@@ -405,31 +422,9 @@ async fn fanout_snapshot_for_query(
         let _ = entry.mark_generation_sent(generation);
     }
 
-    let payload =
-        match DynFilterPayload::from_datafusion_expr(&current, REMOTE_DYN_FILTER_PAYLOAD_MAX_BYTES)
-        {
-            Ok(DynFilterPayload::Datafusion(payload)) => {
-                REMOTE_DYN_FILTER_ENCODE_TOTAL
-                    .with_label_values(&["success"])
-                    .inc();
-                REMOTE_DYN_FILTER_PAYLOAD_BYTES.observe(payload.len() as f64);
-                payload
-            }
-            Ok(_) => {
-                REMOTE_DYN_FILTER_ENCODE_TOTAL
-                    .with_label_values(&["unsupported"])
-                    .inc();
-                warn!("Ignored unsupported remote dynamic filter producer payload");
-                return true;
-            }
-            Err(error) => {
-                REMOTE_DYN_FILTER_ENCODE_TOTAL
-                    .with_label_values(&["error"])
-                    .inc();
-                warn!(error; "Failed to encode remote dynamic filter producer snapshot");
-                return true;
-            }
-        };
+    let Some(payload) = snapshot_payload(&current) else {
+        return true;
+    };
 
     fanout_update_for_query(
         query_id,
@@ -442,6 +437,100 @@ async fn fanout_snapshot_for_query(
         control_rpc_timeout,
     )
     .await
+}
+
+/// Payload to publish for one producer snapshot, or `None` when nothing can be published.
+///
+/// A representable snapshot is published exactly as the producer wrote it. A snapshot the
+/// wire cannot carry is **not** published as the producer wrote it (that is impossible) and
+/// is **not** skipped either: the stale region predicate it would leave behind could prune
+/// away rows the producer keeps after widening, so it is replaced by the explicit `true`
+/// reset described on [`fanout_snapshot_for_query`]. The producer expression itself is
+/// never rewritten.
+fn snapshot_payload(current: &Arc<dyn PhysicalExpr>) -> Option<Vec<u8>> {
+    let max_payload_bytes = REMOTE_DYN_FILTER_PAYLOAD_MAX_BYTES;
+    match DynFilterPayload::from_datafusion_expr(current, max_payload_bytes) {
+        Ok(DynFilterPayload::Datafusion(payload)) => {
+            REMOTE_DYN_FILTER_ENCODE_TOTAL
+                .with_label_values(&["success"])
+                .inc();
+            REMOTE_DYN_FILTER_PAYLOAD_BYTES.observe(payload.len() as f64);
+            Some(payload)
+        }
+        Ok(_) => {
+            REMOTE_DYN_FILTER_ENCODE_TOTAL
+                .with_label_values(&["unsupported"])
+                .inc();
+            warn!(
+                "Remote dynamic filter producer payload has an unknown encoding; publishing an explicit `true` reset"
+            );
+            true_reset_payload()
+        }
+        Err(error) if is_dyn_filter_unsupported(&error) => {
+            REMOTE_DYN_FILTER_ENCODE_TOTAL
+                .with_label_values(&["unsupported"])
+                .inc();
+            warn!(
+                error;
+                "Remote dynamic filter snapshot has no wire form; publishing an explicit `true` reset to invalidate the stale region predicate"
+            );
+            true_reset_payload()
+        }
+        Err(error) if is_dyn_filter_payload_too_large(&error) => {
+            REMOTE_DYN_FILTER_ENCODE_TOTAL
+                .with_label_values(&["too_large"])
+                .inc();
+            warn!(
+                error;
+                "Remote dynamic filter snapshot stays over budget; publishing an explicit `true` reset to invalidate the stale region predicate"
+            );
+            true_reset_payload()
+        }
+        Err(error) => {
+            REMOTE_DYN_FILTER_ENCODE_TOTAL
+                .with_label_values(&["error"])
+                .inc();
+            warn!(
+                error;
+                "Failed to encode remote dynamic filter producer snapshot; publishing an explicit `true` reset to invalidate the stale region predicate"
+            );
+            true_reset_payload()
+        }
+    }
+}
+
+/// Encodes the literal-`true` payload that invalidates a stale remote predicate.
+///
+/// This is the wire form of the explicit reset described on [`fanout_snapshot_for_query`]:
+/// it is a *payload the transport builds itself*, never a reuse of the producer's
+/// unrepresentable expression, so no predicate is rewritten to `true` on the way out. It
+/// has no budget problem by construction and can only fail on a transport defect, which
+/// is reported as `None` so best-effort fanout continues with the query running.
+fn true_reset_payload() -> Option<Vec<u8>> {
+    let reset = lit(true) as Arc<dyn PhysicalExpr>;
+    match DynFilterPayload::from_datafusion_expr(&reset, REMOTE_DYN_FILTER_PAYLOAD_MAX_BYTES) {
+        Ok(DynFilterPayload::Datafusion(payload)) => {
+            REMOTE_DYN_FILTER_ENCODE_TOTAL
+                .with_label_values(&["reset"])
+                .inc();
+            REMOTE_DYN_FILTER_PAYLOAD_BYTES.observe(payload.len() as f64);
+            Some(payload)
+        }
+        Ok(_) => {
+            REMOTE_DYN_FILTER_ENCODE_TOTAL
+                .with_label_values(&["reset_error"])
+                .inc();
+            warn!("Ignored remote dynamic filter `true` reset with an unknown encoding");
+            None
+        }
+        Err(error) => {
+            REMOTE_DYN_FILTER_ENCODE_TOTAL
+                .with_label_values(&["reset_error"])
+                .inc();
+            warn!(error; "Failed to encode the remote dynamic filter `true` reset");
+            None
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -828,7 +917,10 @@ mod tests {
     use async_trait::async_trait;
     use common_meta::peer::Peer;
     use common_query::request::QueryRequest;
-    use datafusion_physical_expr::expressions::{Column, lit};
+    use datafusion::execution::TaskContext;
+    use datafusion::physical_plan::joins::join_hash_map::JoinHashMapU32;
+    use datafusion::physical_plan::joins::{HashTableLookupExpr, Map, SeededRandomState};
+    use datafusion_physical_expr::expressions::{Column, NotExpr, lit};
     use session::ReadPreference;
     use uuid::Uuid;
 
@@ -1007,6 +1099,42 @@ mod tests {
             .collect();
 
         Arc::new(DynamicFilterPhysicalExpr::new(children, lit(true) as _))
+    }
+
+    /// `NOT lookup` over a hand-built lookup: no key list, and no membership-free conjunct.
+    fn unsupported_lookup_predicate() -> Arc<dyn PhysicalExpr> {
+        let column = Arc::new(Column::new("host", 0)) as Arc<dyn PhysicalExpr>;
+        let lookup = Arc::new(HashTableLookupExpr::new(
+            vec![Arc::clone(&column)],
+            SeededRandomState::with_seed(0),
+            Arc::new(Map::HashMap(Box::new(JoinHashMapU32::with_capacity(0)))),
+            "hash_lookup".to_string(),
+            None,
+        )) as Arc<dyn PhysicalExpr>;
+
+        Arc::new(NotExpr::new(lookup)) as Arc<dyn PhysicalExpr>
+    }
+
+    fn host_schema() -> Arc<arrow_schema::Schema> {
+        Arc::new(arrow_schema::Schema::new(vec![arrow_schema::Field::new(
+            "host",
+            arrow_schema::DataType::Utf8,
+            true,
+        )]))
+    }
+
+    /// Decodes a recorded update the way a region receiver does.
+    fn decode_recorded_payload(
+        update: &RecordedUpdate,
+        schema: &Arc<arrow_schema::Schema>,
+    ) -> Arc<dyn PhysicalExpr> {
+        DynFilterPayload::Datafusion(update.payload.clone())
+            .decode_datafusion_expr(
+                &TaskContext::default(),
+                schema,
+                REMOTE_DYN_FILTER_PAYLOAD_MAX_BYTES,
+            )
+            .unwrap()
     }
 
     #[test]
@@ -1338,6 +1466,145 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn fanout_resets_stale_predicate_when_a_wider_generation_has_no_wire_form() {
+        let query_id = test_query_id(11);
+        let registry = Arc::new(QueryDynFilterRegistry::new(query_id));
+        let filter = test_dyn_filter(&["host"]);
+        let filter_id = test_filter_id(1);
+        let entry = match registry.register_remote_dyn_filter(filter_id.clone(), filter.clone()) {
+            EntryRegistration::Inserted(entry) => entry,
+            other => panic!("unexpected registration result: {other:?}"),
+        };
+        let subscriber = Subscriber::new(RegionId::new(1024, 7), test_target(1));
+        assert_eq!(
+            registry.register_subscriber(&filter_id, subscriber),
+            SubscriberRegistration::Added
+        );
+
+        let handler = Arc::new(RecordingRegionQueryHandler::default());
+        let handler_ref = handler.clone() as RegionQueryHandlerRef;
+        let schema = host_schema();
+
+        // A representable narrow generation reaches the region and is applied there.
+        filter.update(lit(false) as _).unwrap();
+        registry
+            .fanout_snapshot(&handler_ref, &entry, filter.as_ref(), false)
+            .await;
+        let updates = handler.updates();
+        assert_eq!(updates.len(), 1);
+        let narrow = decode_recorded_payload(&updates[0], &schema);
+        assert_eq!(narrow.to_string(), "false");
+        let receiver = Arc::new(DynamicFilterPhysicalExpr::new(
+            vec![Arc::new(Column::new("host", 0)) as _],
+            lit(true) as _,
+        ));
+        receiver.update(narrow).unwrap();
+        let narrow_generation = receiver.snapshot_generation();
+        assert_eq!(receiver.current().unwrap().to_string(), "false");
+
+        // `NOT lookup` has no wire form and no membership-free conjunct. The producer
+        // expression is never rewritten, but leaving the stale `false` installed would let
+        // it prune away the rows of a producer that widened, so the region gets an explicit
+        // `true` reset at the new generation instead.
+        filter.update(unsupported_lookup_predicate() as _).unwrap();
+        registry
+            .fanout_snapshot(&handler_ref, &entry, filter.as_ref(), false)
+            .await;
+        let updates = handler.updates();
+        assert_eq!(
+            updates.len(),
+            2,
+            "the unsupported generation must be published as a reset"
+        );
+        assert_eq!(updates[1].generation, filter.snapshot_generation());
+        assert!(updates[1].generation > updates[0].generation);
+        let reset = decode_recorded_payload(&updates[1], &schema);
+        assert_eq!(reset.to_string(), "true");
+        receiver.update(reset).unwrap();
+        assert!(
+            receiver.snapshot_generation() > narrow_generation,
+            "the receiver generation must advance for the reset"
+        );
+        assert_eq!(receiver.current().unwrap().to_string(), "true");
+
+        // A representable generation after the reset is still published as the producer
+        // wrote it, and the reset is not repeated for the same generation.
+        registry
+            .fanout_snapshot(&handler_ref, &entry, filter.as_ref(), false)
+            .await;
+        assert_eq!(handler.updates().len(), 2);
+        filter.update(lit(false) as _).unwrap();
+        registry
+            .fanout_snapshot(&handler_ref, &entry, filter.as_ref(), false)
+            .await;
+        let updates = handler.updates();
+        assert_eq!(updates.len(), 3);
+        assert_eq!(updates[2].generation, filter.snapshot_generation());
+        assert_eq!(
+            decode_recorded_payload(&updates[2], &schema).to_string(),
+            "false"
+        );
+    }
+
+    #[tokio::test]
+    async fn fanout_publishes_producer_supplied_true_after_restrictive_generation() {
+        let query_id = test_query_id(12);
+        let registry = Arc::new(QueryDynFilterRegistry::new(query_id));
+        let filter = test_dyn_filter(&["host"]);
+        let filter_id = test_filter_id(1);
+        let entry = match registry.register_remote_dyn_filter(filter_id.clone(), filter.clone()) {
+            EntryRegistration::Inserted(entry) => entry,
+            other => panic!("unexpected registration result: {other:?}"),
+        };
+        let subscriber = Subscriber::new(RegionId::new(1024, 7), test_target(1));
+        assert_eq!(
+            registry.register_subscriber(&filter_id, subscriber),
+            SubscriberRegistration::Added
+        );
+
+        let handler = Arc::new(RecordingRegionQueryHandler::default());
+        let handler_ref = handler.clone() as RegionQueryHandlerRef;
+        let schema = host_schema();
+        let receiver = Arc::new(DynamicFilterPhysicalExpr::new(
+            vec![Arc::new(Column::new("host", 0)) as _],
+            lit(true) as _,
+        ));
+
+        // A restrictive generation reaches the region and is applied there.
+        filter.update(lit(false) as _).unwrap();
+        registry
+            .fanout_snapshot(&handler_ref, &entry, filter.as_ref(), false)
+            .await;
+        let updates = handler.updates();
+        assert_eq!(updates.len(), 1);
+        let restrictive = decode_recorded_payload(&updates[0], &schema);
+        assert_eq!(restrictive.to_string(), "false");
+        receiver.update(restrictive).unwrap();
+        let restrictive_generation = receiver.snapshot_generation();
+        assert_eq!(receiver.current().unwrap().to_string(), "false");
+
+        // A `true` the *producer* itself publishes is a real predicate and is published
+        // normally - it is not the transport reset, which only exists for generations the
+        // wire cannot carry, and it is not a synthesized fallback either.
+        filter.update(lit(true) as _).unwrap();
+        registry
+            .fanout_snapshot(&handler_ref, &entry, filter.as_ref(), false)
+            .await;
+        let updates = handler.updates();
+        assert_eq!(updates.len(), 2);
+        assert_eq!(updates[1].generation, filter.snapshot_generation());
+        assert!(updates[1].generation > updates[0].generation);
+        let widened = decode_recorded_payload(&updates[1], &schema);
+        assert_eq!(widened.to_string(), "true");
+        receiver.update(widened).unwrap();
+        assert!(
+            receiver.snapshot_generation() > restrictive_generation,
+            "the receiver generation must advance for a producer-supplied `true`"
+        );
+        assert_eq!(receiver.current().unwrap().to_string(), "true");
+    }
+
+    #[tokio::test]
     async fn fanout_task_waits_for_dynamic_filter_notifications() {
         let query_id = test_query_id(3);
         let manager = Arc::new(DynFilterRegistryManager::default());
@@ -1587,6 +1854,75 @@ mod tests {
 
         drop(lease);
         handler.wait_for_unregister_count(1).await;
+        wait_for_registry_drop(registry_weak).await;
+    }
+
+    #[tokio::test]
+    async fn fanout_task_resets_unsupported_final_generation_and_cleans_up_once() {
+        let query_id = test_query_id(13);
+        let manager = Arc::new(DynFilterRegistryManager::default());
+        let lease = manager.acquire_lease(query_id);
+        let registry_weak = Arc::downgrade(lease.registry.as_ref().unwrap());
+        let filter = test_dyn_filter(&["host"]);
+        // A narrow, representable generation is the predicate the region starts with.
+        filter.update(lit(false) as _).unwrap();
+        let filter_id = test_filter_id(1);
+        let _ = lease
+            .registry()
+            .register_remote_dyn_filter(filter_id.clone(), filter.clone());
+        let subscriber = Subscriber::new(RegionId::new(1024, 7), test_target(1));
+        assert_eq!(
+            lease.registry().register_subscriber(&filter_id, subscriber),
+            SubscriberRegistration::Added
+        );
+
+        let handler = Arc::new(RecordingRegionQueryHandler::default());
+        lease.ensure_fanout_task(handler.clone() as RegionQueryHandlerRef);
+
+        // The supported initial generation installs the narrow predicate on the region.
+        handler.wait_for_update_count(1).await;
+        assert_eq!(
+            decode_recorded_payload(&handler.updates()[0], &host_schema()).to_string(),
+            "false"
+        );
+
+        // The final generation has no wire form, so the stale `false` must be invalidated
+        // instead of being kept: an explicit `true` reset is published at that generation
+        // (complete, if the completion was already visible), and the fanout still cleans up
+        // exactly once. Whether the update and the completion are observed in one snapshot
+        // or two is racy, so both shapes are accepted.
+        filter.update(unsupported_lookup_predicate() as _).unwrap();
+        filter.mark_complete();
+        handler.wait_for_complete_update().await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        drop(lease);
+        handler.wait_for_unregister_count(1).await;
+
+        let schema = host_schema();
+        let updates = handler.updates();
+        assert!(updates.len() >= 2, "the final generation must be reset");
+        for reset in &updates[1..] {
+            assert_eq!(
+                decode_recorded_payload(reset, &schema).to_string(),
+                "true",
+                "every snapshot after the narrow one must be the true reset"
+            );
+            assert_eq!(
+                reset.generation,
+                filter.snapshot_generation(),
+                "the reset must carry the current generation"
+            );
+        }
+        assert!(
+            updates.last().unwrap().is_complete,
+            "the complete final generation must be marked complete"
+        );
+        assert_eq!(
+            handler.unregisters().len(),
+            1,
+            "the unsupported final generation must still clean up exactly once"
+        );
         wait_for_registry_drop(registry_weak).await;
     }
 

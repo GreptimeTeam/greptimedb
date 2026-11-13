@@ -22,7 +22,7 @@ use common_recordbatch::error::{
     ArrowComputeSnafu, DataTypesSnafu, ExternalSnafu, NewDfRecordBatchSnafu,
 };
 use common_recordbatch::{DfRecordBatch, RecordBatch};
-use datatypes::arrow::array::Array;
+use datatypes::arrow::array::{Array, AsArray};
 use datatypes::arrow::datatypes::{DataType as ArrowDataType, Field};
 use datatypes::extension::json::is_json2_extension_type;
 use datatypes::prelude::{ConcreteDataType, DataType};
@@ -320,6 +320,16 @@ impl FlatProjectionMapper {
         let mut arrays = Vec::with_capacity(self.output_schema.num_columns());
         for (output_idx, index) in self.batch_indices.iter().enumerate() {
             let mut array = batch.column(*index).clone();
+            if matches!(
+                self.output_schema.arrow_schema().fields()[output_idx].data_type(),
+                ArrowDataType::Dictionary(_, _)
+            ) && let Some(dictionary) = array.as_any_dictionary_opt()
+                && dictionary.values().len() > dictionary.len()
+            {
+                // Small scan slices must not retain an entire SST's tag dictionary in merges.
+                array = arrow_select::dictionary::garbage_collect_any_dictionary(dictionary)
+                    .context(ArrowComputeSnafu)?;
+            }
             // Cast dictionary values to the target type.
             if let ArrowDataType::Dictionary(_key_type, value_type) = array.data_type()
                 && !matches!(
@@ -664,6 +674,63 @@ mod tests {
                 Box::new(ArrowDataType::Utf8),
             ),
             mapper.output_schema().arrow_schema().field(0).data_type()
+        );
+    }
+
+    #[test]
+    fn test_tag_projection_compacts_dictionary_slices() {
+        use datatypes::arrow::array::{
+            DictionaryArray, StringArray, TimestampMillisecondArray, UInt32Array,
+        };
+        use datatypes::arrow::datatypes::UInt32Type;
+
+        let mut builder = RegionMetadataBuilder::new(RegionId::new(1024, 0));
+        builder
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new("tag", ConcreteDataType::string_datatype(), true),
+                semantic_type: SemanticType::Tag,
+                column_id: 0,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "ts",
+                    ConcreteDataType::timestamp_millisecond_datatype(),
+                    false,
+                ),
+                semantic_type: SemanticType::Timestamp,
+                column_id: 1,
+            })
+            .primary_key(vec![0]);
+        let metadata = Arc::new(builder.build().unwrap());
+        let mapper = FlatProjectionMapper::new(&metadata, [0, 1])
+            .unwrap()
+            .with_pk_dictionary_encoding();
+        let values = StringArray::from_iter(
+            (0..1024).map(|i| (i != 1).then(|| format!("{i}{}", "x".repeat(4096)))),
+        );
+        let dictionary = DictionaryArray::<UInt32Type>::try_new(
+            UInt32Array::from(vec![Some(1023), None, Some(1), Some(1023)]),
+            Arc::new(values),
+        )
+        .unwrap();
+        let expected = datatypes::arrow::compute::cast(&dictionary, &ArrowDataType::Utf8).unwrap();
+        let batch = DfRecordBatch::try_from_iter([
+            ("tag", Arc::new(dictionary) as Arc<dyn Array>),
+            (
+                "ts",
+                Arc::new(TimestampMillisecondArray::from(vec![1, 2, 3, 4])),
+            ),
+        ])
+        .unwrap();
+        let output = mapper.convert(&batch, &CacheStrategy::Disabled).unwrap();
+        let actual = output.column(0);
+        assert!(actual.get_array_memory_size() < 64 * 1024);
+        assert_eq!(actual.data_type(), batch.column(0).data_type());
+        assert_eq!(
+            datatypes::arrow::compute::cast(actual.as_ref(), &ArrowDataType::Utf8)
+                .unwrap()
+                .as_ref(),
+            expected.as_ref(),
         );
     }
 

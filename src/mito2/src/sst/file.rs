@@ -39,6 +39,7 @@ use crate::cache::CacheManagerRef;
 use crate::cache::file_cache::{FileType, IndexKey};
 use crate::region::options::IndexOptions;
 use crate::sst::file_purger::FilePurgerRef;
+use crate::sst::file_ref::FileReferenceManagerRef;
 use crate::sst::index::fulltext_index::FULLTEXT_BLOOM_VERSION;
 use crate::sst::location;
 use crate::sst::parquet::SstInfo;
@@ -551,13 +552,13 @@ impl fmt::Debug for FileHandle {
         f.debug_struct("FileHandle")
             .field("meta", self.meta_ref())
             .field("compacting", &self.compacting())
-            .field("deleted", &self.inner.deleted.load(Ordering::Relaxed))
+            .field("deleted", &self.is_deleted())
             .finish()
     }
 }
 
 impl FileHandle {
-    /// Creates a handle sharing the file's physical state and original statistics.
+    /// Creates a new logical SST reference. Index replacements must reuse its lifetime.
     pub fn new(meta: FileMeta, file_purger: FilePurgerRef) -> FileHandle {
         let pk_range = meta.primary_key_range();
         FileHandle {
@@ -573,6 +574,23 @@ impl FileHandle {
     ) -> FileHandle {
         FileHandle {
             inner: Arc::new(FileHandleInner::new(meta, file_purger, primary_key_range)),
+        }
+    }
+
+    /// Replaces an index metadata view without splitting the underlying SST lifetime.
+    pub(crate) fn with_updated_index(&self, meta: FileMeta) -> Self {
+        debug_assert_eq!(self.file_id(), meta.file_id());
+        let primary_key_range = meta
+            .primary_key_range()
+            .or_else(|| self.raw_primary_key_range());
+        let lifetime = self.inner.lifetime.clone();
+        *lifetime.meta.lock().unwrap() = meta.clone();
+        Self {
+            inner: Arc::new(FileHandleInner::with_lifetime(
+                meta,
+                lifetime,
+                primary_key_range,
+            )),
         }
     }
 
@@ -615,7 +633,7 @@ impl FileHandle {
 
     /// Mark the file as deleted and will delete it on drop asynchronously
     pub fn mark_deleted(&self) {
-        self.inner.deleted.store(true, Ordering::Relaxed);
+        self.inner.lifetime.deleted.store(true, Ordering::Relaxed);
     }
 
     pub fn compacting(&self) -> bool {
@@ -634,23 +652,13 @@ impl FileHandle {
             .is_ok()
     }
 
-    pub fn index_outdated(&self) -> bool {
-        self.inner.index_outdated.load(Ordering::Relaxed)
-    }
-
-    pub fn set_index_outdated(&self, index_outdated: bool) {
-        self.inner
-            .index_outdated
-            .store(index_outdated, Ordering::Relaxed);
-    }
-
     /// Returns a reference to the [FileMeta].
     pub fn meta_ref(&self) -> &FileMeta {
         &self.inner.meta
     }
 
     pub fn file_purger(&self) -> FilePurgerRef {
-        self.inner.file_purger.clone()
+        self.inner.lifetime.file_purger.clone()
     }
 
     pub fn size(&self) -> u64 {
@@ -670,7 +678,7 @@ impl FileHandle {
     }
 
     pub fn is_deleted(&self) -> bool {
-        self.inner.deleted.load(Ordering::Relaxed)
+        self.inner.lifetime.deleted.load(Ordering::Relaxed)
     }
 
     /// Returns bounds aligned to the caller's pinned schema, before any comparison
@@ -776,39 +784,69 @@ impl PrimaryKeyRange {
 struct FileHandleInner {
     meta: FileMeta,
     compacting: AtomicBool,
-    deleted: AtomicBool,
-    index_outdated: AtomicBool,
     primary_key_range: RwLock<PrimaryKeyRange>,
-    file_purger: FilePurgerRef,
+    lifetime: Arc<SstLifetime>,
 }
 
 impl Drop for FileHandleInner {
     fn drop(&mut self) {
-        self.file_purger.remove_file(
-            self.meta.clone(),
-            self.deleted.load(Ordering::Acquire),
-            self.index_outdated.load(Ordering::Acquire),
-        );
+        if let Some(manager) = &self.lifetime.file_ref_manager {
+            manager.remove_file(&self.meta);
+        }
     }
 }
 
 impl FileHandleInner {
-    /// There should only be one `FileHandleInner` for each file on a datanode
     fn new(
         meta: FileMeta,
         file_purger: FilePurgerRef,
         primary_key_range: Option<(Bytes, Bytes)>,
-    ) -> FileHandleInner {
-        file_purger.new_file(&meta);
-        FileHandleInner {
+    ) -> Self {
+        let file_ref_manager = file_purger.file_ref_manager();
+        let lifetime = Arc::new(SstLifetime {
+            meta: Mutex::new(meta.clone()),
+            deleted: AtomicBool::new(false),
+            file_purger,
+            file_ref_manager,
+        });
+        Self::with_lifetime(meta, lifetime, primary_key_range)
+    }
+
+    fn with_lifetime(
+        meta: FileMeta,
+        lifetime: Arc<SstLifetime>,
+        primary_key_range: Option<(Bytes, Bytes)>,
+    ) -> Self {
+        if let Some(manager) = &lifetime.file_ref_manager {
+            manager.register_file(&meta);
+        }
+        Self {
             meta,
             compacting: AtomicBool::new(false),
-            deleted: AtomicBool::new(false),
-            index_outdated: AtomicBool::new(false),
             primary_key_range: RwLock::new(
                 primary_key_range.map_or(PrimaryKeyRange::Missing, PrimaryKeyRange::Raw),
             ),
-            file_purger,
+            lifetime,
+        }
+    }
+}
+
+/// Physical deletion must wait for readers of every index metadata version.
+/// Independent logical references (for example, copied regions) do not share this guard.
+struct SstLifetime {
+    /// Latest metadata ensures final purge includes indexes newer than the last reader's view.
+    meta: Mutex<FileMeta>,
+    deleted: AtomicBool,
+    file_purger: FilePurgerRef,
+    /// Tracks each metadata view's readers independently for object-store index GC.
+    file_ref_manager: Option<FileReferenceManagerRef>,
+}
+
+impl Drop for SstLifetime {
+    fn drop(&mut self) {
+        if self.deleted.load(Ordering::Acquire) {
+            self.file_purger
+                .purge_file(self.meta.get_mut().unwrap().clone());
         }
     }
 }

@@ -65,6 +65,9 @@
 //! 13. Topic name to region map key `__topic_region/{topic_name}/{region_id}`
 //!     - Mapping {topic_name} to {region_id}
 //!
+//! 14. Datanode epoch key: `__datanode_epoch/{datanode_id}`
+//!     - The highest `node_epoch` the metasrv leader has accepted from the datanode
+//!
 //! All keys have related managers. The managers take care of the serialization and deserialization
 //! of keys and values, and the interaction with the underlying KV store backend.
 //!
@@ -98,6 +101,7 @@
 //!            {partition_id}
 
 pub mod catalog_name;
+pub mod datanode_epoch;
 pub mod datanode_table;
 pub mod flow;
 pub mod node_address;
@@ -149,6 +153,7 @@ use topic_region::{TopicRegionKey, TopicRegionManager};
 use view_info::{ViewInfoKey, ViewInfoManager, ViewInfoValue};
 
 use self::catalog_name::{CatalogManager, CatalogNameKey, CatalogNameValue};
+use self::datanode_epoch::DatanodeEpochValue;
 use self::datanode_table::RegionInfo;
 use self::flow::flow_info::FlowInfoValue;
 use self::flow::flow_name::FlowNameValue;
@@ -179,6 +184,7 @@ pub const PAUSE_PROCEDURE_KEY: &str = "__switches/pause_procedure";
 pub const RECOVERY_MODE_KEY: &str = "__switches/recovery";
 
 pub const DATANODE_TABLE_KEY_PREFIX: &str = "__dn_table";
+pub const DATANODE_EPOCH_KEY_PREFIX: &str = "__datanode_epoch";
 pub const TABLE_INFO_KEY_PREFIX: &str = "__table_info";
 pub const VIEW_INFO_KEY_PREFIX: &str = "__view_info";
 pub const TABLE_NAME_KEY_PREFIX: &str = "__table_name";
@@ -198,12 +204,13 @@ pub const ELECTION_KEY: &str = "__metasrv_election";
 pub const CANDIDATES_ROOT: &str = "__metasrv_election_candidates/";
 
 /// The keys with these prefixes will be loaded into the cache when the leader starts.
-pub const CACHE_KEY_PREFIXES: [&str; 5] = [
+pub const CACHE_KEY_PREFIXES: [&str; 6] = [
     TABLE_NAME_KEY_PREFIX,
     CATALOG_NAME_KEY_PREFIX,
     SCHEMA_NAME_KEY_PREFIX,
     TABLE_ROUTE_PREFIX,
     NODE_ADDRESS_PREFIX,
+    DATANODE_EPOCH_KEY_PREFIX,
 ];
 
 /// A set of regions with the same role.
@@ -1886,7 +1893,8 @@ impl_metadata_value! {
     SchemaNameValue,
     FlowStateValue,
     PoisonValue,
-    TopicRegionValue
+    TopicRegionValue,
+    DatanodeEpochValue
 }
 
 impl_optional_metadata_value! {

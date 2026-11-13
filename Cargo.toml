@@ -76,7 +76,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "1.3.0"
+version = "1.3.1"
 edition = "2024"
 license = "Apache-2.0"
 
@@ -107,6 +107,7 @@ arrow-buffer = "=59.2.0"
 arrow-flight = "=59.2.0"
 arrow-ipc = { version = "=59.2.0", default-features = false, features = ["lz4", "zstd"] }
 arrow-schema = { version = "=59.2.0", features = ["serde"] }
+arrow-select = "=59.2.0"
 async-stream = "0.3"
 async-trait = "0.1"
 # Remember to update axum-extra, axum-macros when updating axum
@@ -173,7 +174,7 @@ hyper-util = "0.1"
 icu_properties = "2.0.1"
 indicatif = "0.17"
 itertools = "0.14"
-jsonb = { git = "https://github.com/GreptimeTeam/jsonb", rev = "dd1e2341e3df35e9de38959328caa7628e81b6b1", default-features = false, features = [
+jsonb = { git = "https://github.com/GreptimeTeam/jsonb", rev = "5a6472858d860ac034075c17253f41617bdfa956", default-features = false, features = [
     "databend",
 ] }
 lazy_static = "1.4"
@@ -244,7 +245,7 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = { version = "1.0", features = ["float_roundtrip"] }
 serde_with = "3"
 serde_yaml_ng = "0.10"
-simd-json = "0.15"
+simd-json = "0.19"
 similar-asserts = "1.6.0"
 smallvec = { version = "1", features = ["serde"] }
 snafu = "0.8"
@@ -365,22 +366,22 @@ rev = "f743c3a5fe8c1f57363eac5866c356b7d91f9b39"
 
 [patch.crates-io]
 substrait = { git = "https://github.com/GreptimeTeam/substrait-rs.git", rev = "91ec978b0649417ad3da8390e7a515baec723b1b" }
-datafusion = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "70f84c5bf2511d40ee4a4036fa086ba36f207a85" }
-datafusion-common = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "70f84c5bf2511d40ee4a4036fa086ba36f207a85" }
-datafusion-datasource = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "70f84c5bf2511d40ee4a4036fa086ba36f207a85" }
-datafusion-execution = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "70f84c5bf2511d40ee4a4036fa086ba36f207a85" }
-datafusion-expr = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "70f84c5bf2511d40ee4a4036fa086ba36f207a85" }
-datafusion-expr-common = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "70f84c5bf2511d40ee4a4036fa086ba36f207a85" }
-datafusion-functions = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "70f84c5bf2511d40ee4a4036fa086ba36f207a85" }
-datafusion-functions-aggregate-common = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "70f84c5bf2511d40ee4a4036fa086ba36f207a85" }
-datafusion-functions-window-common = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "70f84c5bf2511d40ee4a4036fa086ba36f207a85" }
-datafusion-optimizer = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "70f84c5bf2511d40ee4a4036fa086ba36f207a85" }
-datafusion-physical-expr = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "70f84c5bf2511d40ee4a4036fa086ba36f207a85" }
-datafusion-physical-expr-common = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "70f84c5bf2511d40ee4a4036fa086ba36f207a85" }
-datafusion-physical-plan = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "70f84c5bf2511d40ee4a4036fa086ba36f207a85" }
-datafusion-proto = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "70f84c5bf2511d40ee4a4036fa086ba36f207a85" }
-datafusion-sql = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "70f84c5bf2511d40ee4a4036fa086ba36f207a85" }
-datafusion-substrait = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "70f84c5bf2511d40ee4a4036fa086ba36f207a85" }
+datafusion = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "638a77fb504e86f85ef6053c552bbee1ed814fb9" }
+datafusion-common = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "638a77fb504e86f85ef6053c552bbee1ed814fb9" }
+datafusion-datasource = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "638a77fb504e86f85ef6053c552bbee1ed814fb9" }
+datafusion-execution = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "638a77fb504e86f85ef6053c552bbee1ed814fb9" }
+datafusion-expr = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "638a77fb504e86f85ef6053c552bbee1ed814fb9" }
+datafusion-expr-common = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "638a77fb504e86f85ef6053c552bbee1ed814fb9" }
+datafusion-functions = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "638a77fb504e86f85ef6053c552bbee1ed814fb9" }
+datafusion-functions-aggregate-common = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "638a77fb504e86f85ef6053c552bbee1ed814fb9" }
+datafusion-functions-window-common = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "638a77fb504e86f85ef6053c552bbee1ed814fb9" }
+datafusion-optimizer = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "638a77fb504e86f85ef6053c552bbee1ed814fb9" }
+datafusion-physical-expr = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "638a77fb504e86f85ef6053c552bbee1ed814fb9" }
+datafusion-physical-expr-common = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "638a77fb504e86f85ef6053c552bbee1ed814fb9" }
+datafusion-physical-plan = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "638a77fb504e86f85ef6053c552bbee1ed814fb9" }
+datafusion-proto = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "638a77fb504e86f85ef6053c552bbee1ed814fb9" }
+datafusion-sql = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "638a77fb504e86f85ef6053c552bbee1ed814fb9" }
+datafusion-substrait = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "638a77fb504e86f85ef6053c552bbee1ed814fb9" }
 datafusion-pg-catalog = { git = "https://github.com/datafusion-contrib/datafusion-postgres.git", rev = "ffb14a52b3d7c7489559812e1ec38096f225ce93" }
 arrow-pg = { git = "https://github.com/datafusion-contrib/datafusion-postgres.git", rev = "ffb14a52b3d7c7489559812e1ec38096f225ce93" }
 sqlparser = { git = "https://github.com/GreptimeTeam/sqlparser-rs.git", rev = "9e9019bb1c7040ed956f654e39378dd42ab17884" }

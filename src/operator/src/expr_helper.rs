@@ -817,6 +817,14 @@ pub(crate) fn to_alter_table_expr(
             .map_err(BoxedError::new)
             .context(ExternalSnafu)?;
 
+    // SQL must not reach the gRPC entry point's default-schema fallback.
+    ensure!(
+        !schema_name.is_empty(),
+        crate::error::SchemaNotFoundSnafu {
+            schema_info: &schema_name
+        }
+    );
+
     let kind = match alter_table.alter_operation {
         AlterTableOperation::AddConstraint(_) => {
             return NotSupportedSnafu {
@@ -1111,6 +1119,13 @@ pub fn to_create_flow_task_expr(
         .map(|s| s.to_owned())
         .unwrap_or(query_ctx.current_schema());
 
+    ensure!(
+        !schema.is_empty(),
+        crate::error::SchemaNotFoundSnafu {
+            schema_info: &schema
+        }
+    );
+
     let sink_table_name = TableName {
         catalog_name: catalog,
         schema_name: schema,
@@ -1133,6 +1148,13 @@ pub fn to_create_flow_task_expr(
                 .schema()
                 .map(|s| s.to_string())
                 .unwrap_or(query_ctx.current_schema());
+
+            ensure!(
+                !schema.is_empty(),
+                crate::error::SchemaNotFoundSnafu {
+                    schema_info: &schema
+                }
+            );
 
             let table_name = TableName {
                 catalog_name: catalog,
@@ -1429,6 +1451,39 @@ SELECT * FROM tql;
             "greptime.public.tql",
             to_dot_sep(expr.source_table_names[0].clone())
         );
+    }
+
+    #[test]
+    fn test_create_flow_requires_schema_for_unqualified_tables() {
+        let ctx = QueryContext::arc();
+        ctx.set_current_schema("");
+        for (sink, source, valid) in [
+            ("sink", "public.source", false),
+            ("public.sink", "source", false),
+            ("public.sink", "public.source", true),
+        ] {
+            let sql = format!("CREATE FLOW test_flow SINK TO {sink} AS SELECT * FROM {source}");
+            let stmt = ParserContext::create_with_dialect(
+                &sql,
+                &GreptimeDbDialect {},
+                ParseOptions::default(),
+            )
+            .unwrap()
+            .pop()
+            .unwrap();
+            let Statement::CreateFlow(flow) = stmt else {
+                unreachable!()
+            };
+            let result = to_create_flow_task_expr(flow, &ctx);
+            if valid {
+                assert!(result.is_ok(), "{result:?}");
+            } else {
+                assert!(
+                    matches!(result, Err(crate::error::Error::SchemaNotFound { ref schema_info, .. }) if schema_info.is_empty()),
+                    "{result:?}"
+                );
+            }
+        }
     }
 
     #[test]

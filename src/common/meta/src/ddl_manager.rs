@@ -124,6 +124,13 @@ pub struct DdlManager {
 #[cfg(feature = "enterprise")]
 #[async_trait::async_trait]
 pub trait TriggerDdlManager: Send + Sync {
+    /// Registers trigger procedure loaders before procedure recovery starts.
+    fn register_loaders(
+        &self,
+        ddl_context: &DdlContext,
+        procedure_manager: &ProcedureManagerRef,
+    ) -> Result<()>;
+
     async fn create_trigger(
         &self,
         create_trigger_task: CreateTriggerTask,
@@ -366,6 +373,11 @@ impl DdlManager {
                     }),
                 )
                 .context(RegisterProcedureLoaderSnafu { type_name })?;
+        }
+
+        #[cfg(feature = "enterprise")]
+        if let Some(trigger_ddl_manager) = &self.trigger_ddl_manager {
+            trigger_ddl_manager.register_loaders(&self.ddl_context, &self.procedure_manager)?;
         }
 
         self.repartition_procedure_factory
@@ -1783,12 +1795,22 @@ mod tests {
     #[cfg(feature = "enterprise")]
     #[derive(Default)]
     struct RecordingTriggerDdlManager {
+        loader_registrations: Mutex<usize>,
         procedure_contexts: Mutex<Vec<ProcedureContext>>,
     }
 
     #[cfg(feature = "enterprise")]
     #[async_trait::async_trait]
     impl super::TriggerDdlManager for RecordingTriggerDdlManager {
+        fn register_loaders(
+            &self,
+            _ddl_context: &DdlContext,
+            _procedure_manager: &ProcedureManagerRef,
+        ) -> crate::error::Result<()> {
+            *self.loader_registrations.lock().unwrap() += 1;
+            Ok(())
+        }
+
         async fn create_trigger(
             &self,
             _create_trigger_task: CreateTriggerTask,
@@ -1891,7 +1913,14 @@ mod tests {
             procedure_manager.clone(),
             Arc::new(DummyRepartitionProcedureFactory),
         );
+        #[cfg(feature = "enterprise")]
+        let trigger_manager = Arc::new(RecordingTriggerDdlManager::default());
+        #[cfg(feature = "enterprise")]
+        let ddl_manager = ddl_manager.with_trigger_ddl_manager(trigger_manager.clone());
         ddl_manager.register_loaders().unwrap();
+
+        #[cfg(feature = "enterprise")]
+        assert_eq!(*trigger_manager.loader_registrations.lock().unwrap(), 1);
 
         let expected_loaders = vec![
             CreateTableProcedure::TYPE_NAME,

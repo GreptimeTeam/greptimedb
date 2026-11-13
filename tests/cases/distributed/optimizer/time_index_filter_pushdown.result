@@ -122,13 +122,12 @@ WHERE
 |_|_Projection: cpu.greptime_timestamp_|
 |_|_TableScan: cpu_|
 |_| ]]_|
-|_|_Projection: cpu.rack, cpu.os, cpu.greptime_timestamp_|
 |_|_MergeScan [is_placeholder=false, remote_input=[_|
-|_| TableScan: cpu_|
+|_| Projection: cpu.rack, cpu.os, cpu.greptime_timestamp_|
+|_|_TableScan: cpu_|
 |_| ]]_|
 | physical_plan | ScalarSubqueryExec: subqueries=1_|
 |_|_FilterExec: greptime_timestamp@2 = scalar_subquery(<pending>)_|
-|_|_ProjectionExec: expr=[rack@0 as rack, os@1 as os, greptime_timestamp@3 as greptime_timestamp]_|
 |_|_CooperativeExec_|
 |_|_MergeScanExec: REDACTED
 |_|_MergeSortExec: [greptime_timestamp@0 DESC], fetch=1_|
@@ -198,26 +197,25 @@ WHERE
 +-+-+-+
 | 0_| 0_|_ScalarSubqueryExec REDACTED
 |_|_|_FilterExec: greptime_timestamp@2 = scalar_subquery(1686535800000000000) REDACTED
-|_|_|_ProjectionExec: expr=[rack@0 as rack, os@1 as os, greptime_timestamp@3 as greptime_timestamp] REDACTED
 |_|_|_CooperativeExec REDACTED
 |_|_|_MergeScanExec: REDACTED
 |_|_|_MergeSortExec: [greptime_timestamp@0 DESC], fetch=1 REDACTED
 |_|_|_MergeScanExec: REDACTED
 |_|_|_|
 | 1_| 0_|_CooperativeExec REDACTED
-|_|_|_UnorderedScan: REDACTED, "dyn_filters": ["DynamicFilter [ greptime_timestamp@3 = 1686535800000000000 ]"]
+|_|_|_UnorderedScan: REDACTED, "dyn_filters": ["DynamicFilter [ greptime_timestamp@2 = 1686535800000000000 ]"]
 |_|_|_|
 | 1_| 1_|_CooperativeExec REDACTED
-|_|_|_UnorderedScan: REDACTED, "dyn_filters": ["DynamicFilter [ greptime_timestamp@3 = 1686535800000000000 ]"]
+|_|_|_UnorderedScan: REDACTED, "dyn_filters": ["DynamicFilter [ greptime_timestamp@2 = 1686535800000000000 ]"]
 |_|_|_|
 | 1_| 2_|_CooperativeExec REDACTED
-|_|_|_UnorderedScan: REDACTED, "dyn_filters": ["DynamicFilter [ greptime_timestamp@3 = 1686535800000000000 ]"]
+|_|_|_UnorderedScan: REDACTED, "dyn_filters": ["DynamicFilter [ greptime_timestamp@2 = 1686535800000000000 ]"]
 |_|_|_|
 | 1_| 3_|_CooperativeExec REDACTED
-|_|_|_UnorderedScan: REDACTED, "dyn_filters": ["DynamicFilter [ greptime_timestamp@3 = 1686535800000000000 ]"]
+|_|_|_UnorderedScan: REDACTED, "dyn_filters": ["DynamicFilter [ greptime_timestamp@2 = 1686535800000000000 ]"]
 |_|_|_|
 | 1_| 4_|_CooperativeExec REDACTED
-|_|_|_UnorderedScan: REDACTED, "dyn_filters": ["DynamicFilter [ greptime_timestamp@3 = 1686535800000000000 ]"]
+|_|_|_UnorderedScan: REDACTED, "dyn_filters": ["DynamicFilter [ greptime_timestamp@2 = 1686535800000000000 ]"]
 |_|_|_|
 | 1_| 0_|_FilterExec: DynamicFilter [ REDACTED ] REDACTED
 |_|_|_SortPreservingMergeExec: [greptime_timestamp@0 DESC], fetch=1 REDACTED

@@ -16,6 +16,7 @@ use std::sync::Arc;
 
 use auth::{DefaultPermissionChecker, PermissionCheckerRef, UserProviderRef};
 use common_base::Plugins;
+use common_base::secrets::ExposeSecret;
 use common_meta::cache::CacheRegistryBuilder;
 use frontend::error::{IllegalAuthConfigSnafu, Result};
 use frontend::frontend::FrontendOptions;
@@ -44,8 +45,8 @@ pub async fn setup_frontend_plugins_pre_build(
     _meta_config: Option<&[PluginOptions]>,
 ) -> Result<()> {
     if let Some(user_provider) = fe_opts.user_provider.as_ref() {
-        let provider =
-            auth::user_provider_from_option(user_provider).context(IllegalAuthConfigSnafu)?;
+        let provider = auth::user_provider_from_option(user_provider.expose_secret())
+            .context(IllegalAuthConfigSnafu)?;
         let permission_checker = DefaultPermissionChecker::arc();
 
         plugins.insert::<PermissionCheckerRef>(permission_checker);

@@ -62,7 +62,7 @@
 //! | Operations during staging    | N/A                    | ❌ (staging dir)      |
 //! | Async index build            | ❌ (index files only)   | ✅ Yes                |
 //!
-//! ¹ Remote compaction runs on a dedicated compactor node via `open_compaction_region()`;
+//! ¹ Remote compaction runs on a dedicated compactor node via `CompactionRegionOpener::open()`;
 //!   pass plugins via `OpenCompactionRegionRequest` to enable hooks there. `sst_infos` is
 //!   `#[serde(skip)]` over the wire, so each [`SstInfo`] is rebuilt from [`FileMeta`] with
 //!   empty footer/index — see [`SstFileInfo`] for field-level detail.
@@ -328,7 +328,7 @@ pub trait RegionHook: Send + Sync + Debug {
     /// Fires once when a region becomes active via a create or open request —
     /// the natural counterpart to [`on_region_closed`] / [`on_region_dropped`].
     /// It does **not** fire for the compactor's transient compaction regions
-    /// (`open_compaction_region`), nor for the internal reopen performed during
+    /// (`CompactionRegionOpener::open`), nor for the internal reopen performed during
     /// follower catch-up / leadership promotion.
     ///
     /// On the **create** path it runs inline in the region worker loop; on the

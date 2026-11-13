@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::path::Path;
+
 use api::v1::SemanticType;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::ColumnSchema;
@@ -47,4 +49,57 @@ pub fn basic_region_metadata() -> RegionMetadata {
         })
         .primary_key(vec![36]);
     builder.build().unwrap()
+}
+
+/// Measures stored delta and checkpoint bytes independently of the size tracker.
+pub async fn manifest_dir_usage(path: impl AsRef<Path>) -> u64 {
+    let mut entries = tokio::fs::read_dir(path).await.unwrap();
+    let mut total = 0;
+    while let Some(entry) = entries.next_entry().await.unwrap() {
+        let name = entry.file_name();
+        let name = name.to_str().unwrap();
+        if crate::manifest::storage::is_delta_file(name)
+            || crate::manifest::storage::is_checkpoint_file(name)
+        {
+            total += entry.metadata().await.unwrap().len();
+        }
+    }
+    total
+}
+
+/// Independently measures the logical recovery set described by the persisted pointer.
+/// Older physical files (including the previous checkpoint) are deliberately excluded.
+pub async fn manifest_recovery_usage(path: impl AsRef<Path>) -> u64 {
+    let path = path.as_ref();
+    let checkpoint = match tokio::fs::read(path.join("_last_checkpoint")).await {
+        Ok(bytes) => Some(
+            serde_json::from_slice::<serde_json::Value>(&bytes).unwrap()["version"]
+                .as_u64()
+                .unwrap(),
+        ),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => panic!("Cannot read checkpoint pointer: {error}"),
+    };
+    let mut entries = tokio::fs::read_dir(path).await.unwrap();
+    let mut total = 0;
+    while let Some(entry) = entries.next_entry().await.unwrap() {
+        let name = entry.file_name();
+        let Some((version, suffix)) = name.to_str().unwrap().split_once('.') else {
+            continue;
+        };
+        let Ok(version) = version.parse::<u64>() else {
+            continue;
+        };
+        let keep = if suffix.starts_with("json") {
+            checkpoint.is_none_or(|checkpoint| version > checkpoint)
+        } else if suffix.starts_with("checkpoint") {
+            checkpoint == Some(version)
+        } else {
+            false
+        };
+        if keep {
+            total += entry.metadata().await.unwrap().len();
+        }
+    }
+    total
 }

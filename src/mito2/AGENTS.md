@@ -34,6 +34,7 @@ snapshot isolation). It implements the `RegionEngine` trait from `store-api`.
 | `schedule` | `src/mito2/src/schedule/` | Local/remote background job scheduling |
 | `remap_manifest` | `src/mito2/src/remap_manifest.rs` | Manifest path remapping for region copy/migration |
 | `config` | `src/mito2/src/config.rs` | `MitoConfig` tuning knobs |
+| `temp_file_sweeper` | `src/mito2/src/temp_file_sweeper.rs` | Reclaims temporary files a crashed writer left in a region, triggered when the region becomes a writable leader or a create opens an existing region (under the `hdfs-object-store` feature) |
 | `test_util` | `src/mito2/src/test_util.rs` | `TestEnv` and builders (under the `test` feature) |
 
 ## Write path
@@ -95,6 +96,9 @@ Tests live next to the code as `*_test.rs` (e.g. `src/mito2/src/engine/flush_tes
 - In flat batches, equal `__primary_key` dictionary keys imply the same series, but
   not the reverse: `wrap_pk_binary_to_dict` gives every row its own key. Compare key
   bytes when grouping rows by series.
+- Staging regions never flush: a flush would move rows into the staging manifest and
+  release their WAL, losing them if staging does not end successfully. Every flush
+  trigger in `worker/handle_flush.rs` must skip them, and `handle_close` leaves staging first.
 
 ## Maintenance contract
 

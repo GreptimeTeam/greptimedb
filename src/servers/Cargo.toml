@@ -133,7 +133,7 @@ table.workspace = true
 tokio.workspace = true
 tokio-rustls.workspace = true
 tokio-stream = { workspace = true, features = ["net"] }
-tokio-util.workspace = true
+tokio-util = { workspace = true, features = ["rt"] }
 tonic.workspace = true
 tonic-reflection = "0.14"
 tonic-web = "0.14"

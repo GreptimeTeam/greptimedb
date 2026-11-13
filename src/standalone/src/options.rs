@@ -15,6 +15,7 @@
 use std::time::Duration;
 
 use common_base::readable_size::ReadableSize;
+use common_base::secrets::SecretString;
 use common_config::{Configurable, KvBackendConfig};
 use common_event_recorder::EventRecorderOptions;
 use common_memory_manager::OnExhaustedPolicy;
@@ -71,7 +72,13 @@ pub struct StandaloneOptions {
     pub procedure: ProcedureConfig,
     pub flow: FlowConfig,
     pub logging: LoggingOptions,
-    pub user_provider: Option<String>,
+    /// The user provider for authentication.
+    ///
+    /// The inline `static_user_provider:cmd:` form carries plaintext
+    /// passwords, so the value is held as a [`SecretString`] and serialized
+    /// with those passwords redacted.
+    #[serde(serialize_with = "auth::serialize_user_provider_option")]
+    pub user_provider: Option<SecretString>,
     /// Options for different store engines.
     pub region_engine: Vec<RegionEngineConfig>,
     pub tracing: TracingOptions,
@@ -234,6 +241,7 @@ impl StandaloneOptions {
 mod tests {
     use std::sync::Arc;
 
+    use common_config::Configurable;
     use common_event_recorder::EventTypeFilter;
     use servers::batcher::BatchingProtocol;
 
@@ -249,6 +257,18 @@ mod tests {
                 .max_retries,
             0
         );
+    }
+
+    #[test]
+    fn test_user_provider_redacts_cmd_passwords_in_config() {
+        let options = StandaloneOptions {
+            user_provider: Some("static_user_provider:cmd:alice=secret".to_string().into()),
+            ..Default::default()
+        };
+
+        let serialized = options.to_toml().unwrap();
+        assert!(serialized.contains("user_provider = \"[REDACTED]\""));
+        assert!(!serialized.contains("secret"));
     }
 
     #[test]
@@ -320,13 +340,17 @@ concurrent_query_limiter_timeout = "250ms""#,
     }
 
     #[test]
-    fn test_pipeline_host_access_config_forwarding() {
+    fn test_pipeline_config_forwarding() {
         let defaults: StandaloneOptions = toml::from_str("").unwrap();
         assert!(!defaults.pipeline.allow_vrl_host_access);
         assert!(!defaults.frontend_options().pipeline.allow_vrl_host_access);
+        assert!(!defaults.pipeline.ignore_errors);
+        assert!(!defaults.frontend_options().pipeline.ignore_errors);
         let options: StandaloneOptions =
-            toml::from_str("[pipeline]\nallow_vrl_host_access = true").unwrap();
+            toml::from_str("[pipeline]\nallow_vrl_host_access = true\nignore_errors = true")
+                .unwrap();
         assert!(options.frontend_options().pipeline.allow_vrl_host_access);
+        assert!(options.frontend_options().pipeline.ignore_errors);
         let serialized = toml::to_string(&options).unwrap();
         let restored: StandaloneOptions = toml::from_str(&serialized).unwrap();
         assert_eq!(options.pipeline, restored.pipeline);

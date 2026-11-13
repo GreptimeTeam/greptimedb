@@ -172,13 +172,13 @@ impl SqlQueryHandler for DummyInstance {
     }
 
     async fn is_valid_schema(&self, catalog: &str, schema: &str) -> Result<bool> {
-        Ok(self
-            .query_engine
+        self.query_engine
             .engine_state()
             .catalog_manager()
             .schema_exists(catalog, schema, None)
             .await
-            .unwrap())
+            .map_err(common_error::ext::BoxedError::new)
+            .context(servers::error::CheckDatabaseValiditySnafu)
     }
 }
 

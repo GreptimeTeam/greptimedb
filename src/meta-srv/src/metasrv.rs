@@ -212,6 +212,7 @@ pub struct MetasrvOptions {
     #[deprecated(note = "Use grpc.server_addr instead")]
     pub server_addr: String,
     /// The address of the store, e.g., etcd.
+    #[serde(serialize_with = "serialize_store_addrs")]
     pub store_addrs: Vec<String>,
     /// TLS configuration for kv store backend (PostgreSQL/MySQL)
     /// Only applicable when using PostgreSQL or MySQL as the metadata store
@@ -308,7 +309,7 @@ impl fmt::Debug for MetasrvOptions {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mut debug_struct = f.debug_struct("MetasrvOptions");
         debug_struct
-            .field("store_addrs", &self.sanitize_store_addrs())
+            .field("store_addrs", &sanitize_store_addrs(&self.store_addrs))
             .field("backend_tls", &self.backend_tls)
             .field("selector", &self.selector)
             .field("enable_region_failover", &self.enable_region_failover)
@@ -417,13 +418,18 @@ impl Configurable for MetasrvOptions {
     }
 }
 
-impl MetasrvOptions {
-    fn sanitize_store_addrs(&self) -> Vec<String> {
-        self.store_addrs
-            .iter()
-            .map(|addr| common_meta::kv_backend::util::sanitize_connection_string(addr))
-            .collect()
-    }
+fn sanitize_store_addrs(addrs: &[String]) -> Vec<String> {
+    addrs
+        .iter()
+        .map(|addr| common_meta::kv_backend::util::sanitize_connection_string(addr))
+        .collect()
+}
+
+fn serialize_store_addrs<S>(addrs: &[String], serializer: S) -> std::result::Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    sanitize_store_addrs(addrs).serialize(serializer)
 }
 
 pub struct MetasrvInfo {
@@ -963,6 +969,19 @@ mod tests {
 
     use super::*;
     use crate::metasrv::MetasrvNodeInfo;
+
+    #[test]
+    fn test_store_addresses_are_redacted() {
+        let address = "mysql://alice:store-secret@localhost/database?password=query-secret";
+        let options: MetasrvOptions =
+            toml::from_str(&format!("store_addrs = ['{address}']")).unwrap();
+        assert_eq!(options.store_addrs, [address]);
+        for output in [options.to_toml().unwrap(), format!("{options:#?}")] {
+            assert!(!output.contains("store-secret"));
+            assert!(!output.contains("query-secret"));
+            assert!(output.contains("alice"));
+        }
+    }
 
     #[test]
     fn test_deserialize_metasrv_node_info() {

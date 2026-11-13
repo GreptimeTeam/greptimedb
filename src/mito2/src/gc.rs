@@ -159,6 +159,12 @@ pub struct GcConfig {
     /// expel time is the time when the file is considered as removed, as in removed from the manifest.
     /// This should only occur rarely, as manifest keep tracks in `removed_files` field
     /// unless something goes wrong.
+    ///
+    /// It is also the age threshold of the sweep that reclaims temporary files left behind
+    /// by a crashed HDFS writer, and that sweep runs even if `enable` is false. HDFS advances
+    /// the modification time of a file under construction only as its blocks complete, so
+    /// lowering this value also shrinks the margin between the sweep and files that are
+    /// still being written.
     #[serde(with = "humantime_serde")]
     pub unknown_file_lingering_time: Duration,
     /// Maximum concurrent list operations per GC job.
@@ -167,6 +173,8 @@ pub struct GcConfig {
     /// Maximum concurrent GC jobs.
     /// This is used to limit the number of concurrent GC jobs running on the datanode
     /// to prevent too many concurrent GC jobs from overwhelming the datanode.
+    /// Setting it to 0 disables GC jobs and the temporary file sweep, which is limited
+    /// to the same number of concurrent tasks.
     pub max_concurrent_gc_job: usize,
 }
 
@@ -177,8 +185,9 @@ impl Default for GcConfig {
             // expect long running queries to be finished(or at least be able to notify it's using a deleted file) within a reasonable time
             lingering_time: Some(Duration::from_secs(60 * 60)),
             // 1 day, for unknown expel time, which is when this file get removed from manifest.
-            // Only applies to full-listing GC for active/open regions. A long default avoids
-            // accidentally deleting pre-manifest files (e.g. compaction/flush still in progress).
+            // A long default avoids accidentally deleting pre-manifest files (e.g.
+            // compaction/flush still in progress) or temporary files of a writer that is
+            // still alive; the temporary file sweep uses this value as well.
             unknown_file_lingering_time: Duration::from_secs(24 * 60 * 60),
             max_concurrent_lister_per_gc_job: 32,
             max_concurrent_gc_job: 4,
@@ -806,7 +815,7 @@ impl LocalGcWorker {
     /// Only `.puffin` files (not subdirectories) are included.
     async fn list_region_index_files(&self, region_id: RegionId) -> Result<Vec<Entry>> {
         let region_dir = self.access_layer.build_region_dir(region_id);
-        let index_dir = object_store::util::join_dir(&region_dir, "index");
+        let index_dir = location::index_dir(&region_dir);
 
         let mut lister = match self
             .access_layer
@@ -920,17 +929,8 @@ impl LocalGcWorker {
         unknown_file_may_linger_until: chrono::DateTime<chrono::Utc>,
     ) -> Vec<RemovedFile> {
         let mut ready_for_delete = vec![];
-        // all group by file id for easier checking
-        let in_tmp_ref: HashMap<FileId, HashSet<IndexVersion>> =
-            in_tmp_ref
-                .iter()
-                .fold(HashMap::new(), |mut acc, (file, version)| {
-                    let indices = acc.entry(*file).or_default();
-                    if let Some(version) = version {
-                        indices.insert(*version);
-                    }
-                    acc
-                });
+        // Every index-version reader needs the same Parquet file.
+        let referenced_ssts: HashSet<_> = in_tmp_ref.iter().map(|(file_id, _)| *file_id).collect();
 
         let may_linger_files: HashMap<FileId, HashSet<&RemovedFile>> = may_linger_files
             .iter()
@@ -967,7 +967,7 @@ impl LocalGcWorker {
             let should_delete = match file_type {
                 FileType::Parquet => {
                     let is_in_manifest = in_manifest.contains_key(&file_id);
-                    let is_in_tmp_ref = in_tmp_ref.contains_key(&file_id);
+                    let is_in_tmp_ref = referenced_ssts.contains(&file_id);
                     let is_linger = may_linger_files.contains_key(&file_id);
                     let is_eligible_for_delete = eligible_for_delete.contains_key(&file_id);
 
@@ -982,15 +982,8 @@ impl LocalGcWorker {
                     )
                 }
                 FileType::Puffin(version) => {
-                    // notice need to check both file id and version
-                    let is_in_manifest = in_manifest
-                        .get(&file_id)
-                        .map(|opt_ver| *opt_ver == Some(version))
-                        .unwrap_or(false);
-                    let is_in_tmp_ref = in_tmp_ref
-                        .get(&file_id)
-                        .map(|versions| versions.contains(&version))
-                        .unwrap_or(false);
+                    let is_in_manifest = in_manifest.get(&file_id) == Some(&Some(version));
+                    let is_in_tmp_ref = in_tmp_ref.contains(&(file_id, Some(version)));
                     let is_linger = may_linger_files
                         .get(&file_id)
                         .map(|files| files.contains(&&RemovedFile::Index(file_id, version)))
@@ -1091,21 +1084,22 @@ impl LocalGcWorker {
         // When full_file_listing is false, skip expensive list operations and only delete
         // files that are tracked in recently_removed_files
         if !self.full_file_listing {
+            let referenced_ssts: HashSet<_> =
+                in_tmp_ref.iter().map(|(file_id, _)| *file_id).collect();
             // Only delete files that:
             // 1. Are in recently_removed_files (tracked in manifest)
             // 2. Are not in use(in manifest or tmp ref)
             // 3. Have passed the lingering time
             let files_to_delete: Vec<RemovedFile> = eligible_for_removal
                 .iter()
-                .filter(|file_id| {
-                    let in_use = match file_id {
-                        RemovedFile::File(file_id, index_version) => {
-                            in_manifest.get(file_id) == Some(index_version)
-                                || in_tmp_ref.contains(&(*file_id, *index_version))
+                .filter(|file| {
+                    let in_use = match file {
+                        RemovedFile::File(file_id, _) => {
+                            in_manifest.contains_key(file_id) || referenced_ssts.contains(file_id)
                         }
-                        RemovedFile::Index(file_id, index_version) => {
-                            in_manifest.get(file_id) == Some(&Some(*index_version))
-                                || in_tmp_ref.contains(&(*file_id, Some(*index_version)))
+                        RemovedFile::Index(file_id, version) => {
+                            in_manifest.get(file_id) == Some(&Some(*version))
+                                || in_tmp_ref.contains(&(*file_id, Some(*version)))
                         }
                     };
                     !in_use

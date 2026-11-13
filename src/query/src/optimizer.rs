@@ -23,6 +23,7 @@ pub(crate) mod infer_aggregate_input_bounds;
 pub(crate) mod insert_assignment;
 pub(crate) mod json_schema_concretize;
 pub(crate) mod json_type_concretize;
+pub(crate) mod merge_scan_projection;
 pub mod parallelize_scan;
 pub mod promql_tsid_narrow_join;
 pub mod remove_duplicate;

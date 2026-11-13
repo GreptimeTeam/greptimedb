@@ -19,6 +19,7 @@ workspace = true
 api.workspace = true
 aquamarine.workspace = true
 arrow-schema.workspace = true
+arrow-select.workspace = true
 async-channel = "1.9"
 async-stream.workspace = true
 async-trait.workspace = true

@@ -84,7 +84,9 @@ impl DistributedInformationExtension {
                         header: None,
                     })
                     .await
-                    .context(crate::error::HandleQuerySnafu)
+                    .context(crate::error::HandleQuerySnafu {
+                        addr: node.peer.addr,
+                    })
             }
         }))
         .await?;

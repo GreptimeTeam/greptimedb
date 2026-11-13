@@ -32,6 +32,8 @@ use common_meta::heartbeat::handler::{
 };
 use common_meta::heartbeat::mailbox::{HeartbeatMailbox, MailboxRef};
 use common_meta::heartbeat::utils::outgoing_message_to_mailbox_message;
+use common_meta::key::MetadataValue;
+use common_meta::key::datanode_epoch::{DatanodeEpochKey, DatanodeEpochValue};
 use common_meta::kv_backend::KvBackendRef;
 use common_stat::ResourceStatRef;
 use common_telemetry::{debug, error, info, trace, warn};
@@ -47,7 +49,9 @@ use tokio::time::Instant;
 use self::handler::RegionHeartbeatResponseHandler;
 use crate::alive_keeper::{CountdownTaskHandlerExtRef, RegionAliveKeeper};
 use crate::config::DatanodeOptions;
-use crate::error::{self, MetaClientInitSnafu, RegionEngineNotFoundSnafu, Result};
+use crate::error::{
+    self, GetMetadataSnafu, MetaClientInitSnafu, RegionEngineNotFoundSnafu, Result,
+};
 use crate::event_listener::RegionServerEventReceiver;
 use crate::metrics::{self, HEARTBEAT_RECV_COUNT, HEARTBEAT_SENT_COUNT};
 use crate::region_server::RegionServer;
@@ -55,11 +59,29 @@ use crate::region_server::RegionServer;
 pub(crate) mod handler;
 pub(crate) mod task_tracker;
 
+/// Returns the epoch of this process: its start time, or one more than the epoch the metasrv has
+/// recorded for the node when the record is not lower than the start time, as after a restart on
+/// a slower clock or after the clock stepped back. The metasrv fences an epoch lower than the
+/// recorded one.
+async fn node_epoch_above_record(
+    kv_backend: &KvBackendRef,
+    node_id: u64,
+    start_time_ms: u64,
+) -> Result<u64> {
+    let key = DatanodeEpochKey::new(node_id).to_bytes();
+    let Some(kv) = kv_backend.get(&key).await.context(GetMetadataSnafu)? else {
+        return Ok(start_time_ms);
+    };
+    let recorded = DatanodeEpochValue::try_from_raw_value(&kv.value).context(GetMetadataSnafu)?;
+    Ok(start_time_ms.max(recorded.node_epoch + 1))
+}
+
 /// The datanode heartbeat task which sending `[HeartbeatRequest]` to Metasrv periodically in background.
 pub struct HeartbeatTask {
     node_id: u64,
     workload_types: Vec<DatanodeWorkloadType>,
     node_epoch: u64,
+    start_time_ms: u64,
     peer_addr: String,
     running: Arc<AtomicBool>,
     meta_client: MetaClientRef,
@@ -87,6 +109,9 @@ impl HeartbeatTask {
         plugins: Plugins,
         resource_stat: ResourceStatRef,
     ) -> Result<Self> {
+        let node_id = opts.node_id.unwrap_or(0);
+        let start_time_ms = common_time::util::current_time_millis() as u64;
+        let node_epoch = node_epoch_above_record(&kv_backend, node_id, start_time_ms).await?;
         let countdown_task_handler_ext = plugins.get::<CountdownTaskHandlerExtRef>();
         let region_alive_keeper = Arc::new(RegionAliveKeeper::new(
             region_server.clone(),
@@ -105,10 +130,10 @@ impl HeartbeatTask {
         ]));
 
         Ok(Self {
-            node_id: opts.node_id.unwrap_or(0),
+            node_id,
             workload_types: opts.workload_types.clone(),
-            // We use datanode's start time millis as the node's epoch.
-            node_epoch: common_time::util::current_time_millis() as u64,
+            node_epoch,
+            start_time_ms,
             peer_addr: addrs::resolve_addr(&opts.grpc.bind_addr, Some(&opts.grpc.server_addr)),
             running: Arc::new(AtomicBool::new(false)),
             meta_client,
@@ -227,6 +252,7 @@ impl HeartbeatTask {
         }
         let node_id = self.node_id;
         let node_epoch = self.node_epoch;
+        let start_time_ms = self.start_time_ms;
         let addr = &self.peer_addr;
 
         let meta_client = self.meta_client.clone();
@@ -301,7 +327,7 @@ impl HeartbeatTask {
                 info: Some(NodeInfo {
                     version: build_info.version.to_string(),
                     git_commit: build_info.commit_short.to_string(),
-                    start_time_ms: node_epoch,
+                    start_time_ms,
                     total_cpu_millicores,
                     total_memory_bytes,
                     cpu_usage_millicores: 0,
@@ -469,5 +495,68 @@ impl HeartbeatTask {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use common_meta::cache_invalidator::DummyCacheInvalidator;
+    use common_meta::kv_backend::memory::MemoryKvBackend;
+    use common_meta::rpc::store::PutRequest;
+    use common_stat::ResourceStatImpl;
+    use meta_client::client::MetaClientBuilder;
+
+    use super::*;
+    use crate::tests::mock_region_server;
+
+    const NODE_ID: u64 = 7;
+
+    async fn kv_backend_with_record(node_epoch: Option<u64>) -> KvBackendRef {
+        let kv_backend: KvBackendRef = Arc::new(MemoryKvBackend::new());
+        if let Some(node_epoch) = node_epoch {
+            let key = DatanodeEpochKey::new(NODE_ID).to_bytes();
+            let value = DatanodeEpochValue { node_epoch }
+                .try_as_raw_value()
+                .unwrap();
+            let req = PutRequest::new().with_key(key).with_value(value);
+            kv_backend.put(req).await.unwrap();
+        }
+        kv_backend
+    }
+
+    #[tokio::test]
+    async fn test_node_epoch_above_record() {
+        for (record, expected) in [
+            (None, 1000),
+            (Some(500), 1000),
+            (Some(1000), 1001),
+            (Some(5000), 5001),
+        ] {
+            let kv_backend = kv_backend_with_record(record).await;
+            let node_epoch = node_epoch_above_record(&kv_backend, NODE_ID, 1000).await;
+            assert_eq!(node_epoch.unwrap(), expected);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_start_time_stays_local_above_a_record() {
+        let now = common_time::util::current_time_millis() as u64;
+        let record = now + 60_000;
+        let task = HeartbeatTask::try_new(
+            &DatanodeOptions {
+                node_id: Some(NODE_ID),
+                ..Default::default()
+            },
+            mock_region_server(),
+            Arc::new(MetaClientBuilder::datanode_default_options(NODE_ID).build()),
+            kv_backend_with_record(Some(record)).await,
+            Arc::new(DummyCacheInvalidator),
+            Plugins::default(),
+            Arc::new(ResourceStatImpl::default()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(task.node_epoch, record + 1);
+        assert!(task.start_time_ms >= now && task.start_time_ms < record);
     }
 }

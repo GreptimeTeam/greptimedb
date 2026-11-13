@@ -39,6 +39,11 @@ pub fn region_dir_from_table_dir(
     }
 }
 
+/// Generate index dir from region_dir
+pub fn index_dir(region_dir: &str) -> String {
+    util::join_dir(region_dir, "index")
+}
+
 pub fn sst_file_path(table_dir: &str, region_file_id: RegionFileId, path_type: PathType) -> String {
     let region_dir = region_dir_from_table_dir(table_dir, region_file_id.region_id(), path_type);
     util::join_path(
@@ -49,7 +54,7 @@ pub fn sst_file_path(table_dir: &str, region_file_id: RegionFileId, path_type: P
 
 pub fn index_file_path(table_dir: &str, index_id: RegionIndexId, path_type: PathType) -> String {
     let region_dir = region_dir_from_table_dir(table_dir, index_id.file_id.region_id(), path_type);
-    let index_dir = util::join_dir(&region_dir, "index");
+    let index_dir = index_dir(&region_dir);
 
     let filename = if index_id.version == 0 {
         format!("{}.puffin", index_id.file_id.file_id())

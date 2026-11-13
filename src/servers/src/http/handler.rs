@@ -19,12 +19,12 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
+use auth::UserProviderRef;
 use axum::extract::rejection::FormRejection;
 use axum::extract::{Json, Query, State};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::{Extension, Form};
-use common_catalog::parse_catalog_and_schema_from_db_string;
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_plugins::GREPTIME_EXEC_WRITE_COST;
@@ -45,6 +45,7 @@ use sql::statements::statement::Statement;
 use tokio::sync::{Notify, watch};
 
 use crate::error::{CollectRecordbatchSnafu, FailedToParseQuerySnafu, InvalidQuerySnafu, Result};
+use crate::http::authorize::select_database;
 use crate::http::header::collect_plan_metrics;
 use crate::http::result::arrow_result::ArrowResponse;
 use crate::http::result::csv_result::CsvResponse;
@@ -140,14 +141,19 @@ pub async fn sql(
     State(state): State<ApiState>,
     Query(query_params): Query<SqlQuery>,
     Extension(mut query_ctx): Extension<QueryContext>,
+    user_provider: Option<Extension<UserProviderRef>>,
     Form(form_params): Form<SqlQuery>,
 ) -> HttpResponse {
     let start = Instant::now();
     let sql_handler = &state.sql_handler;
-    if let Some(db) = &query_params.db.or(form_params.db) {
-        let (catalog, schema) = parse_catalog_and_schema_from_db_string(db);
-        query_ctx.set_current_catalog(&catalog);
-        query_ctx.set_current_schema(&schema);
+    if let Err(error) = select_database(
+        &mut query_ctx,
+        query_params.db.or(form_params.db).as_deref(),
+        user_provider.as_ref().map(|provider| &provider.0),
+    )
+    .await
+    {
+        return HttpResponse::Error(ErrorResponse::from_error(error));
     }
     let db = query_ctx.get_db_string();
 
@@ -294,6 +300,7 @@ pub async fn sql_analyze_stream(
     State(state): State<ApiState>,
     Query(query_params): Query<SqlQuery>,
     Extension(mut query_ctx): Extension<QueryContext>,
+    user_provider: Option<Extension<UserProviderRef>>,
     form_params: std::result::Result<Form<SqlQuery>, FormRejection>,
 ) -> Response {
     let start = Instant::now();
@@ -312,10 +319,14 @@ pub async fn sql_analyze_stream(
         }
     };
     let sql_handler = &state.sql_handler;
-    if let Some(db) = &query_params.db.or(form_params.db) {
-        let (catalog, schema) = parse_catalog_and_schema_from_db_string(db);
-        query_ctx.set_current_catalog(&catalog);
-        query_ctx.set_current_schema(&schema);
+    if let Err(error) = select_database(
+        &mut query_ctx,
+        query_params.db.or(form_params.db).as_deref(),
+        user_provider.as_ref().map(|provider| &provider.0),
+    )
+    .await
+    {
+        return ErrorResponse::from_error(error).into_response();
     }
     query_ctx.set_channel(Channel::HttpSql);
     query_ctx.enable_live_analyze_metrics();
@@ -1003,6 +1014,7 @@ mod tests {
     use query::query_engine::DescribeResult;
 
     use super::*;
+    use crate::http::authorize::tests::ScopedUserProvider;
     use crate::query_handler::sql::SqlQueryHandler;
 
     struct TestSqlQueryHandler {
@@ -1045,6 +1057,82 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn test_sql_endpoints_authorize_effective_database() {
+        use axum::http::{Request, StatusCode as HttpStatusCode};
+        use tower::ServiceExt;
+
+        for authorization in ["Basic cmVhZGVyOnB3ZA==", "Bearer test-token"] {
+            for (path, query, body, method) in [
+                ("/v1/sql", "", "sql=select+1&db=denied", "POST"),
+                ("/v1/sql", "?db=denied&sql=select+1", "", "GET"),
+                ("/v1/sql", "?db=%64enied&sql=select+1", "", "GET"),
+                ("/v1/sql", "?db=denied", "sql=select+1&db=public", "POST"),
+                ("/v1/analyze", "", "sql=select+1&db=denied", "POST"),
+                ("/v1/analyze", "?db=denied&sql=select+1", "", "GET"),
+            ] {
+                let handler = Arc::new(TestSqlQueryHandler {
+                    outputs: Mutex::new(vec![Ok(Output::new_with_affected_rows(0))]),
+                });
+                let app = axum::Router::new()
+                    .route("/v1/sql", axum::routing::get(sql).post(sql))
+                    .route(
+                        "/v1/analyze",
+                        axum::routing::get(sql_analyze_stream).post(sql_analyze_stream),
+                    )
+                    .with_state(ApiState {
+                        sql_handler: handler.clone(),
+                    })
+                    .layer(axum::middleware::from_fn_with_state(
+                        crate::http::authorize::AuthState::new(Some(Arc::new(ScopedUserProvider))),
+                        crate::http::authorize::check_http_auth,
+                    ));
+                let mut request = Request::builder()
+                    .method(method)
+                    .uri(format!("{path}{query}"))
+                    .header("authorization", authorization)
+                    .header("content-type", "application/x-www-form-urlencoded");
+                if !query.contains("%64") {
+                    request = request.header("x-greptime-db-name", "public");
+                }
+                let response = app
+                    .oneshot(request.body(axum::body::Body::from(body)).unwrap())
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    HttpStatusCode::FORBIDDEN,
+                    response.status(),
+                    "{path}{query}"
+                );
+                assert_eq!(1, handler.outputs.lock().unwrap().len());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_select_database_authorizes_before_mutating_context() {
+        let provider: UserProviderRef = Arc::new(ScopedUserProvider);
+        let mut ctx = QueryContext::with_db_name(Some("initial"));
+        select_database(&mut ctx, Some("public"), Some(&provider))
+            .await
+            .unwrap();
+        assert_eq!("public", ctx.current_schema());
+        let failures = crate::metrics::METRIC_AUTH_FAILURE
+            .with_label_values(&[StatusCode::PermissionDenied.as_ref()]);
+        let before = failures.get();
+        assert!(
+            select_database(&mut ctx, Some("denied"), Some(&provider))
+                .await
+                .is_err()
+        );
+        assert!(failures.get() > before);
+        assert_eq!("public", ctx.current_schema());
+        select_database(&mut ctx, Some("other"), None)
+            .await
+            .unwrap();
+        assert_eq!("other", ctx.current_schema());
+    }
+
     async fn sql_response(
         outputs: Vec<Result<Output>>,
         format: &str,
@@ -1063,6 +1151,7 @@ mod tests {
                 ..Default::default()
             }),
             Extension(QueryContext::with_db_name(None)),
+            None,
             Form(SqlQuery::default()),
         )
         .await

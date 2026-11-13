@@ -247,6 +247,12 @@ lazy_static! {
             &[METRIC_DB_LABEL, METRIC_RESULT_LABEL]
         )
         .unwrap();
+    pub static ref METRIC_HTTP_LOGS_UTF8_RETRIES_TOTAL: IntCounterVec = register_int_counter_vec!(
+        "greptime_servers_http_logs_utf8_retries_total",
+        "UTF-8 parse retry attempts for HTTP logs and pipeline dry-runs, per JSON payload or NDJSON line, regardless of outcome",
+        &["format"]
+    )
+    .unwrap();
 
     /// Count of logs ingested into Loki.
     pub static ref METRIC_LOKI_LOGS_INGESTION_COUNTER: IntCounterVec = register_int_counter_vec!(

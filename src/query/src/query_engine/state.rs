@@ -71,6 +71,7 @@ use crate::optimizer::global_limit::EnsureGlobalLimitForFetch;
 use crate::optimizer::infer_aggregate_input_bounds::InferAggregateInputBoundsRule;
 use crate::optimizer::json_schema_concretize::JsonSchemaConcretizeRule;
 use crate::optimizer::json_type_concretize::JsonTypeConcretizeRule;
+use crate::optimizer::merge_scan_projection::MergeScanProjection;
 use crate::optimizer::parallelize_scan::ParallelizeScan;
 use crate::optimizer::promql_tsid_narrow_join::PromqlTsidNarrowJoin;
 use crate::optimizer::remove_duplicate::RemoveDuplicate;
@@ -238,6 +239,9 @@ impl QueryEngineState {
             filter_pushdown_index,
             Arc::new(InferAggregateInputBoundsRule),
         );
+        if with_dist_planner {
+            optimizer.rules.push(Arc::new(MergeScanProjection));
+        }
         optimizer.rules.push(Arc::new(ScanHintRule));
         optimizer.rules.push(Arc::new(JsonTypeConcretizeRule));
 

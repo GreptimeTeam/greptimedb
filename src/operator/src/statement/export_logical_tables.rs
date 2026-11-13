@@ -41,7 +41,7 @@ use common_recordbatch::SendableRecordBatchStream;
 use common_time::range::TimestampRange;
 use datafusion::datasource::DefaultTableSource;
 use datafusion_common::TableReference as DfTableReference;
-use datafusion_expr::{LogicalPlan, LogicalPlanBuilder, col};
+use datafusion_expr::{LogicalPlan, LogicalPlanBuilder, col, lit};
 use futures::StreamExt;
 use object_store::ObjectStore;
 use session::context::QueryContextRef;
@@ -53,6 +53,7 @@ use store_api::metric_engine_consts::{
 use table::TableRef;
 use table::metadata::TableId;
 use table::table::adapter::DfTableProviderAdapter;
+use tokio::sync::OwnedSemaphorePermit;
 use tokio_util::sync::CancellationToken;
 
 use crate::error::{self, InvalidLogicalTableExportSnafu, LogicalTableExportResourceSnafu, Result};
@@ -79,7 +80,7 @@ impl Default for LogicalTableExportLimits {
             input_batch_bytes: 64 * 1024 * 1024,
             conversion_bytes: 1024 * 1024,
             writer: ParquetWriterLimits {
-                row_group_rows: 8192,
+                row_group_rows: 1024 * 1024,
                 flush_threshold_bytes: 8 * 1024 * 1024,
                 max_row_groups: 4096,
             },
@@ -255,7 +256,7 @@ impl LogicalTableExport {
 
     fn build_plan(&self, time_range: Option<&TimestampRange>) -> Result<LogicalPlan> {
         let info = self.physical_table.table_info();
-        let filters = self
+        let mut filters = self
             .physical_table
             .schema()
             .timestamp_column()
@@ -264,6 +265,11 @@ impl LogicalTableExport {
             })
             .into_iter()
             .collect::<Vec<_>>();
+        if self.logical_tables.len() == 1
+            && let Some((&id, _)) = self.logical_tables.first_key_value()
+        {
+            filters.push(col(TABLE_ID).eq(lit(id)));
+        }
         let source = Arc::new(DefaultTableSource::new(Arc::new(
             DfTableProviderAdapter::new(self.physical_table.clone()),
         )));
@@ -283,11 +289,13 @@ impl LogicalTableExport {
                 .filter(filter)
                 .context(error::BuildDfLogicalPlanSnafu)?;
         }
-        builder
-            .sort(vec![col(TABLE_ID).sort(true, false)])
-            .context(error::BuildDfLogicalPlanSnafu)?
-            .build()
-            .context(error::BuildDfLogicalPlanSnafu)
+        // A single selected table has a constant routing key after filtering.
+        if self.logical_tables.len() > 1 {
+            builder = builder
+                .sort(vec![col(TABLE_ID).sort(true, false)])
+                .context(error::BuildDfLogicalPlanSnafu)?;
+        }
+        builder.build().context(error::BuildDfLogicalPlanSnafu)
     }
 }
 
@@ -613,6 +621,46 @@ async fn expand_bounded_slice(
         batch.num_columns(),
         requested,
     )?;
+    // Parquet accepts compatible string dictionaries without expanding their values.
+    let fields = schema
+        .fields()
+        .iter()
+        .zip(batch.columns())
+        .map(|(field, array)| {
+            if let DataType::Dictionary(_, value) = array.data_type()
+                && value.as_ref() == field.data_type()
+                && matches!(value.as_ref(), DataType::Utf8 | DataType::LargeUtf8)
+            {
+                Arc::new(
+                    field
+                        .as_ref()
+                        .clone()
+                        .with_data_type(array.data_type().clone()),
+                )
+            } else {
+                field.clone()
+            }
+        })
+        .collect::<Vec<_>>();
+    let schema = Arc::new(arrow::datatypes::Schema::new_with_metadata(
+        fields,
+        schema.metadata().clone(),
+    ));
+    // Sharing compatible arrays needs no CPU conversion. Keep the size check on
+    // this task only when its dictionary inspection is bounded.
+    if start < end
+        && batch
+            .columns()
+            .iter()
+            .zip(schema.fields())
+            .all(|(array, field)| array.data_type() == field.data_type())
+        && let Some(estimated) = estimate_batch_bytes_upper_bound(&batch, end - start, &[])?
+        && estimated <= conversion
+    {
+        let reservation = retained.saturating_add(estimated.saturating_mul(4));
+        let permit = budget.reserve(reservation, cancellation).await?;
+        return convert_slice_payload(batch, schema, start, end - start, reservation, permit);
+    }
     let input = batch.clone();
     let (len, estimated) = common_runtime::spawn_blocking_global(move || {
         rows_within_budget(&input, start, end, conversion, &[])
@@ -622,24 +670,34 @@ async fn expand_bounded_slice(
     let reservation = retained.saturating_add(estimated.saturating_mul(4));
     let permit = budget.reserve(reservation, cancellation).await?;
     common_runtime::spawn_blocking_global(move || {
-        let slice = batch.slice(start, len);
-        let expanded = expand_export_batch(&slice, schema)?;
-        ensure!(
-            expanded.get_array_memory_size() <= reservation,
-            LogicalTableExportResourceSnafu {
-                reason: "converted backing buffers exceed reservation"
-            }
-        );
-        Ok((
-            Payload {
-                batch: expanded,
-                permit,
-            },
-            len,
-        ))
+        convert_slice_payload(batch, schema, start, len, reservation, permit)
     })
     .await
     .context(error::JoinTaskSnafu)?
+}
+
+fn convert_slice_payload(
+    batch: RecordBatch,
+    schema: SchemaRef,
+    start: usize,
+    len: usize,
+    reservation: usize,
+    permit: OwnedSemaphorePermit,
+) -> Result<(Payload, usize)> {
+    let expanded = expand_export_batch(&batch.slice(start, len), schema)?;
+    ensure!(
+        expanded.get_array_memory_size() <= reservation,
+        LogicalTableExportResourceSnafu {
+            reason: "converted backing buffers exceed reservation"
+        }
+    );
+    Ok((
+        Payload {
+            batch: expanded,
+            permit,
+        },
+        len,
+    ))
 }
 
 /// Limits nested casts to selected children: Arrow's List cast otherwise expands
@@ -788,6 +846,41 @@ fn estimate_value_size(array: &dyn Array, row: usize) -> Result<usize> {
     Ok(bytes.saturating_add(16))
 }
 
+/// Estimates a conservative byte upper bound with bounded work on an async task.
+/// `None` means this path cannot estimate the batch, not that it exceeds a budget.
+fn estimate_batch_bytes_upper_bound(
+    batch: &RecordBatch,
+    rows: usize,
+    json_columns: &[usize],
+) -> Result<Option<usize>> {
+    let mut dictionary_values = 1024usize;
+    let mut max_row_bytes = 0usize;
+    for (index, array) in batch.columns().iter().enumerate() {
+        let size = if let Some(width) = array.data_type().primitive_width() {
+            (width + 16).max(32)
+        } else if let Some(dictionary) = array.as_any_dictionary_opt()
+            && dictionary.values().len() < rows
+            && dictionary.values().len() <= dictionary_values
+            && matches!(
+                dictionary.values().data_type(),
+                DataType::Utf8 | DataType::LargeUtf8 | DataType::Utf8View
+            )
+        {
+            let values = dictionary.values();
+            dictionary_values -= values.len();
+            let max = (0..values.len()).try_fold(0usize, |max, row| {
+                Ok::<_, error::Error>(max.max(estimate_value_size(values.as_ref(), row)?))
+            })?;
+            max.saturating_add(16).max(32)
+        } else {
+            return Ok(None);
+        };
+        let expansion = if json_columns.contains(&index) { 8 } else { 1 };
+        max_row_bytes = max_row_bytes.saturating_add(size.saturating_mul(expansion));
+    }
+    Ok(max_row_bytes.checked_mul(rows))
+}
+
 pub(crate) fn rows_within_budget(
     batch: &RecordBatch,
     start: usize,
@@ -795,6 +888,12 @@ pub(crate) fn rows_within_budget(
     budget: usize,
     json_columns: &[usize],
 ) -> Result<(usize, usize)> {
+    if start < end
+        && let Some(bytes) = estimate_batch_bytes_upper_bound(batch, end - start, json_columns)?
+        && bytes <= budget
+    {
+        return Ok((end - start, bytes));
+    }
     let mut bytes = 0usize;
     let mut row = start;
     while row < end {

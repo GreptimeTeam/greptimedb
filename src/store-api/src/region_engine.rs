@@ -18,6 +18,7 @@ use std::any::Any;
 use std::collections::HashMap;
 use std::fmt::{Debug, Display};
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use api::greptime_proto::v1::meta::{GrantedRegion as PbGrantedRegion, RegionRole as PbRegionRole};
 use api::region::RegionResponse;
@@ -48,7 +49,7 @@ pub enum SettableRegionRoleState {
     DowngradingLeader,
     /// Exit staging mode and return to normal leader state. Only allowed from staging state.
     Leader,
-    /// Enter staging mode. Region remains writable but disables checkpoint and compaction. Only allowed from normal leader state.
+    /// Enter staging mode. Region remains writable but disables checkpoint, compaction and flush. Only allowed from normal leader state.
     StagingLeader,
 }
 
@@ -561,7 +562,10 @@ pub struct RegionStatistic {
     pub memtable_size: u64,
     /// The size of WAL in bytes.
     pub wal_size: u64,
-    /// The size of manifest in bytes.
+    /// Stored bytes of the latest observed manifest checkpoint and subsequent deltas,
+    /// compressed when enabled. Excludes staging manifests, `_last_checkpoint`, and
+    /// superseded files still present on disk. This is a logical recovery-size estimate,
+    /// not the physical directory usage; observation failures can leave it incomplete.
     pub manifest_size: u64,
     /// The size of SST data files owned by this region in bytes.
     ///
@@ -1043,6 +1047,21 @@ pub trait RegionEngine: Send + Sync {
     /// the region as readonly doesn't guarantee that write operations in progress will not
     /// take effect.
     fn set_region_role(&self, region_id: RegionId, role: RegionRole) -> Result<(), BoxedError>;
+
+    /// Sets [RegionRole] for a region from a lease the metasrv grants until `deadline`, in reply
+    /// to a heartbeat sent at `sent_at`. Returns false if the engine ignores a Leader lease because
+    /// the region was downgraded or (re)opened after `sent_at`.
+    ///
+    /// The region must not acknowledge a write whose WAL append completes at or after the
+    /// deadline of its latest Leader or StagingLeader lease. Leases of other roles do not extend
+    /// that deadline.
+    fn set_region_role_with_lease(
+        &self,
+        region_id: RegionId,
+        role: RegionRole,
+        sent_at: Instant,
+        deadline: Instant,
+    ) -> Result<bool, BoxedError>;
 
     /// Syncs the region manifest to the given manifest version.
     async fn sync_region(

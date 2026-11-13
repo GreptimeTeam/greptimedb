@@ -120,6 +120,9 @@ pub struct MitoConfig {
     /// Max number of running background flush jobs (default: 1/2 of cpu cores).
     pub max_background_flushes: usize,
     /// Max number of running background compaction jobs (default: 1/4 of cpu cores).
+    ///
+    /// The limit applies to the whole engine, not to each region worker. SST compaction
+    /// and background bulk memtable compaction each have their own budget of this size.
     pub max_background_compactions: usize,
     /// Max number of running background purge jobs (default: number of cpu cores).
     pub max_background_purges: usize,

@@ -25,6 +25,7 @@ use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
+use std::time::Instant;
 
 use common_base::hash::partition_expr_version;
 use common_recordbatch::adapter::RegionQueryStatCounters;
@@ -58,6 +59,7 @@ use crate::error::{
     FlushableRegionStateSnafu, InvalidPartitionExprSnafu, RegionNotFoundSnafu, RegionStateSnafu,
     RegionTruncatedSnafu, Result, UnexpectedSnafu, UpdateManifestSnafu,
 };
+use crate::lease::Deadline;
 use crate::manifest::action::{
     RegionChange, RegionManifest, RegionMetaAction, RegionMetaActionList,
 };
@@ -92,7 +94,7 @@ impl RegionUsage {
 pub enum RegionLeaderState {
     /// The region is opened and is writable.
     Writable,
-    /// The region is in staging mode - writable but no checkpoint/compaction.
+    /// The region is in staging mode - writable but no checkpoint/compaction/flush.
     Staging,
     /// The region is entering staging mode. - write requests will be stalled.
     EnteringStaging,
@@ -376,6 +378,17 @@ impl MitoRegion {
         self.manifest_ctx.state.load() == RegionRoleState::Leader(RegionLeaderState::Staging)
     }
 
+    /// Returns whether the region is in staging mode, counting a staged edit in progress.
+    pub(crate) fn is_staging_or_staged_edit(&self) -> bool {
+        match self.manifest_ctx.state.load() {
+            RegionRoleState::Leader(RegionLeaderState::Staging) => true,
+            RegionRoleState::Leader(RegionLeaderState::Editing) => {
+                self.manifest_ctx.staging_partition_info().is_some()
+            }
+            _ => false,
+        }
+    }
+
     /// Returns whether the region is entering staging mode.
     pub(crate) fn is_enter_staging(&self) -> bool {
         self.manifest_ctx.state.load()
@@ -489,6 +502,29 @@ impl MitoRegion {
             self.region_id,
             RegionRoleState::Leader(RegionLeaderState::Writable),
         )
+    }
+
+    /// Leaves staging without committing it, abandoning a staged edit in progress.
+    ///
+    /// You should call this method in the worker loop, which is what restores the state of an
+    /// edit, and only when [Self::is_staging_or_staged_edit] holds.
+    pub(crate) fn abort_staging(&self) {
+        let aborted = self
+            .manifest_ctx
+            .state
+            .fetch_update(|state| {
+                matches!(
+                    state,
+                    RegionRoleState::Leader(
+                        RegionLeaderState::Staging | RegionLeaderState::Editing
+                    )
+                )
+                .then_some(RegionRoleState::Leader(RegionLeaderState::Writable))
+            })
+            .is_ok();
+        if aborted {
+            self.manifest_ctx.clear_staging_partition_info();
+        }
     }
 
     /// Sets the region role state gracefully. This acquires the manifest write lock.
@@ -1097,30 +1133,6 @@ impl MitoRegion {
         Ok(Some(pending))
     }
 
-    /// Returns the partition expression string for this region.
-    ///
-    /// If the region is currently in staging state, this returns the partition expression held in
-    /// the staging partition field. Otherwise, it returns the partition expression from the primary
-    /// region metadata (current committed version).
-    pub fn maybe_staging_partition_expr_str(&self) -> Option<String> {
-        let is_staging = self.is_staging();
-        if is_staging {
-            let staging_partition_info = self.manifest_ctx.staging_partition_info();
-            if staging_partition_info.is_none() {
-                warn!(
-                    "Staging partition expr is none for region {} in staging state",
-                    self.region_id
-                );
-            }
-            staging_partition_info
-                .as_ref()
-                .and_then(|info| info.partition_expr().map(ToString::to_string))
-        } else {
-            let version = self.version();
-            version.metadata.partition_expr.clone()
-        }
-    }
-
     pub fn expected_partition_expr_version(&self) -> u64 {
         if self.is_staging() {
             self.manifest_ctx
@@ -1208,6 +1220,17 @@ pub(crate) struct ManifestContext {
     /// The state of the region. The region checks the state before updating
     /// manifest.
     state: AtomicCell<RegionRoleState>,
+    /// When the region last began a downgrade. A promotion issued before it does not apply. The
+    /// lock covers comparing or raising it and the role change.
+    ///
+    /// It starts at creation time, so promotions issued before the region was opened or reopened
+    /// do not apply. A context that replaces this one is created after the worker loop closes or
+    /// reopens the region, so after its last downgrade began.
+    downgrade_started_at: Mutex<Instant>,
+    /// Deadline of the region's latest Leader or StagingLeader lease from the metasrv, which is how
+    /// long the Leader role stays valid. The engine extends it from those leases, and writes check
+    /// it.
+    pub(crate) leader_deadline: Deadline,
     /// Partition info of the region in staging mode.
     ///
     /// During the staging mode, the region metadata in [`VersionControlRef`] is not updated,
@@ -1226,6 +1249,8 @@ impl ManifestContext {
         ManifestContext {
             manifest_manager: tokio::sync::RwLock::new(manager),
             state: AtomicCell::new(state),
+            downgrade_started_at: Mutex::new(Instant::now()),
+            leader_deadline: Deadline::default(),
             staging_partition_info: Mutex::new(None),
             hook,
         }
@@ -1582,6 +1607,33 @@ impl ManifestContext {
         }
 
         self.update_and_fire(manager, action_list, is_staging).await
+    }
+
+    /// Raises the downgrade start time to now, then marks the region downgrading.
+    pub(crate) fn begin_downgrade(&self, region_id: RegionId) {
+        let mut downgrade_started_at = self.downgrade_started_at.lock().unwrap();
+        *downgrade_started_at = Instant::now();
+        self.set_role(RegionRole::DowngradingLeader, region_id);
+    }
+
+    /// Promotes the region to a writable leader unless a downgrade started after `issued_at`.
+    /// Returns false if the promotion is ignored for that reason; otherwise the role changes as
+    /// [`Self::set_role`] allows.
+    pub(crate) fn promote_unless_downgrade_started_after(
+        &self,
+        issued_at: Instant,
+        region_id: RegionId,
+    ) -> bool {
+        // A writable leader needs no change; a staging leader is promoted below.
+        if self.state.load() == RegionRoleState::Leader(RegionLeaderState::Writable) {
+            return true;
+        }
+        let downgrade_started_at = self.downgrade_started_at.lock().unwrap();
+        if issued_at < *downgrade_started_at {
+            return false;
+        }
+        self.set_role(RegionRole::Leader, region_id);
+        true
     }
 
     /// Sets the [`RegionRole`].
@@ -2280,10 +2332,8 @@ mod tests {
         struct CountingPurger(AtomicUsize);
 
         impl FilePurger for CountingPurger {
-            fn remove_file(&self, _: FileMeta, is_delete: bool, _: bool) {
-                if is_delete {
-                    self.0.fetch_add(1, Ordering::SeqCst);
-                }
+            fn purge_file(&self, _: FileMeta) {
+                self.0.fetch_add(1, Ordering::SeqCst);
             }
         }
 
@@ -2374,6 +2424,24 @@ mod tests {
             flushed_sequence: None,
             committed_sequence: None,
         }
+    }
+
+    #[tokio::test]
+    async fn test_promoting_writable_leader_takes_no_lock() {
+        let env = SchedulerEnv::new().await;
+        let region = Arc::new(build_test_region(&env).await);
+        let _downgrade_started_at = region.manifest_ctx.downgrade_started_at.lock().unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let promoted = region.clone();
+        std::thread::spawn(move || {
+            let manifest_ctx = &promoted.manifest_ctx;
+            let issued_at = std::time::Instant::now();
+            tx.send(
+                manifest_ctx.promote_unless_downgrade_started_after(issued_at, promoted.region_id),
+            )
+            .unwrap();
+        });
+        assert!(rx.recv_timeout(std::time::Duration::from_secs(10)).unwrap());
     }
 
     #[tokio::test]

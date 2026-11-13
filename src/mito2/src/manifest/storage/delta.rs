@@ -15,7 +15,7 @@
 use std::sync::Arc;
 
 use common_datasource::compression::CompressionType;
-use common_telemetry::debug;
+use common_telemetry::{debug, warn};
 use futures::TryStreamExt;
 use futures::future::try_join_all;
 use object_store::{Entry, ErrorKind, Lister, ObjectStore};
@@ -31,7 +31,7 @@ use crate::error::{
 };
 use crate::manifest::storage::size_tracker::Tracker;
 use crate::manifest::storage::utils::{
-    get_from_cache, put_to_cache, sort_manifests, write_and_put_cache,
+    get_from_cache_decoded, sort_manifests, write_and_put_cache,
 };
 use crate::manifest::storage::{
     FETCH_MANIFEST_PARALLELISM, delta_file, file_compress_type, file_version, gen_path,
@@ -206,13 +206,22 @@ impl<T: Tracker> DeltaStorage<T> {
             let _permit = semaphore.acquire().await.unwrap();
 
             let cache_key = entry.path();
+            let compress_type = file_compress_type(entry.name());
             // Try to get from cache first
-            if let Some(data) = get_from_cache(self.manifest_cache.as_ref(), cache_key).await {
+            if let Some(data) = get_from_cache_decoded(self.manifest_cache.as_ref(), cache_key, compress_type).await {
+                let size = entry.metadata().content_length();
+                if size > 0 {
+                    self.delta_tracker.record(*v, size);
+                } else {
+                    match self.object_store.stat(entry.path()).await {
+                        Ok(metadata) => self.delta_tracker.record(*v, metadata.content_length()),
+                        Err(error) => warn!(error; "Failed to account for cached manifest delta {}", entry.path()),
+                    }
+                }
                 return Ok((*v, data));
             }
 
             // Fetch from remote object store
-            let compress_type = file_compress_type(entry.name());
             let bytes = match self.object_store.read(entry.path()).await {
                 Ok(bytes) => bytes,
                 Err(error) if error.kind() == ErrorKind::NotFound => {
@@ -223,8 +232,9 @@ impl<T: Tracker> DeltaStorage<T> {
                 }
                 Err(error) => return Err(error).context(OpenDalSnafu),
             };
+            self.delta_tracker.record(*v, bytes.len() as u64);
             let data = compress_type
-                .decode(bytes)
+                .decode(bytes.clone())
                 .await
                 .context(DecompressObjectSnafu {
                     compress_type,
@@ -232,7 +242,9 @@ impl<T: Tracker> DeltaStorage<T> {
                 })?;
 
             // Add to cache
-            put_to_cache(self.manifest_cache.as_ref(), cache_key.to_string(), &data).await;
+            if let Some(cache) = &self.manifest_cache {
+                cache.put_file(cache_key.to_string(), bytes.to_vec()).await;
+            }
 
             Ok((*v, data))
         });

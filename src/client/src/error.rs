@@ -42,7 +42,7 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Failed to do Flight get, code: {}", tonic_code))]
+    #[snafu(display("Failed to do Flight get, addr: {}, code: {}", addr, tonic_code))]
     FlightGet {
         addr: String,
         tonic_code: Code,
