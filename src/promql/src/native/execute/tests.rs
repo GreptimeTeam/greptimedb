@@ -4791,6 +4791,80 @@ fn a_chunk_with_no_output_keeps_charging_the_emitted_table() {
     assert_eq!(execution.state().reserved_bytes(), pool.reserved());
 }
 
+/// A node that has handed out everything it ever will gives its label-set history back.
+///
+/// The map below the window records the label set of every piece it hands up, because two series
+/// can reach it under one label set. Once its input has ended and it owes nothing more, no chunk can
+/// be refused against that history: it is dropped there, and the merged answer the window above is
+/// still charging for is what the tree holds afterwards. While the caller is still pushing, the same
+/// history stays -- a series pushed later is exactly what it is for.
+#[test]
+fn a_settled_node_gives_its_label_set_history_back() {
+    let inner_grid = grid(0, 60_000, 2);
+    let outer_grid = grid(60_000, 60_000, 1);
+    let tree = NativeTree::try_new(window_with(
+        map(evaluated_input(Arc::clone(&inner_grid)), vec![MathOp::Abs]),
+        RangeFunction::SumOverTime,
+        120_000,
+        Some(Arc::clone(&inner_grid)),
+        Arc::clone(&outer_grid),
+    ))
+    .unwrap();
+    let schema = evaluated_schema(Arc::clone(&inner_grid));
+    let mut execution = executor(&tree, pool());
+    // Two series onto one label set, holding their values at complementary positions: the map drops
+    // the name, and the two pieces merge cleanly below the window.
+    for (name, values) in [("a", vec![Some(-1.0), None]), ("b", vec![None, Some(-3.0)])] {
+        execution
+            .push_evaluated(
+                InputId::new(0),
+                evaluated_chunk_of(&schema, named_metric(name, "x"), 0, values, true),
+            )
+            .unwrap();
+    }
+    assert!(
+        execution.next_chunk().unwrap().is_none(),
+        "the window above the map answered before its input ended"
+    );
+    // The map handed both pieces up while the caller was still pushing, so it holds what it handed
+    // out: an input that has not ended is where a later series could still collide.
+    let (kept, held) = map_below(&execution);
+    assert!(
+        kept && held > 0,
+        "a map gave its history back before its input ended: kept {kept}, held {held} bytes"
+    );
+
+    execution.end_of_input().unwrap();
+    let merged = execution
+        .next_chunk()
+        .unwrap()
+        .expect("the merged series is the answer");
+    assert_eq!(
+        decided(std::slice::from_ref(&merged)),
+        vec![(0, Some(4.0))],
+        "the two pieces were not merged before the window evaluated them"
+    );
+    // The map has ended its input and owes no answer, so the history it kept is gone -- and so is
+    // every byte it reserved for it.
+    let (kept, held) = map_below(&execution);
+    assert!(
+        !kept && held == 0,
+        "a settled map still holds its label-set history: kept {kept}, held {held} bytes"
+    );
+}
+
+/// What the map below the window of `execution` holds: whether it keeps its label-set history, and
+/// the bytes it reserves.
+fn map_below(execution: &NativeExecutor) -> (bool, usize) {
+    let RuntimeOp::Window { input, .. } = &execution.state().live.as_ref().unwrap().root.op else {
+        panic!("the root is not the window the tree built");
+    };
+    let RuntimeOp::Map { state, .. } = &input.op else {
+        panic!("the window does not read the map the tree built");
+    };
+    (state.emitted.is_some(), state.buffer.reservation.size())
+}
+
 /// A window cannot run over an interleaved input, and the runtime says so before reading a chunk.
 ///
 /// The binding refuses a window whose own input declares the ordering, and the runtime refuses the
@@ -5558,6 +5632,7 @@ fn a_sparse_series_that_moves_forward_is_appended_to_its_history() {
             .fields
             .first()
             .expect("the series has one field")
+            .runs
             .iter()
             .map(|run| (run.start, run.end))
             .collect()
@@ -5667,6 +5742,117 @@ fn a_sparse_series_that_moves_forward_is_appended_to_its_history() {
     assert!(
         ordered(&runs),
         "the merged history is not sorted, disjoint and joined: {runs:?}"
+    );
+}
+
+/// A field that reached every position of its grid is full, and a later value of it is still refused.
+///
+/// The runs are what a later chunk is looked up in, and a field holding a value at every position of
+/// the grid has nothing left to look up: every position a later chunk holds is taken. The history
+/// says so with a flag instead of the one run the whole grid is, so a full field costs no runs and
+/// the refusal is read off the flag -- but only a grid axis places its rows at coordinates two
+/// chunks share, so an explicit axis never counts as full.
+#[test]
+fn a_field_that_reached_every_position_collapses_to_a_flag() {
+    let saturation_grid = grid(0, 60_000, 3);
+    let schema = evaluated_schema(Arc::clone(&saturation_grid));
+    let mut emitted = Emitted::default();
+    // One label set for all of the grid chunks: a map dropping the name would have left them all
+    // under the set below, which is why the chunks carry one metric.
+    let labels = || named_metric("a", "x");
+    let chunks = |emitted: &Emitted, job: &str| {
+        emitted
+            .sets
+            .iter()
+            .find(|(set, _)| {
+                set.iter()
+                    .any(|(name, value)| name.as_ref() == "job" && value.as_ref() == job)
+            })
+            .map(|(_, history)| {
+                let field = history.fields.first().expect("the series has one field");
+                (
+                    field.complete,
+                    field
+                        .runs
+                        .iter()
+                        .map(|run| (run.start, run.end))
+                        .collect::<Vec<_>>(),
+                )
+            })
+            .unwrap_or_else(|| panic!("no label set was recorded for job {job}"))
+    };
+
+    // The first series holds a value at every position of the three-point grid, so field 0 is full.
+    let full = evaluated_chunk_of(
+        &schema,
+        labels(),
+        0,
+        vec![Some(1.0), Some(2.0), Some(3.0)],
+        true,
+    );
+    emitted
+        .occupy(&full)
+        .expect("the first series onto its label set");
+    let (complete, runs) = chunks(&emitted, "x");
+    assert!(
+        complete,
+        "a field holding every position of its grid was not marked full"
+    );
+    assert!(
+        runs.is_empty(),
+        "a full field kept the runs of the whole grid: {runs:?}"
+    );
+    assert_eq!(
+        emitted.counts.runs, 0,
+        "a full field still charges the runs it dropped"
+    );
+
+    // A chunk holding no value of that field is still legal: it takes no position at all.
+    let no_value = evaluated_chunk_of(&schema, labels(), 0, vec![None, None, None], true);
+    emitted
+        .occupy(&no_value)
+        .expect("a chunk holding no value was refused by a full field");
+    assert_eq!(
+        emitted.sets.len(),
+        1,
+        "a chunk holding no value recorded a label set of its own"
+    );
+
+    // A value at any position of it is not, and the refusal names that position.
+    let second = evaluated_chunk_of(&schema, labels(), 1, vec![Some(9.0)], false);
+    let error = emitted
+        .occupy(&second)
+        .expect_err("a position of a full field was handed out twice");
+    let message = error.to_string();
+    assert!(
+        message.contains("job") && message.contains("field 0") && message.contains("position 1"),
+        "the rejection does not name the field and the position the full grid holds: {message}"
+    );
+
+    // An explicit axis addresses its rows by row number, so a field of it is never full: two chunks
+    // of it do not sit at the same coordinates. `EvaluatedChunk::try_new` refuses that shape, so
+    // this one is built by struct literal, as a caller of this crate could.
+    let explicit = Series {
+        metric: named_metric("d", "y"),
+        time: TimeAxis::try_new(ScalarBuffer::from(vec![0i64, 60_000])).expect("an explicit axis"),
+        fields: SeriesFields::try_from_vec(vec![Samples::from_float(Float64Array::from(vec![
+            1.0, 2.0,
+        ]))])
+        .expect("one field"),
+    };
+    let chunk = EvaluatedChunk {
+        series: explicit,
+        is_last: false,
+    };
+    emitted
+        .occupy(&chunk)
+        .expect("an explicit chunk is recorded by its row numbers");
+    let (complete, rows) = chunks(&emitted, "y");
+    assert!(!complete, "an explicit axis was read as a grid it fills");
+    assert_eq!(
+        rows,
+        vec![(0, 2)],
+        "an explicit axis was not recorded as the rows it carries"
     );
 }
 
@@ -7013,6 +7199,117 @@ fn a_binary_result_does_not_depend_on_arrival_order_or_chunk_boundaries() {
     ];
     assert_eq!(split, expected);
     assert_eq!(reversed, expected);
+}
+
+/// How many chunks of each operand the root binary node has retained, left then right.
+///
+/// A chunk of an operand is read before it ends, so a figure above zero is what says a side was
+/// read: the node keeps every chunk each operand hands over until both vectors are whole.
+fn retained_operand_chunks(execution: &NativeExecutor) -> [usize; 2] {
+    let live = execution
+        .state()
+        .live
+        .as_ref()
+        .expect("the execution is live");
+    let RuntimeOp::Binary { binary, .. } = &live.root.op else {
+        panic!("the root is not a binary node");
+    };
+    [
+        binary.operands[0].series.len(),
+        binary.operands[1].series.len(),
+    ]
+}
+
+/// A binary node reads its two operands in turn, so the right side's first chunk is read before the
+/// left side's second.
+///
+/// Each side here hands over a chunk that does not match the layout its operand is bound to, and
+/// which operand the refusal names is what says which chunk was read first: a node that drained the
+/// left operand before touching the right one would refuse the left operand's second chunk and name
+/// the left one. Reading both sides at once is what running them concurrently amounts to in a pull
+/// tree, and it is why neither side has to wait for the other to end before it is read.
+#[test]
+fn a_binary_node_reads_both_operands_in_turn() {
+    let (tree, grid, left, right) = binary_tree(BinaryOp::Add, 4);
+    let pool = pool();
+    let schema = evaluated_schema(Arc::clone(&grid));
+    // Two fields where each operand is bound to one: refused before the kernel reads the chunk.
+    let two_fields = Arc::new(SeriesSchema {
+        fields: field_count(2),
+        eval_grid: Some(Arc::clone(&grid)),
+    });
+    let refused = || {
+        evaluated_on(
+            &two_fields,
+            metric(),
+            0,
+            2,
+            vec![vec![Some(1.0), Some(2.0)], vec![Some(3.0), Some(4.0)]],
+            true,
+        )
+    };
+
+    let mut execution = executor(&tree, Arc::clone(&pool));
+    // The left side is a chunk ahead: its first chunk is readable and its second one is refused,
+    // exactly as the right side's first one is.
+    execution
+        .push_evaluated(left, evaluated_chunk(&schema, 0, vec![1.0, 2.0], false))
+        .unwrap();
+    execution.push_evaluated(left, refused()).unwrap();
+    execution.push_evaluated(right, refused()).unwrap();
+
+    let error = execution.next_chunk().unwrap_err();
+    assert!(
+        error.to_string().contains("rejected its right operand"),
+        "the left operand was drained before the right one was read: {error}"
+    );
+    assert_eq!(pool.reserved(), 0, "the refused chunk is still held");
+}
+
+/// Both operands are read as their chunks arrive: neither waits for the other to end.
+///
+/// The two sides are read in turn, so a pull retains what the side that is ahead has already handed
+/// over instead of reading one operand dry first. The left side below is always a chunk ahead of the
+/// right one, and every chunk of it is retained as it arrives; the answer is still the whole vector,
+/// because a pair is decided only once both sides have ended.
+#[test]
+fn a_binary_node_advances_both_operands_as_they_arrive() {
+    let (tree, grid, left, right) = binary_tree(BinaryOp::Add, 4);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let mut execution = executor(&tree, pool());
+
+    // The left side arrives first, one chunk at a time, and only its last chunk closes it.
+    execution
+        .push_evaluated(left, evaluated_chunk(&schema, 0, vec![1.0, 2.0], false))
+        .unwrap();
+    assert!(execution.next_chunk().unwrap().is_none());
+    assert_eq!(
+        retained_operand_chunks(&execution),
+        [1, 0],
+        "the left operand's chunk was not retained while the right operand had nothing to give"
+    );
+
+    // The right side starts arriving while the left one is already a chunk ahead.
+    execution
+        .push_evaluated(right, evaluated_chunk(&schema, 0, vec![10.0, 20.0], false))
+        .unwrap();
+    assert!(execution.next_chunk().unwrap().is_none());
+    assert_eq!(
+        retained_operand_chunks(&execution),
+        [1, 1],
+        "the right operand's chunk was not retained beside the left one's"
+    );
+
+    execution
+        .push_evaluated(left, evaluated_chunk(&schema, 2, vec![3.0, 4.0], true))
+        .unwrap();
+    execution
+        .push_evaluated(right, evaluated_chunk(&schema, 2, vec![30.0, 40.0], true))
+        .unwrap();
+    assert_eq!(
+        addressed(&run(&mut execution)),
+        vec![(0, vec![Some(11.0), Some(22.0), Some(33.0), Some(44.0)])]
+    );
 }
 
 /// Two series that arrive in separate chunks and hold a value at the same point are refused.
@@ -10108,6 +10405,26 @@ fn emitted_tables(node: NativeNode) -> (bool, bool) {
     (state.emitted.is_some(), window)
 }
 
+/// Whether the window at the root of `node` keeps an [`Emitted`] table of its own.
+fn window_keeps_emitted_table(node: NativeNode) -> bool {
+    let tree = NativeTree::try_new(node).unwrap();
+    let mut inputs = Vec::new();
+    let mut binary_before = 0;
+    let root = RuntimeNode::build(
+        tree.root(),
+        &pool(),
+        &mut inputs,
+        &mut binary_before,
+        "root".to_string(),
+        None,
+    )
+    .unwrap();
+    let RuntimeOp::Window { state, .. } = root.op else {
+        panic!("the tree did not build a window at its root");
+    };
+    state.emitted.is_some()
+}
+
 /// A constant on the right multiplies every value of the vector and drops the metric name.
 ///
 /// The chunk arrives as it is pushed, before the input ends: a broadcast answers a chunk from that
@@ -11414,6 +11731,44 @@ fn a_literal_arithmetic_over_a_name_dropping_window_keeps_no_emitted_table() {
         )),
         (true, false),
         "a source under the broadcast leaves it the only node that can refuse"
+    );
+}
+
+/// A name-keeping window over an input that already answers one series per label set keeps no
+/// [`Emitted`] table.
+///
+/// A table is what refuses a second series onto one label set, and such a window is where no second
+/// series can arrive: what it reads shares no label set, and its output label set is the one it read
+/// with the name it kept. A function that drops the name is the other way round — it makes two
+/// series one whatever its input held — and an input that reports fragments can hand over two series
+/// of one set that the window folds as two. Both keep the table.
+#[test]
+fn a_window_over_a_unified_input_keeps_no_emitted_table() {
+    let grid = grid(0, 60_000, 2);
+    let unified = || merge(evaluated_input(Arc::clone(&grid)));
+    let window = |inner: NativeNode, function: RangeFunction| {
+        window_with(
+            inner,
+            function,
+            120_000,
+            Some(Arc::clone(&grid)),
+            Arc::clone(&grid),
+        )
+    };
+    assert!(
+        !window_keeps_emitted_table(window(unified(), RangeFunction::LastOverTime)),
+        "a window over a unified input charges a table of sets that cannot arrive twice"
+    );
+    assert!(
+        window_keeps_emitted_table(window(unified(), RangeFunction::Rate)),
+        "a name-dropping window over a unified input keeps no table"
+    );
+    assert!(
+        window_keeps_emitted_table(window(
+            evaluated_input(Arc::clone(&grid)),
+            RangeFunction::LastOverTime
+        )),
+        "a window over a fragmenting input keeps no table"
     );
 }
 

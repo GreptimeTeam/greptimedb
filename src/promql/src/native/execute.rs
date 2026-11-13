@@ -548,10 +548,15 @@ impl Drop for NodeBuffer {
 /// sharing no sample merge cleanly, as they do in [`crate::grid_series::merge_same_labelset`]. A
 /// chunk holding no value occupies nothing and changes nothing.
 ///
-/// A set is never retired: `is_last` closes the source series whose data the chunk carries, and a
-/// later series may still fill the positions the closed one left empty. Every run handed out stays
-/// charged until the node is released, which is what lets a later chunk be refused against the
-/// positions an earlier series already occupied.
+/// A set is never retired by `is_last`: that closes the source series whose data the chunk carries,
+/// and a later series may still fill the positions the closed one left empty. Every run handed out
+/// stays charged while a later chunk could still be refused against it, which is what keeps two
+/// values of one position from reaching the node above.
+///
+/// A field whose runs covered every position of the grid is done with instead: nothing of it is
+/// left to hand out, so its runs are dropped and one flag says so. The whole table is dropped once
+/// the input has ended and the node owes no answer, because from then on no chunk of this node can
+/// be refused against it.
 ///
 /// The table is one node's own: a node knows what it has handed out itself and sees nothing of what
 /// the node below kept, so a label set costs its bytes again in every node that keeps a table, and
@@ -559,23 +564,24 @@ impl Drop for NodeBuffer {
 #[derive(Default)]
 struct Emitted {
     sets: HashMap<LabelSet, History>,
-    /// How many run vectors, runs and label payload bytes every entry holds, counted as the entries
-    /// change rather than by walking them.
+    /// How many field histories, runs and label payload bytes every entry holds, counted as the
+    /// entries change rather than by walking them.
     ///
-    /// A node records every label set it has ever handed out and charges for all of them, so the
-    /// figure is read after every output; walking the table there would cost a pass over every entry
+    /// A node records every label set it has handed out and charges for all of them, so the figure
+    /// is read after every output; walking the table there would cost a pass over every entry
     /// recorded so far for each output. Folding one entry's change in as it happens keeps the read
-    /// constant, and the update is the shape of the change itself: a vector's length before and
-    /// after [`absorb`], and one vector per field a history gains.
+    /// constant, and the update is the shape of the change itself: a field's length before and
+    /// after [`absorb`] — or before it is dropped as full — and one field history per field a
+    /// history gains.
     counts: Counts,
 }
 
 /// What the entries of an [`Emitted`] table hold, as running totals.
 #[derive(Default)]
 struct Counts {
-    /// The run vectors, one per field of one entry.
+    /// The field histories, one per field of one entry.
     vectors: usize,
-    /// The occupied runs in every vector.
+    /// The occupied runs in every field history.
     runs: usize,
     /// The payload of every label set: the bytes of its names and values with one row per label.
     payload: usize,
@@ -584,8 +590,27 @@ struct Counts {
 /// What one node has handed out under one output label set.
 #[derive(Default)]
 struct History {
-    /// The occupied runs of each field, in position order and disjoint.
-    fields: Vec<Vec<Run>>,
+    /// One history per field of the chunks handed out, in field order.
+    fields: Vec<FieldHistory>,
+}
+
+/// The positions one field of one label set has been handed out at.
+#[derive(Default)]
+struct FieldHistory {
+    /// The occupied runs, in position order and disjoint.
+    runs: Vec<Run>,
+    /// Whether the runs covered every position of the grid this node's chunks are addressed on.
+    ///
+    /// A field that reaches every position has nothing left to hand out: a later value of it is a
+    /// collision whatever position it holds, because every position is taken. The runs go when the
+    /// flag is set — a full grid is one run of the whole grid and says no more than the flag — and a
+    /// later chunk is refused from the flag rather than from a look-up among runs that would answer
+    /// the same way.
+    ///
+    /// Only a grid axis places its rows at positions two chunks share. An explicit axis addresses
+    /// its rows by row number, so a field of it is never full of another chunk, and the flag stays
+    /// unset there ([`grid_extent`] answers `None`).
+    complete: bool,
 }
 
 /// The bytes a label set holds: each label's name and value with the pair that refers to them.
@@ -620,6 +645,10 @@ impl Emitted {
     /// field at one position, so that is the only thing refused here. `is_last` is not consulted: it
     /// closes the source series the chunk carries, not the label set, and a later series may still
     /// fill the positions that one left empty.
+    ///
+    /// A field the node has filled completely is the one exception: nothing of it is left to hand
+    /// out, so its runs are dropped for a flag and a later value of it is refused without looking
+    /// for the run it would have landed in.
     fn occupy(&mut self, chunk: &EvaluatedChunk) -> Result<()> {
         let labels = label_set(&chunk.series.metric);
         let occupied: Vec<Vec<Run>> = chunk
@@ -629,10 +658,28 @@ impl Emitted {
             .enumerate()
             .map(|(index, field)| occupied_runs(index, field, &chunk.series.time))
             .collect::<Result<_>>()?;
+        // The grid this chunk is addressed on, which is what says whether a field of the set is
+        // full. Every chunk of one node sits on one grid, so the positions below are the same
+        // coordinates whichever chunk recorded them.
+        let extent = grid_extent(&chunk.series.time);
         let empty = occupied.iter().all(Vec::is_empty);
         if let Some(history) = self.sets.get(&labels) {
             for (index, runs) in occupied.iter().enumerate() {
-                let stored = history.fields.get(index).map_or(&[][..], Vec::as_slice);
+                let stored = history.fields.get(index);
+                if stored.is_some_and(|field| field.complete) {
+                    // Every position of this field is taken, so the first position this chunk holds
+                    // is a collision. No run is left to name it beside, so the rejection is drawn
+                    // against the whole grid the field filled.
+                    if let Some(run) = runs.first() {
+                        let full = Run {
+                            start: 0,
+                            end: extent.unwrap_or(usize::MAX),
+                        };
+                        return Err(occupied_position(&labels, index, run, &full));
+                    }
+                    continue;
+                }
+                let stored = stored.map_or(&[][..], |field| field.runs.as_slice());
                 for run in runs {
                     // The stored runs are sorted and disjoint, so only the one holding `run.start`
                     // or the one just before it can share a position. Scanning them all would make
@@ -661,31 +708,58 @@ impl Emitted {
         };
         if history.fields.len() < fields {
             self.counts.vectors += fields - history.fields.len();
-            history.fields.resize_with(fields, Vec::new);
+            history.fields.resize_with(fields, FieldHistory::default);
         }
         for (index, runs) in occupied.into_iter().enumerate() {
-            let stored = &mut history.fields[index];
-            let before = stored.len();
-            absorb(stored, &runs);
-            self.counts.runs = self.counts.runs - before + stored.len();
+            let field = &mut history.fields[index];
+            let before = field.runs.len();
+            absorb(&mut field.runs, &runs);
+            // A field that reached every position of the grid is full: the run it holds says only
+            // that, so the flag says it and the runs go.
+            if extent.is_some_and(|extent| covers_grid(&field.runs, extent)) {
+                field.runs.clear();
+                field.complete = true;
+            }
+            self.counts.runs = self.counts.runs - before + field.runs.len();
         }
         Ok(())
     }
 
     /// An estimate of the bytes this table holds, which the node reserves for.
     ///
-    /// It counts one label-set slot and one history header per entry, one vector per field of a
-    /// history, the runs in those vectors, and the payload of every label set. Each of those is a
-    /// running total, so the figure is read in constant time however many series the node has
+    /// It counts one label-set slot and one history header per entry, one field history per field of
+    /// a history, the runs in those histories, and the payload of every label set. Each of those is
+    /// a running total, so the figure is read in constant time however many series the node has
     /// handed out; it leaves out the map's buckets, the slack of a vector's capacity and the `Arc`
     /// headers of the strings it shares, so it is an approximation rather than a measurement.
     fn bytes(&self) -> usize {
         let slots =
             self.sets.len() * (std::mem::size_of::<LabelSet>() + std::mem::size_of::<History>());
         slots
-            + self.counts.vectors * std::mem::size_of::<Vec<Run>>()
+            + self.counts.vectors * std::mem::size_of::<FieldHistory>()
             + self.counts.runs * std::mem::size_of::<Run>()
             + self.counts.payload
+    }
+}
+
+/// The number of grid positions `time` is addressed on, when it sits on an evaluation grid.
+///
+/// An explicit axis addresses its rows by row number, so a position of one chunk is not a
+/// coordinate of another: no field of one is ever full of the other, and this answers `None` rather
+/// than a row count that would make it look so.
+fn grid_extent(time: &TimeAxis) -> Option<usize> {
+    time.grid()
+        .map(|grid| usize::try_from(grid.spec().len).unwrap_or(usize::MAX))
+}
+
+/// Whether `runs` hold every position of a grid of `extent` points.
+///
+/// Stored runs are sorted, disjoint and joined where they touch, so covering the whole grid is one
+/// run from its first position to its last.
+fn covers_grid(runs: &[Run], extent: usize) -> bool {
+    match runs {
+        [only] => only.start == 0 && only.end >= extent,
+        _ => false,
     }
 }
 
@@ -3204,14 +3278,23 @@ impl RuntimeNode {
                 let input_schema = input.output.samples().cloned().ok_or_else(|| {
                     DataFusionError::Execution("window consumes non-sample input".to_string())
                 })?;
-                let merge = matches!(unifies_its_own_contributions(input), Some(false))
+                let unification = unifies_its_own_contributions(input);
+                let merge = matches!(unification, Some(false))
                     .then(|| MergeInput::new(Arc::clone(&input_schema)));
                 let mut state = NodeState::new(
                     format!("native.window at {location}"),
                     Arc::clone(&metrics),
                     pool,
                 );
-                state.emitted = Some(Emitted::default());
+                // A window only needs a table where it can hand two series one label set: a
+                // function that drops the metric name does that whatever its input held, and an
+                // input that has not unified its own contributions can hand over two series of one
+                // label set that this node folds as two. A name-keeping window over an input that
+                // answers one series per label set keeps the identity its input already refuses
+                // collisions under, so a table of its own would record the same sets twice.
+                if op.function.drops_metric_name() || unification != Some(true) {
+                    state.emitted = Some(Emitted::default());
+                }
                 RuntimeOp::Window {
                     input: Box::new(child),
                     // The collector arrives through `set_annotations` before the first pull;
@@ -3924,8 +4007,41 @@ impl RuntimeNode {
         inputs_finished: bool,
     ) -> Result<Option<NativeChunk>> {
         stacker::maybe_grow(NATIVE_STACK_RED_ZONE, NATIVE_STACK_GROWTH, || {
-            self.pull_within_stack(inputs, inputs_finished)
+            let chunk = self.pull_within_stack(inputs, inputs_finished)?;
+            // A node that has ended its input and owes no answer is never handed another chunk, so
+            // the history of what it handed out can no longer refuse one: it goes back here, after
+            // the pull that could have added to it, rather than waiting for the tree to be closed.
+            // What is above still merges and evaluates then, and it is charged for its own work
+            // without standing beside a table nothing can reach.
+            if inputs_finished && self.settled(inputs) {
+                self.release_emitted()?;
+            }
+            Ok(chunk)
         })
+    }
+
+    /// Gives back the label-set history of this node, which is the only state it keeps of what it
+    /// handed out.
+    fn release_emitted(&mut self) -> Result<()> {
+        match &mut self.op {
+            RuntimeOp::ScalarOf { state, .. }
+            | RuntimeOp::EvalTime { state, .. }
+            | RuntimeOp::VectorOf { state, .. }
+            | RuntimeOp::Instant { state, .. }
+            | RuntimeOp::Merge { state, .. }
+            | RuntimeOp::Window { state, .. }
+            | RuntimeOp::Map { state, .. }
+            | RuntimeOp::ParameterizedMap { state, .. }
+            | RuntimeOp::Timestamp { state, .. }
+            | RuntimeOp::Binary { state, .. }
+            | RuntimeOp::Broadcast { state, .. }
+            | RuntimeOp::Aggregate { state, .. }
+            | RuntimeOp::Vector { state, .. }
+            | RuntimeOp::ParameterizedTopK { state, .. }
+            | RuntimeOp::ParameterizedHistogram { state, .. } => state.release_emitted(),
+            // A source keeps a queue of what the caller pushed and no history at all.
+            RuntimeOp::Input(_) | RuntimeOp::Scalar => Ok(()),
+        }
     }
 
     fn pull_within_stack(
@@ -4294,15 +4410,34 @@ impl RuntimeNode {
                 // Both operands are read to the end of what they hand over: before the input ends a
                 // binary node only retains the chunks, because a pair is not decided until both
                 // sides are whole, and after it ends this is the drain that empties the two.
-                while let Some(chunk) = left.pull(inputs, inputs_finished)? {
-                    state
-                        .retain_binary(operation, 0, chunk)
-                        .map_err(|error| state.context(error))?;
-                }
-                while let Some(chunk) = right.pull(inputs, inputs_finished)? {
-                    state
-                        .retain_binary(operation, 1, chunk)
-                        .map_err(|error| state.context(error))?;
+                //
+                // The two are read in turn -- one chunk from each before either is asked again --
+                // rather than one being drained before the other is touched. The engine this
+                // runtime mirrors runs the two sides concurrently, and in a pull tree, where a node
+                // is advanced only by being asked, reading them in step is what that amounts to:
+                // neither operand waits for the other to end before it is read, and neither is left
+                // unread while the other hands over everything it holds. It costs no extra pull at a
+                // source either, because what a side is asked for past its last chunk is the one
+                // `None` that says it has nothing more, and that is the pull the drain would have
+                // spent closing it.
+                //
+                // Nothing below pushes to a source within one pull, so an operand that hands back
+                // nothing has nothing left for this drain and is not asked again: the loop ends when
+                // both have said so.
+                let mut operands = [&mut **left, &mut **right];
+                let mut open = [true, true];
+                while open[0] || open[1] {
+                    for (side, operand) in operands.iter_mut().enumerate() {
+                        if !open[side] {
+                            continue;
+                        }
+                        match operand.pull(inputs, inputs_finished)? {
+                            Some(chunk) => state
+                                .retain_binary(operation, side, chunk)
+                                .map_err(|error| state.context(error))?,
+                            None => open[side] = false,
+                        }
+                    }
                 }
                 // Nothing has settled for a point that has an operand still arriving, and an
                 // operand below a collecting window has not arrived until that window is flushed:
@@ -6183,6 +6318,23 @@ impl NodeState {
     fn emitted_bytes(&self) -> usize {
         self.emitted.as_ref().map_or(0, Emitted::bytes)
     }
+
+    /// Gives the label-set history back once this node can no longer be handed a chunk.
+    ///
+    /// The table is what refuses a second series onto one label set, so it is worth its bytes only
+    /// while a later chunk can still reach this node. A node whose input has ended and that owes no
+    /// answer is done recording, and what it holds goes back to the pool in the same step the table
+    /// is dropped, rather than standing beside the nodes above it — which are the ones still
+    /// allocating by then.
+    fn release_emitted(&mut self) -> Result<()> {
+        let freed = self.emitted.take().map_or(0, |emitted| emitted.bytes());
+        if freed == 0 {
+            // A table that had recorded nothing holds nothing: there is nothing to give back and
+            // the reservation is left alone rather than resized to the figure it already has.
+            return Ok(());
+        }
+        self.buffer.shrink(freed)
+    }
 }
 
 impl InputSlot {
@@ -6856,18 +7008,64 @@ fn broadcast_runtime(
 
 /// Whether the [`Emitted`] table `broadcast` would keep only repeats the one its vector side keeps.
 ///
-/// Literal arithmetic leaves missing samples missing and floats at their positions; a histogram is
-/// either retained at its position or dropped. Its output occupancy is therefore a subset of the
-/// window's. A name-dropping [`NativeExpr::Window`] already removed the metadata labels, and the
-/// second drop removes only empty-valued labels that [`label_set`] ignores. The canonical identity
-/// is unchanged, so arithmetic cannot create a collision the window did not already refuse.
+/// Two things make it a duplicate, and both are asked for.
+///
+/// The operation must only change values. Arithmetic keeps a float where the vector holds one and
+/// leaves a missing sample missing, a `bool` comparison reports `0`/`1` for the value it read, and a
+/// histogram is either retained at its position or dropped. Either way the positions this node hands
+/// out are a subset of the ones its vector side handed to it -- it widens none -- and neither the
+/// literal nor the varying scalar side carries labels to add.
+///
+/// And the label rewrite the operation does -- [`drop_metric_name`], which removes the metric name,
+/// `__type__`, `__unit__` and the empty-valued labels -- must be one nobody below has to hear about:
+/// a node that already ran the same rewrite hands out label sets whose canonical identity this node
+/// cannot change, and the positions under them are the ones it has already refused a second value
+/// at. [`already_dropped_metric_name`] names those nodes, and each of them keeps the table that
+/// refuses; a second table here would record the same label sets again.
+///
+/// What is left out is what rewrites or widens the identity: a window that keeps the metric name
+/// hands out names this node's drop is the first to merge, a `label_replace` writes a label this
+/// node's drop knows nothing about, and a filtering comparison keeps the label set it read, so it is
+/// not a broadcast that drops labels at all.
 fn elides_emitted_table(broadcast: &BroadcastRuntime, vector: &NativeNode) -> bool {
-    matches!(broadcast.scalar, BroadcastScalar::Literal(_))
-        && matches!(broadcast.op, BroadcastOp::Arithmetic(_))
-        && matches!(
-            &vector.expr,
-            NativeExpr::Window { op, .. } if op.function.drops_metric_name()
-        )
+    let pointwise = matches!(
+        broadcast.op,
+        BroadcastOp::Arithmetic(_) | BroadcastOp::Compare(Comparison::Bool(_))
+    );
+    pointwise && already_dropped_metric_name(vector)
+}
+
+/// Whether `node` hands out label sets that a [`drop_metric_name`] above it would not change.
+///
+/// Each node named here runs that rewrite in its own kernel, so its output carries no metric name,
+/// no `__type__` and no `__unit__`, and its empty-valued labels -- which [`label_set`] ignores
+/// anyway -- are gone as well. Each also keeps the [`Emitted`] table that refuses a second series
+/// onto the label set it produced, or cannot hand out two chunks of one (a `Map` always keeps one,
+/// and so does `timestamp`), so the identity a name-dropping node above would hand out is the one
+/// already checked here.
+fn already_dropped_metric_name(node: &NativeNode) -> bool {
+    match &node.expr {
+        // A function that drops the name drops the metadata labels with it, and the window keeps the
+        // table that refuses a second series onto what it produced.
+        NativeExpr::Window { op, .. } => op.function.drops_metric_name(),
+        // `timestamp` reports a position under the name dropped, in both its forms.
+        NativeExpr::Timestamp { .. } => true,
+        NativeExpr::Instant { op, .. } => op.value == InstantValue::Timestamp,
+        // A math map drops the metadata labels where it runs. A histogram function drops the name
+        // alone and keeps the type and the unit, and a label rewrite writes a label of its own
+        // choosing, so neither is read as a drop this node's rewrite would repeat.
+        NativeExpr::Map { op, .. } => {
+            !op.ops.is_empty()
+                && op
+                    .ops
+                    .iter()
+                    .all(|operation| matches!(operation, MapOp::Math(_)))
+        }
+        // `round` and `clamp` compute a value of their own with the input, and their kernel drops the
+        // metadata labels as a math map does.
+        NativeExpr::ParameterizedMap { .. } => true,
+        _ => false,
+    }
 }
 
 /// The operation a binary node's `matching` describes.
