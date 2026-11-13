@@ -45,7 +45,7 @@ use crate::info::InfoSelector;
 use crate::map::MathOp;
 use crate::map_label::LabelRewrite;
 use crate::map_time::DateFunction;
-use crate::range_eval::{RangeFunction, RangeWindow};
+use crate::range_eval::{RangeFunction, RangeModifier, RangeWindow};
 use crate::select::SortOrder;
 use crate::vector_match::{
     BinaryMatching, BinaryOp, Cardinality, FillValues, MatchingLabels, SetOp,
@@ -1509,6 +1509,304 @@ impl<'de> serde::Deserialize<'de> for NativeTree {
         let wire = Wire::deserialize(deserializer)?;
         wire.root.validate().map_err(serde::de::Error::custom)?;
         Ok(Self { root: wire.root })
+    }
+}
+
+/// Whether the native runtime executes `tree`, answered from the tree's own shapes.
+///
+/// This is the question the native route asks before it commits a statement: a shape the runtime
+/// refuses has to keep the plan it had, because a refusal raised during physical planning cannot
+/// fall back. It used to be answered by building a
+/// [`NativeExecutionState`](crate::native::execute::NativeExecutionState) over the tree and
+/// dropping it, which allocates a runtime node per node per partition only to throw it away. The
+/// answer depends on the shapes the tree holds, so it is read from those instead.
+///
+/// # What is refused
+///
+/// This lists what `RuntimeNode::build` (and the root check in
+/// `NativeExecutionState::try_new`) refuses, less what [`NativeNode::validate`] has already
+/// refused: a `NativeTree` exists only through [`NativeTree::try_new`] or `Deserialize`, and both
+/// validate, so a compiled tree's per-node type contracts hold by the time this runs. What is left
+/// is the shape of the nodes:
+///
+/// - a root that answers raw samples, which has no positions to answer on;
+/// - an input leaf whose series chunks may interleave, which no consumer of a leaf can order;
+/// - `scalar()` over a vector carrying more than one field;
+/// - a binary node that is neither a vector–vector operation nor a broadcast the runtime performs:
+///   two constant operands (no series to carry the result), a scalar broadcast carrying
+///   vector-matching modifiers, or `bool` on an arithmetic operator, which has no `bool` form;
+/// - the `quantile` aggregate, which has no kernel on this route at any stage;
+/// - an aggregate below `Final` whose `by` names a value field, which would fold series the
+///   existing plan keeps apart;
+/// - `topk`, `bottomk`, `limitk`, `sort` and `sort_desc` over a vector carrying more than one
+///   field, whose series have no one value to rank;
+/// - a `topk`, `bottomk`, `limitk` or `count_values` grouping that names a value field, and a
+///   `count_values` label that is empty;
+/// - a window whose `anchored` or `smoothed` modifier reads evaluated input, names a function its
+///   kernel does not correct, or carries a negative lookback.
+///
+/// # What `NativeExecutionState::try_new` still decides
+///
+/// Not every refusal is a shape, and the ones below stay where the runtime builds:
+///
+/// - arithmetic that does not fit: an `@` anchor or `predict_linear` horizon whose timestamp
+///   computation overflows, and a reservation the memory pool refuses;
+/// - a tree a test assembled directly, whose nodes disagree about their types, which
+///   [`NativeNode::validate`] rejects for every compiled one.
+pub fn native_tree_supported(tree: &NativeTree) -> bool {
+    // A constant root and a state root are answers the state produces itself; a root of raw
+    // samples is not one, because raw samples carry their own timestamps instead of positions.
+    let root_supported = match &tree.root().output {
+        NativeType::Scalar(_) | NativeType::AggregateState(_) => true,
+        NativeType::Samples(schema) => schema.eval_grid.is_some(),
+    };
+    root_supported && native_node_supported(tree.root())
+}
+
+/// Whether `node` and every input below it is a shape the runtime builds.
+fn native_node_supported(node: &NativeNode) -> bool {
+    stacker::maybe_grow(VALIDATE_STACK_RED_ZONE, VALIDATE_STACK_GROWTH, || {
+        native_node_supported_within_stack(node)
+    })
+}
+
+/// [`native_node_supported`] one tree level down.
+///
+/// Every arm reads this node's own shape and recurses into exactly the inputs its variant holds,
+/// so a new [`NativeExpr`] variant does not compile until it is classified here.
+fn native_node_supported_within_stack(node: &NativeNode) -> bool {
+    match &node.expr {
+        NativeExpr::Input(bound) => bound.ordering != SeriesOrdering::Interleaved,
+        NativeExpr::Scalar(_) | NativeExpr::EvalTime { .. } => true,
+        NativeExpr::VectorOf { input } | NativeExpr::Instant { input, .. } => {
+            native_node_supported(input)
+        }
+        NativeExpr::Merge { input } | NativeExpr::Map { input, .. } => native_node_supported(input),
+        NativeExpr::Timestamp { input } => native_node_supported(input),
+        NativeExpr::Window { input, op } => {
+            native_node_supported(input) && window_modifier_supported(input, op)
+        }
+        NativeExpr::ParameterizedMap {
+            input, parameters, ..
+        } => native_node_supported(input) && parameters.iter().all(native_node_supported),
+        NativeExpr::ParameterizedHistogram {
+            input, parameters, ..
+        } => native_node_supported(input) && parameters.iter().all(native_node_supported),
+        NativeExpr::Aggregate { input, op } => {
+            native_node_supported(input) && aggregate_supported(node, input, op)
+        }
+        NativeExpr::Vector { input, op } => {
+            native_node_supported(input)
+                && node
+                    .output
+                    .samples()
+                    .is_some_and(|schema| vector_op_supported(schema, op))
+        }
+        NativeExpr::ParameterizedTopK {
+            input,
+            op,
+            parameter,
+        } => {
+            native_node_supported(input)
+                && native_node_supported(parameter)
+                // A per-point `k` ranks the same series as the constant one, one value per series.
+                && node.output.samples().is_some_and(|schema| {
+                    schema.fields.len() == 1 && vector_op_supported(schema, op)
+                })
+        }
+        NativeExpr::ScalarOf { input } => {
+            native_node_supported(input)
+                // `scalar()` answers the sole value of a vector, so a vector of several fields has
+                // more than one value to answer with.
+                && input
+                    .output
+                    .samples()
+                    .is_some_and(|schema| schema.fields.len() == 1)
+        }
+        NativeExpr::Binary {
+            left,
+            right,
+            matching,
+        } => {
+            native_node_supported(left)
+                && native_node_supported(right)
+                && binary_supported(left, right, matching)
+        }
+        NativeExpr::Set { left, right, .. } => {
+            native_node_supported(left) && native_node_supported(right)
+        }
+        NativeExpr::Info { base, info, .. } => {
+            native_node_supported(base) && native_node_supported(info)
+        }
+    }
+}
+
+/// Whether a binary node over `left` and `right` is a shape the runtime builds.
+///
+/// Two evaluated vectors are matched by `matching`, which the kernel takes as it is bound. Every
+/// other pair is a broadcast over one scalar side, and a broadcast has no labels to match and no
+/// series to pair: two constants leave no series to carry the result, a modifier a vector match
+/// would use has no meaning over a scalar, and arithmetic has no `bool` form.
+fn binary_supported(left: &NativeNode, right: &NativeNode, matching: &BinaryMatching) -> bool {
+    let evaluated = |node: &NativeNode| {
+        node.output
+            .samples()
+            .is_some_and(|schema| schema.eval_grid.is_some())
+    };
+    if evaluated(left) && evaluated(right) {
+        return true;
+    }
+    let literal = |node: &NativeNode| matches!(&node.expr, NativeExpr::Scalar(_));
+    let broadcastable = match (&left.output, &right.output) {
+        (NativeType::Samples(vector), NativeType::Scalar(_))
+        | (NativeType::Scalar(_), NativeType::Samples(vector)) => vector.eval_grid.is_some(),
+        (NativeType::Scalar(_), NativeType::Scalar(_)) => !(literal(left) && literal(right)),
+        _ => false,
+    };
+    broadcastable
+        && matching.labels == MatchingLabels::Ignoring(Vec::new())
+        && matching.cardinality == Cardinality::OneToOne
+        && matching.fill == FillValues::default()
+        && !(is_arithmetic(matching.op) && matching.return_bool)
+}
+
+/// Whether `op` is one of the arithmetic operations, which have no `bool` form.
+fn is_arithmetic(op: BinaryOp) -> bool {
+    match op {
+        BinaryOp::Add
+        | BinaryOp::Sub
+        | BinaryOp::Mul
+        | BinaryOp::Div
+        | BinaryOp::Mod
+        | BinaryOp::Pow
+        | BinaryOp::Atan2 => true,
+        BinaryOp::Eq | BinaryOp::Ne | BinaryOp::Gt | BinaryOp::Lt | BinaryOp::Ge | BinaryOp::Le => {
+            false
+        }
+    }
+}
+
+/// Whether the runtime folds `op` over `input` with the layout `node` declares.
+///
+/// `quantile` has no kernel on this route, so it is refused at every stage. A `Complete` or
+/// `Partial` node folds values into groups it keys by series labels only, while `Final` merges
+/// state that was already grouped, which is why only the folding stages are checked against the
+/// schema.
+fn aggregate_supported(node: &NativeNode, input: &NativeNode, op: &BoundAggregate) -> bool {
+    match op.kind {
+        AggregateKind::Sum
+        | AggregateKind::Count
+        | AggregateKind::Avg
+        | AggregateKind::Min
+        | AggregateKind::Max
+        | AggregateKind::Group
+        | AggregateKind::Stddev
+        | AggregateKind::Stdvar => {}
+        AggregateKind::Quantile { .. } => return false,
+    }
+    if op.stage == AggregateStage::Final {
+        return true;
+    }
+    node.output
+        .samples()
+        .or_else(|| input.output.samples())
+        .is_some_and(|schema| grouping_supported(schema, &op.group))
+}
+
+/// Whether `op` is an operation the vector kernel runs over a vector of `schema`.
+fn vector_op_supported(schema: &SeriesSchema, op: &BoundVectorOp) -> bool {
+    // These five rank or order one value per series, so a vector whose samples carry several
+    // fields has no one value to rank.
+    let one_field = matches!(
+        op,
+        BoundVectorOp::TopK { .. }
+            | BoundVectorOp::LimitK { .. }
+            | BoundVectorOp::Sort(SortOrder::Asc | SortOrder::Desc)
+    );
+    if one_field && schema.fields.len() != 1 {
+        return false;
+    }
+    match op {
+        BoundVectorOp::TopK { group, .. } | BoundVectorOp::LimitK { group, .. } => {
+            grouping_supported(schema, group)
+        }
+        BoundVectorOp::CountValues { label, group } => {
+            let names = group_names(group);
+            crate::aggregate::validate_count_values(
+                schema,
+                label.as_ref(),
+                kernel_grouping(group, &names),
+            )
+            .is_ok()
+        }
+        BoundVectorOp::LimitRatio { .. }
+        | BoundVectorOp::Sort(_)
+        | BoundVectorOp::Absent { .. }
+        | BoundVectorOp::Histogram(_) => true,
+    }
+}
+
+/// Whether the kernel folds `schema`'s series the way `group` asks.
+///
+/// The kernel validates its grouping by the schema alone: the group is a set of series labels, and
+/// a `by` naming one of the schema's fields would group by a value that varies between samples.
+/// This is the check `FloatAggregator::try_new_budgeted` and `VectorRuntime::try_new` run, spelled
+/// once so a reader of either name finds the same rule.
+fn grouping_supported(schema: &SeriesSchema, group: &Grouping) -> bool {
+    let names = group_names(group);
+    crate::aggregate::validate_vector_grouping(schema, kernel_grouping(group, &names)).is_ok()
+}
+
+/// The labels `group` names, which is what the kernel's grouping is built over.
+fn group_names(group: &Grouping) -> Vec<&str> {
+    match group {
+        Grouping::By(names) | Grouping::Without(names) => names.iter().map(AsRef::as_ref).collect(),
+    }
+}
+
+/// `group` spelled with the kernel's own [`Grouping`](crate::aggregate::Grouping), over the labels
+/// [`group_names`] reports for it: `by` and `without` are not interchangeable to the kernel.
+fn kernel_grouping<'a>(group: &Grouping, names: &'a [&'a str]) -> crate::aggregate::Grouping<'a> {
+    match group {
+        Grouping::By(_) => crate::aggregate::Grouping::By(names),
+        Grouping::Without(_) => crate::aggregate::Grouping::Without(names),
+    }
+}
+
+/// Whether the runtime evaluates `op` over `input`, with or without a range modifier.
+///
+/// An `anchored` or `smoothed` window reads samples around the window to pin its boundary values,
+/// which only a raw sample stream can offer and only a kernel that corrects its boundaries reads.
+fn window_modifier_supported(input: &NativeNode, op: &BoundWindow) -> bool {
+    let Some(modifier) = op.window.modifier else {
+        return true;
+    };
+    if input
+        .output
+        .samples()
+        .is_some_and(|schema| schema.eval_grid.is_some())
+    {
+        return false;
+    }
+    match modifier {
+        RangeModifier::Anchored { lookback_ms } => {
+            lookback_ms >= 0
+                && matches!(
+                    op.function,
+                    RangeFunction::Rate
+                        | RangeFunction::Increase
+                        | RangeFunction::Delta
+                        | RangeFunction::Resets
+                        | RangeFunction::Changes
+                )
+        }
+        RangeModifier::Smoothed { lookback_ms } => {
+            lookback_ms >= 0
+                && matches!(
+                    op.function,
+                    RangeFunction::Rate | RangeFunction::Increase | RangeFunction::Delta
+                )
+        }
     }
 }
 

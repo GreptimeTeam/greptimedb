@@ -111,37 +111,7 @@ impl ExtensionOptions for DistPlannerOptions {
 /// Rewrites a logical plan into a distributed plan: the part above a merge scan runs on the
 /// frontend, and every `MergeScan` carries the sub-plan that runs in a region.
 #[derive(Debug, Default)]
-pub struct DistPlannerAnalyzer {
-    /// Whether every region a rewritten plan reads is reached in process.
-    ///
-    /// A region input has to be encodable to Substrait when it leaves the frontend, and
-    /// [`PlanRewriter::should_expand`] cuts the plan at the first node that does not encode. That
-    /// check is the same for both transports: whether a plan reaches a region as bytes or as a
-    /// `LogicalPlan` does not change what may run there.
-    ///
-    /// The transport does not decide placement either. It is handed to [`Categorizer`] for the one
-    /// node whose placement is genuinely about the transport: a canonical producer collects the
-    /// pieces of one label set from the partitions it runs on, which is only the region's whole read
-    /// when region reads are served in process.
-    ///
-    /// Whoever builds the query engine sets this, once, from the transport it wired. It is neither a
-    /// query-time decision nor a property of a region.
-    in_process_region_transport: bool,
-}
-
-impl DistPlannerAnalyzer {
-    /// Creates the analyzer.
-    ///
-    /// `in_process_region_transport` must only be `true` for an engine whose region reads are served
-    /// by region servers in the same process. Its plans are then handed to
-    /// `RegionServer::handle_read` as `LogicalPlan`s; the remote read path
-    /// (`RegionServer::handle_remote_read`) decodes Substrait bytes and cannot do that.
-    pub fn new(in_process_region_transport: bool) -> Self {
-        Self {
-            in_process_region_transport,
-        }
-    }
-}
+pub struct DistPlannerAnalyzer {}
 
 impl AnalyzerRule for DistPlannerAnalyzer {
     fn name(&self) -> &str {
@@ -296,16 +266,14 @@ fn unwrap_dictionary_literals(plan: LogicalPlan) -> DfResult<Transformed<Logical
 impl DistPlannerAnalyzer {
     /// Try push down as many nodes as possible
     fn try_push_down(&self, plan: LogicalPlan) -> DfResult<LogicalPlan> {
-        let in_process_region_transport = self.in_process_region_transport;
         // Use the subquery-aware transform so expression subqueries (including
         // nested scalar subqueries left in place by DataFusion 55's
         // `enable_physical_uncorrelated_scalar_subquery`) are visited at every
         // depth and their table scans get wrapped in `MergeScan`.
-        let plan = plan.transform_with_subqueries(&|plan| {
-            Self::inspect_plan_with_subquery(plan, in_process_region_transport)
-        })?;
-        let plan = rewrite_hybrid_binary_operands(plan.data, in_process_region_transport)?;
-        let mut rewriter = PlanRewriter::new(&plan, in_process_region_transport);
+        let plan =
+            plan.transform_with_subqueries(&|plan| Self::inspect_plan_with_subquery(plan))?;
+        let plan = rewrite_hybrid_binary_operands(plan.data)?;
+        let mut rewriter = PlanRewriter::new(&plan);
         let result = plan.rewrite(&mut rewriter)?.data;
         Self::assign_merge_scan_remote_dyn_filter_producer_ids(result)
     }
@@ -317,10 +285,7 @@ impl DistPlannerAnalyzer {
         Self::assign_merge_scan_remote_dyn_filter_producer_ids(result)
     }
 
-    fn inspect_plan_with_subquery(
-        plan: LogicalPlan,
-        in_process_region_transport: bool,
-    ) -> DfResult<Transformed<LogicalPlan>> {
+    fn inspect_plan_with_subquery(plan: LogicalPlan) -> DfResult<Transformed<LogicalPlan>> {
         // Workaround for https://github.com/GreptimeTeam/greptimedb/issues/5469 and https://github.com/GreptimeTeam/greptimedb/issues/5799
         // FIXME(yingwen): Remove the `Limit` plan once we update DataFusion.
         if let LogicalPlan::Limit(_) | LogicalPlan::Distinct(_) = &plan {
@@ -330,12 +295,7 @@ impl DistPlannerAnalyzer {
         let exprs = plan
             .expressions_consider_join()
             .into_iter()
-            .map(|e| {
-                e.transform(|subquery_expr| {
-                    Self::transform_subquery(subquery_expr, in_process_region_transport)
-                })
-                .map(|x| x.data)
-            })
+            .map(|e| e.transform(Self::transform_subquery).map(|x| x.data))
             .collect::<DfResult<Vec<_>>>()?;
 
         // Some plans that are special treated (should not call `with_new_exprs` on them)
@@ -347,33 +307,27 @@ impl DistPlannerAnalyzer {
         }
     }
 
-    fn transform_subquery(
-        expr: Expr,
-        in_process_region_transport: bool,
-    ) -> DfResult<Transformed<Expr>> {
+    fn transform_subquery(expr: Expr) -> DfResult<Transformed<Expr>> {
         match expr {
             Expr::Exists(exists) => Ok(Transformed::yes(Expr::Exists(Exists {
-                subquery: Self::handle_subquery(exists.subquery, in_process_region_transport)?,
+                subquery: Self::handle_subquery(exists.subquery)?,
                 negated: exists.negated,
             }))),
             Expr::InSubquery(in_subquery) => Ok(Transformed::yes(Expr::InSubquery(InSubquery {
                 expr: in_subquery.expr,
-                subquery: Self::handle_subquery(in_subquery.subquery, in_process_region_transport)?,
+                subquery: Self::handle_subquery(in_subquery.subquery)?,
                 negated: in_subquery.negated,
             }))),
             Expr::ScalarSubquery(scalar_subquery) => Ok(Transformed::yes(Expr::ScalarSubquery(
-                Self::handle_subquery(scalar_subquery, in_process_region_transport)?,
+                Self::handle_subquery(scalar_subquery)?,
             ))),
 
             _ => Ok(Transformed::no(expr)),
         }
     }
 
-    fn handle_subquery(
-        subquery: Subquery,
-        in_process_region_transport: bool,
-    ) -> DfResult<Subquery> {
-        let mut rewriter = PlanRewriter::new(&subquery.subquery, in_process_region_transport);
+    fn handle_subquery(subquery: Subquery) -> DfResult<Subquery> {
+        let mut rewriter = PlanRewriter::new(&subquery.subquery);
         let mut rewrote_subquery = subquery
             .subquery
             .as_ref()
@@ -462,14 +416,6 @@ enum RewriterStatus {
 
 #[derive(Debug, Default)]
 struct PlanRewriter {
-    /// Whether every region this pass reads is reached in process.
-    ///
-    /// [`Categorizer`] needs it to place canonical producers: their router collects the pieces of
-    /// one label set from the partitions the producer runs on, so the producer belongs inside a
-    /// region only when region reads are served in process. It is a fact about the transport, not
-    /// about the plan, and every check this pass makes is a placement decision for the same
-    /// transport.
-    in_process_region_transport: bool,
     /// Whether the whole plan encodes, allowing per-node checks to be skipped.
     whole_plan_encodable: bool,
     /// Current level in the tree
@@ -550,7 +496,7 @@ fn is_native_operand_subtree(plan: &LogicalPlan) -> bool {
     native_operand_fused(plan).is_some()
 }
 
-fn rewrite_hybrid_binary_operands(plan: LogicalPlan, transport: bool) -> DfResult<LogicalPlan> {
+fn rewrite_hybrid_binary_operands(plan: LogicalPlan) -> DfResult<LogicalPlan> {
     plan.transform_up(|plan| {
         let LogicalPlan::Join(join) = &plan else {
             return Ok(Transformed::no(plan));
@@ -558,18 +504,18 @@ fn rewrite_hybrid_binary_operands(plan: LogicalPlan, transport: bool) -> DfResul
         if !is_native_operand_subtree(&join.left) || !is_native_operand_subtree(&join.right) {
             return Ok(Transformed::no(plan));
         }
-        fn rewrite_side(side: &LogicalPlan, transport: bool) -> DfResult<LogicalPlan> {
+        fn rewrite_side(side: &LogicalPlan) -> DfResult<LogicalPlan> {
             if let Some(child) = native_operand_wrapper_child(side) {
-                let rewritten_child = rewrite_side(child, transport)?;
+                let rewritten_child = rewrite_side(child)?;
                 return side
                     .clone()
                     .with_new_exprs(side.expressions(), vec![rewritten_child]);
             }
-            let mut rw = PlanRewriter::new(side, transport);
+            let mut rw = PlanRewriter::new(side);
             Ok(side.clone().rewrite(&mut rw)?.data)
         }
-        let left = rewrite_side(&join.left, transport)?;
-        let right = rewrite_side(&join.right, transport)?;
+        let left = rewrite_side(&join.left)?;
+        let right = rewrite_side(&join.right)?;
         let mut rebuilt = LogicalPlan::Join(join.clone());
         rebuilt = rebuilt.with_new_exprs(rebuilt.expressions(), vec![left, right])?;
         Ok(Transformed::yes(rebuilt))
@@ -584,12 +530,11 @@ fn is_fused_series_plan(plan: &LogicalPlan) -> bool {
 impl PlanRewriter {
     /// `plan` must be the root of the tree that is about to be rewritten, otherwise
     /// [`PlanRewriter::should_expand`] may skip a check it has to perform.
-    fn new(plan: &LogicalPlan, in_process_region_transport: bool) -> Self {
+    fn new(plan: &LogicalPlan) -> Self {
         let whole_plan_encodable = DFLogicalSubstraitConvertor
             .encode(plan, DefaultSerializer)
             .is_ok();
         Self {
-            in_process_region_transport,
             whole_plan_encodable,
             ..Default::default()
         }
@@ -639,11 +584,7 @@ impl PlanRewriter {
         }
 
         if self.expand_on_next_part_cond_trans_commutative {
-            let comm = Categorizer::check_plan(
-                plan,
-                self.partition_cols.clone(),
-                self.in_process_region_transport,
-            )?;
+            let comm = Categorizer::check_plan(plan, self.partition_cols.clone())?;
             match comm {
                 Commutativity::PartialCommutative => {
                     // a small difference is that for partial commutative, we still need to
@@ -668,11 +609,7 @@ impl PlanRewriter {
             }
         }
 
-        match Categorizer::check_plan(
-            plan,
-            self.partition_cols.clone(),
-            self.in_process_region_transport,
-        )? {
+        match Categorizer::check_plan(plan, self.partition_cols.clone())? {
             Commutativity::Commutative => {
                 // PATCH: we should reconsider SORT's commutativity instead of doing this trick.
                 // explain: for a fully commutative SeriesDivide, its child Sort plan only serves it. I.e., that

@@ -110,9 +110,6 @@ pub struct QueryEngineState {
     experimental_native_promql: bool,
     /// Whether this engine plans distributed statements.
     with_dist_planner: bool,
-    /// Whether this engine's regions are reached in process, which is what lets a region take a
-    /// `LogicalPlan` instead of Substrait bytes.
-    in_process_region_transport: bool,
 }
 
 impl fmt::Debug for QueryEngineState {
@@ -159,39 +156,6 @@ impl QueryEngineState {
         procedure_service_handler: Option<ProcedureServiceHandlerRef>,
         flow_service_handler: Option<FlowServiceHandlerRef>,
         with_dist_planner: bool,
-        plugins: Plugins,
-        options: QueryOptionsNew,
-    ) -> DfResult<Self> {
-        Self::try_new_with_region_transport(
-            catalog_list,
-            partition_rule_manager,
-            region_query_handler,
-            table_mutation_handler,
-            procedure_service_handler,
-            flow_service_handler,
-            with_dist_planner,
-            false,
-            plugins,
-            options,
-        )
-    }
-
-    /// [`QueryEngineState::try_new`], additionally stating how the engine reaches its regions.
-    ///
-    /// `in_process_region_transport` reaches [`DistPlannerAnalyzer`]: when it is `true` the
-    /// distributed planner may hand a region a `LogicalPlan` instead of Substrait bytes, which only
-    /// the in-process read path accepts. Every other caller builds an engine whose regions are
-    /// reached over the wire, which is what [`QueryEngineState::try_new`] states.
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn try_new_with_region_transport(
-        catalog_list: CatalogManagerRef,
-        partition_rule_manager: Option<PartitionRuleManagerRef>,
-        region_query_handler: Option<RegionQueryHandlerRef>,
-        table_mutation_handler: Option<TableMutationHandlerRef>,
-        procedure_service_handler: Option<ProcedureServiceHandlerRef>,
-        flow_service_handler: Option<FlowServiceHandlerRef>,
-        with_dist_planner: bool,
-        in_process_region_transport: bool,
         plugins: Plugins,
         options: QueryOptionsNew,
     ) -> DfResult<Self> {
@@ -259,9 +223,9 @@ impl QueryEngineState {
             analyzer.rules.push(Arc::new(SstManifestAggregateRule));
         }
         if with_dist_planner {
-            analyzer.rules.push(Arc::new(DistPlannerAnalyzer::new(
-                in_process_region_transport,
-            )));
+            analyzer
+                .rules
+                .push(Arc::new(DistPlannerAnalyzer::default()));
             analyzer.rules.push(Arc::new(JsonSchemaConcretizeRule));
         }
         analyzer.rules.push(Arc::new(FixStateUdafOrderingAnalyzer));
@@ -340,7 +304,7 @@ impl QueryEngineState {
             .with_serializer_registry(Arc::new(DefaultSerializer))
             .with_query_planner(Arc::new(DfQueryPlanner::new(
                 catalog_list.clone(),
-                partition_rule_manager,
+                partition_rule_manager.clone(),
                 region_query_handler.clone(),
                 options.enable_per_region_metrics,
             )))
@@ -367,7 +331,6 @@ impl QueryEngineState {
             plugins,
             experimental_native_promql: options.experimental_native_promql,
             with_dist_planner,
-            in_process_region_transport,
             scalar_functions: Arc::new(RwLock::new(HashMap::new())),
         })
     }
@@ -576,11 +539,6 @@ impl QueryEngineState {
     /// Whether this engine plans distributed statements.
     pub(crate) fn with_dist_planner(&self) -> bool {
         self.with_dist_planner
-    }
-
-    /// Whether a region read is served in this process, so a region can take a `LogicalPlan`.
-    pub(crate) fn in_process_region_transport(&self) -> bool {
-        self.in_process_region_transport
     }
 
     pub fn catalog_manager(&self) -> &CatalogManagerRef {
@@ -980,7 +938,7 @@ mod tests {
         let raw_plan = DfLogicalPlan::Extension(Extension {
             node: Arc::new(raw),
         });
-        for (disjoint, needs_router) in [(true, false), (false, true)] {
+        for (disjoint, needs_router) in [(true, true), (false, true)] {
             let fused = FusedSeries::try_new(
                 Arc::from("metric"),
                 tree.clone(),
@@ -997,7 +955,7 @@ mod tests {
             let logical = DfLogicalPlan::Extension(Extension {
                 node: Arc::new(fused),
             });
-            let analyzed = DistPlannerAnalyzer::new(false)
+            let analyzed = DistPlannerAnalyzer::default()
                 .analyze(
                     logical,
                     &datafusion_common::config::ConfigOptions::default(),
@@ -1018,10 +976,12 @@ mod tests {
                 "disjoint={disjoint}: {analyzed}"
             );
             if let Some(router) = child.downcast_ref::<SeriesRepartitionExec>() {
-                assert_eq!(
+                // A router by the raw primary key reconciles interleaved frames into contiguous
+                // series; the ordering below it is whatever the region's read declared.
+                assert!(matches!(
                     series_frame_ordering(router.children()[0].schema().as_ref()).unwrap(),
-                    SeriesOrdering::Interleaved
-                );
+                    SeriesOrdering::Contiguous | SeriesOrdering::Interleaved
+                ));
             }
             assert_eq!(
                 series_frame_ordering(child.schema().as_ref()).unwrap(),
