@@ -247,6 +247,31 @@ fn set_over(left: NativeNode, right: NativeNode, out: Arc<EvalGrid>) -> NativeNo
     }
 }
 
+/// `last_over_time(inner[5m])`, a window that folds `inner` onto `out` and keeps the metric name.
+fn keeping_window_over(
+    inner: NativeNode,
+    input_grid: Option<Arc<EvalGrid>>,
+    out: Arc<EvalGrid>,
+) -> NativeNode {
+    NativeNode {
+        expr: NativeExpr::Window {
+            input: Box::new(inner),
+            op: BoundWindow {
+                function: RangeFunction::LastOverTime,
+                window: RangeWindow {
+                    range_ms: 300_000,
+                    offset_ms: 0,
+                    anchor_ms: None,
+                    modifier: None,
+                },
+                input_grid,
+                output_grid: Arc::clone(&out),
+            },
+        },
+        output: evaluated(fields(1), out),
+    }
+}
+
 /// `rate(inner[5m])`, a window that folds `inner` onto `out` and drops the metric name.
 fn window_over(
     inner: NativeNode,
@@ -731,9 +756,10 @@ fn a_set_operation_collects_each_side() {
 #[test]
 fn a_window_collects_an_aliasing_child() {
     let out = grid(0, 1000, 2);
-    // A window over an evaluated vector folds one series' range, so it reads the series whole.
+    // A window over an evaluated vector folds one series' range, so it reads the series whole. The
+    // window keeps the metric name here, so the rewrite below it is the only source of duplicates.
     let tree = passed(
-        window_over(
+        keeping_window_over(
             rewrite(selected(&out), "host", "host"),
             Some(Arc::clone(&out)),
             Arc::clone(&out),
@@ -751,8 +777,46 @@ fn a_window_collects_an_aliasing_child() {
 fn a_window_over_a_raw_scan_collects_nothing() {
     let out = grid(0, 1000, 2);
     // The scan hands over whole storage series, and a merge cannot take raw samples anyway.
-    let tree = passed(window_over(raw_input(0), None, out), &scan_tags());
+    let tree = passed(keeping_window_over(raw_input(0), None, out), &scan_tags());
     assert_eq!(0, merges(&tree));
+}
+
+#[test]
+fn a_name_dropping_window_is_collected_by_its_consumer() {
+    let out = grid(0, 1000, 2);
+    // `rate` drops the metric name, which is part of the identity a merge groups by: what the window
+    // hands out is collected at the root, whatever the scan below held.
+    let tree = passed(
+        window_over(raw_input(0), None, Arc::clone(&out)),
+        &scan_tags(),
+    );
+    assert_eq!(1, merges(&tree));
+    let NativeExpr::Merge { input } = &tree.root().expr else {
+        panic!("the root collects what the window hands out: {tree}");
+    };
+    assert!(
+        matches!(input.expr, NativeExpr::Window { .. }),
+        "the merge sits above the window, not below it"
+    );
+}
+
+#[test]
+fn a_timestamp_is_collected_by_its_consumer() {
+    let out = grid(0, 1000, 2);
+    // `timestamp` reports a sample's own time under the metric name dropped, so its answer is
+    // collected at the root as well.
+    let stamped = NativeNode {
+        expr: NativeExpr::Timestamp {
+            input: Box::new(selected(&out)),
+        },
+        output: evaluated(fields(1), Arc::clone(&out)),
+    };
+    let tree = passed(stamped, &scan_tags());
+    assert_eq!(1, merges(&tree));
+    assert!(
+        matches!(tree.root().expr, NativeExpr::Merge { .. }),
+        "the root collects what the timestamp hands out: {tree}"
+    );
 }
 
 #[test]

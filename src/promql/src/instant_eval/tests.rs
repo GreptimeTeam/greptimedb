@@ -15,6 +15,7 @@
 use std::collections::BTreeMap;
 use std::ops::RangeInclusive;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
 use datatypes::arrow::array::{Float64Array, UInt32Array};
 use datatypes::arrow::buffer::ScalarBuffer;
@@ -28,8 +29,8 @@ use datatypes::series::samples::{
 use datatypes::series::time::{EvalGrid, GridSpec};
 
 use super::{
-    InstantCandidateSpan, info_sample_times, instant_candidate_span, select_instants,
-    timestamp_of_evaluated, timestamp_of_selection,
+    AXIS_ROWS_READ, InstantCandidateSpan, info_sample_times, instant_candidate_span,
+    select_instants, timestamp_of_evaluated, timestamp_of_selection,
 };
 use crate::grid_series::GridSeriesBuilder;
 use crate::grid_series::reference::{Labels, labels_of, metric_of};
@@ -231,6 +232,42 @@ fn offset_extreme_timestamps_are_checked_without_large_fixture() {
     let (rows, times) = select(&[0, 1_000_000], &fields, 0..=1_000_000, 1, 0, 0).unwrap();
     assert_eq!(rows, [1]);
     assert_eq!(times, [1_000_000]);
+}
+
+/// A selection walks its axis once, whatever the grid it selects onto.
+///
+/// The strictly increasing order of the timestamps is `RawTimestamps`' guarantee, checked when the
+/// axis is built, so the selector has nothing left to validate: the rows it reads are the rows of
+/// the axis, once each, and a second pass over them -- such as a re-check of their order -- would
+/// show up here as twice as many. The selection itself is the same either way, which is why the
+/// count has to be what the test reads.
+#[test]
+fn a_selection_reads_its_axis_once() {
+    let rows = 5_000;
+    let times: Vec<i64> = (0..rows).map(|row| row as i64).collect();
+    let fields = SeriesFields::one(Samples::from_float(Float64Array::from(vec![1.0; rows])));
+    let read = |range: RangeInclusive<i64>, step: i64| -> u64 {
+        AXIS_ROWS_READ.store(0, Ordering::Relaxed);
+        let (selected, _) = select(&times, &fields, range, step, 10, 0).unwrap();
+        assert!(!selected.is_empty(), "the selection is what reads the axis");
+        AXIS_ROWS_READ.load(Ordering::Relaxed)
+    };
+    // Every row is selected: one pass, no more.
+    assert_eq!(
+        read(0..=rows as i64 - 1, 1),
+        rows as u64,
+        "the axis was walked more than once"
+    );
+    // Fewer points over the whole axis read it once as well: the pass follows the samples, not the
+    // points, so it never exceeds the rows of the axis however many points the grid holds.
+    for step in [10, 499] {
+        let visited = read(0..=rows as i64 - 1, step);
+        assert!(
+            visited <= rows as u64,
+            "step {step} read {visited} rows of a {} row axis",
+            rows
+        );
+    }
 }
 
 #[test]

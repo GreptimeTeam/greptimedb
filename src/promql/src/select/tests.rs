@@ -24,7 +24,7 @@ use datatypes::series::time::{EvalGrid, GridRange, GridSpec, TimeAxis};
 use datatypes::series::{Label, SeriesLabels};
 
 use super::{
-    Grouping, LabelMatcher, MatchOp, SortOrder, absent, absent_labels, limit_ratio, limitk,
+    Grouping, LabelMatcher, MatchOp, SortOrder, absent, absent_labels, calls, limit_ratio, limitk,
     natural_less, sample_offset, scalar, sort_instant, topk,
 };
 use crate::golden::fold_pieces;
@@ -33,7 +33,7 @@ use crate::grid_series::reference::{
     run_ranges, sparse_series,
 };
 use crate::grid_series::{GridSample, GridSeriesBuilder};
-use crate::histogram_eval::float_histogram::FloatHistogram;
+use crate::histogram_eval::float_histogram::{FloatHistogram, copies};
 
 fn schema(points: u64, fields: usize) -> SeriesSchema {
     SeriesSchema {
@@ -398,6 +398,148 @@ fn limit_operators_keep_the_start_timestamp_of_a_selected_sample() {
         [expected(0), expected(2)],
         "limitk did not hand back the samples it selected"
     );
+}
+
+/// The selections that only move samples hand them from the field to the builder: no owned
+/// histogram is built on the way, and the payload arrives as it was read.
+#[test]
+fn limit_operators_pass_histograms_through_without_an_owned_form() {
+    let histogram =
+        OwnedHistogram::parse("0/0/0/3ff0000000000000/3ff0000000000000/0/1_1/3ff0000000000000///");
+    let schema = schema(3, 1);
+    let mut builder = GridSeriesBuilder::try_new(Arc::new(schema.clone())).unwrap();
+    builder
+        .push_refs(0, &[SampleRef::Histogram(histogram.view())])
+        .unwrap();
+    builder
+        .push_refs(2, &[SampleRef::Histogram(histogram.view())])
+        .unwrap();
+    let series = builder.finish(metric("__name__=a")).unwrap().unwrap();
+
+    copies::take_materialized();
+    let by_ratio = limit_ratio(1.0, &schema, std::slice::from_ref(&series)).unwrap();
+    let by_count = limitk(
+        1.0,
+        &Grouping::By(Vec::new()),
+        &schema,
+        std::slice::from_ref(&series),
+    )
+    .unwrap();
+    assert_eq!(
+        copies::take_materialized(),
+        0,
+        "a selection built an owned histogram of a sample it only moved"
+    );
+
+    // Both selections hand on the samples they kept, unchanged and in the same place.
+    let kept = |series: &Series| -> Vec<(usize, bool)> {
+        let samples = &series.fields.as_slice()[0];
+        series
+            .time
+            .positions()
+            .map(|(point, row)| {
+                (
+                    point,
+                    matches!(samples.sample(row), SampleRef::Histogram(_)),
+                )
+            })
+            .collect()
+    };
+    for kept_series in [&by_ratio, &by_count] {
+        assert_eq!(kept_series.len(), 1);
+        assert_eq!(kept(&kept_series[0]), [(0, true), (2, true)]);
+    }
+}
+
+/// `topk` builds one label list per series and ranks each point with a partial selection: the
+/// comparisons it makes grow with the candidates rather than with their logarithm, which is what
+/// ordering the whole group at every point cost.
+#[test]
+fn topk_ranks_a_point_with_a_partial_selection() {
+    let schema = schema(1, 1);
+    // Every series is one group, and the input arrives in reverse label order, so nothing about it
+    // is inherited from the order the members were built in.
+    let series: Vec<Series> = (0..256)
+        .rev()
+        .map(|index| {
+            let value = if index < 16 { 10.0 } else { 1.0 };
+            build(
+                &schema,
+                metric(&format!("__name__=s{index:03}")),
+                &vec![vec![Some(value)]],
+            )
+            .unwrap()
+        })
+        .collect();
+
+    calls::take_label_lists();
+    calls::take_ranks();
+    let kept = topk(8.0, true, &Grouping::By(Vec::new()), &schema, &series).unwrap();
+    let lists = calls::take_label_lists();
+    let comparisons = calls::take_ranks();
+
+    let mut kept = rendered(&kept);
+    kept.sort();
+    assert_eq!(
+        kept,
+        [
+            "__name__=s000",
+            "__name__=s001",
+            "__name__=s002",
+            "__name__=s003",
+            "__name__=s004",
+            "__name__=s005",
+            "__name__=s006",
+            "__name__=s007"
+        ],
+    );
+    assert_eq!(
+        lists,
+        series.len(),
+        "topk rebuilt a series' label list instead of reading the one it built"
+    );
+    // Ordering the whole group at the point would take the candidates' logarithm per candidate;
+    // the partial selection takes a small constant.
+    assert!(
+        comparisons <= 4 * series.len(),
+        "topk compared {comparisons} candidate pairs to select 8 of {}",
+        series.len()
+    );
+}
+
+/// Ties go to the label set that sorts first, whatever order the input arrived in: the value the
+/// partial selection stops at falls inside a run of equal values, and the run is resolved by label
+/// order rather than by the order the ranking left the group in.
+#[test]
+fn topk_breaks_ties_by_label_order() {
+    let names: Vec<String> = (0..40)
+        .map(|index| format!("__name__=s{index:02}"))
+        .collect();
+    // The ten series that sort first carry the top value, and the input arrives in reverse label
+    // order, so a tie can only be resolved by the labels.
+    let values: Vec<(&str, Option<f64>)> = names
+        .iter()
+        .rev()
+        .map(|name| {
+            let value = if name.as_str() < "__name__=s10" {
+                7.0
+            } else {
+                3.0
+            };
+            (name.as_str(), Some(value))
+        })
+        .collect();
+    let (schema, series) = instant(&values);
+    let kept = topk(3.0, true, &Grouping::By(Vec::new()), &schema, &series).unwrap();
+    let mut kept = rendered(&kept);
+    kept.sort();
+    assert_eq!(kept, ["__name__=s00", "__name__=s01", "__name__=s02"]);
+
+    // `bottomk` ties the same way, and its run of equal values holds the whole group.
+    let kept = topk(3.0, false, &Grouping::By(Vec::new()), &schema, &series).unwrap();
+    let mut kept = rendered(&kept);
+    kept.sort();
+    assert_eq!(kept, ["__name__=s10", "__name__=s11", "__name__=s12"]);
 }
 
 fn grouping(kind: &str, labels: &str) -> Grouping {

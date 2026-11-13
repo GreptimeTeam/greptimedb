@@ -15,6 +15,7 @@
 //! `sum` and `avg` of native histograms within one aggregation group, following the histogram
 //! paths of Prometheus `aggregation`.
 
+use std::borrow::Cow;
 use std::sync::Arc;
 
 use datafusion::arrow::array::UInt32Array;
@@ -139,7 +140,7 @@ fn aggregate_point<'a>(
             has_float = true;
             None
         }
-        SampleRef::Histogram(view) => Some(FloatHistogram::try_from_view(&view)),
+        SampleRef::Histogram(view) => Some(FloatHistogram::try_from_view(&view).map(Cow::Owned)),
     });
     let (value, _) = sum_or_avg(op, histograms.by_ref())?;
     // A fold stopped by mixed bucket kinds still reports conversion errors of later samples.
@@ -159,12 +160,17 @@ fn aggregate_point<'a>(
 /// time, so the first error ends the fold. The result is derived, so it carries no start
 /// timestamp.
 ///
+/// The histograms are carried by reference: the accumulator is the only value the fold copies
+/// out, and every sample after the first is only read. A window of `w` samples therefore costs
+/// one deep copy, not `w`, and a caller that already owns its window pays none for the samples it
+/// keeps.
+///
 /// The flag reports whether any add had to reconcile two different custom-bucket sets, which is
 /// what Prometheus annotates with an info. It is carried out of the fold rather than recomputed:
 /// the fold already calls [`FloatHistogram::kahan_add`] and receives that outcome.
-pub(crate) fn sum_or_avg(
+pub(crate) fn sum_or_avg<'a>(
     op: HistogramAggregate,
-    histograms: impl IntoIterator<Item = Result<FloatHistogram>>,
+    histograms: impl IntoIterator<Item = Result<Cow<'a, FloatHistogram>>>,
 ) -> Result<(Option<FloatHistogram>, bool)> {
     let mut value: Option<FloatHistogram> = None;
     let mut compensation: Option<FloatHistogram> = None;
@@ -175,23 +181,25 @@ pub(crate) fn sum_or_avg(
         let h = h?;
         count += 1.0;
         let Some(current) = value.as_mut() else {
-            value = Some(h);
+            // The one copy the fold takes: the accumulator starts as the first sample.
+            value = Some(h.into_owned());
             continue;
         };
+        let h = h.as_ref();
         // Go drops the result with a warning for this addition error only; others propagate.
         if current.uses_custom_buckets() != h.uses_custom_buckets() {
             return Ok((None, custom_reconciled));
         }
         match op {
             HistogramAggregate::Sum => {
-                let (c, outcome) = current.kahan_add(&h, compensation.take())?;
+                let (c, outcome) = current.kahan_add(h, compensation.take())?;
                 custom_reconciled |= outcome.custom_bounds_reconciled;
                 compensation = Some(c);
             }
             HistogramAggregate::Avg => {
                 if mean.is_none() {
                     let mut sum = current.clone();
-                    let (c, outcome) = sum.kahan_add(&h, compensation.clone())?;
+                    let (c, outcome) = sum.kahan_add(h, compensation.clone())?;
                     custom_reconciled |= outcome.custom_bounds_reconciled;
                     if !sum.has_overflow() {
                         *current = sum;
@@ -210,7 +218,9 @@ pub(crate) fn sum_or_avg(
                 if let Some(c) = compensation.as_mut() {
                     c.mul(q);
                 }
-                let mut to_add = h;
+                // The incremental mean scales the sample it adds, so this is the one branch that
+                // needs the histogram by value on the sample after the first.
+                let mut to_add = h.clone();
                 to_add.div(count);
                 let mean = mean.as_mut().expect("set above");
                 mean.mul(q);

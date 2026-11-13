@@ -41,9 +41,9 @@ use datatypes::series::samples::{SampleRef, Series, SeriesSchema};
 use datatypes::series::time::{GridSpan, TimeAxis};
 
 use crate::aggregate::{
-    AggregateOp, BLOCK_POINTS, Counts, FloatAggregator, FloatState, Group, LabelKey,
+    AggregateOp, BLOCK_POINTS, Counts, FloatAggregator, FloatState, Group, LabelKey, block_bytes,
     btree_backing_bytes, count_series, finish_groups, finish_groups_budgeted,
-    hash_map_backing_bytes, kahan_inc, label_key, metric_bytes, next_hash_capacity,
+    hash_map_backing_bytes, kahan_inc, label_key, metric_bytes, next_hash_capacity, state_seen,
 };
 use crate::map::validate_float_series;
 
@@ -121,7 +121,7 @@ impl FloatAggregator {
         let width = self.schema.fields.len();
         let mut partial_bytes = self.groups.len().saturating_mul(size_of::<StateSeries>());
         for group in &self.groups {
-            let points = seen_points(group, width);
+            let points = seen_points(group, width, self.op);
             partial_bytes = partial_bytes
                 .saturating_add(size_of::<TimeAxis>())
                 .saturating_add(
@@ -151,15 +151,18 @@ impl FloatAggregator {
             DataFusionError::Execution("aggregate state is indexed on an evaluated grid".into())
         })?;
         let grid_len = grid.spec().len as usize;
+        let op = self.op;
+        let words = op.state_words();
+        let point_words = width.saturating_mul(words);
         let mut groups: Vec<StateSeries> = Vec::with_capacity(self.groups.len());
         for group in self.groups {
-            let points = seen_points(&group, width);
+            let points = seen_points(&group, width, op);
             let mut spans: Vec<GridSpan> = Vec::with_capacity(points.min(1));
             let mut states: Vec<Vec<Option<AggregateStateValues>>> =
                 (0..width).map(|_| Vec::with_capacity(points)).collect();
             for (&block, block_states) in &group.blocks {
-                for (offset, point) in block_states.chunks_exact(width).enumerate() {
-                    if !point.iter().any(|state| state.seen) {
+                for (offset, point) in block_states.chunks_exact(point_words).enumerate() {
+                    if !point.chunks_exact(words).any(|state| state_seen(state, op)) {
                         continue;
                     }
                     let position = block * BLOCK_POINTS + offset;
@@ -174,8 +177,8 @@ impl FloatAggregator {
                         }
                         _ => spans.push(GridSpan::new(position, 1)),
                     }
-                    for (field, state) in point.iter().enumerate() {
-                        states[field].push(state.partial());
+                    for (field, state) in point.chunks_exact(words).enumerate() {
+                        states[field].push(state_partial(state, op));
                     }
                 }
             }
@@ -195,12 +198,14 @@ impl FloatAggregator {
 }
 
 /// The points of `group` that carry a state: the ones a partial of it holds.
-fn seen_points(group: &Group, width: usize) -> usize {
+fn seen_points(group: &Group, width: usize, op: AggregateOp) -> usize {
+    let words = op.state_words();
+    let point_words = width.saturating_mul(words);
     group.blocks.values().fold(0usize, |count, states| {
         count.saturating_add(
             states
-                .chunks_exact(width)
-                .filter(|point| point.iter().any(|state| state.seen))
+                .chunks_exact(point_words)
+                .filter(|point| point.chunks_exact(words).any(|state| state_seen(state, op)))
                 .count(),
         )
     })
@@ -559,9 +564,10 @@ impl FloatMerger {
         budget: &mut impl FnMut(usize) -> Result<()>,
     ) -> Result<()> {
         let width = self.schema.fields.len();
-        let block_bytes = BLOCK_POINTS
-            .saturating_mul(width)
-            .saturating_mul(size_of::<FloatState>());
+        let op = self.op;
+        let words = op.state_words();
+        let point_words = width.saturating_mul(words);
+        let states_bytes = block_bytes(width, op);
         let blocks = &mut self.groups[index].blocks;
         let block_index = point / BLOCK_POINTS;
         let entries = blocks.len();
@@ -571,21 +577,24 @@ impl FloatMerger {
                 budget(
                     self.retained
                         .saturating_add(live)
-                        .saturating_add(block_bytes)
+                        .saturating_add(states_bytes)
                         .saturating_add(btree_backing_bytes(entries.saturating_add(1))),
                 )?;
                 self.retained = self
                     .retained
-                    .saturating_add(block_bytes)
+                    .saturating_add(states_bytes)
                     .saturating_add(btree_backing_bytes(entries.saturating_add(1)))
                     .saturating_sub(btree_backing_bytes(entries));
-                entry.insert(vec![FloatState::default(); BLOCK_POINTS * width].into_boxed_slice())
+                entry.insert(vec![0.0; BLOCK_POINTS * point_words].into_boxed_slice())
             }
         };
-        let offset = (point % BLOCK_POINTS) * width;
-        for (slot, state) in block[offset..offset + width].iter_mut().zip(states) {
+        let offset = (point % BLOCK_POINTS) * point_words;
+        for (slot, state) in block[offset..offset + point_words]
+            .chunks_exact_mut(words)
+            .zip(states)
+        {
             if let Some(state) = state {
-                slot.merge(self.op, FloatState::from_partial(state));
+                FloatState::new(slot, op).merge_partial(&state);
             }
         }
         Ok(())
@@ -658,97 +667,166 @@ fn state_at(
     Ok(Some(state))
 }
 
-impl FloatState {
-    fn partial(&self) -> Option<AccumulatorState> {
-        self.seen.then_some(AccumulatorState {
-            value: self.value,
-            mean: self.mean,
-            compensation: self.compensation,
-            count: self.count,
-            incremental_mean: self.incremental_mean,
-        })
+/// The exported form of the state in `words`, or `None` if it has seen no sample.
+///
+/// Only the components the op keeps are filled in; the rest stay at their defaults, exactly as the
+/// frame that carries them leaves them out.
+fn state_partial(words: &[f64], op: AggregateOp) -> Option<AccumulatorState> {
+    if !state_seen(words, op) {
+        return None;
     }
+    Some(match op {
+        // `value`, its compensation, then the presence flag.
+        AggregateOp::Sum => AccumulatorState {
+            value: words[0],
+            compensation: words[1],
+            ..Default::default()
+        },
+        // `value`, `compensation`, `mean`, the incremental flag, then the count.
+        AggregateOp::Avg => AccumulatorState {
+            value: words[0],
+            compensation: words[1],
+            mean: words[2],
+            incremental_mean: words[3] != 0.0,
+            count: words[4],
+        },
+        AggregateOp::Count => AccumulatorState {
+            count: words[0],
+            ..Default::default()
+        },
+        AggregateOp::Min | AggregateOp::Max => AccumulatorState {
+            value: words[0],
+            ..Default::default()
+        },
+        AggregateOp::Group => AccumulatorState::default(),
+        // `value`, `mean`, then the count.
+        AggregateOp::Stddev | AggregateOp::Stdvar => AccumulatorState {
+            value: words[0],
+            mean: words[1],
+            count: words[2],
+            ..Default::default()
+        },
+    })
+}
 
-    fn from_partial(state: AccumulatorState) -> Self {
-        Self {
-            seen: true,
-            value: state.value,
-            mean: state.mean,
-            compensation: state.compensation,
-            count: state.count,
-            incremental_mean: state.incremental_mean,
+impl<'a> FloatState<'a> {
+    /// Writes `other` into this state, for a state that has seen nothing yet.
+    fn store_partial(self, other: &AccumulatorState) {
+        let (op, words) = (self.op, self.words);
+        match op {
+            AggregateOp::Count => words[0] = other.count,
+            // Presence alone, whatever the other side keeps: `group` answers 1 either way.
+            AggregateOp::Group => words[0] = 1.0,
+            AggregateOp::Min | AggregateOp::Max => {
+                words[0] = other.value;
+                words[1] = 1.0;
+            }
+            AggregateOp::Sum => {
+                words[0] = other.value;
+                words[1] = other.compensation;
+                words[2] = 1.0;
+            }
+            AggregateOp::Stddev | AggregateOp::Stdvar => {
+                words[0] = other.value;
+                words[1] = other.mean;
+                words[2] = other.count;
+            }
+            AggregateOp::Avg => {
+                words[0] = other.value;
+                words[1] = other.compensation;
+                words[2] = other.mean;
+                words[3] = if other.incremental_mean { 1.0 } else { 0.0 };
+                words[4] = other.count;
+            }
         }
     }
 
     /// Folds the state of another partition into this one.
-    fn merge(&mut self, op: AggregateOp, other: Self) {
-        if !self.seen {
-            *self = other;
+    fn merge_partial(self, other: &AccumulatorState) {
+        if !state_seen(self.words, self.op) {
+            self.store_partial(other);
             return;
         }
+        let (op, words) = (self.op, self.words);
         match op {
             AggregateOp::Sum => {
-                (self.value, self.compensation) = add_compensated(*self, other);
+                (words[0], words[1]) =
+                    add_compensated((words[0], words[1]), (other.value, other.compensation));
             }
-            AggregateOp::Count => self.count += other.count,
+            AggregateOp::Count => words[0] += other.count,
             AggregateOp::Group => {}
             AggregateOp::Max => {
-                if self.value < other.value || self.value.is_nan() {
-                    self.value = other.value;
+                if words[0] < other.value || words[0].is_nan() {
+                    words[0] = other.value;
                 }
             }
             AggregateOp::Min => {
-                if self.value > other.value || self.value.is_nan() {
-                    self.value = other.value;
+                if words[0] > other.value || words[0].is_nan() {
+                    words[0] = other.value;
                 }
             }
-            AggregateOp::Avg => self.merge_avg(other),
+            AggregateOp::Avg => merge_avg(words, other),
             AggregateOp::Stddev | AggregateOp::Stdvar => {
                 // Chan et al.'s pairwise update. `delta * (delta * weight)` keeps the product
                 // finite where it is: `delta²` alone overflows for `[0]` and `[1.5e154]`, whose
                 // merged sum of squares is finite.
-                let count = self.count + other.count;
-                let delta = other.mean - self.mean;
-                let weight = self.count * other.count / count;
-                self.mean += delta * (other.count / count);
-                self.value = self.value + other.value + delta * (delta * weight);
-                self.count = count;
+                let count = words[2] + other.count;
+                let delta = other.mean - words[1];
+                let weight = words[2] * other.count / count;
+                words[1] += delta * (other.count / count);
+                words[0] = words[0] + other.value + delta * (delta * weight);
+                words[2] = count;
             }
         }
     }
+}
 
-    /// Adds the sums while they stay finite, and otherwise continues with the count-weighted
-    /// mean, as the serial update switches to an incremental mean once its sum overflows.
-    fn merge_avg(&mut self, other: Self) {
-        let count = self.count + other.count;
-        if !self.incremental_mean && !other.incremental_mean {
-            let (value, compensation) = add_compensated(*self, other);
-            if !value.is_infinite() {
-                self.value = value;
-                self.compensation = compensation;
-                self.count = count;
-                return;
-            }
+/// Adds the sums while they stay finite, and otherwise continues with the count-weighted mean, as
+/// the serial update switches to an incremental mean once its sum overflows.
+///
+/// The state words are `value`, `compensation`, `mean`, the incremental flag and the count.
+fn merge_avg(words: &mut [f64], other: &AccumulatorState) {
+    let count = words[4] + other.count;
+    if words[3] == 0.0 && !other.incremental_mean {
+        let (value, compensation) =
+            add_compensated((words[0], words[1]), (other.value, other.compensation));
+        if !value.is_infinite() {
+            words[0] = value;
+            words[1] = compensation;
+            words[4] = count;
+            return;
         }
-        let (mean, compensation) = self.mean_form();
-        let (other_mean, other_compensation) = other.mean_form();
-        let (weight, other_weight) = (self.count / count, other.count / count);
-        (self.mean, self.compensation) = kahan_inc(
-            other_mean * other_weight,
-            mean * weight,
-            compensation * weight + other_compensation * other_weight,
-        );
-        self.incremental_mean = true;
-        self.count = count;
     }
+    let (mean, compensation) = mean_form(words[0], words[1], words[2], words[3] != 0.0, words[4]);
+    let (other_mean, other_compensation) = mean_form(
+        other.value,
+        other.compensation,
+        other.mean,
+        other.incremental_mean,
+        other.count,
+    );
+    let (weight, other_weight) = (words[4] / count, other.count / count);
+    (words[2], words[1]) = kahan_inc(
+        other_mean * other_weight,
+        mean * weight,
+        compensation * weight + other_compensation * other_weight,
+    );
+    words[3] = 1.0;
+    words[4] = count;
+}
 
-    /// The mean and its compensation, converting a sum as the serial update does on switching.
-    fn mean_form(&self) -> (f64, f64) {
-        if self.incremental_mean {
-            (self.mean, self.compensation)
-        } else {
-            (self.value / self.count, self.compensation / self.count)
-        }
+/// The mean and its compensation, converting a sum as the serial update does on switching.
+fn mean_form(
+    value: f64,
+    compensation: f64,
+    mean: f64,
+    incremental: bool,
+    count: f64,
+) -> (f64, f64) {
+    if incremental {
+        (mean, compensation)
+    } else {
+        (value / count, compensation / count)
     }
 }
 
@@ -756,9 +834,9 @@ impl FloatState {
 /// Kahan addends: adding the compensation plainly would drop what the compensation already
 /// holds once later partials cancel the sums, as merging `[1e100, 1]`, `[-1e100, 1e84]` and
 /// `[-1e84]` would lose the `1`.
-fn add_compensated(this: FloatState, other: FloatState) -> (f64, f64) {
-    let (value, compensation) = kahan_inc(other.value, this.value, this.compensation);
-    kahan_inc(other.compensation, value, compensation)
+fn add_compensated(this: (f64, f64), other: (f64, f64)) -> (f64, f64) {
+    let (value, compensation) = kahan_inc(other.0, this.0, this.1);
+    kahan_inc(other.1, value, compensation)
 }
 
 /// Merges `count_values` results of several partitions. Each partial already carries its full

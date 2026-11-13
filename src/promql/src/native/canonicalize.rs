@@ -23,10 +23,10 @@
 //!
 //! # What decides it
 //!
-//! Only a rewrite can alias, and only one that writes a label its input already carries:
-//! [`duplicates_canonical_labels`] is that fact, derived from the tree and the tags each source
-//! reports. A tree with no such rewrite gains no merge at all, so a per-series query keeps every
-//! scan partition and pays nothing for this pass.
+//! Only a rewrite can alias, and only one that writes a label its input already carries or drops one
+//! its output would still be told apart by: [`duplicates_canonical_labels`] is that fact, derived
+//! from the tree and the tags each source reports. A tree with no such rewrite gains no merge at
+//! all, so a per-series query keeps every scan partition and pays nothing for this pass.
 //!
 //! Where a merge is added is a property of the consumer, and of what the operations between the
 //! consumer and the rewrite do to one sample:
@@ -44,6 +44,11 @@
 //!
 //! A merge is never added below a raw scan, a scalar or aggregate state: it binds samples evaluated
 //! on a grid, and no consumer asks for one over those.
+//!
+//! A node can be a source of duplicates without rewriting a label its input carries: a range
+//! function that drops the metric name, and `timestamp` in both of its forms, hand out a set the
+//! name no longer tells apart. What they produce is therefore collected by their consumer - the
+//! root included - exactly as a rewrite of an existing label is.
 //!
 //! Canonicalizing a map's input is what makes the histogram case work: in
 //! `histogram_count(label_replace(x, "host", "same", "host", ".*"))` two scan partitions each

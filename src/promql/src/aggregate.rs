@@ -117,6 +117,24 @@ pub(crate) enum HistogramSamples {
     Refused,
 }
 
+impl AggregateOp {
+    /// The words of `f64` one field's state of this aggregation keeps for one grid point.
+    ///
+    /// The last word is the presence word: the op's own count where its state carries one, so a
+    /// zero count reads as unseen, and a `0`/`1` flag where it does not. The words before it are
+    /// the components the op folds, in [`Self::state_fields`] order. A state therefore costs what
+    /// its own operation needs instead of what the widest operation needs: a block holds
+    /// `BLOCK_POINTS * fields * state_words * size_of::<f64>()` bytes however wide the op is.
+    pub(crate) const fn state_words(self) -> usize {
+        match self {
+            Self::Count | Self::Group => 1,
+            Self::Min | Self::Max => 2,
+            Self::Sum | Self::Stddev | Self::Stdvar => 3,
+            Self::Avg => 5,
+        }
+    }
+}
+
 /// What `op` does with a native histogram sample.
 pub(crate) fn histogram_samples(op: AggregateOp) -> HistogramSamples {
     match op {
@@ -215,16 +233,45 @@ impl FloatAggregator {
     ) -> Result<()> {
         validate_aggregate_series(&self.schema, series, self.op)?;
         let existing_bytes = self.state_bytes();
-        let grouping_workspace = grouping_workspace_bytes(&series.metric);
-        let mut workspace_bytes =
-            grouping_workspace.saturating_add(pending_bytes(self.schema.fields.len()));
-        budget(existing_bytes.saturating_add(workspace_bytes))?;
-        workspace_bytes = workspace_bytes.saturating_add(
-            self.labels
-                .len()
-                .saturating_mul(std::mem::size_of::<&str>()),
-        );
-        budget(existing_bytes.saturating_add(workspace_bytes))?;
+        let group_capacity = self.groups.capacity();
+        let map_capacity = self.group_index.capacity();
+        // One admission for everything the fold can allocate before it writes a sample: the copy of
+        // this series' metric the grouping makes, the group's own copy of those labels and its
+        // key, the labels vector, and the group vector and index that may grow. What only a new
+        // group pays for is admitted whether or not this series opens one, so a chunk costs one
+        // pool call here instead of one per step, and a refusal still arrives before any of it is
+        // allocated.
+        //
+        // The grouping copy, the second workspace the copy is grouped into, and the group's
+        // retained labels and key are each a copy or a subset of this series' labels, so three
+        // copies of the one workspace bound all of them.
+        let label_workspace = grouping_workspace_bytes(&series.metric);
+        budget(
+            existing_bytes
+                .saturating_add(label_workspace.saturating_mul(3))
+                .saturating_add(pending_bytes(self.schema.fields.len()))
+                .saturating_add(
+                    self.labels
+                        .len()
+                        .saturating_mul(std::mem::size_of::<&str>()),
+                )
+                // A realloc that cannot grow in place keeps both buffers alive while it copies,
+                // so a growing step admits the new buffer beside the old one, which the retained
+                // state already holds. The map is admitted the same way.
+                .saturating_add(if self.groups.len() == group_capacity {
+                    group_capacity
+                        .saturating_mul(2)
+                        .max(4)
+                        .saturating_mul(size_of::<Group>())
+                } else {
+                    0
+                })
+                .saturating_add(if self.group_index.len() == map_capacity {
+                    hash_map_backing_bytes(next_hash_capacity(map_capacity))
+                } else {
+                    0
+                }),
+        )?;
         let labels: Vec<&str> = self.labels.iter().map(|label| &**label).collect();
         let grouping = if self.by {
             Grouping::By(&labels)
@@ -232,51 +279,12 @@ impl FloatAggregator {
             Grouping::Without(&labels)
         };
         let metric = grouping.apply(&series.metric)?;
-        let key_bytes = metric
-            .tags()
-            .len()
-            .saturating_add(1)
-            .saturating_mul(std::mem::size_of::<(Arc<str>, Arc<str>)>());
-        workspace_bytes = workspace_bytes
-            .saturating_add(grouping_workspace_bytes(&metric))
-            .saturating_add(key_bytes);
-        budget(existing_bytes.saturating_add(workspace_bytes))?;
         let key = label_key(&metric);
         let key_retained = key
             .capacity()
             .saturating_mul(size_of::<(Arc<str>, Arc<str>)>());
         let new_group = !self.group_index.contains_key(&key);
-        let group_capacity = self.groups.capacity();
-        let map_capacity = self.group_index.capacity();
         let old_map_backing = hash_map_backing_bytes(map_capacity);
-        if new_group {
-            let next_group_capacity = if self.groups.len() == group_capacity {
-                group_capacity.saturating_mul(2).max(4)
-            } else {
-                group_capacity
-            };
-            let group_realloc_bytes = if next_group_capacity > group_capacity {
-                next_group_capacity.saturating_mul(size_of::<Group>())
-            } else {
-                0
-            };
-            budget(
-                existing_bytes
-                    .saturating_add(metric_bytes(&metric))
-                    .saturating_add(key_bytes)
-                    // A realloc that cannot grow in place keeps both buffers alive while it
-                    // copies, so a growing step admits the old buffer beside the new one --
-                    // the same reason the map below admits both tables. The old buffer alone
-                    // is already in `existing_bytes`; what is added here is the new one.
-                    .saturating_add(group_realloc_bytes)
-                    .saturating_add(if self.group_index.len() == map_capacity {
-                        hash_map_backing_bytes(next_hash_capacity(map_capacity))
-                    } else {
-                        0
-                    })
-                    .saturating_add(workspace_bytes),
-            )?;
-        }
         let group_capacity_growth = if new_group && self.groups.len() == group_capacity {
             group_capacity.saturating_mul(2).max(4)
         } else {
@@ -349,7 +357,8 @@ impl FloatAggregator {
                         .len()
                         .saturating_mul(BLOCK_POINTS)
                         .saturating_mul(self.schema.fields.len())
-                        .saturating_mul(std::mem::size_of::<FloatState>()),
+                        .saturating_mul(self.op.state_words())
+                        .saturating_mul(std::mem::size_of::<f64>()),
                 )
                 .saturating_add(btree_backing_bytes(group.blocks.len()))
         });
@@ -423,10 +432,12 @@ fn finish_groups_budgeted(
         DataFusionError::Execution(format!("cannot reserve aggregate row: {error}"))
     })?;
     let mut completed_output_bytes = 0usize;
+    let words = op.state_words();
+    let point_words = width.saturating_mul(words);
     for group in groups {
         // One builder serves every group, so each result series starts explicitly.
         builder.begin_series();
-        let (rows, runs) = group_rows_runs(&group, width);
+        let (rows, runs) = group_rows_runs(&group, width, op);
         let finish_bytes = finish_working_bytes(rows, runs, width);
         budget(
             state
@@ -438,12 +449,16 @@ fn finish_groups_budgeted(
         builder.reserve_rows(rows)?;
         for (&block, states) in &group.blocks {
             // The last block can extend past the grid; only points with a sample are pushed.
-            for (offset, point) in states.chunks_exact(width).enumerate() {
-                if !point.iter().any(|state| state.seen) {
+            for (offset, point) in states.chunks_exact(point_words).enumerate() {
+                if !point.chunks_exact(words).any(|state| state_seen(state, op)) {
                     continue;
                 }
                 row.clear();
-                row.extend(point.iter().map(|state| state.finish(op)));
+                row.extend(
+                    point
+                        .chunks_exact(words)
+                        .map(|state| state_finish(state, op)),
+                );
                 builder.push(block * BLOCK_POINTS + offset, &row)?;
             }
         }
@@ -475,16 +490,18 @@ fn finish_groups(
     finish_groups_budgeted(schema, op, groups, 0, |_| Ok(()))
 }
 
-fn group_rows_runs(group: &Group, width: usize) -> (usize, usize) {
+fn group_rows_runs(group: &Group, width: usize, op: AggregateOp) -> (usize, usize) {
     if width == 0 {
         return (0, 0);
     }
+    let words = op.state_words();
+    let point_words = width * words;
     let mut rows = 0usize;
     let mut runs = 0usize;
     let mut previous: Option<usize> = None;
     for (&block, states) in &group.blocks {
-        for (offset, point) in states.chunks_exact(width).enumerate() {
-            if point.iter().any(|state| state.seen) {
+        for (offset, point) in states.chunks_exact(point_words).enumerate() {
+            if point.chunks_exact(words).any(|state| state_seen(state, op)) {
                 let index = block.saturating_mul(BLOCK_POINTS).saturating_add(offset);
                 rows = rows.saturating_add(1);
                 if previous.is_none_or(|previous| previous.checked_add(1) != Some(index)) {
@@ -871,7 +888,7 @@ fn next_hash_capacity(capacity: usize) -> usize {
 /// words; the leaf form is smaller than that. The header allowance is generous on purpose, so the
 /// bound does not depend on how a toolchain lays the node out.
 fn btree_node_bytes() -> usize {
-    11 * size_of::<(usize, Box<[FloatState]>)>() + 16 * size_of::<usize>()
+    11 * size_of::<(usize, Box<[f64]>)>() + 16 * size_of::<usize>()
 }
 
 /// An upper bound on the bytes a B-tree of `entries` holds.
@@ -926,11 +943,21 @@ fn label_key(metric: &SeriesLabels) -> LabelKey {
 /// input never expands to the full grid and dense input costs one allocation per block.
 const BLOCK_POINTS: usize = 64;
 
+/// Bytes one allocated block keeps: a state per point per field, [`AggregateOp::state_words`]
+/// words of `f64` each. The fold, the merge and the recount all size a block through this, so what
+/// is admitted and what is allocated cannot drift apart.
+fn block_bytes(width: usize, op: AggregateOp) -> usize {
+    BLOCK_POINTS
+        .saturating_mul(width)
+        .saturating_mul(op.state_words())
+        .saturating_mul(size_of::<f64>())
+}
+
 struct Group {
     metric: SeriesLabels,
     /// Keyed by absolute grid index / `BLOCK_POINTS`; each block holds one state per field for
-    /// each of its points, point by point.
-    blocks: BTreeMap<usize, Box<[FloatState]>>,
+    /// each of its points, point by point, each state as many `f64` words as the op folds.
+    blocks: BTreeMap<usize, Box<[f64]>>,
 }
 
 /// Which field of which layout a fold is writing, and how it folds it.
@@ -943,6 +970,20 @@ struct FieldFold {
     width: usize,
     field_index: usize,
     op: AggregateOp,
+}
+
+impl FieldFold {
+    /// Words one point of this fold's block keeps: every field's state, side by side.
+    fn point_words(self) -> usize {
+        self.width.saturating_mul(self.op.state_words())
+    }
+
+    /// Where this field's state of the point at `offset` starts inside a block.
+    fn state_start(self, offset: usize) -> usize {
+        offset
+            .saturating_mul(self.point_words())
+            .saturating_add(self.field_index.saturating_mul(self.op.state_words()))
+    }
 }
 
 impl Group {
@@ -1001,14 +1042,15 @@ impl Group {
                 let block = index / BLOCK_POINTS;
                 let (states, admitted) = self.block_states(block, fold, budget, retained)?;
                 retained = admitted;
-                states[(index % BLOCK_POINTS) * fold.width + fold.field_index]
-                    .update(fold.op, sample);
+                let words = fold.op.state_words();
+                let start = fold.state_start(index % BLOCK_POINTS);
+                FloatState::new(&mut states[start..start + words], fold.op).update(sample);
                 while let Some(&(at, sample)) = samples.peek()
                     && at / BLOCK_POINTS == block
                 {
                     samples.next();
-                    states[(at % BLOCK_POINTS) * fold.width + fold.field_index]
-                        .update(fold.op, sample);
+                    let start = fold.state_start(at % BLOCK_POINTS);
+                    FloatState::new(&mut states[start..start + words], fold.op).update(sample);
                 }
             }
         }
@@ -1026,13 +1068,11 @@ impl Group {
         fold: FieldFold,
         budget: &mut impl FnMut(usize) -> Result<()>,
         retained: usize,
-    ) -> Result<(&'a mut [FloatState], usize)> {
+    ) -> Result<(&'a mut [f64], usize)> {
         let new_block = !self.blocks.contains_key(&block);
-        let (block_bytes, backing_delta) = if new_block {
+        let (states_bytes, backing_delta) = if new_block {
             (
-                BLOCK_POINTS
-                    .saturating_mul(fold.width)
-                    .saturating_mul(size_of::<FloatState>()),
+                block_bytes(fold.width, fold.op),
                 btree_backing_bytes(self.blocks.len() + 1)
                     .saturating_sub(btree_backing_bytes(self.blocks.len())),
             )
@@ -1041,106 +1081,149 @@ impl Group {
         };
         let retained = retained
             .saturating_add(backing_delta)
-            .saturating_add(block_bytes);
+            .saturating_add(states_bytes);
         if new_block {
             budget(retained)?;
         }
-        let states = self.blocks.entry(block).or_insert_with(|| {
-            vec![FloatState::default(); BLOCK_POINTS * fold.width].into_boxed_slice()
-        });
+        let states = self
+            .blocks
+            .entry(block)
+            .or_insert_with(|| vec![0.0; BLOCK_POINTS * fold.point_words()].into_boxed_slice());
         Ok((&mut states[..], retained))
     }
 }
 
-/// The float part of Prometheus' `groupedAggregation`.
-#[derive(Clone, Copy, Default)]
-struct FloatState {
-    seen: bool,
-    value: f64,
-    mean: f64,
-    compensation: f64,
-    count: f64,
-    incremental_mean: bool,
+/// The float part of Prometheus' `groupedAggregation`, as a view of one state's words.
+///
+/// A state is [`AggregateOp::state_words`] words of the block it sits in: the components the op
+/// folds, then the presence word. The view reads and writes that layout in place, so folding
+/// allocates nothing per state and an op that keeps less memory keeps less.
+struct FloatState<'a> {
+    words: &'a mut [f64],
+    op: AggregateOp,
 }
 
-impl FloatState {
-    fn update(&mut self, op: AggregateOp, sample: f64) {
-        if !self.seen {
-            *self = Self {
-                seen: true,
-                value: match op {
-                    // The running sum of squared deviations; Prometheus starts it at NaN for a
-                    // non-finite first sample.
-                    AggregateOp::Stddev | AggregateOp::Stdvar if !sample.is_finite() => f64::NAN,
-                    AggregateOp::Stddev | AggregateOp::Stdvar => 0.0,
-                    _ => sample,
-                },
-                mean: sample,
-                count: 1.0,
-                ..Self::default()
-            };
+/// Whether the state in `words` has seen a sample: its presence word is set.
+///
+/// The presence word is the last one, which is the op's count where its state carries one - a
+/// state that has folded nothing has no count - and a `0`/`1` flag where it does not.
+fn state_seen(words: &[f64], op: AggregateOp) -> bool {
+    words[op.state_words() - 1] != 0.0
+}
+
+/// The value the state in `words` finishes to, or `None` if it has seen no sample.
+fn state_finish(words: &[f64], op: AggregateOp) -> Option<f64> {
+    if !state_seen(words, op) {
+        return None;
+    }
+    Some(match op {
+        // `value`, its compensation, then the presence flag.
+        AggregateOp::Sum => words[0] + words[1],
+        // `value`, `compensation`, `mean`, the incremental flag, then the count.
+        AggregateOp::Avg if words[3] != 0.0 => words[2] + words[1],
+        AggregateOp::Avg => words[0] / words[4] + words[1] / words[4],
+        AggregateOp::Count => words[0],
+        AggregateOp::Min | AggregateOp::Max => words[0],
+        AggregateOp::Group => 1.0,
+        // `value`, `mean`, then the count.
+        AggregateOp::Stdvar => words[0] / words[2],
+        AggregateOp::Stddev => (words[0] / words[2]).sqrt(),
+    })
+}
+
+impl<'a> FloatState<'a> {
+    /// The state at `words`, which is `op`'s layout: [`AggregateOp::state_words`] words.
+    fn new(words: &'a mut [f64], op: AggregateOp) -> Self {
+        debug_assert_eq!(words.len(), op.state_words());
+        Self { words, op }
+    }
+
+    /// Folds one sample in, initializing the state if it had seen none.
+    fn update(self, sample: f64) {
+        let (op, words) = (self.op, self.words);
+        if !state_seen(words, op) {
+            match op {
+                // The count is the presence word.
+                AggregateOp::Count => words[0] = 1.0,
+                // Presence alone: `group` answers 1 for any kind of sample, NaN included, so the
+                // sample itself is not kept - a zero sample would read as unseen.
+                AggregateOp::Group => words[0] = 1.0,
+                // `value`, then the presence flag.
+                AggregateOp::Min | AggregateOp::Max => {
+                    words[0] = sample;
+                    words[1] = 1.0;
+                }
+                // `value`, its compensation, then the presence flag.
+                AggregateOp::Sum => {
+                    words[0] = sample;
+                    words[1] = 0.0;
+                    words[2] = 1.0;
+                }
+                // The running sum of squared deviations, which Prometheus starts at NaN for a
+                // non-finite first sample; then `mean` and the count that says it is seen.
+                AggregateOp::Stddev | AggregateOp::Stdvar => {
+                    words[0] = if sample.is_finite() { 0.0 } else { f64::NAN };
+                    words[1] = sample;
+                    words[2] = 1.0;
+                }
+                // `value`, `compensation`, `mean`, the incremental flag, then the count.
+                AggregateOp::Avg => {
+                    words[0] = sample;
+                    words[1] = 0.0;
+                    words[2] = sample;
+                    words[3] = 0.0;
+                    words[4] = 1.0;
+                }
+            }
             return;
         }
         match op {
             AggregateOp::Sum => {
-                (self.value, self.compensation) = kahan_inc(sample, self.value, self.compensation);
+                (words[0], words[1]) = kahan_inc(sample, words[0], words[1]);
             }
-            AggregateOp::Avg => self.update_avg(sample),
-            AggregateOp::Count => self.count += 1.0,
+            AggregateOp::Avg => update_avg(words, sample),
+            AggregateOp::Count => words[0] += 1.0,
             AggregateOp::Max => {
-                if self.value < sample || self.value.is_nan() {
-                    self.value = sample;
+                if words[0] < sample || words[0].is_nan() {
+                    words[0] = sample;
                 }
             }
             AggregateOp::Min => {
-                if self.value > sample || self.value.is_nan() {
-                    self.value = sample;
+                if words[0] > sample || words[0].is_nan() {
+                    words[0] = sample;
                 }
             }
             AggregateOp::Group => {}
             // Welford's update, uncompensated as in Prometheus.
             AggregateOp::Stddev | AggregateOp::Stdvar => {
-                self.count += 1.0;
-                let delta = sample - self.mean;
-                self.mean += delta / self.count;
-                self.value += delta * (sample - self.mean);
+                let count = words[2] + 1.0;
+                let delta = sample - words[1];
+                words[1] += delta / count;
+                words[0] += delta * (sample - words[1]);
+                words[2] = count;
             }
         }
     }
+}
 
-    /// Sums directly until the running sum would overflow, then switches to an incremental mean.
-    fn update_avg(&mut self, sample: f64) {
-        self.count += 1.0;
-        if !self.incremental_mean {
-            let (value, compensation) = kahan_inc(sample, self.value, self.compensation);
-            if !value.is_infinite() {
-                (self.value, self.compensation) = (value, compensation);
-                return;
-            }
-            self.incremental_mean = true;
-            self.mean = self.value / (self.count - 1.0);
-            self.compensation /= self.count - 1.0;
+/// `avg`'s update: sums directly until the running sum would overflow, then switches to an
+/// incremental mean, whose flag is the fourth word.
+fn update_avg(words: &mut [f64], sample: f64) {
+    let count = words[4] + 1.0;
+    words[4] = count;
+    if words[3] == 0.0 {
+        let (value, compensation) = kahan_inc(sample, words[0], words[1]);
+        if !value.is_infinite() {
+            words[0] = value;
+            words[1] = compensation;
+            return;
         }
-        let q = (self.count - 1.0) / self.count;
-        (self.mean, self.compensation) =
-            kahan_inc(sample / self.count, q * self.mean, q * self.compensation);
+        words[3] = 1.0;
+        words[2] = words[0] / (count - 1.0);
+        words[1] /= count - 1.0;
     }
-
-    fn finish(self, op: AggregateOp) -> Option<f64> {
-        if !self.seen {
-            return None;
-        }
-        Some(match op {
-            AggregateOp::Sum => self.value + self.compensation,
-            AggregateOp::Avg if self.incremental_mean => self.mean + self.compensation,
-            AggregateOp::Avg => self.value / self.count + self.compensation / self.count,
-            AggregateOp::Count => self.count,
-            AggregateOp::Min | AggregateOp::Max => self.value,
-            AggregateOp::Group => 1.0,
-            AggregateOp::Stdvar => self.value / self.count,
-            AggregateOp::Stddev => (self.value / self.count).sqrt(),
-        })
-    }
+    let q = (count - 1.0) / count;
+    (words[2], words[1]) = kahan_inc(sample / count, q * words[2], q * words[1]);
 }
 
 /// Prometheus `kahansum.Inc`, with the Neumaier swap.

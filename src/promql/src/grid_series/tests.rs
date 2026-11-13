@@ -16,7 +16,9 @@ use std::mem::size_of;
 use std::sync::Arc;
 
 use datafusion::arrow::array::{Float64Array, UInt32Array};
-use datatypes::series::histogram::{HistogramBatch, HistogramBatchBuilder};
+use datatypes::series::histogram::{
+    CounterResetHint, HistogramBatch, HistogramBatchBuilder, HistogramView,
+};
 use datatypes::series::samples::{
     DenseSamplesRef, FieldSpec, HistogramSamples, SampleRef, Samples, Series, SeriesFields,
     SeriesSchema,
@@ -1460,4 +1462,123 @@ mod acceptance {
         );
         assert_eq!(read(&three_chunks), read(&two_chunks));
     }
+}
+
+/// The payload of one histogram, field by field, with every float compared by its bits so that a
+/// value that moved by one bit is not equal.
+fn payload(view: &HistogramView<'_>) -> Vec<u64> {
+    let hint = match view.reset_hint {
+        CounterResetHint::Unknown => 0,
+        CounterResetHint::CounterReset => 1,
+        CounterResetHint::NotCounterReset => 2,
+        CounterResetHint::Gauge => 3,
+        CounterResetHint::Unrecognized(value) => (value as u64) | (1 << 32),
+    };
+    let mut bits = vec![
+        view.schema as u64,
+        hint,
+        view.start_timestamp.map_or(u64::MAX, |start| start as u64),
+        view.zero_threshold.to_bits(),
+        view.zero_count.to_bits(),
+        view.count.to_bits(),
+        view.sum.to_bits(),
+        view.custom_values.len() as u64,
+    ];
+    bits.extend(view.custom_values.iter().map(|value| value.to_bits()));
+    for side in [&view.positive, &view.negative] {
+        bits.push(side.span_offsets.len() as u64);
+        bits.push(side.span_lengths.len() as u64);
+        bits.push(side.buckets.len() as u64);
+        bits.extend(side.span_offsets.iter().map(|&offset| offset as u64));
+        bits.extend(side.span_lengths.iter().map(|&length| length as u64));
+        bits.extend(side.buckets.iter().map(|bucket| bucket.to_bits()));
+    }
+    bits
+}
+
+/// A value pushed from the view it was read as lands in the result as the payload the owned route
+/// writes, start timestamp included: a selection that only hands a sample on leaves it as it is.
+#[test]
+fn a_pushed_view_writes_the_payload_of_the_owned_route() {
+    let schema = grid_schema(2, 3);
+    let histograms = [
+        OwnedHistogram::parse("0/0/0/3ff0000000000000/3ff0000000000000/0/1_1/3ff0000000000000///"),
+        OwnedHistogram::parse("0/0/0/4000000000000000/4008000000000000/1/0_1/4000000000000000///"),
+    ];
+    // The sample a scan read: the payload of its row plus the start timestamp the row carried.
+    let mut stamped = histograms[1].view();
+    stamped.start_timestamp = Some(1_500);
+    let views = [histograms[0].view(), stamped];
+
+    let mut builder = GridSeriesBuilder::try_new(schema.clone()).unwrap();
+    builder
+        .push_samples(
+            0,
+            &[
+                Some(GridSample::Histogram(Box::new(
+                    FloatHistogram::try_from_view(&views[0]).unwrap(),
+                ))),
+                Some(GridSample::Float(2.0)),
+            ],
+        )
+        .unwrap();
+    builder
+        .push_samples(
+            2,
+            &[
+                None,
+                Some(GridSample::Histogram(Box::new(
+                    FloatHistogram::try_from_view(&views[1]).unwrap(),
+                ))),
+            ],
+        )
+        .unwrap();
+    let owned = builder.finish(metric(0)).unwrap().unwrap();
+
+    let mut builder = GridSeriesBuilder::try_new(schema).unwrap();
+    builder
+        .push_refs(0, &[SampleRef::Histogram(views[0]), SampleRef::Float(2.0)])
+        .unwrap();
+    builder
+        .push_refs(2, &[SampleRef::Missing, SampleRef::Histogram(views[1])])
+        .unwrap();
+    let by_view = builder.finish(metric(0)).unwrap().unwrap();
+
+    let described = |series: &Series, field: usize| -> Vec<(usize, String, Option<Vec<u64>>)> {
+        let samples = &series.fields.as_slice()[field];
+        series
+            .time
+            .positions()
+            .map(|(point, row)| match samples.sample(row) {
+                SampleRef::Missing => (point, "missing".to_string(), None),
+                SampleRef::Float(value) => {
+                    (point, "float".to_string(), Some(vec![value.to_bits()]))
+                }
+                SampleRef::Histogram(view) => {
+                    (point, "histogram".to_string(), Some(payload(&view)))
+                }
+            })
+            .collect()
+    };
+    for field in 0..2 {
+        assert_eq!(
+            described(&owned, field),
+            described(&by_view, field),
+            "field {field} came back different through the view route"
+        );
+    }
+    assert_eq!(
+        described(&by_view, 1),
+        vec![
+            (0, "float".to_string(), Some(vec![2.0f64.to_bits()])),
+            (2, "histogram".to_string(), Some(payload(&views[1]))),
+        ],
+        "the pushed view lost the payload it was read with"
+    );
+    // The comparison covers the start timestamp, which the two routes had to preserve.
+    assert_ne!(
+        payload(&views[1]),
+        payload(&histograms[1].view()),
+        "the start timestamp is part of what is compared"
+    );
 }

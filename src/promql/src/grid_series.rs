@@ -233,17 +233,43 @@ impl GridSeriesBuilder {
         for (field, value) in self.fields.iter_mut().zip(values) {
             match value {
                 Some(GridSample::Histogram(h)) => {
-                    field.values.push(0.0);
-                    field.nulls.append(false);
-                    let rows = field.values.len() - 1;
-                    let column = field.histograms.get_or_insert_with(|| HistogramColumn {
-                        batch: HistogramBatchBuilder::new(),
-                        indices: vec![None; rows],
-                    });
+                    let column = field.start_histogram();
                     column.indices.push(Some(h.push_to(&mut column.batch)?));
                 }
                 Some(GridSample::Float(value)) => field.push_float(Some(*value)),
                 None => field.push_float(None),
+            }
+        }
+        Ok(())
+    }
+
+    /// Like [`GridSeriesBuilder::push_samples`], with the values taken as the fields hand them out.
+    ///
+    /// A histogram value goes into its column straight from the view it was read as: the owned
+    /// form beside this builder exists for the paths that compute a histogram, while a selection
+    /// that only hands a sample on has nothing to compute and copies nothing. The row this writes
+    /// and the row [`GridSeriesBuilder::push_samples`] writes are the same, so a value pushed
+    /// either way leaves the same payload.
+    pub(crate) fn push_refs(&mut self, index: usize, values: &[SampleRef<'_>]) -> Result<()> {
+        if !self.start_row(
+            index,
+            values.len(),
+            values
+                .iter()
+                .all(|value| matches!(value, SampleRef::Missing)),
+        )? {
+            return Ok(());
+        }
+        for (field, value) in self.fields.iter_mut().zip(values) {
+            match value {
+                SampleRef::Histogram(view) => {
+                    let column = field.start_histogram();
+                    column
+                        .indices
+                        .push(Some(column.batch.push(*view).map_err(external)?));
+                }
+                SampleRef::Float(value) => field.push_float(Some(*value)),
+                SampleRef::Missing => field.push_float(None),
             }
         }
         Ok(())
@@ -403,6 +429,18 @@ impl FieldBuilder {
         if let Some(column) = &mut self.histograms {
             column.indices.push(None);
         }
+    }
+
+    /// Writes the value columns of a row holding a histogram, opening the histogram column if this
+    /// is its first value, and hands back the column the new row's index still goes into.
+    fn start_histogram(&mut self) -> &mut HistogramColumn {
+        self.values.push(0.0);
+        self.nulls.append(false);
+        let rows = self.values.len() - 1;
+        self.histograms.get_or_insert_with(|| HistogramColumn {
+            batch: HistogramBatchBuilder::new(),
+            indices: vec![None; rows],
+        })
     }
 }
 

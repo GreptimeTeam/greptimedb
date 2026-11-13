@@ -43,11 +43,11 @@ fn is_resources_exhausted(error: &DataFusionError) -> bool {
 }
 
 use super::{
-    BinaryRuntime, Emitted, InputId, InputSlot, InstantRuntime, NativeChunk, NativeExecutionState,
+    BinaryRuntime, InputId, InputSlot, InstantRuntime, NativeChunk, NativeExecutionState,
     NativeExecutor, NodeState, PairKernel, Reader, RetainedInput, RuntimeNode, RuntimeOp,
-    absorb_rebuilds, buffered_fields, buffered_time, evaluated_bytes, grid_chunk_bytes,
-    grid_end_ms, grid_position, map_chunk, map_workspace_bytes, operand_chunk_bytes, raw_bytes,
-    vector_series_with_k, vector_workspace_bytes,
+    buffered_fields, buffered_time, evaluated_bytes, grid_chunk_bytes, grid_end_ms, grid_position,
+    map_chunk, map_workspace_bytes, operand_chunk_bytes, raw_bytes, vector_series_with_k,
+    vector_workspace_bytes,
 };
 use crate::evaluated::EvaluatedChunk;
 use crate::grid_series::merge_same_labelset;
@@ -1249,6 +1249,135 @@ fn eval_time_reports_seconds_and_dates_of_the_grid() {
         sample_values(&chunks[0]),
         vec![Some(0.0), Some(0.0), Some(1.0)]
     );
+    assert_eq!(pool.reserved(), 0);
+}
+
+/// The bytes a grid's timestamps take, which is what an execution reserves for the array.
+fn grid_array_bytes(grid: &EvalGrid) -> usize {
+    usize::try_from(grid.spec().len).unwrap() * std::mem::size_of::<i64>()
+}
+
+/// A grid whose timestamps are still deferred, as a subquery's or an anchored step's is: the plan
+/// is compiled without allocating them, and the execution that reads them allocates once.
+fn deferred_grid(start: i64, step: i64, len: u64) -> Arc<EvalGrid> {
+    let grid = EvalGrid::try_deferred(GridSpec::try_new(start, step, len).unwrap()).unwrap();
+    assert!(!grid.is_materialized());
+    Arc::new(grid)
+}
+
+/// The node that materializes a deferred grid reserves its array and keeps that reservation.
+///
+/// A deferred grid is what keeps compilation proportional to the plan rather than to the timestamp
+/// count, so the array it eventually needs is allocated at execution: the node that triggers the
+/// allocation reserves it, and a pool that cannot hold it refuses the query instead of letting it
+/// take the array unasked. What it reserved stays reserved for as long as the node lives, because
+/// the array outlives the chunk the node read it for.
+#[test]
+fn a_node_that_materializes_a_deferred_grid_reserves_it_for_its_lifetime() {
+    let points = 1_000u64;
+    let grid = deferred_grid(0, 60_000, points);
+    let array = grid_array_bytes(&grid);
+    let tree = NativeTree::try_new(vector_of(eval_time(None, Arc::clone(&grid)))).unwrap();
+
+    // One byte short of the array: the node that would allocate it is refused instead.
+    let pool = bounded_pool(array - 1);
+    let mut execution = executor(&tree, Arc::clone(&pool));
+    let error = execution.next_chunk().unwrap_err();
+    assert!(is_resources_exhausted(&error), "{error}");
+    assert!(
+        !grid.is_materialized(),
+        "a refused node materialized the grid anyway"
+    );
+    assert_eq!(pool.reserved(), 0);
+
+    // Room for the array and the chunk built from it: the query answers, and what the node keeps
+    // once its chunk has been handed on is the array alone.
+    let chunk = grid_chunk_bytes(&grid).unwrap();
+    let pool = bounded_pool(array + chunk);
+    let mut execution = executor(&tree, Arc::clone(&pool));
+    assert!(execution.next_chunk().unwrap().is_some());
+    assert!(
+        grid.is_materialized(),
+        "the node did not materialize the grid"
+    );
+    assert_eq!(
+        execution.state().reserved_bytes(),
+        array,
+        "the materialized grid was not kept reserved after its chunk was handed on"
+    );
+    drop(execution);
+    assert_eq!(
+        pool.reserved(),
+        0,
+        "the array's reservation outlived its node"
+    );
+}
+
+/// A grid that is already materialized is charged to nobody: the execution reads the array that is
+/// there, and only the node that allocates it reserves it.
+///
+/// This is also what keeps two nodes reading one grid from charging it twice, and what makes a grid
+/// the plan built eagerly -- [`EvalGrid::try_new`] rather than [`EvalGrid::try_deferred`] -- cost
+/// the execution nothing.
+#[test]
+fn a_materialized_grid_is_not_reserved_again() {
+    let points = 1_000u64;
+    let grid = grid(0, 60_000, points);
+    let array = grid_array_bytes(&grid);
+    assert!(grid.is_materialized());
+    let chunk = grid_chunk_bytes(&grid).unwrap();
+    let tree = NativeTree::try_new(vector_of(eval_time(None, Arc::clone(&grid)))).unwrap();
+    // A pool one byte short of the array *and* the chunk: the deferred grid above needed both, and
+    // this one needs the chunk alone.
+    let pool = bounded_pool(array + chunk - 1);
+    let mut execution = executor(&tree, Arc::clone(&pool));
+    assert!(execution.next_chunk().unwrap().is_some());
+    assert_eq!(execution.state().reserved_bytes(), 0);
+    drop(execution);
+    assert_eq!(pool.reserved(), 0);
+}
+
+/// A window reads the grid's timestamps to place every point it decides, so it materializes a
+/// deferred output grid and keeps that reservation as well.
+#[test]
+fn a_window_reserves_the_grid_it_materializes() {
+    let points = 1_000u64;
+    let grid = deferred_grid(0, 60_000, points);
+    let array = grid_array_bytes(&grid);
+    let schema = raw_schema();
+    let tree = NativeTree::try_new(window(input(), Arc::clone(&grid))).unwrap();
+
+    // A pool short of the array refuses the window instead of letting it take the array unasked.
+    let short = bounded_pool(array - 1);
+    let mut execution = executor(&tree, Arc::clone(&short));
+    execution
+        .push_raw(InputId::new(0), raw_chunk(&schema, &[0], &[1.0], true))
+        .unwrap();
+    let error = execution.next_chunk().unwrap_err();
+    assert!(is_resources_exhausted(&error), "{error}");
+    assert!(
+        !grid.is_materialized(),
+        "a refused window materialized the grid anyway"
+    );
+    assert_eq!(short.reserved(), 0);
+
+    // With room for the array the window keeps it while it holds the series it is evaluating.
+    let pool = pool();
+    let mut execution = executor(&tree, Arc::clone(&pool));
+    execution
+        .push_raw(InputId::new(0), raw_chunk(&schema, &[0], &[1.0], false))
+        .unwrap();
+    drop(execution.next_chunk().unwrap());
+    assert!(
+        grid.is_materialized(),
+        "the window did not materialize the grid"
+    );
+    let held = execution.state().reserved_bytes();
+    assert!(
+        held >= array,
+        "the window gave the grid's array back: {held} bytes held, {array} reserved for the grid"
+    );
+    drop(execution);
     assert_eq!(pool.reserved(), 0);
 }
 
@@ -3140,8 +3269,8 @@ fn two_series_onto_one_label_set_under_a_parameterized_topk_are_merged() {
 ///
 /// The pair below maps into one label set and both hold a value at position 0 of the field, which
 /// no merge resolves and Prometheus rejects for two series whose label sets became equal. The
-/// refusal is the map's own, before the window above evaluates anything, and it names the position
-/// rather than a closed label set: a closed source series is not a closed label set.
+/// refusal is the merge's, which the window above runs on the input it collected before it evaluates
+/// anything: nothing reaches the evaluator until the pieces of one label set are one series.
 #[test]
 fn two_series_onto_one_label_set_after_a_map_are_rejected() {
     let inner_grid = grid(0, 60_000, 2);
@@ -3188,6 +3317,8 @@ fn two_series_onto_one_label_set_after_a_map_are_rejected() {
             ),
         )
         .unwrap();
+    // The window collects its input, so the two pieces are merged when the input ends.
+    execution.end_of_input().unwrap();
     let error = match execution.next_chunk() {
         Ok(None) => panic!("the second series was accepted at a position the first one holds"),
         Ok(Some(chunk)) => panic!(
@@ -3198,12 +3329,12 @@ fn two_series_onto_one_label_set_after_a_map_are_rejected() {
     };
     let message = error.to_string();
     assert!(
-        message.contains("job"),
-        "the rejection does not name the label set: {message}"
+        message.contains("vector cannot contain metrics with the same labelset"),
+        "the rejection does not name the defect: {message}"
     );
     assert!(
-        message.contains("position 0"),
-        "the rejection does not name the shared position: {message}"
+        message.contains("job"),
+        "the rejection does not name the label set: {message}"
     );
 }
 
@@ -3412,10 +3543,9 @@ fn a_merge_flush_reserves_every_queued_output() {
     assert_eq!(first.series.metric.tags()[0].value.as_ref(), "a");
     assert!(first.is_last, "a merged series is handed over closed");
 
-    // What the root holds once one of the two answers left: the answer still queued, the label sets
-    // the node handed out under, and the evaluator that evaluated them. The borrow ends before the
-    // next pull.
-    let (queued, queued_bytes, retained, emitted, held) = {
+    // What the root holds once one of the two answers left: the answer still queued and the
+    // evaluator that evaluated it. The borrow ends before the next pull.
+    let (queued, queued_bytes, retained, held) = {
         let RuntimeOp::Window { window, state, .. } =
             &execution.state().live.as_ref().unwrap().root.op
         else {
@@ -3426,7 +3556,6 @@ fn a_merge_flush_reserves_every_queued_output() {
             state.queued.len(),
             queued_bytes,
             window.as_ref().map_or(0, RangeEvaluator::retained_bytes),
-            state.emitted_bytes(),
             state.buffer.reservation.size(),
         )
     };
@@ -3437,7 +3566,7 @@ fn a_merge_flush_reserves_every_queued_output() {
     );
     assert_eq!(
         held,
-        queued_bytes + retained + emitted,
+        queued_bytes + retained,
         "the reservation after the first pull is not what the node still holds"
     );
     assert_eq!(pool.reserved(), execution.state().reserved_bytes());
@@ -3719,25 +3848,22 @@ fn a_pool_that_cannot_admit_the_merge_workspace_releases_what_it_held() {
 /// `{host="web-1", zone=""}` and `{host="web-1"}` are two series to the scan: an empty tag value is
 /// a present label, an absent one is not. `rate` drops the metric name and the empty-valued labels,
 /// so both become `{host="web-1"}` and each covers the same grid; answering would hand the whole
-/// grid out twice under the same labels and the same timestamps. No map is involved, so the
-/// rejection has to be the node's own — a check at the root would be too late, because the window
-/// above would already have evaluated the two as two series.
+/// grid out twice under the same labels and the same timestamps.
 ///
-/// The two cover the same positions of the same field, which is the collision no merge resolves:
-/// the refusal names the position, not a closed label set, because closing a source series says
-/// nothing about the label set it shared with another one. `rate` needs two samples, so neither
-/// series decides position 0 -- it holds the single sample at its own timestamp -- and both decide
-/// positions 1 to 4. The first position both occupy is therefore 1.
+/// The two cover the same positions of the same field, which is the collision no merge resolves.
+/// The merge above the window is where it is refused, because a range function that drops the metric
+/// name is where two identities become one: collecting the window's output groups the two under the
+/// label set the name no longer tells apart and reports it rather than answering one point twice.
 #[test]
 fn two_series_onto_one_label_set_after_a_window_are_rejected() {
     let out_grid = grid(0, 60_000, 5);
-    let tree = NativeTree::try_new(window_with(
+    let tree = NativeTree::try_new(merge(window_with(
         input(),
         RangeFunction::Rate,
         300_000,
         None,
         Arc::clone(&out_grid),
-    ))
+    )))
     .unwrap();
     let schema = raw_schema();
     let counter = [0, 60_000, 120_000, 180_000, 240_000];
@@ -3756,22 +3882,11 @@ fn two_series_onto_one_label_set_after_a_window_are_rejected() {
             ),
         )
         .unwrap();
-    let first = execution
-        .next_chunk()
-        .unwrap()
-        .expect("the first series settles the grid");
-    // The decided positions of the first series, which are the ones the second one has to share.
-    assert_eq!(
-        first.series.time.runs().count(),
-        1,
-        "the first series decided more than one run"
+    // The merge collects what the window answers, so nothing is handed over before the input ends.
+    assert!(
+        execution.next_chunk().unwrap().is_none(),
+        "the merge answered before its input ended"
     );
-    assert_eq!(
-        first.series.time.first_position(),
-        Some(1),
-        "`rate` decided a position the single sample at 0 cannot settle"
-    );
-    assert!(first.is_last);
 
     // The second series is a different one to the scan and the same one to `rate`.
     execution
@@ -3787,6 +3902,9 @@ fn two_series_onto_one_label_set_after_a_window_are_rejected() {
             ),
         )
         .unwrap();
+    // Both series are in the merge's collection: the pair shares every label the window kept, so
+    // the merge groups them and reports the two values of one position.
+    execution.end_of_input().unwrap();
     let error = match execution.next_chunk() {
         Ok(None) => panic!("the second series settled nothing at all"),
         Ok(Some(chunk)) => panic!(
@@ -3796,12 +3914,12 @@ fn two_series_onto_one_label_set_after_a_window_are_rejected() {
         Err(error) => error,
     };
     let message = error.to_string();
+    assert!(
+        message.contains("vector cannot contain metrics with the same labelset"),
+        "{message}"
+    );
     assert!(message.contains("host"), "{message}");
     assert!(message.contains("web-1"), "{message}");
-    assert!(
-        message.contains("position 1"),
-        "the rejection does not name the first position both series hold: {message}"
-    );
 
     // Two series carrying different hosts stay distinct, which is what a rate over a label that
     // survives the rewrite looks like.
@@ -3843,18 +3961,91 @@ fn two_series_onto_one_label_set_after_a_window_are_rejected() {
     assert_eq!(out.len(), 2, "two series over two hosts are two series");
 }
 
+/// Two series a `timestamp` hands out under one label set are refused by the merge above it.
+///
+/// `timestamp` reports a sample's own time under the metric name dropped, so `a{job="x"}` and
+/// `b{job="x"}` are one label set the moment they leave it, whatever their input held. The merge
+/// collecting its output is where the second value of one position is reported, as Prometheus
+/// refuses two series of one label set; a single series passes through it unchanged.
+#[test]
+fn two_series_onto_one_label_set_after_a_timestamp_are_rejected() {
+    let grid = grid(0, 60_000, 2);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let tree = || {
+        let input = evaluated_input(Arc::clone(&grid));
+        let output = input.output.clone();
+        NativeTree::try_new(merge(NativeNode {
+            expr: NativeExpr::Timestamp {
+                input: Box::new(input),
+            },
+            output,
+        }))
+        .unwrap()
+    };
+
+    // One series: the merge groups the one label set `timestamp` leaves it and answers it.
+    let mut single = executor(&tree(), pool());
+    single
+        .push_evaluated(
+            InputId::new(0),
+            evaluated_chunk_of(
+                &schema,
+                named_metric("a", "x"),
+                0,
+                vec![Some(1.0), Some(2.0)],
+                true,
+            ),
+        )
+        .unwrap();
+    let out = run(&mut single);
+    assert_eq!(out.len(), 1, "one series is one answer");
+    let mut expected = named_metric("a", "x");
+    expected.remove("__name__");
+    assert_eq!(out[0].series.metric, expected);
+
+    // Two series: both leave `timestamp` under `{job="x"}` and both hold a value at position 0.
+    let mut execution = executor(&tree(), pool());
+    for (name, values) in [
+        ("a", vec![Some(1.0), Some(2.0)]),
+        ("b", vec![Some(3.0), Some(4.0)]),
+    ] {
+        execution
+            .push_evaluated(
+                InputId::new(0),
+                evaluated_chunk_of(&schema, named_metric(name, "x"), 0, values, true),
+            )
+            .unwrap();
+    }
+    execution.end_of_input().unwrap();
+    let error = match execution.next_chunk() {
+        Ok(None) => panic!("the timestamp of two series settled nothing at all"),
+        Ok(Some(chunk)) => panic!(
+            "a second series left `timestamp` under the first one's label set: {:?}",
+            decided(&[chunk])
+        ),
+        Err(error) => error,
+    };
+    let message = error.to_string();
+    assert!(
+        message.contains("vector cannot contain metrics with the same labelset")
+            && message.contains("job=\"x\""),
+        "the rejection does not name the label set the two now share: {message}"
+    );
+}
+
 /// A chunk that holds a value where the same field already holds one is rejected.
 ///
-/// Neither piece closes its series, and neither needs to: the refusal is about the positions
-/// themselves. `v0` would carry two values at position 0 under one label set, which no merge can
-/// resolve, so the node refuses rather than picking one.
+/// Each piece is a whole source series that closes itself, and the refusal is about the positions
+/// the two hold, not about the close: they are one label set to the merge, and both hold a value of
+/// field 0 at position 0. `v0` would carry two values at position 0 under one label set, which no merge can
+/// resolve, so the merge collecting the map's output refuses rather than picking one.
 #[test]
 fn two_series_holding_a_value_at_one_position_are_rejected() {
     let map_grid = grid(0, 60_000, 2);
-    let tree = NativeTree::try_new(map(
+    let tree = NativeTree::try_new(merge(map(
         evaluated_input(Arc::clone(&map_grid)),
         vec![MathOp::Abs],
-    ))
+    )))
     .unwrap();
     let schema = evaluated_schema(Arc::clone(&map_grid));
 
@@ -3866,17 +4057,12 @@ fn two_series_holding_a_value_at_one_position_are_rejected() {
         execution
             .push_evaluated(
                 InputId::new(0),
-                evaluated_chunk_of(&schema, named_metric(name, "x"), 0, values, false),
+                evaluated_chunk_of(&schema, named_metric(name, "x"), 0, values, true),
             )
             .unwrap();
     }
-    // The first piece is fine on its own: nothing has occupied any position yet.
-    let first = execution
-        .next_chunk()
-        .unwrap()
-        .expect("the first piece is handed on as it arrives");
-    assert_eq!(sample_values(&first), vec![Some(1.0), Some(2.0)]);
-    // The second one puts a second value of the same field at position 0.
+    // The merge holds both pieces until its input ends, and then reports the shared position.
+    execution.end_of_input().unwrap();
     let error = match execution.next_chunk() {
         Ok(None) => panic!("the map produced no chunk at all"),
         Ok(Some(chunk)) => panic!(
@@ -3886,9 +4072,11 @@ fn two_series_holding_a_value_at_one_position_are_rejected() {
         Err(error) => error,
     };
     let message = error.to_string();
+    assert!(
+        message.contains("vector cannot contain metrics with the same labelset"),
+        "{message}"
+    );
     assert!(message.contains("job"), "{message}");
-    assert!(message.contains("field 0"), "{message}");
-    assert!(message.contains("position 0"), "{message}");
 }
 
 /// Two closed series under one label set are two pieces of one logical series.
@@ -4429,21 +4617,16 @@ fn merge_rejects_overlapping_occupancy() {
     );
 }
 
-/// Two open chunks that share a label set are accepted where no position of a field collides.
+/// Two open chunks that share a label set are handed on as they arrive.
 ///
 /// `a{job="x"}` and `b{job="x"}` are two series to the input and one label set to `abs`, which
 /// drops the name. Neither piece says it is the last chunk of its series, so the second one arrives
 /// while the first is still open. The two occupy disjoint positions of field 0 — a value at 0 and a
-/// value at 3 — so the label-set check hands both on.
-///
-/// The ordering is contiguous because that is the only ordering this runtime executes: the stream
-/// below is not one a scan produces, since it never closes `a`, and what is checked here is the
-/// occupancy the check reads rather than a delivery order.
-///
-/// This is acceptance by that check, and it is not a merge: this layer passes every chunk through
-/// as it arrives and keeps no sample state that would combine two series. Merging two series under
-/// one label set is [`crate::grid_series::merge_same_labelset`]'s job, and nothing here performs
-/// it.
+/// value at 3 — so nothing about their labels is decided here: a map passes each chunk through as it
+/// arrives, and combining two pieces of one label set is
+/// [`crate::grid_series::merge_same_labelset`]'s job, which the merge a consumer reads them through
+/// performs. A pair holding a value at the same position is what that merge refuses, not this
+/// layer.
 #[test]
 fn two_open_series_that_share_a_label_set_are_accepted_when_no_position_collides() {
     let map_grid = grid(0, 60_000, 4);
@@ -4502,18 +4685,19 @@ fn two_open_series_that_share_a_label_set_are_accepted_when_no_position_collides
 
 /// A `NaN` is a value and a missing sample is not, so only the `NaN` occupies its position.
 ///
-/// `abs` drops the metric name, so the two series below are one label set to the map, which is where
-/// the two are read against each other. A position holding no sample is a position the series never
-/// claimed, and another series may fill it; a position holding a `NaN` is decided and holds a value,
-/// like any other, so a second value there is the collision no merge resolves.
+/// `abs` drops the metric name, so the two series below are one label set to the map, and the merge
+/// above it is where the two are read against each other. A position holding no sample is a
+/// position the series never claimed, and another series may fill it; a position holding a `NaN` is
+/// decided and holds a value, like any other, so a second value there is the collision no merge
+/// resolves.
 #[test]
 fn a_nan_occupies_its_position_where_a_missing_sample_does_not() {
     let map_grid = grid(0, 60_000, 1);
     let tree = || {
-        NativeTree::try_new(map(
+        NativeTree::try_new(merge(map(
             evaluated_input_with_ordering(Arc::clone(&map_grid), SeriesOrdering::Contiguous),
             vec![MathOp::Abs],
-        ))
+        )))
         .unwrap()
     };
     let schema = evaluated_schema(Arc::clone(&map_grid));
@@ -4527,28 +4711,24 @@ fn a_nan_occupies_its_position_where_a_missing_sample_does_not() {
         (vec![Some(1.0)], vec![None], true),
         (vec![None], vec![Some(f64::NAN)], true),
     ];
-    // Both chunks are open and neither needs to close: what the check reads is which positions a
-    // chunk occupies, and that does not depend on `is_last`.
-    let drain = |execution: &mut NativeExecutor| -> Result<(), DataFusionError> {
-        while execution.next_chunk()?.is_some() {}
-        Ok(())
-    };
+    // Each chunk is a whole source series that closes itself, so the merge reads the two as two
+    // pieces of one label set rather than as one series' runs. It holds both until the input ends
+    // and only then answers or refuses the pair.
     for (first, second, accepted) in cases {
         let mut execution = executor(&tree(), pool());
         execution
             .push_evaluated(
                 InputId::new(0),
-                evaluated_chunk_of(&schema, named_metric("a", "x"), 0, first.clone(), false),
+                evaluated_chunk_of(&schema, named_metric("a", "x"), 0, first.clone(), true),
             )
             .unwrap();
-        drain(&mut execution).expect("the first open chunk is handed on");
         execution
             .push_evaluated(
                 InputId::new(0),
-                evaluated_chunk_of(&schema, named_metric("b", "x"), 0, second.clone(), false),
+                evaluated_chunk_of(&schema, named_metric("b", "x"), 0, second.clone(), true),
             )
             .unwrap();
-        let outcome = drain(&mut execution);
+        let outcome = execution.finish().map(|_| ());
         assert_eq!(
             outcome.is_ok(),
             accepted,
@@ -4732,63 +4912,6 @@ fn a_window_retains_the_samples_of_every_field() {
         "a window over three fields reserved {three} bytes, no more than the {two} bytes a window \
          over two fields reserves"
     );
-}
-
-/// A chunk that produces nothing still leaves the table this node emitted into in its hands.
-///
-/// The first chunk decided both grid points and the window handed them out, so the table holds a
-/// label set and its runs. The second chunk decides nothing — every point was already decided — so
-/// the window yields no chunk, but it has given none of that history back: the reservation has to
-/// keep covering the table, not drop it.
-#[test]
-fn a_chunk_with_no_output_keeps_charging_the_emitted_table() {
-    let tree = NativeTree::try_new(window_with(
-        input(),
-        RangeFunction::LastOverTime,
-        1,
-        None,
-        grid(0, 60_000, 2),
-    ))
-    .unwrap();
-    let schema = raw_schema();
-    let pool = pool();
-    let mut execution = executor(&tree, Arc::clone(&pool));
-
-    execution
-        .push_raw(
-            InputId::new(0),
-            raw_chunk(&schema, &[0, 60_000], &[1.0, 2.0], false),
-        )
-        .unwrap();
-    let first = execution
-        .next_chunk()
-        .unwrap()
-        .expect("the first chunk decided both points");
-    assert_eq!(sample_values(&first), vec![Some(1.0), Some(2.0)]);
-    drop(first);
-    let after_output = execution.state().reserved_bytes();
-    assert!(
-        after_output > 0,
-        "the window handed out a position, which it has to hold"
-    );
-    assert_eq!(after_output, pool.reserved());
-
-    // Both points are decided, so this chunk decides nothing and the window yields no chunk.
-    execution
-        .push_raw(
-            InputId::new(0),
-            raw_chunk(&schema, &[120_000], &[3.0], false),
-        )
-        .unwrap();
-    assert!(
-        execution.next_chunk().unwrap().is_none(),
-        "a chunk after every point was decided produced a chunk"
-    );
-    assert!(
-        execution.state().reserved_bytes() > 0,
-        "a chunk with no output released the bytes the emitted table still holds"
-    );
-    assert_eq!(execution.state().reserved_bytes(), pool.reserved());
 }
 
 /// A window cannot run over an interleaved input, and the runtime says so before reading a chunk.
@@ -5481,195 +5604,6 @@ fn dropping_a_node_drops_its_queue() {
     assert!(gauge(&metrics, "native.p0.source.peak_reserved_bytes") > 0);
 }
 
-/// A chunk whose axis and fields disagree is refused, not read past the end of a field.
-///
-/// [`Series`] keeps its fields public, so a chunk built by struct literal -- by a caller of this
-/// crate as much as by a mistake here -- can carry fewer samples than the axis places rows. The
-/// label-set ledger reads every row the axis names, so it is where such a chunk would be read out of
-/// bounds; it reports the misalignment against the node that was handed it instead.
-#[test]
-fn a_series_whose_axis_and_fields_disagree_is_rejected() {
-    let grid = grid(0, 60_000, 4);
-    // Two samples placed on a four-row axis: the third row the axis names has nothing to read.
-    let samples = Samples::from_float(Float64Array::from(vec![1.0, 2.0]));
-    let time = TimeAxis::Grid(GridRange::try_new(Arc::clone(&grid), 0, 4).unwrap());
-    let series = Series {
-        metric: named_metric("requests", "job"),
-        time,
-        fields: SeriesFields::try_from_vec(vec![samples]).unwrap(),
-    };
-    let chunk = EvaluatedChunk::try_new(series, false).expect("the axis is addressed on a grid");
-
-    let mut emitted = Emitted::default();
-    let error = emitted
-        .occupy(&chunk)
-        .expect_err("a field with fewer samples than the axis places rows was accepted");
-    let message = error.to_string();
-    assert!(
-        message.contains("misaligned")
-            && message.contains("4 rows")
-            && message.contains("2 samples"),
-        "the rejection does not name what the axis places against what the field holds: {message}"
-    );
-}
-
-/// A sparse series that only ever moves forward is appended to its history, not merged into it again
-/// chunk after chunk.
-///
-/// One legal series arrives as eight chunks of one position each, every position a hole apart from
-/// the last: no label set is reached twice, no position of a field is occupied twice, and this is
-/// what a scan produces as its positions advance. The stored runs still grow by one per chunk, so
-/// rebuilding the array after each chunk moves `K(K+1)/2` runs to hold `K` rows of real data, which
-/// is the cost this asserts away.
-///
-/// The chunks go through [`super::Emitted::occupy`], the helper the runtime records an output with,
-/// so what is checked is the history that helper keeps. Three shapes are pushed: chunks landing past
-/// every stored run, which have to be appended to; a chunk starting where the last stored run ends,
-/// which has to be joined to it rather than left beside it; and chunks landing before what is
-/// stored, which cannot be appended to and have to go through the full merge while still leaving the
-/// history sorted and disjoint.
-#[test]
-fn a_sparse_series_that_moves_forward_is_appended_to_its_history() {
-    let map_grid = grid(0, 60_000, 21);
-    let schema = evaluated_schema(Arc::clone(&map_grid));
-    let mut emitted = Emitted::default();
-
-    // One row at `position`, which is one run of one position: the same series every time, since a
-    // map dropping the name leaves them all one label set.
-    let push = |emitted: &mut Emitted, position: usize| {
-        let chunk = sparse_chunk(
-            &schema,
-            named_metric("a", "x"),
-            &[(position, 1)],
-            vec![-1.0],
-            false,
-        );
-        emitted
-            .occupy(&chunk)
-            .unwrap_or_else(|error| panic!("position {position} was refused: {error}"));
-    };
-    // The runs stored under the one label set, which is what `absorb` keeps in position order.
-    let stored = |emitted: &Emitted| -> Vec<(usize, usize)> {
-        emitted
-            .sets
-            .values()
-            .next()
-            .expect("the chunk was recorded under one label set")
-            .fields
-            .first()
-            .expect("the series has one field")
-            .iter()
-            .map(|run| (run.start, run.end))
-            .collect()
-    };
-    let ordered = |runs: &[(usize, usize)]| {
-        runs.iter().all(|(start, end)| start < end)
-            && runs.windows(2).all(|pair| pair[0].1 < pair[1].0)
-    };
-
-    // Eight chunks, one position each, a hole between them.
-    let positions = [4, 6, 8, 10, 12, 14, 16, 18];
-    let before = absorb_rebuilds();
-    for position in positions {
-        push(&mut emitted, position);
-    }
-    assert_eq!(
-        stored(&emitted),
-        vec![
-            (4, 5),
-            (6, 7),
-            (8, 9),
-            (10, 11),
-            (12, 13),
-            (14, 15),
-            (16, 17),
-            (18, 19),
-        ],
-        "a sparse series was not stored as the one run each of its chunks occupies"
-    );
-    assert_eq!(
-        absorb_rebuilds() - before,
-        0,
-        "the {} chunks of a series moving forward rebuilt its history instead of appending to it",
-        positions.len()
-    );
-
-    // A chunk that starts where the last stored run ends touches it, and the two are one run: the
-    // fast path appends, and the boundary is the part it has to join.
-    let before = absorb_rebuilds();
-    push(&mut emitted, 19);
-    assert_eq!(
-        stored(&emitted),
-        vec![
-            (4, 5),
-            (6, 7),
-            (8, 9),
-            (10, 11),
-            (12, 13),
-            (14, 15),
-            (16, 17),
-            (18, 20),
-        ],
-        "a chunk touching the last stored run was left beside it rather than joined to it"
-    );
-    assert_eq!(
-        absorb_rebuilds() - before,
-        0,
-        "a chunk touching the last stored run was merged rather than appended to it"
-    );
-
-    // A chunk landing in a hole before the last stored run cannot be appended to: it joins the runs
-    // on both sides of it, so it goes through the full merge, which has to join them all the same.
-    let before = absorb_rebuilds();
-    push(&mut emitted, 5);
-    assert_eq!(
-        stored(&emitted),
-        vec![
-            (4, 7),
-            (8, 9),
-            (10, 11),
-            (12, 13),
-            (14, 15),
-            (16, 17),
-            (18, 20),
-        ],
-        "a chunk in a hole did not join the runs on either side of it"
-    );
-    assert_eq!(
-        absorb_rebuilds() - before,
-        1,
-        "a chunk landing before the last stored run was appended rather than merged"
-    );
-
-    // A chunk before every stored run is the other shape the fast path cannot take.
-    let before = absorb_rebuilds();
-    push(&mut emitted, 1);
-    let runs = stored(&emitted);
-    assert_eq!(
-        runs,
-        vec![
-            (1, 2),
-            (4, 7),
-            (8, 9),
-            (10, 11),
-            (12, 13),
-            (14, 15),
-            (16, 17),
-            (18, 20),
-        ],
-        "a chunk before every stored run did not land in front of them"
-    );
-    assert_eq!(
-        absorb_rebuilds() - before,
-        1,
-        "a chunk landing before every stored run was appended rather than merged"
-    );
-    assert!(
-        ordered(&runs),
-        "the merged history is not sorted, disjoint and joined: {runs:?}"
-    );
-}
-
 /// A bare selector stamps the last sample at or before each grid point onto its own grid.
 ///
 /// The chunk is addressed on the node's output grid, not on the source's timestamps; a grid point
@@ -5985,9 +5919,9 @@ fn a_selected_histogram_keeps_its_start_timestamp() {
 
 /// Two series that differ only in an empty-valued label are two series, and both are answered.
 ///
-/// The label set the runtime's occupancy table compares drops empty values, so a node that recorded
-/// what it handed out under one would refuse the second series. A selection keeps the labels it
-/// read, empty values included, so it keeps them apart and records nothing.
+/// The label set a merge groups by drops empty values, so the two would be one set to a merge. A
+/// selection keeps the labels it read, empty values included, so it hands the two on apart and
+/// collects nothing.
 #[test]
 fn two_series_differing_only_in_an_empty_label_are_both_answered() {
     let out_grid = grid(0, 60_000, 1);
@@ -7013,6 +6947,117 @@ fn a_binary_result_does_not_depend_on_arrival_order_or_chunk_boundaries() {
     ];
     assert_eq!(split, expected);
     assert_eq!(reversed, expected);
+}
+
+/// How many chunks of each operand the root binary node has retained, left then right.
+///
+/// A chunk of an operand is read before it ends, so a figure above zero is what says a side was
+/// read: the node keeps every chunk each operand hands over until both vectors are whole.
+fn retained_operand_chunks(execution: &NativeExecutor) -> [usize; 2] {
+    let live = execution
+        .state()
+        .live
+        .as_ref()
+        .expect("the execution is live");
+    let RuntimeOp::Binary { binary, .. } = &live.root.op else {
+        panic!("the root is not a binary node");
+    };
+    [
+        binary.operands[0].series.len(),
+        binary.operands[1].series.len(),
+    ]
+}
+
+/// A binary node reads its two operands in turn, so the right side's first chunk is read before the
+/// left side's second.
+///
+/// Each side here hands over a chunk that does not match the layout its operand is bound to, and
+/// which operand the refusal names is what says which chunk was read first: a node that drained the
+/// left operand before touching the right one would refuse the left operand's second chunk and name
+/// the left one. Reading both sides at once is what running them concurrently amounts to in a pull
+/// tree, and it is why neither side has to wait for the other to end before it is read.
+#[test]
+fn a_binary_node_reads_both_operands_in_turn() {
+    let (tree, grid, left, right) = binary_tree(BinaryOp::Add, 4);
+    let pool = pool();
+    let schema = evaluated_schema(Arc::clone(&grid));
+    // Two fields where each operand is bound to one: refused before the kernel reads the chunk.
+    let two_fields = Arc::new(SeriesSchema {
+        fields: field_count(2),
+        eval_grid: Some(Arc::clone(&grid)),
+    });
+    let refused = || {
+        evaluated_on(
+            &two_fields,
+            metric(),
+            0,
+            2,
+            vec![vec![Some(1.0), Some(2.0)], vec![Some(3.0), Some(4.0)]],
+            true,
+        )
+    };
+
+    let mut execution = executor(&tree, Arc::clone(&pool));
+    // The left side is a chunk ahead: its first chunk is readable and its second one is refused,
+    // exactly as the right side's first one is.
+    execution
+        .push_evaluated(left, evaluated_chunk(&schema, 0, vec![1.0, 2.0], false))
+        .unwrap();
+    execution.push_evaluated(left, refused()).unwrap();
+    execution.push_evaluated(right, refused()).unwrap();
+
+    let error = execution.next_chunk().unwrap_err();
+    assert!(
+        error.to_string().contains("rejected its right operand"),
+        "the left operand was drained before the right one was read: {error}"
+    );
+    assert_eq!(pool.reserved(), 0, "the refused chunk is still held");
+}
+
+/// Both operands are read as their chunks arrive: neither waits for the other to end.
+///
+/// The two sides are read in turn, so a pull retains what the side that is ahead has already handed
+/// over instead of reading one operand dry first. The left side below is always a chunk ahead of the
+/// right one, and every chunk of it is retained as it arrives; the answer is still the whole vector,
+/// because a pair is decided only once both sides have ended.
+#[test]
+fn a_binary_node_advances_both_operands_as_they_arrive() {
+    let (tree, grid, left, right) = binary_tree(BinaryOp::Add, 4);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let mut execution = executor(&tree, pool());
+
+    // The left side arrives first, one chunk at a time, and only its last chunk closes it.
+    execution
+        .push_evaluated(left, evaluated_chunk(&schema, 0, vec![1.0, 2.0], false))
+        .unwrap();
+    assert!(execution.next_chunk().unwrap().is_none());
+    assert_eq!(
+        retained_operand_chunks(&execution),
+        [1, 0],
+        "the left operand's chunk was not retained while the right operand had nothing to give"
+    );
+
+    // The right side starts arriving while the left one is already a chunk ahead.
+    execution
+        .push_evaluated(right, evaluated_chunk(&schema, 0, vec![10.0, 20.0], false))
+        .unwrap();
+    assert!(execution.next_chunk().unwrap().is_none());
+    assert_eq!(
+        retained_operand_chunks(&execution),
+        [1, 1],
+        "the right operand's chunk was not retained beside the left one's"
+    );
+
+    execution
+        .push_evaluated(left, evaluated_chunk(&schema, 2, vec![3.0, 4.0], true))
+        .unwrap();
+    execution
+        .push_evaluated(right, evaluated_chunk(&schema, 2, vec![30.0, 40.0], true))
+        .unwrap();
+    assert_eq!(
+        addressed(&run(&mut execution)),
+        vec![(0, vec![Some(11.0), Some(22.0), Some(33.0), Some(44.0)])]
+    );
 }
 
 /// Two series that arrive in separate chunks and hold a value at the same point are refused.
@@ -10073,41 +10118,6 @@ fn name_of(chunk: &EvaluatedChunk) -> Option<&str> {
     chunk.series.metric.name()
 }
 
-/// The [`Emitted`] tables a tree built from `node` keeps, as `(broadcast, window it reads)`.
-///
-/// The second answer is `false` when the broadcast's vector side is not a window, which is what
-/// tells a table its own node keeps from one the node below it already keeps.
-fn emitted_tables(node: NativeNode) -> (bool, bool) {
-    let tree = NativeTree::try_new(node).unwrap();
-    let mut inputs = Vec::new();
-    let mut binary_before = 0;
-    let root = RuntimeNode::build(
-        tree.root(),
-        &pool(),
-        &mut inputs,
-        &mut binary_before,
-        "root".to_string(),
-        None,
-    )
-    .unwrap();
-    let RuntimeOp::Broadcast {
-        left, right, state, ..
-    } = root.op
-    else {
-        panic!("the tree did not build a broadcast at its root");
-    };
-    let vector = if matches!(left.op, RuntimeOp::Window { .. }) {
-        left
-    } else {
-        right
-    };
-    let window = match vector.op {
-        RuntimeOp::Window { state, .. } => state.emitted.is_some(),
-        _ => false,
-    };
-    (state.emitted.is_some(), window)
-}
-
 /// A constant on the right multiplies every value of the vector and drops the metric name.
 ///
 /// The chunk arrives as it is pushed, before the input ends: a broadcast answers a chunk from that
@@ -11277,16 +11287,20 @@ fn a_broadcast_above_a_collecting_window_waits_for_its_flush() {
 }
 
 /// A broadcast rejects distinct input names that become one output label set at occupied points.
+///
+/// The multiplication drops the metric name, so `requests` and `requests_total` hold one label set
+/// above it and both hold a value at the same positions. The merge above the broadcast is what
+/// refuses the pair: the node itself is point-wise and hands every chunk over as it arrives.
 #[test]
 fn a_broadcast_refuses_two_series_that_share_a_label_set_and_releases_the_reservation() {
     let grid = grid(0, 60_000, 2);
     let schema = evaluated_schema(Arc::clone(&grid));
-    let tree = NativeTree::try_new(broadcast_right(
+    let tree = NativeTree::try_new(merge(broadcast_right(
         evaluated_input(Arc::clone(&grid)),
         100.0,
         BinaryOp::Mul,
         false,
-    ))
+    )))
     .unwrap();
     let pool = pool();
     let mut execution = executor(&tree, Arc::clone(&pool));
@@ -11298,15 +11312,6 @@ fn a_broadcast_refuses_two_series_that_share_a_label_set_and_releases_the_reserv
             evaluated_chunk_of(&schema, first_metric, 0, vec![Some(1.0), Some(2.0)], true),
         )
         .unwrap();
-    let first = execution
-        .next_chunk()
-        .unwrap()
-        .expect("first series output");
-    assert_eq!(
-        decided(std::slice::from_ref(&first)),
-        vec![(0, Some(100.0)), (1, Some(200.0))]
-    );
-
     let second_metric =
         SeriesLabels::try_new(Some("requests_total".to_string().into()), Vec::new()).unwrap();
     execution
@@ -11315,6 +11320,8 @@ fn a_broadcast_refuses_two_series_that_share_a_label_set_and_releases_the_reserv
             evaluated_chunk_of(&schema, second_metric, 0, vec![Some(3.0), Some(4.0)], true),
         )
         .unwrap();
+    // The merge collects both mapped series and reports the collision when its input ends.
+    execution.end_of_input().unwrap();
     let error = execution
         .next_chunk()
         .expect_err("the output label set and occupied positions conflict");
@@ -11323,8 +11330,7 @@ fn a_broadcast_refuses_two_series_that_share_a_label_set_and_releases_the_reserv
     // scalar broadcast produced no label set of its own, so the rendering is empty and the two
     // series are told apart only by what they produced.
     assert!(
-        message.contains("vector cannot contain metrics with the same labelset")
-            && message.contains("two series hold a value of field 0"),
+        message.contains("vector cannot contain metrics with the same labelset"),
         "expected the collision the node produces, got: {message:?}"
     );
     assert_eq!(
@@ -11336,84 +11342,6 @@ fn a_broadcast_refuses_two_series_that_share_a_label_set_and_releases_the_reserv
         execution.state().reserved_bytes(),
         0,
         "error retained execution bytes: {message}"
-    );
-}
-
-/// A literal arithmetic broadcast hands out the label set its vector side already checked, so it
-/// keeps no [`Emitted`] table of its own — and the window below it keeps its own.
-///
-/// A table is what refuses a second series collapsing onto one label set, and the window is where a
-/// dropped name makes that collapse happen. A second copy above it would record every label set the
-/// window hands out to decide what the window has already decided.
-#[test]
-fn a_literal_arithmetic_over_a_name_dropping_window_keeps_no_emitted_table() {
-    let grid = grid(0, 60_000, 2);
-    let streaming = || {
-        window_with(
-            evaluated_input(Arc::clone(&grid)),
-            RangeFunction::Increase,
-            120_000,
-            Some(Arc::clone(&grid)),
-            Arc::clone(&grid),
-        )
-    };
-    let collecting = || {
-        window_with(
-            map(evaluated_input(Arc::clone(&grid)), vec![MathOp::Abs]),
-            RangeFunction::Increase,
-            120_000,
-            Some(Arc::clone(&grid)),
-            Arc::clone(&grid),
-        )
-    };
-    // `increase` drops the metric name, so both shapes stand on a window whose table already covers
-    // the identities this node would hand out -- and the operation is neither `rate` nor a
-    // multiplication, which is not what decides it.
-    assert_eq!(
-        emitted_tables(broadcast_right(streaming(), 2.0, BinaryOp::Add, false)),
-        (false, true),
-        "a streaming window repeats its table under a constant add"
-    );
-    assert_eq!(
-        emitted_tables(broadcast_left(2.0, streaming(), BinaryOp::Add, false)),
-        (false, true),
-        "a constant on the left is the same one-to-one map"
-    );
-    assert_eq!(
-        emitted_tables(broadcast_right(collecting(), 2.0, BinaryOp::Mul, false)),
-        (false, true),
-        "a collecting window repeats its table too"
-    );
-    // A window that keeps the metric name hands out identities the operation has not seen: the
-    // multiplication drops the name, so two names of one tag set become one label set above it.
-    assert_eq!(
-        emitted_tables(broadcast_right(
-            window_with(
-                evaluated_input(Arc::clone(&grid)),
-                RangeFunction::LastOverTime,
-                120_000,
-                Some(Arc::clone(&grid)),
-                Arc::clone(&grid),
-            ),
-            2.0,
-            BinaryOp::Mul,
-            false,
-        )),
-        (true, true),
-        "a name-preserving window leaves the collision to the node above it"
-    );
-    // The vector side is the source itself, so nothing below this node dropped a name and this node
-    // is the only one that can refuse: `a_broadcast_refuses_two_series_that_share_a_label_set_and_
-    // releases_the_reservation` is the refusal that rests on the table it keeps.
-    assert_eq!(
-        emitted_tables(broadcast_right(
-            evaluated_input(Arc::clone(&grid)),
-            2.0,
-            BinaryOp::Mul,
-            false,
-        )),
-        (true, false),
-        "a source under the broadcast leaves it the only node that can refuse"
     );
 }
 
@@ -11584,23 +11512,24 @@ fn a_literal_arithmetic_over_a_collecting_window_hands_on_its_flush() {
     assert_eq!(pool.reserved(), 0);
 }
 
-/// The window below a literal arithmetic broadcast refuses two series that collapse onto one label
-/// set, and it does so before the aggregate above can fold them into one group.
+/// The merge over a name-dropping window refuses two series that collapse onto one label set, and
+/// it does so before the aggregate above can fold them into one group.
 ///
-/// The broadcast keeps no table for this shape, so the refusal is the window's -- which is also what
-/// keeps it upstream: a duplicate the partial aggregate read would land in one group and answer a
-/// wrong value instead of refusing, and the reservations would be held until the fold answered.
+/// `rate` drops the metric name, so the two series below leave the window under one label set: the
+/// merge collecting the window's output is where the pair is refused. That placement is what keeps
+/// the refusal upstream -- a duplicate the partial aggregate read would land in one group and answer
+/// a wrong value instead of refusing, and the reservations would be held until the fold answered.
 #[test]
-fn a_window_under_a_literal_arithmetic_refuses_the_collision_it_collapses() {
+fn a_merge_over_a_name_dropping_window_refuses_before_the_aggregate() {
     let out_grid = grid(0, 60_000, 5);
     let tree = NativeTree::try_new(partial_sum(broadcast_right(
-        window_with(
+        merge(window_with(
             input(),
             RangeFunction::Rate,
             300_000,
             None,
             Arc::clone(&out_grid),
-        ),
+        )),
         2.0,
         BinaryOp::Mul,
         false,
@@ -11628,8 +11557,8 @@ fn a_window_under_a_literal_arithmetic_refuses_the_collision_it_collapses() {
         execution.next_state().unwrap().is_none(),
         "the partial aggregate answered before its input ended"
     );
-    // The second series is a different one to the scan and the same one to `rate`: the window is
-    // where the two meet, and the broadcast above it has no table to notice it.
+    // The second series is a different one to the scan and the same one to `rate`: the merge over
+    // the window is where the two meet, and the broadcast above it collects nothing of its own.
     execution
         .push_raw(
             InputId::new(0),
@@ -11643,6 +11572,9 @@ fn a_window_under_a_literal_arithmetic_refuses_the_collision_it_collapses() {
             ),
         )
         .unwrap();
+    // The merge holds both series until its input ends, and then reports the pair it cannot file
+    // under one label set.
+    execution.end_of_input().unwrap();
     let error = match execution.next_state() {
         Ok(None) => panic!("the second series settled nothing at all"),
         Ok(Some(_)) => panic!("a second series left the window under the first one's label set"),
@@ -11651,15 +11583,11 @@ fn a_window_under_a_literal_arithmetic_refuses_the_collision_it_collapses() {
     let message = error.to_string();
     assert!(
         message.contains("vector cannot contain metrics with the same labelset")
-            && message.contains("two series hold a value of field 0"),
-        "expected the window's refusal, got: {message:?}"
+            && message.contains("host=\"web-1\""),
+        "expected the merge's refusal, got: {message:?}"
     );
-    // The node the refusal comes from is the one named: the window under the broadcast's left
-    // operand, not the broadcast that hands its answer on.
-    assert!(
-        message.contains("native.window at root.input.left"),
-        "the refusal does not name the window that made it: {message:?}"
-    );
+    // The refusal is upstream of the fold: a duplicate it read would land in one group and answer a
+    // wrong value instead of refusing.
     assert_eq!(
         count(&metrics, "root", NodeMetric::OUTPUT_BATCHES),
         0,
@@ -11677,17 +11605,16 @@ fn a_window_under_a_literal_arithmetic_refuses_the_collision_it_collapses() {
     );
 }
 
-/// A window that keeps the metric name leaves the collision to the broadcast, which still keeps the
-/// table that refuses it.
+/// A window that keeps the metric name leaves the collision to the merge above the broadcast.
 ///
 /// `last_over_time` reports the name it read, so the two series stay distinct under it; the
 /// multiplication drops the name, and the two then hold one label set at the same positions. Nothing
-/// below this node has checked that identity, so this node is where it is refused.
+/// below the merge has collected that identity, so the merge above this node is where it is refused.
 #[test]
-fn a_name_preserving_window_leaves_the_collision_to_the_broadcast() {
+fn a_name_preserving_window_leaves_the_collision_to_the_merge_above_the_broadcast() {
     let grid = grid(0, 60_000, 2);
     let schema = evaluated_schema(Arc::clone(&grid));
-    let tree = NativeTree::try_new(broadcast_right(
+    let tree = NativeTree::try_new(merge(broadcast_right(
         window_with(
             evaluated_input(Arc::clone(&grid)),
             RangeFunction::LastOverTime,
@@ -11698,7 +11625,7 @@ fn a_name_preserving_window_leaves_the_collision_to_the_broadcast() {
         2.0,
         BinaryOp::Mul,
         false,
-    ))
+    )))
     .unwrap();
     let pool = pool();
     let mut execution = executor(&tree, Arc::clone(&pool));
@@ -11714,13 +11641,10 @@ fn a_name_preserving_window_leaves_the_collision_to_the_broadcast() {
             ),
         )
         .unwrap();
-    let first = execution
-        .next_chunk()
-        .unwrap()
-        .expect("the first series answers under its own name dropped");
-    assert_eq!(
-        decided(std::slice::from_ref(&first)),
-        vec![(0, Some(2.0)), (1, Some(4.0))]
+    // The merge collects what the broadcast hands over, so nothing is answered yet.
+    assert!(
+        execution.next_chunk().unwrap().is_none(),
+        "the merge answered before its input ended"
     );
     execution
         .push_evaluated(
@@ -11734,14 +11658,14 @@ fn a_name_preserving_window_leaves_the_collision_to_the_broadcast() {
             ),
         )
         .unwrap();
+    execution.end_of_input().unwrap();
     let error = execution
         .next_chunk()
         .expect_err("the two names become one label set at the positions both hold");
     let message = error.to_string();
     assert!(
-        message.contains("vector cannot contain metrics with the same labelset")
-            && message.contains("two series hold a value of field 0"),
-        "expected the collision the broadcast produces, got: {message:?}"
+        message.contains("vector cannot contain metrics with the same labelset"),
+        "expected the collision the merge produces, got: {message:?}"
     );
     assert_eq!(
         pool.reserved(),
@@ -11838,7 +11762,6 @@ fn a_histogram_window_under_literal_arithmetic_never_expands_occupancy() {
         } else {
             broadcast_right(window(), 2.0, op, false)
         };
-        assert_eq!(emitted_tables(root.clone()), (false, true));
         let tree = NativeTree::try_new(root).unwrap();
         let pool = pool();
         let collector = common_query::promql_annotations::PromqlAnnotationCollector::default();
@@ -12671,8 +12594,8 @@ fn dynamic_parameters_drop_broadcast_subtrees_before_input_finishes() {
     for histogram in [false, true] {
         let grid = grid(1_000, 1_000, 2);
         let input = evaluated_input(Arc::clone(&grid));
-        // Both sides are varying scalars: the broadcast retains one scalar series and emitted
-        // label history after producing the parameter.
+        // Both sides are varying scalars: the broadcast retains one scalar series after producing
+        // the parameter.
         let parameter = scalar_binary(
             eval_time(None, Arc::clone(&grid)),
             eval_time(None, Arc::clone(&grid)),
@@ -12764,85 +12687,6 @@ fn dynamic_parameters_drop_broadcast_subtrees_before_input_finishes() {
             1
         );
         assert!(execution.finish().unwrap().is_empty());
-        assert_eq!(pool.reserved(), 0);
-    }
-}
-
-/// `scalar()` releases its own retained input after producing, but a map below it still holds
-/// charged emitted-label history. Consuming the parameter must drop that subtree as well.
-#[test]
-fn dynamic_parameters_drop_scalar_of_map_history_before_terminal_close() {
-    for histogram in [false, true] {
-        let grid = grid(0, 1_000, 2);
-        let schema = evaluated_schema(Arc::clone(&grid));
-        let input = evaluated_input(Arc::clone(&grid));
-        let parameter = scalar_of(map(
-            evaluated_input_with_source_index(Arc::clone(&grid), 1),
-            vec![MathOp::Abs],
-        ));
-        let root = NativeNode {
-            output: input.output.clone(),
-            expr: if histogram {
-                NativeExpr::ParameterizedHistogram {
-                    input: Box::new(input),
-                    op: BoundVectorOp::Histogram(HistogramFunction::Quantile(0.0)),
-                    parameters: vec![parameter],
-                }
-            } else {
-                NativeExpr::ParameterizedTopK {
-                    input: Box::new(input),
-                    op: BoundVectorOp::TopK {
-                        k: 0.0,
-                        top: true,
-                        group: Grouping::By(Arc::from([])),
-                    },
-                    parameter: Box::new(parameter),
-                }
-            },
-        };
-        let tree = NativeTree::try_new(root).unwrap();
-        let pool = pool();
-        let mut execution = executor(&tree, Arc::clone(&pool));
-        let metrics = metrics_of(&execution);
-        let parameter_name = if histogram {
-            "root.parameter0"
-        } else {
-            "root.parameter"
-        };
-        let map_name = format!("{parameter_name}.input");
-        execution
-            .push_evaluated(
-                InputId::new(1),
-                evaluated_chunk(&schema, 0, vec![1.0, 1.0], true),
-            )
-            .unwrap();
-        assert!(execution.next_chunk().unwrap().is_none());
-        let map_current = format!("native.{map_name}.current_reserved_bytes");
-        assert!(
-            gauge(&metrics, &map_current) > 0,
-            "map did not retain emitted history"
-        );
-        // Drive exactly the finishing stage that produces the scalar, before the executor closes.
-        assert!(execution.live_mut().unwrap().pull(true).unwrap().is_none());
-        assert_eq!(gauge(&metrics, &map_current), 0);
-        assert!(
-            gauge(
-                &metrics,
-                &format!("native.p0.{map_name}.peak_reserved_bytes")
-            ) > 0
-        );
-        assert_eq!(count(&metrics, &map_name, NodeMetric::OUTPUT_BATCHES), 1);
-        let root = &execution.state().live.as_ref().unwrap().root;
-        match &root.op {
-            RuntimeOp::ParameterizedTopK { parameter, .. } => assert!(parameter.is_none()),
-            RuntimeOp::ParameterizedHistogram { parameters, .. } => {
-                assert!(parameters[0].is_none())
-            }
-            _ => panic!("expected dynamic operator"),
-        }
-        assert_eq!(execution.state().reserved_bytes(), pool.reserved());
-        execution.live_mut().unwrap().root.finish_windows().unwrap();
-        drop(execution);
         assert_eq!(pool.reserved(), 0);
     }
 }
@@ -14180,17 +14024,51 @@ fn count_values_reserves_a_group_per_field_sample() {
 
 /// `label_replace` runs in a map: each series is relabelled as it passes, and two series it gives
 /// one label set collide where both hold a value, as Prometheus' same-labelset check refuses.
+///
+/// The map rewrites a label its input carries, so the canonical pass collects what it hands out: the
+/// merge above the rewrite is where the two pieces are read against each other.
 #[test]
 fn a_label_rewrite_relabels_series_and_refuses_a_shared_point() {
     let grid = grid(0, 60_000, 2);
     let schema = evaluated_schema(Arc::clone(&grid));
     let rewrite = LabelRewrite::replace("job", "all", "job", ".*").unwrap();
-    let tree = NativeTree::try_new(map_ops(
-        evaluated_input(Arc::clone(&grid)),
-        vec![MapOp::Label(Arc::new(rewrite))],
-    ))
-    .unwrap();
-    let mut execution = executor(&tree, pool());
+    let tree = |merge_above: bool| {
+        let rewritten = map_ops(
+            evaluated_input(Arc::clone(&grid)),
+            vec![MapOp::Label(Arc::new(
+                LabelRewrite::replace("job", "all", "job", ".*").unwrap(),
+            ))],
+        );
+        NativeTree::try_new(if merge_above {
+            merge(rewritten)
+        } else {
+            rewritten
+        })
+        .unwrap()
+    };
+    assert_eq!(rewrite.destination(), "job");
+
+    // The rewrite itself: one series passes and leaves under the label it wrote.
+    let mut relabelled = executor(&tree(false), pool());
+    relabelled
+        .push_evaluated(
+            InputId::new(0),
+            evaluated_chunk_of(
+                &schema,
+                named_metric("a", "x"),
+                0,
+                vec![Some(1.0), Some(2.0)],
+                true,
+            ),
+        )
+        .unwrap();
+    let first = relabelled
+        .next_chunk()
+        .unwrap()
+        .expect("the relabelled series");
+    assert_eq!(first.series.metric, named_metric("a", "all"));
+
+    let mut execution = executor(&tree(true), pool());
     execution
         .push_evaluated(
             InputId::new(0),
@@ -14203,21 +14081,17 @@ fn a_label_rewrite_relabels_series_and_refuses_a_shared_point() {
             ),
         )
         .unwrap();
-    let first = execution
-        .next_chunk()
-        .unwrap()
-        .expect("the relabelled series");
-    assert_eq!(first.series.metric, named_metric("a", "all"));
     execution
         .push_evaluated(
             InputId::new(0),
             evaluated_chunk_of(&schema, named_metric("a", "y"), 1, vec![Some(3.0)], true),
         )
         .unwrap();
+    execution.end_of_input().unwrap();
     let error = execution.next_chunk().unwrap_err().to_string();
     assert!(
         error.contains("vector cannot contain metrics with the same labelset")
-            && error.contains("two series hold a value of field 0 at position 1"),
+            && error.contains("job=\"all\""),
         "{error}"
     );
 }
