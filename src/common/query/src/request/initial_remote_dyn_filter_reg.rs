@@ -22,16 +22,25 @@ use datafusion_common::Result as DataFusionResult;
 use serde::{Deserialize, Serialize};
 
 use crate::request::{
-    DynFilterPayload, REMOTE_DYN_FILTER_PAYLOAD_MAX_BYTES, decode_physical_expr_from_bytes,
+    DynFilterPayload, REMOTE_DYN_FILTER_PAYLOAD_NO_APP_CAP, decode_physical_expr_from_bytes,
     encode_physical_expr_to_bytes,
 };
 
 pub const INITIAL_REMOTE_DYN_FILTER_REGISTRATIONS_EXTENSION_KEY: &str =
     "initial_remote_dyn_filter_registrations";
+/// Default policy cap on the number of initial remote dynamic filter registrations per region.
+///
+/// This is a separate policy from payload size: it bounds how many filters are registered and
+/// fanned out. It is unrelated to the byte size of each payload.
 pub const INITIAL_REMOTE_DYN_FILTER_REGS_MAX_COUNT: usize = 64;
 
-// Initial registration validation uses the shared remote dynamic filter payload budget.
-// It counts raw protobuf payload bytes before JSON/base64 expansion, not the final extension size.
+// Initial registration validation policy:
+// - count: at most `INITIAL_REMOTE_DYN_FILTER_REGS_MAX_COUNT` registrations, plus unique
+//   `filter_id`s.
+// - size: no application-level byte cap. Payload bytes are bounded by the gRPC max message
+//   size and memory; deriving a payload budget from that limit and the planner is a follow-up.
+// The encoded size (when a caller passes a real limit) counts raw protobuf payload bytes
+// before JSON/base64 expansion, not the final extension size.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InitialDynFilterRegs {
     #[serde(rename = "registrations")]
@@ -54,13 +63,24 @@ impl InitialDynFilterRegs {
             .sum()
     }
 
+    /// Validates the default registration policy: the count limit and unique `filter_id`s.
+    ///
+    /// There is intentionally no byte-size cap here. A payload is only bounded by the gRPC
+    /// max message size (and memory), which this layer cannot see, so the default passes
+    /// [`REMOTE_DYN_FILTER_PAYLOAD_NO_APP_CAP`]. A planner/budget policy on top of the
+    /// transport limit is a follow-up.
     pub fn validate_default_bounds(&self) -> Result<(), String> {
         self.validate_bounds(
             INITIAL_REMOTE_DYN_FILTER_REGS_MAX_COUNT,
-            REMOTE_DYN_FILTER_PAYLOAD_MAX_BYTES,
+            REMOTE_DYN_FILTER_PAYLOAD_NO_APP_CAP,
         )
     }
 
+    /// Validates the registration count, the uniqueness of `filter_id`s, and - when the
+    /// caller supplies a real limit - the total encoded payload bytes.
+    ///
+    /// `max_total_proto_bytes` is a caller-supplied limit, not a policy: the default policy
+    /// passes [`REMOTE_DYN_FILTER_PAYLOAD_NO_APP_CAP`].
     pub fn validate_bounds(
         &self,
         max_count: usize,
@@ -333,7 +353,7 @@ mod tests {
     }
 
     #[test]
-    fn initial_dyn_filter_regs_validate_bounds_rejects_total_proto_bytes_over_limit() {
+    fn initial_dyn_filter_regs_validate_bounds_rejects_total_proto_bytes_over_caller_limit() {
         let regs = InitialDynFilterRegs::new(vec![
             InitialDynFilterReg::new("filter-a", vec![vec![1, 2, 3]]),
             InitialDynFilterReg::new("filter-b", vec![vec![4, 5, 6]]),
@@ -345,7 +365,7 @@ mod tests {
     }
 
     #[test]
-    fn initial_dyn_filter_regs_validate_bounds_rejects_snapshot_bytes_over_limit() {
+    fn initial_dyn_filter_regs_validate_bounds_rejects_snapshot_bytes_over_caller_limit() {
         let regs = InitialDynFilterRegs::new(vec![
             InitialDynFilterReg::new("filter-a", vec![vec![1]]).with_initial_snapshot(
                 InitialDynFilterSnapshot::new(
@@ -362,6 +382,25 @@ mod tests {
     }
 
     #[test]
+    fn initial_dyn_filter_regs_default_bounds_have_no_size_cap() {
+        // Larger than the removed 512 KiB total cap: only the gRPC max message size and
+        // memory bound the payload, so the default policy accepts it.
+        let regs = InitialDynFilterRegs::new(vec![
+            InitialDynFilterReg::new("filter-a", vec![vec![0; 1024 * 1024]]).with_initial_snapshot(
+                InitialDynFilterSnapshot::new(
+                    DynFilterPayload::Datafusion(vec![1; 1024 * 1024]),
+                    1,
+                    false,
+                ),
+            ),
+        ]);
+
+        assert!(regs.total_encoded_registration_bytes() > 512 * 1024);
+        regs.validate_default_bounds().unwrap();
+        InitialDynFilterRegs::from_extension_value(&regs.to_extension_value().unwrap()).unwrap();
+    }
+
+    #[test]
     fn initial_dyn_filter_reg_round_trips_child_exprs() {
         let schema = Schema::new(vec![Field::new("host", DataType::Utf8, false)]);
         let child: Arc<dyn PhysicalExpr> =
@@ -369,7 +408,11 @@ mod tests {
         let reg = InitialDynFilterReg::from_filter_id_and_children("filter-1", &[child]).unwrap();
 
         let decoded = reg
-            .decode_children(&TaskContext::default(), &schema, 1024)
+            .decode_children(
+                &TaskContext::default(),
+                &schema,
+                REMOTE_DYN_FILTER_PAYLOAD_NO_APP_CAP,
+            )
             .unwrap();
         let decoded = decoded[0].downcast_ref::<Column>().unwrap();
 
@@ -388,7 +431,11 @@ mod tests {
         .unwrap();
 
         let err = reg
-            .decode_children(&TaskContext::default(), &schema, 1024)
+            .decode_children(
+                &TaskContext::default(),
+                &schema,
+                REMOTE_DYN_FILTER_PAYLOAD_NO_APP_CAP,
+            )
             .unwrap_err();
 
         assert!(matches!(err, DataFusionError::Plan(_)));

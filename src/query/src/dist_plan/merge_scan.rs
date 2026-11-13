@@ -2031,7 +2031,7 @@ mod tests {
                         arrow_schema::DataType::Boolean,
                         false,
                     )]),
-                    common_query::request::REMOTE_DYN_FILTER_PAYLOAD_MAX_BYTES,
+                    common_query::request::REMOTE_DYN_FILTER_PAYLOAD_NO_APP_CAP,
                 )
                 .unwrap()
                 .to_string(),
@@ -3318,6 +3318,43 @@ mod tests {
             )
             .unwrap();
 
+        assert_eq!(exec.captured_remote_dyn_filters().len(), 1);
+        assert!(matches!(propagation.filters.as_slice(), [PushedDown::Yes]));
+    }
+
+    #[test]
+    fn remote_dyn_filter_preflight_keeps_large_initial_snapshot_without_an_application_cap() {
+        let exec = remote_dyn_filter_test_exec(
+            Arc::new(TestRegionQueryHandler::default()),
+            QueryContext::arc(),
+        );
+        let dyn_filter = Arc::new(DynamicFilterPhysicalExpr::new(
+            vec![Arc::new(Column::new("host", 0)) as Arc<_>],
+            physical_lit(true) as _,
+        ));
+        dyn_filter
+            .update(physical_lit(datafusion_common::ScalarValue::Utf8(Some(
+                "x".repeat(1024 * 1024),
+            ))) as _)
+            .unwrap();
+
+        let propagation = exec
+            .handle_child_pushdown_result(
+                FilterPushdownPhase::Post,
+                ChildPushdownResult {
+                    parent_filters: vec![ChildFilterPushdownResult {
+                        filter: dyn_filter as Arc<dyn datafusion_physical_expr::PhysicalExpr>,
+                        child_results: vec![PushedDown::Yes],
+                    }],
+                    self_filters: Vec::new(),
+                },
+                &ConfigOptions::new(),
+            )
+            .unwrap();
+
+        // The snapshot is larger than the removed 512 KiB application cap but still
+        // encodable, so the filter is captured and pushed down: gRPC's max message size (and
+        // memory) is the only bound.
         assert_eq!(exec.captured_remote_dyn_filters().len(), 1);
         assert!(matches!(propagation.filters.as_slice(), [PushedDown::Yes]));
     }

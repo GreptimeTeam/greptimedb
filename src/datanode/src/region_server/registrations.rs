@@ -19,7 +19,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use common_query::request::{
     DynFilterPayload, INITIAL_REMOTE_DYN_FILTER_REGISTRATIONS_EXTENSION_KEY, InitialDynFilterReg,
-    InitialDynFilterRegs, REMOTE_DYN_FILTER_PAYLOAD_MAX_BYTES,
+    InitialDynFilterRegs, REMOTE_DYN_FILTER_PAYLOAD_NO_APP_CAP,
 };
 use common_telemetry::{debug, warn};
 use dashmap::DashMap;
@@ -112,7 +112,6 @@ pub(super) enum RemoteDynFilterUpdateOutcome {
     Idempotent,
     Stale,
     AlreadyComplete,
-    PayloadTooLarge,
     DecodeFailed,
 }
 
@@ -125,7 +124,6 @@ impl RemoteDynFilterUpdateOutcome {
             Self::Idempotent => "idempotent",
             Self::Stale => "stale",
             Self::AlreadyComplete => "already_complete",
-            Self::PayloadTooLarge => "payload_too_large",
             Self::DecodeFailed => "decode_failed",
         }
     }
@@ -133,11 +131,7 @@ impl RemoteDynFilterUpdateOutcome {
     fn is_drop(&self) -> bool {
         matches!(
             self,
-            Self::MissingRegistration
-                | Self::Stale
-                | Self::AlreadyComplete
-                | Self::PayloadTooLarge
-                | Self::DecodeFailed
+            Self::MissingRegistration | Self::Stale | Self::AlreadyComplete | Self::DecodeFailed
         )
     }
 }
@@ -215,10 +209,6 @@ impl RemoteDynFilterState {
         generation: u64,
         is_complete: bool,
     ) -> RemoteDynFilterUpdateOutcome {
-        if !validate_update_payload_size(payload) {
-            return RemoteDynFilterUpdateOutcome::PayloadTooLarge;
-        }
-
         let mut epoch = self.epoch.lock().unwrap();
         if let Some(current_generation) = epoch.generation {
             if generation < current_generation {
@@ -328,10 +318,6 @@ impl RegisteredDynFilter {
         generation: u64,
         is_complete: bool,
     ) -> RemoteDynFilterUpdateOutcome {
-        if !validate_update_payload_size(payload) {
-            return RemoteDynFilterUpdateOutcome::PayloadTooLarge;
-        }
-
         if let Some(pending) = self.pending_update.as_mut() {
             if generation < pending.generation {
                 return RemoteDynFilterUpdateOutcome::Stale;
@@ -379,7 +365,7 @@ impl RegisteredDynFilter {
         .decode_children(
             remote_dyn_filter_task_context(),
             input_schema,
-            REMOTE_DYN_FILTER_PAYLOAD_MAX_BYTES,
+            REMOTE_DYN_FILTER_PAYLOAD_NO_APP_CAP,
         )
     }
 
@@ -449,7 +435,7 @@ pub(super) fn initial_dyn_filter_regs_from_query_ctx(
         Ok(registrations) => match registrations.validate_default_bounds() {
             Ok(()) => Some(registrations),
             Err(error) => {
-                warn!(error; "Initial remote dyn filter registrations exceeded Task 03 bounds");
+                warn!(error; "Invalid initial remote dyn filter registrations");
                 None
             }
         },
@@ -541,19 +527,9 @@ pub(super) fn apply_remote_dyn_filter_update(
     generation: u64,
     is_complete: bool,
 ) -> RemoteDynFilterUpdateOutcome {
-    if !validate_update_payload_size(payload) {
-        warn!(
-            "Ignored oversized remote dynamic filter update, query_id: {}, filter_id: {}, payload_size: {}, max_payload_size: {}",
-            query_id,
-            filter_id,
-            payload.len(),
-            REMOTE_DYN_FILTER_PAYLOAD_MAX_BYTES
-        );
-        let outcome = RemoteDynFilterUpdateOutcome::PayloadTooLarge;
-        record_update_outcome(outcome);
-        return outcome;
-    }
-
+    // There is no application-level payload size cap: gRPC's max message size (and memory)
+    // bounds a request before it reaches this point. Oversized payloads are only recorded so
+    // the distribution stays observable.
     REMOTE_DYN_FILTER_PAYLOAD_BYTES.observe(payload.len() as f64);
 
     let Some(query_regs) = regs_by_query.get_query(query_id) else {
@@ -672,7 +648,7 @@ fn decode_update_payload(
     DynFilterPayload::Datafusion(payload.to_vec()).decode_datafusion_expr(
         remote_dyn_filter_task_context(),
         input_schema,
-        REMOTE_DYN_FILTER_PAYLOAD_MAX_BYTES,
+        REMOTE_DYN_FILTER_PAYLOAD_NO_APP_CAP,
     )
 }
 
@@ -687,10 +663,6 @@ fn remote_dyn_filter_task_context() -> &'static TaskContext {
         let session_state = SessionStateBuilder::new().with_default_features().build();
         TaskContext::from(&session_state)
     })
-}
-
-fn validate_update_payload_size(payload: &[u8]) -> bool {
-    payload.len() <= REMOTE_DYN_FILTER_PAYLOAD_MAX_BYTES
 }
 
 #[cfg(test)]

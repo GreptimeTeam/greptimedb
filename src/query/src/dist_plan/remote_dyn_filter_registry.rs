@@ -18,7 +18,7 @@ use std::sync::{Arc, Mutex, RwLock, Weak};
 use std::time::Duration;
 
 use api::v1::region::{RemoteDynFilterUnregister, RemoteDynFilterUpdate};
-use common_query::request::{DynFilterPayload, REMOTE_DYN_FILTER_PAYLOAD_MAX_BYTES};
+use common_query::request::{DynFilterPayload, REMOTE_DYN_FILTER_PAYLOAD_NO_APP_CAP};
 use common_runtime::spawn_global;
 use common_telemetry::{debug, warn};
 use datafusion_physical_expr::PhysicalExpr;
@@ -405,31 +405,39 @@ async fn fanout_snapshot_for_query(
         let _ = entry.mark_generation_sent(generation);
     }
 
-    let payload =
-        match DynFilterPayload::from_datafusion_expr(&current, REMOTE_DYN_FILTER_PAYLOAD_MAX_BYTES)
-        {
-            Ok(DynFilterPayload::Datafusion(payload)) => {
-                REMOTE_DYN_FILTER_ENCODE_TOTAL
-                    .with_label_values(&["success"])
-                    .inc();
-                REMOTE_DYN_FILTER_PAYLOAD_BYTES.observe(payload.len() as f64);
-                payload
-            }
-            Ok(_) => {
-                REMOTE_DYN_FILTER_ENCODE_TOTAL
-                    .with_label_values(&["unsupported"])
-                    .inc();
-                warn!("Ignored unsupported remote dynamic filter producer payload");
-                return true;
-            }
-            Err(error) => {
-                REMOTE_DYN_FILTER_ENCODE_TOTAL
-                    .with_label_values(&["error"])
-                    .inc();
-                warn!(error; "Failed to encode remote dynamic filter producer snapshot");
-                return true;
-            }
-        };
+    let payload = match DynFilterPayload::from_datafusion_expr(
+        &current,
+        REMOTE_DYN_FILTER_PAYLOAD_NO_APP_CAP,
+    ) {
+        Ok(DynFilterPayload::Datafusion(payload)) => {
+            REMOTE_DYN_FILTER_ENCODE_TOTAL
+                .with_label_values(&["success"])
+                .inc();
+            REMOTE_DYN_FILTER_PAYLOAD_BYTES.observe(payload.len() as f64);
+            payload
+        }
+        Ok(_) => {
+            REMOTE_DYN_FILTER_ENCODE_TOTAL
+                .with_label_values(&["unsupported"])
+                .inc();
+            warn!("Ignored unsupported remote dynamic filter producer payload");
+            return true;
+        }
+        Err(error) => {
+            REMOTE_DYN_FILTER_ENCODE_TOTAL
+                .with_label_values(&["error"])
+                .inc();
+            // The payload is not degraded to a weaker predicate, so skip this generation
+            // instead of sending `true`. Subscribers keep their previous filter, later
+            // generations supersede it, and the query itself is never failed here.
+            warn!(
+                error;
+                "Skipped remote dynamic filter generation {}, failed to encode remote dynamic filter producer snapshot",
+                generation
+            );
+            return true;
+        }
+    };
 
     fanout_update_for_query(
         query_id,
@@ -828,6 +836,7 @@ mod tests {
     use async_trait::async_trait;
     use common_meta::peer::Peer;
     use common_query::request::QueryRequest;
+    use datafusion_common::ScalarValue;
     use datafusion_physical_expr::expressions::{Column, lit};
     use session::ReadPreference;
     use uuid::Uuid;
@@ -1335,6 +1344,47 @@ mod tests {
                 .any(|update| update.target == second_subscriber.target().clone())
         );
         assert_eq!(entry.subscribers().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn fanout_sends_large_generation_without_an_application_cap() {
+        let query_id = test_query_id(4);
+        let registry = Arc::new(QueryDynFilterRegistry::new(query_id));
+        let filter = test_dyn_filter(&["host"]);
+        let filter_id = test_filter_id(1);
+        let entry = match registry.register_remote_dyn_filter(filter_id.clone(), filter.clone()) {
+            EntryRegistration::Inserted(entry) => entry,
+            other => panic!("unexpected registration result: {other:?}"),
+        };
+        let subscriber = Subscriber::new(RegionId::new(1024, 7), test_target(1));
+        assert_eq!(
+            registry.register_subscriber(&filter_id, subscriber),
+            SubscriberRegistration::Added
+        );
+        let handler = Arc::new(RecordingRegionQueryHandler::default());
+        let handler_ref = handler.clone() as RegionQueryHandlerRef;
+
+        // A small payload is fanned out.
+        registry
+            .fanout_snapshot(&handler_ref, &entry, filter.as_ref(), false)
+            .await;
+        assert_eq!(handler.updates().len(), 1);
+        let small_generation = filter.snapshot_generation();
+
+        // A payload over the removed 512 KiB application cap is fanned out too: only the
+        // gRPC max message size (and memory) bounds it, so fanout must not drop it here.
+        filter
+            .update(lit(ScalarValue::Utf8(Some("x".repeat(1024 * 1024)))) as _)
+            .unwrap();
+        let large_generation = filter.snapshot_generation();
+        assert!(large_generation > small_generation);
+        registry
+            .fanout_snapshot(&handler_ref, &entry, filter.as_ref(), false)
+            .await;
+        let updates = handler.updates();
+        assert_eq!(updates.len(), 2);
+        assert_eq!(updates[1].generation, large_generation);
+        assert!(updates[1].payload.len() > 512 * 1024);
     }
 
     #[tokio::test]

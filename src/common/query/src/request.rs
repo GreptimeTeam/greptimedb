@@ -20,7 +20,7 @@ use std::sync::Arc;
 
 use api::v1::region::RegionRequestHeader;
 use datafusion::execution::TaskContext;
-use datafusion::physical_expr::expressions::{Column, InListExpr, lit};
+use datafusion::physical_expr::expressions::{Column, lit};
 use datafusion::physical_plan::joins::HashTableLookupExpr;
 use datafusion::physical_plan::{ExecutionPlan, PhysicalExpr};
 use datafusion_common::tree_node::{Transformed, TreeNode, TreeNodeRecursion};
@@ -48,8 +48,20 @@ pub use self::initial_remote_dyn_filter_reg::{
 use crate::error::{DynFilterPayloadTooLargeSnafu, Error as CommonQueryError};
 
 pub const DYN_FILTER_PROTOCOL_VERSION: u32 = 1;
-/// Shared raw protobuf byte budget for remote dynamic filter payloads.
-pub const REMOTE_DYN_FILTER_PAYLOAD_MAX_BYTES: usize = 512 * 1024;
+/// "No application-level cap" for remote dynamic filter payload bytes.
+///
+/// Dynamic filter predicates travel over gRPC, so the real bound on a payload is the gRPC
+/// max message size (configured by `grpc.max_recv_message_size`/`grpc.max_send_message_size`,
+/// 512 MiB by default) plus the memory needed to encode/decode a frame that large. It is not
+/// a number picked in this layer. This crate cannot see the transport limit - it is a
+/// per-node setting and the receiving side may differ - so it applies no cap of its own:
+/// pass this value unless the caller holds a real transport/frame limit, in which case that
+/// limit may be passed instead and surfaces as
+/// [`crate::error::Error::DynFilterPayloadTooLarge`].
+///
+/// Deriving a payload budget from the gRPC frame limit together with planner policy is a
+/// follow-up; until then an oversized payload fails at the transport.
+pub const REMOTE_DYN_FILTER_PAYLOAD_NO_APP_CAP: usize = usize::MAX;
 
 /// Serialized predicate payload for remote dynamic filter updates.
 ///
@@ -70,31 +82,34 @@ pub enum DynFilterPayload {
 }
 
 impl DynFilterPayload {
-    /// Encodes a DataFusion physical expression into a bounded dynamic filter payload.
+    /// Encodes a DataFusion physical expression into a dynamic filter payload.
     ///
     /// Runtime-only hash lookup predicates are degraded to `true` before encoding so
     /// serializable min/max bounds around them can still be shipped to remote scans.
-    /// If the full serializable predicate is still larger than `max_payload_bytes`, large
-    /// membership predicates (`IN (...)`) are also degraded to `true` as a bounds-only fallback.
+    ///
+    /// The predicate is encoded once against `max_payload_bytes`. A predicate that does not
+    /// fit is not degraded to a weaker `true`/bounds-only payload: the error
+    /// `CommonQueryError::DynFilterPayloadTooLarge` is returned instead, and the caller
+    /// decides whether to drop that pushdown (or that fanout generation).
+    ///
+    /// There is no application-level size cap: pass
+    /// [`REMOTE_DYN_FILTER_PAYLOAD_NO_APP_CAP`] so that only the gRPC max message size and
+    /// memory bound the payload. `max_payload_bytes` exists for callers that hold a real
+    /// transport/frame limit; a planner/budget policy on top of it is a follow-up.
     pub fn from_datafusion_expr(
         expr: &Arc<dyn PhysicalExpr>,
         max_payload_bytes: usize,
     ) -> DataFusionResult<Self> {
-        match encode_remote_dyn_filter_expr(expr, max_payload_bytes, false) {
-            Ok(bytes) => Ok(Self::Datafusion(bytes)),
-            Err(CommonQueryError::DynFilterPayloadTooLarge { .. }) => {
-                encode_remote_dyn_filter_expr(expr, max_payload_bytes, true)
-                    .map(Self::Datafusion)
-                    .map_err(DataFusionError::from)
-            }
-            Err(error) => Err(DataFusionError::from(error)),
-        }
+        encode_remote_dyn_filter_expr(expr, max_payload_bytes)
+            .map(Self::Datafusion)
+            .map_err(DataFusionError::from)
     }
 
     /// Decodes a DataFusion dynamic filter payload against the provided input schema.
     ///
     /// The decoded expression is validated to ensure column indexes stay within the receiver-side
-    /// schema, column names are consistent (defensive check), and the payload stays within
+    /// schema, column names are consistent (defensive check), and - when the caller passes a real
+    /// limit instead of [`REMOTE_DYN_FILTER_PAYLOAD_NO_APP_CAP`] - the payload stays within
     /// `max_payload_bytes`.
     pub fn decode_datafusion_expr(
         &self,
@@ -184,7 +199,7 @@ fn encode_bounded_physical_expr_to_bytes(
         encoded_bytes: Cell::new(0),
     };
     let proto = encoder.physical_expr_to_proto(expr, &codec);
-    // Preserve the size error so the caller can retry with bounds only.
+    // Preserve the size error so the caller can drop this pushdown/generation.
     validate_payload_size(encoder.encoded_bytes.get(), max_payload_bytes)?;
     Ok(proto.map_err(CommonQueryError::from)?.encode_to_vec())
 }
@@ -192,19 +207,16 @@ fn encode_bounded_physical_expr_to_bytes(
 fn encode_remote_dyn_filter_expr(
     expr: &Arc<dyn PhysicalExpr>,
     max_payload_bytes: usize,
-    bounds_only: bool,
 ) -> Result<Vec<u8>, CommonQueryError> {
-    let expr = portable_remote_dyn_filter_expr(Arc::clone(expr), bounds_only)
-        .map_err(CommonQueryError::from)?;
+    let expr = portable_remote_dyn_filter_expr(Arc::clone(expr)).map_err(CommonQueryError::from)?;
     encode_bounded_physical_expr_to_bytes(&expr, max_payload_bytes)
 }
 
 fn portable_remote_dyn_filter_expr(
     expr: Arc<dyn PhysicalExpr>,
-    bounds_only: bool,
 ) -> DataFusionResult<Arc<dyn PhysicalExpr>> {
     expr.transform_up(|node| {
-        if node.is::<HashTableLookupExpr>() || (bounds_only && node.is::<InListExpr>()) {
+        if node.is::<HashTableLookupExpr>() {
             Ok(Transformed::yes(lit(true)))
         } else {
             Ok(Transformed::no(node))
@@ -213,6 +225,11 @@ fn portable_remote_dyn_filter_expr(
     .map(|transformed| transformed.data)
 }
 
+/// Decodes a DataFusion physical expression serialized by [`encode_physical_expr_to_bytes`].
+///
+/// `max_payload_bytes` is only a caller-supplied limit; pass
+/// [`REMOTE_DYN_FILTER_PAYLOAD_NO_APP_CAP`] when the gRPC max message size should be the
+/// only bound.
 pub(crate) fn decode_physical_expr_from_bytes(
     bytes: &[u8],
     task_ctx: &TaskContext,
@@ -231,6 +248,12 @@ pub(crate) fn decode_physical_expr_from_bytes(
     Ok(expr)
 }
 
+/// Enforces a caller-supplied payload limit.
+///
+/// This is not a policy cap: the default path passes
+/// [`REMOTE_DYN_FILTER_PAYLOAD_NO_APP_CAP`] and relies on the gRPC max message size and
+/// memory to bound a payload. It only rejects when a caller knows a real transport/frame
+/// limit.
 fn validate_payload_size(
     payload_size_bytes: usize,
     max_payload_bytes: usize,
@@ -451,9 +474,15 @@ mod tests {
         let expr: Arc<dyn PhysicalExpr> =
             Arc::new(Column::new_with_schema("host", &schema).unwrap());
 
-        let payload = DynFilterPayload::from_datafusion_expr(&expr, 1024).unwrap();
+        let payload =
+            DynFilterPayload::from_datafusion_expr(&expr, REMOTE_DYN_FILTER_PAYLOAD_NO_APP_CAP)
+                .unwrap();
         let decoded = payload
-            .decode_datafusion_expr(&TaskContext::default(), &schema, 1024)
+            .decode_datafusion_expr(
+                &TaskContext::default(),
+                &schema,
+                REMOTE_DYN_FILTER_PAYLOAD_NO_APP_CAP,
+            )
             .unwrap();
 
         let original = expr.downcast_ref::<Column>().unwrap();
@@ -469,7 +498,11 @@ mod tests {
         let payload = DynFilterPayload::Datafusion(vec![1, 2, 3]);
 
         let err = payload
-            .decode_datafusion_expr(&TaskContext::default(), &schema, 1024)
+            .decode_datafusion_expr(
+                &TaskContext::default(),
+                &schema,
+                REMOTE_DYN_FILTER_PAYLOAD_NO_APP_CAP,
+            )
             .unwrap_err();
 
         assert!(matches!(err, DataFusionError::Internal(_)));
@@ -480,9 +513,15 @@ mod tests {
         let schema = Schema::new(vec![Field::new("host", DataType::Utf8, false)]);
         let expr: Arc<dyn PhysicalExpr> = Arc::new(Column::new("service", 0));
 
-        let payload = DynFilterPayload::from_datafusion_expr(&expr, 1024).unwrap();
+        let payload =
+            DynFilterPayload::from_datafusion_expr(&expr, REMOTE_DYN_FILTER_PAYLOAD_NO_APP_CAP)
+                .unwrap();
         let err = payload
-            .decode_datafusion_expr(&TaskContext::default(), &schema, 1024)
+            .decode_datafusion_expr(
+                &TaskContext::default(),
+                &schema,
+                REMOTE_DYN_FILTER_PAYLOAD_NO_APP_CAP,
+            )
             .unwrap_err();
 
         let msg = err.to_string();
@@ -499,9 +538,15 @@ mod tests {
         let schema = Schema::new(vec![Field::new("host", DataType::Utf8, false)]);
         let expr: Arc<dyn PhysicalExpr> = Arc::new(Column::new("host", 1));
 
-        let payload = DynFilterPayload::from_datafusion_expr(&expr, 1024).unwrap();
+        let payload =
+            DynFilterPayload::from_datafusion_expr(&expr, REMOTE_DYN_FILTER_PAYLOAD_NO_APP_CAP)
+                .unwrap();
         let err = payload
-            .decode_datafusion_expr(&TaskContext::default(), &schema, 1024)
+            .decode_datafusion_expr(
+                &TaskContext::default(),
+                &schema,
+                REMOTE_DYN_FILTER_PAYLOAD_NO_APP_CAP,
+            )
             .unwrap_err();
 
         assert!(matches!(err, DataFusionError::Plan(_)));
@@ -530,9 +575,15 @@ mod tests {
         let expr =
             Arc::new(BinaryExpr::new(lower_bound, Operator::And, lookup)) as Arc<dyn PhysicalExpr>;
 
-        let payload = DynFilterPayload::from_datafusion_expr(&expr, 1024).unwrap();
+        let payload =
+            DynFilterPayload::from_datafusion_expr(&expr, REMOTE_DYN_FILTER_PAYLOAD_NO_APP_CAP)
+                .unwrap();
         let decoded = payload
-            .decode_datafusion_expr(&TaskContext::default(), &schema, 1024)
+            .decode_datafusion_expr(
+                &TaskContext::default(),
+                &schema,
+                REMOTE_DYN_FILTER_PAYLOAD_NO_APP_CAP,
+            )
             .unwrap();
 
         assert!(!contains_expr::<HashTableLookupExpr>(&decoded));
@@ -543,7 +594,7 @@ mod tests {
     }
 
     #[test]
-    fn dyn_filter_payload_oversized_inlist_falls_back_to_bounds() {
+    fn dyn_filter_payload_oversized_inlist_returns_payload_too_large() {
         let schema = Arc::new(Schema::new(vec![Field::new(
             "device_id",
             DataType::Int32,
@@ -573,21 +624,15 @@ mod tests {
         ) as Arc<dyn PhysicalExpr>;
         let expr = Arc::new(BinaryExpr::new(Arc::clone(&bounds), Operator::And, in_list))
             as Arc<dyn PhysicalExpr>;
-        let bounds_only = portable_remote_dyn_filter_expr(Arc::clone(&expr), true).unwrap();
-        let bounds_only_size = encode_physical_expr_to_bytes(&bounds_only).unwrap().len();
+        // The bounds-only predicate would fit in the caller-supplied limit, but the predicate
+        // is no longer degraded to it: the payload is rejected instead.
+        let bounds_size = encode_physical_expr_to_bytes(&bounds).unwrap().len();
         let full_size = encode_physical_expr_to_bytes(&expr).unwrap().len();
-        assert!(full_size > bounds_only_size);
+        assert!(full_size > bounds_size);
 
-        let payload = DynFilterPayload::from_datafusion_expr(&expr, bounds_only_size).unwrap();
-        let decoded = payload
-            .decode_datafusion_expr(&TaskContext::default(), &schema, bounds_only_size)
-            .unwrap();
+        let err = DynFilterPayload::from_datafusion_expr(&expr, bounds_size).unwrap_err();
 
-        assert!(!contains_expr::<InListExpr>(&decoded));
-        let decoded_display = decoded.to_string();
-        assert!(decoded_display.contains("device_id"));
-        assert!(decoded_display.contains(">="));
-        assert!(decoded_display.contains("<="));
+        assert_payload_too_large(&err);
     }
 
     #[test]
@@ -647,11 +692,42 @@ mod tests {
     }
 
     #[test]
-    fn dyn_filter_payload_rejects_oversized_payload() {
+    fn dyn_filter_payload_enforces_caller_supplied_limit() {
+        // A caller that does have a real limit (for example a transport frame limit) still
+        // gets the explicit error; the default path passes no application cap.
         let expr: Arc<dyn PhysicalExpr> = Arc::new(Column::new("host", 0));
 
         let err = DynFilterPayload::from_datafusion_expr(&expr, 1).unwrap_err();
 
+        assert_payload_too_large(&err);
+    }
+
+    #[test]
+    fn dyn_filter_payload_has_no_application_size_cap() {
+        // Larger than the removed 512 KiB application cap: the payload is encoded and
+        // decoded instead of being rejected. Only gRPC's max message size (and memory)
+        // bound a payload; there is no policy cap in this layer.
+        let schema = Schema::new(vec![Field::new("host", DataType::Utf8, false)]);
+        let expr: Arc<dyn PhysicalExpr> = lit("x".repeat(1024 * 1024));
+
+        let payload =
+            DynFilterPayload::from_datafusion_expr(&expr, REMOTE_DYN_FILTER_PAYLOAD_NO_APP_CAP)
+                .unwrap();
+        let DynFilterPayload::Datafusion(bytes) = payload;
+        assert!(bytes.len() > 512 * 1024);
+
+        let decoded = DynFilterPayload::Datafusion(bytes)
+            .decode_datafusion_expr(
+                &TaskContext::default(),
+                &schema,
+                REMOTE_DYN_FILTER_PAYLOAD_NO_APP_CAP,
+            )
+            .unwrap();
+
+        assert!(decoded.to_string().len() > 512 * 1024);
+    }
+
+    fn assert_payload_too_large(err: &DataFusionError) {
         let DataFusionError::External(error) = err else {
             panic!("expected external common query error, got: {err:?}");
         };
