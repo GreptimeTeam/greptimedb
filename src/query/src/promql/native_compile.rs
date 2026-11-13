@@ -106,9 +106,9 @@
 //! so `quantile_over_time(1 - 0.1, x[5m])` binds the number it means rather than the expression it
 //! was written as. A math function is bound by [`math_op`] from a list of names, so
 //! `clamp_min(abs(rate(x[5m])), 0)` is two maps over one window because the arguments nest, not
-//! because the compiler knows the query. Arithmetic inside a fold is [`ArithmeticOp::calculate`]'s
-//! alone, so the number this compiler binds and the number the kernel computes cannot disagree
-//! about `%`, `^` or `atan2`.
+//! because the compiler knows the query. Arithmetic inside a fold is the kernel operation
+//! [`BinaryOp::kind`] names, so the number this compiler binds and the number the kernel computes
+//! cannot disagree about `%`, `^` or `atan2`.
 //!
 //! Two more are about what a node means rather than about which node to build. A binary operation
 //! keeps its operands in the order they were written, because most operators are not commutative:
@@ -148,7 +148,7 @@ use datatypes::series::time::{EvalGrid, GridSpec};
 use datatypes::series::{SeriesLabels, SeriesOrdering};
 use promql::histogram_eval::{HistogramFunction, NativeHistogramFunction};
 use promql::info::InfoSelector;
-use promql::map::{ArithmeticOp, ComparisonOp, MathOp};
+use promql::map::MathOp;
 use promql::map_label::LabelRewrite;
 use promql::map_time::DateFunction;
 use promql::native::plan::{
@@ -159,7 +159,8 @@ use promql::native::plan::{
 use promql::range_eval::{RangeFunction, RangeWindow, subquery_grid};
 use promql::select::{LabelMatcher, MatchOp, SortOrder, absent_labels};
 use promql::vector_match::{
-    BinaryMatching, BinaryOp, Cardinality, FillValues, MatchingLabels, SetOp, binary_output_schema,
+    BinaryKind, BinaryMatching, BinaryOp, Cardinality, FillValues, MatchingLabels, SetOp,
+    binary_output_schema,
 };
 use promql_parser::label::{MatchOp as ParserMatchOp, Matcher, Matchers};
 use promql_parser::parser::token::TokenType;
@@ -676,7 +677,7 @@ fn binary_operation(context: &Context, binary: &BinaryExpr) -> Result<NativeNode
     // run, so it is refused here with what was found. Two constants never reach here: they folded.
     if binary.lhs.value_type() == ValueType::Scalar
         && binary.rhs.value_type() == ValueType::Scalar
-        && comparison_op(&binary.op).is_some()
+        && matches!(op.kind(), BinaryKind::Comparison(_))
         && !binary.return_bool()
     {
         return Err(not_implemented(&format!(
@@ -898,8 +899,7 @@ fn label_names(labels: &[String]) -> Vec<Arc<str>> {
 /// The binary operator a PromQL token denotes, or `None` when there is no node for it.
 ///
 /// A comparison carries `return_bool` separately, so `x > 0` and `x > bool 0` use the same
-/// operator. Unlike [`arithmetic_op`], which decides what a constant fold may compute, this map
-/// selects the operation the runtime executes.
+/// operator. The node the runtime executes and the constant fold both read the operator here.
 fn binary_op(op: &TokenType) -> Option<BinaryOp> {
     match op.id() {
         token::T_ADD => Some(BinaryOp::Add),
@@ -2684,10 +2684,10 @@ fn refuses_modifier(modifier: Option<&BinModifier>) -> bool {
 /// it runs. Returning `None` rather than an error is what lets the caller report where the
 /// expression was found, which is the useful half of the refusal.
 ///
-/// Arithmetic is [`ArithmeticOp::calculate`]'s and nothing else's: that is where Prometheus'
-/// semantics for `%`, `^` and `atan2` live, the last two through `go_math`, so defining them again
-/// here would be a second answer for the two to disagree over. An operator with no
-/// [`ArithmeticOp`] — a comparison, `and`, `or`, `unless` — is not arithmetic and does not fold.
+/// Arithmetic is the kernel operation [`BinaryOp::kind`] names and nothing else's: that is where
+/// Prometheus' semantics for `%`, `^` and `atan2` live, so defining them again here would be a
+/// second answer for the two to disagree over. A set operator has no [`BinaryOp`] and does not
+/// fold.
 /// Visible to the planner, which asks whether a statement's value is a constant before binding it.
 pub(crate) fn constant_value(expr: &PromExpr) -> Option<f64> {
     match expr {
@@ -2704,58 +2704,19 @@ pub(crate) fn constant_value(expr: &PromExpr) -> Option<f64> {
             }
             let left = constant_value(&binary.lhs)?;
             let right = constant_value(&binary.rhs)?;
-            if let Some(op) = arithmetic_op(&binary.op) {
-                return Some(op.calculate(left, right));
+            match binary_op(&binary.op)?.kind() {
+                BinaryKind::Arithmetic(op) => Some(op.calculate(left, right)),
+                // A comparison of two constants is the number it reports when it is written with
+                // `bool`: Prometheus reads `1 > bool 2` as `0`, which is the kernel's own
+                // comparison. Without `bool` there is no number to report -- `1 > 2` is a parse
+                // error in Prometheus -- so it is left unfolded and the dispatch refuses it.
+                BinaryKind::Comparison(op) => binary
+                    .return_bool()
+                    .then(|| f64::from(op.apply(left, right))),
             }
-            // A comparison of two constants is the number it reports when it is written with
-            // `bool`: Prometheus reads `1 > bool 2` as `0`, and [`ComparisonOp::apply`] is the same
-            // answer the kernel gives. Without `bool` there is no number to report -- `1 > 2` is a
-            // parse error in Prometheus -- so it is left unfolded and the dispatch refuses it.
-            if binary.return_bool()
-                && let Some(op) = comparison_op(&binary.op)
-            {
-                return Some(f64::from(op.apply(left, right)));
-            }
-            None
         }
         // Calls (`time()`, `scalar(v)`), selectors, range selectors, aggregates and subqueries all
         // read something this compiler cannot know before the query runs.
-        _ => None,
-    }
-}
-
-/// The arithmetic operator a PromQL token denotes, or `None` when the token is not arithmetic.
-///
-/// The token is matched by its id, which is stable and is what the rest of the planner matches on,
-/// rather than by the text it displays as: a symbol this compiler does not recognise is not
-/// arithmetic here rather than a wrong operator. A comparison is `None` here and is folded by
-/// [`comparison_op`] instead, because only a `bool` comparison of two constants has a number to
-/// report; a set operator folds nothing at all.
-fn arithmetic_op(op: &TokenType) -> Option<ArithmeticOp> {
-    match op.id() {
-        token::T_ADD => Some(ArithmeticOp::Add),
-        token::T_SUB => Some(ArithmeticOp::Subtract),
-        token::T_MUL => Some(ArithmeticOp::Multiply),
-        token::T_DIV => Some(ArithmeticOp::Divide),
-        token::T_MOD => Some(ArithmeticOp::Modulo),
-        token::T_POW => Some(ArithmeticOp::Power),
-        token::T_ATAN2 => Some(ArithmeticOp::Atan2),
-        _ => None,
-    }
-}
-
-/// The comparison operator a PromQL token denotes, or `None` when the token is not a comparison.
-///
-/// This is the folding half of [`binary_op`], which binds the same tokens to a node: the fold and
-/// the node have to agree on which token is which comparison, so the two maps sit beside each other.
-fn comparison_op(op: &TokenType) -> Option<ComparisonOp> {
-    match op.id() {
-        token::T_EQLC => Some(ComparisonOp::Equal),
-        token::T_NEQ => Some(ComparisonOp::NotEqual),
-        token::T_GTR => Some(ComparisonOp::Greater),
-        token::T_LSS => Some(ComparisonOp::Less),
-        token::T_GTE => Some(ComparisonOp::GreaterEqual),
-        token::T_LTE => Some(ComparisonOp::LessEqual),
         _ => None,
     }
 }

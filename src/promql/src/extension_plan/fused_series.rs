@@ -1390,16 +1390,7 @@ fn preserves_matching_key(node: &NativeNode, matching: &MatchingLabels) -> bool 
             right,
             matching: binary,
         } if matches!(left.output, NativeType::Scalar(_)) => {
-            let drops_labels = binary.return_bool
-                || !matches!(
-                    binary.op,
-                    crate::vector_match::BinaryOp::Eq
-                        | crate::vector_match::BinaryOp::Ne
-                        | crate::vector_match::BinaryOp::Gt
-                        | crate::vector_match::BinaryOp::Lt
-                        | crate::vector_match::BinaryOp::Ge
-                        | crate::vector_match::BinaryOp::Le
-                );
+            let drops_labels = binary.return_bool || !binary.op.is_comparison();
             (!drops_labels || !labels_removed(&COMPUTED_LABELS))
                 && preserves_matching_key(right, matching)
         }
@@ -1408,16 +1399,7 @@ fn preserves_matching_key(node: &NativeNode, matching: &MatchingLabels) -> bool 
             right,
             matching: binary,
         } if matches!(right.output, NativeType::Scalar(_)) => {
-            let drops_labels = binary.return_bool
-                || !matches!(
-                    binary.op,
-                    crate::vector_match::BinaryOp::Eq
-                        | crate::vector_match::BinaryOp::Ne
-                        | crate::vector_match::BinaryOp::Gt
-                        | crate::vector_match::BinaryOp::Lt
-                        | crate::vector_match::BinaryOp::Ge
-                        | crate::vector_match::BinaryOp::Le
-                );
+            let drops_labels = binary.return_bool || !binary.op.is_comparison();
             (!drops_labels || !labels_removed(&COMPUTED_LABELS))
                 && preserves_matching_key(left, matching)
         }

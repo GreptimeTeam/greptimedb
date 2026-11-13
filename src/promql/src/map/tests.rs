@@ -15,6 +15,7 @@
 mod arithmetic;
 mod broadcast;
 mod comparison;
+mod go_math;
 mod math_functions;
 mod prometheus;
 

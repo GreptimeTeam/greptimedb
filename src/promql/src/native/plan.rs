@@ -421,10 +421,7 @@ pub fn fused_output_tags(node: &NativeNode, source_tags: &[Vec<String>]) -> Opti
 /// operation computes new values, and `bool` reports the comparison's own outcome rather than
 /// either operand's samples, so both drop the name.
 fn keeps_metric_name(matching: &BinaryMatching) -> bool {
-    matches!(
-        matching.op,
-        BinaryOp::Eq | BinaryOp::Ne | BinaryOp::Gt | BinaryOp::Lt | BinaryOp::Ge | BinaryOp::Le
-    ) && !matching.return_bool
+    matching.op.is_comparison() && !matching.return_bool
 }
 
 /// The labels a node reports after the metric name is dropped, which is what a kernel that computes
@@ -1918,10 +1915,7 @@ impl NativeNode {
 /// applies: arithmetic and a `bool` comparison answer a series under the metric name dropped, and a
 /// filtering comparison keeps the label set it read.
 fn broadcast_drops_labels(matching: &BinaryMatching) -> bool {
-    !matches!(
-        matching.op,
-        BinaryOp::Eq | BinaryOp::Ne | BinaryOp::Gt | BinaryOp::Lt | BinaryOp::Ge | BinaryOp::Le
-    ) || matching.return_bool
+    !matching.op.is_comparison() || matching.return_bool
 }
 
 /// Whether `node` hands over one logical series per canonical label set, or several.

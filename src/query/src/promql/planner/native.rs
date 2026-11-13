@@ -3323,11 +3323,7 @@ pub fn discovers_metric_name(selector: &VectorSelector) -> bool {
 
 /// Whether a binary operation reports the samples of the side it keeps, name included.
 fn keeps_metric_name(matching: &promql::vector_match::BinaryMatching) -> bool {
-    use promql::vector_match::BinaryOp;
-    matches!(
-        matching.op,
-        BinaryOp::Eq | BinaryOp::Ne | BinaryOp::Gt | BinaryOp::Lt | BinaryOp::Ge | BinaryOp::Le
-    ) && !matching.return_bool
+    matching.op.is_comparison() && !matching.return_bool
 }
 
 /// The tags a node reports after the metric name is dropped, which is what its runtime does to the
