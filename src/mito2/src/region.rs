@@ -1528,12 +1528,12 @@ impl ManifestContext {
         self.manifest_manager.read().await.has_update().await
     }
 
-    /// Waits for the in-flight checkpoint of a stopped manager, without holding the manifest
-    /// lock. A stopped manager starts no checkpoint, so this instance no longer writes the
-    /// manifest directory afterwards.
+    /// Waits for the in-flight checkpoint of a stopped manager. A stopped manager starts no
+    /// checkpoint, so this instance no longer writes the manifest directory afterwards.
     ///
-    /// [RegionManifestManager::wait_for_pending_checkpoint] instead waits under the manifest
-    /// lock, and its manager need not be stopped.
+    /// Callers must not hold the manifest lock: this takes its read lock, and the lock is not
+    /// reentrant. Under the lock, use [RegionManifestManager::wait_for_pending_checkpoint]
+    /// instead. The wait itself holds no lock.
     pub(crate) async fn wait_for_checkpoint_after_stop(&self) {
         let done = self.manifest_manager.read().await.pending_checkpoint_done();
         done.await;

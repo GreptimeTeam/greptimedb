@@ -1847,12 +1847,17 @@ impl<S> RegionWorkerLoop<S> {
         }
         // Closes remaining regions.
         let regions = self.regions.list_regions();
-        for region in regions {
+        for region in &regions {
             region.deactivate_region_manifest_size_metric();
             region.stop().await;
-            // Another engine may open the region from the same storage after the stop.
-            region.manifest_ctx.wait_for_checkpoint_after_stop().await;
         }
+        // Another engine may open the regions from the same storage after the stop.
+        join_all(
+            regions
+                .iter()
+                .map(|region| region.manifest_ctx.wait_for_checkpoint_after_stop()),
+        )
+        .await;
 
         self.regions.clear();
     }

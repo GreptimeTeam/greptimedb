@@ -25,6 +25,7 @@ use object_store::layers::mock::{
 };
 use store_api::storage::{FileId, RegionId};
 use strum::IntoEnumIterator;
+use tokio::sync::Notify;
 
 use crate::error::Error::{ChecksumMismatch, ManifestDeltaNotFound};
 use crate::manifest::action::{
@@ -891,13 +892,17 @@ async fn pending_checkpoint_done_waits_until_the_task_ends(#[case] abort: bool) 
     );
 }
 
-/// Panics on the first delete, which a checkpoint issues in its cleanup.
+/// Panics on the first delete, which a checkpoint issues in its cleanup, once released.
 struct PanickingDeleter {
+    entered: Arc<Notify>,
+    release: Arc<Notify>,
     panicked: Arc<AtomicBool>,
 }
 
 impl oio::Delete for PanickingDeleter {
     async fn delete(&mut self, _path: &str, _args: OpDelete) -> MockResult<()> {
+        self.entered.notify_one();
+        self.release.notified().await;
         self.panicked.store(true, Ordering::Relaxed);
         panic!("mock manifest delete panic");
     }
@@ -909,11 +914,16 @@ impl oio::Delete for PanickingDeleter {
 
 #[tokio::test]
 async fn pending_checkpoint_done_ends_when_the_task_panics() {
+    let entered = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
     let panicked = Arc::new(AtomicBool::new(false));
-    let factory_panicked = panicked.clone();
+    let (factory_entered, factory_release, factory_panicked) =
+        (entered.clone(), release.clone(), panicked.clone());
     let mock_layer = MockLayerBuilder::default()
         .deleter_factory(Arc::new(move |_inner| {
             Box::new(PanickingDeleter {
+                entered: factory_entered.clone(),
+                release: factory_release.clone(),
                 panicked: factory_panicked.clone(),
             })
         }))
@@ -928,7 +938,18 @@ async fn pending_checkpoint_done_ends_when_the_task_panics() {
         .unwrap();
 
     manager.update(nop_action(), false).await.unwrap();
-    tokio::time::timeout(Duration::from_secs(5), manager.pending_checkpoint_done())
+    tokio::time::timeout(Duration::from_secs(5), entered.notified())
+        .await
+        .expect("checkpoint cleanup did not start");
+    let mut done = Box::pin(manager.pending_checkpoint_done());
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), &mut done)
+            .await
+            .is_err(),
+        "the wait ended before the checkpoint task panicked"
+    );
+    release.notify_one();
+    tokio::time::timeout(Duration::from_secs(5), done)
         .await
         .expect("the wait did not end after the checkpoint task panicked");
     assert!(panicked.load(Ordering::Relaxed));
