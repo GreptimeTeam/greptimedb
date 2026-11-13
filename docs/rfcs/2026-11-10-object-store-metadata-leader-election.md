@@ -178,7 +178,7 @@ Admission requires strong single-object read-after-write consistency and atomic 
 
 First-phase qualification covers S3-compatible backends, including MinIO, Azure Blob, and GCS. Each actual endpoint must pass the startup probe through the production Head read/write path and configured OpenDAL layers. S3 and Azure use ETag conditions; GCS uses the generation exposed as `Metadata::version()`. GCS must pass real-endpoint generation-path tests before it is enabled; that validation has not been performed for this RFC revision.
 
-The current OpenDAL OSS write path lacks atomic replacement conditioned on the version read, so OSS is deferred. Reassessment requires real-bucket tests of `PutObject` conditional-write behavior and a conforming adapter. The local filesystem and other backends without the same atomic condition, coherent metadata, or strong-read guarantees are also excluded; declared flags or read-then-unconditional-write emulation do not satisfy admission.
+Alibaba OSS server-side `PutObject` rejects `If-Match` and `If-None-Match` with `NotImplemented` (`0017-00000245`); see [Alibaba Cloud's documentation](https://www.alibabacloud.com/help/en/oss/user-guide/0017-00000245). OSS is therefore not supported by the current Head protocol, which requires atomic replacement conditioned on the version read. The local filesystem and other backends without the same atomic condition, coherent metadata, or strong-read guarantees are also excluded; declared flags or read-then-unconditional-write emulation do not satisfy admission.
 
 The current OpenDAL write interfaces for HDFS and MySQL also lack the required conditional replacement; the MySQL restriction applies to the adapter. HDFS `append` only appends bytes and cannot replace this version-checked Head update: using it would require a separate election protocol, and append support varies by backend.
 
@@ -528,7 +528,7 @@ Qualify S3-compatible endpoints including MinIO, Azure Blob, and GCS through the
 - **F15, F16:** check candidate listing metadata and each backend's actual conditional-delete capability and behavior, including versioned storage and refresh/delete interleavings.
 - **F4, F7–F12:** repeat fault-injection schedules with real request delays, routing cutoffs, and event handlers. Measure renewal request and read-back latency under queued load to validate the margin provided by the ten-second lease and five-second renewal interval.
 
-OSS remains deferred. Its future qualification must test real-bucket `PutObject` conditional writes and the adapter's preservation of the same atomic replacement contract before admission is reconsidered.
+Future OSS support requires evaluating a separate election protocol, such as one based on immutable records.
 
 # Implementation plan
 The work is split into reviewable changes:
