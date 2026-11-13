@@ -52,75 +52,15 @@ pub(crate) enum StateChunk {
     Row(crate::aggregate::state::StateRow),
 }
 
-/// The state kind an aggregate's states are states of.
-///
-/// Every kind this returns is one the kernel keeps a mergeable partial for; `quantile` and the
-/// other non-mergeable aggregates are rejected earlier, when the compiler binds the tree.
-pub(crate) fn state_kind(op: AggregateOp) -> AggregateStateKind {
-    match op {
-        AggregateOp::Sum => AggregateStateKind::Sum,
-        AggregateOp::Count => AggregateStateKind::Count,
-        AggregateOp::Avg => AggregateStateKind::Avg,
-        AggregateOp::Min => AggregateStateKind::Min,
-        AggregateOp::Max => AggregateStateKind::Max,
-        AggregateOp::Group => AggregateStateKind::Group,
-        AggregateOp::Stddev => AggregateStateKind::Stddev,
-        AggregateOp::Stdvar => AggregateStateKind::Stdvar,
-    }
-}
-
-/// The accumulator components an aggregate's state carries, in kernel order.
-///
-/// Derived from [`AggregateOp::state_fields`](crate::aggregate::AggregateOp::state_fields) so the
-/// frame layout and the kernel cannot drift apart: adding a component to a kernel adds a column to
-/// its state frames in the same change.
-fn state_components(op: AggregateOp) -> Vec<StateComponent> {
-    op.state_fields()
-        .iter()
-        .map(|field| match field {
-            crate::aggregate::StateField::Value => StateComponent::Value,
-            crate::aggregate::StateField::Mean => StateComponent::Mean,
-            crate::aggregate::StateField::Compensation => StateComponent::Compensation,
-            crate::aggregate::StateField::Count => StateComponent::Count,
-            crate::aggregate::StateField::IncrementalMean => StateComponent::IncrementalMean,
-        })
-        .collect()
-}
-
-/// Rejects a bound state whose kind or component layout is not what `op` produces.
-///
-/// Both halves matter. A frame carries its kind so a `sum` state is never merged as an `avg` one,
-/// and it carries the component list so a merge reads exactly the columns the producer wrote. Two
-/// states of one kind over the same field count and grid are still not interchangeable if their
-/// components differ, which is why the comparison is over the list and not over its length.
-fn ensure_bound_state(op: AggregateOp, state_schema: &AggregateStateSchema) -> Result<()> {
-    if state_schema.kind != state_kind(op) {
-        return Err(DataFusionError::Execution(format!(
-            "aggregate state of kind {:?} is not {:?} state",
-            state_schema.kind,
-            state_kind(op)
-        )));
-    }
-    let expected = state_components(op);
-    if state_schema.components.as_ref() != expected.as_slice() {
-        return Err(DataFusionError::Execution(format!(
-            "aggregate state components {:?} are not what {:?} produces: {:?}",
-            state_schema.components, op, expected
-        )));
-    }
-    Ok(())
-}
-
 /// Hands one partition's kernel state over as the frame state a consumer reads.
 ///
 /// The fold already builds the frame's own representation - field-major states on sparse absolute
-/// grid positions - so this moves the groups and checks the binding. It copies nothing: the charge
-/// the fold reported for those groups is the charge the chunk keeps.
+/// grid positions - so this moves the groups. It copies nothing: the charge the fold reported for
+/// those groups is the charge the chunk keeps.
 pub(crate) fn state_chunk_from_partial(
     partial: PartialAggregate,
     state_schema: Arc<AggregateStateSchema>,
 ) -> Result<StateChunk> {
-    ensure_bound_state(partial.op, state_schema.as_ref())?;
     Ok(StateChunk::Series {
         series: partial.groups,
         state_schema,
