@@ -1,0 +1,215 @@
+-- A filter on `date_bin(stride, ts)` bounds the time index, so it prunes SST files.
+-- This is what a filter on a view's `date_bin(...) AS time` column becomes once it is
+-- pushed below the view's aggregate.
+CREATE TABLE
+    IF NOT EXISTS `power` (
+        `topic` STRING NULL,
+        `p` DOUBLE NULL,
+        `ts` TIMESTAMP(9) NOT NULL,
+        TIME INDEX (`ts`),
+    ) ENGINE = mito
+WITH
+    (append_mode = 'true');
+
+Affected Rows: 0
+
+-- One SST file per day.
+INSERT INTO
+    power
+VALUES
+    ("a", 1, "2023-06-10 10:00:10"),
+    ("a", 3, "2023-06-10 10:00:50"),
+    ("b", 5, "2023-06-10 23:59:59");
+
+Affected Rows: 3
+
+ADMIN FLUSH_TABLE ('power');
+
++----------------------------+
+| ADMIN FLUSH_TABLE('power') |
++----------------------------+
+| 0                          |
++----------------------------+
+
+INSERT INTO
+    power
+VALUES
+    ("a", 10, "2023-06-11 00:00:00"),
+    ("a", 20, "2023-06-11 00:00:30"),
+    ("b", 30, "2023-06-11 12:00:00");
+
+Affected Rows: 3
+
+ADMIN FLUSH_TABLE ('power');
+
++----------------------------+
+| ADMIN FLUSH_TABLE('power') |
++----------------------------+
+| 0                          |
++----------------------------+
+
+INSERT INTO
+    power
+VALUES
+    ("a", 100, "2023-06-12 00:00:00"),
+    ("b", 200, "2023-06-12 08:30:00");
+
+Affected Rows: 2
+
+ADMIN FLUSH_TABLE ('power');
+
++----------------------------+
+| ADMIN FLUSH_TABLE('power') |
++----------------------------+
+| 0                          |
++----------------------------+
+
+CREATE VIEW power_per_minute AS
+SELECT
+    date_bin('1 minute' :: INTERVAL, ts) AS time,
+    topic,
+    avg(p) AS p
+FROM
+    power
+GROUP BY
+    time,
+    topic;
+
+Affected Rows: 0
+
+SELECT * FROM power_per_minute WHERE time >= '2023-06-11 00:00:00' ORDER BY time, topic;
+
++---------------------+-------+-------+
+| time                | topic | p     |
++---------------------+-------+-------+
+| 2023-06-11T00:00:00 | a     | 15.0  |
+| 2023-06-11T12:00:00 | b     | 30.0  |
+| 2023-06-12T00:00:00 | a     | 100.0 |
+| 2023-06-12T08:30:00 | b     | 200.0 |
++---------------------+-------+-------+
+
+SELECT * FROM power_per_minute WHERE time > '2023-06-11 00:00:00' ORDER BY time, topic;
+
++---------------------+-------+-------+
+| time                | topic | p     |
++---------------------+-------+-------+
+| 2023-06-11T12:00:00 | b     | 30.0  |
+| 2023-06-12T00:00:00 | a     | 100.0 |
+| 2023-06-12T08:30:00 | b     | 200.0 |
++---------------------+-------+-------+
+
+-- The bucket starting at 2023-06-10 23:59:00 holds a row from the first file.
+SELECT * FROM power_per_minute WHERE time < '2023-06-11 00:00:00' ORDER BY time, topic;
+
++---------------------+-------+-----+
+| time                | topic | p   |
++---------------------+-------+-----+
+| 2023-06-10T10:00:00 | a     | 2.0 |
+| 2023-06-10T23:59:00 | b     | 5.0 |
++---------------------+-------+-----+
+
+SELECT * FROM power_per_minute WHERE time <= '2023-06-10 23:59:00' ORDER BY time, topic;
+
++---------------------+-------+-----+
+| time                | topic | p   |
++---------------------+-------+-----+
+| 2023-06-10T10:00:00 | a     | 2.0 |
+| 2023-06-10T23:59:00 | b     | 5.0 |
++---------------------+-------+-----+
+
+SELECT * FROM power_per_minute WHERE time = '2023-06-11 00:00:00' ORDER BY time, topic;
+
++---------------------+-------+------+
+| time                | topic | p    |
++---------------------+-------+------+
+| 2023-06-11T00:00:00 | a     | 15.0 |
++---------------------+-------+------+
+
+SELECT * FROM power_per_minute WHERE time BETWEEN '2023-06-11 00:00:00' AND '2023-06-11 23:59:00' ORDER BY time, topic;
+
++---------------------+-------+------+
+| time                | topic | p    |
++---------------------+-------+------+
+| 2023-06-11T00:00:00 | a     | 15.0 |
+| 2023-06-11T12:00:00 | b     | 30.0 |
++---------------------+-------+------+
+
+SELECT * FROM power_per_minute WHERE '2023-06-12 00:00:00' <= time ORDER BY time, topic;
+
++---------------------+-------+-------+
+| time                | topic | p     |
++---------------------+-------+-------+
+| 2023-06-12T00:00:00 | a     | 100.0 |
+| 2023-06-12T08:30:00 | b     | 200.0 |
++---------------------+-------+-------+
+
+-- Only the file of 2023-06-12 is scanned.
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (metrics.*) REDACTED
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (Hash.*) REDACTED
+-- SQLNESS REPLACE \\?"(file_summary|max_part_range)\\?":.* "$1":REDACTED
+EXPLAIN ANALYZE SELECT count(*) FROM power_per_minute WHERE time >= '2023-06-12 00:00:00';
+
++-+-+-+
+| stage | node | plan_|
++-+-+-+
+| 0_| 0_|_CooperativeExec REDACTED
+|_|_|_MergeScanExec: REDACTED
+|_|_|_|
+| 1_| 0_|_ProjectionExec: expr=[count(Int64(1))@0 as count(*)] REDACTED
+|_|_|_AggregateExec: mode=Final, gby=[], aggr=[count(Int64(1))] REDACTED
+|_|_|_CoalescePartitionsExec REDACTED
+|_|_|_AggregateExec: mode=Partial, gby=[], aggr=[count(Int64(1))] REDACTED
+|_|_|_ProjectionExec: expr=[] REDACTED
+|_|_|_AggregateExec: mode=FinalPartitioned, gby=[date_bin(Utf8("1 minute"),greptime.public.power.ts)@0 as date_bin(Utf8("1 minute"),greptime.public.power.ts), topic@1 as topic], aggr=[] REDACTED
+|_|_|_RepartitionExec: partitioning=REDACTED
+|_|_|_AggregateExec: mode=Partial, gby=[date_bin(IntervalMonthDayNano { months: 0, days: 0, nanoseconds: 60000000000 }, ts@1) as date_bin(Utf8("1 minute"),greptime.public.power.ts), topic@0 as topic], aggr=[] REDACTED
+|_|_|_FilterExec: date_bin(IntervalMonthDayNano { months: 0, days: 0, nanoseconds: 60000000000 }, ts@1) >= 1686528000000000000 REDACTED
+|_|_|_UnorderedScan: region=REDACTED, "partition_count":{"count":1, "mem_ranges":0, "files":1, "file_ranges":1}, "projection": ["topic", "ts"], "filters": ["date_bin(IntervalMonthDayNano(\"IntervalMonthDayNano { months: 0, days: 0, nanoseconds: 60000000000 }\"), ts) >= TimestampNanosecond(1686528000000000000, None)"], "time_range": "TimestampRange{[1686528000000000000ns,#)}", "file_summary":REDACTED
+|_|_|_|
+|_|_| Total rows: 1_|
++-+-+-+
+
+-- The files of 2023-06-10 and 2023-06-11 are scanned: the upper bound is widened by one stride.
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (metrics.*) REDACTED
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (Hash.*) REDACTED
+-- SQLNESS REPLACE \\?"(file_summary|max_part_range)\\?":.* "$1":REDACTED
+EXPLAIN ANALYZE SELECT count(*) FROM power_per_minute WHERE time < '2023-06-11 00:00:00';
+
++-+-+-+
+| stage | node | plan_|
++-+-+-+
+| 0_| 0_|_CooperativeExec REDACTED
+|_|_|_MergeScanExec: REDACTED
+|_|_|_|
+| 1_| 0_|_ProjectionExec: expr=[count(Int64(1))@0 as count(*)] REDACTED
+|_|_|_AggregateExec: mode=Final, gby=[], aggr=[count(Int64(1))] REDACTED
+|_|_|_CoalescePartitionsExec REDACTED
+|_|_|_AggregateExec: mode=Partial, gby=[], aggr=[count(Int64(1))] REDACTED
+|_|_|_ProjectionExec: expr=[] REDACTED
+|_|_|_AggregateExec: mode=FinalPartitioned, gby=[date_bin(Utf8("1 minute"),greptime.public.power.ts)@0 as date_bin(Utf8("1 minute"),greptime.public.power.ts), topic@1 as topic], aggr=[] REDACTED
+|_|_|_RepartitionExec: partitioning=REDACTED
+|_|_|_AggregateExec: mode=Partial, gby=[date_bin(IntervalMonthDayNano { months: 0, days: 0, nanoseconds: 60000000000 }, ts@1) as date_bin(Utf8("1 minute"),greptime.public.power.ts), topic@0 as topic], aggr=[] REDACTED
+|_|_|_FilterExec: date_bin(IntervalMonthDayNano { months: 0, days: 0, nanoseconds: 60000000000 }, ts@1) < 1686441600000000000 REDACTED
+|_|_|_UnorderedScan: region=REDACTED, "partition_count":{"count":2, "mem_ranges":0, "files":2, "file_ranges":2}, "projection": ["topic", "ts"], "filters": ["date_bin(IntervalMonthDayNano(\"IntervalMonthDayNano { months: 0, days: 0, nanoseconds: 60000000000 }\"), ts) < TimestampNanosecond(1686441600000000000, None)"], "time_range": "TimestampRange{[#,1686441660000000000ns)}", "file_summary":REDACTED
+|_|_|_|
+|_|_| Total rows: 1_|
++-+-+-+
+
+DROP VIEW power_per_minute;
+
+Affected Rows: 0
+
+DROP TABLE power;
+
+Affected Rows: 0
+
