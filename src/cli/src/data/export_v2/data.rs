@@ -390,7 +390,7 @@ fn build_azblob_connection(storage: &ObjectStoreConfig) -> (String, Vec<Option<S
         ));
     }
 
-    let secrets = vec![account_name, account_key, sas_token];
+    let secrets = vec![sas_token, account_name, account_key];
     let connection = if options.is_empty() {
         String::new()
     } else {
@@ -518,9 +518,9 @@ mod tests {
     fn test_build_azblob_connection_redacts_sas_token() {
         let storage = ObjectStoreConfig {
             azblob: PrefixedAzblobConnection {
-                azblob_account_name: Some(SecretString::from("account".to_string())),
+                azblob_account_name: Some(SecretString::from("sig".to_string())),
                 azblob_account_key: Some(SecretString::from("key".to_string())),
-                azblob_sas_token: Some("sig=secret-token".to_string().into()),
+                azblob_sas_token: Some("sv=2024-11-04&sig=CANARY_SIGNATURE".to_string().into()),
                 ..Default::default()
             },
             ..Default::default()
@@ -529,9 +529,9 @@ mod tests {
         let (connection, secrets) = build_azblob_connection(&storage);
         let masked = mask_secrets(&connection, &secrets);
 
-        assert!(connection.contains("SAS_TOKEN='sig=secret-token'"));
+        assert!(connection.contains("SAS_TOKEN='sv=2024-11-04&sig=CANARY_SIGNATURE'"));
         assert!(masked.contains("SAS_TOKEN='[REDACTED]'"));
-        assert!(!masked.contains("sig=secret-token"));
+        assert!(!masked.contains("CANARY_SIGNATURE"));
     }
 
     #[test]
