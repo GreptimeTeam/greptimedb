@@ -23,6 +23,7 @@ use common_telemetry::info;
 use store_api::storage::{FileId, RegionId};
 use tokio::sync::{Notify, Semaphore};
 
+use crate::error::Error;
 use crate::sst::file::RegionFileId;
 
 /// Mito engine background event listener.
@@ -36,6 +37,18 @@ pub trait EventListener: Send + Sync {
 
     /// Notifies the listener before a catchup reopens the region.
     async fn on_catchup_reopen_begin(&self, _region_id: RegionId) {}
+
+    /// Notifies the listener before a tail replay commits its result.
+    async fn on_tail_commit_begin(&self, _region_id: RegionId) {}
+
+    /// Notifies the listener each time a tail replay checks for a Leader lease while it waits.
+    fn on_tail_lease_check(&self, _region_id: RegionId) {}
+
+    /// Notifies the listener that a round of tail replay failed and will be retried.
+    fn on_tail_replay_failed(&self, _region_id: RegionId, _error: &Error) {}
+
+    /// Notifies the listener after the worker learns that a tail replay ended.
+    fn on_tail_replay_ended(&self, _region_id: RegionId) {}
 
     /// Notifies the listener that a region is flushed successfully.
     fn on_flush_success(&self, region_id: RegionId) {

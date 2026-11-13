@@ -54,6 +54,7 @@ use crate::region::{ManifestContext, RegionLeaderState, RegionRoleState};
 use crate::schedule::scheduler::LocalScheduler;
 use crate::sst::FormatType;
 use crate::sst::file::{self, FileHandle, FileMeta, UncommittedSsts};
+use crate::sst::file_metadata::{FileMetadataInterner, FileMetadataInternerRef};
 use crate::sst::file_purger::LocalFilePurger;
 use crate::sst::index::intermediate::IntermediateManager;
 use crate::sst::index::puffin_manager::PuffinManagerFactory;
@@ -208,6 +209,7 @@ pub struct OpenCompactionRegionRequest {
 /// stale intermediate files, so repeating it can delete another job's live files.
 #[derive(Clone)]
 pub struct CompactionRegionOpener {
+    file_metadata_interner: FileMetadataInternerRef,
     mito_config: Arc<MitoConfig>,
     object_store_manager: ObjectStoreManagerRef,
     puffin_manager_factory: PuffinManagerFactory,
@@ -232,6 +234,7 @@ impl CompactionRegionOpener {
             IntermediateManager::init_fs(&mito_config.index.aux_path).await?;
 
         Ok(Self {
+            file_metadata_interner: FileMetadataInterner::new(),
             mito_config: Arc::new(mito_config),
             object_store_manager,
             puffin_manager_factory,
@@ -270,8 +273,12 @@ impl CompactionRegionOpener {
         let manifest_manager = {
             let region_dir =
                 region_dir_from_table_dir(&req.table_dir, req.region_id, req.path_type);
-            let region_manifest_options =
-                RegionManifestOptions::new(mito_config, &region_dir, object_store);
+            let region_manifest_options = RegionManifestOptions::new(
+                mito_config,
+                &region_dir,
+                object_store,
+                self.file_metadata_interner.clone(),
+            );
 
             RegionManifestManager::open(region_manifest_options, &Default::default())
                 .await?
@@ -715,7 +722,7 @@ impl SstMerger for DefaultSstMerger {
                     num_rows: sst_info.num_rows as u64,
                     num_row_groups: sst_info.num_row_groups,
                     sequence: sequence_metadata.file_sequence,
-                    partition_expr: partition_expr.clone(),
+                    partition_expr: partition_expr.clone().map(Into::into),
                     num_series: sst_info.num_series,
                     primary_key_min,
                     primary_key_max,

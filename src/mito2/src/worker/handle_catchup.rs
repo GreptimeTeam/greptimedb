@@ -32,8 +32,7 @@ use crate::request::OptionOutputTx;
 #[cfg(feature = "hdfs-object-store")]
 use crate::temp_file_sweeper;
 use crate::wal::entry_distributor::WalEntryReceiver;
-use crate::worker::RegionWorkerLoop;
-use crate::worker::drain_ended_staging;
+use crate::worker::{RegionWorkerLoop, drain_ended_staging, handle_tail_replay};
 
 impl<S: LogStore> RegionWorkerLoop<S> {
     pub(crate) async fn handle_catchup_request(
@@ -113,6 +112,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                                     error!(err; "Failed to set region {region_id} to leader");
                                 }
                             }
+                            handle_tail_replay::notify_writable(&worker_sender, &region);
                         }
                     }
                     catchup_regions.remove_region(region_id);

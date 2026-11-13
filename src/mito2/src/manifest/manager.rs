@@ -42,11 +42,14 @@ use crate::manifest::storage::{
 };
 use crate::metrics::MANIFEST_OP_ELAPSED;
 use crate::region::ManifestStats;
+use crate::sst::file_metadata::FileMetadataInternerRef;
 use crate::sst::{FormatType, file};
 
 /// Options for [RegionManifestManager].
 #[derive(Debug, Clone)]
 pub struct RegionManifestOptions {
+    /// Shares immutable file metadata with runtime readers in this engine.
+    pub(crate) file_metadata_interner: FileMetadataInternerRef,
     /// Directory to store manifest.
     pub manifest_dir: String,
     pub object_store: ObjectStore,
@@ -63,9 +66,15 @@ pub struct RegionManifestOptions {
 }
 
 impl RegionManifestOptions {
-    /// Creates a new [RegionManifestOptions] with the given region directory, object store, and configuration.
-    pub fn new(config: &MitoConfig, region_dir: &str, object_store: &ObjectStore) -> Self {
+    /// Creates options using the same metadata interner as the owner's runtime file views.
+    pub fn new(
+        config: &MitoConfig,
+        region_dir: &str,
+        object_store: &ObjectStore,
+        file_metadata_interner: FileMetadataInternerRef,
+    ) -> Self {
         RegionManifestOptions {
+            file_metadata_interner,
             manifest_dir: manifest_dir(region_dir),
             object_store: object_store.clone(),
             // We don't allow users to set the compression algorithm as we use it as a file suffix.
@@ -164,6 +173,7 @@ pub struct RemoveFileOptions {
 /// ```
 #[derive(Debug)]
 pub struct RegionManifestManager {
+    file_metadata_interner: FileMetadataInternerRef,
     store: ManifestObjectStore,
     last_version: Arc<AtomicU64>,
     checkpointer: Checkpointer,
@@ -230,6 +240,7 @@ impl RegionManifestManager {
         )
         .with_conditional_publication(options.conditional_publication)?;
         let manifest_version = stats.manifest_version.clone();
+        let file_metadata_interner = options.file_metadata_interner.clone();
 
         info!(
             "Creating region manifest in {} with metadata {:?}, flushed_entry_id: {}",
@@ -237,7 +248,7 @@ impl RegionManifestManager {
         );
 
         let version = MIN_VERSION;
-        let mut manifest_builder = RegionManifestBuilder::default();
+        let mut manifest_builder = RegionManifestBuilder::new(file_metadata_interner.clone());
         // set the initial metadata.
         manifest_builder.apply_change(
             version,
@@ -284,6 +295,7 @@ impl RegionManifestManager {
             .removed_files
             .update_file_removed_cnt_to_stats(stats);
         let manager = Self {
+            file_metadata_interner,
             store,
             last_version: manifest_version,
             checkpointer,
@@ -318,6 +330,7 @@ impl RegionManifestManager {
         )
         .with_conditional_publication(options.conditional_publication)?;
         let manifest_version = stats.manifest_version.clone();
+        let file_metadata_interner = options.file_metadata_interner.clone();
 
         // recover from storage
         // construct manifest builder
@@ -334,13 +347,16 @@ impl RegionManifestManager {
                 options.manifest_dir, checkpoint.last_version
             );
             version = version.max(checkpoint.last_version + 1);
-            RegionManifestBuilder::with_checkpoint(checkpoint.checkpoint)
+            RegionManifestBuilder::with_checkpoint(
+                checkpoint.checkpoint,
+                file_metadata_interner.clone(),
+            )
         } else {
             info!(
                 "Checkpoint not found in {}, build manifest from scratch",
                 options.manifest_dir
             );
-            RegionManifestBuilder::default()
+            RegionManifestBuilder::new(file_metadata_interner.clone())
         };
 
         let replay_start_version = version;
@@ -414,6 +430,7 @@ impl RegionManifestManager {
             open_start.elapsed(),
         );
         let manager = Self {
+            file_metadata_interner,
             store,
             last_version: manifest_version,
             checkpointer,
@@ -527,8 +544,10 @@ impl RegionManifestManager {
         }
 
         debug_assert_eq!(manifests.first().unwrap().0, last_version + 1);
-        let mut manifest_builder =
-            RegionManifestBuilder::with_checkpoint(Some(self.manifest.as_ref().clone()));
+        let mut manifest_builder = RegionManifestBuilder::from_shared_manifest(
+            Some(self.manifest.as_ref().clone()),
+            self.file_metadata_interner.clone(),
+        );
 
         for (manifest_version, raw_action_list) in manifests {
             let action_list = RegionMetaActionList::decode(&raw_action_list)?;
@@ -591,7 +610,10 @@ impl RegionManifestManager {
             }
             .fail();
         };
-        let builder = RegionManifestBuilder::with_checkpoint(checkpoint.checkpoint);
+        let builder = RegionManifestBuilder::with_checkpoint(
+            checkpoint.checkpoint,
+            self.file_metadata_interner.clone(),
+        );
         let manifest = builder.try_build()?;
         let last_version = self.set_version(manifest.manifest_version);
         manifest
@@ -692,8 +714,10 @@ impl RegionManifestManager {
             self.set_version(version);
         }
 
-        let mut manifest_builder =
-            RegionManifestBuilder::with_checkpoint(Some(self.manifest.as_ref().clone()));
+        let mut manifest_builder = RegionManifestBuilder::from_shared_manifest(
+            Some(self.manifest.as_ref().clone()),
+            self.file_metadata_interner.clone(),
+        );
         self.apply_actions(&mut manifest_builder, version, actions);
         let new_manifest = manifest_builder.try_build()?;
         new_manifest
@@ -770,8 +794,10 @@ impl RegionManifestManager {
         }
 
         let base = self.staged.view.as_ref().unwrap_or(&self.manifest);
-        let mut manifest_builder =
-            RegionManifestBuilder::with_checkpoint(Some(base.as_ref().clone()));
+        let mut manifest_builder = RegionManifestBuilder::from_shared_manifest(
+            Some(base.as_ref().clone()),
+            self.file_metadata_interner.clone(),
+        );
         self.apply_actions(
             &mut manifest_builder,
             self.last_version(),
@@ -1043,6 +1069,67 @@ mod test {
             .unwrap();
         let manifest = manager.manifest();
         assert_eq!(manifest.metadata.partition_expr.as_deref(), Some(expr_json));
+    }
+
+    #[tokio::test]
+    async fn recover_historical_file_expression_types() {
+        use datatypes::value::Value;
+        use partition::expr::col;
+        use store_api::storage::FileId;
+
+        use crate::sst::file::FileMeta;
+
+        for checkpoint_distance in [0, 1] {
+            let env = TestEnv::new().await;
+            let metadata = Arc::new(basic_region_metadata());
+            let mut manager = env
+                .create_manifest_manager(
+                    CompressionType::Uncompressed,
+                    checkpoint_distance,
+                    Some(metadata.clone()),
+                )
+                .await
+                .unwrap()
+                .unwrap();
+            let mut files = Vec::new();
+            for value in [Value::Int32(10), Value::Int64(10)] {
+                let file = FileMeta {
+                    region_id: metadata.region_id,
+                    file_id: FileId::random(),
+                    partition_expr: Some(col("tag").lt(value).into()),
+                    ..Default::default()
+                };
+                manager
+                    .update(
+                        RegionMetaActionList::with_action(RegionMetaAction::Edit(RegionEdit {
+                            files_to_add: vec![file.clone()],
+                            ..Default::default()
+                        })),
+                        false,
+                    )
+                    .await
+                    .unwrap();
+                manager.wait_for_pending_checkpoint().await;
+                files.push(file);
+            }
+            assert_eq!(
+                checkpoint_distance != 0,
+                manager.checkpointer.last_checkpoint_version() > 0
+            );
+            manager.stop().await;
+            drop(manager);
+            // The helper supplies a fresh interner, so recovery cannot reuse old entries.
+            let recovered = env
+                .create_manifest_manager(CompressionType::Uncompressed, checkpoint_distance, None)
+                .await
+                .unwrap()
+                .unwrap();
+            let manifest = recovered.manifest();
+            assert_eq!(files.len(), manifest.files.len());
+            for file in files {
+                assert_eq!(&file, manifest.files[&file.file_id].as_ref());
+            }
+        }
     }
 
     #[tokio::test]

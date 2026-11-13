@@ -69,18 +69,28 @@ pub struct KafkaClientSasl {
 pub enum KafkaClientSaslConfig {
     Plain {
         username: String,
+        #[serde(serialize_with = "serialize_password")]
         password: String,
     },
     #[serde(rename = "SCRAM-SHA-256")]
     ScramSha256 {
         username: String,
+        #[serde(serialize_with = "serialize_password")]
         password: String,
     },
     #[serde(rename = "SCRAM-SHA-512")]
     ScramSha512 {
         username: String,
+        #[serde(serialize_with = "serialize_password")]
         password: String,
     },
+}
+
+fn serialize_password<S>(_: &str, serializer: S) -> std::result::Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    serializer.serialize_str("<REDACTED>")
 }
 
 impl fmt::Debug for KafkaClientSaslConfig {

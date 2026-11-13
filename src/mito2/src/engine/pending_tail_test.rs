@@ -23,7 +23,7 @@ use datatypes::schema::{ColumnDefaultConstraint, ColumnSchema};
 use rstest::rstest;
 use store_api::logstore::provider::RaftEngineProvider;
 use store_api::metadata::ColumnMetadata;
-use store_api::region_engine::RegionEngine;
+use store_api::region_engine::{RegionEngine, SetRegionRoleStateResponse, SettableRegionRoleState};
 use store_api::region_request::{
     AddColumn, AlterKind, EnterStagingRequest, RegionAlterRequest, RegionCloseRequest,
     RegionCompactRequest, RegionCreateRequest, RegionDropRequest, RegionFlushReason,
@@ -95,7 +95,7 @@ pub(crate) fn pending_tails_edit(pending_tails: Vec<PendingTail>) -> RegionEdit 
     }
 }
 
-async fn commit_edit(engine: &MitoEngine, region_id: RegionId, edit: RegionEdit) {
+pub(crate) async fn commit_edit(engine: &MitoEngine, region_id: RegionId, edit: RegionEdit) {
     let region = engine.get_region(region_id).unwrap();
     region
         .manifest_ctx
@@ -120,7 +120,7 @@ pub(crate) async fn set_pending_tails(
 }
 
 async fn reopen(engine: &MitoEngine, region_id: RegionId, request: RegionCreateRequest) {
-    reopen_region(engine, region_id, request.table_dir, true, request.options).await;
+    reopen_region(engine, region_id, request.table_dir, false, request.options).await;
 }
 
 fn wal_span(env: &TestEnv, region_id: RegionId) -> (Option<EntryId>, Option<EntryId>) {
@@ -252,7 +252,7 @@ fn assert_pending_tails_error(err: &BoxedError) {
     );
 }
 
-fn add_field(default_constraint: Option<ColumnDefaultConstraint>) -> AlterKind {
+pub(crate) fn add_field(default_constraint: Option<ColumnDefaultConstraint>) -> AlterKind {
     let column_schema = ColumnSchema::new("field_1", ConcreteDataType::float64_datatype(), true)
         .with_default_constraint(default_constraint)
         .unwrap();
@@ -395,6 +395,14 @@ async fn test_enter_staging_rejects_region_with_pending_tails() {
         .await
         .unwrap_err();
 
+    assert_pending_tails_error(&err);
+    let response = engine
+        .set_region_role_state_gracefully(region_id, SettableRegionRoleState::StagingLeader)
+        .await
+        .unwrap();
+    let SetRegionRoleStateResponse::InvalidTransition(err) = response else {
+        panic!("{response:?}");
+    };
     assert_pending_tails_error(&err);
     let region = engine.get_region(region_id).unwrap();
     assert!(!region.is_staging());

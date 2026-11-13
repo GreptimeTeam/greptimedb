@@ -69,6 +69,7 @@ impl<S> RegionWorkerLoop<S> {
             self.config.clone(),
             self.object_store_manager.clone(),
             self.node_lease.is_enabled(),
+            self.file_ref_manager.file_metadata_interner.clone(),
         );
         let worker_sender = self.sender.clone();
 
@@ -230,7 +231,7 @@ impl<S> RegionWorkerLoop<S> {
         for (file_id, file_meta) in &source_region_manifest.files {
             if !target_region_manifest.files.contains_key(file_id) {
                 new_file_metas.push(if file_meta.level == file::LEVEL_SHARED {
-                    file_meta.clone()
+                    file_meta.as_ref().clone()
                 } else {
                     remap_copied_file_meta(file_meta, target_region_id)
                 });

@@ -30,6 +30,7 @@ mod otlp;
 pub mod prom_store;
 mod promql;
 mod region_query;
+mod schema_selection;
 
 use std::collections::HashSet;
 use std::pin::Pin;
@@ -396,6 +397,16 @@ impl Instance {
             }
             _ => {
                 query_interceptor.pre_execute(Some(&stmt), None, query_ctx.clone())?;
+                if let Statement::SetVariables(set) = &stmt
+                    && query_ctx.channel() == Channel::Postgres
+                    && let Some(schemas) = set.search_path()
+                {
+                    return self.set_search_path(schemas, query_ctx).await;
+                }
+                if let Statement::Use(schema) = &stmt {
+                    self.authorize_database(query_ctx.current_catalog(), schema, &query_ctx)
+                        .await?;
+                }
                 if let Statement::Copy(sql::statements::copy::Copy::CopyDatabase(
                     CopyDatabase::From(arg),
                 )) = &stmt
@@ -636,6 +647,8 @@ impl Instance {
         stmt: &Statement,
         query_ctx: &QueryContextRef,
     ) -> Result<()> {
+        self.check_unselected_mysql_database(stmt, query_ctx)
+            .await?;
         self.plugins
             .get::<PermissionCheckerRef>()
             .as_ref()
@@ -870,7 +883,9 @@ impl Instance {
                         }
                         Err(e) => {
                             if e.status_code().should_log_error() {
-                                error!(e; "Failed to execute query: {stmt}");
+                                error!(e; user = query_ctx.current_user().username(), protocol = %query_ctx.channel(),
+                                    catalog = query_ctx.current_catalog(), schema = %query_ctx.current_schema(),
+                                    process_id = query_ctx.process_id(), "Failed to execute query: {stmt}");
                             } else {
                                 debug!("Failed to execute query: {stmt}, {e}");
                             }
@@ -925,6 +940,15 @@ impl Instance {
         query_ctx: QueryContextRef,
     ) -> Result<Output> {
         ensure!(!self.is_suspended(), error::SuspendedSnafu);
+        if let Some(stmt) = &stmt {
+            self.check_unselected_mysql_database(stmt, &query_ctx)
+                .await?;
+        } else if query_ctx.channel() == Channel::Mysql && query_ctx.current_schema().is_empty() {
+            return Err(BoxedError::new(
+                session::SessionError::NoDatabaseSelected {},
+            ))
+            .context(ExternalSnafu);
+        }
 
         let query_interceptor_opt = self.plugins.get::<SqlQueryInterceptorRef<Error>>();
         let query_interceptor = query_interceptor_opt.as_ref();
@@ -1081,6 +1105,8 @@ impl Instance {
         query_ctx: QueryContextRef,
     ) -> Result<Option<DescribeResult>> {
         ensure!(!self.is_suspended(), error::SuspendedSnafu);
+        self.check_unselected_mysql_database(&stmt, &query_ctx)
+            .await?;
 
         // EXPLAIN / EXPLAIN ANALYZE wrap an inner statement; describe them when the
         // wrapped statement is something we already plan (so that bind parameters
@@ -3777,6 +3803,429 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_sql_schema_selection_authorizes_before_mutation() -> TestResult<()> {
+        struct SchemaProvider;
+        #[async_trait::async_trait]
+        impl auth::UserProvider for SchemaProvider {
+            fn name(&self) -> &str {
+                "schema-test"
+            }
+            async fn authenticate(
+                &self,
+                _: auth::Identity<'_>,
+                _: auth::Password<'_>,
+            ) -> auth::error::Result<UserInfoRef> {
+                unreachable!("the request already has an authenticated user")
+            }
+            async fn authorize(
+                &self,
+                _: &str,
+                schema: &str,
+                _: &UserInfoRef,
+            ) -> auth::error::Result<()> {
+                if schema == "backend_error" {
+                    return auth::error::InternalStateSnafu {
+                        msg: "backend unavailable",
+                    }
+                    .fail();
+                }
+                if matches!(schema, "public" | "allowed" | "allowed_missing" | "admin") {
+                    Ok(())
+                } else {
+                    auth::error::PermissionDeniedSnafu.fail()
+                }
+            }
+        }
+        let plugins = Plugins::new();
+        plugins.insert::<auth::UserProviderRef>(Arc::new(SchemaProvider));
+        let catalog =
+            catalog::memory::MemoryCatalogManager::new_with_table(test_table(1024, "source")?);
+        for schema in ["denied", "allowed", "admin"] {
+            catalog
+                .register_schema_sync(catalog::RegisterSchemaRequest {
+                    catalog: "greptime".to_string(),
+                    schema: schema.to_string(),
+                })
+                .unwrap();
+        }
+        let instance = test_instance_with_catalog_manager(
+            catalog,
+            test_table(1025, "target")?,
+            plugins,
+            None,
+            Arc::new(NoopProcedureExecutor),
+        )
+        .await?;
+        for sql in [
+            "Use denied",
+            " USE denied",
+            "/* switch */ USE denied",
+            "USE public; Use denied",
+            "USE missing",
+        ] {
+            let ctx = Arc::new(QueryContext::with_channel(
+                "greptime",
+                "public",
+                Channel::Postgres,
+            ));
+            let results = instance.do_query_inner(sql, ctx.clone()).await;
+            assert_eq!(
+                StatusCode::PermissionDenied,
+                results.last().unwrap().as_ref().unwrap_err().status_code(),
+                "{sql}"
+            );
+            assert_eq!("public", ctx.current_schema());
+        }
+        for sql in ["USE allowed", "SET search_path TO allowed"] {
+            let ctx = Arc::new(QueryContext::with_channel(
+                "greptime",
+                "public",
+                Channel::Postgres,
+            ));
+            assert!(
+                instance
+                    .do_query_inner(sql, ctx.clone())
+                    .await
+                    .remove(0)
+                    .is_ok()
+            );
+            assert_eq!("allowed", ctx.current_schema());
+        }
+        let ctx = Arc::new(QueryContext::with_channel(
+            "greptime",
+            "public",
+            Channel::Postgres,
+        ));
+        let error = instance
+            .do_query_inner("USE allowed_missing", ctx.clone())
+            .await
+            .remove(0)
+            .unwrap_err();
+        assert_eq!(StatusCode::InvalidArguments, error.status_code());
+        assert_eq!("public", ctx.current_schema());
+        for (sql, expected) in [
+            ("SET search_path TO denied, public", "public"),
+            ("SET search_path TO DEFAULT", "admin"),
+            ("SET search_path TO allowed_missing, allowed", "allowed"),
+            (
+                "SET search_path TO denied, allowed_missing, public",
+                "public",
+            ),
+            (r#"SET search_path TO "$user", public"#, "admin"),
+            (r#"SET "search_path" TO denied, allowed"#, "allowed"),
+            ("SET SEARCH_PATH TO 'denied'", ""),
+            ("SET search_path TO allowed_missing", ""),
+            ("SET search_path TO ''", ""),
+            ("SET search_path TO allowed; SET search_path TO denied", ""),
+        ] {
+            let ctx = Arc::new(QueryContext::with_channel(
+                "greptime",
+                "public",
+                Channel::Postgres,
+            ));
+            ctx.set_current_user(Arc::new(AdminUserInfo));
+            let results = instance.do_query_inner(sql, ctx.clone()).await;
+            assert!(
+                results.iter().all(|result| matches!(
+                    result,
+                    Ok(Output {
+                        data: OutputData::AffectedRows(0),
+                        ..
+                    })
+                )),
+                "{sql}: {results:?}"
+            );
+            assert_eq!(expected, ctx.current_schema(), "{sql}");
+        }
+
+        let ctx = Arc::new(QueryContext::with_channel(
+            "greptime",
+            "public",
+            Channel::Postgres,
+        ));
+        // The default user's schema is absent or unauthorized, so public remains usable.
+        assert!(
+            instance
+                .do_query_inner(r#"SET search_path TO "$user", public"#, ctx.clone())
+                .await
+                .remove(0)
+                .is_ok()
+        );
+        assert_eq!("public", ctx.current_schema());
+        assert!(
+            instance
+                .do_query_inner("SET search_path TO DEFAULT", ctx.clone())
+                .await
+                .remove(0)
+                .is_ok()
+        );
+        assert_eq!("public", ctx.current_schema());
+        let error = instance
+            .do_query_inner("SET search_path TO backend_error, allowed", ctx.clone())
+            .await
+            .remove(0)
+            .unwrap_err();
+        assert_eq!(StatusCode::Unexpected, error.status_code());
+        assert_eq!("public", ctx.current_schema());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_mysql_without_selected_database() -> TestResult<()> {
+        let plugins = Plugins::new();
+        plugins.insert::<auth::UserProviderRef>(Arc::new(auth::tests::MockUserProvider::default()));
+        let instance = test_instance_with_plugins(
+            test_table(1024, "source")?,
+            test_table(1025, "target")?,
+            plugins,
+        )
+        .await?;
+        let ctx = Arc::new(QueryContext::with_channel("greptime", "", Channel::Mysql));
+        for sql in [
+            "SELECT * FROM source",
+            "INSERT INTO source VALUES (1, 0)",
+            "CREATE TABLE t (ts TIMESTAMP TIME INDEX)",
+            "SHOW TABLES",
+            "TRUNCATE TABLE source",
+            "SHOW CREATE TABLE source",
+            "COPY source TO '/tmp/out'",
+            "SELECT flush_table('public.source')",
+        ] {
+            let result = instance.do_query_inner(sql, ctx.clone()).await.remove(0);
+            let error = match result {
+                Err(error) => Err::<(), _>(BoxedError::new(error))
+                    .context(servers::error::ExecuteQuerySnafu)
+                    .unwrap_err(),
+                Ok(output) => {
+                    let OutputData::Stream(stream) = output.data else {
+                        panic!("Expected a query stream: {sql}");
+                    };
+                    common_recordbatch::util::collect(stream)
+                        .await
+                        .context(servers::error::CollectRecordbatchSnafu)
+                        .unwrap_err()
+                }
+            };
+            let (kind, message) = servers::mysql::writer::handle_err(error, ctx.clone());
+            assert_eq!(1046, kind as u16, "{sql}: {message}");
+            assert!(message.contains("No database selected"), "{message}");
+        }
+        let output = instance
+            .do_query_inner(
+                "SELECT 1, DATABASE() IS NULL AS no_database, SCHEMA() IS NULL AS no_schema",
+                ctx.clone(),
+            )
+            .await
+            .remove(0)
+            .unwrap();
+        assert_eq!(2, output.data.pretty_print().await.matches("true").count());
+        for sql in [
+            "SELECT * FROM denied.source",
+            "SHOW TABLES FROM denied",
+            "USE denied",
+        ] {
+            let error = instance
+                .do_query_inner(sql, ctx.clone())
+                .await
+                .remove(0)
+                .unwrap_err();
+            assert_eq!(
+                StatusCode::AccessDenied,
+                error.status_code(),
+                "{sql}: {error}"
+            );
+            assert!(ctx.current_schema().is_empty());
+        }
+        for sql in [
+            "SELECT * FROM public.source",
+            "SHOW TABLES FROM public",
+            "SET time_zone = '+00:00'",
+        ] {
+            assert!(
+                instance
+                    .do_query_inner(sql, ctx.clone())
+                    .await
+                    .remove(0)
+                    .is_ok(),
+                "{sql}"
+            );
+        }
+        let plan = instance
+            .do_describe_inner(parse_one_sql("SELECT * FROM public.source"), ctx.clone())
+            .await
+            .unwrap()
+            .unwrap()
+            .logical_plan;
+        instance
+            .do_exec_plan_inner(
+                plan.clone(),
+                Some(parse_one_sql("SELECT * FROM public.source")),
+                ctx.clone(),
+            )
+            .await
+            .unwrap();
+        let error = instance
+            .do_describe_inner(parse_one_sql("SELECT * FROM denied.source"), ctx.clone())
+            .await
+            .unwrap_err();
+        assert_eq!(StatusCode::AccessDenied, error.status_code());
+        assert!(ctx.current_schema().is_empty());
+        let error = instance
+            .do_exec_plan_inner(plan.clone(), None, ctx.clone())
+            .await
+            .unwrap_err();
+        assert_eq!(StatusCode::DatabaseNotFound, error.status_code());
+        let current_user = ctx.current_user();
+        ctx.set_current_user(Arc::new(AdminUserInfo));
+        let error = instance
+            .do_exec_plan_inner(
+                plan,
+                Some(parse_one_sql("SELECT * FROM public.source")),
+                ctx.clone(),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(StatusCode::AccessDenied, error.status_code());
+        ctx.set_current_user(current_user);
+        instance
+            .do_query_inner("USE public", ctx.clone())
+            .await
+            .remove(0)
+            .unwrap();
+        assert_eq!("public", ctx.current_schema());
+        instance
+            .do_query_inner("SELECT * FROM source", ctx)
+            .await
+            .remove(0)
+            .unwrap();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_empty_search_path_statements() -> TestResult<()> {
+        let instance = test_instance_with_plugins(
+            test_table(1024, "source")?,
+            test_table(1025, "target")?,
+            Plugins::new(),
+        )
+        .await?;
+        let ctx = Arc::new(QueryContext::with_channel(
+            "greptime",
+            "public",
+            Channel::Postgres,
+        ));
+        instance
+            .do_query_inner("SET search_path TO ''", ctx.clone())
+            .await
+            .remove(0)
+            .unwrap();
+        let tables = instance
+            .do_query_inner("SHOW TABLES", ctx.clone())
+            .await
+            .remove(0)
+            .unwrap()
+            .data
+            .pretty_print()
+            .await;
+        assert!(
+            !tables.contains("source") && !tables.contains("target"),
+            "{tables}"
+        );
+        let error = instance
+            .do_query_inner("INSERT INTO source VALUES (1, 0)", ctx.clone())
+            .await
+            .remove(0)
+            .unwrap_err();
+        assert!(
+            matches!(error, Error::TableOperation { source: operator::error::Error::TableNotFound { ref table_name, .. }, .. } if table_name == "greptime..source"),
+            "{error:?}"
+        );
+        for sql in [
+            "CREATE TABLE no_schema (ts TIMESTAMP TIME INDEX)",
+            "ALTER TABLE source ADD COLUMN no_schema_column INT",
+            "CREATE VIEW no_schema_view AS SELECT 1 AS n",
+            "CREATE FLOW no_schema_flow SINK TO sink AS SELECT * FROM public.source",
+            "CREATE FLOW no_schema_flow SINK TO public.sink AS SELECT * FROM source",
+        ] {
+            let error = instance
+                .do_query_inner(sql, ctx.clone())
+                .await
+                .remove(0)
+                .unwrap_err();
+            assert!(
+                matches!(error, Error::TableOperation { source: operator::error::Error::SchemaNotFound { ref schema_info, .. }, .. } if schema_info.is_empty()),
+                "{sql}: {error:?}"
+            );
+        }
+
+        for sql in ["SELECT * FROM source", "DELETE FROM source"] {
+            assert!(
+                instance
+                    .do_query_inner(sql, ctx.clone())
+                    .await
+                    .remove(0)
+                    .is_err(),
+                "{sql}"
+            );
+        }
+        let output = instance
+            .do_query_inner(
+                "SELECT current_schema() IS NULL AS empty, current_schemas(false) AS schemas",
+                ctx.clone(),
+            )
+            .await
+            .remove(0)
+            .unwrap();
+        let printed = output.data.pretty_print().await;
+        assert!(
+            printed.contains("true") && printed.contains("[]"),
+            "{printed}"
+        );
+        let output = instance
+            .do_query_inner("DROP TABLE IF EXISTS source", ctx.clone())
+            .await
+            .remove(0)
+            .unwrap();
+        assert!(matches!(output.data, OutputData::AffectedRows(0)));
+        instance
+            .do_query_inner("USE public", ctx.clone())
+            .await
+            .remove(0)
+            .unwrap();
+        assert!(
+            instance
+                .do_query_inner("SELECT * FROM source", ctx)
+                .await
+                .remove(0)
+                .is_ok()
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_operator_rejects_search_path_without_frontend() -> TestResult<()> {
+        let instance = test_instance_with_plugins(
+            test_table(1024, "source")?,
+            test_table(1025, "target")?,
+            Plugins::new(),
+        )
+        .await?;
+        let ctx = Arc::new(QueryContext::with_channel(
+            "greptime",
+            "public",
+            Channel::Postgres,
+        ));
+        let error = instance
+            .statement_executor
+            .execute_sql(parse_one_sql("SET search_path TO denied"), ctx.clone())
+            .await
+            .unwrap_err();
+        assert!(matches!(error, operator::error::Error::NotSupported { .. }));
+        assert_eq!("public", ctx.current_schema());
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn test_write_only_grpc_sql_is_checked_after_parsing() -> TestResult<()> {
         let plugins = Plugins::new();
         plugins.insert::<PermissionCheckerRef>(Arc::new(WriteOnlyPermissionChecker));
@@ -5095,6 +5544,43 @@ mod tests {
             "expected one create table task, got {submitted:?}"
         );
         assert!(matches!(&submitted[0], DdlTask::CreateTable(_)));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_copy_in_checks_table_permissions() -> TestResult<()> {
+        use servers::query_handler::CopyInHandler;
+
+        for source in [
+            test_table(1024, "denied")?,
+            test_physical_table(1024, "physical")?,
+        ] {
+            let name = source.table_info().name.clone();
+            let plugins = Plugins::new();
+            plugins.insert::<PermissionCheckerRef>(Arc::new(RejectUnresolvedPermissionChecker));
+            let instance =
+                test_instance_with_plugins(source, test_table(1025, "target")?, plugins).await?;
+            let ctx = QueryContext::arc();
+            assert_permission_denied(
+                instance
+                    .copy_in_table("greptime", "public", &name, ctx.clone())
+                    .await,
+            );
+            assert!(
+                instance
+                    .copy_in_table("greptime", "public", "target", ctx.clone())
+                    .await
+                    .unwrap()
+                    .is_some()
+            );
+            assert!(
+                instance
+                    .copy_in_table("greptime", "public", "missing", ctx)
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+        }
         Ok(())
     }
 
