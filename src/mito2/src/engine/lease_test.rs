@@ -482,4 +482,26 @@ async fn test_granted_lease_removed_with_region(#[case] request: RegionRequest) 
 
     assert!(!engine.is_region_exists(REGION_ID));
     assert_eq!(granted_lease(&engine), None);
+    // A lease that arrives after the removal is not recorded.
+    let _ = engine.set_region_role_with_lease(
+        REGION_ID,
+        RegionRole::Follower,
+        Instant::now(),
+        Instant::now() + LEASE,
+        Some(3),
+    );
+    assert_eq!(granted_lease(&engine), None);
+}
+
+#[tokio::test]
+async fn test_granted_lease_removed_on_engine_stop() {
+    common_telemetry::init_default_ut_logging();
+    let mut env = TestEnv::with_prefix("granted-lease-stop").await;
+    let (_listener, engine, _schema) = create_region(&mut env, None).await;
+    grant_candidate_at(&engine, RegionRole::Follower, Instant::now(), Some(7));
+    assert!(granted_lease(&engine).is_some());
+
+    engine.stop().await.unwrap();
+
+    assert_eq!(granted_lease(&engine), None);
 }

@@ -1861,12 +1861,15 @@ impl<S> RegionWorkerLoop<S> {
         }
         // Closes remaining regions.
         let regions = self.regions.list_regions();
-        for region in regions {
+        for region in &regions {
             region.deactivate_region_manifest_size_metric();
             region.stop().await;
         }
 
         self.regions.clear();
+        for region in regions {
+            self.granted_leases.remove(region.region_id);
+        }
     }
 
     /// Notifies the whole group that a flush job is finished so other

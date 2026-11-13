@@ -477,17 +477,24 @@ mod tests {
     async fn test_build_upgrade_region_instruction_carries_candidate_lease_id() {
         let state = UpgradeCandidateRegion::default();
         let env = TestingEnv::new();
-        let mut ctx = env.context_factory().new_context(new_persistent_context());
-        let region_id = ctx.persistent_ctx.region_ids[0];
+        let mut persistent_context = new_persistent_context();
+        let region_ids = vec![RegionId::new(1024, 1), RegionId::new(1024, 2)];
+        persistent_context.region_ids = region_ids.clone();
+        let mut ctx = env.context_factory().new_context(persistent_context);
         prepare_table_metadata(&ctx, RegionWalOptions::default()).await;
-        let guard = env
-            .opening_region_keeper()
-            .register_candidate_region(ctx.persistent_ctx.to_peer.id, region_id)
-            .unwrap();
-        let candidate_lease_id = guard.candidate_lease_id();
-        ctx.volatile_ctx.opening_region_guards.push(guard);
+        let to_peer_id = ctx.persistent_ctx.to_peer.id;
+        let mut expected = HashMap::new();
+        // The guards are stored in the opposite order of the regions.
+        for region_id in region_ids.iter().rev() {
+            let guard = env
+                .opening_region_keeper()
+                .register_candidate_region(to_peer_id, *region_id)
+                .unwrap();
+            expected.insert(*region_id, guard.candidate_lease_id().unwrap());
+            ctx.volatile_ctx.opening_region_guards.push(guard);
+        }
 
-        // Retries send the same id.
+        // Retries send the same ids.
         for _ in 0..2 {
             let instruction = state
                 .build_upgrade_region_instruction(&mut ctx, Duration::from_secs(1))
@@ -496,8 +503,13 @@ mod tests {
             let Instruction::UpgradeRegions(upgrade_regions) = instruction else {
                 unreachable!()
             };
-            assert!(candidate_lease_id.is_some());
-            assert_eq!(upgrade_regions[0].candidate_lease_id, candidate_lease_id);
+            assert_eq!(upgrade_regions.len(), 2);
+            for upgrade_region in upgrade_regions {
+                assert_eq!(
+                    upgrade_region.candidate_lease_id,
+                    Some(expected[&upgrade_region.region_id])
+                );
+            }
         }
     }
 

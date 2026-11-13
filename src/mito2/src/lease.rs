@@ -146,26 +146,21 @@ impl GrantedLeases {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-    use std::thread;
-    use std::time::Duration;
-
     use super::*;
 
     #[test]
-    fn test_record_racing_with_remove_leaves_no_record() {
-        let leases = Arc::new(GrantedLeases::default());
+    fn test_record_checks_region_under_removal_lock() {
+        let leases = GrantedLeases::default();
         let region_id = RegionId::new(1, 1);
-        let mut remover = None;
         leases.record(region_id, Some(1), Instant::now(), || {
-            // The worker removes the region right after the check finds it open.
-            let leases = leases.clone();
-            remover = Some(thread::spawn(move || leases.remove(region_id)));
-            thread::sleep(Duration::from_millis(20));
+            // A concurrent `remove` waits until the record is done.
+            assert!(leases.0.try_lock().is_err());
             true
         });
-        remover.unwrap().join().unwrap();
+        assert_eq!(leases.get(region_id).unwrap().candidate_lease_id, Some(1));
 
+        leases.remove(region_id);
+        leases.record(region_id, Some(2), Instant::now(), || false);
         assert_eq!(leases.get(region_id), None);
     }
 }
