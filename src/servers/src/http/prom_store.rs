@@ -266,6 +266,7 @@ pub(crate) async fn ingest_remote_write_v1(
         *prom_validation_mode,
         &mut processor,
         memory_limiter,
+        body_reserved_bytes,
     )
     .await
     .map_err(no_progress)?;
@@ -1139,8 +1140,8 @@ mod exemplar_accounting_tests {
     use axum::body::Body;
     use axum::http::Request;
 
-    /// Records nothing and succeeds; lets the wrapper's accounting be
-    /// observed in isolation.
+    /// Reports written rows without touching counters, with an optional exemplar
+    /// failure, so the wrapper's accounting can be observed in isolation.
     struct RecordingHandler {
         fail_exemplars: bool,
     }
@@ -1174,11 +1175,13 @@ mod exemplar_accounting_tests {
         }
         async fn write_prepared(
             &self,
-            _: RowInsertRequests,
+            request: RowInsertRequests,
             _: QueryContextRef,
             _: bool,
         ) -> Result<Output> {
-            unreachable!("exemplar requests take the exemplar path")
+            Ok(Output::new_with_affected_rows(
+                prom_write_row_count(&request) as usize,
+            ))
         }
         async fn write(&self, _: RowInsertRequests, _: QueryContextRef, _: bool) -> Result<Output> {
             unreachable!()
@@ -1194,19 +1197,37 @@ mod exemplar_accounting_tests {
     async fn post_v1_exemplars(
         db: &str,
         handler: Arc<RecordingHandler>,
+        sample_count: usize,
         exemplar_count: usize,
     ) -> axum::response::Response {
         use api::prom_store::remote;
 
         let request = remote::WriteRequest {
-            timeseries: vec![remote::TimeSeries {
-                labels: vec![remote::Label {
-                    name: "__name__".into(),
-                    value: "counter_test_metric".into(),
-                }],
-                exemplars: vec![remote::Exemplar::default(); exemplar_count],
-                ..Default::default()
-            }],
+            // Separate sources keep sample writes on write_prepared rather than
+            // requiring the stub to resolve real metric-engine table identities.
+            timeseries: vec![
+                remote::TimeSeries {
+                    labels: vec![remote::Label {
+                        name: "__name__".into(),
+                        value: "counter_test_samples".into(),
+                    }],
+                    samples: (0..sample_count)
+                        .map(|i| remote::Sample {
+                            value: i as f64,
+                            timestamp: i as i64,
+                        })
+                        .collect(),
+                    ..Default::default()
+                },
+                remote::TimeSeries {
+                    labels: vec![remote::Label {
+                        name: "__name__".into(),
+                        value: "counter_test_metric".into(),
+                    }],
+                    exemplars: vec![remote::Exemplar::default(); exemplar_count],
+                    ..Default::default()
+                },
+            ],
             ..Default::default()
         };
         let server = HttpServerBuilder::new(HttpOptions::default())
@@ -1244,39 +1265,40 @@ mod exemplar_accounting_tests {
         }
     }
 
-    /// The wrapper records sample/exemplar counters exactly once per
-    /// request — success and partial failure — executing the real
-    /// `remote_write_v1` handler end to end (the core never records, so
-    /// reverting the fix would double these deltas and fail).
-    /// The wrapper records sample/exemplar counters exactly once per
-    /// request — success and partial failure — executing the real
-    /// `remote_write_v1` handler end to end (the core never records, so
-    /// reverting the fix would double these deltas and fail).
+    /// Exercises accounting through the HTTP wrapper on success and partial
+    /// failure; recording again in the core would double the counter deltas.
     #[tokio::test]
     async fn v1_exemplar_counters_are_recorded_once_through_the_wrapper() {
-        // The counters are process-global; each post uses its own db
-        // label so deltas are unambiguous.
+        // Counters are process-global, so use an isolated db label and deltas.
         let db = format!("once-{}", std::process::id());
-
-        // Success: 2 samples (the series row) and 3 exemplars recorded once.
-        let response = post_v1_exemplars(
-            &db,
-            Arc::new(RecordingHandler {
-                fail_exemplars: false,
-            }),
-            3,
-        )
-        .await;
-        assert_eq!(response.status(), StatusCode::NO_CONTENT);
-        assert_eq!(
-            counter(&db, REMOTE_WRITE_V1_VERSION, false),
-            0,
-            "label isolation broken; this db is fresh"
-        );
-
-        // (The counters above use a fresh per-run db label; assert via
-        // deltas around a second post instead, since the first post's
-        // label is the same db.)
+        for (fail_exemplars, samples, exemplars) in [(false, 10, 2), (true, 3, 1)] {
+            let samples_before = counter(&db, REMOTE_WRITE_V1_VERSION, false);
+            let exemplars_before = counter(&db, REMOTE_WRITE_V1_VERSION, true);
+            let response = post_v1_exemplars(
+                &db,
+                Arc::new(RecordingHandler { fail_exemplars }),
+                samples,
+                exemplars,
+            )
+            .await;
+            assert_eq!(
+                response.status(),
+                if fail_exemplars {
+                    StatusCode::BAD_REQUEST
+                } else {
+                    StatusCode::NO_CONTENT
+                }
+            );
+            // A failed exemplar write still leaves the successful samples counted.
+            assert_eq!(
+                counter(&db, REMOTE_WRITE_V1_VERSION, false) - samples_before,
+                samples as u64
+            );
+            assert_eq!(
+                counter(&db, REMOTE_WRITE_V1_VERSION, true) - exemplars_before,
+                if fail_exemplars { 0 } else { exemplars as u64 }
+            );
+        }
     }
 }
 

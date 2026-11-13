@@ -807,7 +807,13 @@ impl PostgresServerHandlerInner {
             // The reservation outlives the payload: it is dropped when
             // the payload's bytes are consumed below.
             let rows = self
-                .flush_otlp(otlp_handler, options, bytes, query_ctx)
+                .flush_otlp(
+                    otlp_handler,
+                    options,
+                    bytes,
+                    reservation.charged_bytes(),
+                    query_ctx,
+                )
                 .await?;
             drop(reservation);
             return Ok(rows);
@@ -866,6 +872,7 @@ impl PostgresServerHandlerInner {
         otlp_handler: &crate::query_handler::OpenTelemetryProtocolHandlerRef,
         options: OtlpOptions,
         bytes: Vec<u8>,
+        body_reserved_bytes: u64,
         query_ctx: QueryContextRef,
     ) -> PgWireResult<u64> {
         use opentelemetry_proto::tonic::collector::logs::v1::ExportLogsServiceRequest;
@@ -901,7 +908,7 @@ impl PostgresServerHandlerInner {
                     .metrics(
                         request,
                         Arc::new(ctx),
-                        Some((self.memory_limiter.clone(), 0)),
+                        Some((self.memory_limiter.clone(), body_reserved_bytes)),
                     )
                     .await
                     .map_err(convert_err)?;
