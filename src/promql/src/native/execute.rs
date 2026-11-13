@@ -3985,8 +3985,8 @@ impl RuntimeNode {
                 if !*produced {
                     let len = grid.spec().len as usize;
                     let bytes = grid_chunk_bytes(grid).map_err(|e| state.context(e))?;
-                    // The counts are decided beside the assembled input and read until the answer
-                    // exists, so they are reserved on top of the chunk the node hands over.
+                    // The counts the kernel decides its answer by are read while it walks the
+                    // assembled input, so they are reserved on top of the chunk it hands over.
                     let counts_bytes = len.saturating_mul(std::mem::size_of::<u8>());
                     let assembly = retained
                         .assembly_bytes(input_schema)
@@ -3999,45 +3999,22 @@ impl RuntimeNode {
                         .assemble(input_schema, Reader::Vector)
                         .map_err(|e| state.context(e))?;
                     retained.release();
-                    let mut values = vec![f64::NAN; len];
-                    let mut counts = vec![0u8; len];
-                    for series in assembled {
-                        let mut cursor = series
-                            .fields
-                            .get(0)
-                            .expect("scalar() input has one field")
-                            .cursor();
-                        for (point, row) in series.time.positions() {
-                            match cursor.at(row) {
-                                Some(SampleRef::Float(value)) => {
-                                    counts[point] = counts[point].saturating_add(1);
-                                    values[point] = value;
-                                }
-                                Some(SampleRef::Histogram(_)) => {}
-                                Some(SampleRef::Missing) | None => {}
-                            }
-                        }
-                    }
-                    for point in 0..len {
-                        if counts[point] != 1 {
-                            values[point] = f64::NAN;
-                        }
-                    }
-                    // The assembled input is consumed and the counts are read, so what this node
-                    // holds from here on is the one chunk the values become.
-                    drop(counts);
+                    // `scalar()` reads a whole vector, which is what the assembled input is, so
+                    // the kernel Prometheus' `funcScalar` is answers here too: one value per grid
+                    // point, NaN where the point does not hold exactly one float sample, and the
+                    // histogram samples of the input ignored.
+                    let answer =
+                        select::scalar(input_schema, &assembled).map_err(|e| state.context(e))?;
+                    // The assembled input is consumed, so what this node holds from here on is the
+                    // one chunk the answer becomes.
+                    drop(assembled);
                     state.buffer.resize(bytes).map_err(|e| state.context(e))?;
+                    // Only the layout the answer is named by changes: a scalar sits on this node's
+                    // grid, in the one field a scalar's carrier has.
                     let schema = scalar_schema(Arc::clone(grid));
-                    let time =
-                        GridRange::try_new(Arc::clone(grid), 0, len).map_err(series_error)?;
-                    let fields = SeriesFields::one(Samples::from_float(Float64Array::from(values)));
-                    let series = Series::try_new(
-                        &schema,
-                        SeriesLabels::try_new(None, Vec::new()).map_err(series_error)?,
-                        TimeAxis::Grid(time),
-                        fields,
-                    )
-                    .map_err(series_error)?;
+                    let series =
+                        Series::try_new(&schema, answer.metric, answer.time, answer.fields)
+                            .map_err(series_error)?;
                     state.queued.push_back((
                         NativeChunk::Evaluated(EvaluatedChunk::try_new(series, true)?),
                         bytes,
