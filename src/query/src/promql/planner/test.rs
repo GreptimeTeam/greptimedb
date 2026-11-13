@@ -52,9 +52,9 @@ use promql::native::plan::{
     unifies_its_own_contributions,
 };
 use promql::vector_match::{Cardinality, MatchingLabels};
-use promql_parser::label::Labels;
+use promql_parser::label::{Labels, METRIC_NAME};
 use promql_parser::parser;
-use session::context::{MetricDiscoveryScope, QueryContext};
+use session::context::{MetricDiscoveryScope, QueryContext, QueryContextRef};
 use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
 use table::Table;
 use table::metadata::{FilterPushDownType, TableInfoBuilder, TableMetaBuilder};
@@ -971,6 +971,23 @@ async fn build_test_table_provider_with_tsid_tag_fields_and_field_order_and_time
     logical_field_order: Option<&[usize]>,
     logical_times: &[String],
 ) -> DfTableSourceProvider {
+    build_test_table_provider_with_tsid_tag_fields_and_ctx(
+        table_specs,
+        tag_names,
+        logical_field_order,
+        logical_times,
+        QueryContext::arc(),
+    )
+    .await
+}
+
+async fn build_test_table_provider_with_tsid_tag_fields_and_ctx(
+    table_specs: &[((String, String), usize, usize)],
+    tag_names: &[Vec<String>],
+    logical_field_order: Option<&[usize]>,
+    logical_times: &[String],
+    base_ctx: QueryContextRef,
+) -> DfTableSourceProvider {
     let catalog_list = MemoryCatalogManager::with_default_setup();
 
     let physical_table_name = "phy";
@@ -1154,7 +1171,7 @@ async fn build_test_table_provider_with_tsid_tag_fields_and_field_order_and_time
     // The scope is what discovery consults before it reads anything, and its default declines, so
     // a fixture that wants discovery to run has to say so.
     let query_ctx = {
-        let base = QueryContext::arc();
+        let base = base_ctx;
         let mut ctx = (*base).clone();
         ctx.set_metric_discovery_scope(SCOPE.with(|scope| {
             scope
@@ -1174,8 +1191,6 @@ thread_local! {
         const { std::cell::RefCell::new(None) };
 }
 
-/// A schema of logical metric tables, one tag and one field each, all served through the one
-/// physical table the fixture registers. A selector that names no metric enumerates these.
 async fn metric_discovery_provider(names: &[&str]) -> DfTableSourceProvider {
     let specs = names
         .iter()
@@ -2115,22 +2130,28 @@ async fn do_single_instant_function_call(fn_name: &'static str, plan_name: &str)
     assert_eq!(plan.display_indent_schema().to_string(), expected);
 }
 
-/// A discovered selector reports each series' identity as a `__name__` tag, and the operator
-/// decides whether that survives. The first case is the whole point of the feature: two metrics
-/// whose ordinary labels are equal are told apart by name alone.
+/// A native rows result reports the name of every row it publishes.
+///
+/// A row's name is part of what the statement answers rather than of how a result is displayed: a
+/// discovered selector reports each series' identity as a name tag, so the rows of one result can be
+/// named after different metrics. Every samples root therefore declares the column, and the walk
+/// decides what its values are: an operator that reports a value of its own - a range function, a
+/// math kernel and a folding aggregate - drops the name exactly as it drops a label, so its rows
+/// carry a null one.
 #[tokio::test]
-async fn native_metric_discovery_names_each_metric_where_the_operator_keeps_it() {
-    for (query, expected) in [
-        // The selection itself keeps the name.
-        ("{tag_0=\"x\"}", true),
-        // A filtering comparison reports the kept side's samples with their labels.
-        ("{tag_0=\"x\"} > 0", true),
-        // A range function, a math kernel and a folding aggregate all report values of their own.
-        ("rate({tag_0=\"x\"}[5m])", false),
-        ("abs({tag_0=\"x\"})", false),
-        ("sum({tag_0=\"x\"})", false),
-        // Grouping by the name is how an aggregate keeps it.
-        ("sum by (__name__) ({tag_0=\"x\"})", true),
+async fn native_rows_declare_the_name_of_each_row() {
+    for query in [
+        "{tag_0=\"x\"}",
+        "{tag_0=\"x\"} > 0",
+        "sum by (__name__) ({tag_0=\"x\"})",
+        "rate({tag_0=\"x\"}[5m])",
+        "abs({tag_0=\"x\"})",
+        "sum({tag_0=\"x\"})",
+        "alpha_total or beta_total",
+        "alpha_total and beta_total",
+        "topk(1, alpha_total)",
+        "sort(alpha_total)",
+        "first_over_time(alpha_total[5m])",
     ] {
         let plan = build_native_fused_plan_with_provider(
             query,
@@ -2138,15 +2159,59 @@ async fn native_metric_discovery_names_each_metric_where_the_operator_keeps_it()
             metric_discovery_provider(&["alpha_total", "beta_total"]).await,
         )
         .await;
-        // The response layer reads the plan's own output schema, so that is what has to carry the
-        // name. For an aggregate the root is the finalize node, not the fused producer under it.
-        let has_name = plan
+        assert!(find_fused_series(&plan).is_some(), "{query}: {plan}");
+        let name_fields = plan
             .schema()
             .fields()
             .iter()
-            .any(|field| field.name() == METRIC_NAME);
-        assert_eq!(expected, has_name, "{query}: {plan:?}");
+            .filter(|field| is_metric_name_field(field))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            1,
+            name_fields.len(),
+            "{query}: exactly one declared name column: {:?}",
+            plan.schema()
+        );
+        let name_field = name_fields[0];
+        assert_eq!(name_field.name(), METRIC_NAME, "{query}");
+        assert_eq!(name_field.data_type(), &ArrowDataType::Utf8, "{query}");
+        assert!(name_field.is_nullable(), "{query}");
+        // The column is appended, so the layout keeps its order: time, values, tags.
+        assert_eq!(
+            METRIC_NAME,
+            plan.schema().fields().last().unwrap().name(),
+            "{query}: the name column comes after the labels: {plan}"
+        );
     }
+}
+
+/// A scalar root publishes one value and no series, so it declares no name column; `vector(n)` is a
+/// samples root and declares one.
+#[tokio::test]
+async fn native_scalar_roots_declare_no_name_column() {
+    for query in ["2", "time()", "scalar(some_metric)"] {
+        let plan = build_native_fused_plan(query, true).await;
+        assert!(find_fused_series(&plan).is_some(), "{query}: {plan}");
+        assert!(
+            !plan
+                .schema()
+                .fields()
+                .iter()
+                .any(|field| field.name() == METRIC_NAME),
+            "{query}: a scalar answers one value and no series: {plan}"
+        );
+        assert_eq!(2, plan.schema().fields().len(), "{query}: {plan}");
+    }
+    let plan = build_native_fused_plan("vector(2)", true).await;
+    assert!(find_fused_series(&plan).is_some(), "{plan}");
+    assert_eq!(
+        Some(METRIC_NAME),
+        plan.schema()
+            .fields()
+            .last()
+            .map(|field| field.name().as_str()),
+        "a data-free samples root declares the column too: {plan}"
+    );
 }
 
 /// The scope is the authority on which of the discovered metrics a caller may see. A denied table
@@ -2347,6 +2412,8 @@ async fn native_zero_match_discovery_with_real_selector_binds_both_inputs() {
         (r#"{__name__=~"no_such_metric_.+"} or alpha_total"#, 0),
         (r#"alpha_total or {__name__=~"no_such_metric_.+"}"#, 1),
     ] {
+        // A Prometheus response asks for the per-row name column; a caller's own plan does not, and
+        // this test is about the shape the response path gets.
         let plan = build_native_fused_plan_with_provider(
             query,
             true,
@@ -2531,7 +2598,13 @@ async fn native_absent_over_time_plans_over_discovered_metrics() {
             "{expected} missing from {names:?}"
         );
     }
-    assert!(!names.contains(&METRIC_NAME), "{names:?}");
+    // The layout declares the per-row name column behind the labels, and an `absent` answer names
+    // no row: the column is there, null for every row, and no label of the answer is the name.
+    assert_eq!(Some(&METRIC_NAME), names.last(), "{names:?}");
+    assert!(
+        !names[..names.len() - 1].contains(&METRIC_NAME),
+        "{names:?}"
+    );
 
     // A selector that matches no metric table at all reads the typed empty input, and the route
     // still answers: no candidate table carries `no_such_label`, so the presence read finds nothing
@@ -2830,7 +2903,13 @@ async fn native_fused_plans_dynamic_scalars() {
         } else {
             DEFAULT_TIME_INDEX_COLUMN
         };
-        let expected_schema = vec![expected_time, expected_value, expected_label];
+        // A data-free `count_values` is a samples root, so its rows layout declares the per-row
+        // name column behind the label the node writes. When the label it writes is the name
+        // itself, that one column is both: the layout names each column once.
+        let mut expected_schema = vec![expected_time, expected_value, expected_label];
+        if expected_label != METRIC_NAME {
+            expected_schema.push(METRIC_NAME);
+        }
         let root_fields = fused.tree().root().output.samples().unwrap();
         assert_eq!(
             vec![expected_value],
@@ -3029,7 +3108,8 @@ async fn native_fused_rate_plans_to_a_fused_series_node() {
     let fused = find_fused_series(&plan).expect("the plan holds a native node");
     assert_eq!("rate(some_metric[5m])", fused.promql());
     assert_eq!(
-        vec!["timestamp", "field_0", "tag_0"],
+        // The rows layout declares the per-row name column behind the labels.
+        vec!["timestamp", "field_0", "tag_0", "__name__"],
         plan.schema()
             .fields()
             .iter()
@@ -3437,15 +3517,15 @@ async fn native_fused_metric_engine_two_aggregate_pair_is_one_execution() {
     for (query, columns) in [
         (
             "sum(some_metric) / sum(other_metric)",
-            vec!["timestamp", "field_0"],
+            vec!["timestamp", "field_0", "__name__"],
         ),
         (
             "sum(sum(some_metric)) / sum(other_metric)",
-            vec!["timestamp", "field_0"],
+            vec!["timestamp", "field_0", "__name__"],
         ),
         (
             "sum by (tag_0) (some_metric) / sum by (tag_0) (other_metric)",
-            vec!["timestamp", "field_0", "tag_0"],
+            vec!["timestamp", "field_0", "tag_0", "__name__"],
         ),
     ] {
         let native = build_native_fused_plan_with_provider(query, true, provider().await).await;
@@ -3980,7 +4060,7 @@ async fn native_fused_composes_independent_histogram_binary_frames() {
         }
         assert!(!display.contains("Join:"), "{display}");
         assert_eq!(
-            vec!["field_0", "tag_0", "timestamp"],
+            vec!["__name__", "field_0", "tag_0", "timestamp"],
             sorted_column_names(&plan),
             "{display}"
         );
@@ -4016,7 +4096,7 @@ async fn native_composed_invalid_histogram_arithmetic_declares_float() {
             .unwrap();
         assert_eq!(field.data_type(), &ArrowDataType::Float64, "{display}");
         assert_eq!(
-            vec!["field_0", "tag_0", "timestamp"],
+            vec!["__name__", "field_0", "tag_0", "timestamp"],
             sorted_column_names(&plan),
             "{display}"
         );
@@ -4162,7 +4242,7 @@ async fn native_composed_binary_grouped_cardinality_keeps_many_side_labels() {
         // The many side keeps `tag_0` even though the pair ignores it: a grouping result holds one
         // series per series of that side, so the label is not narrowed away.
         assert_eq!(
-            vec!["field_0", "tag_0", "timestamp"],
+            vec!["__name__", "field_0", "tag_0", "timestamp"],
             sorted_column_names(&plan),
             "{query}: {display}"
         );
@@ -4212,7 +4292,7 @@ async fn native_composed_binary_grouped_cardinality_keeps_many_side_labels() {
         "{display}"
     );
     assert_eq!(
-        vec!["field_0", "timestamp"],
+        vec!["__name__", "field_0", "timestamp"],
         sorted_column_names(&plan),
         "{display}"
     );
@@ -4272,7 +4352,7 @@ async fn native_composed_binary_filled_one_side_carries_its_matching_labels() {
     assert!(!display.contains("Join:"), "{display}");
     // The many side's `host` comes with the pairing and the one side's `job` with the filled step.
     assert_eq!(
-        vec!["field_0", "host", "job", "timestamp"],
+        vec!["__name__", "field_0", "host", "job", "timestamp"],
         sorted_column_names(&plan),
         "{display}"
     );
@@ -4380,9 +4460,12 @@ async fn native_composed_binary_declares_only_include_labels_a_row_can_carry() {
         let NativeExpr::Binary { matching, .. } = &fused.tree().root().expr else {
             panic!("expected composed Binary for {query}: {display}");
         };
-        // The declared columns: the value and time columns plus the labels the walk names.
+        // The declared columns: the value and time columns plus the labels the walk names. The
+        // per-row name column is declared on top of them, which
+        // `native_rows_declare_the_name_of_each_row` pins.
         let mut columns = sorted_column_names(&plan);
-        columns.retain(|column| column != "field_0" && column != "timestamp");
+        columns
+            .retain(|column| column != "field_0" && column != "timestamp" && column != "__name__");
         assert_eq!(
             declared
                 .iter()
@@ -4632,7 +4715,7 @@ async fn native_fused_binary_inside_legacy_math_preserves_anchors() {
         assert_eq!(2, fused.children().len(), "{display}");
         assert!(!display.contains("Join:"), "{display}");
         assert_eq!(
-            vec!["ceil(field_0)", "tag_0", "timestamp"],
+            vec!["__name__", "ceil(field_0)", "tag_0", "timestamp"],
             sorted_column_names(&plan),
             "{display}"
         );
@@ -4699,7 +4782,7 @@ async fn native_ceil_maps_raw_float_input() {
         .map(|field| field.name().clone())
         .collect::<Vec<_>>();
     names.sort();
-    assert_eq!(vec!["field_0", "tag_0", "timestamp"], names);
+    assert_eq!(vec!["__name__", "field_0", "tag_0", "timestamp"], names);
 }
 
 /// Independent selector occurrences remain distinct scans in the native tree.
@@ -4722,10 +4805,13 @@ async fn native_fused_binary_keeps_independent_scan_occurrences() {
         assert_eq!(parser::parse(query).unwrap().to_string(), fused.promql());
         assert_eq!(2, fused.inputs().len(), "{query}");
         if query.contains("on()") || query.contains("ignoring(tag_0)") {
-            assert_eq!(vec!["field_0", "timestamp"], sorted_column_names(&plan));
+            assert_eq!(
+                vec!["__name__", "field_0", "timestamp"],
+                sorted_column_names(&plan)
+            );
         } else if query.contains("group_left") || query.contains("group_right") {
             assert_eq!(
-                vec!["field_0", "tag_0", "timestamp"],
+                vec!["__name__", "field_0", "tag_0", "timestamp"],
                 sorted_column_names(&plan)
             );
         }
@@ -4935,14 +5021,13 @@ async fn native_fused_cross_table_pair_reads_each_table_through_its_own_source()
             sources,
             "{query}"
         );
-        // This pair route is not an aggregate route: it publishes the node's own field names.
-        // `or` reports the series of both sides, so its rows say each one's own name.
-        let expected = if query.contains(" or ") {
-            vec!["__name__", "field_0", "tag_0", "timestamp"]
-        } else if query.contains("on()") || query.contains("ignoring(tag_0)") {
-            vec!["field_0", "timestamp"]
+        // This pair route is not an aggregate route: it publishes the node's own field names, and
+        // every rows result names each row it publishes. A match that keeps only `on()`'s or
+        // `ignoring()`'s labels drops `tag_0`, and the name column is declared either way.
+        let expected = if query.contains("on()") || query.contains("ignoring(tag_0)") {
+            vec!["__name__", "field_0", "timestamp"]
         } else {
-            vec!["field_0", "tag_0", "timestamp"]
+            vec!["__name__", "field_0", "tag_0", "timestamp"]
         };
         assert_eq!(expected, sorted_column_names(&plan), "{query}");
     }
@@ -5225,11 +5310,13 @@ async fn native_fused_info_reads_the_info_table_after_the_base() {
     for (query, columns) in [
         (
             "info(up)",
-            vec!["instance", "job", "ts", "val", "version", "zone"],
+            vec![
+                "__name__", "instance", "job", "ts", "val", "version", "zone",
+            ],
         ),
         (
             "info(rate(up[5m]), {version=~\"v.+\"})",
-            vec!["instance", "job", "ts", "val", "version"],
+            vec!["__name__", "instance", "job", "ts", "val", "version"],
         ),
     ] {
         let plan = build_native_fused_plan_with_provider(query, true, native_info_provider()).await;
@@ -5287,6 +5374,7 @@ async fn native_fused_info_over_its_own_table_reads_two_scans_in_the_region() {
     ));
     assert_eq!(
         vec![
+            "__name__",
             "greptime_timestamp",
             "greptime_value",
             "instance",
@@ -5457,7 +5545,7 @@ async fn native_fused_three_selector_trees_bind_every_occurrence() {
             "{query}: expected a segmented producer: {plan}"
         );
         assert_eq!(
-            vec!["field_0", "tag_0", "timestamp"],
+            vec!["__name__", "field_0", "tag_0", "timestamp"],
             sorted_column_names(&plan),
             "{query}: the segmented boundary uses the native tree's names"
         );
@@ -5642,37 +5730,40 @@ async fn native_fused_aggregate_splits_into_a_final_over_a_partial_producer() {
             "`{query}` native output schema"
         );
         let expected_names: &[&str] = match query {
-            "sum(some_metric)" => &["field_0", "timestamp"],
-            "avg(some_metric)" => &["field_0", "timestamp"],
-            "count(some_metric)" => &["field_0", "timestamp"],
-            "min(some_metric)" => &["field_0", "timestamp"],
-            "max(some_metric)" => &["field_0", "timestamp"],
-            "group(some_metric)" => &["field_0", "timestamp"],
-            "stddev(some_metric)" => &["field_0", "timestamp"],
-            "stdvar(some_metric)" => &["field_0", "timestamp"],
-            "sum by (tag_0) (rate(some_metric[5m]))" => &["field_0", "tag_0", "timestamp"],
-            "sum without (tag_0) (some_metric)" => &["field_0", "timestamp"],
+            "sum(some_metric)" => &["__name__", "field_0", "timestamp"],
+            "avg(some_metric)" => &["__name__", "field_0", "timestamp"],
+            "count(some_metric)" => &["__name__", "field_0", "timestamp"],
+            "min(some_metric)" => &["__name__", "field_0", "timestamp"],
+            "max(some_metric)" => &["__name__", "field_0", "timestamp"],
+            "group(some_metric)" => &["__name__", "field_0", "timestamp"],
+            "stddev(some_metric)" => &["__name__", "field_0", "timestamp"],
+            "stdvar(some_metric)" => &["__name__", "field_0", "timestamp"],
+            "sum by (tag_0) (rate(some_metric[5m]))" => {
+                &["__name__", "field_0", "tag_0", "timestamp"]
+            }
+            "sum without (tag_0) (some_metric)" => &["__name__", "field_0", "timestamp"],
             r#"sum without (tag_0) (label_replace(some_metric, "dst", "$1", "tag_0", "(.*)"))"# => {
-                &["dst", "field_0", "timestamp"]
+                &["__name__", "dst", "field_0", "timestamp"]
             }
             r#"sum by (dst) (label_replace(some_metric, "dst", "$1", "tag_0", "(.*)"))"# => {
-                &["dst", "field_0", "timestamp"]
+                &["__name__", "dst", "field_0", "timestamp"]
             }
-            "sum(rate(some_metric[5m]))" => &["field_0", "timestamp"],
-            "ceil(sum(some_metric))" => &["field_0", "timestamp"],
-            "sum(avg(some_metric) by (tag_0))" => &["field_0", "timestamp"],
-            "sum(8 * rate(some_metric[5m]))" => &["field_0", "timestamp"],
-            "max(10 - rate(some_metric[5m]))" => &["field_0", "timestamp"],
-            "100 - avg(rate(some_metric[5m]))" => &["field_0", "timestamp"],
-            "sum(some_metric) * 2" => &["field_0", "timestamp"],
-            "100 / sum(some_metric)" => &["field_0", "timestamp"],
-            "-sum(some_metric)" => &["field_0", "timestamp"],
-            "abs(sum(some_metric)) * 2" => &["field_0", "timestamp"],
+            "sum(rate(some_metric[5m]))" => &["__name__", "field_0", "timestamp"],
+            "ceil(sum(some_metric))" => &["__name__", "field_0", "timestamp"],
+            "sum(avg(some_metric) by (tag_0))" => &["__name__", "field_0", "timestamp"],
+            "sum(8 * rate(some_metric[5m]))" => &["__name__", "field_0", "timestamp"],
+            "max(10 - rate(some_metric[5m]))" => &["__name__", "field_0", "timestamp"],
+            "100 - avg(rate(some_metric[5m]))" => &["__name__", "field_0", "timestamp"],
+            "sum(some_metric) * 2" => &["__name__", "field_0", "timestamp"],
+            "100 / sum(some_metric)" => &["__name__", "field_0", "timestamp"],
+            "-sum(some_metric)" => &["__name__", "field_0", "timestamp"],
+            "abs(sum(some_metric)) * 2" => &["__name__", "field_0", "timestamp"],
+
             "histogram_quantile(time() / 150, sum by (le) (rate(some_metric[5m])))" => {
-                &["field_0", "timestamp"]
+                &["__name__", "field_0", "timestamp"]
             }
             "histogram_fraction(time() / 150, time() / 75 + 0.5, sum by (le) (rate(some_metric[5m])))" => {
-                &["field_0", "timestamp"]
+                &["__name__", "field_0", "timestamp"]
             }
             _ => panic!("missing exact native schema expectation for `{query}`"),
         };
@@ -5862,8 +5953,18 @@ async fn native_split_boundary_uses_native_tree_column_names() {
         .iter()
         .map(|field| field.name().as_str())
         .collect::<Vec<_>>();
-    assert_eq!(vec!["timestamp", "field_0", "tag_0"], names);
+    // The Final node is a rows layout, so it declares the per-row name column behind the label the
+    // grouping keeps; the value field keeps its position between the time index and the labels.
+    assert_eq!(vec!["timestamp", "field_0", "tag_0", "__name__"], names);
     assert_eq!(&names[1..1 + field_names.len()], field_names);
+    assert!(
+        datatypes::schema::is_metric_name_field(
+            plan.schema()
+                .field_with_unqualified_name("__name__")
+                .unwrap()
+        ),
+        "{plan}"
+    );
     assert!(partial_below(final_node).is_some(), "{plan}");
 }
 
@@ -6202,7 +6303,7 @@ async fn native_fused_nested_rate_abs_aggregates_use_native_schema_names() {
             panic!("{query}: native planning must produce a fused-series node: {native}")
         });
         assert_eq!(
-            vec!["field_0", "timestamp"],
+            vec!["__name__", "field_0", "timestamp"],
             sorted_column_names(&native),
             "{query}: the boundary uses the native tree's field name"
         );
@@ -6230,7 +6331,7 @@ async fn native_fused_declined_nested_aggregate_uses_native_name() {
 
     assert!(find_final_split(&plan).is_none(), "{query}: {plan}");
     assert_eq!(
-        vec!["field_0", "timestamp"],
+        vec!["__name__", "field_0", "timestamp"],
         sorted_column_names(&plan),
         "a bare outer sum drops the inner grouping label and names the value after the compiled root field, not legacy expression text"
     );
@@ -6238,7 +6339,7 @@ async fn native_fused_declined_nested_aggregate_uses_native_name() {
     let grouped = build_native_fused_plan("sum by (tag_0) (some_metric)", true).await;
     assert_eq!(
         sorted_column_names(&grouped),
-        vec!["field_0", "tag_0", "timestamp"],
+        vec!["__name__", "field_0", "tag_0", "timestamp"],
         "an explicit by grouping keeps its label in the exact native schema"
     );
 }
@@ -6738,7 +6839,7 @@ async fn native_fused_clamp_aggregate_is_admitted() {
         .map(|field| field.name().clone())
         .collect::<Vec<_>>();
     native_names.sort();
-    assert_eq!(vec!["field_0", "timestamp"], native_names);
+    assert_eq!(vec!["__name__", "field_0", "timestamp"], native_names);
 
     let legacy_provider = make_provider();
     let legacy_result = PromPlanner::stmt_to_plan_with_annotations(
@@ -6839,15 +6940,26 @@ async fn native_fused_metric_name_rewrites_publish_or_drop_the_name() {
     ] {
         let plan = build_native_fused_plan(query, true).await;
         let display = plan.display_indent().to_string();
+        let fused = find_fused_series(&plan)
+            .unwrap_or_else(|| panic!("`{query}` must run natively: {display}"));
+        // The rows layout declares the per-row name column on every answer; a rewrite that drops
+        // the name leaves it null instead of removing it.
         assert!(
-            find_fused_series(&plan).is_some(),
-            "`{query}` must run natively: {display}"
-        );
-        assert_eq!(
             plan.schema()
                 .fields()
                 .iter()
                 .any(|field| field.name() == METRIC_NAME),
+            "`{query}`: every rows answer declares the name column: {display}"
+        );
+        // What the rewrite decides is whether the tree publishes a name at all, which is the tag
+        // list the walk derives for the root - the column above is appended after that.
+        let tags = promql::native::plan::fused_output_tags(
+            fused.tree().root(),
+            &[fused.binding().tags.clone()],
+        )
+        .unwrap_or_else(|| panic!("`{query}`: the tree derives its output tags: {display}"));
+        assert_eq!(
+            tags.iter().any(|tag| tag == METRIC_NAME),
             keeps_name,
             "`{query}`: {display}"
         );
@@ -9317,8 +9429,44 @@ async fn or_operator_with_unknown_metric_does_not_require_tsid() {
     );
 }
 
-/// The native `or` reports the name of each side's rows through the `__name__` tag column, which
-/// its runtime resolves to the metric name of every series it reports.
+/// `sum by (__name__)` groups by the identity of the series, not by the statement's one name.
+///
+/// A discovered selector reports each series' identity as a name tag, which the grouping then keeps
+/// as a column. Without it every discovered metric falls into one group.
+#[tokio::test]
+async fn native_sum_by_name_separates_discovered_metrics() {
+    let plan = build_native_fused_plan_with_provider(
+        "sum by (__name__) ({tag_0=\"x\"})",
+        true,
+        metric_discovery_provider(&["alpha_total", "beta_total"]).await,
+    )
+    .await;
+    let fused = find_fused_series(&plan).unwrap_or_else(|| panic!("{plan}"));
+    // Each discovered metric is its own source, and each source declares the name it reads.
+    assert_eq!(
+        vec!["alpha_total".to_string(), "beta_total".to_string()],
+        fused_input_metrics(&plan),
+        "{plan}"
+    );
+    assert_eq!(
+        1,
+        fused.inputs().len(),
+        "the discovered metrics share one input: {plan}"
+    );
+    // The grouping keeps the name, so the aggregate answers one group per metric rather than one.
+    assert_eq!(
+        vec!["timestamp", "field_0", "__name__"],
+        plan.schema()
+            .fields()
+            .iter()
+            .map(|field| field.name().as_str())
+            .collect::<Vec<_>>(),
+        "{plan}"
+    );
+}
+
+/// An `or` reports each row's own name, so its column carries the side the row came from rather
+/// than the statement's single name.
 #[tokio::test]
 async fn native_or_declares_the_name_of_each_row() {
     let plan = build_native_fused_plan_with_provider(
@@ -9339,9 +9487,9 @@ async fn native_or_declares_the_name_of_each_row() {
     assert!(name_field.is_nullable());
 }
 
-/// The native `and` and `unless` report the left side's series, whose name is the statement's.
+/// `and` and `unless` report the left side's series, so every row keeps the name of that side.
 #[tokio::test]
-async fn native_and_and_unless_do_not_declare_a_per_row_name() {
+async fn native_and_and_unless_name_each_row_after_the_left_side() {
     for query in [
         "alpha_total and beta_total",
         "alpha_total unless beta_total",
@@ -9353,15 +9501,13 @@ async fn native_and_and_unless_do_not_declare_a_per_row_name() {
         )
         .await;
         assert!(find_fused_series(&plan).is_some(), "{query}: {plan:?}");
-        assert!(
-            !plan
-                .schema()
-                .fields()
-                .iter()
-                .any(|field| is_metric_name_field(field)),
-            "{query}: {:?}",
-            plan.schema()
-        );
+        let name_field = plan
+            .schema()
+            .fields()
+            .iter()
+            .find(|field| is_metric_name_field(field))
+            .unwrap_or_else(|| panic!("{query}: no declared name column in {:?}", plan.schema()));
+        assert_eq!(name_field.name(), METRIC_NAME, "{query}");
     }
 }
 
@@ -14904,6 +15050,8 @@ async fn native_fused_metric_engine_count_values_output_labels() {
             .into_iter()
             .map(str::to_string)
             .collect::<Vec<_>>();
+        // The rows layout declares the per-row name column on top of the labels the walk names.
+        expected.push("__name__".to_string());
         expected.push("timestamp".to_string());
         // The value column keeps the compiled tree's field name rather than the expression text.
         expected.push("field_0".to_string());
@@ -14972,7 +15120,7 @@ async fn native_composed_binary_nests_as_one_fused_tree() {
     );
     assert_eq!(1, right.children().len(), "{query}: {display}");
     assert_eq!(
-        vec!["field_0", "tag_0", "timestamp"],
+        vec!["__name__", "field_0", "tag_0", "timestamp"],
         sorted_column_names(&plan),
         "{query}: {display}"
     );

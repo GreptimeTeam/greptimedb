@@ -1896,6 +1896,11 @@ fn assert_native_result_schema(schema: &SchemaRef, tags: &[&str], context: &str)
     for name in tags {
         columns.push(((*name).to_string(), DataType::Utf8, true));
     }
+    // A rows layout declares the per-row name column after the labels; a constant has no rows and
+    // no labels, and stays the two columns it always was.
+    if !tags.is_empty() {
+        columns.push(("__name__".to_string(), DataType::Utf8, true));
+    }
     assert_eq!(
         result_columns(schema),
         columns,
@@ -2166,6 +2171,19 @@ async fn assert_raw_scan_fused_formats(observer: &NativeFusedObserver, frontend:
                     closed += usize::from(last);
                 }
             } else {
+                // The rows layout declares the per-row metric-name column after the labels, and this
+                // replay binds `native_demo` as the metric the tree evaluates: every row reports it.
+                assert_eq!(row_schema.fields().len(), 4);
+                let name_field = row_schema
+                    .fields()
+                    .iter()
+                    .rposition(|field| datatypes::schema::is_metric_name_field(field))
+                    .expect("the rows layout declares the metric-name column");
+                assert_eq!(
+                    name_field,
+                    row_schema.fields().len() - 1,
+                    "the name column is appended after the labels: {name_field}"
+                );
                 let batches = stream.try_collect::<Vec<_>>().await.unwrap();
                 let mut count = 0;
                 for batch in batches {
@@ -2187,7 +2205,19 @@ async fn assert_raw_scan_fused_formats(observer: &NativeFusedObserver, frontend:
                         .as_any()
                         .downcast_ref::<Float64Array>()
                         .unwrap();
+                    let names = batch
+                        .column_by_name("__name__")
+                        .expect("the rows carry the name column")
+                        .as_any()
+                        .downcast_ref::<StringArray>()
+                        .unwrap();
+                    assert_eq!(names.null_count(), 0, "every row reports its metric name");
                     for i in 0..batch.num_rows() {
+                        assert_eq!(
+                            "native_demo",
+                            names.value(i),
+                            "a row names the metric the bound tree evaluates"
+                        );
                         actual.push((
                             vec![("host".to_string(), host.value(i).to_string())],
                             ts.value(i),
@@ -2196,7 +2226,6 @@ async fn assert_raw_scan_fused_formats(observer: &NativeFusedObserver, frontend:
                         count += 1;
                     }
                 }
-                assert_eq!(row_schema.fields().len(), 3);
                 assert!(count > 0, "partition {partition} emitted no rows");
                 partition_counts.push(count);
             }
@@ -2290,7 +2319,13 @@ async fn promql_output(
             .iter()
             .enumerate()
             .filter(|(_, field)| matches!(field.data_type(), DataType::Utf8 | DataType::Utf8View))
-            .map(|(index, field)| (index, field.name().clone()))
+            .map(|(index, field)| {
+                (
+                    index,
+                    field.name().clone(),
+                    datatypes::schema::is_metric_name_field(field),
+                )
+            })
             .collect::<Vec<_>>();
         for row in 0..batch.num_rows() {
             assert!(
@@ -2298,30 +2333,32 @@ async fn promql_output(
                 "`{query}`: null timestamp at row {row}"
             );
             assert!(values.is_valid(row), "`{query}`: null value at row {row}");
+            // The name column is declared on every rows layout and is null for a row whose value is
+            // computed rather than read from a series; the labels themselves are never null.
             let tags = tag_columns
                 .iter()
-                .map(|(index, name)| {
+                .filter_map(|(index, name, is_name)| {
                     let column = batch.column(*index);
                     let value = match column.data_type() {
                         DataType::Utf8 => {
                             let array = column.as_any().downcast_ref::<StringArray>().unwrap();
-                            assert!(
-                                array.is_valid(row),
-                                "`{query}`: null tag {name} at row {row}"
-                            );
+                            if !array.is_valid(row) {
+                                assert!(*is_name, "`{query}`: null tag {name} at row {row}");
+                                return None;
+                            }
                             array.value(row).to_string()
                         }
                         DataType::Utf8View => {
                             let array = column.as_any().downcast_ref::<StringViewArray>().unwrap();
-                            assert!(
-                                array.is_valid(row),
-                                "`{query}`: null tag {name} at row {row}"
-                            );
+                            if !array.is_valid(row) {
+                                assert!(*is_name, "`{query}`: null tag {name} at row {row}");
+                                return None;
+                            }
                             array.value(row).to_string()
                         }
                         other => panic!("`{query}`: tag column {name} is not a string: {other}"),
                     };
-                    (name.clone(), value)
+                    Some((name.clone(), value))
                 })
                 .collect::<Vec<_>>();
             rows.push((tags, timestamps.value(row), values.value(row)));
@@ -6488,36 +6525,46 @@ pub async fn test_remote_write_v2_histogram_float_prefix_native_route(store_type
     let body = written.text().await;
     assert_eq!(status, StatusCode::NO_CONTENT, "write rejected: {body}");
 
-    for (query, encoded, expected) in [
+    // Every query here transforms the value (a range function counts, resets, changes or reads a
+    // timestamp; `sum` aggregates), and Prometheus drops the metric name for all of them. The
+    // existing route keeps the name of the series it read, so the routes differ in exactly that
+    // label and nowhere else.
+    for (query, encoded, expected, drops_name) in [
         (
             "histogram_count(h)",
             "histogram_count(native_histogram_float_prefix)",
             "10.0",
+            true,
         ),
         (
             "count_over_time(h[1m])",
             "count_over_time(native_histogram_float_prefix%5B1m%5D)",
             "2.0",
+            true,
         ),
         (
             "resets(h[2m])",
             "resets(native_histogram_float_prefix%5B2m%5D)",
             "0.0",
+            true,
         ),
         (
             "changes(h[2m])",
             "changes(native_histogram_float_prefix%5B2m%5D)",
             "1.0",
+            true,
         ),
         (
             "timestamp(h)",
             "timestamp(native_histogram_float_prefix)",
             "4.0",
+            true,
         ),
         (
             "sum by (job)(resets(h[2m]))",
             "sum%20by%20(job)(resets(native_histogram_float_prefix%5B2m%5D))",
             "0.0",
+            true,
         ),
     ] {
         let url = format!("/v1/prometheus/api/v1/query?query={encoded}&time=4");
@@ -6532,10 +6579,28 @@ pub async fn test_remote_write_v2_histogram_float_prefix_native_route(store_type
         let legacy = client.get(&url).send().await;
         assert_eq!(legacy.status(), StatusCode::OK, "{query} failed legacy");
         let legacy: Value = legacy.json().await;
-        assert_eq!(
-            native["data"]["result"], legacy["data"]["result"],
-            "{query}: the native answer differs from the legacy one"
-        );
+        if drops_name {
+            // The name is gone from the answer Prometheus gives, so the routes differ in exactly
+            // that label: the existing route keeps the name of the series it read.
+            assert_eq!(
+                native["data"]["result"][0]["metric"].get("__name__"),
+                None,
+                "{query}: a transforming function drops the name: {native}"
+            );
+            let mut stripped = legacy.clone();
+            for series in stripped["data"]["result"].as_array_mut().unwrap() {
+                series["metric"].as_object_mut().unwrap().remove("__name__");
+            }
+            assert_eq!(
+                native["data"]["result"], stripped["data"]["result"],
+                "{query}: the native answer differs from the legacy one"
+            );
+        } else {
+            assert_eq!(
+                native["data"]["result"], legacy["data"]["result"],
+                "{query}: the native answer differs from the legacy one"
+            );
+        }
         assert_eq!(
             native["data"]["result"][0]["value"][1].as_str(),
             Some(expected),

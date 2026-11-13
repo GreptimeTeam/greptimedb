@@ -1189,6 +1189,9 @@ fn assert_rows(actual: &[ResultRow], expected: &[ResultRow], context: &str) {
 fn assert_native_column_layout(native: &QueryResult, tags: &[&str], query: &str) {
     let mut expected = vec!["ts", "v"];
     expected.extend_from_slice(tags);
+    // The rows layout declares the per-row name column after the labels; an aggregate computes a
+    // value of its own, so that column is null here.
+    expected.push("__name__");
     assert_eq!(
         expected, native.columns,
         "`{query}`: native boundary columns"
@@ -1221,6 +1224,8 @@ fn assert_native_schema(
     );
     let mut expected = vec!["ts".to_string(), value_column.to_string()];
     expected.extend(expected_rows[0].labels.keys().cloned());
+    // Declared on every rows layout, after the labels; the labels above are the ones a row reports.
+    expected.push("__name__".to_string());
     let mut actual = native.columns.clone();
     expected.sort();
     actual.sort();
@@ -1246,9 +1251,26 @@ fn assert_native_columns(
         legacy.time_column, native.time_column,
         "`{query}`: native time column must match legacy"
     );
+    // The rows layout declares `__name__` after the labels. Every statement reaching this helper
+    // aggregates, so it answers no name and that column is null; the labels a row reports are the
+    // ones the existing route reports.
+    assert!(
+        native
+            .label_columns
+            .iter()
+            .any(|column| column == "__name__"),
+        "`{query}`: the rows layout declares the name column: {:?}",
+        native.columns
+    );
+    let reported_labels = native
+        .label_columns
+        .iter()
+        .filter(|column| *column != "__name__")
+        .cloned()
+        .collect::<Vec<_>>();
     assert_eq!(
         sorted(&legacy.label_columns),
-        sorted(&native.label_columns),
+        sorted(&reported_labels),
         "`{query}`: native label columns must match legacy, order-insensitively"
     );
     assert_eq!(
@@ -2186,7 +2208,10 @@ async fn native_aggregate_clamp_executes_on_both_routes() {
         "native `{query}` value"
     );
     assert_eq!("v", native.value_column, "native `{query}` value column");
-    assert_eq!(2, native.columns.len(), "native `{query}` columns");
+    // The rows layout: the time index, the one value, and the declared name column, which an
+    // aggregate leaves null.
+    assert_eq!(3, native.columns.len(), "native `{query}` columns");
+    assert_eq!("__name__", native.columns[2], "native `{query}` columns");
     assert_eq!(1, capture.fused.len(), "native `{query}` fused producers");
     for fused in &capture.fused {
         assert_fused_reads_scan_directly(fused, &format!("native `{query}`"));
@@ -2898,11 +2923,13 @@ async fn native_bare_selector_aggregate_value_columns() {
         let mark = observer.mark();
         let (native_names, native_types, native_rows, capture) =
             read(&instance, &observer, &promql, true).await;
+        // The rows layout declares the per-row name column after the labels; every statement in
+        // this case is an aggregate, which computes its value and leaves that column null.
         let expected_names = match (expected_values, single_owner) {
-            (1, true) => vec!["ts", "v"],
-            (1, false) => vec!["ts", "v", "job"],
-            (2, true) => vec!["ts", "a", "b"],
-            (2, false) => vec!["ts", "a", "b", "job"],
+            (1, true) => vec!["ts", "v", "__name__"],
+            (1, false) => vec!["ts", "v", "job", "__name__"],
+            (2, true) => vec!["ts", "a", "b", "__name__"],
+            (2, false) => vec!["ts", "a", "b", "job", "__name__"],
             _ => unreachable!(),
         };
         assert_eq!(
