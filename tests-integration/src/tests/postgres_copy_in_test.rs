@@ -1173,3 +1173,810 @@ async fn test_postgres_copy_in_otlp_all_rejected() {
 
     server.shutdown().await.unwrap();
 }
+
+/// `COPY FROM STDIN WITH (FORMAT promwrite)` ingests one snappy-
+/// compressed Prometheus Remote Write v1 body through the same
+/// ingestion core as `/v1/prometheus/write`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_postgres_copy_in_prom_write_v1() {
+    use api::prom_store::remote::WriteRequest;
+    use prost::Message;
+
+    init_default_ut_logging();
+    let (_guard, server) = setup_pg_server(StorageType::File, "pg_copy_in_promwrite_v1").await;
+    let port = server.bind_addr().unwrap().port();
+    let client = connect(port).await;
+
+    let request = WriteRequest {
+        timeseries: servers::prom_store::mock_timeseries(),
+        ..Default::default()
+    };
+    let body = servers::prom_store::snappy_compress(&request.encode_to_vec()).unwrap();
+
+    // Split the compressed body across CopyData chunks.
+    let rows = feed_copy_in(
+        &client,
+        "COPY FROM STDIN WITH (FORMAT promwrite)",
+        body.chunks(16).map(Bytes::copy_from_slice).collect(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(rows, 7);
+
+    // mock_timeseries writes metric1..metric3; verify one of them.
+    let messages = client
+        .simple_query("SELECT greptime_value FROM metric1 ORDER BY greptime_timestamp")
+        .await
+        .unwrap();
+    let values: Vec<String> = messages
+        .iter()
+        .filter_map(|m| match m {
+            tokio_postgres::SimpleQueryMessage::Row(row) => row.get(0).map(str::to_string),
+            _ => None,
+        })
+        .collect();
+    assert!(!values.is_empty(), "metric1 must have samples");
+
+    server.shutdown().await.unwrap();
+}
+
+/// Production wiring shares Prom logical-table batching between HTTP and COPY,
+/// including when the Prom HTTP endpoint is disabled. Ordinary tables keep the
+/// direct-write fallback even when the logical batcher is enabled.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_postgres_copy_in_prom_write_batching_parity() {
+    use std::time::Duration;
+
+    use api::greptime_proto::io::prometheus::write::v2::Sample;
+    use api::prom_store::remote;
+    use frontend::server::Services;
+    use frontend::service_config::BatcherOptions;
+    use prost::Message;
+    use servers::batcher::BatchingProtocol;
+    use servers::prom_remote_write::v2::test_util as remote_write_v2;
+
+    init_default_ut_logging();
+    for (prom_batching, http_prom_enabled) in [(false, true), (true, true), (true, false)] {
+        let mut instance =
+            crate::standalone::GreptimeDbStandaloneBuilder::new("pg_copy_prom_batch")
+                .build()
+                .await;
+        let mut opts = instance.opts.clone();
+        opts.http.addr = "127.0.0.1:0".into();
+        opts.grpc.bind_addr = "127.0.0.1:0".into();
+        opts.postgres.addr = "127.0.0.1:0".into();
+        opts.prom_store.enable = http_prom_enabled;
+        // An OTLP-only batcher must not opt Prom COPY into batching. Conversely,
+        // the PostgreSQL-only Prom case must initialize without another endpoint.
+        opts.otlp.enable = !prom_batching;
+        let batcher_options = BatcherOptions {
+            protocols: if prom_batching {
+                vec![BatchingProtocol::Prom]
+            } else {
+                vec![BatchingProtocol::Otlp]
+            },
+            pending_rows_flush_interval: Duration::from_millis(10),
+            ..Default::default()
+        };
+        // Cover both the legacy shared configuration and the logical-table
+        // override. Neither opts into PostgreSQL SQL batching.
+        opts.pending_rows_batcher.table.protocols.clear();
+        if prom_batching && http_prom_enabled {
+            opts.pending_rows_batcher.table = batcher_options;
+        } else {
+            opts.pending_rows_batcher.logical_table = Some(batcher_options);
+        }
+        let mut servers = Services::new(opts, instance.fe_instance().clone(), Default::default())
+            .build()
+            .unwrap();
+        servers.start_all().await.unwrap();
+        let client = connect(servers.addr("POSTGRES_SERVER").unwrap().port()).await;
+
+        client
+            .simple_query(
+                "CREATE TABLE copy_prom_direct (greptime_timestamp TIMESTAMP TIME INDEX, \
+                 greptime_value DOUBLE) ENGINE=mito",
+            )
+            .await
+            .unwrap();
+        for (metric, eligible) in [("copy_prom_batched", true), ("copy_prom_direct", false)] {
+            for version in [1, 2] {
+                let timestamp = 1_700_000_000_000 + version;
+                let payload = if version == 1 {
+                    remote::WriteRequest {
+                        timeseries: vec![remote::TimeSeries {
+                            labels: vec![remote::Label {
+                                name: "__name__".into(),
+                                value: metric.into(),
+                            }],
+                            samples: vec![remote::Sample {
+                                value: 42.0,
+                                timestamp,
+                            }],
+                            ..Default::default()
+                        }],
+                        ..Default::default()
+                    }
+                    .encode_to_vec()
+                } else {
+                    remote_write_v2::request_with_labels_and_samples(
+                        vec![("__name__", metric)],
+                        vec![Sample {
+                            value: 42.0,
+                            timestamp,
+                            ..Default::default()
+                        }],
+                    )
+                    .encode_to_vec()
+                };
+                let body = servers::prom_store::snappy_compress(&payload).unwrap();
+                let before = servers::metrics::FLUSH_TOTAL.get();
+                let rows = feed_copy_in(
+                    &client,
+                    &format!("COPY FROM STDIN WITH (FORMAT promwrite, version {version})"),
+                    vec![Bytes::from(body)],
+                )
+                .await
+                .unwrap();
+                assert_eq!(rows, 1);
+                assert_eq!(
+                    servers::metrics::FLUSH_TOTAL.get() - before,
+                    u64::from(prom_batching && eligible),
+                    "batcher selection: prom={prom_batching}, http={http_prom_enabled}, \
+                     eligible={eligible}, version={version}"
+                );
+                // Default synchronous acknowledgement makes both paths visible
+                // immediately, with COPY's exact affected-row count preserved.
+                let rows = client
+                    .simple_query(&format!(
+                        "SELECT greptime_value FROM {metric} ORDER BY greptime_timestamp"
+                    ))
+                    .await
+                    .unwrap();
+                let values: Vec<_> = rows
+                    .iter()
+                    .filter_map(|message| match message {
+                        tokio_postgres::SimpleQueryMessage::Row(row) => {
+                            Some(row.get(0).unwrap().parse::<f64>().unwrap())
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                assert_eq!(values, vec![42.0; version as usize]);
+            }
+        }
+        drop(client);
+        servers.shutdown_all().await.unwrap();
+        instance.guard.remove_all().await;
+    }
+}
+
+/// `COPY FROM STDIN WITH (FORMAT promwrite, version 2)` ingests a
+/// remote-write v2 body (samples and histograms) through the shared v2
+/// core; the row count reports written samples plus histograms.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_postgres_copy_in_prom_write_v2() {
+    use api::greptime_proto::io::prometheus::write::v2::Sample;
+    use prost::Message;
+    use servers::prom_remote_write::v2::test_util as remote_write_v2;
+
+    init_default_ut_logging();
+    let (_guard, server) = setup_pg_server(StorageType::File, "pg_copy_in_promwrite_v2").await;
+    let port = server.bind_addr().unwrap().port();
+    let client = connect(port).await;
+
+    let request = remote_write_v2::request_with_labels_and_samples(
+        vec![("__name__", "copy_promwrite_v2_gauge"), ("job", "copy")],
+        vec![Sample {
+            value: 42.0,
+            timestamp: 1_700_000_000_000,
+            ..Default::default()
+        }],
+    );
+    let body = servers::prom_store::snappy_compress(&request.encode_to_vec()).unwrap();
+    let rows = feed_copy_in(
+        &client,
+        "COPY FROM STDIN WITH (FORMAT promwrite, version 2)",
+        vec![Bytes::from(body)],
+    )
+    .await
+    .unwrap();
+    assert_eq!(rows, 1);
+
+    let messages = client
+        .simple_query("SELECT greptime_value FROM copy_promwrite_v2_gauge")
+        .await
+        .unwrap();
+    let values: Vec<String> = messages
+        .iter()
+        .filter_map(|m| match m {
+            tokio_postgres::SimpleQueryMessage::Row(row) => row.get(0).map(str::to_string),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(values, vec!["42.0".to_string()]);
+
+    server.shutdown().await.unwrap();
+}
+
+/// The header-equivalent options flow through: a named physical table
+/// routes the series, and a garbage body fails the copy with the
+/// decoder's error while the connection stays usable.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_postgres_copy_in_prom_write_options_and_errors() {
+    use api::prom_store::remote::WriteRequest;
+    use prost::Message;
+
+    init_default_ut_logging();
+    let (_guard, server) = setup_pg_server(StorageType::File, "pg_copy_in_promwrite_opt").await;
+    let port = server.bind_addr().unwrap().port();
+    let client = connect(port).await;
+
+    let request = WriteRequest {
+        timeseries: servers::prom_store::mock_timeseries_new_label(),
+        ..Default::default()
+    };
+    let body = servers::prom_store::snappy_compress(&request.encode_to_vec()).unwrap();
+    let rows = feed_copy_in(
+        &client,
+        "COPY FROM STDIN WITH (FORMAT promwrite, physical_table 'copy_phys')",
+        vec![Bytes::from(body)],
+    )
+    .await
+    .unwrap();
+    assert!(rows > 0);
+
+    // Garbage body: decode error, connection reusable.
+    let error = feed_copy_in(
+        &client,
+        "COPY FROM STDIN WITH (FORMAT promwrite)",
+        vec![Bytes::from_static(b"not a snappy body")],
+    )
+    .await
+    .unwrap_err();
+    assert!(error.as_db_error().is_some(), "unexpected error: {error}");
+    let messages = client.simple_query("SELECT 1").await.unwrap();
+    assert!(!messages.is_empty());
+
+    server.shutdown().await.unwrap();
+}
+
+/// The COPY remote-write flush enforces the shared request-memory
+/// quota: a payload whose decompressed size exceeds the configured
+/// budget fails instead of consuming unbounded memory, matching the
+/// HTTP endpoint's behavior under the same limiter.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_postgres_copy_in_prom_write_memory_quota() {
+    use api::prom_store::remote::WriteRequest;
+    use prost::Message;
+
+    init_default_ut_logging();
+    // A standalone instance plus a pg server wired with a tiny shared
+    // quota, as the frontend does for HTTP ingestion.
+    let instance =
+        crate::standalone::GreptimeDbStandaloneBuilder::new("pg_copy_in_promwrite_quota")
+            .build()
+            .await;
+    let fe = instance.fe_instance().clone();
+    let fe_pg_addr = format!("127.0.0.1:{}", common_test_util::ports::get_port());
+    let opts = frontend::service_config::PostgresOptions {
+        addr: fe_pg_addr.clone(),
+        ..Default::default()
+    };
+    let tls = std::sync::Arc::new(
+        servers::tls::ReloadableTlsServerConfig::try_new(opts.tls.clone()).unwrap(),
+    );
+    let runtime = {
+        use common_runtime::runtime::BuilderBuild as _;
+        let mut builder = common_runtime::Builder::default();
+        builder.worker_threads(2);
+        builder.thread_name("pg-runtime");
+        builder.build().unwrap()
+    };
+    let pg_server = servers::postgres::PostgresServer::new(
+        fe.clone(),
+        fe.clone(),
+        opts.tls.should_force_tls(),
+        tls,
+        0,
+        runtime,
+        None,
+        None,
+    )
+    .with_influxdb_handler(fe.clone())
+    .with_otlp_handler(fe.clone(), true)
+    .with_memory_limiter(servers::request_memory_limiter::ServerMemoryLimiter::new(
+        // A budget far below the decompressed payload below.
+        64 * 1024,
+        common_memory_manager::OnExhaustedPolicy::default(),
+    ))
+    .with_prom_remote_write(fe.clone(), Some(fe.clone()), true, Default::default(), None);
+    use servers::server::Server;
+    let mut pg_server = Box::new(pg_server) as Box<dyn Server>;
+    pg_server
+        .start(fe_pg_addr.parse::<std::net::SocketAddr>().unwrap())
+        .await
+        .unwrap();
+    let port = pg_server.bind_addr().unwrap().port();
+    let client = connect(port).await;
+
+    // A highly compressible v1 body: tiny compressed, large decompressed.
+    let big_label = "x".repeat(512 * 1024);
+    let request = WriteRequest {
+        timeseries: vec![api::prom_store::remote::TimeSeries {
+            labels: vec![api::prom_store::remote::Label {
+                name: "__name__".into(),
+                value: big_label,
+            }],
+            samples: vec![api::prom_store::remote::Sample {
+                value: 1.0,
+                timestamp: 1_700_000_000_000,
+            }],
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    let body = servers::prom_store::snappy_compress(&request.encode_to_vec()).unwrap();
+    assert!(
+        body.len() < 64 * 1024,
+        "the compressed body must fit the COPY limit"
+    );
+
+    let error = feed_copy_in(
+        &client,
+        "COPY FROM STDIN WITH (FORMAT promwrite)",
+        vec![Bytes::from(body)],
+    )
+    .await
+    .unwrap_err();
+    assert!(error.as_db_error().is_some(), "unexpected error: {error}");
+
+    // The connection stays usable.
+    let messages = client.simple_query("SELECT 1").await.unwrap();
+    assert!(!messages.is_empty());
+
+    pg_server.shutdown().await.unwrap();
+}
+
+/// Concurrent unfinished COPY requests share the receive-stage request
+/// memory quota. The fits check covers only a request's OWN holdings;
+/// cross-request contention is left to `acquire` and its policy: under
+/// `Wait`, a second connection parks until the first releases (via a
+/// client CopyFail here, so no decode is involved); under `Fail`, it is
+/// rejected immediately.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_postgres_copy_in_prom_write_shared_receive_quota() {
+    init_default_ut_logging();
+
+    // --- Wait policy (the default): B parks, then proceeds once A's
+    // client abort (CopyFail) drops A's reservation.
+    let server = quota_test_server(
+        "pg_copy_in_pw_quota_wait",
+        common_memory_manager::OnExhaustedPolicy::default(),
+    )
+    .await;
+    let port = server.bind_addr().unwrap().port();
+
+    let chunk = vec![b'x'; 48 * 1024];
+    let client_a = connect(port).await;
+    let client_b = connect(port).await;
+
+    let mut sink_a = Box::pin(
+        client_a
+            .copy_in("COPY FROM STDIN WITH (FORMAT promwrite)")
+            .await
+            .unwrap(),
+    );
+    sink_a
+        .as_mut()
+        .send(Bytes::from(chunk.clone()))
+        .await
+        .unwrap();
+
+    // B's chunk does not fit alongside A's holding: its acquisition
+    // parks. The sink buffers sends locally, so drive it to completion.
+    let mut sink_b = Box::pin(
+        client_b
+            .copy_in("COPY FROM STDIN WITH (FORMAT promwrite)")
+            .await
+            .unwrap(),
+    );
+    sink_b
+        .as_mut()
+        .send(Bytes::from(chunk.clone()))
+        .await
+        .unwrap();
+    let b_finish = tokio::spawn(async move {
+        let mut sink_b = sink_b;
+        sink_b.as_mut().finish().await
+    });
+    // Let B's acquisition park, then release A's reservation by aborting
+    // A's copy client-side (CopyFail drops the buffered state).
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    drop(sink_a);
+
+    let b_result = b_finish.await.unwrap();
+    match &b_result {
+        // B got past the parked acquisition and reached the decoder,
+        // which rejects the garbage body — the point is that it is NOT
+        // the quota timeout.
+        Err(e) => assert!(
+            !e.to_string().contains("Timeout waiting for memory quota"),
+            "B must be unblocked by A's release, got: {e}"
+        ),
+        Ok(rows) => assert!(*rows < 48 * 1024, "unexpected full success: {rows}"),
+    }
+    assert!(!client_b.simple_query("SELECT 1").await.unwrap().is_empty());
+    server.shutdown().await.unwrap();
+
+    // --- Fail policy: the same contention is rejected immediately.
+    let server = quota_test_server(
+        "pg_copy_in_pw_quota_fail",
+        common_memory_manager::OnExhaustedPolicy::Fail,
+    )
+    .await;
+    let port = server.bind_addr().unwrap().port();
+
+    let client_a = connect(port).await;
+    let client_b = connect(port).await;
+    let mut sink_a = Box::pin(
+        client_a
+            .copy_in("COPY FROM STDIN WITH (FORMAT promwrite)")
+            .await
+            .unwrap(),
+    );
+    sink_a
+        .as_mut()
+        .send(Bytes::from(chunk.clone()))
+        .await
+        .unwrap();
+
+    let mut sink_b = Box::pin(
+        client_b
+            .copy_in("COPY FROM STDIN WITH (FORMAT promwrite)")
+            .await
+            .unwrap(),
+    );
+    sink_b.as_mut().send(Bytes::from(chunk)).await.unwrap();
+    let error = sink_b.as_mut().finish().await.unwrap_err();
+    let message = error
+        .as_db_error()
+        .map(|d| d.message().to_string())
+        .unwrap_or_default();
+    assert!(
+        message.to_lowercase().contains("memory"),
+        "expected immediate memory rejection under Fail, got: {error}"
+    );
+    // A still holds its reservation; both connections stay usable.
+    drop(sink_a);
+    assert!(!client_a.simple_query("SELECT 1").await.unwrap().is_empty());
+    assert!(!client_b.simple_query("SELECT 1").await.unwrap().is_empty());
+    server.shutdown().await.unwrap();
+}
+
+/// A pg server with a tiny shared request-memory limiter carrying the
+/// given policy, wired like the frontend does.
+async fn quota_test_server(
+    name: &str,
+    policy: common_memory_manager::OnExhaustedPolicy,
+) -> std::sync::Arc<Box<dyn servers::server::Server>> {
+    let instance = crate::standalone::GreptimeDbStandaloneBuilder::new(name)
+        .build()
+        .await;
+    let fe = instance.fe_instance().clone();
+    let fe_pg_addr = format!("127.0.0.1:{}", common_test_util::ports::get_port());
+    let opts = frontend::service_config::PostgresOptions {
+        addr: fe_pg_addr.clone(),
+        ..Default::default()
+    };
+    let tls = std::sync::Arc::new(
+        servers::tls::ReloadableTlsServerConfig::try_new(opts.tls.clone()).unwrap(),
+    );
+    let runtime = {
+        use common_runtime::runtime::BuilderBuild as _;
+        let mut builder = common_runtime::Builder::default();
+        builder.worker_threads(2);
+        builder.thread_name("pg-runtime");
+        builder.build().unwrap()
+    };
+    let pg_server = servers::postgres::PostgresServer::new(
+        fe.clone(),
+        fe.clone(),
+        opts.tls.should_force_tls(),
+        tls,
+        0,
+        runtime,
+        None,
+        None,
+    )
+    .with_influxdb_handler(fe.clone())
+    .with_otlp_handler(fe.clone(), true)
+    .with_memory_limiter(servers::request_memory_limiter::ServerMemoryLimiter::new(
+        64 * 1024,
+        policy,
+    ))
+    .with_prom_remote_write(fe.clone(), Some(fe.clone()), true, Default::default(), None);
+    use servers::server::Server;
+    let mut pg_server = Box::new(pg_server) as Box<dyn Server>;
+    pg_server
+        .start(fe_pg_addr.parse::<std::net::SocketAddr>().unwrap())
+        .await
+        .unwrap();
+    std::sync::Arc::new(pg_server)
+}
+
+/// COPY preserves the v2 pipeline+exemplars restriction: the same
+/// payload and options rejected by HTTP ("pipelines with exemplars")
+/// are rejected over COPY too, not silently ingested without the
+/// pipeline.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_postgres_copy_in_prom_write_v2_pipeline_exemplar_rejection() {
+    use api::greptime_proto::io::prometheus::write::v2::{Exemplar, Request, Sample, TimeSeries};
+    use prost::Message;
+
+    init_default_ut_logging();
+    let (_guard, server) = setup_pg_server(StorageType::File, "pg_copy_in_pw_v2_pipex").await;
+    let port = server.bind_addr().unwrap().port();
+    let client = connect(port).await;
+
+    // One series with a sample and an exemplar; the exemplar makes the
+    // pipeline combination invalid.
+    let mut symbols = vec![String::new()];
+    let push = |symbols: &mut Vec<String>, s: &str| -> u32 {
+        match symbols.iter().position(|x| x == s) {
+            Some(i) => i as u32,
+            None => {
+                symbols.push(s.to_string());
+                (symbols.len() - 1) as u32
+            }
+        }
+    };
+    let name_ref = push(&mut symbols, "__name__");
+    let value_ref = push(&mut symbols, "copy_pw_v2_exemplar_metric");
+    let trace_ref = push(&mut symbols, "trace_id");
+    let trace_value_ref = push(&mut symbols, "trace-1");
+    let request = Request {
+        symbols,
+        timeseries: vec![TimeSeries {
+            labels_refs: vec![name_ref, value_ref],
+            samples: vec![Sample {
+                value: 1.0,
+                timestamp: 1_700_000_000_000,
+                ..Default::default()
+            }],
+            histograms: Vec::new(),
+            exemplars: vec![Exemplar {
+                labels_refs: vec![trace_ref, trace_value_ref],
+                value: 1.0,
+                timestamp: 1_700_000_000_000,
+            }],
+            metadata: None,
+        }],
+    };
+    let body = servers::prom_store::snappy_compress(&request.encode_to_vec()).unwrap();
+
+    let error = feed_copy_in(
+        &client,
+        "COPY FROM STDIN WITH (FORMAT promwrite, version 2, pipeline_name 'some_pipeline')",
+        vec![Bytes::from(body)],
+    )
+    .await
+    .unwrap_err();
+    let message = error
+        .as_db_error()
+        .map(|d| d.message().to_string())
+        .unwrap_or_default();
+    assert!(
+        message.contains("pipelines with exemplars"),
+        "unexpected error: {error}"
+    );
+
+    // Without the pipeline option the same payload ingests.
+    let request = Request {
+        symbols: request.symbols,
+        timeseries: vec![TimeSeries {
+            labels_refs: vec![name_ref, value_ref],
+            samples: vec![Sample {
+                value: 1.0,
+                timestamp: 1_700_000_000_001,
+                ..Default::default()
+            }],
+            histograms: Vec::new(),
+            exemplars: vec![Exemplar {
+                labels_refs: vec![trace_ref, trace_value_ref],
+                value: 1.0,
+                timestamp: 1_700_000_000_001,
+            }],
+            metadata: None,
+        }],
+    };
+    let body = servers::prom_store::snappy_compress(&request.encode_to_vec()).unwrap();
+    let rows = feed_copy_in(
+        &client,
+        "COPY FROM STDIN WITH (FORMAT promwrite, version 2)",
+        vec![Bytes::from(body)],
+    )
+    .await
+    .unwrap();
+    assert!(rows > 0);
+
+    server.shutdown().await.unwrap();
+}
+
+/// Chunked delivery has the same receive-quota behavior as a single
+/// chunk: each chunk charges only its uncovered delta, so the limiter's
+/// per-acquisition KiB rounding adds at most one rounding for the whole
+/// stream. 48 KiB in 16-byte chunks (3072 acquisitions) fits a 64 KiB
+/// budget where per-chunk full charges would retain ~3 MiB of permits
+/// and reject.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_postgres_copy_in_prom_write_chunked_quota_parity() {
+    init_default_ut_logging();
+    let server = quota_test_server(
+        "pg_copy_in_pw_quota_chunks",
+        common_memory_manager::OnExhaustedPolicy::Fail,
+    )
+    .await;
+    let port = server.bind_addr().unwrap().port();
+    let client = connect(port).await;
+
+    let payload: Vec<u8> = vec![b'x'; 48 * 1024];
+    let mut sink = Box::pin(
+        client
+            .copy_in("COPY FROM STDIN WITH (FORMAT promwrite)")
+            .await
+            .unwrap(),
+    );
+    // 3072 chunks of 16 bytes: under per-chunk charging each acquisition
+    // rounds up to 1 KiB, totalling ~3 MiB of permits — far past the
+    // 64 KiB budget; delta charging holds only the payload's bytes.
+    for chunk in payload.chunks(16) {
+        sink.as_mut()
+            .send(Bytes::copy_from_slice(chunk))
+            .await
+            .unwrap();
+    }
+    // The payload must have been accepted at the receive stage; the
+    // garbage body then fails at decode (not with a quota error).
+    let error = sink.as_mut().finish().await.unwrap_err();
+    let message = error
+        .as_db_error()
+        .map(|d| d.message().to_string())
+        .unwrap_or_default();
+    assert!(
+        !message.to_lowercase().contains("memory") && !message.contains("quota"),
+        "chunked delivery must not exhaust the quota, got: {error} ({message})"
+    );
+
+    // The connection stays usable.
+    let messages = client.simple_query("SELECT 1").await.unwrap();
+    assert!(!messages.is_empty());
+
+    server.shutdown().await.unwrap();
+}
+
+/// A COPY must reject allocations that cannot fit alongside its own body,
+/// rather than waiting for the body permits it cannot release until flush ends.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_postgres_copy_in_prom_write_held_body_quota() {
+    use std::time::Duration;
+
+    init_default_ut_logging();
+    let server = quota_test_server(
+        "pg_copy_in_pw_held_body",
+        common_memory_manager::OnExhaustedPolicy::Wait {
+            timeout: Duration::from_secs(30),
+        },
+    )
+    .await;
+    let client = connect(server.bind_addr().unwrap().port()).await;
+
+    // Incompressible bytes make both the compressed body and decompression
+    // reservation fit individually, but not together. Rejection must precede
+    // protobuf decoding, so the uncompressed contents need not be valid protobuf.
+    let mut state = 1u32;
+    let decoded: Vec<u8> = (0..48 * 1024)
+        .map(|_| {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            state as u8
+        })
+        .collect();
+    let body = servers::prom_store::snappy_compress(&decoded).unwrap();
+    assert!(body.len() < 64 * 1024);
+    assert!(body.len() + decoded.len() > 64 * 1024);
+
+    assert_copy_rejects_held_body(&client, "COPY FROM STDIN WITH (FORMAT promwrite)", body).await;
+    server.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_postgres_copy_in_otlp_held_body_quota() {
+    use std::time::Duration;
+
+    use otel_arrow_rust::proto::opentelemetry::collector::metrics::v1::ExportMetricsServiceRequest;
+    use otel_arrow_rust::proto::opentelemetry::common::v1::{AnyValue, KeyValue, any_value};
+    use otel_arrow_rust::proto::opentelemetry::metrics::v1::{
+        Exemplar, Gauge, Metric, NumberDataPoint, ResourceMetrics, ScopeMetrics, exemplar, metric,
+        number_data_point,
+    };
+    use prost::Message;
+
+    init_default_ut_logging();
+    let server = quota_test_server(
+        "pg_copy_in_otlp_held_body",
+        common_memory_manager::OnExhaustedPolicy::Wait {
+            timeout: Duration::from_secs(30),
+        },
+    )
+    .await;
+    let client = connect(server.bind_addr().unwrap().port()).await;
+    let request = ExportMetricsServiceRequest {
+        resource_metrics: vec![ResourceMetrics {
+            scope_metrics: vec![ScopeMetrics {
+                metrics: vec![Metric {
+                    name: "copy_otlp_held_body".into(),
+                    data: Some(metric::Data::Gauge(Gauge {
+                        data_points: vec![NumberDataPoint {
+                            time_unix_nano: 1_700_000_000_000_000_000,
+                            value: Some(number_data_point::Value::AsDouble(1.0)),
+                            attributes: vec![KeyValue {
+                                key: "host".into(),
+                                value: Some(AnyValue {
+                                    value: Some(any_value::Value::StringValue(
+                                        "x".repeat(13 * 1024),
+                                    )),
+                                }),
+                            }],
+                            exemplars: vec![Exemplar {
+                                time_unix_nano: 1_700_000_000_000_000_000,
+                                value: Some(exemplar::Value::AsDouble(1.0)),
+                                ..Default::default()
+                            }],
+                            ..Default::default()
+                        }],
+                    })),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        }],
+    };
+    let body = request.encode_to_vec();
+    let conversion = servers::otlp::metrics::to_grpc_insert_requests(
+        request,
+        &mut session::protocol_ctx::OtlpMetricCtx {
+            with_metric_engine: true,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(conversion.exemplars.len(), 1);
+    let expansion =
+        servers::exemplar::estimated_row_bytes([conversion.exemplars.as_slice()]).unwrap();
+    assert!(body.len() < 64 * 1024);
+    assert!(expansion < 64 * 1024);
+    assert!(body.len() + expansion > 64 * 1024);
+
+    assert_copy_rejects_held_body(&client, "COPY FROM STDIN WITH (FORMAT otlp)", body).await;
+    server.shutdown().await.unwrap();
+}
+
+async fn assert_copy_rejects_held_body(client: &tokio_postgres::Client, sql: &str, body: Vec<u8>) {
+    let error = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        feed_copy_in(client, sql, vec![Bytes::from(body)]),
+    )
+    .await
+    .expect("COPY must reject promptly, not wait on its own body reservation")
+    .unwrap_err();
+    let message = error.as_db_error().unwrap().message();
+    assert!(
+        message.to_lowercase().contains("memory")
+            && !message.contains("Timeout waiting for memory quota"),
+        "expected a self-fit rejection, got: {message}"
+    );
+    assert!(!client.simple_query("SELECT 1").await.unwrap().is_empty());
+}

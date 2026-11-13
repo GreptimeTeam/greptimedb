@@ -409,7 +409,13 @@ where
 
         if opts.postgres.enable {
             // Init PosgresSQL Server
-            let with_metric_engine = effective_prom_store_options(&opts).with_metric_engine;
+            let prom_store = effective_prom_store_options(&opts);
+            let pending_rows_batcher = opts
+                .logical_batcher_options()
+                .protocols
+                .contains(&BatchingProtocol::Prom)
+                .then(|| instance.logical_batcher().cloned())
+                .flatten();
             let opts = &opts.postgres;
             let pg_addr = parse_addr(&opts.addr)?;
 
@@ -431,8 +437,15 @@ where
                     Some(self.instance.process_manager().clone()),
                 )
                 .with_influxdb_handler(instance.clone())
-                .with_otlp_handler(instance.clone(), with_metric_engine)
+                .with_otlp_handler(instance.clone(), prom_store.with_metric_engine)
                 .with_memory_limiter(self.server_memory_limiter.clone())
+                .with_prom_remote_write(
+                    instance.clone(),
+                    Some(instance.clone()),
+                    prom_store.with_metric_engine,
+                    prom_store.prom_validation_mode,
+                    pending_rows_batcher,
+                )
                 .with_batching_enabled(postgres_batching),
             ) as Box<dyn Server>;
 
@@ -577,6 +590,46 @@ mod tests {
             weak.upgrade().is_none(),
             "batcher must not retain its schema owner"
         );
+    }
+
+    #[tokio::test]
+    async fn test_prom_logical_batcher_endpoint_selection() {
+        use crate::service_config::BatcherOptions;
+
+        for (http_prom, postgres, metric_engine, expected) in [
+            (false, false, true, false),
+            (true, false, true, true),
+            (false, true, true, true),
+            (true, true, true, true),
+            (false, true, false, false),
+        ] {
+            let mut options = FrontendOptions::default();
+            options.prom_store.enable = http_prom;
+            options.postgres.enable = postgres;
+            options.prom_store.with_metric_engine = metric_engine;
+            options.pending_rows_batcher.logical_table = Some(BatcherOptions {
+                protocols: vec![BatchingProtocol::Prom],
+                pending_rows_flush_interval: Duration::from_millis(10),
+                ..Default::default()
+            });
+            let meta_client = Arc::new(
+                MetaClientBuilder::new(0, Role::Frontend)
+                    .enable_procedure()
+                    .build(),
+            );
+            let instance = Arc::new(
+                FrontendBuilder::new_test(&options, meta_client)
+                    .try_build()
+                    .await
+                    .unwrap(),
+            );
+            instance.init_logical_batcher(&options);
+            assert_eq!(
+                instance.logical_batcher().is_some(),
+                expected,
+                "http_prom={http_prom}, postgres={postgres}, metric_engine={metric_engine}"
+            );
+        }
     }
 
     #[test]

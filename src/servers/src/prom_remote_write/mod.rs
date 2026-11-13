@@ -115,6 +115,7 @@ pub async fn decode_remote_write_request(
     prom_validation_mode: PromValidationMode,
     processor: &mut PromSeriesProcessor,
     limiter: &ServerMemoryLimiter,
+    body_reserved_bytes: u64,
 ) -> crate::error::Result<(
     TablesBuilder<'static>,
     Vec<MemoryGuard<RequestMemoryMetrics>>,
@@ -126,7 +127,8 @@ pub async fn decode_remote_write_request(
     // Holds the memory permits for the decompressed bytes; the caller must
     // keep them alive as long as the returned `TablesBuilder`, which retains
     // the decompressed buffer as its raw data.
-    let buf = decompress_remote_write_body(is_zstd, &body[..], limiter, 0).await?;
+    let buf =
+        decompress_remote_write_body(is_zstd, &body[..], limiter, body_reserved_bytes).await?;
     // Decompression copied the payload out, so the compressed body is no longer needed.
     drop(body);
     let (data, guards) = buf.into_parts();

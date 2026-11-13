@@ -34,7 +34,7 @@ impl Instance {
             .protocols
             .iter()
             .any(|protocol| match protocol {
-                BatchingProtocol::Prom => options.prom_store.enable,
+                BatchingProtocol::Prom => options.prom_store.enable || options.postgres.enable,
                 BatchingProtocol::Otlp => options.otlp.enable,
                 _ => false,
             });
