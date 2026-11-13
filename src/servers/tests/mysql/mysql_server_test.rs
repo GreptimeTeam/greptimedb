@@ -470,7 +470,7 @@ async fn test_bearer_token_auth_over_clear_password() -> Result<()> {
             assert_eq!(1, value);
             assert_eq!(1, provider.authentications.load(Ordering::Relaxed));
             assert_eq!(
-                2 * usize::from(database.is_some()),
+                1 + usize::from(database.is_some()),
                 provider.authorizations.load(Ordering::Relaxed)
             );
             connection.disconnect().await.unwrap();
@@ -596,7 +596,7 @@ async fn test_db_name() -> Result<()> {
         .await
         .unwrap()
         .flatten();
-    assert_eq!(None, database);
+    assert_eq!(Some("public".to_string()), database);
     connection.query_drop("USE public").await.unwrap();
     let database: String = connection
         .query_first("SELECT DATABASE()")

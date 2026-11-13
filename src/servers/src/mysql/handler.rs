@@ -439,11 +439,11 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
                 return false;
             }
         };
-        let (catalog, schema) = if let Some(database) = database {
+        let (catalog, mut schema) = if let Some(database) = database {
             let (catalog, schema) = parse_optional_catalog_and_schema_from_db_string(database);
             (catalog.unwrap_or_else(|| self.session.catalog()), schema)
         } else {
-            (self.session.catalog(), String::new())
+            (self.session.catalog(), self.session.schema())
         };
         // if not specified then **greptime** will be used
         let username = String::from_utf8_lossy(username);
@@ -491,20 +491,30 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
                 Ok(userinfo) => {
                     // on_init writes an ERR packet without aborting the handshake.
                     // Reject here so opensrv closes the connection before its command loop.
-                    if database.is_some()
-                        && let Err(e) = user_provider.authorize(&catalog, &schema, &userinfo).await
-                    {
-                        METRIC_AUTH_FAILURE
-                            .with_label_values(&[e.status_code().as_ref()])
-                            .inc();
-                        if e.status_code().should_log_error() {
-                            error!(e; user = userinfo.username(), protocol = "mysql", catalog = %catalog,
-                                schema = %schema, "Handshake database authorization failed");
+                    if let Err(e) = user_provider.authorize(&catalog, &schema, &userinfo).await {
+                        let denied = matches!(
+                            e.status_code(),
+                            common_error::status_code::StatusCode::AccessDenied
+                                | common_error::status_code::StatusCode::PermissionDenied
+                        );
+                        if database.is_none() && denied {
+                            debug!(user = userinfo.username(), protocol = "mysql", catalog = %catalog,
+                                schema = %schema, reason = %e.status_code(),
+                                "Default database not authorized; starting without a selected database");
+                            schema.clear();
                         } else {
-                            warn!(user = userinfo.username(), protocol = "mysql", catalog = %catalog,
-                                schema = %schema, reason = %e.status_code(), "Handshake database authorization denied");
+                            METRIC_AUTH_FAILURE
+                                .with_label_values(&[e.status_code().as_ref()])
+                                .inc();
+                            if denied {
+                                warn!(user = userinfo.username(), protocol = "mysql", catalog = %catalog,
+                                    schema = %schema, reason = %e.status_code(), "Handshake database authorization denied");
+                            } else {
+                                error!(e; user = userinfo.username(), protocol = "mysql", catalog = %catalog,
+                                    schema = %schema, "Handshake database authorization failed");
+                            }
+                            return false;
                         }
-                        return false;
                     }
                     user_info = Some(userinfo);
                 }
@@ -520,9 +530,14 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
         let user_info =
             user_info.unwrap_or_else(|| auth::userinfo_by_name(Some(username.to_string())));
 
-        if database.is_some() {
+        if database.is_some() || !schema.is_empty() {
             match self.query_handler.is_valid_schema(&catalog, &schema).await {
                 Ok(true) => {}
+                Ok(false) if database.is_none() => {
+                    debug!(user = %username, protocol = "mysql", catalog = %catalog,
+                        schema = %schema, "Default database does not exist; starting without a selected database");
+                    schema.clear();
+                }
                 Ok(false) => {
                     warn!(
                         "Unknown MySQL handshake database {}.{} for user {}",
@@ -1057,6 +1072,7 @@ mod tests {
     use std::sync::Arc;
 
     use async_trait::async_trait;
+    use auth::UserProvider;
     use common_query::Output;
     use datafusion_expr::LogicalPlan;
     use query::parser::PromQuery;
@@ -1102,6 +1118,12 @@ mod tests {
         }
 
         async fn is_valid_schema(&self, _: &str, schema: &str) -> Result<bool> {
+            if schema == "backend_error" {
+                return crate::error::InternalSnafu {
+                    err_msg: "Schema backend unavailable",
+                }
+                .fail();
+            }
             Ok(schema != "missing")
         }
     }
@@ -1116,19 +1138,62 @@ mod tests {
         )
     }
 
+    struct HandshakeUserProvider {
+        inner: auth::tests::MockUserProvider,
+        fail_authorization: bool,
+    }
+
+    #[async_trait]
+    impl UserProvider for HandshakeUserProvider {
+        fn name(&self) -> &str {
+            "handshake_test"
+        }
+
+        async fn authenticate(
+            &self,
+            identity: Identity<'_>,
+            password: Password<'_>,
+        ) -> auth::error::Result<auth::UserInfoRef> {
+            self.inner.authenticate(identity, password).await
+        }
+
+        async fn authorize(
+            &self,
+            catalog: &str,
+            schema: &str,
+            user_info: &auth::UserInfoRef,
+        ) -> auth::error::Result<()> {
+            if self.fail_authorization {
+                auth::error::InternalStateSnafu {
+                    msg: "Authorization backend unavailable",
+                }
+                .fail()
+            } else {
+                self.inner.authorize(catalog, schema, user_info).await
+            }
+        }
+    }
+
     #[tokio::test]
-    async fn test_handshake_rejects_unauthorized_or_missing_database() {
-        for (allowed, database, accepted) in [
-            ("allowed", None, true),
-            ("allowed", Some("denied"), false),
-            ("allowed", Some("allowed"), true),
-            ("missing", Some("missing"), false),
-            ("public", None, true),
+    async fn test_handshake_database_selection() {
+        for (allowed, default_schema, database, fail_authorization, expected_schema) in [
+            ("allowed", "public", None, false, Some("")),
+            ("allowed", "public", Some("denied"), false, None),
+            ("allowed", "public", Some("allowed"), false, Some("allowed")),
+            ("missing", "public", Some("missing"), false, None),
+            ("public", "public", None, false, Some("public")),
+            ("missing", "missing", None, false, Some("")),
+            ("backend_error", "backend_error", None, false, None),
+            ("public", "public", None, true, None),
         ] {
             let mut shim = create_shim();
-            shim.user_provider = Some(Arc::new(auth::tests::MockUserProvider {
-                schema: allowed.to_string(),
-                ..Default::default()
+            shim.session.set_schema(default_schema.to_string());
+            shim.user_provider = Some(Arc::new(HandshakeUserProvider {
+                inner: auth::tests::MockUserProvider {
+                    schema: allowed.to_string(),
+                    ..Default::default()
+                },
+                fail_authorization,
             }));
             let result =
                 <MysqlInstanceShim as AsyncMysqlShim<tokio::io::Sink>>::authenticate_with_database(
@@ -1140,13 +1205,9 @@ mod tests {
                     database.map(str::as_bytes),
                 )
                 .await;
-            assert_eq!(accepted, result, "{allowed}: {database:?}");
+            assert_eq!(expected_schema.is_some(), result, "{allowed}: {database:?}");
             assert_eq!(
-                if accepted {
-                    database.unwrap_or("")
-                } else {
-                    "public"
-                },
+                expected_schema.unwrap_or(default_schema),
                 shim.session.schema()
             );
         }
