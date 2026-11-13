@@ -1187,7 +1187,7 @@ mod tests {
                 None => batch.clone(),
             };
             assert_eq!(compacted, raw);
-            let base = RangeBase {
+            let mut base = RangeBase {
                 filters: filters.clone(),
                 dyn_filters: vec![],
                 read_format,
@@ -1249,7 +1249,58 @@ mod tests {
                     compacted,
                     datatypes::arrow::compute::filter_record_batch(&raw, &mask).unwrap()
                 );
+                // Both scan consumers project before compatibility. Compose the
+                // same boundary with an added nullable field, for either layout.
+                let mut target = RegionMetadataBuilder::from_existing(metadata.as_ref().clone());
+                target.push_column_metadata(store_api::metadata::ColumnMetadata {
+                    column_schema: ColumnSchema::new(
+                        "added",
+                        ConcreteDataType::uint64_datatype(),
+                        true,
+                    ),
+                    semantic_type: SemanticType::Field,
+                    column_id: tag_count + 2,
+                });
+                let target = Arc::new(target.build().unwrap());
+                let projection =
+                    crate::read::flat_projection::FlatProjectionMapper::all(&target).unwrap();
+                let compat = FlatCompatBatch::try_new(&projection, &base.read_format, true)
+                    .unwrap()
+                    .unwrap();
+                let compatible = compat.compat(compacted.clone()).unwrap();
+                assert_eq!(compatible.schema(), projection.input_arrow_schema(true));
+                assert_eq!(compatible.column(1).null_count(), compatible.num_rows());
+                assert_eq!(compatible.column(0), compacted.column(0));
+                assert_eq!(&compatible.columns()[2..], &compacted.columns()[1..]);
             }
+            // Missing partition tags produce NULL, which must reject the row
+            // even when ordinary tag and field predicates are skipped.
+            base.filters.clear();
+            let schema = Arc::new(Schema::new(vec![ColumnSchema::new(
+                "tag_0",
+                ConcreteDataType::dictionary_datatype(
+                    ConcreteDataType::uint32_datatype(),
+                    ConcreteDataType::string_datatype(),
+                ),
+                true,
+            )]));
+            base.partition_filter = Some(PartitionFilterContext {
+                region_partition_physical_expr: partition_col("tag_0")
+                    .eq(Value::String("".into()))
+                    .try_as_physical_expr(schema.arrow_schema())
+                    .unwrap(),
+                partition_schema: schema.clone(),
+            });
+            let temporary = base
+                .project_record_batch_for_pruning_flat(&batch, &schema, &mut TagDecodeState::new())
+                .unwrap();
+            // Dictionary keys can be valid while the referenced value is NULL.
+            assert_eq!(temporary.column(0).logical_null_count(), 1);
+            let filtered = base
+                .precise_filter_flat(batch.clone(), true, true)
+                .unwrap()
+                .unwrap();
+            assert_eq!(filtered, batch.slice(1, 1));
         }
     }
 

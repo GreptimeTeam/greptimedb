@@ -2963,8 +2963,14 @@ mod tests {
         }
     }
 
+    #[rstest::rstest]
+    #[case(None)]
+    #[case(Some(false))]
+    #[case(Some(true))]
     #[tokio::test]
-    async fn test_sparse_compaction_partition_mismatch_keeps_encoded_layout() {
+    async fn test_sparse_compaction_partition_mismatch_keeps_encoded_layout(
+        #[case] prefilter: Option<bool>,
+    ) {
         let source = crate::test_util::sst_util::sst_region_metadata_with_encoding(
             PrimaryKeyEncoding::Sparse,
         );
@@ -3002,7 +3008,21 @@ mod tests {
                 )
                 .expected_metadata(Some(Arc::new(expected.clone())))
                 .compaction(compaction);
+                let builder = if let Some(enabled) = prefilter {
+                    builder
+                        .predicate(Some(Predicate::new(vec![
+                            col("tag_1").eq(lit("x")),
+                            col("field_0").gt(lit(1_u64)),
+                        ])))
+                        .enable_predicate_prefilter(enabled)
+                } else {
+                    builder
+                };
                 let mut reader = builder.build().await.unwrap().unwrap();
+                assert_eq!(
+                    reader.context.reader_builder().prefilter_builder.is_some(),
+                    prefilter == Some(true),
+                );
                 assert!(reader.context.compaction_projection_mapper().is_none());
                 let mut count = 0;
                 while let Some(batch) = reader.next_record_batch().await.unwrap() {
@@ -3035,8 +3055,18 @@ mod tests {
                 assert_eq!(
                     count,
                     match partition {
-                        None => 6,
-                        Some("a") => 5,
+                        None =>
+                            if prefilter.is_some() {
+                                4
+                            } else {
+                                6
+                            },
+                        Some("a") =>
+                            if prefilter.is_some() {
+                                3
+                            } else {
+                                5
+                            },
                         Some("b") => 1,
                         _ => 0,
                     }
