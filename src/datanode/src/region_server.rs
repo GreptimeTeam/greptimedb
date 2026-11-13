@@ -74,6 +74,7 @@ use servers::grpc::flight::{
 use servers::grpc::region_server::RegionServerHandler;
 use session::context::{
     FLIGHT_METRICS_HEARTBEAT_INTERVAL, QueryContext, QueryContextBuilder, QueryContextRef,
+    RemoteReadDepthError,
 };
 use snafu::{IntoError, OptionExt, ResultExt, ensure};
 use store_api::metric_engine_consts::{
@@ -99,9 +100,9 @@ use crate::error::{
     ConcurrentQueryLimiterTimeoutSnafu, DataFusionSnafu, DecodeLogicalPlanSnafu,
     ExecuteLogicalPlanSnafu, FindLogicalRegionsSnafu, GetRegionMetadataSnafu,
     HandleBatchDdlRequestSnafu, HandleBatchOpenRequestSnafu, HandleRegionRequestSnafu,
-    NewPlanDecoderSnafu, RegionEngineNotFoundSnafu, RegionNotFoundSnafu, RegionNotReadySnafu,
-    Result, RuntimeJoinSnafu, SerializeJsonSnafu, StopRegionEngineSnafu, UnexpectedSnafu,
-    UnsupportedOutputSnafu,
+    InvalidQueryContextSnafu, NewPlanDecoderSnafu, RegionEngineNotFoundSnafu, RegionNotFoundSnafu,
+    RegionNotReadySnafu, Result, RuntimeJoinSnafu, SerializeJsonSnafu, StopRegionEngineSnafu,
+    UnexpectedSnafu, UnsupportedOutputSnafu, UnsupportedRemoteReadDepthSnafu,
 };
 use crate::event_listener::RegionServerEventListenerRef;
 use crate::query_stream::QueryRuntimeStream;
@@ -290,11 +291,7 @@ impl RegionServer {
         request: api::v1::region::QueryRequest,
         query_ctx: QueryContextRef,
     ) -> Result<SendableRecordBatchStream> {
-        let permit = if let Some(p) = &self.inner.parallelism {
-            Some(p.acquire().await?)
-        } else {
-            None
-        };
+        let (permit, query_ctx) = self.admit_read(&query_ctx).await?;
 
         let region_id = RegionId::from_u64(request.region_id);
         let engine_ctx = self
@@ -354,12 +351,6 @@ impl RegionServer {
     }
 
     async fn handle_read_inner(&self, request: QueryRequest) -> Result<SendableRecordBatchStream> {
-        let permit = if let Some(p) = &self.inner.parallelism {
-            Some(p.acquire().await?)
-        } else {
-            None
-        };
-
         let ctx = request
             .header
             .as_ref()
@@ -372,6 +363,7 @@ impl RegionServer {
                 .build()
             })?;
         let query_ctx = Arc::new(ctx.unwrap_or_else(|| QueryContextBuilder::default().build()));
+        let (permit, query_ctx) = self.admit_read(&query_ctx).await?;
 
         let region_id = request.region_id;
         let injector_builder = NameAwareDataSourceInjectorBuilder::from_plan(&request.plan)
@@ -428,6 +420,50 @@ impl RegionServer {
                 (!reportable).then_some(region_id)
             })
             .collect()
+    }
+
+    /// Admits one read and returns its permit plus the query context to execute it with.
+    ///
+    /// The lane comes from the reserved remote read depth of the incoming query
+    /// context: a missing or `0` depth is an ordinary read, `1` is the nested read a
+    /// datanode dispatches while executing another remote read. The returned context
+    /// has that depth incremented by exactly one, so the reads dispatched by this
+    /// request inherit the depth of the nested level they run at.
+    ///
+    /// A depth of 2 or more can only come from an unsupported plan: the nested
+    /// broadcast join rewrite reads at most two remote levels, so a third level would
+    /// need a third admission lane, and would deadlock the same way a single shared
+    /// lane deadlocks two levels. Those requests are rejected before any permit is
+    /// waited for. Without the limiter there is nothing to deadlock, so no depth is
+    /// rejected.
+    async fn admit_read(
+        &self,
+        query_ctx: &QueryContextRef,
+    ) -> Result<(Option<OwnedSemaphorePermit>, QueryContextRef)> {
+        let depth = query_ctx
+            .remote_read_depth()
+            .map_err(|error| invalid_query_context(&error))?;
+
+        let permit = match &self.inner.parallelism {
+            Some(parallelism) => {
+                ensure!(
+                    !depth.exceeds_supported_limit(),
+                    UnsupportedRemoteReadDepthSnafu { depth: depth.get() }
+                );
+                let lane = if depth.is_nested() {
+                    ReadLane::Nested
+                } else {
+                    ReadLane::Ordinary
+                };
+                Some(parallelism.acquire(lane).await?)
+            }
+            None => None,
+        };
+
+        let query_ctx = query_ctx
+            .with_next_remote_read_depth()
+            .map_err(|error| invalid_query_context(&error))?;
+        Ok((permit, Arc::new(query_ctx)))
     }
 
     /// Returns all opened and reportable regions.
@@ -1401,8 +1437,34 @@ struct RegionServerInner {
     initial_remote_dyn_filter_registrations: RemoteDynFilterRegistry,
 }
 
+/// The admission lane of one read handled by the region server.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReadLane {
+    /// A read requested from outside the datanode, i.e. a remote read of depth 0.
+    Ordinary,
+    /// A read dispatched by a datanode while executing a remote read, i.e. a remote
+    /// read of depth 1.
+    Nested,
+}
+
+/// The concurrent read limiter of a datanode.
+///
+/// It holds one semaphore per [`ReadLane`], each with `max_concurrent_queries`
+/// permits:
+/// * [`ReadLane::Ordinary`] bounds the reads requested from outside the datanode.
+/// * [`ReadLane::Nested`] bounds the reads a remote read dispatches while it executes,
+///   i.e. the inner `MergeScan` of a nested plan.
+///
+/// The lanes are disjoint, so the datanode admits at most `2 * max_concurrent_queries`
+/// concurrent read streams (`N` ordinary plus `N` nested). A single shared semaphore
+/// would deadlock: an outer read holds its permit through [`PermitGuardedStream`]
+/// until its stream ends, and the stream only ends after the nested read it waits for
+/// obtains a permit. Keeping the nested lane free of ordinary reads means a datanode
+/// that owns both the outer probe region and an inner build region always serves the
+/// nested read its own outer stream is blocked on.
 struct RegionServerParallelism {
-    semaphore: Arc<Semaphore>,
+    ordinary: Arc<Semaphore>,
+    nested: Arc<Semaphore>,
     timeout: Duration,
 }
 
@@ -1415,17 +1477,31 @@ impl RegionServerParallelism {
             return None;
         }
         Some(RegionServerParallelism {
-            semaphore: Arc::new(Semaphore::new(max_concurrent_queries)),
+            ordinary: Arc::new(Semaphore::new(max_concurrent_queries)),
+            nested: Arc::new(Semaphore::new(max_concurrent_queries)),
             timeout: concurrent_query_limiter_timeout,
         })
     }
 
-    pub async fn acquire(&self) -> Result<OwnedSemaphorePermit> {
-        timeout(self.timeout, self.semaphore.clone().acquire_owned())
+    /// Acquires one permit of `lane` under the configured timeout.
+    pub async fn acquire(&self, lane: ReadLane) -> Result<OwnedSemaphorePermit> {
+        let semaphore = match lane {
+            ReadLane::Ordinary => &self.ordinary,
+            ReadLane::Nested => &self.nested,
+        };
+        timeout(self.timeout, semaphore.clone().acquire_owned())
             .await
             .context(ConcurrentQueryLimiterTimeoutSnafu)?
             .context(ConcurrentQueryLimiterClosedSnafu)
     }
+}
+
+/// Wraps a reserved remote read depth failure as an invalid query context error.
+fn invalid_query_context(error: &RemoteReadDepthError) -> error::Error {
+    InvalidQueryContextSnafu {
+        reason: error.to_string(),
+    }
+    .build()
 }
 
 /// Wraps a record batch stream and holds a concurrency permit until the stream is
@@ -2438,8 +2514,12 @@ mod tests {
     };
     use store_api::storage::RegionId;
 
+    use common_recordbatch::EmptyRecordBatchStream;
+    use session::context::REMOTE_READ_DEPTH_EXTENSION_KEY;
+
     use super::*;
-    use crate::tests::{MockRegionEngine, mock_region_server};
+    use crate::event_listener::NoopRegionServerEventListener;
+    use crate::tests::{MockQueryEngine, MockRegionEngine, mock_region_server};
 
     #[test]
     fn test_is_ingest_request() {
@@ -3486,11 +3566,11 @@ mod tests {
     #[tokio::test]
     async fn test_region_server_parallelism() {
         let p = RegionServerParallelism::from_opts(2, Duration::from_millis(1)).unwrap();
-        let first_query = p.acquire().await;
+        let first_query = p.acquire(ReadLane::Ordinary).await;
         assert!(first_query.is_ok());
-        let second_query = p.acquire().await;
+        let second_query = p.acquire(ReadLane::Ordinary).await;
         assert!(second_query.is_ok());
-        let third_query = p.acquire().await;
+        let third_query = p.acquire(ReadLane::Ordinary).await;
         assert!(third_query.is_err());
         let err = third_query.unwrap_err();
         assert_eq!(
@@ -3498,8 +3578,197 @@ mod tests {
             "Failed to acquire permit under timeouts: deadline has elapsed".to_string()
         );
         drop(first_query);
-        let forth_query = p.acquire().await;
+        let forth_query = p.acquire(ReadLane::Ordinary).await;
         assert!(forth_query.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_nested_lane_is_admitted_while_ordinary_lane_is_full() {
+        // `max_concurrent_queries = 1`: the outer read takes the only ordinary permit.
+        let p = RegionServerParallelism::from_opts(1, Duration::from_millis(1)).unwrap();
+        let ordinary = p.acquire(ReadLane::Ordinary).await.unwrap();
+        assert!(
+            p.acquire(ReadLane::Ordinary).await.is_err(),
+            "the ordinary lane must be bounded by max_concurrent_queries"
+        );
+
+        // The nested read the outer stream waits for is still admitted, and the nested
+        // lane is bounded on its own.
+        let nested = p.acquire(ReadLane::Nested).await.unwrap();
+        assert!(
+            p.acquire(ReadLane::Nested).await.is_err(),
+            "the nested lane must be bounded by max_concurrent_queries"
+        );
+        assert!(
+            p.acquire(ReadLane::Ordinary).await.is_err(),
+            "a nested permit must not consume ordinary capacity"
+        );
+
+        // Permits are independent again once they are released.
+        drop(nested);
+        assert!(p.acquire(ReadLane::Nested).await.is_ok());
+        drop(ordinary);
+        assert!(p.acquire(ReadLane::Ordinary).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_permit_is_released_when_guarded_stream_is_dropped() {
+        let p = RegionServerParallelism::from_opts(1, Duration::from_millis(1)).unwrap();
+        let stream: SendableRecordBatchStream =
+            Box::pin(EmptyRecordBatchStream::new(Arc::new(Schema::new(vec![]))));
+
+        let permit = p.acquire(ReadLane::Ordinary).await.unwrap();
+        let guarded = maybe_guard_stream(stream, Some(permit));
+        assert!(
+            p.acquire(ReadLane::Ordinary).await.is_err(),
+            "a guarded stream must hold its permit while it is alive"
+        );
+        // The nested read of an outer stream is admitted even while the outer permit is held.
+        let nested = p.acquire(ReadLane::Nested).await.unwrap();
+        drop(nested);
+
+        drop(guarded);
+        assert!(
+            p.acquire(ReadLane::Ordinary).await.is_ok(),
+            "dropping the guarded stream must recover the permit"
+        );
+    }
+
+    fn mock_region_server_with_limiter(
+        max_concurrent_queries: usize,
+        timeout: Duration,
+    ) -> RegionServer {
+        use common_runtime::runtime::{BuilderBuild, RuntimeTrait};
+
+        RegionServer::with_table_provider(
+            Arc::new(MockQueryEngine),
+            Runtime::builder().build().unwrap(),
+            Box::new(NoopRegionServerEventListener),
+            Arc::new(DummyTableProviderFactory),
+            max_concurrent_queries,
+            timeout,
+            FlightCompression::default(),
+        )
+    }
+
+    fn query_ctx_with_depth(depth: Option<&str>) -> QueryContextRef {
+        let mut query_ctx = QueryContext::arc().as_ref().clone();
+        query_ctx.set_extension("unrelated", "preserved");
+        if let Some(depth) = depth {
+            query_ctx.set_extension(REMOTE_READ_DEPTH_EXTENSION_KEY, depth);
+        }
+        Arc::new(query_ctx)
+    }
+
+    #[tokio::test]
+    async fn test_admit_read_selects_lane_and_increments_depth() {
+        let region_server = mock_region_server_with_limiter(1, Duration::from_secs(1));
+
+        // A missing depth is an ordinary read; it dispatches depth 1 reads.
+        let (permit, query_ctx) = region_server
+            .admit_read(&query_ctx_with_depth(None))
+            .await
+            .unwrap();
+        assert!(permit.is_some());
+        assert_eq!(
+            Some("1"),
+            query_ctx.extension(REMOTE_READ_DEPTH_EXTENSION_KEY)
+        );
+        drop(permit);
+
+        // Depth 0 is the same ordinary read.
+        let (permit, query_ctx) = region_server
+            .admit_read(&query_ctx_with_depth(Some("0")))
+            .await
+            .unwrap();
+        assert!(permit.is_some());
+        assert_eq!(
+            Some("1"),
+            query_ctx.extension(REMOTE_READ_DEPTH_EXTENSION_KEY)
+        );
+        drop(permit);
+
+        // Depth 1 takes the nested lane and dispatches depth 2 reads.
+        let outer = region_server
+            .admit_read(&query_ctx_with_depth(Some("0")))
+            .await
+            .unwrap()
+            .0
+            .unwrap();
+        let (permit, query_ctx) = region_server
+            .admit_read(&query_ctx_with_depth(Some("1")))
+            .await
+            .unwrap();
+        assert!(permit.is_some());
+        assert_eq!(
+            Some("2"),
+            query_ctx.extension(REMOTE_READ_DEPTH_EXTENSION_KEY)
+        );
+        assert_eq!(
+            Some("preserved"),
+            query_ctx.extension("unrelated"),
+            "unrelated extensions of the incoming context must survive"
+        );
+        drop(permit);
+        drop(outer);
+
+        // Malformed depths are invalid query contexts, never nested reads.
+        for value in ["", "abc", "-1", "18446744073709551616"] {
+            let error = region_server
+                .admit_read(&query_ctx_with_depth(Some(value)))
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(error, error::Error::InvalidQueryContext { .. }),
+                "depth {value:?} must be an invalid query context, got {error:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_unsupported_depth_is_rejected_before_waiting_for_a_permit() {
+        // Both lanes are saturated and any acquisition would fail with the limiter
+        // timeout, so only the depth check can produce the error below.
+        let region_server = mock_region_server_with_limiter(1, Duration::from_millis(1));
+        let parallelism = region_server.inner.parallelism.as_ref().unwrap();
+        let _ordinary = parallelism.acquire(ReadLane::Ordinary).await.unwrap();
+        let _nested = parallelism.acquire(ReadLane::Nested).await.unwrap();
+
+        for value in ["2", "3", "42"] {
+            let error = region_server
+                .admit_read(&query_ctx_with_depth(Some(value)))
+                .await
+                .unwrap_err();
+            let depth = value.parse::<u64>().unwrap();
+            assert!(
+                matches!(error, error::Error::UnsupportedRemoteReadDepth { depth: actual, .. } if actual == depth),
+                "depth {value:?} must be rejected as unsupported, got {error:?}"
+            );
+            let message = error.output_msg();
+            assert!(
+                message.contains(value) && message.contains("two remote levels"),
+                "the error must mention the depth and the supported rewrite: {message}"
+            );
+            assert!(
+                !message.to_ascii_lowercase().contains("permit"),
+                "the depth must be rejected before waiting for a permit: {message}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_unsupported_depth_is_allowed_without_the_limiter() {
+        // Without admission control there is no lane to starve, so a deeper plan runs.
+        let region_server = mock_region_server();
+        let (permit, query_ctx) = region_server
+            .admit_read(&query_ctx_with_depth(Some("2")))
+            .await
+            .unwrap();
+        assert!(permit.is_none());
+        assert_eq!(
+            Some("3"),
+            query_ctx.extension(REMOTE_READ_DEPTH_EXTENSION_KEY)
+        );
     }
 
     fn mock_region_metadata(region_id: RegionId) -> RegionMetadata {

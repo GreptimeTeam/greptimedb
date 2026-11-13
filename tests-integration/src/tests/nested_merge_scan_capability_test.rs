@@ -18,24 +18,25 @@
 //! against the engine catalog; distinct column names ensure these scopes cannot be confused.
 //! Success compares the complete duplicate-sensitive result multiset with frontend SQL and known
 //! rows. Missing inner tables and closed remote inner regions must each fail the whole query.
+//!
+//! [`test_nested_broadcast_join_rewrite_executes_on_probe_regions`] also exercises the SQL/planner
+//! capability, including the BIG local probe, SMALL remote build, complete output schema, and
+//! BIG-region pruning.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
+use std::time::Duration;
 
 use api::v1::region::{QueryRequest, RegionRequestHeader};
-use client::Client;
-use client::region::RegionRequester;
-use common_error::ext::ErrorExt;
-use common_error::status_code::StatusCode;
-use common_grpc::channel_manager::ChannelManager;
 use common_query::Output;
 use common_recordbatch::{RecordBatch, RecordBatches, SendableRecordBatchStream};
 use common_telemetry::info;
+use datafusion::physical_plan::ExecutionPlan;
 use datafusion_expr::{JoinType, LogicalPlan, LogicalPlanBuilder};
 use datanode::region_server::RegionServer;
 use frontend::instance::Instance;
 use query::datafusion::QUERY_PARALLELISM_HINT;
-use query::dist_plan::MergeScanLogicalPlan;
+use query::dist_plan::{MergeScanExec, MergeScanLogicalPlan};
 use query::parser::QueryLanguageParser;
 use query::query_engine::DefaultSerializer;
 use servers::query_handler::sql::SqlQueryHandler;
@@ -130,123 +131,825 @@ async fn test_nested_merge_scan_capability_join_across_datanodes() {
     assert_cross_datanode_region_query(&cluster, &remote_datanodes, &baseline_requests);
 }
 
-/// Internal read-preference wire metadata is rejected before nested execution on both inbound paths.
+/// A single datanode that owns both the probe and the build regions must still serve the
+/// nested read of its own outer stream when the concurrent read limiter is enabled. Sharing
+/// one semaphore would deadlock: the outer read holds its permit until its stream ends, and
+/// the stream only ends after the nested read it waits for gets a permit.
+///
+/// `max_concurrent_queries = 1` gives the ordinary and the nested lane one permit each, so the
+/// query below only completes if the nested read does not compete with its own outer read.
 #[tokio::test(flavor = "multi_thread")]
-async fn test_nested_merge_scan_capability_rejects_internal_read_preference() {
-    use common_meta::node_manager::Datanode;
-    use common_query::request::QueryRequest as LogicalQueryRequest;
-    use futures::TryStreamExt;
-    use session::hints::READ_PREFERENCE_EXTENSION_KEY;
-
+async fn test_nested_merge_scan_completes_on_one_datanode_with_query_limiter() {
     common_telemetry::init_default_ut_logging();
 
-    let cluster = build_cluster("test_nested_merge_scan_internal_read_preference").await;
+    let cluster = GreptimeDbClusterBuilder::new(
+        "test_nested_merge_scan_completes_on_one_datanode_with_query_limiter",
+    )
+    .await
+    // The inner region read of the nested plan is a datanode to datanode request, so the
+    // datanode must be reachable at the address it registers in metasrv.
+    .with_real_datanode_grpc_addr(true)
+    .with_datanodes(1)
+    .with_datanode_max_concurrent_queries(1)
+    .build(false)
+    .await;
     let frontend = cluster.fe_instance().clone();
+
     prepare_tables(&frontend).await;
 
     let probe_leaders = region_leaders(&frontend, PROBE_TABLE).await;
+    let build_leaders = region_leaders(&frontend, BUILD_TABLE).await;
+    let single_datanode = datanodes(&probe_leaders);
+    assert_eq!(
+        1,
+        single_datanode.len(),
+        "expected the regions of {PROBE_TABLE} on the only datanode, actual region leaders: \
+         {probe_leaders:?}"
+    );
+    assert_eq!(
+        single_datanode,
+        datanodes(&build_leaders),
+        "the build regions must live on the same datanode as the probe regions, actual region \
+         leaders: {build_leaders:?}"
+    );
+    assert!(
+        cluster
+            .datanode_options
+            .iter()
+            .all(|opts| opts.max_concurrent_queries == 1),
+        "the test must run with the datanode read limiter saturated at one permit per lane"
+    );
+
     let query_ctx = query_ctx();
-    let plan = nested_plan(&frontend, &query_ctx).await;
-    let (region_id, (datanode_id, address)) = probe_leaders.iter().next().unwrap();
-    let target = region_server(&cluster, *datanode_id);
-    // Confirm the same plan completes on the valid default-Leader path before asserting rejection.
-    let valid_rows = run_nested_queries(&cluster, &probe_leaders, &encode(&plan), &query_ctx).await;
-    assert_eq!(expected_join_rows(), multiset(valid_rows));
-    let mut baseline = cluster
-        .datanode_instances
-        .keys()
-        .map(|id| (*id, rpc_requests(&cluster, *id)))
-        .collect::<BTreeMap<_, _>>();
+    let nested_plan = nested_plan(&frontend, &query_ctx).await;
+    let plan = encode(&nested_plan);
 
-    for value in ["", "invalid"] {
-        let mut header = region_request_header(&query_ctx);
-        header
-            .query_context
-            .as_mut()
-            .unwrap()
-            .extensions
-            .insert(READ_PREFERENCE_EXTENSION_KEY.to_string(), value.to_string());
-        let header = Some(header);
-        let error = target
-            .handle_read(LogicalQueryRequest {
-                header: header.clone(),
-                region_id: RegionId::from_u64(*region_id),
-                plan: plan.clone(),
-            })
-            .await
-            .err()
-            .expect("internal read preference must be rejected at logical ingress");
-        assert_eq!(
-            StatusCode::InvalidArguments,
-            error.status_code(),
-            "value={value:?}"
-        );
-        let logical_message = error.output_msg().to_ascii_lowercase();
-        assert!(
-            logical_message.contains("read_preference"),
-            "expected an invalid query-context read-preference error, got: {logical_message}"
-        );
-        if !value.is_empty() {
-            assert!(
-                logical_message.contains(value),
-                "unexpected logical error: {logical_message}"
-            );
-        }
-        for id in cluster.datanode_instances.keys() {
-            assert_eq!(
-                baseline[id],
-                rpc_requests(&cluster, *id),
-                "logical invalid context caused DoGet at datanode {id}"
-            );
-        }
+    // The outer read holds an ordinary permit while this collects the whole stream, so the
+    // nested read of the same datanode must be admitted by the nested lane.
+    let rows = run_nested_queries(&cluster, &probe_leaders, &plan, &query_ctx).await;
+    let actual_rows = multiset(rows);
+    assert_eq!(
+        expected_join_rows(),
+        actual_rows,
+        "the nested plan must complete on one datanode under the query limiter"
+    );
 
-        let client = Client::with_query_and_control_managers(
-            ChannelManager::new(),
-            ChannelManager::new(),
-            [address.as_str()],
-        );
-        let requester = RegionRequester::new(client, false, false);
-        let request = LogicalQueryRequest {
-            header,
-            region_id: RegionId::from_u64(*region_id),
-            plan: plan.clone(),
-        };
-        let flight_message = match Datanode::handle_query(&requester, request).await {
-            Err(error) => {
-                assert_eq!(StatusCode::InvalidArguments, error.status_code());
-                error.output_msg().to_ascii_lowercase()
+    // The limiter must be fully recovered afterwards: a second identical query still completes.
+    let rows = run_nested_queries(&cluster, &probe_leaders, &plan, &query_ctx).await;
+    assert_eq!(
+        expected_join_rows(),
+        multiset(rows),
+        "the permits of the first query must be recovered"
+    );
+}
+
+/// The SQL setting and region statistics select the nested plan through the production frontend
+/// path. An unfiltered BIG-table case proves the local probe and remote build roles, complete
+/// output, and schema; a separate filtered query verifies BIG-region pruning. Both exercise the
+/// executed SQL result with duplicate keys, NULL keys, and a residual join filter.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_nested_broadcast_join_rewrite_executes_on_probe_regions() {
+    common_telemetry::init_default_ut_logging();
+
+    let cluster =
+        build_cluster("test_nested_broadcast_join_rewrite_executes_on_probe_regions").await;
+    let frontend = cluster.fe_instance().clone();
+
+    prepare_tables(&frontend).await;
+    // A NULL join key on both sides and a second probe row of the duplicated join key `10`. They
+    // are inserted here, so the shared fixture of the capability tests keeps its rows.
+    execute_sql(
+        &frontend,
+        &format!("INSERT INTO {PROBE_TABLE}(a_id, probe_key, probe_v, a_ts) VALUES (3, NULL, 500, 3000), (4, 10, 600, 4000)"),
+    )
+    .await;
+    execute_sql(
+        &frontend,
+        &format!(
+            "INSERT INTO {BUILD_TABLE}(b_id, build_key, build_v, b_ts) VALUES (4, NULL, 6, 5000)"
+        ),
+    )
+    .await;
+    insert_extra_probe_rows(&frontend).await;
+
+    // Leave the BIG probe table unfiltered so all padding rows reach the local probe input. The
+    // projection order, duplicate keys, NULLs, and residual condition remain part of the check.
+    let sql = format!(
+        "SELECT p.probe_v, p.a_id, b.build_v
+         FROM {PROBE_TABLE} p JOIN {BUILD_TABLE} b
+         ON p.probe_key = b.build_key AND p.probe_v + b.build_v > 105"
+    );
+    let expected = expected_full_broadcast_rows();
+    let query_ctx = query_ctx();
+
+    // The reference: the frontend executes the same SQL with its default distributed plan, i.e.
+    // both sides of the join are read with a `MergeScan` and the join runs on the frontend.
+    let reference = output_batches(run_sql(&frontend, &sql, query_ctx.clone()).await).await;
+    assert_eq!(
+        vec!["probe_v", "a_id", "build_v"],
+        reference
+            .schema()
+            .column_schemas()
+            .iter()
+            .map(|column| column.name.as_str())
+            .collect::<Vec<_>>(),
+        "the unfiltered query must preserve its explicit projection order"
+    );
+    let reference_pretty = reference.pretty_print().unwrap();
+    info!("reference result of the frontend:\n{reference_pretty}");
+    let star_sql = format!(
+        "SELECT *
+         FROM {PROBE_TABLE} p JOIN {BUILD_TABLE} b
+         ON p.probe_key = b.build_key AND p.probe_v + b.build_v > 105
+         WHERE p.a_id < 100 AND p.a_ts < 10000::TIMESTAMP"
+    );
+    let star_reference =
+        output_batches(run_sql(&frontend, &star_sql, query_ctx.clone()).await).await;
+    let expected_star_columns = vec![
+        "a_id",
+        "probe_key",
+        "probe_v",
+        "a_ts",
+        "b_id",
+        "build_key",
+        "build_v",
+        "b_ts",
+    ];
+    assert_eq!(
+        expected_star_columns,
+        star_reference
+            .schema()
+            .column_schemas()
+            .iter()
+            .map(|column| column.name.as_str())
+            .collect::<Vec<_>>(),
+        "SELECT * must retain BIG columns followed by SMALL columns"
+    );
+    assert_eq!(
+        3,
+        table_cells(&star_reference.pretty_print().unwrap()).len(),
+        "the filtered SELECT * baseline must contain all three rows"
+    );
+    assert_eq!(
+        expected,
+        multiset(table_cells(&reference_pretty)),
+        "unexpected result of the join on the frontend:\n{reference_pretty}"
+    );
+
+    // Use the actual session setting and SQL entrypoint. The region statistics above drive the
+    // production selector; no analyzer options or plans are injected by this test.
+    let (probe_bytes, build_bytes) =
+        wait_for_region_statistics(&frontend, BUILD_ROWS.len() as u64 + 1).await;
+    assert!(
+        2 * build_bytes < probe_bytes,
+        "the fixture must make the heuristic favor the build side, actual region statistics: \
+         probe {probe_bytes} bytes in 2 regions, build {build_bytes} bytes in 2 regions"
+    );
+    run_sql(
+        &frontend,
+        "SET experimental_dist_join = true",
+        query_ctx.clone(),
+    )
+    .await;
+
+    let actual = run_sql(&frontend, &sql, query_ctx.clone()).await;
+    let physical = actual
+        .meta
+        .plan
+        .clone()
+        .expect("the output of the query must carry its physical plan");
+    info!("physical plan of the SQL-selected nested join:\\n{physical:?}");
+
+    // The unfiltered BIG probe scan dispatches both of its regions.
+    let probe_leaders = region_leaders(&frontend, PROBE_TABLE).await;
+    assert!(
+        probe_leaders.len() > 1,
+        "expected {PROBE_TABLE} to have several regions, actual region leaders: {probe_leaders:?}"
+    );
+    let merge_scan = find_merge_scan_exec(&physical)
+        .unwrap_or_else(|| panic!("expected the outer MergeScan to be planned, got: {physical:?}"));
+    let regions = merge_scan.regions().to_vec();
+    info!("the outer MergeScan is planned for the regions {regions:?}");
+    assert_eq!(
+        probe_leaders.len(),
+        regions.len(),
+        "the unfiltered BIG table scan must dispatch all {} regions, actual selection: {regions:?}",
+        probe_leaders.len()
+    );
+    assert!(
+        regions
+            .iter()
+            .all(|region| probe_leaders.contains_key(&region.as_u64())),
+        "the outer MergeScan must select regions of {PROBE_TABLE}, actual selection: {regions:?}"
+    );
+
+    let actual = output_batches(actual).await;
+    assert_eq!(
+        reference.schema(),
+        actual.schema(),
+        "broadcast execution must preserve full schema and types"
+    );
+    let actual_pretty = actual.pretty_print().unwrap();
+    info!("result of the SQL-selected nested plan:\n{actual_pretty}");
+    let stages = merge_scan.sub_stage_metrics();
+    assert_eq!(
+        regions.len(),
+        stages.len(),
+        "each dispatched outer region must report its stage metrics"
+    );
+    let hash_joins = stages
+        .iter()
+        .flat_map(|stage| &stage.plan_metrics)
+        .filter(|metric| metric.plan_name == "HashJoinExec")
+        .collect::<Vec<_>>();
+    assert_eq!(
+        regions.len(),
+        hash_joins.len(),
+        "every dispatched outer region must report its actual DN HashJoinExec: {stages:?}"
+    );
+    // The ordinary equijoin pre-scan optimizer filters NULL join keys before the DN HashJoin.
+    // The six-row SMALL table (including its NULL-key row) is still covered by result/schema
+    // checks and heartbeat readiness; the actual hash build therefore contains BUILD_ROWS only.
+    let expected_build_rows = BUILD_ROWS.len();
+    assert!(
+        hash_joins.iter().all(|metric| {
+            metric
+                .metrics
+                .iter()
+                .any(|(name, value)| *name == "build_input_rows" && *value == expected_build_rows)
+                && metric
+                    .metrics
+                    .iter()
+                    .any(|(name, value)| *name == "input_rows" && *value > expected_build_rows)
+        }),
+        "each DN HashJoinExec must build {expected_build_rows} non-NULL remote SMALL rows and consume more BIG probe rows: {hash_joins:?}"
+    );
+
+    assert_eq!(
+        expected,
+        multiset(table_cells(&actual_pretty)),
+        "the nested plan returned an unexpected multiset of rows:\n{actual_pretty}"
+    );
+    assert_eq!(
+        multiset(table_cells(&reference_pretty)),
+        multiset(table_cells(&actual_pretty)),
+        "the nested plan returned a different multiset of rows than the frontend:\n{actual_pretty}"
+    );
+
+    // Keep the original selective query as a separate routing regression. Its filtered local
+    // side can be smaller than the remote table, so this asserts pruning/results only, not build
+    // orientation.
+    let pruned_sql = format!(
+        "SELECT p.probe_v, p.a_id, b.build_v
+         FROM {PROBE_TABLE} p JOIN {BUILD_TABLE} b
+         ON p.probe_key = b.build_key AND p.probe_v + b.build_v > 105
+         WHERE p.a_id < 100 AND p.a_ts < 10000::TIMESTAMP"
+    );
+    let pruned_expected = multiset(vec![
+        vec!["200".to_string(), "2".to_string(), "3".to_string()],
+        vec!["600".to_string(), "4".to_string(), "1".to_string()],
+        vec!["600".to_string(), "4".to_string(), "2".to_string()],
+    ]);
+    let pruned = run_sql(&frontend, &pruned_sql, query_ctx.clone()).await;
+    let pruned_plan = pruned
+        .meta
+        .plan
+        .clone()
+        .expect("the pruned query output must carry its physical plan");
+    let pruned_merge_scan = find_merge_scan_exec(&pruned_plan)
+        .unwrap_or_else(|| panic!("expected pruned query outer MergeScan: {pruned_plan:?}"));
+    let pruned_regions = pruned_merge_scan.regions();
+    assert_eq!(
+        1,
+        pruned_regions.len(),
+        "the predicate must prune to one BIG region"
+    );
+    assert!(
+        pruned_regions
+            .iter()
+            .all(|region| probe_leaders.contains_key(&region.as_u64())),
+        "the pruned region must belong to BIG table {PROBE_TABLE}: {pruned_regions:?}"
+    );
+    let pruned_batches = output_batches(pruned).await;
+    assert_eq!(
+        pruned_expected,
+        multiset(table_cells(&pruned_batches.pretty_print().unwrap())),
+        "pruned query must preserve the expected complete result"
+    );
+
+    // SELECT * must also restore the original BIG-then-SMALL schema after rewriting.
+    let star_actual = output_batches(run_sql(&frontend, &star_sql, query_ctx.clone()).await).await;
+    assert_eq!(
+        star_reference.schema(),
+        star_actual.schema(),
+        "rewritten SELECT * must preserve all column types and order"
+    );
+    assert_eq!(
+        expected_star_columns,
+        star_actual
+            .schema()
+            .column_schemas()
+            .iter()
+            .map(|column| column.name.as_str())
+            .collect::<Vec<_>>(),
+        "rewritten SELECT * must retain BIG columns followed by SMALL columns"
+    );
+    assert_eq!(
+        multiset(table_cells(&star_reference.pretty_print().unwrap())),
+        multiset(table_cells(&star_actual.pretty_print().unwrap())),
+        "rewritten SELECT * must preserve all three baseline rows"
+    );
+}
+
+/// The append-only BIG scan reports exact row counts to DataFusion; the SMALL side must remain
+/// the hash-build input after the experimental setting crosses the nested-plan wire boundary.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_experimental_dist_join_roundtrip_keeps_small_hash_build() {
+    common_telemetry::init_default_ut_logging();
+
+    let cluster =
+        build_cluster("test_experimental_dist_join_roundtrip_keeps_small_hash_build").await;
+    let frontend = cluster.fe_instance().clone();
+    let big = "nested_cap_stats_probe";
+    let small = "nested_cap_stats_build";
+
+    execute_sql(
+        &frontend,
+        &format!(
+            "CREATE TABLE {big} (
+                big_id INT,
+                join_key INT,
+                payload STRING,
+                big_ts TIMESTAMP,
+                TIME INDEX (big_ts)
+            ) PARTITION ON COLUMNS (big_id) (
+                big_id < 100,
+                big_id >= 100
+            ) ENGINE=mito"
+        ),
+    )
+    .await;
+    execute_sql(
+        &frontend,
+        &format!(
+            "CREATE TABLE {small} (
+                small_id INT,
+                join_key INT,
+                small_ts TIMESTAMP,
+                TIME INDEX (small_ts),
+                PRIMARY KEY (small_id)
+            ) PARTITION ON COLUMNS (small_id) (
+                small_id < 100,
+                small_id >= 100
+            ) ENGINE=mito"
+        ),
+    )
+    .await;
+    execute_sql(
+        &frontend,
+        &format!(
+            "INSERT INTO {big}(big_id, join_key, payload, big_ts) VALUES
+             (1, 10, repeat('large-big-payload-', 80), 1000),
+             (2, 20, repeat('large-big-payload-', 80), 2000),
+             (3, 30, repeat('large-big-payload-', 80), 3000),
+             (4, 40, repeat('large-big-payload-', 80), 4000),
+             (120, 10, repeat('large-big-payload-', 80), 5000),
+             (121, 20, repeat('large-big-payload-', 80), 6000),
+             (122, 30, repeat('large-big-payload-', 80), 7000),
+             (123, 40, repeat('large-big-payload-', 80), 8000),
+             (5, 10, repeat('large-big-payload-', 80), 9000),
+             (6, 20, repeat('large-big-payload-', 80), 10000),
+             (124, 10, repeat('large-big-payload-', 80), 11000),
+             (125, 20, repeat('large-big-payload-', 80), 12000),
+             (126, 10, repeat('large-big-payload-', 80), 13000),
+             (127, 20, repeat('large-big-payload-', 80), 14000),
+             (128, 10, repeat('large-big-payload-', 80), 15000),
+             (129, 20, repeat('large-big-payload-', 80), 16000)"
+        ),
+    )
+    .await;
+    execute_sql(
+        &frontend,
+        &format!(
+            "INSERT INTO {small}(small_id, join_key, small_ts) VALUES
+             (1, 10, 1000), (2, 20, 2000)"
+        ),
+    )
+    .await;
+
+    let (big_bytes, small_bytes) = wait_for_named_region_statistics(&frontend, big, small, 2).await;
+    assert!(
+        2 * small_bytes < big_bytes,
+        "the planner cost heuristic must favor SMALL: BIG={big_bytes} bytes, SMALL={small_bytes} bytes"
+    );
+    let big_leaders = region_leaders(&frontend, big).await;
+    assert_eq!(2, big_leaders.len());
+    assert_eq!(2, datanodes(&big_leaders).len());
+
+    let query_ctx = query_ctx();
+    run_sql(
+        &frontend,
+        "SET experimental_dist_join = true",
+        query_ctx.clone(),
+    )
+    .await;
+    let sql = format!(
+        "SELECT b.join_key, s.join_key FROM {big} b JOIN {small} s ON b.join_key = s.join_key"
+    );
+    let actual = run_sql(&frontend, &sql, query_ctx).await;
+    let physical = actual
+        .meta
+        .plan
+        .clone()
+        .expect("query output must include its physical plan");
+    let merge_scan = find_merge_scan_exec(&physical)
+        .unwrap_or_else(|| panic!("expected nested MergeScan, got {physical:?}"));
+    let rows = output_batches(actual).await;
+    let total_rows: usize = rows.iter().map(|batch| batch.num_rows()).sum();
+    assert_eq!(12, total_rows);
+
+    let stages = merge_scan.sub_stage_metrics();
+    let hash_joins = stages
+        .iter()
+        .flat_map(|stage| &stage.plan_metrics)
+        .filter(|metric| metric.plan_name == "HashJoinExec")
+        .collect::<Vec<_>>();
+    assert_eq!(
+        merge_scan.regions().len(),
+        hash_joins.len(),
+        "each dispatched BIG region must report its DN HashJoinExec: {stages:?}"
+    );
+    assert!(
+        hash_joins.iter().all(|metric| {
+            metric
+                .metrics
+                .iter()
+                .any(|(name, value)| *name == "build_input_rows" && *value == 2)
+                && metric
+                    .metrics
+                    .iter()
+                    .any(|(name, value)| *name == "input_rows" && *value > 2)
+        }),
+        "each DN join must build the two SMALL rows and probe more BIG rows: {hash_joins:?}"
+    );
+}
+
+/// Complete expected output for the unfiltered broadcast SQL, in its projected column order.
+fn expected_full_broadcast_rows() -> Vec<Vec<String>> {
+    let mut rows = Vec::new();
+    let mut probes = PROBE_ROWS.to_vec();
+    // SQL equality never matches the explicit NULL-key probe row.
+    probes.extend(
+        extra_probe_rows()
+            .into_iter()
+            .map(|(a_id, key, value, _)| (a_id, key, value)),
+    );
+    probes.push((4, 10, 600));
+    for (a_id, probe_key, probe_v) in probes {
+        for (_, build_key, build_v) in BUILD_ROWS.iter().copied() {
+            if probe_key == build_key && probe_v + build_v > 105 {
+                rows.push(vec![
+                    probe_v.to_string(),
+                    a_id.to_string(),
+                    build_v.to_string(),
+                ]);
             }
-            Ok(stream) => {
-                let error = stream
-                    .try_collect::<Vec<RecordBatch>>()
-                    .await
-                    .expect_err("Flight must reject invalid internal read preference");
-                assert_eq!(StatusCode::InvalidArguments, error.status_code());
-                error.output_msg().to_ascii_lowercase()
-            }
-        };
-        assert!(
-            flight_message.contains("read_preference"),
-            "expected an invalid-parameter read-preference error, got: {flight_message}"
-        );
-        if !value.is_empty() {
-            assert!(
-                flight_message.contains(value),
-                "unexpected Flight error: {flight_message}"
-            );
-        }
-        for id in cluster.datanode_instances.keys() {
-            let expected = baseline[id] + u8::from(*id == *datanode_id) as usize;
-            assert_eq!(
-                expected,
-                rpc_requests(&cluster, *id),
-                "invalid Flight context caused nested DoGet at datanode {id}"
-            );
-        }
-        for id in cluster.datanode_instances.keys() {
-            baseline.insert(*id, rpc_requests(&cluster, *id));
         }
     }
+    multiset(rows)
+}
+
+/// Returns the `MergeScanExec` of `plan`, descending through the physical plan tree.
+fn find_merge_scan_exec(plan: &Arc<dyn ExecutionPlan>) -> Option<&MergeScanExec> {
+    if let Some(merge_scan) = plan.downcast_ref::<MergeScanExec>() {
+        return Some(merge_scan);
+    }
+
+    plan.children().into_iter().find_map(find_merge_scan_exec)
+}
+
+/// The join keys of [`BUILD_ROWS`], so the extra probe rows of
+/// [`test_experimental_dist_join_setting_activates_rewrite`] match every build key.
+const BUILD_JOIN_KEYS: &[i32] = &[10, 20, 30, 40];
+
+/// The number of extra rows of [`extra_probe_rows`]: enough for the cost heuristic of the rewrite
+/// to favor the build side of the join by a wide margin, see
+/// [`test_experimental_dist_join_setting_activates_rewrite`].
+const EXTRA_PROBE_ROWS: i32 = 4_000;
+
+/// `(a_id, probe_key, probe_v, a_ts)` of the extra probe rows: `a_id` alternates between the two
+/// partitions of the probe table and `probe_key` cycles the build keys, so every build key is
+/// matched.
+fn extra_probe_rows() -> Vec<(i32, i32, i32, i64)> {
+    (0..EXTRA_PROBE_ROWS)
+        .map(|i| {
+            (
+                if i % 2 == 0 { i } else { 1_000 + i },
+                BUILD_JOIN_KEYS[i as usize % BUILD_JOIN_KEYS.len()],
+                i,
+                i as i64 + 10_000,
+            )
+        })
+        .collect()
+}
+
+/// Inserts the extra probe rows of [`extra_probe_rows`] in batches.
+async fn insert_extra_probe_rows(frontend: &Arc<Instance>) {
+    for chunk in extra_probe_rows().chunks(500) {
+        let values = chunk
+            .iter()
+            .map(|(a_id, probe_key, probe_v, a_ts)| {
+                format!("({a_id}, {probe_key}, {probe_v}, {a_ts})")
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        execute_sql(
+            frontend,
+            &format!("INSERT INTO {PROBE_TABLE}(a_id, probe_key, probe_v, a_ts) VALUES {values}"),
+        )
+        .await;
+    }
+}
+
+/// Whether `plan` contains a hash join, the physical node of the join of the rewrite.
+fn contains_hash_join(plan: &Arc<dyn ExecutionPlan>) -> bool {
+    plan.name().contains("HashJoin") || plan.children().into_iter().any(contains_hash_join)
+}
+
+/// The region statistics of `table`: `(leader reports, summed disk bytes, minimum disk bytes, summed rows)`.
+///
+/// A region that has not reported yet, reports zero bytes, or is not served by a leader makes the
+/// cost heuristic of the rewrite skip the table, so a test that expects the rewrite has to wait
+/// until every region of every table has an ordinary leader report. A missing or NULL aggregate
+/// counts as `0`, i.e. as "not reported yet".
+async fn region_statistics(frontend: &Arc<Instance>, table: &str) -> (u64, u64, u64, u64) {
+    let sql = format!(
+        "SELECT count(*) AS regions, sum(disk_size) AS bytes, min(disk_size) AS min_bytes,
+                sum(region_rows) AS rows
+         FROM information_schema.region_statistics
+         WHERE table_id IN (SELECT table_id FROM information_schema.tables
+                            WHERE table_schema = 'public' AND table_name = '{table}')
+           AND region_role = 'Leader'"
+    );
+    let pretty = query_pretty(frontend, &sql, query_ctx()).await;
+    let cells = table_cells(&pretty);
+    let row = cells.first().cloned().unwrap_or_default();
+    let parse = |index: usize| {
+        row.get(index)
+            .and_then(|cell| cell.parse::<u64>().ok())
+            .unwrap_or(0)
+    };
+
+    (parse(0), parse(1), parse(2), parse(3))
+}
+
+/// Waits until both tables of the join have one ordinary leader report per region with a non-zero
+/// size, and returns the summed disk bytes of the probe and of the build table.
+///
+/// The frontend reads these statistics from the region statistics that the datanodes report to
+/// metasrv, so they appear a few heartbeats after the tables are created.
+async fn wait_for_region_statistics(
+    frontend: &Arc<Instance>,
+    expected_build_rows: u64,
+) -> (u64, u64) {
+    wait_for_named_region_statistics(frontend, PROBE_TABLE, BUILD_TABLE, expected_build_rows).await
+}
+
+async fn wait_for_named_region_statistics(
+    frontend: &Arc<Instance>,
+    probe_table: &str,
+    build_table: &str,
+    expected_build_rows: u64,
+) -> (u64, u64) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(120);
+    loop {
+        let mut stats = Vec::new();
+        for table in [probe_table, build_table] {
+            stats.push(region_statistics(frontend, table).await);
+        }
+        let probe = stats[0];
+        let build = stats[1];
+        info!("region statistics of {probe_table}: {probe:?}, of {build_table}: {build:?}");
+        if probe.0 == 2
+            && probe.2 > 0
+            && probe.3 > 0
+            && build.0 == 2
+            && build.2 > 0
+            && build.3 == expected_build_rows
+        {
+            return (probe.1, build.1);
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the region statistics of {probe_table} {probe:?} and {build_table} {build:?} must be \
+             reported"
+        );
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+}
+
+/// Whether the logical plan text of an EXPLAIN of the join shows the nested rewrite: the outer
+/// `MergeScan` of the rewritten plan wraps the join, so the boundary appears before the join,
+/// while the plan without the rewrite starts at the join of the two boundaries.
+fn nests_join_in_merge_scan(explained: &str) -> bool {
+    match (explained.find("Join:"), explained.find("MergeScan")) {
+        (Some(join), Some(merge_scan)) => merge_scan < join,
+        _ => false,
+    }
+}
+
+/// `SET experimental_dist_join` is the session opt-in of the cost heuristic: with the setting, the
+/// frontend nests the build side of a join into the probe side's `MergeScan` when the region
+/// statistics favor it, and executes that plan; without it, the join of the two boundaries stays.
+///
+/// The fixture makes the heuristic favor the build side by a wide margin: the probe table gets
+/// [`EXTRA_PROBE_ROWS`] extra rows while the build table keeps the rows of [`BUILD_ROWS`], and the
+/// test asserts the region statistics it reads really satisfy `regions * build_bytes <
+/// probe_bytes`. The query of the test selects the rows of the fixture it can predict by hand, so
+/// the parity of the execution with and without the opt-in is checked on the full multiset of the
+/// projected rows, not on a row count: a rewritten plan that loses, duplicates or mixes up values
+/// fails the comparison.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_experimental_dist_join_setting_activates_rewrite() {
+    common_telemetry::init_default_ut_logging();
+
+    let cluster = build_cluster("test_experimental_dist_join_setting_activates_rewrite").await;
+    let frontend = cluster.fe_instance().clone();
+
+    prepare_tables(&frontend).await;
+    insert_extra_probe_rows(&frontend).await;
+
+    // The join of the test: the projection reorders the columns, and the equality and the residual
+    // filter of the `ON` clause stay in the join. The predicate on the time index of the probe
+    // table is what keeps the result readable by hand: `10000::TIMESTAMP` is the raw `10000` of
+    // the (millisecond) time index, so it keeps the rows that [`prepare_tables`] inserted (raw
+    // timestamps `1000` to `4000`) and drops every row of [`insert_extra_probe_rows`] (raw
+    // timestamps `10000` and above). The fixture is not changed, and the heuristic reads the
+    // region statistics of the whole tables anyway.
+    let sql = format!(
+        "SELECT p.a_id, p.probe_v, b.b_id, b.build_v
+         FROM {PROBE_TABLE} p JOIN {BUILD_TABLE} b
+         ON p.probe_key = b.build_key AND p.probe_v + b.build_v > 105
+         WHERE p.a_ts < 10000::TIMESTAMP"
+    );
+    // The rows of the join as `(a_id, probe_v, b_id, build_v)`: the probe row `(2, 20, 200)` joins
+    // `(3, 20, 3)`, the probe row `(120, 30, 300)` joins `(120, 30, 4)`, the probe row
+    // `(121, 10, 400)` joins the two build rows of the duplicated key `10` (`400 + 1` and
+    // `400 + 2`), and the residual filter rejects the probe row `(1, 10, 100)` (`100 + 1` and
+    // `100 + 2` are not greater than `105`).
+    let expected = multiset(vec![
+        vec![
+            "2".to_string(),
+            "200".to_string(),
+            "3".to_string(),
+            "3".to_string(),
+        ],
+        vec![
+            "120".to_string(),
+            "300".to_string(),
+            "120".to_string(),
+            "4".to_string(),
+        ],
+        vec![
+            "121".to_string(),
+            "400".to_string(),
+            "1".to_string(),
+            "1".to_string(),
+        ],
+        vec![
+            "121".to_string(),
+            "400".to_string(),
+            "2".to_string(),
+            "2".to_string(),
+        ],
+    ]);
+    let query_ctx = query_ctx();
+
+    let reference = run_sql(&frontend, &sql, query_ctx.clone()).await;
+    let plan = reference
+        .meta
+        .plan
+        .clone()
+        .expect("the output of the query must carry its physical plan");
+    info!("the physical plan of the join without the opt-in:\n{plan:?}");
+    assert!(
+        contains_hash_join(&plan),
+        "without the opt-in the join must run on the frontend, got:\n{plan:?}"
+    );
+    let reference = reference.data.pretty_print().await;
+    info!("the join without the opt-in returns:\n{reference}");
+    assert_eq!(
+        expected,
+        multiset(table_cells(&reference)),
+        "unexpected result of the join without the opt-in:\n{reference}"
+    );
+    // The heuristic is off by default: the EXPLAIN of the same join keeps the join of the two
+    // boundaries.
+    let explained = query_pretty(&frontend, &format!("EXPLAIN {sql}"), query_ctx.clone()).await;
+    info!("EXPLAIN without the opt-in:\n{explained}");
+    assert!(
+        !nests_join_in_merge_scan(&explained),
+        "without `SET experimental_dist_join = true` the join must keep its two MergeScan \
+         boundaries:\n{explained}"
+    );
+
+    // The statistics the heuristic reads: every region of both tables has a leader report with a
+    // non-zero size, and broadcasting the build table to the probe regions is much cheaper than
+    // the probe table itself.
+    let (probe_bytes, build_bytes) =
+        wait_for_region_statistics(&frontend, BUILD_ROWS.len() as u64).await;
+    assert!(
+        2 * build_bytes < probe_bytes,
+        "the fixture must make the heuristic favor the build side, actual region statistics: \
+         probe {probe_bytes} bytes in 2 regions, build {build_bytes} bytes in 2 regions"
+    );
+
+    // The setting is only an opt-in: with the small build table on the left and the padded probe
+    // table on the right, it must leave the unfavorable join placement on the frontend.
+    run_sql(
+        &frontend,
+        "SET experimental_dist_join = true",
+        query_ctx.clone(),
+    )
+    .await;
+    let reversed_sql = format!(
+        "SELECT p.a_id, p.probe_v, b.b_id, b.build_v
+         FROM {BUILD_TABLE} b JOIN {PROBE_TABLE} p
+         ON p.probe_key = b.build_key AND p.probe_v + b.build_v > 105
+         WHERE p.a_ts < 10000::TIMESTAMP"
+    );
+    let reversed_explained = query_pretty(
+        &frontend,
+        &format!("EXPLAIN {reversed_sql}"),
+        query_ctx.clone(),
+    )
+    .await;
+    assert!(
+        !nests_join_in_merge_scan(&reversed_explained),
+        "the opt-in must leave the unfavorable small-left/big-right placement on the frontend:\n\
+         {reversed_explained}"
+    );
+    let reversed = run_sql(&frontend, &reversed_sql, query_ctx.clone()).await;
+    let reversed_plan = reversed
+        .meta
+        .plan
+        .clone()
+        .expect("the output of the reversed query must carry its physical plan");
+    assert!(
+        contains_hash_join(&reversed_plan),
+        "the unfavorable small-left/big-right placement must keep its frontend hash join, got:\n\
+         {reversed_plan:?}"
+    );
+    assert_eq!(
+        expected,
+        multiset(table_cells(&reversed.data.pretty_print().await)),
+        "the reversed join must return the same expected rows"
+    );
+
+    let explained = query_pretty(&frontend, &format!("EXPLAIN {sql}"), query_ctx.clone()).await;
+    info!("EXPLAIN with the opt-in:\n{explained}");
+    assert!(
+        nests_join_in_merge_scan(&explained),
+        "with `SET experimental_dist_join = true` the EXPLAIN must show the nested rewrite:\n\
+         {explained}"
+    );
+
+    let rewritten = run_sql(&frontend, &sql, query_ctx.clone()).await;
+    let plan = rewritten
+        .meta
+        .plan
+        .clone()
+        .expect("the output of the query must carry its physical plan");
+    info!("the physical plan of the join with the opt-in:\n{plan:?}");
+    assert!(
+        !contains_hash_join(&plan) && find_merge_scan_exec(&plan).is_some(),
+        "the executed plan of the opted-in join must read the join through a MergeScan instead of \
+         joining on the frontend, got:\n{plan:?}"
+    );
+    let rewritten = rewritten.data.pretty_print().await;
+    info!("the join with the opt-in returns:\n{rewritten}");
+    assert_eq!(
+        multiset(table_cells(&reference)),
+        multiset(table_cells(&rewritten)),
+        "the executed plan of the opted-in join must return the same multiset of rows as the \
+         frontend without the opt-in:\nfrontend:\n{reference}\nrewritten:\n{rewritten}"
+    );
+
+    // Turning the setting off restores the existing plan for the same session.
+    run_sql(
+        &frontend,
+        "SET experimental_dist_join = false",
+        query_ctx.clone(),
+    )
+    .await;
+
+    let explained = query_pretty(&frontend, &format!("EXPLAIN {sql}"), query_ctx).await;
+    info!("EXPLAIN after turning the opt-in off:\n{explained}");
+    assert!(
+        !nests_join_in_merge_scan(&explained),
+        "`SET experimental_dist_join = false` must restore the join of the two boundaries:\n\
+         {explained}"
+    );
 }
 
 /// A failing inner region makes the whole query fail: the datanode must not return the rows of the
@@ -339,7 +1042,7 @@ async fn test_nested_merge_scan_capability_inner_failure_fails_query() {
         .expect("the query must fail when one of its inner regions fails");
     info!("the nested plan failed as a whole: {error}");
 
-    // The increased DoGet count proves execution reached the remote region owner.
+    // The increased Flight DoGet count proves execution reached the remote region owner.
     let actual = rpc_requests(&cluster, *build_datanode);
     assert!(
         actual > baseline,
@@ -375,7 +1078,7 @@ fn assert_cross_datanode_region_query(
         let baseline = baseline_requests[datanode];
         assert!(
             actual > baseline,
-            "expected a nested Flight DoGet at datanode {datanode}, count {actual}, baseline {baseline}"
+            "expected a nested Flight DoGet at datanode {datanode}, DoGet count {actual}, baseline {baseline}"
         );
     }
 }
@@ -437,6 +1140,42 @@ async fn run_nested_queries(
 }
 
 /// Creates the probe and build tables of the tests and inserts the rows.
+/// `JOIN ... USING` stays executable with `experimental_dist_join = true`: the rewrite
+/// rejects the constraint because the pinned Substrait producer cannot encode
+/// `JoinConstraint::Using`.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_using_join_executes_with_dist_join_opt_in() {
+    common_telemetry::init_default_ut_logging();
+    let cluster = build_cluster("test_using_join_executes_with_dist_join_opt_in").await;
+    let frontend = cluster.fe_instance().clone();
+
+    for sql in [
+        "CREATE TABLE IF NOT EXISTS using_left (k INT, v INT, ts TIMESTAMP TIME INDEX)",
+        "CREATE TABLE IF NOT EXISTS using_right (k INT, w INT, ts TIMESTAMP TIME INDEX)",
+        "INSERT INTO using_left VALUES (1, 10, 0), (2, 20, 1)",
+        "INSERT INTO using_right VALUES (1, 100, 0), (3, 300, 1)",
+    ] {
+        run_sql(&frontend, sql, query_ctx()).await;
+    }
+
+    let sql =
+        "SELECT l.k, l.v, r.w FROM using_left l INNER JOIN using_right r USING (k) ORDER BY l.k";
+    let without = query_pretty(&frontend, sql, query_ctx()).await;
+    let with = query_pretty(&frontend, sql, {
+        let mut ctx = QueryContext::with_db_name(None);
+        ctx.set_extension(QUERY_PARALLELISM_HINT, "1");
+        ctx.configuration_parameter()
+            .set_experimental_dist_join(true);
+        Arc::new(ctx)
+    })
+    .await;
+
+    assert_eq!(
+        without, with,
+        "USING join output must not depend on the opt-in"
+    );
+}
+
 async fn prepare_tables(frontend: &Arc<Instance>) {
     execute_sql(
         frontend,

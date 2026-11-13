@@ -32,11 +32,13 @@ use common_time::Timezone;
 use common_time::timezone::parse_timezone;
 use datafusion_common::config::ConfigOptions;
 use derive_builder::Builder;
+use snafu::Snafu;
 use sql::dialect::{Dialect, GenericDialect, GreptimeDbDialect, MySqlDialect, PostgreSqlDialect};
 
 pub use crate::hints::{
-    LIVE_ANALYZE_METRICS_EXTENSION_KEY, READ_PREFERENCE_EXTENSION_KEY,
-    REMOTE_QUERY_ID_EXTENSION_KEY, SUPPORT_FLIGHT_METRICS_BEFORE_BATCH_EXTENSION_KEY,
+    EXPERIMENTAL_DIST_JOIN_EXTENSION_KEY, LIVE_ANALYZE_METRICS_EXTENSION_KEY,
+    READ_PREFERENCE_EXTENSION_KEY, REMOTE_QUERY_ID_EXTENSION_KEY, REMOTE_READ_DEPTH_EXTENSION_KEY,
+    SUPPORT_FLIGHT_METRICS_BEFORE_BATCH_EXTENSION_KEY,
 };
 use crate::protocol_ctx::ProtocolCtx;
 use crate::query_id::QueryId;
@@ -52,6 +54,82 @@ pub type ConnInfoRef = Arc<ConnInfo>;
 pub const FLIGHT_METRICS_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(1);
 
 const CURSOR_COUNT_WARNING_LIMIT: usize = 10;
+
+/// The nesting depth of a remote (region) read, carried by the reserved
+/// [`REMOTE_READ_DEPTH_EXTENSION_KEY`] extension.
+///
+/// The depth counts how many remote reads are already in progress above the read:
+/// a read dispatched by a frontend (or any other top level client) is depth 0,
+/// and every datanode entry point increments the depth of the reads that the
+/// request it serves dispatches. A datanode therefore reads depth 0 for a
+/// top-level request and depth 1 for the isolated inner read of a nested
+/// `MergeScan` plan.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct RemoteReadDepth(u64);
+
+impl RemoteReadDepth {
+    /// Depth of a read that is not nested inside another remote read.
+    pub const ORDINARY: Self = Self(0);
+
+    /// The deepest depth the supported nested broadcast join rewrite produces: the
+    /// outer remote read (depth 0) dispatches one nested read (depth 1).
+    pub const SUPPORTED_LIMIT: Self = Self(1);
+
+    /// Returns the raw depth.
+    pub fn get(self) -> u64 {
+        self.0
+    }
+
+    /// Parses the raw value of the reserved extension.
+    ///
+    /// Malformed and overflowing values are errors: a depth that cannot be
+    /// interpreted must never be silently treated as a nested (or ordinary) read.
+    pub fn parse(value: &str) -> Result<Self, RemoteReadDepthError> {
+        match value.parse::<u64>() {
+            Ok(depth) => Ok(Self(depth)),
+            Err(error) => match error.kind() {
+                std::num::IntErrorKind::PosOverflow => OverflowSnafu { value }.fail(),
+                _ => InvalidSnafu { value }.fail(),
+            },
+        }
+    }
+
+    /// Whether this read is dispatched by another remote read.
+    pub fn is_nested(self) -> bool {
+        self != Self::ORDINARY
+    }
+
+    /// Whether this depth is deeper than the supported nested rewrite.
+    pub fn exceeds_supported_limit(self) -> bool {
+        self > Self::SUPPORTED_LIMIT
+    }
+
+    /// Returns the depth of the reads dispatched while serving this one.
+    pub fn next(self) -> Result<Self, RemoteReadDepthError> {
+        match self.0.checked_add(1) {
+            Some(next) => Ok(Self(next)),
+            None => OverflowSnafu {
+                value: self.0.to_string(),
+            }
+            .fail(),
+        }
+    }
+}
+
+impl Display for RemoteReadDepth {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+/// Failure to interpret the reserved remote read depth extension.
+#[derive(Debug, Snafu)]
+pub enum RemoteReadDepthError {
+    #[snafu(display("Invalid remote read depth \"{value}\": expected a non-negative integer"))]
+    Invalid { value: String },
+    #[snafu(display("Remote read depth \"{value}\" overflows a 64-bit integer"))]
+    Overflow { value: String },
+}
 
 pub fn generate_remote_query_id() -> String {
     generate_remote_query_id_value().to_string()
@@ -213,6 +291,11 @@ impl TryFrom<api::v1::QueryContext> for QueryContext {
     type Error = crate::session_config::Error;
 
     fn try_from(mut ctx: api::v1::QueryContext) -> Result<Self, Self::Error> {
+        let experimental_dist_join = ctx
+            .extensions
+            .remove(EXPERIMENTAL_DIST_JOIN_EXTENSION_KEY)
+            .as_deref()
+            == Some("true");
         let read_preference = ctx.extensions.remove(READ_PREFERENCE_EXTENSION_KEY);
         let read_preference = match read_preference {
             Some(value) => ReadPreference::from_str(&value).map_err(|_| {
@@ -226,7 +309,7 @@ impl TryFrom<api::v1::QueryContext> for QueryContext {
             None => ReadPreference::default(),
         };
         let sequences = ctx.snapshot_seqs.as_ref();
-        Ok(QueryContextBuilder::default()
+        let query_context = QueryContextBuilder::default()
             .current_catalog(ctx.current_catalog)
             .current_schema(ctx.current_schema)
             .timezone(parse_timezone(Some(&ctx.timezone)))
@@ -244,7 +327,13 @@ impl TryFrom<api::v1::QueryContext> for QueryContext {
             )))
             .explain_options(ctx.explain)
             .read_preference(read_preference)
-            .build())
+            .build();
+        if experimental_dist_join {
+            query_context
+                .configuration_parameter()
+                .set_experimental_dist_join(true);
+        }
+        Ok(query_context)
     }
 }
 
@@ -258,6 +347,7 @@ impl From<QueryContext> for api::v1::QueryContext {
             snapshot_seqs,
             sst_min_sequences,
             mutable_query_context_data,
+            configuration_parameter,
             ..
         }: QueryContext,
     ) -> Self {
@@ -265,6 +355,13 @@ impl From<QueryContext> for api::v1::QueryContext {
         let mutable_inner = mutable_inner.read().unwrap();
         let mut extensions = extensions;
         extensions.remove(READ_PREFERENCE_EXTENSION_KEY);
+        extensions.remove(EXPERIMENTAL_DIST_JOIN_EXTENSION_KEY);
+        if configuration_parameter.experimental_dist_join() {
+            extensions.insert(
+                EXPERIMENTAL_DIST_JOIN_EXTENSION_KEY.to_string(),
+                "true".to_string(),
+            );
+        }
         if mutable_inner.read_preference != ReadPreference::Leader {
             extensions.insert(
                 READ_PREFERENCE_EXTENSION_KEY.to_string(),
@@ -511,6 +608,33 @@ impl QueryContext {
     pub fn remote_query_id_value(&self) -> Option<QueryId> {
         self.remote_query_id()
             .and_then(|query_id| query_id.parse().ok())
+    }
+
+    /// Returns the nesting depth of this remote read.
+    ///
+    /// A context without the reserved [`REMOTE_READ_DEPTH_EXTENSION_KEY`] extension
+    /// is an ordinary (depth 0) read. Malformed values are errors, so that an
+    /// unreadable depth is never mistaken for a nested read.
+    pub fn remote_read_depth(&self) -> Result<RemoteReadDepth, RemoteReadDepthError> {
+        match self.extension(REMOTE_READ_DEPTH_EXTENSION_KEY) {
+            Some(value) => RemoteReadDepth::parse(value),
+            None => Ok(RemoteReadDepth::ORDINARY),
+        }
+    }
+
+    /// Overwrites the reserved remote read depth and keeps every other extension.
+    pub fn set_remote_read_depth(&mut self, depth: RemoteReadDepth) {
+        self.set_extension(REMOTE_READ_DEPTH_EXTENSION_KEY, depth.get().to_string());
+    }
+
+    /// Returns a clone of this context that records the depth of the reads
+    /// dispatched while serving this one, i.e. this depth incremented by exactly
+    /// one. Every other extension is preserved.
+    pub fn with_next_remote_read_depth(&self) -> Result<Self, RemoteReadDepthError> {
+        let next = self.remote_read_depth()?.next()?;
+        let mut next_context = self.clone();
+        next_context.set_remote_read_depth(next);
+        Ok(next_context)
     }
 
     pub fn enable_live_analyze_metrics(&mut self) {
@@ -857,6 +981,7 @@ pub struct ConfigurationVariables {
     pg_datestyle_format: ArcSwap<(PGDateTimeStyle, PGDateOrder)>,
     pg_intervalstyle_format: ArcSwap<PGIntervalStyle>,
     query_options: RwLock<HashMap<String, String>>,
+    experimental_dist_join: ArcSwap<bool>,
 }
 
 impl Clone for ConfigurationVariables {
@@ -866,6 +991,7 @@ impl Clone for ConfigurationVariables {
             pg_datestyle_format: ArcSwap::new(self.pg_datestyle_format.load().clone()),
             pg_intervalstyle_format: ArcSwap::new(self.pg_intervalstyle_format.load().clone()),
             query_options: RwLock::new(self.query_options.read().unwrap().clone()),
+            experimental_dist_join: ArcSwap::new(self.experimental_dist_join.load().clone()),
         }
     }
 }
@@ -937,6 +1063,16 @@ impl ConfigurationVariables {
     /// Returns the session's canonical query option overrides.
     pub fn query_options(&self) -> HashMap<String, String> {
         self.query_options.read().unwrap().clone()
+    }
+
+    /// Whether the session opted into the cost heuristic of the nested broadcast join
+    /// rewrite (`SET experimental_dist_join = true`).
+    pub fn experimental_dist_join(&self) -> bool {
+        **self.experimental_dist_join.load()
+    }
+
+    pub fn set_experimental_dist_join(&self, enabled: bool) {
+        self.experimental_dist_join.swap(Arc::new(enabled));
     }
 }
 
@@ -1040,6 +1176,190 @@ mod test {
         fork.set_skip_wal(true);
         assert!(!context.skip_wal());
         assert!(fork.skip_wal());
+    }
+
+    /// The configuration parameters belong to the session, not to a single statement: a
+    /// statement that is planned or executed after `SET` sees the same value.
+    #[test]
+    fn test_experimental_dist_join_persists_across_statements() {
+        let session = Session::new(None, Channel::Mysql, Default::default(), 0);
+        assert!(
+            !session
+                .new_query_context()
+                .configuration_parameter()
+                .experimental_dist_join()
+        );
+
+        session
+            .new_query_context()
+            .configuration_parameter()
+            .set_experimental_dist_join(true);
+
+        assert!(
+            session
+                .new_query_context()
+                .configuration_parameter()
+                .experimental_dist_join()
+        );
+    }
+
+    #[test]
+    fn test_experimental_dist_join_query_context_roundtrip() {
+        let enabled = QueryContext::with(DEFAULT_CATALOG_NAME, "public");
+        enabled
+            .configuration_parameter()
+            .set_experimental_dist_join(true);
+        let wire: api::v1::QueryContext = enabled.into();
+        assert_eq!(
+            Some(&"true".to_string()),
+            wire.extensions.get(EXPERIMENTAL_DIST_JOIN_EXTENSION_KEY)
+        );
+        let restored = QueryContext::try_from(wire).unwrap();
+        assert!(restored.configuration_parameter().experimental_dist_join());
+
+        let wire: api::v1::QueryContext = QueryContext::with(DEFAULT_CATALOG_NAME, "public").into();
+        assert!(
+            !wire
+                .extensions
+                .contains_key(EXPERIMENTAL_DIST_JOIN_EXTENSION_KEY)
+        );
+        let restored = QueryContext::try_from(wire).unwrap();
+        assert!(!restored.configuration_parameter().experimental_dist_join());
+    }
+
+    /// The reserved remote read depth is an internal transport field: it defaults to 0,
+    /// it round trips through the wire context, and an unreadable value is an error.
+    #[test]
+    fn test_remote_read_depth_parsing() {
+        let mut context = QueryContext::with(DEFAULT_CATALOG_NAME, "public");
+        // A missing extension is the ordinary, top-level read.
+        assert_eq!(
+            Ok(RemoteReadDepth::ORDINARY),
+            context.remote_read_depth().map_err(|e| e.to_string())
+        );
+        assert_eq!(0, context.remote_read_depth().unwrap().get());
+        assert!(!context.remote_read_depth().unwrap().is_nested());
+
+        for (value, depth) in [("0", 0), ("1", 1), ("2", 2), ("42", 42)] {
+            context.set_extension(REMOTE_READ_DEPTH_EXTENSION_KEY, value);
+            assert_eq!(
+                Ok(RemoteReadDepth(depth)),
+                context.remote_read_depth().map_err(|e| e.to_string())
+            );
+            assert_eq!(depth, context.remote_read_depth().unwrap().get());
+        }
+
+        context.set_extension(REMOTE_READ_DEPTH_EXTENSION_KEY, "1");
+        assert!(context.remote_read_depth().unwrap().is_nested());
+        assert!(
+            !context
+                .remote_read_depth()
+                .unwrap()
+                .exceeds_supported_limit()
+        );
+        assert_eq!(
+            2,
+            context.remote_read_depth().unwrap().next().unwrap().get()
+        );
+
+        context.set_extension(REMOTE_READ_DEPTH_EXTENSION_KEY, "2");
+        assert!(
+            context
+                .remote_read_depth()
+                .unwrap()
+                .exceeds_supported_limit()
+        );
+
+        for value in ["", "abc", "1x", "-1", " 1", "1 "] {
+            context.set_extension(REMOTE_READ_DEPTH_EXTENSION_KEY, value);
+            let error = context.remote_read_depth().unwrap_err();
+            assert!(
+                matches!(error, RemoteReadDepthError::Invalid { .. }),
+                "value {value:?} must be rejected as invalid, got {error:?}"
+            );
+        }
+
+        for value in ["18446744073709551616", "99999999999999999999999"] {
+            context.set_extension(REMOTE_READ_DEPTH_EXTENSION_KEY, value);
+            let error = context.remote_read_depth().unwrap_err();
+            assert!(
+                matches!(error, RemoteReadDepthError::Overflow { .. }),
+                "value {value:?} must be rejected as an overflow, got {error:?}"
+            );
+        }
+    }
+
+    /// The depth the reads of a request inherit is the depth of the request plus
+    /// exactly one, and every unrelated extension survives the increment.
+    #[test]
+    fn test_next_remote_read_depth_preserves_other_extensions() {
+        let mut context = QueryContext::with(DEFAULT_CATALOG_NAME, "public");
+        context.set_extension("unrelated", "preserved");
+
+        let next = context.with_next_remote_read_depth().unwrap();
+        assert_eq!(
+            Some("1"),
+            next.extension(REMOTE_READ_DEPTH_EXTENSION_KEY),
+            "a top-level read must dispatch depth 1 reads"
+        );
+        assert_eq!(Some("preserved"), next.extension("unrelated"));
+        assert_eq!(
+            None,
+            context.extension(REMOTE_READ_DEPTH_EXTENSION_KEY),
+            "the incremented context must not mutate the original"
+        );
+
+        let next = next.with_next_remote_read_depth().unwrap();
+        assert_eq!(Some("2"), next.extension(REMOTE_READ_DEPTH_EXTENSION_KEY));
+        assert_eq!(Some("preserved"), next.extension("unrelated"));
+
+        // The value is written in its normalized decimal form.
+        let mut text = QueryContext::with(DEFAULT_CATALOG_NAME, "public");
+        text.set_extension(REMOTE_READ_DEPTH_EXTENSION_KEY, "007");
+        assert_eq!(
+            Some("8"),
+            text.with_next_remote_read_depth()
+                .unwrap()
+                .extension(REMOTE_READ_DEPTH_EXTENSION_KEY)
+        );
+    }
+
+    #[test]
+    fn test_remote_read_depth_overflow_is_an_error() {
+        let depth = RemoteReadDepth(u64::MAX);
+        assert!(matches!(
+            depth.next(),
+            Err(RemoteReadDepthError::Overflow { .. })
+        ));
+    }
+
+    /// The reserved key is internal: it never becomes a public query option.
+    #[test]
+    fn test_remote_read_depth_is_not_a_public_query_option() {
+        let mut context = QueryContext::with(DEFAULT_CATALOG_NAME, "public");
+        context.set_extension(REMOTE_READ_DEPTH_EXTENSION_KEY, "1");
+
+        assert!(crate::hints::is_reserved_extension_key(
+            REMOTE_READ_DEPTH_EXTENSION_KEY
+        ));
+        assert!(
+            !context
+                .effective_query_options()
+                .unwrap()
+                .contains_key(REMOTE_READ_DEPTH_EXTENSION_KEY)
+        );
+        assert_eq!(
+            Some("1"),
+            context.extension(REMOTE_READ_DEPTH_EXTENSION_KEY)
+        );
+
+        // A public query option of the same name is not supported.
+        assert!(
+            context
+                .configuration_parameter()
+                .set_query_option(REMOTE_READ_DEPTH_EXTENSION_KEY, "1")
+                .is_err()
+        );
     }
 
     #[test]

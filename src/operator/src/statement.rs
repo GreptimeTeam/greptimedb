@@ -100,7 +100,7 @@ use crate::error::{
 };
 use crate::insert::InserterRef;
 use crate::statement::copy_database::{COPY_DATABASE_TIME_END_KEY, COPY_DATABASE_TIME_START_KEY};
-use crate::statement::set::set_query_option;
+use crate::statement::set::{set_experimental_dist_join, set_query_option};
 
 /// A configurator that customizes or enhances a [`StatementExecutor`].
 #[async_trait::async_trait]
@@ -557,6 +557,9 @@ impl StatementExecutor {
             // The tracked issue is https://github.com/GreptimeTeam/greptimedb/issues/3442.
             "DATESTYLE" => set_datestyle(set_var.value, query_ctx)?,
             "INTERVALSTYLE" => set_intervalstyle(set_var.value, query_ctx)?,
+
+            // Opt into the cost heuristic of the nested broadcast join rewrite.
+            "EXPERIMENTAL_DIST_JOIN" => set_experimental_dist_join(set_var.value, query_ctx)?,
 
             "CLIENT_ENCODING" => validate_client_encoding(set_var)?,
             "@@SESSION.MAX_EXECUTION_TIME" | "MAX_EXECUTION_TIME" => match query_ctx.channel() {
