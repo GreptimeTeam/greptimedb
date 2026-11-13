@@ -624,7 +624,7 @@ fn finish_histogram_group(
 /// mean with the compensation folded in; one that never switched divides the sum and the compensation
 /// by the sample count and then folds the compensation in, which is what `sum_or_avg` does at the end
 /// of both paths.
-fn finished_histogram(
+pub(crate) fn finished_histogram(
     op: AggregateOp,
     accumulator: &HistogramAccumulator,
 ) -> Result<Option<FloatHistogram>> {
@@ -1171,7 +1171,11 @@ struct Group {
 /// `histogram_value`, `mean` is its `incremental_mean` mode, `count` is its `count`, and
 /// `compensation` is its `histogram_compensation`. A `sum` fold leaves `mean` at `None` and only
 /// counts for the average's sake.
-struct HistogramAccumulator {
+///
+/// The legacy `prom_native_histogram_agg_sum`/`_avg` accumulators fold through this one as well, so
+/// their arithmetic is this arithmetic; only their state frame differs.
+#[derive(Debug)]
+pub(crate) struct HistogramAccumulator {
     /// The live value: the running sum, or -- once an average switched -- the sum the switch started
     /// from, which the mean is derived from.
     value: FloatHistogram,
@@ -1185,7 +1189,9 @@ struct HistogramAccumulator {
     mean: Option<FloatHistogram>,
     /// Samples folded into this position, which is the divisor an average's mean uses.
     count: f64,
-    evidence: HistogramEvidence,
+    /// The evidence bits this fold recorded. A legacy accumulator keeps its own copy of the bits its
+    /// state frame can carry and seeds them in before every operation.
+    pub(crate) evidence: HistogramEvidence,
 }
 
 /// The evidence bits a histogram fold records beside its payload.
@@ -1406,16 +1412,10 @@ impl Group {
                     .saturating_add(backing),
             )?;
         }
-        let accumulator = self.histograms.entry(key).or_insert_with(|| {
-            let compensation = sample.new_compensation();
-            HistogramAccumulator {
-                value: sample.clone(),
-                compensation: Some(compensation),
-                mean: None,
-                count: 1.0,
-                evidence: HistogramEvidence::default(),
-            }
-        });
+        let accumulator = self
+            .histograms
+            .entry(key)
+            .or_insert_with(|| HistogramAccumulator::from_sample(&sample));
         // The evidence follows the sample's own reset hint, whether or not the point still folds.
         match sample.reset_hint {
             CounterResetHint::CounterReset => accumulator.evidence.counter_reset_seen = true,
@@ -1439,12 +1439,10 @@ impl Group {
                 .saturating_add(before)
                 .saturating_add(sample.heap_bytes()),
         )?;
-        if accumulator.value.uses_custom_buckets() != sample.uses_custom_buckets() {
+        if accumulator.uses_custom_buckets() != sample.uses_custom_buckets() {
             // Exponential buckets cannot be added to custom ones: the point is removed rather than
             // answered, and the evidence says why.
-            accumulator.evidence.poisoned = true;
-            accumulator.evidence.incompatible_layout = true;
-            accumulator.compensation = None;
+            accumulator.poison();
             return Ok(retained);
         }
         match fold.op {
@@ -1459,8 +1457,36 @@ impl Group {
 }
 
 impl HistogramAccumulator {
+    /// A fold that has taken `sample` and nothing else: the sample is the live value, the
+    /// compensation is the layout-carrying zero built beside it, and one sample is counted.
+    pub(crate) fn from_sample(sample: &FloatHistogram) -> Self {
+        Self {
+            value: sample.clone(),
+            compensation: Some(sample.new_compensation()),
+            mean: None,
+            count: 1.0,
+            evidence: HistogramEvidence::default(),
+        }
+    }
+
+    /// Whether the live value -- the mean once an average switched -- uses custom buckets.
+    pub(crate) fn uses_custom_buckets(&self) -> bool {
+        match &self.mean {
+            Some(mean) => mean.uses_custom_buckets(),
+            None => self.value.uses_custom_buckets(),
+        }
+    }
+
+    /// Removes this position: its samples disagreed on their bucket layout, so it answers nothing
+    /// and the evidence says why.
+    pub(crate) fn poison(&mut self) {
+        self.evidence.poisoned = true;
+        self.evidence.incompatible_layout = true;
+        self.compensation = None;
+    }
+
     /// Adds one sample into the running sum, one compensated add into the live value.
-    fn fold_sum(&mut self, sample: &FloatHistogram) -> Result<()> {
+    pub(crate) fn fold_sum(&mut self, sample: &FloatHistogram) -> Result<()> {
         let (compensation, outcome) = self.value.kahan_add(sample, self.compensation.take())?;
         self.compensation = Some(compensation);
         self.evidence.custom_bounds_reconciled |= outcome.custom_bounds_reconciled;
@@ -1476,7 +1502,7 @@ impl HistogramAccumulator {
     /// `sample / count` weighted by `(count - 1) / count`. Dividing before adding is what keeps a
     /// mean of finite inputs finite: two histograms of `1e308` at one observation each average to
     /// `1e308`, while `(1e308 + 1e308) / 2` would be `Inf`.
-    fn fold_avg(&mut self, sample: &FloatHistogram) -> Result<()> {
+    pub(crate) fn fold_avg(&mut self, sample: &FloatHistogram) -> Result<()> {
         self.count += 1.0;
         if self.mean.is_none() {
             // The trial runs on a copy, so an overflowing add leaves the sum it started from intact
@@ -1525,7 +1551,7 @@ impl HistogramAccumulator {
     ///
     /// A poisoned position exports the empty placeholders the state layout reserves for it: it
     /// answers nothing, and the merge reads its evidence, not its buckets.
-    fn payload(&self, op: AggregateOp) -> Result<StatePayload> {
+    pub(crate) fn payload(&self, op: AggregateOp) -> Result<StatePayload> {
         if self.evidence.poisoned {
             let empty = self.value.empty_like();
             return Ok(StatePayload::Histogram(Box::new(HistogramState {
@@ -1572,7 +1598,7 @@ impl HistogramAccumulator {
     }
 
     /// The state a decoded payload carries, as the merge keeps it.
-    fn from_payload(op: AggregateOp, payload: &HistogramState) -> Result<Self> {
+    pub(crate) fn from_payload(op: AggregateOp, payload: &HistogramState) -> Result<Self> {
         let value = decoded_histogram(&payload.value)?;
         let compensation = decoded_histogram(&payload.compensation)?;
         let switched = op == AggregateOp::Avg && payload.incremental_mean;
@@ -1599,7 +1625,7 @@ impl HistogramAccumulator {
     /// into the live value, and an average either adds its sums the same way -- when that stays
     /// finite -- or continues in mean mode from the means and the counts, dividing before it adds.
     /// Poison is sticky, and both sides' evidence is kept whatever the outcome of the arithmetic.
-    fn merge_state(&mut self, op: AggregateOp, other: &HistogramState) -> Result<()> {
+    pub(crate) fn merge_state(&mut self, op: AggregateOp, other: &HistogramState) -> Result<()> {
         self.evidence.poisoned |= other.poisoned;
         self.evidence.incompatible_layout |= other.incompatible_layout;
         self.evidence.custom_bounds_reconciled |= other.custom_bounds_reconciled;
@@ -1615,10 +1641,7 @@ impl HistogramAccumulator {
         // buckets, the other custom ones. The fold removes such a point when both layouts meet
         // inside one partition, so the merge reports it the same way instead of letting the add
         // refuse the layouts and fail the whole statement.
-        let left_uses_custom = match &self.mean {
-            Some(mean) => mean.uses_custom_buckets(),
-            None => self.value.uses_custom_buckets(),
-        };
+        let left_uses_custom = self.uses_custom_buckets();
         if left_uses_custom != right.uses_custom_buckets() {
             self.evidence.poisoned = true;
             self.evidence.incompatible_layout = true;
@@ -1734,7 +1757,7 @@ impl HistogramAccumulator {
 }
 
 /// One histogram as the frame payload's own one-row batch.
-fn histogram_batch(histogram: &FloatHistogram) -> Result<Arc<HistogramBatch>> {
+pub(crate) fn histogram_batch(histogram: &FloatHistogram) -> Result<Arc<HistogramBatch>> {
     let mut builder = HistogramBatchBuilder::new();
     histogram.push_to(&mut builder)?;
     builder.finish().map_err(external)
@@ -1768,7 +1791,7 @@ fn evidence_summary(groups: &[Group]) -> HistogramEvidence {
 }
 
 /// Bytes one histogram position holds: every histogram it keeps, with buckets, bounds and spans.
-fn accumulator_bytes(accumulator: &HistogramAccumulator) -> usize {
+pub(crate) fn accumulator_bytes(accumulator: &HistogramAccumulator) -> usize {
     size_of::<HistogramAccumulator>()
         .saturating_add(accumulator.value.heap_bytes())
         .saturating_add(

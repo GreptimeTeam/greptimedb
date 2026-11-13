@@ -33,12 +33,19 @@ use datafusion::physical_plan::ColumnarValue;
 use datafusion_common::ScalarValue;
 use datafusion_expr::function::AccumulatorArgs;
 use datafusion_expr::{ScalarFunctionArgs, ScalarUDFImpl, Signature, create_udaf, create_udf};
+use datatypes::series::aggregate_state::HistogramState;
+use datatypes::series::histogram::{BucketSideView, HistogramView};
 
+use crate::aggregate::{
+    AggregateOp, HistogramAccumulator, HistogramEvidence, accumulator_bytes, finished_histogram,
+    histogram_batch,
+};
 use crate::functions::{
     AvgOverTime, Deriv, DoubleExponentialSmoothing, IDelta, Increase, LastOverTime, MaxOverTime,
     MinOverTime, PredictLinear, QuantileOverTime, Rate, StddevOverTime, StdvarOverTime,
     SumOverTime, extract_array, extract_range_dict,
 };
+use crate::histogram_eval::float_histogram::FloatHistogram;
 use crate::range_array::{RangeArray, unpack};
 
 fn extract_histogram_array(value: &ColumnarValue, func_name: &str) -> DfResult<ArrayRef> {
@@ -293,11 +300,19 @@ fn record_custom_reconciliation(
     rhs: &NativeHistogram,
 ) {
     if lhs.needs_custom_reconciliation(rhs) {
-        record_info(
-            collector,
-            format!("{name}: reconciled native histograms with different custom buckets"),
-        );
+        record_reconciled_custom_buckets(collector, name);
     }
+}
+
+/// Records that two custom-bucket layouts met and the result uses the bounds they share.
+fn record_reconciled_custom_buckets(
+    collector: &Option<PromqlAnnotationCollector>,
+    name: &'static str,
+) {
+    record_info(
+        collector,
+        format!("{name}: reconciled native histograms with different custom buckets"),
+    );
 }
 
 fn record_counter_reset_contradiction(
@@ -918,14 +933,30 @@ impl NativeHistogramAggAvg {
     }
 }
 
+/// The legacy `prom_native_histogram_agg_sum`/`_avg` accumulator.
+///
+/// Its state frame is the one it has always been -- one native histogram, an average's `UInt64`
+/// count, and three Booleans -- but the arithmetic behind it is the kernel's own
+/// [`HistogramAccumulator`], the same fold a native aggregate uses. What this type adds is the frame:
+/// the fold's answer, its count, and the evidence bits the frame can carry.
 #[derive(Debug)]
 struct NativeHistogramAggregateAccumulator {
     kind: NativeHistogramAggregateKind,
-    value: Option<NativeHistogram>,
+    /// The fold, once a sample established it.
+    ///
+    /// `None` while no histogram reached this accumulator, and `None` again once the position is
+    /// poisoned: a dropped position answers nothing, so it keeps no histogram to answer with.
+    fold: Option<HistogramAccumulator>,
+    /// The evidence this accumulator records, seeded into the fold before every operation and read
+    /// back out of it afterwards so the two never disagree about what the inputs reported.
+    ///
+    /// It is what the state frame exports: a position is poisoned, or saw a counter reset, or saw
+    /// its absence. The reconciliation bit has no component of its own and only drives a warning
+    /// here, because the frame a reader decodes has nowhere to put it.
+    evidence: HistogramEvidence,
+    /// Samples folded in, as the `UInt64` component an average's state declares. A sum declares no
+    /// count, so it leaves this at zero.
     count: u64,
-    dropped_incompatible: bool,
-    counter_reset_seen: bool,
-    not_counter_reset_seen: bool,
     collector: Option<PromqlAnnotationCollector>,
 }
 
@@ -936,11 +967,9 @@ impl NativeHistogramAggregateAccumulator {
     ) -> Self {
         Self {
             kind,
-            value: None,
+            fold: None,
+            evidence: HistogramEvidence::default(),
             count: 0,
-            dropped_incompatible: false,
-            counter_reset_seen: false,
-            not_counter_reset_seen: false,
             collector,
         }
     }
@@ -953,14 +982,45 @@ impl NativeHistogramAggregateAccumulator {
         Ok(Box::new(Self::new(kind, collector)))
     }
 
+    /// This kind as the kernel's own aggregate operation, which is what the fold is told it folds.
+    fn op(&self) -> AggregateOp {
+        match self.kind {
+            NativeHistogramAggregateKind::Sum => AggregateOp::Sum,
+            NativeHistogramAggregateKind::Avg => AggregateOp::Avg,
+        }
+    }
+
     fn observe_reset_hints(&mut self, counter_reset_seen: bool, not_counter_reset_seen: bool) {
-        self.counter_reset_seen |= counter_reset_seen;
-        self.not_counter_reset_seen |= not_counter_reset_seen;
-        if self.counter_reset_seen && self.not_counter_reset_seen {
+        self.evidence.counter_reset_seen |= counter_reset_seen;
+        self.evidence.not_counter_reset_seen |= not_counter_reset_seen;
+        if self.evidence.counter_reset_seen && self.evidence.not_counter_reset_seen {
             record_counter_reset_contradiction_warning(&self.collector, self.kind.name());
         }
     }
 
+    /// The count the state declares after folding `count` more samples.
+    ///
+    /// It is a `u64` because that is the state component's Arrow type, so a merge that would carry
+    /// it past `u64::MAX` is an overflow of the frame rather than of the arithmetic. A sum declares
+    /// no count at all and keeps this at zero.
+    fn combined_count(&self, count: u64) -> DfResult<u64> {
+        if !self.kind.needs_count() {
+            return Ok(self.count);
+        }
+        self.count.checked_add(count).ok_or_else(|| {
+            DataFusionError::Execution(format!(
+                "{}: native histogram sample count overflow",
+                self.kind.name()
+            ))
+        })
+    }
+
+    /// Folds one sample into the position's fold, one `fold_sum` or `fold_avg` per kind.
+    ///
+    /// The evidence follows the sample's own reset hint whether or not the position still folds, as
+    /// it always has. A sample whose bucket layout cannot be added to the fold's -- exponential
+    /// buckets meeting custom ones -- poisons the position instead of failing the statement: the
+    /// aggregate drops the point, as Prometheus does, and reports why.
     fn push_histogram(&mut self, histogram: NativeHistogram, count: u64) -> DfResult<()> {
         if self.kind.needs_count() && count == 0 {
             return Ok(());
@@ -970,49 +1030,47 @@ impl NativeHistogramAggregateAccumulator {
             histogram.reset_hint == COUNTER_RESET_HINT,
             histogram.reset_hint == NOT_COUNTER_RESET_HINT,
         );
-        if self.dropped_incompatible {
+        if self.evidence.poisoned {
             return Ok(());
         }
-        let combined_count = if self.kind.needs_count() {
-            self.count.checked_add(count).ok_or_else(|| {
-                DataFusionError::Execution(format!(
-                    "{}: native histogram sample count overflow",
-                    self.kind.name()
-                ))
-            })?
-        } else {
-            self.count
-        };
-        let value = match self.value.take() {
-            Some(value) => {
-                record_custom_reconciliation(&self.collector, self.kind.name(), &value, &histogram);
-                let combined = match self.kind {
-                    NativeHistogramAggregateKind::Sum => value.add(&histogram),
-                    NativeHistogramAggregateKind::Avg => {
-                        weighted_histogram_mean(value, self.count, histogram, count, combined_count)
-                    }
-                };
-                match combined {
-                    Some(value) => Some(value),
-                    None => {
-                        self.record_incompatible();
-                        None
-                    }
-                }
+        let combined_count = self.combined_count(count)?;
+        let sample = float_histogram(&histogram)?;
+        let recorded = self.evidence;
+        // The first sample of a position *is* the fold's value, so it is not added into it.
+        let vacant = self.fold.is_none();
+        let fold = self
+            .fold
+            .get_or_insert_with(|| HistogramAccumulator::from_sample(&sample));
+        // The bits this accumulator already recorded go in beside the sample, so the fold exports
+        // the merge-time evidence along with its own.
+        fold.evidence = recorded;
+        if fold.uses_custom_buckets() != sample.uses_custom_buckets() {
+            fold.poison();
+        } else if !vacant {
+            match self.kind {
+                NativeHistogramAggregateKind::Sum => fold.fold_sum(&sample)?,
+                NativeHistogramAggregateKind::Avg => fold.fold_avg(&sample)?,
             }
-            None => Some(histogram),
-        };
-        if !self.dropped_incompatible {
-            self.value = value;
-            self.count = combined_count;
+        }
+        let evidence = fold.evidence;
+        self.evidence = evidence;
+        if evidence.poisoned {
+            self.record_incompatible();
+            return Ok(());
+        }
+        self.count = combined_count;
+        if evidence.custom_bounds_reconciled && !recorded.custom_bounds_reconciled {
+            record_reconciled_custom_buckets(&self.collector, self.kind.name());
         }
         Ok(())
     }
 
+    /// Drops this position: its inputs disagreed on their bucket layout, so it answers nothing.
     fn mark_incompatible(&mut self) {
-        self.value = None;
+        self.evidence.poisoned = true;
+        self.evidence.incompatible_layout = true;
         self.count = 0;
-        self.dropped_incompatible = true;
+        self.fold = None;
     }
 
     fn record_incompatible(&mut self) {
@@ -1025,6 +1083,109 @@ impl NativeHistogramAggregateAccumulator {
             ),
         );
     }
+
+    /// The histogram component of this position's state, or `None` when it answers nothing.
+    ///
+    /// The legacy frame declares no compensation component and no mean mode, so what it carries is
+    /// the fold's answer: the running sum with its compensation folded in for a sum, and the running
+    /// mean of its samples for an average. Both are the value a reader of the frame adds or weights,
+    /// which is what makes a merged state mean what the state already means.
+    ///
+    /// Folding the compensation back into one `f64` rounds again, so this is not a lossless Kahan
+    /// state: a partition holding `[1e16, 1]` still exports `1e16`, and merging it with a partition
+    /// holding `[-1e16]` answers `0`. What the frame preserves is the residual of samples already
+    /// folded into one position, which a frame exporting the running sum would lose even there.
+    fn state_histogram(&self) -> DfResult<Option<NativeHistogram>> {
+        if self.evidence.poisoned || (self.kind.needs_count() && self.count == 0) {
+            return Ok(None);
+        }
+        let Some(fold) = &self.fold else {
+            return Ok(None);
+        };
+        Ok(finished_histogram(self.op(), fold)?
+            .as_ref()
+            .map(native_histogram))
+    }
+}
+
+/// The fold's form of one legacy sample.
+///
+/// A legacy sample is the same histogram in the frame's row representation, so this only re-borrows
+/// the spans it stores as pairs and hands the payload slices on.
+fn float_histogram(histogram: &NativeHistogram) -> DfResult<FloatHistogram> {
+    let spans = |spans: &[Span]| -> (Vec<i32>, Vec<i32>) {
+        (
+            spans.iter().map(|span| span.offset).collect(),
+            spans.iter().map(|span| span.length).collect(),
+        )
+    };
+    let (positive_offsets, positive_lengths) = spans(&histogram.positive_spans);
+    let (negative_offsets, negative_lengths) = spans(&histogram.negative_spans);
+    FloatHistogram::try_from_view(&HistogramView {
+        schema: histogram.schema,
+        zero_threshold: histogram.zero_threshold,
+        sum: histogram.sum,
+        count: histogram.count,
+        zero_count: histogram.zero_count,
+        reset_hint: histogram.reset_hint,
+        start_timestamp: histogram.start_timestamp,
+        custom_values: &histogram.custom_values,
+        positive: BucketSideView {
+            span_offsets: &positive_offsets,
+            span_lengths: &positive_lengths,
+            buckets: &histogram.positive_buckets,
+        },
+        negative: BucketSideView {
+            span_offsets: &negative_offsets,
+            span_lengths: &negative_lengths,
+            buckets: &histogram.negative_buckets,
+        },
+    })
+}
+
+/// The frame's row form of one owned histogram, as the state's histogram component.
+fn native_histogram(histogram: &FloatHistogram) -> NativeHistogram {
+    let (positive_spans, positive_buckets) = spans_and_counts(&histogram.positive);
+    let (negative_spans, negative_buckets) = spans_and_counts(&histogram.negative);
+    NativeHistogram {
+        schema: histogram.schema,
+        zero_threshold: histogram.zero_threshold,
+        sum: histogram.sum,
+        reset_hint: histogram.reset_hint,
+        start_timestamp: histogram.start_timestamp,
+        custom_values: histogram.custom_values.clone(),
+        positive_spans,
+        negative_spans,
+        count: histogram.count,
+        zero_count: histogram.zero_count,
+        positive_buckets,
+        negative_buckets,
+    }
+}
+
+/// The spans and absolute counts an owned bucket list encodes as: one span per run of consecutive
+/// bucket indices, the first span starting at its own index and every later one stating its gap.
+fn spans_and_counts(buckets: &[(i32, f64)]) -> (Vec<Span>, Vec<f64>) {
+    let mut spans: Vec<Span> = Vec::new();
+    let mut counts = Vec::with_capacity(buckets.len());
+    // The absolute index the last span continues at.
+    let mut next: Option<i32> = None;
+    for &(index, count) in buckets {
+        match next {
+            Some(expected) if expected == index => {
+                if let Some(span) = spans.last_mut() {
+                    span.length += 1;
+                }
+            }
+            _ => spans.push(Span {
+                offset: next.map_or(index, |expected| index - expected),
+                length: 1,
+            }),
+        }
+        next = Some(index + 1);
+        counts.push(count);
+    }
+    (spans, counts)
 }
 
 fn weighted_histogram_mean(
@@ -2294,38 +2455,28 @@ impl DfAccumulator for NativeHistogramAggregateAccumulator {
     }
 
     fn evaluate(&mut self) -> DfResult<ScalarValue> {
-        let histogram = match (self.kind, self.dropped_incompatible, self.value.clone()) {
-            (_, true, _) => None,
-            (_, false, None) => None,
-            (NativeHistogramAggregateKind::Sum, false, value) => value,
-            (NativeHistogramAggregateKind::Avg, false, Some(value)) if self.count > 0 => {
-                Some(value)
-            }
-            (NativeHistogramAggregateKind::Avg, _, _) => None,
-        };
-
-        Ok(native_histogram_scalar(histogram))
+        Ok(native_histogram_scalar(self.state_histogram()?))
     }
 
     fn size(&self) -> usize {
+        // The fold sits inline in this struct, so only the histograms it owns are counted on top of
+        // it.
         size_of::<Self>()
-            + self.value.as_ref().map_or(0, |histogram| {
-                histogram.custom_values.capacity() * size_of::<f64>()
-                    + histogram.positive_spans.capacity() * size_of::<Span>()
-                    + histogram.negative_spans.capacity() * size_of::<Span>()
-                    + histogram.positive_buckets.capacity() * size_of::<f64>()
-                    + histogram.negative_buckets.capacity() * size_of::<f64>()
+            + self.fold.as_ref().map_or(0, |fold| {
+                accumulator_bytes(fold).saturating_sub(size_of::<HistogramAccumulator>())
             })
     }
 
     fn state(&mut self) -> DfResult<Vec<ScalarValue>> {
-        let mut state = vec![native_histogram_scalar(self.value.clone())];
+        let mut state = vec![native_histogram_scalar(self.state_histogram()?)];
         if self.kind.needs_count() {
             state.push(ScalarValue::UInt64(Some(self.count)));
         }
-        state.push(ScalarValue::Boolean(Some(self.dropped_incompatible)));
-        state.push(ScalarValue::Boolean(Some(self.counter_reset_seen)));
-        state.push(ScalarValue::Boolean(Some(self.not_counter_reset_seen)));
+        state.push(ScalarValue::Boolean(Some(self.evidence.poisoned)));
+        state.push(ScalarValue::Boolean(Some(self.evidence.counter_reset_seen)));
+        state.push(ScalarValue::Boolean(Some(
+            self.evidence.not_counter_reset_seen,
+        )));
         Ok(state)
     }
 
@@ -2387,22 +2538,69 @@ impl DfAccumulator for NativeHistogramAggregateAccumulator {
                 ))
             })?;
 
+        let op = self.op();
         for row in 0..histograms.len() {
             self.observe_reset_hints(
                 counter_reset_seen.value(row),
                 not_counter_reset_seen.value(row),
             );
             if dropped.value(row) {
+                // A dropped partition answers nothing, so only its poison crosses the boundary.
                 self.mark_incompatible();
             }
-            if self.dropped_incompatible {
+            if self.evidence.poisoned {
                 continue;
             }
             let Some(histogram) = read_histogram(histograms, row)? else {
                 continue;
             };
             let count = counts.map(|counts| counts.value(row)).unwrap_or(1);
-            self.push_histogram(histogram, count)?;
+            if self.kind.needs_count() && count == 0 {
+                continue;
+            }
+            let combined_count = self.combined_count(count)?;
+            let sample = float_histogram(&histogram)?;
+            // The incoming side carries what its frame could: its answer, its count and its
+            // evidence. It has no compensation component, so the compensation it brings is the
+            // layout-carrying zero -- the residual it exported is already inside its answer.
+            let payload = HistogramState {
+                value: histogram_batch(&sample)?,
+                compensation: histogram_batch(&sample.new_compensation())?,
+                count: count as f64,
+                // A legacy average exports the mean of its `count` samples, because its frame has
+                // no mean mode to export instead; a sum exports a sum.
+                incremental_mean: self.kind.needs_count(),
+                poisoned: false,
+                incompatible_layout: false,
+                custom_bounds_reconciled: false,
+                counter_reset_seen: false,
+                not_counter_reset_seen: false,
+            };
+            let recorded = self.evidence;
+            if let Some(mut fold) = self.fold.take() {
+                fold.evidence = recorded;
+                let merged = fold.merge_state(op, &payload);
+                self.evidence = fold.evidence;
+                self.fold = Some(fold);
+                merged?;
+            } else {
+                // Nothing folded here yet, so the incoming state is this position's state.
+                let mut fold = HistogramAccumulator::from_payload(op, &payload)?;
+                fold.evidence = recorded;
+                self.fold = Some(fold);
+            }
+            let evidence = self.fold.as_ref().map_or(recorded, |fold| fold.evidence);
+            self.evidence = evidence;
+            if evidence.poisoned {
+                // Two partitions can each be valid on their own and still disagree on their bucket
+                // layout, which the merge reports the way a fold inside one partition reports it.
+                self.record_incompatible();
+                continue;
+            }
+            self.count = combined_count;
+            if evidence.custom_bounds_reconciled && !recorded.custom_bounds_reconciled {
+                record_reconciled_custom_buckets(&self.collector, self.kind.name());
+            }
         }
 
         Ok(())
@@ -2911,6 +3109,7 @@ mod tests {
     use datafusion::arrow::datatypes::Field;
     use datafusion_common::config::ConfigOptions;
     use datafusion_expr::ScalarFunctionArgs;
+    use datatypes::series::aggregate_state::StatePayload;
 
     use super::*;
 
@@ -2975,10 +3174,145 @@ mod tests {
     fn evaluated_histogram(
         accumulator: &mut NativeHistogramAggregateAccumulator,
     ) -> NativeHistogram {
+        evaluated(accumulator).expect("native histogram accumulator answered nothing")
+    }
+
+    fn evaluated(accumulator: &mut NativeHistogramAggregateAccumulator) -> Option<NativeHistogram> {
         let ScalarValue::Struct(array) = accumulator.evaluate().unwrap() else {
             panic!("native histogram accumulator returned a non-struct value");
         };
-        read_histogram(&array, 0).unwrap().unwrap()
+        read_histogram(&array, 0).unwrap()
+    }
+
+    /// The Arrow arrays one accumulator's state frame spans, one row each.
+    fn state_arrays(aggregate: &mut NativeHistogramAggregateAccumulator) -> Vec<ArrayRef> {
+        aggregate
+            .state()
+            .unwrap()
+            .into_iter()
+            .map(|value| value.to_array_of_size(1).unwrap())
+            .collect()
+    }
+
+    /// The components of one legacy accumulator's state frame.
+    struct LegacyState {
+        histogram: Option<NativeHistogram>,
+        /// The `UInt64` component; only an average declares one.
+        count: Option<u64>,
+        /// The `dropped_incompatible` component.
+        dropped: bool,
+        counter_reset_seen: bool,
+        not_counter_reset_seen: bool,
+    }
+
+    fn legacy_state(aggregate: &mut NativeHistogramAggregateAccumulator) -> LegacyState {
+        let state = aggregate.state().unwrap();
+        let ScalarValue::Struct(array) = state[0].clone() else {
+            panic!("native histogram accumulator state is not a struct");
+        };
+        let mut offset = 1;
+        let count = if aggregate.kind.needs_count() {
+            let count = match state[offset].clone() {
+                ScalarValue::UInt64(count) => count,
+                _ => panic!("native histogram accumulator count state is not UInt64"),
+            };
+            offset += 1;
+            count
+        } else {
+            None
+        };
+        let boolean = |index: usize| match state[index] {
+            ScalarValue::Boolean(value) => value.unwrap_or_default(),
+            _ => panic!("native histogram accumulator state component is not Boolean"),
+        };
+        LegacyState {
+            histogram: read_histogram(&array, 0).unwrap(),
+            count,
+            dropped: boolean(offset),
+            counter_reset_seen: boolean(offset + 1),
+            not_counter_reset_seen: boolean(offset + 2),
+        }
+    }
+
+    /// Asserts one legacy frame histogram carries what one fold histogram carries, bit for bit.
+    fn assert_frame_carries(actual: &NativeHistogram, expected: &FloatHistogram, case: &str) {
+        assert_eq!(
+            actual.count.to_bits(),
+            expected.count.to_bits(),
+            "{case}: count"
+        );
+        assert_eq!(
+            actual.zero_count.to_bits(),
+            expected.zero_count.to_bits(),
+            "{case}: zero count"
+        );
+        assert_eq!(actual.sum.to_bits(), expected.sum.to_bits(), "{case}: sum");
+        assert_eq!(actual.schema, expected.schema, "{case}: schema");
+        assert_eq!(
+            actual.zero_threshold.to_bits(),
+            expected.zero_threshold.to_bits(),
+            "{case}: zero threshold"
+        );
+        assert_eq!(
+            actual
+                .custom_values
+                .iter()
+                .map(|bound| bound.to_bits())
+                .collect::<Vec<_>>(),
+            expected
+                .custom_values
+                .iter()
+                .map(|bound| bound.to_bits())
+                .collect::<Vec<_>>(),
+            "{case}: custom bounds"
+        );
+        for (side, spans, counts, buckets) in [
+            (
+                "positive",
+                &actual.positive_spans,
+                &actual.positive_buckets,
+                &expected.positive,
+            ),
+            (
+                "negative",
+                &actual.negative_spans,
+                &actual.negative_buckets,
+                &expected.negative,
+            ),
+        ] {
+            assert_eq!(
+                expand_spans(spans),
+                buckets.iter().map(|&(index, _)| index).collect::<Vec<_>>(),
+                "{case}: {side} bucket indices"
+            );
+            assert_eq!(
+                counts
+                    .iter()
+                    .map(|count| count.to_bits())
+                    .collect::<Vec<_>>(),
+                buckets
+                    .iter()
+                    .map(|&(_, count)| count.to_bits())
+                    .collect::<Vec<_>>(),
+                "{case}: {side} bucket counts"
+            );
+        }
+    }
+
+    /// The absolute bucket indices a span list expands to, as the frame's reader expands them.
+    fn expand_spans(spans: &[Span]) -> Vec<i32> {
+        let mut indices = Vec::new();
+        let mut cursor = 0;
+        for (position, span) in spans.iter().enumerate() {
+            cursor = if position == 0 {
+                span.offset
+            } else {
+                cursor + span.offset
+            };
+            indices.extend(cursor..cursor + span.length);
+            cursor += span.length;
+        }
+        indices
     }
 
     fn histogram_range_input(values: Vec<Option<NativeHistogram>>) -> Vec<ColumnarValue> {
@@ -3496,13 +3830,228 @@ mod tests {
     fn histogram_average_rejects_sample_count_overflow() {
         let mut aggregate =
             NativeHistogramAggregateAccumulator::new(NativeHistogramAggregateKind::Avg, None);
-        aggregate.value = Some(sample_histogram(1.0, 1.0, vec![1.0]));
+        aggregate
+            .push_histogram(sample_histogram(1.0, 1.0, vec![1.0]), 1)
+            .unwrap();
         aggregate.count = u64::MAX;
 
         let error = aggregate
             .push_histogram(sample_histogram(1.0, 1.0, vec![1.0]), 1)
             .unwrap_err();
         assert!(error.to_string().contains("sample count overflow"));
+    }
+
+    /// The legacy frame and the canonical fold answer the same thing, bit for bit.
+    ///
+    /// The same inputs are folded twice: once through the legacy accumulator, whose state frame is
+    /// the Arrow partial a distributed aggregate hands over, and once through the kernel's own
+    /// [`HistogramAccumulator`], whose `payload` is the canonical partial state. The frame declares
+    /// one native histogram, an average's count and three Booleans, so what it can carry is the
+    /// fold's *answer* -- `finished_histogram`, the running sum with its compensation folded in or
+    /// the average's mean -- and that is what it is compared on. The count and the evidence are
+    /// compared against the payload, which is where they come from, and a state boundary is then
+    /// expected to keep the answer: merging an exported state into an empty accumulator answers
+    /// what the accumulator that exported it answered.
+    #[test]
+    fn legacy_state_carries_the_canonical_histogram_fold() {
+        for (case, inputs) in aggregate_agreement_cases() {
+            let samples = inputs
+                .iter()
+                .map(|histogram| float_histogram(histogram).unwrap())
+                .collect::<Vec<_>>();
+            for kind in [
+                NativeHistogramAggregateKind::Sum,
+                NativeHistogramAggregateKind::Avg,
+            ] {
+                let op = match kind {
+                    NativeHistogramAggregateKind::Sum => AggregateOp::Sum,
+                    NativeHistogramAggregateKind::Avg => AggregateOp::Avg,
+                };
+                let mut legacy = NativeHistogramAggregateAccumulator::new(kind, None);
+                for histogram in &inputs {
+                    legacy.push_histogram(histogram.clone(), 1).unwrap();
+                }
+                let frame = legacy_state(&mut legacy);
+                let fold = canonical_fold(op, &samples);
+                let StatePayload::Histogram(payload) = fold.payload(op).unwrap() else {
+                    panic!("{case}: the canonical fold exported a non-histogram payload");
+                };
+
+                // The three Booleans of the frame are the payload's own evidence.
+                assert_eq!(frame.dropped, payload.poisoned, "{case}: poisoned");
+                assert_eq!(
+                    frame.counter_reset_seen, payload.counter_reset_seen,
+                    "{case}: counter reset seen"
+                );
+                assert_eq!(
+                    frame.not_counter_reset_seen, payload.not_counter_reset_seen,
+                    "{case}: not-counter-reset seen"
+                );
+                assert_eq!(
+                    legacy.evidence.poisoned, payload.poisoned,
+                    "{case}: poisoned evidence"
+                );
+                assert_eq!(
+                    legacy.evidence.incompatible_layout, payload.incompatible_layout,
+                    "{case}: incompatible layout"
+                );
+
+                // The count the frame declares is the samples it folded, as a `UInt64` -- except
+                // on a dropped position, whose count goes with its answer.
+                if kind.needs_count() {
+                    let folded = if frame.dropped {
+                        0
+                    } else {
+                        inputs.len() as u64
+                    };
+                    assert_eq!(frame.count, Some(folded), "{case}: count");
+                    assert_eq!(
+                        frame.count.map(|count| count as f64),
+                        Some(payload.count),
+                        "{case}: payload count"
+                    );
+                } else {
+                    assert_eq!(frame.count, None, "{case}: a sum declares no count");
+                }
+
+                // The histogram component is the fold's answer, bit for bit.
+                let answer = finished_histogram(op, &fold).unwrap();
+                match (&frame.histogram, &answer) {
+                    (Some(actual), Some(expected)) => assert_frame_carries(actual, expected, case),
+                    (None, None) => {}
+                    _ => panic!(
+                        "{case}: the frame and the fold disagree on whether the point answers"
+                    ),
+                }
+
+                // A state boundary keeps that answer.
+                let mut merged = NativeHistogramAggregateAccumulator::new(kind, None);
+                merged.merge_batch(&state_arrays(&mut legacy)).unwrap();
+                let merged = evaluated(&mut merged);
+                let direct = evaluated(&mut legacy);
+                match (merged, direct) {
+                    (Some(merged), Some(direct)) => assert_frame_carries(
+                        &merged,
+                        &float_histogram(&direct).unwrap(),
+                        &format!("{case}, merged"),
+                    ),
+                    (None, None) => {}
+                    _ => panic!("{case}: a merged state answers where its source did not"),
+                }
+            }
+        }
+    }
+
+    /// The compensated sum's residual belongs to the state, not to one partition's fold.
+    ///
+    /// `1e16 + 1 - 1e16` answers `1` only because the Kahan compensation carries what the running sum
+    /// lost. The legacy frame has no compensation component, so it carries the answer instead: a
+    /// merge of the exported state answers `1` too, which a frame exporting the running sum could
+    /// not do.
+    ///
+    /// The guarantee stops at samples already folded into one position. Splitting those same samples
+    /// across two partitions loses the residual, because exporting folds the compensation back into
+    /// a single `f64`: `[1e16, 1]` exports `1e16`, and merging it with `[-1e16]` answers `0`.
+    #[test]
+    fn legacy_state_keeps_the_compensated_sum() {
+        let mut aggregate =
+            NativeHistogramAggregateAccumulator::new(NativeHistogramAggregateKind::Sum, None);
+        for histogram in [
+            sample_histogram(1.0, 1.0e16, vec![1.0e16]),
+            sample_histogram(1.0, 1.0, vec![1.0]),
+            sample_histogram(1.0, -1.0e16, vec![-1.0e16]),
+        ] {
+            aggregate.push_histogram(histogram, 1).unwrap();
+        }
+        let direct = evaluated_histogram(&mut aggregate);
+        assert_eq!(direct.count, 3.0);
+        assert_eq!(direct.sum, 1.0);
+        assert_eq!(direct.positive_buckets, vec![1.0]);
+
+        let state = state_arrays(&mut aggregate);
+        let mut merged =
+            NativeHistogramAggregateAccumulator::new(NativeHistogramAggregateKind::Sum, None);
+        merged.merge_batch(&state).unwrap();
+        let merged = evaluated_histogram(&mut merged);
+        assert_eq!(merged.count, 3.0);
+        assert_eq!(merged.sum, 1.0);
+        assert_eq!(merged.positive_buckets, vec![1.0]);
+    }
+
+    /// The inputs the two accumulators are compared on: two exponential resolutions, two custom
+    /// layouts with different bounds, exponential meeting custom, and a compensated sum whose
+    /// residual lives in the compensation alone.
+    fn aggregate_agreement_cases() -> Vec<(&'static str, Vec<NativeHistogram>)> {
+        let mut coarse = sample_histogram(2.0, 3.0, vec![1.0, 1.0]);
+        coarse.schema = 2;
+        coarse.reset_hint = NOT_COUNTER_RESET_HINT;
+        let mut fine = sample_histogram(1.0, 1.0, vec![1.0]);
+        fine.reset_hint = COUNTER_RESET_HINT;
+
+        let mut custom = sample_histogram(2.0, 3.0, vec![1.0, 1.0, 0.0]);
+        custom.schema = CUSTOM_BUCKETS_SCHEMA;
+        custom.custom_values = vec![1.0, 2.0, 3.0];
+        let mut narrower = sample_histogram(2.0, 5.0, vec![1.0, 1.0]);
+        narrower.schema = CUSTOM_BUCKETS_SCHEMA;
+        narrower.custom_values = vec![2.0, 3.0];
+
+        let mut custom_only = sample_histogram(1.0, 1.0, vec![1.0]);
+        custom_only.schema = CUSTOM_BUCKETS_SCHEMA;
+        custom_only.custom_values = vec![1.0];
+
+        vec![
+            (
+                "two exponential resolutions",
+                vec![fine, coarse.clone(), coarse],
+            ),
+            (
+                "custom bounds reconciled",
+                vec![custom, narrower.clone(), narrower],
+            ),
+            (
+                "exponential meeting custom",
+                vec![
+                    sample_histogram(1.0, 1.0, vec![1.0]),
+                    custom_only,
+                    sample_histogram(1.0, 1.0, vec![1.0, 1.0]),
+                ],
+            ),
+            (
+                "compensated sum",
+                vec![
+                    sample_histogram(1.0, 1.0e16, vec![1.0e16]),
+                    sample_histogram(1.0, 1.0, vec![1.0]),
+                    sample_histogram(1.0, -1.0e16, vec![-1.0e16]),
+                ],
+            ),
+        ]
+    }
+
+    /// One case's inputs folded through the kernel's own accumulator, as `fold_histogram` folds
+    /// them: reset evidence per sample, and a layout disagreement poisoning the position instead of
+    /// failing it.
+    fn canonical_fold(op: AggregateOp, samples: &[FloatHistogram]) -> HistogramAccumulator {
+        let mut fold = HistogramAccumulator::from_sample(&samples[0]);
+        for sample in samples {
+            fold.evidence.counter_reset_seen |= sample.reset_hint == CounterResetHint::CounterReset;
+            fold.evidence.not_counter_reset_seen |=
+                sample.reset_hint == CounterResetHint::NotCounterReset;
+        }
+        for sample in &samples[1..] {
+            if fold.evidence.poisoned {
+                break;
+            }
+            if fold.uses_custom_buckets() != sample.uses_custom_buckets() {
+                fold.poison();
+                break;
+            }
+            match op {
+                AggregateOp::Sum => fold.fold_sum(sample).unwrap(),
+                AggregateOp::Avg => fold.fold_avg(sample).unwrap(),
+                op => unreachable!("{op:?} does not fold a histogram payload"),
+            }
+        }
+        fold
     }
 
     #[test]
@@ -3749,7 +4298,7 @@ mod tests {
                     aggregate.push_histogram(histogram, 1).unwrap();
                 }
 
-                assert!(aggregate.dropped_incompatible);
+                assert!(aggregate.evidence.poisoned);
                 let warnings = collected_warnings(&collector);
                 assert!(warnings.contains(&format!(
                     "{}: dropped native histogram aggregate with incompatible schemas",
@@ -3794,7 +4343,7 @@ mod tests {
                 merged.merge_batch(first).unwrap();
                 merged.merge_batch(second).unwrap();
 
-                assert!(merged.dropped_incompatible);
+                assert!(merged.evidence.poisoned);
                 assert!(collected_warnings(&collector).contains(&format!(
                     "{}: native histogram counter reset hints contradict",
                     kind.name()
@@ -3835,19 +4384,17 @@ mod tests {
     #[test]
     fn histogram_aggregate_accumulator_accounts_for_heap_allocations() {
         let histogram = sample_histogram(3.0, 3.0, vec![1.0, 2.0]);
-        let heap_size = histogram.custom_values.capacity() * size_of::<f64>()
-            + histogram.positive_spans.capacity() * size_of::<Span>()
-            + histogram.negative_spans.capacity() * size_of::<Span>()
-            + histogram.positive_buckets.capacity() * size_of::<f64>()
-            + histogram.negative_buckets.capacity() * size_of::<f64>();
+        let sample = float_histogram(&histogram).unwrap();
         let mut accumulator =
             NativeHistogramAggregateAccumulator::new(NativeHistogramAggregateKind::Sum, None);
         let empty_size = accumulator.size();
 
         accumulator.push_histogram(histogram, 1).unwrap();
 
-        assert!(heap_size > 0);
-        assert_eq!(accumulator.size(), empty_size + heap_size);
+        // The fold keeps the sample's buckets and a compensation carrying the same layout, so at
+        // least the sample's own heap is counted beyond the accumulator struct that holds it.
+        assert!(sample.heap_bytes() > 0);
+        assert!(accumulator.size() >= empty_size + sample.heap_bytes());
     }
 
     #[test]
