@@ -81,18 +81,14 @@ const APPEND_BUFFER: usize = 16;
 const MIN_FLUSH_INTERVAL: Duration = Duration::from_millis(10);
 const MAX_IN_FLIGHT_CREATES: usize = 4;
 const MAX_IN_FLIGHT_DELETES: usize = 4;
-/// Delay before a create that failed transiently is attempted again in the
-/// `enqueued` acknowledgement mode, where no caller is left to retry it.
+/// Delay before retrying a transiently failed enqueued create, and the initial
+/// delay for retained releases after a durable rollback.
 const CREATE_RETRY_DELAY: Duration = Duration::from_millis(100);
-/// Longest delay from a failed attempt of a backlog that the object store
-/// refuses with an error that requires intervention, see [`Failing`], to the
-/// next attempt.
-/// The delay doubles from [`CREATE_RETRY_DELAY`] after every attempt. At the
-/// cap a dead bucket costs four requests a minute, a conditional create and
-/// the read that reconciles it every 30 seconds; a longer cap would keep
-/// appends rejected longer after the cause is fixed.
+/// Maximum backoff for an enqueued backlog requiring intervention or a durable
+/// rollback retaining releases. Both double from [`CREATE_RETRY_DELAY`].
+/// The cap bounds recovery delay after storage becomes available.
 const MAX_FAILING_RETRY_DELAY: Duration = Duration::from_secs(30);
-/// How often a store logs that the object store still refuses its backlog.
+/// Minimum interval between repeated warnings about upload failures or retained releases.
 const FAILING_LOG_INTERVAL: Duration = Duration::from_secs(60);
 /// Number of sealed batches that may wait to be created or indexed. One
 /// admission can seal two batches, the open batch before an append that would
@@ -443,8 +439,8 @@ impl ObjectStoreLogStore {
             durable_reclaim_boundary: reclaim_boundary,
             unindexed: unindexed.into_iter().chain(moved_past).collect(),
             pending_releases: BTreeMap::new(),
-            release_retry_delay: CREATE_RETRY_DELAY,
-            release_retry_at: None,
+            release_retry: RetryBackoff::default(),
+            release_retry_logged_at: None,
             creating: HashSet::new(),
             deleting: deleting.clone(),
             deletes: FuturesUnordered::new(),
@@ -1317,6 +1313,11 @@ enum Command {
     },
     #[cfg(any(test, feature = "testing"))]
     Crash { response: oneshot::Sender<()> },
+    /// Runs test assertions and controls deadlines on the actor's own task.
+    #[cfg(test)]
+    Inspect {
+        inspect: Box<dyn FnOnce(&mut Actor) + Send>,
+    },
 }
 
 /// An append waiting for the object that holds its entries.
@@ -1397,6 +1398,34 @@ enum Withdrawal {
     Settled,
 }
 
+/// Exponential retry timing shared by failed uploads and retained releases.
+struct RetryBackoff {
+    /// Delay to use when scheduling the next failed attempt.
+    delay: Duration,
+    /// Scheduled retry deadline, absent until scheduled or after a probe starts/reset.
+    at: Option<Instant>,
+}
+
+impl Default for RetryBackoff {
+    fn default() -> Self {
+        Self {
+            delay: CREATE_RETRY_DELAY,
+            at: None,
+        }
+    }
+}
+
+impl RetryBackoff {
+    fn schedule(&mut self, now: Instant) {
+        self.at = Some(now + self.delay);
+        self.delay = (self.delay * 2).min(MAX_FAILING_RETRY_DELAY);
+    }
+
+    fn is_waiting(&self, now: Instant) -> bool {
+        self.at.is_some_and(|at| now < at)
+    }
+}
+
 /// The state of an `enqueued` store whose backlog the object store refuses
 /// with an error that requires intervention, see [`requires_intervention`],
 /// such as denied
@@ -1415,10 +1444,8 @@ struct Failing {
     /// The last error a create met, which rejected appends carry.
     error: Arc<Error>,
     since: Instant,
-    /// The delay before the next attempt is due once nothing is in flight.
-    delay: Duration,
-    /// When the next attempt starts, `None` until it is scheduled.
-    probe_at: Option<Instant>,
+    /// Retry timing for the lowest pending create.
+    retry: RetryBackoff,
     failed_creates: u64,
     rejected_appends: u64,
     logged_at: Instant,
@@ -1428,8 +1455,7 @@ impl Failing {
     /// Schedules the next attempt after the current delay and doubles the
     /// delay for the one after it.
     fn schedule(&mut self) {
-        self.probe_at = Some(Instant::now() + self.delay);
-        self.delay = (self.delay * 2).min(MAX_FAILING_RETRY_DELAY);
+        self.retry.schedule(Instant::now());
     }
 
     /// Counts an admission the store refuses and returns the error it
@@ -1455,7 +1481,7 @@ impl Failing {
 /// | Situation | Sequence | Waiters | Store |
 /// | --- | --- | --- | --- |
 /// | created, or identical retry | advances | acknowledged in order | healthy |
-/// | transient error, `durable` mode | never reused: a create that reported an error may have written its object | every batch that is not indexed fails, created ones included; retries are assigned new ids | healthy: the next batch links to the last indexed object, so no chain reaches a failed batch |
+/// | transient error, `durable` mode | never reused: a create that reported an error may have written its object | every batch that is not indexed fails, created ones included; retries are assigned new ids | healthy: the next batch links to the last indexed object, so no chain reaches a failed batch; retained releases back off before a release-only retry |
 /// | transient error, `enqueued` mode | unchanged | already acknowledged, except a permanent release, which waits for the repeat | healthy: the create is repeated with the same bytes after [`CREATE_RETRY_DELAY`], which an identical retry accepts |
 /// | error that requires intervention, `enqueued` mode | unchanged | already acknowledged, except a permanent release, which fails while its record stays in the backlog; later appends and permanent releases are rejected with a retryable error | failing, see [`Failing`]: the lowest pending create is repeated alone with backoff, and the first create that succeeds ends it |
 /// | object store error, `enqueued` mode after `stop` began | never reused | already acknowledged, except a permanent release, which fails with the stopped error | the backlog is dropped and `stop` reports the error |
@@ -1542,13 +1568,13 @@ struct Actor {
     /// objects recovery listed off the chain and the batches that failed.
     unindexed: BTreeSet<u64>,
     /// Accepted release records and records from failed batches, coalesced by
-    /// region for the next sealed batch. Timer ticks also seal them when no
-    /// entries arrive, and shutdown drains them in both acknowledgement modes.
+    /// region for the next sealed batch. Timer ticks seal them when no entries
+    /// arrive, after any durable rollback backoff; shutdown drains them in both modes.
     pending_releases: BTreeMap<RegionId, EntryId>,
-    /// Durable release-only batches consume a new sequence after each failed
-    /// create, so retry them with bounded exponential backoff.
-    release_retry_delay: Duration,
-    release_retry_at: Option<Instant>,
+    /// Backoff for release-only sealing after a durable rollback retains records.
+    release_retry: RetryBackoff,
+    /// Last warning about retained release records after a durable rollback.
+    release_retry_logged_at: Option<Instant>,
     /// Sequences whose create is in flight.
     creating: HashSet<u64>,
     deleting: Arc<DeletingObjects>,
@@ -1578,7 +1604,7 @@ impl Actor {
         interval.tick().await;
 
         loop {
-            let probe_at = self.failing.as_ref().and_then(|failing| failing.probe_at);
+            let probe_at = self.failing.as_ref().and_then(|failing| failing.retry.at);
             tokio::select! {
                 _ = interval.tick() => {
                     // Nothing starts after stop began; the `enqueued` mode
@@ -1629,6 +1655,8 @@ impl Actor {
                         let _ = response.send(());
                         return;
                     }
+                    #[cfg(test)]
+                    Some(Command::Inspect { inspect }) => inspect(&mut self),
                     // Every sender is gone: the store was dropped without
                     // `stop`. The creates in flight are dropped with the actor.
                     None => return,
@@ -1800,19 +1828,16 @@ impl Actor {
     /// coalesced instead of sealing them alone on every tick. Stop seals them
     /// for its last attempt even when the backlog is full. Explicit permanent
     /// releases still seal immediately, as their callers wait for persistence.
+    /// A durable rollback retaining releases also delays release-only sealing.
+    /// Ordinary entries bypass this delay; indexing a batch carrying releases
+    /// resets it.
     fn seal(&mut self, releases: Vec<Release>) -> bool {
-        let release_retry_waiting = self.ack_mode == AckMode::Durable
-            && self.open_batch.is_empty()
-            && releases.is_empty()
-            && !self.pending_releases.is_empty()
-            && self.stop.is_empty()
-            && self.release_retry_at.is_some_and(|at| Instant::now() < at);
         if self.open_batch.is_empty()
             && releases.is_empty()
-            && (release_retry_waiting
-                || self.pending_releases.is_empty()
+            && (self.pending_releases.is_empty()
                 || (self.stop.is_empty()
                     && (self.failing.is_some()
+                        || self.release_retry.is_waiting(Instant::now())
                         || self.sealed.len() >= MAX_SEALED_BATCHES
                         || self.backlog_at_threshold())))
         {
@@ -1915,7 +1940,7 @@ impl Actor {
         if !self.is_stopped()
             && let Some(failing) = &mut self.failing
         {
-            if self.creates.is_empty() && failing.probe_at.is_none() {
+            if self.creates.is_empty() && failing.retry.at.is_none() {
                 failing.schedule();
             }
             return;
@@ -1945,7 +1970,7 @@ impl Actor {
         let Some(failing) = &mut self.failing else {
             return;
         };
-        failing.probe_at = None;
+        failing.retry.at = None;
         if self.is_stopped() {
             return;
         }
@@ -2089,7 +2114,7 @@ impl Actor {
                 failing.since.elapsed(),
                 failing.failed_creates,
                 failing.rejected_appends,
-                failing.delay
+                failing.retry.delay
             );
         }
     }
@@ -2107,8 +2132,7 @@ impl Actor {
         let failing = self.failing.insert(Failing {
             error: Arc::new(error),
             since: now,
-            delay: CREATE_RETRY_DELAY,
-            probe_at: None,
+            retry: RetryBackoff::default(),
             failed_creates: 1,
             rejected_appends: 0,
             logged_at: now,
@@ -2192,8 +2216,8 @@ impl Actor {
             let _ = waiter.send(Ok(()));
         }
         if !batch.releases.is_empty() {
-            self.release_retry_delay = CREATE_RETRY_DELAY;
-            self.release_retry_at = None;
+            self.release_retry = RetryBackoff::default();
+            self.release_retry_logged_at = None;
         }
         #[cfg(any(test, feature = "testing"))]
         for waiter in batch.seal_waiters {
@@ -2246,6 +2270,8 @@ impl Actor {
     /// batch. Waiters of a store that was stopped meanwhile learn that
     /// instead of the I/O error, like every other entry that never became
     /// durable.
+    /// Retained releases, including those from data batches, back off before
+    /// the next release-only seal. Failures are logged at a limited rate.
     fn roll_back(&mut self, error: Arc<Error>) {
         let stopped = self.is_stopped();
         let failure = || {
@@ -2261,8 +2287,20 @@ impl Actor {
             batch.fail(failure);
         }
         if self.ack_mode == AckMode::Durable && !stopped && !self.pending_releases.is_empty() {
-            self.release_retry_at = Some(Instant::now() + self.release_retry_delay);
-            self.release_retry_delay = (self.release_retry_delay * 2).min(MAX_FAILING_RETRY_DELAY);
+            let now = Instant::now();
+            if self
+                .release_retry_logged_at
+                .is_none_or(|at| now.duration_since(at) >= FAILING_LOG_INTERVAL)
+            {
+                warn!(
+                    error;
+                    "Object store WAL retains {} release records after a failed create; next release-only retry in {:?}",
+                    self.pending_releases.len(),
+                    self.release_retry.delay
+                );
+                self.release_retry_logged_at = Some(now);
+            }
+            self.release_retry.schedule(now);
         }
         self.reset_open_batch();
         // The stalled append was never admitted; the sealed batches are gone,
@@ -3436,6 +3474,23 @@ mod tests {
 
     fn latest(store: &ObjectStoreLogStore, region_id: RegionId) -> EntryId {
         store.latest_entry_id(&provider(region_id)).unwrap()
+    }
+
+    async fn inspect_actor<T: Send + 'static>(
+        store: &ObjectStoreLogStore,
+        inspect: impl FnOnce(&mut Actor) -> T + Send + 'static,
+    ) -> T {
+        let (response, receiver) = oneshot::channel();
+        store
+            .command_tx
+            .send(Command::Inspect {
+                inspect: Box::new(move |actor| {
+                    let _ = response.send(inspect(actor));
+                }),
+            })
+            .await
+            .unwrap();
+        timeout(WAIT, receiver).await.unwrap().unwrap()
     }
 
     /// The id of the entry at `position` of its region in object `object_seq`.
@@ -8163,18 +8218,17 @@ mod tests {
         let mut failing = Failing {
             error: Arc::new(ObjectStoreWalStoppedSnafu.build()),
             since: now,
-            delay: CREATE_RETRY_DELAY,
-            probe_at: None,
+            retry: RetryBackoff::default(),
             failed_creates: 1,
             rejected_appends: 0,
             logged_at: now,
         };
         let mut delays = Vec::new();
         for _ in 0..12 {
-            let delay = failing.delay;
+            let delay = failing.retry.delay;
             let scheduled_at = Instant::now();
             failing.schedule();
-            assert!(failing.probe_at.unwrap() >= scheduled_at + delay);
+            assert!(failing.retry.at.unwrap() >= scheduled_at + delay);
             delays.push(delay.as_millis());
         }
         assert_eq!(
@@ -9444,51 +9498,203 @@ mod tests {
         }
     }
 
+    #[test]
+    fn test_retry_backoff_deadlines_and_cap() {
+        let mut retry = RetryBackoff::default();
+        let mut now = Instant::now();
+        assert!(!retry.is_waiting(now));
+        for millis in [
+            100, 200, 400, 800, 1600, 3200, 6400, 12800, 25600, 30000, 30000,
+        ] {
+            retry.schedule(now);
+            let deadline = now + Duration::from_millis(millis);
+            assert_eq!(Some(deadline), retry.at);
+            assert!(retry.is_waiting(deadline - Duration::from_nanos(1)));
+            assert!(!retry.is_waiting(deadline));
+            now = deadline;
+        }
+    }
+
     #[tokio::test]
     async fn test_durable_release_retries_back_off_after_create_failure() {
         let _serialized = SERIALIZED.lock().await;
-        let config = ObjectStoreWalConfig {
-            flush_interval: Duration::from_millis(10),
-            ..manual()
+        let (store, io, mut parked) = open_parking_creates(memory_store(), &manual()).await;
+        let region_id = region(1);
+        store
+            .release_entries(&provider(region_id), region_id, 0)
+            .await
+            .unwrap();
+        // Manual sealing and actor-owned deadlines make this independent of
+        // executor delays. Each failure must retain the record and grow the
+        // delay; no upload may start while its deadline is in the future.
+        for (index, next_delay) in [200, 400, 800, 1600, 3200, 6400, 12800, 25600, 30000, 30000]
+            .into_iter()
+            .enumerate()
+        {
+            let seal = {
+                let store = store.clone();
+                tokio::spawn(async move { store.seal_open_batch().await })
+            };
+            let (seq, create) = next_parked_operation(&mut parked).await;
+            assert_eq!(index as u64 + 1, seq);
+            create.send(false).unwrap();
+            assert!(timeout(WAIT, seal).await.unwrap().unwrap().is_err());
+            let next_seq = inspect_actor(&store, move |actor| {
+                assert_eq!(Duration::from_millis(next_delay), actor.release_retry.delay);
+                assert!(actor.release_retry.at.is_some());
+                assert!(actor.release_retry_logged_at.is_some());
+                assert_eq!(Some(&0), actor.pending_releases.get(&region_id));
+                actor.release_retry.at = Some(Instant::now() + Duration::from_secs(3600));
+                actor.next_object_seq
+            })
+            .await;
+            store.seal_open_batch().await.unwrap();
+            inspect_actor(&store, move |actor| {
+                assert_eq!(next_seq, actor.next_object_seq);
+                assert!(actor.sealed.is_empty());
+                actor.release_retry.at = Some(Instant::now());
+            })
+            .await;
+        }
+
+        let seal = {
+            let store = store.clone();
+            tokio::spawn(async move { store.seal_open_batch().await })
         };
-        let object_store = memory_store();
-        let store = open(object_store.clone(), &config).await;
-        store.fail_creates();
-        let before = METRIC_OBJECT_STORE_WAL_OBJECT_BYTES.get_sample_count();
-        store
-            .release_entries(&provider(region(1)), region(1), 0)
-            .await
-            .unwrap();
-        let (response, _) = oneshot::channel();
-        store
-            .command_tx
-            .send(Command::Seal { response })
-            .await
-            .unwrap();
-        wait_until(|| METRIC_OBJECT_STORE_WAL_OBJECT_BYTES.get_sample_count() > before).await;
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        let (seq, create) = next_parked_operation(&mut parked).await;
+        create.send(true).unwrap();
+        timeout(WAIT, seal).await.unwrap().unwrap().unwrap();
+        inspect_actor(&store, |actor| {
+            assert_eq!(CREATE_RETRY_DELAY, actor.release_retry.delay);
+            assert_eq!(None, actor.release_retry.at);
+            assert_eq!(None, actor.release_retry_logged_at);
+        })
+        .await;
         assert_eq!(
-            before + 1,
-            METRIC_OBJECT_STORE_WAL_OBJECT_BYTES.get_sample_count(),
-            "failed release-only create must not retry on every flush tick"
+            vec![release(region_id, 0)],
+            releases_of(io.as_ref(), seq).await
         );
 
-        store.allow_creates();
+        // A fresh failure after successful indexing must start at the initial
+        // delay, rather than retaining the capped delay from the old outage.
+        store
+            .release_entries(&provider(region_id), region_id, 0)
+            .await
+            .unwrap();
+        let seal = {
+            let store = store.clone();
+            tokio::spawn(async move { store.seal_open_batch().await })
+        };
+        let (_, create) = next_parked_operation(&mut parked).await;
+        create.send(false).unwrap();
+        assert!(timeout(WAIT, seal).await.unwrap().unwrap().is_err());
+        inspect_actor(&store, |actor| {
+            assert_eq!(CREATE_RETRY_DELAY * 2, actor.release_retry.delay);
+            actor.release_retry.at = Some(Instant::now() + Duration::from_secs(3600));
+        })
+        .await;
+        // Shutdown still drains pending records despite the future deadline.
+        let stop = begin_spawned_stop(&store).await;
+        let (_, create) = next_parked_operation(&mut parked).await;
+        create.send(true).unwrap();
+        timeout(WAIT, stop).await.unwrap().unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_durable_release_timer_recovers_before_shutdown() {
+        let _serialized = SERIALIZED.lock().await;
+        let config = ObjectStoreWalConfig {
+            flush_interval: MIN_FLUSH_INTERVAL,
+            ..manual()
+        };
+        let (store, io, mut parked) = open_parking_creates(memory_store(), &config).await;
+        let region_id = region(1);
+        store
+            .release_entries(&provider(region_id), region_id, 0)
+            .await
+            .unwrap();
+        let (seq, create) = next_parked_operation(&mut parked).await;
+        assert_eq!(1, seq);
+        create.send(false).unwrap();
+        // Only timer ticks can issue the retry: no manual seal or stop occurs.
+        let (seq, create) = next_parked_operation(&mut parked).await;
+        assert_eq!(2, seq);
+        create.send(true).unwrap();
         timeout(WAIT, async {
-            loop {
-                if watermark(&store, region(1)) == Some(0) {
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(5)).await;
+            while inspect_actor(&store, |actor| actor.last_indexed.object_seq).await < seq {
+                tokio::time::sleep(Duration::from_millis(1)).await;
             }
         })
         .await
         .unwrap();
+        assert_eq!(
+            vec![release(region_id, 0)],
+            releases_of(io.as_ref(), seq).await
+        );
+        let recovered = recover(io.as_ref()).await.unwrap();
+        assert_eq!(Some(&0), recovered.released_entry_ids.get(&region_id));
         store.stop().await.unwrap();
-        let recovered = recover(store.io.as_ref()).await.unwrap();
-        assert_eq!(Some(&0), recovered.released_entry_ids.get(&region(1)));
-        drop(store);
-        let _ = object_store;
+    }
+
+    #[tokio::test]
+    async fn test_durable_release_backoff_allows_data_and_permanent_releases() {
+        let _serialized = SERIALIZED.lock().await;
+        let (store, io, mut parked) = open_parking_creates(memory_store(), &eager()).await;
+        let region_id = region(1);
+        store
+            .release_entries(&provider(region_id), region_id, 0)
+            .await
+            .unwrap();
+        let seal = {
+            let store = store.clone();
+            tokio::spawn(async move { store.seal_open_batch().await })
+        };
+        let (_, create) = next_parked_operation(&mut parked).await;
+        create.send(false).unwrap();
+        assert!(timeout(WAIT, seal).await.unwrap().unwrap().is_err());
+        inspect_actor(&store, |actor| {
+            actor.release_retry.at = Some(Instant::now() + Duration::from_secs(3600));
+        })
+        .await;
+
+        // A data batch can carry the retained release before its deadline.
+        let append = spawn_append_batch(&store, vec![entry(&store, region_id, "data")]);
+        let (seq, create) = next_parked_operation(&mut parked).await;
+        assert_eq!(2, seq);
+        create.send(false).unwrap();
+        assert!(timeout(WAIT, append).await.unwrap().unwrap().is_err());
+        inspect_actor(&store, move |actor| {
+            // Rolling back a data batch carrying a release also grows the
+            // backoff for the next release-only attempt.
+            assert_eq!(CREATE_RETRY_DELAY * 4, actor.release_retry.delay);
+            assert_eq!(Some(&0), actor.pending_releases.get(&region_id));
+            actor.release_retry.at = Some(Instant::now() + Duration::from_secs(3600));
+        })
+        .await;
+
+        // A permanent release still seals immediately and waits for indexing.
+        let permanent_release = {
+            let store = store.clone();
+            tokio::spawn(async move { store.obsolete_all(&provider(region_id), region_id).await })
+        };
+        let (seq, create) = next_parked_operation(&mut parked).await;
+        assert_eq!(3, seq);
+        create.send(true).unwrap();
+        timeout(WAIT, permanent_release)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        inspect_actor(&store, |actor| {
+            assert_eq!(CREATE_RETRY_DELAY, actor.release_retry.delay);
+            assert_eq!(None, actor.release_retry.at);
+        })
+        .await;
+        assert_eq!(
+            vec![release(region_id, EntryId::MAX)],
+            releases_of(io.as_ref(), seq).await
+        );
+        store.stop().await.unwrap();
     }
 
     #[tokio::test]
