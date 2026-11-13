@@ -25,6 +25,7 @@ mod remote_dyn_filter_receiver;
 mod remote_dyn_filter_registry;
 
 pub use analyzer::{DistPlannerAnalyzer, DistPlannerOptions};
+pub(crate) use commutativity::region_local_node;
 #[cfg(test)]
 pub(crate) use commutativity::{Categorizer, Commutativity};
 pub use filter_id::{FilterFingerprint, FilterId, ParseFilterIdError, RemoteDynFilterProducerId};
