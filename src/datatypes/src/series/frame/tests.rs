@@ -369,7 +369,7 @@ fn assert_row_local_histogram_rows(rows: &[RawSeriesChunk]) {
 }
 
 #[test]
-fn sliced_histogram_frames_densify_without_duplicating_shared_table() {
+fn sliced_histogram_frames_keep_the_shared_table_per_row() {
     let schema = test_schema(&["histogram"]);
     let source_table = histogram_batch();
     let source_samples =
@@ -464,13 +464,16 @@ fn sliced_histogram_frames_densify_without_duplicating_shared_table() {
     drop(decoded_chunks);
     drop(source_samples);
 
-    let dense = samples.into_dense().unwrap();
-    let DenseSamplesRef::Histogram(histograms) = dense.dense().unwrap() else {
-        panic!("expected dense histogram samples");
-    };
-    assert_eq!(histograms.len(), 64);
-    for position in 0..64 {
-        assert_histogram(histograms.view_at(position).unwrap(), -9.5);
+    // Each decoded row keeps its own one-row view of the shared table, so the retained descriptors
+    // still read the same row after the source owner drops.
+    assert_eq!(samples.len(), 64);
+    assert_eq!(samples.segments().len(), 64);
+    for segment in samples.segments() {
+        let DenseSamplesRef::Histogram(histograms) = segment.dense().unwrap() else {
+            panic!("expected histogram samples");
+        };
+        assert_eq!(histograms.len(), 1);
+        assert_histogram(histograms.view_at(0).unwrap(), -9.5);
     }
 }
 

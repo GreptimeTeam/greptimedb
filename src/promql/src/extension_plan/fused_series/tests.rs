@@ -71,10 +71,10 @@ use datafusion::physical_plan::{
 use datafusion::prelude::SessionContext;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, SchemaRef as DatatypesSchemaRef};
-use datatypes::series::aggregate_state::{AggregateStateKind, StateComponent, StateSeries};
+use datatypes::series::aggregate_state::{AggregateStateKind, StateComponent};
 use datatypes::series::frame::{
     FrameContent, FrameLabelMode, LABEL_DECODE_VERSION, LabelDecodeColumn, LabelDecodeEncoding,
-    LabelDecodeSpec, LabelDecodeTag, SeriesFrameDeclaration, pack_raw_series_chunk,
+    LabelDecodeSpec, LabelDecodeTag, SeriesFrameDeclaration, StateFrameRow, pack_raw_series_chunk,
     raw_series_frame_schema, series_frame_schema,
 };
 use datatypes::series::raw::{RawSeriesChunk, RawTimestamps};
@@ -6073,7 +6073,7 @@ async fn state_batches(exec: &Arc<dyn ExecutionPlan>, partition: usize) -> Vec<R
 /// A state frame has no flat accumulator column - each aggregate field is one
 /// `List<Struct<component...>>` - so a reader of its values goes through the decoder, which is the
 /// same path the `Final` half takes.
-async fn decode_state_batches(batches: Vec<RecordBatch>) -> Vec<StateSeries> {
+async fn decode_state_batches(batches: Vec<RecordBatch>) -> Vec<StateFrameRow> {
     let schema = batches
         .first()
         .expect("a state-exporting node answers at least one batch")
@@ -6095,9 +6095,6 @@ async fn decode_state_batches(batches: Vec<RecordBatch>) -> Vec<StateSeries> {
     .await
     .unwrap();
     decoded
-        .iter()
-        .map(|batch| batch.to_state_series().unwrap())
-        .collect()
 }
 
 /// State is keyed by the cut aggregate's grouping, not by the tags its scan was bound with.
@@ -6132,7 +6129,7 @@ async fn a_state_export_keys_its_labels_by_the_cut_aggregate_grouping() {
     let tags = states
         .first()
         .expect("the state export answers at least one series")
-        .metric
+        .metric()
         .tags();
     assert_eq!(
         Some("shared"),
@@ -6218,19 +6215,20 @@ async fn a_partial_root_exports_state_frames_from_every_partition() {
         .await
         .unwrap();
         assert!(!decoded.is_empty());
-        let batch = decoded[0].to_state_series().unwrap();
+        let batch = &decoded[0];
         assert_eq!(
             Some("shared"),
             batch
-                .metric
+                .metric()
                 .tags()
                 .iter()
                 .find(|tag| tag.name.as_ref() == JOB)
                 .map(|tag| tag.value.as_ref())
         );
-        assert_eq!(GRID_LEN as usize, batch.time.len());
-        assert_eq!(1, batch.states.len());
-        assert!(batch.states[0].iter().all(Option::is_some));
+        assert_eq!(GRID_LEN as usize, batch.time().len());
+        let fields = batch.fields().unwrap();
+        assert_eq!(1, fields.len());
+        assert!((0..GRID_LEN as usize).all(|point| fields.is_present(0, point).unwrap()));
         assert_eq!(AggregateStateKind::Count, binding.kind);
         assert_eq!(vec![StateComponent::Count], binding.components.as_ref());
     }
@@ -6392,13 +6390,19 @@ async fn a_constant_broadcast_prefix_exports_the_values_the_constant_computes() 
     let values: Vec<Option<f64>> = decoded
         .iter()
         .flat_map(|batch| {
-            (0..batch.time.len())
-                .map(|position| {
-                    batch
-                        .states
-                        .first()
-                        .and_then(|field| field.get(position).copied().flatten())
-                        .map(|state| state.value)
+            let fields = batch.fields().unwrap();
+            (0..batch.time().len())
+                .map(move |position| {
+                    fields
+                        .is_present(0, position)
+                        .unwrap()
+                        .then(|| {
+                            fields
+                                .field_values(0, StateComponent::Value)
+                                .unwrap()
+                                .expect("the count state carries a value component")
+                                .value(position)
+                        })
                 })
                 .collect::<Vec<_>>()
         })
@@ -8234,9 +8238,15 @@ async fn histogram_split_routes_whole_state_batches_and_preserves_each_bound() {
             let bounds: std::collections::BTreeMap<_, _> = states
                 .iter()
                 .map(|state| {
+                    let fields = state.fields().unwrap();
+                    assert!(fields.is_present(0, 0).unwrap());
                     (
-                        state.metric.get("le").unwrap().to_string(),
-                        state.states[0][0].unwrap().value,
+                        state.metric().get("le").unwrap().to_string(),
+                        fields
+                            .field_values(0, StateComponent::Value)
+                            .unwrap()
+                            .expect("the histogram state carries a value component")
+                            .value(0),
                     )
                 })
                 .collect();
