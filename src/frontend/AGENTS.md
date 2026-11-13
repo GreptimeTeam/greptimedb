@@ -126,6 +126,14 @@ cargo nextest run -p frontend
 
 - Keep the frontend/servers split straight: wire format and network live in
   `servers`; permissions, planning, and routing live here.
+- A statement whose tables are known only at execution time (`COPY DATABASE`)
+  resolves them first, authorizes every resolved table, then executes exactly
+  the authorized set. Do not authorize such a statement with empty targets.
+- Built-in permission action names are a contract with external
+  `PermissionChecker` implementations. Define each as a constant in
+  `src/auth/src/permission.rs` and list it in `ALL_ACTIONS`; do not build them
+  from string literals at call sites. A new action or access-mode requirement
+  on an existing statement or endpoint is a user-visible permission change.
 - Standalone vs distributed diverge in datanode access (the `standalone` crate's
   local `RegionServer` adapter vs `NodeClients` RPC), MetaClient usage, and
   whether heartbeat matters. The builder defaults local invalidation to its
