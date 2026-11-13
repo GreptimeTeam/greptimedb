@@ -558,8 +558,8 @@ artifacts through existing maintenance. Source SST identity remains in metadata.
 
 ### Local cache rollout
 
-Daily consolidation is the default for the opt-in columnar samples backend,
-including manual reconciliation. Legacy-format defaults are unchanged. A day may
+Daily consolidation is the only layout the opt-in columnar samples backend
+writes, including manual reconciliation. Legacy-format defaults are unchanged. A day may
 contain several generations with disjoint source sets (at most 64 SSTs per merge),
 and each generation may contain multiple bounded part files. Source Parquet files
 are never rewritten.

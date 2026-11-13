@@ -72,7 +72,7 @@ pub enum SeriesIndexFormat {
     /// Parquet series indexes and authoritative SST reads.
     #[default]
     Legacy,
-    /// Columnar series indexes and per-SST columnar samples.
+    /// Columnar series indexes and daily columnar samples.
     Columnar,
 }
 

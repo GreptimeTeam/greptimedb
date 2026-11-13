@@ -430,79 +430,58 @@ async fn build_index_version(
         samples.clear();
     }
     if let Some(backend) = &formats.samples {
-        if backend.format() == ArtifactFormat::ColumnarSamples {
-            let reusable: std::collections::HashMap<_, _> = samples
-                .iter()
-                .filter(|(id, _)| reusable_samples.contains(id))
-                .map(|(id, handle)| (*id, handle.clone()))
-                .collect();
-            // Retain complete existing groups. Adding a source must not shift their boundaries.
-            let covered: HashSet<_> = files
-                .iter()
-                .filter(|file| crate::series_index::artifact::samples_cover_file(&reusable, file))
-                .map(|file| file.file_id().file_id())
-                .collect();
-            let mut daily: std::collections::HashMap<_, _> = reusable
-                .into_iter()
-                .filter(|(_, h)| h.entry().window.is_some() && h.entry().sources_visible(&covered))
-                .collect();
-            let covered: HashSet<_> = daily
-                .values()
-                .flat_map(|handle| handle.entry().source_file_ids.iter().copied())
-                .collect();
-            let mut uncovered: Vec<_> = files
-                .iter()
-                .filter(|file| !covered.contains(&file.file_id().file_id()))
-                .cloned()
-                .collect();
-            uncovered.sort_unstable_by_key(|file| file.file_id().file_id().to_string());
-            for sources in uncovered.chunks(64) {
-                let handles = crate::series_index::builder::build_sample_windows(
-                    store,
-                    region,
-                    metadata,
-                    sources,
-                    backend.as_ref(),
-                    purger,
-                )
-                .await?;
-                for handle in handles {
-                    unpublished.1.push(handle.clone());
-                    stats.built_samples += 1;
-                    daily.insert(handle.entry().file_id, handle);
-                }
+        // Samples are only ever written as daily columnar generations. A backend naming any
+        // other format cannot be reconciled into that layout, and rebuilding its artifacts
+        // must not silently succeed without writing them.
+        if backend.format() != ArtifactFormat::ColumnarSamples {
+            return crate::error::UnsupportedOperationSnafu {
+                err_msg: format!("unsupported samples format: {:?}", backend.format()),
             }
-            stats.removed_samples += samples.keys().filter(|id| !daily.contains_key(id)).count();
-            samples = daily;
-        } else {
-            for file in files {
-                let id = file.file_id().file_id();
-                let reusable = reusable_samples.contains(&id);
-                if reusable {
-                    continue;
-                }
-                if let Some(handle) = crate::series_index::builder::build_samples(
-                    store,
-                    region,
-                    metadata,
-                    file.clone(),
-                    backend.as_ref(),
-                    purger,
-                )
-                .await?
-                {
-                    unpublished.1.push(handle.clone());
-                    samples.insert(id, handle);
-                    stats.built_samples += 1;
-                } else if manual {
-                    return crate::error::InvalidRequestSnafu {
-                        region_id: region.region_id,
-                        reason: format!("SST {id} has no readable input for samples"),
-                    }
-                    .fail();
-                }
+            .fail();
+        }
+        let reusable: std::collections::HashMap<_, _> = samples
+            .iter()
+            .filter(|(id, _)| reusable_samples.contains(id))
+            .map(|(id, handle)| (*id, handle.clone()))
+            .collect();
+        // Retain complete existing groups. Adding a source must not shift their boundaries.
+        let covered: HashSet<_> = files
+            .iter()
+            .filter(|file| crate::series_index::artifact::samples_cover_file(&reusable, file))
+            .map(|file| file.file_id().file_id())
+            .collect();
+        let mut daily: std::collections::HashMap<_, _> = reusable
+            .into_iter()
+            .filter(|(_, h)| h.entry().window.is_some() && h.entry().sources_visible(&covered))
+            .collect();
+        let covered: HashSet<_> = daily
+            .values()
+            .flat_map(|handle| handle.entry().source_file_ids.iter().copied())
+            .collect();
+        let mut uncovered: Vec<_> = files
+            .iter()
+            .filter(|file| !covered.contains(&file.file_id().file_id()))
+            .cloned()
+            .collect();
+        uncovered.sort_unstable_by_key(|file| file.file_id().file_id().to_string());
+        for sources in uncovered.chunks(64) {
+            let handles = crate::series_index::builder::build_sample_windows(
+                store,
+                region,
+                metadata,
+                sources,
+                backend.as_ref(),
+                purger,
+            )
+            .await?;
+            for handle in handles {
+                unpublished.1.push(handle.clone());
+                stats.built_samples += 1;
+                daily.insert(handle.entry().file_id, handle);
             }
         }
+        stats.removed_samples += samples.keys().filter(|id| !daily.contains_key(id)).count();
+        samples = daily;
     }
     for id in &plan.superseded_index_ids {
         series_indexes.remove(id);
