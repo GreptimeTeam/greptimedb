@@ -348,6 +348,10 @@ pub struct MySqlExecutorFactory {
 
 #[async_trait::async_trait]
 impl ExecutorFactory<MySqlClient> for MySqlExecutorFactory {
+    async fn close(&self) {
+        self.pool.close().await;
+    }
+
     async fn default_executor(&self) -> Result<MySqlClient> {
         Ok(self.pool.clone())
     }
@@ -690,6 +694,38 @@ mod tests {
     use crate::maybe_skip_mysql_integration_test;
     use crate::rpc::store::{PutRequest, RangeRequest};
     use crate::test_util::test_certs_dir;
+
+    #[tokio::test]
+    async fn test_close_backend() {
+        let pool =
+            sqlx::mysql::MySqlPoolOptions::new().connect_lazy_with(MySqlConnectOptions::new());
+        let backend: ClosableKvBackendRef = Arc::new(MySqlStore {
+            max_txn_ops: 128,
+            txn_retry_count: RDS_STORE_TXN_RETRY_COUNT,
+            executor_factory: MySqlExecutorFactory {
+                pool: Arc::new(pool.clone()),
+            },
+            sql_template_set: MySqlTemplateFactory::new("close_test").build(),
+            _phantom: PhantomData,
+        });
+        let shared_backend = backend.clone();
+        assert!(!pool.is_closed());
+        backend.close().await.unwrap();
+        assert!(pool.is_closed());
+        shared_backend.close().await.unwrap();
+        assert!(matches!(pool.acquire().await, Err(sqlx::Error::PoolClosed)));
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            shared_backend.put(crate::rpc::store::PutRequest {
+                key: b"key".to_vec(),
+                value: b"value".to_vec(),
+                prev_kv: false,
+            }),
+        )
+        .await
+        .expect("closed backend must reject writes promptly");
+        assert!(result.is_err());
+    }
 
     fn new_test_table_name(prefix: &str) -> String {
         let uuid = Uuid::new_v4().simple().to_string();

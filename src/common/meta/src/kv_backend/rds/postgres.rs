@@ -389,6 +389,10 @@ impl PgExecutorFactory {
 
 #[async_trait::async_trait]
 impl ExecutorFactory<PgClient> for PgExecutorFactory {
+    async fn close(&self) {
+        self.pool.close();
+    }
+
     async fn default_executor(&self) -> Result<PgClient> {
         self.client().await
     }
@@ -926,6 +930,42 @@ mod tests {
     };
     use crate::test_util::test_certs_dir;
     use crate::{maybe_skip_postgres_integration_test, maybe_skip_postgres15_integration_test};
+
+    #[tokio::test]
+    async fn test_close_backend() {
+        let mut config = Config::new();
+        config.host = Some("localhost".to_string());
+        config.user = Some("test".to_string());
+        config.dbname = Some("test".to_string());
+        let pool = config.create_pool(Some(Runtime::Tokio1), NoTls).unwrap();
+        let backend: ClosableKvBackendRef = Arc::new(PgStore {
+            max_txn_ops: 128,
+            txn_retry_count: RDS_STORE_TXN_RETRY_COUNT,
+            executor_factory: PgExecutorFactory { pool: pool.clone() },
+            sql_template_set: PgSqlTemplateFactory::new(None, "close_test").build(),
+            _phantom: PhantomData,
+        });
+        let shared_backend = backend.clone();
+        assert!(!pool.is_closed());
+        backend.close().await.unwrap();
+        assert!(pool.is_closed());
+        shared_backend.close().await.unwrap();
+        assert!(matches!(
+            pool.get().await,
+            Err(deadpool::managed::PoolError::Closed)
+        ));
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            shared_backend.put(crate::rpc::store::PutRequest {
+                key: b"key".to_vec(),
+                value: b"value".to_vec(),
+                prev_kv: false,
+            }),
+        )
+        .await
+        .expect("closed backend must reject writes promptly");
+        assert!(result.is_err());
+    }
 
     async fn build_pg_kv_backend(table_name: &str) -> Option<PgStore> {
         let endpoints = std::env::var("GT_POSTGRES_ENDPOINTS").unwrap_or_default();

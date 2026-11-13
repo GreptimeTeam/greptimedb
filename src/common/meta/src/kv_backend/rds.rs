@@ -121,6 +121,9 @@ pub trait Transaction<'a>: Send + Sync {
 /// Factory for creating default and transaction query executors.
 #[async_trait::async_trait]
 pub trait ExecutorFactory<T: Executor>: Send + Sync {
+    /// Closes the connection pool to new acquisitions.
+    async fn close(&self);
+
     async fn default_executor(&self) -> Result<T>;
 
     async fn txn_executor<'a>(&self, default_executor: &'a mut T) -> Result<T::Transaction<'a>>;
@@ -594,9 +597,7 @@ where
     S: ExecutorFactory<T> + 'static,
 {
     async fn close(&self) -> Result<()> {
-        // The store only holds a reference-counted connection pool, which is
-        // released together with the last backend handle. There is no explicit
-        // shutdown step for the pool itself.
+        self.executor_factory.close().await;
         Ok(())
     }
 }
