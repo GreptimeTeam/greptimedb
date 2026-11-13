@@ -20,12 +20,13 @@ use std::sync::{Arc, Mutex, Weak};
 
 use common_base::readable_size::ReadableSize;
 use common_telemetry::{debug, error, info};
+use snafu::ResultExt;
 use store_api::logstore::LogStore;
 use store_api::region_request::{RegionFlushReason, RegionFlushRequest};
 use store_api::storage::RegionId;
 
 use crate::config::{IndexBuildMode, MitoConfig};
-use crate::error::{RegionBusySnafu, RegionNotFoundSnafu, Result};
+use crate::error::{FlushRegionSnafu, RegionBusySnafu, RegionNotFoundSnafu, Result};
 use crate::flush::{FlushReason, RegionFlushTask};
 use crate::manifest::action::cap_wal_release;
 use crate::region::version::VersionRef;
@@ -57,7 +58,7 @@ impl StagingRegions {
         regions.insert(region.region_id, Arc::downgrade(region));
         let mut usage = 0;
         regions.retain(|_, region| match region.upgrade() {
-            Some(region) if region.is_staging_or_staged_edit() => {
+            Some(region) if region.in_staging_session() => {
                 usage += region_memtable_usage(&region.version());
                 true
             }
@@ -88,7 +89,12 @@ fn resolve_flush_reason(
 impl<S: LogStore> RegionWorkerLoop<S> {
     /// On region flush job failed.
     pub(crate) async fn handle_flush_failed(&mut self, region_id: RegionId, request: FlushFailed) {
-        let mut pending_ddls = self.flush_scheduler.on_flush_failed(region_id, request.err);
+        let mut pending_ddls = self
+            .flush_scheduler
+            .on_flush_failed(region_id, request.err.clone());
+        for sender in request.senders {
+            sender.send(Err(request.err.clone()).context(FlushRegionSnafu { region_id }));
+        }
         if !pending_ddls.is_empty() {
             info!(
                 "Flush terminated for region {}, handling {} pending lifecycle DDL requests",
@@ -403,14 +409,21 @@ impl<S: LogStore> RegionWorkerLoop<S> {
 
     /// Flushes locally writable candidates selected by the WAL.
     pub(crate) fn flush_for_wal_pressure(&mut self, candidates: &[RegionId]) -> Result<()> {
+        let node_id = self.file_ref_manager.node_id();
         for &region_id in candidates.iter() {
             let Some(region) = self.regions.get_region(region_id) else {
                 continue;
             };
+            let version = region.version();
+            // A flush cannot move the WAL release of a region past one of this node's tails.
+            let release_capped = version.pending_tails.iter().any(|tail| {
+                Some(tail.node_id) == node_id && tail.after <= version.flushed_entry_id
+            });
             if !region.is_writable()
                 || region.is_staging()
                 || self.flush_scheduler.is_flush_requested(region_id)
-                || region_memtable_usage(&region.version()) == 0
+                || region_memtable_usage(&version) == 0
+                || release_capped
             {
                 continue;
             }
@@ -531,8 +544,14 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             error!(err; "Failed to write wal, region: {}", region_id);
             request.on_shared_failure(err.clone());
             // The flush scheduler still tracks the flush, so release it as a failed flush does.
-            self.handle_flush_failed(region_id, FlushFailed { err })
-                .await;
+            self.handle_flush_failed(
+                region_id,
+                FlushFailed {
+                    err,
+                    senders: Vec::new(),
+                },
+            )
+            .await;
             return;
         }
 

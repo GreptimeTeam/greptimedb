@@ -46,6 +46,64 @@ use crate::test_util::{CreateRequestBuilder, TestEnv, build_rows, rows_schema};
 use crate::time_provider::mock::MockTimeProvider;
 
 #[tokio::test]
+async fn test_runtime_edits_share_manifest_file_metadata() {
+    for flush in [false, true] {
+        let mut env = TestEnv::new().await;
+        let engine = env
+            .create_engine(MitoConfig {
+                schedule_compaction_after_edit: false,
+                ..Default::default()
+            })
+            .await;
+        let region_id = RegionId::new(1, 1);
+        let request = CreateRequestBuilder::new().build();
+        let schema = rows_schema(&request);
+        engine
+            .handle_request(region_id, RegionRequest::Create(request))
+            .await
+            .unwrap();
+        if flush {
+            crate::test_util::put_rows(
+                &engine,
+                region_id,
+                api::v1::Rows {
+                    schema,
+                    rows: build_rows(0, 10),
+                },
+            )
+            .await;
+            crate::test_util::flush_region(&engine, region_id, None).await;
+        } else {
+            engine
+                .edit_region(
+                    region_id,
+                    RegionEdit {
+                        files_to_add: vec![FileMeta {
+                            region_id,
+                            file_id: FileId::random(),
+                            ..Default::default()
+                        }],
+                        ..Default::default()
+                    },
+                )
+                .await
+                .unwrap();
+        }
+        let region = engine.get_region(region_id).unwrap();
+        let manifest = region.manifest_ctx.manifest().await;
+        let version = region.version();
+        assert!(!manifest.files.is_empty());
+        for handle in version.ssts.levels().iter().flat_map(|level| level.files()) {
+            let meta = &manifest.files[&handle.file_id().file_id()];
+            assert!(
+                std::ptr::eq(meta.as_ref(), handle.meta_ref()),
+                "flush={flush}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
 async fn test_edit_region_schedule_compaction() {
     for flat_format in [true, false] {
         for schedule_compaction_after_edit in [true, false] {

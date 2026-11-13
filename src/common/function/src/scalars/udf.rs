@@ -35,7 +35,13 @@ impl Debug for ScalarUdf {
 
 impl PartialEq for ScalarUdf {
     fn eq(&self, other: &Self) -> bool {
-        self.function.signature() == other.function.signature()
+        // Identity first: many unrelated functions share one signature (for
+        // example `Signature::any(1, Immutable)`), and DataFusion compares
+        // expressions (and therefore `ScalarUDF`s) structurally, so matching on
+        // the signature alone makes different functions interchangeable and
+        // corrupts planning (see `rebase_expr`).
+        self.function.name() == other.function.name()
+            && self.function.signature() == other.function.signature()
     }
 }
 
@@ -43,7 +49,8 @@ impl Eq for ScalarUdf {}
 
 impl Hash for ScalarUdf {
     fn hash<H: Hasher>(&self, state: &mut H) {
-        self.function.signature().hash(state)
+        self.function.name().hash(state);
+        self.function.signature().hash(state);
     }
 }
 

@@ -32,10 +32,11 @@ mod handle_reload;
 mod handle_remap;
 #[cfg(feature = "enterprise")]
 mod handle_table_compaction;
+mod handle_tail_replay;
 mod handle_truncate;
 mod handle_write;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -76,13 +77,14 @@ use crate::memtable::bulk::CompactDispatcher;
 use crate::metrics::{REGION_COUNT, REQUEST_WAIT_TIME, WRITE_STALLING};
 use crate::region::opener::PartitionExprFetcherRef;
 use crate::region::{
-    CatchupRegions, CatchupRegionsRef, MitoRegionRef, OpeningRegions, OpeningRegionsRef, RegionMap,
-    RegionMapRef,
+    CatchupRegions, CatchupRegionsRef, MitoRegion, MitoRegionRef, OpeningRegions,
+    OpeningRegionsRef, RegionMap, RegionMapRef,
 };
 use crate::request::{
     BackgroundNotify, BulkInsertRequest, DdlRequest, OptionOutputTx, SenderBulkRequest,
     SenderDdlRequest, SenderWriteRequest, WorkerRequest, WorkerRequestWithTime,
 };
+use crate::schedule::CancellableTaskState;
 use crate::schedule::scheduler::{LocalScheduler, SchedulerRef};
 use crate::series_index::{
     IndexFilePurger, SeriesIndexTaskState, series_index_channel, spawn_series_index_tasks,
@@ -418,6 +420,11 @@ impl WorkerGroup {
 
     pub(crate) fn node_lease(&self) -> &NodeLease {
         &self.node_lease
+    }
+
+    /// Asks the worker of `region` to replay its pending tails, if it has any, without waiting.
+    pub(crate) fn notify_writable(&self, region: &MitoRegion) {
+        handle_tail_replay::notify_writable(&self.worker(region.region_id).sender, region);
     }
 
     /// Get worker for specific `region_id`.
@@ -795,6 +802,7 @@ impl<S: LogStore> WorkerStarter<S> {
             sweep_limiter: self.sweep_limiter,
             node_lease: self.node_lease,
             staging_regions: self.staging_regions,
+            tail_replays: HashMap::new(),
         };
         let handle = common_runtime::spawn_global(async move {
             worker_thread.run().await;
@@ -973,7 +981,8 @@ type RequestBuffer = Vec<WorkerRequest>;
 
 /// Buffer for stalled write requests.
 ///
-/// Maintains stalled write requests and their estimated size.
+/// Maintains stalled write requests, their estimated size, and the regions whose writes wait for
+/// the end of staging to drain them.
 #[derive(Default)]
 pub(crate) struct StalledRequests {
     /// Stalled requests.
@@ -986,6 +995,10 @@ pub(crate) struct StalledRequests {
         HashMap<RegionId, (usize, Vec<SenderWriteRequest>, Vec<SenderBulkRequest>)>,
     /// Estimated size of all stalled requests.
     pub(crate) estimated_size: usize,
+    /// Regions with writes stalled while they were ending staging. Later writes of these regions
+    /// stall behind them until [BackgroundNotify::StagingEnded] handles them, so they keep their
+    /// order.
+    staging_drains: HashSet<RegionId>,
 }
 
 impl StalledRequests {
@@ -1049,6 +1062,35 @@ impl StalledRequests {
             .map(|(_, reqs, bulk_reqs)| reqs.len() + bulk_reqs.len())
             .sum()
     }
+
+    /// Records that `region_id` stalled a write while ending staging, so its later writes stall
+    /// behind it until [Self::remove_staging_drain].
+    pub(crate) fn add_staging_drain(&mut self, region_id: RegionId) {
+        self.staging_drains.insert(region_id);
+    }
+
+    /// Returns whether writes of `region_id` stall behind the ones it stalled while ending
+    /// staging.
+    pub(crate) fn has_staging_drain(&self, region_id: &RegionId) -> bool {
+        self.staging_drains.contains(region_id)
+    }
+
+    /// Lets later writes of `region_id` through once the end of staging drains its stalled ones.
+    pub(crate) fn remove_staging_drain(&mut self, region_id: &RegionId) {
+        self.staging_drains.remove(region_id);
+    }
+}
+
+/// Has the worker handle the writes it stalled while the region was ending staging, and waits
+/// until it has. Await it only as `MitoRegion::end_staging` does.
+async fn drain_ended_staging(sender: &Sender<WorkerRequestWithTime>, region_id: RegionId) {
+    let (drained, wait) = oneshot::channel();
+    let notify = WorkerRequest::Background {
+        region_id,
+        notify: BackgroundNotify::StagingEnded(drained),
+    };
+    let _ = sender.send(WorkerRequestWithTime::new(notify)).await;
+    let _ = wait.await;
 }
 
 /// Background worker loop to handle requests.
@@ -1139,6 +1181,8 @@ struct RegionWorkerLoop<S> {
     node_lease: Arc<NodeLease>,
     /// Staging regions of this node that have received writes.
     staging_regions: StagingRegionsRef,
+    /// Running tail replays, which stay here until they report their end.
+    tail_replays: HashMap<RegionId, CancellableTaskState>,
 }
 
 impl<S: LogStore> RegionWorkerLoop<S> {
@@ -1146,6 +1190,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
     fn register_region(&mut self, region: MitoRegionRef) {
         if let Some(old) = self.regions.get_region(region.region_id) {
             old.deactivate_region_manifest_size_metric();
+            self.cancel_tail_replay(region.region_id);
         }
 
         self.compaction_scheduler.register_region(
@@ -1155,6 +1200,8 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         );
         self.regions.insert_region(region.clone());
         region.activate_region_manifest_size_metric();
+        // A create can open an existing region as a writable leader.
+        self.maybe_replay_tails(region.region_id);
     }
 
     /// Starts the worker loop.
@@ -1600,6 +1647,11 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 self.handle_manifest_region_change_result(req).await
             }
             BackgroundNotify::EnterStaging(req) => self.handle_enter_staging_result(req).await,
+            BackgroundNotify::StagingEnded(drained) => {
+                self.stalled_requests.remove_staging_drain(&region_id);
+                self.handle_region_stalled_requests(&region_id, true).await;
+                let _ = drained.send(());
+            }
             BackgroundNotify::RegionEdit(req) => self.handle_region_edit_result(req).await,
             BackgroundNotify::CopyRegionFromFinished(req) => {
                 self.handle_copy_region_from_finished(req)
@@ -1608,6 +1660,16 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             BackgroundNotify::RegionReloaded { old, result } => {
                 self.handle_region_reloaded(region_id, old, result).await
             }
+            BackgroundNotify::RegionBecameWritable => self.maybe_replay_tails(region_id),
+            BackgroundNotify::TailReplayCommitted {
+                region,
+                edit,
+                tails,
+            } => {
+                self.handle_tail_replay_committed(region_id, region, edit, tails)
+                    .await
+            }
+            BackgroundNotify::TailReplayEnded => self.handle_tail_replay_ended(region_id),
         }
         // A commit that found a newer manifest fenced the region before its job reported here.
         if !is_reload_result {
@@ -1632,6 +1694,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 // changes a writable or staging leader, but always fences
                 // promotions issued before.
                 region.manifest_ctx.begin_downgrade(region_id);
+                self.cancel_tail_replay(region_id);
             }
             #[cfg(feature = "hdfs-object-store")]
             let sweep_older_than = self.config.gc.unknown_file_lingering_time;
@@ -1640,7 +1703,11 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             let request_sender = self.sender.clone();
             // We need to do this in background as we need the manifest lock.
             common_runtime::spawn_global(async move {
-                match region.set_role_state_gracefully(region_role_state).await {
+                let drain = drain_ended_staging(&request_sender, region_id);
+                match region
+                    .set_role_state_gracefully(region_role_state, drain)
+                    .await
+                {
                     Ok(()) => {
                         let last_entry_id = region.version_control.current().last_entry_id;
                         let _ = sender.send(SetRegionRoleStateResponse::success(
@@ -1677,6 +1744,9 @@ impl<S: LogStore> RegionWorkerLoop<S> {
 impl<S> RegionWorkerLoop<S> {
     /// Cleans up the worker.
     async fn clean(&self) {
+        for state in self.tail_replays.values() {
+            let _ = state.request_cancel();
+        }
         // Closes remaining regions.
         let regions = self.regions.list_regions();
         for region in regions {
@@ -1733,6 +1803,38 @@ impl WorkerListener {
         #[cfg(any(test, feature = "test"))]
         if let Some(listener) = &self.listener {
             listener.on_catchup_reopen_begin(_region_id).await;
+        }
+    }
+
+    /// A tail replay is about to commit its result.
+    pub(crate) async fn on_tail_commit_begin(&self, _region_id: RegionId) {
+        #[cfg(any(test, feature = "test"))]
+        if let Some(listener) = &self.listener {
+            listener.on_tail_commit_begin(_region_id).await;
+        }
+    }
+
+    /// A tail replay checks for a Leader lease while it waits.
+    pub(crate) fn on_tail_lease_check(&self, _region_id: RegionId) {
+        #[cfg(any(test, feature = "test"))]
+        if let Some(listener) = &self.listener {
+            listener.on_tail_lease_check(_region_id);
+        }
+    }
+
+    /// A round of tail replay failed.
+    pub(crate) fn on_tail_replay_failed(&self, _region_id: RegionId, _error: &crate::error::Error) {
+        #[cfg(any(test, feature = "test"))]
+        if let Some(listener) = &self.listener {
+            listener.on_tail_replay_failed(_region_id, _error);
+        }
+    }
+
+    /// The worker learned that a tail replay ended.
+    pub(crate) fn on_tail_replay_ended(&self, _region_id: RegionId) {
+        #[cfg(any(test, feature = "test"))]
+        if let Some(listener) = &self.listener {
+            listener.on_tail_replay_ended(_region_id);
         }
     }
 

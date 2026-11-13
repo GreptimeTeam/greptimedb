@@ -175,6 +175,7 @@ hyper = "1.1"
 hyper-util = "0.1"
 icu_properties = "2.0.1"
 indicatif = "0.17"
+intern-arc = "0.6.2"
 itertools = "0.14"
 jsonb = { git = "https://github.com/GreptimeTeam/jsonb", rev = "5a6472858d860ac034075c17253f41617bdfa956", default-features = false, features = [
     "databend",

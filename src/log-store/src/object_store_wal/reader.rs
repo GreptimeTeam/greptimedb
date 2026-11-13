@@ -19,9 +19,10 @@ use std::sync::{Arc, Mutex, PoisonError, Weak};
 
 use async_stream::try_stream;
 use common_cache::Cache;
-use futures::{StreamExt, TryStreamExt};
+use futures::StreamExt;
 use object_store::ObjectStore;
 use snafu::{OptionExt, ResultExt, ensure};
+pub use store_api::logstore::WalReadUpperBound;
 use store_api::logstore::entry::{Entry, NaiveEntry};
 use store_api::logstore::provider::Provider;
 use store_api::logstore::{EntryId, SendableEntryStream};
@@ -45,24 +46,6 @@ use crate::object_store_wal::prefetch;
 /// Node-wide limit on concurrent remote object index reads. Startup recovery
 /// keeps its existing, separate concurrency setting.
 const FOOTER_CONCURRENCY: usize = 16;
-
-/// Upper bound of a remote WAL recovery range. A reported final entry must be
-/// present, whereas a LIST boundary need not contain entries of this region.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum WalReadUpperBound {
-    /// The durable last entry reported by the source on downgrade.
-    LastEntry(EntryId),
-    /// A conservative bound obtained by listing the source prefix.
-    Listed(EntryId),
-}
-
-impl WalReadUpperBound {
-    fn entry_id(self) -> EntryId {
-        match self {
-            Self::LastEntry(id) | Self::Listed(id) => id,
-        }
-    }
-}
 
 /// A normalized WAL node prefix: `<root>/datanodes/<node>/epochs/<generation>`.
 /// Construct it from a persisted source prefix or
@@ -230,6 +213,14 @@ impl ObjectStoreWalReader {
     /// call (including a retry) starts a new LIST; cached indexes never replace
     /// that LIST. Previously indexed, still-listed immutable objects are reused.
     ///
+    /// The store writing the prefix may collect listed objects before their
+    /// indexes are read. An object gone below the sequence where the read stops
+    /// following links to predecessors (a reclaim boundary, or the object of
+    /// `after` when it is higher in the `LastEntry` mode) is skipped, as
+    /// startup recovery skips it, unless it holds the reported entry. One gone
+    /// at or above it, on the chain or not, fails the read; a retry lists the
+    /// prefix again.
+    ///
     /// Errors can occur after entries have been yielded. The caller must finish
     /// the stream successfully before publishing recovery progress. In the
     /// `LastEntry` mode success also proves that the reported entry was read.
@@ -319,8 +310,10 @@ impl ObjectStoreWalReader {
                 }
             );
         }
-        let objects = futures::stream::iter(listed)
-            .map(|object| async move {
+        let (objects, vanished) = index::fetch_listed(
+            futures::stream::iter(listed.into_iter().map(Ok)),
+            FOOTER_CONCURRENCY,
+            |object| async move {
                 let seq = object.object_seq;
                 // Include listing metadata in the key so a load for a changed
                 // object cannot join an older in-flight load of the same sequence.
@@ -344,10 +337,10 @@ impl ObjectStoreWalReader {
                     .await
                     .context(ObjectStoreWalSnafu)?;
                 Ok::<_, Error>((seq, cached))
-            })
-            .buffer_unordered(FOOTER_CONCURRENCY)
-            .try_collect::<BTreeMap<_, _>>()
-            .await?;
+            },
+        )
+        .await?;
+        let objects = objects.into_iter().collect::<BTreeMap<_, _>>();
         let headers = objects
             .iter()
             .map(|(seq, object)| (*seq, &object.header))
@@ -362,6 +355,7 @@ impl ObjectStoreWalReader {
                     .max()
                     .unwrap_or(0)
                     .max(start);
+                index::ensure_vanished_below(vanished, boundary)?;
                 index::chain_from(&headers, last >> POSITION_BITS, boundary).with_context(|| {
                     CorruptedWalObjectSnafu {
                         reason: format!(
@@ -373,6 +367,8 @@ impl ObjectStoreWalReader {
             }
             WalReadUpperBound::Listed(_) => {
                 let chain = index::select_chain(&headers);
+                let boundary = chain.last().map_or(0, |tip| headers[tip].reclaim_boundary);
+                index::ensure_vanished_below(vanished, boundary)?;
                 let tip = chain.last().with_context(|| CorruptedWalObjectSnafu {
                     reason: format!("no complete WAL chain in {}", self.prefix()),
                 })?;

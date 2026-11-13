@@ -56,6 +56,8 @@ use store_api::storage::{RegionId, ScanRequest};
 
 use crate::config::MitoConfig;
 use crate::engine::MitoEngine;
+use crate::engine::pending_tail_test::set_pending_tails;
+use crate::manifest::action::{PendingTail, UptoKind};
 use crate::region::{MitoRegionRef, RegionLeaderState, RegionRoleState};
 use crate::test_util::{
     CreateRequestBuilder, TestEnv, build_rows, build_rows_for_key, flush_region, put_rows,
@@ -2188,6 +2190,61 @@ async fn test_wal_pressure_flushes_blockers_across_workers(#[case] state: Region
     );
     engine.stop().await.unwrap();
     store.stop().await.unwrap();
+}
+
+/// Pressure leaves alone a region whose own pending tail starts at or below its flushed entry id,
+/// since a flush cannot move its WAL release past that tail, and flushes any other region.
+#[rstest]
+#[case::own_tail(0, 0, false)]
+#[case::own_tail_ahead(0, 1, true)]
+#[case::other_node_tail(1, 0, true)]
+#[tokio::test]
+async fn test_wal_pressure_skips_regions_capped_by_own_tails(
+    #[case] node_id: u64,
+    #[case] after: u64,
+    #[case] flushed: bool,
+) {
+    use crate::time_provider::mock::MockTimeProvider;
+
+    let mut env = TestEnv::new().await.with_node_id(0);
+    let store = open_store(&memory_store(), AckMode::Durable).await;
+    let now = common_time::util::current_time_millis();
+    let clock = Arc::new(MockTimeProvider::new(now));
+    let (checked, mut observations) = tokio::sync::mpsc::unbounded_channel();
+    let engine = env
+        .create_engine_with_log_store_and_time(
+            MitoConfig {
+                auto_flush_interval: Duration::from_secs(3600),
+                ..Default::default()
+            },
+            store.clone(),
+            clock.clone(),
+            Some(Arc::new(PressureAdmissionListener { checked })),
+        )
+        .await;
+    let (_, schema) = create_region(&engine, REGION_A, &[]).await;
+    let mut writer = SealedWriter::new(&store);
+    for i in 0..=1_200 {
+        writer
+            .put_and_seal(&engine, vec![(REGION_A, rows(&schema, i, i + 1))])
+            .await;
+    }
+    assert_eq!(vec![REGION_A], store.flush_candidates());
+    let tail = PendingTail {
+        node_id,
+        after,
+        upto: latest(&store, REGION_A),
+        upto_kind: UptoKind::Reported,
+    };
+    set_pending_tails(&engine, REGION_A, vec![tail]).await;
+
+    clock.set_now(now + 120_000);
+    clock.set_elapsed(120_000);
+
+    assert_eq!(
+        flushed,
+        wait_for_pressure_admission(&mut observations, REGION_A).await
+    );
 }
 
 /// Different regions pin successive old objects. One refresh must flush all
