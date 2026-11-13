@@ -53,6 +53,7 @@ impl Instance {
                 self.table_flownode_set_cache().clone(),
                 true,
                 Arc::new(LogicalTables(Arc::downgrade(self))),
+                options.auto_create_physical_table_timestamp_unit,
                 options_batcher.pending_rows_flush_interval,
                 options_batcher.max_batch_rows,
                 options_batcher.max_concurrent_flushes,

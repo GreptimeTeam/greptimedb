@@ -169,6 +169,202 @@ mod tests {
         .await;
     }
 
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_standalone_prom_remote_write_auto_create_microsecond_physical_table() {
+        common_telemetry::init_default_ut_logging();
+        let standalone = GreptimeDbStandaloneBuilder::new("test_prom_rw_auto_create_us_physical")
+            .with_auto_create_physical_table_timestamp_unit(
+                common_time::timestamp::TimeUnit::Microsecond,
+            )
+            .build()
+            .await;
+        let instance = standalone.fe_instance();
+
+        let db = "prometheus_auto_create_us";
+        let ctx = Arc::new(QueryContext::with(DEFAULT_CATALOG_NAME, db));
+        assert!(
+            SqlQueryHandler::do_query(
+                instance.as_ref(),
+                &format!("CREATE DATABASE IF NOT EXISTS {db}"),
+                ctx.clone(),
+            )
+            .await
+            .first()
+            .unwrap()
+            .is_ok()
+        );
+
+        // No manual table creation: both the physical table and the logical
+        // table `metric1` must be auto-created by the write, with a
+        // microsecond time index inherited from the physical table.
+        let write_request = WriteRequest {
+            timeseries: vec![prom_store::mock_timeseries()[0].clone()],
+            ..Default::default()
+        };
+        let (row_inserts, _) = to_grpc_row_insert_requests(&write_request).unwrap();
+        instance
+            .write(row_inserts, ctx.clone(), true)
+            .await
+            .unwrap();
+
+        for table in ["greptime_physical_table", "metric1"] {
+            let mut output = instance
+                .do_query(
+                    &format!("SELECT greptime_timestamp FROM {table}"),
+                    ctx.clone(),
+                )
+                .await;
+            let OutputData::Stream(stream) = output.remove(0).unwrap().data else {
+                unreachable!()
+            };
+            let batches = common_recordbatch::RecordBatches::try_collect(stream)
+                .await
+                .unwrap()
+                .take();
+            assert_eq!(batches[0].num_rows(), 2, "unexpected rows in {table}");
+            let ts_column = batches[0].column(0);
+            assert_eq!(
+                ts_column.data_type(),
+                &DataType::Timestamp(TimeUnit::Microsecond, None),
+                "unexpected time index type in {table}"
+            );
+            let timestamps = ts_column
+                .as_primitive::<TimestampMicrosecondType>()
+                .values();
+            assert_eq!(timestamps.to_vec(), vec![1_000_000, 2_000_000]);
+        }
+
+        // Remote read narrows microsecond timestamps back to milliseconds.
+        let read_request = ReadRequest {
+            queries: vec![Query {
+                start_timestamp_ms: 1000,
+                end_timestamp_ms: 2000,
+                matchers: vec![LabelMatcher {
+                    name: prom_store::METRIC_NAME_LABEL.to_string(),
+                    value: "metric1".to_string(),
+                    r#type: 0,
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let resp = instance.read(read_request, ctx.clone()).await.unwrap();
+        let body = prom_store::snappy_decompress(&resp.body).unwrap();
+        let read_response = ReadResponse::decode(&body[..]).unwrap();
+        let samples = &read_response.results[0].timeseries[0].samples;
+        assert_eq!(
+            samples.clone(),
+            vec![
+                Sample {
+                    value: 1.0,
+                    timestamp: 1000
+                },
+                Sample {
+                    value: 2.0,
+                    timestamp: 2000
+                }
+            ]
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_standalone_prom_batcher_auto_create_microsecond_physical_table() {
+        use servers::batcher::logical_table::PendingRowsSchemaAlterer;
+
+        common_telemetry::init_default_ut_logging();
+        let standalone = GreptimeDbStandaloneBuilder::new("test_prom_batcher_auto_create_us")
+            .with_auto_create_physical_table_timestamp_unit(
+                common_time::timestamp::TimeUnit::Microsecond,
+            )
+            .build()
+            .await;
+        let instance = standalone.fe_instance();
+
+        // Drives the batcher's schema-alterer path: a missing physical table is
+        // auto-created with the configured microsecond unit, and new logical
+        // tables aligned to it.
+        let db = "prometheus_batcher_auto_create_us";
+        let ctx = Arc::new(QueryContext::with(DEFAULT_CATALOG_NAME, db));
+        assert!(
+            SqlQueryHandler::do_query(
+                instance.as_ref(),
+                &format!("CREATE DATABASE IF NOT EXISTS {db}"),
+                ctx.clone(),
+            )
+            .await
+            .first()
+            .unwrap()
+            .is_ok()
+        );
+        // The batcher aligns request schemas to the physical table's unit
+        // before invoking the schema alterer, so the schema below arrives in
+        // the configured microsecond unit. A missing physical table must be
+        // auto-created with the same unit.
+        let request_schema = vec![
+            api::v1::ColumnSchema {
+                column_name: "greptime_timestamp".to_string(),
+                datatype: ColumnDataType::TimestampMicrosecond as i32,
+                semantic_type: SemanticType::Timestamp as i32,
+                datatype_extension: None,
+                options: None,
+            },
+            api::v1::ColumnSchema {
+                column_name: "greptime_value".to_string(),
+                datatype: ColumnDataType::Float64 as i32,
+                semantic_type: SemanticType::Field as i32,
+                datatype_extension: None,
+                options: None,
+            },
+            api::v1::ColumnSchema {
+                column_name: "job".to_string(),
+                datatype: ColumnDataType::String as i32,
+                semantic_type: SemanticType::Tag as i32,
+                datatype_extension: None,
+                options: None,
+            },
+        ];
+        instance
+            .create_tables_if_missing_batch(
+                DEFAULT_CATALOG_NAME,
+                db,
+                &[("metric1", request_schema.as_slice())],
+                true,
+                ctx.clone(),
+            )
+            .await
+            .unwrap();
+
+        for table in ["greptime_physical_table", "metric1"] {
+            let mut output = instance
+                .do_query(
+                    &format!(
+                        "SELECT greptime_data_type FROM information_schema.columns \
+                         WHERE table_schema='{db}' AND table_name='{table}' \
+                         AND column_name='greptime_timestamp'"
+                    ),
+                    ctx.clone(),
+                )
+                .await;
+            let OutputData::Stream(stream) = output.remove(0).unwrap().data else {
+                unreachable!()
+            };
+            let batches = common_recordbatch::RecordBatches::try_collect(stream)
+                .await
+                .unwrap()
+                .take();
+            assert_eq!(
+                batches[0].num_rows(),
+                1,
+                "missing time index column in {table}"
+            );
+            let data_type = batches[0].column(0).as_string::<i32>().value(0);
+            assert_eq!(
+                data_type, "TimestampMicrosecond",
+                "unexpected time index type in {table}"
+            );
+        }
+    }
+
     /// Regression test for <https://github.com/GreptimeTeam/greptimedb/issues/9231>:
     /// prometheus remote write/read against a physical metric table
     /// pre-created with a non-millisecond time index. Millisecond samples are

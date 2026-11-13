@@ -3966,6 +3966,94 @@ WITH(
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn test_otlp_initial_write_auto_create_physical_timestamp_unit() {
+        use common_time::timestamp::TimeUnit as ConfigTimeUnit;
+
+        for (unit, arrow_unit, expected) in [
+            (ConfigTimeUnit::Second, TimeUnit::Second, 60),
+            (ConfigTimeUnit::Millisecond, TimeUnit::Millisecond, 60_123),
+            (
+                ConfigTimeUnit::Microsecond,
+                TimeUnit::Microsecond,
+                60_123_456,
+            ),
+            (
+                ConfigTimeUnit::Nanosecond,
+                TimeUnit::Nanosecond,
+                60_123_456_789,
+            ),
+        ] {
+            let standalone = GreptimeDbStandaloneBuilder::new(&format!("otlp_initial_{unit:?}"))
+                .with_auto_create_physical_table_timestamp_unit(unit)
+                .build()
+                .await;
+            let instance = standalone.fe_instance();
+            let mut ctx = QueryContext::with(DEFAULT_CATALOG_NAME, "public");
+            ctx.set_protocol_ctx(ProtocolCtx::OtlpMetric(OtlpMetricCtx {
+                with_metric_engine: true,
+                ..Default::default()
+            }));
+            let ctx = Arc::new(ctx);
+
+            // No pre-created tables: preflight must accept the first point so
+            // ingestion can create both tables with the configured time index.
+            let outcome = instance
+                .metrics(
+                    metric_request(vec![gauge_metric(
+                        "initial_metric",
+                        &[(60_123_456_789, 1.0, None)],
+                    )]),
+                    ctx.clone(),
+                    None,
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                (outcome.accepted_data_points, outcome.rejected_data_points),
+                (1, 0),
+                "unit={unit:?}"
+            );
+
+            for table in ["greptime_physical_table", "initial_metric"] {
+                let output = instance
+                    .do_query(
+                        &format!("SELECT greptime_timestamp FROM {table}"),
+                        ctx.clone(),
+                    )
+                    .await
+                    .remove(0)
+                    .unwrap();
+                let OutputData::Stream(stream) = output.data else {
+                    panic!("expected stream")
+                };
+                let batches = RecordBatches::try_collect(stream).await.unwrap().take();
+                assert_eq!(
+                    batches.iter().map(|batch| batch.num_rows()).sum::<usize>(),
+                    1
+                );
+                let timestamp = batches[0].column(0);
+                assert_eq!(
+                    timestamp.data_type(),
+                    &DataType::Timestamp(arrow_unit, None)
+                );
+                let actual = match arrow_unit {
+                    TimeUnit::Second => timestamp.as_primitive::<TimestampSecondType>().value(0),
+                    TimeUnit::Millisecond => timestamp
+                        .as_primitive::<TimestampMillisecondType>()
+                        .value(0),
+                    TimeUnit::Microsecond => timestamp
+                        .as_primitive::<TimestampMicrosecondType>()
+                        .value(0),
+                    TimeUnit::Nanosecond => {
+                        timestamp.as_primitive::<TimestampNanosecondType>().value(0)
+                    }
+                };
+                assert_eq!(actual, expected, "unit={unit:?}, table={table}");
+            }
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_otlp_preflight_shared_physical_and_fanout_conflicts() {
         let standalone = GreptimeDbStandaloneBuilder::new("otlp_physical_conflicts")
             .build()

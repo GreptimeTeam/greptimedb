@@ -3418,6 +3418,7 @@ providers = []"#,
         r#"
 enable_telemetry = true
 auto_create_table = true
+auto_create_physical_table_timestamp_unit = "Millisecond"
 max_in_flight_write_bytes = "0KiB"
 write_bytes_exhausted_policy = "wait"
 init_regions_in_background = false

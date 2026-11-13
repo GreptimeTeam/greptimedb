@@ -252,6 +252,9 @@ impl FrontendBuilder {
                 table_flownode_cache.clone(),
                 self.options.auto_create_table,
             )
+            .with_auto_create_physical_table_timestamp_unit(
+                self.options.auto_create_physical_table_timestamp_unit,
+            )
             .with_write_dispatcher(write_dispatcher.clone())
         };
         // The execution-only inserter owns no batchers, avoiding an Arc cycle.
@@ -432,6 +435,9 @@ impl FrontendBuilder {
             process_manager,
             slow_query_options: self.options.slow_query.clone(),
             influxdb_default_merge_mode: self.options.influxdb.default_merge_mode,
+            auto_create_physical_table_timestamp_unit: self
+                .options
+                .auto_create_physical_table_timestamp_unit,
             trace_ingest_chunk_size: self.options.otlp.trace_ingest_chunk_size,
             trace_aux_cache: TraceAuxCache::new(self.options.otlp.trace_aux_cache_size.as_bytes()),
             trace_aux_limiter,
