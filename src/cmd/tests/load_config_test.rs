@@ -621,6 +621,7 @@ where
         "storage.access_key_secret",
         "storage.account_name",
         "storage.account_key",
+        "storage.sas_token",
         "storage.credential_path",
         "storage.credential",
         "region_engine.mito.inverted_index.intermediate_path",
