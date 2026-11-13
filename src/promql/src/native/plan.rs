@@ -671,11 +671,11 @@ impl NativeNode {
             // sample whatever their arguments are, constant or per point.
             NativeExpr::ParameterizedHistogram { .. } => Some(FieldKind::Float),
             // Every aggregate answers floats: `count`/`group` answer a count or a `1` whatever the
-            // samples they counted, `min`/`max`/`stddev`/`stdvar` fold the float samples and skip
-            // the histogram ones, and `sum`/`avg` - the only two that would fold the payload - keep
-            // a histogram out at admission. Naming it here is what lets `sum(count_over_time(h[5m]))`
-            // - a float built from histograms - declare a float column instead of keeping the
-            // existing plan.
+            // samples they counted, `min`/`max`/`stddev`/`stdvar`/`quantile` fold the float samples
+            // and skip the histogram ones, and `sum`/`avg` - the only two that would fold the
+            // payload - keep a histogram out at admission. Naming it here is what lets
+            // `sum(count_over_time(h[5m]))` - a float built from histograms - declare a float
+            // column instead of keeping the existing plan.
             NativeExpr::Aggregate { .. } => Some(FieldKind::Float),
             _ => None,
         }

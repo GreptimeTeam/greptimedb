@@ -12163,6 +12163,201 @@ fn aggregate_sparse_output_budget_uses_rows_not_grid_length() {
     assert_eq!(pool.reserved(), 0);
 }
 
+/// `quantile` answers what the kernel answers, because the node keeps the input the kernel reads.
+///
+/// The node is not a second implementation of the quantile: it retains its members and hands them to
+/// [`crate::aggregate::aggregate_quantile`] with a constant parameter over the rows they hold, so the
+/// assertion is against that kernel over the same series. Positions, values and the group each row
+/// belongs to must agree row for row. The input is uneven on purpose - a group's members hold
+/// different points, and one point's values come only from one member - which is what a per-point
+/// fold would answer and this must not.
+#[test]
+fn quantile_answers_what_the_kernel_answers() {
+    let grid = grid(0, 60_000, 6);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let members = [
+        (
+            job_instance_metric("requests", "api", "a"),
+            vec![Some(1.0), None, Some(3.0), Some(4.0), None, Some(6.0)],
+        ),
+        (
+            job_instance_metric("requests", "api", "b"),
+            vec![None, Some(2.0), Some(5.0), None, Some(2.0), None],
+        ),
+        (
+            job_instance_metric("requests", "db", "c"),
+            vec![Some(10.0), Some(20.0), None, None, Some(50.0), Some(60.0)],
+        ),
+    ];
+    let chunks: Vec<EvaluatedChunk> = members
+        .iter()
+        .map(|(metric, values)| {
+            evaluated_chunk_of(&schema, metric.clone(), 0, values.clone(), true)
+        })
+        .collect();
+    for grouping in [
+        Grouping::By(Arc::new([])),
+        Grouping::By(Arc::new(["job".into()])),
+    ] {
+        let tree = NativeTree::try_new(aggregate(
+            evaluated_input(Arc::clone(&grid)),
+            BoundAggregate {
+                kind: AggregateKind::Quantile { quantile: 0.9 },
+                group: grouping.clone(),
+                stage: AggregateStage::Complete,
+            },
+        ))
+        .unwrap();
+        let pool = bounded_pool(1 << 20);
+        let mut execution = executor(&tree, Arc::clone(&pool));
+        for chunk in &chunks {
+            execution
+                .push_evaluated(InputId::new(0), chunk.clone())
+                .unwrap();
+        }
+        let output = execution.finish().unwrap();
+        assert!(
+            !output.is_empty(),
+            "{grouping:?}: the quantile answered nothing"
+        );
+
+        // The kernel over the same members, with the parameter this node builds: the φ as an
+        // unlabelled single-field scalar over every point the input's rows sit at.
+        let series: Vec<Series> = chunks.iter().map(|chunk| chunk.series.clone()).collect();
+        let parameter_schema = SeriesSchema {
+            fields: Arc::from([FieldSpec {
+                name: "scalar".into(),
+            }]),
+            eval_grid: Some(Arc::clone(&grid)),
+        };
+        let parameter = crate::map::constant_series(
+            &parameter_schema,
+            GridRange::try_new(Arc::clone(&grid), 0, 6).unwrap(),
+            0.9,
+        )
+        .unwrap();
+        let names: Vec<&str> = match &grouping {
+            Grouping::By(labels) | Grouping::Without(labels) => {
+                labels.iter().map(|label| label.as_ref()).collect()
+            }
+        };
+        let kernel_grouping = match &grouping {
+            Grouping::By(_) => crate::aggregate::Grouping::By(&names),
+            Grouping::Without(_) => crate::aggregate::Grouping::Without(&names),
+        };
+        let expected =
+            crate::aggregate::aggregate_quantile(&schema, &series, &parameter, kernel_grouping)
+                .unwrap();
+        drop(names);
+        let expected: Vec<EvaluatedChunk> = expected
+            .into_iter()
+            .map(|series| EvaluatedChunk::try_new(series, true).unwrap())
+            .collect();
+        assert_eq!(groups_of(&expected), groups_of(&output), "{grouping:?}");
+        assert_eq!(pool.reserved(), 0, "{grouping:?}");
+    }
+}
+
+/// A `quantile`'s parameter is as wide as the points the input holds, not the span they sit in.
+///
+/// The two points are 99_999 positions apart on a 100_000-point grid, so a parameter over the window
+/// between them carries a value for every position in it -- 800 KB at this width -- and no admission
+/// ever sized it. That pool is 64 KiB, which the dense span could not be admitted into and which this
+/// fold answers in: the parameter is built over the input's own positions, so the gaps cost a span
+/// and not a row. What the fold took is released again when it answers.
+#[test]
+fn quantile_parameter_costs_the_points_held_not_the_span_between_them() {
+    let grid = grid(0, 1, 100_000);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let tree = NativeTree::try_new(aggregate(
+        evaluated_input(Arc::clone(&grid)),
+        BoundAggregate {
+            kind: AggregateKind::Quantile { quantile: 0.5 },
+            group: Grouping::By(Arc::new([])),
+            stage: AggregateStage::Complete,
+        },
+    ))
+    .unwrap();
+    let pool = bounded_pool(64 * 1024);
+    let mut execution = executor(&tree, Arc::clone(&pool));
+    execution
+        .push_evaluated(
+            InputId::new(0),
+            sparse_chunk(
+                &schema,
+                metric(),
+                &[(0, 1), (99_999, 1)],
+                vec![1.0, 3.0],
+                true,
+            ),
+        )
+        .unwrap();
+    let output = execution.finish().unwrap();
+    assert_eq!(
+        groups_of(&output),
+        vec![unlabelled(vec![(0, Some(1.0)), (99_999, Some(3.0))])]
+    );
+    assert_eq!(pool.reserved(), 0);
+}
+
+/// A `quantile` skips a histogram sample and says so, exactly as `min` does.
+///
+/// The φ-quantile orders the values of its group and a native histogram is not one it can order, so
+/// Prometheus answers the quantile of the float samples and skips the histogram ones -- which for a
+/// group of nothing but histograms is no answer at all. `min` reads a histogram the same way and
+/// records the same info while doing it; the two are one branch in the legacy planner, and this pins
+/// that the native fold agrees with them rather than answering from samples it dropped.
+#[test]
+fn a_quantile_skips_histogram_samples_and_reports_it_like_min() {
+    let grid = grid(0, 60_000, 2);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    for (kind, expected_info) in [
+        (
+            AggregateKind::Quantile { quantile: 0.5 },
+            "quantile: ignored native histogram samples",
+        ),
+        (AggregateKind::Min, "min: ignored native histogram samples"),
+    ] {
+        let tree = NativeTree::try_new(aggregate(
+            evaluated_input(Arc::clone(&grid)),
+            BoundAggregate {
+                kind,
+                group: Grouping::By(Arc::new([])),
+                stage: AggregateStage::Complete,
+            },
+        ))
+        .unwrap();
+        let collector = common_query::promql_annotations::PromqlAnnotationCollector::default();
+        let mut state = NativeExecutionState::try_new(&tree, pool(), None).unwrap();
+        state.set_annotations(Some(collector.clone()));
+        let mut execution = NativeExecutor::new(state);
+        execution
+            .push_evaluated(
+                InputId::new(0),
+                evaluated_histogram_chunk_of(
+                    &schema,
+                    metric(),
+                    0,
+                    vec![Some(0), None],
+                    &histogram_table(1, 2),
+                    true,
+                ),
+            )
+            .unwrap();
+        let output = run(&mut execution);
+        assert!(
+            output.is_empty(),
+            "{kind:?} answered a group it had no value for: {:?}",
+            groups_of(&output)
+        );
+        let mut warnings = Vec::new();
+        let mut infos = Vec::new();
+        collector.append_to(&mut warnings, &mut infos);
+        assert!(warnings.is_empty(), "{kind:?}: {warnings:?}");
+        assert_eq!(infos, vec![expected_info.to_string()], "{kind:?}");
+    }
+}
+
 /// An aggregate retains its fold before finish and release returns its reservation.
 #[test]
 fn aggregate_fold_state_is_released_after_input() {
@@ -12198,29 +12393,81 @@ fn aggregate_fold_state_is_released_after_input() {
     assert_eq!(pool.reserved(), 0);
 }
 
-/// An aggregate kind this runtime does not compute is refused, naming what was found.
+/// A `quantile` carries no state, so a tree cannot even bind it as anything but `Complete`.
+///
+/// `quantile` is answered from its group's whole sample set, so a stage that saw part of a group
+/// would answer the quantile of a subset of it, and the quantile of two partial groups is not a
+/// function of their quantiles. There is no state layout to export or merge, which is what the tree's
+/// own validation refuses while it is built: a `Partial` or `Final` node has nowhere to put its
+/// state. The runtime refuses the same stage again in [`crate::native::aggregate`] as a guard for a
+/// node built some other way, but the refusal a caller can reach is this one.
 #[test]
-fn an_aggregate_kind_the_runtime_does_not_compute_is_named() {
+fn a_quantile_stage_the_runtime_does_not_compute_is_named() {
     let grid = || grid(0, 60_000, 4);
-    let kind_tree = NativeTree::try_new(aggregate(
-        evaluated_input(grid()),
-        BoundAggregate {
-            kind: AggregateKind::Quantile { quantile: 0.5 },
+    let schema = || evaluated_schema(grid());
+    // The state layout a `Sum` exports is enough to build the stage's tree: what this test asks is
+    // which stages the runtime starts, and a `quantile` state is refused before it is read.
+    let (state_kind, components) =
+        crate::native::plan::aggregate_state_binding(AggregateKind::Sum).unwrap();
+    let state_schema = || {
+        Arc::new(AggregateStateSchema {
             group: Grouping::By(Arc::new([])),
-            stage: AggregateStage::Complete,
-        },
-    ))
-    .unwrap();
-    let error = match NativeExecutionState::try_new(&kind_tree, pool(), None) {
-        Ok(_) => panic!("the runtime accepted a Quantile aggregate"),
-        Err(error) => error,
+            kind: state_kind,
+            components: components.clone().into(),
+            accumulators: schema().fields.clone(),
+            grid: grid(),
+        })
     };
+    let state_input = || NativeNode {
+        expr: NativeExpr::Input(BoundInput {
+            output: NativeType::AggregateState(state_schema()),
+            source_index: 0,
+            ordering: SeriesOrdering::Contiguous,
+        }),
+        output: NativeType::AggregateState(state_schema()),
+    };
+    let quantile_node = |stage| {
+        let (input, output) = match stage {
+            AggregateStage::Complete => (evaluated_input(grid()), evaluated(grid())),
+            AggregateStage::Partial => (
+                evaluated_input(grid()),
+                NativeType::AggregateState(state_schema()),
+            ),
+            AggregateStage::Final => (state_input(), evaluated(grid())),
+        };
+        aggregate_with_output(
+            input,
+            BoundAggregate {
+                kind: AggregateKind::Quantile { quantile: 0.5 },
+                group: Grouping::By(Arc::new([])),
+                stage,
+            },
+            output,
+        )
+    };
+    for stage in [AggregateStage::Partial, AggregateStage::Final] {
+        let error = match NativeTree::try_new(quantile_node(stage)) {
+            Ok(_) => panic!("the tree accepted a {stage:?} Quantile aggregate"),
+            Err(error) => error,
+        };
+        assert!(
+            matches!(error, DataFusionError::NotImplemented(_)),
+            "{stage:?}: {error}"
+        );
+        let message = error.to_string();
+        assert!(message.contains("Quantile"), "{stage:?}: {message}");
+        assert!(
+            message.contains("aggregate state is not defined"),
+            "{stage:?}: {message}"
+        );
+    }
+    // The `Complete` stage of the same kind is what this runtime does compute.
+    let complete = NativeTree::try_new(quantile_node(AggregateStage::Complete))
+        .expect("a complete quantile is a legal tree");
     assert!(
-        matches!(error, DataFusionError::NotImplemented(_)),
-        "Quantile: {error}"
+        NativeExecutionState::try_new(&complete, pool(), None).is_ok(),
+        "the runtime rejected a Complete quantile"
     );
-    let message = error.to_string();
-    assert!(message.contains("Quantile"), "Quantile: {message}");
 
     let out = grid();
     let group = Grouping::By(Arc::new(["job".into()]));

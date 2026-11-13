@@ -48,7 +48,7 @@ use promql::extension_plan::{
     FusedSeries, HistogramFold, InputLocality, RawSeriesSource, input_locality,
 };
 use promql::native::plan::{
-    AggregateStage, BoundVectorOp, NativeExpr, NativeNode, NativeType,
+    AggregateKind, AggregateStage, BoundVectorOp, Grouping, NativeExpr, NativeNode, NativeType,
     unifies_its_own_contributions,
 };
 use promql::vector_match::{Cardinality, MatchingLabels};
@@ -2723,9 +2723,12 @@ async fn native_fused_timestamp_with_multiple_fields_keeps_legacy_plan() {
 }
 
 /// Literal roots need no raw scan, while a literal beside a selector broadcasts over that input.
+///
+/// `pi()` is a constant the statement itself decides, so it is bound where a literal is: as a scalar
+/// root, as the constant side of a binary operation, and as a call's parameter.
 #[tokio::test]
 async fn native_fused_supports_constant_roots_and_selector_broadcasts() {
-    for (query, value) in [("1 + 2", 3.0), ("-1", -1.0)] {
+    for (query, value) in [("1 + 2", 3.0), ("-1", -1.0), ("pi()", std::f64::consts::PI)] {
         let plan = build_native_fused_plan(query, true).await;
         let fused = find_fused_series(&plan).expect("constant root uses native route");
         assert!(
@@ -2744,6 +2747,10 @@ async fn native_fused_supports_constant_roots_and_selector_broadcasts() {
         "100 / some_metric",
         "-some_metric",
         "rate(some_metric[5m]) * 100",
+        // `pi()` over a selector is the multiplication it was written as, and as a parameter it is
+        // the kernel constant a literal would bind.
+        "pi() * some_metric",
+        "clamp_max(some_metric, pi())",
     ] {
         let plan = build_native_fused_plan(query, true).await;
         let fused = find_fused_series(&plan).expect("selector expression uses native route");
@@ -4428,13 +4435,17 @@ async fn native_composed_binary_declares_only_include_labels_a_row_can_carry() {
 
 /// Composition decides by what the kernels and the column can answer, not by operand shape.
 ///
-/// An operand with more than one selector, and an operand that ranks one, each compile and evaluate
-/// on their own, so the pair composes.
+/// An operand with more than one selector, an operand that ranks one and an operand that folds one
+/// each compile and evaluate on their own, so the pair composes. A `quantile` is such an operand now
+/// that the runtime folds it: the fold runs inside the operand's own frame, over the series the
+/// statement's sources answer, and the pair above it matches the two frames.
 #[tokio::test]
 async fn native_composed_binary_admits_complex_operands() {
     for (query, operand_inputs) in [
         ("hist * on(tag_0) (floats + on(tag_0) floats)", 2),
         ("hist * on(tag_0) topk(1, floats)", 1),
+        ("hist * on(tag_0) quantile(0.5, floats)", 1),
+        ("hist * on(tag_0) sum by (tag_0) (quantile(0.5, floats))", 1),
     ] {
         let plan =
             build_native_fused_plan_with_provider(query, true, native_mixed_kind_provider().await)
@@ -4460,12 +4471,11 @@ async fn native_composed_binary_admits_complex_operands() {
         assert!(!display.contains("Join:"), "{query}: {display}");
     }
 
-    // A fold the split cannot carry is still refused: `quantile` folds a group's samples rather
-    // than a fixed-width accumulator, and a second fold above one is a second cut. Those statements
-    // keep the existing plan, which answers them.
+    // An operand that folds a histogram column is still refused: `sum` has no histogram state to
+    // fold into, so a second fold above one cannot be composed either.
     for query in [
-        "hist * on(tag_0) quantile(0.5, floats)",
-        "hist * on(tag_0) sum by (tag_0) (quantile(0.5, floats))",
+        "hist * on(tag_0) sum by (tag_0) (hist)",
+        "hist * on(tag_0) sum by (tag_0) (sum(hist))",
     ] {
         let plan =
             build_native_fused_plan_with_provider(query, true, native_mixed_kind_provider().await)
@@ -6419,24 +6429,18 @@ async fn native_fused_histogram_quantile_binary_drops_le_from_operand_matching()
     assert!(!display.contains("Join:"), "{display}");
 }
 
-/// A legacy wrapper or a native one preserves a whole native binary below it, not a join of native
-/// operands.
+/// A whole-vector node preserves a whole native binary below it, not a join of native operands.
 ///
-/// `scalar()` is a native node, so it becomes the fused root itself and reads the binary's own fused
-/// node as its single bound input. `quantile` is not a native aggregate, so its legacy fold stays
-/// above a fused node that still holds the whole binary. Either way the binary matches above its two
-/// sources rather than joining two separately evaluated native operands.
+/// `scalar()` and `quantile` are both native nodes, so each becomes the fused root itself and reads
+/// the binary's own fused node as its single bound input — `scalar()` as `ScalarOf`, `quantile` as
+/// the `Complete` aggregate it is. Either way the binary matches above its two sources rather than
+/// joining two separately evaluated native operands.
 #[tokio::test]
 async fn native_fused_binary_inside_scalar_and_quantile() {
-    // `true` marks the wrapper the native compiler admits into the tree; `false` keeps the legacy
-    // fold above it.
-    for (query, native_wrapper) in [
-        ("scalar(some_metric + on(tag_0) other_metric)", true),
-        ("quantile(0.5, some_metric + on(tag_0) other_metric)", false),
-        (
-            "scalar(clamp(some_metric, 0, 1) / on(tag_0) other_metric)",
-            true,
-        ),
+    for query in [
+        "scalar(some_metric + on(tag_0) other_metric)",
+        "quantile(0.5, some_metric + on(tag_0) other_metric)",
+        "scalar(clamp(some_metric, 0, 1) / on(tag_0) other_metric)",
     ] {
         let provider = build_test_table_provider_with_options(
             &[
@@ -6468,44 +6472,46 @@ async fn native_fused_binary_inside_scalar_and_quantile() {
             "{query}: {display}"
         );
 
-        let tree = if native_wrapper {
-            // The wrapper is this node's root and binds the binary's fused node as its one input.
-            let NativeExpr::ScalarOf { input } = &fused.tree().root().expr else {
-                panic!(
-                    "`{query}`: the native wrapper is the fused root: {}\n{display}",
+        // The wrapper is this node's root and binds the binary's fused node as its one input.
+        let (input, wrapper) = match &fused.tree().root().expr {
+            NativeExpr::ScalarOf { input } => (input.as_ref(), "scalar()"),
+            NativeExpr::Aggregate { input, op } => {
+                assert!(
+                    matches!(op.kind, AggregateKind::Quantile { .. }),
+                    "`{query}`: the fused root is not the quantile it wrote: {}\n{display}",
                     fused.tree()
                 );
-            };
-            let NativeExpr::Input(bound) = &input.expr else {
-                panic!(
-                    "`{query}`: the wrapper reads one bound source: {}\n{display}",
-                    fused.tree()
-                );
-            };
-            // The wrapper's tree has one input, so the binding names child 0: the segment that runs
-            // the binary.
-            assert_eq!(
-                0,
-                bound.source_index,
-                "`{query}`: {}\n{display}",
+                (input.as_ref(), "quantile()")
+            }
+            other => panic!(
+                "`{query}`: the native wrapper is the fused root, and it is {other:?}: {}\n{display}",
+                fused.tree()
+            ),
+        };
+        let NativeExpr::Input(bound) = &input.expr else {
+            panic!(
+                "`{query}`: {wrapper} reads one bound source: {}\n{display}",
                 fused.tree()
             );
-            assert_eq!(1, fused.children().len(), "`{query}`: {display}");
-            let nested = find_fused_series(&fused.children()[0]).unwrap_or_else(|| {
-                panic!("`{query}`: the wrapper's input is a fused node: {display}")
-            });
-            // The binary's node reads both sources itself, so it has one child per operand.
-            assert_eq!(2, nested.children().len(), "`{query}`: {display}");
-            nested.tree()
-        } else {
-            // The legacy fold is still there, above the one fused node that runs the binary.
-            assert!(
-                display.contains("Aggregate: groupBy="),
-                "`{query}`: the legacy aggregate is gone: {display}"
-            );
-            assert_eq!(2, fused.children().len(), "`{query}`: {display}");
-            fused.tree()
         };
+        // The wrapper's tree has one input, so the binding names child 0: the segment that runs the
+        // binary.
+        assert_eq!(
+            0,
+            bound.source_index,
+            "`{query}`: {}\n{display}",
+            fused.tree()
+        );
+        assert_eq!(1, fused.children().len(), "`{query}`: {display}");
+        let nested = find_fused_series(&fused.children()[0])
+            .unwrap_or_else(|| panic!("`{query}`: the wrapper's input is a fused node: {display}"));
+        // The binary's node reads both sources itself, so it has one child per operand.
+        assert_eq!(2, nested.children().len(), "`{query}`: {display}");
+        let tree = nested.tree();
+        assert!(
+            !display.contains("Aggregate: groupBy="),
+            "`{query}`: {display}"
+        );
         assert!(
             matches!(tree.root().expr, NativeExpr::Binary { .. }),
             "`{query}`: the binary is one native operation: {tree}\n{display}"
@@ -6514,8 +6520,7 @@ async fn native_fused_binary_inside_scalar_and_quantile() {
 }
 
 /// A shape neither the split nor the node can keep correct keeps the existing plan: a group by a
-/// value field cannot be named by the state rows, and a kernel the compiler does not fold keeps it
-/// too.
+/// value field cannot be named by the state rows.
 ///
 /// `sum(m) / m` and `m + sum(m)` are not on this list. The fold and the plain selector are two
 /// occurrences, so each reads its own source and the operation above them answers over both; the
@@ -6526,13 +6531,13 @@ async fn native_fused_binary_inside_scalar_and_quantile() {
 /// makes a new sample at the evaluation instant rather than inheriting a stored one's time - and
 /// `instant_eval.rs` says so where it projects the grid's own timestamps. The segmentation route
 /// answers those, and `native_promql_timestamp_over_a_computed_vector` pins the values.
+///
+/// `quantile` is not on this list either: it has no mergeable state, so it cannot be split, but a
+/// `Complete` one is a node this runtime computes - the names in this list are the shapes even that
+/// node cannot answer.
 #[tokio::test]
 async fn native_fused_unsplittable_aggregate_falls_back() {
-    for query in [
-        "quantile(0.5, some_metric)",
-        "sum(quantile(0.5, some_metric))",
-        "sum by (field_0) (some_metric)",
-    ] {
+    for query in ["sum by (field_0) (some_metric)"] {
         let native = build_native_fused_plan(query, true).await;
         let without_flag = build_native_fused_plan(query, false).await;
         assert!(
@@ -6549,6 +6554,200 @@ async fn native_fused_unsplittable_aggregate_falls_back() {
             native.display_indent().to_string(),
             without_flag.display_indent().to_string(),
             "`{query}` must keep the existing plan"
+        );
+    }
+}
+
+/// A `quantile` is native as the one `Complete` aggregate it can be.
+///
+/// Its answer is the φ-quantile of a group's whole sample set, so the runtime keeps the input and
+/// answers from all of it once the input ends. The tree therefore carries one `Complete` aggregate
+/// with the φ the query wrote and the grouping it named, and it carries it under a second aggregate
+/// too: neither the split nor the segmentation cuts a `quantile` out, because it exports no state to
+/// combine and a partition's quantile is not part of the group's.
+#[tokio::test]
+async fn native_fused_quantile_is_a_complete_aggregate() {
+    for (query, quantile, grouped, columns) in [
+        (
+            "quantile(0.5, some_metric)",
+            0.5f64,
+            false,
+            vec!["field_0", "timestamp"],
+        ),
+        (
+            "quantile(0.9, some_metric) by (tag_0)",
+            0.9f64,
+            true,
+            vec!["field_0", "tag_0", "timestamp"],
+        ),
+        (
+            "sum(quantile(0.5, some_metric))",
+            0.5f64,
+            false,
+            vec!["field_0", "timestamp"],
+        ),
+    ] {
+        let plan = build_native_fused_plan(query, true).await;
+        let display = plan.display_indent().to_string();
+        let fused = find_fused_series(&plan).unwrap_or_else(|| panic!("`{query}`: {display}"));
+        // A quantile exports no state, so there is no split half for it: the statement is one
+        // execution's work.
+        assert!(find_final_split(&plan).is_none(), "`{query}`: {display}");
+        let mut node = fused.tree().root();
+        if query.starts_with("sum(") {
+            // The outer fold reads the quantile's answer in the same execution, so the quantile is
+            // the node below it rather than a boundary between two of them.
+            let NativeExpr::Aggregate { input, op } = &node.expr else {
+                panic!("`{query}`: the root is not the outer sum: {display}");
+            };
+            assert!(
+                matches!(op.kind, AggregateKind::Sum) && op.stage == AggregateStage::Complete,
+                "`{query}`: {display}"
+            );
+            node = input.as_ref();
+        }
+        let NativeExpr::Aggregate { input, op } = &node.expr else {
+            panic!("`{query}`: the node is not an aggregate: {display}");
+        };
+        assert!(
+            matches!(
+                op.kind,
+                AggregateKind::Quantile { quantile: value } if value.to_bits() == quantile.to_bits()
+            ),
+            "`{query}`: {display}"
+        );
+        assert_eq!(AggregateStage::Complete, op.stage, "`{query}`: {display}");
+        assert_eq!(
+            grouped,
+            matches!(&op.group, Grouping::By(labels) if !labels.is_empty()),
+            "`{query}`: {display}"
+        );
+        assert!(
+            matches!(
+                input.expr,
+                NativeExpr::Instant { .. } | NativeExpr::Input(_)
+            ),
+            "`{query}`: the quantile reads the selection, cut or not: {display}"
+        );
+        // The quantile answers a float per group, under the fields and labels it read.
+        assert_eq!(columns, sorted_column_names(&plan), "`{query}`");
+    }
+}
+
+/// A `quantile` over a histogram column folds it natively, exactly as `min` and `max` do.
+///
+/// The phi-quantile orders the samples it reads, so a histogram is one it cannot order: Prometheus
+/// answers the quantile of the float samples of the group and skips the histogram ones, which the
+/// legacy planner writes as the same drop-and-Float-NULL branch it gives `min`/`max`/`stddev`/
+/// `stdvar` (`create_native_histogram_aggregate_expr`). The native fold therefore reads a histogram
+/// where `min` reads one - it skips it the same way, and reports the same "ignored native histogram
+/// samples" info at run time - so the admission lets it through instead of keeping the plan it had.
+#[tokio::test]
+async fn native_fused_quantile_over_a_histogram_folds_it_like_min() {
+    let query = "quantile(0.5, some_metric)";
+    let native = build_native_fused_plan_with_provider(
+        query,
+        true,
+        build_test_native_histogram_table_provider("some_metric").await,
+    )
+    .await;
+    let display = native.display_indent_schema().to_string();
+    let fused = find_fused_series(&native)
+        .unwrap_or_else(|| panic!("a quantile over a histogram left the route: {display}"));
+    // The answer is one float per group, not a column carrying the histograms it skipped.
+    let field = fused
+        .schema()
+        .field_with_unqualified_name(greptime_native_histogram())
+        .unwrap_or_else(|_| panic!("the quantile published no field column: {display}"));
+    assert_eq!(
+        &ArrowDataType::Float64,
+        field.data_type(),
+        "a quantile answers a float, not a histogram: {display}"
+    );
+    // The fold is the one `Complete` aggregate the quantile can be, reading the selection it was
+    // written over.
+    let NativeExpr::Aggregate { input, op } = &fused.tree().root().expr else {
+        panic!("the fused root is not the quantile: {display}");
+    };
+    assert!(
+        matches!(op.kind, AggregateKind::Quantile { .. }) && op.stage == AggregateStage::Complete,
+        "{display}"
+    );
+    assert!(
+        matches!(
+            input.expr,
+            NativeExpr::Instant { .. } | NativeExpr::Input(_)
+        ),
+        "the quantile reads the selection: {display}"
+    );
+    // The statement is planned as `min` is: the same columns, one float per group, over the same
+    // labels and timestamps.
+    let like_min = build_native_fused_plan_with_provider(
+        "min(some_metric)",
+        true,
+        build_test_native_histogram_table_provider("some_metric").await,
+    )
+    .await;
+    assert!(
+        find_fused_series(&like_min).is_some(),
+        "min over a histogram stopped folding natively: {}",
+        like_min.display_indent()
+    );
+    assert_eq!(
+        sorted_column_names(&native),
+        sorted_column_names(&like_min),
+        "a quantile over a histogram is planned like min: {display}"
+    );
+    // The route is the setting's doing, which is what the refusal above used to hide.
+    let without_flag = build_native_fused_plan_with_provider(
+        query,
+        false,
+        build_test_native_histogram_table_provider("some_metric").await,
+    )
+    .await;
+    assert!(
+        find_fused_series(&without_flag).is_none(),
+        "the existing planner does not use the native route: {}",
+        without_flag.display_indent()
+    );
+}
+
+/// A `quantile` is never folded once per partition, whatever shape the table behind it has.
+///
+/// The split is the route that answers an aggregate per partition and merges the state, so a
+/// `quantile` - whose state is its group's sample set - has no split half anywhere: `check_cut`
+/// declines the kind, and the tree itself refuses a `Partial` or `Final` one. What runs instead is a
+/// single `Complete` fold above the per-series prefixes. A table partitioned on a tag keeps every
+/// series whole in one region; a table that splits one series across regions is read through a raw
+/// source that reconciles its fragments, so the fold still sees whole series. Both shapes are
+/// asserted here, because "one fold, never one per partition" is the invariant and "falls back" is
+/// not: gathering the whole vector into one execution is not folding it by partition.
+#[tokio::test]
+async fn native_fused_quantile_is_never_folded_per_partition() {
+    for partition_key_indices in [vec![0], vec![1]] {
+        let query = "quantile(0.5, some_metric)";
+        let plan = build_native_fused_plan_with_provider(
+            query,
+            true,
+            native_engine_provider(partition_key_indices.clone()).await,
+        )
+        .await;
+        let display = plan.display_indent().to_string();
+        assert!(
+            find_fused_series(&plan).is_some(),
+            "partition on {partition_key_indices:?}: {display}"
+        );
+        // No `Final` over a `Partial`: a quantile has no state to export, so the fold is one node's
+        // work over the whole vector rather than one per partition.
+        assert!(
+            find_final_split(&plan).is_none(),
+            "partition on {partition_key_indices:?}: the quantile must not be split: {display}"
+        );
+        // The fold is above the prefixes: the node that holds it reads a segment rather than the
+        // scan, and the statement is still named by the quantile it wrote.
+        assert!(
+            display.contains("quantile(0.5, some_metric)"),
+            "partition on {partition_key_indices:?}: {display}"
         );
     }
 }
@@ -9893,8 +10092,9 @@ async fn a_float_prefix_over_histograms_aggregates_natively() {
 /// function that answers histograms and scalar arithmetic over them all run here, while an
 /// aggregate that would fold them keeps the existing plan. `rate` is in the histogram-answering
 /// set, so `sum(rate(h[5m]))` is refused by the same rule as `sum(h)`.
-/// A histogram is counted by `count`/`group` and skipped by `min`/`max`/`stddev`/`stdvar`, so all
-/// of them fold it natively; only `sum` and `avg` fold the payload and keep the existing plan.
+/// A histogram is counted by `count`/`group` and skipped by `min`/`max`/`stddev`/`stdvar`/
+/// `quantile`, so all of them fold it natively. Only `sum` and `avg`, which fold the payload, keep
+/// the existing plan.
 ///
 /// Prometheus counts every present sample whatever its type is, answers `1` for a non-empty group,
 /// and ignores a histogram where it would have to order or average the values. The second half
@@ -9908,6 +10108,7 @@ async fn presence_and_order_aggregates_fold_histograms_natively() {
         "max(some_metric)",
         "stddev(some_metric)",
         "stdvar(some_metric)",
+        "quantile(0.9, some_metric)",
     ] {
         let table_provider = build_test_native_histogram_table_provider("some_metric").await;
         let plan = build_native_fused_plan_with_provider(query, true, table_provider).await;
@@ -9927,10 +10128,6 @@ async fn presence_and_order_aggregates_fold_histograms_natively() {
     for query in [
         "sum(some_metric)",
         "avg(some_metric)",
-        // `quantile` has no kernel in this runtime: the admission check lets it through and the
-        // runtime's own construction refuses it, which keeps the statement on the plan it had
-        // rather than making it count or skip histogram samples here.
-        "quantile(0.9, some_metric)",
         // A skipping or counting aggregate at the root does not excuse the payload-folding one
         // below it: `sum` still has no histogram state to fold into.
         "count(sum(some_metric))",

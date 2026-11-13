@@ -1292,6 +1292,8 @@ fn the_supported_math_functions_map_to_their_kernels() {
         ("clamp(x, 0, 1)", "clamp 0 1"),
         ("clamp_min(x, 0)", "clamp_min 0"),
         ("clamp_max(x, 1)", "clamp_max 1"),
+        // `pi()` is a constant, so it binds the kernel constant a literal would.
+        ("clamp_max(x, pi())", "clamp_max 3.141592653589793"),
         // Date functions over a vector read its values as Unix seconds.
         ("day_of_month(x)", "day_of_month"),
         ("day_of_week(x)", "day_of_week"),
@@ -1314,6 +1316,51 @@ fn the_supported_math_functions_map_to_their_kernels() {
             "`{query}` bound the wrong kernel"
         );
     }
+}
+
+/// `pi()` is a constant the statement itself decides, so it binds where a literal binds.
+///
+/// It is a call, but not one whose value comes from the data or from the evaluation time: it is one
+/// number, the same `std::f64::consts::PI` the legacy planner's `pi` reports. Folding it is what
+/// makes an operation over it a broadcast of that number and a parameter written as `pi()` a kernel
+/// constant, rather than two shapes this compiler would have to answer separately.
+#[test]
+fn pi_folds_to_the_number_it_means() {
+    let tree = compile_statement(&eval_stmt("pi()"))
+        .unwrap_or_else(|error| panic!("`pi()` was refused: {error}"));
+    assert_eq!(Some(std::f64::consts::PI), constant(tree.root()));
+    assert_eq!((0, 5_000, 21), scalar_grid(tree.root()));
+
+    // Over a selector it is the multiplication it was written as, with the constant on the side the
+    // query wrote it on.
+    let tree = compile(
+        &eval_stmt("pi() * x"),
+        raw_schema(),
+        SeriesOrdering::KeyThenTime,
+    )
+    .unwrap_or_else(|error| panic!("`pi() * x` was refused: {error}"));
+    let (left, right, matching) = binary_parts(tree.root());
+    assert_eq!(Some(std::f64::consts::PI), constant(left));
+    assert!(matches!(right.expr, NativeExpr::Instant { .. }));
+    assert_eq!(BinaryOp::Mul, matching.op);
+
+    // As a parameter it stays a constant, so the call is one map node and not a per-point
+    // parameter: `clamp_max(x, pi())` binds the same kernel as `clamp_max(x, 3.141592653589793)`.
+    let tree = compile(
+        &eval_stmt("clamp_max(x, pi())"),
+        raw_schema(),
+        SeriesOrdering::KeyThenTime,
+    )
+    .unwrap_or_else(|error| panic!("`clamp_max(x, pi())` was refused: {error}"));
+    let MathOp::ClampMax { max } = map_op(tree.root()) else {
+        panic!(
+            "the root is not a clamp_max: {:?}",
+            map_parts(tree.root()).1.ops
+        );
+    };
+    assert_eq!(std::f64::consts::PI, max);
+    let (input, _) = map_parts(tree.root());
+    assert!(matches!(input.expr, NativeExpr::Instant { .. }));
 }
 
 /// The constants a function folds are folded by the kernel's own arithmetic, not by a second copy of
@@ -2129,9 +2176,12 @@ fn a_statement_without_values_on_a_grid_is_refused() {
 ///
 /// The vector entry above refuses it — a tree over that entry reports evaluated samples — so the
 /// statement entry is the one that binds it, and the grid it reports on is the statement's own.
+///
+/// `pi()` is one of these constants: it is a call, but the statement itself decides its value, so it
+/// folds to the number it means rather than keeping the call for the runtime.
 #[test]
 fn a_constant_statement_is_a_scalar_on_the_statement_grid_without_input() {
-    for (query, value) in [("1 + 2", 3.0), ("-1", -1.0)] {
+    for (query, value) in [("1 + 2", 3.0), ("-1", -1.0), ("pi()", std::f64::consts::PI)] {
         let stmt = eval_stmt(query);
         let tree = compile_statement(&stmt)
             .unwrap_or_else(|error| panic!("`{query}` was refused: {error}"));
@@ -2180,7 +2230,7 @@ fn a_statement_that_reads_no_data_compiles_without_input() {
         }
     ));
 
-    for (query, found) in [("x", "a selector"), ("pi()", "a call to `pi`")] {
+    for (query, found) in [("x", "a selector"), ("step()", "a call to `step`")] {
         let error = compile_statement(&eval_stmt(query))
             .expect_err(&format!("`{query}` compiled, and it should not have"));
         assert!(

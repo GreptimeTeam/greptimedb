@@ -3085,13 +3085,17 @@ fn scan_operand(node: &NativeNode) -> bool {
 ///
 /// The walk asks each aggregate what kind enters it rather than what the tree's root answers,
 /// because an operator above an aggregate hides it: `sum(h) * 2` has a binary root. Only a
-/// histogram entering an aggregate is refused; a float-producing prefix such as
-/// `count_over_time` over a histogram stays eligible.
+/// histogram entering an aggregate that would fold its payload is refused; a float-producing prefix
+/// such as `count_over_time` over a histogram stays eligible, and so does an aggregate that skips the
+/// sample instead of folding it.
 fn aggregate_reads_histogram(node: &NativeNode, input_kind: FieldKind) -> bool {
-    // Only `sum` and `avg` fold the payload, and this route has no histogram aggregate state yet:
-    // `count` and `group` count a histogram as one present sample, `min`/`max`/`stddev`/`stdvar`
-    // skip it the way Prometheus does, and `quantile` has no native kernel and keeps the existing
-    // plan after this check.
+    // `sum` and `avg` fold the payload and this route has no histogram aggregate state yet, so they
+    // are the two that keep the existing plan. Every other kind answers a float without folding a
+    // histogram's payload: `count` and `group` count a histogram as one present sample, and
+    // `min`/`max`/`stddev`/`stdvar`/`quantile` skip it the way Prometheus does -- the legacy
+    // planner maps all five through one branch (`create_native_histogram_aggregate_expr`), which
+    // drops the samples and answers a Float NULL plus an info annotation, and the native fold does
+    // the same thing at run time.
     //
     // The kind entering them has to be provably a float. "Cannot name it" is not "not a
     // histogram": a canonical merge and a set operation hand on the samples they were given

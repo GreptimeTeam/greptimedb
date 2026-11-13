@@ -37,7 +37,7 @@
 //!   <expression> <operator> <scalar>               e.g. x * 100, x > bool time()
 //!   <scalar> <operator> <expression>               e.g. 1 / x, time() - timestamp(x)
 //!   <scalar> <operator> <scalar>                   e.g. time() - 60, time() > bool 1
-//!   time(), vector(<scalar>)                       e.g. vector(time())
+//!   time(), pi(), vector(<scalar>)                 e.g. vector(time()), pi() * x
 //!   <date function>()                              e.g. hour(), which is `hour(vector(time()))`
 //!   -<expression>                                  e.g. -x
 //!   <expression> <set operator> <expression>       e.g. x and on(job) y, x unless y
@@ -1376,9 +1376,9 @@ fn compile_call(context: &Context, call: &Call) -> Result<NativeNode> {
         return vector_call(context, func.name, op, vector);
     }
     // The name is looked up before the call's arguments are read, so a name this compiler has no
-    // kernel for is refused as such whichever arguments it was given: `pi()` and `time()` have no
-    // vector to map, and the rejection names the name rather than describing a vector they never
-    // wrote.
+    // kernel for is refused as such whichever arguments it was given, and the rejection names the
+    // name rather than describing a vector it never wrote. `pi()` does not reach here: it is a
+    // constant the statement itself decides, so it already folded in `compile_expr`.
     if let Some(node) = parameterized_call(context, func.name, &args.args)? {
         return Ok(node);
     }
@@ -2639,11 +2639,18 @@ fn refuses_modifier(modifier: Option<&BinModifier>) -> bool {
 /// The number `expr` folds to, or `None` when its value is not the statement's to know.
 ///
 /// Only what the statement itself decides is folded: a number literal, a group around one, a negated
-/// one, and arithmetic whose two operands both fold. A call, a selector, a range selector, an
-/// aggregate and a subquery are `None`, because their value comes from the data or from the
-/// evaluation time, and a kernel's constant is a field of the tree rather than something bound while
-/// it runs. Returning `None` rather than an error is what lets the caller report where the
+/// one, `pi()`, and arithmetic whose two operands both fold. Any other call, a selector, a range
+/// selector, an aggregate and a subquery are `None`, because their value comes from the data or from
+/// the evaluation time, and a kernel's constant is a field of the tree rather than something bound
+/// while it runs. Returning `None` rather than an error is what lets the caller report where the
 /// expression was found, which is the useful half of the refusal.
+///
+/// `pi()` belongs on the folding side because the statement itself decides it: it is one number, not
+/// a value read from the data. Folding it is what makes `pi() * x` the multiplication by
+/// [`std::f64::consts::PI`] it means, `clamp_max(x, pi())` a kernel constant like `clamp_max(x, 3)`,
+/// and `quantile(pi() / 4, x)` a parameter this compiler can bind. The number is the one the promql
+/// crate's `map_pi` answers the previous route with — both are `std::f64::consts::PI` — so the two
+/// routes cannot disagree about what `pi()` is.
 ///
 /// Arithmetic is the kernel operation [`BinaryOp::kind`] names and nothing else's: that is where
 /// Prometheus' semantics for `%`, `^` and `atan2` live, so defining them again here would be a
@@ -2676,8 +2683,13 @@ pub(crate) fn constant_value(expr: &PromExpr) -> Option<f64> {
                     .then(|| f64::from(op.apply(left, right))),
             }
         }
-        // Calls (`time()`, `scalar(v)`), selectors, range selectors, aggregates and subqueries all
-        // read something this compiler cannot know before the query runs.
+        // A selector, a range selector, an aggregate and a subquery read data; `time()`,
+        // `scalar(v)` and the rest of the calls read something this compiler cannot know before the
+        // query runs. `pi()` is not one of them: it is the one call whose value the statement itself
+        // fixes, so it folds here as a literal does.
+        PromExpr::Call(call) if call.func.name == "pi" && call.args.args.is_empty() => {
+            Some(std::f64::consts::PI)
+        }
         _ => None,
     }
 }
