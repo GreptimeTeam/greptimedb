@@ -6,6 +6,7 @@ Query options adjust selected behavior for a connection or request; they are not
 | --- | --- | --- |
 | `query.parallelism` | `query_parallelism`, `query.parallelism` | Integer `1`–`1024`; server default `0` means automatic CPU-based parallelism. This is not a resource-pool limit. |
 | `query.allow_query_fallback` | `query_fallback`, `allow_query_fallback`, `query.allow_query_fallback` (legacy `ALLOW_QUERY_FALLBACK` syntax / `query_fallback` hint also work) | `true` or `false` |
+| `query.experimental_enable_factorized_join_agg` | `experimental_enable_factorized_join_agg`, `query.experimental_enable_factorized_join_agg` | `true` or `false`; experimental opt-in for shape-based AVG/SUM join aggregation. Server default `false`; unset inherits it. |
 | `query.enable_remote_dynamic_filter_pushdown` | canonical name | `true` or `false` |
 | `datafusion.optimizer.*` | canonical name | Keys, types, defaults, and validation come from the linked DataFusion version (for example, numeric `max_passes` and Boolean `filter_null_join_keys`). |
 

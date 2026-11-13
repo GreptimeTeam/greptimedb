@@ -22,6 +22,10 @@ pub fn canonical_query_option_name(key: &str) -> Option<String> {
         "query_fallback" | "allow_query_fallback" | "query.allow_query_fallback" => {
             Some("query.allow_query_fallback".to_string())
         }
+        "experimental_enable_factorized_join_agg"
+        | "query.experimental_enable_factorized_join_agg" => {
+            Some("query.experimental_enable_factorized_join_agg".to_string())
+        }
         "query.enable_remote_dynamic_filter_pushdown" => {
             Some("query.enable_remote_dynamic_filter_pushdown".to_string())
         }

@@ -18,6 +18,7 @@ pub mod count_nest_aggr;
 pub mod count_wildcard;
 pub mod enforce_sorting;
 pub(crate) mod expr_depth;
+pub(crate) mod factorized_join_agg;
 pub mod global_limit;
 pub(crate) mod infer_aggregate_input_bounds;
 pub(crate) mod insert_assignment;
