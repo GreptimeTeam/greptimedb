@@ -34,9 +34,11 @@
 //! [`unpack_evaluated_series`] carry computed values under complete labels and grid positions, so a
 //! compute consumer needs neither a storage key nor a scan binding to read them.
 
+use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
+use std::time::Duration;
 
 use common_error::ext::BoxedError;
 use common_recordbatch::{DfRecordBatch, DfSendableRecordBatchStream};
@@ -57,6 +59,7 @@ use store_api::codec::PrimaryKeyEncoding;
 use store_api::region_engine::{
     NO_BOUND_LABEL_SOURCE, RawLabelSource, RawSeriesStream, SendableRawSeriesStream,
 };
+use tokio::time::{Instant, Sleep};
 
 #[cfg(test)]
 mod tests;
@@ -243,6 +246,7 @@ pub fn pack_raw_series(
         batches: PackBatches::new(builder, frame_schema),
         ordering,
         validator: SequenceValidator::new(ordering),
+        pending: PendingFlush::default(),
     }))
 }
 
@@ -839,6 +843,95 @@ impl PackBatches {
     }
 }
 
+/// How long a pending source may keep buffered rows before they are published as a batch of their
+/// own.
+///
+/// One fixed short delay bounds how long a partially filled batch is held, so a slow producer costs
+/// at most this latency per pending period instead of one batch per series.
+const PENDING_FLUSH_DELAY: Duration = Duration::from_millis(1);
+
+/// Bounded batching across a pending raw source.
+///
+/// The first pending period that has buffered rows publishes them immediately, so a stream whose
+/// source delivers one chunk at a time keeps its original first-batch latency. Every later pending
+/// period keeps accumulating rows until the builder is full - which [`PackBatches::advance`] reports
+/// on its own - or until [`PENDING_FLUSH_DELAY`] elapses, whichever comes first. One deadline serves
+/// the whole pending period, so rows arriving meanwhile extend the batch instead of restarting the
+/// wait, and a pending source with nothing buffered arms no timer at all.
+#[derive(Default)]
+struct PendingFlush {
+    /// Whether the buffered rows of the first pending period were already published immediately.
+    first_flushed: bool,
+    /// Whether the builder may hold rows, i.e. whether a deadline would have anything to publish.
+    ///
+    /// A flush leaves the builder empty and no source wake refills it, so waiting there would only
+    /// spin a timer. The estimate is exact after every flush and errs to `true` between installing
+    /// a chunk and the flush that publishes it, which costs at most one empty timer per chunk that
+    /// happened to fill a batch exactly.
+    maybe_buffered: bool,
+    /// End of the pending period the stream is in, while a timer is armed.
+    deadline: Option<Instant>,
+    /// The timer that wakes the stream at `deadline`; polling it registers this stream's waker.
+    timer: Option<Pin<Box<Sleep>>>,
+}
+
+impl PendingFlush {
+    /// Releases the deadline, leaving no timer registered with the runtime.
+    fn disarm(&mut self) {
+        self.deadline = None;
+        self.timer = None;
+    }
+
+    /// Records that the builder published everything it had, so it is empty again.
+    fn flushed(&mut self) {
+        self.maybe_buffered = false;
+        self.disarm();
+    }
+
+    /// Records that a chunk was installed, which may buffer rows.
+    fn installed(&mut self) {
+        self.maybe_buffered = true;
+    }
+
+    /// Polls the armed deadline and reports whether it elapsed.
+    ///
+    /// Polling the timer is what registers this stream's waker with the runtime, so an elapsed
+    /// deadline wakes the stream by itself instead of waiting for the source to wake it first.
+    fn elapsed(&mut self, cx: &mut Context<'_>) -> bool {
+        let Some(timer) = self.timer.as_mut() else {
+            return false;
+        };
+        if timer.as_mut().poll(cx).is_pending() {
+            return false;
+        }
+        self.disarm();
+        true
+    }
+
+    /// Arms the deadline for a later pending period, keeping an armed one as it is.
+    ///
+    /// Returns `false` when there is nothing to wait for: no rows are buffered, or no Tokio timer can
+    /// be registered where this stream is polled. The caller then publishes the buffered rows
+    /// immediately instead of waiting for a deadline that would never fire.
+    fn arm(&mut self, cx: &mut Context<'_>) -> bool {
+        if self.deadline.is_some() {
+            return true;
+        }
+        if !self.maybe_buffered || tokio::runtime::Handle::try_current().is_err() {
+            return false;
+        }
+        let deadline = Instant::now() + PENDING_FLUSH_DELAY;
+        let mut timer = Box::pin(tokio::time::sleep_until(deadline));
+        // Polling a fresh sleep registers the waker, and it cannot be ready at once.
+        if timer.as_mut().poll(cx).is_ready() {
+            return false;
+        }
+        self.deadline = Some(deadline);
+        self.timer = Some(timer);
+        true
+    }
+}
+
 struct PackStream {
     source: Option<SendableRawSeriesStream>,
     schema: Arc<SeriesSchema>,
@@ -846,6 +939,7 @@ struct PackStream {
     batches: PackBatches,
     ordering: SeriesOrdering,
     validator: SequenceValidator,
+    pending: PendingFlush,
 }
 
 impl PackStream {
@@ -854,6 +948,58 @@ impl PackStream {
         self.source = None;
         self.batches.release();
         self.validator = SequenceValidator::new(self.ordering);
+        self.pending.disarm();
+    }
+
+    /// Publishes the rows buffered so far, or returns to waiting on the source when there are none.
+    fn publish_buffered(&mut self) -> Poll<Option<datafusion_common::Result<DfRecordBatch>>> {
+        match self.batches.flush() {
+            Ok(Some(batch)) => {
+                self.pending.flushed();
+                self.batches.declare(batch)
+            }
+            Ok(None) => {
+                // Nothing to publish, so the pending source stays the only wakeup.
+                self.pending.flushed();
+                Poll::Pending
+            }
+            Err(error) => {
+                self.finish();
+                Poll::Ready(Some(Err(codec_error(error))))
+            }
+        }
+    }
+
+    /// Decides what a pending source yields once its own waker is registered.
+    ///
+    /// The first buffered pending still publishes at once, keeping the first-batch latency of a
+    /// source that delivers one chunk at a time; later pendings hand the decision to the deadline or
+    /// to the builder filling up.
+    fn poll_pending(
+        &mut self,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<datafusion_common::Result<DfRecordBatch>>> {
+        if !self.pending.first_flushed {
+            return match self.batches.flush() {
+                Ok(Some(batch)) => {
+                    self.pending.first_flushed = true;
+                    self.pending.flushed();
+                    self.batches.declare(batch)
+                }
+                // Nothing is buffered, so the first buffered pending is still to come.
+                Ok(None) => Poll::Pending,
+                Err(error) => {
+                    self.finish();
+                    Poll::Ready(Some(Err(codec_error(error))))
+                }
+            };
+        }
+        if self.pending.arm(cx) {
+            return Poll::Pending;
+        }
+        // Nothing is buffered here, or no timer can be registered where this stream is polled, so
+        // publishing now is the only bounded choice.
+        self.publish_buffered()
     }
 }
 
@@ -863,6 +1009,24 @@ impl Stream for PackStream {
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = &mut *self;
         loop {
+            // The deadline is checked before the source is read again: rows it already promised to
+            // publish are not postponed by a source that keeps waking, and polling the timer here is
+            // what keeps this stream's waker registered with the runtime.
+            if this.pending.elapsed(cx) {
+                match this.batches.flush() {
+                    Ok(Some(batch)) => {
+                        this.pending.flushed();
+                        return this.batches.declare(batch);
+                    }
+                    // The deadline was armed on rows that the builder already published, so reading
+                    // the source again is what the buffered estimate allows.
+                    Ok(None) => this.pending.flushed(),
+                    Err(error) => {
+                        this.finish();
+                        return Poll::Ready(Some(Err(codec_error(error))));
+                    }
+                }
+            }
             match this.batches.advance() {
                 Ok(Some(batch)) => return this.batches.declare(batch),
                 Ok(None) => {}
@@ -876,17 +1040,9 @@ impl Stream for PackStream {
                 None => return Poll::Ready(None),
             };
             match polled {
-                Poll::Pending => {
-                    let flushed = this.batches.flush();
-                    return match flushed {
-                        Ok(Some(batch)) => this.batches.declare(batch),
-                        Ok(None) => Poll::Pending,
-                        Err(error) => {
-                            this.finish();
-                            Poll::Ready(Some(Err(codec_error(error))))
-                        }
-                    };
-                }
+                // The source registered its waker above, so a later chunk, EOF, or error still wakes
+                // this stream even while the buffered rows wait for the deadline.
+                Poll::Pending => return this.poll_pending(cx),
                 Poll::Ready(None) => {
                     if let Err(error) = this.validator.finish() {
                         this.finish();
@@ -918,7 +1074,10 @@ impl Stream for PackStream {
                         return Poll::Ready(Some(Err(error)));
                     }
                     match SeriesFrameCursor::try_new_raw(&this.schema, this.labels, chunk) {
-                        Ok(cursor) => this.batches.install(cursor),
+                        Ok(cursor) => {
+                            this.batches.install(cursor);
+                            this.pending.installed();
+                        }
                         Err(error) => {
                             this.finish();
                             return Poll::Ready(Some(Err(codec_error(error))));

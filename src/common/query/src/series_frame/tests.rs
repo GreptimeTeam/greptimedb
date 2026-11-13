@@ -48,11 +48,15 @@ use futures_util::{Stream, StreamExt};
 use store_api::region_engine::{
     BoundTag, RawLabelSource, RawSeriesStream, SendableRawSeriesStream,
 };
+use tokio::sync::mpsc::UnboundedSender;
 
 use super::{
-    ensure_frame_matches_label_source, label_decode_spec, pack_raw_series, series_frame_ordering,
-    unpack_raw_series,
+    PENDING_FLUSH_DELAY, ensure_frame_matches_label_source, label_decode_spec, pack_raw_series,
+    series_frame_ordering, unpack_raw_series,
 };
+
+/// One item of a raw series source.
+type RawItem = Result<RawSeriesChunk, BoxedError>;
 
 fn schema() -> Arc<SeriesSchema> {
     Arc::new(SeriesSchema {
@@ -316,6 +320,75 @@ fn raw_items(
         drops,
     )
 }
+
+/// A raw source whose readiness the test drives: it yields the sent items, then reports `Pending`
+/// without a wake of its own until the test sends more or drops the sender to signal EOF. Unlike
+/// [`RawMock`] it can stall the stream any number of times, which is what the bounded pending
+/// behavior needs.
+struct RawChannel {
+    schema: Arc<SeriesSchema>,
+    binding: RawLabelSource,
+    ordering: SeriesOrdering,
+    items: tokio::sync::mpsc::UnboundedReceiver<RawItem>,
+    polls: Arc<AtomicUsize>,
+    drops: Arc<AtomicUsize>,
+}
+impl Drop for RawChannel {
+    fn drop(&mut self) {
+        self.drops.fetch_add(1, Ordering::SeqCst);
+    }
+}
+impl Stream for RawChannel {
+    type Item = RawItem;
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let this = &mut *self;
+        this.polls.fetch_add(1, Ordering::SeqCst);
+        this.items.poll_recv(cx)
+    }
+}
+impl RawSeriesStream for RawChannel {
+    fn schema(&self) -> &Arc<SeriesSchema> {
+        &self.schema
+    }
+    fn label_source(&self) -> &RawLabelSource {
+        &self.binding
+    }
+    fn label_decode_spec(&self) -> Option<&LabelDecodeSpec> {
+        None
+    }
+    fn ordering(&self) -> SeriesOrdering {
+        self.ordering
+    }
+}
+fn hand_driven_raw(
+    ordering: SeriesOrdering,
+) -> (
+    SendableRawSeriesStream,
+    UnboundedSender<RawItem>,
+    Arc<AtomicUsize>,
+    Arc<AtomicUsize>,
+) {
+    let (tx, items) = tokio::sync::mpsc::unbounded_channel();
+    let polls = Arc::new(AtomicUsize::new(0));
+    let drops = Arc::new(AtomicUsize::new(0));
+    (
+        Box::pin(RawChannel {
+            schema: schema(),
+            binding: RawLabelSource::Explicit,
+            ordering,
+            items,
+            polls: polls.clone(),
+            drops: drops.clone(),
+        }),
+        tx,
+        polls,
+        drops,
+    )
+}
+fn send(tx: &UnboundedSender<RawItem>, item: RawSeriesChunk) {
+    tx.send(Ok(item)).expect("the pack stream is still live");
+}
+
 fn df_source(
     batches: Vec<RecordBatch>,
     declared: SchemaRef,
@@ -1597,6 +1670,17 @@ fn poll_packed(
     stream.as_mut().poll_next(&mut Context::from_waker(waker))
 }
 
+fn expect_batch(
+    stream: &mut DfSendableRecordBatchStream,
+    waker: &Waker,
+    label: &str,
+) -> RecordBatch {
+    match poll_packed(stream, waker) {
+        Poll::Ready(Some(Ok(batch))) => batch,
+        other => panic!("{label}: expected a batch, got {other:?}"),
+    }
+}
+
 #[tokio::test]
 async fn unpack_bounds_empty_batches_per_poll_and_eventually_yields_row() {
     const BUDGET: usize = 32;
@@ -2182,23 +2266,24 @@ async fn dropping_pack_mid_chunk_keeps_last_batch_and_releases_source() {
 }
 
 /// Two ready chunks of one key, with more rows buffered than `Pending` reports: the partial
-/// batch is flushed complete at that `Pending` without EOF, keeping `is_last` false while the
-/// series is not final in the source, and the remainder follows at EOF.
-#[tokio::test]
+/// batch is flushed complete at that first `Pending` without EOF, keeping `is_last` false while the
+/// series is not final in the source. A later `Pending` waits for its deadline instead of publishing
+/// at once, and the final row follows at EOF.
+#[tokio::test(start_paused = true)]
 async fn pack_flushes_ready_rows_at_pending_then_remainder_at_eof() {
-    let (input, polls, drops) = raw_pending(
-        vec![
-            chunk_with(b"k", &[1], vec![Some(1.0)], Some(metric()), false),
-            chunk_with(b"k", &[2], vec![Some(2.0)], Some(metric()), false),
-            chunk_with(b"k", &[3], vec![Some(3.0)], Some(metric()), true),
-        ],
-        SeriesOrdering::Contiguous,
-        2,
-    );
+    let (input, tx, polls, drops) = hand_driven_raw(SeriesOrdering::Contiguous);
     let mut packed = pack_raw_series(input).unwrap();
     let wake = Arc::new(CountingWake(AtomicUsize::new(0)));
     let waker = Waker::from(wake.clone());
 
+    send(
+        &tx,
+        chunk_with(b"k", &[1], vec![Some(1.0)], Some(metric()), false),
+    );
+    send(
+        &tx,
+        chunk_with(b"k", &[2], vec![Some(2.0)], Some(metric()), false),
+    );
     let first = match poll_packed(&mut packed, &waker) {
         Poll::Ready(Some(Ok(batch))) => batch,
         other => panic!("expected a flush at Pending, got {other:?}"),
@@ -2209,7 +2294,11 @@ async fn pack_flushes_ready_rows_at_pending_then_remainder_at_eof() {
         3,
         "two ready rows and one Pending poll, without reaching EOF"
     );
-    assert_eq!(wake.0.load(Ordering::SeqCst), 1, "upstream wakes the task");
+    assert_eq!(
+        wake.0.load(Ordering::SeqCst),
+        0,
+        "the first buffered Pending publishes without waiting for a wake"
+    );
     let decoded = datatypes::series::frame::unpack_raw_series_frame(
         &schema(),
         datatypes::series::frame::FrameLabelMode::Explicit,
@@ -2221,13 +2310,45 @@ async fn pack_flushes_ready_rows_at_pending_then_remainder_at_eof() {
     assert_chunk(&decoded[0], b"k", &[1], &[Some(1.0)], false);
     assert_chunk(&decoded[1], b"k", &[2], &[Some(2.0)], false);
 
+    // A later pending keeps its rows buffered, so both of them share one batch.
+    send(
+        &tx,
+        chunk_with(b"k", &[3], vec![Some(3.0)], Some(metric()), false),
+    );
+    send(
+        &tx,
+        chunk_with(b"k", &[4], vec![Some(4.0)], Some(metric()), false),
+    );
+    assert!(
+        matches!(poll_packed(&mut packed, &waker), Poll::Pending),
+        "a later Pending waits for the deadline instead of publishing"
+    );
+    assert_eq!(
+        polls.load(Ordering::SeqCst),
+        6,
+        "two rows and one Pending poll"
+    );
+    let wakes = wake.0.load(Ordering::SeqCst);
+    tokio::time::advance(PENDING_FLUSH_DELAY).await;
+    assert_eq!(
+        wake.0.load(Ordering::SeqCst) - wakes,
+        1,
+        "the armed deadline wakes the stream by itself"
+    );
     let second = match poll_packed(&mut packed, &waker) {
         Poll::Ready(Some(Ok(batch))) => batch,
-        other => panic!("expected the remainder at EOF, got {other:?}"),
+        other => panic!("expected the deadline to publish both rows, got {other:?}"),
     };
-    assert_eq!(second.num_rows(), 1);
-    assert_eq!(polls.load(Ordering::SeqCst), 5);
-    assert_eq!(drops.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        second.num_rows(),
+        2,
+        "both later rows share one bounded batch"
+    );
+    assert_eq!(
+        polls.load(Ordering::SeqCst),
+        6,
+        "the deadline flush polls no source"
+    );
     let decoded = datatypes::series::frame::unpack_raw_series_frame(
         &schema(),
         datatypes::series::frame::FrameLabelMode::Explicit,
@@ -2235,7 +2356,31 @@ async fn pack_flushes_ready_rows_at_pending_then_remainder_at_eof() {
         &second,
     )
     .unwrap();
-    assert_chunk(&decoded[0], b"k", &[3], &[Some(3.0)], true);
+    assert_eq!(decoded.len(), 2);
+    assert_chunk(&decoded[0], b"k", &[3], &[Some(3.0)], false);
+    assert_chunk(&decoded[1], b"k", &[4], &[Some(4.0)], false);
+
+    // The remainder is published exactly once at EOF, which also releases the source.
+    send(
+        &tx,
+        chunk_with(b"k", &[5], vec![Some(5.0)], Some(metric()), true),
+    );
+    drop(tx);
+    let last = match poll_packed(&mut packed, &waker) {
+        Poll::Ready(Some(Ok(batch))) => batch,
+        other => panic!("expected the remainder at EOF, got {other:?}"),
+    };
+    assert_eq!(last.num_rows(), 1);
+    assert_eq!(polls.load(Ordering::SeqCst), 8);
+    assert_eq!(drops.load(Ordering::SeqCst), 1);
+    let decoded = datatypes::series::frame::unpack_raw_series_frame(
+        &schema(),
+        datatypes::series::frame::FrameLabelMode::Explicit,
+        None,
+        &last,
+    )
+    .unwrap();
+    assert_chunk(&decoded[0], b"k", &[5], &[Some(5.0)], true);
     assert!(matches!(
         poll_packed(&mut packed, &waker),
         Poll::Ready(None)
@@ -2534,6 +2679,496 @@ async fn pack_discards_buffered_rows_and_reports_upstream_error_once() {
         polls.load(Ordering::SeqCst),
         4,
         "the error is reported exactly once"
+    );
+}
+
+/// One row then a permanently pending source: the first buffered `Pending` still publishes at once,
+/// and a later buffered `Pending` publishes at its own deadline without the source waking again.
+#[tokio::test(start_paused = true)]
+async fn pack_pending_publishes_first_batch_at_once_then_waits_for_the_deadline() {
+    let (input, tx, polls, drops) = hand_driven_raw(SeriesOrdering::Contiguous);
+    let mut packed = pack_raw_series(input).unwrap();
+    let wake = Arc::new(CountingWake(AtomicUsize::new(0)));
+    let waker = Waker::from(wake.clone());
+
+    // The first buffered pending keeps the original first-batch latency.
+    send(&tx, chunk(b"k", &[1], false));
+    let first = expect_batch(&mut packed, &waker, "first pending");
+    assert_eq!(first.num_rows(), 1);
+    assert_eq!(
+        polls.load(Ordering::SeqCst),
+        2,
+        "one row and one Pending poll"
+    );
+    assert_eq!(
+        wake.0.load(Ordering::SeqCst),
+        0,
+        "the first pending publishes without waiting for a wake"
+    );
+
+    // The next chunk stays buffered until the deadline instead of being published alone.
+    send(&tx, chunk(b"k", &[2], true));
+    assert!(matches!(poll_packed(&mut packed, &waker), Poll::Pending));
+    assert_eq!(polls.load(Ordering::SeqCst), 4);
+    assert_eq!(drops.load(Ordering::SeqCst), 0);
+    let wakes = wake.0.load(Ordering::SeqCst);
+    tokio::time::advance(PENDING_FLUSH_DELAY).await;
+    assert_eq!(
+        wake.0.load(Ordering::SeqCst) - wakes,
+        1,
+        "the armed deadline wakes the stream without a source wake"
+    );
+    let second = expect_batch(&mut packed, &waker, "deadline flush");
+    assert_eq!(
+        polls.load(Ordering::SeqCst),
+        4,
+        "the deadline flush polls no source"
+    );
+    let decoded = datatypes::series::frame::unpack_raw_series_frame(
+        &schema(),
+        datatypes::series::frame::FrameLabelMode::Explicit,
+        None,
+        &second,
+    )
+    .unwrap();
+    assert_chunk(&decoded[0], b"k", &[2], &[Some(2.0)], true);
+
+    drop(tx);
+    assert!(
+        matches!(poll_packed(&mut packed, &waker), Poll::Ready(None)),
+        "the delivered tail leaves nothing behind"
+    );
+    assert_eq!(drops.load(Ordering::SeqCst), 1);
+}
+
+/// A pending source with nothing buffered arms no deadline: a quiet stream neither spins a timer nor
+/// publishes an empty batch, however long it waits.
+#[tokio::test(start_paused = true)]
+async fn pack_pending_without_buffered_rows_arms_no_deadline() {
+    let (input, tx, polls, _drops) = hand_driven_raw(SeriesOrdering::Contiguous);
+    let mut packed = pack_raw_series(input).unwrap();
+    let wake = Arc::new(CountingWake(AtomicUsize::new(0)));
+    let waker = Waker::from(wake.clone());
+
+    send(&tx, chunk(b"k", &[1], true));
+    assert_eq!(
+        expect_batch(&mut packed, &waker, "first pending").num_rows(),
+        1
+    );
+
+    // The buffer is empty here, so waiting on the source is the only wakeup.
+    for _ in 0..3 {
+        let polls_before = polls.load(Ordering::SeqCst);
+        assert!(matches!(poll_packed(&mut packed, &waker), Poll::Pending));
+        assert_eq!(
+            polls.load(Ordering::SeqCst) - polls_before,
+            1,
+            "each poll reads the source once"
+        );
+        let wakes = wake.0.load(Ordering::SeqCst);
+        tokio::time::advance(PENDING_FLUSH_DELAY * 4).await;
+        assert_eq!(
+            wake.0.load(Ordering::SeqCst),
+            wakes,
+            "an empty cache arms no timer"
+        );
+    }
+}
+
+/// A later pending sets one deadline: rows arriving before it extend the batch instead of restarting
+/// the wait.
+#[tokio::test(start_paused = true)]
+async fn pack_pending_deadline_is_not_reset_by_new_rows() {
+    let (input, tx, polls, _drops) = hand_driven_raw(SeriesOrdering::Contiguous);
+    let mut packed = pack_raw_series(input).unwrap();
+    let wake = Arc::new(CountingWake(AtomicUsize::new(0)));
+    let waker = Waker::from(wake.clone());
+
+    send(&tx, chunk(b"k", &[1], false));
+    assert_eq!(
+        expect_batch(&mut packed, &waker, "first pending").num_rows(),
+        1
+    );
+
+    // This chunk arms the deadline.
+    send(&tx, chunk(b"k", &[2], false));
+    assert!(matches!(poll_packed(&mut packed, &waker), Poll::Pending));
+
+    // A row arriving before the deadline joins the same batch and does not move the deadline.
+    tokio::time::advance(PENDING_FLUSH_DELAY / 2).await;
+    send(&tx, chunk(b"k", &[3], false));
+    assert!(matches!(poll_packed(&mut packed, &waker), Poll::Pending));
+    tokio::time::advance(PENDING_FLUSH_DELAY / 4).await;
+    assert!(
+        matches!(poll_packed(&mut packed, &waker), Poll::Pending),
+        "the deadline is measured from the pending period, not from the newest row"
+    );
+    let polls_before = polls.load(Ordering::SeqCst);
+    tokio::time::advance(PENDING_FLUSH_DELAY / 4).await;
+    let merged = expect_batch(&mut packed, &waker, "unchanged deadline");
+    assert_eq!(
+        merged.num_rows(),
+        2,
+        "both rows share the batch of the original deadline"
+    );
+    assert_eq!(
+        polls.load(Ordering::SeqCst),
+        polls_before,
+        "the deadline flush polls no source"
+    );
+    let decoded = datatypes::series::frame::unpack_raw_series_frame(
+        &schema(),
+        datatypes::series::frame::FrameLabelMode::Explicit,
+        None,
+        &merged,
+    )
+    .unwrap();
+    assert_eq!(decoded.len(), 2);
+    assert_chunk(&decoded[0], b"k", &[2], &[Some(2.0)], false);
+    assert_chunk(&decoded[1], b"k", &[3], &[Some(3.0)], false);
+}
+
+/// A builder that reached its row bound publishes without waiting for the deadline, and the tail
+/// still follows exactly once at EOF.
+#[tokio::test(start_paused = true)]
+async fn pack_pending_publishes_when_the_row_bound_fills() {
+    let (input, tx, _polls, drops) = hand_driven_raw(SeriesOrdering::Contiguous);
+    let mut packed = pack_raw_series(input).unwrap();
+    let wake = Arc::new(CountingWake(AtomicUsize::new(0)));
+    let waker = Waker::from(wake.clone());
+    // One Arrow segment per sample, so the raw walk emits one row per sample instead of one per
+    // chunk, which is what the 256-row bound needs.
+    let segmented = |from: i64, rows: usize, last: bool| -> RawSeriesChunk {
+        let samples = (0..rows)
+            .map(|index| {
+                Samples::from_float(Float64Array::from(vec![Some((from + index as i64) as f64)]))
+            })
+            .collect::<Vec<_>>();
+        RawSeriesChunk::try_new(
+            &schema(),
+            Buffer::from(b"k".to_vec()),
+            Some(metric()),
+            RawTimestamps::try_new(ScalarBuffer::from(
+                (from..from + rows as i64).collect::<Vec<_>>(),
+            ))
+            .unwrap(),
+            SeriesFields::one(Samples::try_from_chunks(samples).unwrap()),
+            last,
+        )
+        .unwrap()
+    };
+
+    send(&tx, segmented(0, 1, false));
+    assert_eq!(
+        expect_batch(&mut packed, &waker, "first pending").num_rows(),
+        1
+    );
+
+    // Two more chunks reach the 256-row bound while the source is only pending.
+    send(&tx, segmented(1, 130, false));
+    send(&tx, segmented(131, 130, false));
+    let full = expect_batch(&mut packed, &waker, "row bound");
+    assert_eq!(full.num_rows(), 256, "a full builder publishes at once");
+
+    // The rows the full batch left behind and the closing row share the next deadline batch.
+    send(&tx, segmented(261, 1, true));
+    assert!(matches!(poll_packed(&mut packed, &waker), Poll::Pending));
+    tokio::time::advance(PENDING_FLUSH_DELAY).await;
+    let tail = expect_batch(&mut packed, &waker, "tail");
+    assert_eq!(
+        tail.num_rows(),
+        5,
+        "the four rows the full batch left behind and the closing row"
+    );
+    let decoded = datatypes::series::frame::unpack_raw_series_frame(
+        &schema(),
+        datatypes::series::frame::FrameLabelMode::Explicit,
+        None,
+        &tail,
+    )
+    .unwrap();
+    assert_eq!(decoded.len(), 5);
+    assert_chunk(&decoded[3], b"k", &[260], &[Some(260.0)], false);
+    assert_chunk(&decoded[4], b"k", &[261], &[Some(261.0)], true);
+
+    drop(tx);
+    assert!(
+        matches!(poll_packed(&mut packed, &waker), Poll::Ready(None)),
+        "the tail is published once"
+    );
+    assert_eq!(drops.load(Ordering::SeqCst), 1);
+}
+
+/// The byte bound publishes before the deadline as well: a row that would cross the estimated cap
+/// flushes the rows already buffered.
+#[tokio::test(start_paused = true)]
+async fn pack_pending_publishes_when_the_byte_bound_fills() {
+    const SAMPLES: usize = 40_000;
+    let (input, tx, _polls, _drops) = hand_driven_raw(SeriesOrdering::Contiguous);
+    let mut packed = pack_raw_series(input).unwrap();
+    let wake = Arc::new(CountingWake(AtomicUsize::new(0)));
+    let waker = Waker::from(wake.clone());
+    let samples = |from: usize| -> (Vec<i64>, Vec<Option<f64>>) {
+        let times: Vec<i64> = (from..from + SAMPLES).map(|index| index as i64).collect();
+        let values = times.iter().map(|time| Some(*time as f64)).collect();
+        (times, values)
+    };
+
+    let (times, values) = samples(0);
+    send(&tx, chunk_with(b"b", &times, values, Some(metric()), false));
+    assert_eq!(
+        expect_batch(&mut packed, &waker, "first pending").num_rows(),
+        1,
+        "one chunk is one row however many samples it carries"
+    );
+
+    let (times, values) = samples(SAMPLES);
+    send(&tx, chunk_with(b"b", &times, values, Some(metric()), false));
+    assert!(
+        matches!(poll_packed(&mut packed, &waker), Poll::Pending),
+        "the buffered row waits for the deadline"
+    );
+
+    // The next row would cross the byte cap, so the buffered row is published at once.
+    let (times, values) = samples(SAMPLES * 2);
+    send(&tx, chunk_with(b"b", &times, values, Some(metric()), true));
+    let byte_bound = expect_batch(&mut packed, &waker, "byte bound");
+    assert_eq!(byte_bound.num_rows(), 1);
+    let decoded = datatypes::series::frame::unpack_raw_series_frame(
+        &schema(),
+        datatypes::series::frame::FrameLabelMode::Explicit,
+        None,
+        &byte_bound,
+    )
+    .unwrap();
+    assert_eq!(decoded.len(), 1);
+    assert_eq!(decoded[0].time.len(), SAMPLES);
+    assert_eq!(decoded[0].time.timestamp(0), Some(SAMPLES as i64));
+    assert!(!decoded[0].is_last);
+
+    // The row that crossed the cap keeps waiting, and the tail is published once at the deadline.
+    assert!(matches!(poll_packed(&mut packed, &waker), Poll::Pending));
+    tokio::time::advance(PENDING_FLUSH_DELAY).await;
+    let tail = expect_batch(&mut packed, &waker, "tail");
+    assert_eq!(tail.num_rows(), 1);
+    let decoded = datatypes::series::frame::unpack_raw_series_frame(
+        &schema(),
+        datatypes::series::frame::FrameLabelMode::Explicit,
+        None,
+        &tail,
+    )
+    .unwrap();
+    assert_eq!(decoded[0].time.timestamp(0), Some((SAMPLES * 2) as i64));
+    assert!(decoded[0].is_last);
+}
+
+/// Raw `Interleaved` fragments stay independent across a bounded batch: one batch can hold two
+/// closed chains, and a fragment chain may recur with the same key in a later deadline batch.
+#[tokio::test(start_paused = true)]
+async fn pack_pending_batches_interleaved_fragments_with_recurring_keys() {
+    let (input, tx, _polls, _drops) = hand_driven_raw(SeriesOrdering::Interleaved);
+    let mut packed = pack_raw_series(input).unwrap();
+    let wake = Arc::new(CountingWake(AtomicUsize::new(0)));
+    let waker = Waker::from(wake.clone());
+
+    send(
+        &tx,
+        chunk_with(b"a", &[5], vec![Some(5.0)], Some(labeled_metric("x")), true),
+    );
+    send(
+        &tx,
+        chunk_with(b"b", &[8], vec![Some(8.0)], Some(labeled_metric("y")), true),
+    );
+    let first = expect_batch(&mut packed, &waker, "first pending");
+    assert_eq!(
+        first.num_rows(),
+        2,
+        "one batch holds two independently closed chains"
+    );
+    let decoded = datatypes::series::frame::unpack_raw_series_frame(
+        &schema(),
+        datatypes::series::frame::FrameLabelMode::Explicit,
+        None,
+        &first,
+    )
+    .unwrap();
+    assert_eq!(decoded.len(), 2);
+    assert_chunk(&decoded[0], b"a", &[5], &[Some(5.0)], true);
+    assert_chunk(&decoded[1], b"b", &[8], &[Some(8.0)], true);
+
+    // A recurring key is a new closed fragment chain, so it may repeat timestamps too.
+    send(
+        &tx,
+        chunk_with(b"a", &[4], vec![Some(4.0)], Some(labeled_metric("x")), true),
+    );
+    assert!(matches!(poll_packed(&mut packed, &waker), Poll::Pending));
+    tokio::time::advance(PENDING_FLUSH_DELAY).await;
+    let second = expect_batch(&mut packed, &waker, "recurring key");
+    assert_eq!(second.num_rows(), 1);
+    let decoded = datatypes::series::frame::unpack_raw_series_frame(
+        &schema(),
+        datatypes::series::frame::FrameLabelMode::Explicit,
+        None,
+        &second,
+    )
+    .unwrap();
+    assert_chunk(&decoded[0], b"a", &[4], &[Some(4.0)], true);
+}
+
+/// An unclosed chain reaching EOF is rejected after the delivered prefix: the published batches stay
+/// published, the buffered tail is dropped, and the source is released.
+#[tokio::test(start_paused = true)]
+async fn pack_pending_rejects_unclosed_chain_at_eof_after_delivering_prefix() {
+    let (input, tx, polls, drops) = hand_driven_raw(SeriesOrdering::Contiguous);
+    let mut packed = pack_raw_series(input).unwrap();
+    let wake = Arc::new(CountingWake(AtomicUsize::new(0)));
+    let waker = Waker::from(wake.clone());
+
+    send(
+        &tx,
+        chunk_with(b"k", &[1], vec![Some(1.0)], Some(metric()), false),
+    );
+    assert_eq!(
+        expect_batch(&mut packed, &waker, "first pending").num_rows(),
+        1
+    );
+
+    // A later row is published at the deadline while its chain stays open.
+    send(
+        &tx,
+        chunk_with(b"k", &[2], vec![Some(2.0)], Some(metric()), false),
+    );
+    assert!(matches!(poll_packed(&mut packed, &waker), Poll::Pending));
+    tokio::time::advance(PENDING_FLUSH_DELAY).await;
+    assert_eq!(
+        expect_batch(&mut packed, &waker, "deadline flush").num_rows(),
+        1
+    );
+
+    // The closing chunk never arrives, so EOF reports the existing error and publishes nothing.
+    send(
+        &tx,
+        chunk_with(b"k", &[3], vec![Some(3.0)], Some(metric()), false),
+    );
+    drop(tx);
+    let error = match poll_packed(&mut packed, &waker) {
+        Poll::Ready(Some(Err(error))) => error,
+        other => panic!("expected an unclosed chain to be rejected, got {other:?}"),
+    };
+    assert_eq!(
+        crate::error::datafusion_status_code::<crate::error::Error>(&error, None),
+        StatusCode::InvalidArguments
+    );
+    assert_eq!(drops.load(Ordering::SeqCst), 1, "EOF releases the source");
+    assert!(
+        matches!(poll_packed(&mut packed, &waker), Poll::Ready(None)),
+        "no buffered row may follow the rejection"
+    );
+    let polls_after = polls.load(Ordering::SeqCst);
+    assert!(
+        matches!(poll_packed(&mut packed, &waker), Poll::Ready(None)),
+        "the rejection is reported exactly once"
+    );
+    assert_eq!(polls.load(Ordering::SeqCst), polls_after);
+}
+
+/// An upstream error after a deadline was armed: the error surfaces once, the buffered rows are
+/// dropped, the delivered prefix stays, and the armed deadline is released.
+#[tokio::test(start_paused = true)]
+async fn pack_pending_error_after_armed_deadline_reports_once_and_drops_buffer() {
+    let status = StatusCode::Unsupported;
+    let (input, tx, polls, drops) = hand_driven_raw(SeriesOrdering::Contiguous);
+    let mut packed = pack_raw_series(input).unwrap();
+    let wake = Arc::new(CountingWake(AtomicUsize::new(0)));
+    let waker = Waker::from(wake.clone());
+
+    send(&tx, chunk(b"a", &[1], true));
+    let prefix = expect_batch(&mut packed, &waker, "first pending");
+    assert_eq!(prefix.num_rows(), 1);
+
+    send(&tx, chunk(b"b", &[2], true));
+    assert!(
+        matches!(poll_packed(&mut packed, &waker), Poll::Pending),
+        "the row waits for the deadline"
+    );
+    assert_eq!(drops.load(Ordering::SeqCst), 0);
+
+    tx.send(Err(BoxedError::new(PlainError::new(
+        "mid-stream".into(),
+        status,
+    ))))
+    .unwrap();
+    let error = match poll_packed(&mut packed, &waker) {
+        Poll::Ready(Some(Err(error))) => error,
+        other => panic!("expected the upstream error, got {other:?}"),
+    };
+    assert_eq!(
+        crate::error::datafusion_status_code::<crate::error::Error>(&error, None),
+        status
+    );
+    assert_eq!(
+        drops.load(Ordering::SeqCst),
+        1,
+        "the error releases the source"
+    );
+
+    let polls_after = polls.load(Ordering::SeqCst);
+    let wakes = wake.0.load(Ordering::SeqCst);
+    tokio::time::advance(PENDING_FLUSH_DELAY * 4).await;
+    assert_eq!(
+        wake.0.load(Ordering::SeqCst),
+        wakes,
+        "the error releases the armed deadline"
+    );
+    assert!(
+        matches!(poll_packed(&mut packed, &waker), Poll::Ready(None)),
+        "the undelivered row is dropped"
+    );
+    assert_eq!(
+        polls.load(Ordering::SeqCst),
+        polls_after,
+        "the error is reported exactly once"
+    );
+}
+
+/// Dropping a pack stream that is waiting on a deadline releases the source and the timer.
+#[tokio::test(start_paused = true)]
+async fn dropping_pending_pack_releases_source_and_deadline() {
+    let (input, tx, polls, drops) = hand_driven_raw(SeriesOrdering::Contiguous);
+    let mut packed = pack_raw_series(input).unwrap();
+    let wake = Arc::new(CountingWake(AtomicUsize::new(0)));
+    let waker = Waker::from(wake.clone());
+
+    send(&tx, chunk(b"a", &[1], true));
+    assert_eq!(
+        expect_batch(&mut packed, &waker, "first pending").num_rows(),
+        1
+    );
+    send(&tx, chunk(b"b", &[2], true));
+    assert!(matches!(poll_packed(&mut packed, &waker), Poll::Pending));
+
+    let polls_before = polls.load(Ordering::SeqCst);
+    let wakes = wake.0.load(Ordering::SeqCst);
+    drop(packed);
+    assert_eq!(
+        drops.load(Ordering::SeqCst),
+        1,
+        "the drop releases upstream"
+    );
+    tokio::time::advance(PENDING_FLUSH_DELAY * 4).await;
+    assert_eq!(
+        wake.0.load(Ordering::SeqCst),
+        wakes,
+        "the drop releases the armed deadline"
+    );
+    assert_eq!(
+        polls.load(Ordering::SeqCst),
+        polls_before,
+        "the drop neither polls upstream nor drains the buffer"
+    );
+    assert!(
+        tx.send(Ok(chunk(b"c", &[3], true))).is_err(),
+        "the dropped stream closed its source channel"
     );
 }
 
