@@ -91,8 +91,8 @@ use store_api::region_engine::RawLabelSource;
 use table::table::scan::SeriesScanExec;
 
 use crate::evaluated::EvaluatedChunk;
-use crate::extension_plan::SeriesRouting;
 use crate::extension_plan::series_repartition::SeriesRepartitionExec;
+use crate::extension_plan::{RawSeriesSourceExec, SeriesRouting};
 use crate::histogram_eval::HISTOGRAM_ROUTING_EXCLUDED_LABELS;
 use crate::native::execute::{InputId, NativeExecutionState, NativeExecutor};
 use crate::native::plan::{
@@ -2244,11 +2244,25 @@ pub struct FusedSeriesExec {
     properties: Arc<PlanProperties>,
 }
 
+/// Whether every series `node` emits is one series it read, under the labels that series read.
+///
+/// A leaf reads one stored series at a time, and an instant selection of the sample hands that
+/// series over under the labels it read. A window answers one series per input series and keeps its
+/// labels, so it preserves identity exactly when its function keeps the metric name: a function that
+/// drops the name - `rate` and every other range function except `last_over_time` and
+/// `first_over_time` - can file two input series whose remaining labels are equal under one output
+/// label set, and those two need not have been read in the same partition.
+///
+/// Everything else writes labels of its own or answers a series built from several inputs, so an
+/// identity above it is not an identity of what it read.
 fn preserves_partition_identity(node: &NativeNode) -> bool {
     match &node.expr {
         NativeExpr::Input(_) => true,
         NativeExpr::Instant { input, op } => {
             op.value == InstantValue::Sample && preserves_partition_identity(input)
+        }
+        NativeExpr::Window { input, op } => {
+            !op.function.drops_metric_name() && preserves_partition_identity(input)
         }
         _ => false,
     }
@@ -2285,9 +2299,18 @@ fn bound_tags_cover_primary_key(label_source: &RawLabelSource) -> bool {
 impl FusedSeriesExec {
     /// Returns whether each output series identity is confined to one input partition.
     ///
-    /// This is true only for a single per-series scan with every primary-key tag bound (or another
-    /// proven fused chain) whose native tree consists solely of identity-preserving instant
-    /// selections and inputs.
+    /// This is true only for a single per-series scan with every primary-key tag bound, a raw source
+    /// that kept its own per-series provenance, or another proven fused chain, whose native tree
+    /// hands every series over under its own labels: identity-preserving instant selections, window
+    /// functions that keep the metric name - `last_over_time` and `first_over_time` - and inputs.
+    ///
+    /// A window that drops the metric name does not qualify even though it answers one series per
+    /// input series: the name it drops is part of what tells two series apart, so the output can
+    /// hold two inputs' series under one label set, and those were not necessarily read on one
+    /// partition. It is refused here rather than refined later, because the router above a producer
+    /// that claims [`CompleteDisjoint`] stops checking for duplicates.
+    ///
+    /// [`CompleteDisjoint`]: crate::extension_plan::IdentityCompletion::CompleteDisjoint
     pub fn has_partition_disjoint_identities(&self) -> bool {
         if self.inputs.len() != 1 || !preserves_partition_identity(self.tree.root()) {
             return false;
@@ -2296,6 +2319,9 @@ impl FusedSeriesExec {
         fn is_complete_series_input(plan: &dyn ExecutionPlan) -> bool {
             if let Some(scan) = plan.downcast_ref::<SeriesScanExec>() {
                 return bound_tags_cover_primary_key(scan.scan_binding());
+            }
+            if let Some(source) = plan.downcast_ref::<RawSeriesSourceExec>() {
+                return source.is_per_series_scan();
             }
             if let Some(cooperative) = plan.downcast_ref::<CooperativeExec>() {
                 return cooperative
