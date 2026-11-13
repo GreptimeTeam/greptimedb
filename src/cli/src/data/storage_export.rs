@@ -41,10 +41,10 @@ fn format_root_path(root: &str) -> String {
 
 /// Helper function to mask multiple secrets in a string.
 fn mask_secrets(mut sql: String, secrets: &[&str]) -> String {
+    let mut secrets: Vec<_> = secrets.iter().filter(|secret| !secret.is_empty()).collect();
+    secrets.sort_by_key(|secret| std::cmp::Reverse(secret.len()));
     for secret in secrets {
-        if !secret.is_empty() {
-            sql = sql.replace(secret, "[REDACTED]");
-        }
+        sql = sql.replace(*secret, "[REDACTED]");
     }
     sql
 }
@@ -378,6 +378,7 @@ mod tests {
         let backend = AzblobBackend {
             config: PrefixedAzblobConnection {
                 azblob_account_name: Some("sig".to_string().into()),
+                azblob_account_key: Some("prefix_sig_CANARY_KEY".to_string().into()),
                 azblob_sas_token: Some("sig=secret-token".to_string().into()),
                 ..Default::default()
             },
@@ -386,6 +387,8 @@ mod tests {
         assert!(connection.contains("SAS_TOKEN='sig=secret-token'"));
         let masked = backend.mask_sensitive_info(&connection);
         assert!(masked.contains("SAS_TOKEN='[REDACTED]'"));
+        assert!(masked.contains("ACCOUNT_KEY='[REDACTED]'"));
+        assert!(!masked.contains("CANARY_KEY"));
         assert!(!masked.contains("sig=secret-token"));
     }
 }

@@ -405,16 +405,18 @@ fn expose_optional_secret(secret: &Option<SecretString>) -> Option<String> {
 
 fn mask_secrets(sql: &str, secrets: &[Option<String>]) -> String {
     let mut masked = sql.to_string();
+    let mut secrets: Vec<_> = secrets
+        .iter()
+        .flatten()
+        .filter(|secret| !secret.is_empty())
+        .collect();
+    secrets.sort_by_key(|secret| std::cmp::Reverse(secret.len()));
     for secret in secrets {
-        if let Some(secret) = secret
-            && !secret.is_empty()
-        {
-            let escaped = escape_sql_literal(secret);
-            if escaped != *secret {
-                masked = masked.replace(&escaped, "[REDACTED]");
-            }
-            masked = masked.replace(secret, "[REDACTED]");
+        let escaped = escape_sql_literal(secret);
+        if escaped != *secret {
+            masked = masked.replace(&escaped, "[REDACTED]");
         }
+        masked = masked.replace(secret, "[REDACTED]");
     }
     masked
 }
@@ -519,7 +521,7 @@ mod tests {
         let storage = ObjectStoreConfig {
             azblob: PrefixedAzblobConnection {
                 azblob_account_name: Some(SecretString::from("sig".to_string())),
-                azblob_account_key: Some(SecretString::from("key".to_string())),
+                azblob_account_key: Some(SecretString::from("prefix_sig_CANARY_KEY".to_string())),
                 azblob_sas_token: Some("sv=2024-11-04&sig=CANARY_SIGNATURE".to_string().into()),
                 ..Default::default()
             },
@@ -532,13 +534,15 @@ mod tests {
         assert!(connection.contains("SAS_TOKEN='sv=2024-11-04&sig=CANARY_SIGNATURE'"));
         assert!(masked.contains("SAS_TOKEN='[REDACTED]'"));
         assert!(!masked.contains("CANARY_SIGNATURE"));
+        assert!(masked.contains("ACCOUNT_KEY='[REDACTED]'"));
+        assert!(!masked.contains("CANARY_KEY"));
     }
 
     #[test]
     fn test_mask_secrets_redacts_sql_escaped_literals() {
         let sql =
             "COPY DATABASE \"greptime\".\"public\" TO 's3://bucket' CONNECTION (SECRET='ab''cd');";
-        let masked = mask_secrets(sql, &[Some("ab'cd".to_string())]);
+        let masked = mask_secrets(sql, &[Some("ab".to_string()), Some("ab'cd".to_string())]);
 
         assert!(!masked.contains("ab'cd"));
         assert!(!masked.contains("ab''cd"));
