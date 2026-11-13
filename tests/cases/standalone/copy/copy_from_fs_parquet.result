@@ -94,6 +94,19 @@ select host, cpu, memory, json_to_string(jsons), ts from with_json order by ts;
 | host3 | 111.1 | 444.4  |                                 | 2024-07-27T10:47:43 |
 +-------+-------+--------+---------------------------------+---------------------+
 
+-- `json_is_object` and `json_get_string` decode the stored value with the strict
+-- jsonb decoder, so they only succeed when COPY FROM stored jsonb instead of the
+-- JSON text itself (issue #10195).
+select host, json_is_object(jsons), json_get_string(jsons, 'foo') from with_json order by ts;
+
++-------+---------------------------------+----------------------------------------------+
+| host  | json_is_object(with_json.jsons) | json_get_string(with_json.jsons,Utf8("foo")) |
++-------+---------------------------------+----------------------------------------------+
+| host1 | true                            | bar                                          |
+| host2 | true                            | bar                                          |
+| host3 |                                 |                                              |
++-------+---------------------------------+----------------------------------------------+
+
 -- SQLNESS PROTOCOL MYSQL
 select host, cpu, memory, jsons, ts from demo where host != 'host3';
 
