@@ -18,7 +18,6 @@ use std::num::NonZeroU64;
 use std::sync::Arc;
 use std::time::Duration;
 
-use common_base::cancellation::CancellableFuture;
 use common_telemetry::{error, info, warn};
 use futures::TryStreamExt;
 use snafu::ensure;
@@ -416,16 +415,22 @@ impl<S: LogStore> TailReplayTask<S> {
 
     /// Awaits `future` unless the task is cancelled first.
     async fn unless_cancelled<T>(&self, future: impl Future<Output = Result<T>>) -> Result<T> {
-        CancellableFuture::new(future, self.state.cancel_handle())
-            .await
-            .unwrap_or_else(|_| FlushCancelledSnafu.fail())
+        let cancellation = self.state.cancel_token();
+        tokio::select! {
+            biased;
+            _ = cancellation.cancelled() => FlushCancelledSnafu.fail(),
+            result = future => result,
+        }
     }
 
     /// Sleeps for `delay`. Returns false if the task is cancelled first.
     async fn sleep(&self, delay: Duration) -> bool {
-        CancellableFuture::new(tokio::time::sleep(delay), self.state.cancel_handle())
-            .await
-            .is_ok()
+        self.unless_cancelled(async {
+            tokio::time::sleep(delay).await;
+            Ok(())
+        })
+        .await
+        .is_ok()
     }
 }
 
