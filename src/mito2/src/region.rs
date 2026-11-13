@@ -1528,6 +1528,27 @@ impl ManifestContext {
         self.manifest_manager.read().await.has_update().await
     }
 
+    /// Fences a Writable leader for a reload, see [Self::fence_for_reload], when the storage
+    /// holds a manifest version newer than the installed one and nothing installed or committed
+    /// another version since the check. Returns whether it fenced the region.
+    pub(crate) async fn fence_for_reload_if_updated(&self, region_id: RegionId) -> Result<bool> {
+        let installed = {
+            let manager = self.manifest_manager.read().await;
+            if !manager.has_update().await? {
+                return Ok(false);
+            }
+            manager.last_version()
+        };
+        let mut manager = self.manifest_manager.write().await;
+        if self.state.load() != RegionRoleState::Leader(RegionLeaderState::Writable)
+            || manager.last_version() != installed
+        {
+            return Ok(false);
+        }
+        self.fence_for_reload(&mut manager, region_id).await;
+        Ok(true)
+    }
+
     /// Returns the current region role state.
     pub(crate) fn current_state(&self) -> RegionRoleState {
         self.state.load()

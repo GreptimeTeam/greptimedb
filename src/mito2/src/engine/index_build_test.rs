@@ -56,7 +56,7 @@ use crate::test_util::{
     CreateRequestBuilder, TestEnv, build_rows, flush_region, put_rows, reopen_region, rows_schema,
 };
 
-fn async_build_mode_config(is_create_on_flush: bool) -> MitoConfig {
+pub(crate) fn async_build_mode_config(is_create_on_flush: bool) -> MitoConfig {
     let mut config = MitoConfig::default();
     config.index.build_mode = IndexBuildMode::Async;
     if !is_create_on_flush {

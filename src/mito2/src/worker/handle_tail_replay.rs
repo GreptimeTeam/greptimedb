@@ -21,8 +21,8 @@ use store_api::logstore::LogStore;
 use store_api::storage::RegionId;
 use tokio::sync::mpsc::Sender;
 
+use crate::access_layer::WriteType;
 use crate::config::IndexBuildMode;
-use crate::flush::FlushReason;
 use crate::manifest::action::{PendingTail, RegionEdit};
 use crate::region::{MitoRegion, MitoRegionRef};
 use crate::request::{BackgroundNotify, BuildIndexRequest, OptionOutputTx, WorkerRequestWithTime};
@@ -43,15 +43,19 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         info!("Replaying the pending WAL tails of region {region_id}");
         let state = CancellableTaskState::new();
         let task = TailReplayTask {
-            flush_task: self.new_flush_task(
+            sst_writer: self.new_sst_writer(
                 &region,
-                FlushReason::TailReplay,
+                WriteType::TailReplay,
                 None,
                 self.config.clone(),
+                self.tail_replay_limits.write_semaphore.clone(),
             ),
             region,
             node_id: self.file_ref_manager.node_id(),
             wal: self.wal.clone(),
+            listener: self.listener.clone(),
+            request_sender: self.sender.clone(),
+            limits: self.tail_replay_limits.clone(),
             state: state.clone(),
         };
         self.tail_replays.insert(region_id, state);
