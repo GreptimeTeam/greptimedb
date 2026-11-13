@@ -1,0 +1,94 @@
+-- SQLNESS PROTOCOL MYSQL
+SHOW VARIABLES query.allow_query_fallback;
+
++----------------------------+
+| query.allow_query_fallback |
++----------------------------+
+| false                      |
++----------------------------+
+
+-- SQLNESS PROTOCOL MYSQL
+SET query.allow_query_fallback = true;
+
+affected_rows: 0
+
+-- SQLNESS PROTOCOL MYSQL
+SHOW VARIABLES query.allow_query_fallback;
+
++----------------------------+
+| query.allow_query_fallback |
++----------------------------+
+| true                       |
++----------------------------+
+
+-- SQLNESS PROTOCOL POSTGRES
+SHOW query.allow_query_fallback;
+
++----------------------------+
+| query.allow_query_fallback |
++----------------------------+
+| false                      |
++----------------------------+
+
+-- SQLNESS PROTOCOL POSTGRES
+SET query.allow_query_fallback = true;
+
+Affected Rows: 0
+
+-- SQLNESS PROTOCOL POSTGRES
+SHOW query.allow_query_fallback;
+
++----------------------------+
+| query.allow_query_fallback |
++----------------------------+
+| true                       |
++----------------------------+
+
+SELECT current_schema();
+
++------------------+
+| current_schema() |
++------------------+
+| public           |
++------------------+
+
+DROP DATABASE IF EXISTS session_isolation_a;
+
+Affected Rows: 0
+
+CREATE DATABASE IF NOT EXISTS session_isolation_a;
+
+Affected Rows: 1
+
+USE session_isolation_a;
+
+Affected Rows: 0
+
+SELECT current_schema();
+
++---------------------+
+| current_schema()    |
++---------------------+
+| session_isolation_a |
++---------------------+
+
+SELECT timezone();
+
++------------+
+| timezone() |
++------------+
+| UTC        |
++------------+
+
+SET time_zone = '+08:00';
+
+Affected Rows: 0
+
+SELECT timezone();
+
++------------+
+| timezone() |
++------------+
+| +08:00     |
++------------+
+
