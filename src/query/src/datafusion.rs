@@ -31,7 +31,7 @@ use common_function::function::FunctionContext;
 use common_function::function_factory::ScalarFunctionFactory;
 use common_query::{Output, OutputData, OutputMeta};
 use common_recordbatch::adapter::{RecordBatchStreamAdapter, RegionQueryStatCounters};
-use common_recordbatch::{EmptyRecordBatchStream, SendableRecordBatchStream};
+use common_recordbatch::{EmptyRecordBatchStream, JsonPayloadPolicy, SendableRecordBatchStream};
 use common_telemetry::tracing;
 use datafusion::catalog::TableFunction;
 use datafusion::dataframe::DataFrame;
@@ -217,10 +217,23 @@ impl DatafusionQueryEngine {
 
         match dml.op {
             WriteOp::Insert(_) => {
+                // See `JsonPayloadPolicy` for the rule.
+                let key_columns = table
+                    .table_info()
+                    .meta
+                    .row_key_column_names()
+                    .cloned()
+                    .collect::<Vec<_>>();
                 while let Some(batch) = stream.next().await {
                     let batch = batch.context(CreateRecordBatchSnafu)?;
                     let column_vectors = batch
-                        .column_vectors(&table_name.to_string(), table.schema())
+                        .column_vectors(
+                            &table_name.to_string(),
+                            table.schema(),
+                            JsonPayloadPolicy::NormalizeExceptKeys {
+                                key_columns: &key_columns,
+                            },
+                        )
                         .map_err(BoxedError::new)
                         .context(QueryExecutionSnafu)?;
                     // We ignore the insert op.
@@ -268,8 +281,13 @@ impl DatafusionQueryEngine {
                         .context(CreateRecordBatchSnafu)?
                         .try_project(&key_indices)
                         .context(CreateRecordBatchSnafu)?;
+                    // See `JsonPayloadPolicy::Preserve`.
                     let column_vectors = batch
-                        .column_vectors(&table_name.to_string(), table.schema())
+                        .column_vectors(
+                            &table_name.to_string(),
+                            table.schema(),
+                            JsonPayloadPolicy::Preserve,
+                        )
                         .map_err(BoxedError::new)
                         .context(QueryExecutionSnafu)?;
                     affected_rows += self

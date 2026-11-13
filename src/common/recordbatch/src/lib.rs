@@ -17,6 +17,7 @@ pub mod cursor;
 pub mod error;
 pub mod ext;
 pub mod filter;
+mod jsonb_payload;
 mod memory;
 pub mod recordbatch;
 pub mod util;
@@ -49,7 +50,7 @@ use datatypes::types::{JsonFormat, StructField, StructType, jsonb_to_string};
 use error::Result;
 use futures::task::{Context, Poll};
 use futures::{Stream, TryStreamExt};
-pub use recordbatch::RecordBatch;
+pub use recordbatch::{JsonPayloadPolicy, RecordBatch};
 use snafu::{ResultExt, ensure};
 
 use crate::error::{ArrowComputeSnafu, NewDfRecordBatchSnafu};
