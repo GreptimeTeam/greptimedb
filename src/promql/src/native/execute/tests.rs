@@ -13538,6 +13538,43 @@ fn scalar_of_ignores_histogram_when_one_float_is_present() {
 }
 
 #[test]
+fn scalar_of_answers_nan_for_a_histogram_alone() {
+    let grid = grid(0, 1_000, 1);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let tree = NativeTree::try_new(scalar_of(evaluated_input(Arc::clone(&grid)))).unwrap();
+    let mut execution = executor(&tree, pool());
+    let mut builder = HistogramBatchBuilder::new();
+    let index = push_histogram(&mut builder, 2);
+    let table = Arc::new(builder.finish().unwrap());
+    execution
+        .push_evaluated(
+            InputId::new(0),
+            evaluated_histogram_chunk_of(
+                &schema,
+                named_metric("histogram", "histogram"),
+                0,
+                vec![Some(index)],
+                &table,
+                true,
+            ),
+        )
+        .unwrap();
+    // A histogram sample holds no float value, so the point answers NaN rather than an error: the
+    // kernel ignores it, as Prometheus' `funcScalar` does.
+    let values = decided(&run(&mut execution));
+    assert_eq!(
+        values.len(),
+        1,
+        "one answer for the one grid point: {values:?}"
+    );
+    assert_eq!(values[0].0, 0);
+    assert!(
+        values[0].1.is_some_and(f64::is_nan),
+        "a histogram alone is no element of the vector: {values:?}"
+    );
+}
+
+#[test]
 fn scalar_of_reads_one_value_per_point_from_the_whole_vector() {
     let grid = grid(0, 1_000, 4);
     let schema = evaluated_schema(Arc::clone(&grid));

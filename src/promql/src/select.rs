@@ -23,9 +23,12 @@ use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use datafusion::arrow::array::Float64Array;
 use datafusion::error::{DataFusionError, Result};
-use datatypes::series::samples::{RowCursor, SampleRef, Series, SeriesSchema};
-use datatypes::series::time::union_positions;
+use datatypes::series::samples::{
+    RowCursor, SampleRef, Samples, Series, SeriesFields, SeriesSchema,
+};
+use datatypes::series::time::{GridRange, TimeAxis, union_positions};
 use datatypes::series::{Label, SeriesLabels};
 
 use crate::go_sort;
@@ -290,41 +293,55 @@ fn sample_offset(metric: &SeriesLabels) -> f64 {
     twox_hash::XxHash64::oneshot(0, &data) as f64 / u64::MAX as f64
 }
 
-/// `scalar(v)`: the value of the only series present at each point, NaN otherwise.
+/// `scalar(v)`: the value of the only float sample present at each point, NaN otherwise.
+///
+/// Native histogram samples are ignored, as Prometheus' `funcScalar` ignores them: they hold no
+/// float value, and they are not an element either, so they never make a point hold more than one
+/// sample. A point whose only sample is a histogram therefore answers NaN, a histogram beside one
+/// float answers that float, and two floats answer NaN.
+///
+/// A scalar holds a value at every point of the grid, so its value array is written where the input
+/// is read rather than staged and rebuilt: the one buffer of values becomes the result's array, and
+/// the counts that decide between a value and a NaN are dropped before it is handed over. Building
+/// it therefore costs one `f64` and one count per point and nothing else per point -- no optional
+/// value, no row index, no second copy of the answer -- which is what the caller reserves for it.
 pub fn scalar(schema: &SeriesSchema, series: &[Series]) -> Result<Series> {
     single_field(schema, "scalar")?;
     let points = grid_points(schema, series)?;
-    let mut values: Vec<Option<f64>> = vec![None; points];
+    let grid = schema
+        .eval_grid
+        .clone()
+        .expect("grid_points reads the schema's evaluation grid");
+    // A point no float has reached answers the Go NaN, which is where it starts. The first float of
+    // a point writes its value there; the second takes the point back to NaN, and so does any float
+    // after it, so a point holding more than one float never reads as holding one.
+    let mut values = vec![GO_NAN; points];
     let mut counts = vec![0u8; points];
     for item in series {
         // Walk the rows this series carries: a sparse axis must not be read as its envelope, and
         // a forward cursor keeps the read proportional to them.
         let mut field = item.fields.as_slice()[0].cursor();
         for (point, row) in item.time.positions() {
-            if let Some(value) = cursor_value(&mut field, row)? {
-                counts[point] = counts[point].saturating_add(1);
-                values[point] = Some(value);
+            match field.at(row).expect("the axis and the fields are aligned") {
+                SampleRef::Float(value) => {
+                    let count = &mut counts[point];
+                    values[point] = if *count == 0 { value } else { GO_NAN };
+                    *count = count.saturating_add(1);
+                }
+                // Neither a histogram nor a position holding no sample is an element of the
+                // vector, so neither decides what the point answers.
+                SampleRef::Histogram(_) | SampleRef::Missing => {}
             }
         }
     }
-    let mut builder = GridSeriesBuilder::try_new(Arc::new(schema.clone()))?;
-    for (point, (value, count)) in values.into_iter().zip(counts).enumerate() {
-        let value = if count == 1 { value } else { Some(GO_NAN) };
-        builder.push(point, &[value])?;
-    }
+    // The counts have decided every value above; handing them back first leaves the values as the
+    // only per-point buffer alive when the answer is built.
+    drop(counts);
+    let fields = SeriesFields::one(Samples::from_float(Float64Array::from(values)));
+    // Every point of the grid holds a value, so the axis is the whole grid as one run.
+    let time = TimeAxis::Grid(GridRange::try_new(grid, 0, points).map_err(external)?);
     let empty = SeriesLabels::try_new(None, Vec::new()).map_err(external)?;
-    // Every grid point is written above, with a value or a NaN, so the result is one run over the
-    // grid and never empty. A different shape would mean this invariant broke, and returning it
-    // silently would hide it.
-    let series = builder
-        .finish(empty)?
-        .ok_or_else(|| DataFusionError::Execution("scalar holds no point of the grid".into()))?;
-    if !series.time.is_contiguous() {
-        return Err(DataFusionError::Execution(
-            "scalar produced several runs, expected exactly one over the grid".into(),
-        ));
-    }
-    Ok(series)
+    Series::try_new(schema, empty, time, fields).map_err(external)
 }
 
 /// `absent(v)`: 1 with `labels` at every point where no series is present.
@@ -714,7 +731,11 @@ fn value_at(series: &Series, point: usize) -> Result<Option<f64>> {
     into_value(series.fields.as_slice()[0].sample(row))
 }
 
-/// A sample as a value, rejecting histograms as the select operators do.
+/// A sample as a value for an operator that ranks or sorts reads it.
+///
+/// The callers read floats only -- `sort` drops the histogram samples before it keys a series by a
+/// value, and `topk` collects float candidates -- so a histogram here is a broken invariant rather
+/// than an input.
 fn into_value(sample: SampleRef<'_>) -> Result<Option<f64>> {
     match sample {
         SampleRef::Missing => Ok(None),
