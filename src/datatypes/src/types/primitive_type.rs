@@ -346,6 +346,7 @@ impl DataType for Int64Type {
             Value::UInt8(v) => num::cast::cast(v).map(Value::Int64),
             Value::UInt16(v) => num::cast::cast(v).map(Value::Int64),
             Value::UInt32(v) => num::cast::cast(v).map(Value::Int64),
+            Value::UInt64(v) => num::cast::cast(v).map(Value::Int64),
             Value::Float32(v) => num::cast::cast(v).map(Value::Int64),
             Value::Float64(v) => num::cast::cast(v).map(Value::Int64),
             Value::String(v) => v.as_utf8().parse::<i64>().map(Value::Int64).ok(),
@@ -536,6 +537,23 @@ mod tests {
             Value::UInt64(12345),
             ConcreteDataType::int32_datatype(),
             Value::Int32(12345)
+        );
+        assert_primitive_cast!(
+            Value::UInt64(12345),
+            ConcreteDataType::int64_datatype(),
+            Value::Int64(12345)
+        );
+        // A UInt64 that fits in i64 casts to its exact Int64 value.
+        assert_primitive_cast!(
+            Value::UInt64(i64::MAX as u64),
+            ConcreteDataType::int64_datatype(),
+            Value::Int64(i64::MAX)
+        );
+        // A UInt64 larger than i64::MAX is not representable as Int64, so the
+        // cast fails (the caller turns this into NULL or an out-of-range error).
+        assert_eq!(
+            ConcreteDataType::int64_datatype().try_cast(Value::UInt64(i64::MAX as u64 + 1)),
+            None
         );
     }
 
