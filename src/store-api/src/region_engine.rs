@@ -581,55 +581,6 @@ pub trait RawSeriesStream: Stream<Item = Result<RawSeriesChunk, BoxedError>> + S
 /// A pinned raw-series stream that can be sent between threads.
 pub type SendableRawSeriesStream = Pin<Box<dyn RawSeriesStream>>;
 
-/// Stable identity metadata for one ordinal in a prepared series source.
-#[derive(Clone, Debug)]
-pub struct SeriesInfo {
-    /// Complete source identity, not a TSID or hash alone. Explicit-label sources
-    /// may use an opaque domain-qualified identity instead of a label-bearing key.
-    pub primary_key: datatypes::arrow::buffer::Buffer,
-    /// Complete explicit metric name and labels, not a partial label projection; or `None` for
-    /// primary-key label binding (undecoded, not nameless). The metric name itself may be absent.
-    pub metric: Option<datatypes::series::SeriesLabels>,
-}
-
-/// An immutable, finite selected set of series prepared for independent range reads.
-///
-/// The count may include series with no samples after filtering. Ordinals are stable local
-/// indexes, not protocol identifiers; each has exactly one complete identity returned by
-/// [`PreparedSeriesSource::series_info`], and that identity matches chunks for that ordinal.
-/// Every reader exposes the same fixed schema, label binding, and ordering before polling,
-/// including for an empty range, and describes labels independently of this source's lifetime.
-/// Key-encoded output has `metric: None`; explicit-label output has a complete
-/// `Some(metric)` matching each chunk, independently of its scan binding.
-/// Ordering describes the stream, not ordinal enumeration.
-///
-/// Preparation, identity lookup, and reader creation do not load sample payloads or perform
-/// hidden blocking I/O. The selected set is bound to the scanner's immutable MVCC view,
-/// predicates, authorization, projection, labels, and existing scan resources. Readers own
-/// resources needed to continue after this source or scanner is dropped. Dropping one reader
-/// does not cancel sibling readers; normal ownership cleanup applies without detached work.
-///
-/// A range must satisfy `start <= end <= num_series()`. Invalid ranges and invalid ordinals
-/// return errors; an empty in-bounds range returns an ordinary empty stream. Repeated and
-/// overlapping reads are independent and do not consume shared iteration state.
-pub trait PreparedSeriesSource: Send + Sync {
-    /// Returns the exact, stable number of selected local series ordinals.
-    fn num_series(&self) -> usize;
-
-    /// Returns label binding shared by series metadata and every reader, without opening or
-    /// polling a reader; the binding is self-contained for remote consumers.
-    fn label_source(&self) -> &RawLabelSource;
-
-    /// Returns identity metadata for an ordinal without polling sample data.
-    fn series_info(&self, ordinal: usize) -> Result<SeriesInfo, BoxedError>;
-
-    /// Creates an independent reader for the half-open ordinal range.
-    fn read_series(
-        &self,
-        range: std::ops::Range<usize>,
-    ) -> Result<SendableRawSeriesStream, BoxedError>;
-}
-
 /// A scanner that provides a way to scan the region concurrently.
 ///
 /// The scanner splits the region into partitions so that each partition can be scanned concurrently.
@@ -719,24 +670,6 @@ pub trait RegionScanner: Debug + DisplayAs + Send {
         _label_source: &RawLabelSource,
     ) -> Result<Option<SendableRawSeriesStream>, BoxedError> {
         todo!()
-    }
-
-    /// Prepares scanner-wide candidates once for independent ordinal-range reads.
-    ///
-    /// Metadata I/O is asynchronous; sample payloads are loaded only by polling readers.
-    /// The owned future does not borrow the scanner. `None` means unsupported before
-    /// execution; errors must propagate without replay through a different scan path.
-    /// Implementations may share preparation with their raw partition adapter.
-    fn prepare_series(
-        &self,
-        _ctx: &QueryScanContext,
-        _metrics_set: &ExecutionPlanMetricsSet,
-        _label_source: &RawLabelSource,
-    ) -> futures::future::BoxFuture<
-        'static,
-        Result<Option<Arc<dyn PreparedSeriesSource>>, BoxedError>,
-    > {
-        Box::pin(async { Ok(None) })
     }
 
     /// Check if there is any predicate exclude region partition exprs that may be executed in this scanner.
@@ -997,9 +930,6 @@ impl RegionStatistic {
 }
 
 #[cfg(test)]
-#[path = "region_engine/prepared_series_tests.rs"]
-mod prepared_series_tests;
-
 #[cfg(test)]
 mod tests {
     use common_recordbatch::{RecordBatch, RecordBatches};
@@ -1055,18 +985,10 @@ mod tests {
         let ctx = QueryScanContext::default();
         let metrics = ExecutionPlanMetricsSet::new();
 
-        // The default raw-scan preflight declines without consuming the legacy scan, and the
-        // prepared-series entrypoint reports unsupported before consumption as well.
+        // The default raw-scan preflight declines without consuming the legacy scan.
         assert!(
             scanner
                 .raw_series_schema(&RawLabelSource::Explicit)
-                .unwrap()
-                .is_none()
-        );
-        assert!(
-            scanner
-                .prepare_series(&ctx, &metrics, &RawLabelSource::Explicit)
-                .await
                 .unwrap()
                 .is_none()
         );
