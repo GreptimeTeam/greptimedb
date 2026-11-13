@@ -157,11 +157,19 @@ impl DynFilterPayload {
     /// rules still leave an over-budget payload the second one is applied as well, so a
     /// static `IN` list that is too large for the budget is dropped last.
     ///
-    /// # No `true` fallback
+    /// # Encoder-level no-substitution rule
     ///
-    /// Transport never rewrites a dynamic predicate to `true`, because doing so would make
-    /// a region believe the producer published a filter it never published. The two
-    /// refusals stay distinct so callers can tell a shape problem from a size problem:
+    /// This encoder never replaces a node in the producer expression with `true`: it
+    /// either serializes the expression, drops whole membership-free top-level conjuncts,
+    /// or returns one of the typed errors below. A caller decides what a refused
+    /// generation means for its receiver. Initial capture keeps the parent filter local;
+    /// the long-lived query fanout path
+    /// (`remote_dyn_filter_registry::fanout_snapshot_for_query`) publishes an explicit
+    /// `true` reset to invalidate a stale region-side predicate. That reset is not a
+    /// representation of the refused producer expression.
+    ///
+    /// The two refusals stay distinct so callers can tell a shape problem from a size
+    /// problem:
     ///
     /// - [`CommonQueryError::DynFilterUnsupported`]: no conjunct can be retained because
     ///   every one of them holds a lookup with no UTF-8 key list (`NOT lookup`, `CASE` /
@@ -172,8 +180,9 @@ impl DynFilterPayload {
     ///   as unsupported; it is a size refusal and uses
     ///   [`ConjunctRetention::OverBudget`].
     ///
-    /// Producers answer both errors by not publishing that generation, which leaves the
-    /// query running with local dynamic filtering.
+    /// Neither error is a query error: initial capture leaves the parent filter local, and
+    /// fanout resets the remote predicate to `true` so a later widening cannot be pruned
+    /// by a stale narrower filter.
     pub fn from_datafusion_expr(
         expr: &Arc<dyn PhysicalExpr>,
         max_payload_bytes: usize,
