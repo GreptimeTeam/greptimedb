@@ -488,33 +488,30 @@ pub(crate) struct CompactionProjectionMapper {
 }
 
 impl CompactionProjectionMapper {
-    /// Builds a projection from the converted source layout. Encoded-only
-    /// batches already match sparse compaction's layout and need no mapper.
-    /// Compaction must request every source field before constructing this helper.
-    pub(crate) fn try_new(format: &FlatReadFormat) -> Result<Option<Self>> {
+    /// Builds a projection from the converted source layout.
+    ///
+    /// Normal sparse writers omit physical tags, so encoded-only compaction
+    /// batches need no mapper. The reader also accepts flat SST schemas containing
+    /// physical tag columns alongside a sparse encoded key: `is_legacy_format`
+    /// selects the flat adapter from the file's column count, not its encoding.
+    /// Such inputs still need their exposed tags removed before compatibility.
+    ///
+    /// Fields absent from the read projection (for example, dropped target
+    /// columns still present in an old SST) are left to compatibility handling.
+    pub(crate) fn new(format: &FlatReadFormat) -> Option<Self> {
         let metadata = format.metadata();
         if !metadata
             .primary_key
             .iter()
             .any(|id| format.projected_index_by_id(*id).is_some())
         {
-            return Ok(None);
+            return None;
         }
         let projection = metadata
             .field_columns()
-            .map(|column| {
-                format
-                    .projected_index_by_id(column.column_id)
-                    .with_context(|| InvalidRequestSnafu {
-                        region_id: metadata.region_id,
-                        reason: format!(
-                            "Compaction projection is missing field {}",
-                            column.column_id
-                        ),
-                    })
-            })
-            .collect::<Result<Vec<_>>>()?;
-        Ok(Some(Self { projection }))
+            .filter_map(|column| format.projected_index_by_id(column.column_id))
+            .collect();
+        Some(Self { projection })
     }
 
     /// Projects columns and appends internal columns for compaction output.
@@ -523,6 +520,10 @@ impl CompactionProjectionMapper {
     /// The trailing timestamp, encoded key, sequence and operation are preserved.
     /// Predicate-only temporary tag arrays must never be appended to this input.
     pub(crate) fn project(&self, batch: DfRecordBatch) -> Result<DfRecordBatch> {
+        debug_assert!(
+            batch.num_columns() >= FIXED_POS_COLUMN_NUM,
+            "Compaction input must contain timestamp, primary key, sequence and operation"
+        );
         let mut projection = self.projection.clone();
         projection.extend(batch.num_columns() - FIXED_POS_COLUMN_NUM..batch.num_columns());
         // Projection must preserve the Arrow layouts already produced by compaction Rewrite.

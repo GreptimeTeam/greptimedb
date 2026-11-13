@@ -1810,12 +1810,43 @@ mod tests {
         )
         .unwrap();
         assert!(flat_format.batch_has_raw_pk_columns());
-        let flat_batch = flat_format.convert_batch(result, None).unwrap();
-        let mapper =
-            crate::read::flat_projection::CompactionProjectionMapper::try_new(&flat_format)
+        assert!(
+            !FlatReadFormat::is_legacy_format(&metadata, result.num_columns(), "flat sparse SST")
                 .unwrap()
-                .unwrap();
+        );
+        let flat_batch = flat_format.convert_batch(result.clone(), None).unwrap();
+        let mapper =
+            crate::read::flat_projection::CompactionProjectionMapper::new(&flat_format).unwrap();
         assert_eq!(record_batch, mapper.project(flat_batch).unwrap());
+
+        // A dropped target field remains in source metadata but not in the
+        // physical read projection. The mapper must preserve the remaining field.
+        let dropped_id = metadata.field_columns().next().unwrap().column_id;
+        let dropped_index = flat_format.projected_index_by_id(dropped_id).unwrap();
+        let projected = result
+            .project(
+                &(0..result.num_columns())
+                    .filter(|i| *i != dropped_index)
+                    .collect::<Vec<_>>(),
+            )
+            .unwrap();
+        let dropped_format = FlatReadFormat::new(
+            metadata.clone(),
+            ReadColumns::new(column_ids.iter().copied().filter(|id| *id != dropped_id)),
+            Some(result.schema()),
+            "dropped field",
+            true,
+        )
+        .unwrap();
+        let mapper =
+            crate::read::flat_projection::CompactionProjectionMapper::new(&dropped_format).unwrap();
+        let projected = dropped_format.convert_batch(projected, None).unwrap();
+        assert_eq!(
+            record_batch
+                .project(&(1..record_batch.num_columns()).collect::<Vec<_>>())
+                .unwrap(),
+            mapper.project(projected).unwrap()
+        );
 
         let format = FlatReadFormat::new(
             metadata.clone(),

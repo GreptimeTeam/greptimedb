@@ -503,7 +503,7 @@ impl ParquetReaderBuilder {
         // indices describe converted batches, not the physical Parquet projection.
         let compaction_projection_mapper =
             if self.compaction && region_meta.primary_key_encoding == PrimaryKeyEncoding::Sparse {
-                CompactionProjectionMapper::try_new(&read_format)?
+                CompactionProjectionMapper::new(&read_format)
             } else {
                 None
             };
