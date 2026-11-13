@@ -443,6 +443,8 @@ impl ObjectStoreLogStore {
             durable_reclaim_boundary: reclaim_boundary,
             unindexed: unindexed.into_iter().chain(moved_past).collect(),
             pending_releases: BTreeMap::new(),
+            release_retry_delay: CREATE_RETRY_DELAY,
+            release_retry_at: None,
             creating: HashSet::new(),
             deleting: deleting.clone(),
             deletes: FuturesUnordered::new(),
@@ -1543,6 +1545,10 @@ struct Actor {
     /// region for the next sealed batch. Timer ticks also seal them when no
     /// entries arrive, and shutdown drains them in both acknowledgement modes.
     pending_releases: BTreeMap<RegionId, EntryId>,
+    /// Durable release-only batches consume a new sequence after each failed
+    /// create, so retry them with bounded exponential backoff.
+    release_retry_delay: Duration,
+    release_retry_at: Option<Instant>,
     /// Sequences whose create is in flight.
     creating: HashSet<u64>,
     deleting: Arc<DeletingObjects>,
@@ -1795,9 +1801,16 @@ impl Actor {
     /// for its last attempt even when the backlog is full. Explicit permanent
     /// releases still seal immediately, as their callers wait for persistence.
     fn seal(&mut self, releases: Vec<Release>) -> bool {
+        let release_retry_waiting = self.ack_mode == AckMode::Durable
+            && self.open_batch.is_empty()
+            && releases.is_empty()
+            && !self.pending_releases.is_empty()
+            && self.stop.is_empty()
+            && self.release_retry_at.is_some_and(|at| Instant::now() < at);
         if self.open_batch.is_empty()
             && releases.is_empty()
-            && (self.pending_releases.is_empty()
+            && (release_retry_waiting
+                || self.pending_releases.is_empty()
                 || (self.stop.is_empty()
                     && (self.failing.is_some()
                         || self.sealed.len() >= MAX_SEALED_BATCHES
@@ -2178,6 +2191,10 @@ impl Actor {
         for waiter in batch.release_waiters {
             let _ = waiter.send(Ok(()));
         }
+        if !batch.releases.is_empty() {
+            self.release_retry_delay = CREATE_RETRY_DELAY;
+            self.release_retry_at = None;
+        }
         #[cfg(any(test, feature = "testing"))]
         for waiter in batch.seal_waiters {
             let _ = waiter.send(Ok(()));
@@ -2242,6 +2259,10 @@ impl Actor {
             self.unindexed.insert(batch.object_seq);
             self.keep_releases(&mut batch);
             batch.fail(failure);
+        }
+        if self.ack_mode == AckMode::Durable && !stopped && !self.pending_releases.is_empty() {
+            self.release_retry_at = Some(Instant::now() + self.release_retry_delay);
+            self.release_retry_delay = (self.release_retry_delay * 2).min(MAX_FAILING_RETRY_DELAY);
         }
         self.reset_open_batch();
         // The stalled append was never admitted; the sealed batches are gone,
@@ -9421,6 +9442,53 @@ mod tests {
                 assert_eq!(Some(&0), recovered.released_entry_ids.get(&region(2)));
             }
         }
+    }
+
+    #[tokio::test]
+    async fn test_durable_release_retries_back_off_after_create_failure() {
+        let _serialized = SERIALIZED.lock().await;
+        let config = ObjectStoreWalConfig {
+            flush_interval: Duration::from_millis(10),
+            ..manual()
+        };
+        let object_store = memory_store();
+        let store = open(object_store.clone(), &config).await;
+        store.fail_creates();
+        let before = METRIC_OBJECT_STORE_WAL_OBJECT_BYTES.get_sample_count();
+        store
+            .release_entries(&provider(region(1)), region(1), 0)
+            .await
+            .unwrap();
+        let (response, _) = oneshot::channel();
+        store
+            .command_tx
+            .send(Command::Seal { response })
+            .await
+            .unwrap();
+        wait_until(|| METRIC_OBJECT_STORE_WAL_OBJECT_BYTES.get_sample_count() > before).await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(
+            before + 1,
+            METRIC_OBJECT_STORE_WAL_OBJECT_BYTES.get_sample_count(),
+            "failed release-only create must not retry on every flush tick"
+        );
+
+        store.allow_creates();
+        timeout(WAIT, async {
+            loop {
+                if watermark(&store, region(1)) == Some(0) {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+        store.stop().await.unwrap();
+        let recovered = recover(store.io.as_ref()).await.unwrap();
+        assert_eq!(Some(&0), recovered.released_entry_ids.get(&region(1)));
+        drop(store);
+        let _ = object_store;
     }
 
     #[tokio::test]
