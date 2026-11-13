@@ -465,12 +465,15 @@ where
     let db = client.metadata().get(super::METADATA_DATABASE);
     let error = if let Some(db) = db {
         let (catalog, schema) = parse_catalog_and_schema_from_db_string(db);
-        if query_handler
-            .is_valid_schema(&catalog, &schema)
-            .await
-            .map_err(convert_err)?
-        {
-            return Ok(true);
+        match query_handler.is_valid_schema(&catalog, &schema).await {
+            Ok(true) => return Ok(true),
+            Ok(false) => {}
+            Err(error) => {
+                let mut error_info: ErrorInfo = convert_err(error).into();
+                error_info.severity = "FATAL".to_string();
+                send_error(client, error_info).await?;
+                return Ok(false);
+            }
         }
         debug!(protocol = "postgres", user = ?client.metadata().get(super::METADATA_USER),
             catalog = %catalog, schema = %schema, reason = "schema_not_found",

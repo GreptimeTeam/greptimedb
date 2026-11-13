@@ -43,6 +43,9 @@ including caches owned by pipeline and protocol handlers.
 - **SQL query** (`instance.rs`): `do_query_inner` handles parsing, interceptors,
   permission checks, timeout/cancellation, and delegates planning/execution to
   `StatementExecutor`. Distributed scans enter through `region_query.rs`.
+  MySQL sessions without a selected database validate explicit scopes before
+  planning or executing SQL, including prepared statements; unqualified targets
+  fail without falling back to `public`.
 - **Exemplar query** (`instance/exemplar.rs`): authorize all selector branches
   before calling `PromQueryInterceptor::pre_execute_exemplars` for each resolved
   exemplar table, with that table's schema context, before scanning it.

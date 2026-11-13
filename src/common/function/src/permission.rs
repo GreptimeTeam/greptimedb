@@ -27,6 +27,14 @@ pub fn ensure_admin_privilege(
     func_ctx: &FunctionContext,
     fn_name: &str,
 ) -> datafusion_common::Result<()> {
+    if func_ctx.query_ctx.channel() == session::context::Channel::Mysql
+        && func_ctx.query_ctx.current_schema().is_empty()
+    {
+        return Err(DataFusionError::External(Box::new(BoxedError::new(
+            session::SessionError::NoDatabaseSelected {},
+        ))));
+    }
+
     let admin_stmt = Statement::Admin(Admin::Func(sql::ast::Function {
         name: ObjectName::from(vec![Ident::new(fn_name)]),
         uses_odbc_syntax: false,

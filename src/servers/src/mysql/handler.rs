@@ -443,7 +443,7 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
             let (catalog, schema) = parse_optional_catalog_and_schema_from_db_string(database);
             (catalog.unwrap_or_else(|| self.session.catalog()), schema)
         } else {
-            (self.session.catalog(), self.session.schema())
+            (self.session.catalog(), String::new())
         };
         // if not specified then **greptime** will be used
         let username = String::from_utf8_lossy(username);
@@ -491,7 +491,9 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
                 Ok(userinfo) => {
                     // on_init writes an ERR packet without aborting the handshake.
                     // Reject here so opensrv closes the connection before its command loop.
-                    if let Err(e) = user_provider.authorize(&catalog, &schema, &userinfo).await {
+                    if database.is_some()
+                        && let Err(e) = user_provider.authorize(&catalog, &schema, &userinfo).await
+                    {
                         METRIC_AUTH_FAILURE
                             .with_label_values(&[e.status_code().as_ref()])
                             .inc();
@@ -518,19 +520,21 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
         let user_info =
             user_info.unwrap_or_else(|| auth::userinfo_by_name(Some(username.to_string())));
 
-        match self.query_handler.is_valid_schema(&catalog, &schema).await {
-            Ok(true) => {}
-            Ok(false) => {
-                warn!(
-                    "Unknown MySQL handshake database {}.{} for user {}",
-                    catalog, schema, username
-                );
-                return false;
-            }
-            Err(error) => {
-                error!(error; user = %username, protocol = "mysql", catalog = %catalog,
+        if database.is_some() {
+            match self.query_handler.is_valid_schema(&catalog, &schema).await {
+                Ok(true) => {}
+                Ok(false) => {
+                    warn!(
+                        "Unknown MySQL handshake database {}.{} for user {}",
+                        catalog, schema, username
+                    );
+                    return false;
+                }
+                Err(error) => {
+                    error!(error; user = %username, protocol = "mysql", catalog = %catalog,
                     schema = %schema, "Failed to validate MySQL handshake database");
-                return false;
+                    return false;
+                }
             }
         }
         self.session.set_catalog(catalog);
@@ -647,9 +651,12 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
                             return Ok(());
                         }
                         Err(e) => {
-                            writer
-                                .error(ErrorKind::ER_SP_BADSTATEMENT, e.output_msg().as_bytes())
-                                .await?;
+                            let kind = if writer::is_no_database_selected(&e) {
+                                ErrorKind::ER_NO_DB_ERROR
+                            } else {
+                                ErrorKind::ER_SP_BADSTATEMENT
+                            };
+                            writer.error(kind, e.output_msg().as_bytes()).await?;
                             return Ok(());
                         }
                     }
@@ -1112,7 +1119,7 @@ mod tests {
     #[tokio::test]
     async fn test_handshake_rejects_unauthorized_or_missing_database() {
         for (allowed, database, accepted) in [
-            ("allowed", None, false),
+            ("allowed", None, true),
             ("allowed", Some("denied"), false),
             ("allowed", Some("allowed"), true),
             ("missing", Some("missing"), false),
@@ -1136,7 +1143,7 @@ mod tests {
             assert_eq!(accepted, result, "{allowed}: {database:?}");
             assert_eq!(
                 if accepted {
-                    database.unwrap_or("public")
+                    database.unwrap_or("")
                 } else {
                     "public"
                 },

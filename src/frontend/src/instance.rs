@@ -90,6 +90,7 @@ use servers::prometheus_handler::{
 use servers::query_handler::sql::SqlQueryHandler;
 use session::context::{Channel, QueryContextRef};
 use session::table_name::table_idents_to_full_name;
+use snafu::IntoError;
 use snafu::prelude::*;
 use sql::ast::ObjectNamePartExt;
 use sql::dialect::Dialect;
@@ -624,11 +625,123 @@ fn attach_timeout(
 }
 
 impl Instance {
+    // A database-less MySQL login has no authorized default scope. Resolve explicit
+    // scopes before planning, including PREPARE, without assigning one to the session.
+    async fn check_unselected_mysql_database(
+        &self,
+        stmt: &Statement,
+        query_ctx: &QueryContextRef,
+    ) -> Result<()> {
+        if query_ctx.channel() != Channel::Mysql || !query_ctx.current_schema().is_empty() {
+            return Ok(());
+        }
+        let no_database = || {
+            error::ExternalSnafu.into_error(BoxedError::new(
+                session::SessionError::NoDatabaseSelected {},
+            ))
+        };
+        let mut stmt = stmt;
+        while let Statement::Explain(explain) = stmt {
+            stmt = &explain.statement;
+        }
+        let mut scopes = HashSet::new();
+        let tables = extract_tables_from_statement_checked(stmt).ok_or_else(no_database)?;
+        for table in tables {
+            let (catalog, schema, _) = table_idents_to_full_name(&table, query_ctx)
+                .map_err(BoxedError::new)
+                .context(ExternalSnafu)?;
+            if schema.is_empty() {
+                return Err(no_database());
+            }
+            scopes.insert((catalog, schema));
+        }
+        let database = match stmt {
+            Statement::ShowTables(show) => Some(show.database.as_deref()),
+            Statement::ShowTableStatus(show) => Some(show.database.as_deref()),
+            Statement::ShowViews(show) => Some(show.database.as_deref()),
+            _ => None,
+        };
+        if let Some(database) = database {
+            let schema = database
+                .filter(|schema| !schema.is_empty())
+                .ok_or_else(no_database)?;
+            scopes.insert((query_ctx.current_catalog().to_string(), schema.to_string()));
+        }
+        let database_name = match stmt {
+            Statement::CreateDatabase(create) => Some(&create.name),
+            Statement::AlterDatabase(alter) => Some(alter.database_name()),
+            Statement::DropDatabase(drop) => Some(drop.name()),
+            Statement::ShowCreateDatabase(show) => Some(&show.database_name),
+            Statement::Copy(sql::statements::copy::Copy::CopyDatabase(copy)) => Some(match copy {
+                CopyDatabase::To(args) | CopyDatabase::From(args) => &args.database_name,
+            }),
+            _ => None,
+        };
+        if let Some(name) = database_name {
+            let scope = match &name.0[..] {
+                [schema] => (
+                    query_ctx.current_catalog().to_string(),
+                    schema.to_string_unquoted(),
+                ),
+                [catalog, schema] => (catalog.to_string_unquoted(), schema.to_string_unquoted()),
+                _ => {
+                    return InvalidSqlSnafu {
+                        err_msg: format!("Invalid database name: {name}"),
+                    }
+                    .fail();
+                }
+            };
+            if scope.1.is_empty() {
+                return Err(no_database());
+            }
+            scopes.insert(scope);
+        }
+        if scopes.is_empty()
+            && !matches!(
+                stmt,
+                Statement::Query(_)
+                    | Statement::Use(_)
+                    | Statement::SetVariables(_)
+                    | Statement::ShowVariables(_)
+                    | Statement::ShowDatabases(_)
+                    | Statement::ShowCharset(_)
+                    | Statement::ShowCollation(_)
+                    | Statement::ShowStatus(_)
+                    | Statement::ShowProcesslist(_)
+                    | Statement::Kill(_)
+            )
+        {
+            return Err(no_database());
+        }
+        if let Some(provider) = self.plugins.get::<auth::UserProviderRef>() {
+            for (catalog, schema) in scopes {
+                if let Err(error) = provider
+                    .authorize(&catalog, &schema, &query_ctx.current_user())
+                    .await
+                {
+                    if matches!(
+                        error.status_code(),
+                        common_error::status_code::StatusCode::PermissionDenied
+                            | common_error::status_code::StatusCode::AccessDenied
+                    ) {
+                        warn!(user = query_ctx.current_user().username(), protocol = "mysql",
+                            catalog = %catalog, schema = %schema, reason = %error.status_code(),
+                            "Database access denied without a selected database");
+                    }
+                    return Err(error).context(PermissionSnafu);
+                }
+            }
+        }
+        Ok(())
+    }
+
     async fn check_sql_permission(
         &self,
         stmt: &Statement,
         query_ctx: &QueryContextRef,
     ) -> Result<()> {
+        self.check_unselected_mysql_database(stmt, query_ctx)
+            .await?;
         self.plugins
             .get::<PermissionCheckerRef>()
             .as_ref()
@@ -907,6 +1020,15 @@ impl Instance {
         query_ctx: QueryContextRef,
     ) -> Result<Output> {
         ensure!(!self.is_suspended(), error::SuspendedSnafu);
+        if let Some(stmt) = &stmt {
+            self.check_unselected_mysql_database(stmt, &query_ctx)
+                .await?;
+        } else if query_ctx.channel() == Channel::Mysql && query_ctx.current_schema().is_empty() {
+            return Err(BoxedError::new(
+                session::SessionError::NoDatabaseSelected {},
+            ))
+            .context(ExternalSnafu);
+        }
 
         let query_interceptor_opt = self.plugins.get::<SqlQueryInterceptorRef<Error>>();
         let query_interceptor = query_interceptor_opt.as_ref();
@@ -1063,6 +1185,8 @@ impl Instance {
         query_ctx: QueryContextRef,
     ) -> Result<Option<DescribeResult>> {
         ensure!(!self.is_suspended(), error::SuspendedSnafu);
+        self.check_unselected_mysql_database(&stmt, &query_ctx)
+            .await?;
 
         // EXPLAIN / EXPLAIN ANALYZE wrap an inner statement; describe them when the
         // wrapped statement is something we already plan (so that bind parameters
@@ -3711,6 +3835,137 @@ mod tests {
             .unwrap_err();
         assert_eq!(StatusCode::Unexpected, error.status_code());
         assert_eq!("public", ctx.current_schema());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_mysql_without_selected_database() -> TestResult<()> {
+        let plugins = Plugins::new();
+        plugins.insert::<auth::UserProviderRef>(Arc::new(auth::tests::MockUserProvider::default()));
+        let instance = test_instance_with_plugins(
+            test_table(1024, "source")?,
+            test_table(1025, "target")?,
+            plugins,
+        )
+        .await?;
+        let ctx = Arc::new(QueryContext::with_channel("greptime", "", Channel::Mysql));
+        for sql in [
+            "SELECT * FROM source",
+            "INSERT INTO source VALUES (1, 0)",
+            "CREATE TABLE t (ts TIMESTAMP TIME INDEX)",
+            "SHOW TABLES",
+            "TRUNCATE TABLE source",
+            "SHOW CREATE TABLE source",
+            "COPY source TO '/tmp/out'",
+            "SELECT flush_table('public.source')",
+        ] {
+            let result = instance.do_query_inner(sql, ctx.clone()).await.remove(0);
+            let error = match result {
+                Err(error) => Err::<(), _>(BoxedError::new(error))
+                    .context(servers::error::ExecuteQuerySnafu)
+                    .unwrap_err(),
+                Ok(output) => {
+                    let OutputData::Stream(stream) = output.data else {
+                        panic!("Expected a query stream: {sql}");
+                    };
+                    common_recordbatch::util::collect(stream)
+                        .await
+                        .context(servers::error::CollectRecordbatchSnafu)
+                        .unwrap_err()
+                }
+            };
+            let (kind, message) = servers::mysql::writer::handle_err(error, ctx.clone());
+            assert_eq!(1046, kind as u16, "{sql}: {message}");
+            assert!(message.contains("No database selected"), "{message}");
+        }
+        let output = instance
+            .do_query_inner(
+                "SELECT 1, DATABASE() IS NULL AS no_database, SCHEMA() IS NULL AS no_schema",
+                ctx.clone(),
+            )
+            .await
+            .remove(0)
+            .unwrap();
+        assert_eq!(2, output.data.pretty_print().await.matches("true").count());
+        for sql in [
+            "SELECT * FROM denied.source",
+            "SHOW TABLES FROM denied",
+            "USE denied",
+        ] {
+            let error = instance
+                .do_query_inner(sql, ctx.clone())
+                .await
+                .remove(0)
+                .unwrap_err();
+            assert_eq!(
+                StatusCode::AccessDenied,
+                error.status_code(),
+                "{sql}: {error}"
+            );
+            assert!(ctx.current_schema().is_empty());
+        }
+        for sql in [
+            "SELECT * FROM public.source",
+            "SHOW TABLES FROM public",
+            "SET time_zone = '+00:00'",
+        ] {
+            assert!(
+                instance
+                    .do_query_inner(sql, ctx.clone())
+                    .await
+                    .remove(0)
+                    .is_ok(),
+                "{sql}"
+            );
+        }
+        let plan = instance
+            .do_describe_inner(parse_one_sql("SELECT * FROM public.source"), ctx.clone())
+            .await
+            .unwrap()
+            .unwrap()
+            .logical_plan;
+        instance
+            .do_exec_plan_inner(
+                plan.clone(),
+                Some(parse_one_sql("SELECT * FROM public.source")),
+                ctx.clone(),
+            )
+            .await
+            .unwrap();
+        let error = instance
+            .do_describe_inner(parse_one_sql("SELECT * FROM denied.source"), ctx.clone())
+            .await
+            .unwrap_err();
+        assert_eq!(StatusCode::AccessDenied, error.status_code());
+        assert!(ctx.current_schema().is_empty());
+        let error = instance
+            .do_exec_plan_inner(plan.clone(), None, ctx.clone())
+            .await
+            .unwrap_err();
+        assert_eq!(StatusCode::DatabaseNotFound, error.status_code());
+        let current_user = ctx.current_user();
+        ctx.set_current_user(Arc::new(AdminUserInfo));
+        let error = instance
+            .do_exec_plan_inner(
+                plan,
+                Some(parse_one_sql("SELECT * FROM public.source")),
+                ctx.clone(),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(StatusCode::AccessDenied, error.status_code());
+        ctx.set_current_user(current_user);
+        instance
+            .do_query_inner("USE public", ctx.clone())
+            .await
+            .remove(0)
+            .unwrap();
+        assert_eq!("public", ctx.current_schema());
+        instance
+            .do_query_inner("SELECT * FROM source", ctx)
+            .await
+            .remove(0)
+            .unwrap();
         Ok(())
     }
 

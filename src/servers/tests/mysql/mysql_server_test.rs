@@ -470,7 +470,7 @@ async fn test_bearer_token_auth_over_clear_password() -> Result<()> {
             assert_eq!(1, value);
             assert_eq!(1, provider.authentications.load(Ordering::Relaxed));
             assert_eq!(
-                1 + usize::from(database.is_some()),
+                2 * usize::from(database.is_some()),
                 provider.authorizations.load(Ordering::Relaxed)
             );
             connection.disconnect().await.unwrap();
@@ -588,9 +588,23 @@ async fn test_db_name() -> Result<()> {
     mysql_server.start(listening).await.unwrap();
     let server_addr = mysql_server.bind_addr().unwrap();
 
-    // None actually uses default database name
-    let r = create_connection_default_db_name(server_addr.port(), client_tls).await;
-    let _ = r.unwrap();
+    let mut connection = create_connection(server_addr.port(), None, client_tls)
+        .await
+        .unwrap();
+    let database: Option<String> = connection
+        .query_first("SELECT DATABASE()")
+        .await
+        .unwrap()
+        .flatten();
+    assert_eq!(None, database);
+    connection.query_drop("USE public").await.unwrap();
+    let database: String = connection
+        .query_first("SELECT DATABASE()")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!("public", database);
+    connection.disconnect().await.unwrap();
 
     let r = create_connection(server_addr.port(), Some("tomcat"), client_tls).await;
     assert!(r.is_err());
