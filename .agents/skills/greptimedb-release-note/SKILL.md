@@ -248,8 +248,7 @@ Mirror past release bodies (`gh release view v1.0.0 --repo GreptimeTeam/greptime
     so.
   - Give an example (SQL / TOML config) only where it helps readers act. Don't pick highlights,
     or the example, by what is easy to demonstrate.
-  - One highlight covers one user-visible problem or closely related outcome, such as write
-    durability. Related fixes can share an entry; omit their implementation mechanisms.
+  - One highlight covers one user-visible problem or closely related outcome. Related fixes can share an entry; omit their implementation mechanisms.
   - Sources: the PR body's sections on impact, compatibility, and behavior changes, plus the
     code and config it touches, not the title alone. Verify examples against the related docs
     PR/page in the docs repo (`GreptimeTeam/docs`, often checked out locally),
@@ -266,32 +265,13 @@ Mirror past release bodies (`gh release view v1.0.0 --repo GreptimeTeam/greptime
   ```
   Screenshots need absolute `https://` URLs: the body is copied to the GitHub release, where
   relative and site-root (`/img/...`) paths don't resolve.
-- **`### Upgrade and compatibility notes`** — check every PR in the release for:
-  `!` titles; `Compatibility`, `Behavior change`, `Breaking` paragraphs in the body (often a
-  plain `Compatibility:` line, not a heading); unchecked "API changes are backward compatible" /
-  "Schema or data changes are backward compatible" boxes; new config options and their defaults;
-  changed defaults; persisted format changes; rolling-upgrade order; new hard limits. These
-  signals set reading order, not a filter: a limit can sit in plain prose with every box
-  checked, so read the body of every user-facing `feat`/`fix` PR. Examples of what is easy to
-  miss: a 512 MiB cap on decompressed request bodies (#9264); a default step for stepless
-  subqueries (#9481).
-  - Write for database users and operators. Include required upgrade actions, observable
-    compatibility changes, and concrete rolling-upgrade risks. State the affected usage,
-    consequence, and action where one is needed; link detailed checks to the source.
-  - A `!` title or unchecked compatibility box is an investigation signal, not a publication
-    category. Internal Rust API/type changes and source-integrator obligations belong in the
-    PR, not these notes. Move their generated bullets to the appropriate changelog group,
-    preserving titles, links, and contributor attribution.
-  - Automatic cache recovery, internal accounting, and scheduler changes without a required
-    operator action belong in ordinary fixes or performance entries. Do not turn them into
-    vague instructions to review settings or monitor load.
-  - Keep genuine external incompatibilities even when they fix bugs or affect few users.
-    For unsupported manual configurations, name the opt-in setting and scope the warning;
-    do not imply that normal deployments need an audit.
-  - Use one combined section when short; split upgrade steps from breaking changes only when
-    that helps navigation. Omit empty sections and avoid repeating the same change across
-    curated sections. Each bullet should fit in one or two sentences without a PR's internal
-    contracts, edge-case inventory, or implementation history.
+- **`### Upgrade and compatibility notes`** — distinguish internal changes from changes
+  visible to database users and operators. Include only user-visible compatibility changes
+  and required upgrade actions; state who is affected, what changes, and what to do.
+  Read PR bodies to establish impact: `!` titles and compatibility checkboxes alone do not
+  determine whether a change belongs here. Keep internal changes in the ordinary changelog,
+  preserving PR links and contributor attribution. Omit empty sections and avoid repeating
+  information across curated sections.
 - **Benchmark results** (optional) — state the baseline version (often the previous formal
   release, not the previous beta), data size, cache state, and hardware. Don't attribute results
   to single PRs. Leave out results the benchmark marks as not for publication, and smoke-level
