@@ -27,7 +27,7 @@ function retry_fetch() {
     local filename=$2
     local auth_args=()
 
-    if [[ -n "$DASHBOARD_GITHUB_TOKEN" ]]; then
+    if [[ -n "$DASHBOARD_GITHUB_TOKEN" && "$url" == https://github.com/* ]]; then
         auth_args=(
             -H "Authorization: Bearer ${DASHBOARD_GITHUB_TOKEN}"
             -H "Accept: application/octet-stream"

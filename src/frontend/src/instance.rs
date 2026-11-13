@@ -5160,6 +5160,43 @@ mod tests {
         Ok(())
     }
 
+    #[tokio::test]
+    async fn test_copy_in_checks_table_permissions() -> TestResult<()> {
+        use servers::query_handler::CopyInHandler;
+
+        for source in [
+            test_table(1024, "denied")?,
+            test_physical_table(1024, "physical")?,
+        ] {
+            let name = source.table_info().name.clone();
+            let plugins = Plugins::new();
+            plugins.insert::<PermissionCheckerRef>(Arc::new(RejectUnresolvedPermissionChecker));
+            let instance =
+                test_instance_with_plugins(source, test_table(1025, "target")?, plugins).await?;
+            let ctx = QueryContext::arc();
+            assert_permission_denied(
+                instance
+                    .copy_in_table("greptime", "public", &name, ctx.clone())
+                    .await,
+            );
+            assert!(
+                instance
+                    .copy_in_table("greptime", "public", "target", ctx.clone())
+                    .await
+                    .unwrap()
+                    .is_some()
+            );
+            assert!(
+                instance
+                    .copy_in_table("greptime", "public", "missing", ctx)
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+        }
+        Ok(())
+    }
+
     /// COPY FROM STDIN must enforce the same cross-catalog restriction as
     /// SQL INSERT when `disallow_cross_catalog_query` is configured.
     #[tokio::test]
