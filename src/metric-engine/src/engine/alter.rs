@@ -29,8 +29,8 @@ use validate::validate_alter_region_requests;
 
 use crate::engine::MetricEngineInner;
 use crate::error::{
-    AddingFieldColumnSnafu, LogicalRegionNotFoundSnafu, PhysicalRegionNotFoundSnafu, Result,
-    SerializeColumnMetadataSnafu, UnexpectedRequestSnafu,
+    AddingFieldColumnSnafu, LogicalRegionNotFoundSnafu, MissingPhysicalColumnSnafu,
+    PhysicalRegionNotFoundSnafu, Result, SerializeColumnMetadataSnafu, UnexpectedRequestSnafu,
 };
 use crate::utils::{append_manifest_info, encode_manifest_info_to_extensions, to_data_region_id};
 
@@ -163,8 +163,7 @@ impl MetricEngineInner {
             );
         }
 
-        self.data_region
-            .add_columns(data_region_id, new_columns_to_add, index_options)
+        self.add_physical_columns(physical_region_id, new_columns_to_add, index_options)
             .await?;
 
         let physical_columns = self.data_region.physical_columns(data_region_id).await?;
@@ -173,28 +172,39 @@ impl MetricEngineInner {
             .map(|metadata| (metadata.column_schema.name.as_str(), metadata))
             .collect::<HashMap<_, _>>();
 
-        let logical_region_columns = requests.iter().map(|(region_id, request)| {
+        // The physical region now has every requested column, either because this call
+        // added it or because it was already there with the same definition.
+        let mut logical_region_columns = Vec::with_capacity(requests.len());
+        for (region_id, request) in &requests {
             let AlterKind::AddColumns { columns } = &request.kind else {
                 unreachable!()
             };
-            (
-                *region_id,
-                columns
-                    .iter()
-                    .map(|col| {
-                        let column_name = col.column_metadata.column_schema.name.as_str();
-                        let column_metadata = *physical_schema_map.get(column_name).unwrap();
-                        (column_name, column_metadata)
-                    })
-                    .collect::<HashMap<_, _>>(),
-            )
-        });
+            let mut column_metadata = HashMap::with_capacity(columns.len());
+            for col in columns {
+                let column_name = col.column_metadata.column_schema.name.as_str();
+                let metadata =
+                    physical_schema_map
+                        .get(column_name)
+                        .copied()
+                        .with_context(|| MissingPhysicalColumnSnafu {
+                            name: column_name,
+                            region_id: physical_region_id,
+                        })?;
+                column_metadata.insert(column_name, metadata);
+            }
+            logical_region_columns.push((*region_id, column_metadata));
+        }
 
-        let new_add_columns = new_column_indices.keys().map(|name| {
-            // Safety: previous steps ensure the physical region exist
-            let column_metadata = *physical_schema_map.get(name).unwrap();
-            (name.to_string(), column_metadata.clone())
-        });
+        let mut new_add_columns = Vec::with_capacity(new_column_indices.len());
+        for name in new_column_indices.keys() {
+            let column_metadata = physical_schema_map.get(name).copied().with_context(|| {
+                MissingPhysicalColumnSnafu {
+                    name: name.to_string(),
+                    region_id: physical_region_id,
+                }
+            })?;
+            new_add_columns.push((name.to_string(), column_metadata.clone()));
+        }
 
         // The data region has the new columns, whatever happens to the metadata write.
         self.state
@@ -205,7 +215,11 @@ impl MetricEngineInner {
         // Writes logical regions metadata to metadata region
         let result = self
             .metadata_region
-            .add_logical_regions(physical_region_id, false, logical_region_columns)
+            .add_logical_regions(
+                physical_region_id,
+                false,
+                logical_region_columns.into_iter(),
+            )
             .await;
         // A failed write may still be applied, e.g. when the region lease expires after the WAL
         // append, so the cached logical columns are dropped either way.
@@ -284,6 +298,9 @@ mod test {
     use common_meta::ddl::test_util::assert_column_name_and_id;
     use common_meta::ddl::utils::{parse_column_metadatas, parse_manifest_infos_from_extensions};
     use common_query::prelude::{greptime_timestamp, greptime_value};
+    use datatypes::prelude::ConcreteDataType;
+    use datatypes::schema::ColumnSchema;
+    use store_api::metadata::ColumnMetadata;
     use store_api::metric_engine_consts::ALTER_PHYSICAL_EXTENSION_KEY;
     use store_api::region_engine::RegionEngine;
     use store_api::region_request::{
@@ -292,7 +309,9 @@ mod test {
     use store_api::storage::RegionId;
     use store_api::storage::consts::ReservedColumnId;
 
+    use crate::engine::IndexOptions;
     use crate::test_util::{TestEnv, alter_logical_region_request, create_logical_region_request};
+    use crate::utils::to_data_region_id;
 
     async fn check_alter_physical_skip_wal(
         engine: &super::MetricEngineInner,
@@ -441,5 +460,110 @@ mod test {
                 ("tag1", 3),
             ],
         );
+    }
+
+    // Column ids are derived from the current metadata, so concurrent requests on
+    // logical regions sharing one physical region must not hand the same id to
+    // different columns.
+    #[tokio::test]
+    async fn test_add_physical_columns_concurrently_assigns_distinct_ids() {
+        let env = TestEnv::new().await;
+        env.init_metric_region().await;
+        let physical_region_id = env.default_physical_region_id();
+        let data_region_id = to_data_region_id(physical_region_id);
+        let tag = |name: &str| ColumnMetadata {
+            column_id: 0,
+            semantic_type: SemanticType::Tag,
+            column_schema: ColumnSchema::new(name, ConcreteDataType::string_datatype(), false),
+        };
+
+        let inner = env.metric().inner.clone();
+        let (first, second) = tokio::join!(
+            inner.add_physical_columns(
+                physical_region_id,
+                vec![tag("tag4")],
+                IndexOptions::Inverted,
+            ),
+            inner.add_physical_columns(
+                physical_region_id,
+                vec![tag("tag5")],
+                IndexOptions::Inverted,
+            ),
+        );
+        first.unwrap();
+        second.unwrap();
+
+        let metadata = env.mito().get_metadata(data_region_id).await.unwrap();
+        assert_ne!(
+            metadata.column_by_name("tag4").unwrap().column_id,
+            metadata.column_by_name("tag5").unwrap().column_id
+        );
+    }
+
+    // A request that Mito accepted but that never wrote the logical metadata leaves the
+    // physical column installed while the cache still misses it. The retry must reuse the
+    // installed column id and repair both the cache and the logical metadata.
+    #[tokio::test]
+    async fn test_alter_logical_region_after_cancelled_physical_alter() {
+        let env = TestEnv::new().await;
+        env.init_metric_region().await;
+        let physical_region_id = env.default_physical_region_id();
+        let logical_region_id = env.default_logical_region_id();
+        let data_region_id = to_data_region_id(physical_region_id);
+
+        env.data_region()
+            .add_columns(
+                physical_region_id,
+                vec![ColumnMetadata {
+                    column_id: 0,
+                    semantic_type: SemanticType::Tag,
+                    column_schema: ColumnSchema::new(
+                        "tag1",
+                        ConcreteDataType::string_datatype(),
+                        false,
+                    ),
+                }],
+                IndexOptions::Inverted,
+            )
+            .await
+            .unwrap();
+        let installed_id = env
+            .mito()
+            .get_metadata(data_region_id)
+            .await
+            .unwrap()
+            .column_by_name("tag1")
+            .unwrap()
+            .column_id;
+
+        env.metric()
+            .handle_batch_ddl_requests(BatchRegionDdlRequest::Alter(vec![(
+                logical_region_id,
+                alter_logical_region_request(&["tag1"]),
+            )]))
+            .await
+            .unwrap();
+
+        let metadata = env.mito().get_metadata(data_region_id).await.unwrap();
+        assert_eq!(
+            metadata.column_by_name("tag1").unwrap().column_id,
+            installed_id
+        );
+        assert_eq!(
+            env.metadata_region()
+                .column_semantic_type(physical_region_id, logical_region_id, "tag1")
+                .await
+                .unwrap(),
+            Some(SemanticType::Tag)
+        );
+
+        let engine = env.metric();
+        let state = engine.inner.state.read().unwrap();
+        let physical_columns = state
+            .physical_region_states()
+            .get(&data_region_id)
+            .unwrap()
+            .physical_columns();
+        assert!(physical_columns.contains_key("tag1"));
     }
 }

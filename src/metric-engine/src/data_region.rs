@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
+
 use api::v1::SemanticType;
 use common_query::native_histogram::is_native_histogram_value_type;
 use common_telemetry::{debug, info};
@@ -26,7 +28,7 @@ use store_api::region_request::{
 use store_api::storage::consts::ReservedColumnId;
 use store_api::storage::{ConcreteDataType, RegionId};
 
-use crate::engine::IndexOptions;
+use crate::engine::{IndexOptions, validate_shared_column};
 use crate::error::{
     AddingFieldColumnSnafu, ColumnTypeMismatchSnafu, ForbiddenPhysicalAlterSnafu,
     MitoReadOperationSnafu, MitoWriteOperationSnafu, Result, SetSkippingIndexOptionSnafu,
@@ -44,7 +46,7 @@ pub struct DataRegion {
 }
 
 impl DataRegion {
-    pub fn new(mito: MitoEngine) -> Self {
+    pub(crate) fn new(mito: MitoEngine) -> Self {
         Self { mito }
     }
 
@@ -55,10 +57,16 @@ impl DataRegion {
     /// logical regions.
     ///
     /// Invoker don't need to set up or verify the column id. This method will adjust
-    /// it using underlying schema.
+    /// it using underlying schema, and reuse the persisted id of a column that the
+    /// physical region already has.
     ///
     /// This method will also set the nullable marker to true. All of those change are applies
     /// to `columns` in-place.
+    ///
+    /// Callers must hold the column-add lock of the physical region, otherwise two
+    /// concurrent requests could read the same metadata and assign one column id to
+    /// different columns. Use
+    /// [MetricEngineInner::add_physical_columns](crate::engine::MetricEngineInner::add_physical_columns).
     pub async fn add_columns(
         &self,
         region_id: RegionId,
@@ -72,10 +80,13 @@ impl DataRegion {
 
         let region_id = utils::to_data_region_id(region_id);
 
-        let num_columns = columns.len();
-        let request = self
+        let Some((new_column_count, request)) = self
             .assemble_alter_request(region_id, columns, index_options)
-            .await?;
+            .await?
+        else {
+            // Every requested column already exists.
+            return Ok(());
+        };
 
         let _timer = MITO_DDL_DURATION.start_timer();
 
@@ -85,25 +96,54 @@ impl DataRegion {
             .await
             .context(MitoWriteOperationSnafu)?;
 
-        PHYSICAL_COLUMN_COUNT.add(num_columns as _);
+        PHYSICAL_COLUMN_COUNT.add(new_column_count as _);
 
         Ok(())
     }
 
     /// Generate wrapped [RegionAlterRequest] with given [ColumnMetadata].
-    /// This method will modify `columns` in-place.
+    ///
+    /// Columns that the physical region already has are not added again: their
+    /// definitions are validated and their persisted column ids are reused.
+    /// Returns `None` if every given column already exists.
     async fn assemble_alter_request(
         &self,
         region_id: RegionId,
         columns: Vec<ColumnMetadata>,
         index_options: IndexOptions,
-    ) -> Result<RegionRequest> {
-        // retrieve underlying version
+    ) -> Result<Option<(usize, RegionRequest)>> {
         let region_metadata = self
             .mito
             .get_metadata(region_id)
             .await
             .context(MitoReadOperationSnafu)?;
+
+        // The caller derives the columns to add from a cached schema that a cancelled or
+        // concurrent alter may have left behind, so the names are checked against the
+        // real metadata instead of being trusted.
+        let mut seen: HashMap<String, usize> = HashMap::with_capacity(columns.len());
+        let mut columns_to_add = Vec::with_capacity(columns.len());
+        for column in columns {
+            let name = column.column_schema.name.clone();
+            if let Some(existing) = region_metadata.column_by_name(&name) {
+                validate_shared_column(region_id, existing, &column)?;
+                continue;
+            }
+            // The batch itself may repeat a column that is not installed yet: the duplicate
+            // must agree with the first occurrence, and only one of them is added.
+            if let Some(&index) = seen.get(&name) {
+                validate_shared_column(region_id, &columns_to_add[index], &column)?;
+                continue;
+            }
+            seen.insert(name, columns_to_add.len());
+            columns_to_add.push(column);
+        }
+
+        if columns_to_add.is_empty() {
+            debug!("No new columns to add to physical region {region_id:?}");
+            return Ok(None);
+        }
+        let new_column_count = columns_to_add.len();
 
         // find the max column id
         let new_column_id_start = 1 + region_metadata
@@ -120,7 +160,7 @@ impl DataRegion {
             .unwrap_or(0);
 
         // overwrite semantic type
-        let new_columns = columns
+        let new_columns = columns_to_add
             .into_iter()
             .enumerate()
             .map(|(delta, mut c)| {
@@ -188,7 +228,7 @@ impl DataRegion {
             },
         });
 
-        Ok(alter_request)
+        Ok(Some((new_column_count, alter_request)))
     }
 
     pub async fn write_data(
@@ -258,6 +298,14 @@ mod test {
 
     use super::*;
     use crate::test_util::TestEnv;
+
+    fn tag_column(name: &str) -> ColumnMetadata {
+        ColumnMetadata {
+            column_id: 0,
+            semantic_type: SemanticType::Tag,
+            column_schema: ColumnSchema::new(name, ConcreteDataType::string_datatype(), false),
+        }
+    }
 
     #[tokio::test]
     async fn test_add_columns() {
@@ -344,5 +392,123 @@ mod test {
             )
             .await;
         assert!(result.is_err());
+    }
+
+    // A duplicate column inside one batch must agree with the first occurrence instead of
+    // being dropped silently.
+    #[tokio::test]
+    async fn test_add_columns_rejects_conflicting_duplicates() {
+        let env = TestEnv::new().await;
+        env.init_metric_region().await;
+        let physical_region_id = env.default_physical_region_id();
+        let data_region_id = utils::to_data_region_id(physical_region_id);
+
+        let conflicting = ColumnMetadata {
+            column_id: 0,
+            semantic_type: SemanticType::Field,
+            column_schema: ColumnSchema::new("dup", ConcreteDataType::float64_datatype(), false),
+        };
+        let result = env
+            .data_region()
+            .add_columns(
+                physical_region_id,
+                vec![tag_column("dup"), conflicting],
+                IndexOptions::Inverted,
+            )
+            .await;
+
+        assert!(result.is_err());
+        assert!(
+            env.mito()
+                .get_metadata(data_region_id)
+                .await
+                .unwrap()
+                .column_by_name("dup")
+                .is_none()
+        );
+    }
+
+    // A retry passes the column it added before, because the caller derives the columns to
+    // add from a cache that a cancelled request may not have refreshed. The column keeps the
+    // id it was installed with.
+    #[tokio::test]
+    async fn test_add_columns_reuses_the_existing_column_id() {
+        let env = TestEnv::new().await;
+        env.init_metric_region().await;
+        let physical_region_id = env.default_physical_region_id();
+        let data_region_id = utils::to_data_region_id(physical_region_id);
+
+        env.data_region()
+            .add_columns(
+                physical_region_id,
+                vec![tag_column("tag2")],
+                IndexOptions::Inverted,
+            )
+            .await
+            .unwrap();
+        let tag2_id = env
+            .mito()
+            .get_metadata(data_region_id)
+            .await
+            .unwrap()
+            .column_by_name("tag2")
+            .unwrap()
+            .column_id;
+
+        env.data_region()
+            .add_columns(
+                physical_region_id,
+                vec![tag_column("tag2"), tag_column("tag3")],
+                IndexOptions::Inverted,
+            )
+            .await
+            .unwrap();
+
+        let metadata = env.mito().get_metadata(data_region_id).await.unwrap();
+        assert_eq!(metadata.column_by_name("tag2").unwrap().column_id, tag2_id);
+        assert_eq!(
+            metadata.column_by_name("tag3").unwrap().column_id,
+            tag2_id + 1
+        );
+    }
+
+    // Adding only columns that already exist must not submit an ALTER at all.
+    #[tokio::test]
+    async fn test_add_columns_skips_the_alter_when_all_columns_exist() {
+        let env = TestEnv::new().await;
+        env.init_metric_region().await;
+        let physical_region_id = env.default_physical_region_id();
+        let data_region_id = utils::to_data_region_id(physical_region_id);
+
+        env.data_region()
+            .add_columns(
+                physical_region_id,
+                vec![tag_column("tag2")],
+                IndexOptions::Inverted,
+            )
+            .await
+            .unwrap();
+        let metadata = env.mito().get_metadata(data_region_id).await.unwrap();
+        let version = metadata.schema_version;
+
+        env.data_region()
+            .add_columns(
+                physical_region_id,
+                vec![tag_column("tag2")],
+                IndexOptions::Inverted,
+            )
+            .await
+            .unwrap();
+
+        let metadata = env.mito().get_metadata(data_region_id).await.unwrap();
+        assert_eq!(metadata.schema_version, version);
+        assert_eq!(
+            metadata
+                .column_metadatas
+                .iter()
+                .filter(|column| column.column_schema.name == "tag2")
+                .count(),
+            1
+        );
     }
 }

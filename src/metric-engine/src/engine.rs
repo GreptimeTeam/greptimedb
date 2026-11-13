@@ -25,7 +25,7 @@ mod put;
 mod read;
 mod region_metadata;
 mod staging;
-mod state;
+pub(crate) mod state;
 mod sync;
 
 use std::any::Any;
@@ -59,8 +59,8 @@ use store_api::storage::{RegionId, ScanRequest, SequenceNumber};
 use crate::config::EngineConfig;
 use crate::data_region::DataRegion;
 use crate::error::{
-    self, Error, Result, StartRepeatedTaskSnafu, UnsupportedRegionRequestSnafu,
-    UnsupportedRemapManifestsRequestSnafu,
+    self, Error, PhysicalRegionNotFoundSnafu, Result, StartRepeatedTaskSnafu,
+    UnsupportedRegionRequestSnafu, UnsupportedRemapManifestsRequestSnafu,
 };
 use crate::metadata_region::MetadataRegion;
 use crate::repeated_task::FlushMetadataRegionTask;
@@ -608,7 +608,7 @@ impl MetricEngine {
 }
 
 /// Shared definitions must agree before CREATE/ALTER mutates either region.
-fn validate_shared_column(
+pub(crate) fn validate_shared_column(
     region_id: store_api::storage::RegionId,
     existing: &store_api::metadata::ColumnMetadata,
     proposed: &store_api::metadata::ColumnMetadata,
@@ -645,6 +645,42 @@ struct MetricEngineInner {
     state: Arc<RwLock<MetricEngineState>>,
     row_modifier: RowModifier,
     flush_task: RepeatedTask<Error>,
+}
+
+impl MetricEngineInner {
+    /// Adds columns to the physical region while holding its column-add lock.
+    ///
+    /// Column ids are derived from the metadata of the physical region, so requests
+    /// on logical regions that share one physical region must not allocate ids at
+    /// the same time, otherwise two different columns could get one id.
+    async fn add_physical_columns(
+        &self,
+        physical_region_id: RegionId,
+        columns: Vec<store_api::metadata::ColumnMetadata>,
+        index_options: IndexOptions,
+    ) -> Result<()> {
+        if columns.is_empty() {
+            return Ok(());
+        }
+
+        let data_region_id = utils::to_data_region_id(physical_region_id);
+        let column_add_lock = {
+            let state = self.state.read().unwrap();
+            state
+                .physical_region_states()
+                .get(&data_region_id)
+                .with_context(|| PhysicalRegionNotFoundSnafu {
+                    region_id: data_region_id,
+                })?
+                .column_add_lock()
+                .clone()
+        };
+
+        let _guard = column_add_lock.lock().await;
+        self.data_region
+            .add_columns(physical_region_id, columns, index_options)
+            .await
+    }
 }
 
 #[cfg(test)]
