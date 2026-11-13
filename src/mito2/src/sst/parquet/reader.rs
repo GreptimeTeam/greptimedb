@@ -736,13 +736,11 @@ impl ParquetReaderBuilder {
         let region_partition_expr_str = self
             .expected_metadata
             .as_ref()
-            .and_then(|meta| meta.partition_expr.as_ref());
-        let file_partition_expr_ref = self.file_handle.meta_ref().partition_expr.as_ref();
+            .and_then(|meta| meta.partition_expr.as_deref());
+        let file_partition_expr_ref = self.file_handle.meta_ref().partition_expr.as_deref();
 
-        let (region_partition_expr, is_same_region_partition) = Self::is_same_region_partition(
-            region_partition_expr_str.map(|s| s.as_str()),
-            file_partition_expr_ref,
-        )?;
+        let (region_partition_expr, is_same_region_partition) =
+            Self::is_same_region_partition(region_partition_expr_str, file_partition_expr_ref)?;
 
         if is_same_region_partition {
             return Ok(None);

@@ -71,7 +71,9 @@ use crate::object_store_wal::index::{
 };
 use crate::object_store_wal::io::{ObjectStoreIo, PutResult, WalObjectIo};
 use crate::object_store_wal::prefetch::READ_PREFETCH_BYTES;
-use crate::object_store_wal::{history, prefetch};
+use crate::object_store_wal::{
+    NodeWalPrefix, ObjectStoreWalReaders, WalReadUpperBound, history, prefetch,
+};
 
 const COMMAND_BUFFER: usize = 1024;
 /// Appends queued for the actor; a caller beyond them waits to send.
@@ -128,6 +130,12 @@ const RECOVERY_CONCURRENCY: usize = 64;
 /// once and returns, in both modes, once that object is durable and indexed.
 pub struct ObjectStoreLogStore {
     prefix: String,
+    /// The configuration and generation the prefix comes from. The prefix of every node
+    /// derives from them, so all nodes under the root share this store's generation.
+    config: ObjectStoreWalConfig,
+    generation: u64,
+    /// Reads the WAL of any node, this node's included, see [`LogStore::read_node`].
+    node_readers: ObjectStoreWalReaders,
     /// The storage the prefix is read from, as configured, for messages.
     storage: String,
     ack_mode: AckMode,
@@ -280,15 +288,18 @@ impl ObjectStoreLogStore {
         generation: u64,
     ) -> Result<Arc<Self>> {
         let prefix = config.node_prefix(node_id, generation);
-        let io = ObjectStoreIo::new(object_store, &prefix)?;
+        let io = ObjectStoreIo::new(object_store.clone(), &prefix)?;
         io.probe_conditional_create().await?;
-        Self::open(Arc::new(io), config, prefix).await
+        let node_readers = ObjectStoreWalReaders::new(object_store);
+        Self::open(Arc::new(io), config, prefix, generation, node_readers).await
     }
 
     async fn open(
         io: Arc<dyn WalObjectIo>,
         config: &ObjectStoreWalConfig,
         prefix: String,
+        generation: u64,
+        node_readers: ObjectStoreWalReaders,
     ) -> Result<Arc<Self>> {
         ensure!(
             config.flush_interval >= MIN_FLUSH_INTERVAL,
@@ -458,6 +469,9 @@ impl ObjectStoreLogStore {
         };
         Ok(Arc::new(Self {
             prefix,
+            config: config.clone(),
+            generation,
+            node_readers,
             storage,
             ack_mode: config.ack_mode,
             on_corrupted_segment: config.on_corrupted_segment,
@@ -1200,6 +1214,22 @@ impl LogStore for ObjectStoreLogStore {
         self.check_terminal()?;
         started_regions.insert(region_id);
         Ok(())
+    }
+
+    async fn read_node(
+        &self,
+        node_id: u64,
+        region_id: RegionId,
+        after: EntryId,
+        upper: WalReadUpperBound,
+    ) -> Result<Option<SendableEntryStream<'static, Entry, Error>>> {
+        let prefix = NodeWalPrefix::try_new(&self.config.node_prefix(node_id, self.generation))?;
+        let reader = self.node_readers.reader(&prefix)?;
+        let entries = reader.read(region_id, after, upper).await?;
+        // The stream holds the reader, so concurrent reads of the node share its indexes.
+        Ok(Some(Box::pin(entries.inspect(move |_| {
+            let _ = &reader;
+        }))))
     }
 }
 
@@ -3405,9 +3435,16 @@ mod tests {
         io: Arc<dyn WalObjectIo>,
         config: &ObjectStoreWalConfig,
     ) -> Arc<ObjectStoreLogStore> {
-        ObjectStoreLogStore::open(io, config, PREFIX.to_string())
-            .await
-            .unwrap()
+        open_io(io, config).await.unwrap()
+    }
+
+    /// Opens a store over `io` under [PREFIX], reading other nodes from an empty storage.
+    async fn open_io(
+        io: Arc<dyn WalObjectIo>,
+        config: &ObjectStoreWalConfig,
+    ) -> Result<Arc<ObjectStoreLogStore>> {
+        let node_readers = ObjectStoreWalReaders::new(memory_store());
+        ObjectStoreLogStore::open(io, config, PREFIX.to_string(), 0, node_readers).await
     }
 
     async fn open_parking_creates(
@@ -4856,6 +4893,9 @@ mod tests {
         let (append_tx, _) = mpsc::channel(APPEND_BUFFER);
         let store = ObjectStoreLogStore {
             prefix: PREFIX.to_string(),
+            config: eager(),
+            generation: 0,
+            node_readers: ObjectStoreWalReaders::new(memory_store()),
             storage: String::new(),
             ack_mode: AckMode::Durable,
             on_corrupted_segment: CorruptedSegmentAction::Skip,
@@ -5015,9 +5055,7 @@ mod tests {
         let (io, mut parked) = ParkedIo::over(object_store.clone());
         let fetch = {
             let io = io.clone();
-            tokio::spawn(async move {
-                ObjectStoreLogStore::open(io, &eager(), PREFIX.to_string()).await
-            })
+            tokio::spawn(async move { open_io(io, &eager()).await })
         };
         let mut wave = Vec::new();
         for _ in 0..RECOVERY_CONCURRENCY {
@@ -5228,9 +5266,7 @@ mod tests {
         corrupt_object(&object_store, &path, |bytes| bytes[HEADER_LEN + 20] ^= 1).await;
         let (io, reads) = RecordingIo::over(object_store);
         let object = io.list().await.unwrap().remove(0);
-        let store = ObjectStoreLogStore::open(io, &eager(), PREFIX.to_string())
-            .await
-            .unwrap();
+        let store = open_io(io, &eager()).await.unwrap();
         assert_eq!(1, latest(&store, region(1)));
         let mut reads = reads.lock().unwrap().clone();
         reads.sort_unstable();
@@ -5322,9 +5358,7 @@ mod tests {
             }
         }
         let (io, reads) = RecordingIo::over(object_store);
-        let store = ObjectStoreLogStore::open(io, &eager(), PREFIX.to_string())
-            .await
-            .unwrap();
+        let store = open_io(io, &eager()).await.unwrap();
         for number in [1, 2] {
             reads.lock().unwrap().clear();
             let entries = read_entries(&store, region(number), 11).await;
@@ -5722,9 +5756,7 @@ mod tests {
         let (io, mut parked) = ParkedIo::over(object_store);
         let mut opening = {
             let io = io.clone();
-            tokio::spawn(async move {
-                ObjectStoreLogStore::open(io, &eager(), PREFIX.to_string()).await
-            })
+            tokio::spawn(async move { open_io(io, &eager()).await })
         };
         let store = loop {
             tokio::select! {
@@ -7462,7 +7494,7 @@ mod tests {
                 inner: ObjectStoreIo::new(object_store.clone(), PREFIX).unwrap(),
                 late: Mutex::new(Some((1, late))),
             });
-            let result = ObjectStoreLogStore::open(io, &eager(), PREFIX.to_string()).await;
+            let result = open_io(io, &eager()).await;
             if moves {
                 let store = result.unwrap();
                 let start = decode_header(&fixtures.get(2).await.unwrap()).unwrap();
@@ -7509,9 +7541,7 @@ mod tests {
                 inner: ObjectStoreIo::new(object_store.clone(), PREFIX).unwrap(),
                 late: Mutex::new(Some((start_seq, same))),
             });
-            let error = ObjectStoreLogStore::open(io, &eager(), PREFIX.to_string())
-                .await
-                .unwrap_err();
+            let error = open_io(io, &eager()).await.unwrap_err();
             assert!(
                 matches!(&error, Error::UnconfirmedWalEpochStart { epoch: actual, path, .. }
                     if *actual == epoch && path == &fixtures.object_path(start_seq)),
@@ -7597,9 +7627,7 @@ mod tests {
             inner: ObjectStoreIo::new(object_store.clone(), PREFIX).unwrap(),
             lose_next: AtomicBool::new(true),
         });
-        let error = ObjectStoreLogStore::open(io, &eager(), PREFIX.to_string())
-            .await
-            .unwrap_err();
+        let error = open_io(io, &eager()).await.unwrap_err();
         assert!(
             matches!(error, Error::WalObjectStore { .. }),
             "unexpected error: {error:?}"
@@ -11777,7 +11805,7 @@ mod tests {
                 inner: ObjectStoreIo::new(object_store.clone(), PREFIX).unwrap(),
                 late: Mutex::new(Some((1, late))),
             });
-            ObjectStoreLogStore::open(io, &eager(), PREFIX.to_string()).await
+            open_io(io, &eager()).await
         }
 
         async fn start_object_meets_an_earlier_epoch() {
@@ -11891,9 +11919,7 @@ mod tests {
                 lose_next: AtomicBool::new(true),
             });
             let before = Counters::sample();
-            let error = ObjectStoreLogStore::open(io, &eager(), PREFIX.to_string())
-                .await
-                .unwrap_err();
+            let error = open_io(io, &eager()).await.unwrap_err();
             assert_start_fails(
                 &fixtures,
                 before,
@@ -11941,9 +11967,7 @@ mod tests {
         ) {
             let gauges = initialize_indexed_gauges().await;
             let before = Counters::sample();
-            let error = ObjectStoreLogStore::open(io.clone(), &eager(), PREFIX.to_string())
-                .await
-                .unwrap_err();
+            let error = open_io(io.clone(), &eager()).await.unwrap_err();
             assert!(recognise(&error), "unexpected error: {error:?}");
             assert_eq!(retry_hint, error.retry_hint());
             assert_eq!(present, object_seqs(io.as_ref()).await.as_slice());
@@ -12147,9 +12171,7 @@ mod tests {
             let before = Counters::sample();
             let opening = {
                 let io = io.clone();
-                tokio::spawn(async move {
-                    ObjectStoreLogStore::open(io, &eager(), PREFIX.to_string()).await
-                })
+                tokio::spawn(async move { open_io(io, &eager()).await })
             };
             let path = object_path(&object_store, vanished);
             let delete = || object_store.delete(&path);
@@ -12864,9 +12886,7 @@ mod tests {
                 let started_at = Instant::now();
                 let opening = {
                     let io = io.clone();
-                    tokio::spawn(async move {
-                        ObjectStoreLogStore::open(io, &eager(), PREFIX.to_string()).await
-                    })
+                    tokio::spawn(async move { open_io(io, &eager()).await })
                 };
                 // Every object is short enough to be read whole, and every
                 // such read parks.

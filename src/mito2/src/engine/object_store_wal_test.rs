@@ -72,7 +72,7 @@ use crate::time_provider::mock::MockTimeProvider;
 use crate::wal::EntryId;
 use crate::worker::CHECK_REGION_INTERVAL;
 
-fn wal_config() -> ObjectStoreWalConfig {
+pub(crate) fn wal_config() -> ObjectStoreWalConfig {
     ObjectStoreWalConfig {
         prefix: "cluster-a/wal".to_string(),
         ..Default::default()
@@ -85,7 +85,7 @@ fn node_prefix() -> String {
     wal_config().node_prefix(0, STANDALONE_GENERATION)
 }
 
-fn wal_options() -> HashMap<String, String> {
+pub(crate) fn wal_options() -> HashMap<String, String> {
     let options = WalOptions::ObjectStore(ObjectStoreWalOptions::new(node_prefix()));
     HashMap::from([(
         WAL_OPTIONS_KEY.to_string(),
@@ -161,7 +161,7 @@ async fn close_region(engine: &MitoEngine, region_id: RegionId) {
         .unwrap();
 }
 
-async fn count_rows(engine: &MitoEngine, region_id: RegionId) -> usize {
+pub(crate) async fn count_rows(engine: &MitoEngine, region_id: RegionId) -> usize {
     let stream = engine
         .scan_to_stream(region_id, ScanRequest::default())
         .await
@@ -175,7 +175,10 @@ async fn count_rows(engine: &MitoEngine, region_id: RegionId) -> usize {
 }
 
 /// Returns the ids of the entries the store still hands out for `region_id`.
-async fn stored_entry_ids(log_store: &ObjectStoreLogStore, region_id: RegionId) -> Vec<EntryId> {
+pub(crate) async fn stored_entry_ids(
+    log_store: &ObjectStoreLogStore,
+    region_id: RegionId,
+) -> Vec<EntryId> {
     log_store
         .read(&object_store_provider(region_id), 0)
         .await
@@ -437,7 +440,7 @@ async fn create_leased_region(
 
 /// Creates a region whose writes require a lease on `engine`. Returns its table dir, row schema
 /// and lease deadline, which the frozen clock of the lease checks has not reached.
-async fn create_leased_region_on(
+pub(crate) async fn create_leased_region_on(
     engine: &MitoEngine,
     region_id: RegionId,
 ) -> (String, Vec<ColumnSchema>, Instant) {
@@ -451,7 +454,7 @@ async fn create_leased_region_on(
     (table_dir, schema, deadline)
 }
 
-async fn count_ssts(store: &ObjectStore, region_dir: &str) -> usize {
+pub(crate) async fn count_ssts(store: &ObjectStore, region_dir: &str) -> usize {
     let entries = store.list(region_dir).await.unwrap();
     entries
         .iter()
@@ -656,7 +659,7 @@ impl EventListener for CatchupReopenBlocker {
     }
 }
 
-async fn put_range(
+pub(crate) async fn put_range(
     engine: &MitoEngine,
     region_id: RegionId,
     schema: &[ColumnSchema],
@@ -670,7 +673,7 @@ async fn put_range(
     put_rows(engine, region_id, rows).await;
 }
 
-async fn wait_until(condition: impl Fn() -> bool) {
+pub(crate) async fn wait_until(condition: impl Fn() -> bool) {
     tokio::time::timeout(Duration::from_secs(10), async {
         while !condition() {
             tokio::time::sleep(Duration::from_millis(10)).await;
@@ -681,13 +684,13 @@ async fn wait_until(condition: impl Fn() -> bool) {
 }
 
 /// Returns whether the engine registers another instance of the region than `old`.
-fn is_replaced(engine: &MitoEngine, old: &MitoRegionRef) -> bool {
+pub(crate) fn is_replaced(engine: &MitoEngine, old: &MitoRegionRef) -> bool {
     engine
         .get_region(old.region_id)
         .is_some_and(|region| !Arc::ptr_eq(&region, old))
 }
 
-async fn next_manifest_version(region: &MitoRegionRef) -> u64 {
+pub(crate) async fn next_manifest_version(region: &MitoRegionRef) -> u64 {
     region
         .manifest_ctx
         .manifest_manager
@@ -698,7 +701,12 @@ async fn next_manifest_version(region: &MitoRegionRef) -> u64 {
 }
 
 /// Stores `bytes` as manifest version `version` of the region, as another writer would.
-async fn publish_delta(store: &ObjectStore, region_dir: &str, version: u64, bytes: Vec<u8>) {
+pub(crate) async fn publish_delta(
+    store: &ObjectStore,
+    region_dir: &str,
+    version: u64,
+    bytes: Vec<u8>,
+) {
     let path = gen_path(
         &manifest_dir(region_dir),
         &delta_file(version),
@@ -707,7 +715,7 @@ async fn publish_delta(store: &ObjectStore, region_dir: &str, version: u64, byte
     store.write(&path, bytes).await.unwrap();
 }
 
-async fn encode_delta(action_list: RegionMetaActionList) -> Vec<u8> {
+pub(crate) async fn encode_delta(action_list: RegionMetaActionList) -> Vec<u8> {
     CompressionType::Gzip
         .encode(&action_list.encode().unwrap()[..])
         .await
@@ -870,7 +878,7 @@ async fn test_end_of_staging_after_deadline_sends_nothing() {
         .await
         .unwrap();
     engine
-        .edit_region(region_id, edit_files(vec![file], vec![]))
+        .edit_region(region_id, edit_files(vec![file.as_ref().clone()], vec![]))
         .await
         .unwrap();
     let version = next_manifest_version(&region).await;
@@ -1151,7 +1159,7 @@ async fn test_edit_conflict_reloads_region() {
         .clone();
     let added = FileMeta {
         file_id: FileId::random(),
-        ..flushed
+        ..flushed.as_ref().clone()
     };
     let region_dir = region_dir_from_table_dir(&table_dir, region_id, PathType::Bare);
     let version = next_manifest_version(&old).await;
@@ -1200,7 +1208,7 @@ async fn test_reload_ignores_edit_of_replaced_instance() {
         .clone();
     let file = |file_id| FileMeta {
         file_id,
-        ..flushed.clone()
+        ..flushed.as_ref().clone()
     };
     let added = file(FileId::random());
 
@@ -1399,7 +1407,7 @@ async fn test_end_of_staging_conflict_reloads_region() {
         .await
         .unwrap();
     engine
-        .edit_region(region_id, edit_files(vec![file], vec![]))
+        .edit_region(region_id, edit_files(vec![file.as_ref().clone()], vec![]))
         .await
         .unwrap();
     let region_dir = region_dir_from_table_dir(&table_dir, region_id, PathType::Bare);
