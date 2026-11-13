@@ -588,11 +588,9 @@ impl RangePlanRewriter {
                     Ok(table_source) => table_source,
                     Err(error) => {
                         // `TableNotExist` here usually means the qualifier now refers to a derived
-                        // input instead of a base table. We can still salvage the time index from
-                        // field metadata, but only when such metadata is present.
-                        if matches!(&error, catalog::error::Error::TableNotExist { .. })
-                            && metadata_time_index_expr.is_some()
-                        {
+                        // input instead of a base table. Skip it and let the checks below take the
+                        // time index from field metadata or report `TimeIndexNotFound`.
+                        if matches!(&error, catalog::error::Error::TableNotExist { .. }) {
                             continue;
                         }
                         return Err(error).context(CatalogSnafu);
@@ -1277,6 +1275,35 @@ mod test {
             assert!(plan.contains("RangeSelect"));
             assert!(plan.contains("Union"));
             assert!(plan.contains("time_index=timestamp"));
+        }
+    }
+
+    #[tokio::test]
+    async fn range_from_derived_query_without_time_index_err() {
+        let queries = [
+            (
+                r#"SELECT ts, avg(value) RANGE '5m'
+                FROM (SELECT now() AS ts, 1.0 AS value)
+                ALIGN '1h' BY (1)"#,
+                "Cannot find time index column in table fields:[ts, value], metadata:{}",
+            ),
+            (
+                r#"SELECT tmp.ts, avg(tmp.value) RANGE '5m'
+                FROM (SELECT now() AS ts, 1.0 AS value) AS tmp
+                ALIGN '1h' BY (1)"#,
+                "Cannot find time index column in table fields:[tmp.ts, tmp.value], metadata:{}",
+            ),
+            (
+                r#"WITH tmp AS (SELECT now() AS ts, 1.0 AS value)
+                SELECT ts, avg(value) RANGE '5m'
+                FROM tmp
+                ALIGN '1h' BY (1)"#,
+                "Cannot find time index column in table fields:[tmp.ts, tmp.value], metadata:{}",
+            ),
+        ];
+
+        for (query, expected) in queries {
+            assert_eq!(do_query(query).await.unwrap_err().to_string(), expected);
         }
     }
 
