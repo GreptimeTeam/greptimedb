@@ -18,9 +18,27 @@
 //! operation order. Arithmetic that GreptimeDB's range UDFs compute the same way is shared with
 //! them.
 
+use std::collections::VecDeque;
+use std::ops::Range;
+
 use crate::functions::{EdgeKind, count_edges, extremum, instant_delta, kahan_inc};
 use crate::go_sort;
 use crate::range_eval::{BatchKernel, FloatWindow, FloatWindows, RangeModifier, WindowKernel};
+
+/// The samples the batch kernels examine, counted per value.
+///
+/// A batch kernel exists so a field is walked once per batch instead of once per window, which the
+/// results cannot show: both shapes compute the same values. Counting what a batch kernel touches
+/// is what tells them apart.
+#[cfg(test)]
+pub(super) static SAMPLES_EXAMINED: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+/// Counts `count` samples examined by a batch kernel; a no-op outside tests.
+fn examined(_count: usize) {
+    #[cfg(test)]
+    SAMPLES_EXAMINED.fetch_add(_count as u64, std::sync::atomic::Ordering::Relaxed);
+}
 
 /// A PromQL range-vector function over float and native histogram samples.
 #[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
@@ -91,28 +109,34 @@ impl RangeFunction {
 
     /// Whether the evaluator has to index counter resets for this function.
     ///
-    /// This must hold for exactly the kernels that read [`FloatWindow::counter_resets`], which is
-    /// the same as saying `IS_COUNTER` in `extrapolated_rate`: `rate` and `increase`. A kernel
-    /// that corrects counters without the index being maintained would silently drop every
-    /// correction, so a new counter function has to be added here as well.
+    /// This must hold for exactly the functions that read the index: `rate` and `increase`, whose
+    /// kernels read [`FloatWindow::counter_resets`] -- the same as saying `IS_COUNTER` in
+    /// `extrapolated_rate` -- and `resets`, whose batch kernel reads [`FloatWindows::resets_of`].
+    /// A kernel that corrects or counts counters without the index being maintained would silently
+    /// miss every reset, so a new reset-reading function has to be added here as well.
     ///
-    /// It governs both readers of the index: the per-window kernel above, and the batch kernel,
-    /// which reads [`FloatWindows::resets_of`]. When it returns `false`, `resets` stays empty and
-    /// `resets_of` yields nothing, so a batch kernel for a counter function would skip every
-    /// correction and report `delta`-like values.
+    /// It governs both readers of the index. When it returns `false`, `resets` stays empty,
+    /// `resets_of` yields nothing and `counter_resets` is empty, so a kernel reading either would
+    /// see a series that never reset.
     pub(crate) fn indexes_counter_resets(self) -> bool {
-        matches!(self, Self::Rate | Self::Increase)
+        matches!(self, Self::Rate | Self::Increase | Self::Resets)
     }
 
     /// The batch form of this function, when it has one.
     ///
-    /// Only the counter functions have one. The rest keep the per-window form, which the
-    /// evaluator falls back to, so adding a function here is what changes which shape its
-    /// evaluation takes.
+    /// A batch form exists for the functions whose window answer is a running summary of the field
+    /// -- the two endpoints and the resets for the counter rates, a movement of the window's bounds
+    /// for the extremes, the resets inside it, and the change edges inside it. The rest keep the
+    /// per-window form, which the evaluator falls back to, so adding a function here is what
+    /// changes which shape its evaluation takes.
     pub(crate) fn batch_kernel(self) -> Option<BatchKernel> {
         match self {
             Self::Rate => Some(Box::new(extrapolated_rate_batch::<true, true>)),
             Self::Increase => Some(Box::new(extrapolated_rate_batch::<true, false>)),
+            Self::MinOverTime => Some(extremum_batch::<true>()),
+            Self::MaxOverTime => Some(extremum_batch::<false>()),
+            Self::Resets => Some(Box::new(resets_batch)),
+            Self::Changes => Some(changes_batch()),
             _ => None,
         }
     }
@@ -461,6 +485,189 @@ pub(crate) fn extrapolated_rate_batch<const IS_COUNTER: bool, const IS_RATE: boo
             batch.range_ms,
             (IS_COUNTER, IS_RATE),
         ));
+    }
+}
+
+/// The batch form of `min_over_time` (`IS_MIN`) and `max_over_time`: one pass over the union of
+/// the batch's windows, carrying the candidates that can still become the window's extremum.
+///
+/// The windows of a batch start and end no earlier than the ones before them, so a sample that
+/// lost to a later, strictly better one can never win a later window either: it leaves the back of
+/// the queue, and a sample the window start has passed leaves the front. That is exactly what
+/// [`extremum`] computes window by window, which is why the deque keeps the arrival order of equal
+/// values (and with it the sign of tied zeros) and why a NaN never wins while the window holds
+/// anything else.
+fn extremum_batch<const IS_MIN: bool>() -> BatchKernel {
+    let mut candidates = SlidingExtremum::<IS_MIN>::default();
+    Box::new(
+        move |batch: &FloatWindows<'_>, out: &mut Vec<Option<f64>>| {
+            out.clear();
+            out.reserve(batch.windows.len());
+            // Batches are independent: the retained arrays of the previous one may have been drained
+            // since, and the samples behind the first window are gone anyway.
+            candidates.clear();
+            let values = batch.values;
+            let sliding = pays_to_slide(batch.windows);
+            for span in batch.windows {
+                let (start, end) = (span.start, span.end);
+                out.push(if sliding {
+                    candidates.evaluate(values, start, end)
+                } else if start == end {
+                    None
+                } else {
+                    examined(end - start);
+                    extremum(values[start..end].iter().copied(), IS_MIN)
+                });
+            }
+        },
+    )
+}
+
+/// The samples between the first window's start and the last window's end: what a window-moving
+/// summary of a batch has to walk, against the sum of the windows' lengths a rescan walks.
+fn union_len(windows: &[Range<usize>]) -> usize {
+    match (windows.first(), windows.last()) {
+        (Some(first), Some(last)) => last.end.saturating_sub(first.start),
+        _ => 0,
+    }
+}
+
+/// Whether walking the union of a batch's windows once beats scanning each window on its own.
+///
+/// Reuse pays off in proportion to how much consecutive windows overlap: a window-moving summary
+/// visits every sample between the first window's start and the last one's end -- plus a step per
+/// window -- while a scan visits every sample of every window. On wide steps that barely overlap
+/// the walk is the more expensive of the two.
+fn pays_to_slide(windows: &[Range<usize>]) -> bool {
+    let scanned: usize = windows.iter().map(|span| span.len()).sum();
+    union_len(windows) + windows.len() < scanned
+}
+
+/// The extrema candidates of one window, carried to the next.
+///
+/// Consecutive windows ascend, so the queue is only trimmed at the front and appended at the back.
+#[derive(Default)]
+struct SlidingExtremum<const IS_MIN: bool> {
+    /// Indices of the samples that can still become the extremum, in arrival order. A strictly
+    /// better sample evicts the ones queued before it, so the front is the window's extremum.
+    candidates: VecDeque<usize>,
+    /// Backs the all-NaN window, which reports the last NaN it holds, as [`extremum`] does.
+    latest_nan: Option<usize>,
+    /// The window the queue describes; `None` until the first window of a batch.
+    previous: Option<(usize, usize)>,
+}
+
+impl<const IS_MIN: bool> SlidingExtremum<IS_MIN> {
+    fn clear(&mut self) {
+        self.candidates.clear();
+        self.latest_nan = None;
+        self.previous = None;
+    }
+
+    /// Whether `value` replaces `current`, the comparison [`extremum`] replaces on.
+    #[inline]
+    fn beats(value: f64, current: f64) -> bool {
+        if IS_MIN {
+            value < current
+        } else {
+            value > current
+        }
+    }
+
+    /// The extremum of `values[start..end]`, `None` when the window holds no sample.
+    fn evaluate(&mut self, values: &[f64], start: usize, end: usize) -> Option<f64> {
+        let append_start = match self.previous {
+            Some((previous_start, previous_end))
+                if start >= previous_start && end >= previous_end =>
+            {
+                while self.candidates.front().is_some_and(|&index| index < start) {
+                    self.candidates.pop_front();
+                }
+                if self.latest_nan.is_some_and(|index| index < start) {
+                    self.latest_nan = None;
+                }
+                previous_end.max(start)
+            }
+            // A retreating window would need samples the queue no longer holds. A batch's windows
+            // ascend, so this is the state a call starts from, not a case the walk reaches.
+            Some(_) | None => {
+                self.clear();
+                start
+            }
+        };
+        for (offset, &value) in values[append_start..end].iter().enumerate() {
+            if value.is_nan() {
+                self.latest_nan = Some(append_start + offset);
+                continue;
+            }
+            while let Some(&back) = self.candidates.back() {
+                if !Self::beats(value, values[back]) {
+                    break;
+                }
+                self.candidates.pop_back();
+            }
+            self.candidates.push_back(append_start + offset);
+        }
+        examined(end.saturating_sub(append_start));
+        self.previous = Some((start, end));
+        self.candidates
+            .front()
+            .or(self.latest_nan.as_ref())
+            .map(|&index| values[index])
+    }
+}
+
+/// The batch form of `changes`: a prefix count of the change edges between neighbouring samples,
+/// so a window's answer is the difference of two entries instead of a scan.
+///
+/// The edges are counted with [`count_edges`], the predicate the per-window kernel uses, so the
+/// two shapes agree on what a change is -- including that two NaNs, whose comparison is always
+/// false, are not one.
+fn changes_batch() -> BatchKernel {
+    let mut prefix: Vec<u64> = Vec::new();
+    Box::new(
+        move |batch: &FloatWindows<'_>, out: &mut Vec<Option<f64>>| {
+            out.clear();
+            out.reserve(batch.windows.len());
+            let Some((first, last)) = batch.windows.first().zip(batch.windows.last()) else {
+                return;
+            };
+            let (union_start, union_end) = (first.start, last.end);
+            let scan = !pays_to_slide(batch.windows);
+            // `prefix[i]` counts the change edges among `values[union_start..=i]`, so the window
+            // `[start, end)` counts the edges inside it: its first one is the edge into `start + 1`.
+            prefix.clear();
+            if !scan {
+                prefix.push(0);
+                examined(union_end.saturating_sub(union_start));
+                for index in union_start + 1..union_end {
+                    let edge = count_edges(&batch.values[index - 1..=index], EdgeKind::Changes);
+                    prefix.push(prefix[prefix.len() - 1] + edge);
+                }
+            }
+            for span in batch.windows {
+                out.push((span.start != span.end).then(|| {
+                    if scan {
+                        examined(span.len());
+                        return count_edges(&batch.values[span.start..span.end], EdgeKind::Changes)
+                            as f64;
+                    }
+                    let below = prefix[span.start - union_start];
+                    let inside = prefix[span.end - 1 - union_start];
+                    (inside - below) as f64
+                }));
+            }
+        },
+    )
+}
+
+/// The batch form of `resets`: the resets inside each window, read off the evaluator's reset
+/// index. No sample is scanned: a window's answer is a count of index entries between its bounds.
+fn resets_batch(batch: &FloatWindows<'_>, out: &mut Vec<Option<f64>>) {
+    out.clear();
+    out.reserve(batch.windows.len());
+    for (index, span) in batch.windows.iter().enumerate() {
+        out.push((span.start != span.end).then(|| batch.resets_of(index).len() as f64));
     }
 }
 

@@ -70,6 +70,33 @@ pub(crate) fn visited_pairs() -> usize {
     VISITED_PAIRS.with(std::cell::Cell::get)
 }
 
+// How many matches the binary kernel recorded in this thread's match set.
+//
+// Test-only, and per thread: whether a field needs the set at all is what decides the per-sample
+// work of the default one-to-one walk, and that is not visible in the result. A thread of its own
+// keeps one test's matches out of another test's figure, and the counter is compiled out of the
+// kernel otherwise.
+#[cfg(test)]
+thread_local! {
+    static MATCH_RECORDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Resets the match-set counter of this thread to zero.
+#[cfg(test)]
+pub(crate) fn reset_match_records() {
+    MATCH_RECORDS.with(|recorded| recorded.set(0));
+}
+
+/// The matches the binary kernel has recorded in this thread's match set since the last
+/// [`reset_match_records`].
+///
+/// A match is recorded once per row the operator keeps, so the count is what the walk does rather
+/// than what its operands' sizes imply it would.
+#[cfg(test)]
+pub(crate) fn match_records() -> usize {
+    MATCH_RECORDS.with(std::cell::Cell::get)
+}
+
 /// A PromQL binary operator between two instant vectors.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, Hash)]
 pub enum BinaryOp {
@@ -868,6 +895,21 @@ fn binary_field(
     }
 
     let drop_name = !matching.op.is_comparison() || matching.return_bool;
+    // One-to-one: a match group may be matched once per point; Prometheus counts a filtered
+    // comparison as a match too, but not an operation that failed. Filling the one side consults the
+    // same set. A group whose many side holds one series is matched at a point by one pairing only --
+    // a second row there would have to come from a second one-side series, and two members of one
+    // group present at one point is the duplicate `overlap` already reports -- so the set is built
+    // only for the fields that can hold two matches of one group at one point, and the walk of the
+    // default one-to-one shape records nothing at all.
+    let matched = fill.lhs.is_some()
+        || (matching.cardinality == Cardinality::OneToOne
+            && shared_match_group(
+                many,
+                &matching.labels,
+                metadata.tables.saturating_add(metadata.pairing),
+                budget.as_deref_mut(),
+            )?);
     let mut results = Results::default();
     let mut pairs = Pairs {
         matching,
@@ -875,11 +917,7 @@ fn binary_field(
         annotations,
         group_keys: Vec::new(),
         group_ids: HashMap::new(),
-        // One-to-one: a match group may be matched once per point; Prometheus counts a filtered
-        // comparison as a match too, but not an operation that failed. Filling the many side
-        // consults the same set.
-        matched: (matching.cardinality == Cardinality::OneToOne || fill.lhs.is_some())
-            .then(HashSet::new),
+        matched: matched.then(HashSet::new),
         implicit_many_to_one: None,
     };
     for (many_index, many_series) in many.series.iter().enumerate() {
@@ -1109,6 +1147,96 @@ fn binary_field(
     Ok(results)
 }
 
+/// Whether two series of `operand` share a match group.
+///
+/// The keys are compared by a hash of the labels they keep: two series that share a group hash
+/// equal, and two that differ may still collide -- an answer of `true` for a group that no two
+/// series share only makes the caller build the set a shared group would need. One `u64` per series
+/// is sorted in place and dropped with the check, so a field of single-member groups builds no key
+/// and keeps none, whatever the length of the grid.
+fn shared_match_group(
+    operand: &Operand<'_>,
+    labels: &MatchingLabels,
+    base: usize,
+    mut budget: Option<&mut Budget<'_>>,
+) -> Result<bool> {
+    if operand.series.len() < 2 {
+        return Ok(false);
+    }
+    if let Some(budget) = budget.as_deref_mut() {
+        // One hash per series, entered beside the field's own tables before the list is allocated.
+        budget.phase(
+            base.saturating_add(
+                operand
+                    .series
+                    .len()
+                    .saturating_mul(std::mem::size_of::<u64>()),
+            ),
+        )?;
+    }
+    let mut hashes: Vec<u64> = Vec::with_capacity(operand.series.len());
+    hashes.extend(
+        operand
+            .series
+            .iter()
+            .map(|series| match_group_hash(&series.metric, labels)),
+    );
+    hashes.sort_unstable();
+    let shared = hashes.windows(2).any(|pair| pair[0] == pair[1]);
+    // The list is dropped with the check, so the field's own phase figure is live from here on.
+    if let Some(budget) = budget {
+        budget.phase(base)?;
+    }
+    Ok(shared)
+}
+
+/// The FNV-1a offset basis and prime, which hash one label's name and value in the same steps
+/// whatever hasher the tables of a field happen to use.
+const FNV_OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
+const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+
+/// The hash of the labels [`group_key`] would keep for `metric`.
+///
+/// Each kept label hashes its name and value as one string, and the labels are summed with
+/// wrapping addition, so the order the label set stores them in cannot change the answer: two
+/// series of one match group hash equal however they are laid out.
+fn match_group_hash(metric: &SeriesLabels, labels: &MatchingLabels) -> u64 {
+    let label = |name: &str, value: &str| {
+        let mut hash = FNV_OFFSET_BASIS;
+        for byte in name
+            .as_bytes()
+            .iter()
+            .chain(&[0xff])
+            .chain(value.as_bytes())
+        {
+            hash ^= u64::from(*byte);
+            hash = hash.wrapping_mul(FNV_PRIME);
+        }
+        hash
+    };
+    let mut hash = 0u64;
+    match labels {
+        MatchingLabels::On(names) => {
+            for name in names {
+                // An empty value is absent, as in `group_key`.
+                if let Some(value) = metric.get(name)
+                    && !value.is_empty()
+                {
+                    hash = hash.wrapping_add(label(name, value));
+                }
+            }
+        }
+        MatchingLabels::Ignoring(ignored) => {
+            for tag in metric.tags() {
+                if !tag.value.is_empty() && !ignored.contains(&tag.name) {
+                    hash = hash.wrapping_add(label(&tag.name, &tag.value));
+                }
+            }
+        }
+    }
+    hash
+}
+
 /// The matched pairs of one field and the state Prometheus checks them against.
 ///
 /// The results are filed beside it, not in it: a pairing's open row borrows the table it files into
@@ -1120,8 +1248,10 @@ struct Pairs<'a> {
     group_keys: Vec<GroupKey>,
     group_ids: HashMap<GroupKey, usize>,
     /// The match groups an operation matched at a point, kept where Prometheus consults them:
-    /// one-to-one matching, and filling the many side. A filtered comparison counts as a match,
-    /// an operation that failed does not.
+    /// one-to-one matching, and filling the one side. A filtered comparison counts as a match, an
+    /// operation that failed does not. Kept only for the fields that need it: one whose groups hold
+    /// one many-side series cannot match a group twice at a point, and one filling neither side never
+    /// asks.
     matched: Option<HashSet<(usize, usize)>>,
     implicit_many_to_one: Option<(usize, usize)>,
 }
@@ -1195,6 +1325,11 @@ impl Pairs<'_> {
         // One-to-one: a match group may be matched once per point; Prometheus counts a filtered
         // comparison as a match too, but not an operation that failed.
         if let Some(matched) = &mut self.matched {
+            // Matches are what the set is for, and it exists only for the fields that can hold two
+            // of one group at one point: the test-only counter reports that the walk of a
+            // single-member group records nothing.
+            #[cfg(test)]
+            MATCH_RECORDS.with(|recorded| recorded.set(recorded.get() + 1));
             // The match set is the one container this walk grows point by point, so it is charged by
             // the block it takes when it outgrows what it holds -- before the insert allocates it, and
             // never per point of a set that has room.
@@ -1541,12 +1676,25 @@ fn group_presence(
 /// The merge is one phase, entered from the results the fields filed: the triples it groups, the
 /// table it groups them in and the builder's own buffers. Its columns are reserved once per result
 /// series, before the series pushes its first row, rather than once per row.
+///
+/// One field is no join at all: its results are already filed under the label sets the builder
+/// writes out, so [`merge_single_field`] hands them over instead of copying every row into a triple
+/// of a table that would be keyed by the set it already has.
 fn merge_fields(
     fields: Vec<Results>,
     schema: Arc<SeriesSchema>,
     mut budget: Option<&mut Budget<'_>>,
 ) -> Result<Vec<Series>> {
     let width = schema.fields.len();
+    if width == 1 {
+        // One result table per paired field, and one field: the results are the builder's rows
+        // already, filed under the label sets it writes out.
+        let results = fields
+            .into_iter()
+            .next()
+            .expect("one result table per paired field");
+        return merge_single_field(results, schema, budget);
+    }
     // What the merge holds before it allocates any of it, read from the results themselves: the
     // kept triples, the label sets they are filed under and the histogram payload they carry.
     if let Some(budget) = budget.as_deref_mut() {
@@ -1604,6 +1752,83 @@ fn merge_fields(
     Ok(output)
 }
 
+/// Hands one field's rows to the builder as they were filed.
+///
+/// The rows of a label set are already in one result table keyed by the label set the series is
+/// written out under, and [`Results::sort_rows`] has left them in point order, so every piece the
+/// general merge would build -- the triple of each sample, the table it groups them in, the sort of
+/// them -- would only reproduce what the field holds. It is one phase, entered from the results:
+/// the series each label set is written out as and the builder's own buffers, with the columns of
+/// each series reserved once, before it pushes its first row.
+fn merge_single_field(
+    results: Results,
+    schema: Arc<SeriesSchema>,
+    mut budget: Option<&mut Budget<'_>>,
+) -> Result<Vec<Series>> {
+    let Results { series, totals } = results;
+    if let Some(budget) = budget.as_deref_mut() {
+        budget.phase(single_field_merge_bytes(
+            series.len(),
+            totals.histograms,
+            totals.histogram_heap,
+        ))?;
+    }
+    let mut builder = GridSeriesBuilder::try_new(schema)?;
+    let mut output = Vec::with_capacity(series.len());
+    for (_key, rows) in series {
+        let ResultRows {
+            metric,
+            points,
+            values,
+            ..
+        } = rows;
+        debug_assert!(
+            points.is_sorted(),
+            "a field's rows are sorted by point before they are merged"
+        );
+        builder.begin_series();
+        // This series' columns, in one reservation before it writes the first row of them. They stay
+        // live inside the series it is finished as, so the phase keeps them.
+        if let Some(budget) = budget.as_deref_mut() {
+            budget.grow(merge_single_series_columns(&points, &values))?;
+        }
+        for (&point, value) in points.iter().zip(&values) {
+            // A row the operator filtered keeps its place and no value: the builder writes a row
+            // only where one is handed to it, as it does for the merge's empty samples.
+            if value.is_some() {
+                builder.push_samples(point, std::slice::from_ref(value))?;
+            }
+        }
+        output.extend(builder.finish(metric)?);
+    }
+    Ok(output)
+}
+
+/// The bytes [`merge_single_field`] holds besides the columns of each series: the series each label
+/// set is written out as, the row the builder reads its pushes from, and the histogram table beside
+/// the value the results still hold.
+fn single_field_merge_bytes(sets: usize, histograms: usize, histogram_heap: usize) -> usize {
+    sets.saturating_mul(2 * std::mem::size_of::<Series>())
+        .saturating_add(2 * std::mem::size_of::<Option<GridSample>>())
+        .saturating_add(std::mem::size_of::<HistogramBatchBuilder>())
+        .saturating_add(histograms.saturating_mul(2 * HISTOGRAM_ROW_BYTES))
+        .saturating_add(2 * histogram_heap)
+}
+
+/// The bytes one single-field series' columns take: the rows it writes -- one per kept point, which
+/// is what the builder writes a row for -- times a row's columns.
+fn merge_single_series_columns(points: &[usize], values: &[Option<GridSample>]) -> usize {
+    let mut rows = 0usize;
+    let mut consumed: Option<usize> = None;
+    for (&point, value) in points.iter().zip(values) {
+        if value.is_some() && consumed != Some(point) {
+            rows = rows.saturating_add(1);
+            consumed = Some(point);
+        }
+    }
+    rows.saturating_mul(merge_row_bytes(1))
+}
+
 /// The bytes one result series' columns take: the rows it writes -- one per distinct point of its
 /// samples, which is what the builder writes a row for -- times a row's columns.
 ///
@@ -1612,8 +1837,6 @@ fn merge_fields(
 /// field rather than only the ones that happen to carry a histogram, so the figure over-reserves
 /// rather than missing a column, and nothing here follows how a column grows.
 fn merge_series_columns(samples: &[(usize, usize, GridSample)], fields: usize) -> usize {
-    let row = 2 * fields.saturating_mul(std::mem::size_of::<f64>() + 1)
-        + fields.saturating_mul(std::mem::size_of::<Option<u32>>());
     let mut rows = 0usize;
     let mut consumed: Option<usize> = None;
     for (point, ..) in samples {
@@ -1622,7 +1845,13 @@ fn merge_series_columns(samples: &[(usize, usize, GridSample)], fields: usize) -
             consumed = Some(*point);
         }
     }
-    rows.saturating_mul(row)
+    rows.saturating_mul(merge_row_bytes(fields))
+}
+
+/// The bytes one row of a result series' columns takes; see [`merge_series_columns`].
+fn merge_row_bytes(fields: usize) -> usize {
+    2 * fields.saturating_mul(std::mem::size_of::<f64>() + 1)
+        + fields.saturating_mul(std::mem::size_of::<Option<u32>>())
 }
 
 fn same_grid(lhs: &SeriesSchema, rhs: &SeriesSchema) -> Result<Arc<EvalGrid>> {

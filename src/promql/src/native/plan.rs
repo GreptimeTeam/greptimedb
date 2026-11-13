@@ -1236,9 +1236,10 @@ impl NativeNode {
 /// A canonical label set is the identity a [`NativeExpr::Merge`] groups by: the metric name plus the
 /// ordinary labels, which is exactly what [`SeriesLabels`] holds. One scan partition holds one
 /// series per such set - a stored series is one identity, and the scan splits rows by storage key
-/// rather than by label set - so only a computation that *writes* an existing label can turn two of
-/// those identities into one. A `label_replace` or `label_join` does exactly that, and it may name
-/// the very label that told its input's series apart.
+/// rather than by label set - so only a computation that *writes* an existing label, or drops one,
+/// can turn two of those identities into one. A `label_replace` or a `label_join` writes one, and it
+/// may name the very label that told its input's series apart; a range function that drops the
+/// metric name, and `timestamp` in either of its forms, drop one.
 ///
 /// The rewrite is judged by the labels it writes and the ones its input carries, which is why the
 /// caller supplies what it knows about each source's tags, indexed by the `source_index` the leaves
@@ -1268,7 +1269,10 @@ impl NativeNode {
 ///   `Binary` that reads whole vectors files its rows by the label set a sample *ends* under and
 ///   refuses two values of a field at one point. A `Set` does the same, and `info` merges the
 ///   results that share a label set. Each answers one series per set it names.
-/// - A node that hands its input's series over unchanged - a selection, a window, a timestamp, a
+/// - A `Window` that drops the metric name, and a `Timestamp` in either of its forms, claim one of
+///   their own: the name is part of the identity a merge groups by, so two series that shared every
+///   other label are one label set from there on, whatever their input held.
+/// - A node that hands its input's series over unchanged - a selection, a name-keeping window, a
 ///   parameterized map, `topk` and its ranking siblings - passes the answer on: an alias below it is
 ///   still an alias above it.
 ///
@@ -1284,11 +1288,20 @@ pub fn duplicates_canonical_labels(node: &NativeNode, source_tags: &[Vec<String>
         | NativeExpr::VectorOf { .. } => false,
         // The collection itself: one series per label set comes out of it.
         NativeExpr::Merge { .. } => false,
-        // These hand each series over as they read it, so what aliases below them still aliases.
-        NativeExpr::Instant { input, .. }
-        | NativeExpr::Window { input, .. }
-        | NativeExpr::Timestamp { input }
-        | NativeExpr::ParameterizedMap { input, .. }
+        // These hand each series over as they read it, so what aliases below them still aliases --
+        // except `timestamp`, which reports a sample's own time under the metric name dropped and
+        // is therefore a source of duplicates in its own right.
+        NativeExpr::Instant { input, op } => {
+            op.value == InstantValue::Timestamp || duplicates_canonical_labels(input, source_tags)
+        }
+        // A window that drops the metric name can fold two series that agreed on every other label
+        // into one set, so it is a source of duplicates whether or not its input was one.
+        NativeExpr::Window { input, op } => {
+            op.function.drops_metric_name() || duplicates_canonical_labels(input, source_tags)
+        }
+        // `timestamp` always drops the metric name, so two series it reads can become one set.
+        NativeExpr::Timestamp { .. } => true,
+        NativeExpr::ParameterizedMap { input, .. }
         | NativeExpr::ParameterizedTopK { input, .. } => {
             duplicates_canonical_labels(input, source_tags)
         }
@@ -2134,8 +2147,8 @@ pub fn unifies_its_own_contributions(node: &NativeNode) -> Option<bool> {
         NativeExpr::Window { input, op } => {
             Some(!op.function.drops_metric_name() && unifies_its_own_contributions(input).is_some())
         }
-        // A map can rewrite labels, so two series can end under one label set and the runtime
-        // records what it wrote in an `Emitted` table.
+        // A map can rewrite labels, so two series can end under one label set: what it hands out is
+        // not one series per set until a canonical merge has collected the set.
         NativeExpr::Map { .. } | NativeExpr::ParameterizedMap { .. } => Some(false),
         // `topk` hands back the series it read with their labels, so the input's answer is its own -
         // exactly as for the bound operation.

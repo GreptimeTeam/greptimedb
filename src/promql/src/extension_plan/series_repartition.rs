@@ -94,6 +94,8 @@
 //! until its per-input close/EOF barrier is satisfied, then
 //! reserve merge workspace for that identity alone. This bounds merge workspace to one pending
 //! identity, while its inputs remain charged until handoff. No task waits for memory admission.
+//! An output registers one consumer with the pool and splits every identity's charge off it, so the
+//! pool holds an entry per output stream rather than one per series that stream routes.
 //!
 //! An output ends only when every input partition finished and its queue was drained; a chain that
 //! closed locally is not the end of anything. Each input sends its own EOF to each live output before
@@ -2146,6 +2148,14 @@ struct RepartitionStream {
     inputs: usize,
     output: VecDeque<ReadySeries>,
     handoff: Arc<Mutex<Handoff>>,
+    /// What every identity of this output is charged to.
+    ///
+    /// One registration for the whole output stream: each identity's descriptor, each owner's
+    /// merge workspace and each raw owner's reconstruction are reservations split off it, so the
+    /// pool holds an entry per output partition instead of one per series the output routes. A
+    /// reservation split off it still keeps its bytes live until it is dropped, and the pool sees
+    /// each of those bytes exactly once.
+    groups_reservation: MemoryReservation,
     /// Whether a new pass over the pending identities is owed after an input EOF.
     ///
     /// A chain can only complete the identity it carries, so the chain arm checks that group
@@ -2229,6 +2239,7 @@ impl RepartitionStream {
             inputs,
             output: VecDeque::new(),
             handoff: Arc::new(Mutex::new(Handoff::default())),
+            groups_reservation: MemoryConsumer::new("SeriesRepartitionGroups").register(pool),
             rescan: false,
             resume_after: None,
             reported: false,
@@ -2246,7 +2257,7 @@ impl RepartitionStream {
             let rows = group.fragments.iter().fold(0usize, |rows, series| {
                 rows.saturating_add(series.time.len())
             });
-            let reservation = MemoryConsumer::new("SeriesRepartitionOwner").register(&self.pool);
+            let reservation = self.groups_reservation.new_empty();
             reservation.try_grow(merge_workspace_bytes(
                 rows,
                 group.fragments.len(),
@@ -2320,7 +2331,7 @@ impl RepartitionStream {
         // Reconstruction's working set depends on how the pieces interleave, which is only known
         // while it runs: charge each allocation as it is made rather than reserving a worst case
         // that a well-ordered identity never approaches.
-        let workspace = MemoryConsumer::new("SeriesRepartitionRawOwner").register(&self.pool);
+        let workspace = self.groups_reservation.new_empty();
         let mut reserve = |bytes: usize| workspace.try_grow(bytes);
         let mut shrink = |bytes: usize| {
             let result = workspace.try_shrink(bytes);
@@ -2519,8 +2530,7 @@ impl Stream for RepartitionStream {
                         }
                     };
                     if !this.groups.contains_key(&key) {
-                        let metadata =
-                            MemoryConsumer::new("SeriesRepartitionIdentity").register(&this.pool);
+                        let metadata = this.groups_reservation.new_empty();
                         let key_bytes =
                             match &key {
                                 OwnerKey::Evaluated((name, tags)) => {

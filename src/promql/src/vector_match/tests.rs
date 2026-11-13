@@ -28,7 +28,8 @@ use rand::{Rng, SeedableRng};
 
 use super::{
     BinaryMatching, BinaryOp, Cardinality, FillValues, MatchingLabels, RESULT_ROW_BYTES, SetOp,
-    binary_vectors, binary_vectors_with_reservation, set_vectors, set_vectors_with_reservation,
+    binary_vectors, binary_vectors_with_reservation, match_records, reset_match_records,
+    set_vectors, set_vectors_with_reservation,
 };
 use crate::grid_series::reference::{
     Dense, OwnedHistogram, Points, assert_histogram_close, assert_result_eq, golden_cases,
@@ -1197,6 +1198,163 @@ fn colliding_reset_hints_do_not_count_as_a_match() {
         let result = binary_vectors(&matching, &schema, &lhs, &schema, &rhs).unwrap();
         assert_eq!(result.len(), 1, "{op:?}");
     }
+}
+
+/// A group whose many side holds one series can be matched at a point by one pairing only: a second
+/// row for that point would have to come from a second one-side series, and two members of one group
+/// present at one point is the duplicate the one side's own scan reports. So the default one-to-one
+/// shape records no match and builds no set, and the pairing still answers every point.
+#[test]
+fn a_single_series_group_records_no_match() {
+    const POINTS: usize = 1_000;
+    let grid = budget_grid(POINTS);
+    let schema = Arc::new(schema(1, &grid));
+    let at: Vec<usize> = (0..POINTS).collect();
+    // One series of the many side and one of the one side, in the same match group.
+    let lhs = vec![budget_operand(&schema, "a", &at)];
+    let rhs = vec![budget_operand(&schema, "b", &at)];
+    let matching = budget_matching(BinaryOp::Add, MatchingLabels::Ignoring(Vec::new()));
+    reset_match_records();
+    let output =
+        binary_vectors(&matching, &schema, &lhs, &schema, &rhs).expect("the one pair matches");
+    assert_eq!(
+        match_records(),
+        0,
+        "a group of one many-side series recorded a match"
+    );
+    // Both operands hold the point's own position, so the sum doubles it at every point.
+    assert_eq!(output.len(), 1, "{output:?}");
+    let mut cursor = output[0].fields.as_slice()[0].cursor();
+    let mut rows = 0;
+    for (point, row) in output[0].time.positions() {
+        match cursor.at(row).expect("the axis and the fields are aligned") {
+            SampleRef::Float(value) => assert_eq!(value, 2.0 * point as f64, "point {point}"),
+            _ => panic!("`+` of two floats keeps a float"),
+        }
+        rows += 1;
+    }
+    assert_eq!(rows, POINTS, "the pair answers every point");
+}
+
+/// A group of two many-side series can be matched twice at one point, so the set is built and the
+/// second match of the group at that point is the duplicate Prometheus reports.
+#[test]
+fn a_group_of_two_many_series_records_its_matches() {
+    let grid = budget_grid(1);
+    let schema = Arc::new(schema(1, &grid));
+    // Two left-hand series in one match group and one right-hand series they both pair with.
+    let lhs = [
+        jobbed_operand(&schema, "a", "x", &[0]),
+        jobbed_operand(&schema, "b", "x", &[0]),
+    ];
+    let rhs = [jobbed_operand(&schema, "c", "x", &[0])];
+    let matching = budget_matching(BinaryOp::Add, MatchingLabels::Ignoring(Vec::new()));
+    reset_match_records();
+    let error = binary_vectors(&matching, &schema, &lhs, &schema, &rhs)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("many-to-one matching must be explicit"),
+        "{error}"
+    );
+    assert!(
+        match_records() >= 2,
+        "the second match of the group was not recorded: {}",
+        match_records()
+    );
+}
+
+/// Two one-side series of a group that are never present at the same point are no duplicate: each
+/// point is matched by one pairing, which is what a group of one many-side series allows.
+#[test]
+fn a_group_matched_at_different_points_is_no_duplicate() {
+    const POINTS: usize = 64;
+    let grid = budget_grid(POINTS);
+    let schema = Arc::new(schema(1, &grid));
+    let operand = |name: &str, instance: &str, value: f64, at: &[usize]| -> Series {
+        let labels = Labels::from([
+            ("__name__".to_string(), name.to_string()),
+            ("job".to_string(), "x".to_string()),
+            ("instance".to_string(), instance.to_string()),
+        ]);
+        let points: Points = at
+            .iter()
+            .map(|&point| (point, f64::to_bits(value)))
+            .collect();
+        sparse_series(&schema, &labels, &points).expect("the operand holds a value")
+    };
+    let even: Vec<usize> = (0..POINTS).step_by(2).collect();
+    let odd: Vec<usize> = (1..POINTS).step_by(2).collect();
+    // One many-side series holding every point, and two one-side series that split the grid between
+    // them: the group is matched at every point, never twice at one.
+    let lhs = [operand("a", "many", 0.5, &(0..POINTS).collect::<Vec<_>>())];
+    let rhs = [
+        operand("b", "even", 1.0, &even),
+        operand("c", "odd", 100.0, &odd),
+    ];
+    let matching = budget_matching(BinaryOp::Add, MatchingLabels::On(vec![Arc::from("job")]));
+    reset_match_records();
+    let output =
+        binary_vectors(&matching, &schema, &lhs, &schema, &rhs).expect("no point is matched twice");
+    assert_eq!(
+        match_records(),
+        0,
+        "a group of one many-side series recorded a match"
+    );
+    // One-to-one matching names the result after the many side and the matching labels, so both
+    // pairings file under one label set: the series holds the even points a `b` kept and the odd ones
+    // a `c` kept.
+    assert_eq!(output.len(), 1, "{output:?}");
+    let mut cursor = output[0].fields.as_slice()[0].cursor();
+    let mut rows = 0;
+    for (point, row) in output[0].time.positions() {
+        let expected = if point % 2 == 0 { 1.5 } else { 100.5 };
+        match cursor.at(row).expect("the axis and the fields are aligned") {
+            SampleRef::Float(value) => assert_eq!(value, expected, "point {point}"),
+            _ => panic!("`+` of two floats keeps a float"),
+        }
+        rows += 1;
+    }
+    assert_eq!(rows, POINTS, "the two pairings cover the grid between them");
+}
+
+/// A fill value of the one side is answered from the matches the walk recorded, so a pairing that
+/// holds at a point keeps it and only the points it left unmatched are filled -- the query of an
+/// arbitrary point of a group, not a run of them.
+#[test]
+fn a_fill_consults_the_match_set_point_by_point() {
+    let grid = budget_grid(2);
+    let schema = Arc::new(schema(1, &grid));
+    let lhs = [jobbed_operand(&schema, "a", "x", &[0])];
+    let rhs = [jobbed_operand(&schema, "b", "x", &[0, 1])];
+    let matching = BinaryMatching {
+        fill: FillValues {
+            lhs: Some(1_000.0),
+            rhs: None,
+        },
+        ..budget_matching(BinaryOp::Add, MatchingLabels::Ignoring(Vec::new()))
+    };
+    reset_match_records();
+    let output =
+        binary_vectors(&matching, &schema, &lhs, &schema, &rhs).expect("the operands are readable");
+    // Filling the one side is what asks the set whether a point was matched, so the field builds it:
+    // the pair at point 0 records its match, and so does the row point 1 is filled with.
+    assert!(
+        match_records() > 0,
+        "filling the one side did not record the match it consults"
+    );
+    assert_eq!(output.len(), 1, "{output:?}");
+    let mut cursor = output[0].fields.as_slice()[0].cursor();
+    let mut kept = Vec::new();
+    for (point, row) in output[0].time.positions() {
+        match cursor.at(row).expect("the axis and the fields are aligned") {
+            // Point 0 is the pair's own sum; at point 1 the fill stands in for the sample the left
+            // side has at no point, and the operator is applied to it as it would be to a sample.
+            SampleRef::Float(value) => kept.push((point, value)),
+            _ => panic!("`+` of two floats keeps a float"),
+        }
+    }
+    assert_eq!(kept, [(0, 0.0), (1, 1_001.0)], "{output:?}");
 }
 
 /// A pair whose operation fails is not a match, so `fill_left` still fills for the right-hand
@@ -2452,6 +2610,43 @@ fn a_dense_result_is_refused_where_a_sparse_one_is_admitted() {
     assert!(
         peak < limit,
         "the sparse run asked for {peak} bytes, past the {limit} it ran under"
+    );
+}
+
+/// A single field's rows reach the builder as they were filed: no table of triples is keyed by the
+/// label set the rows already sit under, so what the merge adds to the rows the field holds is the
+/// columns it writes them into, and a second copy of every sample is not part of the figure.
+#[test]
+fn a_single_field_holds_no_second_copy_of_its_rows() {
+    const POINTS: usize = 8_192;
+    let grid = budget_grid(POINTS);
+    let schema = Arc::new(schema(1, &grid));
+    let at: Vec<usize> = (0..POINTS).collect();
+    let lhs = vec![budget_operand(&schema, "a", &at)];
+    let rhs = vec![budget_operand(&schema, "b", &at)];
+    let matching = budget_matching(BinaryOp::Add, MatchingLabels::Ignoring(Vec::new()));
+    let (output, seen) = budgeted(&matching, &schema, &lhs, &schema, &rhs, usize::MAX);
+    let output = output.expect("the one pair matches");
+    assert_eq!(output.len(), 1, "{output:?}");
+    assert_eq!(
+        run_ranges(&output[0]).len(),
+        1,
+        "the pair keeps one run of the whole grid"
+    );
+    let peak = *seen
+        .iter()
+        .max()
+        .expect("the operation asks for its workspace");
+    assert!(peak > 0, "the operation asks for its workspace");
+    // What the operation holds once the field's tables are released is the rows it filed and the
+    // builder's own buffers: a merge that copied every row into a triple of its own table would hold
+    // a second copy of every sample beside them.
+    let floor = retained_total(&seen);
+    let rows = POINTS * RESULT_ROW_BYTES;
+    assert!(floor >= rows, "floor {floor}, rows {rows}");
+    assert!(
+        floor <= rows + 8 * 1024,
+        "floor {floor} for {rows} row bytes: the merge holds a second copy of every sample"
     );
 }
 

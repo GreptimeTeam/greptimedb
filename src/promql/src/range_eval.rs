@@ -200,10 +200,34 @@ pub struct RangeEvaluator {
     batch: Option<BatchKernel>,
     /// Windows accumulated for the next batch call.
     pending: PendingBatch,
+    /// Buffers the bulk ingest shifts and compacts a chunk into, kept between chunks so a series
+    /// that needs them does not allocate per push.
+    bulk_scratch: BulkScratch,
     /// Batch kernel calls made so far. Test-only: both dispatch shapes produce the same output,
     /// so a test comparing only output could not tell which one ran.
     #[cfg(test)]
     batch_calls: usize,
+}
+
+/// The buffers the bulk ingest needs for a chunk whose samples are not retained as they arrive:
+/// the timestamps shifted by the selector offset, and one compacted column per field.
+#[derive(Default)]
+struct BulkScratch {
+    timestamps: Vec<i64>,
+    columns: Vec<Vec<f64>>,
+}
+
+impl BulkScratch {
+    /// The bytes these buffers hold, by capacity.
+    fn bytes(&self) -> usize {
+        self.timestamps.capacity() * std::mem::size_of::<i64>()
+            + self.columns.capacity() * std::mem::size_of::<Vec<f64>>()
+            + self
+                .columns
+                .iter()
+                .map(|column| column.capacity() * std::mem::size_of::<f64>())
+                .sum::<usize>()
+    }
 }
 
 /// Windows accumulated for the next batch call: one list per field.
@@ -695,9 +719,18 @@ impl RangeEvaluator {
             bulk_ingests: 0,
             batch: None,
             pending: PendingBatch::with_fields(input.fields.len()),
+            bulk_scratch: BulkScratch::default(),
             #[cfg(test)]
             batch_calls: 0,
         })
+    }
+
+    /// The evaluation grid this evaluator decides points of.
+    ///
+    /// Every window ends at a point of it and is read at that point's timestamp, so a caller
+    /// reserving for what the evaluator is about to allocate reserves this grid's timestamps.
+    pub fn grid(&self) -> &Arc<EvalGrid> {
+        &self.grid
     }
 
     /// Chunks appended without the per-sample loop. Test-only: both paths produce the same
@@ -725,8 +758,9 @@ impl RangeEvaluator {
     /// Counted by capacity, so it is what the storage holds rather than what it uses: the retained
     /// samples per field (timestamps, values, the reset index and the native histograms with the
     /// payload each of them owns), the row a push fills with the histograms it boxes, the identity
-    /// of the open series and the pending batch's own vectors. Left out are the kernel's scratch
-    /// buffers, this struct's `Vec` headers and the grid, which every chunk addressed on it shares.
+    /// of the open series, the pending batch's own vectors and the buffers the bulk ingest shifts
+    /// and compacts into. Left out are the kernel's scratch buffers, this struct's `Vec` headers
+    /// and the grid, which every chunk addressed on it shares.
     ///
     /// The figure is an estimate, not a ledger of every allocation: a histogram's payload is
     /// measured once when it is admitted and released with it, so neither the retained samples nor
@@ -744,6 +778,7 @@ impl RangeEvaluator {
             + boxed_bytes(&self.row)
             + self.series.as_ref().map_or(0, SeriesState::identity_bytes)
             + self.pending.bytes()
+            + self.bulk_scratch.bytes()
     }
 
     /// An upper bound of the rows the next push hands out, for input whose last sample is at
@@ -1075,63 +1110,139 @@ impl RangeEvaluator {
         Ok(())
     }
 
-    /// Appends the chunk in bulk when every field is an entirely present, unshifted float column.
+    /// Appends the chunk in bulk when every field is an entirely present float column.
     ///
-    /// Returns `false` when any condition of the per-sample path applies, so the caller can run
-    /// it. A chunk carrying a stale marker takes that path too: the marker drops the whole row,
-    /// and reproducing that here would cost the same scan the loop already makes.
+    /// Returns `false` when a condition of the per-sample path applies, so the caller can run it.
+    /// Only the shapes that path alone can read do: a field holding native histogram samples or
+    /// mixed floats and histograms -- `dense()` reports [`DenseSamplesRef::Mixed`] for the latter,
+    /// keeping its windows on the histogram path where the mixed-window rules decide the result --
+    /// and a column with missing samples, which are absent rows rather than values.
     ///
-    /// A field mixing floats and native histograms never qualifies: `dense()` reports
-    /// [`DenseSamplesRef::Mixed`] for it, keeping its windows on the histogram path where the
-    /// mixed-window rules decide the result.
+    /// A selector offset and a stale marker do not: the shift and the rows the marker drops are
+    /// applied here, over the columns, instead of handing the chunk to the per-sample loop. The
+    /// search for a marker is one short-circuiting pass, the same pass the loop would have made.
     fn ingest_in_bulk(
         &mut self,
         timestamps: &[i64],
         fields: &SeriesFields,
         drop_stale: bool,
-    ) -> bool {
+    ) -> Result<bool> {
         // Lengths are checked by `check_chunk` for raw input and by `push_series` for evaluated
         // input, so only the shape of the columns is decided here.
-        if self.window.offset_ms != 0 {
-            return false;
-        }
         let mut columns = Vec::with_capacity(fields.len());
         for field in fields.iter() {
             let Some(DenseSamplesRef::Float(values)) = field.dense() else {
-                return false;
+                return Ok(false);
             };
             if values.null_count() != 0 {
-                return false;
+                return Ok(false);
             }
-            columns.push(values);
+            columns.push(values.values().as_ref());
         }
-        // A kept sample's shifted time must fit `i64`; with no offset it is the source timestamp,
-        // which `RawTimestamps` already validated as increasing and which the frame widened into
-        // this array without narrowing, so there is nothing left to check here.
-        if drop_stale
-            && columns.iter().any(|values| {
-                values
-                    .values()
-                    .iter()
-                    .any(|value| is_prometheus_stale_nan(*value))
-            })
+        // A stale marker drops its whole row, so which rows go is decided before anything is
+        // retained. A chunk holding none -- the common case -- is judged by one scan that stops at
+        // the first marker and then leaves the columns as they are.
+        let stale_rows = if drop_stale
+            && columns
+                .iter()
+                .any(|values| values.iter().any(|value| is_prometheus_stale_nan(*value)))
         {
-            return false;
-        }
-        for (field, values) in self.fields.iter_mut().zip(columns) {
-            field.push_bulk(timestamps, values.values());
-        }
+            let mut stale = vec![false; timestamps.len()];
+            for values in &columns {
+                for (row, dropped) in stale.iter_mut().enumerate() {
+                    *dropped |= is_prometheus_stale_nan(values[row]);
+                }
+            }
+            Some(stale)
+        } else {
+            None
+        };
+        self.append_float_chunk(timestamps, &columns, stale_rows.as_deref())?;
         #[cfg(test)]
         {
             self.bulk_ingests += 1;
         }
-        true
+        Ok(true)
+    }
+
+    /// Retains one chunk of entirely present float columns.
+    ///
+    /// `stale` marks the rows a stale marker drops, `None` when the chunk holds none. The retained
+    /// samples are the chunk's rows less those, on the evaluation timeline: the selector offset
+    /// shifts them, and only a chunk that needs neither keeps the incoming timestamps as they are.
+    fn append_float_chunk(
+        &mut self,
+        timestamps: &[i64],
+        columns: &[&[f64]],
+        stale: Option<&[bool]>,
+    ) -> Result<()> {
+        let offset_ms = self.window.offset_ms;
+        if offset_ms == 0 && stale.is_none() {
+            // The source timestamps, which `RawTimestamps` already validated as increasing and
+            // which the frame widened into this array without narrowing: nothing to shift, nothing
+            // to check, and the two appends become two `memcpy`s.
+            for (field, values) in self.fields.iter_mut().zip(columns) {
+                field.push_bulk(timestamps, values);
+            }
+            return Ok(());
+        }
+        let BulkScratch {
+            timestamps: mut shifted,
+            columns: mut compacted,
+        } = std::mem::take(&mut self.bulk_scratch);
+        shifted.clear();
+        shifted.reserve(timestamps.len());
+        for (row, &timestamp) in timestamps.iter().enumerate() {
+            if stale.is_some_and(|stale| stale[row]) {
+                continue;
+            }
+            // Like RangeManipulate, any kept sample whose shifted time leaves i64 fails the series,
+            // whichever path retains it.
+            let Some(shifted_timestamp) = timestamp.checked_add(offset_ms) else {
+                self.bulk_scratch = BulkScratch {
+                    timestamps: shifted,
+                    columns: compacted,
+                };
+                return Err(DataFusionError::Execution(format!(
+                    "sample timestamp {timestamp} overflows with offset {offset_ms} ms"
+                )));
+            };
+            shifted.push(shifted_timestamp);
+        }
+        match stale {
+            None => {
+                for (field, values) in self.fields.iter_mut().zip(columns) {
+                    field.push_bulk(&shifted, values);
+                }
+            }
+            Some(stale) => {
+                compacted.resize_with(columns.len(), Vec::new);
+                for (retained, values) in compacted.iter_mut().zip(columns) {
+                    retained.clear();
+                    retained.extend(
+                        values
+                            .iter()
+                            .enumerate()
+                            .filter(|(row, _)| !stale[*row])
+                            .map(|(_, &value)| value),
+                    );
+                }
+                for (field, values) in self.fields.iter_mut().zip(&compacted) {
+                    field.push_bulk(&shifted, values);
+                }
+            }
+        }
+        self.bulk_scratch = BulkScratch {
+            timestamps: shifted,
+            columns: compacted,
+        };
+        Ok(())
     }
 
     /// Retains the samples of `fields` at `timestamps`. From `raw` input a row holding a stale
     /// marker in any field is dropped; evaluated input keeps it as a value.
     fn ingest(&mut self, timestamps: &[i64], fields: &SeriesFields, raw: bool) -> Result<()> {
-        if self.ingest_in_bulk(timestamps, fields, raw) {
+        if self.ingest_in_bulk(timestamps, fields, raw)? {
             return Ok(());
         }
         let mut samples: Vec<_> = fields.iter().map(|field| field.iter()).collect();

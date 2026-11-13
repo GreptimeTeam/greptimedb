@@ -604,6 +604,96 @@ fn incremental_retained_bytes_match_full_recount_for_many_groups() {
     }
 }
 
+/// A state keeps the components its operation folds plus a presence word, which the count already
+/// provides where the state has one. That is the whole width of a state, so a `max` state costs two
+/// words where an `avg` state costs five instead of every state costing one fixed struct.
+#[test]
+fn a_state_is_as_wide_as_the_operation_it_belongs_to() {
+    for (op, words) in [
+        (AggregateOp::Count, 1),
+        (AggregateOp::Group, 1),
+        (AggregateOp::Min, 2),
+        (AggregateOp::Max, 2),
+        (AggregateOp::Sum, 3),
+        (AggregateOp::Stddev, 3),
+        (AggregateOp::Stdvar, 3),
+        (AggregateOp::Avg, 5),
+    ] {
+        assert_eq!(op.state_words(), words, "{op:?}");
+        let counted = op
+            .state_fields()
+            .iter()
+            .any(|field| matches!(field, StateField::Count));
+        assert_eq!(
+            op.state_words(),
+            op.state_fields().len() + usize::from(!counted),
+            "{op:?} keeps its own components and nothing else"
+        );
+    }
+}
+
+/// What a block keeps is what its operation folds: for every operation the fold's retained figure
+/// and the recount of its live blocks agree, and a block holds one state per point per field, each
+/// as many words as the operation keeps.
+#[test]
+fn every_operation_recounts_the_states_it_keeps() {
+    let schema = schema_with_grid_len(&["value", "other"], 256);
+    for op in [
+        AggregateOp::Sum,
+        AggregateOp::Count,
+        AggregateOp::Avg,
+        AggregateOp::Min,
+        AggregateOp::Max,
+        AggregateOp::Group,
+        AggregateOp::Stddev,
+        AggregateOp::Stdvar,
+    ] {
+        let mut aggregator =
+            FloatAggregator::try_new(&schema, op, Grouping::By(&["zone"])).unwrap();
+        assert_eq!(
+            aggregator.state_bytes(),
+            aggregator.recounted_state_bytes(),
+            "{op:?} initial state"
+        );
+        let updates = [
+            input(
+                &schema,
+                metric("m", &[("zone", "a")]),
+                0,
+                &[vec![Some(1.0), Some(2.0)], vec![Some(3.0)]],
+            ),
+            input(
+                &schema,
+                metric("m", &[("zone", "a")]),
+                64,
+                &[vec![Some(4.0)], vec![Some(5.0)]],
+            ),
+            input(
+                &schema,
+                metric("m", &[("zone", "b")]),
+                128,
+                &[vec![Some(6.0)], vec![Some(7.0)]],
+            ),
+        ];
+        for (index, series) in updates.iter().enumerate() {
+            aggregator.update(series).unwrap();
+            assert_eq!(
+                aggregator.state_bytes(),
+                aggregator.recounted_state_bytes(),
+                "{op:?} update {index}"
+            );
+        }
+        // Three blocks of two fields, each state as wide as the operation folds it.
+        let blocks = &aggregator.groups[0].blocks;
+        assert_eq!(blocks.len(), 2, "{op:?} blocks the first group wrote");
+        assert_eq!(
+            blocks.values().map(|block| block.len()).sum::<usize>(),
+            blocks.len() * BLOCK_POINTS * schema.fields.len() * op.state_words(),
+            "{op:?} words per block"
+        );
+    }
+}
+
 /// The unbudgeted entry point is the budgeted one with a no-op budget, so this compares one path
 /// with itself: it is a smoke check that the wrapper still runs, not evidence that the kernels are
 /// right. The numbers are checked against Prometheus in `aggregates_match_prometheus` and
@@ -667,9 +757,7 @@ fn adjacent_blocks_are_admitted_and_accounted_separately() {
     assert_eq!(aggregator.groups[0].blocks.len(), 2);
     // A new block is admitted on the retained state alone, so the last admission settles at
     // exactly what the fold keeps and no staging buffer is charged for the samples in it.
-    let block = BLOCK_POINTS
-        .saturating_mul(schema.fields.len())
-        .saturating_mul(std::mem::size_of::<FloatState>());
+    let block = block_bytes(schema.fields.len(), AggregateOp::Sum);
     let (first, second) = (
         admissions[admissions.len() - 2],
         admissions[admissions.len() - 1],
@@ -698,9 +786,7 @@ fn a_rejected_block_allocation_does_not_insert_a_block() {
     // The figure a new block's admission adds: the block's states and its tree node, on top of
     // whatever the fold already holds. Located by the value, not by which call reaches it, so
     // reordering the earlier admissions cannot make this test pass without testing anything.
-    let block_states = BLOCK_POINTS
-        .saturating_mul(schema.fields.len())
-        .saturating_mul(std::mem::size_of::<FloatState>());
+    let block_states = block_bytes(schema.fields.len(), AggregateOp::Sum);
     let block = block_states.saturating_add(btree_backing_bytes(1));
     let mut aggregator =
         FloatAggregator::try_new(&schema, AggregateOp::Sum, Grouping::By(&[])).unwrap();
@@ -744,9 +830,7 @@ fn a_rejected_later_block_keeps_the_blocks_the_group_already_holds() {
     // The group and the tree node are already there, so the block's own states are the whole
     // charge of the second block.
     let later = input(&schema, metric("m", &[]), 64, &[vec![Some(2.0)]]);
-    let block_states = BLOCK_POINTS
-        .saturating_mul(schema.fields.len())
-        .saturating_mul(std::mem::size_of::<FloatState>());
+    let block_states = block_bytes(schema.fields.len(), AggregateOp::Sum);
     let threshold = retained
         .saturating_add(btree_backing_bytes(2).saturating_sub(btree_backing_bytes(1)))
         .saturating_add(block_states);
@@ -852,9 +936,7 @@ fn the_fold_releases_the_series_workspace_before_it_admits_a_block() {
     let state = aggregator.state_bytes();
     assert_eq!(aggregator.recounted_state_bytes(), state);
 
-    let block = BLOCK_POINTS
-        .saturating_mul(schema.fields.len())
-        .saturating_mul(std::mem::size_of::<FloatState>());
+    let block = block_bytes(schema.fields.len(), AggregateOp::Sum);
     let entry = state
         .saturating_sub(block)
         .saturating_sub(btree_backing_bytes(1));
@@ -871,6 +953,105 @@ fn the_fold_releases_the_series_workspace_before_it_admits_a_block() {
         grouping > entry,
         "the series workspace was still charged at the fold entry: {grouping} <= {entry}"
     );
+}
+
+/// A chunk admits its workspace and the group it may open in one pool call, releases the
+/// workspace at the fold entry, and pays for each block it opens: three calls for a chunk that
+/// falls in one block, four for one that opens two.
+///
+/// The fold used to admit the workspace, then a wider bound of it, then the grouping and its key,
+/// then the new group on top of them: six admissions for a chunk that opens a group and one block,
+/// seven for one that opens two, on top of the runtime's own resize once the chunk is folded.
+#[test]
+fn a_chunk_admits_its_workspace_release_and_blocks_in_three_or_four_calls() {
+    let schema = schema(&["value", "other"]);
+    let one_block = input(
+        &schema,
+        metric("m", &[("zone", "a")]),
+        0,
+        &[vec![Some(1.0), Some(2.0)], vec![Some(3.0)]],
+    );
+    // Two samples of the first field straddle the edge at 64, so the fold opens a second block.
+    let two_blocks = input(
+        &schema,
+        metric("m", &[("zone", "a")]),
+        63,
+        &[vec![Some(1.0), Some(2.0)], vec![Some(3.0)]],
+    );
+    let admissions = |series: &Series| {
+        let mut aggregator =
+            FloatAggregator::try_new(&schema, AggregateOp::Sum, Grouping::By(&["zone"])).unwrap();
+        let mut calls = Vec::new();
+        aggregator
+            .update_budgeted(series, |bytes| {
+                calls.push(bytes);
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(aggregator.state_bytes(), aggregator.recounted_state_bytes());
+        calls
+    };
+
+    let one = admissions(&one_block);
+    assert_eq!(
+        one.len(),
+        3,
+        "the workspace, the release and one block: {one:?}"
+    );
+    assert!(
+        one[0] > one[1],
+        "the workspace was admitted beside the retained state: {one:?}"
+    );
+    let block = block_bytes(schema.fields.len(), AggregateOp::Sum);
+    assert_eq!(
+        one[2],
+        one[1]
+            .saturating_add(block)
+            .saturating_add(btree_backing_bytes(1)),
+        "the block is admitted on the retained state alone"
+    );
+
+    let two = admissions(&two_blocks);
+    assert_eq!(
+        two.len(),
+        4,
+        "the workspace, the release and two blocks: {two:?}"
+    );
+    assert!(two[3] > two[2], "each block is admitted separately");
+}
+
+/// A chunk that only writes into states its group already holds costs the workspace admission and
+/// the release, and no block.
+#[test]
+fn a_chunk_of_existing_blocks_admits_only_its_workspace_and_release() {
+    let schema = schema(&["value"]);
+    let mut aggregator =
+        FloatAggregator::try_new(&schema, AggregateOp::Sum, Grouping::By(&["zone"])).unwrap();
+    aggregator
+        .update(&input(
+            &schema,
+            metric("m", &[("zone", "a")]),
+            0,
+            &[vec![Some(1.0)]],
+        ))
+        .unwrap();
+    let mut calls = Vec::new();
+    aggregator
+        .update_budgeted(
+            &input(
+                &schema,
+                metric("m", &[("zone", "a")]),
+                1,
+                &[vec![Some(2.0)]],
+            ),
+            |bytes| {
+                calls.push(bytes);
+                Ok(())
+            },
+        )
+        .unwrap();
+    assert_eq!(calls.len(), 2, "the workspace and the release: {calls:?}");
+    assert_eq!(aggregator.state_bytes(), aggregator.recounted_state_bytes());
 }
 
 /// A block a field holds no value in is not allocated: two fields whose samples fall in different
@@ -1889,7 +2070,7 @@ fn merge_charges_one_block_per_new_block_not_per_point() {
     aggregator.update(&series).unwrap();
     let partial = aggregator.finish_partial().unwrap();
     assert_eq!(partial.groups[0].states[0].len(), 64);
-    let block = BLOCK_POINTS * 64 * std::mem::size_of::<FloatState>();
+    let block = block_bytes(64, AggregateOp::Sum);
     let mut merger = FloatMerger::try_new(&schema, AggregateOp::Sum).unwrap();
     let (peak, result) = peak_admission(|budget| merger.merge_budgeted(partial, budget));
     result.unwrap();

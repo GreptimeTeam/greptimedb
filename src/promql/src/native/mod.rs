@@ -34,6 +34,5 @@ mod display;
 pub mod execute;
 pub mod metrics;
 pub mod plan;
-pub(crate) mod runs;
 pub(crate) mod split;
 pub(crate) mod state;

@@ -159,7 +159,8 @@ pub(super) fn evaluate(
                 HistogramAggregate::Avg
             };
             // The hints are read from the window's own histograms, so nothing is cloned for the
-            // check; the fold below clones one sample at a time as it consumes them.
+            // check; the fold below reads them by reference too and copies only the accumulator
+            // it starts from.
             if has_contradictory_reset_hints(histograms.iter().map(|(_, h)| h)) {
                 record_warning(
                     collector,
@@ -173,7 +174,7 @@ pub(super) fn evaluate(
             // flag is the reconciliation its own adds already observed. Re-walking the pairs to
             // learn either would double the histogram work of every window.
             let (result, custom_reconciled) =
-                sum_or_avg(op, histograms.iter().map(|(_, h)| Ok(h.clone())))?;
+                sum_or_avg(op, histograms.iter().map(|(_, h)| Ok(Cow::Borrowed(h))))?;
             if result.is_none() {
                 record_warning(
                     collector,
