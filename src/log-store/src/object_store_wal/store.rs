@@ -9604,19 +9604,29 @@ mod tests {
         assert_eq!(1, seq);
         create.send(false).unwrap();
         assert!(timeout(WAIT, seal).await.unwrap().unwrap().is_err());
-        let seal = {
-            let store = store.clone();
-            tokio::spawn(async move { store.seal_open_batch().await })
-        };
-        let (seq, create) = next_parked_operation(&mut parked).await;
+        // Manual batching has no timely timer tick. Drive sealing until the
+        // durable retry backoff expires and the next create is issued.
+        let (seq, create) = timeout(WAIT, async {
+            let mut interval = tokio::time::interval(Duration::from_millis(5));
+            loop {
+                tokio::select! {
+                    operation = parked.recv() => break operation.unwrap(),
+                    _ = interval.tick() => {
+                        let (response, _) = oneshot::channel();
+                        store.command_tx.send(Command::Seal { response }).await.unwrap();
+                    }
+                }
+            }
+        })
+        .await
+        .unwrap();
         assert_eq!(2, seq);
         create.send(true).unwrap();
-        timeout(WAIT, seal).await.unwrap().unwrap().unwrap();
+        store.stop().await.unwrap();
         assert_eq!(
             vec![release(region_id, 0)],
             releases_of(io.as_ref(), seq).await
         );
-        store.stop().await.unwrap();
     }
 
     #[tokio::test]
