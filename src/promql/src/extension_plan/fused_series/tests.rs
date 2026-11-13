@@ -6082,7 +6082,7 @@ async fn decode_state_batches(batches: Vec<RecordBatch>) -> Vec<StateFrameRow> {
     assert_eq!(FrameContent::AggregateState, declaration.content());
     let series = Arc::new(declaration.series().clone());
     let state = Arc::new(declaration.aggregate_state().unwrap().to_owned());
-    let decoded = unpack_aggregate_state(
+    unpack_aggregate_state(
         Box::pin(RecordBatchStreamAdapter::new(
             schema,
             futures::stream::iter(batches.into_iter().map(Ok)),
@@ -6093,8 +6093,7 @@ async fn decode_state_batches(batches: Vec<RecordBatch>) -> Vec<StateFrameRow> {
     .unwrap()
     .try_collect::<Vec<_>>()
     .await
-    .unwrap();
-    decoded
+    .unwrap()
 }
 
 /// State is keyed by the cut aggregate's grouping, not by the tags its scan was bound with.

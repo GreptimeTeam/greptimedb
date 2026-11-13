@@ -5931,6 +5931,43 @@ pub async fn test_remote_write_v2_histogram_native_composition(store_type: Stora
         tests_integration::test_util::execute_sql(instance.fe_instance(), sql).await;
     }
 
+    // A counter histogram with a start timestamp strictly inside `(0, 3000]`, its window's only
+    // sample: `rate` can answer that window through the start timestamp alone.
+    let start_request = remote_write_v2::request_with_labels_and_histograms(
+        vec![
+            (prom_store::METRIC_NAME_LABEL, "native_comp_start"),
+            ("job", "api"),
+        ],
+        vec![Histogram {
+            count: Some(Count::CountInt(8)),
+            sum: 10.0,
+            schema: 1,
+            positive_spans: vec![BucketSpan {
+                offset: 0,
+                length: 2,
+            }],
+            positive_deltas: vec![4, 0],
+            reset_hint: 2,
+            start_timestamp: 1_500,
+            timestamp: 3_000,
+            ..Default::default()
+        }],
+    );
+    let payload = prom_store::snappy_compress(&start_request.encode_to_vec()).unwrap();
+    let written = client
+        .post("/v1/prometheus/write")
+        .header("Content-Encoding", "snappy")
+        .header(
+            "Content-Type",
+            "application/x-protobuf;proto=io.prometheus.write.v2.Request",
+        )
+        .body(payload)
+        .send()
+        .await;
+    let status = written.status();
+    let body = written.text().await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "write rejected: {body}");
+
     // The first sample has two equal buckets of 5; h2 has two equal buckets of 2.
     // Repeat the same public requests after flushing so the source can be memtable or SST.
     for phase in ["memtable", "flushed"] {
@@ -5940,6 +5977,7 @@ pub async fn test_remote_write_v2_histogram_native_composition(store_type: Stora
                 "native_comp_h2",
                 "native_comp_dups",
                 "native_comp_f",
+                "native_comp_start",
             ] {
                 tests_integration::test_util::execute_sql(
                     instance.fe_instance(),
@@ -6217,6 +6255,56 @@ pub async fn test_remote_write_v2_histogram_native_composition(store_type: Stora
         }
         assert!(body.get("infos").is_none(), "{phase}: {query}: {body}");
         assert!(body.get("warnings").is_none(), "{phase}: {query}: {body}");
+
+        // The same two windows asked without a hint, so the legacy route answers them and the
+        // observer proves it did. This is where the delegated kernel has to agree with the native
+        // route: the raw sample's start timestamp is what lets `rate` measure the window, while
+        // `* 1` gives that timestamp up, so the derived window has nothing to measure against.
+        for (query, expected_count) in [
+            ("rate(native_comp_start[3s])", Some(8.0 / 3.0)),
+            ("rate((native_comp_start * 1)[3s:1s])", None),
+        ] {
+            let res = client
+                .get(&format!(
+                    "/v1/prometheus/api/v1/query?query={}&time=3",
+                    encode(query)
+                ))
+                .send()
+                .await;
+            let status = res.status();
+            let body: Value = res.json().await;
+            assert_eq!(status, StatusCode::OK, "{phase}: {query}: {body}");
+            let results = body["data"]["result"]
+                .as_array()
+                .unwrap_or_else(|| panic!("{phase}: {query}: no result in {body}"));
+            match expected_count {
+                Some(count) => {
+                    assert_eq!(results.len(), 1, "{phase}: {query}: {body}");
+                    let reported: f64 = body["data"]["result"][0]["histogram"][1]["count"]
+                        .as_str()
+                        .unwrap_or_else(|| panic!("{phase}: {query}: no count in {body}"))
+                        .parse()
+                        .unwrap();
+                    assert!(
+                        (reported - count).abs() < 1e-12,
+                        "{phase}: {query}: expected count {count}, got {body}"
+                    );
+                }
+                None => assert!(
+                    results.is_empty(),
+                    "{phase}: {query}: `* 1` clears the start timestamp, so the derived window \
+                     has nothing to measure: {body}"
+                ),
+            }
+            assert!(
+                body.get("infos").is_none() && body.get("warnings").is_none(),
+                "{phase}: {query}: a counter histogram has nothing to report: {body}"
+            );
+            assert!(
+                !executes_fused_series(&route.take_plan()),
+                "{phase}: {query} did not run on the legacy route"
+            );
+        }
     }
 }
 
@@ -6755,12 +6843,22 @@ pub async fn test_remote_write_v2_histogram_count_and_group_native_route(store_t
 
 pub async fn test_prometheus_remote_write_v2_native_histogram(store_type: StorageType) {
     common_telemetry::init_default_ut_logging();
-    let (app, mut guard) = setup_test_prom_app_with_frontend(
-        store_type,
+    // The histogram answers at the end of this test are legacy ones, so the route observer is what
+    // proves the route they ran on: the engine-wide option stays off and no request carries a hint.
+    let route = Arc::new(PromRouteObserver::default());
+    let plugins = Plugins::default();
+    plugins.insert::<PromQueryInterceptorRef<servers::error::Error>>(route.clone());
+    let mut instance = tests_integration::standalone::GreptimeDbStandaloneBuilder::new(
         "prometheus_remote_write_v2_native_histogram",
     )
+    .with_default_store_type(store_type)
+    .with_plugin(plugins)
+    .build()
     .await;
-    let client = TestClient::new(app).await;
+    let server = build_test_prom_server(instance.fe_instance().clone(), false, None)
+        .with_greptime_config_options(instance.opts.datanode_options().to_toml().unwrap())
+        .build();
+    let client = TestClient::new(server.build(server.make_app()).unwrap()).await;
 
     let mut write_request = remote_write_v2::request_with_labels_and_samples(
         vec![
@@ -6913,6 +7011,123 @@ pub async fn test_prometheus_remote_write_v2_native_histogram(store_type: Storag
         histogram_rows,
     )
     .await;
+
+    // The raw sample carries a start timestamp of 1500, strictly inside the window `(0, 3000]` of
+    // the requests below, and it is the window's only sample. A legacy `rate`/`increase` can only
+    // answer such a window through that start timestamp: the whole sample is what the increase
+    // since the synthetic zero measures, and `rate` is that over the window's seconds.
+    for (query, count, sum) in [
+        (
+            "rate(remote_write_v2_latency_seconds[3s])",
+            8.0 / 3.0,
+            10.0 / 3.0,
+        ),
+        ("increase(remote_write_v2_latency_seconds[3s])", 8.0, 10.0),
+    ] {
+        let res = client
+            .get(&format!(
+                "/v1/prometheus/api/v1/query?query={}&time=3",
+                encode(query)
+            ))
+            .send()
+            .await;
+        let status = res.status();
+        let body: Value = res.json().await;
+        assert_eq!(status, StatusCode::OK, "{query}: {body}");
+        assert_eq!(body["data"]["resultType"], "vector", "{query}: {body}");
+        assert_eq!(
+            body["data"]["result"].as_array().map(Vec::len),
+            Some(1),
+            "{query}: {body}"
+        );
+        let histogram = &body["data"]["result"][0]["histogram"][1];
+        let reported = |field: &str| -> f64 {
+            histogram[field]
+                .as_str()
+                .unwrap_or_else(|| panic!("no histogram {field} in {body}"))
+                .parse()
+                .unwrap()
+        };
+        assert!(
+            (reported("count") - count).abs() < 1e-12 && (reported("sum") - sum).abs() < 1e-12,
+            "{query}: expected count {count} and sum {sum}, got {body}"
+        );
+        assert!(
+            body.get("infos").is_none() && body.get("warnings").is_none(),
+            "{query}: a counter histogram with a start timestamp has nothing to report: {body}"
+        );
+        assert!(
+            !executes_fused_series(&route.take_plan()),
+            "{query} did not run on the legacy route"
+        );
+    }
+
+    // A NaN observation: the buckets hold nine of the count's ten observations and the sum is NaN,
+    // which is how Prometheus marks the rest. Prometheus's NaN branch walks the buckets forward and
+    // leaves the top bucket for the interpolation, so the half quantile reads 2^5 rather than the
+    // 0.7711 the buckets' own rank gives - and the response has to say why.
+    let nan_request = remote_write_v2::request_with_labels_and_histograms(
+        vec![
+            (
+                prom_store::METRIC_NAME_LABEL,
+                "remote_write_v2_nan_quantile",
+            ),
+            ("job", "api"),
+        ],
+        vec![Histogram {
+            count: Some(Count::CountInt(10)),
+            sum: f64::NAN,
+            // A bucket's upper bound is 2^(index * 2^-schema), so schema 0 makes the two buckets
+            // (0.5, 1] and (1, 2]; the deltas hold 8 and then 1.
+            schema: 0,
+            positive_spans: vec![BucketSpan {
+                offset: 0,
+                length: 2,
+            }],
+            positive_deltas: vec![8, -7],
+            reset_hint: 2,
+            timestamp: 3_000,
+            ..Default::default()
+        }],
+    );
+    let payload = prom_store::snappy_compress(&nan_request.encode_to_vec()).unwrap();
+    let written = client
+        .post("/v1/prometheus/write")
+        .header("Content-Encoding", "snappy")
+        .header(
+            "Content-Type",
+            "application/x-protobuf;proto=io.prometheus.write.v2.Request",
+        )
+        .body(payload)
+        .send()
+        .await;
+    let status = written.status();
+    let body = written.text().await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "write rejected: {body}");
+
+    let res = client
+        .get(&format!(
+            "/v1/prometheus/api/v1/query?query={}&time=3",
+            encode("histogram_quantile(0.5, remote_write_v2_nan_quantile)")
+        ))
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let body: Value = res.json().await;
+    assert_eq!(body["data"]["resultType"], "vector", "{body}");
+    assert_eq!(
+        body["data"]["result"][0]["value"][1], "32.0",
+        "the NaN walk leaves the top bucket: {body}"
+    );
+    assert_eq!(
+        body["infos"],
+        json!(["input to histogram_quantile has NaN observations, result is skewed higher"]),
+        "{body}"
+    );
+    assert!(
+        !executes_fused_series(&route.take_plan()),
+        "`histogram_quantile` did not run on the legacy route"
+    );
 
     for flushed in [false, true] {
         if flushed {
@@ -7209,7 +7424,7 @@ pub async fn test_prometheus_remote_write_v2_native_histogram(store_type: Storag
     )
     .await;
 
-    guard.remove_all().await;
+    instance.guard.remove_all().await;
 }
 
 #[apply(both_deployment_cases)]
