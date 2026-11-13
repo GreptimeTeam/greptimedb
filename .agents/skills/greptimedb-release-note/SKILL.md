@@ -156,8 +156,8 @@ done | tr -dc '0-9\n' | sort -un
 List the bullets under the **original** PRs (title and author of the PR merged to `main`), not
 the backport PRs. Build them with patch (a) or (b) above; for (b), fetch
 `gh api repos/GreptimeTeam/greptimedb/pulls/<n> --jq '{number,title,author:.user.login,merged_at}'`,
-group by the `cliff.toml` parsers (first match wins), order by `merged_at`, and put `!` titles
-under Breaking changes (§6).
+group by the `cliff.toml` parsers (first match wins), order by `merged_at`, and review `!` titles
+for user-visible compatibility impact (§6) before assigning a category.
 
 A squashed pick PR can also contain release-only commits that have no PR. List them:
 ```
@@ -248,8 +248,8 @@ Mirror past release bodies (`gh release view v1.0.0 --repo GreptimeTeam/greptime
     so.
   - Give an example (SQL / TOML config) only where it helps readers act. Don't pick highlights,
     or the example, by what is easy to demonstrate.
-  - One highlight covers one change or one user-visible problem. Don't merge unrelated PRs into
-    one entry because they touch the same component.
+  - One highlight covers one user-visible problem or closely related outcome, such as write
+    durability. Related fixes can share an entry; omit their implementation mechanisms.
   - Sources: the PR body's sections on impact, compatibility, and behavior changes, plus the
     code and config it touches, not the title alone. Verify examples against the related docs
     PR/page in the docs repo (`GreptimeTeam/docs`, often checked out locally),
@@ -266,7 +266,7 @@ Mirror past release bodies (`gh release view v1.0.0 --repo GreptimeTeam/greptime
   ```
   Screenshots need absolute `https://` URLs: the body is copied to the GitHub release, where
   relative and site-root (`/img/...`) paths don't resolve.
-- **`### Upgrade notes`** and **`### Breaking changes`** — check every PR in the release for:
+- **`### Upgrade and compatibility notes`** — check every PR in the release for:
   `!` titles; `Compatibility`, `Behavior change`, `Breaking` paragraphs in the body (often a
   plain `Compatibility:` line, not a heading); unchecked "API changes are backward compatible" /
   "Schema or data changes are backward compatible" boxes; new config options and their defaults;
@@ -275,9 +275,23 @@ Mirror past release bodies (`gh release view v1.0.0 --repo GreptimeTeam/greptime
   checked, so read the body of every user-facing `feat`/`fix` PR. Examples of what is easy to
   miss: a 512 MiB cap on decompressed request bodies (#9264); a default step for stepless
   subqueries (#9481).
-  - **Upgrade notes**: steps operators take — upgrade order, index rebuilds, settings to review.
-  - **Breaking changes**: behavior that used to work and now errors or returns different
-    results. Put the `!` PR bullets here too, after these entries (see `v1.3.0-beta.1`).
+  - Write for database users and operators. Include required upgrade actions, observable
+    compatibility changes, and concrete rolling-upgrade risks. State the affected usage,
+    consequence, and action where one is needed; link detailed checks to the source.
+  - A `!` title or unchecked compatibility box is an investigation signal, not a publication
+    category. Internal Rust API/type changes and source-integrator obligations belong in the
+    PR, not these notes. Move their generated bullets to the appropriate changelog group,
+    preserving titles, links, and contributor attribution.
+  - Automatic cache recovery, internal accounting, and scheduler changes without a required
+    operator action belong in ordinary fixes or performance entries. Do not turn them into
+    vague instructions to review settings or monitor load.
+  - Keep genuine external incompatibilities even when they fix bugs or affect few users.
+    For unsupported manual configurations, name the opt-in setting and scope the warning;
+    do not imply that normal deployments need an audit.
+  - Use one combined section when short; split upgrade steps from breaking changes only when
+    that helps navigation. Omit empty sections and avoid repeating the same change across
+    curated sections. Each bullet should fit in one or two sentences without a PR's internal
+    contracts, edge-case inventory, or implementation history.
 - **Benchmark results** (optional) — state the baseline version (often the previous formal
   release, not the previous beta), data size, cache state, and hardware. Don't attribute results
   to single PRs. Leave out results the benchmark marks as not for publication, and smoke-level
