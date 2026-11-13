@@ -65,10 +65,10 @@ use datafusion::physical_plan::{
 };
 use datafusion::prelude::SessionContext;
 use datatypes::prelude::ConcreteDataType;
-use datatypes::series::aggregate_state::{AggregateStateKind, StateComponent, StateSeries};
+use datatypes::series::aggregate_state::{AggregateStateKind, StateComponent};
 use datatypes::series::frame::{
     FrameContent, FrameLabelMode, LABEL_DECODE_VERSION, LabelDecodeColumn, LabelDecodeEncoding,
-    LabelDecodeSpec, LabelDecodeTag, SeriesFrameDeclaration, pack_raw_series_chunk,
+    LabelDecodeSpec, LabelDecodeTag, SeriesFrameDeclaration, StateFrameRow, pack_raw_series_chunk,
     raw_series_frame_schema, series_frame_schema,
 };
 use datatypes::series::raw::{RawSeriesChunk, RawTimestamps};
@@ -5435,12 +5435,13 @@ async fn state_batches(exec: &Arc<dyn ExecutionPlan>, partition: usize) -> Vec<R
         .unwrap()
 }
 
-/// Decodes state-frame batches into per-series states, checking their declaration on the way.
+/// Decodes state-frame batches into per-series rows, checking their declaration on the way.
 ///
 /// A state frame has no flat accumulator column - each aggregate field is one
 /// `List<Struct<component...>>` - so a reader of its values goes through the decoder, which is the
-/// same path the `Final` half takes.
-async fn decode_state_batches(batches: Vec<RecordBatch>) -> Vec<StateSeries> {
+/// same path the `Final` half takes. The rows keep their Arrow handles, so a test reads a
+/// component value in place instead of materialising one state tree per grid position.
+async fn decode_state_batches(batches: Vec<RecordBatch>) -> Vec<StateFrameRow> {
     let schema = batches
         .first()
         .expect("a state-exporting node answers at least one batch")
@@ -5449,7 +5450,7 @@ async fn decode_state_batches(batches: Vec<RecordBatch>) -> Vec<StateSeries> {
     assert_eq!(FrameContent::AggregateState, declaration.content());
     let series = Arc::new(declaration.series().clone());
     let state = Arc::new(declaration.aggregate_state().unwrap().to_owned());
-    let decoded = unpack_aggregate_state(
+    unpack_aggregate_state(
         Box::pin(RecordBatchStreamAdapter::new(
             schema,
             futures::stream::iter(batches.into_iter().map(Ok)),
@@ -5460,11 +5461,7 @@ async fn decode_state_batches(batches: Vec<RecordBatch>) -> Vec<StateSeries> {
     .unwrap()
     .try_collect::<Vec<_>>()
     .await
-    .unwrap();
-    decoded
-        .iter()
-        .map(|batch| batch.to_state_series().unwrap())
-        .collect()
+    .unwrap()
 }
 
 /// State is keyed by the cut aggregate's grouping, not by the tags its scan was bound with.
@@ -5499,7 +5496,7 @@ async fn a_state_export_keys_its_labels_by_the_cut_aggregate_grouping() {
     let tags = states
         .first()
         .expect("the state export answers at least one series")
-        .metric
+        .metric()
         .tags();
     assert_eq!(
         Some("shared"),
@@ -5585,19 +5582,22 @@ async fn a_partial_root_exports_state_frames_from_every_partition() {
         .await
         .unwrap();
         assert!(!decoded.is_empty());
-        let batch = decoded[0].to_state_series().unwrap();
+        let row = &decoded[0];
         assert_eq!(
             Some("shared"),
-            batch
-                .metric
+            row.metric()
                 .tags()
                 .iter()
                 .find(|tag| tag.name.as_ref() == JOB)
                 .map(|tag| tag.value.as_ref())
         );
-        assert_eq!(GRID_LEN as usize, batch.time.len());
-        assert_eq!(1, batch.states.len());
-        assert!(batch.states[0].iter().all(Option::is_some));
+        assert_eq!(GRID_LEN as usize, row.time().len());
+        let fields = row.fields().unwrap();
+        assert_eq!(1, fields.len());
+        assert!(
+            (0..row.time().len()).all(|position| fields.is_present(0, position).unwrap()),
+            "a count state is present at every grid position"
+        );
         assert_eq!(AggregateStateKind::Count, binding.kind);
         assert_eq!(vec![StateComponent::Count], binding.components.as_ref());
     }
@@ -5758,14 +5758,18 @@ async fn a_constant_broadcast_prefix_exports_the_values_the_constant_computes() 
     let decoded = decode_state_batches(batches).await;
     let values: Vec<Option<f64>> = decoded
         .iter()
-        .flat_map(|batch| {
-            (0..batch.time.len())
+        .flat_map(|row| {
+            let fields = row.fields().unwrap();
+            let value = fields
+                .field_values(0, StateComponent::Value)
+                .expect("the exported state declares a value")
+                .expect("the exported state declares a value");
+            (0..row.time().len())
                 .map(|position| {
-                    batch
-                        .states
-                        .first()
-                        .and_then(|field| field.get(position).copied().flatten())
-                        .map(|state| state.value)
+                    fields
+                        .is_present(0, position)
+                        .unwrap()
+                        .then(|| value.value(position))
                 })
                 .collect::<Vec<_>>()
         })
@@ -7529,9 +7533,18 @@ async fn histogram_split_routes_whole_state_batches_and_preserves_each_bound() {
             let bounds: std::collections::BTreeMap<_, _> = states
                 .iter()
                 .map(|state| {
+                    let fields = state.fields().unwrap();
+                    assert!(
+                        fields.is_present(0, 0).unwrap(),
+                        "the bound's first grid position is a present state"
+                    );
                     (
-                        state.metric.get("le").unwrap().to_string(),
-                        state.states[0][0].unwrap().value,
+                        state.metric().get("le").unwrap().to_string(),
+                        fields
+                            .field_values(0, StateComponent::Value)
+                            .expect("the exported state declares a value")
+                            .expect("the exported state declares a value")
+                            .value(0),
                     )
                 })
                 .collect();
