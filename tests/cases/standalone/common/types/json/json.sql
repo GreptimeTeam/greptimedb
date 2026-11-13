@@ -85,6 +85,10 @@ INSERT INTO jsons VALUES(parse_json('{"a":1, "b":2, "c":3'), 4);
 
 INSERT INTO jsons VALUES(parse_json('Morning my friends, have a nice day :)'), 5);
 
+INSERT INTO jsons VALUES(parse_json('{"n": 18446744073709551616}'), 6);
+
+INSERT INTO jsons VALUES('{"n": -9223372036854775809}', 7);
+
 SELECT json_to_string(j), t FROM jsons;
 
 CREATE TABLE json_empty (j JSON, t timestamp time index);
