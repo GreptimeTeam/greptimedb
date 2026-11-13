@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use common_telemetry::debug;
@@ -75,17 +75,25 @@ struct KeyLayout {
     metric_name: Arc<str>,
     encoding: PrimaryKeyEncoding,
     columns: Vec<KeyColumn>,
+    /// Index of each column id in `columns`, built once when a decoder binds.
+    ///
+    /// `columns` is in primary-key encoding order, which is neither sorted nor otherwise
+    /// searchable by id, so a listed column is remembered by id instead: every lookup of a listed
+    /// column is then one probe instead of a walk over the whole physical key, and a sparse key is
+    /// audited in time proportional to its own label count rather than to `labels × columns`.
+    /// Duplicate ids cannot occur here, because [`LabelDecodeSpec::validate`] rejects them.
+    positions: HashMap<ColumnId, usize>,
 }
 
 impl KeyLayout {
     /// Finds a listed primary-key column.
     fn column(&self, id: ColumnId) -> Option<&KeyColumn> {
-        self.columns.iter().find(|column| column.id == id)
+        self.position(id).map(|position| &self.columns[position])
     }
 
     /// Returns the position of a listed primary-key column.
     fn position(&self, id: ColumnId) -> Option<usize> {
-        self.columns.iter().position(|column| column.id == id)
+        self.positions.get(&id).copied()
     }
 }
 
@@ -128,6 +136,8 @@ impl PrimaryKeyLabelDecoder {
                     data_type: column.physical_type.clone(),
                 })
                 .collect(),
+            // Filled from `columns` when the logical tags are bound.
+            positions: HashMap::new(),
         };
         Self::bind(
             key,
@@ -138,10 +148,18 @@ impl PrimaryKeyLabelDecoder {
     }
 
     /// Binds the ordered logical tags of `key` to one decode layout.
-    fn bind<'a, I>(key: KeyLayout, tags: I) -> Result<Self>
+    fn bind<'a, I>(mut key: KeyLayout, tags: I) -> Result<Self>
     where
         I: IntoIterator<Item = (ColumnId, &'a str)>,
     {
+        // Index the physical key once, so binding its tags and auditing every decoded key probe
+        // the index instead of scanning the key columns per label.
+        key.positions = key
+            .columns
+            .iter()
+            .enumerate()
+            .map(|(position, column)| (column.id, position))
+            .collect();
         let mut labels = Vec::new();
         let mut names = HashSet::new();
         let mut ids = HashSet::new();
