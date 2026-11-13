@@ -1370,27 +1370,27 @@ mod tests {
 
         let _guards = Context::register_operating_regions(&keeper, &region_routes).unwrap();
 
-        let leader_roles =
+        let leader_regions =
             keeper.extract_operating_regions(1, &HashSet::from([RegionId::new(1024, 1)]));
-        let staging_roles =
+        let staging_regions =
             keeper.extract_operating_regions(2, &HashSet::from([RegionId::new(1024, 2)]));
-        let downgrading_roles =
+        let downgrading_regions =
             keeper.extract_operating_regions(3, &HashSet::from([RegionId::new(1024, 3)]));
 
         assert_eq!(
-            leader_roles
+            leader_regions
                 .get(&RegionId::new(1024, 1))
                 .map(|region| region.role),
             Some(RegionRole::Leader)
         );
         assert_eq!(
-            staging_roles
+            staging_regions
                 .get(&RegionId::new(1024, 2))
                 .map(|region| region.role),
             Some(RegionRole::StagingLeader)
         );
         assert_eq!(
-            downgrading_roles
+            downgrading_regions
                 .get(&RegionId::new(1024, 3))
                 .map(|region| region.role),
             Some(RegionRole::DowngradingLeader)

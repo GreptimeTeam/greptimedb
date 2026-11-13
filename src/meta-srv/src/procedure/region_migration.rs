@@ -330,9 +330,11 @@ pub struct VolatileContext {
     /// `opening_region_guard` will be set after the
     /// [OpenCandidateRegion](crate::procedure::region_migration::open_candidate_region::OpenCandidateRegion) step.
     ///
-    /// `opening_region_guards` should be consumed after
-    /// the corresponding [RegionRoute](common_meta::rpc::router::RegionRoute) of the opening region
-    /// was written into [TableRouteValue](common_meta::key::table_route::TableRouteValue).
+    /// On success, `opening_region_guards` is consumed after the
+    /// [RegionRoute](common_meta::rpc::router::RegionRoute) of the opening region is written into
+    /// the [TableRouteValue](common_meta::key::table_route::TableRouteValue). On a rollback it is
+    /// consumed before the route is restored, so the target leaves the candidate registration
+    /// before the source can lead again.
     opening_region_guards: Vec<OperatingRegionGuard>,
     /// The deadline of leader region lease.
     leader_region_lease_deadline: Option<Instant>,

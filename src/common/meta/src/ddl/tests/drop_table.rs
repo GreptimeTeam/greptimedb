@@ -2782,11 +2782,11 @@ async fn test_memory_region_keeper_guard_dropped_on_procedure_done() {
                 .memory_region_keeper
                 .contains(datanode_id, region_id)
         );
-        let roles = ddl_context
+        let operating_regions = ddl_context
             .memory_region_keeper
             .extract_operating_regions(datanode_id, &HashSet::from([region_id]));
         assert_eq!(
-            roles.get(&region_id).map(|region| region.role),
+            operating_regions.get(&region_id).map(|region| region.role),
             Some(RegionRole::Leader)
         );
 
