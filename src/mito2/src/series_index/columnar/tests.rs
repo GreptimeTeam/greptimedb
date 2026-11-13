@@ -1700,3 +1700,38 @@ fn reusable_payload_decoder_preserves_bounds_and_recovers_after_errors() {
         first
     );
 }
+
+#[test]
+fn released_payload_decoder_drops_context_and_bounds_scratch() {
+    let mut decoder = codec::PayloadDecoder::default();
+    // An uncompressed payload never builds a context.
+    decoder.decompress(b"plain", 0, 5).unwrap();
+    assert!(!decoder.holds_context());
+
+    let large = vec![7u8; 4 * 1024 * 1024];
+    let frame = codec::compress(&large, Compression::Zstd, 3).unwrap();
+    assert_eq!(decoder.decompress(&frame, 1, large.len()).unwrap(), large);
+    assert!(decoder.holds_context());
+    assert!(decoder.retained_output_bytes() > codec::RELEASED_OUTPUT_BYTES);
+
+    decoder.release();
+    // Releasing before a wait for I/O gives the context back and bounds the scratch, while the
+    // decoder itself stays: the next block rebuilds the context instead of the caller.
+    assert!(!decoder.holds_context());
+    assert!(decoder.retained_output_bytes() <= codec::RELEASED_OUTPUT_BYTES);
+    assert_eq!(decoder.decompress(&frame, 1, large.len()).unwrap(), large);
+    assert!(decoder.holds_context());
+    decoder.release();
+
+    // A modest buffer survives the release, so consecutive blocks of one stream share it.
+    let small = vec![3u8; 1024];
+    let small_frame = codec::compress(&small, Compression::Zstd, 3).unwrap();
+    assert_eq!(
+        decoder.decompress(&small_frame, 1, small.len()).unwrap(),
+        small
+    );
+    let retained = decoder.retained_output_bytes();
+    assert!(retained >= small.len());
+    decoder.release();
+    assert_eq!(retained, decoder.retained_output_bytes());
+}

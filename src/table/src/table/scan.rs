@@ -20,7 +20,9 @@ use std::time::Instant;
 
 use api::v1::SemanticType;
 use common_error::ext::BoxedError;
-use common_query::series_frame::{pack_raw_series, raw_series_frame_schema_with_ordering};
+use common_query::series_frame::{
+    PendingBatching, pack_raw_series_with, raw_series_frame_schema_with_ordering,
+};
 use common_recordbatch::adapter::{
     RecordBatchStreamAdapter, RegionQueryStatCounters, SERIES_SCAN_EXEC_NAME,
 };
@@ -864,7 +866,10 @@ impl ExecutionPlan for SeriesScanExec {
                 "raw series stream does not match its planned binding".into(),
             ));
         }
-        let packed = pack_raw_series(raw)?;
+        // This stream is polled by the query engine's DataFusion execution, whose runtimes are
+        // built with the time driver enabled, so the packer may hold a partially filled batch across
+        // a pending period instead of publishing one batch per source wakeup.
+        let packed = pack_raw_series_with(raw, PendingBatching::Deadline)?;
         if packed.schema() != self.arrow_schema {
             return Err(DataFusionError::Execution(
                 "raw series label representation changed after planning".into(),

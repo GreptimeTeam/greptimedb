@@ -74,6 +74,7 @@ use crate::extension_plan::test_util::prepare_test_data;
 use crate::grid_series::{render_label_set, series_bytes};
 use crate::native::execute::{merge_workspace_bytes, operand_chunk_bytes};
 use crate::vector_match::MatchingLabels;
+use common_query::series_frame::pack_raw_series;
 
 const TEST_FIXTURE_VOLUME: usize = 4;
 const GRID_START: i64 = 0;

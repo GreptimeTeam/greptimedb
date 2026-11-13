@@ -34,11 +34,12 @@ snafu.workspace = true
 sqlparser.workspace = true
 sqlparser_derive = "0.1"
 store-api.workspace = true
+tokio.workspace = true
 
 [dev-dependencies]
 common-base.workspace = true
 serde_json.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, features = ["test-util"] }
 
 [package.metadata.cargo-shear]
 # `sqlparser` is required by `sqlparser_derive`: the generated code references
