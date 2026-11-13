@@ -16,6 +16,8 @@ use std::sync::LazyLock;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Instant;
 
+use store_api::logstore::ObjectStoreWalIoPermit;
+
 /// The instant lease deadlines count from, so that a deadline fits in an [AtomicU64].
 static LEASE_EPOCH: LazyLock<Instant> = LazyLock::new(Instant::now);
 
@@ -87,5 +89,36 @@ impl NodeLease {
         leader_deadline
             .0
             .fetch_max(self.deadline.get(), Ordering::Relaxed);
+    }
+}
+
+impl ObjectStoreWalIoPermit for NodeLease {
+    fn allows_object_store_io(&self) -> bool {
+        !self.is_enabled() || self.now() < self.deadline.get()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use super::*;
+
+    #[test]
+    fn test_object_store_permission_follows_node_lease() {
+        let lease = NodeLease::default();
+        assert!(lease.allows_object_store_io());
+        lease.enable();
+        assert!(!lease.allows_object_store_io());
+        let deadline = Instant::now() + Duration::from_secs(10);
+        lease.renew(deadline);
+        lease.freeze_clock(deadline - Duration::from_secs(1));
+        assert!(lease.allows_object_store_io());
+        lease.freeze_clock(deadline);
+        assert!(!lease.allows_object_store_io());
+        lease.renew(deadline + Duration::from_secs(1));
+        assert!(lease.allows_object_store_io());
+        lease.renew(deadline - Duration::from_secs(1));
+        assert!(lease.allows_object_store_io());
     }
 }

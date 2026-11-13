@@ -482,6 +482,12 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Object store WAL node lease is unavailable or expired"))]
+    ObjectStoreWalLeaseExpired {
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Object store WAL operation failed"))]
     ObjectStoreWal {
         source: Arc<Error>,
@@ -560,7 +566,9 @@ impl ErrorExt for Error {
 
             InvalidWalObject { source, .. } => source.status_code(),
             ObjectStoreWal { source, .. } => source.status_code(),
-            ObjectStoreWalFailing { .. } => StatusCode::StorageUnavailable,
+            ObjectStoreWalFailing { .. } | ObjectStoreWalLeaseExpired { .. } => {
+                StatusCode::StorageUnavailable
+            }
 
             // Object store related errors
             WalObjectStore { .. }
@@ -601,7 +609,8 @@ impl ErrorExt for Error {
             | WalObjectSequenceUnsettled { .. }
             | StaleWalObject { .. }
             | UnconfirmedWalEpochStart { .. }
-            | ObjectStoreWalFailing { .. } => RetryHint::Retryable,
+            | ObjectStoreWalFailing { .. }
+            | ObjectStoreWalLeaseExpired { .. } => RetryHint::Retryable,
             ProduceRecord { error, .. } => match error {
                 rskafka::client::producer::Error::Client(error) => {
                     rskafka_client_error_to_retry_hint(error)

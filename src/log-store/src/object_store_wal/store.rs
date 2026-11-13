@@ -33,7 +33,9 @@ use object_store::{ErrorKind, ObjectStore};
 use snafu::{IntoError, OptionExt, ResultExt, ensure};
 use store_api::logstore::entry::{Entry, NaiveEntry};
 use store_api::logstore::provider::{ObjectStoreProvider, Provider};
-use store_api::logstore::{AppendBatchResponse, EntryId, LogStore, SendableEntryStream};
+use store_api::logstore::{
+    AppendBatchResponse, EntryId, LogStore, ObjectStoreWalIoPermit, SendableEntryStream,
+};
 use store_api::storage::RegionId;
 use tokio::sync::{Semaphore, mpsc, oneshot, watch};
 use tokio::time::MissedTickBehavior;
@@ -42,8 +44,8 @@ use crate::error::{
     CorruptedWalObjectSnafu, Error, IncompleteWalEntrySnafu, InvalidProviderSnafu,
     InvalidWalObjectSnafu, InvalidWalObjectStoreSnafu, MismatchedWalPrefixSnafu,
     MismatchedWalRegionSnafu, MissingWalHistorySnafu, ObjectStoreWalFailingSnafu,
-    ObjectStoreWalSnafu, ObjectStoreWalStoppedSnafu, Result, StaleWalObjectSnafu,
-    UnconfirmedWalEpochStartSnafu, WalObjectSequenceExhaustedSnafu,
+    ObjectStoreWalLeaseExpiredSnafu, ObjectStoreWalSnafu, ObjectStoreWalStoppedSnafu, Result,
+    StaleWalObjectSnafu, UnconfirmedWalEpochStartSnafu, WalObjectSequenceExhaustedSnafu,
     WalObjectSequenceUnsettledSnafu, WalStartWithdrawnSnafu,
 };
 use crate::metrics::{
@@ -158,6 +160,9 @@ pub struct ObjectStoreLogStore {
     read_prefetch_budget: Arc<Semaphore>,
     terminal_error: TerminalError,
     stopped: Arc<AtomicBool>,
+    /// Permission for new object-store creates and deletes. It is absent for
+    /// standalone stores and installed by a metasrv-controlled datanode.
+    io_permit: ObjectStoreIoPermit,
     command_tx: mpsc::Sender<Command>,
     append_tx: mpsc::Sender<QueuedAppend>,
     #[cfg(any(test, feature = "testing"))]
@@ -183,6 +188,7 @@ type ObsoleteEntryIds = Arc<Mutex<HashMap<RegionId, EntryId>>>;
 type StartedRegions = Arc<Mutex<HashSet<RegionId>>>;
 
 type WalHoles = Arc<Mutex<HashMap<RegionId, BTreeMap<u64, WalHole>>>>;
+type ObjectStoreIoPermit = Arc<RwLock<Option<Arc<dyn ObjectStoreWalIoPermit>>>>;
 
 /// A segment a read skipped because it did not decode: the entries of one
 /// region in one object are missing from every read of that region.
@@ -333,7 +339,32 @@ impl ObjectStoreLogStore {
             unindexed,
             released_entry_ids,
             recovered_objects,
+            skipped_epochs,
         } = recover(io.as_ref()).await?;
+        if let Some(tip) = tip
+            && tip.epoch < max_epoch
+        {
+            let skipped = skipped_epochs
+                .iter()
+                .map(|(epoch, objects)| {
+                    format!(
+                        "epoch {epoch}: {} objects, sequences {}..={}",
+                        objects.objects, objects.first_object_seq, objects.last_object_seq
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("; ");
+            let reason = format!(
+                "WAL chain in {prefix} would fall back from epoch {max_epoch} to {}; skipped newer objects: {skipped}. Recover the missing objects, or set accept_missing_history only after all previous writers have exited and acknowledged unflushed data loss is accepted",
+                tip.epoch,
+            );
+            if !config.accept_missing_history {
+                return CorruptedWalObjectSnafu { reason }.fail();
+            }
+            warn!(
+                "{reason}; accepting the fallback because accept_missing_history is enabled; acknowledged unflushed data may be lost"
+            );
+        }
         // Every epoch is one above the sequence of the start object its
         // instance created, and every object is at or above its start object,
         // so an epoch above the next sequence names no instance that ran.
@@ -392,6 +423,7 @@ impl ObjectStoreLogStore {
         let deleting = Arc::new(DeletingObjects::default());
         let terminal_error = TerminalError::default();
         let stopped = Arc::new(AtomicBool::new(false));
+        let io_permit = Arc::new(RwLock::new(None));
         let (command_tx, command_rx) = mpsc::channel(COMMAND_BUFFER);
         let (append_tx, append_rx) = mpsc::channel(APPEND_BUFFER);
         #[cfg(any(test, feature = "testing"))]
@@ -417,6 +449,8 @@ impl ObjectStoreLogStore {
             wal_holes: wal_holes.clone(),
             terminal_error: terminal_error.clone(),
             stopped: stopped.clone(),
+            io_permit: io_permit.clone(),
+            io_blocked: false,
             command_rx,
             append_rx,
             ack_mode: config.ack_mode,
@@ -487,6 +521,7 @@ impl ObjectStoreLogStore {
             read_prefetch_budget: Arc::new(Semaphore::new(READ_PREFETCH_BYTES)),
             terminal_error,
             stopped,
+            io_permit,
             command_tx,
             append_tx,
             #[cfg(any(test, feature = "testing"))]
@@ -517,6 +552,18 @@ impl ObjectStoreLogStore {
     fn durable_entry_id_of(&self, region_id: RegionId) -> EntryId {
         let catalog = self.catalog.read().unwrap_or_else(PoisonError::into_inner);
         catalog.region_max_entry_id(region_id).unwrap_or(0)
+    }
+
+    /// Fences new object-store creates and deletes with `permit`.
+    ///
+    /// The current in-flight operation is not revoked. Supplying a permit is
+    /// a cluster integration concern; standalone stores keep the default
+    /// unrestricted behavior.
+    pub fn set_io_permit(&self, permit: Arc<dyn ObjectStoreWalIoPermit>) {
+        *self
+            .io_permit
+            .write()
+            .unwrap_or_else(PoisonError::into_inner) = Some(permit);
     }
 
     /// Returns the segments of the provider's region that reads of this store
@@ -1452,6 +1499,9 @@ struct Actor {
     wal_holes: WalHoles,
     terminal_error: TerminalError,
     stopped: Arc<AtomicBool>,
+    io_permit: ObjectStoreIoPermit,
+    /// Work that must be retried on a timer tick after permission returns.
+    io_blocked: bool,
     command_rx: mpsc::Receiver<Command>,
     append_rx: mpsc::Receiver<QueuedAppend>,
     ack_mode: AckMode,
@@ -1534,10 +1584,16 @@ impl Actor {
             let probe_at = self.failing.as_ref().and_then(|failing| failing.probe_at);
             tokio::select! {
                 _ = interval.tick() => {
-                    // Nothing starts after stop began; the `enqueued` mode
-                    // sealed its backlog when stop was requested.
-                    if !self.is_stopped() {
-                        self.flush_open_batch();
+                    if !self.io_allowed() {
+                        self.expire_io_permission();
+                    } else {
+                        if !self.is_stopped() {
+                            self.flush_open_batch();
+                        }
+                        if std::mem::take(&mut self.io_blocked) {
+                            self.start_creates();
+                            self.start_deletes();
+                        }
                     }
                 }
                 Some((object_seq, result)) = self.creates.next(), if !self.creates.is_empty() => {
@@ -1605,6 +1661,10 @@ impl Actor {
             return;
         }
         if self.should_hold_back() {
+            if !self.io_allowed() {
+                let _ = response.send(Err(ObjectStoreWalLeaseExpiredSnafu.build()));
+                return;
+            }
             METRIC_OBJECT_STORE_WAL_STALLED_APPENDS_TOTAL.inc();
             self.stalled = Some(((entries, response), Instant::now()));
             self.ensure_create_in_flight();
@@ -1749,6 +1809,13 @@ impl Actor {
     /// of sealing them alone behind its backlog on every tick, until `stop`
     /// seals them for its last attempt of the backlog.
     fn seal(&mut self, releases: Vec<Release>) -> bool {
+        if !self.io_allowed() {
+            for release in releases {
+                self.keep_release(release);
+            }
+            self.expire_io_permission();
+            return false;
+        }
         if self.open_batch.is_empty()
             && releases.is_empty()
             && (self.failed_releases.is_empty() || (self.failing.is_some() && self.stop.is_empty()))
@@ -1846,6 +1913,10 @@ impl Actor {
     /// next attempt once nothing is in flight, see [`Failing`]; after stop
     /// began it uploads its backlog at once.
     fn start_creates(&mut self) {
+        if !self.io_allowed() {
+            self.io_blocked = true;
+            return;
+        }
         if self.is_stopped() && self.ack_mode == AckMode::Durable && self.stop.is_empty() {
             return;
         }
@@ -1883,7 +1954,8 @@ impl Actor {
             return;
         };
         failing.probe_at = None;
-        if self.is_stopped() {
+        if self.is_stopped() || !self.io_allowed() {
+            self.io_blocked = true;
             return;
         }
         if let Some(index) = self
@@ -1907,6 +1979,7 @@ impl Actor {
         self.creating.insert(object_seq);
         let epoch = self.epoch;
         let ack_mode = self.ack_mode;
+        let io_permit = self.io_permit.clone();
         #[cfg(any(test, feature = "testing"))]
         let mut creates_held = self.creates_held.clone();
         #[cfg(any(test, feature = "testing"))]
@@ -1935,6 +2008,9 @@ impl Actor {
                 record_create(&result, Some(sealed_at));
                 return (object_seq, result);
             }
+            if !io_allowed(&io_permit) {
+                return (object_seq, Err(ObjectStoreWalLeaseExpiredSnafu.build()));
+            }
             let created = io.put_if_absent(object_seq, bytes).await;
             #[cfg(any(test, feature = "testing"))]
             let created = match created {
@@ -1960,6 +2036,9 @@ impl Actor {
 
     fn on_create_completed(&mut self, object_seq: u64, result: Result<PutResult>) {
         self.creating.remove(&object_seq);
+        if !self.io_allowed() {
+            self.expire_io_permission();
+        }
         // A batch that already failed, or that the store gave up on when it
         // poisoned itself: the object may exist, but it is off the chain, and
         // collection may delete it now.
@@ -1973,6 +2052,11 @@ impl Actor {
             return;
         };
         match result {
+            Err(Error::ObjectStoreWalLeaseExpired { .. }) => {
+                self.sealed[index].state = CreateState::Pending;
+                self.io_blocked = true;
+                return;
+            }
             Ok(_) => {
                 self.sealed[index].state = CreateState::Created;
                 self.leave_failing("a create succeeded");
@@ -2471,9 +2555,11 @@ impl Actor {
             batch.release_waiters.push(response);
             return;
         }
-        // Sealing failed and poisoned the store.
+        // Sealing either poisoned the store or was held back by its lease.
         if let Some(error) = terminal(&self.terminal_error) {
             let _ = response.send(Err(shared(&error)));
+        } else {
+            let _ = response.send(Err(ObjectStoreWalLeaseExpiredSnafu.build()));
         }
     }
 
@@ -2502,6 +2588,10 @@ impl Actor {
         if self.is_stopped() || terminal(&self.terminal_error).is_some() {
             return;
         }
+        if !self.io_allowed() {
+            self.io_blocked = true;
+            return;
+        }
         let free = MAX_IN_FLIGHT_DELETES.saturating_sub(self.deletes.len());
         let boundary = self.durable_reclaim_boundary;
         let candidates = {
@@ -2522,7 +2612,11 @@ impl Actor {
         for object_seq in candidates {
             self.deleting.start(object_seq);
             let io = self.io.clone();
+            let permit = self.io_permit.clone();
             self.deletes.push(Box::pin(async move {
+                if !io_allowed(&permit) {
+                    return (object_seq, Err(ObjectStoreWalLeaseExpiredSnafu.build()));
+                }
                 (object_seq, io.delete(object_seq).await)
             }));
         }
@@ -2582,6 +2676,7 @@ impl Actor {
                 }
                 METRIC_OBJECT_STORE_WAL_DELETED_OBJECTS_TOTAL.inc();
             }
+            Err(Error::ObjectStoreWalLeaseExpired { .. }) => self.io_blocked = true,
             Err(error) => {
                 warn!(
                     error;
@@ -2655,6 +2750,10 @@ impl Actor {
     /// [`finish_stop`](Self::finish_stop) once nothing is in flight.
     fn handle_stop(&mut self, response: oneshot::Sender<Result<()>>) {
         self.stop.push(response);
+        if !self.io_allowed() {
+            self.expire_io_permission();
+            return;
+        }
         if let Some((_, response)) = self.take_stalled() {
             let _ = response.send(Err(ObjectStoreWalStoppedSnafu.build()));
         }
@@ -2714,6 +2813,11 @@ impl Actor {
             let _ = response.send(Err(ObjectStoreWalStoppedSnafu.build()));
             return;
         }
+        if !self.io_allowed() {
+            self.expire_io_permission();
+            let _ = response.send(Err(ObjectStoreWalLeaseExpiredSnafu.build()));
+            return;
+        }
         if self.flush_open_batch()
             && let Some(batch) = self.sealed.back_mut()
         {
@@ -2742,6 +2846,52 @@ impl Actor {
     fn is_stopped(&self) -> bool {
         self.stopped.load(Ordering::Acquire)
     }
+
+    /// Releases waiters while preserving the acknowledged enqueued backlog,
+    /// unless stop began: then the backlog is dropped and `stop_error` reports it.
+    /// Durable batches abandoned here must never be indexed by late completions.
+    fn expire_io_permission(&mut self) {
+        self.io_blocked = true;
+        let stopped = self.is_stopped();
+        if stopped || self.ack_mode == AckMode::Durable {
+            if !self.open_batch.is_empty() {
+                self.next_object_seq = self
+                    .next_object_seq
+                    .and_then(|seq| seq.checked_add(1))
+                    .filter(|seq| *seq < OBJECT_SEQ_LIMIT);
+            }
+            self.roll_back(Arc::new(ObjectStoreWalLeaseExpiredSnafu.build()));
+        } else {
+            for batch in &mut self.sealed {
+                for waiter in batch.release_waiters.drain(..) {
+                    let _ = waiter.send(Err(ObjectStoreWalLeaseExpiredSnafu.build()));
+                }
+            }
+        }
+        self.fail_unacknowledged(|| {
+            if stopped {
+                ObjectStoreWalStoppedSnafu.build()
+            } else {
+                ObjectStoreWalLeaseExpiredSnafu.build()
+            }
+        });
+        if stopped {
+            self.creates.clear();
+            self.creating.clear();
+        }
+    }
+
+    fn io_allowed(&self) -> bool {
+        io_allowed(&self.io_permit)
+    }
+}
+
+fn io_allowed(permit: &ObjectStoreIoPermit) -> bool {
+    permit
+        .read()
+        .unwrap_or_else(PoisonError::into_inner)
+        .as_ref()
+        .is_none_or(|permit| permit.allows_object_store_io())
 }
 
 impl Drop for Actor {
@@ -2961,6 +3111,16 @@ struct Recovered {
     released_entry_ids: HashMap<RegionId, EntryId>,
     /// Number of objects whose header and footer were read.
     recovered_objects: u64,
+    /// Newer epochs skipped when only an older epoch has a complete chain.
+    skipped_epochs: BTreeMap<u64, SkippedEpoch>,
+}
+
+/// The listed objects of one newer epoch that recovery cannot replay.
+#[derive(Debug)]
+struct SkippedEpoch {
+    first_object_seq: u64,
+    last_object_seq: u64,
+    objects: usize,
 }
 
 /// Rebuilds the catalog from object headers and footers,
@@ -3081,6 +3241,20 @@ fn finish_recovery(fetched: FetchedObjects) -> Result<Recovered> {
         .map(|header| header.epoch)
         .max()
         .unwrap_or(0);
+    let mut skipped_epochs = BTreeMap::<u64, SkippedEpoch>::new();
+    if let Some(tip) = tip {
+        for (&seq, header) in &headers {
+            if header.epoch > tip.epoch || (header.epoch == tip.epoch && seq > tip.object_seq) {
+                let skipped = skipped_epochs.entry(header.epoch).or_insert(SkippedEpoch {
+                    first_object_seq: seq,
+                    last_object_seq: seq,
+                    objects: 0,
+                });
+                skipped.last_object_seq = seq;
+                skipped.objects += 1;
+            }
+        }
+    }
     let last_listed = headers
         .keys()
         .copied()
@@ -3125,6 +3299,7 @@ fn finish_recovery(fetched: FetchedObjects) -> Result<Recovered> {
         unindexed,
         released_entry_ids: HashMap::new(),
         recovered_objects,
+        skipped_epochs,
     })
 }
 
@@ -3307,6 +3482,202 @@ mod tests {
     /// Nothing is persisted until a test seals the open batch.
     fn manual() -> ObjectStoreWalConfig {
         config(Duration::from_secs(3600), u64::MAX)
+    }
+
+    #[derive(Default)]
+    struct TestIoPermit(AtomicBool);
+
+    impl ObjectStoreWalIoPermit for TestIoPermit {
+        fn allows_object_store_io(&self) -> bool {
+            self.0.load(Ordering::Acquire)
+        }
+    }
+
+    #[tokio::test]
+    async fn test_node_lease_retains_enqueued_entries_until_renewed() {
+        let _serialized = SERIALIZED.lock().await;
+        let store = open(memory_store(), &enqueued(manual())).await;
+        let permit = Arc::new(TestIoPermit::default());
+        store.set_io_permit(permit.clone());
+        let admitted = append(&store, region(1), "retained").await.unwrap();
+        assert_eq!(id(1, 1), admitted.last_entry_ids[&region(1)]);
+        assert!(matches!(
+            store.seal_open_batch().await,
+            Err(Error::ObjectStoreWalLeaseExpired { .. })
+        ));
+        assert_eq!(vec![0], object_seqs(store.io.as_ref()).await);
+        assert_eq!(0, latest(&store, region(1)));
+        permit.0.store(true, Ordering::Release);
+        store.seal_open_batch().await.unwrap();
+        assert_eq!(id(1, 1), latest(&store, region(1)));
+        assert_eq!(
+            expected_entries(region(1), &[(id(1, 1), "retained")]),
+            read_entries(&store, region(1), 0).await
+        );
+        store.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_node_lease_rejects_durable_batch_without_reusing_ids() {
+        let _serialized = SERIALIZED.lock().await;
+        let store = open(memory_store(), &manual()).await;
+        let permit = Arc::new(TestIoPermit::default());
+        store.set_io_permit(permit.clone());
+        let first = spawn_append_batch(&store, vec![entry(&store, region(1), "expired")]);
+        store.wait_for_admitted_appends(1).await.unwrap();
+        assert!(store.seal_open_batch().await.is_err());
+        let error = timeout(WAIT, first).await.unwrap().unwrap().unwrap_err();
+        assert_eq!(RetryHint::Retryable, error.retry_hint());
+        assert_eq!(vec![0], object_seqs(store.io.as_ref()).await);
+        permit.0.store(true, Ordering::Release);
+        let next = spawn_append_batch(&store, vec![entry(&store, region(1), "new")]);
+        store.wait_for_admitted_appends(2).await.unwrap();
+        store.seal_open_batch().await.unwrap();
+        assert_eq!(
+            id(2, 1),
+            next.await.unwrap().unwrap().last_entry_ids[&region(1)]
+        );
+        store.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_node_lease_stop_drops_unpersisted_backlog() {
+        let _serialized = SERIALIZED.lock().await;
+        let object_store = memory_store();
+        let store = open(object_store.clone(), &enqueued(manual())).await;
+        append(&store, region(1), "queued").await.unwrap();
+        store.set_io_permit(Arc::new(TestIoPermit::default()));
+        assert!(timeout(WAIT, store.stop()).await.unwrap().is_err());
+        assert_eq!(vec![0], object_seqs(store.io.as_ref()).await);
+        let reopened = open(object_store, &eager()).await;
+        assert!(read_entries(&reopened, region(1), 0).await.is_empty());
+        reopened.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_node_lease_keeps_release_for_renewal() {
+        let _serialized = SERIALIZED.lock().await;
+        let store = open(memory_store(), &manual()).await;
+        let permit = Arc::new(TestIoPermit::default());
+        store.set_io_permit(permit.clone());
+        let error = store
+            .release_region(&provider(region(1)), region(1))
+            .await
+            .unwrap_err();
+        assert!(matches!(error, Error::ObjectStoreWalLeaseExpired { .. }));
+        assert_eq!(vec![0], object_seqs(store.io.as_ref()).await);
+        permit.0.store(true, Ordering::Release);
+        store.seal_open_batch().await.unwrap();
+        assert_eq!(
+            vec![release(region(1), 0)],
+            releases_of(store.io.as_ref(), 1).await
+        );
+        store.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_node_lease_discards_late_durable_upload() {
+        let _serialized = SERIALIZED.lock().await;
+        let (store, io, mut parked) = open_parking_creates(memory_store(), &eager()).await;
+        let permit = Arc::new(TestIoPermit(AtomicBool::new(true)));
+        store.set_io_permit(permit.clone());
+        let first = spawn_append_batch(&store, vec![entry(&store, region(1), "late")]);
+        let (seq, release) = next_parked_operation(&mut parked).await;
+        assert_eq!(1, seq);
+        permit.0.store(false, Ordering::Release);
+        assert!(store.seal_open_batch().await.is_err());
+        assert!(
+            first
+                .await
+                .unwrap()
+                .unwrap_err()
+                .retry_hint()
+                .is_retryable()
+        );
+        // The issued create is allowed to finish, even after renewal. Its batch
+        // was already failed and must not become part of the live chain.
+        permit.0.store(true, Ordering::Release);
+        release.send(true).unwrap();
+        io.creates_parked.store(false, Ordering::SeqCst);
+        let next = append(&store, region(1), "current").await.unwrap();
+        assert_eq!(id(2, 1), next.last_entry_ids[&region(1)]);
+        assert_eq!(
+            expected_entries(region(1), &[(id(2, 1), "current")]),
+            read_entries(&store, region(1), 0).await
+        );
+        store.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_node_lease_rejects_backpressure_without_waiting() {
+        let _serialized = SERIALIZED.lock().await;
+        let config = ObjectStoreWalConfig {
+            max_unpersisted_bytes: ReadableSize(1),
+            ..enqueued(manual())
+        };
+        let store = open(memory_store(), &config).await;
+        store.set_io_permit(Arc::new(TestIoPermit::default()));
+        append(&store, region(1), "queued").await.unwrap();
+        let error = timeout(WAIT, append(&store, region(1), "blocked"))
+            .await
+            .unwrap()
+            .unwrap_err();
+        assert!(matches!(error, Error::ObjectStoreWalLeaseExpired { .. }));
+        assert_eq!(vec![0], object_seqs(store.io.as_ref()).await);
+        assert!(store.stop().await.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_node_lease_expires_during_stop_without_waiting_for_upload() {
+        let _serialized = SERIALIZED.lock().await;
+        let config = enqueued(config(MIN_FLUSH_INTERVAL, 1));
+        let (store, _, mut parked) = open_parking_creates(memory_store(), &config).await;
+        let permit = Arc::new(TestIoPermit(AtomicBool::new(true)));
+        store.set_io_permit(permit.clone());
+        append(&store, region(1), "queued").await.unwrap();
+        let (_, release) = next_parked_operation(&mut parked).await;
+        let stop = {
+            let store = store.clone();
+            tokio::spawn(async move { store.stop().await })
+        };
+        wait_until(|| store.stopped.load(Ordering::Acquire)).await;
+        permit.0.store(false, Ordering::Release);
+        assert!(timeout(WAIT, stop).await.unwrap().unwrap().is_err());
+        assert!(release.is_closed());
+    }
+
+    #[tokio::test]
+    async fn test_node_lease_defers_collection_and_stop_waits_for_issued_delete() {
+        let _serialized = SERIALIZED.lock().await;
+        let config = enqueued(config(MIN_FLUSH_INTERVAL, 1));
+        let (store, io, mut parked) = open_parking_creates(memory_store(), &config).await;
+        let permit = Arc::new(TestIoPermit(AtomicBool::new(true)));
+        store.set_io_permit(permit.clone());
+        io.deletes_parked.store(true, Ordering::SeqCst);
+        append(&store, region(1), "first").await.unwrap();
+        let (seq, release) = next_parked_operation(&mut parked).await;
+        assert_eq!(1, seq);
+        permit.0.store(false, Ordering::Release);
+        release.send(true).unwrap();
+        // An issued enqueued create may finish, but its advanced reclaim
+        // boundary must not issue a delete under the expired lease.
+        wait_until(|| latest(&store, region(1)) == id(1, 1)).await;
+        assert_nothing_parks(&mut parked).await;
+        assert_eq!(vec![0, 1], object_seqs(io.as_ref()).await);
+        permit.0.store(true, Ordering::Release);
+        let (seq, release) = next_parked_operation(&mut parked).await;
+        assert_eq!(0, seq);
+        permit.0.store(false, Ordering::Release);
+        let stop = {
+            let store = store.clone();
+            tokio::spawn(async move { store.stop().await })
+        };
+        wait_until(|| store.stopped.load(Ordering::Acquire)).await;
+        assert!(!stop.is_finished());
+        release.send(true).unwrap();
+        // The expired stop reports its discarded enqueued backlog, even empty.
+        assert!(timeout(WAIT, stop).await.unwrap().unwrap().is_err());
+        assert_eq!(vec![1], object_seqs(io.as_ref()).await);
     }
 
     async fn open(
@@ -4911,6 +5282,7 @@ mod tests {
             read_prefetch_budget: Arc::new(Semaphore::new(READ_PREFETCH_BYTES)),
             terminal_error: Arc::default(),
             stopped: Arc::new(AtomicBool::new(false)),
+            io_permit: Arc::default(),
             command_tx,
             append_tx,
             admitted_appends: watch::channel(0).1,
@@ -7239,6 +7611,84 @@ mod tests {
             prev: prev.map(|(object_seq, epoch)| ChainLink { object_seq, epoch }),
             reclaim_boundary: 0,
         }
+    }
+
+    #[tokio::test]
+    async fn test_recovery_rejects_older_epoch_until_explicitly_accepted() {
+        let _serialized = SERIALIZED.lock().await;
+        let object_store = memory_store();
+        let io = ObjectStoreIo::new(object_store.clone(), PREFIX).unwrap();
+        put_object_with_header(&io, chain_header(0, 1, None), &[]).await;
+        // Both branches have missing predecessors; epoch 1 remains complete
+        // only through object 0.
+        put_object_with_header(&io, chain_header(2, 1, Some((1, 1))), &[]).await;
+        put_object_with_header(&io, chain_header(3, 3, Some((2, 3))), &[]).await;
+        let before = io.list().await.unwrap();
+        for _ in 0..2 {
+            let error = ObjectStoreLogStore::try_new(object_store.clone(), &eager(), 1, 2)
+                .await
+                .unwrap_err();
+            assert!(matches!(error, Error::CorruptedWalObject { reason, .. }
+                if reason.contains("fall back from epoch 3 to 1")
+                    && reason.contains("epoch 1: 1 objects, sequences 2..=2")
+                    && reason.contains("epoch 3: 1 objects, sequences 3..=3")));
+            assert_eq!(before, io.list().await.unwrap());
+        }
+        let accepted = ObjectStoreWalConfig {
+            accept_missing_history: true,
+            ..eager()
+        };
+        let store = open(object_store.clone(), &accepted).await;
+        store.stop().await.unwrap();
+        let reopened = open(object_store, &eager()).await;
+        reopened.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_recovery_accepts_incomplete_branch_in_selected_epoch() {
+        let _serialized = SERIALIZED.lock().await;
+        let object_store = memory_store();
+        let io = ObjectStoreIo::new(object_store.clone(), PREFIX).unwrap();
+        put_object_with_header(&io, chain_header(0, 1, None), &[]).await;
+        // A failed upload of object 1 can leave a later, incomplete branch
+        // without evidence that a newer writer's complete history was lost.
+        put_object_with_header(&io, chain_header(2, 1, Some((1, 1))), &[]).await;
+        let store = open(object_store, &eager()).await;
+        let header = decode_header(&io.get(3).await.unwrap()).unwrap();
+        assert_eq!(4, header.epoch);
+        assert_eq!(
+            Some(ChainLink {
+                object_seq: 0,
+                epoch: 1
+            }),
+            header.prev
+        );
+        store.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_node_lease_rechecks_before_parked_upload() {
+        let _serialized = SERIALIZED.lock().await;
+        let store = open(memory_store(), &enqueued(config(MIN_FLUSH_INTERVAL, 1))).await;
+        let permit = Arc::new(TestIoPermit(AtomicBool::new(true)));
+        store.set_io_permit(permit.clone());
+        store.hold_creates();
+        append(&store, region(1), "queued").await.unwrap();
+        timeout(WAIT, store.wait_for_parked_creates(1))
+            .await
+            .unwrap()
+            .unwrap();
+        permit.0.store(false, Ordering::Release);
+        store.release_creates();
+        assert!(store.seal_open_batch().await.is_err());
+        assert_eq!(vec![0], object_seqs(store.io.as_ref()).await);
+        permit.0.store(true, Ordering::Release);
+        timeout(WAIT, store.wait_durable(&provider(region(1)), id(1, 1)))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(id(1, 1), latest(&store, region(1)));
+        store.stop().await.unwrap();
     }
 
     fn chain_of(headers: &[Header]) -> Vec<u64> {
