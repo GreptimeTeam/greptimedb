@@ -1651,8 +1651,10 @@ mod tests {
         tag1: String,
     }
 
-    #[test]
-    fn test_flat_read_format_convert_format_with_dense_encoding() {
+    #[rstest::rstest]
+    #[case(false)]
+    #[case(true)]
+    fn test_flat_read_format_convert_format_with_dense_encoding(#[case] skip_auto_convert: bool) {
         let metadata = build_test_region_metadata();
 
         let column_ids: Vec<_> = metadata
@@ -1665,7 +1667,7 @@ mod tests {
             ReadColumns::new(column_ids),
             Some(build_test_arrow_schema()),
             "test",
-            false,
+            skip_auto_convert,
         )
         .unwrap();
 
@@ -1795,6 +1797,25 @@ mod tests {
 
         // Compare the actual result with the expected record batch
         assert_eq!(expected_record_batch, result);
+
+        // A physically flat sparse SST already exposes tags even when automatic
+        // conversion is disabled. Its compaction mapper must remove only those
+        // tags, using the converted layout's actual field order.
+        let flat_format = FlatReadFormat::new(
+            metadata.clone(),
+            ReadColumns::new(column_ids.clone()),
+            Some(result.schema()),
+            "flat sparse SST",
+            true,
+        )
+        .unwrap();
+        assert!(flat_format.batch_has_raw_pk_columns());
+        let flat_batch = flat_format.convert_batch(result, None).unwrap();
+        let mapper =
+            crate::read::flat_projection::CompactionProjectionMapper::try_new(&flat_format)
+                .unwrap()
+                .unwrap();
+        assert_eq!(record_batch, mapper.project(flat_batch).unwrap());
 
         let format = FlatReadFormat::new(
             metadata.clone(),
