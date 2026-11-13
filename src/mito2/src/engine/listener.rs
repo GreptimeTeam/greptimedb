@@ -42,7 +42,8 @@ pub trait EventListener: Send + Sync {
         let _ = region_id;
     }
 
-    /// Notifies the listener after the worker handles a failed flush of the region.
+    /// Notifies the listener after the worker handles a failed flush of the region and has
+    /// cleared the region's flush status.
     fn on_flush_failed(&self, _region_id: RegionId) {}
 
     /// Notifies the listener that the engine is stalled.
@@ -224,7 +225,7 @@ impl EventListener for CountingStallListener {
 /// Counts failed flushes the worker has handled, for tests that wait for them.
 #[derive(Default)]
 pub struct FlushFailedListener {
-    count: AtomicUsize,
+    failure_count: AtomicUsize,
     notify: Notify,
 }
 
@@ -233,7 +234,7 @@ impl FlushFailedListener {
     pub async fn wait_for_count(&self, expected: usize) {
         loop {
             let notified = self.notify.notified();
-            if self.count.load(Ordering::Relaxed) >= expected {
+            if self.failure_count.load(Ordering::Relaxed) >= expected {
                 return;
             }
             notified.await;
@@ -242,7 +243,7 @@ impl FlushFailedListener {
 
     /// Returns the number of failed flushes the worker has handled.
     pub fn failure_count(&self) -> usize {
-        self.count.load(Ordering::Relaxed)
+        self.failure_count.load(Ordering::Relaxed)
     }
 }
 
@@ -251,7 +252,7 @@ impl EventListener for FlushFailedListener {
     fn on_flush_failed(&self, region_id: RegionId) {
         info!("Region {} flush failed", region_id);
 
-        self.count.fetch_add(1, Ordering::Relaxed);
+        self.failure_count.fetch_add(1, Ordering::Relaxed);
         self.notify.notify_waiters();
     }
 }

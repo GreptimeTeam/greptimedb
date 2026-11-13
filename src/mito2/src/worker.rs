@@ -1789,7 +1789,7 @@ impl WorkerListener {
         let _ = region_id;
     }
 
-    /// The worker has handled a failed flush.
+    /// The worker has handled a failed flush and cleared the region's flush status.
     pub(crate) fn on_flush_failed(&self, _region_id: RegionId) {
         #[cfg(any(test, feature = "test"))]
         if let Some(listener) = &self.listener {
