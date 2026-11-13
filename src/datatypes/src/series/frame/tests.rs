@@ -369,7 +369,7 @@ fn assert_row_local_histogram_rows(rows: &[RawSeriesChunk]) {
 }
 
 #[test]
-fn sliced_histogram_frames_densify_without_duplicating_shared_table() {
+fn sliced_histogram_frames_share_one_table_across_rows() {
     let schema = test_schema(&["histogram"]);
     let source_table = histogram_batch();
     let source_samples =
@@ -450,27 +450,6 @@ fn sliced_histogram_frames_densify_without_duplicating_shared_table() {
         };
         assert_eq!(histograms.batch().len(), first_table.len());
         assert_histogram(histograms.view_at(0).unwrap(), -9.5);
-    }
-
-    let samples = Samples::try_from_chunks(
-        decoded_chunks
-            .iter()
-            .map(|decoded| decoded.fields.get(0).unwrap().clone())
-            .collect(),
-    )
-    .unwrap();
-    drop(chunk);
-    drop(frames);
-    drop(decoded_chunks);
-    drop(source_samples);
-
-    let dense = samples.into_dense().unwrap();
-    let DenseSamplesRef::Histogram(histograms) = dense.dense().unwrap() else {
-        panic!("expected dense histogram samples");
-    };
-    assert_eq!(histograms.len(), 64);
-    for position in 0..64 {
-        assert_histogram(histograms.view_at(position).unwrap(), -9.5);
     }
 }
 

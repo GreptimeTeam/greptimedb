@@ -136,11 +136,6 @@ pub fn select_instants(
         ));
     }
     let timestamps = time.as_buffer();
-    if timestamps.windows(2).any(|pair| pair[0] >= pair[1]) {
-        return Err(DataFusionError::Execution(
-            "raw timestamps must be strictly increasing".into(),
-        ));
-    }
     if fields
         .as_slice()
         .iter()
