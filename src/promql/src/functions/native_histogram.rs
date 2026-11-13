@@ -39,6 +39,7 @@ use crate::functions::{
     MinOverTime, PredictLinear, QuantileOverTime, Rate, StddevOverTime, StdvarOverTime,
     SumOverTime, extract_array, extract_range_dict,
 };
+use crate::histogram_eval::legacy_bridge;
 use crate::range_array::{RangeArray, unpack};
 
 fn extract_histogram_array(value: &ColumnarValue, func_name: &str) -> DfResult<ArrayRef> {
@@ -814,7 +815,7 @@ impl NativeHistogramQuantile {
             vec![DataType::Float64],
             move |histogram, input, row, len, name| {
                 let q = read_scalar_f64_arg(&input[1], row, len, name)?;
-                let (value, info) = histogram.quantile_with_info(q);
+                let (value, info) = legacy_bridge::quantile_with_info(histogram, q);
                 if let Some(info) = info {
                     let message = match info {
                         NativeHistogramQuantileInfo::NaNSkew => {
@@ -850,7 +851,8 @@ impl NativeHistogramFraction {
             move |histogram, input, row, len, name| {
                 let lower = read_scalar_f64_arg(&input[1], row, len, name)?;
                 let upper = read_scalar_f64_arg(&input[2], row, len, name)?;
-                let (value, excluded_nans) = histogram.fraction_with_info(lower, upper);
+                let (value, excluded_nans) =
+                    legacy_bridge::fraction_with_info(histogram, lower, upper);
                 if excluded_nans {
                     record_info(
                         &collector,
