@@ -146,8 +146,9 @@ Tests live next to the code as `*_test.rs` (e.g. `src/mito2/src/engine/flush_tes
   metadata interner compares complete metadata before sharing; file identity alone is insufficient.
   Partition expressions are shared by table and complete expression content, so historical
   SST partition rules remain distinct after repartition.
-  Interned references reclaim entries and unused tree nodes on final release, including
-  delayed readers, without a maintenance task or new writes.
+  Interned references reclaim entries on final release, including delayed readers,
+  without a maintenance task or new writes. Hash table capacity remains allocated
+  until the interner is dropped.
   Manifest consumers receive the interner directly. Scrape-time entry counts use weak
   references and do not add maintenance tasks or retain engine storage.
   Index replacement preserves old readers and updates the lifetime guard to the newest metadata.

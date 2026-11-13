@@ -17,6 +17,7 @@
 use std::collections::HashMap;
 use std::fmt;
 use std::fmt::{Debug, Formatter};
+use std::hash::{Hash, Hasher};
 use std::num::NonZeroU64;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
@@ -241,7 +242,7 @@ pub type FileMetaRef = MetadataRef<FileMeta>;
 pub type PartitionExprRef = MetadataRef<PartitionExpr>;
 
 /// Metadata of a SST file.
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, Default)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct FileMeta {
     /// Region that created the file. The region id may not be the id of the current region.
@@ -349,6 +350,14 @@ struct DebugFmt<F: Fn(&mut Formatter<'_>) -> fmt::Result>(F);
 impl<F: Fn(&mut Formatter<'_>) -> fmt::Result> std::fmt::Debug for DebugFmt<F> {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         (self.0)(f)
+    }
+}
+
+// Hashing file identity avoids traversing indexes and expressions on every lookup.
+// Full equality still distinguishes metadata versions of the same physical file.
+impl Hash for FileMeta {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        RegionFileId::new(self.region_id, self.file_id).hash(state);
     }
 }
 

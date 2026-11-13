@@ -16,11 +16,11 @@
 
 use std::collections::hash_map::RandomState;
 use std::fmt::{self, Debug, Display};
-use std::hash::BuildHasher;
+use std::hash::{BuildHasher, Hash, Hasher};
 use std::ops::Deref;
 use std::sync::Arc;
 
-use intern_arc::{InternedOrd, OrdInterner};
+use intern_arc::{HashInterner, InternedHash};
 use partition::expr::PartitionExpr;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use store_api::storage::TableId;
@@ -33,21 +33,21 @@ const SHARD_COUNT: usize = 32;
 /// Immutable metadata, either freshly decoded or registered with an engine interner.
 /// Keeping the decoded allocation avoids copying index vectors during recovery.
 #[derive(Clone)]
-pub struct MetadataRef<T: Ord>(MetadataRefInner<T>);
+pub struct MetadataRef<T: Eq + Hash>(MetadataRefInner<T>);
 
 #[derive(Clone)]
-enum MetadataRefInner<T: Ord> {
+enum MetadataRefInner<T: Eq + Hash> {
     Owned(Arc<T>),
-    Interned(InternedOrd<ScopedMetadata<T>>),
+    Interned(InternedHash<ScopedMetadata<T>>),
 }
 
-#[derive(PartialEq, Eq, PartialOrd, Ord)]
-struct ScopedMetadata<T: Ord> {
+#[derive(PartialEq, Eq, Hash)]
+struct ScopedMetadata<T: Eq + Hash> {
     table_id: TableId,
     value: Arc<T>,
 }
 
-impl<T: Ord> MetadataRef<T> {
+impl<T: Eq + Hash> MetadataRef<T> {
     fn as_arc(&self) -> &Arc<T> {
         match &self.0 {
             MetadataRefInner::Owned(value) => value,
@@ -58,7 +58,7 @@ impl<T: Ord> MetadataRef<T> {
     fn get_mut(&mut self) -> Option<&mut T> {
         match &mut self.0 {
             MetadataRefInner::Owned(value) => Arc::get_mut(value),
-            // Mutating a registered value would invalidate the tree ordering.
+            // Mutating a registered value would invalidate the hash table.
             MetadataRefInner::Interned(_) => None,
         }
     }
@@ -69,25 +69,25 @@ impl<T: Ord> MetadataRef<T> {
     }
 }
 
-impl<T: Ord> From<T> for MetadataRef<T> {
+impl<T: Eq + Hash> From<T> for MetadataRef<T> {
     fn from(value: T) -> Self {
         Self::from(Arc::new(value))
     }
 }
 
-impl<T: Ord> From<Arc<T>> for MetadataRef<T> {
+impl<T: Eq + Hash> From<Arc<T>> for MetadataRef<T> {
     fn from(value: Arc<T>) -> Self {
         Self(MetadataRefInner::Owned(value))
     }
 }
 
-impl<T: Ord + Default> Default for MetadataRef<T> {
+impl<T: Eq + Hash + Default> Default for MetadataRef<T> {
     fn default() -> Self {
         T::default().into()
     }
 }
 
-impl<T: Ord> Deref for MetadataRef<T> {
+impl<T: Eq + Hash> Deref for MetadataRef<T> {
     type Target = T;
 
     fn deref(&self) -> &T {
@@ -95,51 +95,45 @@ impl<T: Ord> Deref for MetadataRef<T> {
     }
 }
 
-impl<T: Ord> AsRef<T> for MetadataRef<T> {
+impl<T: Eq + Hash> AsRef<T> for MetadataRef<T> {
     fn as_ref(&self) -> &T {
         self
     }
 }
 
-impl<T: Ord + Debug> Debug for MetadataRef<T> {
+impl<T: Eq + Hash + Debug> Debug for MetadataRef<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         Debug::fmt(self.as_ref(), f)
     }
 }
 
-impl<T: Ord + Display> Display for MetadataRef<T> {
+impl<T: Eq + Hash + Display> Display for MetadataRef<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         Display::fmt(self.as_ref(), f)
     }
 }
 
-impl<T: Ord> PartialEq for MetadataRef<T> {
+impl<T: Eq + Hash> PartialEq for MetadataRef<T> {
     fn eq(&self, other: &Self) -> bool {
         self.as_arc() == other.as_arc()
     }
 }
 
-impl<T: Ord> Eq for MetadataRef<T> {}
+impl<T: Eq + Hash> Eq for MetadataRef<T> {}
 
-impl<T: Ord> PartialOrd for MetadataRef<T> {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
+impl<T: Eq + Hash> Hash for MetadataRef<T> {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.as_ref().hash(state);
     }
 }
 
-impl<T: Ord> Ord for MetadataRef<T> {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.as_arc().cmp(other.as_arc())
-    }
-}
-
-impl<T: Ord + Serialize> Serialize for MetadataRef<T> {
+impl<T: Eq + Hash + Serialize> Serialize for MetadataRef<T> {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         self.as_ref().serialize(serializer)
     }
 }
 
-impl<'de, T: Ord + Deserialize<'de>> Deserialize<'de> for MetadataRef<T> {
+impl<'de, T: Eq + Hash + Deserialize<'de>> Deserialize<'de> for MetadataRef<T> {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         // Decoding must not register values in the crate's process-global pool.
         T::deserialize(deserializer).map(Self::from)
@@ -147,7 +141,8 @@ impl<'de, T: Ord + Deserialize<'de>> Deserialize<'de> for MetadataRef<T> {
 }
 
 /// Engine-local sharing. File and expression operations never hold nested locks.
-/// The final registered reference removes its entry and releases unused tree nodes.
+/// The final registered reference removes its entry. Hash table capacity remains
+/// allocated until the interner is dropped.
 pub struct FileMetadataInterner {
     inner: Arc<FileMetadataInternerState>,
 }
@@ -155,8 +150,8 @@ pub struct FileMetadataInterner {
 /// Shared storage observed through weak references by the metrics collector.
 #[derive(Default)]
 pub(crate) struct FileMetadataInternerState {
-    files: [OrdInterner<ScopedMetadata<FileMeta>>; SHARD_COUNT],
-    expressions: [OrdInterner<ScopedMetadata<PartitionExpr>>; SHARD_COUNT],
+    files: [HashInterner<ScopedMetadata<FileMeta>>; SHARD_COUNT],
+    expressions: [HashInterner<ScopedMetadata<PartitionExpr>>; SHARD_COUNT],
     hasher: RandomState,
 }
 
@@ -173,11 +168,11 @@ impl Default for FileMetadataInterner {
 
 impl FileMetadataInternerState {
     /// Counts registered values, not runtime views or allocations outside this interner.
-    /// Each shard exposes its tree length without traversing entries.
+    /// Each shard exposes its entry count without traversing entries.
     pub(crate) fn entry_counts(&self) -> (usize, usize) {
         (
-            self.files.iter().map(OrdInterner::len).sum(),
-            self.expressions.iter().map(OrdInterner::len).sum(),
+            self.files.iter().map(HashInterner::len).sum(),
+            self.expressions.iter().map(HashInterner::len).sum(),
         )
     }
 }
@@ -263,7 +258,7 @@ mod tests {
                 .inner
                 .files
                 .iter()
-                .map(OrdInterner::len)
+                .map(HashInterner::len)
                 .sum::<usize>(),
             1
         );
@@ -272,7 +267,7 @@ mod tests {
                 .inner
                 .expressions
                 .iter()
-                .map(OrdInterner::len)
+                .map(HashInterner::len)
                 .sum::<usize>(),
             1
         );
@@ -280,8 +275,67 @@ mod tests {
         assert!(MetadataRef::ptr_eq(&reader, &recovered));
         drop(recovered);
         drop(reader);
-        assert!(interner.inner.files.iter().all(OrdInterner::is_empty));
-        assert!(interner.inner.expressions.iter().all(OrdInterner::is_empty));
+        assert!(interner.inner.files.iter().all(HashInterner::is_empty));
+        assert!(
+            interner
+                .inner
+                .expressions
+                .iter()
+                .all(HashInterner::is_empty)
+        );
+    }
+
+    #[test]
+    fn test_historical_expression_types_share_only_equal_metadata() {
+        use datatypes::value::Value;
+        use partition::expr::col;
+
+        let interner = FileMetadataInterner::default();
+        let mut retained = Vec::new();
+        let values = [
+            Value::Int32(10),
+            Value::Int64(10),
+            Value::UInt32(10),
+            serde_json::from_value(serde_json::json!({
+                "Decimal128": {"value": 10, "precision": 10, "scale": 0}
+            }))
+            .unwrap(),
+            serde_json::from_value(serde_json::json!({
+                "Decimal128": {"value": 10, "precision": 10, "scale": 1}
+            }))
+            .unwrap(),
+        ];
+        let expected_count = values.len();
+        for value in values {
+            let meta = FileMeta {
+                region_id: RegionId::new(1, 1),
+                partition_expr: Some(col("tag").lt(value).into()),
+                ..Default::default()
+            };
+            // Recovery creates independent allocations for historical metadata.
+            let encoded = serde_json::to_vec(&meta).unwrap();
+            let first = interner.intern(serde_json::from_slice(&encoded).unwrap());
+            let recovered = interner.intern(serde_json::from_slice(&encoded).unwrap());
+            assert!(MetadataRef::ptr_eq(&first, &recovered));
+            for old in &retained {
+                assert!(!MetadataRef::ptr_eq(old, &first));
+                assert_eq!(
+                    interner.inner.hasher.hash_one(old),
+                    interner.inner.hasher.hash_one(&first)
+                );
+                assert!(!MetadataRef::ptr_eq(
+                    old.partition_expr.as_ref().unwrap(),
+                    first.partition_expr.as_ref().unwrap(),
+                ));
+            }
+            retained.push(first);
+        }
+        assert_eq!(
+            (expected_count, expected_count),
+            interner.inner.entry_counts()
+        );
+        drop(retained);
+        assert_eq!((0, 0), interner.inner.entry_counts());
     }
 
     #[test]
@@ -412,8 +466,14 @@ mod tests {
                 worker.join().unwrap();
             }
         });
-        assert!(interner.inner.files.iter().all(OrdInterner::is_empty));
-        assert!(interner.inner.expressions.iter().all(OrdInterner::is_empty));
+        assert!(interner.inner.files.iter().all(HashInterner::is_empty));
+        assert!(
+            interner
+                .inner
+                .expressions
+                .iter()
+                .all(HashInterner::is_empty)
+        );
     }
 
     #[test]

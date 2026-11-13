@@ -1013,6 +1013,67 @@ mod test {
     }
 
     #[tokio::test]
+    async fn recover_historical_file_expression_types() {
+        use datatypes::value::Value;
+        use partition::expr::col;
+        use store_api::storage::FileId;
+
+        use crate::sst::file::FileMeta;
+
+        for checkpoint_distance in [0, 1] {
+            let env = TestEnv::new().await;
+            let metadata = Arc::new(basic_region_metadata());
+            let mut manager = env
+                .create_manifest_manager(
+                    CompressionType::Uncompressed,
+                    checkpoint_distance,
+                    Some(metadata.clone()),
+                )
+                .await
+                .unwrap()
+                .unwrap();
+            let mut files = Vec::new();
+            for value in [Value::Int32(10), Value::Int64(10)] {
+                let file = FileMeta {
+                    region_id: metadata.region_id,
+                    file_id: FileId::random(),
+                    partition_expr: Some(col("tag").lt(value).into()),
+                    ..Default::default()
+                };
+                manager
+                    .update(
+                        RegionMetaActionList::with_action(RegionMetaAction::Edit(RegionEdit {
+                            files_to_add: vec![file.clone()],
+                            ..Default::default()
+                        })),
+                        false,
+                    )
+                    .await
+                    .unwrap();
+                manager.wait_for_pending_checkpoint().await;
+                files.push(file);
+            }
+            assert_eq!(
+                checkpoint_distance != 0,
+                manager.checkpointer.last_checkpoint_version() > 0
+            );
+            manager.stop().await;
+            drop(manager);
+            // The helper supplies a fresh interner, so recovery cannot reuse old entries.
+            let recovered = env
+                .create_manifest_manager(CompressionType::Uncompressed, checkpoint_distance, None)
+                .await
+                .unwrap()
+                .unwrap();
+            let manifest = recovered.manifest();
+            assert_eq!(files.len(), manifest.files.len());
+            for file in files {
+                assert_eq!(&file, manifest.files[&file.file_id].as_ref());
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn region_change_add_column() {
         let metadata = Arc::new(basic_region_metadata());
         let env = TestEnv::new().await;
