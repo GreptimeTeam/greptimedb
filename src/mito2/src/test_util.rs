@@ -983,6 +983,7 @@ impl TestEnv {
         let manifest_dir = "/".to_string();
 
         let manifest_opts = RegionManifestOptions {
+            file_metadata_interner: Default::default(),
             manifest_dir,
             object_store,
             compress_type,

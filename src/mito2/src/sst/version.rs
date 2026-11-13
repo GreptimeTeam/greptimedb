@@ -21,7 +21,7 @@ use common_time::{TimeToLive, Timestamp};
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::{FileId, RegionId};
 
-use crate::sst::file::{self, FileHandle, FileMeta, FileTimeRange, Level};
+use crate::sst::file::{self, FileHandle, FileMeta, FileMetaRef, FileTimeRange, Level};
 use crate::sst::file_purger::FilePurgerRef;
 use crate::sst::primary_key::PrimaryKeyRangeMapper;
 
@@ -77,10 +77,11 @@ impl SstVersion {
     pub(crate) fn add_files(
         &mut self,
         file_purger: FilePurgerRef,
-        files_to_add: impl Iterator<Item = FileMeta>,
+        files_to_add: impl Iterator<Item = impl Into<FileMetaRef>>,
     ) {
         let levels = Arc::make_mut(&mut self.levels);
         for file in files_to_add {
+            let file = file.into();
             let level = file.level;
             let new_index_version = file.index_version;
             // A trusted L0 adoption changes classification, not the physical object.
@@ -98,7 +99,7 @@ impl SstVersion {
                 .files
                 .entry(file.file_id)
                 .and_modify(|f| {
-                    if *f.meta_ref() == file || f.meta_ref().is_index_up_to_date(&file) {
+                    if f.meta_ref() == file.as_ref() || f.meta_ref().is_index_up_to_date(&file) {
                         // same file meta or current file handle's index is up-to-date, skip adding
                         if f.index_id().version > new_index_version {
                             // what does it mean for us to see older index version?

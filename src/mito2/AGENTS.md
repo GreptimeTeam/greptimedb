@@ -157,6 +157,16 @@ Tests live next to the code as `*_test.rs` (e.g. `src/mito2/src/engine/flush_tes
   `All` removes all data; `ByTimeRanges` removes fully contained files. Other
   regions/readers still protect the shared objects. Stale compaction results must
   not reinstate truncated inputs.
+- Manifest and runtime file views share immutable `FileMetaRef` values. The engine-local
+  metadata interner compares complete metadata before sharing; file identity alone is insufficient.
+  Partition expressions are shared by table and complete expression content, so historical
+  SST partition rules remain distinct after repartition.
+  Interned references reclaim entries on final release, including delayed readers,
+  without a maintenance task or new writes. Hash table capacity remains allocated
+  until the interner is dropped.
+  Manifest consumers receive the interner directly. Scrape-time entry counts use weak
+  references and do not add maintenance tasks or retain engine storage.
+  Index replacement preserves old readers and updates the lifetime guard to the newest metadata.
 - Local compaction units use the snapshot-free `CompactionContext`. Retaining a
   full `CompactionRegion` in a unit pins other units' inputs and delays SST purge.
 - Candidate waiting history is owned by the region scheduler (`scheduler/history.rs`).

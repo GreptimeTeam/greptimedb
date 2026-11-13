@@ -390,11 +390,15 @@ impl RegionOpener {
         // history meanwhile fails the create before it leaves a manifest.
         wal.start_region_history(region_id, &provider)?;
         // Create a manifest manager for this region and writes regions to the manifest file.
-        let mut region_manifest_options =
-            RegionManifestOptions::new(config, &region_dir, &object_store)
-                .with_conditional_publication(
-                    options.requires_conditional_manifest_publication(self.node_lease.is_enabled()),
-                );
+        let mut region_manifest_options = RegionManifestOptions::new(
+            config,
+            &region_dir,
+            &object_store,
+            self.file_ref_manager.file_metadata_interner.clone(),
+        )
+        .with_conditional_publication(
+            options.requires_conditional_manifest_publication(self.node_lease.is_enabled()),
+        );
         // Set manifest cache if available
         region_manifest_options.manifest_cache = self
             .cache_manager
@@ -525,12 +529,15 @@ impl RegionOpener {
         let now = Instant::now();
         let mut region_options = self.options.as_ref().unwrap().clone();
         let object_storage = get_object_store(&region_options.storage, &self.object_store_manager)?;
-        let mut region_manifest_options =
-            RegionManifestOptions::new(config, &self.region_dir(), &object_storage)
-                .with_conditional_publication(
-                    region_options
-                        .requires_conditional_manifest_publication(self.node_lease.is_enabled()),
-                );
+        let mut region_manifest_options = RegionManifestOptions::new(
+            config,
+            &self.region_dir(),
+            &object_storage,
+            self.file_ref_manager.file_metadata_interner.clone(),
+        )
+        .with_conditional_publication(
+            region_options.requires_conditional_manifest_publication(self.node_lease.is_enabled()),
+        );
         // Set manifest cache if available
         region_manifest_options.manifest_cache = self
             .cache_manager

@@ -1030,7 +1030,7 @@ impl IndexBuildTask {
                     .await,
             );
         }
-        self.source.file_meta = current_file_meta;
+        self.source.file_meta = current_file_meta.as_ref().clone();
         ControlFlow::Continue(())
     }
 
