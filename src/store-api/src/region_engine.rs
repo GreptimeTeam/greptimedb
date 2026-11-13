@@ -814,13 +814,24 @@ mod tests {
     }
 
     #[test]
-    fn test_granted_region_candidate_lease_id_roundtrip() {
+    fn test_granted_region_candidate_lease_id_wire() {
+        use prost::Message;
+
         let granted = GrantedRegion {
             candidate_lease_id: Some(7),
             ..GrantedRegion::new(RegionId::new(1024, 1), RegionRole::Follower)
         };
+        // Region id (field 1), role Follower (field 2), then candidate_lease_id as a uint64
+        // varint in field 3.
+        let bytes: &[u8] = &[
+            0x08, 0x81, 0x80, 0x80, 0x80, 0x80, 0x80, 0x01, 0x10, 0x01, 0x18, 0x07,
+        ];
         assert_eq!(
-            GrantedRegion::from(PbGrantedRegion::from(granted.clone())),
+            PbGrantedRegion::from(granted.clone()).encode_to_vec(),
+            bytes
+        );
+        assert_eq!(
+            GrantedRegion::from(PbGrantedRegion::decode(bytes).unwrap()),
             granted
         );
     }
