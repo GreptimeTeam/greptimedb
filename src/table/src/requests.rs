@@ -409,7 +409,7 @@ impl fmt::Display for TableOptions {
             } else if k == RELATIONAL_META_KEY {
                 redact_relational_options(v)
             } else {
-                v.to_string()
+                (*v).clone()
             };
             key_vals.push(format!("{}={}", k, value));
         }
