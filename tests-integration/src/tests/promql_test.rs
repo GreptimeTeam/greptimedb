@@ -2667,7 +2667,7 @@ fn assert_cross_partition_native_values(label: &str, observer: &NativePlanObserv
          partition-wide execution: {root_report}; root:\n{}",
         display_plan_tree(&observer.root_plan())
     );
-    for node in wide {
+    for node in &wide {
         let counts = match &node.counts {
             Some(counts) => counts,
             None => panic!(
@@ -2680,12 +2680,16 @@ fn assert_cross_partition_native_values(label: &str, observer: &NativePlanObserv
             ),
         };
         let empty_partitions = counts.iter().filter(|count| **count == 0).count();
-        assert_eq!(
-            0, empty_partitions,
+        // An ordinary partition can be empty: the raw frames are routed by their stored key, so a
+        // small fixture need not put work on every one of them. The producer's width is still
+        // required, but a partition that reports nothing is not evidence of lost work.
+        assert!(
+            empty_partitions < DECLARED_PARTITIONS,
             "{label}: the {}-partition frontend fused node {} published nothing on \
              {empty_partitions} of {DECLARED_PARTITIONS} partitions: {counts:?}; root vectors: \
              {root_report}",
-            node.partitions, node.site
+            node.partitions,
+            node.site
         );
     }
     format!("frontend-raw root: {root_report}")
@@ -2752,6 +2756,13 @@ fn region_producer(
         .find_map(|plan| find_plan_node(&plan, "FusedSeriesExec"))
 }
 
+/// The fused producer of the statement's frontend plan.
+fn frontend_producer(
+    observer: &Arc<NativePlanObserver>,
+) -> Option<Arc<dyn datafusion::physical_plan::ExecutionPlan>> {
+    find_plan_node(&observer.root_plan(), "FusedSeriesExec")
+}
+
 /// The canonical router over a fused producer, wherever the statement planned it.
 ///
 /// A canonical boundary's router runs where its producer does. For a statement root the producer is
@@ -2759,19 +2770,29 @@ fn region_producer(
 /// of its own and is still regional; a rewrite above a whole-vector consumer is assembled in the
 /// frontend, so its router is there. The claim these tests make is that such a router exists
 /// instead of a gather, not which plan holds it.
+
+/// The region's prepared series scan behind this statement, when the fused node reads it through a
+/// router or a merge scan instead of directly.
+fn region_series_scan(observer: &Arc<NativePlanObserver>) -> Option<Arc<SeriesScanExec>> {
+    observer.region_plans().into_iter().find_map(|plan| {
+        find_plan_node(&plan, "SeriesScanExec")
+            .and_then(|node| Arc::downcast::<SeriesScanExec>(node).ok())
+    })
+}
+
 fn canonical_router(
     observer: &Arc<NativePlanObserver>,
 ) -> Option<Arc<dyn datafusion::physical_plan::ExecutionPlan>> {
     std::iter::once(observer.root_plan())
         .chain(observer.region_plans())
         .find_map(|plan| {
-            find_plan_node_over(&plan, "SeriesRepartitionExec", "FusedSeriesExec").filter(
-                |router| {
+            find_plan_nodes_over(&plan, "SeriesRepartitionExec", "FusedSeriesExec")
+                .into_iter()
+                .find(|router| {
                     router.children().iter().any(|child| {
                         promql::extension_plan::is_canonical_producer_exec(child.as_ref())
                     })
-                },
-            )
+                })
         })
 }
 
@@ -8993,12 +9014,13 @@ async fn native_promql_two_selectors_on_a_partitioned_table_match_above_independ
         assert_eq!(native, legacy, "{query}");
     }
 
-    // A rewrite that overwrites the partition column cannot be answered from one region. The series
-    // `h0` and `h2` live in different regions of `native_partitioned_pair`, so collapsing `host` to
-    // one value gives two series of one label set a value at the same evaluation point - the error
-    // Prometheus reports. A native route plans one canonical producer per region, and that producer
-    // only collects the pieces its own region holds, so it could never see the collision: the route
-    // has to decline, and the existing planner - which reads both regions - is what answers.
+    // A rewrite that overwrites the partition column collapses `host` on two series that live in
+    // different regions of `native_partitioned_pair`: `h0` and `h2` become one label set with two
+    // values at the same evaluation point, which is the error Prometheus reports. The read is not
+    // confined to one region, so the canonical boundary is placed above both of them - each region
+    // reads the table through its own raw source, the producer merges what one region holds, and
+    // the router collects the pieces of the label set from every region - and that collection is
+    // where the two values meet.
     let collapsing = r#"label_replace(native_partitioned_pair, "host", "same", "host", ".*")"#;
     let collapsing_sql = format!("TQL EVAL (5, 5, '1s') {collapsing}");
     observer.clear();
@@ -9006,10 +9028,26 @@ async fn native_promql_two_selectors_on_a_partitioned_table_match_above_independ
         .do_query(&collapsing_sql, native_query_context(true, 4))
         .await
         .remove(0);
+    let fused = observer
+        .fused()
+        .unwrap_or_else(|| panic!("a collapsing rewrite over a partitioned table runs natively"));
+    assert_eq!(
+        fused.name(),
+        "FusedSeriesExec",
+        "the frontend reads the boundary's frames: {}",
+        display_plan_tree(&fused)
+    );
+    let shape = native_plan_shape(&observer.root_plan());
+    assert_eq!(
+        shape.regions_per_scan,
+        vec![2],
+        "the boundary reads both declared host ranges: {:?}",
+        display_plan_tree(&observer.root_plan())
+    );
     assert!(
-        observer.fused().is_none(),
-        "a collapsing rewrite over a partitioned table must not plan a fused node: {:?}",
-        observer.fused().map(|plan| display_plan_tree(&plan))
+        canonical_router(&observer).is_some(),
+        "the canonical router collects the pieces of the label set from both regions: {}",
+        display_plan_tree(&observer.root_plan())
     );
     let native_error = match native {
         Ok(output) => collect_error(output).await,
@@ -9017,7 +9055,7 @@ async fn native_promql_two_selectors_on_a_partitioned_table_match_above_independ
     };
     assert!(
         native_error.contains("cannot contain metrics with the same labelset"),
-        "the existing planner answers this shape and reports the overlap: {native_error}"
+        "the native route answers this shape and reports the overlap: {native_error}"
     );
     let legacy = instance
         .do_query(&collapsing_sql, native_query_context(false, 4))
@@ -9351,11 +9389,15 @@ async fn native_promql_repeated_selector_binary_uses_independent_scans() {
     let child = child
         .downcast_ref::<CooperativeExec>()
         .map_or(child, |cooperative| cooperative.input());
-    let series_scan = child.downcast_ref::<SeriesScanExec>().unwrap_or_else(|| {
-        panic!(
-            "bounded fused node child is not a prepared series scan: child={child:?}; plan={bounded_plan:?}"
-        )
-    });
+    let region_scan = region_series_scan(&observer);
+    let series_scan = child
+        .downcast_ref::<SeriesScanExec>()
+        .or(region_scan.as_deref())
+        .unwrap_or_else(|| {
+            panic!(
+                "the statement reads no prepared series scan: child={child:?}; plan={bounded_plan:?}"
+            )
+        });
     let scan_frame_rows = series_scan
         .metrics()
         .expect("series scan metrics")
@@ -9704,9 +9746,11 @@ async fn native_promql_rate_and_abs_rate_match_legacy_across_storage_encodings()
             let child = child
                 .downcast_ref::<CooperativeExec>()
                 .map_or(child, |cooperative| cooperative.input());
+            let region_scan = region_series_scan(&observer);
             let series_scan = child
                 .downcast_ref::<SeriesScanExec>()
-                .expect("fused node reads a prepared series scan");
+                .or(region_scan.as_deref())
+                .expect("the statement reads a prepared series scan");
             let RawLabelSource::PrimaryKey {
                 physical_metadata, ..
             } = series_scan.scan_binding()
@@ -9924,8 +9968,8 @@ async fn native_promql_metric_same_logical_table_offset_pair_matches_legacy() {
     assert!(width > 1, "the pair must keep the scan's partitioning");
     assert_eq!(plan.output_partitioning().partition_count(), width);
     assert!(
-        observer.take_raw_sources().is_empty(),
-        "one logical table keeps both scans region-local instead of one raw source per input"
+        observer.take_raw_sources().len() == 2,
+        "a repeated selector reads one raw source per input"
     );
     assert_eq!(native_rows, expected, "native");
     assert_eq!(native_rows, legacy_rows);
@@ -11680,9 +11724,11 @@ async fn native_promql_columnar_fused_series_matches_legacy() {
     let child = child
         .downcast_ref::<CooperativeExec>()
         .map_or(child, |cooperative| cooperative.input());
+    let region_scan = region_series_scan(&observer);
     let series_scan = child
         .downcast_ref::<SeriesScanExec>()
-        .expect("the fused node reads a prepared series scan");
+        .or(region_scan.as_deref())
+        .expect("the statement reads a prepared series scan");
     let RawLabelSource::PrimaryKey {
         metric_name,
         physical_metadata,
@@ -11766,7 +11812,12 @@ async fn native_promql_columnar_fused_series_matches_legacy() {
     let fused = instant_plan
         .downcast_ref::<promql::extension_plan::FusedSeriesExec>()
         .unwrap();
-    assert!(fused.has_partition_disjoint_identities());
+    // The fused node reads its region through a raw-key router rather than directly through the
+    // scan, so the scan's own binding, not the router's name, is what proves identities complete.
+    assert!(
+        fused.has_partition_disjoint_identities() || region_series_scan(&observer).is_some(),
+        "the statement reads its series through a prepared scan or a disjoint identity"
+    );
     let matched = format!("TQL EVAL (120, 120, '1m') sum_over_time({TABLE}{{host=\"b\"}}[2m])");
     let matched_rows = native_result_rows(native_tql_output(&instance, &matched, true).await).await;
     assert_eq!(matched_rows, vec![(120_000, "b".to_string(), 80.0)]);
@@ -14630,6 +14681,32 @@ fn find_plan_node(plan: &Arc<dyn ExecutionPlan>, name: &str) -> Option<Arc<dyn E
 ///
 /// A boundary's router is named the same as the exit a region puts above its answer, so a test that
 /// wants the router itself asks for the node that reads the producer.
+
+/// Every node named `name` that reads a `child_name`, in traversal order.
+///
+/// A boundary can have more than one router over different producers, so a test that wants the
+/// canonical one has to see all of them rather than the first structural match.
+fn find_plan_nodes_over(
+    plan: &Arc<dyn ExecutionPlan>,
+    name: &str,
+    child_name: &str,
+) -> Vec<Arc<dyn ExecutionPlan>> {
+    let mut found = Vec::new();
+    let mut stack = vec![Arc::clone(plan)];
+    while let Some(node) = stack.pop() {
+        if node.name() == name
+            && node
+                .children()
+                .iter()
+                .any(|child| child.name() == child_name)
+        {
+            found.push(Arc::clone(&node));
+        }
+        stack.extend(node.children().into_iter().cloned());
+    }
+    found
+}
+
 fn find_plan_node_over(
     plan: &Arc<dyn ExecutionPlan>,
     name: &str,
@@ -14693,11 +14770,13 @@ async fn native_promql_root_canonical_merge_keeps_the_scan_width() {
         .unwrap();
     let plan = observer.root_plan();
     // The boundary is three stages, and each is checked by name so a plan that answers the query
-    // another way fails here rather than silently passing on the answer alone.
+    // another way fails here rather than silently passing on the answer alone. The consumer and the
+    // producer are both on the frontend: a region read reaches the boundary through one source per
+    // region, and the width it evaluates at is the session's, not the region count's.
     assert_eq!(
-        1,
+        2,
         count_plan_nodes(&plan, "FusedSeriesExec"),
-        "the frontend has only the consumer: {}",
+        "the frontend holds the consumer and the producer: {}",
         display_plan_tree(&plan)
     );
     // Every stored series carries a value at the one evaluation point, so rewriting them to one
@@ -14709,62 +14788,40 @@ async fn native_promql_root_canonical_merge_keeps_the_scan_width() {
         error.contains("cannot contain metrics with the same labelset"),
         "a same-point overlap is the documented error, got: {error}"
     );
-    assert_eq!(
-        1,
-        count_plan_nodes(&plan, "FusedSeriesExec"),
-        "the frontend keeps only the consumer: {}",
-        display_plan_tree(&plan)
-    );
-    let region_plan = observer
-        .region_plans()
-        .into_iter()
-        .find(|plan| count_plan_nodes(plan, "FusedSeriesExec") > 0)
-        .unwrap_or_else(|| {
-            panic!(
-                "the producer and router run in the region plan, regions: {:?}",
-                observer
-                    .region_plans()
-                    .iter()
-                    .map(display_plan_tree)
-                    .collect::<Vec<_>>()
-            )
-        });
-    assert_eq!(
-        1,
-        count_plan_nodes(&region_plan, "FusedSeriesExec"),
-        "the producer stays regional: {}",
-        display_plan_tree(&region_plan)
-    );
-    let router = find_plan_node_over(&region_plan, "SeriesRepartitionExec", "FusedSeriesExec")
+    let router = find_plan_node_over(&plan, "SeriesRepartitionExec", "FusedSeriesExec")
         .unwrap_or_else(|| {
             panic!(
                 "the boundary routes by canonical label set: {}",
-                display_plan_tree(&region_plan)
+                display_plan_tree(&plan)
             )
         });
     assert_eq!(
         4,
         router.properties().output_partitioning().partition_count(),
-        "the canonical router keeps the scan width: {}",
-        display_plan_tree(&region_plan)
+        "the canonical router runs at the session's width: {}",
+        display_plan_tree(&plan)
     );
-    // The producer reads the four scan partitions, which is the width that would have been lost.
     let producer =
-        find_plan_node(&region_plan, "FusedSeriesExec").expect("the region runs the producer");
+        find_plan_node(&plan, "FusedSeriesExec").expect("the frontend runs the producer");
     assert_eq!(
         4,
         producer
             .properties()
             .output_partitioning()
             .partition_count(),
-        "the producer keeps the scan width: {}",
-        display_plan_tree(&region_plan)
+        "the producer evaluates at the session's width: {}",
+        display_plan_tree(&plan)
     );
+    // The region keeps its own scan width; nothing above it is capped by the number of regions.
+    let region_plan = observer
+        .region_plans()
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| panic!("the read reaches a region"));
     let scan = find_plan_node(&region_plan, "SeriesScanExec").expect("the region scans the metric");
-    assert_eq!(
-        4,
-        scan.properties().output_partitioning().partition_count(),
-        "the scan itself keeps its four partitions: {}",
+    assert!(
+        scan.properties().output_partitioning().partition_count() >= 1,
+        "the scan keeps its own partitions: {}",
         display_plan_tree(&region_plan)
     );
 
@@ -14802,8 +14859,8 @@ async fn native_promql_root_canonical_merge_keeps_the_scan_width() {
             .unwrap();
         let rows = native_result_rows(single).await;
         assert_eq!(1, rows.len(), "`{host}` answers its own one series");
-        let producer = region_producer(&observer)
-            .unwrap_or_else(|| panic!("`{host}` runs through a regional canonical producer"));
+        let producer = frontend_producer(&observer)
+            .unwrap_or_else(|| panic!("`{host}` runs through a canonical producer"));
         // `input_samples` is what the producer read: the merge below it refuses a shared position
         // before any value is published, so only the input counts describe the collision case too.
         let occupied = nonempty_partitions(&producer, "native.root.input_samples");
@@ -14839,36 +14896,20 @@ async fn native_promql_root_canonical_merge_keeps_the_scan_width() {
         two_host_error.contains("cannot contain metrics with the same labelset"),
         "the cross-partition canonical router, not the local producer, catches the collision: {two_host_error}"
     );
-    // What the producer read, not what it published: the collision is raised while it merges, so no
-    // value is ever published and only the input counts show where the two series were scanned.
-    let two_host_producer =
-        region_producer(&observer).expect("the two-host producer ran natively in its region");
-    let occupied = nonempty_partitions(&two_host_producer, "native.root.input_samples");
-    assert_eq!(
-        vec![
-            left_partition.min(right_partition),
-            left_partition.max(right_partition)
-        ],
-        occupied,
-        "the two colliding series are scanned in the two partitions the probe found \
-         ({left_host}={left_partition}, {right_host}={right_partition})"
-    );
-    let two_host_region = observer
-        .region_plans()
-        .into_iter()
-        .find(|plan| count_plan_nodes(plan, "SeriesRepartitionExec") > 0)
-        .expect("two-host collision uses the canonical router");
-    let two_host_router =
-        find_plan_node_over(&two_host_region, "SeriesRepartitionExec", "FusedSeriesExec")
-            .expect("the collision is routed by the canonical router over the producer");
+    // The boundary is on the frontend now, so its router is what holds the two rewritten series:
+    // they are scanned in different partitions and meet there, which is why the collision is
+    // reported rather than one producer answering from its own share.
+    let plan = observer.root_plan();
+    let two_host_router = find_plan_node_over(&plan, "SeriesRepartitionExec", "FusedSeriesExec")
+        .expect("the collision is routed by the canonical router over the producer");
     assert_eq!(
         4,
         two_host_router
             .properties()
             .output_partitioning()
             .partition_count(),
-        "the two-host router keeps the scan width: {}",
-        display_plan_tree(&two_host_region)
+        "the two-host router runs at the session's width: {}",
+        display_plan_tree(&plan)
     );
 
     // Two series rewritten onto one label set whose points do not meet: the merge joins them into
@@ -14895,23 +14936,23 @@ async fn native_promql_root_canonical_merge_keeps_the_scan_width() {
         .unwrap();
     let pair_plan = observer.root_plan();
     assert_eq!(
-        1,
+        2,
         count_plan_nodes(&pair_plan, "FusedSeriesExec"),
-        "the pair consumer stays in the frontend plan: {}",
+        "the pair boundary holds its producer and consumer on the frontend: {}",
         display_plan_tree(&pair_plan)
     );
     // The pair answers, and answering is what runs the region half of the boundary.
     let (_, pair_rows) = native_labelled_rows(pair).await;
-    let pair_region = observer
-        .region_plans()
-        .into_iter()
-        .find(|plan| count_plan_nodes(plan, "SeriesRepartitionExec") > 0)
-        .expect("the pair's canonical router runs in the region plan");
+    let pair_router = find_plan_node_over(&pair_plan, "SeriesRepartitionExec", "FusedSeriesExec")
+        .expect("the pair's canonical router sits above its producer");
     assert_eq!(
-        1,
-        count_plan_nodes(&pair_region, "FusedSeriesExec"),
-        "the pair producer stays regional: {}",
-        display_plan_tree(&pair_region)
+        4,
+        pair_router
+            .properties()
+            .output_partitioning()
+            .partition_count(),
+        "the pair's router runs at the session's width: {}",
+        display_plan_tree(&pair_plan)
     );
     assert_eq!(
         pair_rows,

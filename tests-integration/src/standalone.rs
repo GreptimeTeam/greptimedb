@@ -346,7 +346,6 @@ impl GreptimeDbStandaloneBuilder {
             procedure_executor.clone(),
             Arc::new(ProcessManager::new(server_addr, None)),
         )
-        .with_in_process_region_transport()
         .with_local_file_access(local_file_access)
         .with_plugin(plugins.clone())
         .try_build()
