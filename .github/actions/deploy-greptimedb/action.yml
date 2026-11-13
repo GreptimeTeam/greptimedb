@@ -26,7 +26,6 @@ runs:
       run: sudo sysctl -w fs.inotify.max_user_instances=1280 fs.inotify.max_user_watches=655360
 
     - name: Deploy GreptimeDB by Helm
-      timeout-minutes: 30
       shell: bash
       env:
         DATA_ROOT: ${{ inputs.data-root }}
@@ -35,4 +34,5 @@ runs:
         AWS_ACCESS_KEY_ID: ${{ inputs.aws-access-key-id }}
         AWS_SECRET_ACCESS_KEY: ${{ inputs.aws-secret-access-key }}
       run: |
-        ./.github/scripts/deploy-greptimedb.sh
+        # Composite steps do not support timeout-minutes.
+        timeout --kill-after=30s 30m ./.github/scripts/deploy-greptimedb.sh
