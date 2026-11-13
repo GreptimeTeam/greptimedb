@@ -343,11 +343,15 @@ impl IcebergHashRangesSqlFunction {
         if name.is_null() || buckets.is_null() {
             return Ok(None);
         }
-        let column = match name {
-            ScalarValue::Utf8(Some(column)) | ScalarValue::LargeUtf8(Some(column)) => column,
-            other => {
+        // Every string representation is a valid column name: a literal is
+        // `Utf8`, but a user can hand over `Utf8View` explicitly (for example
+        // `arrow_cast('host', 'Utf8View')`), and `Signature::any` does not
+        // convert it back.
+        let column = match name.try_as_str() {
+            Some(Some(column)) => column,
+            _ => {
                 return Err(DataFusionError::Execution(format!(
-                    "{} expects a column name string, got {other:?}",
+                    "{} expects a column name string, got {name:?}",
                     self.name()
                 )));
             }
@@ -869,6 +873,31 @@ mod tests {
             ))
         );
 
+        // A column name can arrive in any Arrow string representation. An
+        // explicit `Utf8View` (for example from `arrow_cast`) must render
+        // exactly like a plain literal instead of being rejected as non-string.
+        for name in [
+            ScalarValue::LargeUtf8(Some("host-name".to_string())),
+            ScalarValue::Utf8View(Some("host-name".to_string())),
+        ] {
+            let rendered = invoke(
+                &function,
+                vec![
+                    ColumnarValue::Scalar(name),
+                    ColumnarValue::Scalar(ScalarValue::Int64(Some(2))),
+                ],
+                1,
+                DataType::Utf8,
+            );
+            assert_eq!(
+                into_scalar(rendered),
+                ScalarValue::Utf8(Some(
+                    "iceberg_hash(\"host-name\") < 0,\niceberg_hash(\"host-name\") >= 0"
+                        .to_string()
+                ))
+            );
+        }
+
         // A NULL name or bucket count propagates.
         let call = |args: Vec<ColumnarValue>| {
             let rendered = function
@@ -1144,7 +1173,8 @@ mod tests {
                  iceberg_hash(NULL) AS n, iceberg_hash_bounds(4) AS b, \
                  iceberg_hash_bounds(CAST(4 AS SMALLINT)) AS sb, \
                  iceberg_hash_breakpoints('iceberg', 'a') AS bp, \
-                 iceberg_hash_ranges_sql('host-name', 2) AS rs",
+                 iceberg_hash_ranges_sql('host-name', 2) AS rs, \
+                 iceberg_hash_ranges_sql(arrow_cast('host-name', 'Utf8View'), 2) AS rsv",
             )
             .await
             .unwrap()
@@ -1189,9 +1219,15 @@ mod tests {
             expected_breakpoints
         );
         // Ready-to-paste rule list, with the column name quoted.
+        let rendered_rules = "iceberg_hash(\"host-name\") < 0,\niceberg_hash(\"host-name\") >= 0";
         assert_eq!(
             batches[0].column(6).as_string::<i32>().value(0),
-            "iceberg_hash(\"host-name\") < 0,\niceberg_hash(\"host-name\") >= 0"
+            rendered_rules
+        );
+        // An explicit `Utf8View` column name renders the same rules.
+        assert_eq!(
+            batches[0].column(7).as_string::<i32>().value(0),
+            rendered_rules
         );
     }
 
