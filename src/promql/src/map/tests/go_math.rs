@@ -75,3 +75,17 @@ fn kernels_match_go_math() {
     assert!(failed.is_empty(), "{}", failed.join("\n"));
     assert_eq!(counts.len(), 19, "{counts:?}");
 }
+
+#[test]
+fn kernels_preserve_platform_math_differences() {
+    let subnormal = f64::from_bits(1);
+    assert!((MathOp::Ln.calculate(subnormal) - (-744.4400719213812)).abs() < 1e-10);
+    let power = ArithmeticOp::Power.calculate(subnormal, 0.25);
+    assert!((power / 1.4908919308538354e-81 - 1.0).abs() < 1e-10);
+    assert!(MathOp::Exp.calculate(709.5).is_finite());
+    assert_eq!(
+        ArithmeticOp::Atan2.calculate(-1e-300, -1e300),
+        -std::f64::consts::PI
+    );
+    assert_eq!(MathOp::Floor.calculate(MathOp::Log10.calculate(1e15)), 15.0);
+}

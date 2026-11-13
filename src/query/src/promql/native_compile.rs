@@ -2645,10 +2645,8 @@ fn refuses_modifier(modifier: Option<&BinModifier>) -> bool {
 /// it runs. Returning `None` rather than an error is what lets the caller report where the
 /// expression was found, which is the useful half of the refusal.
 ///
-/// Arithmetic is the kernel operation [`BinaryOp::kind`] names and nothing else's: that is where
-/// Prometheus' semantics for `%`, `^` and `atan2` live, so defining them again here would be a
-/// second answer for the two to disagree over. A set operator has no [`BinaryOp`] and does not
-/// fold.
+/// Arithmetic uses the kernel operation named by [`BinaryOp::kind`], including
+/// [`ArithmeticOp::calculate`]'s platform math behavior. Set operators do not fold.
 /// Visible to the planner, which asks whether a statement's value is a constant before binding it.
 pub(crate) fn constant_value(expr: &PromExpr) -> Option<f64> {
     match expr {
