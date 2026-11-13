@@ -1083,9 +1083,10 @@ pub struct NativeNode {
 /// A canonical label set is the identity a [`NativeExpr::Merge`] groups by: the metric name plus the
 /// ordinary labels, which is exactly what [`SeriesLabels`] holds. One scan partition holds one
 /// series per such set - a stored series is one identity, and the scan splits rows by storage key
-/// rather than by label set - so only a computation that *writes* an existing label can turn two of
-/// those identities into one. A `label_replace` or `label_join` does exactly that, and it may name
-/// the very label that told its input's series apart.
+/// rather than by label set - so only a computation that *writes* an existing label, or drops one,
+/// can turn two of those identities into one. A `label_replace` or a `label_join` writes one, and it
+/// may name the very label that told its input's series apart; a range function that drops the
+/// metric name, and `timestamp` in either of its forms, drop one.
 ///
 /// The rewrite is judged by the labels it writes and the ones its input carries, which is why the
 /// caller supplies what it knows about each source's tags, indexed by the `source_index` the leaves
@@ -1115,7 +1116,12 @@ pub struct NativeNode {
 ///   `Binary` that reads whole vectors files its rows by the label set a sample *ends* under and
 ///   refuses two values of a field at one point. A `Set` does the same, and `info` merges the
 ///   results that share a label set. Each answers one series per set it names.
-/// - A node that hands its input's series over unchanged - a selection, a window, a timestamp, a
+/// - A `Window` that drops the metadata labels, and a `Timestamp` in either of its forms, claim one
+///   of their own: the name is part of the identity a merge groups by, so two series that shared
+///   every other label are one label set from there on - unless
+///   [`metadata_drop_keeps_series_apart`] proves that nothing they drop was telling two of their
+///   input's series apart.
+/// - A node that hands its input's series over unchanged - a selection, a name-keeping window, a
 ///   parameterized map, `topk` and its ranking siblings - passes the answer on: an alias below it is
 ///   still an alias above it.
 ///
@@ -1123,7 +1129,11 @@ pub struct NativeNode {
 /// inserts a `Merge` for: a consumer that reads a whole label set cannot answer from pieces, and this
 /// says where pieces of one set can exist at all. A `Merge` is the collection itself, so it answers
 /// `false` - which is what makes the pass idempotent.
-pub fn duplicates_canonical_labels(node: &NativeNode, source_tags: &[Vec<String>]) -> bool {
+pub fn duplicates_canonical_labels(
+    node: &NativeNode,
+    source_tags: &[Vec<String>],
+    source_metrics: &[Option<Arc<str>>],
+) -> bool {
     match &node.expr {
         NativeExpr::Input(_)
         | NativeExpr::Scalar(_)
@@ -1131,13 +1141,30 @@ pub fn duplicates_canonical_labels(node: &NativeNode, source_tags: &[Vec<String>
         | NativeExpr::VectorOf { .. } => false,
         // The collection itself: one series per label set comes out of it.
         NativeExpr::Merge { .. } => false,
-        // These hand each series over as they read it, so what aliases below them still aliases.
-        NativeExpr::Instant { input, .. }
-        | NativeExpr::Window { input, .. }
-        | NativeExpr::Timestamp { input }
-        | NativeExpr::ParameterizedMap { input, .. }
+        // These hand each series over as they read it, so what aliases below them still aliases --
+        // except `timestamp`, which reports a sample's own time under the metadata labels dropped
+        // and is therefore a source of duplicates in its own right.
+        NativeExpr::Instant { input, op } => {
+            (op.value == InstantValue::Timestamp
+                && !metadata_drop_keeps_series_apart(input, source_tags, source_metrics))
+                || duplicates_canonical_labels(input, source_tags, source_metrics)
+        }
+        // A window that drops the metadata labels can fold two series that agreed on every other
+        // label into one set, so it is a source of duplicates whether or not its input was one -
+        // unless the drop provably tells those series apart still.
+        NativeExpr::Window { input, op } => {
+            (op.function.drops_metric_name()
+                && !metadata_drop_keeps_series_apart(input, source_tags, source_metrics))
+                || duplicates_canonical_labels(input, source_tags, source_metrics)
+        }
+        // `timestamp` always drops the metadata labels, so two series it reads can become one set.
+        NativeExpr::Timestamp { input } => {
+            !metadata_drop_keeps_series_apart(input, source_tags, source_metrics)
+                || duplicates_canonical_labels(input, source_tags, source_metrics)
+        }
+        NativeExpr::ParameterizedMap { input, .. }
         | NativeExpr::ParameterizedTopK { input, .. } => {
-            duplicates_canonical_labels(input, source_tags)
+            duplicates_canonical_labels(input, source_tags, source_metrics)
         }
         // `scalar()` answers one value, which names no label set at all.
         NativeExpr::ScalarOf { .. } => false,
@@ -1151,7 +1178,7 @@ pub fn duplicates_canonical_labels(node: &NativeNode, source_tags: &[Vec<String>
         // whole-vector consumer can emit distinct series whose labels a later rewrite makes equal.
         NativeExpr::Map { input, op } => {
             map_writes_existing_label(input, op, source_tags).unwrap_or(true)
-                || duplicates_canonical_labels(input, source_tags)
+                || duplicates_canonical_labels(input, source_tags, source_metrics)
         }
         // A fold answers one series per group, which is one label set per group.
         NativeExpr::Aggregate { .. } => false,
@@ -1160,7 +1187,9 @@ pub fn duplicates_canonical_labels(node: &NativeNode, source_tags: &[Vec<String>
             BoundVectorOp::TopK { .. }
             | BoundVectorOp::LimitK { .. }
             | BoundVectorOp::LimitRatio { .. }
-            | BoundVectorOp::Sort(_) => duplicates_canonical_labels(input, source_tags),
+            | BoundVectorOp::Sort(_) => {
+                duplicates_canonical_labels(input, source_tags, source_metrics)
+            }
             // `absent` reports one series, `count_values` one per distinct value, and the histogram
             // functions fold the bucket series of one histogram into one series.
             BoundVectorOp::Absent { .. }
@@ -1176,7 +1205,7 @@ pub fn duplicates_canonical_labels(node: &NativeNode, source_tags: &[Vec<String>
             } else {
                 // A broadcast reaches each series of its vector side as it is.
                 let carried = if vector(left) { left } else { right };
-                duplicates_canonical_labels(carried, source_tags)
+                duplicates_canonical_labels(carried, source_tags, source_metrics)
             }
         }
         // A set operation keeps each side's samples and files them by result label set, refusing two
@@ -1223,6 +1252,163 @@ fn map_writes_existing_label(
     }
     Some(existing)
 }
+
+/// Whether the metadata labels a rewrite drops are the only ones telling `node`'s series apart.
+///
+/// A range function that computes its result, a histogram map and `timestamp` in either of its forms
+/// drop [`PROMQL_METADATA_LABELS`] - the metric name, `__type__` and `__unit__` - and a consumer
+/// above them that reads a whole label set has to establish those series cannot collide once the
+/// three are gone. Two series of one input collide only if they differed in one of the three alone,
+/// so the drop is injective - and nothing has to be collected - when neither can tell two of them
+/// apart:
+///
+/// - The name: a source bound to one metric names every series it hands over, so the name is the
+///   same for all of them and removing it merges nothing (see [`single_metric_name`]). A source that
+///   may hand over several - one selector that discovered several metrics, or a caller that cannot
+///   tell - is not proved, and the conservative answer is the one that collects.
+/// - `__type__` and `__unit__`: both are removed along with the name, and neither is a label this
+///   walk can prove constant across a source's series. They are ordinary labels when a source
+///   carries them as tags or a rewrite writes them, and two series that agree on everything else are
+///   one label set once they are gone. Their presence anywhere in `node`'s output is therefore
+///   enough to withhold the proof.
+///
+/// A node whose labels already lost the name - `abs`, a name-dropping window below it - has no name
+/// of its own left to remove, and what its surviving labels tell apart is then only as good as the
+/// metrics below it: a drop that happened on the way there removed a name without asking this walk,
+/// so the proof asks instead that every source it reads is bound to the same one metric
+/// ([`single_source_metric`]). Over a selector that discovered several metrics that drop folds them
+/// together, and the answer is the one that collects.
+///
+/// `false` when the walk cannot derive `node`'s labels at all, because an unknown set proves nothing.
+fn metadata_drop_keeps_series_apart(
+    node: &NativeNode,
+    source_tags: &[Vec<String>],
+    source_metrics: &[Option<Arc<str>>],
+) -> bool {
+    let Some(tags) = fused_output_tags(node, source_tags) else {
+        return false;
+    };
+    if tags
+        .iter()
+        .any(|tag| tag == "__type__" || tag == "__unit__")
+    {
+        return false;
+    }
+    if !tags.iter().any(|tag| tag == METRIC_NAME) {
+        // No name is left to lose, so what the surviving labels tell apart is decided by the sources
+        // below: every one of them reading the same single metric is what says a name dropped on the
+        // way here could not have folded two metrics together either. `abs` and a name-dropping
+        // window both drop the name without asking, so without that fact nothing below is proved.
+        return single_source_metric(node, source_metrics).is_some();
+    }
+    single_metric_name(node, source_metrics).is_some()
+}
+
+/// The one metric every source `node` reads is bound to, or `None` when they are not all one.
+///
+/// This is the facts-free question about the leaves alone: a node can drop the metric name on the
+/// way (a math map, a range function) whatever its sources hold, so what the surviving labels tell
+/// apart is only as good as the set of metrics below them.
+fn single_source_metric(
+    node: &NativeNode,
+    source_metrics: &[Option<Arc<str>>],
+) -> Option<Arc<str>> {
+    let mut pending = vec![node];
+    let mut metric: Option<&Arc<str>> = None;
+    while let Some(node) = pending.pop() {
+        match &node.expr {
+            // A source that may hand over several metrics proves nothing about their names.
+            NativeExpr::Input(input) => {
+                let bound = source_metrics.get(input.source_index)?.as_ref()?;
+                match metric {
+                    None => metric = Some(bound),
+                    Some(seen) if seen == bound => {}
+                    Some(_) => return None,
+                }
+            }
+            NativeExpr::Scalar(_) | NativeExpr::EvalTime { .. } => {}
+            NativeExpr::Instant { input, .. }
+            | NativeExpr::Window { input, .. }
+            | NativeExpr::Map { input, .. }
+            | NativeExpr::Timestamp { input }
+            | NativeExpr::VectorOf { input }
+            | NativeExpr::Merge { input }
+            | NativeExpr::Aggregate { input, .. }
+            | NativeExpr::Vector { input, .. }
+            | NativeExpr::ScalarOf { input } => pending.push(input),
+            NativeExpr::ParameterizedMap {
+                input, parameters, ..
+            }
+            | NativeExpr::ParameterizedHistogram {
+                input, parameters, ..
+            } => {
+                pending.push(input);
+                pending.extend(parameters.iter());
+            }
+            NativeExpr::ParameterizedTopK {
+                input, parameter, ..
+            } => {
+                pending.push(input);
+                pending.push(parameter);
+            }
+            NativeExpr::Binary { left, right, .. }
+            | NativeExpr::Set { left, right, .. }
+            | NativeExpr::Info {
+                base: left,
+                info: right,
+                ..
+            } => {
+                pending.push(left);
+                pending.push(right);
+            }
+        }
+    }
+    metric.cloned()
+}
+
+/// The one metric every series `node` hands over is named, or `None` when this walk cannot say.
+///
+/// Only the nodes that hand their input's label set on unchanged can carry a name: every kernel that
+/// reports a value of its own drops it, so a name above one of those is one a rewrite wrote. What is
+/// left is the boundary the leaves are bound to - where `source_metrics` answers, indexed by the
+/// `source_index` the leaf reads - and the nodes that pass a set through.
+fn single_metric_name(node: &NativeNode, source_metrics: &[Option<Arc<str>>]) -> Option<Arc<str>> {
+    match &node.expr {
+        NativeExpr::Input(input) => source_metrics.get(input.source_index).cloned().flatten(),
+        // These report the label set they read rather than one of their own, so the name is their
+        // input's. A map that computes a value or writes a name is not one of them.
+        NativeExpr::Merge { input }
+        | NativeExpr::ParameterizedTopK { input, .. }
+        | NativeExpr::Vector {
+            input,
+            op:
+                BoundVectorOp::TopK { .. }
+                | BoundVectorOp::LimitK { .. }
+                | BoundVectorOp::LimitRatio { .. }
+                | BoundVectorOp::Sort(_),
+        } => single_metric_name(input, source_metrics),
+        NativeExpr::Instant { input, op } if op.value != InstantValue::Timestamp => {
+            single_metric_name(input, source_metrics)
+        }
+        NativeExpr::Window { input, op } if !op.function.drops_metric_name() => {
+            single_metric_name(input, source_metrics)
+        }
+        NativeExpr::Map { input, op }
+            if op.ops.iter().all(|operation| {
+                matches!(
+                    operation,
+                    MapOp::Label(rewrite) if rewrite.destination() != METRIC_NAME
+                )
+            }) =>
+        {
+            single_metric_name(input, source_metrics)
+        }
+        // A kernel that reports a value of its own drops the name, and a fold, a set operation, an
+        // `info` lookup and a rewrite writing the name answer a set this walk does not follow.
+        _ => None,
+    }
+}
+
 /// Whether `node` reads the whole input vector at a point rather than one series at a time.
 ///
 /// An `Aggregate` folds every series of its group, a `Binary` and a `Set` pair two vectors' series
@@ -1240,11 +1426,16 @@ fn map_writes_existing_label(
 /// Both a region-side placement and the native route's admission ask this, and they must agree: a
 /// tree admitted here but refused there becomes a node the physical layer cannot build, and one
 /// refused here but admitted there would be pushed to a region that holds part of the metric.
+///
+/// The walk asks the facts-free form of [`unifies_its_own_contributions`]: a placement reads a tree
+/// without the binding that says which metric each of its inputs reads, and every reader of this
+/// answer - the admission below, the region-side classification and the locality of a built node -
+/// asks it of the same tree, so the conservative answer is the one that keeps them agreeing.
 pub fn reads_across_series(node: &NativeNode) -> bool {
     match &node.expr {
         NativeExpr::Input(_) | NativeExpr::Scalar(_) | NativeExpr::EvalTime { .. } => false,
         NativeExpr::Window { input, .. } => {
-            matches!(unifies_its_own_contributions(input), Some(false))
+            matches!(unifies_its_own_contributions(input, &[], &[]), Some(false))
                 || reads_across_series(input)
         }
         NativeExpr::Instant { input, .. }
@@ -1946,8 +2137,20 @@ fn broadcast_drops_labels(matching: &BinaryMatching) -> bool {
 ///
 /// The collection condition is `matches!(answer, Some(false))`: the Window `MergeInput` collector
 /// at runtime and the `limitk` collector both ask this predicate of their input.
+///
+/// `source_tags` and `source_metrics` are the same facts
+/// [`duplicates_canonical_labels`] judges a whole label set by, indexed the same way: a node that
+/// drops the metadata labels reports fragments only when
+/// [`metadata_drop_keeps_series_apart`] cannot prove the drop tells its series apart. Both readers
+/// ask that one question, so the merge the canonical pass leaves out and the collection the runtime
+/// performs cannot disagree - and a caller without those facts (placement, which reads a tree
+/// without a binding) passes empty slices and gets the conservative answer.
 #[allow(clippy::match_same_arms)] // Keep each expression's contribution guarantee explicit.
-pub fn unifies_its_own_contributions(node: &NativeNode) -> Option<bool> {
+pub fn unifies_its_own_contributions(
+    node: &NativeNode,
+    source_tags: &[Vec<String>],
+    source_metrics: &[Option<Arc<str>>],
+) -> Option<bool> {
     match &node.expr {
         // A boundary hands over the pieces some upstream execution produced: what it holds is one
         // storage series at a time for a scan and one partition's fragments of a label set for an
@@ -1964,7 +2167,19 @@ pub fn unifies_its_own_contributions(node: &NativeNode) -> Option<bool> {
         // arrive one whole storage series at a time, so it answers one series per series it read,
         // under the label set it read. `timestamp(x)` is the exception: it reports the sample's own
         // time under the metric name dropped, which can give two series one label set.
-        NativeExpr::Instant { op, .. } => Some(op.value != InstantValue::Timestamp),
+        NativeExpr::Instant { input, op } => {
+            if op.value == InstantValue::Timestamp {
+                // `timestamp` drops the metadata labels, so what it emits aliases unless the drop
+                // provably tells its series apart.
+                Some(metadata_drop_keeps_series_apart(
+                    input,
+                    source_tags,
+                    source_metrics,
+                ))
+            } else {
+                Some(true)
+            }
+        }
         // The merge is the collection: whatever its input handed over, it groups the fragments by
         // canonical label set and emits one series per set, so what it emits shares none.
         NativeExpr::Merge { .. } => Some(true),
@@ -1982,20 +2197,43 @@ pub fn unifies_its_own_contributions(node: &NativeNode) -> Option<bool> {
         //   folds each contribution on its own, so what it emits does alias its input's fragments,
         //   and `Some(false)` is exact.
         NativeExpr::Window { input, op } => {
-            Some(!op.function.drops_metric_name() && unifies_its_own_contributions(input).is_some())
+            let child = unifies_its_own_contributions(input, source_tags, source_metrics);
+            if child.is_none() {
+                // A boundary hands the pieces of one series over one at a time, and the window folds
+                // them without ever seeing the whole series: what it emits aliases whatever the
+                // labels say.
+                Some(false)
+            } else if op.function.drops_metric_name() {
+                // The function drops the metadata labels, so the window answers `Some(true)` exactly
+                // when the drop provably tells its input's series apart - the same question the
+                // canonical pass asks before it decides whether a consumer needs a merge.
+                Some(metadata_drop_keeps_series_apart(
+                    input,
+                    source_tags,
+                    source_metrics,
+                ))
+            } else {
+                Some(true)
+            }
         }
-        // A map can rewrite labels, so two series can end under one label set and the runtime
-        // records what it wrote in an `Emitted` table.
+        // A map can rewrite labels, so two series can end under one label set: what it hands out is
+        // not one series per set until a canonical merge has collected the set.
         NativeExpr::Map { .. } | NativeExpr::ParameterizedMap { .. } => Some(false),
         // `topk` hands back the series it read with their labels, so the input's answer is its own -
         // exactly as for the bound operation.
-        NativeExpr::ParameterizedTopK { input, .. } => unifies_its_own_contributions(input),
+        NativeExpr::ParameterizedTopK { input, .. } => {
+            unifies_its_own_contributions(input, source_tags, source_metrics)
+        }
         // A histogram function groups its rows by label set itself, so it emits one series per set.
         NativeExpr::ParameterizedHistogram { .. } => Some(true),
         // `scalar()` answers one value per point, which is not several series.
         NativeExpr::ScalarOf { .. } => Some(true),
-        // A timestamp reports a position under the metric name dropped.
-        NativeExpr::Timestamp { .. } => Some(false),
+        // A timestamp reports a position under the metadata labels dropped.
+        NativeExpr::Timestamp { input } => Some(metadata_drop_keeps_series_apart(
+            input,
+            source_tags,
+            source_metrics,
+        )),
         NativeExpr::Binary {
             left,
             right,
@@ -2029,7 +2267,7 @@ pub fn unifies_its_own_contributions(node: &NativeNode) -> Option<bool> {
                     !matches!(node.expr, NativeExpr::Scalar(BoundScalar { .. }))
                 };
                 let vector = if carries_series(left) { left } else { right };
-                unifies_its_own_contributions(vector)
+                unifies_its_own_contributions(vector, source_tags, source_metrics)
             }
         }
         // A set operation keeps each side's samples and files them by label set, one series per
@@ -2057,7 +2295,7 @@ pub fn unifies_its_own_contributions(node: &NativeNode) -> Option<bool> {
             if whole {
                 Some(true)
             } else {
-                unifies_its_own_contributions(input)
+                unifies_its_own_contributions(input, source_tags, source_metrics)
             }
         }
     }

@@ -304,6 +304,14 @@ pub struct PromPlanner {
     /// The engine-wide `QueryOptions::experimental_native_promql` is applied while `QueryEngineState`
     /// is built; this planner reads the per-query request extension instead.
     native_fused: bool,
+    /// Whether the binary node being planned may still offer its own subtree to the native route.
+    ///
+    /// An offer compiles a whole tree, so it is made where it covers the most: the statement root,
+    /// and the topmost binary below a node this route does not answer. Once a binary node has spent
+    /// the offer, the operands below it are planned by the existing path without offering
+    /// themselves again - re-offering each operand of a refused chain of n operators compiles its
+    /// subtrees again and costs O(n^2) passes instead of O(n).
+    native_binary_offer: bool,
 }
 
 type BinaryFieldPair<'a> = (&'a String, &'a String);
@@ -336,6 +344,9 @@ impl PromPlanner {
             ctx: PromPlannerContext::from_eval_stmt(stmt)?,
             promql_annotations,
             native_fused,
+            // The statement's own expression is offered below before anything else is planned, so
+            // the first binary node reached still holds the offer a wrapper would have spent.
+            native_binary_offer: true,
         };
 
         // The whole statement is offered to the native compiler first, because that compiler folds
@@ -401,8 +412,18 @@ impl PromPlanner {
                     .await?
             }
             PromExpr::Binary(expr) => {
-                self.prom_binary_expr_to_plan(query_engine_state, expr)
-                    .await?
+                // One native offer per binary subtree: the offer at a node covers every node below
+                // it, because the compiler reads the whole tree at once. It is spent here, by the
+                // node that makes it, and handed back once the subtree is planned, so a refused
+                // chain of n operators makes one offer per position instead of one per operator
+                // and per subtree below it - O(n) instead of O(n^2). A wrapper this route cannot
+                // answer leaves the offer to the binary that sits under it.
+                let offer = std::mem::take(&mut self.native_binary_offer);
+                let plan = self
+                    .prom_binary_expr_to_plan(query_engine_state, expr, offer)
+                    .await;
+                self.native_binary_offer = offer;
+                plan?
             }
             PromExpr::Paren(ParenExpr { expr }) => {
                 self.prom_expr_to_plan_inner(expr, timestamp_fn, query_engine_state)
@@ -1186,10 +1207,13 @@ impl PromPlanner {
         })
     }
 
+    /// Plans `binary_expr`; `offer` says whether this node may still offer its subtree to the
+    /// native route, which the caller spends for the subtree it is about to plan.
     async fn prom_binary_expr_to_plan(
         &mut self,
         query_engine_state: &QueryEngineState,
         binary_expr: &PromBinaryExpr,
+        offer: bool,
     ) -> Result<LogicalPlan> {
         // promql-parser accepts fill modifiers, but Greptime does not implement the
         // required outer joins and missing-value substitution. Reject them before the
@@ -1206,6 +1230,7 @@ impl PromPlanner {
         // The same whole native binary the statement root was offered can sit below a
         // legacy-only wrapper. A nested retry is valid only on the statement's own grid.
         if self.native_fused
+            && offer
             && self.ctx.start == self.ctx.stmt_start
             && self.ctx.end == self.ctx.stmt_end
         {

@@ -226,6 +226,52 @@ pub(crate) async fn reconcile_series_indexes_with_mode(
     Ok(stats)
 }
 
+/// How many sources one samples build reads at once. The writer bounds blocks and output sizes on
+/// its own, so this only bounds the memory one pinned source group holds.
+const SAMPLES_SOURCES_PER_BUILD: usize = 64;
+
+/// Splits uncovered sources into samples build groups, by UTC-day window and then by SST level.
+///
+/// A samples artifact records the files it was built from and the days each of them contributed, so
+/// a group is an identity, not a batch: every output of one group names the same sources, and
+/// coverage is read back per group. Cutting the sources by file id alone - the previous behaviour -
+/// put every level and every window into the same arbitrary chunks, so one new file re-cut them and
+/// the days of unrelated levels were rebuilt. Grouping by window and level keeps a group's boundary
+/// where the data puts it: a file of another level or another window joins its own group, and the
+/// outputs already published for a group stay reusable when a source is added beside it.
+///
+/// Windows sort before levels so the days of one window are built next to each other, and the files
+/// inside a group are ordered by id so a build reads them in the same order every time.
+fn sample_source_groups(files: &[FileHandle]) -> Vec<Vec<FileHandle>> {
+    use std::collections::BTreeMap;
+
+    use crate::series_index::builder::sample_day;
+
+    let mut groups = BTreeMap::<(i64, i64, u8), Vec<FileHandle>>::new();
+    for file in files {
+        // The span the file covers is the window it writes into. A file holding several days is a
+        // window of its own here and still reports the days it actually filled.
+        let (start, end) = file.time_range();
+        let (start, end) = (sample_day(start), sample_day(end));
+        groups
+            .entry((start.min(end), start.max(end), file.level()))
+            .or_default()
+            .push(file.clone());
+    }
+    groups
+        .into_values()
+        .map(|mut group| {
+            group.sort_unstable_by(|left, right| {
+                left.file_id()
+                    .file_id()
+                    .as_bytes()
+                    .cmp(right.file_id().file_id().as_bytes())
+            });
+            group
+        })
+        .collect()
+}
+
 /// Builds a changed snapshot, retaining reusable indexes and removing obsolete coverage.
 /// Returns `None` when no range or series indexes were added or removed.
 #[allow(clippy::too_many_arguments)]
@@ -450,26 +496,27 @@ async fn build_index_version(
                 .values()
                 .flat_map(|handle| handle.entry().source_file_ids.iter().copied())
                 .collect();
-            let mut uncovered: Vec<_> = files
+            let uncovered: Vec<_> = files
                 .iter()
                 .filter(|file| !covered.contains(&file.file_id().file_id()))
                 .cloned()
                 .collect();
-            uncovered.sort_unstable_by_key(|file| file.file_id().file_id().to_string());
-            for sources in uncovered.chunks(64) {
-                let handles = crate::series_index::builder::build_sample_windows(
-                    store,
-                    region,
-                    metadata,
-                    sources,
-                    backend.as_ref(),
-                    purger,
-                )
-                .await?;
-                for handle in handles {
-                    unpublished.1.push(handle.clone());
-                    stats.built_samples += 1;
-                    daily.insert(handle.entry().file_id, handle);
+            for sources in sample_source_groups(&uncovered) {
+                for sources in sources.chunks(SAMPLES_SOURCES_PER_BUILD) {
+                    let handles = crate::series_index::builder::build_sample_windows(
+                        store,
+                        region,
+                        metadata,
+                        sources,
+                        backend.as_ref(),
+                        purger,
+                    )
+                    .await?;
+                    for handle in handles {
+                        unpublished.1.push(handle.clone());
+                        stats.built_samples += 1;
+                        daily.insert(handle.entry().file_id, handle);
+                    }
                 }
             }
             stats.removed_samples += samples.keys().filter(|id| !daily.contains_key(id)).count();
@@ -714,13 +761,95 @@ fn publish_index_version(region: &MitoRegionRef, next: Arc<SeriesIndexVersion>) 
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
+    use std::sync::Arc;
 
     use common_time::Timestamp;
     use object_store::services::Memory;
 
     use super::*;
+    use crate::series_index::builder::sample_day;
     use crate::series_index::catalog::{RangeIndexEntry, SeriesIndexEntry};
     use crate::series_index::purger::series_index_channel;
+    use crate::sst::file::{FileHandle, FileMeta};
+    use crate::sst::file_purger::NoopFilePurger;
+
+    /// A source file covering whole UTC days `start_day..=end_day` at `level`.
+    fn samples_source(id: u8, level: u8, start_day: i64, end_day: i64) -> FileHandle {
+        const DAY_MS: i64 = 86_400_000;
+        FileHandle::new(
+            FileMeta {
+                file_id: FileId::from_bytes([id; 16]),
+                time_range: (
+                    Timestamp::new_millisecond(start_day * DAY_MS),
+                    Timestamp::new_millisecond(end_day * DAY_MS + DAY_MS - 1),
+                ),
+                level,
+                ..Default::default()
+            },
+            Arc::new(NoopFilePurger),
+        )
+    }
+
+    /// Sources are grouped by the window they cover and by their level, not cut by file id.
+    ///
+    /// Every group is one window of one level, so a file that joins a level later cannot move the
+    /// boundary of a group built for another level, and the group's days are the days it covers.
+    #[test]
+    fn samples_sources_are_grouped_by_window_and_level() {
+        let mut files = vec![
+            samples_source(1, 0, 0, 0),
+            samples_source(2, 0, 0, 0),
+            samples_source(3, 1, 0, 0),
+            samples_source(4, 0, 5, 5),
+            samples_source(5, 1, 5, 7),
+            samples_source(6, 0, 5, 5),
+        ];
+        // Grouping must not depend on the ids or on the order the files arrive in.
+        files.rotate_left(2);
+
+        let groups = sample_source_groups(&files);
+        let describe = |group: &[FileHandle]| {
+            let days: Vec<(i64, i64)> = group
+                .iter()
+                .map(|file| {
+                    let (start, end) = file.time_range();
+                    (sample_day(start), sample_day(end))
+                })
+                .collect();
+            (group[0].level(), days)
+        };
+        assert_eq!(
+            vec![
+                (0, vec![(0, 0), (0, 0)]),
+                (1, vec![(0, 0)]),
+                (0, vec![(5, 5), (5, 5)]),
+                (1, vec![(5, 7)]),
+            ],
+            groups
+                .iter()
+                .map(|group| describe(group))
+                .collect::<Vec<_>>(),
+            "one window of one level per group, ordered by window then level"
+        );
+        // Every source is placed exactly once, and no group mixes a level or a window.
+        let mut grouped: Vec<_> = groups
+            .iter()
+            .flatten()
+            .map(|file| file.file_id().file_id().as_bytes().to_vec())
+            .collect();
+        let mut sources: Vec<_> = files
+            .iter()
+            .map(|file| file.file_id().file_id().as_bytes().to_vec())
+            .collect();
+        grouped.sort_unstable();
+        sources.sort_unstable();
+        assert_eq!(sources, grouped);
+        for group in &groups {
+            let (level, days) = describe(group);
+            assert!(group.iter().all(|file| file.level() == level));
+            assert!(days.windows(2).all(|pair| pair[0] == pair[1]));
+        }
+    }
 
     #[rstest::rstest]
     fn test_prune_index_version(

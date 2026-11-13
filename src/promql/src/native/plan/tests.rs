@@ -184,6 +184,44 @@ fn window_over(inner: NativeNode, input_grid: Option<Arc<EvalGrid>>) -> NativeNo
     window_on(inner, input_grid, grid(0, 60_000, 4))
 }
 
+/// An instant selection over `inner` reporting the sample it read, which keeps its identity.
+fn instant_sample(inner: NativeNode, out: Arc<EvalGrid>) -> NativeNode {
+    NativeNode {
+        expr: NativeExpr::Instant {
+            input: Box::new(inner),
+            op: BoundInstant {
+                lookback_ms: 300_000,
+                offset_ms: 0,
+                at_ms: None,
+                value: InstantValue::Sample,
+                output_grid: Arc::clone(&out),
+            },
+        },
+        output: evaluated(fields(1), out),
+    }
+}
+
+/// A window over `inner` whose function keeps the metric name, so it hands its input's identity on.
+fn keeping_window_fields(inner: NativeNode, out: Arc<EvalGrid>, count: usize) -> NativeNode {
+    NativeNode {
+        expr: NativeExpr::Window {
+            input: Box::new(inner),
+            op: BoundWindow {
+                function: RangeFunction::LastOverTime,
+                window: RangeWindow {
+                    range_ms: 300_000,
+                    offset_ms: 0,
+                    anchor_ms: None,
+                    modifier: None,
+                },
+                input_grid: None,
+                output_grid: Arc::clone(&out),
+            },
+        },
+        output: evaluated(fields(count), out),
+    }
+}
+
 /// A window over `inner` that produces `count` fields on `out`, so a consumer of it can be given a
 /// layout the window itself holds legally.
 fn window_fields(inner: NativeNode, out: Arc<EvalGrid>, count: usize) -> NativeNode {
@@ -1962,15 +2000,24 @@ fn scan_tags() -> Vec<Vec<String>> {
     vec![vec!["host".to_string()]]
 }
 
+/// The labels a scan bound to one metric reports: its tag, and the name its binding gives every
+/// series it hands over, which is not one of its tag columns.
+fn named_scan_tags() -> Vec<Vec<String>> {
+    vec![vec!["host".to_string(), "__name__".to_string()]]
+}
+
 /// A rewrite that writes a label the input does not carry cannot make two series equal, which is
 /// what lets a query like `label_replace(x, "dst", "$1", "host", "(.*)")` keep every partition.
 #[test]
 fn a_fresh_destination_does_not_alias() {
     let out = grid(0, 60_000, 4);
-    let inner = window_fields(input_with_fields(1), Arc::clone(&out), 1);
+    // A window that keeps the metric name hands its input's identity on, so the rewrite is the only
+    // node that could make two series equal.
+    let inner = keeping_window_fields(input_with_fields(1), Arc::clone(&out), 1);
     assert!(!duplicates_canonical_labels(
         &rewritten(inner, "dst", "host"),
-        &scan_tags()
+        &scan_tags(),
+        &[]
     ));
 }
 
@@ -1982,7 +2029,8 @@ fn a_rewrite_of_an_existing_label_aliases() {
     let inner = window_fields(input_with_fields(1), Arc::clone(&out), 1);
     assert!(duplicates_canonical_labels(
         &rewritten(inner, "host", "host"),
-        &scan_tags()
+        &scan_tags(),
+        &[]
     ));
 }
 
@@ -1996,20 +2044,24 @@ fn a_rewrite_of_the_metric_name_aliases_a_named_source() {
     let named = vec![vec!["host".to_string(), "__name__".to_string()]];
     assert!(duplicates_canonical_labels(
         &rewritten(inner, "__name__", "__name__"),
-        &named
+        &named,
+        &[]
     ));
     // The delete-only form can fold the same two identities, so it is collected too.
     let inner = input_on(Arc::clone(&out));
     assert!(duplicates_canonical_labels(
         &replaced(inner, "__name__", "", "__name__"),
-        &named
+        &named,
+        &[]
     ));
 }
 
 /// A name write is collected even above a kernel that dropped the name: the scan below `abs`, a
 /// `timestamp` or a range function can still hold several metrics whose ordinary labels are equal,
-/// so writing one name puts those identities under one label set. A fresh ordinary destination is
-/// still uncollected, because no scan can carry an ordinary label it does not declare.
+/// so writing one name puts those identities under one label set. A fresh ordinary destination over
+/// a kernel that keeps the name is still uncollected, because no scan can carry an ordinary label it
+/// does not declare -- while over a name-dropping kernel the answer is `true` for the kernel's own
+/// sake, which is what [`dropping_the_metric_name_is_a_new_source`] pins.
 #[test]
 fn a_name_rewrite_above_a_dropped_name_is_collected() {
     let out = grid(0, 60_000, 4);
@@ -2032,16 +2084,20 @@ fn a_name_rewrite_above_a_dropped_name_is_collected() {
     ] {
         assert!(
             duplicates_canonical_labels(
-                &replaced(dropped.clone(), "__name__", "same", "missing"),
-                &named
+                &replaced(dropped, "__name__", "same", "missing"),
+                &named,
+                &[]
             ),
             "{name}: a name write may alias metrics the kernel left indistinguishable"
         );
-        assert!(
-            !duplicates_canonical_labels(&rewritten(dropped, "dst", "host"), &named),
-            "{name}: a fresh ordinary destination cannot alias"
-        );
     }
+    // The fresh destination is judged against a kernel that keeps the name, which is the only shape
+    // where the rewrite alone decides the answer.
+    let keeping = keeping_window_fields(input_with_fields(1), Arc::clone(&out), 1);
+    assert!(
+        !duplicates_canonical_labels(&rewritten(keeping, "dst", "host"), &named, &[]),
+        "a fresh ordinary destination cannot alias"
+    );
 }
 
 /// The label walk keeps a name a rewrite writes and drops it wherever the kernel does, so the
@@ -2213,20 +2269,79 @@ fn an_unknown_source_may_alias() {
     let inner = window_fields(input_with_fields(1), Arc::clone(&out), 1);
     assert!(duplicates_canonical_labels(
         &rewritten(inner, "dst", "host"),
+        &[],
         &[]
     ));
 }
 
-/// Dropping the metric name is not aliasing within one metric: the remaining tags are the primary
-/// key, so two series that agree on all of them are the same stored series.
+/// Dropping the metric name is a source of duplicates in its own right, and a window that keeps it
+/// is not.
+///
+/// The name is part of the identity a merge groups by, so a kernel that computes a value of its own
+/// and reports the name dropped can leave two series under one label set - but only when something
+/// below it could be told apart by that name. A scan bound to one metric names every series it
+/// hands over, so the drop is injective and the kernel keeps every partition; a scan that may hand
+/// over several keeps the collection.
 #[test]
-fn dropping_the_metric_name_keeps_the_inputs_answer() {
+fn dropping_the_metric_name_is_a_new_source() {
     let out = grid(0, 60_000, 4);
-    let plain = window_fields(input_with_fields(1), Arc::clone(&out), 1);
-    assert!(!duplicates_canonical_labels(&plain, &scan_tags()));
+    let single = [Some(Arc::<str>::from("some_metric"))];
+    let dropped = window_fields(input_with_fields(1), Arc::clone(&out), 1);
+    assert!(duplicates_canonical_labels(
+        &dropped,
+        &named_scan_tags(),
+        &[]
+    ));
+    // The scan reads one metric, so the name it drops told none of its series apart.
     assert!(!duplicates_canonical_labels(
-        &map_over(rewritten(plain, "dst", "host")),
-        &scan_tags()
+        &dropped,
+        &named_scan_tags(),
+        &single
+    ));
+    // A source that may hand over several metrics is not proved, and neither is one that carries a
+    // metadata label of its own: both can hold two series that only that label told apart.
+    assert!(duplicates_canonical_labels(
+        &dropped,
+        &named_scan_tags(),
+        &[None]
+    ));
+    for metadata in ["__type__", "__unit__"] {
+        let mut tags = named_scan_tags();
+        tags[0].push(metadata.to_string());
+        assert!(
+            duplicates_canonical_labels(&dropped, &tags, &single),
+            "{metadata}"
+        );
+    }
+    // A window that keeps the name passes its input's answer on instead.
+    let keeping = keeping_window_fields(input_with_fields(1), Arc::clone(&out), 1);
+    assert!(!duplicates_canonical_labels(
+        &keeping,
+        &named_scan_tags(),
+        &[]
+    ));
+    // `timestamp` reports a sample's own time under the name dropped, in both of its forms.
+    let stamps = |inner: NativeNode| NativeNode {
+        expr: NativeExpr::Timestamp {
+            input: Box::new(inner),
+        },
+        output: evaluated(fields(1), Arc::clone(&out)),
+    };
+    assert!(duplicates_canonical_labels(
+        &stamps(input_on(Arc::clone(&out))),
+        &named_scan_tags(),
+        &[]
+    ));
+    assert!(!duplicates_canonical_labels(
+        &stamps(input_on(Arc::clone(&out))),
+        &named_scan_tags(),
+        &single
+    ));
+    // A sample-preserving selection keeps the name it read, so it is no source of its own.
+    assert!(!duplicates_canonical_labels(
+        &instant_sample(input_on(Arc::clone(&out)), Arc::clone(&out)),
+        &named_scan_tags(),
+        &[]
     ));
 }
 
@@ -2235,7 +2350,8 @@ fn dropping_the_metric_name_keeps_the_inputs_answer() {
 #[test]
 fn a_rewrite_after_ranking_or_grouping_may_alias() {
     let out = grid(0, 60_000, 4);
-    let selected = || window_fields(input_with_fields(1), Arc::clone(&out), 1);
+    // A name-keeping window, so the ranking below is the only node whose answer is in question.
+    let selected = || keeping_window_fields(input_with_fields(1), Arc::clone(&out), 1);
     let vector = |op| NativeNode {
         expr: NativeExpr::Vector {
             input: Box::new(selected()),
@@ -2275,7 +2391,10 @@ fn a_rewrite_after_ranking_or_grouping_may_alias() {
         ),
         ("sum by host", grouped_sum),
     ] {
-        assert!(!duplicates_canonical_labels(&inner, &source_tags), "{name}");
+        assert!(
+            !duplicates_canonical_labels(&inner, &source_tags, &[]),
+            "{name}"
+        );
         let output = inner.output.clone();
         let renamed = NativeNode {
             expr: NativeExpr::Map {
@@ -2291,7 +2410,7 @@ fn a_rewrite_after_ranking_or_grouping_may_alias() {
         };
         assert!(renamed.validate().is_ok(), "{name}");
         assert!(
-            duplicates_canonical_labels(&renamed, &source_tags),
+            duplicates_canonical_labels(&renamed, &source_tags, &[]),
             "{name}"
         );
     }
@@ -2411,7 +2530,8 @@ fn a_merge_answers_one_series_per_set() {
     );
     assert!(!duplicates_canonical_labels(
         &merge_over(aliasing),
-        &scan_tags()
+        &scan_tags(),
+        &[]
     ));
 }
 
@@ -2461,25 +2581,64 @@ fn a_window_unifies_its_own_contributions() {
     ] {
         assert_eq!(
             child_answer,
-            unifies_its_own_contributions(&child),
+            unifies_its_own_contributions(&child, &[], &[]),
             "{name}: the child's own answer"
         );
         assert_eq!(
             window_answer,
-            unifies_its_own_contributions(&window_of(child, RangeFunction::LastOverTime)),
+            unifies_its_own_contributions(&window_of(child, RangeFunction::LastOverTime), &[], &[]),
             "{name}: a name-keeping window unifies whatever its child reported, and only a \
              boundary leaves it aliasing"
         );
     }
-    // A function that drops the metric name can give two series one label set whatever its child
-    // answered, so the window reports it whatever the child said.
-    for child in [collected(), fragments(), boundary()] {
+    // A function that drops the metadata labels can give two series one label set, so the window
+    // reports it whatever its child said - and a caller that cannot say which metric the child reads
+    // has no proof to offer on the child's behalf.
+    for child in [collected(), fragments()] {
         assert_eq!(
             Some(false),
-            unifies_its_own_contributions(&window_of(child, RangeFunction::Rate)),
-            "a name-dropping window may alias"
+            unifies_its_own_contributions(&window_of(child, RangeFunction::Rate), &[], &[]),
+            "a name-dropping window over an unproved source may alias"
         );
     }
+    // A boundary is the one child the proof says nothing about: the window folds the pieces of one
+    // series one at a time, so what it emits aliases them whatever the labels say.
+    assert_eq!(
+        Some(false),
+        unifies_its_own_contributions(&window_of(boundary(), RangeFunction::Rate), &[], &[]),
+        "a boundary leaves the window's own answer aliasing"
+    );
+    // The proof is the one the canonical pass reads: a child whose labels lost the name, over a
+    // source bound to a single metric without a metadata tag of its own, keeps the name-dropping
+    // window from reporting fragments.
+    let named = [vec!["host".to_string(), "__name__".to_string()]];
+    let single = [Some(Arc::<str>::from("some_metric"))];
+    let dropped = map_over(input_on(Arc::clone(&out)));
+    assert_eq!(
+        Some(true),
+        unifies_its_own_contributions(
+            &window_of(dropped.clone(), RangeFunction::Rate),
+            &named,
+            &single
+        ),
+        "a single metric's dropped name tells none of its series apart"
+    );
+    assert_eq!(
+        Some(false),
+        unifies_its_own_contributions(
+            &window_of(dropped.clone(), RangeFunction::Rate),
+            &named,
+            &[None]
+        ),
+        "a source that may hand over several metrics is not proved"
+    );
+    let mut typed = named.clone();
+    typed[0].push("__type__".to_string());
+    assert_eq!(
+        Some(false),
+        unifies_its_own_contributions(&window_of(dropped, RangeFunction::Rate), &typed, &single),
+        "a metadata tag the window drops is not proved constant"
+    );
 }
 
 /// `info` reads its info side through a canonical merge: the merge only collects the pieces of one

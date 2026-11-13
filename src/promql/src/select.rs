@@ -29,7 +29,7 @@ use datatypes::series::time::union_positions;
 use datatypes::series::{Label, SeriesLabels};
 
 use crate::go_sort;
-use crate::grid_series::{GridSeriesBuilder, external, owned};
+use crate::grid_series::{GridSeriesBuilder, external};
 
 #[cfg(test)]
 mod tests;
@@ -87,17 +87,28 @@ pub fn topk_at(
     // positions, not the whole grid.
     grid_points(schema, series)?;
     let mut order: Vec<usize> = (0..series.len()).collect();
-    order.sort_by(|&a, &b| compare_labels(&series[a].metric, &series[b].metric));
+    // The label pairs of a series are built once: a comparator that compared two metrics would
+    // rebuild both lists per comparison, and the groups read the same lists again.
+    let mut label_sets: Vec<Vec<(Arc<str>, Arc<str>)>> = series
+        .iter()
+        .map(|item| labels_with_name(&item.metric))
+        .collect();
+    order.sort_by(|&a, &b| label_sets[a].cmp(&label_sets[b]));
     let mut groups: HashMap<GroupKey, Vec<usize>> = HashMap::new();
     for index in order {
         groups
-            .entry(group_key(&series[index].metric, grouping))
+            .entry(group_key_from(&label_sets[index], grouping))
             .or_default()
             .push(index);
     }
+    // The groups hold what they need, so the label lists are freed before the point walk.
+    label_sets.clear();
 
     let mut selected: Vec<Vec<(usize, usize)>> = vec![Vec::new(); series.len()];
     let mut candidates: Vec<(usize, usize, f64)> = Vec::new();
+    // The values of one point, for the partial selection below: ranking them there leaves the
+    // candidates in member order, which is what hands ties to the earlier label set.
+    let mut values: Vec<f64> = Vec::new();
     for members in groups.values() {
         // A point no member carries holds no candidate, so only the union of the members'
         // positions is visited: a hole in the grid never reaches the ranking. Each member reads
@@ -119,12 +130,41 @@ pub fn topk_at(
                     candidates.push((member, row, value));
                 }
             }
-            // Members are in label order, so a stable sort hands ties to the earlier label set.
-            candidates.sort_by(|a, b| rank(a.2, b.2, top));
             let Some(k) = k_at(point)? else {
                 continue;
             };
-            for &(member, row, _) in candidates.iter().take(k) {
+            // Which candidates win is the result; the order they were found in is not. The ranking
+            // is a partial selection of the k best values rather than an ordering of the whole
+            // group, and it runs on a copy of the values so that the candidates keep the member
+            // order the ties are resolved in.
+            let k = k.min(candidates.len());
+            if k == 0 {
+                continue;
+            }
+            let boundary = (k < candidates.len()).then(|| {
+                values.clear();
+                values.extend(candidates.iter().map(|candidate| candidate.2));
+                values.select_nth_unstable_by(k, |a, b| rank(*a, *b, top));
+                values[k]
+            });
+            // The partition splits the run of values equal to its boundary, while ties go to the
+            // earlier label set: the ones equal to the boundary inside the front are the slots left
+            // for them, and the scan below fills those slots in member order, which is label order.
+            let mut tied = match boundary {
+                Some(boundary) => values[..k]
+                    .iter()
+                    .filter(|&&value| rank(value, boundary, top) == Ordering::Equal)
+                    .count(),
+                None => 0,
+            };
+            for &(member, row, value) in &candidates {
+                if let Some(boundary) = boundary {
+                    match rank(value, boundary, top) {
+                        Ordering::Less => {}
+                        Ordering::Equal if tied > 0 => tied -= 1,
+                        _ => continue,
+                    }
+                }
                 selected[member].push((point, row));
             }
         }
@@ -215,8 +255,9 @@ pub fn limitk(
         // A series belongs to one group, whose points are visited in order.
         let mut cursor = series[index].fields.as_slice()[0].cursor();
         for (point, row) in points {
+            // The sample is moved, not computed, so it goes straight into the result.
             let sample = cursor.at(row).expect("the axis and the fields are aligned");
-            builder.push_samples(point, &[owned(sample)?])?;
+            builder.push_refs(point, &[sample])?;
         }
         result.extend(builder.finish(series[index].metric.clone())?);
     }
@@ -237,7 +278,7 @@ pub fn limit_ratio(ratio: f64, schema: &SeriesSchema, series: &[Series]) -> Resu
     let ratio = ratio.clamp(-1.0, 1.0);
     let mut builder = GridSeriesBuilder::try_new(Arc::new(schema.clone()))?;
     let mut result = Vec::new();
-    let mut row = Vec::with_capacity(schema.fields.len());
+    let mut row: Vec<SampleRef<'_>> = Vec::with_capacity(schema.fields.len());
     for item in series {
         let offset = sample_offset(&item.metric);
         let kept = if ratio >= 0.0 {
@@ -254,14 +295,15 @@ pub fn limit_ratio(ratio: f64, schema: &SeriesSchema, series: &[Series]) -> Resu
             item.fields.iter().map(|field| field.cursor()).collect();
         for (point, index) in item.time.positions() {
             row.clear();
+            // The samples are moved, not computed, so the row is read and pushed as it stands.
             for cursor in &mut cursors {
-                row.push(owned(
+                row.push(
                     cursor
                         .at(index)
                         .expect("the axis and the fields are aligned"),
-                )?);
+                );
             }
-            builder.push_samples(point, &row)?;
+            builder.push_refs(point, &row)?;
         }
         result.extend(builder.finish(item.metric.clone())?);
     }
@@ -525,6 +567,8 @@ const GO_NAN: f64 = f64::from_bits(0x7FF8_0000_0000_0001);
 
 /// The order of `a` and `b` for `topk` (`top`) or `bottomk`; NaN ranks last for both.
 fn rank(a: f64, b: f64, top: bool) -> Ordering {
+    #[cfg(test)]
+    calls::record_rank();
     match (a.is_nan(), b.is_nan()) {
         (true, true) => Ordering::Equal,
         (true, false) => Ordering::Greater,
@@ -595,8 +639,13 @@ pub(crate) fn validate_topk_parameters(values: &[Option<f64>]) -> Result<()> {
 type GroupKey = Vec<(Arc<str>, Arc<str>)>;
 
 fn group_key(metric: &SeriesLabels, grouping: &Grouping) -> GroupKey {
-    let mut key: Vec<_> = labels_with_name(metric)
-        .into_iter()
+    group_key_from(&labels_with_name(metric), grouping)
+}
+
+/// The group `labels` belong to, for callers that already hold the series' label pairs.
+fn group_key_from(labels: &[(Arc<str>, Arc<str>)], grouping: &Grouping) -> GroupKey {
+    let mut key: Vec<_> = labels
+        .iter()
         .filter(|(name, value)| {
             !value.is_empty()
                 && match grouping {
@@ -604,6 +653,7 @@ fn group_key(metric: &SeriesLabels, grouping: &Grouping) -> GroupKey {
                     Grouping::Without(names) => &**name != "__name__" && !names.contains(name),
                 }
         })
+        .cloned()
         .collect();
     key.sort();
     key
@@ -611,6 +661,8 @@ fn group_key(metric: &SeriesLabels, grouping: &Grouping) -> GroupKey {
 
 /// The label pairs of `metric` with `__name__` among them, sorted by name.
 fn labels_with_name(metric: &SeriesLabels) -> Vec<(Arc<str>, Arc<str>)> {
+    #[cfg(test)]
+    calls::record_label_list();
     let mut labels: Vec<_> = metric
         .tags()
         .iter()
@@ -728,4 +780,39 @@ fn into_value(sample: SampleRef<'_>) -> Result<Option<f64>> {
 /// The value a forward cursor reads at compact `row`; the rows asked for only increase.
 fn cursor_value(cursor: &mut RowCursor<'_>, row: usize) -> Result<Option<f64>> {
     into_value(cursor.at(row).expect("the axis and the fields are aligned"))
+}
+
+/// How often this thread built a series' label list or compared two candidates, so a test can hold
+/// `topk` to the work it should not do rather than to the result, which every shape produces.
+/// Test-only: a decorated sort and a partial selection select the same candidates.
+#[cfg(test)]
+pub(crate) mod calls {
+    use std::cell::Cell;
+
+    thread_local! {
+        /// Label lists [`super::labels_with_name`] built on this thread.
+        static LABEL_LISTS: Cell<usize> = const { Cell::new(0) };
+        /// Candidate pairs [`super::rank`] looked at on this thread.
+        static RANKS: Cell<usize> = const { Cell::new(0) };
+    }
+
+    /// Records one label list.
+    pub(crate) fn record_label_list() {
+        LABEL_LISTS.with(|lists| lists.set(lists.get() + 1));
+    }
+
+    /// Records one comparison of two candidates.
+    pub(crate) fn record_rank() {
+        RANKS.with(|ranks| ranks.set(ranks.get() + 1));
+    }
+
+    /// The label lists built on this thread since the last call, which starts a new count.
+    pub(crate) fn take_label_lists() -> usize {
+        LABEL_LISTS.with(|lists| lists.replace(0))
+    }
+
+    /// The candidate comparisons made on this thread since the last call, which starts a new count.
+    pub(crate) fn take_ranks() -> usize {
+        RANKS.with(|ranks| ranks.replace(0))
+    }
 }

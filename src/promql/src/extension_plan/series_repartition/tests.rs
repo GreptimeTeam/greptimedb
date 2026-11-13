@@ -519,11 +519,75 @@ impl ExecutionPlan for Scripted {
 
 /// A task context whose memory pool is `pool`, so what the node charges can be read afterwards.
 fn task_context(pool: &Arc<GreedyMemoryPool>) -> Arc<TaskContext> {
+    context_over(Arc::clone(pool) as Arc<dyn MemoryPool>)
+}
+
+/// A task context over `pool`, for a test that keeps its own pool to read it afterwards.
+fn context_over(pool: Arc<dyn MemoryPool>) -> Arc<TaskContext> {
     let runtime = RuntimeEnvBuilder::new()
-        .with_memory_pool(Arc::clone(pool) as Arc<dyn MemoryPool>)
+        .with_memory_pool(pool)
         .build()
         .expect("the runtime environment builds");
     Arc::new(TaskContext::default().with_runtime(Arc::new(runtime)))
+}
+
+/// A pool that counts the consumers registered with it, so a test can see how many entries the node
+/// adds whatever the input carries.
+#[derive(Debug)]
+struct RegistrationCountingPool {
+    inner: GreedyMemoryPool,
+    registrations: AtomicUsize,
+}
+
+impl RegistrationCountingPool {
+    fn new(bytes: usize) -> Arc<Self> {
+        Arc::new(Self {
+            inner: GreedyMemoryPool::new(bytes),
+            registrations: AtomicUsize::new(0),
+        })
+    }
+
+    /// How many consumers were registered with the pool, in total.
+    fn registrations(&self) -> usize {
+        self.registrations.load(Ordering::SeqCst)
+    }
+}
+
+impl fmt::Display for RegistrationCountingPool {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        write!(f, "registration counting test pool")
+    }
+}
+
+impl MemoryPool for RegistrationCountingPool {
+    fn name(&self) -> &str {
+        "registration counting test pool"
+    }
+
+    fn register(&self, consumer: &MemoryConsumer) {
+        self.registrations.fetch_add(1, Ordering::SeqCst);
+        self.inner.register(consumer);
+    }
+
+    fn unregister(&self, consumer: &MemoryConsumer) {
+        self.inner.unregister(consumer);
+    }
+
+    fn grow(&self, reservation: &MemoryReservation, additional: usize) {
+        self.inner.grow(reservation, additional);
+    }
+
+    fn shrink(&self, reservation: &MemoryReservation, shrink: usize) {
+        self.inner.shrink(reservation, shrink);
+    }
+
+    fn try_grow(&self, reservation: &MemoryReservation, additional: usize) -> DataFusionResult<()> {
+        self.inner.try_grow(reservation, additional)
+    }
+
+    fn reserved(&self) -> usize {
+        self.inner.reserved()
+    }
 }
 
 /// The node over `child` routing into `outputs` partitions.
@@ -2686,6 +2750,42 @@ async fn single_fragment_large_identity_fits_finite_payload_budget() {
         0,
         pool.reserved(),
         "delivery releases the single-fragment charge"
+    );
+}
+
+/// Each identity used to register a pool consumer of its own, so the pool's bookkeeping grew with
+/// the number of series an output routed. The stream registers once per output stream now, and the
+/// identity's descriptor, an owner's merge workspace and a raw owner's reconstruction are
+/// reservations split off it: more identities must not mean more entries, and the bytes each of
+/// them holds are still released.
+#[tokio::test]
+async fn pool_entries_follow_output_streams_not_identities() {
+    let registrations = |identities: usize| async move {
+        let steps: Vec<Step> = (0..identities)
+            .map(|index| Step::chunk(chunk(labels(&format!("h{index:03}")), 1, 1, true)))
+            .collect();
+        let pool = RegistrationCountingPool::new(1 << 20);
+        let context = context_over(Arc::clone(&pool) as Arc<dyn MemoryPool>);
+        let plan: Arc<dyn ExecutionPlan> = node(Scripted::plan(vec![steps]), 1);
+        let outputs = drain(&plan, &context).await;
+        let chunks = outputs
+            .into_iter()
+            .flat_map(|output| output.expect("the output routes every identity"))
+            .collect::<Vec<_>>();
+        assert_eq!(identities, chunks.len(), "each identity is published once");
+        assert_eq!(0, pool.reserved(), "every charge is released with the read");
+        pool.registrations()
+    };
+
+    let few = registrations(1).await;
+    let many = registrations(16).await;
+    assert_eq!(
+        few, many,
+        "the entries the node registers follow the identities: {few} for one and {many} for sixteen"
+    );
+    assert!(
+        few <= 4,
+        "{few} pool entries for one input and one output stream"
     );
 }
 

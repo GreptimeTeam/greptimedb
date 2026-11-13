@@ -94,7 +94,7 @@ use crate::evaluated::EvaluatedChunk;
 use crate::extension_plan::SeriesRouting;
 use crate::extension_plan::series_repartition::SeriesRepartitionExec;
 use crate::histogram_eval::HISTOGRAM_ROUTING_EXCLUDED_LABELS;
-use crate::native::execute::{InputId, NativeExecutionState, NativeExecutor};
+use crate::native::execute::{InputId, NativeExecutionState, NativeExecutor, SourceFacts};
 use crate::native::plan::{
     AggregateStage, Grouping, InstantValue, NativeExpr, NativeNode, NativeTree, NativeType,
     reads_across_series,
@@ -966,6 +966,7 @@ impl FusedSeries {
             output_schema,
             self.binding.time_index.clone(),
             tags,
+            self.binding.metric_name.clone(),
             self.format,
             target_partitions,
             self.canonical_producer,
@@ -2230,6 +2231,13 @@ pub struct FusedSeriesExec {
     time_column: String,
     /// The tag column names, indexed by [`OutputColumn::Tag`].
     tags: Arc<[String]>,
+    /// The one metric every input series is named, taken from the binding.
+    ///
+    /// The canonical pass judged a dropped label set by this: a node that drops the metric name is
+    /// only told to stream when everything below it is named the same one. The execution reads it
+    /// so the collection it performs at run time is decided by that same proof; `None` is a binding
+    /// that names no metric - one raw source per input - and every consumer then collects.
+    metric_name: Option<Arc<str>>,
     /// The columns this node produces.
     output_schema: SchemaRef,
     /// The evidence claimed by this plan's output partitions.
@@ -2336,6 +2344,7 @@ impl FusedSeriesExec {
             output_schema,
             time_column,
             tags,
+            None,
             FusedOutputFormat::PlainRows,
             None,
             false,
@@ -2350,6 +2359,7 @@ impl FusedSeriesExec {
         output_schema: SchemaRef,
         time_column: String,
         tags: Vec<String>,
+        metric_name: Option<Arc<str>>,
         format: FusedOutputFormat,
         matching_parallelism: Option<usize>,
         canonical_producer: bool,
@@ -2626,6 +2636,7 @@ impl FusedSeriesExec {
             classification: classification.into(),
             time_column,
             tags: tags.into(),
+            metric_name,
             output_schema,
             duplicate_evidence: Mutex::new(EvidenceClaims {
                 evidence: None,
@@ -2738,6 +2749,7 @@ impl ExecutionPlan for FusedSeriesExec {
             self.output_schema.clone(),
             self.time_column.clone(),
             self.tags.to_vec(),
+            self.metric_name.clone(),
             self.format,
             self.matching_parallelism,
             self.canonical_producer,
@@ -2770,10 +2782,19 @@ impl ExecutionPlan for FusedSeriesExec {
             evidence: Arc::clone(evidence),
             active: true,
         });
-        let mut state = match NativeExecutionState::try_new(
+        // The canonical pass decided where a merge belongs from the labels the binding names; the
+        // execution judges the collection it performs by the same fact, so an already-streaming
+        // window is not turned into a collecting one here.
+        let sources = SourceFacts::uniform(
+            self.tags.to_vec(),
+            self.metric_name.clone(),
+            self.series_schemas.len(),
+        );
+        let mut state = match NativeExecutionState::try_new_with_sources(
             &self.tree,
             Arc::clone(&context.runtime_env().memory_pool),
             evidence.clone(),
+            &sources,
         ) {
             Ok(state) => state,
             Err(error) => {

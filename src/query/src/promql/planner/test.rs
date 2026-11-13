@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use crate::promql::planner::native::{take_native_attempts, take_reported_decline};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -520,6 +521,7 @@ async fn plan_direct_or(
         ctx: PromPlannerContext::default(),
         promql_annotations: None,
         native_fused: false,
+        native_binary_offer: true,
     };
     planner
         .or_operator(
@@ -610,6 +612,7 @@ async fn mixed_direct_or(histogram_on_left: bool) -> (PromPlanner, LogicalPlan) 
         ctx: PromPlannerContext::default(),
         promql_annotations: None,
         native_fused: false,
+        native_binary_offer: true,
     };
     let left_context = direct_or_context("lhs", &["job", "k"], "v");
     let right_context = direct_or_context("rhs", &["job", "k"], "v");
@@ -683,6 +686,7 @@ async fn mixed_aggregate_input(histograms: Vec<NativeHistogram>) -> (PromPlanner
         },
         promql_annotations: None,
         native_fused: false,
+        native_binary_offer: true,
     };
     (planner, plan)
 }
@@ -3053,6 +3057,97 @@ async fn native_fused_rate_plans_to_a_fused_series_node() {
     );
 }
 
+/// A single-metric `rate` streams: the window drops the metric name, but every series the scan
+/// hands over is named the same one, so the drop tells none of them apart. Nothing has to collect
+/// what the window hands out, and the plan keeps the one node over the scan.
+#[tokio::test]
+async fn native_fused_single_metric_rate_streams_without_a_canonical_merge() {
+    let query = "rate(some_metric[5m])";
+    let plan = build_native_fused_plan(query, true).await;
+    let fused = find_fused_series(&plan).expect("the native route answers the query");
+    assert_eq!(
+        Some("some_metric"),
+        fused.binding().metric_name.as_deref(),
+        "the binding names the one metric the scan reads"
+    );
+    assert!(
+        !fused.is_canonical_producer(),
+        "`{query}` needs no canonical boundary: {plan}"
+    );
+    assert!(
+        matches!(fused.tree().root().expr, NativeExpr::Window { .. }),
+        "`{query}`: the root stays the window: {:?}",
+        fused.tree().root().expr
+    );
+    let [child] = fused.children() else {
+        panic!("`{query}` reads one input: {plan}");
+    };
+    assert!(
+        matches!(child, LogicalPlan::TableScan(_)),
+        "`{query}`: the window reads the scan itself: {plan}"
+    );
+}
+
+/// A `rate` over a selector that discovered several metrics keeps its collection: two of those
+/// metrics can agree on every ordinary label, so the name the window drops is the only thing
+/// telling them apart - and the merge is what reports the collision.
+#[tokio::test]
+async fn native_fused_multi_metric_rate_keeps_its_canonical_merge() {
+    let query = r#"rate({tag_0="x"}[5m])"#;
+    let plan = build_native_fused_plan_with_provider(
+        query,
+        true,
+        metric_discovery_provider(&["alpha_total", "beta_total"]).await,
+    )
+    .await;
+    let consumer =
+        find_fused_series(&plan).unwrap_or_else(|| panic!("`{query}` is not native: {plan}"));
+    let [child] = consumer.children() else {
+        panic!("`{query}`: the boundary has one producer: {plan}");
+    };
+    let producer = find_fused_series(child).unwrap_or_else(|| panic!("`{query}`: {plan}"));
+    assert!(producer.is_canonical_producer(), "`{query}`: {plan}");
+    assert!(
+        matches!(producer.tree().root().expr, NativeExpr::Merge { .. }),
+        "`{query}`: the window's pieces are collected: {:?}",
+        producer.tree().root().expr
+    );
+}
+
+/// A scan that carries `__type__` or `__unit__` as a tag can hold two series that agree on
+/// everything else, and a range function drops those two along with the name. A fixed metric name
+/// proves nothing about them, so the collection stays.
+#[tokio::test]
+async fn native_fused_metadata_tag_in_the_binding_keeps_the_collection() {
+    for metadata in ["__type__", "__unit__"] {
+        let query = "rate(some_metric[5m])";
+        let specs = vec![(
+            (DEFAULT_SCHEMA_NAME.to_string(), "some_metric".to_string()),
+            2,
+            1,
+        )];
+        let tags = vec![vec!["tag_0".to_string(), metadata.to_string()]];
+        let plan = build_native_fused_plan_with_provider(
+            query,
+            true,
+            build_test_table_provider_with_tsid_tag_names(&specs, &tags, None).await,
+        )
+        .await;
+        let consumer = find_fused_series(&plan)
+            .unwrap_or_else(|| panic!("{metadata}: `{query}` is not native: {plan}"));
+        let [child] = consumer.children() else {
+            panic!("{metadata}: `{query}`: the boundary has one producer: {plan}");
+        };
+        let producer =
+            find_fused_series(child).unwrap_or_else(|| panic!("{metadata}: `{query}`: {plan}"));
+        assert!(
+            matches!(producer.tree().root().expr, NativeExpr::Merge { .. }),
+            "{metadata}: `{query}` keeps the collection: {:?}",
+            producer.tree().root().expr
+        );
+    }
+}
+
 #[tokio::test]
 async fn native_fused_time_partitioned_table_reads_through_a_raw_source() {
     let table_provider = native_engine_provider(vec![1]).await;
@@ -3493,6 +3588,31 @@ async fn native_fused_metric_engine_two_aggregate_pair_is_one_execution() {
     }
 }
 
+/// Every statement is offered to the native route once, and a statement the flag leaves alone is
+/// offered none.
+///
+/// The count is what bounds planning: one offer compiles the whole tree below it, so a route that
+/// re-offered a subtree for every operator below it would cost the square of the expression's size.
+#[tokio::test]
+async fn native_offer_is_counted_once_per_statement() {
+    let _ = take_native_attempts();
+    let plan = build_native_fused_plan("rate(some_metric[5m])", true).await;
+    assert!(find_fused_series(&plan).is_some(), "{plan}");
+    assert_eq!(
+        1,
+        take_native_attempts(),
+        "the statement is offered exactly once"
+    );
+
+    let plan = build_native_fused_plan("rate(some_metric[5m])", false).await;
+    assert!(find_fused_series(&plan).is_none(), "{plan}");
+    assert_eq!(
+        0,
+        take_native_attempts(),
+        "the flag off offers nothing to the native route"
+    );
+}
+
 /// A metric table without logical-table metadata declines to the legacy plan.
 #[tokio::test]
 async fn native_fused_metric_table_without_logical_metadata_falls_back() {
@@ -3583,6 +3703,12 @@ async fn native_fused_engine_without_raw_series_falls_back() {
         native.display_indent().to_string(),
         without_flag.display_indent().to_string(),
         "a file-engine table must keep the existing plan"
+    );
+    // The refusal is reported with its cause, not a bare Ok(None).
+    assert_eq!(
+        take_reported_decline(),
+        Some("engine_without_raw_series_scanner"),
+        "the refusal names the engine's missing raw-series scanner"
     );
 }
 
@@ -4553,8 +4679,10 @@ async fn native_composed_binary_declines_to_the_existing_plan() {
     );
 
     // An operand that is not a frame leaves the statement's own wrapper in place: the pair is
-    // refused, so the existing plan answers the statement while the operand that does compose keeps
-    // its own answer below it.
+    // refused, so the existing plan answers the statement. The offer is the statement's, and the
+    // binary that makes it spends it for the whole subtree below: the operand is planned by the
+    // existing path too, because a refused chain of n operators would otherwise compile its
+    // subtrees again at every operator.
     for query in [
         // A scalar root is not a frame: composing it by vector matching would broadcast it as if it
         // were a one-series vector, which is not what the query asked for.
@@ -4562,7 +4690,7 @@ async fn native_composed_binary_declines_to_the_existing_plan() {
         // Neither is a scalar function, however it is written.
         "(hist * on(tag_0) floats) / time()",
         // A comparison between a histogram and a float has no kernel at this pair either, so the
-        // operand's own answer stops where it was admitted.
+        // whole statement stops where the pair was refused.
         "(hist * on(tag_0) floats) > on(tag_0) floats",
     ] {
         let plan =
@@ -4574,8 +4702,22 @@ async fn native_composed_binary_declines_to_the_existing_plan() {
             "`{query}` has no composed answer: {display}"
         );
         assert!(
-            find_fused_series(&plan).is_some(),
-            "`{query}` keeps the operand's own answer: {display}"
+            find_fused_series(&plan).is_none(),
+            "`{query}` spends its one offer above the operand: {display}"
+        );
+        let legacy = PromPlanner::stmt_to_plan_with_annotations(
+            native_mixed_kind_provider().await,
+            &build_eval_stmt(query),
+            &build_query_engine_state(),
+            None,
+            false,
+        )
+        .await
+        .unwrap_or_else(|error| panic!("`{query}`: the existing route must answer it: {error}"));
+        assert_eq!(
+            legacy.display_indent().to_string(),
+            display,
+            "`{query}` must keep the existing plan"
         );
     }
 }
@@ -6304,7 +6446,7 @@ async fn native_fused_limitk_over_a_windowed_aggregate_keeps_its_shape() {
     );
     assert_eq!(
         Some(true),
-        unifies_its_own_contributions(window_node),
+        unifies_its_own_contributions(window_node, &[], &[]),
         "`{query}`: the window emits one series per label set, so `limitk` collects nothing"
     );
     let NativeExpr::Aggregate {
@@ -8757,6 +8899,7 @@ async fn comparison_binary_join_uses_tsid_and_keeps_it_in_filtered_result() {
         ctx: PromPlannerContext::from_eval_stmt(&eval_stmt).unwrap(),
         promql_annotations: None,
         native_fused: false,
+        native_binary_offer: true,
     };
     let plan = planner
         .prom_expr_to_plan(&eval_stmt.expr, &build_query_engine_state())
@@ -10759,6 +10902,7 @@ async fn mixed_native_histogram_rate_executes_real_ranges() {
         },
         promql_annotations: Some(collector.clone()),
         native_fused: false,
+        native_binary_offer: true,
     };
     let input = LogicalPlan::Extension(Extension {
         node: Arc::new(
@@ -12249,6 +12393,7 @@ async fn native_scan_bounds_preserve_zero_lookback_and_overflow() {
         ctx: PromPlannerContext::from_eval_stmt(&build_eval_stmt("some_metric")).unwrap(),
         promql_annotations: None,
         native_fused: false,
+        native_binary_offer: true,
     };
     planner.ctx.time_index_column = Some("timestamp".to_string());
     planner.ctx.start = 1_000;
@@ -13090,6 +13235,7 @@ async fn test_direct_or_numeric_value_types() {
         ctx: PromPlannerContext::default(),
         promql_annotations: None,
         native_fused: false,
+        native_binary_offer: true,
     };
     let left_context = direct_or_context("lhs", &["job"], "v");
     let right_context = direct_or_context("rhs", &["job"], "v");
@@ -14324,6 +14470,7 @@ async fn test_mixed_or_value_aliases_do_not_replace_labels() {
         ctx: PromPlannerContext::default(),
         promql_annotations: None,
         native_fused: false,
+        native_binary_offer: true,
     };
     let left = LogicalPlanBuilder::from(scan(&left))
         .project(vec![
@@ -15141,6 +15288,7 @@ async fn native_composed_binary_restores_the_context_after_a_refused_operand() {
         ctx: PromPlannerContext::from_eval_stmt(&stmt).unwrap(),
         promql_annotations: None,
         native_fused: true,
+        native_binary_offer: true,
     };
     let before = format!("{:?}", planner.ctx);
     let refused = planner

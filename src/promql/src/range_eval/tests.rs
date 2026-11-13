@@ -38,6 +38,7 @@ use datatypes::series::{Label, SeriesLabels};
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 
+use super::function::SAMPLES_EXAMINED;
 use super::{
     CounterReset, FieldSamples, FloatWindow, POSITION_COMPARISONS, PendingBatch, RangeEvaluator,
     RangeFunction, RangeModifier, RangeWindow, WindowKernel, accumulate, subquery_grid,
@@ -1837,6 +1838,237 @@ fn a_function_without_a_batch_form_stays_on_the_per_window_path() {
     .unwrap();
     evaluator.push(&chunk(&rows, 1, 0, true)).unwrap();
     assert_eq!(evaluator.batch_call_count(), 0);
+}
+
+/// Rows of a counter that resets twice, plateaus once, steps unevenly and holds one stale marker:
+/// every shape an extremum, a reset count or a change count can get wrong at a window bound.
+fn summary_rows(points: usize) -> Vec<Row> {
+    let mut value = 0.0;
+    (0..points)
+        .map(|index| {
+            value = match index {
+                200 | 500 => 1.0,
+                300 => value,
+                _ if index % 3 == 0 => value + 2.0,
+                _ => value + 1.0,
+            };
+            let sample = if index == 150 { stale() } else { value };
+            (index as i64 * 10_000, vec![Some(sample)])
+        })
+        .collect()
+}
+
+/// The functions whose window answer is a running summary of the field -- the extremes, the resets
+/// and the changes -- reach the batch kernel, and its answers equal the per-window ones.
+///
+/// The series is longer than `EVALUATION_BATCH`, so the batch also flushes in the middle of the
+/// evaluation and has to carry the summary across the flush. A summary read off the wrong window
+/// bounds, or a reset counted across one, differs from the per-window result on these rows.
+#[test]
+fn window_summaries_reach_the_batch_kernel() {
+    let points = 700;
+    let rows = summary_rows(points);
+    let window = RangeWindow {
+        range_ms: 40_000,
+        offset_ms: 0,
+        anchor_ms: None,
+        modifier: None,
+    };
+    for function in [
+        RangeFunction::MinOverTime,
+        RangeFunction::MaxOverTime,
+        RangeFunction::Resets,
+        RangeFunction::Changes,
+    ] {
+        let mut batch = RangeEvaluator::try_new(
+            &raw_schema(1),
+            grid(0, 10_000, points as u64),
+            window,
+            function,
+        )
+        .unwrap();
+        // The per-window path is the same evaluator without the batch kernel, which leaves the
+        // rest of the evaluation identical.
+        let mut per_window = RangeEvaluator::try_new(
+            &raw_schema(1),
+            grid(0, 10_000, points as u64),
+            window,
+            function,
+        )
+        .unwrap();
+        per_window.batch = None;
+
+        let piece = chunk(&rows, 1, 0, true);
+        let batched = collect_chunks(&mut batch, std::slice::from_ref(&piece));
+        let expected = collect_chunks(&mut per_window, std::slice::from_ref(&piece));
+        assert!(
+            batch.batch_call_count() > 0,
+            "{function:?} never reached its batch kernel"
+        );
+        assert_same_series(
+            fold_chunks(&batched, batch.output_schema()).as_ref(),
+            fold_chunks(&expected, per_window.output_schema()).as_ref(),
+            &format!("{function:?}"),
+        );
+    }
+}
+
+/// A batch kernel walks a field once per batch, not once per grid point.
+///
+/// The per-window form visits every sample of every window, so `points` windows of `width` samples
+/// visit `points * width`. A batch visits the union of its windows once plus one entry per window,
+/// so the total stays close to the samples the series holds whatever the width is. The figure is
+/// counted rather than timed, which is what makes it a property of the code and not of the
+/// machine.
+#[test]
+fn window_summaries_are_not_rescanned_per_step() {
+    let points = 2_048u64;
+    let width = 60;
+    let rows = summary_rows(points as usize);
+    let window = RangeWindow {
+        range_ms: width as i64 * 10_000,
+        offset_ms: 0,
+        anchor_ms: None,
+        modifier: None,
+    };
+    // What rescanning each window would visit, and what a walk of the retained samples costs.
+    let rescanned = points * width;
+    let once_over = points * 2;
+    let examined = |function| -> u64 {
+        SAMPLES_EXAMINED.store(0, std::sync::atomic::Ordering::Relaxed);
+        let mut evaluator =
+            RangeEvaluator::try_new(&raw_schema(1), grid(0, 10_000, points), window, function)
+                .unwrap();
+        evaluator.push(&chunk(&rows, 1, 0, true)).unwrap();
+        SAMPLES_EXAMINED.load(std::sync::atomic::Ordering::Relaxed)
+    };
+    for function in [
+        RangeFunction::MinOverTime,
+        RangeFunction::MaxOverTime,
+        RangeFunction::Changes,
+    ] {
+        let visits = examined(function);
+        assert!(
+            visits > 0,
+            "{function:?} reached no batch kernel, so nothing was counted"
+        );
+        assert!(
+            visits <= once_over,
+            "{function:?} examined {visits} samples over {points} grid points, more than the \
+             {once_over} a single walk of the series costs: the windows are being rescanned"
+        );
+    }
+    // `resets` reads the reset index, so it touches no sample at all.
+    assert_eq!(
+        examined(RangeFunction::Resets),
+        0,
+        "resets scanned samples instead of reading the reset index"
+    );
+    assert!(rescanned > once_over * 10, "the comparison proves nothing");
+}
+
+/// The samples of a chunk kept in segments, which `dense()` refuses: the per-sample loop is the
+/// only path that retains them, so one chunk can be handed to either path unchanged.
+fn segmented(piece: &RawSeriesChunk, split: usize) -> RawSeriesChunk {
+    let mut piece = piece.clone();
+    let len = piece.time.len();
+    let fields = piece
+        .fields
+        .iter()
+        .map(|field| {
+            Samples::try_from_chunks(vec![
+                field.slice(0, split).unwrap(),
+                field.slice(split, len - split).unwrap(),
+            ])
+            .unwrap()
+        })
+        .collect();
+    piece.fields = SeriesFields::try_from_vec(fields).unwrap();
+    piece
+}
+
+/// A chunk read with a selector offset is appended in bulk, with the shift applied there rather
+/// than by handing the whole chunk to the per-sample loop.
+///
+/// The same rows go to two evaluators, one from a single dense chunk -- which the bulk path takes
+/// -- and one from a chunk kept in segments, which only the per-sample loop retains. The results
+/// have to be identical, and only the first may count a bulk ingest.
+#[test]
+fn an_offset_chunk_is_appended_in_bulk() {
+    let rows: Vec<Row> = (0..5)
+        .map(|index| (index as i64 * 10_000, vec![Some(index as f64)]))
+        .collect();
+    let window = RangeWindow {
+        range_ms: 20_000,
+        offset_ms: 10_000,
+        anchor_ms: None,
+        modifier: None,
+    };
+    let evaluate = |piece: &RawSeriesChunk| {
+        let mut evaluator = RangeEvaluator::try_new(
+            &raw_schema(1),
+            grid(0, 10_000, 5),
+            window,
+            RangeFunction::SumOverTime,
+        )
+        .unwrap();
+        let chunks = collect_chunks(&mut evaluator, std::slice::from_ref(piece));
+        (
+            fold_chunks(&chunks, evaluator.output_schema()),
+            evaluator.bulk_ingest_count(),
+        )
+    };
+    let piece = chunk(&rows, 1, 0, true);
+    let (bulk, bulk_ingests) = evaluate(&piece);
+    let (per_sample, per_sample_ingests) = evaluate(&segmented(&piece, 2));
+    assert_eq!(
+        bulk_ingests, 1,
+        "a chunk shifted by an offset was handed to the per-sample loop"
+    );
+    assert_eq!(
+        per_sample_ingests, 0,
+        "the segmented chunk took the bulk path, so the two were not compared"
+    );
+    assert_same_series(bulk.as_ref(), per_sample.as_ref(), "offset");
+}
+
+/// A chunk holding a stale marker is appended in bulk too, with the rows the marker drops taken
+/// out there, and the result is what retaining the same rows sample by sample produces.
+#[test]
+fn a_stale_marker_does_not_force_the_per_sample_loop() {
+    let mut rows: Vec<Row> = (0..5)
+        .map(|index| (index as i64 * 10_000, vec![Some(index as f64)]))
+        .collect();
+    rows[2].1[0] = Some(stale());
+    let window = RangeWindow {
+        range_ms: 20_000,
+        offset_ms: 0,
+        anchor_ms: None,
+        modifier: None,
+    };
+    let evaluate = |piece: &RawSeriesChunk| {
+        let mut evaluator = RangeEvaluator::try_new(
+            &raw_schema(1),
+            grid(0, 10_000, 5),
+            window,
+            RangeFunction::LastOverTime,
+        )
+        .unwrap();
+        let chunks = collect_chunks(&mut evaluator, std::slice::from_ref(piece));
+        (
+            fold_chunks(&chunks, evaluator.output_schema()),
+            evaluator.bulk_ingest_count(),
+        )
+    };
+    let piece = chunk(&rows, 1, 0, true);
+    let (bulk, bulk_ingests) = evaluate(&piece);
+    let (per_sample, per_sample_ingests) = evaluate(&segmented(&piece, 2));
+    assert_eq!(
+        bulk_ingests, 1,
+        "a chunk holding a stale marker was handed to the per-sample loop"
+    );
+    assert_eq!(per_sample_ingests, 0);
+    assert_same_series(bulk.as_ref(), per_sample.as_ref(), "stale marker");
 }
 
 #[test]

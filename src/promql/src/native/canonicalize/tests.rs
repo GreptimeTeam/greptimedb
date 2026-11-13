@@ -247,6 +247,31 @@ fn set_over(left: NativeNode, right: NativeNode, out: Arc<EvalGrid>) -> NativeNo
     }
 }
 
+/// `last_over_time(inner[5m])`, a window that folds `inner` onto `out` and keeps the metric name.
+fn keeping_window_over(
+    inner: NativeNode,
+    input_grid: Option<Arc<EvalGrid>>,
+    out: Arc<EvalGrid>,
+) -> NativeNode {
+    NativeNode {
+        expr: NativeExpr::Window {
+            input: Box::new(inner),
+            op: BoundWindow {
+                function: RangeFunction::LastOverTime,
+                window: RangeWindow {
+                    range_ms: 300_000,
+                    offset_ms: 0,
+                    anchor_ms: None,
+                    modifier: None,
+                },
+                input_grid,
+                output_grid: Arc::clone(&out),
+            },
+        },
+        output: evaluated(fields(1), out),
+    }
+}
+
 /// `rate(inner[5m])`, a window that folds `inner` onto `out` and drops the metric name.
 fn window_over(
     inner: NativeNode,
@@ -325,7 +350,25 @@ fn merges(tree: &NativeTree) -> usize {
 /// Runs the pass over `root`, whose sources report `source_tags`.
 fn passed(root: NativeNode, source_tags: &[Vec<String>]) -> NativeTree {
     let tree = NativeTree::try_new(root).expect("the fixture is a legal tree");
-    merge_label_rewrites(&tree, source_tags).expect("the pass produces a legal tree")
+    merge_label_rewrites(&tree, source_tags, &[]).expect("the pass produces a legal tree")
+}
+
+/// Runs the pass over `root`, whose sources report `source_tags` and read the metric each of
+/// `source_metrics` names.
+fn passed_over(
+    root: NativeNode,
+    source_tags: &[Vec<String>],
+    source_metrics: &[Option<Arc<str>>],
+) -> NativeTree {
+    let tree = NativeTree::try_new(root).expect("the fixture is a legal tree");
+    merge_label_rewrites(&tree, source_tags, source_metrics)
+        .expect("the pass produces a legal tree")
+}
+
+/// The labels a scan bound to one metric reports: its tag, and the name the binding gives every
+/// series it hands over, which is not a tag column.
+fn named_scan_tags() -> Vec<Vec<String>> {
+    vec![tags(&["host", "__name__"])]
 }
 
 fn tags(names: &[&str]) -> Vec<String> {
@@ -433,7 +476,7 @@ fn presence_and_folding_vector_operations_collect_aliasing_inputs() {
         };
         assert!(matches!(input.expr, NativeExpr::Map { .. }), "{op:?}");
 
-        let twice = merge_label_rewrites(&tree, &scan_tags()).unwrap();
+        let twice = merge_label_rewrites(&tree, &scan_tags(), &[]).unwrap();
         assert_eq!(1, merges(&twice), "{op:?}");
         assert_eq!(tree.to_string(), twice.to_string(), "{op:?}");
     }
@@ -488,7 +531,7 @@ fn rewrites_after_ranking_or_grouping_are_collected() {
             ),
             "{name}"
         );
-        let twice = merge_label_rewrites(&tree, &source_tags).unwrap();
+        let twice = merge_label_rewrites(&tree, &source_tags, &[]).unwrap();
         assert_eq!(tree.to_string(), twice.to_string(), "{name}");
         assert_eq!(1, merges(&twice), "{name}");
     }
@@ -519,7 +562,7 @@ fn a_rewrite_above_a_match_collects_the_matches_own_labels() {
         matches!(input.expr, NativeExpr::Binary { .. }),
         "the match is not handed the rewritten operand"
     );
-    let twice = merge_label_rewrites(&tree, &scan_tags()).unwrap();
+    let twice = merge_label_rewrites(&tree, &scan_tags(), &[]).unwrap();
     assert_eq!(tree.to_string(), twice.to_string());
     assert_eq!(1, merges(&twice));
 }
@@ -591,7 +634,7 @@ fn a_pointwise_map_reads_each_piece_as_it_is() {
         panic!("the map is handed one series per label set");
     };
     assert!(matches!(input.expr, NativeExpr::Map { .. }));
-    let twice = merge_label_rewrites(&tree, &scan_tags()).unwrap();
+    let twice = merge_label_rewrites(&tree, &scan_tags(), &[]).unwrap();
     assert_eq!(1, merges(&twice));
     assert_eq!(tree.to_string(), twice.to_string());
 }
@@ -628,7 +671,7 @@ fn a_sample_dropping_map_collects_below_itself() {
     );
     // A second pass over the collected tree changes nothing: the merge answers one series per label
     // set, so nothing below the map aliases any more.
-    let twice = merge_label_rewrites(&tree, &scan_tags()).unwrap();
+    let twice = merge_label_rewrites(&tree, &scan_tags(), &[]).unwrap();
     assert_eq!(1, merges(&twice));
     assert_eq!(tree.to_string(), twice.to_string());
 }
@@ -643,7 +686,7 @@ fn a_pointwise_map_over_a_clean_input_gains_no_merge() {
         panic!("the root stays the point-wise map");
     };
     assert!(matches!(input.expr, NativeExpr::Map { .. }));
-    let twice = merge_label_rewrites(&tree, &scan_tags()).unwrap();
+    let twice = merge_label_rewrites(&tree, &scan_tags(), &[]).unwrap();
     assert_eq!(tree.to_string(), twice.to_string());
 }
 
@@ -691,7 +734,7 @@ fn a_parameterized_map_collects_below_itself() {
         matches!(parameters[0].expr, NativeExpr::Scalar(_)),
         "a scalar argument is not collected"
     );
-    let twice = merge_label_rewrites(&tree, &scan_tags()).unwrap();
+    let twice = merge_label_rewrites(&tree, &scan_tags(), &[]).unwrap();
     assert_eq!(1, merges(&twice));
     assert_eq!(tree.to_string(), twice.to_string());
 }
@@ -731,9 +774,10 @@ fn a_set_operation_collects_each_side() {
 #[test]
 fn a_window_collects_an_aliasing_child() {
     let out = grid(0, 1000, 2);
-    // A window over an evaluated vector folds one series' range, so it reads the series whole.
+    // A window over an evaluated vector folds one series' range, so it reads the series whole. The
+    // window keeps the metric name here, so the rewrite below it is the only source of duplicates.
     let tree = passed(
-        window_over(
+        keeping_window_over(
             rewrite(selected(&out), "host", "host"),
             Some(Arc::clone(&out)),
             Arc::clone(&out),
@@ -751,8 +795,109 @@ fn a_window_collects_an_aliasing_child() {
 fn a_window_over_a_raw_scan_collects_nothing() {
     let out = grid(0, 1000, 2);
     // The scan hands over whole storage series, and a merge cannot take raw samples anyway.
-    let tree = passed(window_over(raw_input(0), None, out), &scan_tags());
+    let tree = passed(keeping_window_over(raw_input(0), None, out), &scan_tags());
     assert_eq!(0, merges(&tree));
+}
+
+#[test]
+fn a_name_dropping_window_is_collected_by_its_consumer() {
+    let out = grid(0, 1000, 2);
+    // `rate` drops the metric name, which is part of the identity a merge groups by: a caller that
+    // says nothing about which metric the scan reads collects what the window hands out.
+    let tree = passed(
+        window_over(raw_input(0), None, Arc::clone(&out)),
+        &named_scan_tags(),
+    );
+    assert_eq!(1, merges(&tree));
+    let NativeExpr::Merge { input } = &tree.root().expr else {
+        panic!("the root collects what the window hands out: {tree}");
+    };
+    assert!(
+        matches!(input.expr, NativeExpr::Window { .. }),
+        "the merge sits above the window, not below it"
+    );
+}
+
+#[test]
+fn a_name_dropping_window_over_one_metric_streams() {
+    let out = grid(0, 1000, 2);
+    // The scan is bound to one metric, so every series it hands over is named the same thing:
+    // dropping that name tells none of them apart, and the window keeps every partition.
+    let tree = passed_over(
+        window_over(raw_input(0), None, Arc::clone(&out)),
+        &named_scan_tags(),
+        &[Some(Arc::from("some_metric"))],
+    );
+    assert_eq!(0, merges(&tree), "{tree}");
+    assert!(
+        matches!(tree.root().expr, NativeExpr::Window { .. }),
+        "the root stays the window: {tree}"
+    );
+}
+
+#[test]
+fn a_name_dropping_window_over_several_metrics_is_collected() {
+    let out = grid(0, 1000, 2);
+    // A selector that discovered several metrics binds no single name, so two of its series can be
+    // told apart by the name alone - and dropping it folds them into one label set.
+    let tree = passed_over(
+        window_over(raw_input(0), None, Arc::clone(&out)),
+        &named_scan_tags(),
+        &[None],
+    );
+    assert_eq!(1, merges(&tree), "{tree}");
+    assert!(
+        matches!(tree.root().expr, NativeExpr::Merge { .. }),
+        "the root collects what the window hands out: {tree}"
+    );
+}
+
+#[test]
+fn a_metadata_tag_in_the_binding_fails_closed() {
+    let out = grid(0, 1000, 2);
+    // `__type__` and `__unit__` go with the name, and a scan that carries one of them as a tag can
+    // hold two series that differ only there. A fixed metric name proves nothing about them, so the
+    // drop stays collected.
+    for metadata in ["__type__", "__unit__"] {
+        let scan = vec![tags(&["host", "__name__", metadata])];
+        let tree = passed_over(
+            window_over(raw_input(0), None, Arc::clone(&out)),
+            &scan,
+            &[Some(Arc::from("some_metric"))],
+        );
+        assert_eq!(1, merges(&tree), "{metadata}: {tree}");
+    }
+}
+
+#[test]
+fn a_timestamp_is_collected_by_its_consumer() {
+    let out = grid(0, 1000, 2);
+    // `timestamp` reports a sample's own time under the metric name dropped, so a caller that says
+    // nothing about the scan's metric collects its answer at the root as well.
+    let stamped = || NativeNode {
+        expr: NativeExpr::Timestamp {
+            input: Box::new(selected(&out)),
+        },
+        output: evaluated(fields(1), Arc::clone(&out)),
+    };
+    let tree = passed(stamped(), &named_scan_tags());
+    assert_eq!(1, merges(&tree));
+    assert!(
+        matches!(tree.root().expr, NativeExpr::Merge { .. }),
+        "the root collects what the timestamp hands out: {tree}"
+    );
+
+    // The scan reads one metric, so the name it drops told none of its series apart.
+    let tree = passed_over(
+        stamped(),
+        &named_scan_tags(),
+        &[Some(Arc::from("some_metric"))],
+    );
+    assert_eq!(0, merges(&tree), "{tree}");
+    assert!(
+        matches!(tree.root().expr, NativeExpr::Timestamp { .. }),
+        "the root stays the timestamp: {tree}"
+    );
 }
 
 #[test]
@@ -808,7 +953,7 @@ fn aggregate_state_is_not_collected() {
     let tree = passed(state, &scan_tags());
     assert_eq!(0, merges(&tree));
     assert!(matches!(tree.root().output, NativeType::AggregateState(_)));
-    let twice = merge_label_rewrites(&tree, &scan_tags()).unwrap();
+    let twice = merge_label_rewrites(&tree, &scan_tags(), &[]).unwrap();
     assert_eq!(tree.to_string(), twice.to_string());
 }
 
@@ -832,7 +977,7 @@ fn the_pass_is_idempotent() {
         ),
         &scan_tags(),
     );
-    let twice = merge_label_rewrites(&once, &scan_tags()).expect("a collected tree is legal");
+    let twice = merge_label_rewrites(&once, &scan_tags(), &[]).expect("a collected tree is legal");
     assert_eq!(1, merges(&twice));
     assert_eq!(once.to_string(), twice.to_string());
 }

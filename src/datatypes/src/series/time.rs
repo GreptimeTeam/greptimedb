@@ -148,17 +148,39 @@ impl EvalGrid {
         self.timestamps.get_or_try_init(|| {
             let len = usize::try_from(self.spec.len)
                 .map_err(|_| invalid_series("grid length overflows usize"))?;
-            let mut values = Vec::new();
-            values
-                .try_reserve_exact(len)
-                .map_err(|_| invalid_series("grid timestamp allocation failed"))?;
-            for index in 0..len {
-                let timestamp =
-                    (self.spec.start_ms as i128) + (index as i128) * (self.spec.step_ms as i128);
-                values.push(timestamp as i64);
-            }
-            Ok(values.into())
+            Ok(self.gather_timestamps(0, len)?.into())
         })
+    }
+
+    /// Whether the whole timestamp array exists already.
+    ///
+    /// A consumer that pays for the array -- an execution reserving what it is about to allocate --
+    /// asks this before it materializes a grid: a grid that is already materialized was charged to
+    /// whoever materialized it, and a second consumer must not charge it again.
+    pub fn is_materialized(&self) -> bool {
+        self.timestamps.get().is_some()
+    }
+
+    /// Returns the timestamps of the positions `start..start + len` as an array of their own,
+    /// leaving the grid unmaterialized.
+    ///
+    /// Every value is [`Self::timestamp_at`]'s, in position order, so gathering a window of the
+    /// grid costs its own length and not the length of the grid it is cut from.
+    fn gather_timestamps(&self, start: usize, len: usize) -> Result<Vec<i64>> {
+        let mut values = Vec::new();
+        values
+            .try_reserve_exact(len)
+            .map_err(|_| invalid_series("grid timestamp allocation failed"))?;
+        let end = start.checked_add(len).context(InvalidSeriesSnafu {
+            reason: "grid range overflow".to_string(),
+        })?;
+        for position in start..end {
+            let Some(timestamp) = self.timestamp_at(position) else {
+                return invalid("grid range exceeds its grid");
+            };
+            values.push(timestamp);
+        }
+        Ok(values)
     }
 
     fn timestamp_at(&self, position: usize) -> Option<i64> {
@@ -211,9 +233,22 @@ impl GridRange {
     pub fn is_empty(&self) -> bool {
         self.len == 0
     }
-    /// Returns this range as a zero-copy Arrow buffer slice.
+    /// Returns the timestamps of the positions this range names.
+    ///
+    /// A range covering the whole grid shares the grid's array, which that grid has to materialize
+    /// for any reader of all of it. A range cut out of a larger grid computes the `len` timestamps
+    /// it names instead, each one [`EvalGrid::timestamp_at`]'s for its position: reading a window
+    /// out of a large grid costs the window's rows, and leaves a deferred grid deferred.
     pub fn timestamps(&self) -> Result<ScalarBuffer<i64>> {
-        Ok(self.grid.timestamps()?.slice(self.start, self.len))
+        if self.covers_grid() {
+            return Ok(self.grid.timestamps()?.clone());
+        }
+        Ok(self.grid.gather_timestamps(self.start, self.len)?.into())
+    }
+
+    /// Whether this range names every position of its grid.
+    fn covers_grid(&self) -> bool {
+        self.start == 0 && u64::try_from(self.len).is_ok_and(|len| len == self.grid.spec.len)
     }
 }
 
@@ -809,13 +844,20 @@ impl TimeAxis {
 
     /// Returns the timestamps of the carried rows, in compact-row order.
     ///
-    /// A single-run grid axis lends its buffer without copying; an axis of several runs, and a
-    /// chunked explicit axis, allocate one array of the carried rows.
+    /// An axis covering the whole grid lends the grid's array; a grid axis holding fewer positions
+    /// than its grid computes the rows it carries and lends nothing, so gathering a window out of
+    /// a large grid costs the window and leaves a deferred grid deferred. An axis of several runs,
+    /// and a chunked explicit axis, allocate one array of the carried rows.
     pub fn timestamps(&self) -> Result<Cow<'_, [i64]>> {
         match self {
-            Self::Grid(range) => Ok(Cow::Borrowed(
-                &range.grid.timestamps()?[range.start()..range.start() + range.len()],
-            )),
+            Self::Grid(range) => {
+                if !range.covers_grid() {
+                    return Ok(Cow::Owned(
+                        range.grid.gather_timestamps(range.start(), range.len())?,
+                    ));
+                }
+                Ok(Cow::Borrowed(&range.grid.timestamps()?[..]))
+            }
             Self::GridRanges(ranges) => {
                 let mut timestamps = Vec::with_capacity(ranges.len());
                 for (position, _) in self.positions() {

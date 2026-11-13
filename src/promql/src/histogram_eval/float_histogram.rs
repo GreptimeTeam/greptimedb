@@ -31,8 +31,46 @@ use crate::histogram_eval::native::{CUSTOM_BUCKETS_SCHEMA, bound};
 
 type Buckets = Vec<(i32, f64)>;
 
+/// How often a histogram of this thread was copied or built from a view, so a test can hold a path
+/// to the copies it should not make rather than to the shape of its arguments. Test-only: a copy
+/// and a borrow produce the same value, so a test comparing only values could not tell the two
+/// apart. Both counters belong to the calling thread, so tests running side by side cannot see
+/// each other's work.
+#[cfg(test)]
+pub(crate) mod copies {
+    use std::cell::Cell;
+
+    thread_local! {
+        /// Deep copies [`super::FloatHistogram::clone`] made on this thread.
+        static CLONES: Cell<usize> = const { Cell::new(0) };
+        /// Owned histograms [`super::FloatHistogram::try_from_view`] built on this thread.
+        static MATERIALIZED: Cell<usize> = const { Cell::new(0) };
+    }
+
+    /// Records one deep copy.
+    pub(crate) fn record_clone() {
+        CLONES.with(|clones| clones.set(clones.get() + 1));
+    }
+
+    /// Records one owned histogram built from a view.
+    pub(crate) fn record_materialized() {
+        MATERIALIZED.with(|built| built.set(built.get() + 1));
+    }
+
+    /// The deep copies made on this thread since the last call, which starts a new count.
+    pub(crate) fn take_clones() -> usize {
+        CLONES.with(|clones| clones.replace(0))
+    }
+
+    /// The owned histograms built from a view on this thread since the last call, which starts a
+    /// new count.
+    pub(crate) fn take_materialized() -> usize {
+        MATERIALIZED.with(|built| built.replace(0))
+    }
+}
+
 /// A native histogram with absolute bucket counts.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub(crate) struct FloatHistogram {
     pub(crate) reset_hint: CounterResetHint,
     /// The start timestamp of the sample this histogram was read from, in milliseconds.
@@ -74,8 +112,30 @@ pub(crate) struct AddOutcome {
     pub(crate) custom_bounds_reconciled: bool,
 }
 
+impl Clone for FloatHistogram {
+    fn clone(&self) -> Self {
+        #[cfg(test)]
+        copies::record_clone();
+        Self {
+            reset_hint: self.reset_hint,
+            start_timestamp: self.start_timestamp,
+            schema: self.schema,
+            zero_threshold: self.zero_threshold,
+            zero_count: self.zero_count,
+            count: self.count,
+            sum: self.sum,
+            positive: self.positive.clone(),
+            negative: self.negative.clone(),
+            custom_values: self.custom_values.clone(),
+            layout: self.layout.clone(),
+        }
+    }
+}
+
 impl FloatHistogram {
     pub(crate) fn try_from_view(view: &HistogramView<'_>) -> Result<Self> {
+        #[cfg(test)]
+        copies::record_materialized();
         Ok(Self {
             reset_hint: view.reset_hint,
             start_timestamp: view.start_timestamp,

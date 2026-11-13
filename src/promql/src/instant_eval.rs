@@ -27,6 +27,22 @@ use crate::map::drop_metric_name;
 #[cfg(test)]
 mod tests;
 
+/// The source rows [`select_instants`] examined, counted per row.
+///
+/// The selector advances one cursor over the axis, so the rows it reads can never outnumber the
+/// rows of the axis: one pass, not one per grid point. Counting them is what keeps a second pass
+/// over the axis from being added back unobserved, since the selection it returns is the same
+/// either way.
+#[cfg(test)]
+pub(crate) static AXIS_ROWS_READ: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+/// Counts one row of the axis examined; a no-op outside tests.
+fn row_read() {
+    #[cfg(test)]
+    AXIS_ROWS_READ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+
 /// Selects the one source row an anchored instant reads, with the lookback, offset and staleness
 /// rules of [`select_instants`]: the last sample at or before `at_ms` (shifted by `offset_ms`) and
 /// not more than the lookback before it, unless a stale marker is the latest sample there.
@@ -101,9 +117,12 @@ pub(crate) fn instant_candidate_span(
 
 /// Selects source rows for an aligned PromQL instant-evaluation range.
 ///
-/// Returns original logical row indices and evaluation timestamps from a complete source axis
-/// of strictly increasing milliseconds. Any provided field's stale marker suppresses selection;
+/// Returns original logical row indices and evaluation timestamps from a complete source axis of
+/// strictly increasing milliseconds. Any provided field's stale marker suppresses selection;
 /// missing samples are not stale and remain selectable.
+///
+/// The ordering of the axis is [`RawTimestamps`]' own guarantee, checked when it was built, so this
+/// walks the axis once -- one cursor advance per row -- and validates nothing about it again.
 ///
 /// The two vectors it returns hold one `u64` source row index and one `i64` evaluation timestamp
 /// per selected point, so what it allocates is 16 bytes per point of the clipped grid rather than
@@ -136,11 +155,6 @@ pub fn select_instants(
         ));
     }
     let timestamps = time.as_buffer();
-    if timestamps.windows(2).any(|pair| pair[0] >= pair[1]) {
-        return Err(DataFusionError::Execution(
-            "raw timestamps must be strictly increasing".into(),
-        ));
-    }
     if fields
         .as_slice()
         .iter()
@@ -183,6 +197,7 @@ pub fn select_instants(
                 };
                 current_stale |= stale;
             }
+            row_read();
             cursor += 1;
         }
         let Some(candidate) = cursor.checked_sub(1) else {
