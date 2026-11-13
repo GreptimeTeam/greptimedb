@@ -899,8 +899,13 @@ impl RegionFlushTask {
                     BackgroundNotify::FlushFinished(mut finished) => {
                         finished.on_failure(err);
                     }
-                    BackgroundNotify::FlushFailed(mut failed) => {
-                        failed.on_shared_failure(Arc::new(err), self.region_id);
+                    BackgroundNotify::FlushFailed(failed) => {
+                        let err = Arc::new(err);
+                        for sender in failed.senders {
+                            sender.send(Err(err.clone()).context(FlushRegionSnafu {
+                                region_id: self.region_id,
+                            }));
+                        }
                     }
                     _ => {}
                 }
@@ -1959,6 +1964,42 @@ mod tests {
 
         let output = output_rx.await.expect("waiter must receive explicit error");
         assert!(output.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_flush_failure_defers_waiter_notification_to_worker() {
+        let env = SchedulerEnv::new().await;
+        let (tx, mut rx) = mpsc::channel(1);
+        let builder = VersionControlBuilder::new();
+        let region_id = builder.region_id();
+        let version_control = builder.build();
+        let version_data = version_control.current();
+        let manifest_ctx = env
+            .mock_manifest_context(version_data.version.metadata.clone())
+            .await;
+        let mut task = new_test_flush_task(&env, region_id, FlushReason::Closing, tx, manifest_ctx);
+        let (output_tx, mut output_rx) = oneshot::channel();
+        task.push_sender(OptionOutputTx::from(output_tx));
+        let state = CancellableTaskState::new();
+        state.request_cancel();
+
+        // Cancellation exercises the job's failure path without depending on I/O or scheduling.
+        task.do_flush(version_data, state).await;
+        let request = rx.try_recv().unwrap().request;
+        assert!(matches!(
+            output_rx.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        ));
+        let WorkerRequest::Background {
+            region_id: failed_region_id,
+            notify: BackgroundNotify::FlushFailed(failed),
+        } = request
+        else {
+            panic!("expected a flush failure notification");
+        };
+        assert_eq!(failed_region_id, region_id);
+        assert_eq!(failed.senders.len(), 1);
+        assert!(failed.is_cancelled());
     }
 
     #[tokio::test]

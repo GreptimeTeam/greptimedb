@@ -20,12 +20,13 @@ use std::sync::{Arc, Mutex, Weak};
 
 use common_base::readable_size::ReadableSize;
 use common_telemetry::{debug, error, info};
+use snafu::ResultExt;
 use store_api::logstore::LogStore;
 use store_api::region_request::{RegionFlushReason, RegionFlushRequest};
 use store_api::storage::RegionId;
 
 use crate::config::{IndexBuildMode, MitoConfig};
-use crate::error::{RegionBusySnafu, RegionNotFoundSnafu, Result};
+use crate::error::{FlushRegionSnafu, RegionBusySnafu, RegionNotFoundSnafu, Result};
 use crate::flush::{FlushReason, RegionFlushTask};
 use crate::manifest::action::cap_wal_release;
 use crate::region::version::VersionRef;
@@ -87,15 +88,13 @@ fn resolve_flush_reason(
 
 impl<S: LogStore> RegionWorkerLoop<S> {
     /// On region flush job failed.
-    pub(crate) async fn handle_flush_failed(
-        &mut self,
-        region_id: RegionId,
-        mut request: FlushFailed,
-    ) {
+    pub(crate) async fn handle_flush_failed(&mut self, region_id: RegionId, request: FlushFailed) {
         let mut pending_ddls = self
             .flush_scheduler
             .on_flush_failed(region_id, request.err.clone());
-        request.on_shared_failure(request.err.clone(), region_id);
+        for sender in request.senders {
+            sender.send(Err(request.err.clone()).context(FlushRegionSnafu { region_id }));
+        }
         if !pending_ddls.is_empty() {
             info!(
                 "Flush terminated for region {}, handling {} pending lifecycle DDL requests",
