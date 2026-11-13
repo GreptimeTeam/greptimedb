@@ -123,8 +123,13 @@ impl FloatHistogram {
             .saturating_add(layout)
     }
 
-    /// The spans of each side.
-    fn spans(&self) -> [Vec<(i32, i32)>; 2] {
+    /// The spans of each side: the layout a view was read with, or the compacted layout of a
+    /// histogram this crate derived.
+    ///
+    /// [`crate::histogram_eval::legacy_bridge`] reads them to build the legacy
+    /// `NativeHistogram`, whose spans are explicit where this type keeps them in the bucket
+    /// indices.
+    pub(crate) fn spans(&self) -> [Vec<(i32, i32)>; 2] {
         self.layout
             .clone()
             .unwrap_or_else(|| [&self.positive, &self.negative].map(canonical_spans))
