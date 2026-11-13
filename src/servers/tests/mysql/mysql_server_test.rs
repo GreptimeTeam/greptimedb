@@ -297,8 +297,15 @@ async fn test_schema_validation() -> Result<()> {
 
     let fail = create_connection_default_db_name(server_port, false).await;
     assert!(fail.is_err());
-    let fail = create_connection(server_port, None, false).await;
-    assert!(fail.is_err());
+    let mut connection = create_connection(server_port, None, false).await.unwrap();
+    match connection.query_drop("USE public").await {
+        Err(mysql_async::Error::Server(error)) => assert_eq!(1044, error.code),
+        result => panic!("expected database access denied, got {result:?}"),
+    }
+    let database: Option<Option<String>> =
+        connection.query_first("SELECT DATABASE()").await.unwrap();
+    assert_eq!(Some(None), database);
+    connection.disconnect().await.unwrap();
     mysql_server.shutdown().await.unwrap();
 
     Ok(())
