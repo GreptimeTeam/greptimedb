@@ -39,6 +39,7 @@ use partition::manager::{PartitionRuleManagerRef, create_partitions_from_region_
 use session::context::QueryContext;
 use snafu::{OptionExt, ResultExt};
 use store_api::storage::RegionId;
+use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
 use table::TableRef;
 use table::metadata::TableInfo;
 pub use table::metadata::TableType;
@@ -46,12 +47,18 @@ use table::table::adapter::DfTableProviderAdapter;
 use table::table_name::TableName;
 
 use crate::dist_plan::PredicateExtractor;
+use crate::dist_plan::grouped_read::{
+    DatanodeReadGroup, MAX_GROUP_READ_PAYLOAD_BYTES, MAX_GROUP_READ_REGIONS,
+    build_group_read_plan_from_nested, eligible_remote_plan, encode_nested_plan,
+    max_regions_for_group_read_payload, nested_plan_table,
+};
 use crate::dist_plan::merge_scan::{MergeScanExec, MergeScanLogicalPlan};
 use crate::dist_plan::merge_sort::{MergeSortExec, MergeSortLogicalPlan};
 use crate::dist_plan::region_pruner::ConstraintPruner;
 use crate::error::{CatalogSnafu, PartitionRuleManagerSnafu, TableNotFoundSnafu};
 use crate::optimizer::expr_depth;
-use crate::region_query::RegionQueryHandlerRef;
+use crate::query_engine::DefaultSerializer;
+use crate::region_query::{RegionQueryHandlerRef, RegionQueryTarget};
 
 /// Planner for converting merge sort logical plan to physical plan.
 ///
@@ -220,7 +227,10 @@ impl ExtensionPlanner for DistExtensionPlanner {
             .config()
             .get_extension()
             .unwrap_or_else(QueryContext::arc);
-        let merge_scan_plan = MergeScanExec::new(
+        let datanode_groups = self
+            .grouped_read_groups(&table_name, input_plan, &regions, &query_ctx)
+            .await;
+        let mut merge_scan_plan = MergeScanExec::new(
             session_state,
             table_name,
             regions,
@@ -232,6 +242,9 @@ impl ExtensionPlanner for DistExtensionPlanner {
             merge_scan.remote_dyn_filter_producer_id(),
             self.enable_per_region_metrics,
         )?;
+        if let Some(datanode_groups) = datanode_groups {
+            merge_scan_plan = merge_scan_plan.with_datanode_groups(datanode_groups)?;
+        }
         Ok(Some(Arc::new(merge_scan_plan) as _))
     }
 }
@@ -242,6 +255,181 @@ impl DistExtensionPlanner {
         let mut extractor = TableScanExtractor::default();
         let _ = plan.visit(&mut extractor)?;
         Ok(extractor.table_name)
+    }
+
+    /// Freezes the datanode groups of a grouped read, when this request may be batched.
+    ///
+    /// The groups are resolved once, here, so execution neither re-resolves a route nor splits a
+    /// selection that was already pruned: every group is a subset of the selected regions, and the
+    /// groups together are exactly that selection. `None` keeps the ordinary
+    /// one-request-per-region path; a failed target lookup also falls back to it, so the ordinary
+    /// path reports the error itself instead of the planner hiding it.
+    async fn grouped_read_groups(
+        &self,
+        table_name: &TableName,
+        remote_plan: &LogicalPlan,
+        regions: &[RegionId],
+        query_ctx: &session::context::QueryContextRef,
+    ) -> Option<Vec<DatanodeReadGroup>> {
+        // Batching needs more than one region, and it must not change what the frontend plan
+        // promises. Grouped batches depend on region placement, so keep explain output on the
+        // ordinary path: the explained plan must not vary with the query's deployment topology.
+        // Verbose explain additionally reads per-region metrics.
+        if regions.len() < 2
+            || self.enable_per_region_metrics
+            || query_ctx.is_explain()
+            || query_ctx.explain_verbose()
+        {
+            return None;
+        }
+        if !grouped_read_context_allowed(query_ctx) {
+            return None;
+        }
+        // Only a plain single-table scan keeps the ordinary plan's shape and ordering: a sort, a
+        // limit, an aggregate, a join or a second scan stays one request per region.
+        if !eligible_remote_plan(remote_plan) {
+            return None;
+        }
+        let table = match self
+            .catalog_manager
+            .table(
+                &table_name.catalog_name,
+                &table_name.schema_name,
+                &table_name.table_name,
+                None,
+            )
+            .await
+        {
+            Ok(Some(table)) => table,
+            // An unknown table is not a grouped-read candidate. The ordinary path reports the
+            // missing metadata itself, so nothing is lost here.
+            Ok(None) => return None,
+            Err(error) => {
+                common_telemetry::warn!(
+                    error;
+                    "Grouped read keeps the ordinary path because the metadata of {} cannot be read",
+                    table_name
+                );
+                return None;
+            }
+        };
+        let table_id = table.table_info().table_id();
+        // A logical table whose regions belong to another physical table (e.g. a logical metric
+        // table) keeps the ordinary path: the envelope validates the named regions' table ids
+        // against this captured logical table id.
+        if regions.iter().any(|region| region.table_id() != table_id) {
+            return None;
+        }
+
+        let read_preference = query_ctx.read_preference();
+        let mut groups: Vec<(RegionQueryTarget, Vec<RegionId>)> = Vec::new();
+        for region_id in regions {
+            let target = match self
+                .region_query_handler
+                .select_target(read_preference, *region_id)
+                .await
+            {
+                Ok(target) => target,
+                Err(error) => {
+                    common_telemetry::warn!(
+                        error;
+                        "Grouped read keeps the ordinary path because region {} has no target",
+                        region_id
+                    );
+                    return None;
+                }
+            };
+            match groups
+                .iter_mut()
+                .find(|(group_target, _)| *group_target == target)
+            {
+                Some((_, members)) => members.push(*region_id),
+                None => groups.push((target, vec![*region_id])),
+            }
+        }
+
+        if !grouped_read_has_batch(&groups) {
+            return None;
+        }
+        // Encode the regional template once and estimate the per-RegionPlan payload growth before
+        // materializing any leaf. This both bounds request memory and lets a byte-heavy template
+        // shrink the chunk instead of building an oversized GroupRead first.
+        let table_name_for_plan = nested_plan_table(remote_plan)?;
+        let nested = match encode_nested_plan(remote_plan) {
+            Ok(nested) => nested,
+            Err(error) => {
+                common_telemetry::warn!(
+                    error;
+                    "Grouped read keeps the ordinary path because its regional plan cannot be encoded"
+                );
+                return None;
+            }
+        };
+        let max_regions_by_payload =
+            max_regions_for_group_read_payload(nested.len(), table_name_for_plan.table_name.len());
+        let chunk_limit = MAX_GROUP_READ_REGIONS.min(max_regions_by_payload);
+        if chunk_limit == 0 {
+            debug!(
+                "Grouped read keeps the ordinary path: one regional template does not fit the \
+                 {MAX_GROUP_READ_PAYLOAD_BYTES} byte budget"
+            );
+            return None;
+        }
+        let mut frozen = Vec::with_capacity(groups.len());
+        for (target, regions) in groups {
+            for chunk in regions.chunks(chunk_limit) {
+                match DatanodeReadGroup::try_new(target.clone(), chunk.to_vec()) {
+                    Ok(group) => frozen.push(group),
+                    Err(error) => {
+                        // A refused group is a rule or budget decision, not a failure.
+                        debug!("Grouped read keeps the ordinary path: {error}");
+                        return None;
+                    }
+                }
+            }
+        }
+
+        // Verify the actual encoded request after estimate-based chunking. This defensive check
+        // is not the primary budget gate.
+        for group in &frozen {
+            let envelope = match build_group_read_plan_from_nested(
+                group.regions(),
+                table_id,
+                table_name_for_plan.table_name.clone(),
+                &nested,
+                remote_plan.schema().clone(),
+            ) {
+                Ok(envelope) => envelope,
+                Err(error) => {
+                    common_telemetry::warn!(
+                        error;
+                        "Grouped read keeps the ordinary path because its envelope cannot be built"
+                    );
+                    return None;
+                }
+            };
+            let encoded = match DFLogicalSubstraitConvertor.encode(&envelope, DefaultSerializer) {
+                Ok(encoded) => encoded,
+                Err(error) => {
+                    common_telemetry::warn!(
+                        error;
+                        "Grouped read keeps the ordinary path because its envelope cannot be encoded"
+                    );
+                    return None;
+                }
+            };
+            if encoded.len() > MAX_GROUP_READ_PAYLOAD_BYTES {
+                debug!(
+                    "Grouped read keeps the ordinary path: an envelope of {} regions is {} bytes, \
+                     above the {} byte bound",
+                    group.regions().len(),
+                    encoded.len(),
+                    MAX_GROUP_READ_PAYLOAD_BYTES
+                );
+                return None;
+            }
+        }
+        Some(frozen)
     }
 
     async fn get_regions(
@@ -464,6 +652,19 @@ impl DistExtensionPlanner {
     }
 }
 
+// Flow source and sink scans both require their ordinary per-region behavior, including
+// watermark handling. Check the raw namespace also for malformed or newer Flow options.
+fn grouped_read_context_allowed(query_ctx: &session::context::QueryContextRef) -> bool {
+    !query_ctx
+        .extensions()
+        .keys()
+        .any(|key| key.starts_with("flow."))
+}
+
+fn grouped_read_has_batch(groups: &[(RegionQueryTarget, Vec<RegionId>)]) -> bool {
+    groups.iter().any(|(_, regions)| regions.len() > 1)
+}
+
 fn partition_column_types(table_info: &TableInfo) -> Vec<(String, ConcreteDataType)> {
     table_info
         .meta
@@ -557,6 +758,8 @@ mod tests {
     use common_recordbatch::SendableRecordBatchStream;
     use datafusion::datasource::DefaultTableSource;
     use datafusion_expr::{LogicalPlan, LogicalPlanBuilder, col as df_col, lit};
+
+    use crate::dist_plan::{MAX_GROUP_READ_PAYLOAD_BYTES, MAX_GROUP_READ_REGIONS};
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::{ColumnSchema, Schema};
     use datatypes::value::Value;
@@ -780,6 +983,209 @@ mod tests {
                     .and(partition_col("rack").gt_eq(Value::String("n".into()))),
             ),
         ]
+    }
+
+    #[test]
+    fn grouped_read_respects_flow_and_singleton_boundaries() {
+        use super::{grouped_read_context_allowed, grouped_read_has_batch};
+        use common_meta::peer::Peer;
+        use session::context::QueryContext;
+
+        assert!(grouped_read_context_allowed(&QueryContext::arc()));
+        for (key, value) in [
+            ("flow.return_region_seq", "true"),
+            ("flow.sink_table_id", "1024"),
+            ("flow.incremental_mode", "malformed"),
+            ("flow.scheduled_time_millis", "1"),
+        ] {
+            let mut ctx = QueryContext::with("greptime", "public");
+            ctx.set_extension(key, value);
+            assert!(!grouped_read_context_allowed(&Arc::new(ctx)), "{key}");
+        }
+        let target = |id| RegionQueryTarget::new(Peer::new(id, format!("peer-{id}")));
+        let region = |id| RegionId::new(LOGICAL_TABLE_ID, id);
+        assert!(!grouped_read_has_batch(&[]));
+        assert!(!grouped_read_has_batch(&[
+            (target(1), vec![region(1)]),
+            (target(2), vec![region(2)])
+        ]));
+        assert!(grouped_read_has_batch(&[
+            (target(1), vec![region(1), region(2)]),
+            (target(2), vec![region(3)])
+        ]));
+    }
+
+    #[tokio::test]
+    async fn grouped_read_planner_falls_back_for_singleton_targets_and_flow() {
+        use common_meta::peer::Peer;
+        use session::context::QueryContext;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct RoutedTargets {
+            batch: bool,
+            lookups: AtomicUsize,
+        }
+        #[async_trait]
+        impl RegionQueryHandler for RoutedTargets {
+            async fn select_target(
+                &self,
+                _pref: ReadPreference,
+                region: RegionId,
+            ) -> crate::error::Result<RegionQueryTarget> {
+                self.lookups.fetch_add(1, Ordering::SeqCst);
+                let id = if self.batch {
+                    1
+                } else {
+                    region.region_number() as u64
+                };
+                Ok(RegionQueryTarget::new(Peer::new(id, format!("peer-{id}"))))
+            }
+            async fn do_get(
+                &self,
+                _: &RegionQueryTarget,
+                _: QueryRequest,
+            ) -> crate::error::Result<SendableRecordBatchStream> {
+                unreachable!()
+            }
+            async fn handle_remote_dyn_filter_update(
+                &self,
+                _: &RegionQueryTarget,
+                _: String,
+                _: RemoteDynFilterUpdate,
+            ) -> crate::error::Result<()> {
+                unreachable!()
+            }
+            async fn handle_remote_dyn_filter_unregister(
+                &self,
+                _: &RegionQueryTarget,
+                _: String,
+                _: RemoteDynFilterUnregister,
+            ) -> crate::error::Result<()> {
+                unreachable!()
+            }
+        }
+        let (mut planner, plan, table_name) = planner_and_plan(vec![0], vec![None]).await;
+        let regions = [
+            RegionId::new(LOGICAL_TABLE_ID, 1),
+            RegionId::new(LOGICAL_TABLE_ID, 2),
+        ];
+        let singleton = Arc::new(RoutedTargets {
+            batch: false,
+            lookups: AtomicUsize::new(0),
+        });
+        planner.region_query_handler = singleton.clone();
+        assert!(
+            planner
+                .grouped_read_groups(&table_name, &plan, &regions, &QueryContext::arc())
+                .await
+                .is_none()
+        );
+        assert_eq!(2, singleton.lookups.load(Ordering::SeqCst));
+        let batch = Arc::new(RoutedTargets {
+            batch: true,
+            lookups: AtomicUsize::new(0),
+        });
+        planner.region_query_handler = batch.clone();
+        let grouped = planner
+            .grouped_read_groups(&table_name, &plan, &regions, &QueryContext::arc())
+            .await
+            .unwrap();
+        assert_eq!(1, grouped.len());
+        assert_eq!(&regions, grouped[0].regions());
+        for (key, value) in [
+            ("flow.return_region_seq", "true"),
+            ("flow.sink_table_id", "1024"),
+        ] {
+            let mut ctx = QueryContext::with("greptime", "public");
+            ctx.set_extension(key, value);
+            assert!(
+                planner
+                    .grouped_read_groups(&table_name, &plan, &regions, &Arc::new(ctx))
+                    .await
+                    .is_none()
+            );
+        }
+        assert_eq!(
+            2,
+            batch.lookups.load(Ordering::SeqCst),
+            "Flow fallback must not resolve grouped targets"
+        );
+
+        // One datanode may own more regions than a single envelope can name. The planner must
+        // split them instead of failing the legal query.
+        let many = (1..=MAX_GROUP_READ_REGIONS + 1)
+            .map(|id| RegionId::new(LOGICAL_TABLE_ID, id as u32))
+            .collect::<Vec<_>>();
+        let chunks = planner
+            .grouped_read_groups(&table_name, &plan, &many, &QueryContext::arc())
+            .await
+            .unwrap();
+        assert_eq!(2, chunks.len());
+        assert_eq!(MAX_GROUP_READ_REGIONS, chunks[0].regions().len());
+        assert_eq!(1, chunks[1].regions().len());
+        let covered = chunks
+            .iter()
+            .flat_map(|chunk| chunk.regions().iter().copied())
+            .collect::<Vec<_>>();
+        assert_eq!(many, covered);
+
+        // A low session target partition count does not disable batching.
+        let five = many[..5].to_vec();
+        let mut low_parallelism = QueryContext::with("greptime", "public");
+        low_parallelism.set_extension("query.parallelism", "1");
+        let grouped_low = planner
+            .grouped_read_groups(&table_name, &plan, &five, &Arc::new(low_parallelism))
+            .await
+            .unwrap();
+        assert_eq!(1, grouped_low.len());
+        assert_eq!(five, grouped_low[0].regions());
+
+        // Many individually valid small leaves still exceed the payload budget cumulatively. The
+        // planner must shrink the chunk before materializing the oversized UnionAll. The padding is
+        // sized against the per-region protobuf estimate over the encoded template.
+        let bulky = LogicalPlanBuilder::from(plan.clone())
+            .filter(df_col("host").eq(lit("x".repeat(96 * 1024))))
+            .unwrap()
+            .build()
+            .unwrap();
+        let hundred = &many[..100];
+        let shrunk = planner
+            .grouped_read_groups(&table_name, &bulky, hundred, &QueryContext::arc())
+            .await
+            .unwrap();
+        assert!(
+            shrunk.len() > 1,
+            "the cumulative estimate must shrink the chunk, got {:?}",
+            shrunk.iter().map(|g| g.regions().len()).collect::<Vec<_>>()
+        );
+        assert!(shrunk.iter().all(|g| g.regions().len() < hundred.len()));
+        assert_eq!(
+            hundred,
+            shrunk
+                .iter()
+                .flat_map(|g| g.regions().iter().copied())
+                .collect::<Vec<_>>()
+        );
+
+        // An envelope over the payload budget is a planning fallback. It must not be selected
+        // and then fail after the frontend has already handed the group to a datanode. One
+        // regional template above the whole budget cannot be chunked into a valid envelope.
+        let oversized = LogicalPlanBuilder::from(plan.clone())
+            .filter(df_col("host").eq(lit("x".repeat(MAX_GROUP_READ_PAYLOAD_BYTES + 4096))))
+            .unwrap()
+            .build()
+            .unwrap();
+        assert!(
+            planner
+                .grouped_read_groups(
+                    &table_name,
+                    &oversized,
+                    &[many[0], many[1]],
+                    &QueryContext::arc(),
+                )
+                .await
+                .is_none()
+        );
     }
 
     #[tokio::test]

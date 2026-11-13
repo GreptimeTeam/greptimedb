@@ -49,6 +49,7 @@ flow.workspace = true
 frontend.workspace = true
 futures.workspace = true
 futures-util.workspace = true
+greptime-proto.workspace = true
 http.workspace = true
 hyper-util = { workspace = true, features = ["tokio"] }
 meta-client.workspace = true
