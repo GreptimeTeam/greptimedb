@@ -25,7 +25,7 @@ use std::sync::Arc;
 use datafusion::error::Result as DfResult;
 use datafusion::logical_expr::{Expr, Literal, Operator, utils};
 use datafusion::physical_plan::PhysicalExpr;
-use datafusion_common::arrow::array::{ArrayRef, Datum};
+use datafusion_common::arrow::array::{ArrayRef, Datum, Scalar};
 use datafusion_common::arrow::buffer::BooleanBuffer;
 use datafusion_common::cast::{as_boolean_array, as_null_array};
 use datafusion_common::{DataFusionError, ScalarValue, internal_err};
@@ -79,6 +79,7 @@ impl MetadataFilter {
 
 /// Evaluates supported single-column predicates with precompiled regular expressions.
 /// Compound predicates preserve SQL null semantics until conversion to a scan mask.
+/// Float comparisons treat `-0.0` and `+0.0` as equal, as DataFusion does.
 #[derive(Debug, Clone)]
 pub struct SimpleFilterEvaluator {
     column_name: String,
@@ -104,7 +105,9 @@ impl SimpleFilterEvaluator {
         Some(Self {
             column_name,
             predicate: SimplePredicate::Comparison {
-                literal: value.to_scalar().ok()?,
+                literal: datafusion_common::utils::normalize_float_zero_scalar(value)
+                    .to_scalar()
+                    .ok()?,
                 op,
                 regex: None,
                 regex_negative: false,
@@ -224,11 +227,15 @@ impl SimpleFilterEvaluator {
         let input = input
             .to_scalar()
             .with_context(|_| ToArrowScalarSnafu { v: input.clone() })?;
+        let input = Scalar::new(datafusion_common::utils::normalize_float_zero(
+            &input.into_inner(),
+        ));
         Ok(self.evaluate_datum(&input, 1)?.value(0))
     }
 
     pub fn evaluate_array(&self, input: &ArrayRef) -> Result<BooleanBuffer> {
-        self.evaluate_datum(input, input.len())
+        let input = datafusion_common::utils::normalize_float_zero(input);
+        self.evaluate_datum(&input, input.len())
     }
 
     pub fn evaluate_vector(&self, input: &VectorRef) -> Result<BooleanBuffer> {

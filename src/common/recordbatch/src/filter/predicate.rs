@@ -98,7 +98,9 @@ impl SimplePredicate {
                 };
                 let (regex, regex_negative) = Self::maybe_build_regex(op, literal).ok()?;
                 Some(Self::Comparison {
-                    literal: literal.to_scalar().ok()?,
+                    literal: datafusion_common::utils::normalize_float_zero_scalar(literal.clone())
+                        .to_scalar()
+                        .ok()?,
                     op,
                     regex,
                     regex_negative,
