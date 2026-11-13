@@ -2188,11 +2188,16 @@ struct BroadcastRuntime {
 struct ParameterizedMapRuntime {
     op: ParameterizedOp,
     schema: Arc<SeriesSchema>,
+    /// A constant input's value, which its node does not hand over as a chunk, and whether the
+    /// one chunk it stands for has been built. Only a function of two scalars has an input a
+    /// constant can be: `max_of(0, time())` maps the constant onto the varying scalar.
+    input_literal: Option<f64>,
+    input_produced: bool,
     /// A constant parameter's value, which its node does not hand over as a chunk.
     literals: Vec<Option<f64>>,
     /// Each parameter's one unlabelled series, in argument order.
     values: Vec<Option<Series>>,
-    /// The bytes charged for `values`.
+    /// The bytes charged for `values` and for the constant input's chunk.
     parameter_bytes: usize,
 }
 
@@ -2223,6 +2228,8 @@ impl ParameterizedMapRuntime {
             },
             ParameterizedOp::ClampMin => ParameterizedMath::ClampMin { min: value(0)? },
             ParameterizedOp::ClampMax => ParameterizedMath::ClampMax { max: value(0)? },
+            ParameterizedOp::MaxOf => ParameterizedMath::MaxOf { other: value(0)? },
+            ParameterizedOp::MinOf => ParameterizedMath::MinOf { other: value(0)? },
         };
         map_math_with_parameters(&self.schema, &chunk.series, function)
     }
@@ -3266,9 +3273,19 @@ impl RuntimeNode {
                     format!("{location}.input"),
                     duplicate_evidence.clone(),
                 )?;
-                let schema = node.output.samples().cloned().ok_or_else(|| {
-                    DataFusionError::Execution("map does not produce samples".to_string())
-                })?;
+                // A function of two scalars answers a scalar, which has one unlabelled field on
+                // the grid it is evaluated on; every other function here answers its input's own
+                // fields.
+                let schema = match &node.output {
+                    NativeType::Samples(schema) => Arc::clone(schema),
+                    NativeType::Scalar(grid) => Arc::new(scalar_schema(Arc::clone(grid))),
+                    NativeType::AggregateState(_) => {
+                        return Err(DataFusionError::Execution(
+                            "map does not produce samples or a scalar, but aggregate state"
+                                .to_string(),
+                        ));
+                    }
+                };
                 let literals = parameters
                     .iter()
                     .map(|parameter| match &parameter.expr {
@@ -3276,6 +3293,12 @@ impl RuntimeNode {
                         _ => None,
                     })
                     .collect();
+                // A constant input hands over no chunk of its own, as a constant parameter does:
+                // the map materializes the one chunk it stands for.
+                let input_literal = match &input.expr {
+                    NativeExpr::Scalar(BoundScalar { value }) => Some(*value),
+                    _ => None,
+                };
                 let nodes = parameters
                     .iter()
                     .enumerate()
@@ -3302,6 +3325,8 @@ impl RuntimeNode {
                     map: ParameterizedMapRuntime {
                         op: *op,
                         schema,
+                        input_literal,
+                        input_produced: false,
                         literals,
                         values: vec![None; parameters.len()],
                         parameter_bytes: 0,
@@ -4238,6 +4263,28 @@ impl RuntimeNode {
                     return Err(DataFusionError::Execution(
                         "a map parameter did not hand over its value".to_string(),
                     ));
+                }
+                // A constant input hands over no chunk of its own, as a constant parameter does:
+                // the one chunk it stands for is built here, on the grid the map answers on.
+                if let Some(value) = operation.input_literal
+                    && !std::mem::replace(&mut operation.input_produced, true)
+                {
+                    let grid = operation.schema.eval_grid.clone().ok_or_else(|| {
+                        DataFusionError::Execution(
+                            "a map produces values without a grid".to_string(),
+                        )
+                    })?;
+                    let mut slot = None;
+                    state
+                        .hold_constant(&mut operation.parameter_bytes, &mut slot, grid, value)
+                        .map_err(|error| state.context(error))?;
+                    let series = slot.expect("the constant input was just built");
+                    let chunk = EvaluatedChunk::try_new(series, true)
+                        .map_err(|error| state.context(error))?;
+                    return state
+                        .parameterized_map(operation, chunk)
+                        .map_err(|error| state.context(error))
+                        .map(|output| output.map(NativeChunk::Evaluated));
                 }
                 loop {
                     let chunk = match input.pull(inputs, inputs_finished)? {

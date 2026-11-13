@@ -48,7 +48,7 @@ use promql::extension_plan::{
     FusedSeries, HistogramFold, InputLocality, RawSeriesSource, input_locality,
 };
 use promql::native::plan::{
-    AggregateStage, BoundVectorOp, NativeExpr, NativeNode, NativeType,
+    AggregateStage, BoundVectorOp, NativeExpr, NativeNode, NativeType, ParameterizedOp,
     unifies_its_own_contributions,
 };
 use promql::vector_match::{Cardinality, MatchingLabels};
@@ -3011,6 +3011,46 @@ async fn native_fused_plans_varying_map_parameters() {
     let plan = build_native_fused_plan(query, true).await;
     let fused = find_fused_series(&plan).expect("the match uses the native route");
     assert_eq!(2, fused.children().len(), "{query}");
+}
+
+/// `max_of` and `min_of` are answered by the native route: the statement plans to one fused node
+/// whose root is the scalar map the call binds, and the answer is the value the call computes.
+///
+/// The existing path has a kernel for neither name, so a statement that falls back answers nothing:
+/// what answers these two is the tree, and the number it reports is the call's own.
+#[tokio::test]
+async fn native_fused_answers_max_of_and_min_of_over_two_scalars() {
+    for (query, expected) in [("max_of(1, 2)", 2.0), ("min_of(1, 2)", 1.0)] {
+        let plan = build_native_fused_plan(query, true).await;
+        let fused = find_fused_series(&plan)
+            .unwrap_or_else(|| panic!("a call of two scalars uses the native route: {plan}"));
+        assert!(
+            matches!(
+                fused.tree().root().expr,
+                NativeExpr::ParameterizedMap {
+                    op: ParameterizedOp::MaxOf | ParameterizedOp::MinOf,
+                    ..
+                }
+            ),
+            "{query} bound another root: {}",
+            fused.tree()
+        );
+        let (_, batches) = execute(plan, &build_query_engine_state()).await;
+        let mut answers = Vec::new();
+        for batch in &batches {
+            let values = batch
+                .column(1)
+                .as_any()
+                .downcast_ref::<Float64Array>()
+                .unwrap();
+            answers.extend((0..batch.num_rows()).map(|row| values.value(row)));
+        }
+        assert!(!answers.is_empty(), "{query} answered nothing");
+        assert!(
+            answers.iter().all(|value| *value == expected),
+            "{query} answered {answers:?}"
+        );
+    }
 }
 
 /// The flag on and a shape the compiler accepts: the statement plans to one native node.
