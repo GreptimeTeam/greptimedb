@@ -58,6 +58,15 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display(
+        "duplicate native PromQL output column name(s): {names}; time index, value and tag columns must have distinct names"
+    ))]
+    DuplicateOutputColumns {
+        names: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Unexpected plan or expression: {}", desc))]
     UnexpectedPlanExpr {
         desc: String,
@@ -281,7 +290,8 @@ impl ErrorExt for Error {
             | SystemTimeOutOfRange { .. }
             | AtModifierTimestampOutOfRange { .. }
             | InvalidRegularExpression { .. }
-            | InvalidDestinationLabelName { .. } => StatusCode::InvalidArguments,
+            | InvalidDestinationLabelName { .. }
+            | DuplicateOutputColumns { .. } => StatusCode::InvalidArguments,
 
             UnknownTable { .. } => StatusCode::Internal,
 
