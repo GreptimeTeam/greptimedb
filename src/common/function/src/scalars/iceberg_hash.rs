@@ -39,7 +39,7 @@ use datafusion::arrow::array::ArrayRef;
 use datafusion::arrow::datatypes::DataType;
 use datafusion_common::{DataFusionError, ScalarValue};
 use datafusion_expr::{ColumnarValue, ScalarFunctionArgs, Signature, Volatility};
-use partition::function::{IcebergHash, iceberg_hash_udf, iceberg_hash_values};
+use partition::function::{iceberg_hash_udf, iceberg_hash_values};
 
 use crate::function::Function;
 use crate::function_registry::FunctionRegistry;
@@ -49,50 +49,19 @@ use crate::function_registry::FunctionRegistry;
 /// beyond any practical table.
 const MAX_BUCKETS: i64 = 1024;
 
-/// `iceberg_hash(col)`: the 32-bit Murmur3 that partition rules persist.
-#[derive(Debug)]
-pub(crate) struct IcebergHashFunction {
-    signature: Signature,
-}
-
-impl Default for IcebergHashFunction {
-    fn default() -> Self {
-        Self {
-            signature: Signature::any(1, Volatility::Immutable),
-        }
-    }
-}
+/// `iceberg_hash(col)`: registers the UDF partition rules already plan.
+///
+/// The raw [`iceberg_hash_udf`] is registered instead of a `Function` wrapper:
+/// a wrapper is a different `ScalarUDFImpl` type, and DataFusion compares
+/// expressions by concrete type, so `iceberg_hash(host)` from SQL would not
+/// compare equal to the expression `Operand::IcebergHash::to_logical_expr`
+/// builds. One impl type also keeps a batch from constructing a fresh
+/// `ScalarUDF`.
+pub(crate) struct IcebergHashFunction;
 
 impl IcebergHashFunction {
     pub fn register(registry: &FunctionRegistry) {
-        registry.register_scalar(Self::default());
-    }
-}
-
-impl Function for IcebergHashFunction {
-    fn name(&self) -> &str {
-        IcebergHash::NAME
-    }
-
-    fn return_type(&self, _input_types: &[DataType]) -> datafusion_common::Result<DataType> {
-        Ok(DataType::Int32)
-    }
-
-    fn signature(&self) -> &Signature {
-        &self.signature
-    }
-
-    fn invoke_with_args(
-        &self,
-        args: ScalarFunctionArgs,
-    ) -> datafusion_common::Result<ColumnarValue> {
-        iceberg_hash_udf().invoke_with_args(args)
-    }
-}
-
-impl fmt::Display for IcebergHashFunction {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("ICEBERG_HASH")
+        registry.register(iceberg_hash_udf());
     }
 }
 
@@ -117,24 +86,22 @@ impl IcebergHashBoundsFunction {
     }
 
     /// Returns the bucket count a constant scalar names, or an error naming
-    /// the rejected input.
-    fn bucket_count(scalar: &ScalarValue) -> datafusion_common::Result<i64> {
+    /// the rejected input and the calling function.
+    fn bucket_count(name: &str, scalar: &ScalarValue) -> datafusion_common::Result<i64> {
         let count = match scalar {
             ScalarValue::Int64(Some(v)) => *v,
             ScalarValue::Int32(Some(v)) => i64::from(*v),
             ScalarValue::Int16(Some(v)) => i64::from(*v),
             ScalarValue::Int8(Some(v)) => i64::from(*v),
             ScalarValue::UInt64(Some(v)) => i64::try_from(*v).map_err(|_| {
-                DataFusionError::Execution(format!(
-                    "iceberg_hash_bounds bucket count is too large: {v}"
-                ))
+                DataFusionError::Execution(format!("{name} bucket count is too large: {v}"))
             })?,
             ScalarValue::UInt32(Some(v)) => i64::from(*v),
             ScalarValue::UInt16(Some(v)) => i64::from(*v),
             ScalarValue::UInt8(Some(v)) => i64::from(*v),
             other => {
                 return Err(DataFusionError::Execution(format!(
-                    "iceberg_hash_bounds expects an integer bucket count, got {other:?}"
+                    "{name} expects an integer bucket count, got {other:?}"
                 )));
             }
         };
@@ -143,9 +110,10 @@ impl IcebergHashBoundsFunction {
 
     /// Returns the `n - 1` equal-width breakpoints a constant bucket count
     /// names, or an error when the count is not a constant integer in
-    /// `[2, MAX_BUCKETS]`. Shared with [`IcebergHashRangesSqlFunction`].
-    fn breakpoints_of(&self, scalar: &ScalarValue) -> datafusion_common::Result<Vec<i32>> {
-        equal_split_breakpoints(Self::bucket_count(scalar)?)
+    /// `[2, MAX_BUCKETS]`. Shared with [`IcebergHashRangesSqlFunction`], which
+    /// passes its own name so errors name the function the user called.
+    fn breakpoints_of(name: &str, scalar: &ScalarValue) -> datafusion_common::Result<Vec<i32>> {
+        equal_split_breakpoints(name, Self::bucket_count(name, scalar)?)
     }
 }
 
@@ -186,7 +154,7 @@ impl Function for IcebergHashBoundsFunction {
             return Ok(ColumnarValue::Scalar(ScalarValue::Utf8(None)));
         }
         Ok(ColumnarValue::Scalar(ScalarValue::Utf8(Some(
-            self.breakpoints_of(value)?
+            Self::breakpoints_of(self.name(), value)?
                 .iter()
                 .map(i32::to_string)
                 .collect::<Vec<_>>()
@@ -356,17 +324,14 @@ impl IcebergHashRangesSqlFunction {
 
     /// Renders the rule list from the hashed column name and the bucket count.
     fn ranges_sql(&self, args: &ScalarFunctionArgs) -> datafusion_common::Result<Option<String>> {
-        if args.args.len() != 2 {
+        let [column_name, buckets] = args.args.as_slice() else {
             return Err(DataFusionError::Execution(format!(
                 "{} expects (column, buckets), got {} arguments",
                 self.name(),
                 args.args.len()
             )));
-        }
-        let [name, buckets] = args.args.as_slice() else {
-            unreachable!("length checked above");
         };
-        let (name, buckets) = match (name, buckets) {
+        let (name, buckets) = match (column_name, buckets) {
             (ColumnarValue::Scalar(name), ColumnarValue::Scalar(buckets)) => (name, buckets),
             (ColumnarValue::Array(_), _) | (_, ColumnarValue::Array(_)) => {
                 return Err(DataFusionError::Execution(format!(
@@ -393,7 +358,7 @@ impl IcebergHashRangesSqlFunction {
                 self.name()
             )));
         }
-        let bounds = IcebergHashBoundsFunction::default().breakpoints_of(buckets)?;
+        let bounds = IcebergHashBoundsFunction::breakpoints_of(self.name(), buckets)?;
         // `column` is a raw name, not SQL text: quote it so names with dashes,
         // spaces, dots, quotes or upper case stay a single identifier when the
         // rendered rules are pasted into `PARTITION ON COLUMNS`.
@@ -517,10 +482,10 @@ fn into_hashed_scalar(
 
 /// Returns the `n - 1` equal-width breakpoints of `buckets` over `INT32`,
 /// following `bi = i32::MIN + floor(i * 2^32 / n)`.
-fn equal_split_breakpoints(buckets: i64) -> datafusion_common::Result<Vec<i32>> {
+fn equal_split_breakpoints(name: &str, buckets: i64) -> datafusion_common::Result<Vec<i32>> {
     if !(2..=MAX_BUCKETS).contains(&buckets) {
         return Err(DataFusionError::Execution(format!(
-            "iceberg_hash_bounds expects a bucket count in [2, {MAX_BUCKETS}], got {buckets}"
+            "{name} expects a bucket count in [2, {MAX_BUCKETS}], got {buckets}"
         )));
     }
 
@@ -540,6 +505,8 @@ mod tests {
     use datafusion::arrow::array::{Array, AsArray, Int64Array};
     use datafusion::arrow::datatypes::{DataType, Field, Int32Type};
     use datatypes::value::Value;
+
+    use partition::function::IcebergHash;
 
     use super::*;
     use crate::function_registry::FUNCTION_REGISTRY;
@@ -561,6 +528,22 @@ mod tests {
             .unwrap()
     }
 
+    fn invoke_udf(
+        udf: &datafusion::logical_expr::ScalarUDF,
+        args: Vec<ColumnarValue>,
+        rows: usize,
+        return_type: DataType,
+    ) -> ColumnarValue {
+        udf.invoke_with_args(ScalarFunctionArgs {
+            args,
+            arg_fields: vec![],
+            number_rows: rows,
+            return_field: Arc::new(Field::new("result", return_type, true)),
+            config_options: Arc::new(Default::default()),
+        })
+        .unwrap()
+    }
+
     fn into_scalar(value: ColumnarValue) -> ScalarValue {
         match value {
             ColumnarValue::Scalar(scalar) => scalar,
@@ -570,16 +553,13 @@ mod tests {
 
     #[test]
     fn test_hash_matches_partition_rule() {
-        let function = IcebergHashFunction::default();
-        assert_eq!(function.name(), "iceberg_hash");
-        assert_eq!(
-            function.return_type(&[DataType::Utf8]).unwrap(),
-            DataType::Int32
-        );
+        let udf = iceberg_hash_udf();
+        assert_eq!(udf.name(), "iceberg_hash");
+        assert_eq!(udf.return_type(&[DataType::Utf8]).unwrap(), DataType::Int32);
 
         // Iceberg table spec, appendix B.
-        let hashed = invoke(
-            &function,
+        let hashed = invoke_udf(
+            &udf,
             vec![ColumnarValue::Scalar(ScalarValue::Utf8(Some(
                 "iceberg".to_string(),
             )))],
@@ -589,8 +569,8 @@ mod tests {
         assert_eq!(into_scalar(hashed), ScalarValue::Int32(Some(1210000089)));
 
         // An untyped NULL reaches the UDF as ScalarValue::Null.
-        let untyped_null = invoke(
-            &function,
+        let untyped_null = invoke_udf(
+            &udf,
             vec![ColumnarValue::Scalar(ScalarValue::Null)],
             1,
             DataType::Int32,
@@ -598,8 +578,8 @@ mod tests {
         assert_eq!(into_scalar(untyped_null), ScalarValue::Int32(None));
 
         // Integers hash as Iceberg longs, and NULL hashes to NULL.
-        let array = invoke(
-            &function,
+        let array = invoke_udf(
+            &udf,
             vec![ColumnarValue::Array(Arc::new(Int64Array::from(vec![
                 Some(34),
                 None,
@@ -971,12 +951,17 @@ mod tests {
                 .to_string()
         };
 
-        // Bucket count outside the accepted range names the shared limit.
+        // Bucket count outside the accepted range names the shared limit and
+        // the function the user actually called.
         let err = call(vec![
             ColumnarValue::Scalar(ScalarValue::Utf8(Some("host".to_string()))),
             ColumnarValue::Scalar(ScalarValue::Int64(Some(1))),
         ]);
         assert!(err.contains("bucket count in [2, 1024]"), "{err}");
+        assert!(
+            err.contains("iceberg_hash_ranges_sql expects"),
+            "error must name the caller: {err}"
+        );
 
         // Non-integer bucket count names the shared type error.
         let err = call(vec![
@@ -984,6 +969,10 @@ mod tests {
             ColumnarValue::Scalar(ScalarValue::Utf8(Some("4".to_string()))),
         ]);
         assert!(err.contains("integer bucket count"), "{err}");
+        assert!(
+            err.contains("iceberg_hash_ranges_sql expects"),
+            "error must name the caller: {err}"
+        );
 
         // Non-string column name.
         let err = call(vec![
@@ -1009,6 +998,26 @@ mod tests {
         // Wrong arity.
         let err = call(vec![ColumnarValue::Scalar(ScalarValue::Int64(Some(4)))]);
         assert!(err.contains("expects (column, buckets)"), "{err}");
+    }
+
+    /// The SQL function must be the same `ScalarUDFImpl` the partition planner
+    /// builds, so a query expression compares equal to a rule expression.
+    #[test]
+    fn test_registered_hash_matches_partition_rule_expression() {
+        use datafusion::prelude::col;
+
+        let sql_expr = FUNCTION_REGISTRY
+            .get_function("iceberg_hash")
+            .expect("iceberg_hash is registered")
+            .provide(crate::function::FunctionContext::default())
+            .call(vec![col("host")]);
+        // The exact expression `Operand::IcebergHash` builds while planning a
+        // partition rule.
+        let rule_expr = IcebergHash::new("host").to_logical_expr();
+        assert_eq!(
+            rule_expr, sql_expr,
+            "the registered iceberg_hash must be the UDF partition rules plan"
+        );
     }
 
     /// Functions that share a signature must stay distinct `ScalarUDF`s:
@@ -1111,17 +1120,23 @@ mod tests {
     async fn test_functions_run_through_sql() {
         use datafusion::prelude::SessionContext;
 
-        use crate::scalars::udf::create_udf;
+        use crate::function::FunctionContext;
 
+        // Register what the registry actually exposes, which also pins the
+        // `iceberg_hash` registration to the raw partition-rule UDF.
         let ctx = SessionContext::new();
-        ctx.register_udf(create_udf(Arc::new(IcebergHashFunction::default())));
-        ctx.register_udf(create_udf(Arc::new(IcebergHashBoundsFunction::default())));
-        ctx.register_udf(create_udf(Arc::new(
-            IcebergHashBreakpointsFunction::default(),
-        )));
-        ctx.register_udf(create_udf(
-            Arc::new(IcebergHashRangesSqlFunction::default()),
-        ));
+        for name in [
+            "iceberg_hash",
+            "iceberg_hash_bounds",
+            "iceberg_hash_breakpoints",
+            "iceberg_hash_ranges_sql",
+        ] {
+            let udf = FUNCTION_REGISTRY
+                .get_function(name)
+                .unwrap_or_else(|| panic!("{name} is not registered"))
+                .provide(FunctionContext::default());
+            ctx.register_udf(udf);
+        }
 
         let batches = ctx
             .sql(
