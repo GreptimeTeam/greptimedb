@@ -1,0 +1,14 @@
+name = "tql_view_persistence"
+reason = "Verify a TQL CREATE VIEW persisted as a Substrait plan, with its explicit lookback kept in the view definition, still evaluates correctly after a restart on a newer binary."
+introduced_by = "feat(sql): support TQL evaluation in persisted views"
+topologies = ["standalone", "distributed"]
+# setup.sql uses `CREATE VIEW ... AS TQL EVAL (start, end, step, lookback)`, which only
+# parses on builds that already carry this feature, so the from side has to stay on the
+# 1.4.0 line: today that means a same-candidate restart, and it starts covering real
+# release-to-release restarts from the first release that ships the syntax. `*` would
+# select older released binaries that cannot parse setup.sql. (The runner compares core
+# versions only, so this also admits other 1.4.0 prereleases.)
+from_range = [">=v1.4.0-alpha.0"]
+to_range = [">=v1.4.0-alpha.0"]
+features = ["view", "tql", "substrait", "table", "query"]
+owner = "query"
