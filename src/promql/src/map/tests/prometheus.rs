@@ -22,8 +22,8 @@ use datatypes::series::time::GridRange;
 use crate::golden::{Case, assert_result, cases, hex};
 use crate::map::{
     ArithmeticOp, Comparison, ComparisonOp, MathOp, ScalarOperand, ScalarSeriesOperand,
-    map_arithmetic, map_arithmetic_series, map_compare, map_compare_series, map_math, map_negate,
-    scalar_arithmetic, scalar_compare,
+    constant_series, map_arithmetic, map_arithmetic_series, map_compare_literal,
+    map_compare_series, map_math,
 };
 
 const CASES: &str = include_str!("../prometheus_cases.txt");
@@ -123,7 +123,14 @@ fn evaluate(case: &Case) -> Vec<Series> {
                 .into_iter()
                 .collect()
         }),
-        "neg" => each(&|s| vec![map_negate(schema, s).unwrap()]),
+        // Prometheus' unary minus compiles to `-1 * x`, so the fixture's negations run through the
+        // multiplication kernel the compiler binds for them.
+        "neg" => each(&|s| {
+            vec![
+                map_arithmetic(schema, s, ArithmeticOp::Multiply, ScalarOperand::Left(-1.0))
+                    .unwrap(),
+            ]
+        }),
         "arith" => {
             let operand = scalar_operand(&h[2], hex(&h[3]));
             each(&|s| vec![map_arithmetic(schema, s, arithmetic_op(&h[1]), operand).unwrap()])
@@ -131,8 +138,9 @@ fn evaluate(case: &Case) -> Vec<Series> {
         "cmp" => {
             let operand = scalar_operand(&h[3], hex(&h[4]));
             each(&|s| {
-                map_compare(schema, s, comparison(&h[1], &h[2]), operand)
+                map_compare_literal(schema, s, comparison(&h[1], &h[2]), operand)
                     .unwrap()
+                    .0
                     .into_iter()
                     .collect()
             })
@@ -150,26 +158,31 @@ fn evaluate(case: &Case) -> Vec<Series> {
                 .into_iter()
                 .collect()
         }),
+        // Two constants are folded when the statement is compiled, so what the runtime materializes
+        // is the folded number on the statement's grid, unlabelled and single-field.
         "scalar_arith" => vec![
-            scalar_arithmetic(
+            constant_series(
                 schema,
                 full_grid(),
-                arithmetic_op(&h[1]),
-                [hex(&h[2]), hex(&h[3])],
+                arithmetic_op(&h[1]).calculate(hex(&h[2]), hex(&h[3])),
             )
             .unwrap(),
         ],
-        "scalar_cmp" => vec![
-            scalar_compare(
-                schema,
-                full_grid(),
-                match comparison(&h[1], "bool") {
-                    Comparison::Bool(op) | Comparison::Filter(op) => op,
-                },
-                [hex(&h[2]), hex(&h[3])],
-            )
-            .unwrap(),
-        ],
+        // A comparison of two constants is folded the same way: it reports the number it holds, and
+        // only when the query wrote `bool`, which is why the fixture writes one.
+        "scalar_cmp" => {
+            let op = match comparison(&h[1], "bool") {
+                Comparison::Bool(op) | Comparison::Filter(op) => op,
+            };
+            vec![
+                constant_series(
+                    schema,
+                    full_grid(),
+                    f64::from(op.apply(hex(&h[2]), hex(&h[3]))),
+                )
+                .unwrap(),
+            ]
+        }
         other => panic!("unmapped case kind {other}"),
     }
 }

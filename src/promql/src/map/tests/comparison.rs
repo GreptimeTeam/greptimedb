@@ -30,13 +30,14 @@ fn filter_compares_fields_independently_and_trims_the_output() {
         ],
     );
     let output = mapped(
-        map_compare(
+        map_compare_literal(
             &schema,
             &input,
             Comparison::Filter(ComparisonOp::Greater),
             ScalarOperand::Right(4.0),
         )
-        .unwrap(),
+        .unwrap()
+        .0,
     );
     // Field 1 keeps position 5 and field 0 keeps position 6, so 5 and 6 stay one run; position 7
     // fails in both fields, which costs no row and ends the run; position 8 keeps field 0.
@@ -53,8 +54,9 @@ fn filter_compares_fields_independently_and_trims_the_output() {
     for scalar in [ScalarOperand::Right(100.0), ScalarOperand::Right(f64::NAN)] {
         let filter = Comparison::Filter(ComparisonOp::Greater);
         assert!(
-            map_compare(&schema, &input, filter, scalar)
+            map_compare_literal(&schema, &input, filter, scalar)
                 .unwrap()
+                .0
                 .is_none(),
             "nothing passes, so the filter yields no series"
         );
@@ -70,13 +72,14 @@ fn filter_with_left_scalar_keeps_the_vector_value() {
         vec![floats(&[Some(1.0), Some(3.0), None, Some(4.0)])],
     );
     let output = mapped(
-        map_compare(
+        map_compare_literal(
             &schema,
             &input,
             Comparison::Filter(ComparisonOp::Less),
             ScalarOperand::Left(2.0),
         )
-        .unwrap(),
+        .unwrap()
+        .0,
     );
     // Position 6 holds 3.0 and position 8 holds 4.0; position 7 failed the filter, so it costs no
     // row and the result is two runs rather than one padded stretch.
@@ -100,13 +103,14 @@ fn bool_emits_every_present_field_and_drops_the_name() {
         ],
     );
     let output = mapped(
-        map_compare(
+        map_compare_literal(
             &schema,
             &input,
             Comparison::Bool(ComparisonOp::Equal),
             ScalarOperand::Right(0.0),
         )
-        .unwrap(),
+        .unwrap()
+        .0,
     );
     // Every position keeps a value in at least one field, so the result is one run; a field
     // missing where the other has a value keeps a null row.
@@ -123,20 +127,25 @@ fn bool_emits_every_present_field_and_drops_the_name() {
     assert_eq!(output.metric.tags(), &input.metric.tags()[1..]);
 }
 
+/// A statement of two constants is folded when it is compiled, so what the runtime materializes is
+/// the folded number on the statement's grid: unlabelled, single-field, on the requested range.
 #[test]
 fn scalar_operations_produce_unlabelled_short_ranges() {
     let schema = schema(&["value"]);
     let range = GridRange::try_new(schema.eval_grid.clone().unwrap(), 8, 3).unwrap();
-    let output =
-        scalar_arithmetic(&schema, range.clone(), ArithmeticOp::Power, [0.0, -1.0]).unwrap();
+    let output = constant_series(
+        &schema,
+        range.clone(),
+        ArithmeticOp::Power.calculate(0.0, -1.0),
+    )
+    .unwrap();
     assert_floats(output.fields.get(0).unwrap(), &[Some(f64::INFINITY); 3]);
     assert!(output.metric.name().is_none() && output.metric.tags().is_empty());
     assert!(matches!(&output.time, TimeAxis::Grid(actual) if actual == &range));
-    let output = scalar_compare(
+    let output = constant_series(
         &schema,
         range.clone(),
-        ComparisonOp::NotEqual,
-        [f64::NAN, f64::NAN],
+        f64::from(ComparisonOp::NotEqual.apply(f64::NAN, f64::NAN)),
     )
     .unwrap();
     assert_floats(output.fields.get(0).unwrap(), &[Some(1.0); 3]);
@@ -144,8 +153,11 @@ fn scalar_operations_produce_unlabelled_short_ranges() {
     assert!(matches!(&output.time, TimeAxis::Grid(actual) if actual == &range));
 }
 
+/// A histogram has no ordering against a scalar, so the literal comparison answers no value where
+/// one sits and reports that it dropped it; a raw axis is refused, since there is no grid to
+/// address the result on.
 #[test]
-fn comparisons_reject_raw_axes_and_late_histogram_chunks() {
+fn comparisons_reject_raw_axes_and_drop_histogram_positions() {
     let schema = Arc::new(schema(&["value"]));
     let unsupported = Samples::try_from_chunks(vec![
         floats(&[Some(1.0)]),
@@ -174,14 +186,24 @@ fn comparisons_reject_raw_axes_and_late_histogram_chunks() {
         Comparison::Bool(ComparisonOp::Equal),
         Comparison::Filter(ComparisonOp::Equal),
     ] {
-        for input in [&input, &all_missing] {
-            assert!(matches!(
-                map_compare(&schema, input, comparison, ScalarOperand::Right(1.0)),
-                Err(DataFusionError::NotImplemented(_))
-            ));
-        }
+        // The float position is compared as usual and the histogram position answers nothing: the
+        // result carries the one row the float sits at, and the dropped sample is reported rather
+        // than read as a value or turned into a failed query.
+        let (output, dropped) =
+            map_compare_literal(&schema, &input, comparison, ScalarOperand::Right(1.0)).unwrap();
+        let output = output.expect("the float position is compared");
+        assert_eq!(run_ranges(&output), vec![(3, 1)]);
+        assert!(dropped, "the dropped histogram was not reported");
+        // A histogram-kind segment whose sample is missing holds no position at all, so nothing is
+        // dropped for it, and the float position still answers.
+        let (output, dropped) =
+            map_compare_literal(&schema, &all_missing, comparison, ScalarOperand::Right(1.0))
+                .unwrap();
+        let output = output.expect("the float position is compared");
+        assert_eq!(run_ranges(&output), vec![(3, 1)]);
+        assert!(!dropped);
         assert!(matches!(
-            map_compare(&raw_schema, &raw, comparison, ScalarOperand::Right(1.0)),
+            map_compare_literal(&raw_schema, &raw, comparison, ScalarOperand::Right(1.0)),
             Err(DataFusionError::Execution(_))
         ));
     }
@@ -265,13 +287,14 @@ fn a_filter_over_runs_keeps_exactly_the_runs_that_pass() {
 
     // Greater than 4: field 0 keeps 5 at 0 and 6 at 9; field 1 keeps 8 at 4. Positions 1 and 7
     // fail in both fields.
-    let output = map_compare(
+    let output = map_compare_literal(
         &schema,
         &input,
         Comparison::Filter(ComparisonOp::Greater),
         ScalarOperand::Right(4.0),
     )
     .unwrap()
+    .0
     .expect("positions 0, 4 and 9 keep a value in some field");
     assert_eq!(
         run_ranges(&output),
@@ -325,13 +348,14 @@ fn a_bool_comparison_keeps_the_axis_of_a_sparse_input() {
         vec![(1, 2), (6, 1)]
     );
 
-    let output = map_compare(
+    let output = map_compare_literal(
         &schema,
         &input,
         Comparison::Bool(ComparisonOp::Greater),
         ScalarOperand::Right(10.0),
     )
     .unwrap()
+    .0
     .expect("a bool comparison holds a value at every carried position");
     assert_eq!(
         run_ranges(&output),

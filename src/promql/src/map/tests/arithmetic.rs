@@ -24,6 +24,9 @@ const OPERATIONS: [ArithmeticOp; 7] = [
     ArithmeticOp::Atan2,
 ];
 
+/// `-x` is compiled as `-1 * x`, so this is the kernel path a unary minus takes: the result keeps
+/// the input's missing positions and the payload of a stale NaN, and the multiplication drops the
+/// metric name with the reserved labels that go with it.
 #[test]
 fn unary_negation_drops_name_and_keeps_missing_positions_and_payloads() {
     let schema = schema(&["value"]);
@@ -35,13 +38,30 @@ fn unary_negation_drops_name_and_keeps_missing_positions_and_payloads() {
     );
     let mut typed = input.clone();
     typed.metric.set("__type__", "gauge".into()).unwrap();
-    let output = map_negate(&schema, &typed).unwrap();
+    let output = map_arithmetic(
+        &schema,
+        &typed,
+        ArithmeticOp::Multiply,
+        ScalarOperand::Left(-1.0),
+    )
+    .unwrap();
     let field = output.fields.get(0).unwrap();
     assert_floats(field, &[Some(0.0), Some(-2.5), Some(stale), None]);
     let SampleRef::Float(negated) = field.iter().nth(2).unwrap() else {
         panic!("missing negated NaN");
     };
-    assert_eq!(negated.to_bits(), PROMETHEUS_STALE_NAN_BITS);
+    // A multiplication propagates the NaN operand instead of negating it bit for bit: the sign
+    // stays the input's and the quiet bit is set, where the unary kernel this replaced flipped the
+    // sign with `-v`. IEEE leaves both of those unspecified, and eval resolves staleness by
+    // validity rather than by payload before this kernel runs, so what is pinned is what identifies
+    // the sample: the payload of a stale NaN survives the negation.
+    assert!(negated.is_nan(), "a NaN stayed a NaN: {negated}");
+    const PAYLOAD: u64 = (1 << 51) - 1;
+    assert_eq!(
+        negated.to_bits() & PAYLOAD,
+        PROMETHEUS_STALE_NAN_BITS & PAYLOAD,
+        "the payload of the stale NaN did not survive the multiplication"
+    );
     assert_eq!(output.metric.name(), None);
     assert_eq!(output.metric.tags(), &input.metric.tags()[1..]);
     assert_eq!(output.time.timestamp(0), Some(4000));
@@ -164,7 +184,12 @@ fn arithmetic_rejects_unevaluated_and_histogram_inputs() {
         Samples::try_from_histogram(UInt32Array::from(vec![0]), histogram_batch()).unwrap();
     let input = series(&schema, 2, vec![histogram]);
     assert!(matches!(
-        map_negate(&schema, &input),
+        map_arithmetic(
+            &schema,
+            &input,
+            ArithmeticOp::Multiply,
+            ScalarOperand::Left(-1.0)
+        ),
         Err(DataFusionError::NotImplemented(_))
     ));
     for op in OPERATIONS {
@@ -185,7 +210,12 @@ fn arithmetic_rejects_unevaluated_and_histogram_inputs() {
     )
     .unwrap();
     assert!(matches!(
-        map_negate(&raw_schema, &raw),
+        map_arithmetic(
+            &raw_schema,
+            &raw,
+            ArithmeticOp::Multiply,
+            ScalarOperand::Left(-1.0)
+        ),
         Err(DataFusionError::Execution(_))
     ));
     assert!(matches!(
