@@ -19,6 +19,7 @@ use std::sync::Arc;
 
 use api::v1::region::build_index_request;
 use common_telemetry::{debug, warn};
+use snafu::{IntoError, ResultExt};
 use store_api::metadata::RegionMetadataRef;
 use store_api::region_request::RegionBuildIndexRequest;
 use store_api::storage::{FileId, RegionId};
@@ -26,7 +27,8 @@ use tokio::sync::mpsc;
 
 use crate::cache::CacheStrategy;
 use crate::error::{
-    IndexBuildIncompleteSnafu, InvalidRequestSnafu, RegionStateSnafu, Result, WorkerStoppedSnafu,
+    BuildIndexAsyncSnafu, ExternalSnafu, IndexBuildIncompleteSnafu, InvalidRequestSnafu,
+    RegionStateSnafu, Result, WorkerStoppedSnafu,
 };
 use crate::manifest::action::RegionEdit;
 use crate::metrics::INDEX_PUBLICATION_STALE_TOTAL;
@@ -34,11 +36,14 @@ use crate::region::options::IndexOptions;
 use crate::region::{IndexBuildSource, MitoRegionRef, RegionLeaderState, RegionRoleState};
 use crate::request::{BuildIndexRequest, IndexBuildFinished, IndexBuildStopped, OptionOutputTx};
 use crate::sst::file::{self, FileHandle, FileMeta, RegionFileId, RegionIndexId};
+use crate::sst::index::build::IndexBuildInputs;
+use crate::sst::index::handler::{IndexKindProviderRef, PlanContext};
+use crate::sst::index::registry::{IndexRegistry, IndexRegistryRef};
 use crate::sst::index::{
     IndexBuildOutcome, IndexBuildTask, IndexBuildType, IndexerBuilderImpl, ResultMpscSender,
     cleanup_stale_index_caches,
 };
-use crate::worker::RegionWorkerLoop;
+use crate::worker::{RegionWorkerLoop, index_registry};
 
 /// Parts of a region version that index build tasks need.
 ///
@@ -54,11 +59,12 @@ impl<S> RegionWorkerLoop<S> {
         &self,
         region: &MitoRegionRef,
         snapshot: &IndexBuildSnapshot,
-        file: FileHandle,
-        file_meta: FileMeta,
+        registry: IndexRegistryRef,
+        source: (FileHandle, FileMeta),
         build_type: IndexBuildType,
         result_senders: Vec<ResultMpscSender>,
     ) -> IndexBuildTask {
+        let (file, file_meta) = source;
         let access_layer = region.access_layer.clone();
 
         let puffin_manager = if let Some(write_cache) = self.cache_manager.write_cache() {
@@ -73,15 +79,30 @@ impl<S> RegionWorkerLoop<S> {
             access_layer.intermediate_manager().clone()
         };
 
+        let plan = Arc::new(registry.plan(&PlanContext {
+            metadata: &snapshot.metadata,
+            index_options: &snapshot.index_options,
+            build_type: build_type.clone(),
+            existing_indexes: &file_meta.indexes,
+        }));
+        let index_build_inputs = Some(IndexBuildInputs {
+            output_rows: Some(file_meta.num_rows),
+            plan,
+            inputs: vec![file.with_updated_index(file_meta.clone())].into(),
+            input_puffin_manager: access_layer.build_puffin_manager(),
+            can_merge_inputs: snapshot
+                .metadata
+                .partition_expr
+                .as_deref()
+                .is_none_or(str::is_empty)
+                && file_meta.region_id == region.region_id,
+            memory_limit: None,
+        });
         let indexer_builder_ref = Arc::new(IndexerBuilderImpl {
+            index_build_inputs,
             build_type: build_type.clone(),
             metadata: snapshot.metadata.clone(),
-            index_build_inputs: None,
-            registry: Arc::new(crate::sst::index::registry::IndexRegistry::new(
-                self.config.inverted_index.clone(),
-                self.config.fulltext_index.clone(),
-                self.config.bloom_filter_index.clone(),
-            )),
+            registry: registry.clone(),
             index_options: snapshot.index_options.clone(),
             intermediate_manager,
             puffin_manager,
@@ -105,6 +126,18 @@ impl<S> RegionWorkerLoop<S> {
             indexer_builder: indexer_builder_ref.clone(),
             result_senders,
         }
+    }
+
+    /// Validates providers and the current plan before selecting or scheduling files.
+    fn prepare_rebuild_registry<'a>(
+        &self,
+        snapshot: &IndexBuildSnapshot,
+        build_type: IndexBuildType,
+        files: impl IntoIterator<Item = &'a FileMeta>,
+    ) -> Result<IndexRegistryRef> {
+        let registry = index_registry(&self.config, self.plugins.get::<IndexKindProviderRef>())?;
+        validate_rebuild_plan(&registry, snapshot, build_type, files)?;
+        Ok(registry)
     }
 
     /// Handles manual build index requests.
@@ -223,6 +256,25 @@ impl<S> RegionWorkerLoop<S> {
             file_meta.cloned()
         };
 
+        let registry = match self.prepare_rebuild_registry(
+            &snapshot,
+            request.build_type.clone(),
+            manifest.files.values(),
+        ) {
+            Ok(registry) => registry,
+            Err(err) => {
+                let err = Arc::new(err);
+                for result_sender in &request.result_senders {
+                    let _ = result_sender
+                        .send(Err(
+                            BuildIndexAsyncSnafu { region_id }.into_error(err.clone())
+                        ))
+                        .await;
+                }
+                sender.send(Err(BuildIndexAsyncSnafu { region_id }.into_error(err)));
+                return;
+            }
+        };
         let build_tasks = if request.file_metas.is_empty() {
             // If no specific files are provided, find files whose index is inconsistent with the region metadata.
             // Check the version rather than the manifest: a publication committed
@@ -231,9 +283,11 @@ impl<S> RegionWorkerLoop<S> {
             all_files
                 .values()
                 .filter(|file| {
-                    !file.meta_ref().is_index_consistent_with_region(
-                        &snapshot.metadata.column_metadatas,
-                        &snapshot.index_options,
+                    index_needs_rebuild(
+                        &registry,
+                        &snapshot,
+                        file.meta_ref(),
+                        request.build_type.clone(),
                     )
                 })
                 .filter_map(|file| {
@@ -292,8 +346,8 @@ impl<S> RegionWorkerLoop<S> {
             let task = self.new_index_build_task(
                 &region,
                 &snapshot,
-                file_handle,
-                file_meta,
+                registry.clone(),
+                (file_handle, file_meta),
                 request.build_type.clone(),
                 result_senders,
             );
@@ -336,10 +390,11 @@ impl<S> RegionWorkerLoop<S> {
             let incomplete = present
                 .into_iter()
                 .filter(|file_id| {
-                    !manifest.files[file_id].is_index_consistent_with_region(
+                    let file = &manifest.files[file_id];
+                    !file.is_index_consistent_with_region(
                         &snapshot.metadata.column_metadatas,
                         &snapshot.index_options,
-                    )
+                    ) || index_needs_rebuild(&registry, &snapshot, file, build_type.clone())
                 })
                 .collect::<Vec<_>>();
             let result = if incomplete.is_empty() {
@@ -448,5 +503,312 @@ impl<S> RegionWorkerLoop<S> {
     ) {
         self.index_build_scheduler
             .on_task_stopped(region_id, request.file_id);
+    }
+}
+
+/// Rejects invalid current options before selecting files or scheduling any task.
+fn validate_rebuild_plan<'a>(
+    registry: &IndexRegistry,
+    snapshot: &IndexBuildSnapshot,
+    build_type: IndexBuildType,
+    files: impl IntoIterator<Item = &'a FileMeta>,
+) -> Result<()> {
+    registry
+        .validate_required_kinds(&snapshot.metadata, files)
+        .with_context(|_| ExternalSnafu {
+            context: "validating index handlers for rebuild".to_string(),
+        })?;
+    let plan = registry.plan(&PlanContext {
+        metadata: &snapshot.metadata,
+        index_options: &snapshot.index_options,
+        build_type,
+        existing_indexes: &[],
+    });
+    plan.check_success().context(BuildIndexAsyncSnafu {
+        region_id: snapshot.metadata.region_id,
+    })
+}
+
+fn index_needs_rebuild(
+    registry: &IndexRegistry,
+    snapshot: &IndexBuildSnapshot,
+    file: &FileMeta,
+    build_type: IndexBuildType,
+) -> bool {
+    let context = PlanContext {
+        metadata: &snapshot.metadata,
+        index_options: &snapshot.index_options,
+        build_type,
+        existing_indexes: &file.indexes,
+    };
+    let plan = registry.plan(&context);
+    !plan.is_current(file, &context)
+}
+
+#[cfg(test)]
+mod tests {
+    use common_error::ext::ErrorExt;
+    use common_error::status_code::StatusCode;
+    use store_api::metadata::RegionMetadataBuilder;
+
+    use super::*;
+    use crate::sst::file::ColumnIndexMetadata;
+    use crate::sst::index::handler::{
+        BuildContext, IndexCreator, IndexKindHandler, PlanEntry, PlannedIndex,
+    };
+    use crate::sst::index::kind::{ExtensionIndexKind, IndexKind};
+    use crate::test_util::CreateRequestBuilder;
+
+    #[derive(Debug)]
+    struct MaintenanceHandler;
+
+    impl IndexKindHandler for MaintenanceHandler {
+        fn kinds(&self) -> &[IndexKind] {
+            &[IndexKind::Extension(ExtensionIndexKind::Hll)]
+        }
+
+        fn plan(
+            &self,
+            context: &PlanContext<'_>,
+        ) -> std::result::Result<Option<Arc<dyn PlannedIndex>>, common_error::ext::BoxedError>
+        {
+            let existing = context.existing_indexes.iter().any(|column| {
+                column
+                    .created_indexes
+                    .contains(&crate::sst::file::IndexType::HllIndex)
+            });
+            Ok((existing
+                && matches!(
+                    context.build_type,
+                    IndexBuildType::Manual | IndexBuildType::SchemaChange
+                ))
+            .then(|| Arc::new(Self) as Arc<dyn PlannedIndex>))
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl PlannedIndex for MaintenanceHandler {
+        fn kinds(&self) -> &[IndexKind] {
+            IndexKindHandler::kinds(self)
+        }
+
+        fn entries(&self) -> &[PlanEntry] {
+            &[]
+        }
+
+        async fn build(
+            &self,
+            _context: &BuildContext<'_>,
+        ) -> std::result::Result<Option<Box<dyn IndexCreator>>, common_error::ext::BoxedError>
+        {
+            Ok(None)
+        }
+
+        fn is_current(&self, _file: &FileMeta, _context: &PlanContext<'_>) -> bool {
+            false
+        }
+    }
+
+    fn snapshot_without_builtin_indexes() -> IndexBuildSnapshot {
+        let request = CreateRequestBuilder::new().build();
+        let mut metadata = RegionMetadataBuilder::new(RegionId::new(1, 1));
+        metadata.primary_key(request.primary_key);
+        for mut column in request.column_metadatas {
+            column.column_schema.set_inverted_index(false);
+            column.column_schema.unset_skipping_options().unwrap();
+            metadata.push_column_metadata(column);
+        }
+        IndexBuildSnapshot {
+            metadata: Arc::new(metadata.build().unwrap()),
+            index_options: IndexOptions::default(),
+        }
+    }
+
+    #[test]
+    fn test_rebuild_selection_uses_registered_currency_and_empty_maintenance_plans() {
+        let snapshot = snapshot_without_builtin_indexes();
+        let builtin =
+            IndexRegistry::new(Default::default(), Default::default(), Default::default());
+        let mut registered = builtin.clone();
+        registered.register(Arc::new(MaintenanceHandler)).unwrap();
+        let empty = FileMeta::default();
+        let mut existing = empty.clone();
+        existing.indexes.push(ColumnIndexMetadata {
+            column_id: 0,
+            created_indexes: smallvec::smallvec![crate::sst::file::IndexType::HllIndex],
+            ..Default::default()
+        });
+        // Missing owners are rejected before selection; currency only compares
+        // the plans of registered handlers with the persisted indexes.
+        assert!(
+            builtin
+                .validate_required_kinds(&snapshot.metadata, [&existing])
+                .is_err()
+        );
+        for reason in [IndexBuildType::Manual, IndexBuildType::SchemaChange] {
+            assert!(!index_needs_rebuild(
+                &registered,
+                &snapshot,
+                &empty,
+                reason.clone()
+            ));
+            assert!(
+                index_needs_rebuild(&registered, &snapshot, &existing, reason),
+                "an explicit empty maintenance plan still requests publication"
+            );
+        }
+        for reason in [IndexBuildType::Flush, IndexBuildType::Compact] {
+            assert!(!index_needs_rebuild(
+                &registered,
+                &snapshot,
+                &existing,
+                reason
+            ));
+        }
+    }
+
+    #[derive(Debug)]
+    struct FailingPlanHandler;
+
+    impl IndexKindHandler for FailingPlanHandler {
+        fn kinds(&self) -> &[IndexKind] {
+            &[IndexKind::Extension(ExtensionIndexKind::Hll)]
+        }
+
+        fn plan(
+            &self,
+            _context: &PlanContext<'_>,
+        ) -> std::result::Result<Option<Arc<dyn PlannedIndex>>, common_error::ext::BoxedError>
+        {
+            Err(common_error::ext::BoxedError::new(
+                common_error::ext::PlainError::new(
+                    "injected plan failure".into(),
+                    common_error::status_code::StatusCode::Internal,
+                ),
+            ))
+        }
+    }
+
+    #[test]
+    fn test_failed_plan_requires_rebuild_even_without_planned_entries() {
+        let snapshot = snapshot_without_builtin_indexes();
+        let mut registry =
+            IndexRegistry::new(Default::default(), Default::default(), Default::default());
+        registry.register(Arc::new(FailingPlanHandler)).unwrap();
+        let file = FileMeta {
+            indexes: vec![ColumnIndexMetadata {
+                column_id: 0,
+                created_indexes: smallvec::smallvec![crate::sst::file::IndexType::HllIndex],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        assert!(
+            registry
+                .validate_required_kinds(&snapshot.metadata, [&file])
+                .is_ok()
+        );
+        for reason in [IndexBuildType::Manual, IndexBuildType::SchemaChange] {
+            let plan = registry.plan(&PlanContext {
+                metadata: &snapshot.metadata,
+                index_options: &snapshot.index_options,
+                build_type: reason.clone(),
+                existing_indexes: &file.indexes,
+            });
+            assert!(plan.entries().next().is_none());
+            assert!(plan.check_success().is_err());
+            assert!(index_needs_rebuild(&registry, &snapshot, &file, reason));
+        }
+    }
+
+    #[derive(Debug)]
+    struct DuplicateKindProvider;
+
+    impl crate::sst::index::handler::IndexKindProvider for DuplicateKindProvider {
+        fn handlers(&self) -> Vec<Arc<dyn IndexKindHandler>> {
+            vec![Arc::new(MaintenanceHandler), Arc::new(MaintenanceHandler)]
+        }
+    }
+
+    #[test]
+    fn test_rebuild_registry_registration_failure_is_not_provider_absence() {
+        let config = crate::config::MitoConfig::default();
+        assert!(index_registry(&config, None).is_ok());
+        let error = index_registry(&config, Some(Arc::new(DuplicateKindProvider))).unwrap_err();
+        assert_eq!(error.status_code(), StatusCode::InvalidArguments);
+        assert!(error.to_string().contains("registering index handlers"));
+    }
+
+    #[test]
+    fn test_rebuild_preflight_rejects_plan_failure_before_file_selection() {
+        let snapshot = snapshot_without_builtin_indexes();
+        let mut registry =
+            IndexRegistry::new(Default::default(), Default::default(), Default::default());
+        assert!(validate_rebuild_plan(&registry, &snapshot, IndexBuildType::Manual, []).is_ok());
+        registry.register(Arc::new(FailingPlanHandler)).unwrap();
+        assert!(validate_rebuild_plan(&registry, &snapshot, IndexBuildType::Manual, []).is_err());
+    }
+
+    #[test]
+    fn test_required_handlers_cover_schema_and_both_persisted_locations() {
+        use crate::sst::file::IndexType;
+        let registry =
+            IndexRegistry::new(Default::default(), Default::default(), Default::default());
+        for kind in [IndexType::HllIndex, IndexType::KllIndex, IndexType::MgIndex] {
+            let mut snapshot = snapshot_without_builtin_indexes();
+            let schema =
+                &mut Arc::make_mut(&mut snapshot.metadata).column_metadatas[0].column_schema;
+            let (key, value) = match kind {
+                IndexType::HllIndex => (datatypes::schema::HLL_KEY, r#"{"precision":10}"#),
+                IndexType::KllIndex => (datatypes::schema::KLL_KEY, r#"{"capacity":64}"#),
+                IndexType::MgIndex => (datatypes::schema::MG_KEY, r#"{"max-counters":64}"#),
+                _ => unreachable!(),
+            };
+            schema.mut_metadata().insert(key.into(), value.into());
+            assert!(
+                registry
+                    .validate_required_kinds(&snapshot.metadata, [])
+                    .is_err()
+            );
+            assert!(
+                validate_rebuild_plan(&registry, &snapshot, IndexBuildType::Manual, []).is_err()
+            );
+            assert!(
+                registry
+                    .plan(&PlanContext {
+                        metadata: &snapshot.metadata,
+                        index_options: &snapshot.index_options,
+                        build_type: IndexBuildType::Flush,
+                        existing_indexes: &[],
+                    })
+                    .check_success()
+                    .is_ok()
+            );
+            let snapshot = snapshot_without_builtin_indexes();
+            for column_level in [false, true] {
+                let mut file = FileMeta::default();
+                if column_level {
+                    file.indexes.push(ColumnIndexMetadata {
+                        column_id: 0,
+                        created_indexes: smallvec::smallvec![kind],
+                        ..Default::default()
+                    });
+                } else {
+                    file.available_indexes.push(kind);
+                }
+                assert!(
+                    validate_rebuild_plan(&registry, &snapshot, IndexBuildType::Manual, [&file])
+                        .is_err()
+                );
+            }
+        }
+        let snapshot = snapshot_without_builtin_indexes();
+        let legacy = FileMeta {
+            available_indexes: smallvec::smallvec![IndexType::VectorIndex],
+            ..Default::default()
+        };
+        assert!(
+            validate_rebuild_plan(&registry, &snapshot, IndexBuildType::Manual, [&legacy]).is_ok()
+        );
     }
 }

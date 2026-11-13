@@ -28,7 +28,7 @@ use store_api::storage::ColumnId;
 
 use crate::read::Batch;
 use crate::region::options::IndexOptions;
-use crate::sst::file::{ColumnIndexMetadata, FileHandle, RegionIndexId};
+use crate::sst::file::{ColumnIndexMetadata, FileHandle, FileMeta, RegionIndexId};
 use crate::sst::index::intermediate::IntermediateManager;
 use crate::sst::index::kind::IndexKind;
 use crate::sst::index::puffin_manager::{SstPuffinManager, SstPuffinWriter};
@@ -104,6 +104,12 @@ pub trait IndexKindHandler: Send + Sync + Debug {
     /// entirely built-in or entirely extension kinds.
     fn kinds(&self) -> &[IndexKind];
 
+    /// Validates options at region creation, even when this lifecycle event does
+    /// not build indexes. Implementations can override operation-specific planning.
+    fn validate(&self, context: &PlanContext<'_>) -> Result<(), BoxedError> {
+        self.plan(context).map(|_| ())
+    }
+
     /// Prepares typed parameters. `None` means no work; an empty entry list may
     /// still request removal of obsolete descriptors during maintenance.
     fn plan(&self, context: &PlanContext<'_>) -> Result<Option<Arc<dyn PlannedIndex>>, BoxedError>;
@@ -123,6 +129,10 @@ pub trait PlannedIndex: Send + Sync + Debug {
         &self,
         context: &BuildContext<'_>,
     ) -> Result<Option<Box<dyn IndexCreator>>, BoxedError>;
+
+    /// Whether persisted entries satisfy this plan.
+    /// The context uses the same file's indexes as the planning input.
+    fn is_current(&self, file: &FileMeta, context: &PlanContext<'_>) -> bool;
 
     /// Whether building this plan can reuse persisted input summaries.
     /// Row-only plans do not require checking input object existence.
