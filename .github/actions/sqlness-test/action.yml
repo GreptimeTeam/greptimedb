@@ -58,11 +58,17 @@ runs:
       run: |
         aws s3 rm s3://${{ inputs.aws-ci-test-bucket }}/${{ inputs.data-root }} --recursive
     - name: Export kind logs
-      if: failure()
+      if: failure() || cancelled()
+      timeout-minutes: 5
       shell: bash
-      run: kind export logs /tmp/kind
+      run: |
+        mkdir -p /tmp/kind
+        kubectl --request-timeout=30s get pods -A -o wide > /tmp/kind/pods.txt 2>&1 || true
+        kubectl --request-timeout=30s get events -A --sort-by=.metadata.creationTimestamp > /tmp/kind/events.txt 2>&1 || true
+        kubectl --request-timeout=30s describe pods -A > /tmp/kind/pod-descriptions.txt 2>&1 || true
+        kind export logs /tmp/kind
     - name: Upload logs
-      if: failure()
+      if: failure() || cancelled()
       uses: actions/upload-artifact@v4
       with:
         name: kind-logs
