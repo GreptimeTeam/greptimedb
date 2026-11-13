@@ -590,22 +590,20 @@ async fn test_reconcile_table_preserves_column_order_and_pk_order() {
 
     // 6. SHOW CREATE TABLE q8 asserts columns ts, a, b and PRIMARY KEY (b, a).
     let output = execute_sql(&frontend, "SHOW CREATE TABLE q8").await;
-    let expected = r#"+-------+-------------------------------------+
-| Table | Create Table                        |
-+-------+-------------------------------------+
-| q8    | CREATE TABLE IF NOT EXISTS "q8" (   |
-|       |   "ts" TIMESTAMP(3) NOT NULL,       |
-|       |   "a" STRING NULL,                  |
-|       |   "b" STRING NULL,                  |
-|       |   TIME INDEX ("ts"),                |
-|       |   PRIMARY KEY ("b", "a")            |
-|       | )                                   |
-|       | PARTITION ON COLUMNS ("b") (        |
-|       |                                     |
-|       | )                                   |
-|       | ENGINE=mito                         |
-|       |                                     |
-+-------+-------------------------------------+"#;
+    let expected = r#"+-------+-----------------------------------+
+| Table | Create Table                      |
++-------+-----------------------------------+
+| q8    | CREATE TABLE IF NOT EXISTS "q8" ( |
+|       |   "ts" TIMESTAMP(3) NOT NULL,     |
+|       |   "a" STRING NULL,                |
+|       |   "b" STRING NULL,                |
+|       |   TIME INDEX ("ts"),              |
+|       |   PRIMARY KEY ("b", "a")          |
+|       | )                                 |
+|       |                                   |
+|       | ENGINE=mito                       |
+|       |                                   |
++-------+-----------------------------------+"#;
     check_output_stream(output.data, expected).await;
 }
 
