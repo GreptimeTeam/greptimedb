@@ -33,25 +33,31 @@ use std::task::{Context, Poll};
 
 use common_error::ext::BoxedError;
 use common_query::series_frame::{
-    pack_raw_series, raw_series_frame_schema_with_ordering, unpack_raw_series,
+    frame_schema_with, pack_raw_series, raw_series_frame_schema_with_ordering,
+    series_frame_ordering, unpack_raw_series,
 };
 use datafusion::arrow::datatypes::SchemaRef;
+use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::common::tree_node::TreeNodeRecursion;
 use datafusion::common::{DFSchema, DFSchemaRef};
 use datafusion::error::{DataFusionError, Result as DataFusionResult};
 use datafusion::execution::context::TaskContext;
 use datafusion::logical_expr::{Expr, LogicalPlan, UserDefinedLogicalNodeCore};
 use datafusion::physical_expr::{EquivalenceProperties, PhysicalExpr};
+use datafusion::physical_plan::coop::CooperativeExec;
 use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
+use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
 use datafusion::physical_plan::{
     DisplayAs, DisplayFormatType, Distribution, ExecutionPlan, InputDistributionRequirements,
     Partitioning, PlanProperties, SendableRecordBatchStream,
 };
 use datatypes::series::SeriesOrdering;
-use datatypes::series::frame::LabelDecodeSpec;
+use datatypes::series::frame::{
+    FrameContent, FrameLabelMode, LabelDecodeSpec, SeriesFrameDeclaration,
+};
 use datatypes::series::raw::RawSeriesChunk;
 use datatypes::series::samples::{FieldSpec, SeriesSchema};
-use futures::Stream;
+use futures::{Stream, StreamExt};
 use greptime_proto::substrait_extension::RawSeriesSource as RawSeriesSourceProto;
 use prost::Message;
 use store_api::region_engine::{RawLabelSource, RawSeriesStream, SendableRawSeriesStream};
@@ -158,6 +164,25 @@ impl RawSeriesSource {
             self.fields.clone(),
             true,
         )?))
+    }
+}
+
+/// Returns the per-series scan below `input`, if `input` is one behind transparent wrappers.
+///
+/// A caller declares the child a per-series scan; this confirms the plan below still is one. The
+/// physical optimizer may put a [`CooperativeExec`] around the scan, because a leaf that does not
+/// yield cooperatively gets one, and that wrapper keeps the scan's partitions, its ordering and its
+/// output unchanged. Only that wrapper is looked through: any node that redistributes or reorders
+/// rows - an exchange, a coalesce, a sort - breaks the one-series-one-partition contract this
+/// answer is about, so its presence must answer `None` rather than be seen through.
+fn per_series_scan_child(input: &Arc<dyn ExecutionPlan>) -> Option<&SeriesScanExec> {
+    let mut node = input.as_ref();
+    loop {
+        if let Some(scan) = node.downcast_ref::<SeriesScanExec>() {
+            return Some(scan);
+        }
+        let cooperative = node.downcast_ref::<CooperativeExec>()?;
+        node = cooperative.input().as_ref();
     }
 }
 
@@ -279,8 +304,59 @@ pub struct RawSeriesSourceExec {
     input: Arc<dyn ExecutionPlan>,
     metric_name: Arc<str>,
     series_schema: Arc<SeriesSchema>,
+    /// The frame schema this node publishes, derived from the fields and [`ORDERING`].
+    frame_schema: SchemaRef,
+    /// The child's own frame schema when every batch only needs to be re-declared under
+    /// [`Self::frame_schema`], as [`pass_through_frame`] decided at construction.
+    pass_through: Option<SchemaRef>,
     properties: Arc<PlanProperties>,
     per_series_scan: bool,
+}
+
+/// The child's frame schema when the child already publishes this node's frame.
+///
+/// Such a child needs no decode and no re-encode: publishing each batch under this node's
+/// declaration is the whole job. "This node's frame" is the canonical frame of these fields with
+/// explicit labels and no label decode description, which is what the decode-and-repack path would
+/// publish for the same chunks, so the declared ordering is the only difference that can remain -
+/// and only downwards. This node declares [`ORDERING`], the weakest per-series promise it keeps, so
+/// a child that promises key-then-time already keeps it, while an interleaved child does not:
+/// forwarding that one would promise more than the child does.
+///
+/// Anything else - other content, key-encoded labels, a description, a grid, other fields, a
+/// metadata entry this node would not write - keeps the batches on the decode-and-repack path.
+fn pass_through_frame(
+    child_plan: &Arc<dyn ExecutionPlan>,
+    child: &SchemaRef,
+    series_schema: &Arc<SeriesSchema>,
+) -> Option<SchemaRef> {
+    // Only a producer that already runs the sequence validator may be forwarded without decoding:
+    // the schema alone does not prove the payload is well-formed or that chains close correctly.
+    // Anything else keeps the decode-and-repack path.
+    let mut node = child_plan.as_ref();
+    loop {
+        if node.downcast_ref::<SeriesScanExec>().is_some() {
+            break;
+        }
+        node = node.downcast_ref::<CooperativeExec>()?.input().as_ref();
+    }
+    let declaration = SeriesFrameDeclaration::parse(child.as_ref()).ok()?;
+    if declaration.content() != FrameContent::Raw
+        || declaration.labels() != FrameLabelMode::Explicit
+        || declaration.label_decode().is_some()
+    {
+        return None;
+    }
+    let ordering = series_frame_ordering(child.as_ref()).ok()?;
+    if ordering == SeriesOrdering::Interleaved {
+        return None;
+    }
+    // Equality with the canonical frame proves the rest: an explicit-label raw frame of these
+    // fields, in this order and with no grid, is exactly the schema a batch is published under
+    // after it was decoded and re-encoded.
+    let canonical =
+        frame_schema_with(series_schema, FrameLabelMode::Explicit, None, ordering).ok()?;
+    (*canonical == **child).then(|| Arc::clone(child))
 }
 
 impl RawSeriesSourceExec {
@@ -290,7 +366,7 @@ impl RawSeriesSourceExec {
         fields: Vec<String>,
         per_series_scan: bool,
     ) -> DataFusionResult<Self> {
-        let per_series_scan = per_series_scan && input.downcast_ref::<SeriesScanExec>().is_some();
+        let per_series_scan = per_series_scan && per_series_scan_child(&input).is_some();
         let series_schema = series_schema(&fields);
         let partition_count = input.properties().partitioning.partition_count();
         if partition_count == 0 {
@@ -298,18 +374,21 @@ impl RawSeriesSourceExec {
                 "RawSeriesSourceExec child has zero partitions".to_string(),
             ));
         }
-        // Rejects a child that is not a raw frame of these fields before the plan can run.
+        // Rejects a child that is not a raw frame of these fields before the plan can run, and
+        // validates the declared layout, the label binding of that layout, and an empty batch.
         unpack_raw_series(
-            Box::pin(
-                datafusion::physical_plan::stream::RecordBatchStreamAdapter::new(
-                    input.schema(),
-                    futures::stream::empty(),
-                ),
-            ),
+            Box::pin(RecordBatchStreamAdapter::new(
+                input.schema(),
+                futures::stream::empty(),
+            )),
             Some(Arc::clone(&series_schema)),
         )?;
+        let published_frame = frame_schema(&fields)?;
+        // That preflight is all this node validates before it runs; a child that already writes
+        // this node's frame then needs nothing but a re-declaration per batch.
+        let pass_through = pass_through_frame(&input, &input.schema(), &series_schema);
         let properties = Arc::new(PlanProperties::new(
-            EquivalenceProperties::new(frame_schema(&fields)?),
+            EquivalenceProperties::new(Arc::clone(&published_frame)),
             Partitioning::UnknownPartitioning(partition_count),
             EmissionType::Incremental,
             Boundedness::Bounded,
@@ -318,6 +397,8 @@ impl RawSeriesSourceExec {
             input,
             metric_name,
             series_schema,
+            frame_schema: published_frame,
+            pass_through,
             properties,
             per_series_scan,
         })
@@ -410,6 +491,28 @@ impl ExecutionPlan for RawSeriesSourceExec {
             )));
         }
         let frames = self.input.execute(partition, context)?;
+        if let Some(child_schema) = &self.pass_through {
+            // The child already writes this node's frame, so a batch differs only in the ordering
+            // it declares. Re-declaring keeps the child's column data untouched and publishes
+            // exactly the schema the plan was built with; one batch in, one batch out, so the
+            // child's polling and backpressure are unchanged.
+            let declared = Arc::clone(&self.frame_schema);
+            let child_schema = Arc::clone(child_schema);
+            let batches = frames.map(move |batch| {
+                let batch = batch?;
+                if batch.schema() != child_schema {
+                    return Err(DataFusionError::Execution(
+                        "raw frame schema mismatch".to_string(),
+                    ));
+                }
+                RecordBatch::try_new(Arc::clone(&declared), batch.columns().to_vec())
+                    .map_err(DataFusionError::from)
+            });
+            return Ok(Box::pin(RecordBatchStreamAdapter::new(
+                Arc::clone(&self.frame_schema),
+                batches,
+            )));
+        }
         let raw = unpack_raw_series(frames, Some(Arc::clone(&self.series_schema)))?;
         let relabelled = materialize_raw_labels(raw)
             .map_err(|error| DataFusionError::External(Box::new(error)))?;
@@ -421,14 +524,53 @@ impl ExecutionPlan for RawSeriesSourceExec {
 }
 
 #[cfg(test)]
-mod tests {
-    use datafusion::arrow::datatypes::DataType;
+pub(crate) mod tests {
+    use api::v1::SemanticType;
+    use common_query::series_frame::label_decode_spec;
+    use common_recordbatch::EmptyRecordBatchStream;
+    use datafusion::arrow::array::Float64Array;
+    use datafusion::arrow::buffer::{Buffer, ScalarBuffer};
+    use datafusion::arrow::datatypes::{DataType, Schema as ArrowSchema};
+    use datafusion::datasource::memory::MemorySourceConfig;
+    use datafusion::datasource::source::DataSourceExec;
     use datafusion::logical_expr::EmptyRelation;
+    use datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec;
+    use datafusion::physical_plan::execution_plan::{
+        ChildrenPropertiesMode, ReplaceChildrenOptions,
+    };
+    use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
+    use datafusion::prelude::SessionContext;
+    use datatypes::data_type::ConcreteDataType;
+    use datatypes::prelude::Value;
+    use datatypes::schema::{ColumnSchema, SchemaRef as DatatypesSchemaRef};
+    use datatypes::series::frame::{
+        LABEL_DECODE_VERSION, LabelDecodeColumn, LabelDecodeEncoding, LabelDecodeTag,
+        pack_raw_series_chunk,
+    };
+    use datatypes::series::raw::RawTimestamps;
+    use datatypes::series::samples::{Samples, SeriesFields};
+    use datatypes::series::time::{EvalGrid, GridSpec};
+    use datatypes::series::{Label, SeriesLabels};
+    use futures::TryStreamExt;
+    use mito_codec::row_converter::{DensePrimaryKeyCodec, PrimaryKeyCodec, SortField};
+    use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder, RegionMetadataRef};
+    use store_api::region_engine::{
+        BoundTag, PrepareRequest, QueryScanContext, RegionScanner, ScannerProperties,
+    };
+    use store_api::storage::{RegionId, ScanRequest};
+    use table::table::scan::RegionScanExec;
 
     use super::*;
 
     const FIXTURE: &str =
         include_str!("../../../../tests/compatibility/wire/raw_series_source/v1_payload.hex");
+
+    /// The one field the fixtures below scan, which is also the field this node declares.
+    const FIELD: &str = "value";
+
+    fn declared_fields() -> Vec<String> {
+        vec![FIELD.to_string()]
+    }
 
     fn fixture_bytes() -> Vec<u8> {
         let hex = FIXTURE.trim().as_bytes();
@@ -510,5 +652,813 @@ mod tests {
         let mut bytes = fixture;
         bytes.extend([0x28, 0x01]);
         assert!(RawSeriesSource::deserialize(&bytes).is_ok());
+    }
+
+    /// The region layout the fixtures below scan: the tag `host`, the time index and one field.
+    fn region_metadata() -> RegionMetadataRef {
+        let mut builder = RegionMetadataBuilder::new(RegionId::new(1024, 1));
+        builder
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "host",
+                    ConcreteDataType::string_datatype(),
+                    false,
+                ),
+                semantic_type: SemanticType::Tag,
+                column_id: 1,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "ts",
+                    ConcreteDataType::timestamp_millisecond_datatype(),
+                    false,
+                )
+                .with_time_index(true),
+                semantic_type: SemanticType::Timestamp,
+                column_id: 2,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(FIELD, ConcreteDataType::float64_datatype(), true),
+                semantic_type: SemanticType::Field,
+                column_id: 3,
+            })
+            .primary_key(vec![1]);
+        Arc::new(builder.build().expect("the fixture metadata is valid"))
+    }
+
+    /// The label binding a per-series scan of [`region_metadata`] publishes: the one key column is
+    /// bound, so one series' chunks stay in one scan partition.
+    fn per_series_labels() -> RawLabelSource {
+        RawLabelSource::PrimaryKey {
+            metric_name: Arc::from("cpu"),
+            physical_metadata: region_metadata(),
+            logical_tags: Arc::from([BoundTag {
+                column_id: 1,
+                name: Arc::from("host"),
+            }]),
+        }
+    }
+
+    /// The region's scanner, answering the raw-series path the region planner selects.
+    ///
+    /// A raw scan answers with `chunks`, packed by the scanner's own pack: it declares them by
+    /// label when `explicit_labels` is set, which is what makes the scan's frame the one the source
+    /// publishes, and promises `ordering` for the keys it emits.
+    struct RawSeriesScanner {
+        metadata: RegionMetadataRef,
+        properties: ScannerProperties,
+        chunks: Vec<RawSeriesChunk>,
+        explicit_labels: bool,
+        ordering: SeriesOrdering,
+    }
+
+    /// The scanner's raw series answer: `chunks` under the binding the scan declared.
+    struct RawChunks {
+        schema: Arc<SeriesSchema>,
+        label_source: RawLabelSource,
+        label_decode_spec: Option<LabelDecodeSpec>,
+        ordering: SeriesOrdering,
+        chunks: Vec<RawSeriesChunk>,
+    }
+
+    impl Stream for RawChunks {
+        type Item = Result<RawSeriesChunk, BoxedError>;
+
+        fn poll_next(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+            Poll::Ready((!self.chunks.is_empty()).then(|| Ok(self.chunks.remove(0))))
+        }
+    }
+
+    impl RawSeriesStream for RawChunks {
+        fn schema(&self) -> &Arc<SeriesSchema> {
+            &self.schema
+        }
+
+        fn label_source(&self) -> &RawLabelSource {
+            &self.label_source
+        }
+
+        fn label_decode_spec(&self) -> Option<&LabelDecodeSpec> {
+            self.label_decode_spec.as_ref()
+        }
+
+        fn ordering(&self) -> SeriesOrdering {
+            self.ordering
+        }
+    }
+
+    impl fmt::Debug for RawSeriesScanner {
+        fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+            write!(f, "RawSeriesScanner")
+        }
+    }
+
+    impl DisplayAs for RawSeriesScanner {
+        fn fmt_as(&self, _format: DisplayFormatType, f: &mut Formatter<'_>) -> fmt::Result {
+            write!(f, "RawSeriesScanner")
+        }
+    }
+
+    impl RegionScanner for RawSeriesScanner {
+        fn name(&self) -> &str {
+            "RawSeriesScanner"
+        }
+
+        fn properties(&self) -> &ScannerProperties {
+            &self.properties
+        }
+
+        fn schema(&self) -> DatatypesSchemaRef {
+            Arc::clone(&self.metadata.schema)
+        }
+
+        fn metadata(&self) -> RegionMetadataRef {
+            Arc::clone(&self.metadata)
+        }
+
+        fn prepare(&mut self, request: PrepareRequest) -> Result<(), BoxedError> {
+            self.properties.prepare(request);
+            Ok(())
+        }
+
+        fn scan_partition(
+            &self,
+            _ctx: &QueryScanContext,
+            _metrics: &ExecutionPlanMetricsSet,
+            _partition: usize,
+        ) -> Result<common_recordbatch::SendableRecordBatchStream, BoxedError> {
+            Ok(Box::pin(EmptyRecordBatchStream::new(Arc::clone(
+                &self.metadata.schema,
+            ))))
+        }
+
+        fn raw_series_schema(
+            &self,
+            _label_source: &RawLabelSource,
+        ) -> Result<Option<Arc<SeriesSchema>>, BoxedError> {
+            Ok(Some(series_schema(&declared_fields())))
+        }
+
+        fn raw_series_has_explicit_labels(
+            &self,
+            _label_source: &RawLabelSource,
+        ) -> Result<bool, BoxedError> {
+            Ok(self.explicit_labels)
+        }
+
+        fn raw_series_ordering(&self) -> Result<SeriesOrdering, BoxedError> {
+            Ok(self.ordering)
+        }
+
+        fn scan_series_partition(
+            &self,
+            _ctx: &QueryScanContext,
+            _metrics: &ExecutionPlanMetricsSet,
+            _partition: usize,
+            label_source: &RawLabelSource,
+        ) -> Result<Option<SendableRawSeriesStream>, BoxedError> {
+            Ok(Some(Box::pin(RawChunks {
+                schema: series_schema(&declared_fields()),
+                label_source: label_source.clone(),
+                // An explicit answer carries its labels in the chunks themselves and declares no
+                // description, exactly as the binding's own frame mode says.
+                label_decode_spec: if self.explicit_labels {
+                    None
+                } else {
+                    label_decode_spec(label_source)
+                },
+                ordering: self.ordering,
+                chunks: self.chunks.clone(),
+            })))
+        }
+
+        fn has_predicate_without_region(&self) -> bool {
+            true
+        }
+
+        fn add_dyn_filter_to_predicate(
+            &mut self,
+            filter_exprs: Vec<Arc<dyn PhysicalExpr>>,
+        ) -> Vec<bool> {
+            vec![false; filter_exprs.len()]
+        }
+
+        fn set_logical_region(&mut self, logical_region: bool) {
+            self.properties.set_logical_region(logical_region);
+        }
+
+        fn set_query_load_region_id(&mut self, region_id: RegionId) {
+            self.properties.set_query_load_region_id(region_id);
+        }
+    }
+
+    /// A region's native raw-series leaf over `partitions` scan partitions.
+    pub(crate) fn per_series_scan(partitions: usize) -> Arc<dyn ExecutionPlan> {
+        per_series_scan_with(partitions, Vec::new(), false, SeriesOrdering::Contiguous)
+    }
+
+    /// A region's native raw-series leaf answering `chunks`, declaring them by label when
+    /// `explicit_labels` and promising `ordering`.
+    fn per_series_scan_with(
+        partitions: usize,
+        chunks: Vec<RawSeriesChunk>,
+        explicit_labels: bool,
+        ordering: SeriesOrdering,
+    ) -> Arc<dyn ExecutionPlan> {
+        let scanner = RawSeriesScanner {
+            metadata: region_metadata(),
+            properties: ScannerProperties::new(vec![vec![]; partitions], false, 0),
+            chunks,
+            explicit_labels,
+            ordering,
+        };
+        let scan = Arc::new(
+            RegionScanExec::new(Box::new(scanner), ScanRequest::default(), None)
+                .expect("the fixture scanner scans"),
+        );
+        scan.try_to_series_scan(per_series_labels())
+            .expect("the fixture binding is legal")
+            .expect("the fixture scanner answers raw series")
+    }
+
+    /// A [`RawSeriesSourceExec`] over `child`, as the region planner builds one.
+    pub(crate) fn raw_source(child: Arc<dyn ExecutionPlan>) -> Arc<dyn ExecutionPlan> {
+        let fields = declared_fields();
+        RawSeriesSource::try_new(
+            Arc::from("cpu"),
+            vec!["host".to_string()],
+            fields.clone(),
+            LogicalPlan::EmptyRelation(EmptyRelation {
+                produce_one_row: false,
+                schema: Arc::new(
+                    DFSchema::try_from(frame_schema(&fields).expect("the frame is legal"))
+                        .expect("the frame is a legal schema"),
+                ),
+            }),
+        )
+        .expect("the source binds one metric")
+        .to_per_series_execution_plan(child)
+        .expect("the child is a raw frame of these fields")
+    }
+
+    fn provenance(plan: &Arc<dyn ExecutionPlan>) -> bool {
+        plan.downcast_ref::<RawSeriesSourceExec>()
+            .expect("the fixture root is the region's raw source")
+            .is_per_series_scan()
+    }
+
+    /// Rebuilds `plan` over `child` the way the physical optimizer does, recomputing its properties.
+    fn rebuilt_over(
+        plan: &Arc<dyn ExecutionPlan>,
+        child: Arc<dyn ExecutionPlan>,
+    ) -> Arc<dyn ExecutionPlan> {
+        Arc::clone(plan)
+            .replace_children(
+                vec![child],
+                ReplaceChildrenOptions::new(ChildrenPropertiesMode::Recompute),
+            )
+            .expect("the child is still a raw frame of these fields")
+    }
+
+    #[test]
+    fn a_cooperative_child_keeps_the_per_series_provenance() {
+        let root = raw_source(per_series_scan(2));
+        assert!(provenance(&root), "the fixture root is the per-series case");
+
+        // The physical optimizer wraps a leaf that does not yield cooperatively, so the scan arrives
+        // as a child of a wrapper instead of as the child itself.
+        let cooperative: Arc<dyn ExecutionPlan> =
+            Arc::new(CooperativeExec::new(per_series_scan(2)));
+        let rebuilt = rebuilt_over(&root, Arc::clone(&cooperative));
+        assert_eq!(
+            2,
+            rebuilt.properties().output_partitioning().partition_count()
+        );
+        assert!(
+            provenance(&rebuilt),
+            "a cooperative wrapper passes rows through unchanged, so the scan is still per-series"
+        );
+
+        // Repeating the wrapper changes nothing either.
+        let nested: Arc<dyn ExecutionPlan> = Arc::new(CooperativeExec::new(cooperative));
+        assert!(
+            provenance(&rebuilt_over(&root, nested)),
+            "wrappers nest without moving rows"
+        );
+    }
+
+    #[test]
+    fn a_child_that_moves_rows_loses_the_per_series_provenance() {
+        let root = raw_source(per_series_scan(2));
+        // Coalescing merges the scan's partitions, so one series is no longer confined to one of the
+        // partitions this node publishes.
+        let coalesced: Arc<dyn ExecutionPlan> =
+            Arc::new(CoalescePartitionsExec::new(per_series_scan(2)));
+        assert!(
+            !provenance(&rebuilt_over(&root, coalesced)),
+            "the provenance stops at the scan, not at whatever node carries its frames"
+        );
+    }
+
+    /// The series the fixture chunks below belong to: `{__name__="cpu", host}`.
+    fn labels_of(host: &str) -> SeriesLabels {
+        SeriesLabels::try_new(
+            Some(Arc::from("cpu")),
+            vec![Label {
+                name: Arc::from("host"),
+                value: Arc::from(host),
+            }],
+        )
+        .expect("the fixture labels are legal")
+    }
+
+    /// The one series the frame fixtures below publish: `{__name__="cpu", host="a"}`.
+    fn fixture_labels() -> SeriesLabels {
+        labels_of("a")
+    }
+
+    /// The description a dense key of the one string column `host` declares.
+    fn host_decode() -> LabelDecodeSpec {
+        LabelDecodeSpec {
+            version: LABEL_DECODE_VERSION,
+            metric_name: "cpu".to_string(),
+            encoding: LabelDecodeEncoding::Dense,
+            primary_key: vec![LabelDecodeColumn {
+                column_id: 1,
+                name: "host".to_string(),
+                physical_type: ConcreteDataType::string_datatype(),
+            }],
+            logical_tags: vec![LabelDecodeTag {
+                column_id: 1,
+                name: "host".to_string(),
+            }],
+        }
+    }
+
+    /// The dense key bytes of `{host=host}`.
+    fn key_of(host: &str) -> Buffer {
+        let mut bytes = Vec::new();
+        DensePrimaryKeyCodec::with_fields(vec![(
+            1,
+            SortField::new(ConcreteDataType::string_datatype()),
+        )])
+        .encode_values(&[(1, Value::String(host.into()))], &mut bytes)
+        .expect("a dense key of one string");
+        Buffer::from(bytes)
+    }
+
+    /// The dense key bytes of `{host="a"}`.
+    fn host_key() -> Buffer {
+        key_of("a")
+    }
+
+    /// One chunk of the series at `host` over `times`, closing its chain when `is_last`.
+    ///
+    /// Nothing here checks the chunk against its neighbours, so this is how an invalid sequence is
+    /// produced: the chunk alone is legal, the order of chunks is not.
+    fn series_chunk(host: &str, times: &[i64], is_last: bool) -> RawSeriesChunk {
+        let values = vec![Some(1.0); times.len()];
+        RawSeriesChunk::try_new(
+            &series_schema(&declared_fields()),
+            key_of(host),
+            Some(labels_of(host)),
+            RawTimestamps::try_new(ScalarBuffer::from(times.to_vec()))
+                .expect("ascending timestamps"),
+            SeriesFields::try_from_vec(vec![Samples::from_float(Float64Array::from(values))])
+                .expect("one sample per timestamp per field"),
+            is_last,
+        )
+        .expect("a legal raw chunk")
+    }
+
+    /// One chunk of the fixture series: carrying `metric`, or naming it by [`host_key`] instead.
+    fn fixture_chunk(metric: Option<SeriesLabels>) -> RawSeriesChunk {
+        RawSeriesChunk::try_new(
+            &series_schema(&declared_fields()),
+            host_key(),
+            metric,
+            RawTimestamps::try_new(ScalarBuffer::from(vec![1000i64, 2000, 3000]))
+                .expect("ascending timestamps"),
+            SeriesFields::try_from_vec(vec![Samples::from_float(Float64Array::from(vec![
+                Some(1.0),
+                Some(2.5),
+                None,
+            ]))])
+            .expect("one sample per timestamp per field"),
+            true,
+        )
+        .expect("a legal raw chunk")
+    }
+
+    /// The frame this node publishes for `fields`.
+    fn root_frame(fields: &[String]) -> SchemaRef {
+        frame_schema(fields).expect("the fixture frame is legal")
+    }
+
+    /// The frame a child declares over this node's fields.
+    fn child_frame(decode: Option<&LabelDecodeSpec>, ordering: SeriesOrdering) -> SchemaRef {
+        let schema = series_schema(&declared_fields());
+        let (labels, decode) = match decode {
+            Some(decode) => (FrameLabelMode::Key, Some(decode)),
+            None => (FrameLabelMode::Explicit, None),
+        };
+        frame_schema_with(&schema, labels, decode, ordering)
+            .expect("the fixture declares one frame")
+    }
+
+    /// The one frame batch of `chunk`, declared under `frame`.
+    fn frame_batch(
+        chunk: &RawSeriesChunk,
+        decode: Option<&LabelDecodeSpec>,
+        frame: &SchemaRef,
+    ) -> RecordBatch {
+        let labels = match decode {
+            Some(_) => FrameLabelMode::Key,
+            None => FrameLabelMode::Explicit,
+        };
+        let packed =
+            pack_raw_series_chunk(&series_schema(&declared_fields()), labels, decode, chunk)
+                .expect("the fixture chunk packs");
+        assert_eq!(1, packed.len(), "one chunk is one frame row");
+        RecordBatch::try_new(Arc::clone(frame), packed[0].columns().to_vec())
+            .expect("the packed columns match the declared frame")
+    }
+
+    /// A child leaf answering `batches` under `frame`, in one partition.
+    fn framed_child(frame: SchemaRef, batches: Vec<RecordBatch>) -> Arc<dyn ExecutionPlan> {
+        Arc::new(DataSourceExec::new(Arc::new(
+            MemorySourceConfig::try_new(&[batches], frame, None)
+                .expect("the fixture batches match their frame"),
+        )))
+    }
+
+    /// Every batch this node publishes for its one partition.
+    async fn publish(root: &Arc<dyn ExecutionPlan>) -> Vec<RecordBatch> {
+        let published = root
+            .execute(0, SessionContext::default().task_ctx())
+            .expect("the fixture root has one partition");
+        published.try_collect().await.expect("the frame publishes")
+    }
+
+    /// The error this node reports instead of publishing anything more.
+    async fn publish_error(root: &Arc<dyn ExecutionPlan>) -> String {
+        let mut stream = root
+            .execute(0, SessionContext::default().task_ctx())
+            .expect("the fixture root has one partition");
+        loop {
+            match stream.try_next().await {
+                Ok(Some(_)) => continue,
+                Ok(None) => panic!("the malformed sequence was published instead of rejected"),
+                Err(error) => return error.to_string(),
+            }
+        }
+    }
+
+    /// The frame this node decided to forward, if it forwards at all.
+    fn forwarded_frame_of(plan: &Arc<dyn ExecutionPlan>) -> Option<SchemaRef> {
+        plan.downcast_ref::<RawSeriesSourceExec>()
+            .expect("the fixture root is the region's raw source")
+            .pass_through
+            .clone()
+    }
+
+    /// Only the native scan's own frames are forwarded.
+    ///
+    /// A frame schema alone proves nothing about the payload: the same frame can come from a
+    /// producer that never validated a sequence. The scan is the one chain that packs through the
+    /// sequence validator, so it is the only child trusted without decoding, and a wrapper that
+    /// moves no rows keeps that trust.
+    #[test]
+    fn only_a_scan_chain_is_trusted_to_forward_its_frames() {
+        let schema = series_schema(&declared_fields());
+        let canonical = child_frame(None, SeriesOrdering::KeyThenTime);
+
+        let memory = framed_child(Arc::clone(&canonical), Vec::new());
+        assert!(
+            pass_through_frame(&memory, &canonical, &schema).is_none(),
+            "an identical frame from an unverified producer still needs decoding"
+        );
+
+        let scan = per_series_scan_with(1, Vec::new(), true, SeriesOrdering::KeyThenTime);
+        let scan_frame = scan.schema();
+        assert_eq!(
+            canonical.as_ref(),
+            scan_frame.as_ref(),
+            "the scan writes the very frame the unverified child was refused for"
+        );
+        assert!(
+            pass_through_frame(&scan, &scan_frame, &schema).is_some(),
+            "the scan validated its own chunks while packing them"
+        );
+
+        let wrapped: Arc<dyn ExecutionPlan> = Arc::new(CooperativeExec::new(scan));
+        let wrapped_frame = wrapped.schema();
+        assert!(
+            pass_through_frame(&wrapped, &wrapped_frame, &schema).is_some(),
+            "a cooperative wrapper moves rows, not series, so the scan's validation still holds"
+        );
+
+        let coalesced: Arc<dyn ExecutionPlan> =
+            Arc::new(CoalescePartitionsExec::new(per_series_scan(2)));
+        let coalesced_frame = coalesced.schema();
+        assert!(
+            pass_through_frame(&coalesced, &coalesced_frame, &schema).is_none(),
+            "a node that merges partitions may hand rows on in any order, so it is not a scan"
+        );
+    }
+
+    /// A per-series scan's frames are published, not decoded and re-encoded.
+    ///
+    /// The columns are handed on as they are, and this node's declared frame is what a decode and a
+    /// re-encode would produce anyway, so the only thing a batch needs is this node's own
+    /// declaration - including the ordering, which the scan promises more strongly than this node
+    /// does.
+    #[tokio::test]
+    async fn a_per_series_scan_frame_is_published_without_decoding_it() {
+        let scan = per_series_scan_with(
+            1,
+            vec![series_chunk("a", &[1000, 2000], true)],
+            true,
+            SeriesOrdering::KeyThenTime,
+        );
+        let root = raw_source(Arc::clone(&scan));
+        assert!(
+            forwarded_frame_of(&root).is_some(),
+            "the scan's frame is forwarded"
+        );
+
+        let published = publish(&root).await;
+        assert_eq!(
+            SeriesOrdering::KeyThenTime,
+            series_frame_ordering(scan.schema().as_ref()).expect("a declared ordering"),
+            "the scan promises key-then-time"
+        );
+        assert_eq!(1, published.len(), "one batch in, one batch out");
+        assert_eq!(
+            root.schema().as_ref(),
+            published[0].schema().as_ref(),
+            "the batch is published under this node's own frame"
+        );
+        assert_eq!(
+            SeriesOrdering::Contiguous,
+            series_frame_ordering(published[0].schema().as_ref()).expect("a declared ordering"),
+            "the scan's finer promise is exchanged for this node's own"
+        );
+
+        // The bytes are the scan's own: re-declaring the scan's batch under this node's frame is
+        // exactly what the published batch is.
+        let scan_batches = publish(&scan).await;
+        assert_eq!(1, scan_batches.len(), "the scan publishes one batch");
+        let re_declared = RecordBatch::try_new(
+            root_frame(&declared_fields()),
+            scan_batches[0].columns().to_vec(),
+        )
+        .expect("the same columns under this node's frame");
+        assert_eq!(
+            vec![re_declared],
+            published,
+            "forwarding re-declares a batch, it never rewrites one"
+        );
+    }
+
+    /// A child whose frame is this node's own is still decoded when nothing vouches for it.
+    ///
+    /// This is the case the shortcut must refuse: byte-identical declaration, unverified payload.
+    /// The decoded path re-encodes the batch, so no row of an unvalidated producer is published as
+    /// it arrived.
+    #[tokio::test]
+    async fn an_unverified_child_keeps_the_pack_path_even_with_this_nodes_frame() {
+        let frame = child_frame(None, SeriesOrdering::KeyThenTime);
+        let payload = series_chunk("a", &[1000, 2000, 3000], true);
+        let batch = frame_batch(&payload, None, &frame);
+        let root = raw_source(framed_child(Arc::clone(&frame), vec![batch.clone()]));
+        assert!(
+            forwarded_frame_of(&root).is_none(),
+            "a matching frame is not proof that its payload was validated"
+        );
+
+        let published = publish(&root).await;
+        let expected = frame_batch(&payload, None, &root_frame(&declared_fields()));
+        assert_eq!(vec![expected], published);
+        assert!(
+            !Arc::ptr_eq(batch.column(0), published[0].column(0)),
+            "the unverified child's columns are re-encoded, not forwarded"
+        );
+    }
+
+    /// A forwarded frame carries exactly what the decode-and-repack path publishes.
+    ///
+    /// The same series is offered twice: once through the scan, which this node forwards after
+    /// exchanging the scan's key-then-time promise for its own `contiguous` one, and once through a
+    /// child it cannot trust, which it decodes. The two outputs are the same frame, byte for byte,
+    /// so forwarding is not an approximation of the old path.
+    #[tokio::test]
+    async fn a_forwarded_frame_carries_what_the_decoded_path_publishes() {
+        let chunks = vec![series_chunk("a", &[1000, 2000], true)];
+
+        let forwarded = publish(&raw_source(per_series_scan_with(
+            1,
+            chunks.clone(),
+            true,
+            SeriesOrdering::KeyThenTime,
+        )))
+        .await;
+
+        let decoded_frame = child_frame(None, SeriesOrdering::Interleaved);
+        let decoded = publish(&raw_source(framed_child(
+            Arc::clone(&decoded_frame),
+            chunks
+                .iter()
+                .map(|chunk| frame_batch(chunk, None, &decoded_frame))
+                .collect(),
+        )))
+        .await;
+
+        assert_eq!(1, forwarded.len(), "the forwarded batch is not split");
+        assert_eq!(1, decoded.len(), "the decoded path flushes one batch");
+        assert_eq!(
+            forwarded, decoded,
+            "both paths publish the same frame, so the shortcut changes no byte"
+        );
+    }
+
+    /// A malformed sequence from a child this node does not trust is rejected, not published.
+    ///
+    /// The chunk-local checks a frame cannot see are exactly what the shortcut would skip: a chain
+    /// that never closes, a key that recurs after its final chunk, timestamps that go back across
+    /// chunks, and keys that go back under key-then-time order. Each child here declares a frame
+    /// and packs legal chunks, so only the decode path's cross-chunk validation catches them.
+    #[tokio::test]
+    async fn an_unverified_child_malformed_sequences_are_rejected() {
+        struct Case {
+            name: &'static str,
+            chunks: Vec<RawSeriesChunk>,
+            ordering: SeriesOrdering,
+            error: &'static str,
+        }
+
+        let cases = vec![
+            Case {
+                name: "a chain that never closes",
+                chunks: vec![series_chunk("a", &[1000], false)],
+                ordering: SeriesOrdering::Contiguous,
+                error: "ended before key was final",
+            },
+            Case {
+                name: "a key that recurs after its final chunk",
+                chunks: vec![
+                    series_chunk("a", &[1000], true),
+                    series_chunk("a", &[2000], true),
+                ],
+                ordering: SeriesOrdering::Contiguous,
+                error: "key recurred after final chunk",
+            },
+            Case {
+                name: "a timestamp that goes back across chunks",
+                chunks: vec![
+                    series_chunk("a", &[3000], false),
+                    series_chunk("a", &[2000], true),
+                ],
+                ordering: SeriesOrdering::Contiguous,
+                error: "timestamps are not increasing across chunks",
+            },
+            Case {
+                name: "a key that goes back under key-then-time order",
+                chunks: vec![
+                    series_chunk("b", &[1000], true),
+                    series_chunk("a", &[2000], true),
+                ],
+                ordering: SeriesOrdering::KeyThenTime,
+                error: "keys are not ordered",
+            },
+        ];
+
+        for case in cases {
+            let name = case.name;
+            let frame = child_frame(None, case.ordering);
+            let batches = case
+                .chunks
+                .iter()
+                .map(|chunk| frame_batch(chunk, None, &frame))
+                .collect();
+            let root = raw_source(framed_child(Arc::clone(&frame), batches));
+            assert!(
+                forwarded_frame_of(&root).is_none(),
+                "{name}: an unverified producer is never forwarded"
+            );
+            let error = publish_error(&root).await;
+            assert!(error.contains(case.error), "{name}: {error}");
+        }
+    }
+
+    /// The forwarding path keeps the scan's own validation.
+    ///
+    /// A scan that ends before closing its key is refused where it packs, so the frames this node
+    /// forwards are the ones that already passed the checks the shortcut would skip.
+    #[tokio::test]
+    async fn a_forwarded_scan_still_reports_a_malformed_sequence() {
+        let root = raw_source(per_series_scan_with(
+            1,
+            vec![series_chunk("a", &[1000], false)],
+            true,
+            SeriesOrdering::Contiguous,
+        ));
+        assert!(
+            forwarded_frame_of(&root).is_some(),
+            "the scan's frame is forwarded"
+        );
+
+        let error = publish_error(&root).await;
+        assert!(error.contains("ended before key was final"), "{error}");
+    }
+
+    /// A key-encoded child is decoded, not forwarded: its frame names its labels by its key.
+    ///
+    /// Decoding `{host="a"}` from the declared description has to land on the same explicit frame
+    /// the labels themselves would have produced.
+    #[tokio::test]
+    async fn a_key_encoded_child_frame_is_decoded() {
+        let decode = host_decode();
+        let keyed_frame = child_frame(Some(&decode), SeriesOrdering::KeyThenTime);
+        let keyed = frame_batch(&fixture_chunk(None), Some(&decode), &keyed_frame);
+        let published = publish(&raw_source(framed_child(keyed_frame, vec![keyed]))).await;
+
+        let explicit_frame = child_frame(None, SeriesOrdering::Contiguous);
+        let expected = frame_batch(
+            &fixture_chunk(Some(fixture_labels())),
+            None,
+            &explicit_frame,
+        );
+        assert_eq!(
+            vec![expected],
+            published,
+            "the decoded key publishes the explicit frame's own bytes"
+        );
+    }
+
+    /// A child frame this node would not have written is re-encoded even when it is explicit.
+    ///
+    /// The extra metadata is not this node's declaration, so forwarding the batch would publish
+    /// rows under a frame they were not written against; the decoded path rewrites them instead.
+    #[tokio::test]
+    async fn a_foreign_explicit_child_frame_keeps_the_pack_path() {
+        let canonical = child_frame(None, SeriesOrdering::Contiguous);
+        let mut metadata = canonical.metadata().clone();
+        metadata.insert("application.note".to_string(), "foreign".to_string());
+        let foreign = Arc::new(ArrowSchema::new_with_metadata(
+            canonical.fields().clone(),
+            metadata,
+        ));
+        let payload = fixture_chunk(Some(fixture_labels()));
+        let batch = frame_batch(&payload, None, &foreign);
+        let published = publish(&raw_source(framed_child(foreign, vec![batch.clone()]))).await;
+
+        assert_eq!(1, published.len());
+        assert_eq!(
+            root_frame(&declared_fields()).as_ref(),
+            published[0].schema().as_ref(),
+            "the published frame is this node's, not the child's"
+        );
+        assert!(
+            !Arc::ptr_eq(batch.column(0), published[0].column(0)),
+            "the child's columns are rewritten, not forwarded"
+        );
+        let expected = frame_batch(&payload, None, &root_frame(&declared_fields()));
+        assert_eq!(vec![expected], published);
+    }
+
+    /// A child that is not a raw frame is refused while the plan is built, as it always was.
+    #[test]
+    fn a_non_raw_child_is_refused_before_the_plan_runs() {
+        let evaluated = Arc::new(SeriesSchema {
+            fields: series_schema(&declared_fields()).fields.clone(),
+            eval_grid: Some(Arc::new(
+                EvalGrid::try_new(GridSpec::try_new(0, 1_000, 2).expect("a legal grid"))
+                    .expect("a legal grid"),
+            )),
+        });
+        let frame = frame_schema_with(
+            &evaluated,
+            FrameLabelMode::Explicit,
+            None,
+            SeriesOrdering::Contiguous,
+        )
+        .expect("an evaluated frame declares its grid");
+        let error = RawSeriesSource::try_new(
+            Arc::from("cpu"),
+            vec!["host".to_string()],
+            declared_fields(),
+            LogicalPlan::EmptyRelation(EmptyRelation {
+                produce_one_row: false,
+                schema: Arc::new(DFSchema::empty()),
+            }),
+        )
+        .expect("the source binds one metric")
+        .to_per_series_execution_plan(framed_child(frame, vec![]))
+        .expect_err("an evaluated child is not a raw frame");
+        assert!(
+            error.to_string().contains("expected a raw frame"),
+            "the preflight decides, not the shortcut: {error}"
+        );
     }
 }

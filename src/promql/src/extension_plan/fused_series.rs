@@ -91,17 +91,18 @@ use store_api::region_engine::RawLabelSource;
 use table::table::scan::SeriesScanExec;
 
 use crate::evaluated::EvaluatedChunk;
-use crate::extension_plan::SeriesRouting;
 use crate::extension_plan::series_repartition::SeriesRepartitionExec;
+use crate::extension_plan::{RawSeriesSourceExec, SeriesRouting};
+use crate::grid_series::METADATA_LABELS;
 use crate::histogram_eval::HISTOGRAM_ROUTING_EXCLUDED_LABELS;
 use crate::native::execute::{InputId, NativeExecutionState, NativeExecutor};
 use crate::native::plan::{
-    AggregateStage, Grouping, InstantValue, NativeExpr, NativeNode, NativeTree, NativeType,
-    reads_across_series,
+    AggregateStage, BoundMap, Grouping, InstantValue, MapOp, NativeExpr, NativeNode, NativeTree,
+    NativeType, reads_across_series,
 };
 use crate::native::state::{StateChunk, state_row_from_frame_row};
 use crate::source::materialize_raw_labels;
-use crate::vector_match::{DuplicateEvidence, MatchingLabels};
+use crate::vector_match::{BinaryMatching, BinaryOp, DuplicateEvidence, MatchingLabels};
 
 #[cfg(test)]
 mod tests;
@@ -2244,14 +2245,199 @@ pub struct FusedSeriesExec {
     properties: Arc<PlanProperties>,
 }
 
-fn preserves_partition_identity(node: &NativeNode) -> bool {
+/// The label facts a per-series scan states about the series below a tree.
+///
+/// A `PrimaryKey` binding names one metric and lists the tags it binds, so every stored series under
+/// it reports that name and exactly those tags. A walk that has to decide whether a node that drops
+/// the metric name still tells two stored series apart needs both: the name such a node drops is the
+/// one every series of the scan shares, and what is left to tell them apart are the tags.
+#[derive(Clone, Debug)]
+struct StoredSeriesLabels {
+    /// Every tag name a stored series reports besides its metric name.
+    tags: Arc<[Arc<str>]>,
+    /// Whether the primary key keeps telling two stored series apart once a name-dropping kernel
+    /// has normalized their labels.
+    ///
+    /// Two facts make that true. The tags and the primary key must be free of the metadata labels:
+    /// `__type__` and `__unit__` go with the metric name when a kernel drops it, so a binding that
+    /// keys a series by either of them stops telling two series apart once the name is gone. And
+    /// every primary-key column must always decode a value, which is what a non-nullable column
+    /// states. A kernel that drops the name drops every label whose value is empty with it, and a
+    /// nullable column lets one series hold `NULL` while another holds `''`: two different storage
+    /// keys, which decode to an absent label and to an empty one, so both are handed over as no
+    /// label at all once the empty one is dropped. Two such series that agree on every other tag
+    /// then leave as one identity, whether they arrive in one partition or in two.
+    keys_survive_metadata_drop: bool,
+}
+
+impl StoredSeriesLabels {
+    /// The labels `label_source` proves about every stored series it reads.
+    fn of(label_source: &RawLabelSource) -> Option<Self> {
+        // A `PrimaryKey` binding names one metric, which is what makes the name a name-dropping node
+        // removes constant over the series below it.
+        let RawLabelSource::PrimaryKey {
+            physical_metadata,
+            logical_tags,
+            ..
+        } = label_source
+        else {
+            return None;
+        };
+        let metadata = |name: &str| METADATA_LABELS.contains(&name);
+        Some(Self {
+            tags: logical_tags
+                .iter()
+                .map(|tag| Arc::clone(&tag.name))
+                .collect(),
+            keys_survive_metadata_drop: logical_tags.iter().all(|tag| !metadata(&tag.name))
+                && physical_metadata.primary_key_columns().all(|column| {
+                    // A nullable key column can be `NULL` in one series and `''` in another, and a
+                    // name-dropping kernel turns both into no label; only a column that always
+                    // decodes a value keeps the two apart under such a kernel.
+                    !metadata(&column.column_schema.name) && !column.column_schema.is_nullable()
+                }),
+        })
+    }
+
+    /// Whether the tags that tell stored series apart are all among the tags the rows carry.
+    ///
+    /// The rows this node emits carry `output` and no other label, so a tag the output does not name
+    /// is one the rows drop: two stored series that differ only there would leave as one identity.
+    fn answers_every_tag(&self, output: &[String]) -> bool {
+        self.tags
+            .iter()
+            .all(|tag| output.iter().any(|column| column.as_str() == tag.as_ref()))
+    }
+}
+
+/// Whether every series `node` emits is one series it read, under labels that still tell it apart.
+///
+/// A leaf reads one stored series at a time, and an instant selection of the sample, an instant
+/// selection of an info sample and a filtering comparison hand that series over under the labels it
+/// read.
+///
+/// `labels` states what the scan below the tree proves about those labels: the tags each stored
+/// series reports, and whether they tell two of them apart once the metadata labels and the empty
+/// values are gone. A node that drops the metric name - a range function such as `rate`,
+/// `timestamp`, a math or histogram map, a parameterized map, and an arithmetic or `bool` scalar
+/// broadcast - drops `__type__` and `__unit__` with it, and normalizes away every empty label value.
+/// The name such a node drops is the one a single-metric scan binds for every series it reads, so
+/// dropping it merges nothing; such a node therefore keeps two series apart exactly when the scan
+/// keys its series by labels that survive the drop, which is what `labels` states. Without that
+/// proof the name is part of what tells two series apart, and the node can file two of them under
+/// one output label set - as it can when the key it drops the empty value of is one column of the
+/// two series that holds `NULL` in one of them and `''` in the other.
+///
+/// Everything else answers one series per group or set it names, or pairs several inputs, so an
+/// identity above it is not an identity of what it read.
+fn preserves_partition_identity(node: &NativeNode, labels: Option<&StoredSeriesLabels>) -> bool {
+    let metadata_drop_keeps_series_apart =
+        || labels.is_some_and(|labels| labels.keys_survive_metadata_drop);
     match &node.expr {
         NativeExpr::Input(_) => true,
         NativeExpr::Instant { input, op } => {
-            op.value == InstantValue::Sample && preserves_partition_identity(input)
+            // Only `timestamp(x)` drops the name; a selection of the sample or of an info sample
+            // keeps the labels it read.
+            let drops_metadata = op.value == InstantValue::Timestamp;
+            (!drops_metadata || metadata_drop_keeps_series_apart())
+                && preserves_partition_identity(input, labels)
         }
+        NativeExpr::Window { input, op } => {
+            (!op.function.drops_metric_name() || metadata_drop_keeps_series_apart())
+                && preserves_partition_identity(input, labels)
+        }
+        NativeExpr::Timestamp { input } => {
+            metadata_drop_keeps_series_apart() && preserves_partition_identity(input, labels)
+        }
+        NativeExpr::Map { input, op } => map_preserves_partition_identity(input, op, labels),
+        NativeExpr::ParameterizedMap {
+            input, parameters, ..
+        } => {
+            // The parameters are scalars that read no source, so they carry no labels of the series
+            // this node reaches; the kernel drops the name as a math map does.
+            metadata_drop_keeps_series_apart()
+                && parameters.iter().all(reads_no_source)
+                && preserves_partition_identity(input, labels)
+        }
+        NativeExpr::Binary {
+            left,
+            right,
+            matching,
+        } => broadcast_preserves_partition_identity(left, right, matching, labels),
         _ => false,
     }
+}
+
+/// Whether a point-wise map keeps every series it reads apart, given what the scan states.
+///
+/// A math kernel drops the metric name and a histogram kernel drops the name alone, so both need the
+/// proof a name-dropping window needs. A label rewrite writes a destination of its own: a label no
+/// series carries cannot make two of them equal, so writing one keeps them apart, while writing a
+/// label some series carries - or a metadata label, `__name__` among them - can fold two series into
+/// one label set. `None` when the input's labels are not derivable, because a destination that may
+/// already be carried proves nothing.
+fn map_preserves_partition_identity(
+    input: &NativeNode,
+    op: &BoundMap,
+    labels: Option<&StoredSeriesLabels>,
+) -> bool {
+    let mut carried = labels.map(|labels| labels.tags.to_vec());
+    let mut drops_metadata = false;
+    for operation in op.ops.iter() {
+        match operation {
+            MapOp::Label(rewrite) => {
+                let Some(carried) = carried.as_mut() else {
+                    return false;
+                };
+                let destination = rewrite.destination();
+                if METADATA_LABELS.contains(&destination)
+                    || carried.iter().any(|tag| tag.as_ref() == destination)
+                {
+                    return false;
+                }
+                // A rewrite that can only write an empty value deletes its destination, which
+                // publishes no label a later operation could carry.
+                if rewrite.writes_value() {
+                    carried.push(Arc::from(destination));
+                }
+            }
+            MapOp::Math(_) | MapOp::Histogram(_) => drops_metadata = true,
+        }
+    }
+    (!drops_metadata || labels.is_some_and(|labels| labels.keys_survive_metadata_drop))
+        && preserves_partition_identity(input, labels)
+}
+
+/// Whether a binary node with a source-free scalar on one side keeps every series of its vector side
+/// apart.
+///
+/// A scalar carries no labels, so the operation reaches each series of the vector side as it is. An
+/// arithmetic operation and a `bool` comparison drop the metric name and the metadata labels with
+/// it, so each needs the proof a name-dropping map needs; a filtering comparison keeps the label set
+/// it read, which is exactly the identity its input had.
+fn broadcast_preserves_partition_identity(
+    left: &NativeNode,
+    right: &NativeNode,
+    matching: &BinaryMatching,
+    labels: Option<&StoredSeriesLabels>,
+) -> bool {
+    let (vector, scalar) = if matches!(left.output, NativeType::Scalar(_)) {
+        (right, left)
+    } else {
+        (left, right)
+    };
+    // `scalar(a)` is a scalar that read a whole vector, so only a value that reads no source is one
+    // this node can pair with each series on its own.
+    if !matches!(scalar.output, NativeType::Scalar(_)) || !reads_no_source(scalar) {
+        return false;
+    }
+    let keeps_labels = !matching.return_bool
+        && matches!(
+            matching.op,
+            BinaryOp::Eq | BinaryOp::Ne | BinaryOp::Gt | BinaryOp::Lt | BinaryOp::Ge | BinaryOp::Le
+        );
+    (keeps_labels || labels.is_some_and(|labels| labels.keys_survive_metadata_drop))
+        && preserves_partition_identity(vector, labels)
 }
 
 /// Returns whether the scan's bound logical tags cover every user-visible primary-key column.
@@ -2282,32 +2468,84 @@ fn bound_tags_cover_primary_key(label_source: &RawLabelSource) -> bool {
     })
 }
 
+/// What the plan below a fused node proves about the series it hands over.
+enum InputProof {
+    /// A per-series scan whose bound tags cover its primary key: every stored series is one series
+    /// here, and the labels its binding states tell the walk what a stored series carries.
+    Scan(Option<StoredSeriesLabels>),
+    /// A producer that already confines each identity to one partition, whose labels this node has
+    /// no binding to enumerate.
+    Confined,
+}
+
+/// The proof `plan` states about the series below it, through the wrappers that pass rows on.
+fn complete_series_input(plan: &dyn ExecutionPlan) -> Option<InputProof> {
+    if let Some(scan) = plan.downcast_ref::<SeriesScanExec>() {
+        let binding = scan.scan_binding();
+        return bound_tags_cover_primary_key(binding)
+            .then(|| InputProof::Scan(StoredSeriesLabels::of(binding)));
+    }
+    if let Some(source) = plan.downcast_ref::<RawSeriesSourceExec>() {
+        // The provenance flag only says the child is a SeriesScanExec; it does not say the bound
+        // tags cover the primary key. Check the child the same way the direct SeriesScanExec branch
+        // does, so a raw source cannot claim disjointness a bare scan would refuse.
+        if !source.is_per_series_scan() {
+            return None;
+        }
+        return complete_series_input(source.children().first()?.as_ref());
+    }
+    if let Some(cooperative) = plan.downcast_ref::<CooperativeExec>() {
+        return complete_series_input(cooperative.children().first()?.as_ref());
+    }
+    plan.downcast_ref::<FusedSeriesExec>()
+        .filter(|fused| fused.has_partition_disjoint_identities())
+        .map(|_| InputProof::Confined)
+}
+
 impl FusedSeriesExec {
     /// Returns whether each output series identity is confined to one input partition.
     ///
-    /// This is true only for a single per-series scan with every primary-key tag bound (or another
-    /// proven fused chain) whose native tree consists solely of identity-preserving instant
-    /// selections and inputs.
+    /// This is true only for a single per-series scan whose bound tags cover its primary key, a raw
+    /// source that kept that provenance, or another proven fused chain, whose native tree answers
+    /// every series it reads as that series: an instant selection of the sample or of an info sample,
+    /// a filtering comparison, a window that keeps the metric name, or a chain of nodes that drop the
+    /// metric name over a scan that reads one metric and keys its series by labels that survive the
+    /// drop.
+    ///
+    /// A node that drops the metric name is proved rather than refused outright: a `PrimaryKey`
+    /// binding reads one metric, so the name those nodes drop is the one every stored series
+    /// carries, and what tells two of them apart are the tags the binding names. Requiring the rows
+    /// to carry those tags, refusing a binding that keys a series by `__type__` or `__unit__` -
+    /// which a name-dropping kernel removes with the name - and refusing a binding whose key columns
+    /// are not every one of them non-nullable, because only a nullable column lets one series hold
+    /// `NULL` where another holds `''`, which such a kernel normalizes into one absent label, is
+    /// what keeps this an identity of what the tree read. A scan that states none of those facts
+    /// proves nothing, and a row table that would not carry the tags below it proves nothing either,
+    /// so both are refused here rather than refined later: the router above a producer that claims
+    /// [`CompleteDisjoint`] stops checking for duplicates, and a refusal only keeps the merging path
+    /// it would otherwise have taken.
+    ///
+    /// [`CompleteDisjoint`]: crate::extension_plan::IdentityCompletion::CompleteDisjoint
     pub fn has_partition_disjoint_identities(&self) -> bool {
-        if self.inputs.len() != 1 || !preserves_partition_identity(self.tree.root()) {
+        if self.inputs.len() != 1 {
             return false;
         }
-
-        fn is_complete_series_input(plan: &dyn ExecutionPlan) -> bool {
-            if let Some(scan) = plan.downcast_ref::<SeriesScanExec>() {
-                return bound_tags_cover_primary_key(scan.scan_binding());
-            }
-            if let Some(cooperative) = plan.downcast_ref::<CooperativeExec>() {
-                return cooperative
-                    .children()
-                    .first()
-                    .is_some_and(|child| is_complete_series_input(child.as_ref()));
-            }
-            plan.downcast_ref::<FusedSeriesExec>()
-                .is_some_and(FusedSeriesExec::has_partition_disjoint_identities)
+        let Some(proof) = complete_series_input(self.inputs[0].0.as_ref()) else {
+            return false;
+        };
+        let labels = match proof {
+            InputProof::Scan(labels) => labels,
+            InputProof::Confined => None,
+        };
+        // A row table carries the node's tag columns and nothing else, so the tags have to say which
+        // labels the rows hold; a frame carries each series' whole label set instead.
+        if self.format == FusedOutputFormat::PlainRows
+            && let Some(labels) = &labels
+            && !labels.answers_every_tag(&self.tags)
+        {
+            return false;
         }
-
-        is_complete_series_input(self.inputs[0].0.as_ref())
+        preserves_partition_identity(self.tree.root(), labels.as_ref())
     }
 
     /// Creates the node, rejecting whatever this node cannot execute or convert.

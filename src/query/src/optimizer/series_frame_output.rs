@@ -115,6 +115,7 @@ mod tests {
     use datafusion::datasource::memory::MemorySourceConfig;
     use datafusion::datasource::source::DataSourceExec;
     use datafusion::logical_expr::{EmptyRelation, LogicalPlan};
+    use datafusion::physical_optimizer::ensure_coop::EnsureCooperative;
     use datafusion::physical_plan::PhysicalExpr;
     use datafusion::physical_plan::display::{DisplayAs, DisplayFormatType};
     use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
@@ -128,8 +129,10 @@ mod tests {
         FusedOutputFormat, FusedSeries, FusedSeriesBinding, RawSeriesSource, SeriesRouting,
     };
     use promql::native::plan::{
-        BoundInput, BoundInstant, InstantValue, NativeExpr, NativeNode, NativeTree, NativeType,
+        BoundInput, BoundInstant, BoundWindow, InstantValue, NativeExpr, NativeNode, NativeTree,
+        NativeType,
     };
+    use promql::range_eval::{RangeFunction, RangeWindow};
     use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder, RegionMetadataRef};
     use store_api::region_engine::{
         BoundTag, PrepareRequest, QueryScanContext, RawLabelSource, RegionScanner,
@@ -329,6 +332,78 @@ mod tests {
         .expect("the child is a raw frame of these fields")
     }
 
+    /// A fused root running `rate(x[5m])` over `input`, as bound by `labels`.
+    ///
+    /// The window drops the metric name, which is what makes the binding below it decide whether the
+    /// drop keeps two stored series apart.
+    fn fused_rate_root_over(
+        input: Arc<dyn ExecutionPlan>,
+        labels: RawLabelSource,
+    ) -> Arc<dyn ExecutionPlan> {
+        let grid = Arc::new(
+            EvalGrid::try_new(GridSpec::try_new(0, 1_000, 2).expect("the grid is valid"))
+                .expect("the grid is materialized"),
+        );
+        let raw = NativeType::Samples(series_schema());
+        let evaluated = NativeType::Samples(Arc::new(SeriesSchema {
+            fields: series_schema().fields.clone(),
+            eval_grid: Some(Arc::clone(&grid)),
+        }));
+        let tree = NativeTree::try_new(NativeNode {
+            expr: NativeExpr::Window {
+                input: Box::new(NativeNode {
+                    expr: NativeExpr::Input(BoundInput {
+                        source_index: 0,
+                        output: raw.clone(),
+                        ordering: SeriesOrdering::Contiguous,
+                    }),
+                    output: raw,
+                }),
+                op: BoundWindow {
+                    function: RangeFunction::Rate,
+                    window: RangeWindow {
+                        range_ms: 5_000,
+                        offset_ms: 0,
+                        anchor_ms: None,
+                        modifier: None,
+                    },
+                    input_grid: None,
+                    output_grid: Arc::clone(&grid),
+                },
+            },
+            output: evaluated,
+        })
+        .expect("the tree is legal");
+        let output_schema = Arc::new(
+            DFSchema::try_from(
+                FusedSeries::series_frame_schema(&tree).expect("the tree declares a frame"),
+            )
+            .expect("the frame is a legal schema"),
+        );
+        let fused = FusedSeries::try_new_with_format(
+            Arc::from("rate(x[5m])"),
+            tree,
+            FusedSeriesBinding {
+                grid,
+                metric_name: Some(Arc::from("cpu")),
+                time_index: "time".to_string(),
+                tags: vec!["host".to_string()],
+            },
+            vec![LogicalPlan::EmptyRelation(EmptyRelation {
+                produce_one_row: false,
+                schema: Arc::new(
+                    DFSchema::try_from(raw_frame_schema()).expect("the frame is a legal schema"),
+                ),
+            })],
+            output_schema,
+            FusedOutputFormat::SeriesFrame,
+        )
+        .expect("the fused node is planned");
+        fused
+            .to_execution_plan(vec![(input, labels, SeriesOrdering::Contiguous)])
+            .expect("the fused node is physical")
+    }
+
     /// A fused root running one sample selection over `input`, as bound by `labels`.
     ///
     /// The input must be a contiguous raw frame, which both [`series_scan`] and [`raw_plan`] are.
@@ -477,6 +552,32 @@ mod tests {
     }
 
     #[test]
+    fn a_cooperative_scan_keeps_the_per_series_raw_root_on_complete_disjoint() {
+        let root = raw_source_root(series_scan(2));
+        // The physical optimizer wraps the scan leaf, so the raw source is rebuilt over a child that
+        // is no longer the scan itself.
+        let root = EnsureCooperative::new()
+            .optimize(root, &ConfigOptions::default())
+            .expect("the plan is optimized");
+        assert!(
+            root.downcast_ref::<RawSeriesSourceExec>()
+                .expect("the root is still the region's raw source")
+                .is_per_series_scan(),
+            "a cooperative wrapper moves the scan, not the series it answers"
+        );
+
+        let exec = optimized(root).unwrap();
+        let router = exec
+            .downcast_ref::<SeriesRepartitionExec>()
+            .expect("the root is routed");
+        assert_eq!(
+            promql::extension_plan::IdentityCompletion::CompleteDisjoint,
+            router.identity_completion(),
+            "the scan's per-partition ownership survives the wrapper"
+        );
+    }
+
+    #[test]
     fn a_raw_source_root_without_per_series_provenance_selects_merge_inputs_router() {
         let root = raw_source_root(raw_plan(2));
         assert!(
@@ -517,6 +618,53 @@ mod tests {
             promql::extension_plan::IdentityCompletion::CompleteDisjoint,
             router.identity_completion(),
             "a fused chain over a per-series scan owns each identity in one partition"
+        );
+    }
+
+    #[test]
+    fn a_fused_rate_root_over_a_per_series_scan_selects_complete_disjoint_router() {
+        let root = fused_rate_root_over(series_scan(2), per_series_labels());
+        assert!(
+            root.downcast_ref::<promql::extension_plan::FusedSeriesExec>()
+                .expect("the root is the fused node")
+                .has_partition_disjoint_identities(),
+            "rate drops the metric name, and the binding below it names one metric and keys its \
+             series by `host`, which the drop leaves in place"
+        );
+        assert_eq!(2, root.properties().output_partitioning().partition_count());
+
+        let exec = optimized(root).unwrap();
+        let router = exec
+            .downcast_ref::<SeriesRepartitionExec>()
+            .expect("the root is routed");
+        assert_eq!(
+            promql::extension_plan::IdentityCompletion::CompleteDisjoint,
+            router.identity_completion(),
+            "a name-dropping window over a single bound metric still owns each identity in one \
+             partition"
+        );
+    }
+
+    #[test]
+    fn a_fused_rate_root_over_an_explicit_source_selects_merge_inputs_router() {
+        let root = fused_rate_root_over(raw_plan(2), RawLabelSource::Explicit);
+        assert!(
+            !root
+                .downcast_ref::<promql::extension_plan::FusedSeriesExec>()
+                .expect("the root is the fused node")
+                .has_partition_disjoint_identities(),
+            "an explicit-label source states no bound key, so the name rate drops is still part of \
+             what tells two series apart"
+        );
+
+        let exec = optimized(root).unwrap();
+        let router = exec
+            .downcast_ref::<SeriesRepartitionExec>()
+            .expect("the root is routed");
+        assert_eq!(
+            promql::extension_plan::IdentityCompletion::MergeInputs,
+            router.identity_completion(),
+            "an unproven source merges its inputs"
         );
     }
 
