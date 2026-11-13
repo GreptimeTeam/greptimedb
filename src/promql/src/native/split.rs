@@ -231,9 +231,10 @@ pub(crate) fn split(
         } => Err(declined("a whole-vector operation above a split aggregate")),
         NativeExpr::Merge { .. } => Err(declined("an aggregate split across a canonical merge")),
         // A window whose input is already evaluated - a subquery - applies to the merged values the
-        // suffix reads, provided it evaluates on that input's own grid. The declared grid must equal
-        // its direct input's grid; the cut's grid need not be that grid, because a window between
-        // them may already have re-gridded the values. A raw-sample window cannot sit above the cut.
+        // suffix reads, provided it evaluates on a grid. The declared grid and the input's grid are
+        // already required to be the same one when the window is bound, so the cut's grid need not be
+        // that grid: a window between them may already have re-gridded the values. A raw-sample
+        // window cannot sit above the cut.
         NativeExpr::Window { input, op } => {
             let Some(mut inner) = split(input, fields, time_index)? else {
                 return Ok(None);
@@ -242,12 +243,8 @@ pub(crate) fn split(
                 .output
                 .samples()
                 .and_then(|schema| schema.eval_grid.as_ref());
-            if op.input_grid.as_ref().is_none_or(|declared| {
-                input_grid.is_none_or(|input| declared.spec() != input.spec())
-            }) {
-                return Err(declined(
-                    "a window above an aggregate with a different evaluation grid",
-                ));
+            if input_grid.is_none() {
+                return Err(declined("a window over raw samples above an aggregate"));
             }
             inner.suffix = NativeNode {
                 expr: NativeExpr::Window {
