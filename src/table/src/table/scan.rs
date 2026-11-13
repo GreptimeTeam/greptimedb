@@ -513,14 +513,18 @@ impl ExecutionPlan for RegionScanExec {
         _input_stats: &[Arc<Statistics>],
         args: &StatisticsArgs,
     ) -> DfResult<Arc<Statistics>> {
-        if args.partition().is_some() || !self.append_mode {
+        if args.partition().is_some() {
             return Ok(Arc::new(Statistics::new_unknown(self.schema().as_ref())));
         }
 
         let scanner = self.scanner.lock().unwrap();
-        let statistics = if scanner.properties().total_rows_is_exact()
-            && !scanner.has_predicate_without_region()
-        {
+        let rows = scanner.properties().exact_num_rows().or_else(|| {
+            (self.append_mode
+                && scanner.properties().total_rows_is_exact()
+                && !scanner.has_predicate_without_region())
+            .then_some(self.total_rows)
+        });
+        let statistics = if let Some(rows) = rows {
             // Only the row count is known. DataFusion answers `count(col)` as
             // `num_rows - null_count` and `count(DISTINCT col)` as `distinct_count`
             // without scanning, so these must stay absent unless the schema
@@ -540,7 +544,7 @@ impl ExecutionPlan for RegionScanExec {
                 })
                 .collect();
             Statistics {
-                num_rows: Precision::Exact(self.total_rows),
+                num_rows: Precision::Exact(rows),
                 total_byte_size: Default::default(),
                 column_statistics,
             }
@@ -1278,10 +1282,11 @@ mod test {
 
     #[test]
     fn test_count_statistics_require_exact_source_rows() {
-        for (append_mode, exact, expected) in [
-            (true, false, Precision::Absent),
-            (true, true, Precision::Exact(3)),
-            (false, true, Precision::Absent),
+        for (append_mode, exact, prepared, expected) in [
+            (true, false, None, Precision::Absent),
+            (true, true, None, Precision::Exact(3)),
+            (false, true, None, Precision::Absent),
+            (false, false, Some(2), Precision::Exact(2)),
         ] {
             // Column `a` is nullable and `ts` is not.
             let (schema, batch, metadata) = dynamic_filter_test_data(5685, true);
@@ -1290,7 +1295,8 @@ mod test {
                 properties: ScannerProperties::default()
                     .with_append_mode(append_mode)
                     .with_total_rows(3)
-                    .with_total_rows_is_exact(exact),
+                    .with_total_rows_is_exact(exact)
+                    .with_exact_num_rows(prepared),
                 metadata,
                 dynamic_filters: Arc::new(Mutex::new(Vec::new())),
                 observed_pool: Default::default(),

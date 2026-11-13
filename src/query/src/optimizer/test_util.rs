@@ -41,6 +41,7 @@ use crate::dummy_catalog::DummyTableProvider;
 /// A mock region engine that can be used for testing the optimizer.
 pub(crate) struct MetaRegionEngine {
     metadatas: HashMap<RegionId, RegionMetadataRef>,
+    name: &'static str,
 }
 
 impl MetaRegionEngine {
@@ -49,14 +50,23 @@ impl MetaRegionEngine {
         let mut metadatas = HashMap::new();
         metadatas.insert(metadata.region_id, metadata);
 
-        Self { metadatas }
+        Self {
+            metadatas,
+            name: "MetaRegionEngine",
+        }
+    }
+
+    /// Sets the engine name exposed to scan-hint capability checks.
+    pub(crate) fn with_engine_name(mut self, name: &'static str) -> Self {
+        self.name = name;
+        self
     }
 }
 
 #[async_trait]
 impl RegionEngine for MetaRegionEngine {
     fn name(&self) -> &str {
-        "MetaRegionEngine"
+        self.name
     }
 
     async fn handle_request(

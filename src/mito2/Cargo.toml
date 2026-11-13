@@ -129,6 +129,11 @@ harness = false
 required-features = ["testing"]
 
 [[bench]]
+name = "bench_metadata_aggr_overlap"
+harness = false
+required-features = ["testing"]
+
+[[bench]]
 name = "bench_flat_merge"
 harness = false
 required-features = ["testing"]
