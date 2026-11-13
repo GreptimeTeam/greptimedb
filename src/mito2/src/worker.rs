@@ -96,6 +96,7 @@ use crate::sst::index::handler::IndexKindProviderRef;
 use crate::sst::index::intermediate::IntermediateManager;
 use crate::sst::index::puffin_manager::PuffinManagerFactory;
 use crate::sst::index::registry::{IndexRegistry, IndexRegistryRef};
+use crate::tail_replay::TailReplayLimits;
 #[cfg(feature = "hdfs-object-store")]
 use crate::temp_file_sweeper;
 use crate::time_provider::{StdTimeProvider, TimeProviderRef};
@@ -219,6 +220,7 @@ impl WorkerGroup {
         let memtable_compact_dispatcher =
             Arc::new(CompactDispatcher::new(config.max_background_compactions));
         let flush_semaphore = Arc::new(Semaphore::new(config.max_background_flushes));
+        let tail_replay_limits = TailReplayLimits::new(&config);
         // We use another scheduler to avoid purge jobs blocking other jobs.
         let purge_scheduler = Arc::new(LocalScheduler::new(config.max_background_purges));
         let upload_store_wrapper = plugins.get::<WriteCacheUploadStoreWrapperRef>();
@@ -297,6 +299,7 @@ impl WorkerGroup {
                     file_ref_manager: file_ref_manager.clone(),
                     partition_expr_fetcher: partition_expr_fetcher.clone(),
                     flush_semaphore: flush_semaphore.clone(),
+                    tail_replay_limits: tail_replay_limits.clone(),
                     #[cfg(feature = "hdfs-object-store")]
                     sweep_limiter: sweep_limiter.clone(),
                     node_lease: node_lease.clone(),
@@ -496,6 +499,7 @@ impl WorkerGroup {
             config.max_background_compactions,
         ));
         let flush_semaphore = Arc::new(Semaphore::new(config.max_background_flushes));
+        let tail_replay_limits = TailReplayLimits::new(&config);
         let purge_scheduler = Arc::new(LocalScheduler::new(config.max_background_flushes));
         let puffin_manager_factory = PuffinManagerFactory::new(
             &config.index.aux_path,
@@ -575,6 +579,7 @@ impl WorkerGroup {
                     file_ref_manager: file_ref_manager.clone(),
                     partition_expr_fetcher: partition_expr_fetcher.clone(),
                     flush_semaphore: flush_semaphore.clone(),
+                    tail_replay_limits: tail_replay_limits.clone(),
                     #[cfg(feature = "hdfs-object-store")]
                     sweep_limiter: sweep_limiter.clone(),
                     node_lease: node_lease.clone(),
@@ -708,6 +713,7 @@ struct WorkerStarter<S> {
     file_ref_manager: FileReferenceManagerRef,
     partition_expr_fetcher: PartitionExprFetcherRef,
     flush_semaphore: Arc<Semaphore>,
+    tail_replay_limits: TailReplayLimits,
     #[cfg(feature = "hdfs-object-store")]
     /// Limiter for the temporary file sweeps, or `None` if the datanode allows
     /// no concurrent GC job.
@@ -816,6 +822,7 @@ impl<S: LogStore> WorkerStarter<S> {
             file_ref_manager: self.file_ref_manager.clone(),
             partition_expr_fetcher: self.partition_expr_fetcher,
             flush_semaphore: self.flush_semaphore,
+            tail_replay_limits: self.tail_replay_limits,
             plugins: self.plugins,
             #[cfg(feature = "hdfs-object-store")]
             sweep_limiter: self.sweep_limiter,
@@ -1274,6 +1281,8 @@ struct RegionWorkerLoop<S> {
     partition_expr_fetcher: PartitionExprFetcherRef,
     /// Semaphore to control flush concurrency.
     flush_semaphore: Arc<Semaphore>,
+    /// Limits of the node's tail replays.
+    tail_replay_limits: TailReplayLimits,
     /// Plugins for flush hooks.
     plugins: Plugins,
     #[cfg(feature = "hdfs-object-store")]
