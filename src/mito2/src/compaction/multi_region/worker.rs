@@ -55,6 +55,14 @@ pub(crate) async fn execute(
         senders.insert(id, sender);
         let schema = source.schema();
         let limits = source.limits.clone();
+        let index_plan =
+            source
+                .index_plans
+                .get(&id)
+                .cloned()
+                .context(InvalidMultiRegionCompactionSnafu {
+                    reason: "Missing index plan for compaction target",
+                })?;
         let plan = plan.clone();
         let context = context.clone();
         workers.push(AbortOnDropHandle::new(common_runtime::spawn_compact(
@@ -76,6 +84,7 @@ pub(crate) async fn execute(
                     &context,
                     &limits,
                     plan.max_output_file_size,
+                    index_plan,
                 )
                 .write(input)
                 .await?;

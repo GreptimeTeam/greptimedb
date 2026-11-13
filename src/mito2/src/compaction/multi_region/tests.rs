@@ -15,6 +15,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use api::v1::{OpType, SemanticType};
+use common_error::ext::BoxedError;
 use datatypes::arrow::array::{
     Array, ArrayRef, BinaryArray, BinaryDictionaryBuilder, BooleanArray, DictionaryArray,
     StringArray, StringDictionaryBuilder, TimestampMillisecondArray, UInt8Array, UInt64Array,
@@ -48,7 +49,9 @@ use crate::error::InvalidMultiRegionCompactionSnafu;
 use crate::read::FlatSource;
 use crate::sst::file::{FileHandle, RegionFileId};
 use crate::sst::file_purger::NoopFilePurger;
+use crate::sst::index::handler::{IndexKindHandler, IndexKindProvider, PlanContext, PlannedIndex};
 use crate::sst::index::intermediate::IntermediateManager;
+use crate::sst::index::kind::{ExtensionIndexKind, IndexKind};
 use crate::sst::index::puffin_manager::PuffinManagerFactory;
 use crate::sst::parquet::WriteOptions;
 use crate::sst::parquet::flat_format::{
@@ -273,6 +276,7 @@ impl Fixture {
         });
         (
             MultiRegionCompactionContext {
+                index_kind_provider: None,
                 access_layer: self.layer.clone(),
                 cache: Arc::new(CacheManager::default()),
                 config: self.config.clone(),
@@ -2327,6 +2331,7 @@ async fn test_limited_writer_fails_instead_of_publishing_over_budget(#[case] kin
         &context,
         &limits,
         plan.max_output_file_size,
+        Arc::default(),
     )
     .write(source)
     .await
@@ -2454,4 +2459,147 @@ async fn test_invalid_plan_is_rejected_before_creating_outputs(
         "expected `{reason}`, got {error:?}"
     );
     assert!(protection.files.lock().unwrap().is_empty());
+}
+
+#[derive(Debug)]
+struct InvalidOptionalIndexHandler;
+
+impl IndexKindProvider for InvalidOptionalIndexHandler {
+    fn handlers(&self) -> Vec<Arc<dyn IndexKindHandler>> {
+        vec![Arc::new(Self)]
+    }
+}
+
+impl IndexKindHandler for InvalidOptionalIndexHandler {
+    fn kinds(&self) -> &[IndexKind] {
+        &[IndexKind::Extension(ExtensionIndexKind::Hll)]
+    }
+
+    fn plan(
+        &self,
+        context: &PlanContext<'_>,
+    ) -> std::result::Result<Option<Arc<dyn PlannedIndex>>, BoxedError> {
+        assert!(
+            context.metadata.column_metadatas[0]
+                .column_schema
+                .hll_options()
+                .is_err()
+        );
+        Err(BoxedError::new(
+            crate::error::InvalidConfigSnafu {
+                reason: "invalid optional index configuration",
+            }
+            .build(),
+        ))
+    }
+}
+
+#[derive(Debug, Default)]
+struct ConflictingRegistrationProvider(std::sync::atomic::AtomicUsize);
+
+impl IndexKindProvider for ConflictingRegistrationProvider {
+    fn handlers(&self) -> Vec<Arc<dyn IndexKindHandler>> {
+        // Preflight succeeds; source preparation must propagate its own failure too.
+        let calls = self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let handler: Arc<dyn IndexKindHandler> = Arc::new(InvalidOptionalIndexHandler);
+        if calls == 0 {
+            vec![handler]
+        } else {
+            vec![handler.clone(), handler]
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_source_index_registration_failure_does_not_fall_back() {
+    let fixture = Fixture::new(PrimaryKeyEncoding::Dense, FormatType::Flat, 0).await;
+    let (mut context, protection) = fixture.context(None);
+    context.index_kind_provider = Some(Arc::new(ConflictingRegistrationProvider::default()));
+    let error = compact_regions(fixture.plan(2), context)
+        .await
+        .err()
+        .expect("conflicting registration must fail");
+    assert!(format!("{error:?}").contains("compaction index registration"));
+    assert!(protection.files.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn test_invalid_optional_index_options_do_not_block_routed_compaction() {
+    let fixture = Fixture::new(PrimaryKeyEncoding::Dense, FormatType::Flat, 0).await;
+    for invalid_value in ["missing-column", "bad-capacity"] {
+        let mut plan = fixture.plan(2);
+        for target in plan.targets.values_mut() {
+            Arc::make_mut(&mut target.metadata).column_metadatas[0]
+                .column_schema
+                .mut_metadata()
+                .insert(datatypes::schema::HLL_KEY.into(), invalid_value.into());
+        }
+        let (mut context, _) = fixture.context(None);
+        context.index_kind_provider = Some(Arc::new(InvalidOptionalIndexHandler));
+        let output = compact_regions(plan, context).await.unwrap();
+        assert_eq!(output.stats.source_rows, output.stats.output_rows);
+        assert!(output.stats.output_rows > 0);
+        assert!(
+            output
+                .files
+                .values()
+                .flatten()
+                .all(|file| file
+                    .indexes
+                    .iter()
+                    .all(|index| index.created_indexes.iter().all(|kind| !matches!(
+                        kind,
+                        crate::sst::file::IndexType::HllIndex
+                            | crate::sst::file::IndexType::KllIndex
+                            | crate::sst::file::IndexType::MgIndex
+                    ))))
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_missing_index_handler_blocks_source_and_target_descriptors() {
+    use crate::sst::file::{ColumnIndexMetadata, IndexType};
+
+    let fixture = Fixture::new(PrimaryKeyEncoding::Dense, FormatType::Flat, 0).await;
+    for required_by in ["schema", "file", "column", "target"] {
+        let mut plan = fixture.plan(2);
+        match required_by {
+            "schema" => {
+                for target in plan.targets.values_mut() {
+                    Arc::make_mut(&mut target.metadata).column_metadatas[0]
+                        .column_schema
+                        .set_hll_options(&datatypes::schema::HllOptions::default())
+                        .unwrap();
+                }
+            }
+            "file" => plan.sources[0].available_indexes.push(IndexType::HllIndex),
+            "column" => plan.sources[0].indexes.push(ColumnIndexMetadata {
+                column_id: 0,
+                created_indexes: [IndexType::HllIndex].into_iter().collect(),
+                ..Default::default()
+            }),
+            _ => {
+                plan.targets
+                    .values_mut()
+                    .next()
+                    .unwrap()
+                    .inputs
+                    .values_mut()
+                    .next()
+                    .unwrap()
+                    .available_indexes
+                    .push(IndexType::HllIndex);
+            }
+        }
+        let (context, _) = fixture.context(None);
+        let result = compact_regions(plan, context).await;
+        let error = result
+            .err()
+            .expect("configured or persisted kind requires a handler");
+        assert!(
+            error.to_string().contains("compaction index planning"),
+            "{required_by}: {error}"
+        );
+    }
 }

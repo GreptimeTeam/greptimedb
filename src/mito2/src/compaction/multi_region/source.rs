@@ -15,6 +15,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use arrow_schema::extension::EXTENSION_TYPE_METADATA_KEY;
+use common_base::readable_size::ReadableSize;
 use common_time::Timestamp;
 use datatypes::arrow::array::{
     Array, ArrayRef, BinaryArray, GenericByteArray, GenericByteDictionaryBuilder, UInt64Array,
@@ -38,9 +39,10 @@ use crate::compaction::multi_region::memory::{BATCH_SIZE, MemoryLimits};
 use crate::compaction::multi_region::{
     MultiRegionCompactionContext, MultiRegionCompactionPlan, MultiRegionTarget, SourceCounters,
 };
+use crate::config::MemoryThreshold;
 use crate::error::{
-    ComputeArrowSnafu, InvalidMultiRegionCompactionSnafu, MultiRegionCompactionResourceSnafu,
-    NewRecordBatchSnafu, Result,
+    ComputeArrowSnafu, ExternalSnafu, InvalidMultiRegionCompactionSnafu,
+    MultiRegionCompactionResourceSnafu, NewRecordBatchSnafu, Result,
 };
 use crate::read::compat::FlatCompatBatch;
 use crate::read::flat_merge::FlatMergeReader;
@@ -49,6 +51,9 @@ use crate::read::read_columns::ReadColumns;
 use crate::read::{BoxedRecordBatchStream, timestamp_array_to_i64_slice};
 use crate::sst::file::{FileHandle, FileMeta};
 use crate::sst::file_purger::NoopFilePurger;
+use crate::sst::index::IndexBuildType;
+use crate::sst::index::handler::PlanContext;
+use crate::sst::index::registry::{IndexBuildPlan, IndexRegistry};
 use crate::sst::parquet::flat_format::{
     primary_key_column_index, sequence_column_index, time_index_column_index,
 };
@@ -108,6 +113,7 @@ pub(crate) struct SharedSource {
     partition_rule: PartitionRuleRef,
     window: (Timestamp, Timestamp),
     pub(crate) limits: MemoryLimits,
+    pub(crate) index_plans: BTreeMap<RegionId, Arc<IndexBuildPlan>>,
     peak_group_bytes: AtomicU64,
     cancellation: Arc<common_base::cancellation::CancellationHandle>,
     stop: CancellationToken,
@@ -205,7 +211,47 @@ impl SharedSource {
         )?;
         let schema = mapper.input_arrow_schema(false);
         let mut limits = MemoryLimits::new(plan, &schema)?;
-        limits.admit(plan, context, &footers)?;
+        let mut inverted = context.config.inverted_index.clone();
+        inverted.mem_threshold_on_create =
+            admitted_index_threshold(inverted.mem_threshold_on_create(), limits.index);
+        let mut fulltext = context.config.fulltext_index.clone();
+        fulltext.mem_threshold_on_create =
+            admitted_index_threshold(Some(fulltext.mem_threshold_on_create()), limits.index);
+        let mut bloom = context.config.bloom_filter_index.clone();
+        bloom.mem_threshold_on_create =
+            admitted_index_threshold(bloom.mem_threshold_on_create(), limits.index);
+        let registry = IndexRegistry::new(inverted, fulltext, bloom)
+            .with_provider(context.index_kind_provider.clone())
+            .with_context(|_| ExternalSnafu {
+                context: "registering index handlers".to_string(),
+            })?;
+        let mut index_plans = plan
+            .targets
+            .iter()
+            .map(|(id, target)| {
+                let work = registry.plan(&PlanContext {
+                    metadata: &target.metadata,
+                    index_options: &target.options.index_options,
+                    build_type: IndexBuildType::Compact,
+                    existing_indexes: &[],
+                });
+                (*id, Arc::new(work))
+            })
+            .collect::<BTreeMap<_, _>>();
+        limits.admit(
+            plan,
+            context,
+            &footers,
+            index_plans
+                .values()
+                .filter(|work| work.entries().any(|entry| !entry.kind.is_builtin()))
+                .count(),
+        )?;
+        if limits.extension_index_memory_limit.is_none() {
+            for (region_id, work) in &mut index_plans {
+                Arc::make_mut(work).omit_extensions_for_budget(*region_id);
+            }
+        }
         // Compute routing/version annotations on bounded reader batches, but
         // keep physical __sequence as the merge key. The annotations are not
         // persisted and fixed-position time/PK/sequence/op columns stay last.
@@ -233,6 +279,7 @@ impl SharedSource {
                 Timestamp::new_second(plan.window_start + plan.window_seconds),
             ),
             limits,
+            index_plans,
             peak_group_bytes: AtomicU64::new(0),
             cancellation: context.cancellation.clone(),
             stop: CancellationToken::new(),
@@ -751,4 +798,8 @@ fn key_at(batch: &RecordBatch, row: usize) -> Result<&[u8]> {
         }
     );
     Ok(values.value(index))
+}
+
+fn admitted_index_threshold(configured: Option<usize>, limit: usize) -> MemoryThreshold {
+    MemoryThreshold::Size(ReadableSize(configured.unwrap_or(limit).min(limit) as u64))
 }
