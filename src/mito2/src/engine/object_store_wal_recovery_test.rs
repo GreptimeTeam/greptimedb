@@ -2866,4 +2866,3 @@ async fn test_wal_pressure_flush_races_with_close() {
     engine.stop().await.unwrap();
     store.stop().await.unwrap();
 }
-
