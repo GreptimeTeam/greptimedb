@@ -21,6 +21,8 @@ use async_trait::async_trait;
 use clap::Parser;
 use common_error::ext::BoxedError;
 use common_meta::key::{TableMetadataManager, TableMetadataManagerRef};
+#[cfg(any(feature = "pg_kvbackend", feature = "mysql_kvbackend"))]
+use common_meta::kv_backend::KvBackendRef;
 use common_meta::kv_backend::etcd::EtcdStore;
 use common_meta::kv_backend::memory::MemoryKvBackend;
 #[cfg(feature = "mysql_kvbackend")]
@@ -86,7 +88,7 @@ impl BenchTableMetadataCommand {
         };
 
         #[cfg(feature = "pg_kvbackend")]
-        let kv_backend = if let Some(postgres_addr) = &self.postgres_addr {
+        let kv_backend: KvBackendRef = if let Some(postgres_addr) = &self.postgres_addr {
             info!("Using postgres as kv backend");
             PgStore::with_url(postgres_addr, "greptime_metakv", 128)
                 .await
@@ -96,7 +98,7 @@ impl BenchTableMetadataCommand {
         };
 
         #[cfg(feature = "mysql_kvbackend")]
-        let kv_backend = if let Some(mysql_addr) = &self.mysql_addr {
+        let kv_backend: KvBackendRef = if let Some(mysql_addr) = &self.mysql_addr {
             info!("Using mysql as kv backend");
             MySqlStore::with_url(mysql_addr, "greptime_metakv", 128)
                 .await

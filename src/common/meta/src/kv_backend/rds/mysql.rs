@@ -27,13 +27,13 @@ use strum::AsRefStr;
 use crate::error::{
     CreateMySqlPoolSnafu, MySqlExecutionSnafu, MySqlTransactionSnafu, Result, UnexpectedSnafu,
 };
+use crate::kv_backend::ClosableKvBackendRef;
 use crate::kv_backend::rds::{
     Executor, ExecutorFactory, ExecutorImpl, KvQueryExecutor, RDS_STORE_OP_BATCH_DELETE,
     RDS_STORE_OP_BATCH_GET, RDS_STORE_OP_BATCH_PUT, RDS_STORE_OP_RANGE_DELETE,
     RDS_STORE_OP_RANGE_QUERY, RDS_STORE_TXN_RETRY_COUNT, RdsStore, Transaction,
     ensure_rustls_crypto_provider_installed,
 };
-use crate::kv_backend::{ClosableKvBackendRef, KvBackendRef};
 use crate::rpc::KeyValue;
 use crate::rpc::store::{
     BatchDeleteRequest, BatchDeleteResponse, BatchGetRequest, BatchGetResponse, BatchPutRequest,
@@ -635,14 +635,17 @@ impl MySqlStore {
         Ok(())
     }
 
-    /// Create [MySqlStore] impl of [KvBackendRef] from url.
-    pub async fn with_url(url: &str, table_name: &str, max_txn_ops: usize) -> Result<KvBackendRef> {
+    /// Create [MySqlStore] impl of [ClosableKvBackendRef] from url.
+    pub async fn with_url(
+        url: &str,
+        table_name: &str,
+        max_txn_ops: usize,
+    ) -> Result<ClosableKvBackendRef> {
         ensure_rustls_crypto_provider_installed()?;
         let pool = MySqlPool::connect(url)
             .await
             .context(CreateMySqlPoolSnafu)?;
-        let backend: KvBackendRef = Self::with_mysql_pool(pool, table_name, max_txn_ops).await?;
-        Ok(backend)
+        Self::with_mysql_pool(pool, table_name, max_txn_ops).await
     }
 
     /// Create [MySqlStore] impl of [ClosableKvBackendRef] from [sqlx::Pool<MySql>].
@@ -725,6 +728,29 @@ mod tests {
         .await
         .expect("closed backend must reject writes promptly");
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_close_backend_waits_for_checked_out_connection() {
+        maybe_skip_mysql_integration_test!();
+        let pool = mysql_pool().await.unwrap();
+        let table = new_test_table_name("close_held");
+        let backend = MySqlStore::with_mysql_pool(pool.clone(), &table, 128)
+            .await
+            .unwrap();
+        let connection = pool.acquire().await.unwrap();
+        let close = backend.close();
+        tokio::pin!(close);
+
+        assert!(futures::poll!(close.as_mut()).is_pending());
+        assert!(pool.is_closed());
+        assert!(matches!(pool.acquire().await, Err(sqlx::Error::PoolClosed)));
+        drop(connection);
+        tokio::time::timeout(std::time::Duration::from_secs(5), close)
+            .await
+            .expect("close must finish after the connection is returned")
+            .unwrap();
+        backend.close().await.unwrap();
     }
 
     fn new_test_table_name(prefix: &str) -> String {

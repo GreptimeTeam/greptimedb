@@ -151,7 +151,7 @@ impl StoreConfig {
                 &self.sanitize_store_addrs(),
                 self.backend
             );
-            let kvbackend = match self.backend {
+            let kvbackend: Result<KvBackendRef, BoxedError> = match self.backend {
                 BackendImpl::EtcdStore => {
                     let tls_config = self.tls_config();
                     let etcd_client = create_etcd_client_with_tls(
@@ -167,33 +167,30 @@ impl StoreConfig {
                 BackendImpl::PostgresStore => {
                     let table_name = &self.meta_table_name;
                     let tls_config = self.tls_config();
-                    let backend: KvBackendRef =
-                        meta_srv::utils::postgres::build_postgres_kv_backend(
-                            store_addrs,
-                            None,
-                            tls_config,
-                            self.meta_schema_name.as_deref(),
-                            table_name,
-                            max_txn_ops,
-                            self.auto_create_schema,
-                        )
-                        .await
-                        .map_err(BoxedError::new)?;
-                    Ok(backend)
+                    Ok(meta_srv::utils::postgres::build_postgres_kv_backend(
+                        store_addrs,
+                        None,
+                        tls_config,
+                        self.meta_schema_name.as_deref(),
+                        table_name,
+                        max_txn_ops,
+                        self.auto_create_schema,
+                    )
+                    .await
+                    .map_err(BoxedError::new)?)
                 }
                 #[cfg(feature = "mysql_kvbackend")]
                 BackendImpl::MysqlStore => {
                     let table_name = &self.meta_table_name;
                     let tls_config = self.tls_config();
-                    let backend: KvBackendRef = meta_srv::utils::mysql::build_mysql_kv_backend(
+                    Ok(meta_srv::utils::mysql::build_mysql_kv_backend(
                         store_addrs,
                         tls_config.as_ref(),
                         table_name,
                         max_txn_ops,
                     )
                     .await
-                    .map_err(BoxedError::new)?;
-                    Ok(backend)
+                    .map_err(BoxedError::new)?)
                 }
                 #[cfg(not(test))]
                 BackendImpl::MemoryStore => {

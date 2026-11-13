@@ -36,13 +36,13 @@ use crate::error::{
     CreatePostgresPoolSnafu, GetPostgresConnectionSnafu, LoadTlsCertificateSnafu,
     PostgresExecutionSnafu, PostgresTlsConfigSnafu, PostgresTransactionSnafu, Result,
 };
+use crate::kv_backend::ClosableKvBackendRef;
 use crate::kv_backend::rds::{
     Executor, ExecutorFactory, ExecutorImpl, KvQueryExecutor, RDS_STORE_OP_BATCH_DELETE,
     RDS_STORE_OP_BATCH_GET, RDS_STORE_OP_BATCH_PUT, RDS_STORE_OP_RANGE_DELETE,
     RDS_STORE_OP_RANGE_QUERY, RDS_STORE_TXN_RETRY_COUNT, RdsStore, Transaction,
     ensure_rustls_crypto_provider_installed,
 };
-use crate::kv_backend::{ClosableKvBackendRef, KvBackendRef};
 use crate::rpc::KeyValue;
 use crate::rpc::store::{
     BatchDeleteRequest, BatchDeleteResponse, BatchGetRequest, BatchGetResponse, BatchPutRequest,
@@ -812,7 +812,7 @@ impl KvQueryExecutor<PgClient> for PgStore {
 }
 
 impl PgStore {
-    /// Create [PgStore] impl of [KvBackendRef] from url with optional TLS support.
+    /// Create [PgStore] impl of [ClosableKvBackendRef] from url with optional TLS support.
     ///
     /// # Arguments
     ///
@@ -825,7 +825,7 @@ impl PgStore {
         table_name: &str,
         max_txn_ops: usize,
         tls_config: Option<TlsOption>,
-    ) -> Result<KvBackendRef> {
+    ) -> Result<ClosableKvBackendRef> {
         let mut cfg = Config::new();
         cfg.url = Some(url.to_string());
 
@@ -854,13 +854,15 @@ impl PgStore {
                 .context(CreatePostgresPoolSnafu)?,
         };
 
-        let backend: KvBackendRef =
-            Self::with_pg_pool(pool, None, table_name, max_txn_ops, false).await?;
-        Ok(backend)
+        Self::with_pg_pool(pool, None, table_name, max_txn_ops, false).await
     }
 
-    /// Create [PgStore] impl of [KvBackendRef] from url (backward compatibility).
-    pub async fn with_url(url: &str, table_name: &str, max_txn_ops: usize) -> Result<KvBackendRef> {
+    /// Create [PgStore] impl of [ClosableKvBackendRef] from url without TLS.
+    pub async fn with_url(
+        url: &str,
+        table_name: &str,
+        max_txn_ops: usize,
+    ) -> Result<ClosableKvBackendRef> {
         Self::with_url_and_tls(url, table_name, max_txn_ops, None).await
     }
 
@@ -965,6 +967,32 @@ mod tests {
         .await
         .expect("closed backend must reject writes promptly");
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_close_backend_with_checked_out_connection() {
+        maybe_skip_postgres_integration_test!();
+        let mut config = Config::new();
+        config.url = Some(std::env::var("GT_POSTGRES_ENDPOINTS").unwrap());
+        let pool = config.create_pool(Some(Runtime::Tokio1), NoTls).unwrap();
+        let backend = PgStore::with_pg_pool(pool.clone(), None, "close_held", 128, false)
+            .await
+            .unwrap();
+        let connection = pool.get().await.unwrap();
+
+        tokio::time::timeout(std::time::Duration::from_secs(5), backend.close())
+            .await
+            .expect("PostgreSQL close does not wait for checked-out connections")
+            .unwrap();
+        assert!(pool.is_closed());
+        assert!(matches!(
+            pool.get().await,
+            Err(deadpool::managed::PoolError::Closed)
+        ));
+        // Existing executors can finish even though new acquisitions are rejected.
+        connection.simple_query("SELECT 1").await.unwrap();
+        drop(connection);
+        backend.close().await.unwrap();
     }
 
     async fn build_pg_kv_backend(table_name: &str) -> Option<PgStore> {

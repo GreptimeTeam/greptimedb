@@ -121,7 +121,9 @@ pub trait Transaction<'a>: Send + Sync {
 /// Factory for creating default and transaction query executors.
 #[async_trait::async_trait]
 pub trait ExecutorFactory<T: Executor>: Send + Sync {
-    /// Closes the connection pool to new acquisitions.
+    /// Closes the connection pool to new acquisitions. This affects all shared pool handles.
+    /// MySQL waits for checked-out connections to be returned; PostgreSQL allows them to
+    /// finish and releases them when returned. Stop consumers before closing the backend.
     async fn close(&self);
 
     async fn default_executor(&self) -> Result<T>;
