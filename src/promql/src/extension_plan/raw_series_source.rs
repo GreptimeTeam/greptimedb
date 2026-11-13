@@ -42,6 +42,7 @@ use datafusion::error::{DataFusionError, Result as DataFusionResult};
 use datafusion::execution::context::TaskContext;
 use datafusion::logical_expr::{Expr, LogicalPlan, UserDefinedLogicalNodeCore};
 use datafusion::physical_expr::{EquivalenceProperties, PhysicalExpr};
+use datafusion::physical_plan::coop::CooperativeExec;
 use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
 use datafusion::physical_plan::{
     DisplayAs, DisplayFormatType, Distribution, ExecutionPlan, InputDistributionRequirements,
@@ -273,6 +274,17 @@ impl RawSeriesStream for DeclaredOrdering {
     }
 }
 
+/// Whether `plan` is a per-series scan, bare or as `EnsureCooperative` leaves it.
+///
+/// That rule wraps the scan and rebuilds this node over the wrapper, which forwards each partition
+/// unchanged, so the scan's partition-per-identity guarantee still holds behind it.
+fn is_series_scan(plan: &dyn ExecutionPlan) -> bool {
+    match plan.downcast_ref::<CooperativeExec>() {
+        Some(cooperative) => is_series_scan(cooperative.input().as_ref()),
+        None => plan.downcast_ref::<SeriesScanExec>().is_some(),
+    }
+}
+
 /// The physical node: the region's raw-series leaf, re-labelling each scan partition in place.
 #[derive(Debug)]
 pub struct RawSeriesSourceExec {
@@ -290,7 +302,7 @@ impl RawSeriesSourceExec {
         fields: Vec<String>,
         per_series_scan: bool,
     ) -> DataFusionResult<Self> {
-        let per_series_scan = per_series_scan && input.downcast_ref::<SeriesScanExec>().is_some();
+        let per_series_scan = per_series_scan && is_series_scan(input.as_ref());
         let series_schema = series_schema(&fields);
         let partition_count = input.properties().partitioning.partition_count();
         if partition_count == 0 {
@@ -324,7 +336,7 @@ impl RawSeriesSourceExec {
     }
 
     /// Whether this node was built by a caller that declared its child a per-series scan, and that
-    /// child is one.
+    /// child is one, bare or behind a `CooperativeExec`.
     ///
     /// A consumer may publish an identity as soon as its chain closes only under this property, so
     /// it is answered from what the constructor established rather than from the node's type.

@@ -2242,7 +2242,7 @@ fn unsupported_histogram_arithmetic(
 /// Prometheus `vectorElemBinop` over present samples: the value and whether to keep it, or
 /// `None` when Prometheus reports the pair as an annotation and skips it without counting the
 /// match: an operator the sample types do not support, or an addition or subtraction of
-/// histograms that mix exponential and custom buckets.
+/// histograms that mix exponential and custom buckets or whose counter reset hints contradict.
 fn elem_binop(
     op: BinaryOp,
     lhs: SampleRef<'_>,
@@ -2293,21 +2293,25 @@ fn elem_binop(
                         }
                         return Ok(None);
                     }
-                    if let Some(collector) = annotations
-                        && matches!(
-                            (lhs.reset_hint, rhs.reset_hint),
-                            (
-                                CounterResetHint::CounterReset,
-                                CounterResetHint::NotCounterReset
-                            ) | (
-                                CounterResetHint::NotCounterReset,
-                                CounterResetHint::CounterReset
-                            )
+                    // Prometheus hands the collision back as the operation's error, and a pair that
+                    // reports one is skipped before its match is counted. A reconciliation the same
+                    // pair needed goes unreported with it.
+                    if matches!(
+                        (lhs.reset_hint, rhs.reset_hint),
+                        (
+                            CounterResetHint::CounterReset,
+                            CounterResetHint::NotCounterReset
+                        ) | (
+                            CounterResetHint::NotCounterReset,
+                            CounterResetHint::CounterReset
                         )
-                    {
-                        collector.record_warning(format!(
-                            "{name}: native histogram counter reset hints contradict"
-                        ));
+                    ) {
+                        if let Some(collector) = annotations {
+                            collector.record_warning(format!(
+                                "{name}: native histogram counter reset hints contradict"
+                            ));
+                        }
+                        return Ok(None);
                     }
                     let outcome = if op == BinaryOp::Add {
                         lhs.add(&rhs)?

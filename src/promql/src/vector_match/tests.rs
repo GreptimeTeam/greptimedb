@@ -1154,9 +1154,10 @@ fn histogram_operators_match_prometheus() {
     );
 }
 
-/// Contradictory reset hints retain the value and therefore count as a successful match.
+/// A pair dropped for contradictory reset hints is not a match: another sample of its group can
+/// still pair one-to-one, where a counted match would make it an implicit many-to-one.
 #[test]
-fn colliding_reset_hints_still_count_as_a_match() {
+fn colliding_reset_hints_do_not_count_as_a_match() {
     let grid = Arc::new(EvalGrid::try_new(GridSpec::try_new(0, 10_000, 1).unwrap()).unwrap());
     let schema = Arc::new(SeriesSchema {
         fields: vec![FieldSpec {
@@ -1193,13 +1194,8 @@ fn colliding_reset_hints_still_count_as_a_match() {
             cardinality: Cardinality::OneToOne,
             fill: FillValues::default(),
         };
-        let error = binary_vectors(&matching, &schema, &lhs, &schema, &rhs)
-            .unwrap_err()
-            .to_string();
-        assert!(
-            error.contains("many-to-one matching must be explicit"),
-            "{op:?}: {error}"
-        );
+        let result = binary_vectors(&matching, &schema, &lhs, &schema, &rhs).unwrap();
+        assert_eq!(result.len(), 1, "{op:?}");
     }
 }
 
@@ -1458,10 +1454,6 @@ fn an_incompatible_bucket_layout_drops_the_reset_collision_warning() {
     let collision = vec![
         "prom_native_histogram_add: native histogram counter reset hints contradict".to_string(),
     ];
-    let reconciled = vec![
-        "prom_native_histogram_add: reconciled native histograms with different custom buckets"
-            .to_string(),
-    ];
 
     // One exponential layout and one custom one, in either order: the layouts cannot be combined,
     // so the pair is answered with the schema warning and never reaches the hints.
@@ -1492,14 +1484,14 @@ fn an_incompatible_bucket_layout_drops_the_reset_collision_warning() {
     }
 
     // The same contradiction over one exponential layout, and over two custom ones the operation
-    // reconciles: there the collision is reported, and only the layouts that cannot be combined
-    // silence it.
+    // would reconcile: the pair is dropped with the collision alone, since Prometheus skips a pair
+    // whose operation reports one before anything else of it is kept.
     assert_eq!(
         diagnostics(
             &operand("a", exponential, CounterResetHint::CounterReset),
             &operand("a", exponential, CounterResetHint::NotCounterReset),
         ),
-        (1, collision.clone(), Vec::new()),
+        (0, collision.clone(), Vec::new()),
     );
     assert_eq!(
         diagnostics(
@@ -1514,7 +1506,7 @@ fn an_incompatible_bucket_layout_drops_the_reset_collision_warning() {
                 CounterResetHint::NotCounterReset,
             ),
         ),
-        (1, collision, reconciled),
+        (0, collision, Vec::new()),
     );
 }
 
