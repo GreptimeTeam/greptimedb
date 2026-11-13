@@ -61,9 +61,9 @@ use crate::error::{
     InvalidRequestSnafu, RegionBusySnafu, RegionLeaseExpiredSnafu, RegionNotFoundSnafu,
     RegionStateSnafu, RegionTruncatedSnafu, Result, UnexpectedSnafu, UpdateManifestSnafu,
 };
-use crate::lease::{Deadline, NodeLease};
+use crate::lease::{Deadline, NodeLease, lease_nanos};
 use crate::manifest::action::{
-    RegionChange, RegionManifest, RegionMetaAction, RegionMetaActionList,
+    PendingTail, RegionChange, RegionManifest, RegionMetaAction, RegionMetaActionList,
 };
 use crate::manifest::manager::RegionManifestManager;
 use crate::metrics::manifest_size::RegionManifestSizeMetric;
@@ -446,6 +446,19 @@ impl MitoRegion {
         self.manifest_ctx.state.load() == RegionRoleState::Leader(RegionLeaderState::Truncating)
     }
 
+    /// Returns whether the region can replay pending tails: a leader that is Writable, Altering or
+    /// Editing. A region with pending tails cannot enter staging; a downgrading one is leaving.
+    pub(crate) fn can_replay_tails(&self) -> bool {
+        matches!(
+            self.manifest_ctx.state.load(),
+            RegionRoleState::Leader(
+                RegionLeaderState::Writable
+                    | RegionLeaderState::Altering
+                    | RegionLeaderState::Editing
+            )
+        )
+    }
+
     pub fn region_id(&self) -> RegionId {
         self.region_id
     }
@@ -637,6 +650,7 @@ impl MitoRegion {
                 // Only allowed from writable leader state
                 match current_state {
                     RegionRoleState::Leader(RegionLeaderState::Writable) => {
+                        self.version().ensure_no_pending_tails()?;
                         info!("Entering staging mode for region {}", self.region_id);
                         self.set_staging(&mut manager).await?;
                     }
@@ -1295,6 +1309,17 @@ pub(crate) enum IndexPublication {
     Stale(IndexPublicationStale),
 }
 
+/// Result of publishing the result of a pending tail replay to the manifest.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum TailPublication {
+    /// The result was committed.
+    Committed(ManifestVersion),
+    /// The region is altering or applying an edit, so the result waits.
+    Busy,
+    /// The region is no longer a writable leader with the replayed tails.
+    Stale,
+}
+
 /// Why an index publication became stale.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum IndexPublicationStale {
@@ -1337,6 +1362,10 @@ pub(crate) struct ManifestContext {
     /// Decides whether a promotion to Leader applies. The lock covers checking or changing it and
     /// the role change.
     promotion_fence: Mutex<PromotionFence>,
+    /// When a catchup last made the region writable, in the unit of [Deadline], until a Leader
+    /// lease of a heartbeat sent after it applies; 0 otherwise. While it is set, the region keeps
+    /// the unread part of another node's listed tails.
+    catchup_promoted_at: AtomicU64,
     /// Deadline of the region's latest Leader or StagingLeader lease from the metasrv, which is how
     /// long the Leader role stays valid. The engine extends it from those leases, and writes check
     /// it.
@@ -1366,6 +1395,7 @@ impl ManifestContext {
                 downgrade_started_at: Instant::now(),
                 reload_pending: false,
             }),
+            catchup_promoted_at: AtomicU64::new(0),
             leader_deadline: Deadline::default(),
             node_lease,
             staging_partition_info: Mutex::new(None),
@@ -1651,6 +1681,28 @@ impl ManifestContext {
         })
     }
 
+    /// Publishes the result of a replay of the pending tails `replayed`, if the region is
+    /// still a writable leader whose manifest records exactly those tails.
+    pub(crate) async fn update_manifest_for_tails(
+        &self,
+        replayed: &[PendingTail],
+        action_list: RegionMetaActionList,
+    ) -> Result<TailPublication> {
+        let manager = self.manifest_manager.write().await;
+        match self.state.load() {
+            RegionRoleState::Leader(RegionLeaderState::Writable) => {}
+            RegionRoleState::Leader(RegionLeaderState::Altering | RegionLeaderState::Editing) => {
+                return Ok(TailPublication::Busy);
+            }
+            _ => return Ok(TailPublication::Stale),
+        }
+        if manager.manifest().pending_tails != replayed {
+            return Ok(TailPublication::Stale);
+        }
+        let manifest_version = self.update_and_fire(manager, action_list, false).await?;
+        Ok(TailPublication::Committed(manifest_version))
+    }
+
     /// Performs a manifest write under a caller-held write lock and returns a
     /// [`PendingManifestHook`] to [`fire`](PendingManifestHook::fire) after
     /// dropping the lock. It calls
@@ -1913,27 +1965,65 @@ impl ManifestContext {
     ) -> bool {
         // A writable leader needs no change; a staging leader is promoted below.
         if self.state.load() == RegionRoleState::Leader(RegionLeaderState::Writable) {
+            self.record_leader_lease(issued_at);
             return true;
         }
         let fence = self.promotion_fence.lock().unwrap();
-        issued_at >= fence.downgrade_started_at
-            && self.promote_unless_reload_pending(&fence, region_id)
+        if issued_at < fence.downgrade_started_at {
+            return false;
+        }
+        self.record_leader_lease(issued_at);
+        self.promote_unless_reload_pending(&fence, region_id, false)
     }
 
     /// Promotes a region that caught up to a writable leader. Returns false if the region waits
     /// for a reload.
     pub(crate) fn promote_after_catchup(&self, region_id: RegionId) -> bool {
         let fence = self.promotion_fence.lock().unwrap();
-        self.promote_unless_reload_pending(&fence, region_id)
+        self.promote_unless_reload_pending(&fence, region_id, true)
     }
 
     /// Promotes the region unless it waits for a reload. The caller holds the fence lock.
-    fn promote_unless_reload_pending(&self, fence: &PromotionFence, region_id: RegionId) -> bool {
+    fn promote_unless_reload_pending(
+        &self,
+        fence: &PromotionFence,
+        region_id: RegionId,
+        by_catchup: bool,
+    ) -> bool {
         if fence.reload_pending {
             return false;
         }
+        if by_catchup {
+            // Before the role, so a lease that finds the region writable compares with it.
+            self.catchup_promoted_at
+                .store(lease_nanos(Instant::now()).max(1), Ordering::Relaxed);
+        }
         self.set_role(RegionRole::Leader, region_id);
         true
+    }
+
+    /// Counts an applied Leader lease of a heartbeat sent at `issued_at` as received since the
+    /// last catchup promotion. A heartbeat sent before the promotion does not count: its lease
+    /// may have been granted before an earlier downgrade of this node, which the fast path of
+    /// [Self::promote_unless_downgrade_started_after] does not check, and the lease of the next
+    /// heartbeat counts instead. It reads one atomic, since every lease of a writable leader
+    /// comes here.
+    pub(crate) fn record_leader_lease(&self, issued_at: Instant) {
+        let promoted_at = self.catchup_promoted_at.load(Ordering::Relaxed);
+        if promoted_at != 0 && lease_nanos(issued_at) >= promoted_at {
+            let _ = self.catchup_promoted_at.compare_exchange(
+                promoted_at,
+                0,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            );
+        }
+    }
+
+    /// Returns whether a Leader lease of a heartbeat sent after the last catchup promotion applied,
+    /// or no catchup promoted the region.
+    pub(crate) fn leader_lease_received(&self) -> bool {
+        self.catchup_promoted_at.load(Ordering::Relaxed) == 0
     }
 
     /// Sets the [`RegionRole`].
@@ -2796,6 +2886,23 @@ mod tests {
             .unwrap();
         });
         assert!(rx.recv_timeout(std::time::Duration::from_secs(10)).unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_lease_sent_before_catchup_promotion_does_not_count() {
+        let env = SchedulerEnv::new().await;
+        let region = build_test_region(&env).await;
+        let manifest_ctx = &region.manifest_ctx;
+        let sent_before = std::time::Instant::now();
+        region.set_role(RegionRole::Follower);
+        std::thread::sleep(std::time::Duration::from_millis(1));
+        assert!(manifest_ctx.promote_after_catchup(region.region_id));
+
+        assert!(manifest_ctx.promote_unless_downgrade_started_after(sent_before, region.region_id));
+        assert!(!manifest_ctx.leader_lease_received());
+        let sent_after = std::time::Instant::now();
+        assert!(manifest_ctx.promote_unless_downgrade_started_after(sent_after, region.region_id));
+        assert!(manifest_ctx.leader_lease_received());
     }
 
     #[tokio::test]

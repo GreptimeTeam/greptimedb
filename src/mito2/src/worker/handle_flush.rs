@@ -409,14 +409,21 @@ impl<S: LogStore> RegionWorkerLoop<S> {
 
     /// Flushes locally writable candidates selected by the WAL.
     pub(crate) fn flush_for_wal_pressure(&mut self, candidates: &[RegionId]) -> Result<()> {
+        let node_id = self.file_ref_manager.node_id();
         for &region_id in candidates.iter() {
             let Some(region) = self.regions.get_region(region_id) else {
                 continue;
             };
+            let version = region.version();
+            // A flush cannot move the WAL release of a region past one of this node's tails.
+            let release_capped = version.pending_tails.iter().any(|tail| {
+                Some(tail.node_id) == node_id && tail.after <= version.flushed_entry_id
+            });
             if !region.is_writable()
                 || region.is_staging()
                 || self.flush_scheduler.is_flush_requested(region_id)
-                || region_memtable_usage(&region.version()) == 0
+                || region_memtable_usage(&version) == 0
+                || release_capped
             {
                 continue;
             }

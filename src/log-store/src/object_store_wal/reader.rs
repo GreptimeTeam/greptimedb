@@ -22,6 +22,7 @@ use common_cache::Cache;
 use futures::StreamExt;
 use object_store::ObjectStore;
 use snafu::{OptionExt, ResultExt, ensure};
+pub use store_api::logstore::WalReadUpperBound;
 use store_api::logstore::entry::{Entry, NaiveEntry};
 use store_api::logstore::provider::Provider;
 use store_api::logstore::{EntryId, SendableEntryStream};
@@ -45,24 +46,6 @@ use crate::object_store_wal::prefetch;
 /// Node-wide limit on concurrent remote object index reads. Startup recovery
 /// keeps its existing, separate concurrency setting.
 const FOOTER_CONCURRENCY: usize = 16;
-
-/// Upper bound of a remote WAL recovery range. A reported final entry must be
-/// present, whereas a LIST boundary need not contain entries of this region.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum WalReadUpperBound {
-    /// The durable last entry reported by the source on downgrade.
-    LastEntry(EntryId),
-    /// A conservative bound obtained by listing the source prefix.
-    Listed(EntryId),
-}
-
-impl WalReadUpperBound {
-    fn entry_id(self) -> EntryId {
-        match self {
-            Self::LastEntry(id) | Self::Listed(id) => id,
-        }
-    }
-}
 
 /// A normalized WAL node prefix: `<root>/datanodes/<node>/epochs/<generation>`.
 /// Construct it from a persisted source prefix or

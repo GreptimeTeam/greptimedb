@@ -58,7 +58,7 @@ use crate::error::{
     Result, UnexpectedSnafu,
 };
 use crate::flush::FlushReason;
-use crate::manifest::action::{RegionEdit, TruncateKind};
+use crate::manifest::action::{PendingTail, RegionEdit, TruncateKind};
 use crate::memtable::MemtableId;
 use crate::memtable::bulk::part::BulkPart;
 use crate::metrics::COMPACTION_ELAPSED_TOTAL;
@@ -1157,6 +1157,19 @@ pub(crate) enum BackgroundNotify {
         /// The reloaded instance.
         result: Result<MitoRegionRef>,
     },
+    /// The region became writable and may have pending tails to replay.
+    RegionBecameWritable,
+    /// A tail replay published its result in the manifest.
+    TailReplayCommitted {
+        /// The instance the replay ran for.
+        region: MitoRegionRef,
+        /// The published edit.
+        edit: RegionEdit,
+        /// The tails the replay read, which the manifest recorded when the edit was published.
+        tails: Vec<PendingTail>,
+    },
+    /// A tail replay ended.
+    TailReplayEnded,
 }
 
 /// Notifies a flush job is finished.

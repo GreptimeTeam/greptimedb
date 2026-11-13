@@ -52,6 +52,7 @@
 //! |------------------------------|:----------------------:|:---------------------:|
 //! | Flush (memtable → SST)       | ✅ Yes                 | ✅ Yes                |
 //! | Local compaction             | ✅ Yes                 | ✅ Yes                |
+//! | Pending WAL tail replay      | ✅ Yes                 | ✅ Yes                |
 //! | Remote compaction            | ✅ (compactor node) ¹     | ✅ (compactor node) ¹    |
 //! | RegionEdit / bulk ingestion  | ❌ (files pre-written)  | ✅ Yes                |
 //! | Copy region                  | ❌ (object-store copy)  | ✅ Yes                |
@@ -116,8 +117,9 @@
 //!
 //! ## Invocation points
 //!
-//! `on_sst_files_written` is invoked at the SST write site (flush task or compaction task),
-//! immediately after SST files are written but **before** the manifest is committed.
+//! `on_sst_files_written` is invoked at the SST write site (flush task, compaction task or
+//! tail replay task), immediately after SST files are written but **before** the manifest
+//! is committed.
 //!
 //! `on_manifest_updated` is funneled through [`ManifestContext::update_locked`],
 //! which calls the low-level [`RegionManifestManager::update_with_verification`]
@@ -291,7 +293,8 @@ pub struct VerifiedSstFileInfo<'a> {
 pub trait RegionHook: Send + Sync + Debug {
     /// Called after SST **data files** are physically written, before manifest commit.
     ///
-    /// This fires only when mito2 itself writes SST files (flush and compaction).
+    /// This fires only when mito2 itself writes SST files (flush, compaction and the replay
+    /// of pending WAL tails).
     /// It does **not** fire when SST files are pre-written externally (bulk ingestion,
     /// copy region) or when only index files are written (async index build).
     ///
