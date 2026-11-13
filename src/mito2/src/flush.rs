@@ -420,7 +420,10 @@ impl RegionFlushTask {
             }
             Err(e) => {
                 let err = Arc::new(e);
-                let failed = FlushFailed { err: err.clone() };
+                let failed = FlushFailed {
+                    err: err.clone(),
+                    senders: std::mem::take(&mut self.senders),
+                };
                 if failed.is_cancelled() {
                     info!("Flush cancelled for region {}", self.region_id);
                 } else {
@@ -430,7 +433,6 @@ impl RegionFlushTask {
                 timer.stop_and_discard();
                 uncommitted.cleanup().await;
 
-                self.on_failure(err.clone());
                 WorkerRequest::Background {
                     region_id: self.region_id,
                     notify: BackgroundNotify::FlushFailed(failed),
@@ -888,17 +890,20 @@ impl RegionFlushTask {
                 "Failed to notify flush job status for region {}, request: {:?}",
                 self.region_id, request
             );
-            if let WorkerRequest::Background {
-                notify: BackgroundNotify::FlushFinished(mut finished),
-                ..
-            } = request
-            {
-                finished.on_failure(
-                    RegionClosedSnafu {
-                        region_id: self.region_id,
+            if let WorkerRequest::Background { notify, .. } = request {
+                let err = RegionClosedSnafu {
+                    region_id: self.region_id,
+                }
+                .build();
+                match notify {
+                    BackgroundNotify::FlushFinished(mut finished) => {
+                        finished.on_failure(err);
                     }
-                    .build(),
-                );
+                    BackgroundNotify::FlushFailed(mut failed) => {
+                        failed.on_shared_failure(Arc::new(err), self.region_id);
+                    }
+                    _ => {}
+                }
             }
         }
     }
@@ -1954,6 +1959,46 @@ mod tests {
 
         let output = output_rx.await.expect("waiter must receive explicit error");
         assert!(output.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_send_worker_request_failure_notifies_flush_failed_waiter() {
+        let env = SchedulerEnv::new().await;
+        let (tx, rx) = mpsc::channel(1);
+        drop(rx);
+        let builder = VersionControlBuilder::new();
+        let version_control = Arc::new(builder.build());
+        let manifest_ctx = env
+            .mock_manifest_context(version_control.current().version.metadata.clone())
+            .await;
+        let task = new_test_flush_task(
+            &env,
+            builder.region_id(),
+            FlushReason::Manual,
+            tx,
+            manifest_ctx,
+        );
+        let (output_tx, output_rx) = oneshot::channel();
+        let request = WorkerRequest::Background {
+            region_id: builder.region_id(),
+            notify: BackgroundNotify::FlushFailed(FlushFailed {
+                err: Arc::new(
+                    RegionBusySnafu {
+                        region_id: builder.region_id(),
+                    }
+                    .build(),
+                ),
+                senders: vec![OutputTx::new(output_tx)],
+            }),
+        };
+
+        task.send_worker_request(request).await;
+
+        let err = output_rx
+            .await
+            .expect("waiter must receive explicit error")
+            .unwrap_err();
+        assert_eq!(err.status_code(), StatusCode::Cancelled);
     }
 
     #[tokio::test]

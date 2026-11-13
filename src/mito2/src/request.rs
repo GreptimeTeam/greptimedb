@@ -1207,9 +1207,18 @@ impl OnFailure for FlushFinished {
 pub(crate) struct FlushFailed {
     /// The error source of the failure.
     pub(crate) err: Arc<Error>,
+    /// Flush result senders.
+    pub(crate) senders: Vec<OutputTx>,
 }
 
 impl FlushFailed {
+    /// Marks the flush job as failed and notifies its waiters.
+    pub(crate) fn on_shared_failure(&mut self, err: Arc<Error>, region_id: RegionId) {
+        for sender in self.senders.drain(..) {
+            sender.send(Err(err.clone()).context(FlushRegionSnafu { region_id }));
+        }
+    }
+
     /// Returns whether the flush was cancelled cooperatively.
     pub(crate) fn is_cancelled(&self) -> bool {
         matches!(self.err.as_ref(), Error::FlushCancelled { .. })

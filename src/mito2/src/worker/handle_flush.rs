@@ -87,8 +87,15 @@ fn resolve_flush_reason(
 
 impl<S: LogStore> RegionWorkerLoop<S> {
     /// On region flush job failed.
-    pub(crate) async fn handle_flush_failed(&mut self, region_id: RegionId, request: FlushFailed) {
-        let mut pending_ddls = self.flush_scheduler.on_flush_failed(region_id, request.err);
+    pub(crate) async fn handle_flush_failed(
+        &mut self,
+        region_id: RegionId,
+        mut request: FlushFailed,
+    ) {
+        let mut pending_ddls = self
+            .flush_scheduler
+            .on_flush_failed(region_id, request.err.clone());
+        request.on_shared_failure(request.err.clone(), region_id);
         if !pending_ddls.is_empty() {
             info!(
                 "Flush terminated for region {}, handling {} pending lifecycle DDL requests",
@@ -531,8 +538,14 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             error!(err; "Failed to write wal, region: {}", region_id);
             request.on_shared_failure(err.clone());
             // The flush scheduler still tracks the flush, so release it as a failed flush does.
-            self.handle_flush_failed(region_id, FlushFailed { err })
-                .await;
+            self.handle_flush_failed(
+                region_id,
+                FlushFailed {
+                    err,
+                    senders: Vec::new(),
+                },
+            )
+            .await;
             return;
         }
 
