@@ -28,8 +28,8 @@ use rstest::rstest;
 use rstest_reuse::apply;
 use store_api::region_engine::{RegionEngine, RegionRole, SettableRegionRoleState};
 use store_api::region_request::{
-    EnterStagingRequest, RegionCatchupRequest, RegionPutRequest, RegionRequest,
-    StagingPartitionDirective,
+    EnterStagingRequest, RegionCatchupRequest, RegionCloseRequest, RegionDropRequest,
+    RegionPutRequest, RegionRequest, StagingPartitionDirective,
 };
 use store_api::storage::{RegionId, ScanRequest};
 use tokio::task::JoinHandle;
@@ -39,6 +39,7 @@ use crate::engine::MitoEngine;
 use crate::engine::basic_test::build_bulk_insert_request;
 use crate::engine::listener::WriteWalListener;
 use crate::error::Error;
+use crate::lease::GrantedLease;
 use crate::region::{RegionLeaderState, RegionRoleState};
 use crate::test_util::{
     CreateRequestBuilder, LogStoreFactory, TestEnv, build_rows, kafka_log_store_factory,
@@ -72,7 +73,7 @@ async fn create_region(
 
 fn grant(engine: &MitoEngine, role: RegionRole, deadline: Instant) {
     engine
-        .set_region_role_with_lease(REGION_ID, role, Instant::now(), deadline)
+        .set_region_role_with_lease(REGION_ID, role, Instant::now(), deadline, None)
         .unwrap();
 }
 
@@ -80,7 +81,7 @@ fn grant(engine: &MitoEngine, role: RegionRole, deadline: Instant) {
 fn grant_leader_at(engine: &MitoEngine, sent_at: Instant) -> bool {
     let deadline = Instant::now() + LEASE;
     engine
-        .set_region_role_with_lease(REGION_ID, RegionRole::Leader, sent_at, deadline)
+        .set_region_role_with_lease(REGION_ID, RegionRole::Leader, sent_at, deadline, None)
         .unwrap()
 }
 
@@ -383,4 +384,101 @@ async fn test_leader_grant_exits_staging() {
         RegionRoleState::Leader(RegionLeaderState::Writable),
         state()
     );
+}
+
+fn granted_lease(engine: &MitoEngine) -> Option<GrantedLease> {
+    engine.inner.workers.granted_leases().get(REGION_ID)
+}
+
+/// Grants `role` for a heartbeat sent at `sent_at` with `candidate_lease_id`.
+fn grant_candidate_at(
+    engine: &MitoEngine,
+    role: RegionRole,
+    sent_at: Instant,
+    candidate_lease_id: Option<u64>,
+) -> bool {
+    engine
+        .set_region_role_with_lease(
+            REGION_ID,
+            role,
+            sent_at,
+            Instant::now() + LEASE,
+            candidate_lease_id,
+        )
+        .unwrap()
+}
+
+#[tokio::test]
+async fn test_granted_lease_keeps_latest_heartbeat_across_catchup_reopen() {
+    common_telemetry::init_default_ut_logging();
+    let mut env = TestEnv::with_prefix("granted-lease-reopen").await;
+    let (_listener, engine, schema) = create_region(&mut env, None).await;
+    grant(&engine, RegionRole::Leader, Instant::now() + LEASE);
+    // The memtable is not empty, so the catchup below reopens the region.
+    put(&engine, REGION_ID, &schema, 0).await.unwrap().unwrap();
+    let sent_before = Instant::now() - Duration::from_millis(1);
+    engine
+        .set_region_role_state_gracefully(REGION_ID, SettableRegionRoleState::Follower)
+        .await
+        .unwrap();
+
+    // A Leader lease the region ignores still counts as the latest one received.
+    assert!(!grant_candidate_at(
+        &engine,
+        RegionRole::Leader,
+        sent_before,
+        Some(9)
+    ));
+    let latest = GrantedLease {
+        candidate_lease_id: Some(9),
+        issued_at: sent_before,
+    };
+    assert_eq!(granted_lease(&engine), Some(latest));
+    // A lease of an earlier heartbeat that arrives late does not replace it.
+    let earlier = sent_before - Duration::from_millis(1);
+    grant_candidate_at(&engine, RegionRole::Follower, earlier, Some(1));
+    assert_eq!(granted_lease(&engine), Some(latest));
+
+    let region = engine.get_region(REGION_ID).unwrap();
+    let request = RegionRequest::Catchup(RegionCatchupRequest::default());
+    engine.handle_request(REGION_ID, request).await.unwrap();
+    assert!(!Arc::ptr_eq(
+        &region,
+        &engine.get_region(REGION_ID).unwrap()
+    ));
+    assert_eq!(granted_lease(&engine), Some(latest));
+
+    let later = Instant::now();
+    grant_candidate_at(&engine, RegionRole::Follower, later, None);
+    assert_eq!(
+        granted_lease(&engine),
+        Some(GrantedLease {
+            candidate_lease_id: None,
+            issued_at: later,
+        })
+    );
+}
+
+#[rstest]
+#[case::close(RegionRequest::Close(RegionCloseRequest::default()))]
+#[case::close_after_flush(RegionRequest::Close(RegionCloseRequest { flush_on_close: true }))]
+#[case::drop(RegionRequest::Drop(RegionDropRequest {
+    fast_path: false,
+    force: false,
+    partial_drop: false,
+}))]
+#[tokio::test]
+async fn test_granted_lease_removed_with_region(#[case] request: RegionRequest) {
+    common_telemetry::init_default_ut_logging();
+    let mut env = TestEnv::with_prefix("granted-lease-removed").await;
+    let (_listener, engine, schema) = create_region(&mut env, None).await;
+    grant(&engine, RegionRole::Leader, Instant::now() + LEASE);
+    // The memtable is not empty, so a close with `flush_on_close` closes after the flush.
+    put(&engine, REGION_ID, &schema, 0).await.unwrap().unwrap();
+    assert!(granted_lease(&engine).is_some());
+
+    engine.handle_request(REGION_ID, request).await.unwrap();
+
+    assert!(!engine.is_region_exists(REGION_ID));
+    assert_eq!(granted_lease(&engine), None);
 }

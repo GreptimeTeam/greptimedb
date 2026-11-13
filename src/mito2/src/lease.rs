@@ -12,9 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::sync::LazyLock;
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{LazyLock, Mutex};
 use std::time::Instant;
+
+use store_api::storage::RegionId;
 
 /// The instant lease deadlines count from, so that a deadline fits in an [AtomicU64].
 static LEASE_EPOCH: LazyLock<Instant> = LazyLock::new(Instant::now);
@@ -87,5 +90,50 @@ impl NodeLease {
         leader_deadline
             .0
             .fetch_max(self.deadline.get(), Ordering::Relaxed);
+    }
+}
+
+/// A region lease the metasrv granted for a heartbeat sent at `issued_at`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct GrantedLease {
+    pub(crate) candidate_lease_id: Option<u64>,
+    pub(crate) issued_at: Instant,
+}
+
+/// The lease of the latest heartbeat each region received, whether or not the region applied it.
+/// It is kept apart from the region instance, so a reopen during catchup keeps it.
+#[derive(Debug, Default)]
+pub(crate) struct GrantedLeases(Mutex<HashMap<RegionId, GrantedLease>>);
+
+impl GrantedLeases {
+    pub(crate) fn record(
+        &self,
+        region_id: RegionId,
+        candidate_lease_id: Option<u64>,
+        issued_at: Instant,
+    ) {
+        let lease = GrantedLease {
+            candidate_lease_id,
+            issued_at,
+        };
+        self.0
+            .lock()
+            .unwrap()
+            .entry(region_id)
+            .and_modify(|latest| {
+                if issued_at > latest.issued_at {
+                    *latest = lease;
+                }
+            })
+            .or_insert(lease);
+    }
+
+    pub(crate) fn remove(&self, region_id: RegionId) {
+        self.0.lock().unwrap().remove(&region_id);
+    }
+
+    #[cfg(any(test, feature = "test"))]
+    pub(crate) fn get(&self, region_id: RegionId) -> Option<GrantedLease> {
+        self.0.lock().unwrap().get(&region_id).copied()
     }
 }

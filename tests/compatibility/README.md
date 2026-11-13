@@ -23,6 +23,14 @@ including exact integer counts, custom bounds, and NaN payloads:
 cargo nextest run -p servers -E 'test(native_histogram_remote_read_wire_fixture)'
 ```
 
+The [legacy region lease fixture](wire/candidate_lease_id/README.md) checks that a
+lease without a candidate lease id decodes as such and encodes to the same bytes
+as before the field existed:
+
+```shell
+cargo nextest run -p store-api -E 'test(test_legacy_granted_region_wire)'
+```
+
 ## Object store WAL fixtures
 
 Frozen objects of the object store WAL are checked byte for byte by the format tests of

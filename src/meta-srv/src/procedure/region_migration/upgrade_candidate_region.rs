@@ -154,6 +154,12 @@ impl UpgradeCandidateRegion {
                 .get(&region_id)
                 .copied();
             let checkpoint = replay_checkpoints.get(&region_id).copied();
+            let candidate_lease_id = ctx
+                .volatile_ctx
+                .opening_region_guards
+                .iter()
+                .find(|guard| guard.info().1 == region_id)
+                .and_then(|guard| guard.candidate_lease_id());
             upgrade_regions.push(UpgradeRegion {
                 region_id,
                 last_entry_id,
@@ -162,6 +168,7 @@ impl UpgradeCandidateRegion {
                 location_id: Some(ctx.persistent_ctx.from_peer.id),
                 replay_entry_id: checkpoint.map(|c| c.entry_id),
                 metadata_replay_entry_id: checkpoint.and_then(|c| c.metadata_entry_id),
+                candidate_lease_id,
             });
         }
 
@@ -464,6 +471,34 @@ mod tests {
         assert_eq!(upgrade_regions.len(), 1);
         assert_eq!(upgrade_regions[0].replay_entry_id, Some(20));
         assert_eq!(upgrade_regions[0].metadata_replay_entry_id, None);
+    }
+
+    #[tokio::test]
+    async fn test_build_upgrade_region_instruction_carries_candidate_lease_id() {
+        let state = UpgradeCandidateRegion::default();
+        let env = TestingEnv::new();
+        let mut ctx = env.context_factory().new_context(new_persistent_context());
+        let region_id = ctx.persistent_ctx.region_ids[0];
+        prepare_table_metadata(&ctx, RegionWalOptions::default()).await;
+        let guard = env
+            .opening_region_keeper()
+            .register_candidate_region(ctx.persistent_ctx.to_peer.id, region_id)
+            .unwrap();
+        let candidate_lease_id = guard.candidate_lease_id();
+        ctx.volatile_ctx.opening_region_guards.push(guard);
+
+        // Retries send the same id.
+        for _ in 0..2 {
+            let instruction = state
+                .build_upgrade_region_instruction(&mut ctx, Duration::from_secs(1))
+                .await
+                .unwrap();
+            let Instruction::UpgradeRegions(upgrade_regions) = instruction else {
+                unreachable!()
+            };
+            assert!(candidate_lease_id.is_some());
+            assert_eq!(upgrade_regions[0].candidate_lease_id, candidate_lease_id);
+        }
     }
 
     #[tokio::test]

@@ -877,6 +877,8 @@ impl RegionMigrationProcedure {
         let _timer = METRIC_META_REGION_MIGRATION_EXECUTE
             .with_label_values(&["rollback"])
             .start_timer();
+        // Before the source can lead again, the target leaves the candidate registration.
+        self.context.volatile_ctx.opening_region_guards.clear();
         let ctx = &self.context;
         let to_peer_id = ctx.persistent_ctx.to_peer.id;
         let table_regions = ctx.persistent_ctx.table_regions();
@@ -949,6 +951,15 @@ impl RegionMigrationProcedure {
         }
 
         Ok(())
+    }
+}
+
+impl Drop for RegionMigrationProcedure {
+    fn drop(&mut self) {
+        // A procedure that ends without a rollback, e.g. it fails to record the rollback or the
+        // manager stops, drops the candidate registration before the region leaves the tracker,
+        // so another migration of the region cannot start while the registration remains.
+        self.context.volatile_ctx.opening_region_guards.clear();
     }
 }
 
@@ -1117,6 +1128,53 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(table_route.region_routes().unwrap()[0].leader_state, None);
+    }
+
+    #[tokio::test]
+    async fn test_rollback_drops_candidate_registration_before_route_write() {
+        let env = TestingEnv::new();
+        let (table_metadata_manager, keeper_empty_at_txn) =
+            table_metadata_manager_observing_keeper(env.opening_region_keeper().clone());
+        let persistent_ctx = new_persistent_context();
+        let region_id = persistent_ctx.region_ids[0];
+        let region_routes = vec![RegionRoute {
+            region: Region::new_test(region_id),
+            leader_peer: Some(persistent_ctx.from_peer.clone()),
+            leader_state: Some(LeaderState::Downgrading),
+            ..Default::default()
+        }];
+        table_metadata_manager
+            .create_table_metadata(
+                new_test_table_info(region_id.table_id()),
+                TableRouteValue::physical(region_routes),
+                HashMap::default(),
+            )
+            .await
+            .unwrap();
+        keeper_empty_at_txn.lock().unwrap().clear();
+        let guard = env
+            .opening_region_keeper()
+            .register_candidate_region(persistent_ctx.to_peer.id, region_id)
+            .unwrap();
+        let mut procedure = RegionMigrationProcedure::new(
+            persistent_ctx,
+            env.context_factory_with_metadata(table_metadata_manager),
+            vec![],
+        );
+        procedure
+            .context
+            .volatile_ctx
+            .opening_region_guards
+            .push(guard);
+
+        procedure
+            .rollback_inner(&new_procedure_context())
+            .await
+            .unwrap();
+
+        let keeper_empty_at_txn = keeper_empty_at_txn.lock().unwrap();
+        assert!(!keeper_empty_at_txn.is_empty());
+        assert!(keeper_empty_at_txn.iter().all(|empty| *empty));
     }
 
     #[test]

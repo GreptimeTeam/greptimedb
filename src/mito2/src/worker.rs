@@ -71,7 +71,7 @@ use crate::config::MitoConfig;
 use crate::error::{self, CreateDirSnafu, JoinSnafu, Result, WorkerStoppedSnafu};
 use crate::flush::{FlushScheduler, WriteBufferManagerImpl, WriteBufferManagerRef};
 use crate::gc::{GcLimiter, GcLimiterRef};
-use crate::lease::NodeLease;
+use crate::lease::{GrantedLeases, NodeLease};
 use crate::memtable::MemtableBuilderProvider;
 use crate::memtable::bulk::CompactDispatcher;
 use crate::metrics::{REGION_COUNT, REQUEST_WAIT_TIME, WRITE_STALLING};
@@ -166,6 +166,7 @@ pub(crate) struct WorkerGroup {
     /// Gc limiter to limit concurrent gc jobs.
     gc_limiter: GcLimiterRef,
     node_lease: Arc<NodeLease>,
+    granted_leases: Arc<GrantedLeases>,
     /// Object store manager.
     object_store_manager: ObjectStoreManagerRef,
     /// Puffin manager factory.
@@ -264,6 +265,7 @@ impl WorkerGroup {
         let sweep_limiter = (config.gc.max_concurrent_gc_job > 0)
             .then(|| Arc::new(Semaphore::new(config.gc.max_concurrent_gc_job)));
         let node_lease = Arc::new(NodeLease::default());
+        let granted_leases = Arc::new(GrantedLeases::default());
         let staging_regions = StagingRegionsRef::default();
         let wal = Wal::new(log_store);
 
@@ -298,6 +300,7 @@ impl WorkerGroup {
                     #[cfg(feature = "hdfs-object-store")]
                     sweep_limiter: sweep_limiter.clone(),
                     node_lease: node_lease.clone(),
+                    granted_leases: granted_leases.clone(),
                     staging_regions: staging_regions.clone(),
                 }
                 .start()
@@ -314,6 +317,7 @@ impl WorkerGroup {
             file_ref_manager,
             gc_limiter,
             node_lease,
+            granted_leases,
             object_store_manager,
             puffin_manager_factory,
             intermediate_manager,
@@ -420,6 +424,10 @@ impl WorkerGroup {
 
     pub(crate) fn node_lease(&self) -> &NodeLease {
         &self.node_lease
+    }
+
+    pub(crate) fn granted_leases(&self) -> &GrantedLeases {
+        &self.granted_leases
     }
 
     /// Asks the worker of `region` to replay its pending tails, if it has any, without waiting.
@@ -543,6 +551,7 @@ impl WorkerGroup {
         let sweep_limiter = (config.gc.max_concurrent_gc_job > 0)
             .then(|| Arc::new(Semaphore::new(config.gc.max_concurrent_gc_job)));
         let node_lease = Arc::new(NodeLease::default());
+        let granted_leases = Arc::new(GrantedLeases::default());
         let staging_regions = StagingRegionsRef::default();
         let wal = Wal::new(log_store);
         let workers = (0..config.num_workers)
@@ -576,6 +585,7 @@ impl WorkerGroup {
                     #[cfg(feature = "hdfs-object-store")]
                     sweep_limiter: sweep_limiter.clone(),
                     node_lease: node_lease.clone(),
+                    granted_leases: granted_leases.clone(),
                     staging_regions: staging_regions.clone(),
                 }
                 .start()
@@ -592,6 +602,7 @@ impl WorkerGroup {
             file_ref_manager,
             gc_limiter,
             node_lease,
+            granted_leases,
             object_store_manager,
             puffin_manager_factory,
             intermediate_manager,
@@ -694,6 +705,7 @@ struct WorkerStarter<S> {
     /// no concurrent GC job.
     sweep_limiter: Option<Arc<Semaphore>>,
     node_lease: Arc<NodeLease>,
+    granted_leases: Arc<GrantedLeases>,
     staging_regions: StagingRegionsRef,
 }
 
@@ -801,6 +813,7 @@ impl<S: LogStore> WorkerStarter<S> {
             #[cfg(feature = "hdfs-object-store")]
             sweep_limiter: self.sweep_limiter,
             node_lease: self.node_lease,
+            granted_leases: self.granted_leases,
             staging_regions: self.staging_regions,
             tail_replays: HashMap::new(),
         };
@@ -1262,6 +1275,7 @@ struct RegionWorkerLoop<S> {
     /// no concurrent GC job.
     sweep_limiter: Option<Arc<Semaphore>>,
     node_lease: Arc<NodeLease>,
+    granted_leases: Arc<GrantedLeases>,
     /// Staging regions of this node that have received writes.
     staging_regions: StagingRegionsRef,
     /// Running tail replays, which stay here until they report their end.

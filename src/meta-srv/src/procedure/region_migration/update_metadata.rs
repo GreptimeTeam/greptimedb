@@ -69,6 +69,8 @@ impl State for UpdateMetadata {
                 Ok((Box::new(CloseDowngradedRegion), Status::executing(false)))
             }
             UpdateMetadata::Rollback => {
+                // Before the source can lead again, the target leaves the candidate registration.
+                ctx.volatile_ctx.opening_region_guards.clear();
                 self.rollback_downgraded_region(ctx, &procedure_ctx.provider)
                     .await?;
 

@@ -1324,4 +1324,55 @@ mod test {
         assert!(result.procedure_id.is_some());
         env.procedure_manager().stop().await.unwrap();
     }
+
+    #[test]
+    fn test_dropped_procedure_releases_candidate_registration_before_tracker() {
+        let env = TestingEnv::new();
+        let keeper = env.opening_region_keeper().clone();
+        let tracker = RegionMigrationProcedureTracker::default();
+        let region_id = RegionId::new(1024, 1);
+        let task = RegionMigrationProcedureTask::new(
+            region_id,
+            Peer::empty(1),
+            Peer::empty(2),
+            Duration::from_secs(1),
+            RegionMigrationTriggerReason::Manual,
+        );
+        let tracker_guard = tracker.insert_running_procedure(&task).unwrap();
+        let persistent_ctx = PersistentContext::new(
+            vec![("greptime".into(), "public".into())],
+            Peer::empty(1),
+            Peer::empty(2),
+            vec![region_id],
+            Duration::from_secs(1),
+            RegionMigrationTriggerReason::Manual,
+        );
+        let mut procedure = RegionMigrationProcedure::new(
+            persistent_ctx,
+            env.context_factory(),
+            vec![tracker_guard],
+        );
+        procedure
+            .context
+            .volatile_ctx
+            .opening_region_guards
+            .push(keeper.register_candidate_region(2, region_id).unwrap());
+
+        // While this read lock is held, the tracker entry cannot be removed, so the registration
+        // has to go first.
+        let running_procedures = tracker.running_procedures.read().unwrap();
+        let dropper = std::thread::spawn(move || drop(procedure));
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while !keeper.is_empty() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the candidate registration outlives the tracker entry"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert!(running_procedures.contains_key(&region_id));
+        drop(running_procedures);
+        dropper.join().unwrap();
+        assert!(tracker.running_procedures.read().unwrap().is_empty());
+    }
 }

@@ -27,7 +27,6 @@ use common_telemetry::info;
 use common_telemetry::tracing_context::TracingContext;
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt};
-use store_api::region_engine::RegionRole;
 use store_api::region_request::RegionRequirements;
 use tokio::time::Instant;
 
@@ -147,7 +146,7 @@ impl OpenCandidateRegion {
                 // Registers the opening region.
                 let guard = ctx
                     .opening_region_keeper
-                    .register_with_role(candidate.id, *region_id, RegionRole::Follower)
+                    .register_candidate_region(candidate.id, *region_id)
                     .context(error::RegionOperatingRaceSnafu {
                         peer_id: candidate.id,
                         region_id: *region_id,
@@ -247,6 +246,7 @@ mod tests {
     use common_meta::key::test_utils::new_test_table_info;
     use common_meta::peer::Peer;
     use common_meta::rpc::router::{Region, RegionRoute};
+    use store_api::region_engine::RegionRole;
     use store_api::storage::RegionId;
 
     use super::*;

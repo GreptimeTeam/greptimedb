@@ -357,6 +357,16 @@ impl MitoEngine {
         self.inner.workers.node_lease().freeze_clock(at);
     }
 
+    /// Returns the candidate lease id of the latest lease granted to the region.
+    #[cfg(any(test, feature = "test"))]
+    pub fn granted_candidate_lease_id(&self, region_id: RegionId) -> Option<u64> {
+        self.inner
+            .workers
+            .granted_leases()
+            .get(region_id)
+            .and_then(|lease| lease.candidate_lease_id)
+    }
+
     pub fn object_store_manager(&self) -> &ObjectStoreManagerRef {
         self.inner.workers.object_store_manager()
     }
@@ -1683,8 +1693,14 @@ impl RegionEngine for MitoEngine {
         role: RegionRole,
         sent_at: Instant,
         deadline: Instant,
+        candidate_lease_id: Option<u64>,
     ) -> Result<bool, BoxedError> {
         let region = self.inner.find_region(region_id).map_err(BoxedError::new)?;
+        // Before the role, so a lease the region ignores still counts.
+        self.inner
+            .workers
+            .granted_leases()
+            .record(region_id, candidate_lease_id, sent_at);
         // Before the role, and even if the role leaves the region's state unchanged.
         if role.writable() {
             region.manifest_ctx.leader_deadline.extend(deadline);
