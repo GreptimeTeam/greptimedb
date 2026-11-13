@@ -51,7 +51,7 @@ use crate::sst::index::registry::IndexRegistry;
 use crate::sst::index::{IndexerBuilderImpl, build_index_from_parquet_bytes};
 use crate::sst::location::{self, region_dir_from_table_dir};
 use crate::sst::parquet::reader::ParquetReaderBuilder;
-use crate::sst::parquet::writer::ParquetWriter;
+use crate::sst::parquet::writer::{ParquetWriter, SstWriteContext};
 use crate::sst::parquet::{SstInfo, WriteOptions};
 use crate::sst::{DEFAULT_WRITE_CONCURRENCY, FormatType};
 
@@ -382,7 +382,7 @@ impl AccessLayer {
         request: SstWriteRequest,
         write_opts: &WriteOptions,
         metrics: &mut Metrics,
-        context: crate::sst::parquet::writer::SstWriteContext,
+        context: SstWriteContext,
     ) -> Result<SstInfoArray> {
         self.write_sst_inner(request, write_opts, metrics, Some(context))
             .await
@@ -393,7 +393,7 @@ impl AccessLayer {
         request: SstWriteRequest,
         write_opts: &WriteOptions,
         metrics: &mut Metrics,
-        context: Option<crate::sst::parquet::writer::SstWriteContext>,
+        context: Option<SstWriteContext>,
     ) -> Result<SstInfoArray> {
         let context = context.unwrap_or_default();
         let limits = context.limits;
@@ -1112,7 +1112,6 @@ mod tests {
     ) {
         use crate::read::FlatSource;
         use crate::sst::file::UncommittedSsts;
-        use crate::sst::parquet::writer::SstWriteContext;
         use crate::test_util::sst_util::{new_record_batch_by_range, sst_region_metadata};
         use common_base::cancellation::CancellationHandle;
 

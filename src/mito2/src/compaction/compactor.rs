@@ -60,6 +60,7 @@ use crate::sst::index::puffin_manager::PuffinManagerFactory;
 use crate::sst::location::region_dir_from_table_dir;
 use crate::sst::parquet::metadata::extract_primary_key_range;
 use crate::sst::parquet::parallel_writer::EncodeRuntime;
+use crate::sst::parquet::writer::SstWriteContext;
 use crate::sst::parquet::{SstInfo, WriteOptions};
 use crate::sst::version::{SstVersion, SstVersionRef};
 
@@ -715,7 +716,7 @@ impl DefaultSstMerger {
                 },
                 &write_opts,
                 &mut metrics,
-                crate::sst::parquet::writer::SstWriteContext {
+                SstWriteContext {
                     guard: Some(Arc::new(uncommitted.clone())),
                     cancellation: Some(cancellation),
                     ..Default::default()
@@ -1045,10 +1046,12 @@ mod tests {
     use std::time::Duration;
 
     use datatypes::arrow::record_batch::RecordBatch;
+    use object_store::ObjectStore;
     use object_store::layers::mock::{self, MockLayerBuilder};
+    use object_store::services::Memory;
     use parquet::arrow::ArrowWriter;
     use store_api::storage::{FileId, RegionId};
-    use tokio::sync::{mpsc, oneshot};
+    use tokio::sync::{Notify, mpsc, oneshot};
     use tokio::time::timeout;
 
     use super::{DefaultCompactor, *};
@@ -1073,7 +1076,7 @@ mod tests {
     }
 
     struct PendingCompactionReader {
-        started: Arc<tokio::sync::Notify>,
+        started: Arc<Notify>,
     }
 
     impl mock::oio::Read for PendingCompactionReader {
@@ -1099,10 +1102,8 @@ mod tests {
     #[case::outputs(false)]
     #[tokio::test]
     async fn test_default_merger_observes_compactor_cancellation(#[case] merge_unit: bool) {
-        use object_store::services::Memory;
-
         let mut region = new_test_compaction_region().await;
-        let started = Arc::new(tokio::sync::Notify::new());
+        let started = Arc::new(Notify::new());
         let signal = started.clone();
         let layer = MockLayerBuilder::default()
             .reader_factory(Arc::new(move |_, _, _| {
@@ -1112,11 +1113,9 @@ mod tests {
             }))
             .build()
             .unwrap();
-        let store = object_store::ObjectStore::new(Memory::default())
-            .unwrap()
-            .layer(layer);
+        let store = ObjectStore::new(Memory::default()).unwrap().layer(layer);
         let access = &region.access_layer;
-        region.access_layer = Arc::new(crate::access_layer::AccessLayer::new(
+        region.access_layer = Arc::new(AccessLayer::new(
             access.table_dir(),
             access.path_type(),
             store.clone(),

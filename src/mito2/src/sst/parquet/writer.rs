@@ -22,7 +22,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
 use bytes::Bytes;
-use common_base::cancellation::CancellationHandle;
+use common_base::cancellation::{CancellationHandle, Cancelled};
 use common_telemetry::debug;
 use common_time::Timestamp;
 use datatypes::arrow::array::{
@@ -49,7 +49,7 @@ use store_api::storage::{FileId, SequenceNumber};
 use crate::access_layer::{FilePathProvider, Metrics, SstInfoArray, TempFileCleaner};
 use crate::config::{IndexBuildMode, IndexConfig};
 use crate::error::{
-    InvalidMetadataSnafu, InvalidRecordBatchSnafu, OpenDalSnafu, Result, UnexpectedSnafu,
+    Error, InvalidMetadataSnafu, InvalidRecordBatchSnafu, OpenDalSnafu, Result, UnexpectedSnafu,
     WriteParquetSnafu,
 };
 use crate::read::FlatSource;
@@ -885,11 +885,9 @@ where
 }
 
 /// Keeps encoder cancellation inside the SST write error contract.
-fn map_write_error(error: ParquetError) -> crate::error::Error {
+fn map_write_error(error: ParquetError) -> Error {
     match error {
-        ParquetError::External(ref source)
-            if source.is::<common_base::cancellation::Cancelled>() =>
-        {
+        ParquetError::External(ref source) if source.is::<Cancelled>() => {
             crate::error::SstWriteCancelledSnafu.build()
         }
         error => WriteParquetSnafu.into_error(error),
@@ -1039,7 +1037,6 @@ mod tests {
     use super::*;
     use crate::access_layer::{RegionFilePathFactory, WriteType};
     use crate::compaction::memory_manager::new_compaction_memory_manager;
-    use crate::error::Error;
     use crate::sst::FormatType;
     use crate::sst::parquet::tests::NoopIndexBuilder;
     use crate::test_util::TestEnv;
@@ -1092,7 +1089,7 @@ mod tests {
         };
         let task = common_runtime::spawn_blocking_compact(move || {
             let source: Box<dyn std::error::Error + Send + Sync> = if cancelled {
-                Box::new(common_base::cancellation::Cancelled)
+                Box::new(Cancelled)
             } else {
                 Box::new(std::io::Error::other("encoding failed"))
             };
