@@ -1520,7 +1520,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                         .await;
                 }
                 WorkerRequest::EditRegion(request) => {
-                    self.admit_region_edit(request);
+                    self.handle_incoming_region_edit(request);
                 }
                 WorkerRequest::CancelCompaction {
                     region_id,

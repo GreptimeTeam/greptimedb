@@ -313,11 +313,12 @@ impl<S: LogStore> RegionWorkerLoop<S> {
 }
 
 impl<S: LogStore> RegionWorkerLoop<S> {
-    fn is_unbound_import(request: &RegionEditRequest) -> bool {
+    fn is_import_without_staging_binding(request: &RegionEditRequest) -> bool {
         matches!(request.kind, RegionEditKind::Import) && request.staging_partition_expr.is_none()
     }
 
-    fn staging_admission_is_sealed(&self, region_id: RegionId) -> bool {
+    /// Whether EnterStaging is pending in the worker, flush, or compaction queue.
+    fn has_pending_enter_staging(&self, region_id: RegionId) -> bool {
         self.flush_scheduler.has_pending_enter_staging(region_id)
             || self
                 .compaction_scheduler
@@ -325,10 +326,16 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             || self.pending_ddls.has_enter_staging(region_id)
     }
 
-    /// Seals admission while staging drains the finite prefix of previously accepted edits.
-    pub(crate) fn admit_region_edit(&mut self, request: RegionEditRequest) -> RegionEditDispatch {
+    /// Handles a newly received edit, rejecting unbound imports while EnterStaging drains
+    /// previously accepted edits. Queued edits bypass this admission check.
+    pub(crate) fn handle_incoming_region_edit(
+        &mut self,
+        request: RegionEditRequest,
+    ) -> RegionEditDispatch {
         let region_id = request.region_id;
-        if Self::is_unbound_import(&request) && self.staging_admission_is_sealed(region_id) {
+        if Self::is_import_without_staging_binding(&request)
+            && self.has_pending_enter_staging(region_id)
+        {
             request
                 .waiters
                 .reply_with(|| RegionBusySnafu { region_id }.fail());
@@ -348,7 +355,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         };
 
         // Unbound imports must not be acknowledged into a manifest that staging can discard.
-        if Self::is_unbound_import(&request) && region.is_staging_or_staged_edit() {
+        if Self::is_import_without_staging_binding(&request) && region.is_staging_or_staged_edit() {
             request
                 .waiters
                 .reply_with(|| RejectWriteInStagingSnafu { region_id }.fail());
@@ -385,11 +392,11 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             return RegionEditDispatch::Rejected;
         }
 
-        if !region.is_writable() || self.scheduler_owns_control_turn(region_id) {
+        if !region.is_writable() || self.scheduler_blocks_region_edits(region_id) {
             if matches!(
                 region.state(),
                 RegionRoleState::Leader(RegionLeaderState::Editing | RegionLeaderState::Altering)
-            ) || (region.is_writable() && self.scheduler_owns_control_turn(region_id))
+            ) || (region.is_writable() && self.scheduler_blocks_region_edits(region_id))
             {
                 return self
                     .region_edit_queues
@@ -615,12 +622,12 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         }
     }
 
-    /// Whether an existing scheduler owns the control turn for this region.
+    /// Whether a scheduler holds lifecycle work that must finish before edits run.
     ///
     /// Running ordinary and repartition flushes retain concurrency with edits through the
-    /// existing manifest synchronization. Only pending DDLs and close-time flushes retain
-    /// the flush scheduler's control turn.
-    fn scheduler_owns_control_turn(&self, region_id: RegionId) -> bool {
+    /// existing manifest synchronization. Ordinary and repartition flushes alone do not block
+    /// edits.
+    fn scheduler_blocks_region_edits(&self, region_id: RegionId) -> bool {
         self.flush_scheduler.has_pending_ddls(region_id)
             || self.compaction_scheduler.blocks_region_edits(region_id)
     }
@@ -630,11 +637,13 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         let Some(region) = self.regions.get_region(ddl.region_id) else {
             return false;
         };
-        self.deferrable_while_blocked(ddl, &region)
-            && self.has_manifest_contention(ddl.region_id, &region, &ddl.request)
+        self.can_defer_ddl_request(ddl, &region)
+            && self.has_work_ahead_of_ddl(ddl.region_id, &region, &ddl.request)
     }
 
-    fn deferrable_while_blocked(&self, ddl: &SenderDdlRequest, region: &MitoRegionRef) -> bool {
+    /// Whether this request may wait for ongoing work in the current region state.
+    /// Ineligible requests go directly to their handlers for normal validation.
+    fn can_defer_ddl_request(&self, ddl: &SenderDdlRequest, region: &MitoRegionRef) -> bool {
         if !matches!(
             region.state(),
             RegionRoleState::Leader(
@@ -677,14 +686,16 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         }
     }
 
-    fn has_manifest_contention(
+    /// Whether active work or queue ordering requires this DDL to wait.
+    /// EnterStaging also waits for previously accepted edits to drain.
+    fn has_work_ahead_of_ddl(
         &self,
         region_id: RegionId,
         region: &MitoRegionRef,
         request: &DdlRequest,
     ) -> bool {
         self.pending_ddls.contains_region(region_id)
-            || self.scheduler_owns_control_turn(region_id)
+            || self.scheduler_blocks_region_edits(region_id)
             || matches!(
                 region.state(),
                 RegionRoleState::Leader(
@@ -703,7 +714,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
     /// Controls retain priority, except that staging first drains its accepted edit prefix.
     pub(crate) async fn dispatch_pending_region_requests(&mut self, region_id: RegionId) {
         loop {
-            if self.scheduler_owns_control_turn(region_id) {
+            if self.scheduler_blocks_region_edits(region_id) {
                 return;
             }
             if self.regions.get_region(region_id).is_some_and(|region| {
