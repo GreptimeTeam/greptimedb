@@ -2769,3 +2769,464 @@ fn independently_allocated_binding_mismatch_is_rejected() {
     }));
     assert!(mismatch.validate().is_err());
 }
+
+/// Asserts the admission verdict for `node`, and that the runtime's own construction answers the
+/// same: a predicate that stopped agreeing with it would either admit a tree the executor cannot
+/// build, or decline a shape the executor can run.
+fn assert_admission(node: NativeNode, admitted: bool, shape: &str) {
+    use datafusion::execution::memory_pool::UnboundedMemoryPool;
+
+    use crate::native::execute::NativeExecutionState;
+
+    let tree = NativeTree::try_new(node)
+        .unwrap_or_else(|error| panic!("{shape} is not a tree the compiler produces: {error}"));
+    assert_eq!(super::native_tree_supported(&tree), admitted, "{shape}");
+    assert_eq!(
+        NativeExecutionState::try_new(&tree, Arc::new(UnboundedMemoryPool::default()), None)
+            .is_ok(),
+        admitted,
+        "{shape}: the runtime does not agree with the admission predicate"
+    );
+}
+
+/// `outer` over `inner`, with `function` and `modifier` bound as written.
+fn window_with(
+    inner: NativeNode,
+    input_grid: Option<Arc<EvalGrid>>,
+    out: Arc<EvalGrid>,
+    function: RangeFunction,
+    modifier: Option<super::RangeModifier>,
+) -> NativeNode {
+    NativeNode {
+        expr: NativeExpr::Window {
+            input: Box::new(inner),
+            op: BoundWindow {
+                function,
+                window: RangeWindow {
+                    range_ms: 300_000,
+                    offset_ms: 0,
+                    anchor_ms: None,
+                    modifier,
+                },
+                input_grid,
+                output_grid: Arc::clone(&out),
+            },
+        },
+        output: evaluated(Arc::new([]), out),
+    }
+}
+
+/// Every shape the runtime refuses is refused here, and each one is a shape a tree can hold.
+#[test]
+fn native_tree_supported_declines_the_shapes_the_runtime_refuses() {
+    use super::RangeModifier;
+    use crate::select::SortOrder;
+
+    let out = grid(0, 60_000, 4);
+    // A leaf whose chunks of different series may interleave: no consumer of a leaf orders them.
+    let interleaved = NativeNode {
+        expr: NativeExpr::Input(BoundInput {
+            output: evaluated(Arc::new([]), Arc::clone(&out)),
+            source_index: 0,
+            ordering: SeriesOrdering::Interleaved,
+        }),
+        output: evaluated(Arc::new([]), Arc::clone(&out)),
+    };
+    let one_field = || window_fields(input_with_fields(1), Arc::clone(&out), 1);
+    let two_fields = || window_fields(input_with_fields(2), Arc::clone(&out), 2);
+    let aggregate = |inner: NativeNode,
+                     kind: AggregateKind,
+                     group: Grouping,
+                     stage: AggregateStage| NativeNode {
+        output: evaluated(fields(inner_field_count(&inner)), Arc::clone(&out)),
+        expr: NativeExpr::Aggregate {
+            input: Box::new(inner),
+            op: BoundAggregate { kind, group, stage },
+        },
+    };
+    let vector = |inner: NativeNode, op| NativeNode {
+        output: inner.output.clone(),
+        expr: NativeExpr::Vector {
+            input: Box::new(inner),
+            op,
+        },
+    };
+    let cases = vec![
+        ("a root of raw samples", input()),
+        (
+            "an input leaf whose chunks may interleave",
+            map_over(interleaved),
+        ),
+        (
+            "scalar() over a vector of two fields",
+            NativeNode {
+                expr: NativeExpr::ScalarOf {
+                    input: Box::new(two_fields()),
+                },
+                output: NativeType::Scalar(Arc::clone(&out)),
+            },
+        ),
+        (
+            "two constant operands",
+            NativeNode {
+                expr: NativeExpr::Binary {
+                    left: Box::new(scalar_on(1.0, Arc::clone(&out))),
+                    right: Box::new(scalar_on(2.0, Arc::clone(&out))),
+                    matching: add(),
+                },
+                output: NativeType::Scalar(Arc::clone(&out)),
+            },
+        ),
+        (
+            "a scalar broadcast carrying a matching modifier",
+            NativeNode {
+                expr: NativeExpr::Binary {
+                    left: Box::new(one_field()),
+                    right: Box::new(scalar_on(1.0, Arc::clone(&out))),
+                    matching: BinaryMatching {
+                        labels: MatchingLabels::Ignoring(vec!["host".into()]),
+                        ..add()
+                    },
+                },
+                output: evaluated(fields(1), Arc::clone(&out)),
+            },
+        ),
+        (
+            "a scalar broadcast of bool arithmetic",
+            NativeNode {
+                expr: NativeExpr::Binary {
+                    left: Box::new(one_field()),
+                    right: Box::new(scalar_on(1.0, Arc::clone(&out))),
+                    matching: BinaryMatching {
+                        return_bool: true,
+                        ..add()
+                    },
+                },
+                output: evaluated(fields(1), Arc::clone(&out)),
+            },
+        ),
+        (
+            "the quantile aggregate",
+            aggregate(
+                one_field(),
+                AggregateKind::Quantile { quantile: 0.9 },
+                Grouping::By(Arc::new(["job".into()])),
+                AggregateStage::Complete,
+            ),
+        ),
+        (
+            "an aggregate whose `by` names a value field",
+            aggregate(
+                one_field(),
+                AggregateKind::Sum,
+                Grouping::By(Arc::new(["f0".into()])),
+                AggregateStage::Complete,
+            ),
+        ),
+        (
+            "topk over a vector of two fields",
+            vector(
+                two_fields(),
+                BoundVectorOp::TopK {
+                    k: 1.0,
+                    top: true,
+                    group: Grouping::By(Arc::new([])),
+                },
+            ),
+        ),
+        (
+            "topk grouped by a value field",
+            vector(
+                one_field(),
+                BoundVectorOp::TopK {
+                    k: 1.0,
+                    top: true,
+                    group: Grouping::By(Arc::new(["f0".into()])),
+                },
+            ),
+        ),
+        (
+            "sort over a vector of two fields",
+            vector(two_fields(), BoundVectorOp::Sort(SortOrder::Asc)),
+        ),
+        (
+            "count_values under an empty label",
+            vector(
+                one_field(),
+                BoundVectorOp::CountValues {
+                    label: Arc::from(""),
+                    group: Grouping::By(Arc::new([])),
+                },
+            ),
+        ),
+        (
+            "a parameterized topk over a vector of two fields",
+            NativeNode {
+                expr: NativeExpr::ParameterizedTopK {
+                    input: Box::new(two_fields()),
+                    op: BoundVectorOp::TopK {
+                        k: 0.0,
+                        top: true,
+                        group: Grouping::By(Arc::new([])),
+                    },
+                    parameter: Box::new(scalar_on(1.0, Arc::clone(&out))),
+                },
+                output: evaluated(fields(2), Arc::clone(&out)),
+            },
+        ),
+        (
+            "an anchored window over evaluated input",
+            window_with(
+                input_on(Arc::clone(&out)),
+                Some(Arc::clone(&out)),
+                Arc::clone(&out),
+                RangeFunction::Rate,
+                Some(RangeModifier::Anchored {
+                    lookback_ms: 60_000,
+                }),
+            ),
+        ),
+        (
+            "a smoothed window over a function its kernel does not correct",
+            window_with(
+                input(),
+                None,
+                Arc::clone(&out),
+                RangeFunction::SumOverTime,
+                Some(RangeModifier::Smoothed {
+                    lookback_ms: 60_000,
+                }),
+            ),
+        ),
+        (
+            "a window with a negative modifier lookback",
+            window_with(
+                input(),
+                None,
+                Arc::clone(&out),
+                RangeFunction::Rate,
+                Some(RangeModifier::Anchored { lookback_ms: -1 }),
+            ),
+        ),
+    ];
+    for (shape, node) in cases {
+        assert_admission(node, false, shape);
+    }
+}
+
+/// Every shape the runtime builds is admitted, so the predicate does not narrow the route.
+#[test]
+fn native_tree_supported_admits_the_shapes_the_runtime_builds() {
+    use crate::select::SortOrder;
+
+    let out = grid(0, 60_000, 4);
+    let one_field = || window_fields(input_with_fields(1), Arc::clone(&out), 1);
+    let two_fields = || window_fields(input_with_fields(2), Arc::clone(&out), 2);
+    let vector = |inner: NativeNode, op| NativeNode {
+        output: inner.output.clone(),
+        expr: NativeExpr::Vector {
+            input: Box::new(inner),
+            op,
+        },
+    };
+    let cases = vec![
+        ("an evaluated input leaf", input_on(Arc::clone(&out))),
+        ("a constant root", scalar_on(3.0, Arc::clone(&out))),
+        (
+            "an evaluation-time root",
+            NativeNode {
+                expr: NativeExpr::EvalTime { date: None },
+                output: NativeType::Scalar(Arc::clone(&out)),
+            },
+        ),
+        ("a window over raw samples", window_over(input(), None)),
+        (
+            "an instant selection over raw samples",
+            NativeNode {
+                expr: NativeExpr::Instant {
+                    input: Box::new(input()),
+                    op: BoundInstant {
+                        lookback_ms: 300_000,
+                        offset_ms: 0,
+                        at_ms: None,
+                        value: InstantValue::Sample,
+                        output_grid: Arc::clone(&out),
+                    },
+                },
+                output: evaluated(Arc::new([]), Arc::clone(&out)),
+            },
+        ),
+        (
+            "a merge of an evaluated vector",
+            NativeNode {
+                expr: NativeExpr::Merge {
+                    input: Box::new(one_field()),
+                },
+                output: evaluated(fields(1), Arc::clone(&out)),
+            },
+        ),
+        (
+            "a map over an evaluated vector",
+            map_over(input_on(Arc::clone(&out))),
+        ),
+        (
+            "scalar() over a vector of one field",
+            NativeNode {
+                expr: NativeExpr::ScalarOf {
+                    input: Box::new(one_field()),
+                },
+                output: NativeType::Scalar(Arc::clone(&out)),
+            },
+        ),
+        (
+            "vector(s)",
+            NativeNode {
+                expr: NativeExpr::VectorOf {
+                    input: Box::new(scalar_on(1.0, Arc::clone(&out))),
+                },
+                output: evaluated(fields(1), Arc::clone(&out)),
+            },
+        ),
+        (
+            "an aggregate whose `by` names a label",
+            NativeNode {
+                expr: NativeExpr::Aggregate {
+                    input: Box::new(one_field()),
+                    op: BoundAggregate {
+                        kind: AggregateKind::Sum,
+                        group: Grouping::By(Arc::new(["job".into()])),
+                        stage: AggregateStage::Complete,
+                    },
+                },
+                output: evaluated(fields(1), Arc::clone(&out)),
+            },
+        ),
+        (
+            "a partial aggregate root",
+            partial_aggregate(window_over(input(), None)),
+        ),
+        (
+            "a final aggregate over partial state",
+            final_aggregate(partial_aggregate(window_over(input(), None))),
+        ),
+        (
+            "two evaluated vectors",
+            NativeNode {
+                expr: NativeExpr::Binary {
+                    left: Box::new(one_field()),
+                    right: Box::new(one_field()),
+                    matching: add(),
+                },
+                output: evaluated(fields(1), Arc::clone(&out)),
+            },
+        ),
+        (
+            "two evaluated vectors under a cardinality modifier",
+            NativeNode {
+                expr: NativeExpr::Binary {
+                    left: Box::new(one_field()),
+                    right: Box::new(one_field()),
+                    matching: BinaryMatching {
+                        cardinality: Cardinality::ManyToOne(Vec::new()),
+                        labels: MatchingLabels::On(vec!["job".into()]),
+                        ..add()
+                    },
+                },
+                output: evaluated(fields(1), Arc::clone(&out)),
+            },
+        ),
+        (
+            "a scalar broadcast",
+            NativeNode {
+                expr: NativeExpr::Binary {
+                    left: Box::new(one_field()),
+                    right: Box::new(scalar_on(1.0, Arc::clone(&out))),
+                    matching: add(),
+                },
+                output: evaluated(fields(1), Arc::clone(&out)),
+            },
+        ),
+        (
+            "a set operation over two evaluated vectors",
+            NativeNode {
+                expr: NativeExpr::Set {
+                    left: Box::new(one_field()),
+                    right: Box::new(one_field()),
+                    op: super::BoundSetOp {
+                        op: SetOp::Or,
+                        labels: MatchingLabels::Ignoring(Vec::new()),
+                    },
+                },
+                output: evaluated(fields(1), Arc::clone(&out)),
+            },
+        ),
+        (
+            "topk over a vector of one field",
+            vector(
+                one_field(),
+                BoundVectorOp::TopK {
+                    k: 1.0,
+                    top: true,
+                    group: Grouping::By(Arc::new([])),
+                },
+            ),
+        ),
+        (
+            "count_values naming its own value field",
+            vector(
+                one_field(),
+                BoundVectorOp::CountValues {
+                    label: Arc::from("f0"),
+                    group: Grouping::By(Arc::new(["f0".into()])),
+                },
+            ),
+        ),
+        (
+            "sort_by_label over a vector of two fields",
+            vector(
+                two_fields(),
+                BoundVectorOp::Sort(SortOrder::ByLabel(vec!["f0".into()])),
+            ),
+        ),
+        (
+            "limit_ratio over a vector of two fields",
+            vector(two_fields(), BoundVectorOp::LimitRatio { ratio: 0.5 }),
+        ),
+        (
+            "absent over a vector of two fields",
+            vector(
+                two_fields(),
+                BoundVectorOp::Absent {
+                    labels: datatypes::series::SeriesLabels::try_new(None, Vec::new()).unwrap(),
+                },
+            ),
+        ),
+        (
+            "a window without a modifier",
+            window_with(input(), None, Arc::clone(&out), RangeFunction::Rate, None),
+        ),
+        (
+            "a smoothed window over a function its kernel corrects",
+            window_with(
+                input(),
+                None,
+                Arc::clone(&out),
+                RangeFunction::Rate,
+                Some(super::RangeModifier::Smoothed {
+                    lookback_ms: 60_000,
+                }),
+            ),
+        ),
+    ];
+    for (shape, node) in cases {
+        assert_admission(node, true, shape);
+    }
+}
+
+/// The field count `inner` carries, which a complete aggregate reports unchanged.
+fn inner_field_count(inner: &NativeNode) -> usize {
+    inner
+        .output
+        .samples()
+        .map_or(0, |schema| schema.fields.len())
+}

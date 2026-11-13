@@ -44,7 +44,6 @@ use common_query::series_frame::raw_series_frame_schema_with_ordering;
 use datafusion::arrow::datatypes::{DataType as ArrowDataType, Field, TimeUnit as ArrowTimeUnit};
 use datafusion::common::{DFSchema, DFSchemaRef};
 use datafusion::error::DataFusionError;
-use datafusion::execution::memory_pool::UnboundedMemoryPool;
 use datafusion::logical_expr::UserDefinedLogicalNode;
 use datafusion::logical_expr::{EmptyRelation, Extension, LogicalPlan, TableScanBuilder, Union};
 use datafusion::physical_plan::ExecutionPlan;
@@ -60,11 +59,10 @@ use promql::extension_plan::{
     FieldKind, FusedOutputFormat, FusedSeries, FusedSeriesBinding, FusedSeriesExec, InputLocality,
     RawSeriesSource, input_locality, matching_operands_drop_key, tree_source_fields,
 };
-use promql::native::execute::NativeExecutionState;
 use promql::native::plan::{
     AggregateKind, BoundAggregate, BoundInput, BoundVectorOp, Grouping, NativeExpr, NativeNode,
-    NativeTree, NativeType, binary_output_field_kind, fused_output_tags, reads_across_series,
-    uniform_field_kind,
+    NativeTree, NativeType, binary_output_field_kind, fused_output_tags, native_tree_supported,
+    reads_across_series, uniform_field_kind,
 };
 use promql::vector_match::Cardinality;
 use promql_parser::label::{METRIC_NAME, MatchOp, Matchers};
@@ -582,9 +580,7 @@ impl PromPlanner {
         ) else {
             return Ok(None);
         };
-        if NativeExecutionState::try_new(&tree, Arc::new(UnboundedMemoryPool::default()), None)
-            .is_err()
-        {
+        if !native_tree_supported(&tree) {
             return Ok(None);
         }
         // What a consumer of this composition reads, and the layout the node publishes. The row
@@ -1575,15 +1571,12 @@ impl PromPlanner {
         if multi_input && groups_by_metric_name(root) {
             return Ok(None);
         }
-        // Catch construction-time refusals before choosing native execution: errors raised during
-        // physical planning cannot fall back. This includes unsupported aggregates and `topk`,
-        // `limitk` or CountValues groupings; it does not cover data-dependent errors raised while
-        // executing the tree. A plan split over regions commits to the fused node without the
-        // split or a segment above it, so it validates itself the same way before that choice.
-        if (multi_input || per_source_inputs)
-            && NativeExecutionState::try_new(&tree, Arc::new(UnboundedMemoryPool::default()), None)
-                .is_err()
-        {
+        // Catch the shape refusals before choosing native execution: errors raised during physical
+        // planning cannot fall back. This includes unsupported aggregates and `topk`, `limitk` or
+        // CountValues groupings; it does not cover data-dependent errors raised while executing the
+        // tree. A plan split over regions commits to the fused node without the split or a segment
+        // above it, so it checks itself the same way before that choice.
+        if (multi_input || per_source_inputs) && !native_tree_supported(&tree) {
             return Ok(None);
         }
         // A tree that ends in a canonical merge answers one series per label set, and the pieces of
@@ -2464,8 +2457,7 @@ fn build_evaluated_segment(
         return Some((plan, tags));
     }
     let output_tags = fused_output_tags(tree.root(), &local_tags)?;
-    if NativeExecutionState::try_new(&tree, Arc::new(UnboundedMemoryPool::default()), None).is_err()
-    {
+    if !native_tree_supported(&tree) {
         return None;
     }
     let frame = FusedSeries::series_frame_schema(&tree).ok()?;
@@ -2555,8 +2547,7 @@ fn build_inner_segment(
         let time_index = per_source.get(*sources.first()?)?.1.clone();
         (children, None, time_index, output_tags.clone())
     };
-    if NativeExecutionState::try_new(&tree, Arc::new(UnboundedMemoryPool::default()), None).is_err()
-    {
+    if !native_tree_supported(&tree) {
         return None;
     }
     let frame = FusedSeries::series_frame_schema(&tree).ok()?;
@@ -2808,9 +2799,7 @@ fn segment_tree(
     // Nothing below can fall back once physical planning starts, so every tree this route commits
     // to has to be one the runtime executes. A shape the runtime refuses - a grouping by a value
     // field, an operation with no kernel - therefore keeps the plan it had.
-    if NativeExecutionState::try_new(&parent, Arc::new(UnboundedMemoryPool::default()), None)
-        .is_err()
-    {
+    if !native_tree_supported(&parent) {
         return Ok(None);
     }
     let output_schema = match format {
