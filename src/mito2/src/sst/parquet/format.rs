@@ -902,7 +902,8 @@ mod tests {
 
     use api::v1::OpType;
     use datatypes::arrow::array::{
-        Int64Array, StringArray, TimestampMillisecondArray, UInt8Array, UInt32Array, UInt64Array,
+        Array, Int64Array, StringArray, TimestampMillisecondArray, UInt8Array, UInt32Array,
+        UInt64Array,
     };
     use datatypes::arrow::datatypes::{DataType as ArrowDataType, Field, Schema, TimeUnit};
     use datatypes::prelude::ConcreteDataType;
@@ -1810,6 +1811,71 @@ mod tests {
     }
 
     #[test]
+    fn test_sparse_tag_materialization_duplicate_labels() {
+        let codec = SparsePrimaryKeyCodec::schemaless();
+        let mut encoded = Vec::new();
+        for first in [Some("first"), None] {
+            let mut pk = Vec::new();
+            codec.encode_internal(1, 2, &mut pk).unwrap();
+            if let Some(value) = first {
+                codec
+                    .encode_raw_tag_value([(1, value.as_bytes())].into_iter(), &mut pk)
+                    .unwrap();
+            } else {
+                pk.extend_from_slice(&1_u32.to_be_bytes());
+                pk.push(0);
+            }
+            codec
+                .encode_raw_tag_value(
+                    [
+                        (9, b"unprojected".as_slice()),
+                        (1, b"duplicate".as_slice()),
+                        (3, b"tail".as_slice()),
+                    ]
+                    .into_iter(),
+                    &mut pk,
+                )
+                .unwrap();
+            encoded.push(pk);
+        }
+        let keys = UInt32Array::from(vec![0, 1]);
+        let pk = DictionaryArray::new(
+            keys.clone(),
+            Arc::new(BinaryArray::from_iter_values(&encoded)),
+        );
+        let batch = RecordBatch::try_from_iter([
+            (
+                "ts",
+                Arc::new(TimestampMillisecondArray::from(vec![0, 1])) as ArrayRef,
+            ),
+            ("__primary_key", Arc::new(pk) as ArrayRef),
+            (
+                "__sequence",
+                Arc::new(UInt64Array::from(vec![1; 2])) as ArrayRef,
+            ),
+            (
+                "__op_type",
+                Arc::new(UInt8Array::from(vec![TEST_OP_TYPE; 2])) as ArrayRef,
+            ),
+        ])
+        .unwrap();
+        let mut decoded = decode_primary_keys(&codec, &batch).unwrap();
+        let columns: Vec<_> = [3, 1, 1]
+            .into_iter()
+            .map(|id| (id, ConcreteDataType::string_datatype()))
+            .collect();
+        let arrays = decoded.get_sparse_tag_columns(&columns).unwrap();
+        for (actual, values) in arrays.iter().zip([
+            vec![Some("tail"), Some("tail")],
+            vec![Some("first"), None],
+            vec![Some("first"), None],
+        ]) {
+            let expected = DictionaryArray::new(keys.clone(), Arc::new(StringArray::from(values)));
+            assert_eq!(actual.to_data(), expected.to_data());
+        }
+    }
+
+    #[test]
     fn test_sparse_tag_materialization_matches_full_decode_on_slices() {
         let metadata = build_test_sparse_region_metadata();
         let codec = SparsePrimaryKeyCodec::schemaless();
@@ -1906,6 +1972,23 @@ mod tests {
                     assert_eq!(array.to_data(), expected[idx].to_data());
                     assert_eq!(single.to_data(), expected[idx].to_data());
                 }
+            }
+            // Wide projections include present tags outside the metadata and entirely
+            // absent columns. Compare all dictionary values and their row mapping.
+            let wide_columns: Vec<_> = (0..3600)
+                .rev()
+                .map(|id| (id, ConcreteDataType::string_datatype()))
+                .collect();
+            let arrays = lazy.get_sparse_tag_columns(&wide_columns).unwrap();
+            assert_eq!(arrays.len(), wide_columns.len());
+            for ((id, ty), actual) in wide_columns.iter().zip(arrays) {
+                let mut builder = ty.create_mutable_vector(decoded.len());
+                for pk in &decoded {
+                    builder.push_value_ref(&pk.get_or_null(*id).as_value_ref());
+                }
+                let expected =
+                    DictionaryArray::new(indices.clone(), builder.to_vector().to_arrow_array());
+                assert_eq!(actual.to_data(), expected.to_data(), "column={id}");
             }
             let mut expected_columns = expected;
             expected_columns.extend_from_slice(input.columns());

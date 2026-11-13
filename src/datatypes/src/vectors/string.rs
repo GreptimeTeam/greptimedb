@@ -423,6 +423,18 @@ impl MutableVector for StringVectorBuilder {
             MutableStringArrayData::StringView(array) => array.append_null(),
         }
     }
+
+    fn push_nulls(&mut self, num_nulls: usize) {
+        match &mut self.mutable_array {
+            MutableStringArrayData::String(array) => array.append_nulls(num_nulls),
+            MutableStringArrayData::LargeString(array) => array.append_nulls(num_nulls),
+            MutableStringArrayData::StringView(array) => {
+                for _ in 0..num_nulls {
+                    array.append_null();
+                }
+            }
+        }
+    }
 }
 
 impl ScalarVectorBuilder for StringVectorBuilder {
@@ -522,6 +534,34 @@ mod tests {
     use arrow::datatypes::DataType;
 
     use super::*;
+
+    #[test]
+    fn test_string_vector_bulk_nulls() {
+        for mut builder in [
+            StringVectorBuilder::new(),
+            StringVectorBuilder::new_large(),
+            StringVectorBuilder::new_view(),
+        ] {
+            builder.push_nulls(0);
+            builder.push_nulls(65);
+            builder.push(Some(""));
+            builder.push_nulls(3);
+            builder.push(Some("标签"));
+            builder.push_nulls(66);
+            let vector = builder.finish();
+            let mut expected = vec![None; 65];
+            expected.push(Some(""));
+            expected.extend([None; 3]);
+            expected.push(Some("标签"));
+            expected.extend([None; 66]);
+            assert_eq!(vector.iter_data().collect::<Vec<_>>(), expected);
+            builder.push(Some("reused"));
+            assert_eq!(
+                builder.finish().iter_data().collect::<Vec<_>>(),
+                vec![Some("reused")]
+            );
+        }
+    }
 
     #[test]
     fn test_string_vector_build_get() {
