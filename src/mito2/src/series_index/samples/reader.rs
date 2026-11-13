@@ -270,6 +270,15 @@ impl SamplesFormatReader for SamplesReader {
             let _handle = &handle;
             let mut metrics = ColumnarReadMetrics::default();
             if empty { return; }
+            // One decoder and one scratch per stream, reused by every block. The decoder holds
+            // the only zstd context this stream builds, and the scratch keeps its containers
+            // instead of rebuilding them per block. Neither is shared with another stream.
+            let mut decoder = codec::PayloadDecoder::default();
+            let mut scratch = ReadScratch::default();
+            // Only the consumer identity is hoisted: a reservation still belongs to one block's
+            // batch, so it is registered per block and released with that batch.
+            let buffers_consumer = request.memory_pool.as_ref()
+                .map(|_| MemoryConsumer::new("ColumnarSamplesBuffers"));
             // Traversal state: the last block this stream visited, whatever it selected, and
             // whether it is the block immediately before the next one in the artifact.
             let mut previous: Option<BlockOrder> = None;
@@ -445,8 +454,12 @@ impl SamplesFormatReader for SamplesReader {
                             }
                             *metrics.counts.entry("blocks").or_default() += 1;
                             *metrics.counts.entry("decoded_rows").or_default() += u64::from(block.rows);
-                            read_block(&payload_reader, block, &manifest, &request, &projection, &field_ids, projected.clone(), &mut prefetched, &mut metrics).await?
+                            read_block(&payload_reader, block, &manifest, &request, buffers_consumer.as_ref(), &projection, &field_ids, projected.clone(), &mut prefetched, &mut scratch, &mut decoder, &mut metrics).await?
                         } else { None };
+                        // The block's payload slices are shared with the read-ahead window and
+                        // the part cache, so they are dropped before the yield: the block's
+                        // reservation is then the only charge alive with the batch.
+                        scratch.release();
                         if let Some((batch, _reservation)) = batch {
                             // The key is copied only now: `read_block` has just reserved the
                             // bytes the batch retains, so the clone is paid for before it
@@ -881,6 +894,42 @@ const ARRAY_HEADER_BYTES: usize = std::mem::size_of::<BinaryArray>();
 /// to this much more than the bytes it holds.
 const BUFFER_ALIGNMENT: usize = 64;
 
+/// Per-stream scratch for decoding one block.
+///
+/// A block needs a handful of small containers. They keep their allocations across blocks, so a
+/// stream builds them once instead of once per block; [`ReadScratch::release`] empties them
+/// without giving the allocations back.
+#[derive(Default)]
+struct ReadScratch {
+    /// Stored ranges of the columns this block decodes.
+    ranges: Vec<std::ops::Range<u64>>,
+    /// [`Self::ranges`] after bounded gap coalescing.
+    merged: Vec<std::ops::Range<u64>>,
+    /// This block's payload slices, keyed by their stored offset.
+    buffers: HashMap<u64, bytes::Bytes>,
+    /// Row indices this block keeps.
+    selected: Vec<usize>,
+    /// Projection indices in physical order.
+    sorted: Vec<usize>,
+    /// Projected arrays waiting for the batch's column order.
+    arrays: BTreeMap<usize, ArrayRef>,
+}
+
+impl ReadScratch {
+    /// Empties every container and keeps the allocations for the next block.
+    ///
+    /// The payload slices are handed out before the batch is yielded, so they are dropped here
+    /// rather than carried across the yield.
+    fn release(&mut self) {
+        self.ranges.clear();
+        self.merged.clear();
+        self.buffers.clear();
+        self.selected.clear();
+        self.sorted.clear();
+        self.arrays.clear();
+    }
+}
+
 fn timestamp_array(values: impl Iterator<Item = i64>, unit: TimestampUnit) -> ArrayRef {
     match unit {
         TimestampUnit::Second => Arc::new(TimestampSecondArray::from_iter_values(values)),
@@ -895,10 +944,13 @@ async fn read_block(
     block: &Block,
     manifest: &Manifest,
     request: &SamplesReadRequest,
+    buffers_consumer: Option<&MemoryConsumer>,
     projection: &[usize],
     field_ids: &HashSet<u32>,
     schema: SchemaRef,
     prefetched: &mut PrefetchedBlocks,
+    scratch: &mut ReadScratch,
+    decoder: &mut codec::PayloadDecoder,
     metrics: &mut ColumnarReadMetrics,
 ) -> Result<Option<(RecordBatch, Option<MemoryReservation>)>> {
     let boundary = request.start.is_some_and(|start| start > block.min)
@@ -915,21 +967,20 @@ async fn read_block(
             _ => false,
         })
         .collect();
-    let reservation = request
-        .memory_pool
-        .as_ref()
-        .map(|pool| MemoryConsumer::new("ColumnarSamplesBuffers").register(pool));
+    let reservation = buffers_consumer
+        .zip(request.memory_pool.as_ref())
+        .map(|(consumer, pool)| consumer.clone_with_new_id().register(pool));
     // Stored buffers, decompression, typed values, selection, and Arrow output coexist.
     // Reserve before any payload I/O/allocation. The reservation survives the yield.
-    let ranges = columns
-        .iter()
-        .map(|c| Ok(c.payload.offset..c.payload.end()?))
-        .collect::<Result<Vec<_>>>()?;
-    let gap_bytes = merge_read_ranges(&ranges)
-        .iter()
-        .map(|r| r.end - r.start)
-        .sum::<u64>()
-        - ranges.iter().map(|r| r.end - r.start).sum::<u64>();
+    scratch.ranges.clear();
+    for column in &columns {
+        scratch
+            .ranges
+            .push(column.payload.offset..column.payload.end()?);
+    }
+    merge_read_ranges_into(&scratch.ranges, &mut scratch.merged);
+    let gap_bytes = scratch.merged.iter().map(|r| r.end - r.start).sum::<u64>()
+        - scratch.ranges.iter().map(|r| r.end - r.start).sum::<u64>();
     // The block's exact key is returned with the batch, once per block rather than once per
     // row, so it costs one key regardless of how many rows the block holds. Time pruning
     // cannot add output rows, so no per-row term is needed for identity at all.
@@ -948,7 +999,7 @@ async fn read_block(
         // term that keeps its array accounted for.
         + projection.len() * (ARRAY_HEADER_BYTES + BUFFER_ALIGNMENT)
         + columns.len() * 128;
-    let bytes = base_bytes + reader.reservation_bytes(&ranges, reader.end);
+    let bytes = base_bytes + reader.reservation_bytes(&scratch.ranges, reader.end);
     let mut bypass_cache = false;
     if let Some(reservation) = &reservation {
         let mut result = reservation.try_grow(bytes);
@@ -977,25 +1028,27 @@ async fn read_block(
         key_end: reader.key_end,
     };
     let reader = if bypass_cache { &uncached } else { reader };
-    let mut buffers = HashMap::new();
+    // The map keeps its allocation; the previous block's slices were already released.
+    scratch.buffers.clear();
     for column in &columns {
         if let Some(bytes) = prefetched.buffers.get(&column.payload.offset) {
-            buffers.insert(column.payload.offset, bytes.clone());
+            scratch.buffers.insert(column.payload.offset, bytes.clone());
         }
     }
     if boundary {
-        fetch_columns(reader, &[&block.columns[0]], &mut buffers, metrics).await?;
+        fetch_columns(reader, &[&block.columns[0]], &mut scratch.buffers, metrics).await?;
     } else {
-        fetch_columns(reader, &columns, &mut buffers, metrics).await?;
+        fetch_columns(reader, &columns, &mut scratch.buffers, metrics).await?;
     }
-    let mut decoder = codec::PayloadDecoder::default();
     let decode_started = Instant::now();
-    let mut selected: Vec<usize> = (0..block.rows as usize).collect();
+    scratch.selected.clear();
+    scratch.selected.reserve(block.rows as usize);
+    scratch.selected.extend(0..block.rows as usize);
     let mut times = None;
     if needs_time {
         let column = &block.columns[0];
         let values = codec::decode_numbers(
-            load_column_chunk(&buffers, column, &mut decoder)?,
+            load_column_chunk(&scratch.buffers, column, decoder)?,
             column.payload.encoding,
             block.rows as usize,
         )?;
@@ -1004,13 +1057,13 @@ async fn read_block(
                 && values.last().map(|v| *v as i64) == Some(block.max),
             "sample timestamp bounds mismatch",
         )?;
-        selected.retain(|&i| {
+        scratch.selected.retain(|&i| {
             request
                 .start
                 .is_none_or(|start| (values[i] as i64) >= start)
                 && request.end.is_none_or(|end| (values[i] as i64) < end)
         });
-        if selected.is_empty() {
+        if scratch.selected.is_empty() {
             metrics.add_elapsed("columnar_decode", decode_started.elapsed());
             return Ok(None);
         }
@@ -1018,23 +1071,25 @@ async fn read_block(
     }
     metrics.add_elapsed("columnar_decode", decode_started.elapsed());
     if boundary {
-        // Release decoder scratch and context before waiting for the remaining payloads.
-        drop(decoder);
+        // Release the decoder's context and oversized scratch before waiting for the remaining
+        // payloads, and keep the decoder itself: the stream owns one, it is not rebuilt.
+        decoder.release();
         let remaining = columns
             .into_iter()
             .filter(|column| column.role != 1)
             .collect::<Vec<_>>();
-        fetch_columns(reader, &remaining, &mut buffers, metrics).await?;
-        decoder = codec::PayloadDecoder::default();
+        fetch_columns(reader, &remaining, &mut scratch.buffers, metrics).await?;
     }
     let decode_started = Instant::now();
-    let mut arrays: BTreeMap<usize, ArrayRef> = BTreeMap::new();
+    scratch.arrays.clear();
     // Visit columns in physical order, regardless of requested output order.
-    let mut sorted = projection.to_vec();
-    sorted.sort_unstable();
+    scratch.sorted.clear();
+    scratch.sorted.extend_from_slice(projection);
+    scratch.sorted.sort_unstable();
     // The exact key column is never projected: it is returned with the batch instead,
     // so a block of any row count carries one key in total.
-    for index in sorted {
+    for &index in scratch.sorted.iter() {
+        let selected = &scratch.selected;
         let array: ArrayRef = if index == 0 {
             Arc::new(UInt32Array::from(vec![block.id.table_id; selected.len()]))
         } else if index == 1 {
@@ -1053,7 +1108,7 @@ async fn read_block(
                 3 => {
                     let column = &block.columns[1];
                     let values = codec::decode_numbers(
-                        load_column_chunk(&buffers, column, &mut decoder)?,
+                        load_column_chunk(&scratch.buffers, column, decoder)?,
                         column.payload.encoding,
                         block.rows as usize,
                     )?;
@@ -1071,7 +1126,7 @@ async fn read_block(
                 4 => {
                     let column = &block.columns[2];
                     let values = codec::decode_operations(
-                        load_column_chunk(&buffers, column, &mut decoder)?,
+                        load_column_chunk(&scratch.buffers, column, decoder)?,
                         column.payload.encoding,
                         block.rows as usize,
                     )?;
@@ -1087,7 +1142,7 @@ async fn read_block(
                     let id = field.column_id;
                     if let Some(column) = block.columns.iter().find(|c| c.role == 4 && c.id == id) {
                         let values = codec::decode_float(
-                            load_column_chunk(&buffers, column, &mut decoder)?,
+                            load_column_chunk(&scratch.buffers, column, decoder)?,
                             block.rows as usize,
                             column.nulls,
                         )?;
@@ -1100,12 +1155,13 @@ async fn read_block(
                 }
             }
         };
-        arrays.insert(index, array);
+        scratch.arrays.insert(index, array);
     }
     let output = projection
         .iter()
         .map(|i| {
-            arrays
+            scratch
+                .arrays
                 .remove(i)
                 .ok_or_else(|| invalid("missing sample projected column"))
         })
@@ -1113,7 +1169,7 @@ async fn read_block(
     let batch = RecordBatch::try_new_with_options(
         schema,
         output,
-        &RecordBatchOptions::new().with_row_count(Some(selected.len())),
+        &RecordBatchOptions::new().with_row_count(Some(scratch.selected.len())),
     )
     .context(NewRecordBatchSnafu)?;
     metrics.add_elapsed("columnar_decode", decode_started.elapsed());
@@ -1364,7 +1420,14 @@ fn can_merge_ranges(previous: &std::ops::Range<u64>, next: &std::ops::Range<u64>
 }
 
 fn merge_read_ranges(ranges: &[std::ops::Range<u64>]) -> Vec<std::ops::Range<u64>> {
-    let mut merged: Vec<std::ops::Range<u64>> = Vec::new();
+    let mut merged = Vec::new();
+    merge_read_ranges_into(ranges, &mut merged);
+    merged
+}
+
+/// [`merge_read_ranges`] into a caller-owned buffer, so a stream coalesces into one allocation.
+fn merge_read_ranges_into(ranges: &[std::ops::Range<u64>], merged: &mut Vec<std::ops::Range<u64>>) {
+    merged.clear();
     for range in ranges {
         if let Some(previous) = merged.last_mut()
             && can_merge_ranges(previous, range)
@@ -1374,7 +1437,6 @@ fn merge_read_ranges(ranges: &[std::ops::Range<u64>]) -> Vec<std::ops::Range<u64
             merged.push(range.clone());
         }
     }
-    merged
 }
 
 /// A bounded read-ahead window. Byte slices retain the shared fetched allocation;
@@ -1520,5 +1582,43 @@ mod tests {
             vec![0..MAX_READ_BYTES, MAX_READ_BYTES..MAX_READ_BYTES + 1],
             merge_read_ranges(&[0..MAX_READ_BYTES, MAX_READ_BYTES..MAX_READ_BYTES + 1])
         );
+    }
+
+    #[test]
+    fn coalescing_reuses_the_caller_buffer() {
+        let ranges = [0..4, 4..8, 100..104];
+        // A buffer left full by a previous block must not leak into the next result.
+        let mut merged = vec![0..1, 20..24, 60..64];
+        merge_read_ranges_into(&ranges, &mut merged);
+        assert_eq!(merge_read_ranges(&ranges), merged);
+    }
+
+    #[test]
+    fn scratch_release_drops_contents_and_keeps_allocations() {
+        let mut scratch = ReadScratch::default();
+        scratch.ranges.push(0..4);
+        scratch.merged.push(0..8);
+        scratch
+            .buffers
+            .insert(0, bytes::Bytes::from_static(b"payload"));
+        scratch.selected.extend([0, 1, 2]);
+        scratch.sorted.extend([1, 2, 5]);
+        scratch
+            .arrays
+            .insert(2, Arc::new(UInt32Array::from(vec![1])) as ArrayRef);
+        let ranges = scratch.ranges.capacity();
+        let merged = scratch.merged.capacity();
+        let buffers = scratch.buffers.capacity();
+        let selected = scratch.selected.capacity();
+        let sorted = scratch.sorted.capacity();
+
+        scratch.release();
+
+        assert!(scratch.ranges.is_empty() && scratch.ranges.capacity() == ranges);
+        assert!(scratch.merged.is_empty() && scratch.merged.capacity() == merged);
+        assert!(scratch.buffers.is_empty() && scratch.buffers.capacity() == buffers);
+        assert!(scratch.selected.is_empty() && scratch.selected.capacity() == selected);
+        assert!(scratch.sorted.is_empty() && scratch.sorted.capacity() == sorted);
+        assert!(scratch.arrays.is_empty());
     }
 }

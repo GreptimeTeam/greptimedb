@@ -5457,3 +5457,675 @@ mod aggregate_state_decoder_rejections {
         );
     }
 }
+
+/// Differential tests for the direct raw decode.
+///
+/// A raw frame row holds exactly what one `RawSeriesChunk` holds, so the decoder builds the chunks
+/// straight from the frame's columns instead of collecting an intermediate row list. These tests
+/// hold that path to the former row-list path: for a legal batch the two must produce identical
+/// chunks, and for a malformed one they must reach the same verdict.
+///
+/// A raw frame declares its parent columns non-nullable, and Arrow refuses a null parent under a
+/// non-nullable field, so the row-level null-parent branches cannot be reached from a batch this
+/// crate can construct. The closest legal construction is a frame that declares a nullable parent,
+/// and both paths refuse that one at the schema check before a row is read; the row-level checks
+/// stay defensive guards on both paths.
+mod raw_direct_decode {
+    use super::*;
+
+    /// Builds the decoder both paths run on.
+    fn decoder(schema: &SeriesSchema, mode: FrameLabelMode) -> SeriesFrameDecoder {
+        let decode = (mode == FrameLabelMode::Key).then(dense_description);
+        SeriesFrameDecoder::try_new(schema, mode, decode.as_ref()).unwrap()
+    }
+
+    /// Decodes one batch both ways and requires the same verdict and, if legal, the same chunks.
+    fn agree(
+        schema: &SeriesSchema,
+        mode: FrameLabelMode,
+        batch: &RecordBatch,
+    ) -> crate::error::Result<Vec<RawSeriesChunk>> {
+        let decoder = decoder(schema, mode);
+        let direct = decoder.decode_raw(batch);
+        let via_rows = decoder.decode_raw_via_rows(batch);
+        match (&direct, &via_rows) {
+            (Ok(direct), Ok(via_rows)) => assert_chunks_equal(direct, via_rows),
+            (Err(_), Err(_)) => {}
+            _ => panic!("direct and row paths disagreed: {direct:?} vs {via_rows:?}"),
+        }
+        direct
+    }
+
+    /// Requires both paths to refuse a batch, and returns the direct path's error text.
+    fn agree_refused(schema: &SeriesSchema, mode: FrameLabelMode, batch: &RecordBatch) -> String {
+        let direct = agree(schema, mode, batch);
+        let error = direct.expect_err("a malformed batch must be refused");
+        error.to_string()
+    }
+
+    fn assert_chunks_equal(direct: &[RawSeriesChunk], via_rows: &[RawSeriesChunk]) {
+        assert_eq!(direct.len(), via_rows.len(), "chunk count");
+        for (chunk, (direct, via_rows)) in direct.iter().zip(via_rows).enumerate() {
+            assert_eq!(
+                direct.primary_key.as_slice(),
+                via_rows.primary_key.as_slice(),
+                "chunk {chunk} key"
+            );
+            assert_eq!(direct.is_last, via_rows.is_last, "chunk {chunk} finality");
+            assert_eq!(
+                direct.time.as_buffer().as_ref(),
+                via_rows.time.as_buffer().as_ref(),
+                "chunk {chunk} timestamps"
+            );
+            match (&direct.metric, &via_rows.metric) {
+                (None, None) => {}
+                (Some(direct), Some(via_rows)) => {
+                    assert_eq!(direct.name(), via_rows.name(), "chunk {chunk} metric name");
+                    assert_eq!(direct.tags(), via_rows.tags(), "chunk {chunk} tags");
+                }
+                _ => panic!("chunk {chunk} changed label mode"),
+            }
+            assert_eq!(
+                direct.fields.len(),
+                via_rows.fields.len(),
+                "chunk {chunk} field count"
+            );
+            for (field, (direct, via_rows)) in
+                direct.fields.iter().zip(via_rows.fields.iter()).enumerate()
+            {
+                assert_samples_equal(direct, via_rows, chunk, field);
+            }
+        }
+    }
+
+    fn assert_samples_equal(direct: &Samples, via_rows: &Samples, chunk: usize, field: usize) {
+        assert_eq!(
+            dense_kind(direct),
+            dense_kind(via_rows),
+            "chunk {chunk} field {field} representation"
+        );
+        assert_eq!(
+            direct.len(),
+            via_rows.len(),
+            "chunk {chunk} field {field} length"
+        );
+        for (position, (direct, via_rows)) in direct.iter().zip(via_rows.iter()).enumerate() {
+            match (direct, via_rows) {
+                (SampleRef::Missing, SampleRef::Missing) => {}
+                (SampleRef::Float(direct), SampleRef::Float(via_rows)) => assert_eq!(
+                    direct.to_bits(),
+                    via_rows.to_bits(),
+                    "chunk {chunk} field {field} position {position}"
+                ),
+                (SampleRef::Histogram(direct), SampleRef::Histogram(via_rows)) => {
+                    assert_histogram_views_equal(direct, via_rows, chunk, field, position)
+                }
+                _ => panic!("chunk {chunk} field {field} position {position}: sample kind changed"),
+            }
+        }
+    }
+
+    fn dense_kind(samples: &Samples) -> &'static str {
+        match samples.dense() {
+            Some(DenseSamplesRef::Float(_)) => "float",
+            Some(DenseSamplesRef::Histogram(_)) => "histogram",
+            Some(DenseSamplesRef::Mixed(_)) => "mixed",
+            None => "chunked",
+        }
+    }
+
+    fn assert_histogram_views_equal(
+        direct: crate::series::histogram::HistogramView<'_>,
+        via_rows: crate::series::histogram::HistogramView<'_>,
+        chunk: usize,
+        field: usize,
+        position: usize,
+    ) {
+        let at = format!("chunk {chunk} field {field} position {position}");
+        assert_eq!(direct.schema, via_rows.schema, "{at} schema");
+        assert_eq!(
+            direct.zero_threshold.to_bits(),
+            via_rows.zero_threshold.to_bits(),
+            "{at} zero threshold"
+        );
+        assert_eq!(direct.sum.to_bits(), via_rows.sum.to_bits(), "{at} sum");
+        assert_eq!(
+            direct.count.to_bits(),
+            via_rows.count.to_bits(),
+            "{at} count"
+        );
+        assert_eq!(
+            direct.zero_count.to_bits(),
+            via_rows.zero_count.to_bits(),
+            "{at} zero count"
+        );
+        assert_eq!(direct.reset_hint, via_rows.reset_hint, "{at} reset hint");
+        assert_eq!(
+            direct.start_timestamp, via_rows.start_timestamp,
+            "{at} start timestamp"
+        );
+        assert_eq!(
+            bits(direct.custom_values),
+            bits(via_rows.custom_values),
+            "{at} custom values"
+        );
+        for (side, (direct, via_rows)) in [
+            (direct.positive, via_rows.positive),
+            (direct.negative, via_rows.negative),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            assert_eq!(
+                direct.span_offsets, via_rows.span_offsets,
+                "{at} side {side} span offsets"
+            );
+            assert_eq!(
+                direct.span_lengths, via_rows.span_lengths,
+                "{at} side {side} span lengths"
+            );
+            assert_eq!(
+                bits(direct.buckets),
+                bits(via_rows.buckets),
+                "{at} side {side} buckets"
+            );
+        }
+    }
+
+    fn bits(values: &[f64]) -> Vec<u64> {
+        values.iter().map(|value| value.to_bits()).collect()
+    }
+
+    /// Replaces one top-level column of a batch.
+    fn replace_column(batch: &RecordBatch, column: usize, value: ArrayRef) -> RecordBatch {
+        let mut columns = batch.columns().to_vec();
+        columns[column] = value;
+        RecordBatch::try_new(batch.schema(), columns).unwrap()
+    }
+
+    /// Replaces one column of the frame's `fields` struct.
+    fn replace_field_column(
+        batch: &RecordBatch,
+        field: usize,
+        replacement: ArrayRef,
+    ) -> RecordBatch {
+        let fields = batch
+            .column(3)
+            .as_any()
+            .downcast_ref::<StructArray>()
+            .unwrap();
+        let mut columns = fields.columns().to_vec();
+        columns[field] = replacement;
+        let fields = Arc::new(
+            StructArray::try_new(fields.fields().clone(), columns, fields.nulls().cloned())
+                .unwrap(),
+        );
+        replace_column(batch, 3, fields)
+    }
+
+    /// Rebuilds the frame's timestamps as the given per-row lists.
+    fn with_timestamp_rows(batch: &RecordBatch, rows: &[Vec<i64>]) -> RecordBatch {
+        let time = batch
+            .column(2)
+            .as_any()
+            .downcast_ref::<StructArray>()
+            .unwrap();
+        let times = time.column(0).as_any().downcast_ref::<ListArray>().unwrap();
+        let item = match times.data_type() {
+            DataType::List(item) => item.clone(),
+            _ => unreachable!("the timestamps column is a list"),
+        };
+        let mut offsets = vec![0_i32];
+        let mut values = Vec::new();
+        for row in rows {
+            values.extend_from_slice(row);
+            offsets.push(values.len() as i32);
+        }
+        let list = ListArray::try_new(
+            item,
+            OffsetBuffer::new(ScalarBuffer::from(offsets)),
+            Arc::new(Int64Array::from(values)),
+            None,
+        )
+        .unwrap();
+        let time = Arc::new(
+            StructArray::try_new(time.fields().clone(), vec![Arc::new(list)], None).unwrap(),
+        );
+        replace_column(batch, 2, time)
+    }
+
+    /// Rebuilds one field's `float_values` list as the given per-row values.
+    fn with_float_rows(
+        batch: &RecordBatch,
+        field: usize,
+        rows: &[Vec<Option<f64>>],
+    ) -> RecordBatch {
+        let fields = batch
+            .column(3)
+            .as_any()
+            .downcast_ref::<StructArray>()
+            .unwrap();
+        let payload = fields
+            .column(field)
+            .as_any()
+            .downcast_ref::<StructArray>()
+            .unwrap();
+        let floats = payload
+            .column(0)
+            .as_any()
+            .downcast_ref::<ListArray>()
+            .unwrap();
+        let item = match floats.data_type() {
+            DataType::List(item) => item.clone(),
+            _ => unreachable!("float values are a list"),
+        };
+        let mut offsets = vec![0_i32];
+        let mut values = Vec::new();
+        for row in rows {
+            values.extend_from_slice(row);
+            offsets.push(values.len() as i32);
+        }
+        let list = ListArray::try_new(
+            item,
+            OffsetBuffer::new(ScalarBuffer::from(offsets)),
+            Arc::new(Float64Array::from(values)),
+            None,
+        )
+        .unwrap();
+        let payload = Arc::new(
+            StructArray::try_new(
+                payload.fields().clone(),
+                vec![Arc::new(list), payload.column(1).clone()],
+                payload.nulls().cloned(),
+            )
+            .unwrap(),
+        );
+        replace_field_column(batch, field, payload)
+    }
+
+    /// Rebuilds one field's payload with neither a float nor a histogram value in it.
+    fn with_absent_payload(batch: &RecordBatch, field: usize) -> RecordBatch {
+        let fields = batch
+            .column(3)
+            .as_any()
+            .downcast_ref::<StructArray>()
+            .unwrap();
+        let payload = fields
+            .column(field)
+            .as_any()
+            .downcast_ref::<StructArray>()
+            .unwrap();
+        let floats = payload
+            .column(0)
+            .as_any()
+            .downcast_ref::<ListArray>()
+            .unwrap();
+        let item = match floats.data_type() {
+            DataType::List(item) => item.clone(),
+            _ => unreachable!("float values are a list"),
+        };
+        let absent_floats = ListArray::try_new(
+            item,
+            OffsetBuffer::new(ScalarBuffer::from(floats.value_offsets().to_vec())),
+            floats.values().clone(),
+            Some(NullBuffer::new_null(floats.len())),
+        )
+        .unwrap();
+        let histogram = payload
+            .column(1)
+            .as_any()
+            .downcast_ref::<StructArray>()
+            .unwrap();
+        let absent_histogram = StructArray::try_new(
+            histogram.fields().clone(),
+            histogram.columns().to_vec(),
+            Some(NullBuffer::new_null(histogram.len())),
+        )
+        .unwrap();
+        let payload = Arc::new(
+            StructArray::try_new(
+                payload.fields().clone(),
+                vec![Arc::new(absent_floats), Arc::new(absent_histogram)],
+                payload.nulls().cloned(),
+            )
+            .unwrap(),
+        );
+        replace_field_column(batch, field, payload)
+    }
+
+    /// Rebuilds a batch without one reserved metadata entry.
+    fn without_metadata(batch: &RecordBatch, key: &str) -> RecordBatch {
+        let mut metadata = batch.schema().metadata().clone();
+        metadata.remove(key);
+        let schema = Arc::new(Schema::new_with_metadata(
+            batch.schema().fields().clone(),
+            metadata,
+        ));
+        RecordBatch::try_new(schema, batch.columns().to_vec()).unwrap()
+    }
+
+    /// Replaces the `read_key` column of an explicit frame with one that has a null row.
+    fn with_null_key(batch: &RecordBatch) -> RecordBatch {
+        let keys = BinaryArray::from(vec![None as Option<&[u8]>; batch.num_rows()]);
+        replace_column(batch, 0, Arc::new(keys))
+    }
+
+    fn float_chunk_for_mode(
+        schema: &SeriesSchema,
+        mode: FrameLabelMode,
+        fields: SeriesFields,
+        times: Vec<i64>,
+        is_last: bool,
+    ) -> RawSeriesChunk {
+        let metric = (mode == FrameLabelMode::Explicit).then(|| metric(Some("cpu_usage"), &[]));
+        RawSeriesChunk::try_new(
+            schema,
+            Buffer::from(vec![0x5a_u8, 0x01]),
+            metric,
+            RawTimestamps::try_new(times.into()).unwrap(),
+            fields,
+            is_last,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn float_payloads_decode_identically_through_both_paths() {
+        let schema = test_schema(&["cpu_usage", "cpu_idle"]);
+        let fields = SeriesFields::try_from_vec(vec![
+            Samples::from_float(Float64Array::from(vec![Some(1.5), None, Some(f64::NAN)])),
+            Samples::from_float(Float64Array::from(vec![
+                Some(-0.0),
+                Some(f64::INFINITY),
+                Some(f64::NEG_INFINITY),
+            ])),
+        ])
+        .unwrap();
+        for mode in [FrameLabelMode::Key, FrameLabelMode::Explicit] {
+            let decode = (mode == FrameLabelMode::Key).then(dense_description);
+            let chunk = float_chunk_for_mode(&schema, mode, fields.clone(), vec![10, 20, 30], true);
+            let batch = pack_raw_series_chunk(&schema, mode, decode.as_ref(), &chunk)
+                .unwrap()
+                .remove(0);
+            let decoded = agree(&schema, mode, &batch).unwrap();
+            assert_eq!(decoded.len(), 1);
+            assert_eq!(decoded[0].primary_key.as_slice(), &[0x5a, 0x01]);
+            assert!(decoded[0].is_last);
+            assert_eq!(decoded[0].time.as_buffer().as_ref(), &[10, 20, 30]);
+            let expected_name = match mode {
+                FrameLabelMode::Key => None,
+                FrameLabelMode::Explicit => Some("cpu_usage"),
+            };
+            assert_eq!(
+                decoded[0].metric.as_ref().and_then(SeriesLabels::name),
+                expected_name
+            );
+            assert_float_bits(
+                decoded[0].fields.get(0).unwrap(),
+                &[Some(1.5), None, Some(f64::NAN)],
+            );
+            assert_float_bits(
+                decoded[0].fields.get(1).unwrap(),
+                &[Some(-0.0), Some(f64::INFINITY), Some(f64::NEG_INFINITY)],
+            );
+        }
+    }
+
+    #[test]
+    fn non_zero_slice_offsets_stay_aligned_through_both_paths() {
+        let schema = test_schema(&["cpu_usage", "cpu_idle"]);
+        // One segment per timestamp makes the cursor emit one row per position, so the batch this
+        // packs has several rows and can be sliced at a non-zero offset.
+        let field = |values: [f64; 3]| {
+            Samples::try_from_chunks(
+                values
+                    .into_iter()
+                    .map(|value| Samples::from_float(Float64Array::from(vec![Some(value)])))
+                    .collect(),
+            )
+            .unwrap()
+        };
+        let fields =
+            SeriesFields::try_from_vec(vec![field([1.0, 2.0, 3.0]), field([10.0, 20.0, 30.0])])
+                .unwrap();
+        for mode in [FrameLabelMode::Key, FrameLabelMode::Explicit] {
+            let decode = (mode == FrameLabelMode::Key).then(dense_description);
+            let chunk =
+                float_chunk_for_mode(&schema, mode, fields.clone(), vec![100, 200, 300], true);
+            let batch = pack_raw_series_chunk(&schema, mode, decode.as_ref(), &chunk)
+                .unwrap()
+                .remove(0);
+            assert_eq!(batch.num_rows(), 3);
+            for (offset, len) in [(0, 3), (1, 2), (2, 1), (1, 1)] {
+                let sliced = batch.slice(offset, len);
+                let decoded = agree(&schema, mode, &sliced).unwrap();
+                assert_eq!(decoded.len(), len, "slice ({offset}, {len}) chunk count");
+                for (position, chunk) in decoded.iter().enumerate() {
+                    assert_eq!(
+                        chunk.time.as_buffer().as_ref(),
+                        &[100 + 100 * (offset + position) as i64],
+                        "slice ({offset}, {len}) timestamps"
+                    );
+                    assert_float_bits(
+                        chunk.fields.get(0).unwrap(),
+                        &[Some(1.0 + (offset + position) as f64)],
+                    );
+                    assert_float_bits(
+                        chunk.fields.get(1).unwrap(),
+                        &[Some(10.0 * (1 + (offset + position)) as f64)],
+                    );
+                    assert_eq!(
+                        chunk.is_last,
+                        offset + position + 1 == batch.num_rows(),
+                        "slice ({offset}, {len}) finality"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn histogram_and_mixed_payloads_decode_identically_through_both_paths() {
+        let schema = test_schema(&["hist", "all_null_hist", "mixed", "float"]);
+        let table = histogram_batch();
+        let other = histogram_batch_with_sum(42.25);
+        let fields = SeriesFields::try_from_vec(vec![
+            Samples::try_from_histogram(UInt32Array::from(vec![Some(0), None]), table.clone())
+                .unwrap(),
+            Samples::try_from_histogram(UInt32Array::from(vec![None, Some(0)]), other.clone())
+                .unwrap(),
+            Samples::try_from_mixed(
+                Float64Array::from(vec![Some(3.5), None]),
+                crate::series::samples::HistogramSamples::try_new(
+                    UInt32Array::from(vec![None, Some(0)]),
+                    other,
+                )
+                .unwrap(),
+            )
+            .unwrap(),
+            Samples::from_float(Float64Array::from(vec![None, Some(f64::NAN)])),
+        ])
+        .unwrap();
+        for mode in [FrameLabelMode::Key, FrameLabelMode::Explicit] {
+            let decode = (mode == FrameLabelMode::Key).then(dense_description);
+            let chunk = float_chunk_for_mode(&schema, mode, fields.clone(), vec![7, 8], false);
+            let batch = pack_raw_series_chunk(&schema, mode, decode.as_ref(), &chunk)
+                .unwrap()
+                .remove(0);
+            let decoded = agree(&schema, mode, &batch).unwrap();
+            assert_eq!(decoded.len(), 1);
+            assert!(!decoded[0].is_last);
+            // The histogram route is shared, so the direct path must still hand back the same
+            // table values position by position rather than a normalized copy.
+            let SampleRef::Histogram(first) = decoded[0].fields.get(0).unwrap().sample(0) else {
+                panic!("histogram sample was lost");
+            };
+            assert_histogram(first, -9.5);
+            assert!(
+                matches!(
+                    decoded[0].fields.get(0).unwrap().sample(1),
+                    SampleRef::Missing
+                ),
+                "a null histogram index must stay missing"
+            );
+            let SampleRef::Histogram(third) = decoded[0].fields.get(1).unwrap().sample(1) else {
+                panic!("histogram sample was lost");
+            };
+            assert_histogram(third, 42.25);
+            let SampleRef::Float(mixed) = decoded[0].fields.get(2).unwrap().sample(0) else {
+                panic!("mixed float sample was lost");
+            };
+            assert_eq!(mixed.to_bits(), 3.5_f64.to_bits());
+            let SampleRef::Histogram(mixed) = decoded[0].fields.get(2).unwrap().sample(1) else {
+                panic!("mixed histogram sample was lost");
+            };
+            assert_histogram(mixed, 42.25);
+            assert!(matches!(
+                decoded[0].fields.get(3).unwrap().sample(1),
+                SampleRef::Float(value) if value.is_nan()
+            ));
+        }
+    }
+
+    #[test]
+    fn empty_batches_decode_identically_through_both_paths() {
+        let schema = test_schema(&["value"]);
+        for mode in [FrameLabelMode::Key, FrameLabelMode::Explicit] {
+            let decode = (mode == FrameLabelMode::Key).then(dense_description);
+            let frame = series_frame_schema(&schema, mode, decode.as_ref()).unwrap();
+            let empty = arrow::record_batch::RecordBatch::new_empty(frame);
+            let decoded = agree(&schema, mode, &empty).unwrap();
+            assert!(decoded.is_empty());
+        }
+    }
+
+    #[test]
+    fn malformed_batches_get_the_same_verdict_from_both_paths() {
+        let schema = test_schema(&["value"]);
+        let chunk = float_chunk_for_mode(
+            &schema,
+            FrameLabelMode::Key,
+            SeriesFields::one(Samples::from_float(Float64Array::from(vec![Some(2.0)]))),
+            vec![1],
+            false,
+        );
+        let valid = pack_raw_series_chunk(
+            &schema,
+            FrameLabelMode::Key,
+            Some(&dense_description()),
+            &chunk,
+        )
+        .unwrap()
+        .remove(0);
+        assert_eq!(valid.num_rows(), 1);
+
+        // Reserved metadata is part of the frame's declaration, not of its payload.
+        let missing_time = without_metadata(&valid, TIME);
+        assert!(
+            agree_refused(&schema, FrameLabelMode::Key, &missing_time).contains("metadata"),
+            "a frame without its time declaration must be refused as a metadata mismatch"
+        );
+
+        // A decoder bound to another field layout refuses the batch before reading a row.
+        let renamed = test_schema(&["other"]);
+        assert!(
+            agree_refused(&renamed, FrameLabelMode::Key, &valid).contains("schema"),
+            "a frame whose declared fields differ must be refused as a schema mismatch"
+        );
+
+        // A frame whose parent columns admit nulls is not this revision's frame either.
+        let mut nullable_metadata = valid.schema().metadata().clone();
+        nullable_metadata.insert(LAYOUT.to_string(), FRAME_LAYOUT_VERSION.to_string());
+        let mut fields = valid.schema().fields().clone().to_vec();
+        fields[2] = Arc::new(Field::new("time", fields[2].data_type().clone(), true));
+        let nullable_time = RecordBatch::try_new(
+            Arc::new(Schema::new_with_metadata(fields, nullable_metadata)),
+            valid.columns().to_vec(),
+        )
+        .unwrap();
+        agree_refused(&schema, FrameLabelMode::Key, &nullable_time);
+
+        // Timestamps are the chunk's time axis, so they must be strictly increasing.
+        for bad in [vec![2, 1], vec![1, 1]] {
+            let unsorted = with_timestamp_rows(&valid, std::slice::from_ref(&bad));
+            let error = agree_refused(&schema, FrameLabelMode::Key, &unsorted);
+            assert!(
+                error.contains("increasing"),
+                "timestamps {bad:?} must be refused as unordered, got: {error}"
+            );
+        }
+
+        // A field that carries no position at all is not a chunk this codec can produce.
+        let empty_axis = with_float_rows(&with_timestamp_rows(&valid, &[vec![]]), 0, &[vec![]]);
+        agree_refused(&schema, FrameLabelMode::Key, &empty_axis);
+
+        // Payload lengths are bound to the time axis of their own row.
+        let long_axis = with_timestamp_rows(&valid, &[vec![1, 2]]);
+        assert!(agree_refused(&schema, FrameLabelMode::Key, &long_axis).contains("length"));
+
+        // A field with neither payload kind cannot be decoded into samples.
+        let absent = with_absent_payload(&valid, 0);
+        agree_refused(&schema, FrameLabelMode::Key, &absent);
+
+        // An explicit raw row still carries the chunk's own key.
+        let explicit = test_schema(&["value"]);
+        let explicit_chunk = float_chunk_for_mode(
+            &explicit,
+            FrameLabelMode::Explicit,
+            SeriesFields::one(Samples::from_float(Float64Array::from(vec![Some(2.0)]))),
+            vec![1],
+            false,
+        );
+        let explicit_valid =
+            pack_raw_series_chunk(&explicit, FrameLabelMode::Explicit, None, &explicit_chunk)
+                .unwrap()
+                .remove(0);
+        assert_eq!(
+            agree(&explicit, FrameLabelMode::Explicit, &explicit_valid)
+                .unwrap()
+                .len(),
+            1
+        );
+        let null_key = with_null_key(&explicit_valid);
+        assert!(
+            agree_refused(&explicit, FrameLabelMode::Explicit, &null_key).contains("key"),
+            "an explicit raw row without a key must be refused"
+        );
+    }
+
+    #[test]
+    fn a_bad_last_row_leaves_no_decodable_prefix() {
+        let schema = test_schema(&["value"]);
+        // Two segments of two positions make one batch of two rows, so the last row can be broken
+        // on its own while the first stays legal.
+        let samples = Samples::try_from_chunks(vec![
+            Samples::from_float(Float64Array::from(vec![Some(1.0), Some(2.0)])),
+            Samples::from_float(Float64Array::from(vec![Some(3.0), Some(4.0)])),
+        ])
+        .unwrap();
+        let chunk = float_chunk_for_mode(
+            &schema,
+            FrameLabelMode::Key,
+            SeriesFields::one(samples),
+            vec![10, 20, 30, 40],
+            false,
+        );
+        let batch = pack_raw_series_chunk(
+            &schema,
+            FrameLabelMode::Key,
+            Some(&dense_description()),
+            &chunk,
+        )
+        .unwrap()
+        .remove(0);
+        assert_eq!(batch.num_rows(), 2);
+
+        let broken = with_timestamp_rows(&batch, &[vec![10, 20], vec![40, 30]]);
+        let direct = decoder(&schema, FrameLabelMode::Key).decode_raw(&broken);
+        // The first row alone would decode, but a batch is decoded as a whole: the call fails and
+        // returns no chunks at all, so a consumer never sees the legal prefix of a broken batch.
+        let error = direct.expect_err("a batch whose last row is unordered must fail as a whole");
+        assert!(error.to_string().contains("increasing"), "{error}");
+        agree_refused(&schema, FrameLabelMode::Key, &broken);
+    }
+}

@@ -123,7 +123,7 @@ use std::task::{Context, Poll};
 
 use common_error::ext::BoxedError;
 use common_query::series_frame::{
-    SendableEvaluatedSeriesStream, pack_evaluated_series, pack_raw_series,
+    PendingBatching, SendableEvaluatedSeriesStream, pack_evaluated_series, pack_raw_series_with,
     raw_series_frame_schema_with_ordering, unpack_evaluated_series, unpack_raw_series,
 };
 use datafusion::arrow::datatypes::SchemaRef;
@@ -577,7 +577,10 @@ impl ExecutionPlan for SeriesRepartitionExec {
                         self.ordering
                     },
                 };
-                pack_raw_series(Box::pin(raw))?
+                // Repartition runs inside the query engine's DataFusion execution, whose runtimes
+                // enable the time driver, so the packer may hold a partially filled batch across a
+                // pending period.
+                pack_raw_series_with(Box::pin(raw), PendingBatching::Deadline)?
             }
             FrameContent::AggregateState => unreachable!("aggregate state output handled above"),
         };
