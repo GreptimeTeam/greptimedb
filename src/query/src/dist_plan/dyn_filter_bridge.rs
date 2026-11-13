@@ -18,15 +18,14 @@ use std::sync::Arc;
 use common_query::request::{
     DynFilterPayload, INITIAL_REMOTE_DYN_FILTER_REGISTRATIONS_EXTENSION_KEY, InitialDynFilterReg,
     InitialDynFilterRegs, InitialDynFilterSnapshot, REMOTE_DYN_FILTER_PAYLOAD_MAX_BYTES,
+    is_dyn_filter_payload_too_large, is_dyn_filter_unsupported,
 };
 use datafusion::physical_plan::filter_pushdown::PushedDown;
 use datafusion_common::Result;
 use datafusion_common::tree_node::{Transformed, TreeNode, TreeNodeRecursion};
 use datafusion_expr::ColumnarValue;
 use datafusion_physical_expr::PhysicalExpr;
-use datafusion_physical_expr::expressions::{
-    Column, DynamicFilterPhysicalExpr, InListExpr, Literal, lit,
-};
+use datafusion_physical_expr::expressions::{Column, DynamicFilterPhysicalExpr, Literal, lit};
 use datafusion_physical_expr::scalar_subquery::ScalarSubqueryExpr;
 use datafusion_physical_expr::utils::collect_columns;
 use session::context::{QueryContext, QueryContextRef};
@@ -36,6 +35,7 @@ use crate::dist_plan::filter_id::build_remote_dyn_filter_id;
 use crate::dist_plan::{
     FilterId, QueryDynFilterRegistry, RemoteDynFilterProducerId, Subscriber, SubscriberRegistration,
 };
+use crate::metrics::REMOTE_DYN_FILTER_ENCODE_TOTAL;
 use crate::region_query::RegionQueryTarget;
 
 #[derive(Debug, Clone)]
@@ -82,7 +82,7 @@ pub(crate) fn capture_remote_dyn_filters_for_pushdown(
                 producer_local_ordinal,
                 alive_dyn_filter,
             )
-            .map(|captured| (captured, PushedDown::Yes))
+            .map(pushdown_for_captured_filter)
         } else if is_scalar_subquery_filter(&filter) {
             // The filter is only forwarded to regions for pruning; the parent keeps
             // evaluating it, so report it as not pushed down.
@@ -128,24 +128,43 @@ pub(crate) fn capture_remote_dyn_filters_for_pushdown(
     }
 }
 
+/// A captured filter is only reported as pushed down when its initial snapshot could be
+/// shipped.
+///
+/// An unsupported (or oversized) snapshot is never rewritten to `true`, so a region
+/// receives **no initial predicate** from the initial registration. The registration
+/// itself is still sent - filter id plus children - and the receiver installs a `true`
+/// placeholder for it, which is why the region is not filtered yet but the later updates
+/// already have somewhere to land. The parent must therefore keep evaluating the filter
+/// itself, which is what [`PushedDown::No`] tells DataFusion.
+fn pushdown_for_captured_filter(captured: CapturedDynFilter) -> (CapturedDynFilter, PushedDown) {
+    let pushed_down = if captured.initial_registration.initial_snapshot.is_some() {
+        PushedDown::Yes
+    } else {
+        PushedDown::No
+    };
+
+    (captured, pushed_down)
+}
+
 /// Returns true if `filter` references at least one scalar subquery and is otherwise
 /// built only from columns and literals, so it becomes a plain predicate once the
 /// subqueries are resolved.
 ///
-/// Filters containing `IN` lists are rejected: an oversized payload replaces `IN` with
-/// `true`, which only widens a conjunction but can narrow an arbitrary predicate such as
-/// `(host IN (...)) = false`.
-// TODO(dennis): make the bounds-only fallback in `DynFilterPayload` replace only `IN` lists
-// in conjunctive positions, then drop this restriction.
+/// `IN` lists are accepted: the retention contract in
+/// [`DynFilterPayload::from_datafusion_expr`] only ever drops whole top-level `AND`
+/// conjuncts and never substitutes `true` for a node, so an `IN` list inside an arbitrary
+/// predicate such as `(host IN (...)) = false` cannot be narrowed by transport. A payload
+/// that cannot be shipped as it stands is an explicit error, which the capture answers by
+/// only attaching no initial predicate (the region keeps its `true` placeholder) while the
+/// parent keeps evaluating the filter.
 fn is_scalar_subquery_filter(filter: &Arc<dyn PhysicalExpr>) -> bool {
     let mut has_scalar_subquery = false;
     let mut supported = true;
     let _ = filter.apply(|expr| {
         if expr.is::<ScalarSubqueryExpr>() {
             has_scalar_subquery = true;
-        } else if expr.is::<InListExpr>()
-            || (expr.children().is_empty() && !expr.is::<Column>() && !expr.is::<Literal>())
-        {
+        } else if expr.children().is_empty() && !expr.is::<Column>() && !expr.is::<Literal>() {
             supported = false;
             return Ok(TreeNodeRecursion::Stop);
         }
@@ -323,6 +342,15 @@ fn attach_initial_snapshot(
     initial_registration.with_initial_snapshot(initial_snapshot)
 }
 
+/// Initial snapshot of a captured filter, or `None` when regions must not be filtered yet.
+///
+/// A predicate transport cannot represent (or that does not fit the payload budget) is
+/// *not* replaced with `true`: only the initial snapshot is dropped (warn + metric), so the
+/// region starts with no initial predicate but still receives the registration itself
+/// (filter id plus children) and installs its `true` placeholder. Later updates land in
+/// that placeholder - a representable payload, or the explicit `true` reset the registry
+/// publishes when a generation has no wire form. The capture reports `PushedDown::No` so
+/// the parent keeps evaluating the filter itself.
 fn initial_snapshot(
     alive_dyn_filter: &DynamicFilterPhysicalExpr,
 ) -> Option<InitialDynFilterSnapshot> {
@@ -340,6 +368,24 @@ fn initial_snapshot(
         REMOTE_DYN_FILTER_PAYLOAD_MAX_BYTES,
     ) {
         Ok(payload) => payload,
+        Err(error) if is_dyn_filter_unsupported(&error) => {
+            REMOTE_DYN_FILTER_ENCODE_TOTAL
+                .with_label_values(&["unsupported"])
+                .inc();
+            common_telemetry::warn!(
+                error; "Remote dyn filter initial snapshot is dropped because the predicate has no wire form"
+            );
+            return None;
+        }
+        Err(error) if is_dyn_filter_payload_too_large(&error) => {
+            REMOTE_DYN_FILTER_ENCODE_TOTAL
+                .with_label_values(&["too_large"])
+                .inc();
+            common_telemetry::warn!(
+                error; "Remote dyn filter initial snapshot is dropped because the predicate does not fit the payload budget"
+            );
+            return None;
+        }
         Err(error) => {
             common_telemetry::warn!(error; "Failed to encode remote dyn filter initial snapshot");
             return None;
@@ -453,11 +499,13 @@ mod tests {
 
     use common_meta::peer::Peer;
     use datafusion::execution::TaskContext;
+    use datafusion::physical_plan::joins::join_hash_map::JoinHashMapU32;
+    use datafusion::physical_plan::joins::{HashTableLookupExpr, Map, SeededRandomState};
     use datafusion_common::ScalarValue;
     use datafusion_expr::ColumnarValue;
     use datafusion_expr::Operator;
     use datafusion_expr::physical_planning_context::{ScalarSubqueryResults, SubqueryIndex};
-    use datafusion_physical_expr::expressions::BinaryExpr;
+    use datafusion_physical_expr::expressions::{BinaryExpr, NotExpr};
     use session::query_id::QueryId;
     use uuid::Uuid;
 
@@ -557,6 +605,33 @@ mod tests {
         .unwrap()
     }
 
+    /// A probe filter whose current predicate has no wire form.
+    ///
+    /// A hand-built lookup has no build lease, hence no key list, and `NOT lookup` is a
+    /// single top-level conjunct that carries the membership: neither a key list nor a
+    /// membership-free conjunct exists.
+    fn test_unsupported_snapshot_filter(
+        column_name: &str,
+        column_index: usize,
+    ) -> Arc<DynamicFilterPhysicalExpr> {
+        let column = Arc::new(Column::new(column_name, column_index)) as Arc<dyn PhysicalExpr>;
+        let lookup = Arc::new(HashTableLookupExpr::new(
+            vec![Arc::clone(&column)],
+            SeededRandomState::with_seed(0),
+            Arc::new(Map::HashMap(Box::new(JoinHashMapU32::with_capacity(0)))),
+            "hash_lookup".to_string(),
+            None,
+        )) as Arc<dyn PhysicalExpr>;
+        let dyn_filter = Arc::new(DynamicFilterPhysicalExpr::new(
+            vec![Arc::clone(&column) as _],
+            lit(true) as _,
+        ));
+        dyn_filter
+            .update(Arc::new(NotExpr::new(lookup)) as _)
+            .unwrap();
+        dyn_filter
+    }
+
     fn test_dyn_filter_with_snapshot_payload(
         column_name: &str,
         column_index: usize,
@@ -654,7 +729,12 @@ mod tests {
     }
 
     #[test]
-    fn scalar_subquery_filter_with_in_list_is_left_to_parent() {
+    fn scalar_subquery_filter_with_in_list_is_captured_and_never_narrowed() {
+        // `(host IN ('a', 'b')) = (SELECT flag ...)` used to be rejected because an
+        // oversized payload was thought to replace `IN` with `true`. That is not the
+        // contract any more: transport never substitutes `true` for a node and only drops
+        // whole top-level conjuncts, so a membership inside an arbitrary predicate can only
+        // be kept or refused as a whole, never narrowed.
         let results = ScalarSubqueryResults::new(1);
         let schema = arrow_schema::Schema::new(vec![arrow_schema::Field::new(
             "host",
@@ -668,7 +748,6 @@ mod tests {
             &schema,
         )
         .unwrap();
-        // `(host IN ('a', 'b')) = (SELECT flag ...)`
         let filter = Arc::new(BinaryExpr::new(
             host_in_list,
             Operator::Eq,
@@ -676,7 +755,7 @@ mod tests {
                 arrow_schema::DataType::Boolean,
                 true,
                 SubqueryIndex::new(0),
-                results,
+                results.clone(),
             )),
         )) as Arc<dyn PhysicalExpr>;
 
@@ -687,8 +766,40 @@ mod tests {
             vec![filter],
         );
 
+        // Captured like any other scalar subquery filter, and still left to the parent.
         assert_eq!(pushed_down(&pushdown), vec![false]);
-        assert!(pushdown.captured_dyn_filters.is_empty());
+        assert_eq!(pushdown.captured_dyn_filters.len(), 1);
+        let captured = &pushdown.captured_dyn_filters[0];
+
+        // Once resolved, the published predicate keeps the `IN` list structurally instead
+        // of widening it to `true`: `(host IN (...)) = true`.
+        results
+            .set(SubqueryIndex::new(0), ScalarValue::Boolean(Some(true)))
+            .unwrap();
+        resolve_scalar_subquery_dyn_filters(std::slice::from_ref(captured));
+        let snapshot = refreshed_regs(std::slice::from_ref(captured)).regs[0]
+            .initial_snapshot
+            .clone()
+            .expect("the resolved predicate is representable");
+        let display = decode_snapshot(&snapshot, "host");
+        assert!(
+            display.contains("IN"),
+            "the IN list must survive the wire: {display}"
+        );
+        assert_ne!(display, "true", "transport must not widen to `true`");
+        assert!(
+            display.ends_with("= true"),
+            "the equality over the IN list must survive: {display}"
+        );
+
+        // A payload that does not fit is refused outright rather than narrowed: the whole
+        // conjunct is dropped and nothing is left to ship.
+        let current = captured.alive_dyn_filter.current().unwrap();
+        let refused = DynFilterPayload::from_datafusion_expr(&current, 8).unwrap_err();
+        assert!(
+            is_dyn_filter_payload_too_large(&refused),
+            "an oversized payload must be refused as too large, got: {refused:?}"
+        );
     }
 
     #[test]
@@ -849,6 +960,88 @@ mod tests {
                 .initial_snapshot
                 .is_some()
         );
+    }
+
+    #[test]
+    fn capture_remote_dyn_filters_for_pushdown_skips_unsupported_initial_snapshot() {
+        // The parent retention and the registration are checked end to end: the capture
+        // still sends its registration (filter id plus children) but no initial predicate,
+        // the region installs its `true` placeholder, and a later representable generation
+        // still reaches it.
+        let dyn_filter = test_unsupported_snapshot_filter("host", 0);
+        let parent_filters =
+            vec![Arc::clone(&dyn_filter) as Arc<dyn datafusion::physical_plan::PhysicalExpr>];
+
+        let pushdown = capture_remote_dyn_filters_for_pushdown(
+            test_remote_dyn_filter_producer_id(42),
+            0,
+            &[],
+            parent_filters,
+        );
+
+        // No snapshot is published (and it is never replaced with `true`), so the parent
+        // must keep evaluating the filter itself.
+        assert_eq!(pushed_down(&pushdown), vec![false]);
+        assert_eq!(pushdown.captured_dyn_filters.len(), 1);
+        let captured = &pushdown.captured_dyn_filters[0];
+        assert!(captured.initial_registration.initial_snapshot.is_none());
+        assert!(
+            !captured
+                .initial_registration
+                .child_exprs_datafusion_proto
+                .is_empty(),
+            "the registration must still describe the filter children"
+        );
+
+        // The registration survives the wire: filter id and children are intact, and the
+        // region installs the filter with a `true` placeholder and no initial predicate.
+        let regs = build_initial_dyn_filter_regs_for_region(&pushdown.captured_dyn_filters);
+        let serialized = regs.to_extension_value().unwrap();
+        let received = InitialDynFilterRegs::from_extension_value(&serialized).unwrap();
+        assert_eq!(received.regs.len(), 1);
+        assert_eq!(
+            received.regs[0].filter_id,
+            captured.filter_id.to_string(),
+            "the filter id must survive serialization"
+        );
+        assert!(received.regs[0].initial_snapshot.is_none());
+        let schema = Arc::new(arrow_schema::Schema::new(vec![arrow_schema::Field::new(
+            "host",
+            arrow_schema::DataType::Utf8,
+            true,
+        )]));
+        let children = received.regs[0]
+            .decode_children(
+                &TaskContext::default(),
+                &schema,
+                REMOTE_DYN_FILTER_PAYLOAD_MAX_BYTES,
+            )
+            .unwrap();
+        assert_eq!(children.len(), 1);
+        assert!(children[0].is::<Column>());
+
+        // A later generation transport can represent is delivered to the installed filter.
+        dyn_filter.update(lit(false) as _).unwrap();
+        let current = captured.alive_dyn_filter.current().unwrap();
+        let payload =
+            DynFilterPayload::from_datafusion_expr(&current, REMOTE_DYN_FILTER_PAYLOAD_MAX_BYTES)
+                .unwrap();
+        let decoded = payload
+            .decode_datafusion_expr(
+                &TaskContext::default(),
+                &schema,
+                REMOTE_DYN_FILTER_PAYLOAD_MAX_BYTES,
+            )
+            .unwrap();
+        assert_eq!(decoded.to_string(), "false");
+        let installed = Arc::new(DynamicFilterPhysicalExpr::new(children, lit(true) as _));
+        let generation = installed.snapshot_generation();
+        installed.update(decoded).unwrap();
+        assert!(
+            installed.snapshot_generation() > generation,
+            "the receiver generation must advance"
+        );
+        assert_eq!(installed.current().unwrap().to_string(), "false");
     }
 
     #[test]
