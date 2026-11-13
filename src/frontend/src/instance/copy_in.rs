@@ -14,7 +14,10 @@
 
 use api::v1::RowInsertRequests;
 use async_trait::async_trait;
-use auth::{PermissionChecker, PermissionCheckerRef, PermissionReq};
+use auth::{
+    PermissionChecker, PermissionCheckerRef, PermissionReq, PermissionTableTarget,
+    PermissionTableTargets,
+};
 use common_error::ext::BoxedError;
 use common_query::Output;
 use query::query_engine::options::{QueryOptions, validate_catalog_and_schema};
@@ -67,11 +70,28 @@ impl CopyInHandler for Instance {
             )
             .context(AuthSnafu)?;
 
-        self.catalog_manager()
+        let table_info = self
+            .catalog_manager()
             .table(catalog, schema, table, None)
             .await
             .map(|table| table.map(|table| table.table_info()))
-            .map_err(servers::error::Error::from)
+            .map_err(servers::error::Error::from)?;
+        let target = PermissionTableTarget::new(catalog, schema, table).with_physical_metric_table(
+            table_info
+                .as_ref()
+                .is_some_and(|info| info.is_physical_table()),
+        );
+        self.check_table_permission(
+            &query_ctx,
+            PermissionReq::BulkInsert {
+                catalog,
+                schema,
+                table,
+            },
+            PermissionTableTargets::resolved(vec![target]),
+        )
+        .context(AuthSnafu)?;
+        Ok(table_info)
     }
 
     async fn copy_in_insert(
