@@ -101,10 +101,8 @@ impl HeartbeatHandler for RegionLeaseHandler {
                         .collect()
                 } else {
                     renewed
-                        .into_iter()
-                        .map(|(region_id, region_lease_info)| {
-                            GrantedRegion::new(region_id, region_lease_info.role).into()
-                        })
+                        .into_values()
+                        .map(|region_lease_info| GrantedRegion::from(region_lease_info).into())
                         .collect::<Vec<_>>()
                 };
 
@@ -288,6 +286,10 @@ mod test {
         let _guard = opening_region_keeper
             .register_with_role(follower_peer.id, opening_region_id, RegionRole::Follower)
             .unwrap();
+        let candidate_region_id = RegionId::new(table_id, region_number + 3);
+        let candidate_guard = opening_region_keeper
+            .register_candidate_region(follower_peer.id, candidate_region_id)
+            .unwrap();
 
         let acc = &mut HeartbeatAccumulator::default();
 
@@ -297,6 +299,7 @@ mod test {
                 new_empty_region_stat(region_id, RegionRole::Follower),
                 new_empty_region_stat(another_region_id, RegionRole::Follower),
                 new_empty_region_stat(opening_region_id, RegionRole::Follower),
+                new_empty_region_stat(candidate_region_id, RegionRole::Follower),
             ],
             ..Default::default()
         });
@@ -313,6 +316,10 @@ mod test {
             vec![
                 GrantedRegion::new(region_id, RegionRole::Follower),
                 GrantedRegion::new(opening_region_id, RegionRole::Follower),
+                GrantedRegion {
+                    candidate_lease_id: Some(candidate_guard.candidate_lease_id().unwrap()),
+                    ..GrantedRegion::new(candidate_region_id, RegionRole::Follower)
+                },
             ],
         );
         assert_eq!(acc.inactive_region_ids, HashSet::from([another_region_id]));

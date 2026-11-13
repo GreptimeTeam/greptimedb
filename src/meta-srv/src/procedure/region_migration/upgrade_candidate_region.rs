@@ -154,6 +154,12 @@ impl UpgradeCandidateRegion {
                 .get(&region_id)
                 .copied();
             let checkpoint = replay_checkpoints.get(&region_id).copied();
+            let candidate_lease_id = ctx
+                .volatile_ctx
+                .opening_region_guards
+                .iter()
+                .find(|guard| guard.info().1 == region_id)
+                .and_then(|guard| guard.candidate_lease_id());
             upgrade_regions.push(UpgradeRegion {
                 region_id,
                 last_entry_id,
@@ -162,6 +168,7 @@ impl UpgradeCandidateRegion {
                 location_id: Some(ctx.persistent_ctx.from_peer.id),
                 replay_entry_id: checkpoint.map(|c| c.entry_id),
                 metadata_replay_entry_id: checkpoint.and_then(|c| c.metadata_entry_id),
+                candidate_lease_id,
             });
         }
 
@@ -464,6 +471,46 @@ mod tests {
         assert_eq!(upgrade_regions.len(), 1);
         assert_eq!(upgrade_regions[0].replay_entry_id, Some(20));
         assert_eq!(upgrade_regions[0].metadata_replay_entry_id, None);
+    }
+
+    #[tokio::test]
+    async fn test_build_upgrade_region_instruction_carries_candidate_lease_id() {
+        let state = UpgradeCandidateRegion::default();
+        let env = TestingEnv::new();
+        let mut persistent_context = new_persistent_context();
+        let region_ids = vec![RegionId::new(1024, 1), RegionId::new(1024, 2)];
+        persistent_context.region_ids = region_ids.clone();
+        let mut ctx = env.context_factory().new_context(persistent_context);
+        prepare_table_metadata(&ctx, RegionWalOptions::default()).await;
+        let to_peer_id = ctx.persistent_ctx.to_peer.id;
+        let mut expected = HashMap::new();
+        // The guards are stored in the opposite order of the regions.
+        for region_id in region_ids.iter().rev() {
+            let guard = env
+                .opening_region_keeper()
+                .register_candidate_region(to_peer_id, *region_id)
+                .unwrap();
+            expected.insert(*region_id, guard.candidate_lease_id().unwrap());
+            ctx.volatile_ctx.opening_region_guards.push(guard);
+        }
+
+        // Retries send the same ids.
+        for _ in 0..2 {
+            let instruction = state
+                .build_upgrade_region_instruction(&mut ctx, Duration::from_secs(1))
+                .await
+                .unwrap();
+            let Instruction::UpgradeRegions(upgrade_regions) = instruction else {
+                unreachable!()
+            };
+            assert_eq!(upgrade_regions.len(), 2);
+            for upgrade_region in upgrade_regions {
+                assert_eq!(
+                    upgrade_region.candidate_lease_id,
+                    Some(expected[&upgrade_region.region_id])
+                );
+            }
+        }
     }
 
     #[tokio::test]

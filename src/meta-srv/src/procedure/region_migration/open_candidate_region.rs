@@ -27,7 +27,6 @@ use common_telemetry::info;
 use common_telemetry::tracing_context::TracingContext;
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt};
-use store_api::region_engine::RegionRole;
 use store_api::region_request::RegionRequirements;
 use tokio::time::Instant;
 
@@ -147,7 +146,7 @@ impl OpenCandidateRegion {
                 // Registers the opening region.
                 let guard = ctx
                     .opening_region_keeper
-                    .register_with_role(candidate.id, *region_id, RegionRole::Follower)
+                    .register_candidate_region(candidate.id, *region_id)
                     .context(error::RegionOperatingRaceSnafu {
                         peer_id: candidate.id,
                         region_id: *region_id,
@@ -236,7 +235,7 @@ impl OpenCandidateRegion {
 #[cfg(test)]
 mod tests {
     use std::assert_matches;
-    use std::collections::HashMap;
+    use std::collections::{HashMap, HashSet};
 
     use common_catalog::consts::MITO2_ENGINE;
     use common_error::ext::RetryHint;
@@ -247,6 +246,7 @@ mod tests {
     use common_meta::key::test_utils::new_test_table_info;
     use common_meta::peer::Peer;
     use common_meta::rpc::router::{Region, RegionRoute};
+    use store_api::region_engine::RegionRole;
     use store_api::storage::RegionId;
 
     use super::*;
@@ -623,8 +623,24 @@ mod tests {
         send_mock_reply(mailbox, rx, |id| Ok(new_open_region_reply(id, true, None)));
         let procedure_ctx = new_procedure_context();
         let (next, _) = state.next(&mut ctx, &procedure_ctx).await.unwrap();
-        let vc = ctx.volatile_ctx;
-        assert_eq!(vc.opening_region_guards[0].info(), (to_peer_id, region_id));
+        let candidate_lease_id = {
+            let vc = &ctx.volatile_ctx;
+            assert_eq!(vc.opening_region_guards[0].info(), (to_peer_id, region_id));
+            vc.opening_region_guards[0].candidate_lease_id()
+        };
+        assert!(candidate_lease_id.is_some_and(|id| id != 0));
+        let regions = HashSet::from([region_id]);
+        let registered = |ctx: &Context| {
+            ctx.opening_region_keeper
+                .extract_operating_regions(to_peer_id, &regions)[&region_id]
+                .candidate_lease_id
+        };
+        assert_eq!(registered(&ctx), candidate_lease_id);
+
+        // A retry of the step keeps the registration and its id.
+        state.next(&mut ctx, &procedure_ctx).await.unwrap();
+        assert_eq!(ctx.volatile_ctx.opening_region_guards.len(), 1);
+        assert_eq!(registered(&ctx), candidate_lease_id);
 
         let flush_leader_region = next.as_any().downcast_ref::<PreFlushRegion>().unwrap();
         assert_matches!(flush_leader_region, PreFlushRegion);

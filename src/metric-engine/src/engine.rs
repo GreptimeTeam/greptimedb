@@ -390,6 +390,7 @@ impl RegionEngine for MetricEngine {
         role: RegionRole,
         sent_at: Instant,
         deadline: Instant,
+        candidate_lease_id: Option<u64>,
     ) -> Result<bool, BoxedError> {
         // The metadata region goes first. If it ignores the grant, the data region, whose role the
         // engine reports, must not take it either. A region that is not found is ignored.
@@ -397,13 +398,23 @@ impl RegionEngine for MetricEngine {
             utils::to_metadata_region_id(region_id),
             utils::to_data_region_id(region_id),
         ] {
-            match self
-                .inner
-                .mito
-                .set_region_role_with_lease(x, role, sent_at, deadline)
-            {
+            match self.inner.mito.set_region_role_with_lease(
+                x,
+                role,
+                sent_at,
+                deadline,
+                candidate_lease_id,
+            ) {
                 Ok(true) => {}
-                Ok(false) => return Ok(false),
+                Ok(false) => {
+                    // The data region does not take the grant but has received it.
+                    self.inner.mito.record_granted_lease(
+                        utils::to_data_region_id(region_id),
+                        candidate_lease_id,
+                        sent_at,
+                    );
+                    return Ok(false);
+                }
                 Err(e) if e.status_code() != StatusCode::RegionNotFound => return Err(e),
                 Err(_) => {}
             }
@@ -982,14 +993,46 @@ mod test {
                     RegionRole::Leader,
                     sent_at,
                     sent_at + lease,
+                    Some(7),
                 )
                 .unwrap()
         };
         assert!(!grant(sent_at));
         assert_eq!(engine.role(physical_region_id), Some(RegionRole::Follower));
+        // The data region still records the grant it did not take.
+        assert_eq!(
+            mito.granted_candidate_lease_id(utils::to_data_region_id(physical_region_id)),
+            Some(7)
+        );
 
         assert!(grant(Instant::now()));
         assert_eq!(engine.role(physical_region_id), Some(RegionRole::Leader));
+    }
+
+    #[tokio::test]
+    async fn test_lease_candidate_lease_id_reaches_both_regions() {
+        let env = TestEnv::new().await;
+        env.init_metric_region().await;
+        let (engine, mito) = (env.metric(), env.mito());
+        let physical_region_id = env.default_physical_region_id();
+        let sent_at = Instant::now();
+
+        engine
+            .set_region_role_with_lease(
+                physical_region_id,
+                RegionRole::Follower,
+                sent_at,
+                sent_at + std::time::Duration::from_secs(10),
+                Some(7),
+            )
+            .unwrap();
+
+        for region_id in [
+            utils::to_metadata_region_id(physical_region_id),
+            utils::to_data_region_id(physical_region_id),
+        ] {
+            assert_eq!(mito.granted_candidate_lease_id(region_id), Some(7));
+        }
     }
 
     #[tokio::test]

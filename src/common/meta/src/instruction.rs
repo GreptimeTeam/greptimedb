@@ -388,6 +388,9 @@ pub struct UpgradeRegion {
     pub replay_entry_id: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub metadata_replay_entry_id: Option<u64>,
+    /// The candidate lease id of the migration's registration of this target region.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub candidate_lease_id: Option<u64>,
 }
 
 impl UpgradeRegion {
@@ -1559,6 +1562,7 @@ mod tests {
             location_id: None,
             replay_entry_id: None,
             metadata_replay_entry_id: None,
+            candidate_lease_id: None,
         }]);
 
         let serialized = serde_json::to_string(&upgrade_region).unwrap();
@@ -1656,8 +1660,25 @@ mod tests {
             location_id: None,
             replay_entry_id: None,
             metadata_replay_entry_id: None,
+            candidate_lease_id: None,
         }]);
         assert_eq!(upgrade_region_instruction, upgrade_region);
+    }
+
+    #[test]
+    fn test_upgrade_region_candidate_lease_id_json() {
+        let upgrade_region = UpgradeRegion {
+            region_id: RegionId::new(1024, 1),
+            replay_timeout: Duration::from_millis(1000),
+            candidate_lease_id: Some(7),
+            ..Default::default()
+        };
+        let json = serde_json::to_value(&upgrade_region).unwrap();
+        assert_eq!(json["candidate_lease_id"], 7);
+        assert_eq!(
+            serde_json::from_value::<UpgradeRegion>(json).unwrap(),
+            upgrade_region
+        );
     }
 
     #[test]

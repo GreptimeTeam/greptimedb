@@ -448,10 +448,13 @@ mod tests {
 
         state.recover(&ddl_context).unwrap();
 
-        let roles = ddl_context
+        let operating_regions = ddl_context
             .memory_region_keeper
-            .extract_operating_region_roles(7, &HashSet::from([region_id]));
-        assert_eq!(roles.get(&region_id), Some(&RegionRole::DowngradingLeader));
+            .extract_operating_regions(7, &HashSet::from([region_id]));
+        assert_eq!(
+            operating_regions.get(&region_id).map(|region| region.role),
+            Some(RegionRole::DowngradingLeader)
+        );
     }
 
     #[tokio::test]

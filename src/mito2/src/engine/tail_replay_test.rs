@@ -261,6 +261,7 @@ impl TestRegion {
                 RegionRole::Leader,
                 now,
                 now + Duration::from_secs(10),
+                None,
             )
             .unwrap();
     }

@@ -449,7 +449,13 @@ pub(crate) async fn create_leased_region_on(
     let (table_dir, schema) = create_region(engine, region_id).await;
     let deadline = Instant::now() + Duration::from_secs(10);
     engine
-        .set_region_role_with_lease(region_id, RegionRole::Leader, Instant::now(), deadline)
+        .set_region_role_with_lease(
+            region_id,
+            RegionRole::Leader,
+            Instant::now(),
+            deadline,
+            None,
+        )
         .unwrap();
     (table_dir, schema, deadline)
 }
@@ -953,7 +959,7 @@ async fn test_lease_on_fenced_region_only_extends_deadline() {
 
     let later = deadline + Duration::from_secs(10);
     let promoted = engine
-        .set_region_role_with_lease(region_id, RegionRole::Leader, Instant::now(), later)
+        .set_region_role_with_lease(region_id, RegionRole::Leader, Instant::now(), later, None)
         .unwrap();
 
     assert!(!promoted);
@@ -1310,7 +1316,7 @@ async fn test_reload_ignores_leases_sent_before_swap() {
     wait_until(|| is_replaced(&engine, &old)).await;
 
     let lease = |sent_at| {
-        engine.set_region_role_with_lease(region_id, RegionRole::Leader, sent_at, deadline)
+        engine.set_region_role_with_lease(region_id, RegionRole::Leader, sent_at, deadline, None)
     };
     assert!(!lease(sent_before_swap).unwrap());
     assert!(engine.get_region(region_id).unwrap().is_follower());

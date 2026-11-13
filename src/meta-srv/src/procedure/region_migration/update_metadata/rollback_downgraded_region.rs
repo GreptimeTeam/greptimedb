@@ -77,6 +77,7 @@ mod tests {
     use std::collections::HashMap;
     use std::sync::Arc;
 
+    use common_meta::key::table_route::TableRouteValue;
     use common_meta::key::test_utils::new_test_table_info;
     use common_meta::peer::Peer;
     use common_meta::rpc::router::{LeaderState, Region, RegionRoute};
@@ -172,5 +173,47 @@ mod tests {
             &expected_region_routes,
             table_route.region_routes().unwrap()
         );
+    }
+
+    #[tokio::test]
+    async fn test_next_drops_candidate_registration_before_route_write() {
+        let env = TestingEnv::new();
+        let (table_metadata_manager, keeper_empty_at_txn) =
+            test_util::table_metadata_manager_observing_keeper(env.opening_region_keeper().clone());
+        let persistent_context = new_persistent_context();
+        let region_id = persistent_context.region_ids[0];
+        let to_peer_id = persistent_context.to_peer.id;
+        let region_routes = vec![RegionRoute {
+            region: Region::new_test(region_id),
+            leader_peer: Some(persistent_context.from_peer.clone()),
+            leader_state: Some(LeaderState::Downgrading),
+            ..Default::default()
+        }];
+        table_metadata_manager
+            .create_table_metadata(
+                new_test_table_info(region_id.table_id()),
+                TableRouteValue::physical(region_routes),
+                HashMap::default(),
+            )
+            .await
+            .unwrap();
+        keeper_empty_at_txn.lock().unwrap().clear();
+        let mut ctx = env
+            .context_factory_with_metadata(table_metadata_manager)
+            .new_context(persistent_context);
+        let guard = env
+            .opening_region_keeper()
+            .register_candidate_region(to_peer_id, region_id)
+            .unwrap();
+        ctx.volatile_ctx.opening_region_guards.push(guard);
+
+        UpdateMetadata::Rollback
+            .next(&mut ctx, &new_procedure_context())
+            .await
+            .unwrap();
+
+        let keeper_empty_at_txn = keeper_empty_at_txn.lock().unwrap();
+        assert!(!keeper_empty_at_txn.is_empty());
+        assert!(keeper_empty_at_txn.iter().all(|empty| *empty));
     }
 }

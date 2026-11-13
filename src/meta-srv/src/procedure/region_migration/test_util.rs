@@ -12,10 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::any::Any;
 use std::assert_matches;
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use api::v1::meta::MailboxMessage;
@@ -23,11 +24,17 @@ use common_meta::DatanodeId;
 use common_meta::ddl::NoopRegionFailureDetectorControl;
 use common_meta::key::table_route::TableRouteValue;
 use common_meta::key::{TableMetadataManager, TableMetadataManagerRef};
-use common_meta::kv_backend::KvBackendRef;
 use common_meta::kv_backend::memory::MemoryKvBackend;
+use common_meta::kv_backend::txn::{Txn, TxnResponse, TxnService};
+use common_meta::kv_backend::{KvBackend, KvBackendRef};
 use common_meta::peer::Peer;
 use common_meta::region_keeper::{MemoryRegionKeeper, MemoryRegionKeeperRef};
 use common_meta::rpc::router::RegionRoute;
+use common_meta::rpc::store::{
+    BatchDeleteRequest, BatchDeleteResponse, BatchGetRequest, BatchGetResponse, BatchPutRequest,
+    BatchPutResponse, DeleteRangeRequest, DeleteRangeResponse, PutRequest, PutResponse,
+    RangeRequest, RangeResponse,
+};
 use common_meta::sequence::SequenceBuilder;
 use common_meta::state_store::KvStateStore;
 use common_procedure::local::{LocalManager, ManagerConfig};
@@ -591,4 +598,89 @@ pub fn new_procedure_context() -> ProcedureContext {
         provider: Arc::new(MockContextProvider::default()),
         event_context: None,
     }
+}
+
+/// A [KvBackend] that runs `before_txn` before each transaction of `inner`, e.g. to observe the
+/// state when a table route is written.
+pub(crate) struct TxnObservingKvBackend {
+    pub(crate) inner: KvBackendRef,
+    pub(crate) before_txn: Box<dyn Fn() + Send + Sync>,
+}
+
+#[async_trait::async_trait]
+impl TxnService for TxnObservingKvBackend {
+    type Error = common_meta::error::Error;
+
+    async fn txn(&self, txn: Txn) -> common_meta::error::Result<TxnResponse> {
+        (self.before_txn)();
+        self.inner.txn(txn).await
+    }
+
+    fn max_txn_ops(&self) -> usize {
+        self.inner.max_txn_ops()
+    }
+}
+
+#[async_trait::async_trait]
+impl KvBackend for TxnObservingKvBackend {
+    fn name(&self) -> &str {
+        self.inner.name()
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    async fn range(&self, req: RangeRequest) -> common_meta::error::Result<RangeResponse> {
+        self.inner.range(req).await
+    }
+
+    async fn put(&self, req: PutRequest) -> common_meta::error::Result<PutResponse> {
+        self.inner.put(req).await
+    }
+
+    async fn batch_put(
+        &self,
+        req: BatchPutRequest,
+    ) -> common_meta::error::Result<BatchPutResponse> {
+        self.inner.batch_put(req).await
+    }
+
+    async fn batch_get(
+        &self,
+        req: BatchGetRequest,
+    ) -> common_meta::error::Result<BatchGetResponse> {
+        self.inner.batch_get(req).await
+    }
+
+    async fn delete_range(
+        &self,
+        req: DeleteRangeRequest,
+    ) -> common_meta::error::Result<DeleteRangeResponse> {
+        self.inner.delete_range(req).await
+    }
+
+    async fn batch_delete(
+        &self,
+        req: BatchDeleteRequest,
+    ) -> common_meta::error::Result<BatchDeleteResponse> {
+        self.inner.batch_delete(req).await
+    }
+}
+
+/// Returns a table metadata manager that records, before each of its transactions, whether
+/// `keeper` holds no registration.
+pub(crate) fn table_metadata_manager_observing_keeper(
+    keeper: MemoryRegionKeeperRef,
+) -> (TableMetadataManagerRef, Arc<Mutex<Vec<bool>>>) {
+    let keeper_empty_at_txn = Arc::new(Mutex::new(Vec::new()));
+    let recorded = keeper_empty_at_txn.clone();
+    let kv_backend = Arc::new(TxnObservingKvBackend {
+        inner: Arc::new(MemoryKvBackend::new()),
+        before_txn: Box::new(move || recorded.lock().unwrap().push(keeper.is_empty())),
+    });
+    (
+        Arc::new(TableMetadataManager::new(kv_backend)),
+        keeper_empty_at_txn,
+    )
 }

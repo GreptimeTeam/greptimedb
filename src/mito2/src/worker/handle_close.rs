@@ -126,6 +126,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         let Some(region) = self.regions.remove_region(region_id) else {
             return;
         };
+        self.granted_leases.remove(region_id);
         region.deactivate_region_manifest_size_metric();
         self.cancel_tail_replay(region_id);
         region.stop().await;

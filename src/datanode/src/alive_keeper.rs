@@ -142,10 +142,17 @@ impl RegionAliveKeeper {
         deadline: Instant,
     ) {
         for region in regions {
-            let (role, region_id) = (region.role().into(), RegionId::from(region.region_id));
+            let region = store_api::region_engine::GrantedRegion::from(region.clone());
+            let region_id = region.region_id;
             if let Some(handle) = self.find_handle(region_id).await {
                 handle
-                    .reset_deadline(role, sent_at, deadline, region.extensions.clone())
+                    .reset_deadline(
+                        region.region_role,
+                        sent_at,
+                        deadline,
+                        region.candidate_lease_id,
+                        region.extensions,
+                    )
                     .await;
             } else {
                 warn!(
@@ -301,8 +308,16 @@ enum CountdownCommand {
     /// 4 * `heartbeat_interval_millis`
     Start(u64),
     /// Reset countdown deadline to the given instance.
-    /// (NextRole, HeartbeatSentAt, Deadline, ExtensionInfo)
-    Reset((RegionRole, Instant, Instant, HashMap<String, Vec<u8>>)),
+    /// (NextRole, HeartbeatSentAt, Deadline, CandidateLeaseId, ExtensionInfo)
+    Reset(
+        (
+            RegionRole,
+            Instant,
+            Instant,
+            Option<u64>,
+            HashMap<String, Vec<u8>>,
+        ),
+    ),
     /// Returns the current deadline of the countdown task.
     #[cfg(test)]
     Deadline(oneshot::Sender<Instant>),
@@ -384,6 +399,7 @@ impl CountdownTaskHandle {
         role: RegionRole,
         sent_at: Instant,
         deadline: Instant,
+        candidate_lease_id: Option<u64>,
         extension_info: HashMap<String, Vec<u8>>,
     ) {
         if let Err(e) = self
@@ -392,6 +408,7 @@ impl CountdownTaskHandle {
                 role,
                 sent_at,
                 deadline,
+                candidate_lease_id,
                 extension_info,
             )))
             .await
@@ -447,9 +464,9 @@ impl CountdownTask {
                                 started = true;
                             }
                         },
-                        Some(CountdownCommand::Reset((role, sent_at, deadline, extension_info))) => {
+                        Some(CountdownCommand::Reset((role, sent_at, deadline, candidate_lease_id, extension_info))) => {
                             let prev_role_leader = self.region_server.is_region_leader(self.region_id).unwrap_or(false);
-                            let applied = match self.region_server.set_region_role_with_lease(self.region_id, role, sent_at.into_std(), deadline.into_std()) {
+                            let applied = match self.region_server.set_region_role_with_lease(self.region_id, role, sent_at.into_std(), deadline.into_std(), candidate_lease_id) {
                                 Ok(applied) => applied,
                                 Err(err) => {
                                     if err.status_code() == StatusCode::RegionNotFound {
@@ -590,12 +607,35 @@ mod test {
         let grant = GrantedRegion {
             region_id: region_id.as_u64(),
             role: api::v1::meta::RegionRole::Leader.into(),
+            candidate_lease_id: 0,
             extensions: HashMap::new(),
         };
         handle_lease_response(&alive_keeper, vec![grant]).await;
         // The countdown task has handled the grant once it answers.
         alive_keeper.deadline(region_id).await.unwrap();
         assert_eq!(0, finalized.load(Ordering::Relaxed));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn lease_response_passes_candidate_lease_id_to_engine() {
+        common_telemetry::init_default_ut_logging();
+        let region_server = mock_region_server();
+        let (engine, _) = MockRegionEngine::new(MITO_ENGINE_NAME);
+        let region_id = RegionId::new(1024, 1);
+        region_server.register_test_region(region_id, engine.clone());
+        let alive_keeper =
+            RegionAliveKeeper::new(region_server.clone(), None, Duration::from_millis(100));
+        alive_keeper.register_region(region_id).await;
+        let grant = GrantedRegion {
+            region_id: region_id.as_u64(),
+            role: api::v1::meta::RegionRole::Follower.into(),
+            candidate_lease_id: 7,
+            extensions: HashMap::new(),
+        };
+        handle_lease_response(&alive_keeper, vec![grant]).await;
+        // The countdown task has handled the grant once it answers.
+        alive_keeper.deadline(region_id).await.unwrap();
+        assert_eq!(*engine.candidate_lease_ids.lock().unwrap(), vec![Some(7)]);
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -645,6 +685,7 @@ mod test {
         let grant = GrantedRegion {
             region_id: region_id.as_u64(),
             role: api::v1::meta::RegionRole::Leader.into(),
+            candidate_lease_id: 0,
             extensions: HashMap::new(),
         };
         handle_lease_response(&alive_keeper, vec![grant.clone()]).await;
@@ -719,6 +760,7 @@ mod test {
                 &[GrantedRegion {
                     region_id: region_id.as_u64(),
                     role: api::v1::meta::RegionRole::Leader.into(),
+                    candidate_lease_id: 0,
                     extensions: HashMap::new(),
                 }],
                 Instant::now(),
@@ -777,6 +819,7 @@ mod test {
                 RegionRole::Leader,
                 Instant::now(),
                 Instant::now() + Duration::from_millis(heartbeat_interval_millis * 5),
+                None,
                 HashMap::new(),
             )
             .await;
@@ -824,6 +867,7 @@ mod test {
                 &[GrantedRegion {
                     region_id: region_id.as_u64(),
                     role: api::v1::meta::RegionRole::StagingLeader.into(),
+                    candidate_lease_id: 0,
                     extensions: HashMap::new(),
                 }],
                 Instant::now(),
@@ -873,6 +917,7 @@ mod test {
                 &[GrantedRegion {
                     region_id: region_id.as_u64(),
                     role: api::v1::meta::RegionRole::Leader.into(),
+                    candidate_lease_id: 0,
                     extensions: HashMap::new(),
                 }],
                 Instant::now(),
@@ -916,6 +961,7 @@ mod test {
                 &[GrantedRegion {
                     region_id: region_id.as_u64(),
                     role: api::v1::meta::RegionRole::StagingLeader.into(),
+                    candidate_lease_id: 0,
                     extensions: HashMap::new(),
                 }],
                 Instant::now(),

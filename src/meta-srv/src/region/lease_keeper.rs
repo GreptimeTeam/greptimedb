@@ -18,11 +18,11 @@ use std::sync::Arc;
 use common_meta::DatanodeId;
 use common_meta::key::TableMetadataManagerRef;
 use common_meta::key::table_route::TableRouteValue;
-use common_meta::region_keeper::MemoryRegionKeeperRef;
+use common_meta::region_keeper::{MemoryRegionKeeperRef, OperatingRegion};
 use common_meta::rpc::router::RegionRoute;
 use common_telemetry::{info, warn};
 use snafu::ResultExt;
-use store_api::region_engine::RegionRole;
+use store_api::region_engine::{GrantedRegion, RegionRole};
 use store_api::storage::{RegionId, TableId};
 
 use crate::error::{self, Result};
@@ -81,16 +81,22 @@ fn renew_region_lease_via_region_route(
 }
 
 fn renew_region_lease_via_operating_regions(
-    operating_regions: &HashMap<RegionId, RegionRole>,
+    operating_regions: &HashMap<RegionId, OperatingRegion>,
     datanode_id: DatanodeId,
     region_id: RegionId,
     reported_role: RegionRole,
+    table_route_exists: bool,
 ) -> Option<RegionLeaseInfo> {
     // `operating_regions` is filtered by the current datanode in `collect_metadata`,
     // so looking up by `region_id` is sufficient here.
-    if let Some(role) = operating_regions.get(&region_id) {
-        let region_lease_info = RegionLeaseInfo::operating(region_id, *role);
-        if *role != reported_role {
+    if let Some(operating_region) = operating_regions.get(&region_id) {
+        let role = operating_region.role;
+        let mut region_lease_info = RegionLeaseInfo::operating(region_id, role);
+        // Without the table route, the registration alone must not vouch for a migration.
+        if table_route_exists {
+            region_lease_info.candidate_lease_id = operating_region.candidate_lease_id;
+        }
+        if role != reported_role {
             info!(
                 "The region {} on datanode {} is operating with role {:?}, but reported as {:?}",
                 region_id, datanode_id, role, reported_role
@@ -112,6 +118,9 @@ pub struct RegionLeaseInfo {
     pub is_operating: bool,
     /// The role of region.
     pub role: RegionRole,
+    /// The candidate lease id of the region migration that registered this region as its
+    /// target, if the lease is granted because of that registration and the table route exists.
+    pub candidate_lease_id: Option<u64>,
 }
 
 impl RegionLeaseInfo {
@@ -121,6 +130,7 @@ impl RegionLeaseInfo {
             region_id,
             is_operating: true,
             role,
+            candidate_lease_id: None,
         }
     }
 }
@@ -131,6 +141,16 @@ impl From<(RegionId, RegionRole)> for RegionLeaseInfo {
             region_id,
             is_operating: false,
             role,
+            candidate_lease_id: None,
+        }
+    }
+}
+
+impl From<RegionLeaseInfo> for GrantedRegion {
+    fn from(value: RegionLeaseInfo) -> Self {
+        GrantedRegion {
+            candidate_lease_id: value.candidate_lease_id,
+            ..GrantedRegion::new(value.region_id, value.role)
         }
     }
 }
@@ -165,13 +185,14 @@ impl RegionLeaseKeeper {
     fn renew_region_lease(
         &self,
         table_metadata: &HashMap<TableId, TableRouteValue>,
-        operating_regions: &HashMap<RegionId, RegionRole>,
+        operating_regions: &HashMap<RegionId, OperatingRegion>,
         datanode_id: DatanodeId,
         region_id: RegionId,
         reported_role: RegionRole,
     ) -> Option<RegionLeaseInfo> {
+        let table_route = table_metadata.get(&region_id.table_id());
         // First try to renew via region route
-        if let Some(table_route) = table_metadata.get(&region_id.table_id())
+        if let Some(table_route) = table_route
             && let Ok(Some(region_route)) = table_route.region_route(region_id)
             && let Some(region_lease) =
                 renew_region_lease_via_region_route(&region_route, datanode_id, region_id)
@@ -184,6 +205,7 @@ impl RegionLeaseKeeper {
             datanode_id,
             region_id,
             reported_role,
+            table_route.is_some(),
         ) {
             return Some(region_lease_info);
         }
@@ -200,11 +222,11 @@ impl RegionLeaseKeeper {
         region_ids: HashSet<RegionId>,
     ) -> Result<(
         HashMap<TableId, TableRouteValue>,
-        HashMap<RegionId, RegionRole>,
+        HashMap<RegionId, OperatingRegion>,
     )> {
         let operating_regions = self
             .memory_region_keeper
-            .extract_operating_region_roles(datanode_id, &region_ids);
+            .extract_operating_regions(datanode_id, &region_ids);
         let table_ids = region_ids
             .into_iter()
             .map(|region_id| region_id.table_id())
@@ -271,12 +293,13 @@ mod tests {
     use std::collections::{HashMap, HashSet};
     use std::sync::Arc;
 
+    use common_meta::DatanodeId;
     use common_meta::key::TableMetadataManager;
     use common_meta::key::table_route::{LogicalTableRouteValue, TableRouteValue};
     use common_meta::key::test_utils::new_test_table_info;
     use common_meta::kv_backend::memory::MemoryKvBackend;
     use common_meta::peer::Peer;
-    use common_meta::region_keeper::MemoryRegionKeeper;
+    use common_meta::region_keeper::{MemoryRegionKeeper, OperatingRegion, OperatingRegionGuard};
     use common_meta::rpc::router::{LeaderState, Region, RegionRouteBuilder};
     use store_api::region_engine::RegionRole;
     use store_api::storage::RegionId;
@@ -414,7 +437,13 @@ mod tests {
         );
         assert_eq!(
             regions,
-            HashMap::from([(opening_region_id, RegionRole::Leader)])
+            HashMap::from([(
+                opening_region_id,
+                OperatingRegion {
+                    role: RegionRole::Leader,
+                    candidate_lease_id: None,
+                }
+            )])
         );
     }
 
@@ -814,6 +843,97 @@ mod tests {
             HashMap::from([(
                 region_id,
                 RegionLeaseInfo::operating(region_id, RegionRole::DowngradingLeader)
+            )])
+        );
+    }
+
+    /// Creates a table whose route has the region led by `leader_id`, and registers the region
+    /// on `candidate_id` as the target of a migration.
+    async fn register_candidate_with_route(
+        keeper: &RegionLeaseKeeper,
+        region_id: RegionId,
+        leader_id: DatanodeId,
+        candidate_id: DatanodeId,
+    ) -> OperatingRegionGuard {
+        let region_route = RegionRouteBuilder::default()
+            .region(Region::new_test(region_id))
+            .leader_peer(Peer::empty(leader_id))
+            .build()
+            .unwrap();
+        keeper
+            .table_metadata_manager()
+            .create_table_metadata(
+                new_test_table_info(region_id.table_id()),
+                TableRouteValue::physical(vec![region_route]),
+                HashMap::default(),
+            )
+            .await
+            .unwrap();
+        keeper
+            .memory_region_keeper
+            .register_candidate_region(candidate_id, region_id)
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_renew_region_leases_candidate_lease_carries_candidate_lease_id() {
+        let keeper = new_test_keeper();
+        let region_id = RegionId::new(2048, 1);
+        let guard = register_candidate_with_route(&keeper, region_id, 1, 2).await;
+
+        let RenewRegionLeasesResponse { renewed, .. } = keeper
+            .renew_region_leases(2, &[(region_id, RegionRole::Follower)])
+            .await
+            .unwrap();
+
+        let expected = RegionLeaseInfo {
+            candidate_lease_id: guard.candidate_lease_id(),
+            ..RegionLeaseInfo::operating(region_id, RegionRole::Follower)
+        };
+        assert!(expected.candidate_lease_id.is_some());
+        assert_eq!(renewed, HashMap::from([(region_id, expected)]));
+    }
+
+    #[tokio::test]
+    async fn test_renew_region_leases_route_lease_has_no_candidate_lease_id() {
+        let keeper = new_test_keeper();
+        let region_id = RegionId::new(2048, 1);
+        // The route already names the candidate as the leader.
+        let _guard = register_candidate_with_route(&keeper, region_id, 2, 2).await;
+
+        let RenewRegionLeasesResponse { renewed, .. } = keeper
+            .renew_region_leases(2, &[(region_id, RegionRole::Follower)])
+            .await
+            .unwrap();
+
+        assert_eq!(
+            renewed,
+            HashMap::from([(
+                region_id,
+                RegionLeaseInfo::from((region_id, RegionRole::Leader))
+            )])
+        );
+    }
+
+    #[tokio::test]
+    async fn test_renew_region_leases_without_table_route_has_no_candidate_lease_id() {
+        let keeper = new_test_keeper();
+        let region_id = RegionId::new(2048, 1);
+        let _guard = keeper
+            .memory_region_keeper
+            .register_candidate_region(2, region_id)
+            .unwrap();
+
+        let RenewRegionLeasesResponse { renewed, .. } = keeper
+            .renew_region_leases(2, &[(region_id, RegionRole::Follower)])
+            .await
+            .unwrap();
+
+        assert_eq!(
+            renewed,
+            HashMap::from([(
+                region_id,
+                RegionLeaseInfo::operating(region_id, RegionRole::Follower)
             )])
         );
     }
