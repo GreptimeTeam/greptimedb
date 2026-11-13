@@ -31,7 +31,8 @@ use crate::cache::CacheManagerRef;
 use crate::cache::file_cache::{FileType, IndexKey};
 use crate::config::IndexBuildMode;
 use crate::error::{
-    EditRegionSnafu, RegionBusySnafu, RegionNotFoundSnafu, RegionStateSnafu, Result,
+    EditRegionSnafu, RegionBusySnafu, RegionNotFoundSnafu, RegionStateSnafu,
+    RejectWriteInStagingSnafu, Result,
 };
 use crate::manifest::action::{
     RegionChange, RegionEdit, RegionMetaAction, RegionMetaActionList, RegionTruncate, TruncateKind,
@@ -44,13 +45,14 @@ use crate::region::options::RegionOptions;
 use crate::region::version::VersionControlRef;
 use crate::region::{MitoRegionRef, RegionLeaderState, RegionRoleState};
 use crate::request::{
-    BackgroundNotify, BuildIndexRequest, DiscardUnflushedResult, OptionOutputTx,
+    BackgroundNotify, BuildIndexRequest, DdlRequest, DiscardUnflushedResult, OptionOutputTx,
     RegionChangeResult, RegionEditKind, RegionEditRequest, RegionEditResult, RegionSyncRequest,
-    TruncateResult, WorkerRequest, WorkerRequestWithTime,
+    SenderDdlRequest, TruncateResult, WorkerRequest, WorkerRequestWithTime,
 };
 use crate::sst::index::IndexBuildType;
 use crate::sst::{file, location};
 use crate::wal::EntryId;
+use crate::worker::handle_close;
 use crate::worker::{RegionWorkerLoop, WorkerListener};
 
 pub(crate) type RegionEditQueues = HashMap<RegionId, RegionEditQueue>;
@@ -85,7 +87,7 @@ impl RegionEditQueue {
     }
 
     fn enqueue(&mut self, request: RegionEditRequest) -> RegionEditDispatch {
-        if self.requests.len() > Self::QUEUE_MAX_LEN {
+        if self.requests.len() >= Self::QUEUE_MAX_LEN {
             request.waiters.reply_with(|| {
                 RegionBusySnafu {
                     region_id: self.region_id,
@@ -128,7 +130,10 @@ impl RegionEditQueue {
             return Some(merged);
         }
 
-        while let Some(request) = self.requests.pop_front_if(|request| can_merge(request)) {
+        // Merging must preserve the staging binding of every waiter.
+        while let Some(request) = self.requests.pop_front_if(|request| {
+            can_merge(request) && request.staging_partition_expr == merged.staging_partition_expr
+        }) {
             merged.edit.files_to_add.extend(request.edit.files_to_add);
             merged.waiters.merge(request.waiters);
         }
@@ -162,13 +167,18 @@ impl RegionEditQueue {
 }
 
 impl<S: LogStore> RegionWorkerLoop<S> {
-    /// Rejects queued ALTER and region edit requests as region not found.
-    pub(crate) fn reject_region_edit_queue_as_not_found(&mut self, region_id: RegionId) {
-        if let Some(queue) = self.pending_alters.remove(&region_id) {
-            for (_, sender) in queue {
-                sender.send(RegionNotFoundSnafu { region_id }.fail());
+    /// Rejects queued DDL and region edit requests as region not found.
+    pub(crate) fn reject_region_requests_as_not_found(&mut self, region_id: RegionId) {
+        if let Some(queue) = self.pending_ddls.remove(region_id) {
+            for ddl in queue {
+                ddl.sender.send(RegionNotFoundSnafu { region_id }.fail());
             }
         }
+        self.reject_region_edits_as_not_found(region_id);
+    }
+
+    /// Rejects edits belonging to an abandoned staging without dropping queued controls.
+    pub(crate) fn reject_region_edits_as_not_found(&mut self, region_id: RegionId) {
         if let Some(edit_queue) = self.region_edit_queues.remove(&region_id) {
             edit_queue.reject_all_as_not_found();
         }
@@ -223,8 +233,6 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         }
         // Handles the stalled requests.
         self.handle_region_stalled_requests(&change_result.region_id, true)
-            .await;
-        self.dispatch_pending_region_requests(change_result.region_id)
             .await;
     }
 
@@ -305,8 +313,39 @@ impl<S: LogStore> RegionWorkerLoop<S> {
 }
 
 impl<S: LogStore> RegionWorkerLoop<S> {
-    /// Admits an edit and reports whether it started, queued, or failed synchronously.
-    pub(crate) fn handle_region_edit(&mut self, request: RegionEditRequest) -> RegionEditDispatch {
+    fn is_import_without_staging_binding(request: &RegionEditRequest) -> bool {
+        matches!(request.kind, RegionEditKind::Import) && request.staging_partition_expr.is_none()
+    }
+
+    /// Whether EnterStaging is pending in the worker, flush, or compaction queue.
+    fn has_pending_enter_staging(&self, region_id: RegionId) -> bool {
+        self.flush_scheduler.has_pending_enter_staging(region_id)
+            || self
+                .compaction_scheduler
+                .has_pending_enter_staging(region_id)
+            || self.pending_ddls.has_enter_staging(region_id)
+    }
+
+    /// Handles a newly received edit, rejecting unbound imports while EnterStaging drains
+    /// previously accepted edits. Queued edits bypass this admission check.
+    pub(crate) fn handle_incoming_region_edit(
+        &mut self,
+        request: RegionEditRequest,
+    ) -> RegionEditDispatch {
+        let region_id = request.region_id;
+        if Self::is_import_without_staging_binding(&request)
+            && self.has_pending_enter_staging(region_id)
+        {
+            request
+                .waiters
+                .reply_with(|| RegionBusySnafu { region_id }.fail());
+            return RegionEditDispatch::Rejected;
+        }
+        self.handle_region_edit(request)
+    }
+
+    /// Executes an admitted edit and reports whether it started, queued, or failed synchronously.
+    fn handle_region_edit(&mut self, request: RegionEditRequest) -> RegionEditDispatch {
         let region_id = request.region_id;
         let Some(region) = self.regions.get_region(region_id) else {
             request
@@ -314,6 +353,14 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 .reply_with(|| RegionNotFoundSnafu { region_id }.fail());
             return RegionEditDispatch::Rejected;
         };
+
+        // Unbound imports must not be acknowledged into a manifest that staging can discard.
+        if Self::is_import_without_staging_binding(&request) && region.in_staging_session() {
+            request
+                .waiters
+                .reply_with(|| RejectWriteInStagingSnafu { region_id }.fail());
+            return RegionEditDispatch::Rejected;
+        }
 
         // A close-time flush ends with the region removed. A close that left staging keeps the
         // region writable until then, so an edit meant for staging would run as a normal edit.
@@ -345,11 +392,11 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             return RegionEditDispatch::Rejected;
         }
 
-        if !region.is_writable() || self.flush_scheduler.has_pending_alter(region_id) {
+        if !region.is_writable() || self.scheduler_blocks_region_edits(region_id) {
             if matches!(
                 region.state(),
                 RegionRoleState::Leader(RegionLeaderState::Editing | RegionLeaderState::Altering)
-            ) || (region.is_writable() && self.flush_scheduler.has_pending_alter(region_id))
+            ) || (region.is_writable() && self.scheduler_blocks_region_edits(region_id))
             {
                 return self
                     .region_edit_queues
@@ -463,7 +510,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 // Fail writes stalled behind this edit if the region was removed before the
                 // edit-completion notification reached the worker.
                 self.fail_region_stalled_requests_as_not_found(&edit_result.region_id);
-                self.reject_region_edit_queue_as_not_found(edit_result.region_id);
+                self.reject_region_requests_as_not_found(edit_result.region_id);
 
                 edit_result.waiters.reply_with(|| {
                     RegionNotFoundSnafu {
@@ -557,6 +604,8 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 .await;
         }
 
+        // Edit completion owns dispatch: stalled writes precede queued edits, and queued
+        // controls precede compaction. Early returns either retire waiters or ignore an old instance.
         self.dispatch_pending_region_requests(edit_result.region_id)
             .await;
 
@@ -565,53 +614,150 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         }
     }
 
-    /// ALTER has priority over the edit backlog. Flush-pending DDLs and the
-    /// Altering state retain that priority until their terminal notification.
+    /// Retains a control request without blocking the worker that receives its completion.
+    pub(crate) fn enqueue_region_ddl(&mut self, ddl: SenderDdlRequest) {
+        let region_id = ddl.region_id;
+        if let Err(ddl) = self.pending_ddls.enqueue(ddl) {
+            ddl.sender.send(RegionBusySnafu { region_id }.fail());
+        }
+    }
+
+    /// Whether a scheduler holds lifecycle work that must finish before edits run.
+    ///
+    /// Running ordinary and repartition flushes retain concurrency with edits through the
+    /// existing manifest synchronization. Ordinary and repartition flushes alone do not block
+    /// edits.
+    fn scheduler_blocks_region_edits(&self, region_id: RegionId) -> bool {
+        self.flush_scheduler.has_pending_ddls(region_id)
+            || self.compaction_scheduler.blocks_region_edits(region_id)
+    }
+
+    /// Defers only recoverable local contention; the original handler validates other states.
+    pub(crate) fn should_defer_region_ddl(&self, ddl: &SenderDdlRequest) -> bool {
+        let Some(region) = self.regions.get_region(ddl.region_id) else {
+            return false;
+        };
+        self.can_defer_ddl_request(ddl, &region)
+            && self.has_work_ahead_of_ddl(ddl.region_id, &region, &ddl.request)
+    }
+
+    /// Whether this request may wait for ongoing work in the current region state.
+    /// Ineligible requests go directly to their handlers for normal validation.
+    fn can_defer_ddl_request(&self, ddl: &SenderDdlRequest, region: &MitoRegionRef) -> bool {
+        if !matches!(
+            region.state(),
+            RegionRoleState::Leader(
+                RegionLeaderState::Writable
+                    | RegionLeaderState::Staging
+                    | RegionLeaderState::Editing
+                    | RegionLeaderState::Altering
+                    | RegionLeaderState::EnteringStaging
+            )
+        ) {
+            return false;
+        }
+        let version = region.version();
+        match &ddl.request {
+            DdlRequest::Alter(_) | DdlRequest::Flush(_) | DdlRequest::ApplyStagingManifest(_) => {
+                true
+            }
+            DdlRequest::EnterStaging(request) => {
+                if version.has_pending_tails() {
+                    return false;
+                }
+                // A different directive is not temporary contention with the active staging.
+                if let Some(info) = region.manifest_ctx.staging_partition_info()
+                    && info.partition_directive != request.partition_directive
+                {
+                    return false;
+                }
+                true
+            }
+            DdlRequest::Close(request) if !region.in_staging_session() => {
+                // Another Close can take queued closes and reply without executing their
+                // handlers, so reject invalid flush-on-close requests before that handoff.
+                !self.flush_scheduler.has_close_time_flush(ddl.region_id)
+                    && !(request.flush_on_close && version.has_pending_tails())
+                    // A later close cannot bypass an earlier close's flush requirement.
+                    && (handle_close::close_needs_flush(region, request)
+                        || self.pending_ddls.has_close(ddl.region_id))
+            }
+            _ => false,
+        }
+    }
+
+    /// Whether active work or queue ordering requires this DDL to wait.
+    /// EnterStaging also waits for previously accepted edits to drain.
+    fn has_work_ahead_of_ddl(
+        &self,
+        region_id: RegionId,
+        region: &MitoRegionRef,
+        request: &DdlRequest,
+    ) -> bool {
+        self.pending_ddls.contains_region(region_id)
+            || self.scheduler_blocks_region_edits(region_id)
+            || matches!(
+                region.state(),
+                RegionRoleState::Leader(
+                    RegionLeaderState::Editing
+                        | RegionLeaderState::Altering
+                        | RegionLeaderState::EnteringStaging
+                )
+            )
+            || (matches!(request, DdlRequest::EnterStaging(_))
+                && self
+                    .region_edit_queues
+                    .get(&region_id)
+                    .is_some_and(|queue| !queue.is_empty()))
+    }
+
+    /// Controls retain priority, except that staging first drains its accepted edit prefix.
     pub(crate) async fn dispatch_pending_region_requests(&mut self, region_id: RegionId) {
         loop {
-            if self.flush_scheduler.has_pending_alter(region_id) {
+            if self.scheduler_blocks_region_edits(region_id) {
                 return;
             }
             if self.regions.get_region(region_id).is_some_and(|region| {
                 matches!(
                     region.state(),
                     RegionRoleState::Leader(
-                        RegionLeaderState::Editing | RegionLeaderState::Altering
+                        RegionLeaderState::Editing
+                            | RegionLeaderState::Altering
+                            | RegionLeaderState::EnteringStaging
                     )
                 )
             }) {
                 return;
             }
+            let drain_edits = self.pending_ddls.front_is_enter_staging(region_id);
+            if !drain_edits
+                || self
+                    .region_edit_queues
+                    .get(&region_id)
+                    .is_none_or(|queue| queue.is_empty())
+            {
+                let next = self.pending_ddls.pop_front(region_id);
+                if let Some(ddl) = next {
+                    self.execute_ddl_request(ddl).await;
+                    continue;
+                }
+            }
             let next = self
-                .pending_alters
-                .get_mut(&region_id)
-                .and_then(|q| q.pop_front());
-            let Some((request, sender)) = next else {
-                break;
-            };
-            self.execute_alter_request(region_id, request, sender).await;
-        }
-        self.pending_alters.remove(&region_id);
-        loop {
-            let next_request = self
                 .region_edit_queues
                 .get_mut(&region_id)
-                .and_then(|queue| queue.dequeue());
+                .and_then(RegionEditQueue::dequeue);
             if self
                 .region_edit_queues
                 .get(&region_id)
-                .is_some_and(|queue| queue.is_empty())
+                .is_some_and(RegionEditQueue::is_empty)
             {
                 self.region_edit_queues.remove(&region_id);
             }
-            let Some(request) = next_request else {
+            let Some(request) = next else {
                 return;
             };
-            // Start at most one edit batch per turn. Started and queued requests
-            // rely on a completion notification to resume dispatch. Only synchronous
-            // rejections continue: they produce no notification, so stopping would
-            // strand the remaining waiters. Use the admission outcome rather than
-            // rereading region state, which can race with a role change.
+            // Rejected edits produce no completion notification. Keep draining them so neither
+            // the next edit nor the staging boundary is stranded. Execution bypasses admission.
             match self.handle_region_edit(request) {
                 RegionEditDispatch::Started | RegionEditDispatch::Queued => return,
                 RegionEditDispatch::Rejected => continue,
@@ -1020,6 +1166,46 @@ mod tests {
     use super::*;
     use crate::sst::file::{FileMeta, LEVEL_SHARED};
     use crate::test_util::{CreateRequestBuilder, TestEnv};
+
+    #[test]
+    fn test_edit_queue_preserves_staging_bindings() {
+        for (left, right, merge) in [
+            (None, None, true),
+            (Some("a"), Some("a"), true),
+            (None, Some("a"), false),
+            (Some("a"), None, false),
+            (Some("a"), Some("b"), false),
+        ] {
+            let region_id = RegionId::new(1, 1);
+            let mut queue = RegionEditQueue::new(region_id);
+            let mut receivers = Vec::new();
+            for binding in [left, right] {
+                let (sender, receiver) = tokio::sync::oneshot::channel();
+                let mut request =
+                    RegionEditRequest::new(region_id, RegionEdit::default(), false, sender);
+                request.staging_partition_expr = binding.map(str::to_string);
+                assert!(matches!(queue.enqueue(request), RegionEditDispatch::Queued));
+                receivers.push(receiver);
+            }
+            let first = queue.dequeue().unwrap();
+            assert_eq!(left, first.staging_partition_expr.as_deref());
+            first.waiters.reply_with(|| Ok(()));
+            assert!(receivers[0].try_recv().unwrap().is_ok());
+            if merge {
+                assert!(receivers[1].try_recv().unwrap().is_ok());
+            } else {
+                assert!(matches!(
+                    receivers[1].try_recv(),
+                    Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+                ));
+                let second = queue.dequeue().unwrap();
+                assert_eq!(right, second.staging_partition_expr.as_deref());
+                second.waiters.reply_with(|| Ok(()));
+                assert!(receivers[1].try_recv().unwrap().is_ok());
+            }
+            assert!(queue.is_empty());
+        }
+    }
 
     #[rstest::rstest]
     #[case::shared_removal(false)]

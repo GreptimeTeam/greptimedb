@@ -278,6 +278,13 @@ async fn test_schema_validation() -> Result<()> {
     let _ = create_connection_default_db_name(server_port, false)
         .await
         .unwrap();
+    let mut connection = create_connection(server_port, None, false).await.unwrap();
+    for schema in ["information_schema", "missing"] {
+        match connection.query_drop(format!("USE {schema}")).await {
+            Err(mysql_async::Error::Server(error)) => assert_eq!(1044, error.code),
+            result => panic!("expected database access denied for {schema}, got {result:?}"),
+        }
+    }
     mysql_server.shutdown().await.unwrap();
 
     // change to another username
@@ -290,6 +297,15 @@ async fn test_schema_validation() -> Result<()> {
 
     let fail = create_connection_default_db_name(server_port, false).await;
     assert!(fail.is_err());
+    let mut connection = create_connection(server_port, None, false).await.unwrap();
+    match connection.query_drop("USE public").await {
+        Err(mysql_async::Error::Server(error)) => assert_eq!(1044, error.code),
+        result => panic!("expected database access denied, got {result:?}"),
+    }
+    let database: Option<Option<String>> =
+        connection.query_first("SELECT DATABASE()").await.unwrap();
+    assert_eq!(Some(None), database);
+    connection.disconnect().await.unwrap();
     mysql_server.shutdown().await.unwrap();
 
     Ok(())
@@ -461,7 +477,7 @@ async fn test_bearer_token_auth_over_clear_password() -> Result<()> {
             assert_eq!(1, value);
             assert_eq!(1, provider.authentications.load(Ordering::Relaxed));
             assert_eq!(
-                usize::from(database.is_some()),
+                1 + usize::from(database.is_some()),
                 provider.authorizations.load(Ordering::Relaxed)
             );
             connection.disconnect().await.unwrap();
@@ -579,9 +595,23 @@ async fn test_db_name() -> Result<()> {
     mysql_server.start(listening).await.unwrap();
     let server_addr = mysql_server.bind_addr().unwrap();
 
-    // None actually uses default database name
-    let r = create_connection_default_db_name(server_addr.port(), client_tls).await;
-    let _ = r.unwrap();
+    let mut connection = create_connection(server_addr.port(), None, client_tls)
+        .await
+        .unwrap();
+    let database: Option<String> = connection
+        .query_first("SELECT DATABASE()")
+        .await
+        .unwrap()
+        .flatten();
+    assert_eq!(Some("public".to_string()), database);
+    connection.query_drop("USE public").await.unwrap();
+    let database: String = connection
+        .query_first("SELECT DATABASE()")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!("public", database);
+    connection.disconnect().await.unwrap();
 
     let r = create_connection(server_addr.port(), Some("tomcat"), client_tls).await;
     assert!(r.is_err());

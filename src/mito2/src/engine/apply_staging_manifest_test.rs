@@ -1527,7 +1527,16 @@ async fn test_apply_staging_manifest_retries_failed_commit(#[case] landed: bool)
         }],
         ..Default::default()
     };
-    let err = engine.edit_region(region_id, edit).await.unwrap_err();
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    let edit = crate::request::RegionEditRequest::new(region_id, edit, true, sender)
+        .for_staging(partition_expr.clone());
+    engine
+        .inner
+        .workers
+        .submit_to_worker(region_id, crate::request::WorkerRequest::EditRegion(edit))
+        .await
+        .unwrap();
+    let err = receiver.await.unwrap().unwrap_err();
     assert_eq!(RetryHint::Retryable, err.retry_hint());
     assert!(region.is_staging());
     assert!(

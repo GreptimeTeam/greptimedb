@@ -38,6 +38,26 @@ use derive_more::Debug;
 
 use crate::context::{Channel, ConnInfo, QueryContextRef, dialect_for_channel};
 
+/// Errors caused by the current connection state.
+#[derive(snafu::Snafu)]
+#[common_macro::stack_trace_debug]
+pub enum SessionError {
+    #[snafu(display("No database selected"))]
+    NoDatabaseSelected {},
+}
+
+impl common_error::ext::ErrorExt for SessionError {
+    fn status_code(&self) -> common_error::status_code::StatusCode {
+        // Keep the shared database-error category; the MySQL writer inspects this
+        // typed cause through error wrappers to emit ER_NO_DB_ERROR (1046).
+        common_error::status_code::StatusCode::DatabaseNotFound
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
 /// Maximum number of warnings to store per session (similar to MySQL's max_error_count)
 const MAX_WARNINGS: usize = 64;
 

@@ -108,7 +108,6 @@ impl<S: LogStore> RegionWorkerLoop<S> {
 
         // Handle stalled requests.
         self.handle_stalled_requests().await;
-        self.dispatch_pending_region_requests(region_id).await;
     }
 
     /// Checks whether the engine reaches flush threshold. If so, finds regions in this
@@ -588,15 +587,8 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             self.flush_scheduler.on_flush_success(region_id)
         {
             // Perform DDLs first because they require empty memtables.
-            // These ALTERs already own the flush turn; bypass initial admission.
-            for ddl in ddl_requests.drain(..) {
-                if let crate::request::DdlRequest::Alter(request) = ddl.request {
-                    self.execute_alter_request(ddl.region_id, request, ddl.sender)
-                        .await;
-                } else {
-                    self.handle_ddl_requests(&mut vec![ddl]).await;
-                }
-            }
+            // Scheduler-owned requests bypass initial admission but retain handler validation.
+            self.handle_ddl_requests(&mut ddl_requests).await;
             if self.flush_scheduler.is_flush_requested(region_id) {
                 // The DDL may schedule another flush, e.g. a close-time flush after writes
                 // arrived in the mutable memtable during the previous flush. Keep pending
@@ -631,7 +623,6 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         // Schedules compaction.
         self.schedule_compaction(&region).await;
 
-        self.dispatch_pending_region_requests(region_id).await;
         self.listener.on_flush_success(region_id);
     }
 

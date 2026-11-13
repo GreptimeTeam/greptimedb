@@ -59,7 +59,9 @@ macro_rules! impl_current_schema_function {
                 let func_ctx = find_function_context(&args)?;
                 let db = func_ctx.query_ctx.current_schema();
 
-                Ok(ColumnarValue::Scalar(ScalarValue::Utf8View(Some(db))))
+                Ok(ColumnarValue::Scalar(ScalarValue::Utf8View(
+                    (!db.is_empty()).then_some(db),
+                )))
             }
         }
     };
