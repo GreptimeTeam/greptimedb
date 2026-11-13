@@ -206,37 +206,6 @@ fn seen_points(group: &Group, width: usize) -> usize {
     })
 }
 
-/// Bytes one exported group keeps: its labels and the field vectors, at the capacity they were
-/// built with, so spare capacity is paid for rather than skipped.
-fn group_bytes(group: &StateSeries) -> usize {
-    metric_bytes(&group.metric).saturating_add(group_field_bytes(group))
-}
-
-/// Bytes a group's axis and field vectors hold, without its labels.
-pub(crate) fn group_field_bytes(group: &StateSeries) -> usize {
-    size_of::<TimeAxis>()
-        .saturating_add(
-            group
-                .time
-                .runs()
-                .count()
-                .saturating_mul(size_of::<GridSpan>().saturating_add(size_of::<usize>())),
-        )
-        .saturating_add(
-            group
-                .states
-                .capacity()
-                .saturating_mul(size_of::<Vec<Option<AggregateStateValues>>>()),
-        )
-        .saturating_add(group.states.iter().fold(0usize, |bytes, field| {
-            bytes.saturating_add(
-                field
-                    .capacity()
-                    .saturating_mul(size_of::<Option<AggregateStateValues>>()),
-            )
-        }))
-}
-
 /// Bytes a group's label key holds: a pair per capacity slot, and the `__name__` entry, whose
 /// label and value `label_key` copies, each with its own `Arc` header. The other label strings are
 /// the metric's, already counted with it.
@@ -295,85 +264,10 @@ impl FloatMerger {
         })
     }
 
-    /// Merges the state of one partition. A partial that does not fit this merge, by its
-    /// aggregation, field count or grid positions, fails and leaves the merge unchanged.
-    pub fn merge(&mut self, partial: PartialAggregate) -> Result<()> {
-        self.merge_budgeted(partial, |_| Ok(()))
-    }
-
     /// Bytes this merge keeps: groups, labels, blocks, B-tree nodes, index table and its keys. Added
     /// to by the allocations that change it, never recounted.
     pub(crate) fn state_bytes(&self) -> usize {
         self.retained
-    }
-
-    /// [`Self::merge`] that admits each allocation before making it: the partial that stays live,
-    /// the key, and the group, index and block backing about to be reserved. A refusal leaves the
-    /// merge half applied, so a caller that budgets must drop it rather than merge into it again.
-    pub(crate) fn merge_budgeted(
-        &mut self,
-        partial: PartialAggregate,
-        mut budget: impl FnMut(usize) -> Result<()>,
-    ) -> Result<()> {
-        let width = self.schema.fields.len();
-        let points = self
-            .schema
-            .eval_grid
-            .as_ref()
-            .expect("checked at construction")
-            .spec()
-            .len as usize;
-        if partial.op != self.op {
-            return Err(DataFusionError::Execution(format!(
-                "cannot merge {:?} state into {:?}",
-                partial.op, self.op
-            )));
-        }
-        for group in &partial.groups {
-            let carried = group.time.len();
-            if group.states.len() != width
-                || group.states.iter().any(|field| field.len() != carried)
-            {
-                return Err(DataFusionError::Execution(
-                    "aggregate state does not match the grid or fields of the merge".into(),
-                ));
-            }
-            if group.time.positions().any(|(point, _)| point >= points) {
-                return Err(DataFusionError::Execution(
-                    "aggregate state does not match the grid or fields of the merge".into(),
-                ));
-            }
-        }
-        let input_live = partial.groups.iter().fold(
-            partial
-                .groups
-                .capacity()
-                .saturating_mul(size_of::<StateSeries>()),
-            |bytes, group| bytes.saturating_add(group_bytes(group)),
-        );
-        for group in partial.groups {
-            let StateSeries {
-                metric,
-                time,
-                states,
-            } = group;
-            // `label_key` copies the metric name into its own `Arc`, so the copy is admitted
-            // before it is made. A group that is already merged needs a key too, and its
-            // admission comes before anything else this call can allocate.
-            budget(
-                self.retained
-                    .saturating_add(input_live)
-                    .saturating_add(key_workspace_bytes(&metric)),
-            )?;
-            let key = label_key(&metric);
-            let live = input_live.saturating_add(key_bytes(&key));
-            let index = match self.group_index.get(&key).copied() {
-                Some(index) => index,
-                None => self.open_group(metric, key, live, &mut budget)?,
-            };
-            self.merge_series(index, &time, &states, live, &mut budget)?;
-        }
-        Ok(())
     }
 
     /// Merges one Arrow-backed state row directly, without materializing a partial aggregate.
@@ -528,25 +422,6 @@ impl FloatMerger {
             .saturating_add(metric_live)
             .saturating_add(key_live);
         Ok(index)
-    }
-
-    /// Adds the points of one partial group to group `index`. A missing block is admitted with its
-    /// states and B-tree node before either is allocated; an existing one only merges state.
-    fn merge_series(
-        &mut self,
-        index: usize,
-        time: &TimeAxis,
-        states: &[Vec<Option<AggregateStateValues>>],
-        live: usize,
-        budget: &mut impl FnMut(usize) -> Result<()>,
-    ) -> Result<()> {
-        // The axis carries the absolute positions and the row each one sits at, so a group's states
-        // are read field by field at that row: this is the same order the point-major form had.
-        for (point, row) in time.positions() {
-            let point_states = states.iter().map(|field| field[row]);
-            self.write_point(index, point, point_states, live, budget)?;
-        }
-        Ok(())
     }
 
     /// Writes one point's states, admitting a missing block before allocating it.
@@ -868,62 +743,36 @@ mod tests {
         })
     }
 
+    /// The row's two fields carry different present states, so a hole in one of them is a hole in
+    /// that field only: it stays absent rather than becoming a zero the sum would count.
     #[test]
-    fn merge_row_matches_partial_merge_with_field_hole() {
+    fn merge_row_keeps_a_field_hole_absent() {
         let schema = schema();
-        let metric = SeriesLabels::try_new(Some("m".into()), Vec::new()).unwrap();
         let row = StateRow {
-            metric: metric.clone(),
+            metric: SeriesLabels::try_new(Some("m".into()), Vec::new()).unwrap(),
             time: TimeAxis::Grid(
                 GridRange::try_new(schema.eval_grid.clone().unwrap(), 0, 3).unwrap(),
             ),
             fields: fields_batch(),
             kind: AggregateStateKind::Sum,
         };
-        let mut from_row = FloatMerger::try_new(&schema, AggregateOp::Sum).unwrap();
-        from_row.merge_row(&row, |_| Ok(())).unwrap();
-        let mut from_partial = FloatMerger::try_new(&schema, AggregateOp::Sum).unwrap();
-        from_partial
-            .merge(PartialAggregate {
-                op: AggregateOp::Sum,
-                groups: vec![StateSeries {
-                    metric,
-                    time: TimeAxis::Grid(
-                        GridRange::try_new(schema.eval_grid.clone().unwrap(), 0, 3).unwrap(),
-                    ),
-                    states: vec![
-                        vec![
-                            Some(AccumulatorState {
-                                value: 2.0,
-                                ..Default::default()
-                            }),
-                            Some(AccumulatorState {
-                                value: 3.0,
-                                ..Default::default()
-                            }),
-                            Some(AccumulatorState {
-                                value: 4.0,
-                                ..Default::default()
-                            }),
-                        ],
-                        vec![
-                            Some(AccumulatorState {
-                                value: 5.0,
-                                ..Default::default()
-                            }),
-                            None,
-                            Some(AccumulatorState {
-                                value: 7.0,
-                                ..Default::default()
-                            }),
-                        ],
-                    ],
-                }],
-            })
-            .unwrap();
-        assert_eq!(
-            format!("{:?}", from_row.finish().unwrap()),
-            format!("{:?}", from_partial.finish().unwrap()),
-        );
+        let mut merger = FloatMerger::try_new(&schema, AggregateOp::Sum).unwrap();
+        merger.merge_row(&row, |_| Ok(())).unwrap();
+        let merged = merger.finish().unwrap();
+        assert_eq!(merged.len(), 1, "one group, one series");
+        let values = |field: usize| {
+            merged[0]
+                .fields
+                .get(field)
+                .expect("the fixture has two fields")
+                .iter()
+                .map(|sample| match sample {
+                    SampleRef::Float(value) => Some(value),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(values(0), [Some(2.0), Some(3.0), Some(4.0)]);
+        assert_eq!(values(1), [Some(5.0), None, Some(7.0)]);
     }
 }
