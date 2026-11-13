@@ -174,8 +174,9 @@ A `testing` cargo feature exposes hooks to wait for admitted appends, to seal th
 
 ### Node lease and recovery fencing
 
-Cluster wiring installs an I/O permit backed by Mito's node lease before opening
-regions. The permit exposes only whether new object-store I/O is allowed; the
+The WAL exposes an I/O permit backed by Mito's node lease. Cluster wiring must
+install it before opening regions when cluster support is enabled; the current
+datanode builder still rejects object-store WAL with a metasrv client. The permit exposes only whether new object-store I/O is allowed; the
 WAL does not own deadlines or heartbeat renewal. Standalone installs no permit.
 Startup's initial object and its withdrawal after a missing-history failure are
 exempt so startup does not depend on a heartbeat that has not started yet.
@@ -190,10 +191,13 @@ renewal. Release records remain available for a later batch, while their current
 waiters fail. An admission that would wait for upload capacity fails immediately
 while expired; ordinary admissions continue to rely on the region write lease.
 
-Shutdown keeps the heartbeat running until the object-store WAL stops, then
-closes the heartbeat and regions. If the lease expires during shutdown, the WAL
+Cluster integration must keep the heartbeat running until the object-store WAL
+stops, then close the heartbeat and regions. This shutdown wiring is deferred
+until cluster support is enabled. If the lease expires during shutdown, the WAL
 drops its unindexed backlog without waiting for uploads, and still waits for
-issued deletes. Dropping acknowledged enqueued entries has crash semantics.
+issued deletes. Expiry is checked on the next flush timer tick, including during
+shutdown, so detection can take one configured flush interval plus actor
+scheduling delay. Dropping acknowledged enqueued entries has crash semantics.
 
 Recovery still selects the latest complete chain, but before writing its initial
 object checks that the selected tip carries the maximum epoch among all listed

@@ -162,6 +162,15 @@ impl Datanode {
         );
 
         let _ = self.greptimedb_telemetry_task.stop().await;
+        if let Some(heartbeat_task) = &self.heartbeat_task {
+            record_shutdown_error(
+                &mut first_error,
+                heartbeat_task
+                    .close()
+                    .map_err(BoxedError::new)
+                    .context(ShutdownInstanceSnafu),
+            );
+        }
         // The object store WAL stops before the regions close: its stop
         // uploads the backlog or drops it, and answers every wait for its
         // entries, so a flush that waits for the WAL, queued or run by the
@@ -172,17 +181,6 @@ impl Datanode {
                 log_store
                     .stop()
                     .await
-                    .map_err(BoxedError::new)
-                    .context(ShutdownInstanceSnafu),
-            );
-        }
-        // Keep renewing the node lease until object-store WAL has drained its
-        // permitted backlog. Other log stores do not depend on the heartbeat.
-        if let Some(heartbeat_task) = &self.heartbeat_task {
-            record_shutdown_error(
-                &mut first_error,
-                heartbeat_task
-                    .close()
                     .map_err(BoxedError::new)
                     .context(ShutdownInstanceSnafu),
             );
@@ -407,9 +405,6 @@ impl DatanodeBuilder {
         // the metasrv.
         if controlled_by_metasrv && let Some(mito) = region_server.mito_engine() {
             mito.require_write_lease();
-            if let Some(log_store) = &self.object_store_log_store {
-                log_store.set_io_permit(mito.object_store_wal_io_permit());
-            }
         }
 
         // TODO(weny): Considering introducing a readonly kv_backend trait.

@@ -52,11 +52,14 @@
 //! recovery with possible acknowledged data loss; remote readers never accept
 //! this fallback.
 //!
-//! Cluster integration can install a node-lease I/O permit before opening
-//! regions. New creates and deletes check it immediately before issuance;
+//! A node-lease I/O permit is available for future cluster integration; the
+//! datanode builder currently rejects clustered object-store WAL. Integration
+//! must install the permit before opening regions. New creates and deletes check it immediately before issuance;
 //! already issued operations may finish. Expiry fails unacknowledged durable
 //! batches and pauses the acknowledged enqueued backlog until renewal. Stop
 //! drops that backlog if the lease expires and still waits for issued deletes.
+//! The next flush timer tick detects expiry, including during stop; detection
+//! can take one configured flush interval plus actor scheduling delay.
 //! Standalone stores do not install a permit. Startup's initial create and its
 //! withdrawal on missing history are exempt, so startup needs no heartbeat.
 //!

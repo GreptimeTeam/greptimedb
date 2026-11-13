@@ -2847,7 +2847,8 @@ impl Actor {
         self.stopped.load(Ordering::Acquire)
     }
 
-    /// Releases waiters while preserving the acknowledged enqueued backlog.
+    /// Releases waiters while preserving the acknowledged enqueued backlog,
+    /// unless stop began: then the backlog is dropped and `stop_error` reports it.
     /// Durable batches abandoned here must never be indexed by late completions.
     fn expire_io_permission(&mut self) {
         self.io_blocked = true;
@@ -3661,7 +3662,7 @@ mod tests {
         // An issued enqueued create may finish, but its advanced reclaim
         // boundary must not issue a delete under the expired lease.
         wait_until(|| latest(&store, region(1)) == id(1, 1)).await;
-        assert!(parked.try_recv().is_err());
+        assert_nothing_parks(&mut parked).await;
         assert_eq!(vec![0, 1], object_seqs(io.as_ref()).await);
         permit.0.store(true, Ordering::Release);
         let (seq, release) = next_parked_operation(&mut parked).await;
