@@ -39,6 +39,7 @@ use crate::functions::{
     MinOverTime, PredictLinear, QuantileOverTime, Rate, StddevOverTime, StdvarOverTime,
     SumOverTime, extract_array, extract_range_dict,
 };
+use crate::histogram_eval::legacy_bridge;
 use crate::range_array::{RangeArray, unpack};
 
 fn extract_histogram_array(value: &ColumnarValue, func_name: &str) -> DfResult<ArrayRef> {
@@ -568,11 +569,11 @@ impl NativeHistogramAdd {
     }
 
     pub fn scalar_udf() -> ScalarUDF {
-        histogram_pair_udf(Self::name(), NativeHistogram::add)
+        histogram_pair_udf(Self::name(), legacy_bridge::add)
     }
 
     pub fn scalar_udf_with_collector(collector: Option<PromqlAnnotationCollector>) -> ScalarUDF {
-        histogram_pair_udf_with_collector(Self::name(), NativeHistogram::add, collector)
+        histogram_pair_udf_with_collector(Self::name(), legacy_bridge::add, collector)
     }
 }
 
@@ -584,11 +585,11 @@ impl NativeHistogramSub {
     }
 
     pub fn scalar_udf() -> ScalarUDF {
-        histogram_pair_udf(Self::name(), NativeHistogram::sub)
+        histogram_pair_udf(Self::name(), legacy_bridge::sub)
     }
 
     pub fn scalar_udf_with_collector(collector: Option<PromqlAnnotationCollector>) -> ScalarUDF {
-        histogram_pair_udf_with_collector(Self::name(), NativeHistogram::sub, collector)
+        histogram_pair_udf_with_collector(Self::name(), legacy_bridge::sub, collector)
     }
 }
 
@@ -605,7 +606,7 @@ impl NativeHistogramMulScalar {
             vec![native_histogram_arrow_type(), DataType::Float64],
             0,
             1,
-            |histogram, scalar| Some(histogram.scale(scalar)),
+            |histogram, scalar| Some(legacy_bridge::scale(&histogram, scalar)),
         )
     }
 }
@@ -623,7 +624,7 @@ impl NativeHistogramScalarMul {
             vec![DataType::Float64, native_histogram_arrow_type()],
             1,
             0,
-            |histogram, scalar| Some(histogram.scale(scalar)),
+            |histogram, scalar| Some(legacy_bridge::scale(&histogram, scalar)),
         )
     }
 }
@@ -641,7 +642,7 @@ impl NativeHistogramDivScalar {
             vec![native_histogram_arrow_type(), DataType::Float64],
             0,
             1,
-            |histogram, scalar| Some(histogram.divide_by(scalar)),
+            |histogram, scalar| Some(legacy_bridge::divide_by(&histogram, scalar)),
         )
     }
 }
@@ -654,7 +655,9 @@ impl NativeHistogramNeg {
     }
 
     pub fn scalar_udf() -> ScalarUDF {
-        histogram_transform_udf(Self::name(), NativeHistogram::negated)
+        histogram_transform_udf(Self::name(), |histogram| {
+            legacy_bridge::scale(&histogram, -1.0)
+        })
     }
 }
 
@@ -814,7 +817,7 @@ impl NativeHistogramQuantile {
             vec![DataType::Float64],
             move |histogram, input, row, len, name| {
                 let q = read_scalar_f64_arg(&input[1], row, len, name)?;
-                let (value, info) = histogram.quantile_with_info(q);
+                let (value, info) = legacy_bridge::quantile_with_info(histogram, q);
                 if let Some(info) = info {
                     let message = match info {
                         NativeHistogramQuantileInfo::NaNSkew => {
@@ -850,7 +853,8 @@ impl NativeHistogramFraction {
             move |histogram, input, row, len, name| {
                 let lower = read_scalar_f64_arg(&input[1], row, len, name)?;
                 let upper = read_scalar_f64_arg(&input[2], row, len, name)?;
-                let (value, excluded_nans) = histogram.fraction_with_info(lower, upper);
+                let (value, excluded_nans) =
+                    legacy_bridge::fraction_with_info(histogram, lower, upper);
                 if excluded_nans {
                     record_info(
                         &collector,
@@ -987,7 +991,7 @@ impl NativeHistogramAggregateAccumulator {
             Some(value) => {
                 record_custom_reconciliation(&self.collector, self.kind.name(), &value, &histogram);
                 let combined = match self.kind {
-                    NativeHistogramAggregateKind::Sum => value.add(&histogram),
+                    NativeHistogramAggregateKind::Sum => legacy_bridge::add(&value, &histogram),
                     NativeHistogramAggregateKind::Avg => {
                         weighted_histogram_mean(value, self.count, histogram, count, combined_count)
                     }
@@ -1035,8 +1039,10 @@ fn weighted_histogram_mean(
     total_count: u64,
 ) -> Option<NativeHistogram> {
     let total_count = total_count as f64;
-    left.scale(left_count as f64 / total_count)
-        .add(&right.scale(right_count as f64 / total_count))
+    legacy_bridge::add(
+        &legacy_bridge::scale(&left, left_count as f64 / total_count),
+        &legacy_bridge::scale(&right, right_count as f64 / total_count),
+    )
 }
 
 fn range_fold_histograms(
@@ -1063,7 +1069,7 @@ fn range_fold_histograms(
                 record_custom_reconciliation(collector, name, &value, &histogram);
                 let next_count = count.checked_add(1)?;
                 let combined = match kind {
-                    NativeHistogramAggregateKind::Sum => value.add(&histogram),
+                    NativeHistogramAggregateKind::Sum => legacy_bridge::add(&value, &histogram),
                     NativeHistogramAggregateKind::Avg => {
                         weighted_histogram_mean(value, count, histogram, 1, next_count)
                     }
@@ -2419,9 +2425,7 @@ fn histogram_delta(
     }
 
     if !is_counter {
-        return samples
-            .last()?
-            .sub(samples.first()?)
+        return legacy_bridge::sub(samples.last()?, samples.first()?)
             .map(NativeHistogram::into_gauge);
     }
 
@@ -2433,14 +2437,14 @@ fn histogram_delta(
     } else {
         (samples[0].clone(), 1)
     };
-    let mut result = samples.last()?.sub(&initial)?;
+    let mut result = legacy_bridge::sub(samples.last()?, &initial)?;
     for index in reset_scan_start..samples.len() {
         if samples[index].detect_counter_reset(
             &samples[index - 1],
             timestamps[index - 1],
             timestamps[index],
         ) {
-            result = result.add(&samples[index - 1])?;
+            result = legacy_bridge::add(&result, &samples[index - 1])?;
         }
     }
     Some(result.into_gauge())
@@ -2461,11 +2465,11 @@ fn idelta_value(
     let result = if is_rate && current.detect_counter_reset(previous, previous_ts, current_ts) {
         current.clone()
     } else {
-        current.sub(previous)?
+        legacy_bridge::sub(current, previous)?
     };
     Some(
         if is_rate {
-            result.scale(1.0 / sampled_interval_secs)
+            legacy_bridge::scale(&result, 1.0 / sampled_interval_secs)
         } else {
             result
         }
@@ -2599,7 +2603,7 @@ fn native_extrapolated_rate<const IS_COUNTER: bool, const IS_RATE: bool>(
             continue;
         };
         if synthetic_zero_start && length > 1 {
-            let Some(with_synthetic_zero) = histogram.add(&samples[0]) else {
+            let Some(with_synthetic_zero) = legacy_bridge::add(&histogram, &samples[0]) else {
                 record_warning(
                     &collector,
                     format!(
@@ -2656,7 +2660,7 @@ fn native_extrapolated_rate<const IS_COUNTER: bool, const IS_RATE: bool>(
         if IS_RATE {
             factor /= range_length_secs;
         }
-        histogram = histogram.scale(factor).into_gauge();
+        histogram = legacy_bridge::scale(&histogram, factor).into_gauge();
         result.push(Some(histogram));
     }
 
