@@ -17,14 +17,13 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use common_base::cancellation::CancellationHandle;
 use common_base::readable_size::ReadableSize;
 use common_telemetry::{debug, info};
-use futures::StreamExt;
 use object_store::ObjectStore;
-use snafu::ResultExt;
+use snafu::{IntoError, ResultExt};
 use store_api::storage::RegionId;
 use tokio::sync::mpsc::{UnboundedSender, unbounded_channel};
+use tokio_util::sync::CancellationToken;
 
 use crate::access_layer::{
     EncodedSstIndexBuildParams, FilePathProvider, Metrics, OperationType, RegionFilePathFactory,
@@ -43,6 +42,7 @@ use crate::sst::index::registry::IndexRegistry;
 use crate::sst::index::{IndexerBuilderImpl, build_index_from_parquet_bytes};
 use crate::sst::parquet::writer::{ParquetWriter, SstWriteContext};
 use crate::sst::parquet::{SstInfo, WriteOptions};
+use crate::sst::upload::{self, UploadError};
 use crate::sst::{DEFAULT_WRITE_BUFFER_SIZE, DEFAULT_WRITE_CONCURRENCY};
 
 /// Wraps the remote object store used by write cache uploads.
@@ -383,7 +383,7 @@ impl WriteCache {
                         op_type,
                         write_buffer_size: write_opts.write_buffer_size,
                     },
-                    context.cancellation.as_deref(),
+                    context.cancellation.as_ref(),
                 )
                 .await
             {
@@ -408,7 +408,7 @@ impl WriteCache {
                             op_type,
                             write_buffer_size: DEFAULT_WRITE_BUFFER_SIZE,
                         },
-                        context.cancellation.as_deref(),
+                        context.cancellation.as_ref(),
                     )
                     .await
                 {
@@ -492,7 +492,7 @@ impl WriteCache {
         upload_path: &str,
         remote_store: &ObjectStore,
         options: UploadOptions,
-        cancellation: Option<&CancellationHandle>,
+        cancellation: Option<&CancellationToken>,
     ) -> Result<()> {
         let region_id = index_key.region_id;
         let file_id = index_key.file_id;
@@ -528,37 +528,24 @@ impl WriteCache {
             .context(error::OpenDalSnafu)?;
 
         let result = async {
-            let mut bytes_written = 0;
-            // Bound cancellation latency by one upload chunk, without abandoning an
-            // in-flight write. The writer remains owned until abort completes.
-            loop {
-                let next = if let Some(cancellation) = cancellation {
-                    tokio::select! {
-                        biased;
-                        _ = cancellation.cancelled() => return error::SstWriteCancelledSnafu.fail(),
-                        next = reader.next() => next,
-                    }
-                } else {
-                    reader.next().await
-                };
-                let Some(bytes) = next else { break };
-                let bytes = bytes.context(error::OpenDalSnafu)?;
-                if cancellation.is_some_and(CancellationHandle::is_cancelled) {
-                    return error::SstWriteCancelledSnafu.fail();
+            let bytes_written = upload::copy(
+                &mut reader,
+                &mut writer,
+                options.write_buffer_size.as_bytes() as usize,
+                cancellation,
+            )
+            .await
+            .map_err(|error| match error {
+                UploadError::Cancelled => error::SstWriteCancelledSnafu.build(),
+                UploadError::Read { source } => error::OpenDalSnafu.into_error(source),
+                UploadError::Write { source } => error::UploadSnafu {
+                    region_id,
+                    file_id,
+                    file_type: index_key.file_type,
                 }
-                let len = bytes.len();
-                writer
-                    .write(bytes)
-                    .await
-                    .map_err(std::io::Error::from)
-                    .context(error::UploadSnafu {
-                        region_id,
-                        file_id,
-                        file_type: index_key.file_type,
-                    })?;
-                bytes_written += len as u64;
-            }
-            if cancellation.is_some_and(CancellationHandle::is_cancelled) {
+                .into_error(std::io::Error::from(source)),
+            })?;
+            if cancellation.is_some_and(CancellationToken::is_cancelled) {
                 return error::SstWriteCancelledSnafu.fail();
             }
             writer
@@ -714,7 +701,7 @@ mod tests {
 
     struct CancellingUploadWriter {
         inner: object_store::layers::mock::oio::Writer,
-        cancellation: Arc<CancellationHandle>,
+        cancellation: CancellationToken,
         bytes_written: Arc<std::sync::atomic::AtomicUsize>,
         aborted: Arc<std::sync::atomic::AtomicBool>,
     }
@@ -747,7 +734,7 @@ mod tests {
 
         let env = TestEnv::new().await;
         let local_store = ObjectStore::new(Memory::default()).unwrap();
-        let cancellation = Arc::new(CancellationHandle::default());
+        let cancellation = CancellationToken::new();
         let bytes_written = Arc::new(AtomicUsize::new(0));
         let aborted = Arc::new(AtomicBool::new(false));
         let signal = cancellation.clone();

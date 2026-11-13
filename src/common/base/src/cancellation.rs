@@ -25,12 +25,10 @@ use std::task::{Context, Poll};
 
 use futures::task::AtomicWaker;
 use pin_project::pin_project;
-use tokio::sync::Notify;
 
 #[derive(Default)]
 pub struct CancellationHandle {
     waker: AtomicWaker,
-    notification: Notify,
     cancelled: AtomicBool,
 }
 
@@ -51,27 +49,16 @@ impl CancellationHandle {
     pub fn cancel(&self) {
         if self
             .cancelled
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Relaxed)
+            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
             .is_ok()
         {
             self.waker.wake();
-            self.notification.notify_waiters();
-        }
-    }
-
-    /// Waits for cancellation, supporting independent concurrent waiters.
-    pub async fn cancelled(&self) {
-        let notified = self.notification.notified();
-        tokio::pin!(notified);
-        notified.as_mut().enable();
-        if !self.is_cancelled() {
-            notified.await;
         }
     }
 
     /// Is this handle cancelled.
     pub fn is_cancelled(&self) -> bool {
-        self.cancelled.load(Ordering::Acquire)
+        self.cancelled.load(Ordering::Relaxed)
     }
 }
 
@@ -133,42 +120,6 @@ mod tests {
     use tokio::time::{sleep, timeout};
 
     use crate::cancellation::{CancellableFuture, CancellationHandle, Cancelled};
-
-    #[tokio::test]
-    async fn test_cancelled_wakes_independent_waiters() {
-        let handle = Arc::new(CancellationHandle::default());
-        let mut tasks = Vec::new();
-        let (ready_tx, mut ready_rx) = tokio::sync::mpsc::channel(8);
-        for _ in 0..8 {
-            let handle = handle.clone();
-            let ready = ready_tx.clone();
-            tasks.push(tokio::spawn(async move {
-                let wait = handle.cancelled();
-                tokio::pin!(wait);
-                assert!(futures::poll!(wait.as_mut()).is_pending());
-                ready.send(()).await.unwrap();
-                wait.await;
-            }));
-        }
-        for _ in 0..8 {
-            timeout(Duration::from_secs(5), ready_rx.recv())
-                .await
-                .unwrap()
-                .unwrap();
-        }
-        handle.cancel();
-        for task in tasks {
-            timeout(Duration::from_secs(5), task)
-                .await
-                .unwrap()
-                .unwrap();
-        }
-        // Late registration and repeated cancellation must also complete.
-        handle.cancel();
-        timeout(Duration::from_secs(5), handle.cancelled())
-            .await
-            .unwrap();
-    }
 
     #[tokio::test]
     async fn test_cancellable_future_completes_normally() {

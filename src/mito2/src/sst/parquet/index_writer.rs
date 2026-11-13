@@ -63,7 +63,7 @@ impl ParquetIndexWriter {
             .set_key_value_metadata(key_value_metadata)
             .build();
         let writer = AsyncArrowWriter::try_new(
-            ObjectStoreWriter::new(output),
+            ObjectStoreWriter::new(output, DEFAULT_WRITE_BUFFER_SIZE.as_bytes() as usize, None),
             schema.clone(),
             Some(properties),
         )

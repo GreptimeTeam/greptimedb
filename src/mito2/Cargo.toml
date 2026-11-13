@@ -9,7 +9,7 @@ default = []
 test = ["common-test-util", "rstest", "rstest_reuse", "rskafka"]
 testing = ["test"]
 test-shared-fs-region-migration = []
-enterprise = ["datatypes/enterprise", "tokio-util/rt"]
+enterprise = ["datatypes/enterprise"]
 hdfs-object-store = ["object-store/hdfs-object-store"]
 
 [lints]
@@ -87,7 +87,7 @@ strum.workspace = true
 table.workspace = true
 tokio.workspace = true
 tokio-stream.workspace = true
-tokio-util.workspace = true
+tokio-util = { workspace = true, features = ["rt"] }
 tracing.workspace = true
 uuid.workspace = true
 winner_tree.workspace = true

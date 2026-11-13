@@ -16,6 +16,7 @@ use common_base::readable_size::ReadableSize;
 use partition::expr::PartitionExpr;
 use snafu::{ResultExt, ensure};
 use store_api::codec::PrimaryKeyEncoding;
+use tokio_util::sync::CancellationToken;
 
 use crate::access_layer::{Metrics, OperationType, SstWriteRequest, WriteType};
 use crate::compaction::multi_region::memory::{self, MemoryLimits};
@@ -209,7 +210,7 @@ impl<'a> TargetWriter<'a> {
 fn output_projection(
     target: &MultiRegionTarget,
     mut source: FlatSource,
-    cancellation: Arc<common_base::cancellation::CancellationHandle>,
+    cancellation: CancellationToken,
 ) -> Result<FlatSource> {
     let projection: Vec<_> = source
         .schema()
