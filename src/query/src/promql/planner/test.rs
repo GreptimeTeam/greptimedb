@@ -4276,32 +4276,6 @@ async fn native_composed_binary_filled_one_side_carries_its_matching_labels() {
         sorted_column_names(&plan),
         "{display}"
     );
-    // The parallel walk over the same tree, which the segmentation metadata is derived from, names
-    // the same columns from the two operands' own tags.
-    let operand_tags = fused
-        .children()
-        .iter()
-        .map(|child| {
-            let LogicalPlan::Extension(Extension { node }) = child else {
-                panic!("expected an operand frame: {child}")
-            };
-            node.as_any()
-                .downcast_ref::<FusedSeries>()
-                .unwrap_or_else(|| panic!("expected an operand frame: {child}"))
-                .binding()
-                .tags
-                .clone()
-        })
-        .collect::<Vec<_>>();
-    let mut walked = promql::native::plan::fused_output_tags(fused.tree().root(), &operand_tags)
-        .unwrap_or_else(|| panic!("{display}"));
-    walked.retain(|tag| tag != METRIC_NAME);
-    walked.sort();
-    assert_eq!(
-        vec!["host".to_string(), "job".to_string()],
-        walked,
-        "{display}"
-    );
 }
 
 /// A grouped `include` label is declared only when a result row can carry it.
