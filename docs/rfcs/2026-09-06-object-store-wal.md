@@ -172,6 +172,39 @@ The check does not catch every change of location. A location whose prefix alrea
 
 A `testing` cargo feature exposes hooks to wait for admitted appends, to seal the open batch, to hold and release creates and to make creates fail, so engine tests can flush deterministically and observe entries that are admitted but not durable.
 
+### Node lease and recovery fencing
+
+Cluster wiring installs an I/O permit backed by Mito's node lease before opening
+regions. The permit exposes only whether new object-store I/O is allowed; the
+WAL does not own deadlines or heartbeat renewal. Standalone installs no permit.
+Startup's initial object and its withdrawal after a missing-history failure are
+exempt so startup does not depend on a heartbeat that has not started yet.
+
+Every new upload, including a retry or release-only object, and every collection
+delete checks the permit immediately before issuance. Issued operations may
+finish, including their transport retries. The flush timer checks expiry and
+renewal without sealing while expired. Expiry fails durable open and unindexed
+batches with a retryable error, ignores their late upload results and never
+reuses their ids. Enqueued batches already acknowledged remain pending until
+renewal. Release records remain available for a later batch, while their current
+waiters fail. An admission that would wait for upload capacity fails immediately
+while expired; ordinary admissions continue to rely on the region write lease.
+
+Shutdown keeps the heartbeat running until the object-store WAL stops, then
+closes the heartbeat and regions. If the lease expires during shutdown, the WAL
+drops its unindexed backlog without waiting for uploads, and still waits for
+issued deletes. Dropping acknowledged enqueued entries has crash semantics.
+
+Recovery still selects the latest complete chain, but before writing its initial
+object checks that the selected tip carries the maximum epoch among all listed
+headers. Falling back to an older epoch fails without modifying storage, with
+the skipped epochs, object counts and sequence ranges in the error. Explicit
+`accept_missing_history` permits this fallback only as an operator recovery:
+previous writers must have exited and acknowledged unflushed data may be lost.
+The new initial object's epoch exceeds every listed epoch. An incomplete branch
+within the selected epoch does not trigger this rejection. Remote readers always
+reject an older-epoch fallback, independent of this setting.
+
 ## Mito integration
 
 Mito maps `WalOptions::ObjectStore { prefix }` to `Provider::object_store_provider(region_id, prefix)`; resolving object store options against a Raft Engine or Kafka log store reports the existing incompatible-provider error. Reads go through the region-scoped reader used for Kafka, so a namespace shared by many regions never leaks entries across regions even if a log store returned them. Object store regions are opened individually rather than grouped by topic. After replay, `topic_latest_entry_id` follows the existing remote-WAL rule: it is taken from the store's latest entry id only when the region's memtables are empty, otherwise it stays at the replay start, because that value feeds pruning and must never advance past unflushed data. Before a flush, a full truncate or a discard of unflushed data publishes a manifest watermark, Mito waits on the durability barrier described under *Acknowledgement*; with the `durable` mode and with every other provider the wait returns at once. When Mito drops a region it calls `release_region` after `obsolete`, as described under *Entry ids*; the default of that method does nothing, so the other providers handle a dropped region as before. Neither a release nor an `obsolete` of an object store region that fails, the latter for instance on a store that the release of another region poisoned, fails the drop, since nothing sends the drop of a removed region again and a caller that drops several regions, such as the metric engine with its data and metadata regions, would leave the others undone: the region's runtime state is cleaned up and its files are scheduled for deletion as for any drop, and the failure is logged; an `obsolete` that fails for another provider fails the drop as before. A store that is neither stopped nor poisoned keeps the record and writes it with its next object; a stopped or poisoned store keeps none, and the region stays unreleased after a restart. The store carries the record in a later object, as described under *Entry ids*; a crash before any later create succeeds loses it, and the dropped region's segments then hold the reclaim boundary after the restart. Before Mito replays an existing region on open, on catch-up or for a create that finds the region present, it runs the history check described under *Log store*.
@@ -265,7 +298,7 @@ The reference implementation was validated on the following evidence; the tests 
 - Object store access: an unwritable store; a listing, a trailer fetch, a footer fetch, a segment fetch and a delete that fail; a delete that fails and is retried by the next collection; an object collected between the listing and its fetch, below and at the tip's reclaim boundary; an object store that answers slowly.
 - Store state: an object the catalog rejects, per-region entry id exhaustion, the catalog refusing a next sequence past the maximum, every stop path with several creates in flight that succeed, fail transiently or conflict after stop began, a stop with a delete in flight, an append held back by full sealed batches, and the appends the backlog thresholds were holding back released by admission, by a stop, by a terminal error and by the teardown of the actor.
 - Pipelined uploader: concurrent creates acknowledged in sequence order, every sealed batch linked to its pipeline predecessor, the open batch sealing at the threshold while creates are in flight, a transient failure failing every batch that is not indexed, created ones included, a permanent failure poisoning the store.
-- Chain recovery: a linear chain, orphans below and above the tip, a broken tip falling back to the latest complete object, a late object of an earlier epoch next to the chain of a later one, a missing predecessor, objects present without a complete chain, orphans raising the next sequence, and the start object on an empty prefix and meeting objects of an earlier and of a later epoch.
+- Chain recovery: a linear chain, orphans below and above the tip, an incomplete branch within the selected epoch, rejection of an older-epoch fallback before any mutation and its explicit acceptance with `accept_missing_history`, a late object of an earlier epoch next to the chain of a later one, a missing predecessor, objects present without a complete chain, orphans raising the next sequence, and the start object on an empty prefix and meeting objects of an earlier and of a later epoch.
 
 ### What the evidence does not cover
 

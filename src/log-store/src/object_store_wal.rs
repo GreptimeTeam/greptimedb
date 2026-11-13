@@ -47,6 +47,18 @@
 //! accepts writes, and its epoch is one above the sequence of that object, so
 //! no two instances share an epoch and a late object of an earlier instance
 //! never ends the chain.
+//! Opening rejects a selected chain below the maximum listed epoch before
+//! writing its start object. `accept_missing_history` permits an explicit
+//! recovery with possible acknowledged data loss; remote readers never accept
+//! this fallback.
+//!
+//! Cluster integration can install a node-lease I/O permit before opening
+//! regions. New creates and deletes check it immediately before issuance;
+//! already issued operations may finish. Expiry fails unacknowledged durable
+//! batches and pauses the acknowledged enqueued backlog until renewal. Stop
+//! drops that backlog if the lease expires and still waits for issued deletes.
+//! Standalone stores do not install a permit. Startup's initial create and its
+//! withdrawal on missing history are exempt, so startup needs no heartbeat.
 //!
 //! The reclaim boundary of an object states that every object with a lower
 //! sequence was fully flushed when the object was sealed, so the chain need
@@ -76,7 +88,7 @@
 //! per source prefix. Listing an upper bound reads no object indexes; preparing
 //! a range refreshes the listing and reuses cached indexes. Known last-entry
 //! bounds anchor their own chains, while listed bounds use the complete-chain
-//! selection of startup recovery with an additional maximum-epoch check.
+//! selection of startup recovery, requiring the maximum listed epoch.
 //! Neither path opens a writable store or modifies the source. The caller owns
 //! the lifetime of pending recovery ranges and
 //! publishes progress only after a successful read.
