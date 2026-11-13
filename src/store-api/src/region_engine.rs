@@ -318,6 +318,10 @@ pub struct ScannerProperties {
     /// Whether total_rows is exact before applying query predicates.
     total_rows_is_exact: bool,
 
+    /// Exact rows after static query predicates, prepared against the scanner's
+    /// read view. Unknown unless an engine has proved all visibility conditions.
+    exact_num_rows: Option<usize>,
+
     /// Whether to yield an empty batch to distinguish partition ranges.
     pub distinguish_partition_range: bool,
 
@@ -353,6 +357,22 @@ impl ScannerProperties {
         self
     }
 
+    /// Sets an exact count for the complete scan, including static predicates.
+    pub fn with_exact_num_rows(mut self, rows: Option<usize>) -> Self {
+        self.exact_num_rows = rows;
+        self
+    }
+
+    /// Returns the prepared exact count after all static scan predicates.
+    pub fn exact_num_rows(&self) -> Option<usize> {
+        self.exact_num_rows
+    }
+
+    /// Invalidates prepared statistics when the scan gains a dynamic predicate.
+    pub fn clear_exact_num_rows(&mut self) {
+        self.exact_num_rows = None;
+    }
+
     /// Creates a new [`ScannerProperties`] with the given partitioning.
     pub fn new(partitions: Vec<Vec<PartitionRange>>, append_mode: bool, total_rows: usize) -> Self {
         Self {
@@ -360,6 +380,7 @@ impl ScannerProperties {
             append_mode,
             total_rows,
             total_rows_is_exact: false,
+            exact_num_rows: None,
             distinguish_partition_range: false,
             target_partitions: 0,
             logical_region: false,
@@ -491,12 +512,30 @@ impl Default for QueryScanContext {
     }
 }
 
+/// Two source-disjoint scanners sharing the original scan read view.
+#[derive(Debug)]
+pub struct StatisticsSplit {
+    /// Sources with a proven exact query-visible row count.
+    pub exact: RegionScannerRef,
+    /// All remaining sources, merged and deduplicated together.
+    pub inexact: RegionScannerRef,
+    /// Physical source-row estimate for the remaining scan, never an exact answer.
+    pub inexact_rows: Option<usize>,
+}
+
 /// A scanner that provides a way to scan the region concurrently.
 ///
 /// The scanner splits the region into partitions so that each partition can be scanned concurrently.
 /// You can use this trait to implement an [`ExecutionPlan`](datafusion_physical_plan::ExecutionPlan).
 pub trait RegionScanner: Debug + DisplayAs + Send {
     fn name(&self) -> &str;
+
+    /// Takes the source split an engine prepared for a scalar COUNT against
+    /// the original read view. On success the caller must replace this
+    /// scanner with both parts.
+    fn take_statistics_split(&mut self) -> Option<StatisticsSplit> {
+        None
+    }
 
     /// Returns the properties of the scanner.
     fn properties(&self) -> &ScannerProperties;
