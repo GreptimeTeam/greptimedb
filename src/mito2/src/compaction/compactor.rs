@@ -557,8 +557,10 @@ pub trait SstMerger: Send + Sync + 'static {
 }
 
 /// The production [`SstMerger`] that reads, merges, and writes SST files.
-#[derive(Clone)]
-pub struct DefaultSstMerger;
+#[derive(Clone, Default)]
+pub struct DefaultSstMerger {
+    cancellation: Option<Arc<CancellationHandle>>,
+}
 
 /// File-level sequence metadata is independent of physical row encoding.
 struct OutputSequenceMetadata {
@@ -612,6 +614,41 @@ impl SstMerger for DefaultSstMerger {
         output: CompactionOutput,
         write_opts: WriteOptions,
     ) -> Result<(Vec<FileMeta>, Vec<SstInfo>)> {
+        let uncommitted = UncommittedSsts::new(
+            context.region_id,
+            context.access_layer.clone(),
+            Some(context.cache_manager.clone()),
+        );
+        let result = self
+            .merge_output(context, output, write_opts, &uncommitted)
+            .await;
+        if result.is_err() {
+            uncommitted.cleanup().await;
+        } else {
+            // Successful outputs are transferred to the caller for publication.
+            uncommitted.disarm_cleanup();
+        }
+        match result {
+            Err(error::Error::SstWriteCancelled { .. }) => error::CompactionCancelledSnafu.fail(),
+            Err(error::Error::WriteParquet {
+                error: parquet::errors::ParquetError::External(ref source),
+                ..
+            }) if source.is::<common_base::cancellation::Cancelled>() => {
+                error::CompactionCancelledSnafu.fail()
+            }
+            result => result,
+        }
+    }
+}
+
+impl DefaultSstMerger {
+    async fn merge_output(
+        &self,
+        context: CompactionContext,
+        output: CompactionOutput,
+        write_opts: WriteOptions,
+        uncommitted: &UncommittedSsts,
+    ) -> Result<(Vec<FileMeta>, Vec<SstInfo>)> {
         let region_id = context.region_id;
         validate_region_compaction_output(region_id, &output)?;
         let index_options = context.version_options.index_options.clone();
@@ -645,13 +682,22 @@ impl SstMerger for DefaultSstMerger {
             merge_mode,
             read_parallelism: write_opts.encode_parallelism,
         };
-        let source = spawn_merge(builder.build_flat_sst_reader().await?);
+        let source = if let Some(cancellation) = &self.cancellation {
+            tokio::select! {
+                biased;
+                _ = cancellation.cancelled() => return error::CompactionCancelledSnafu.fail(),
+                source = builder.build_flat_sst_reader() => source?,
+            }
+        } else {
+            builder.build_flat_sst_reader().await?
+        };
+        let source = spawn_merge(source);
 
         let mut metrics = Metrics::new(WriteType::Compaction);
         let region_metadata = context.region_metadata.clone();
         let sst_infos = context
             .access_layer
-            .write_sst(
+            .write_sst_with_context(
                 SstWriteRequest {
                     index_build_inputs: None,
                     op_type: OperationType::Compact,
@@ -676,6 +722,11 @@ impl SstMerger for DefaultSstMerger {
                 },
                 &write_opts,
                 &mut metrics,
+                crate::sst::parquet::writer::SstWriteContext {
+                    guard: Some(Arc::new(uncommitted.clone())),
+                    cancellation: self.cancellation.clone(),
+                    ..Default::default()
+                },
             )
             .await?;
         // Convert partition expression once outside the map
@@ -761,12 +812,14 @@ impl DefaultCompactor {
     /// This is the public entry point for external crates that want a
     /// cancellable compactor without opting into uncommitted-SST tracking.
     ///
-    /// Cancellation stops new output batches. Already spawned outputs finish,
-    /// and their successful SSTs remain in the returned [`MergeOutput`]. This
-    /// can delay cancellation until the current batch completes.
+    /// Cancellation stops new output batches and interrupts active outputs at
+    /// batch and upload-chunk boundaries. Successful complete outputs remain in
+    /// the returned [`MergeOutput`]; incomplete outputs are cleaned up.
     pub fn new_with_cancel_handle(cancel_handle: Arc<CancellationHandle>) -> Self {
         Self {
-            merger: DefaultSstMerger,
+            merger: DefaultSstMerger {
+                cancellation: Some(cancel_handle.clone()),
+            },
             cancel_handle,
             uncommitted: None,
         }
@@ -777,7 +830,9 @@ impl DefaultCompactor {
         uncommitted: UncommittedSsts,
     ) -> Self {
         Self {
-            merger: DefaultSstMerger,
+            merger: DefaultSstMerger {
+                cancellation: Some(cancel_handle.clone()),
+            },
             cancel_handle,
             uncommitted: Some(uncommitted),
         }
@@ -800,8 +855,8 @@ impl<M: SstMerger> DefaultCompactor<M> {
             if self.cancel_handle.is_cancelled() {
                 return error::CompactionCancelledSnafu.fail();
             }
-            // Let the writer finish and register its files before observing cancellation.
-            // Dropping it mid-write can lose ownership of already finalized SSTs.
+            // The merger observes cancellation and drains its writers before returning.
+            // Keep awaiting it so cleanup cannot race with a late finalized SST.
             let (files, infos) = self
                 .merger
                 .merge_single_output(
@@ -923,9 +978,8 @@ where
                 })
                 .collect();
 
-            // Like merge_unit, cancellation must not drop a writer mid-output:
-            // its blocking encoders would detach and finalized SSTs could lose
-            // their owner. Join the whole batch and retain every successful output.
+            // Each merger cancels cooperatively and owns its incomplete outputs.
+            // Join every sibling before returning so writers and cleanup cannot race.
             let mut join_error = None;
             while let Some((inputs, handle)) = spawned.pop() {
                 match handle.await {
@@ -936,6 +990,7 @@ where
                         }
                         compacted_inputs.extend(inputs);
                     }
+                    Ok(Err(error::Error::CompactionCancelled { .. })) => {}
                     Ok(Err(e)) => {
                         warn!(
                             e; "Failed to merge compaction output for region: {}, inputs: [{}]",
@@ -1262,7 +1317,7 @@ mod tests {
             time_window_size: 3600,
             max_file_size: None,
         };
-        let merged = DefaultCompactor::with_merger(DefaultSstMerger)
+        let merged = DefaultCompactor::with_merger(DefaultSstMerger::default())
             .merge_ssts(&compaction_region, picker_output)
             .await
             .unwrap();
@@ -1412,7 +1467,7 @@ mod tests {
             ))
             .await
             .unwrap();
-        let (files, _) = DefaultSstMerger
+        let (files, _) = DefaultSstMerger::default()
             .merge_single_output(context, output, WriteOptions::default())
             .await
             .unwrap();

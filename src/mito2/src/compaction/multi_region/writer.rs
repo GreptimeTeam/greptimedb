@@ -71,13 +71,14 @@ impl<'a> TargetWriter<'a> {
         let infos = self
             .context
             .access_layer
-            .write_sst_with_guard(
+            .write_sst_with_context(
                 request,
                 &self.options(),
                 &mut metrics,
                 crate::sst::parquet::writer::SstWriteContext {
-                    guard: self.context.protection.clone(),
-                    limits: self.limits.writer,
+                    guard: Some(self.context.protection.clone()),
+                    limits: Some(self.limits.writer),
+                    ..Default::default()
                 },
             )
             .await?;
