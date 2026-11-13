@@ -17,13 +17,12 @@
 use std::collections::HashMap;
 use std::future::Future;
 use std::mem;
-use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::task::{Context, Poll};
 use std::time::Instant;
 
 use bytes::Bytes;
+use common_base::cancellation::CancellationHandle;
 use common_telemetry::debug;
 use common_time::Timestamp;
 use datatypes::arrow::array::{
@@ -34,18 +33,18 @@ use datatypes::arrow::compute::{max, min};
 use datatypes::arrow::datatypes::{DataType, SchemaRef, TimeUnit};
 use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::extension::json::is_json2_extension_type;
-use object_store::{FuturesAsyncWriter, ObjectStore};
+use futures::future::BoxFuture;
+use object_store::{ObjectStore, Writer};
 use parquet::arrow::AsyncArrowWriter;
 use parquet::arrow::async_writer::AsyncFileWriter;
 use parquet::basic::{Compression, Encoding, ZstdLevel};
+use parquet::errors::ParquetError;
 use parquet::file::metadata::{FileMetaData, KeyValue, ParquetMetaData};
 use parquet::file::properties::WriterProperties;
 use smallvec::smallvec;
 use snafu::{OptionExt, ResultExt, ensure};
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::{FileId, SequenceNumber};
-use tokio::io::AsyncWrite;
-use tokio_util::compat::{Compat, FuturesAsyncWriteCompatExt};
 
 use crate::access_layer::{FilePathProvider, Metrics, SstInfoArray, TempFileCleaner};
 use crate::config::{IndexBuildMode, IndexConfig};
@@ -179,16 +178,17 @@ impl<W: AsyncFileWriter> SstArrowWriter<W> {
         }
     }
 
-    async fn close(self) -> parquet::errors::Result<ParquetMetaData> {
+    async fn finish(&mut self) -> parquet::errors::Result<ParquetMetaData> {
         match self {
-            SstArrowWriter::Serial(writer) => writer.close().await,
-            SstArrowWriter::Parallel(writer) => writer.close().await,
+            SstArrowWriter::Serial(writer) => writer.finish().await,
+            SstArrowWriter::Parallel(writer) => writer.finish().await,
         }
     }
 
-    async fn abort(self) {
-        if let SstArrowWriter::Parallel(writer) = self {
-            writer.abort().await;
+    async fn abort(self) -> W {
+        match self {
+            SstArrowWriter::Serial(writer) => writer.into_inner(),
+            SstArrowWriter::Parallel(writer) => writer.abort().await,
         }
     }
 }
@@ -248,28 +248,84 @@ pub struct ParquetWriter<'a, F: WriterFactory, I: IndexerBuilder, P: FilePathPro
     /// Write metrics
     metrics: &'a mut Metrics,
     write_guard: Option<Arc<dyn SstWriteGuard>>,
+    cancellation: Option<Arc<CancellationHandle>>,
     memory: WriteMemory,
 }
 
-/// Registers durable ownership before either an SST or its index is published to storage.
+/// Registers output ownership before either an SST or its index is created in storage.
 #[async_trait::async_trait]
 pub trait SstWriteGuard: Send + Sync {
     async fn before_create(&self, file_id: RegionFileId) -> Result<()>;
 }
 
-/// Protection and resource limits travel together for table-compaction output.
+/// Optional ownership, cancellation, and resource limits for an SST write.
+#[derive(Clone, Default)]
 pub(crate) struct SstWriteContext {
-    pub(crate) guard: Arc<dyn SstWriteGuard>,
-    pub(crate) limits: SstWriteLimits,
+    /// Registers output ownership before creating files, including cached files.
+    pub(crate) guard: Option<Arc<dyn SstWriteGuard>>,
+    /// Bounded writes bypass the write cache and use one upload at a time.
+    pub(crate) limits: Option<SstWriteLimits>,
+    pub(crate) cancellation: Option<Arc<CancellationHandle>>,
 }
 
 pub trait WriterFactory {
-    type Writer: AsyncWrite + Send + Unpin;
+    type Writer: AsyncFileWriter;
     fn create(
         &mut self,
         file_path: &str,
         write_buffer_size: usize,
     ) -> impl Future<Output = Result<Self::Writer>>;
+
+    /// Aborts unfinished output after all encoders have stopped using it.
+    fn abort(writer: Self::Writer) -> impl Future<Output = Result<()>>;
+}
+
+/// Bridges an OpenDAL [`Writer`] with Parquet's [`AsyncFileWriter`] and tracks
+/// the number of bytes successfully submitted to the object store.
+pub struct ObjectStoreWriter {
+    inner: Writer,
+    output_bytes: u64,
+}
+
+impl ObjectStoreWriter {
+    pub(crate) fn new(inner: Writer) -> Self {
+        Self {
+            inner,
+            output_bytes: 0,
+        }
+    }
+
+    pub(crate) fn output_bytes(&self) -> u64 {
+        self.output_bytes
+    }
+
+    pub(crate) fn into_inner(self) -> Writer {
+        self.inner
+    }
+}
+
+impl AsyncFileWriter for ObjectStoreWriter {
+    fn write(&mut self, bytes: Bytes) -> BoxFuture<'_, parquet::errors::Result<()>> {
+        Box::pin(async move {
+            let len = bytes.len() as u64;
+            self.inner
+                .write(bytes)
+                .await
+                .map_err(|error| ParquetError::External(Box::new(error)))?;
+            self.output_bytes += len;
+            Ok(())
+        })
+    }
+
+    fn complete(&mut self) -> BoxFuture<'_, parquet::errors::Result<()>> {
+        Box::pin(async move {
+            self.inner
+                .close()
+                .await
+                .map(|_| ())
+                .map_err(|error| ParquetError::External(Box::new(error)))
+        })
+    }
 }
 
 pub struct ObjectStoreWriterFactory {
@@ -278,7 +334,7 @@ pub struct ObjectStoreWriterFactory {
 }
 
 impl WriterFactory for ObjectStoreWriterFactory {
-    type Writer = Compat<FuturesAsyncWriter>;
+    type Writer = ObjectStoreWriter;
 
     async fn create(&mut self, file_path: &str, write_buffer_size: usize) -> Result<Self::Writer> {
         self.object_store
@@ -286,8 +342,12 @@ impl WriterFactory for ObjectStoreWriterFactory {
             .chunk(write_buffer_size)
             .concurrent(self.concurrency)
             .await
-            .map(|v| v.into_futures_async_write().compat_write())
+            .map(ObjectStoreWriter::new)
             .context(OpenDalSnafu)
+    }
+
+    async fn abort(writer: Self::Writer) -> Result<()> {
+        writer.into_inner().abort().await.context(OpenDalSnafu)
     }
 }
 
@@ -361,7 +421,27 @@ where
             file_cleaner: None,
             metrics,
             write_guard: None,
+            cancellation: None,
         }
+    }
+
+    pub(crate) fn with_cancellation(
+        mut self,
+        cancellation: Option<Arc<CancellationHandle>>,
+    ) -> Self {
+        self.cancellation = cancellation;
+        self
+    }
+
+    fn check_cancelled(&self) -> Result<()> {
+        ensure!(
+            !self
+                .cancellation
+                .as_ref()
+                .is_some_and(|handle| handle.is_cancelled()),
+            crate::error::SstWriteCancelledSnafu
+        );
+        Ok(())
     }
 
     pub(crate) fn with_write_guard(mut self, guard: Option<Arc<dyn SstWriteGuard>>) -> Self {
@@ -409,8 +489,9 @@ where
         ssts: &mut SstInfoArray,
         stats: &mut SourceStats,
     ) -> Result<()> {
+        self.check_cancelled()?;
         // maybe_init_writer will re-create a new file.
-        if let Some(mut current_writer) = mem::take(&mut self.writer) {
+        if self.writer.is_some() {
             let mut stats = mem::take(stats);
             // At least one row has been written.
             assert!(stats.num_rows > 0);
@@ -425,9 +506,28 @@ where
             // Finish indexer and writer.
             // safety: writer and index can only be both present or not.
             let index_output = self.current_indexer.as_mut().unwrap().finish().await;
-            current_writer.flush().await.context(WriteParquetSnafu)?;
-
-            let parquet_metadata = current_writer.close().await.context(WriteParquetSnafu)?;
+            self.check_cancelled()?;
+            self.writer
+                .as_mut()
+                .context(UnexpectedSnafu {
+                    reason: "Missing SST writer during finalization",
+                })?
+                .flush()
+                .await
+                .context(WriteParquetSnafu)?;
+            self.check_cancelled()?;
+            // Keep the upload owned until finalization succeeds, so an error
+            // still reaches the common abort path.
+            let parquet_metadata = self
+                .writer
+                .as_mut()
+                .context(UnexpectedSnafu {
+                    reason: "Missing SST writer during finalization",
+                })?
+                .finish()
+                .await
+                .context(WriteParquetSnafu)?;
+            self.writer.take();
             let file_size = self.bytes_written.load(Ordering::Relaxed) as u64;
             if self.memory.limits.is_some() {
                 self.memory.completed = self.memory.completed.saturating_add(
@@ -506,6 +606,7 @@ where
         );
         let res = self.write_all_flat_inner(source, &converter, opts).await;
         if res.is_err() {
+            self.abort_current_indexer().await;
             self.abort_current_file().await;
         }
         res
@@ -531,6 +632,7 @@ where
         };
         let res = self.write_all_flat_inner(source, &converter, opts).await;
         if res.is_err() {
+            self.abort_current_indexer().await;
             self.abort_current_file().await;
         }
         res
@@ -547,7 +649,17 @@ where
 
         loop {
             let start = Instant::now();
-            let batch = match source.next_batch().await {
+            self.check_cancelled()?;
+            let next = if let Some(cancellation) = &self.cancellation {
+                tokio::select! {
+                    biased;
+                    _ = cancellation.cancelled() => return crate::error::SstWriteCancelledSnafu.fail(),
+                    next = source.next_batch() => next,
+                }
+            } else {
+                source.next_batch().await
+            };
+            let batch = match next {
                 Ok(Some(batch)) => batch,
                 Ok(None) => break,
                 Err(e) => {
@@ -611,7 +723,9 @@ where
         stats: &mut SourceStats,
     ) -> Result<()> {
         let result = async {
+            self.check_cancelled()?;
             let arrow_batch = converter.convert_batch(batch)?;
+            self.check_cancelled()?;
             let start = Instant::now();
             self.maybe_init_writer(arrow_batch.schema_ref(), opts)
                 .await?
@@ -620,6 +734,7 @@ where
                 .context(WriteParquetSnafu)?;
             self.metrics.write_batch += start.elapsed();
 
+            self.check_cancelled()?;
             stats.update_flat(batch)?;
             let start = Instant::now();
             // The indexer exists once the first batch has been written. In async
@@ -652,7 +767,10 @@ where
     /// Joins encoders before dropping the writer and deleting its failed output.
     async fn abort_current_file(&mut self) {
         if let Some(writer) = self.writer.take() {
-            writer.abort().await;
+            let output = writer.abort().await;
+            if let Err(error) = F::abort(output.inner).await {
+                common_telemetry::warn!(error; "Failed to abort SST writer, file: {}", self.current_file);
+            }
         }
         if let Some(cleaner) = &self.file_cleaner {
             cleaner.clean_by_file_id(self.current_file).await;
@@ -660,7 +778,7 @@ where
     }
 
     async fn abort_current_indexer(&mut self) {
-        if let Some(indexer) = &mut self.current_indexer {
+        if let Some(mut indexer) = self.current_indexer.take() {
             indexer.abort().await;
         }
     }
@@ -670,6 +788,7 @@ where
         schema: &SchemaRef,
         opts: &WriteOptions,
     ) -> Result<&mut SstArrowWriter<SizeAwareWriter<F::Writer>>> {
+        self.check_cancelled()?;
         if let Some(ref mut w) = self.writer {
             Ok(w)
         } else {
@@ -724,7 +843,8 @@ where
                         opts.encode_parallelism,
                         opts.encode_runtime,
                     )
-                    .context(WriteParquetSnafu)?,
+                    .context(WriteParquetSnafu)?
+                    .with_cancellation(self.cancellation.clone()),
                 )
             } else {
                 SstArrowWriter::Serial(
@@ -866,38 +986,18 @@ impl<W> SizeAwareWriter<W> {
     }
 }
 
-impl<W> AsyncWrite for SizeAwareWriter<W>
-where
-    W: AsyncWrite + Unpin,
-{
-    fn poll_write(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buf: &[u8],
-    ) -> Poll<std::result::Result<usize, std::io::Error>> {
-        let this = self.as_mut().get_mut();
-
-        match Pin::new(&mut this.inner).poll_write(cx, buf) {
-            Poll::Ready(Ok(bytes_written)) => {
-                this.size.fetch_add(bytes_written, Ordering::Relaxed);
-                Poll::Ready(Ok(bytes_written))
-            }
-            other => other,
-        }
+impl<W: AsyncFileWriter> AsyncFileWriter for SizeAwareWriter<W> {
+    fn write(&mut self, bytes: Bytes) -> BoxFuture<'_, parquet::errors::Result<()>> {
+        Box::pin(async move {
+            let len = bytes.len();
+            self.inner.write(bytes).await?;
+            self.size.fetch_add(len, Ordering::Relaxed);
+            Ok(())
+        })
     }
 
-    fn poll_flush(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-    ) -> Poll<std::result::Result<(), std::io::Error>> {
-        Pin::new(&mut self.inner).poll_flush(cx)
-    }
-
-    fn poll_shutdown(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-    ) -> Poll<std::result::Result<(), std::io::Error>> {
-        Pin::new(&mut self.inner).poll_shutdown(cx)
+    fn complete(&mut self) -> BoxFuture<'_, parquet::errors::Result<()>> {
+        self.inner.complete()
     }
 }
 
@@ -926,9 +1026,146 @@ mod tests {
     #[case::flat(FormatType::Flat)]
     #[case::primary_key(FormatType::PrimaryKey)]
     #[tokio::test]
-    async fn test_source_error_waits_for_encoding_cleanup(#[case] format: FormatType) {
+    async fn test_cancel_pending_source(
+        #[case] format: FormatType,
+        #[values(1, 2)] parallelism: usize,
+    ) {
         let mut env = TestEnv::new().await;
         let metadata = Arc::new(sst_region_metadata());
+        let cancellation = Arc::new(CancellationHandle::default());
+        let mut metrics = Metrics::new(WriteType::Compaction);
+        let mut writer = ParquetWriter::new_with_object_store(
+            env.init_object_store_manager(),
+            metadata,
+            IndexConfig::default(),
+            NoopIndexBuilder,
+            RegionFilePathFactory::new(String::new(), PathType::Bare),
+            &mut metrics,
+        )
+        .await
+        .with_cancellation(Some(cancellation.clone()));
+        let batch = new_record_batch_by_range(&["a", "b"], 0, 4);
+        let schema = batch.schema();
+        let source = FlatSource::new_stream(
+            schema,
+            Box::pin(async_stream::try_stream! {
+                yield batch;
+                futures::future::pending::<()>().await;
+            }),
+        );
+        let opts = WriteOptions {
+            row_group_size: 8,
+            encode_parallelism: parallelism,
+            ..Default::default()
+        };
+        let mut write = Box::pin(async {
+            match format {
+                FormatType::Flat => writer.write_all_flat(source, None, &opts).await,
+                FormatType::PrimaryKey => {
+                    writer
+                        .write_all_flat_as_primary_key(source, None, &opts)
+                        .await
+                }
+            }
+        });
+        assert!(futures::poll!(write.as_mut()).is_pending());
+        cancellation.cancel();
+        let error = timeout(Duration::from_secs(5), write)
+            .await
+            .unwrap()
+            .unwrap_err();
+        assert!(matches!(error, Error::SstWriteCancelled { .. }));
+        assert!(writer.writer.is_none());
+    }
+
+    /// Controlled comparison: identical batches and cancellation point, changing
+    /// only whether the writer observes cancellation.
+    #[rstest::rstest]
+    #[case::flat(FormatType::Flat)]
+    #[case::primary_key(FormatType::PrimaryKey)]
+    #[tokio::test]
+    async fn test_batch_cancellation_ablation(
+        #[case] format: FormatType,
+        #[values(1, 2)] parallelism: usize,
+    ) {
+        common_telemetry::init_default_ut_logging();
+        for repeat in 0..3 {
+            for enabled in [false, true] {
+                let mut env = TestEnv::new().await;
+                let cancellation = Arc::new(CancellationHandle::default());
+                let mut metrics = Metrics::new(WriteType::Compaction);
+                let mut writer = ParquetWriter::new_with_object_store(
+                    env.init_object_store_manager(),
+                    Arc::new(sst_region_metadata()),
+                    IndexConfig::default(),
+                    NoopIndexBuilder,
+                    RegionFilePathFactory::new(String::new(), PathType::Bare),
+                    &mut metrics,
+                )
+                .await
+                .with_cancellation(enabled.then(|| cancellation.clone()));
+                let batch = new_record_batch_by_range(&["a", "b"], 0, 4);
+                let consumed = Arc::new(AtomicUsize::new(0));
+                let observed = consumed.clone();
+                let source = FlatSource::new_stream(
+                    batch.schema(),
+                    Box::pin(async_stream::try_stream! {
+                        for i in 0..32 {
+                            if i == 1 { cancellation.cancel(); }
+                            observed.fetch_add(1, Ordering::Relaxed);
+                            yield new_record_batch_by_range(&["a", "b"], i * 8, i * 8 + 8);
+                        }
+                    }),
+                );
+                let opts = WriteOptions {
+                    row_group_size: 8,
+                    encode_parallelism: parallelism,
+                    ..Default::default()
+                };
+                let start = Instant::now();
+                let result = match format {
+                    FormatType::Flat => writer.write_all_flat(source, None, &opts).await,
+                    FormatType::PrimaryKey => {
+                        writer
+                            .write_all_flat_as_primary_key(source, None, &opts)
+                            .await
+                    }
+                };
+                common_telemetry::info!(
+                    "batch_cancellation repeat={repeat} format={format:?} parallelism={parallelism} enabled={enabled} batches={} elapsed_us={}",
+                    consumed.load(Ordering::Relaxed),
+                    start.elapsed().as_micros()
+                );
+                if enabled {
+                    assert!(result.is_err());
+                    assert_eq!(2, consumed.load(Ordering::Relaxed));
+                    assert!(writer.writer.is_none());
+                } else {
+                    assert_eq!(
+                        256,
+                        result
+                            .unwrap()
+                            .iter()
+                            .map(|info| info.num_rows)
+                            .sum::<usize>()
+                    );
+                    assert_eq!(32, consumed.load(Ordering::Relaxed));
+                }
+            }
+        }
+    }
+
+    #[rstest::rstest]
+    #[case::flat(FormatType::Flat)]
+    #[case::primary_key(FormatType::PrimaryKey)]
+    #[tokio::test]
+    async fn test_source_error_waits_for_encoding_cleanup(
+        #[case] format: FormatType,
+        #[values(false, true)] cancel_source: bool,
+    ) {
+        let mut env = TestEnv::new().await;
+        let metadata = Arc::new(sst_region_metadata());
+        let cancellation = Arc::new(CancellationHandle::default());
         let mut metrics = Metrics::new(WriteType::Compaction);
         let mut writer = ParquetWriter::new_with_object_store(
             env.init_object_store_manager(),
@@ -938,7 +1175,8 @@ mod tests {
             RegionFilePathFactory::new("".to_string(), PathType::Bare),
             &mut metrics,
         )
-        .await;
+        .await
+        .with_cancellation(Some(cancellation.clone()));
         let opts = WriteOptions {
             row_group_size: 8,
             encode_parallelism: 2,
@@ -1001,13 +1239,11 @@ mod tests {
         parallel.set_encoding_tasks_for_test(vec![running, queued]);
         let source = FlatSource::new_stream(
             batch.schema(),
-            Box::pin(futures::stream::iter(vec![
-                Ok(batch),
-                InvalidRecordBatchSnafu {
-                    reason: "source read failed",
-                }
-                .fail(),
-            ])),
+            Box::pin(async_stream::try_stream! {
+                yield batch;
+                if cancel_source { futures::future::pending::<()>().await; }
+                Err(InvalidRecordBatchSnafu { reason: "source read failed" }.build())?;
+            }),
         );
         let memory = new_compaction_memory_manager(1024 * 1024);
         let budget = memory.try_acquire(memory.limit_bytes()).unwrap();
@@ -1025,6 +1261,10 @@ mod tests {
         // The next row group is buffered, then the source fails. No codec timing
         // or I/O wait can make the old indexer-only cleanup pass this assertion.
         assert!(futures::poll!(write.as_mut()).is_pending());
+        if cancel_source {
+            cancellation.cancel();
+            assert!(futures::poll!(write.as_mut()).is_pending());
+        }
         assert!(memory.try_acquire(memory.limit_bytes()).is_none());
         assert!(retained_field.upgrade().is_some());
         release_tx.send(()).unwrap();
@@ -1032,9 +1272,13 @@ mod tests {
             .await
             .unwrap()
             .unwrap_err();
-        assert!(
-            matches!(error, Error::InvalidRecordBatch { reason, .. } if reason == "source read failed")
-        );
+        if cancel_source {
+            assert!(matches!(error, Error::SstWriteCancelled { .. }));
+        } else {
+            assert!(
+                matches!(error, Error::InvalidRecordBatch { reason, .. } if reason == "source read failed")
+            );
+        }
         assert!(!queued_started.load(Ordering::SeqCst));
         assert!(retained_field.upgrade().is_none());
         assert!(memory.try_acquire(memory.limit_bytes()).is_some());

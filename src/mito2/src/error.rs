@@ -1406,6 +1406,9 @@ pub enum Error {
     #[snafu(display("Compaction is cancelled."))]
     CompactionCancelled {},
 
+    #[snafu(display("SST write is cancelled."))]
+    SstWriteCancelled {},
+
     #[snafu(display("Flush is cancelled."))]
     FlushCancelled {},
 
@@ -1827,9 +1830,10 @@ impl ErrorExt for Error {
                 source.status_code()
             }
 
-            ManualCompactionOverride {} | CompactionCancelled {} | FlushCancelled {} => {
-                StatusCode::Cancelled
-            }
+            ManualCompactionOverride {}
+            | CompactionCancelled {}
+            | FlushCancelled {}
+            | SstWriteCancelled {} => StatusCode::Cancelled,
 
             // A concurrent manual compaction fails fast instead of being queued;
             // the conflict is reported to the caller, which decides whether to

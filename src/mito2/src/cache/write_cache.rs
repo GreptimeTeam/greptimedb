@@ -17,9 +17,10 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use common_base::cancellation::CancellationHandle;
 use common_base::readable_size::ReadableSize;
 use common_telemetry::{debug, info};
-use futures::AsyncWriteExt;
+use futures::StreamExt;
 use object_store::ObjectStore;
 use snafu::ResultExt;
 use store_api::storage::RegionId;
@@ -40,7 +41,7 @@ use crate::sst::index::intermediate::IntermediateManager;
 use crate::sst::index::puffin_manager::{PuffinManagerFactory, SstPuffinManager};
 use crate::sst::index::registry::IndexRegistry;
 use crate::sst::index::{IndexerBuilderImpl, build_index_from_parquet_bytes};
-use crate::sst::parquet::writer::ParquetWriter;
+use crate::sst::parquet::writer::{ParquetWriter, SstWriteContext};
 use crate::sst::parquet::{SstInfo, WriteOptions};
 use crate::sst::{DEFAULT_WRITE_BUFFER_SIZE, DEFAULT_WRITE_CONCURRENCY};
 
@@ -284,12 +285,32 @@ impl WriteCache {
     }
 
     /// Writes SST to the cache and then uploads it to the remote object store.
+    #[cfg(test)]
     pub(crate) async fn write_and_upload_sst(
         &self,
         write_request: SstWriteRequest,
         upload_request: SstUploadRequest,
         write_opts: &WriteOptions,
         metrics: &mut Metrics,
+    ) -> Result<SstInfoArray> {
+        self.write_and_upload_sst_with_context(
+            write_request,
+            upload_request,
+            write_opts,
+            metrics,
+            SstWriteContext::default(),
+        )
+        .await
+    }
+
+    /// Preserves write ownership and cancellation through local encoding and upload.
+    pub(crate) async fn write_and_upload_sst_with_context(
+        &self,
+        write_request: SstWriteRequest,
+        upload_request: SstUploadRequest,
+        write_opts: &WriteOptions,
+        metrics: &mut Metrics,
+        context: SstWriteContext,
     ) -> Result<SstInfoArray> {
         let region_id = write_request.metadata.region_id;
         let override_sequence = if write_request.preserve_row_sequence {
@@ -328,7 +349,9 @@ impl WriteCache {
             metrics,
         )
         .await
-        .with_file_cleaner(cleaner);
+        .with_file_cleaner(cleaner)
+        .with_write_guard(context.guard)
+        .with_cancellation(context.cancellation.clone());
 
         let sst_info = match write_request.sst_write_format {
             crate::sst::FormatType::PrimaryKey => {
@@ -357,13 +380,21 @@ impl WriteCache {
         let op_type = write_request.op_type;
         let remote_store = &upload_request.remote_store;
         for sst in &sst_info {
+            if context
+                .cancellation
+                .as_ref()
+                .is_some_and(|handle| handle.is_cancelled())
+            {
+                err = Some(error::SstWriteCancelledSnafu.build());
+                break;
+            }
             let parquet_key = IndexKey::new(region_id, sst.file_id, FileType::Parquet);
             let parquet_path = upload_request
                 .dest_path_provider
                 .build_sst_file_path(RegionFileId::new(region_id, sst.file_id));
             let start = Instant::now();
             if let Err(e) = self
-                .upload(
+                .upload_with_cancellation(
                     parquet_key,
                     &parquet_path,
                     remote_store,
@@ -371,6 +402,7 @@ impl WriteCache {
                         op_type,
                         write_buffer_size: write_opts.write_buffer_size,
                     },
+                    context.cancellation.as_deref(),
                 )
                 .await
             {
@@ -387,7 +419,7 @@ impl WriteCache {
                     .build_index_file_path(RegionFileId::new(region_id, sst.file_id));
                 let start = Instant::now();
                 if let Err(e) = self
-                    .upload(
+                    .upload_with_cancellation(
                         puffin_key,
                         &puffin_path,
                         remote_store,
@@ -395,6 +427,7 @@ impl WriteCache {
                             op_type,
                             write_buffer_size: DEFAULT_WRITE_BUFFER_SIZE,
                         },
+                        context.cancellation.as_deref(),
                     )
                     .await
                 {
@@ -468,9 +501,20 @@ impl WriteCache {
         remote_store: &ObjectStore,
         options: UploadOptions,
     ) -> Result<()> {
+        self.upload_with_cancellation(index_key, upload_path, remote_store, options, None)
+            .await
+    }
+
+    async fn upload_with_cancellation(
+        &self,
+        index_key: IndexKey,
+        upload_path: &str,
+        remote_store: &ObjectStore,
+        options: UploadOptions,
+        cancellation: Option<&CancellationHandle>,
+    ) -> Result<()> {
         let region_id = index_key.region_id;
         let file_id = index_key.file_id;
-        let file_type = index_key.file_type;
         let cache_path = self.file_cache.cache_file_path(index_key);
 
         let start = Instant::now();
@@ -480,13 +524,14 @@ impl WriteCache {
             .stat(&cache_path)
             .await
             .context(error::OpenDalSnafu)?;
-        let reader = self
+        let mut reader = self
             .file_cache
             .local_store()
-            .reader(&cache_path)
+            .reader_with(&cache_path)
+            .chunk(options.write_buffer_size.as_bytes().max(1) as usize)
             .await
             .context(error::OpenDalSnafu)?
-            .into_futures_async_read(0..cached_value.content_length())
+            .into_bytes_stream(0..cached_value.content_length())
             .await
             .context(error::OpenDalSnafu)?;
 
@@ -499,24 +544,51 @@ impl WriteCache {
             .chunk(options.write_buffer_size.as_bytes() as usize)
             .concurrent(DEFAULT_WRITE_CONCURRENCY)
             .await
-            .context(error::OpenDalSnafu)?
-            .into_futures_async_write();
+            .context(error::OpenDalSnafu)?;
 
-        let bytes_written =
-            futures::io::copy(reader, &mut writer)
-                .await
-                .context(error::UploadSnafu {
+        let result = async {
+            let mut bytes_written = 0;
+            // Bound cancellation latency by one upload chunk, without abandoning an
+            // in-flight write. The writer remains owned until abort completes.
+            loop {
+                let next = if let Some(cancellation) = cancellation {
+                    tokio::select! {
+                        biased;
+                        _ = cancellation.cancelled() => return error::SstWriteCancelledSnafu.fail(),
+                        next = reader.next() => next,
+                    }
+                } else {
+                    reader.next().await
+                };
+                let Some(bytes) = next else { break };
+                let bytes = bytes.context(error::UploadSnafu {
                     region_id,
                     file_id,
-                    file_type,
+                    file_type: index_key.file_type,
                 })?;
-
-        // Must close to upload all data.
-        writer.close().await.context(error::UploadSnafu {
-            region_id,
-            file_id,
-            file_type,
-        })?;
+                if cancellation.is_some_and(CancellationHandle::is_cancelled) {
+                    return error::SstWriteCancelledSnafu.fail();
+                }
+                let len = bytes.len();
+                writer.write(bytes).await.context(error::OpenDalSnafu)?;
+                bytes_written += len as u64;
+            }
+            if cancellation.is_some_and(CancellationHandle::is_cancelled) {
+                return error::SstWriteCancelledSnafu.fail();
+            }
+            writer.close().await.context(error::OpenDalSnafu)?;
+            Ok(bytes_written)
+        }
+        .await;
+        let bytes_written = match result {
+            Ok(bytes_written) => bytes_written,
+            Err(error) => {
+                if let Err(abort_error) = writer.abort().await {
+                    common_telemetry::warn!(abort_error; "Failed to abort SST upload, region: {}, file: {}", region_id, file_id);
+                }
+                return Err(error);
+            }
+        };
 
         UPLOAD_BYTES_TOTAL.inc_by(bytes_written);
 
@@ -646,6 +718,93 @@ mod tests {
         WriteChunkRecorder, new_flat_source_from_record_batches, new_record_batch_by_range,
         sst_file_handle_with_file_id, sst_region_metadata,
     };
+
+    struct CancellingUploadWriter {
+        inner: object_store::layers::mock::oio::Writer,
+        cancellation: Arc<CancellationHandle>,
+        bytes_written: Arc<std::sync::atomic::AtomicUsize>,
+        aborted: Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    impl object_store::layers::mock::oio::Write for CancellingUploadWriter {
+        async fn write(&mut self, buffer: object_store::Buffer) -> object_store::Result<()> {
+            let len = buffer.len();
+            self.inner.write(buffer).await?;
+            self.bytes_written
+                .fetch_add(len, std::sync::atomic::Ordering::Relaxed);
+            self.cancellation.cancel();
+            Ok(())
+        }
+        async fn close(
+            &mut self,
+        ) -> object_store::layers::mock::Result<object_store::layers::mock::Metadata> {
+            self.inner.close().await
+        }
+        async fn abort(&mut self) -> object_store::Result<()> {
+            self.aborted
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+            self.inner.abort().await
+        }
+    }
+
+    #[tokio::test]
+    async fn test_cancel_upload_aborts_incomplete_object() {
+        use object_store::layers::mock::MockLayerBuilder;
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+        let env = TestEnv::new().await;
+        let local_store = ObjectStore::new(Memory::default()).unwrap();
+        let cancellation = Arc::new(CancellationHandle::default());
+        let bytes_written = Arc::new(AtomicUsize::new(0));
+        let aborted = Arc::new(AtomicBool::new(false));
+        let signal = cancellation.clone();
+        let bytes = bytes_written.clone();
+        let abort = aborted.clone();
+        let layer = MockLayerBuilder::default()
+            .writer_factory(Arc::new(move |_, _, inner| {
+                Box::new(CancellingUploadWriter {
+                    inner,
+                    cancellation: signal.clone(),
+                    bytes_written: bytes.clone(),
+                    aborted: abort.clone(),
+                })
+            }))
+            .build()
+            .unwrap();
+        let remote_store = ObjectStore::new(Memory::default()).unwrap().layer(layer);
+        let cache = env
+            .create_write_cache(local_store.clone(), ReadableSize::mb(10))
+            .await;
+        let key = IndexKey::new(RegionId::new(1024, 1), FileId::random(), FileType::Parquet);
+        let data = vec![42; 1024 * 1024];
+        local_store
+            .write(&cache.file_cache.cache_file_path(key), data.clone())
+            .await
+            .unwrap();
+        let result = cache
+            .upload_with_cancellation(
+                key,
+                "cancelled.parquet",
+                &remote_store,
+                UploadOptions {
+                    op_type: OperationType::Compact,
+                    write_buffer_size: ReadableSize::kb(1),
+                },
+                Some(&cancellation),
+            )
+            .await;
+        assert!(matches!(
+            result,
+            Err(error::Error::SstWriteCancelled { .. })
+        ));
+        assert!(aborted.load(Ordering::Relaxed));
+        let bytes = bytes_written.load(Ordering::Relaxed);
+        assert!(
+            bytes > 0 && bytes < data.len(),
+            "wrote {bytes} bytes before cancelling"
+        );
+        assert!(!remote_store.exists("cancelled.parquet").await.unwrap());
+    }
 
     struct RedirectUploadStoreWrapper {
         target_store: ObjectStore,
