@@ -120,7 +120,7 @@ impl Preparation {
     }
 }
 
-fn same_labels(left: &RawLabelSource, right: &RawLabelSource) -> bool {
+pub(super) fn same_labels(left: &RawLabelSource, right: &RawLabelSource) -> bool {
     match (left, right) {
         (
             RawLabelSource::PrimaryKey {

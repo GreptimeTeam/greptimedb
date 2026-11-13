@@ -36,6 +36,7 @@ use super::metadata::{
 };
 use super::*;
 use crate::series_index::artifact::{SamplesEntry, SamplesFileHandle};
+use crate::series_index::columnar::codec as columnar_codec;
 use crate::series_index::format::{SamplesBatch, SamplesFormat, SamplesReadRequest};
 use crate::series_index::identity::{ExactSeriesKey, IdentityEncoding};
 use crate::series_index::purger::series_index_channel;
@@ -2301,6 +2302,101 @@ async fn keys_are_kept_out_of_metadata_pages() {
         trailer.key_end - trailer.payload_end,
         "the key area holds one copy of each key and its checksum"
     );
+}
+
+/// One stream builds one decoder and one scratch, however many compressed blocks it reads.
+///
+/// Nothing else observes that reuse: a fresh decoder or scratch per block returns the same
+/// rows, so the codec's context counter and the scratch counter are what pin it.
+#[tokio::test]
+async fn stream_reuses_one_decoder_and_scratch_across_compressed_blocks() {
+    let store = store();
+    let meta = metadata();
+    // Four blocks of one series, each with a payload large enough to be stored compressed.
+    let format = ColumnarSamplesFormat {
+        block_rows: 1024,
+        ..Default::default()
+    };
+    let rows: Vec<_> = (0..4096)
+        .map(|index| (1, 7, index as i64, 1, 1, Some(0)))
+        .collect();
+    let handle = build(&format, &store, meta.clone(), &[batch(&meta, &rows, false)]).await;
+    let manifest = manifest(&store, &handle).await;
+    assert_eq!(1, manifest.files.len());
+    assert_eq!(4, manifest.files[0].num_blocks);
+    // Every block must decode a compressed payload, or a decoder rebuilt per block would build
+    // no context and the assertion below could not fail.
+    let (_, _, page, _) = root_page(&store, &handle).await;
+    let Page::Leaf(blocks) = page else {
+        panic!("one leaf page holds every block");
+    };
+    assert!(blocks.iter().all(|block| {
+        block
+            .columns
+            .iter()
+            .any(|column| column.payload.compression == 1)
+    }));
+    let reader = format.reader(store, handle).await.unwrap();
+
+    let contexts = columnar_codec::contexts_built();
+    let scratches = reader::scratches_built();
+    let batches = reader
+        .read(full_request())
+        .unwrap()
+        .try_collect::<Vec<_>>()
+        .await
+        .unwrap();
+
+    // Every block was read once, and all of them shared the stream's single decoder.
+    assert_eq!(4, batches.len());
+    assert_eq!(rows, collect_rows(&batches));
+    assert_eq!(
+        contexts + 1,
+        columnar_codec::contexts_built(),
+        "all blocks of one stream must share one zstd context"
+    );
+    assert_eq!(
+        scratches + 1,
+        reader::scratches_built(),
+        "a stream must build its scratch once, not once per block"
+    );
+}
+
+/// Reuse is per stream, never shared: a second stream over the same artifact builds its own
+/// decoder and scratch and returns the same rows.
+#[tokio::test]
+async fn each_stream_owns_its_decoder_and_scratch() {
+    let store = store();
+    let meta = metadata();
+    let format = ColumnarSamplesFormat {
+        block_rows: 1024,
+        ..Default::default()
+    };
+    let rows: Vec<_> = (0..2048)
+        .map(|index| (1, 7, index as i64, 1, 1, Some(0)))
+        .collect();
+    let handle = build(&format, &store, meta.clone(), &[batch(&meta, &rows, false)]).await;
+    let reader = format.reader(store, handle).await.unwrap();
+    let contexts = columnar_codec::contexts_built();
+    let scratches = reader::scratches_built();
+    let first = reader
+        .read(full_request())
+        .unwrap()
+        .try_collect::<Vec<_>>()
+        .await
+        .unwrap();
+    let second = reader
+        .read(full_request())
+        .unwrap()
+        .try_collect::<Vec<_>>()
+        .await
+        .unwrap();
+    assert_eq!(2, first.len());
+    assert_eq!(first.len(), second.len());
+    assert_eq!(collect_rows(&first), collect_rows(&second));
+    // Two streams build two decoders and two scratches: one each, not one shared.
+    assert_eq!(contexts + 2, columnar_codec::contexts_built());
+    assert_eq!(scratches + 2, reader::scratches_built());
 }
 
 /// A block belongs to exactly one exact series, so its key is emitted once per batch. The
