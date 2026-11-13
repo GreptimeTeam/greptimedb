@@ -504,61 +504,22 @@ fn compile_selectors_with_grid_and_value_field(
 }
 
 fn validate_inputs(root: &NativeNode, inputs: &[CompiledInput]) -> Result<()> {
-    fn check(node: &NativeNode, inputs: &[CompiledInput], next: &mut usize) -> bool {
-        match &node.expr {
-            NativeExpr::Input(bound) => {
-                let Some(input) = inputs.get(*next) else {
-                    return false;
-                };
-                *next += 1;
-                input.source_index == *next - 1
+    let bound = root.inputs();
+    if bound.len() == inputs.len()
+        && bound
+            .iter()
+            .zip(inputs)
+            .enumerate()
+            .all(|(index, (bound, input))| {
+                input.source_index == index
                     && bound.source_index == input.source_index
                     && bound.ordering == input.ordering
                     && bound
                         .output
                         .samples()
                         .is_some_and(|schema| Arc::ptr_eq(schema, &input.schema))
-            }
-            NativeExpr::Scalar(_) | NativeExpr::EvalTime { .. } => true,
-            NativeExpr::Instant { input, .. }
-            | NativeExpr::Window { input, .. }
-            | NativeExpr::Merge { input }
-            | NativeExpr::Map { input, .. }
-            | NativeExpr::Timestamp { input }
-            | NativeExpr::Vector { input, .. }
-            | NativeExpr::Aggregate { input, .. }
-            | NativeExpr::VectorOf { input }
-            | NativeExpr::ScalarOf { input } => check(input, inputs, next),
-            NativeExpr::Binary { left, right, .. }
-            | NativeExpr::Set { left, right, .. }
-            | NativeExpr::Info {
-                base: left,
-                info: right,
-                ..
-            } => check(left, inputs, next) && check(right, inputs, next),
-            NativeExpr::ParameterizedMap {
-                input, parameters, ..
-            } => {
-                check(input, inputs, next)
-                    && parameters
-                        .iter()
-                        .all(|parameter| check(parameter, inputs, next))
-            }
-            NativeExpr::ParameterizedTopK {
-                input, parameter, ..
-            } => check(input, inputs, next) && check(parameter, inputs, next),
-            NativeExpr::ParameterizedHistogram {
-                input, parameters, ..
-            } => {
-                check(input, inputs, next)
-                    && parameters
-                        .iter()
-                        .all(|parameter| check(parameter, inputs, next))
-            }
-        }
-    }
-    let mut next = 0;
-    if check(root, inputs, &mut next) && next == inputs.len() {
+            })
+    {
         return Ok(());
     }
     Err(DataFusionError::Internal(

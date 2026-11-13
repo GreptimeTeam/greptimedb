@@ -1075,6 +1075,157 @@ pub struct NativeNode {
     pub output: NativeType,
 }
 
+impl NativeExpr {
+    /// The subtrees this expression reads, in the order the node evaluates them.
+    pub fn children(&self) -> Vec<&NativeNode> {
+        match self {
+            NativeExpr::Input(_) | NativeExpr::Scalar(_) | NativeExpr::EvalTime { .. } => {
+                Vec::new()
+            }
+            NativeExpr::VectorOf { input }
+            | NativeExpr::Instant { input, .. }
+            | NativeExpr::Merge { input }
+            | NativeExpr::Window { input, .. }
+            | NativeExpr::Map { input, .. }
+            | NativeExpr::Timestamp { input }
+            | NativeExpr::Aggregate { input, .. }
+            | NativeExpr::Vector { input, .. }
+            | NativeExpr::ScalarOf { input } => vec![input],
+            NativeExpr::ParameterizedMap {
+                input, parameters, ..
+            }
+            | NativeExpr::ParameterizedHistogram {
+                input, parameters, ..
+            } => std::iter::once(input.as_ref())
+                .chain(parameters.iter())
+                .collect(),
+            NativeExpr::ParameterizedTopK {
+                input, parameter, ..
+            } => vec![input, parameter],
+            NativeExpr::Binary { left, right, .. } | NativeExpr::Set { left, right, .. } => {
+                vec![left, right]
+            }
+            NativeExpr::Info { base, info, .. } => vec![base, info],
+        }
+    }
+
+    /// This expression with its children replaced, in the order [`Self::children`] reports them.
+    ///
+    /// Panics when `children` holds fewer nodes than the expression reads.
+    pub fn with_children(&self, children: Vec<NativeNode>) -> NativeExpr {
+        let mut children = children.into_iter();
+        let mut next = || children.next().expect("one replacement per child");
+        match self {
+            NativeExpr::Input(_) | NativeExpr::Scalar(_) | NativeExpr::EvalTime { .. } => {
+                self.clone()
+            }
+            NativeExpr::VectorOf { .. } => NativeExpr::VectorOf {
+                input: Box::new(next()),
+            },
+            NativeExpr::Instant { op, .. } => NativeExpr::Instant {
+                input: Box::new(next()),
+                op: op.clone(),
+            },
+            NativeExpr::Merge { .. } => NativeExpr::Merge {
+                input: Box::new(next()),
+            },
+            NativeExpr::Window { op, .. } => NativeExpr::Window {
+                input: Box::new(next()),
+                op: op.clone(),
+            },
+            NativeExpr::Map { op, .. } => NativeExpr::Map {
+                input: Box::new(next()),
+                op: op.clone(),
+            },
+            NativeExpr::ParameterizedMap { op, parameters, .. } => NativeExpr::ParameterizedMap {
+                input: Box::new(next()),
+                op: *op,
+                parameters: (0..parameters.len()).map(|_| next()).collect(),
+            },
+            NativeExpr::ScalarOf { .. } => NativeExpr::ScalarOf {
+                input: Box::new(next()),
+            },
+            NativeExpr::ParameterizedTopK { op, .. } => NativeExpr::ParameterizedTopK {
+                input: Box::new(next()),
+                op: op.clone(),
+                parameter: Box::new(next()),
+            },
+            NativeExpr::ParameterizedHistogram { op, parameters, .. } => {
+                NativeExpr::ParameterizedHistogram {
+                    input: Box::new(next()),
+                    op: op.clone(),
+                    parameters: (0..parameters.len()).map(|_| next()).collect(),
+                }
+            }
+            NativeExpr::Timestamp { .. } => NativeExpr::Timestamp {
+                input: Box::new(next()),
+            },
+            NativeExpr::Aggregate { op, .. } => NativeExpr::Aggregate {
+                input: Box::new(next()),
+                op: op.clone(),
+            },
+            NativeExpr::Vector { op, .. } => NativeExpr::Vector {
+                input: Box::new(next()),
+                op: op.clone(),
+            },
+            NativeExpr::Binary { matching, .. } => NativeExpr::Binary {
+                left: Box::new(next()),
+                right: Box::new(next()),
+                matching: matching.clone(),
+            },
+            NativeExpr::Set { op, .. } => NativeExpr::Set {
+                left: Box::new(next()),
+                right: Box::new(next()),
+                op: op.clone(),
+            },
+            NativeExpr::Info { selector, .. } => NativeExpr::Info {
+                base: Box::new(next()),
+                info: Box::new(next()),
+                selector: selector.clone(),
+            },
+        }
+    }
+}
+
+impl NativeNode {
+    /// Whether `predicate` holds for this node or any node below it.
+    pub fn any(&self, predicate: &impl Fn(&NativeNode) -> bool) -> bool {
+        predicate(self)
+            || self
+                .expr
+                .children()
+                .into_iter()
+                .any(|child| child.any(predicate))
+    }
+
+    /// The input leaves below this node, in the order the tree evaluates them. A source that two
+    /// leaves read is listed once per leaf.
+    pub fn inputs(&self) -> Vec<&BoundInput> {
+        fn collect<'a>(node: &'a NativeNode, inputs: &mut Vec<&'a BoundInput>) {
+            if let NativeExpr::Input(input) = &node.expr {
+                inputs.push(input);
+            }
+            for child in node.expr.children() {
+                collect(child, inputs);
+            }
+        }
+        let mut inputs = Vec::new();
+        collect(self, &mut inputs);
+        inputs
+    }
+
+    /// Whether this node reads no data at all: a constant, the evaluation time, or an operation
+    /// between them. Every execution computes the same value for it.
+    pub fn is_data_free(&self) -> bool {
+        match &self.expr {
+            NativeExpr::Scalar(_) | NativeExpr::EvalTime { .. } => true,
+            NativeExpr::Binary { left, right, .. } => left.is_data_free() && right.is_data_free(),
+            NativeExpr::VectorOf { input } => input.is_data_free(),
+            _ => false,
+        }
+    }
+}
+
 /// Whether this tree can hand over two series that share one canonical label set.
 ///
 /// A canonical label set is the identity a [`NativeExpr::Merge`] groups by: the metric name plus the
