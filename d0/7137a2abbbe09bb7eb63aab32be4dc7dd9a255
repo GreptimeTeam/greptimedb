@@ -1,0 +1,21 @@
+src/puffin/src/puffin_manager/fs_puffin_manager/reader.rs
+  s_17057bba187655::t_f2dfec2a326027 84-145
+src/puffin/src/puffin_manager/tests.rs
+  s_17057bba187655::t_3dd89eb59d68a4 748-752,756-817
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "d07137a2abbbe09bb7eb63aab32be4dc7dd9a255",
+  "prompts": {},
+  "sessions": {
+    "s_17057bba187655": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1c56d-fbcd-75c2-86d2-c4b3f17c03dc",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}
