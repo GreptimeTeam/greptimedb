@@ -43,7 +43,9 @@ pub fn binlit_as_veclit(bytes: &[u8]) -> Result<Cow<'_, [f32]>> {
         .fail();
     }
 
-    if cfg!(target_endian = "little") {
+    if cfg!(target_endian = "little") && bytes.as_ptr().align_offset(align_of::<f32>()) == 0 {
+        // The length is a multiple of four, the pointer is aligned, and every f32 bit
+        // pattern is valid. The borrowed slice cannot outlive the input bytes.
         Ok(unsafe {
             let vec = std::slice::from_raw_parts(
                 bytes.as_ptr() as *const f32,
@@ -121,6 +123,29 @@ mod tests {
 
         let result = parse_veclit_from_strlit("[1.0, a, 3.0]");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_binlit_as_veclit_alignment() {
+        #[repr(align(4))]
+        struct Aligned([u8; 16]);
+        let mut storage = Aligned([0; 16]);
+        let values = [1.25, -2.5, 3.0];
+        let bytes = veclit_to_binlit(&values);
+        for offset in 0..4 {
+            storage.0[offset..offset + bytes.len()].copy_from_slice(&bytes);
+            let result = binlit_as_veclit(&storage.0[offset..offset + bytes.len()]).unwrap();
+            assert_eq!(result.as_ref(), values);
+            assert_eq!(
+                matches!(result, Cow::Borrowed(_)),
+                cfg!(target_endian = "little") && offset == 0
+            );
+            assert!(
+                binlit_as_veclit(&storage.0[offset..offset])
+                    .unwrap()
+                    .is_empty()
+            );
+        }
     }
 
     #[test]
