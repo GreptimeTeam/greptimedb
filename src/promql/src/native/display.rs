@@ -124,6 +124,8 @@ fn describe(node: &NativeNode) -> String {
             ParameterizedOp::Clamp => "clamp".to_string(),
             ParameterizedOp::ClampMin => "clamp_min".to_string(),
             ParameterizedOp::ClampMax => "clamp_max".to_string(),
+            ParameterizedOp::MaxOf => "max_of".to_string(),
+            ParameterizedOp::MinOf => "min_of".to_string(),
         },
         NativeExpr::Instant { op, .. } => {
             let mut text = format!(

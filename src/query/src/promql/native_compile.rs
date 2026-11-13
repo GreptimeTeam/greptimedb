@@ -1379,6 +1379,9 @@ fn compile_call(context: &Context, call: &Call) -> Result<NativeNode> {
     // kernel for is refused as such whichever arguments it was given: `pi()` and `time()` have no
     // vector to map, and the rejection names the name rather than describing a vector they never
     // wrote.
+    if let Some(node) = scalar_function_call(context, func.name, &args.args)? {
+        return Ok(node);
+    }
     if let Some(node) = parameterized_call(context, func.name, &args.args)? {
         return Ok(node);
     }
@@ -1454,6 +1457,76 @@ fn scalar_call(
         _ => return Ok(None),
     };
     Ok(Some(node))
+}
+
+/// Binds `max_of(a, b)` or `min_of(a, b)`, whose arguments are both scalars, or returns `None` for
+/// any other call.
+///
+/// Prometheus types both as `(scalar, scalar) -> scalar`, so what the call wrote is two scalar
+/// expressions rather than a vector and its parameters: the first argument is the map's input and
+/// the second is its one parameter, and the answer is a scalar on the grid they are evaluated on. A
+/// constant argument is bound as the number it folds to ([`compile_expr`]); as the input, that
+/// number is the one chunk the map materializes, so a call of two constants reads no input at all.
+/// A vector argument is refused here: it is not a shape the kernel could compute, and a function of
+/// two scalars has no vector form to fold.
+fn scalar_function_call(
+    context: &Context,
+    name: &str,
+    args: &[Box<PromExpr>],
+) -> Result<Option<NativeNode>> {
+    let op = match name {
+        "max_of" => ParameterizedOp::MaxOf,
+        "min_of" => ParameterizedOp::MinOf,
+        _ => return Ok(None),
+    };
+    let [left, right] = args else {
+        return Err(not_implemented(&format!(
+            "a call to `{name}` with {} argument(s), where it takes two scalars",
+            args.len()
+        )));
+    };
+    for argument in [left, right] {
+        if argument.value_type() != ValueType::Scalar {
+            return Err(not_implemented(&format!(
+                "a call to `{name}` whose argument `{argument}` is a {}, where the function takes \
+                 scalars",
+                argument.value_type()
+            )));
+        }
+    }
+    let input = compile_expr(context, left)?;
+    let output_grid = match &input.output {
+        NativeType::Scalar(grid) => Arc::clone(grid),
+        // A scalar expression compiles to a scalar, so this is a backstop rather than a shape a
+        // statement reaches.
+        _ => {
+            return Err(not_implemented(&format!(
+                "a call to `{name}` whose argument `{left}` does not evaluate to a scalar"
+            )));
+        }
+    };
+    let parameter = compile_expr(context, right)?;
+    match &parameter.output {
+        NativeType::Scalar(grid) if grid.spec() == output_grid.spec() => {}
+        NativeType::Scalar(_) => {
+            return Err(not_implemented(&format!(
+                "a call to `{name}` whose arguments are evaluated on grids that differ"
+            )));
+        }
+        _ => {
+            return Err(not_implemented(&format!(
+                "a call to `{name}` whose argument `{right}` does not evaluate to a scalar"
+            )));
+        }
+    }
+    Ok(Some(NativeNode {
+        expr: NativeExpr::ParameterizedMap {
+            input: Box::new(input),
+            op,
+            parameters: vec![parameter],
+        },
+        output: NativeType::Scalar(output_grid),
+    }))
 }
 
 /// Binds `round`, `clamp`, `clamp_min` or `clamp_max` whose parameters are not all constants, or
