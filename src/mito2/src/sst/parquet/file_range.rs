@@ -545,11 +545,7 @@ impl FileRangeContext {
         self.base.compat_batch = compat;
     }
 
-    /// Filters converted source batches before compatibility and merge.
-    /// Predicate projections are temporary: only their row mask is applied to the
-    /// original batch, preserving its schema and complete encoded primary keys.
-    /// If a partition expr filter is configured, it is also applied.
-    /// Physical filter exprs are not evaluated here; they are only applied during prefiltering.
+    /// Applies source-batch filtering; see [RangeBase::precise_filter_flat] for layout invariants.
     pub(crate) fn precise_filter_flat(
         &self,
         input: RecordBatch,
@@ -655,7 +651,7 @@ impl RangeBase {
     /// Predicate projections are temporary: only their row mask is applied to the
     /// original batch, preserving its schema and complete encoded primary keys.
     ///
-    /// It assumes all necessary tags are already decoded from the primary key.
+    /// Missing predicate tags are decoded from the primary key on demand.
     ///
     /// # Arguments
     /// * `input` - The RecordBatch to filter
@@ -1180,7 +1176,7 @@ mod tests {
             )
             .unwrap();
             let batch = read_format.convert_batch(raw.clone(), None).unwrap();
-            let mapper = CompactionProjectionMapper::try_new(&read_format).unwrap();
+            let mapper = CompactionProjectionMapper::new(&read_format);
             assert_eq!(mapper.is_some(), materialized);
             let compacted = match mapper {
                 Some(mapper) => mapper.project(batch.clone()).unwrap(),
@@ -1235,11 +1231,10 @@ mod tests {
                     expected.as_slice(),
                     "materialized={materialized}, skip_fields={skip_fields}, skip_tags={skip_tags}"
                 );
-                let compacted =
-                    match CompactionProjectionMapper::try_new(&base.read_format).unwrap() {
-                        Some(mapper) => mapper.project(output).unwrap(),
-                        None => output,
-                    };
+                let compacted = match CompactionProjectionMapper::new(&base.read_format) {
+                    Some(mapper) => mapper.project(output).unwrap(),
+                    None => output,
+                };
                 let mask = BooleanArray::from(
                     (0..6)
                         .map(|row| expected.contains(&row))
