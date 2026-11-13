@@ -487,6 +487,9 @@ impl FusedSeries {
             }
             node.canonical_producer = true;
         }
+        // The planner's single-region proof is not part of the encoding: the envelope keeps the
+        // bytes it has always had, and a node read back from one carries no proof - which is the
+        // conservative answer, because a producer without it keeps its placement above the regions.
         if format == FusedOutputFormat::PlainRows {
             let schema = Arc::new(node.output_schema.as_arrow().clone());
             validate_plain_output_schema(
@@ -869,6 +872,22 @@ impl FusedSeries {
                         (input, label_source, ordering)
                     };
                     let count = input.properties().partitioning.partition_count();
+                    // A per-series tree reads each raw series on its own, so its width is a choice:
+                    // route the raw frames by their stored key up to the width this execution was
+                    // asked for, and each series still lands on exactly one owner.
+                    if !normalize
+                        && count < target_partitions.unwrap_or(count).max(1)
+                        && matching_policy.is_none()
+                    {
+                        let width = target_partitions.unwrap_or(count).max(1);
+                        let input = Arc::new(SeriesRepartitionExec::try_new_with_routing(
+                            input,
+                            width,
+                            SeriesRouting::RawPrimaryKey,
+                        )?) as Arc<dyn ExecutionPlan>;
+                        let ordering = series_frame_ordering(input.schema().as_ref())?;
+                        return Ok((input, RawLabelSource::Explicit, ordering));
+                    }
                     if normalize && count != 1 {
                         let input = Arc::new(SeriesRepartitionExec::try_new(input, 1)?)
                             as Arc<dyn ExecutionPlan>;
@@ -2101,6 +2120,7 @@ impl FusedSeriesExec {
             if let Some(scan) = plan.downcast_ref::<SeriesScanExec>() {
                 return bound_tags_cover_primary_key(scan.scan_binding());
             }
+
             if let Some(cooperative) = plan.downcast_ref::<CooperativeExec>() {
                 return cooperative
                     .children()

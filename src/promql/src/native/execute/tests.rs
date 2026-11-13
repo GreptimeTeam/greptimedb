@@ -12021,17 +12021,13 @@ fn an_aggregate_refuses_a_chunk_of_another_layout_and_returns_its_reservation() 
     let error = execution
         .next_chunk()
         .expect_err("a chunk of another field count was folded");
-    match &error {
-        DataFusionError::Context(context, inner) => {
-            assert_eq!(context, "native.aggregate at root");
-            assert!(
-                matches!(inner.as_ref(), DataFusionError::Execution(_)),
-                "{inner}"
-            );
-        }
-        other => panic!("the refusal is not aggregate-contextualized: {other}"),
-    }
+    // The refusal names the node it came from and keeps the sentence that says what disagreed, so a
+    // client reads the cause and not just the node.
     let message = error.to_string();
+    assert!(
+        message.contains("native.aggregate at root: "),
+        "the refusal is not aggregate-contextualized: {message}"
+    );
     assert!(
         message.contains("the `Sum` aggregate"),
         "the refusal does not name the aggregate: {message}"

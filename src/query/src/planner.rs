@@ -52,6 +52,7 @@ use sqlparser::ast::{AccessExpr, Value, visit_expressions_mut};
 use store_api::metric_engine_consts::DATA_SCHEMA_TSID_COLUMN_NAME;
 
 use crate::dist_plan::DistPlannerOptions;
+use crate::dist_plan::region_local_node;
 use crate::error::{
     CteColumnSchemaMismatchSnafu, PlanSqlSnafu, QueryPlanSnafu, Result, SqlSnafu,
     UnimplementedSnafu,
@@ -80,33 +81,63 @@ pub trait LogicalPlanner: Send + Sync {
     fn as_any(&self) -> &dyn Any;
 }
 
-/// A remote native plan may place fused evaluation only above independent raw sources.
-/// In particular, a bare scan under FusedSeries would require shipping the process-local
-/// fused plan to a region, which this gate must not admit.
+/// A native plan a distributed planner splits over regions may place fused evaluation in one of two
+/// places: above one independent raw source per region, or inside the region whose own scan it
+/// reads.
+///
+/// The second placement is the analyzer's to give. It moves a node into a region only when it
+/// classifies the node as running where its scan is, and a bare scan is never shipped across a
+/// region boundary on its own: nothing below the boundary could read it. So a scan is admitted only
+/// under a node the analyzer would move, and every other input of the plan has to be a raw source
+/// that names the region it reads.
 ///
 /// A fused node that reads no region is the one exception: it has nothing to place in a region, so
 /// the frontend evaluates it and the transport this gate protects is never used.
 fn remote_native_raw_plan_supported(plan: &LogicalPlan) -> bool {
-    fn walk(plan: &LogicalPlan, found_raw: &mut bool) -> bool {
-        if matches!(plan, LogicalPlan::TableScan(_)) {
-            return false;
+    /// `region_local` says the nearest enclosing node reads its scan where that scan is planned, so
+    /// the subtree below it travels inside the region's own plan.
+    fn walk(
+        plan: &LogicalPlan,
+        region_local: bool,
+        found_raw: &mut bool,
+        found_region_local: &mut bool,
+    ) -> bool {
+        match plan {
+            LogicalPlan::TableScan(_) => region_local,
+            LogicalPlan::Extension(extension) => {
+                if extension
+                    .node
+                    .as_any()
+                    .is::<promql::extension_plan::RawSeriesSource>()
+                {
+                    *found_raw = true;
+                    return matches!(
+                        extension.node.inputs().as_slice(),
+                        [LogicalPlan::TableScan(_)]
+                    );
+                }
+                let region_local = extension
+                    .node
+                    .as_any()
+                    .is::<promql::extension_plan::FusedSeries>()
+                    && region_local_node(extension.node.as_ref());
+                *found_region_local |= region_local;
+                extension
+                    .node
+                    .inputs()
+                    .iter()
+                    .all(|child| walk(child, region_local, found_raw, found_region_local))
+            }
+            _ => plan
+                .inputs()
+                .iter()
+                .all(|child| walk(child, region_local, found_raw, found_region_local)),
         }
-        if let LogicalPlan::Extension(extension) = plan
-            && extension
-                .node
-                .as_any()
-                .is::<promql::extension_plan::RawSeriesSource>()
-        {
-            *found_raw = true;
-            return matches!(
-                extension.node.inputs().as_slice(),
-                [LogicalPlan::TableScan(_)]
-            );
-        }
-        plan.inputs().iter().all(|child| walk(child, found_raw))
     }
     let mut found_raw = false;
-    walk(plan, &mut found_raw) && (found_raw || is_regionless_fused_plan(plan))
+    let mut found_region_local = false;
+    walk(plan, false, &mut found_raw, &mut found_region_local)
+        && (found_raw || found_region_local || is_regionless_fused_plan(plan))
 }
 
 /// Whether `plan` is a native fused plan with no region below it.
@@ -694,11 +725,13 @@ impl DfLogicalPlanner {
         .map_err(BoxedError::new)
         .context(QueryPlanSnafu)?;
 
-        // Only per-selector raw sources have a supported remote transport, and a statement that
-        // reads no table needs none. Decide while the original statement is still available:
-        // physical planning cannot fall back safely.
+        // A distributed planner plans a native statement over per-selector raw sources, and a
+        // statement that reads no table needs none. Anything else keeps the existing plan. Decide
+        // while the original statement is still available: physical planning cannot fall back
+        // safely. An engine with no distributed planner plans no region, so there is nothing to
+        // admit its plan against.
         let plan = if native_requested
-            && !self.engine_state.in_process_region_transport()
+            && self.engine_state.with_dist_planner()
             && !remote_native_raw_plan_supported(&plan)
         {
             PromPlanner::stmt_to_plan_with_annotations(
@@ -1215,10 +1248,11 @@ mod tests {
         create_promql_test_engine_with(crate::options::QueryOptions::default(), false)
     }
 
-    /// The PromQL fixture, additionally stating the engine options and how its regions are reached.
+    /// The PromQL fixture, additionally stating the engine options and whether it plans distributed
+    /// statements.
     fn create_promql_test_engine_with(
         query_options: crate::options::QueryOptions,
-        in_process_region_transport: bool,
+        with_dist_planner: bool,
     ) -> QueryEngineRef {
         let catalog_manager = MemoryCatalogManager::with_default_setup();
         let physical_table_name = "phy";
@@ -1322,15 +1356,14 @@ mod tests {
             })
             .unwrap();
 
-        QueryEngineFactory::try_new_with_plugins_and_region_transport(
+        QueryEngineFactory::try_new_with_plugins(
             catalog_manager,
             None,
             None,
             None,
             None,
             None,
-            false,
-            in_process_region_transport,
+            with_dist_planner,
             Default::default(),
             query_options,
         )
@@ -1377,7 +1410,7 @@ mod tests {
     ) -> crate::error::Result<String> {
         let engine = create_promql_test_engine_with(
             engine_options,
-            // The native route plans a region input the region server in this process accepts.
+            // The route a deployed frontend plans: a distributed planner over its regions.
             true,
         );
         let mut builder = QueryContextBuilder::default()
@@ -1484,13 +1517,16 @@ mod tests {
         assert!(message.contains("Expected true or false"), "{message}");
     }
 
-    /// Remote native planning accepts independent raw sources only. Unsupported shapes are
-    /// replanned through the legacy route, while the in-process route remains unchanged.
+    /// One deployment, one topology: an engine that plans regions reads every selector through one
+    /// source per region, so the admission gate admits the same shapes wherever those regions are.
+    /// An engine with no distributed planner plans no region, so its plans keep the shapes a region
+    /// runs itself and there is nothing for the gate to judge.
     #[tokio::test]
-    async fn test_remote_native_promql_admission_replans_unsupported_shapes() {
-        for (in_process, query, native) in [
+    async fn test_native_promql_admission_is_the_same_for_both_deployments() {
+        for (with_dist_planner, query, sourced) in [
             (false, "some_metric + other_metric", true),
             (false, "rate(some_metric[5m])", false),
+            (true, "some_metric + other_metric", true),
             (true, "rate(some_metric[5m])", true),
         ] {
             let engine = create_promql_test_engine_with(
@@ -1498,7 +1534,7 @@ mod tests {
                     experimental_native_promql: true,
                     ..Default::default()
                 },
-                in_process,
+                with_dist_planner,
             );
             let query_ctx = Arc::new(
                 QueryContextBuilder::default()
@@ -1519,20 +1555,25 @@ mod tests {
             .unwrap();
             let plan = engine.planner().plan(&stmt, query_ctx).await.unwrap();
             let display = plan.display_indent().to_string();
-            assert_eq!(
+            assert!(
                 display.contains("FusedSeries"),
-                native,
-                "in_process={in_process}, query={query}: {display}"
+                "with_dist_planner={with_dist_planner}, query={query}: {display}"
             );
-            if native && !in_process {
+            if with_dist_planner {
+                // The gate admits the plan instead of replanning it through the legacy route: one
+                // source per region under a fused node.
                 assert!(remote_native_raw_plan_supported(&plan), "{display}");
-                assert!(display.contains("RawSeriesSource"), "{display}");
             }
+            assert_eq!(
+                display.contains("RawSeriesSource"),
+                sourced,
+                "with_dist_planner={with_dist_planner}, query={query}: {display}"
+            );
         }
     }
 
-    /// Plans `query` on the fixture engine with the native route requested. The engine reaches its
-    /// regions over the wire, which is the route the admission gate guards.
+    /// Plans `query` on the fixture engine with the native route requested. The engine is one with
+    /// no distributed planner, so its plans keep the shapes a region runs itself.
     async fn plan_remote_native_promql(
         engine: &QueryEngineRef,
         query_ctx: &QueryContextRef,
@@ -1749,9 +1790,9 @@ mod tests {
         );
     }
 
-    /// A statement that reads no table plans natively over the wire, where there is no region to
-    /// place anything in: the frontend evaluates the fused node under the native column names
-    /// rather than the ones the existing planner derives from an expression.
+    /// A statement that reads no table plans natively, and there is no region to place anything in:
+    /// the frontend evaluates the fused node under the native column names rather than the ones the
+    /// existing planner derives from an expression.
     #[tokio::test]
     async fn test_remote_native_promql_plans_a_data_free_statement_natively() {
         let engine = create_promql_test_engine_with(
@@ -1831,9 +1872,8 @@ mod tests {
     }
 
     /// A nameless selector that matches no metric table has no region to read either, so the typed
-    /// empty input it is planned as stays that input on both routes and the node above it is
-    /// evaluated on the frontend. Binding a metric to it is what used to turn this statement into
-    /// an internal error over the wire.
+    /// empty input it is planned as stays that input and the node above it is evaluated on the
+    /// frontend. Binding a metric to it is what used to turn this statement into an internal error.
     #[tokio::test]
     async fn test_remote_native_promql_plans_a_zero_match_selector_natively() {
         let engine = create_promql_test_engine_with(
