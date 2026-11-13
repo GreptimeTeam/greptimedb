@@ -42,7 +42,8 @@ Double-check with the user.
 For every release type, use the release tag's commit as `<tip>` when the tag exists.
 Resolve the exact tag from the remote (use the peeled `^{}` commit for annotated tags)
 and exclude commits added to the release branch afterward. Before tagging, pin the
-intended release commit and record its SHA; recheck against the tag before publication.
+intended release commit and record its SHA. Pass that SHA as `--target` when creating
+the release, then verify the resulting tag before publishing the docs copy.
 
 Key topology fact: **patch tags** (`v1.0.1`, `v1.0.2`) live on `release/vX.Y` and are **NOT**
 ancestors of `main` (they are cherry-picks with different SHAs). Up to v1.1 the `.0` tag was
@@ -174,6 +175,10 @@ them and add the user-facing ones by hand:
 ```
 git log --format=%s <range> | grep -E '\(#[0-9]+\)$' | grep -vE '^[a-z]+(\([^)]*\))?!?: '
 ```
+Review generated breaking-change bullets using the same user-impact criteria as §6. Move
+internal-only entries to ordinary groups, preserving genuine incompatibilities, PR links,
+and authors.
+
 Use only the groups in `cliff.toml`. `git cliff` prints a `### Build` section for `build:` commits
 because no parser matches them; move a user-facing `build(deps)` fix to Bug Fixes and the rest to
 Miscellaneous Tasks. Keep each bullet list free of blank lines; a blank line turns it into a
