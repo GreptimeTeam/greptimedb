@@ -1220,6 +1220,137 @@ async fn test_postgres_copy_in_prom_write_v1() {
     server.shutdown().await.unwrap();
 }
 
+/// Production wiring shares Prom logical-table batching between HTTP and COPY,
+/// including when the Prom HTTP endpoint is disabled. Ordinary tables keep the
+/// direct-write fallback even when the logical batcher is enabled.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_postgres_copy_in_prom_write_batching_parity() {
+    use std::time::Duration;
+
+    use api::greptime_proto::io::prometheus::write::v2::Sample;
+    use api::prom_store::remote;
+    use frontend::server::Services;
+    use frontend::service_config::BatcherOptions;
+    use prost::Message;
+    use servers::batcher::BatchingProtocol;
+    use servers::prom_remote_write::v2::test_util as remote_write_v2;
+
+    init_default_ut_logging();
+    for (prom_batching, http_prom_enabled) in [(false, true), (true, true), (true, false)] {
+        let mut instance =
+            crate::standalone::GreptimeDbStandaloneBuilder::new("pg_copy_prom_batch")
+                .build()
+                .await;
+        let mut opts = instance.opts.clone();
+        opts.http.addr = "127.0.0.1:0".into();
+        opts.grpc.bind_addr = "127.0.0.1:0".into();
+        opts.postgres.addr = "127.0.0.1:0".into();
+        opts.prom_store.enable = http_prom_enabled;
+        // An OTLP-only batcher must not opt Prom COPY into batching. Conversely,
+        // the PostgreSQL-only Prom case must initialize without another endpoint.
+        opts.otlp.enable = !prom_batching;
+        let batcher_options = BatcherOptions {
+            protocols: if prom_batching {
+                vec![BatchingProtocol::Prom]
+            } else {
+                vec![BatchingProtocol::Otlp]
+            },
+            pending_rows_flush_interval: Duration::from_millis(10),
+            ..Default::default()
+        };
+        // Cover both the legacy shared configuration and the logical-table
+        // override. Neither opts into PostgreSQL SQL batching.
+        opts.pending_rows_batcher.table.protocols.clear();
+        if prom_batching && http_prom_enabled {
+            opts.pending_rows_batcher.table = batcher_options;
+        } else {
+            opts.pending_rows_batcher.logical_table = Some(batcher_options);
+        }
+        let mut servers = Services::new(opts, instance.fe_instance().clone(), Default::default())
+            .build()
+            .unwrap();
+        servers.start_all().await.unwrap();
+        let client = connect(servers.addr("POSTGRES_SERVER").unwrap().port()).await;
+
+        client
+            .simple_query(
+                "CREATE TABLE copy_prom_direct (greptime_timestamp TIMESTAMP TIME INDEX, \
+                 greptime_value DOUBLE) ENGINE=mito",
+            )
+            .await
+            .unwrap();
+        for (metric, eligible) in [("copy_prom_batched", true), ("copy_prom_direct", false)] {
+            for version in [1, 2] {
+                let timestamp = 1_700_000_000_000 + version;
+                let payload = if version == 1 {
+                    remote::WriteRequest {
+                        timeseries: vec![remote::TimeSeries {
+                            labels: vec![remote::Label {
+                                name: "__name__".into(),
+                                value: metric.into(),
+                            }],
+                            samples: vec![remote::Sample {
+                                value: 42.0,
+                                timestamp,
+                            }],
+                            ..Default::default()
+                        }],
+                        ..Default::default()
+                    }
+                    .encode_to_vec()
+                } else {
+                    remote_write_v2::request_with_labels_and_samples(
+                        vec![("__name__", metric)],
+                        vec![Sample {
+                            value: 42.0,
+                            timestamp,
+                            ..Default::default()
+                        }],
+                    )
+                    .encode_to_vec()
+                };
+                let body = servers::prom_store::snappy_compress(&payload).unwrap();
+                let before = servers::metrics::FLUSH_TOTAL.get();
+                let rows = feed_copy_in(
+                    &client,
+                    &format!("COPY FROM STDIN WITH (FORMAT promwrite, version {version})"),
+                    vec![Bytes::from(body)],
+                )
+                .await
+                .unwrap();
+                assert_eq!(rows, 1);
+                assert_eq!(
+                    servers::metrics::FLUSH_TOTAL.get() - before,
+                    u64::from(prom_batching && eligible),
+                    "batcher selection: prom={prom_batching}, http={http_prom_enabled}, \
+                     eligible={eligible}, version={version}"
+                );
+                // Default synchronous acknowledgement makes both paths visible
+                // immediately, with COPY's exact affected-row count preserved.
+                let rows = client
+                    .simple_query(&format!(
+                        "SELECT greptime_value FROM {metric} ORDER BY greptime_timestamp"
+                    ))
+                    .await
+                    .unwrap();
+                let values: Vec<_> = rows
+                    .iter()
+                    .filter_map(|message| match message {
+                        tokio_postgres::SimpleQueryMessage::Row(row) => {
+                            Some(row.get(0).unwrap().parse::<f64>().unwrap())
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                assert_eq!(values, vec![42.0; version as usize]);
+            }
+        }
+        drop(client);
+        servers.shutdown_all().await.unwrap();
+        instance.guard.remove_all().await;
+    }
+}
+
 /// `COPY FROM STDIN WITH (FORMAT promwrite, version 2)` ingests a
 /// remote-write v2 body (samples and histograms) through the shared v2
 /// core; the row count reports written samples plus histograms.
@@ -1359,7 +1490,7 @@ async fn test_postgres_copy_in_prom_write_memory_quota() {
         64 * 1024,
         common_memory_manager::OnExhaustedPolicy::default(),
     ))
-    .with_prom_remote_write(fe.clone(), Some(fe.clone()), true, Default::default());
+    .with_prom_remote_write(fe.clone(), Some(fe.clone()), true, Default::default(), None);
     use servers::server::Server;
     let mut pg_server = Box::new(pg_server) as Box<dyn Server>;
     pg_server
@@ -1564,7 +1695,7 @@ async fn quota_test_server(
         64 * 1024,
         policy,
     ))
-    .with_prom_remote_write(fe.clone(), Some(fe.clone()), true, Default::default());
+    .with_prom_remote_write(fe.clone(), Some(fe.clone()), true, Default::default(), None);
     use servers::server::Server;
     let mut pg_server = Box::new(pg_server) as Box<dyn Server>;
     pg_server

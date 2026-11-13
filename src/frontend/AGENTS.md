@@ -88,8 +88,8 @@ including caches owned by pipeline and protocol handlers.
   Expansion must not wait while the request holds transport memory permits.
 
 - **Logical-table batching** (`instance/logical_batcher.rs`): `Services` initializes
-  one shared batcher for opted-in HTTP Prom and OTLP metric-engine
-  writes. Downstream routers can initialize it when enabling replacement endpoints.
+  one shared batcher for opted-in Prom remote-write (HTTP and PostgreSQL COPY)
+  and OTLP metric-engine writes. Downstream routers can initialize it when enabling replacement endpoints.
   `Instance::handle_otlp_metric_row_inserts` shares OTLP eligibility and dispatch
   between converters and falls back for incompatible tables.
   The schema adapter holds a weak instance reference to avoid an ownership cycle.

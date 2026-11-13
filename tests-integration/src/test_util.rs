@@ -1248,6 +1248,7 @@ pub async fn setup_pg_server_with_slow_query_threshold(
             Some(fe_instance_ref.clone()),
             true,
             Default::default(),
+            None,
         ),
     );
 
@@ -1311,6 +1312,7 @@ pub async fn setup_pg_server_for_frontend_instance(
             Some(fe_instance_ref.clone()),
             true,
             Default::default(),
+            None,
         ),
     );
 
@@ -1377,6 +1379,7 @@ pub async fn setup_pg_server_with_prom_native_histogram(
             Some(instance.fe_instance().clone()),
             true,
             Default::default(),
+            None,
         ),
     );
 

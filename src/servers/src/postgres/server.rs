@@ -27,6 +27,7 @@ use futures::StreamExt;
 use pgwire::tokio::process_socket;
 use tokio_rustls::TlsAcceptor;
 
+use crate::batcher::logical_table::LogicalTablePendingRowsBatcher;
 use crate::error::Result;
 use crate::postgres::{MakePostgresServerHandler, MakePostgresServerHandlerBuilder};
 use crate::prom_remote_write::validation::PromValidationMode;
@@ -136,21 +137,22 @@ impl PostgresServer {
 
     /// Wires the Prometheus Remote Write ingestion used by table-less
     /// `COPY FROM STDIN WITH (FORMAT promwrite)` — the same handler,
-    /// metric-engine flag and validation mode the HTTP endpoint's state
-    /// carries.
+    /// metric-engine flag, validation mode and optional shared logical-table
+    /// batcher the HTTP endpoint's state carries.
     pub fn with_prom_remote_write(
         mut self,
         handler: PromStoreProtocolHandlerRef,
         pipeline_handler: Option<PipelineHandlerRef>,
         with_metric_engine: bool,
         validation_mode: PromValidationMode,
+        pending_rows_batcher: Option<Arc<LogicalTablePendingRowsBatcher>>,
     ) -> Self {
         self.prom_write_state = Some(crate::http::prom_store::PromStoreState {
             prom_store_handler: handler,
             pipeline_handler,
             prom_store_with_metric_engine: with_metric_engine,
             prom_validation_mode: validation_mode,
-            pending_rows_batcher: None,
+            pending_rows_batcher,
             // Placeholder; `accept` injects the server's shared limiter
             // (see below) so the receive-stage charging and the
             // ingestion core enforce ONE budget.
