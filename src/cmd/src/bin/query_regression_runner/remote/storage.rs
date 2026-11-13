@@ -90,6 +90,20 @@ fn storage_summary(inspection: &Value) -> Value {
         .unwrap_or_else(|| json!({}))
 }
 
+/// Returns whether the inspected file count violates `exact_files`. Unlike
+/// `min_files`, this rejects a directory that still holds obsolete compaction
+/// inputs: the footer inspector lists whatever is on disk, not the manifest.
+pub(super) fn exact_files_failed(storage: &StorageConfig, inspection: &Value) -> bool {
+    let Some(limit) = storage.exact_files else {
+        return false;
+    };
+    inspected_file_count(inspection) != Some(limit)
+}
+
+fn inspected_file_count(inspection: &Value) -> Option<u64> {
+    value_u64(inspection.get("summary")?.get("summary")?.get("file_count"))
+}
+
 pub(super) fn enforce_storage_thresholds(
     storage: &StorageConfig,
     base_inspection: &Value,
@@ -99,6 +113,22 @@ pub(super) fn enforce_storage_thresholds(
     let candidate = storage_summary(candidate_inspection);
     let targets = [("base", &base), ("candidate", &candidate)];
     let mut results = Vec::new();
+    if let Some(limit) = storage.exact_files {
+        for (target, inspection) in [
+            ("base", base_inspection),
+            ("candidate", candidate_inspection),
+        ] {
+            let actual = inspected_file_count(inspection);
+            let ok = actual == Some(limit);
+            results.push(json!({
+                "target": target,
+                "threshold": "exact_files",
+                "status": if ok { "passed" } else { "failed" },
+                "actual": actual,
+                "limit": limit,
+            }));
+        }
+    }
     for (threshold, field, limit) in [
         ("min_files", "file_count", storage.min_files),
         (
@@ -237,5 +267,57 @@ mod tests {
         assert!(!is_storage_threshold_entry(&json!({
             "threshold": "max_candidate_latency_regression_pct"
         })));
+    }
+
+    #[test]
+    fn exact_files_rejects_leftover_files_but_stays_opt_in() {
+        let storage: StorageConfig = serde_json::from_value(json!({
+            "inspect": true,
+            "column": "value",
+            "root_suffix": null,
+            "include_metadata_files": false,
+            "min_files": 3,
+            "min_files_with_column": 3,
+            "exact_files": 3,
+            "require_encodings": [],
+            "forbid_encodings": [],
+            "max_total_file_size_bytes": null,
+            "max_column_compressed_size_bytes": null,
+            "max_column_uncompressed_size_bytes": null,
+            "max_candidate_total_file_size_regression_pct": null,
+            "max_candidate_column_compressed_size_regression_pct": null,
+            "max_candidate_column_uncompressed_size_regression_pct": null
+        }))
+        .unwrap();
+        let inspection = |file_count: u64| json!({"summary": {"summary": {"file_count": file_count, "files_with_column": file_count, "total_file_size": 1, "unique_encodings": []}}});
+        let clean = inspection(3);
+        // An obsolete compaction input still on disk after shutdown: min_files
+        // alone accepts it, exact_files must not, and the entry it emits marks
+        // the target failed.
+        let leftover = inspection(4);
+        assert!(!exact_files_failed(&storage, &clean));
+        assert!(exact_files_failed(&storage, &leftover));
+        let entries = enforce_storage_thresholds(&storage, &leftover, &clean);
+        assert!(
+            entries
+                .iter()
+                .any(|entry| entry["threshold"] == "exact_files"
+                    && entry["target"] == "base"
+                    && entry["status"] == "failed"
+                    && entry["actual"] == 4)
+        );
+        assert!(
+            entries
+                .iter()
+                .filter(|entry| entry["target"] == "candidate")
+                .all(|entry| entry["status"] == "passed")
+        );
+        // Missing counts must not pass either.
+        assert!(exact_files_failed(&storage, &json!({})));
+
+        // Without exact_files the same input stays acceptable.
+        let mut without = storage.clone();
+        without.exact_files = None;
+        assert!(!exact_files_failed(&without, &leftover));
     }
 }

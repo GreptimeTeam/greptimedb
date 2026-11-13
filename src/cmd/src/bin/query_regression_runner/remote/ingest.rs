@@ -110,7 +110,7 @@ async fn prepare_remote_target(
         )
         .into());
     }
-    let setup = run_setup_sql(client, port, &remote.database, name, setup_sql).await?;
+    let setup = run_setup_sql(client, port, &remote.database, name, "setup", setup_sql).await?;
     let (remote_write, flushes) = ingest_remote_write(generator, port, remote, client).await?;
     let expected_rows = remote
         .series_count
@@ -125,6 +125,18 @@ async fn prepare_remote_target(
         remote.visibility_timeout_seconds,
     )
     .await?;
+    // Runs after ingestion is visible and before measurement, so a failed
+    // compaction or layout assertion aborts the case instead of measuring a
+    // differently shaped dataset.
+    let post_ingest = run_setup_sql(
+        client,
+        port,
+        &remote.database,
+        name,
+        "post-ingest",
+        &remote.post_ingest_sql,
+    )
+    .await?;
     Ok(json!({
         "name": name,
         "create_database": create_database,
@@ -132,6 +144,7 @@ async fn prepare_remote_target(
         "remote_write": remote_write,
         "flushes": flushes,
         "visibility": visibility,
+        "post_ingest_sql": post_ingest,
         "status": "ok",
     }))
 }
@@ -141,6 +154,7 @@ async fn run_setup_sql(
     port: u16,
     database: &str,
     target: &str,
+    label: &str,
     setup_sql: &[String],
 ) -> Result<Vec<Value>> {
     let mut results = Vec::with_capacity(setup_sql.len());
@@ -148,7 +162,7 @@ async fn run_setup_sql(
         let result = http_post_sql(client, port, statement, database).await;
         if !result["ok"].as_bool().unwrap_or(false) {
             return Err(format!(
-                "setup SQL statement {} failed for {target}: {result}",
+                "{label} SQL statement {} failed for {target}: {result}",
                 index + 1
             )
             .into());
@@ -507,7 +521,13 @@ mod tests {
         let server = tokio::spawn(async move {
             let mut requests = Vec::with_capacity(responses.len());
             for body in responses {
-                let (mut stream, _) = listener.accept().await.unwrap();
+                // Stop waiting once the client is done, so a request count that
+                // diverges from the script fails the test instead of hanging it.
+                let Ok(Ok((mut stream, _))) =
+                    tokio::time::timeout(Duration::from_secs(5), listener.accept()).await
+                else {
+                    break;
+                };
                 let request = read_http_request(&mut stream).await;
                 requests.push(String::from_utf8(request).unwrap());
                 let response = format!(
@@ -531,7 +551,7 @@ mod tests {
             "ALTER TABLE physical SET 'compaction.twcs.trigger_file_num'='100'".to_string(),
         ];
 
-        let results = run_setup_sql(&client, port, "perf", "candidate", &setup)
+        let results = run_setup_sql(&client, port, "perf", "candidate", "setup", &setup)
             .await
             .unwrap();
 
@@ -555,7 +575,7 @@ mod tests {
             "ALTER TABLE physical SET 'compaction.twcs.trigger_file_num'='100'".to_string(),
         ];
 
-        let error = run_setup_sql(&client, port, "perf", "base", &setup)
+        let error = run_setup_sql(&client, port, "perf", "base", "setup", &setup)
             .await
             .unwrap_err();
 
@@ -568,40 +588,12 @@ mod tests {
     #[test]
     fn schedules_remote_sample_chunks_and_flushes() {
         let remote = RemoteWrite {
-            database: "public".to_string(),
-            metric: "metric".to_string(),
-            physical_table: "physical".to_string(),
-            series_count: 2,
             samples_per_series: 5,
             start_unix_millis: 100,
             step_millis: 10,
-            chunk_series_count: 1,
-            timeout_seconds: 60,
             sample_chunk_size: Some(2),
             flush_every_sample_chunks: 2,
-            visibility_timeout_seconds: 30,
-            base_setup_sql: Vec::new(),
-            candidate_setup_sql: Vec::new(),
-            prom_store: PromStore {
-                pending_rows_flush_interval: "1s".to_string(),
-                max_batch_rows: 1,
-                max_concurrent_flushes: 1,
-                worker_channel_capacity: 1,
-                max_inflight_requests: 1,
-            },
-            value: RemoteValue {
-                pattern: "linear".to_string(),
-                base: 0.0,
-                step: 1.0,
-                cardinality: 1,
-                seed: 0,
-                run_length: 1,
-                stall_every: 0,
-                stall_length: 0,
-                mixed_every: 0,
-            },
-            storage: None,
-            read_bench: None,
+            ..remote_write_fixture()
         };
         let chunks = sample_chunks(&remote).unwrap().unwrap();
         assert_eq!(
@@ -631,5 +623,182 @@ mod tests {
             scheduled_flushes(&chunks, remote.flush_every_sample_chunks),
             vec![(2, "periodic"), (3, "final")]
         );
+    }
+
+    /// Minimal remote-write scenario for the lifecycle tests: two series and
+    /// three samples per series, so the visibility count check expects six rows
+    /// in a single request. Override fields with struct update syntax.
+    fn remote_write_fixture() -> RemoteWrite {
+        RemoteWrite {
+            database: "public".to_string(),
+            metric: "metric".to_string(),
+            physical_table: "physical".to_string(),
+            series_count: 2,
+            samples_per_series: 3,
+            start_unix_millis: 1_704_067_200_000,
+            step_millis: 60_000,
+            chunk_series_count: 1,
+            timeout_seconds: 60,
+            sample_chunk_size: None,
+            flush_every_sample_chunks: 1,
+            visibility_timeout_seconds: 30,
+            base_setup_sql: Vec::new(),
+            candidate_setup_sql: Vec::new(),
+            post_ingest_sql: Vec::new(),
+            prom_store: PromStore {
+                pending_rows_flush_interval: "1s".to_string(),
+                max_batch_rows: 1,
+                max_concurrent_flushes: 1,
+                worker_channel_capacity: 1,
+                max_inflight_requests: 1,
+            },
+            value: RemoteValue {
+                pattern: "linear".to_string(),
+                base: 0.0,
+                step: 1.0,
+                cardinality: 1,
+                seed: 0,
+                run_length: 1,
+                stall_every: 0,
+                stall_length: 0,
+                mixed_every: 0,
+            },
+            storage: None,
+            read_bench: None,
+        }
+    }
+
+    /// The runner only needs the generator process to exit successfully; its
+    /// stdout is an optional summary.
+    const GENERATOR: &str = "/bin/echo";
+
+    fn count_response() -> String {
+        // Same shape as the `/v1/sql` JSON body: `http_post_sql` stores the
+        // parsed body under `response`, and `extract_count_value` reads
+        // `response.data[0]`.
+        "{\"data\": [{\"COUNT(*)\": \"6\"}]}".to_string()
+    }
+
+    fn request_index(requests: &[String], needle: &str) -> usize {
+        requests
+            .iter()
+            .position(|request| request.contains(needle))
+            .unwrap_or_else(|| panic!("no request contains {needle:?}: {requests:?}"))
+    }
+
+    #[tokio::test]
+    async fn post_ingest_sql_runs_after_the_visibility_count() {
+        let (port, server) = spawn_sql_server(vec![
+            "{\"code\":0}".to_string(),
+            "{\"code\":0}".to_string(),
+            count_response(),
+            "{\"code\":0}".to_string(),
+            "{\"code\":0}".to_string(),
+        ])
+        .await;
+        let client = Client::new();
+        let remote = RemoteWrite {
+            post_ingest_sql: vec![
+                "ADMIN compact_table('physical', 'strict_window', 'window=86400')".to_string(),
+                "SELECT 1 FROM information_schema.ssts_manifest".to_string(),
+            ],
+            ..remote_write_fixture()
+        };
+
+        let report = prepare_remote_target(
+            "candidate",
+            port,
+            Path::new(GENERATOR),
+            &remote,
+            &[],
+            &client,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(report["status"], "ok");
+        assert_eq!(report["visibility"]["row_count_ok"], true);
+        assert_eq!(
+            report["post_ingest_sql"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|result| result["sql"].as_str().unwrap().to_string())
+                .collect::<Vec<_>>(),
+            remote.post_ingest_sql,
+        );
+        let requests = server.await.unwrap();
+        assert_eq!(requests.len(), 5);
+        assert!(requests[0].contains("sql=CREATE+DATABASE"));
+        assert!(requests[1].contains("sql=ADMIN+FLUSH_TABLE"));
+        // "count" only matches the visibility count query, so its position
+        // proves the post-ingest statements ran after the row-count check.
+        let count = request_index(&requests, "count");
+        assert!(count < request_index(&requests, "compact_table"));
+        assert!(count < request_index(&requests, "ssts_manifest"));
+    }
+
+    #[tokio::test]
+    async fn failing_post_ingest_sql_aborts_the_target() {
+        let (port, server) = spawn_sql_server(vec![
+            "{\"code\":0}".to_string(),
+            "{\"code\":0}".to_string(),
+            count_response(),
+            "{\"code\":1,\"error\":\"layout mismatch\"}".to_string(),
+        ])
+        .await;
+        let client = Client::new();
+        let remote = RemoteWrite {
+            post_ingest_sql: vec![
+                "ADMIN compact_table('physical', 'strict_window', 'window=86400')".to_string(),
+                "SELECT 1 FROM information_schema.ssts_manifest".to_string(),
+            ],
+            ..remote_write_fixture()
+        };
+
+        let error = prepare_remote_target(
+            "candidate",
+            port,
+            Path::new(GENERATOR),
+            &remote,
+            &[],
+            &client,
+        )
+        .await
+        .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("post-ingest SQL statement 1 failed for candidate"),
+            "{error}"
+        );
+        // The failing statement aborts the target before the remaining layout
+        // assertions run, so the case never reaches measurement.
+        let requests = server.await.unwrap();
+        assert_eq!(requests.len(), 4);
+        assert!(requests[3].contains("compact_table"));
+    }
+
+    #[tokio::test]
+    async fn empty_post_ingest_sql_adds_no_requests() {
+        let (port, server) = spawn_sql_server(vec![
+            "{\"code\":0}".to_string(),
+            "{\"code\":0}".to_string(),
+            count_response(),
+        ])
+        .await;
+        let client = Client::new();
+        let remote = remote_write_fixture();
+
+        let report =
+            prepare_remote_target("base", port, Path::new(GENERATOR), &remote, &[], &client)
+                .await
+                .unwrap();
+
+        assert_eq!(report["post_ingest_sql"], json!([]));
+        let requests = server.await.unwrap();
+        assert_eq!(requests.len(), 3);
+        assert!(requests[2].contains("count"));
     }
 }

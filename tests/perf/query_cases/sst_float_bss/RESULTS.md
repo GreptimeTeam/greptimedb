@@ -12,6 +12,15 @@ case.
 > BSS performance. SST byte counts and cross-target stored-row checks remain
 > valid for the inspected dataset. Stable-host timing verification is pending.
 
+> **Layout is no longer whatever flush produced.** The case now compacts both
+> targets with `ADMIN compact_table('sst_float_bss_physical', 'strict_window',
+> 'window=86400')` and fails closed unless each target has exactly three live
+> data SSTs of 1,440,000 rows with the three 2024-01-01..03 daily windows, before
+> any measurement, storage inspection, or read-bench step. Every number below was
+> collected by the earlier harness revision: six post-flush SSTs per target, no
+> compaction, and a layout that was observed rather than enforced. Treat these
+> numbers as pre-change history, not as output of the current case definition.
+
 ## Case and data shape
 
 - Generator/case revision: `149b49de5f3`.

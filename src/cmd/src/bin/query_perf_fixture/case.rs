@@ -108,6 +108,10 @@ pub(super) struct PromRemoteWritePlan {
     pub(super) base_setup_sql: Vec<String>,
     #[serde(default)]
     pub(super) candidate_setup_sql: Vec<String>,
+    /// SQL statements both targets run after ingestion and its visibility
+    /// count check, before measurement. See the runner's `post_ingest_sql`.
+    #[serde(default)]
+    pub(super) post_ingest_sql: Vec<String>,
     #[serde(default)]
     pub(super) prom_store: PromStoreConfig,
     #[serde(default)]
@@ -289,6 +293,10 @@ pub(super) struct StorageConfig {
     pub(super) min_files: u64,
     #[serde(default = "default_min_files")]
     pub(super) min_files_with_column: u64,
+    /// Exact number of inspected physical data files. Unlike `min_files`, this
+    /// rejects leftovers, such as obsolete compaction inputs still on disk.
+    #[serde(default)]
+    pub(super) exact_files: Option<u64>,
     #[serde(default)]
     pub(super) require_encodings: Vec<String>,
     #[serde(default)]
@@ -324,6 +332,9 @@ impl StorageConfig {
             "min_files_with_column",
             self.min_files_with_column,
         ));
+        if let Some(value) = self.exact_files {
+            planned.push(StorageThresholdPlan::new("exact_files", value));
+        }
         if !self.require_encodings.is_empty() {
             planned.push(StorageThresholdPlan::new(
                 "require_encodings",
@@ -462,6 +473,7 @@ metric = "metric"
         };
         assert!(scenario.remote_write.base_setup_sql.is_empty());
         assert!(scenario.remote_write.candidate_setup_sql.is_empty());
+        assert!(scenario.remote_write.post_ingest_sql.is_empty());
     }
 
     #[test]
@@ -475,6 +487,7 @@ kind = "prom_remote_write_then_query"
 metric = "metric"
 base_setup_sql = ["CREATE TABLE base_table"]
 candidate_setup_sql = ["CREATE TABLE candidate_table", "ALTER TABLE candidate_table SET 'x'='y'"]
+post_ingest_sql = ["ADMIN compact_table('candidate_table', 'strict_window', 'window=86400')", "SELECT 1"]
 "#,
         )
         .unwrap();
@@ -493,6 +506,13 @@ candidate_setup_sql = ["CREATE TABLE candidate_table", "ALTER TABLE candidate_ta
             [
                 "CREATE TABLE candidate_table",
                 "ALTER TABLE candidate_table SET 'x'='y'"
+            ]
+        );
+        assert_eq!(
+            scenario.remote_write.post_ingest_sql,
+            [
+                "ADMIN compact_table('candidate_table', 'strict_window', 'window=86400')",
+                "SELECT 1"
             ]
         );
     }
