@@ -22,7 +22,6 @@ use async_trait::async_trait;
 use datatypes::arrow::record_batch::RecordBatch;
 use futures::TryStreamExt;
 use object_store::ObjectStore;
-use object_store::layers::mock::{self, MockLayerBuilder, oio};
 use snafu::ResultExt;
 use store_api::metadata::RegionMetadataRef;
 use store_api::region_engine::RegionEngine;
@@ -31,7 +30,7 @@ use store_api::storage::FileId;
 use crate::config::MitoConfig;
 use crate::error::{OpenDalSnafu, Result, UnexpectedSnafu};
 use crate::series_index::artifact::{ArtifactFormat, ArtifactMetadata, ArtifactObject};
-use crate::series_index::catalog::{SeriesIndexEntry, load_version_control};
+use crate::series_index::catalog::SeriesIndexEntry;
 use crate::series_index::format::{FormatWriter, SamplesFormat, SeriesFormats, SeriesIndexFormat};
 use crate::series_index::maintenance::reconcile_series_indexes;
 use crate::series_index::purger::series_index_channel;
@@ -108,88 +107,7 @@ impl SamplesFormat for FakeSamples {
 }
 
 #[tokio::test]
-async fn format_skeleton_build_reopen_and_retire() {
-    let mut env = TestEnv::with_prefix("format-skeleton").await;
-    let (engine, region) = prepare_region_with_config(
-        &mut env,
-        &[1000, 2000],
-        MitoConfig {
-            experimental_enable_series_index: true,
-            experimental_series_index_maintenance_interval: Duration::from_secs(3600),
-            min_compaction_interval: Duration::from_secs(3600),
-            ..Default::default()
-        },
-    )
-    .await;
-    let fake = Arc::new(FakeSamples::default());
-    *region.series_index_version_control.formats.write().unwrap() = Arc::new(SeriesFormats {
-        samples: Some(fake.clone()),
-        ..Default::default()
-    });
-    let store = region.series_index_store.clone().unwrap();
-    let (purger, mut purges) = series_index_channel(store.clone());
-    let stats = reconcile_series_indexes(
-        0,
-        store.clone(),
-        region.clone(),
-        Duration::from_secs(100),
-        0,
-        purger.clone(),
-        false,
-        true,
-    )
-    .await
-    .unwrap();
-    assert_eq!(2, stats.built_samples);
-    let snapshot = region.series_index_version();
-    assert_eq!(2, snapshot.samples.len());
-    let reopened = load_version_control(&store, region.region_id, &purger).await;
-    assert_eq!(2, reopened.current().samples.len());
-    assert!(snapshot.disk_usage() >= 16);
-    let stats = reconcile_series_indexes(
-        0,
-        store.clone(),
-        region.clone(),
-        Duration::from_secs(100),
-        0,
-        purger.clone(),
-        false,
-        true,
-    )
-    .await
-    .unwrap();
-    assert_eq!(0, stats.built_samples);
-
-    // Rebuilding a missing sidecar replaces its generation but retains old readers' files.
-    let old = snapshot.samples.values().next().unwrap().clone();
-    store
-        .delete(&old.entry().artifact.objects[0].path)
-        .await
-        .unwrap();
-    let stats = reconcile_series_indexes(
-        0,
-        store.clone(),
-        region.clone(),
-        Duration::from_secs(100),
-        0,
-        purger.clone(),
-        false,
-        true,
-    )
-    .await
-    .unwrap();
-    assert_eq!(1, stats.built_samples);
-    assert!(purges.try_recv().is_err());
-    drop(snapshot);
-    assert!(purges.try_recv().is_err());
-    drop(old);
-    let request = purges.try_recv().unwrap();
-    assert_eq!(2, request.objects.unwrap().len());
-    engine.stop().await.unwrap();
-}
-
-#[tokio::test]
-async fn format_skeleton_abort_removes_all_objects() {
+async fn daily_samples_abort_removes_all_objects() {
     let mut env = TestEnv::with_prefix("format-abort").await;
     let (engine, region) = crate::series_index::tests::prepare_region(&mut env).await;
     let store = ObjectStore::new(object_store::services::Memory::default()).unwrap();
@@ -206,11 +124,11 @@ async fn format_skeleton_abort_removes_all_objects() {
     let fake = FakeSamples::default();
     fake.fail.store(true, Ordering::Relaxed);
     assert!(
-        crate::series_index::builder::build_samples(
+        crate::series_index::builder::build_sample_windows(
             &store,
             &region,
             &version.metadata,
-            file,
+            &[file],
             &fake,
             &purger,
         )
@@ -227,6 +145,57 @@ async fn format_skeleton_abort_removes_all_objects() {
             .all(|entry| entry.metadata().is_dir())
     );
     assert!(region.series_index_version().samples.is_empty());
+    engine.stop().await.unwrap();
+}
+
+/// Samples are only written in the daily columnar layout, so a backend naming another format
+/// must fail instead of publishing nothing: the published version stays as it was.
+#[tokio::test]
+async fn unsupported_samples_format_is_refused() {
+    let mut env = TestEnv::with_prefix("format-unsupported-samples").await;
+    let (engine, region) = prepare_region_with_config(
+        &mut env,
+        &[1000, 2000],
+        MitoConfig {
+            experimental_enable_series_index: true,
+            experimental_series_index_maintenance_interval: Duration::from_secs(3600),
+            min_compaction_interval: Duration::from_secs(3600),
+            ..Default::default()
+        },
+    )
+    .await;
+    *region.series_index_version_control.formats.write().unwrap() = Arc::new(SeriesFormats {
+        samples: Some(Arc::new(FakeSamples::default())),
+        ..Default::default()
+    });
+    let store = region.series_index_store.clone().unwrap();
+    let (purger, _purges) = series_index_channel(store.clone());
+    let error = reconcile_series_indexes(
+        0,
+        store.clone(),
+        region.clone(),
+        Duration::from_secs(100),
+        0,
+        purger.clone(),
+        false,
+        true,
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        matches!(error, crate::error::Error::UnsupportedOperation { .. }),
+        "{error:?}"
+    );
+    assert!(region.series_index_version().samples.is_empty());
+    assert!(
+        store
+            .list_with(&format!("{}/samples/", region.region_id.as_u64()))
+            .recursive(true)
+            .await
+            .unwrap()
+            .iter()
+            .all(|entry| entry.metadata().is_dir())
+    );
     engine.stop().await.unwrap();
 }
 
@@ -362,95 +331,5 @@ async fn format_index_rebuild_is_scoped_and_scans_fall_back_to_ssts() {
             .all(|h| h.entry().artifact.is_none())
     );
     assert_eq!(0, reconcile().await.unwrap().built_series);
-    engine.stop().await.unwrap();
-}
-
-struct FailedCatalogWriter(oio::Writer);
-
-impl mock::Write for FailedCatalogWriter {
-    async fn write(&mut self, buffer: mock::Buffer) -> mock::Result<()> {
-        self.0.write(buffer).await
-    }
-    async fn close(&mut self) -> mock::Result<mock::Metadata> {
-        Err(mock::Error::new(
-            mock::ErrorKind::Unexpected,
-            "injected artifact catalog failure",
-        ))
-    }
-    async fn abort(&mut self) -> mock::Result<()> {
-        self.0.abort().await
-    }
-}
-
-#[tokio::test]
-async fn format_catalog_failure_preserves_published_artifacts() {
-    let mut env = TestEnv::with_prefix("format-catalog-failure").await;
-    let (engine, region) = crate::series_index::tests::prepare_region(&mut env).await;
-    *region.series_index_version_control.formats.write().unwrap() = Arc::new(SeriesFormats {
-        index: Some(Arc::new(FakeIndex)),
-        samples: Some(Arc::new(FakeSamples::default())),
-    });
-    let store = ObjectStore::new(object_store::services::Memory::default()).unwrap();
-    let (purger, mut purges) = series_index_channel(store.clone());
-    reconcile_series_indexes(
-        0,
-        store.clone(),
-        region.clone(),
-        Duration::from_secs(100),
-        0,
-        purger.clone(),
-        false,
-        true,
-    )
-    .await
-    .unwrap();
-    let before = region.series_index_version();
-    let catalog_path = crate::series_index::catalog::samples_catalog_path(region.region_id);
-    let catalog = store.read(&catalog_path).await.unwrap().to_bytes();
-    let old = before.samples.values().next().unwrap();
-    store
-        .delete(&old.entry().artifact.objects[0].path)
-        .await
-        .unwrap();
-    let layer = MockLayerBuilder::default()
-        .writer_factory(Arc::new(|path, _, inner| {
-            if path.ends_with("samples.json") {
-                Box::new(FailedCatalogWriter(inner))
-            } else {
-                inner
-            }
-        }))
-        .build()
-        .unwrap();
-    let error = reconcile_series_indexes(
-        0,
-        store.clone().layer(layer),
-        region.clone(),
-        Duration::from_secs(100),
-        0,
-        purger.clone(),
-        false,
-        true,
-    )
-    .await
-    .unwrap_err();
-    assert!(format!("{error:?}").contains("injected artifact catalog failure"));
-    assert!(Arc::ptr_eq(&before, &region.series_index_version()));
-    assert_eq!(catalog, store.read(&catalog_path).await.unwrap().to_bytes());
-    let cleanup = purges.try_recv().unwrap().objects.unwrap();
-    assert_eq!(2, cleanup.len());
-    assert!(cleanup.iter().all(|path| {
-        !old.entry()
-            .artifact
-            .objects
-            .iter()
-            .any(|object| &object.path == path)
-    }));
-    assert!(purges.try_recv().is_err());
-    let reopened = load_version_control(&store, region.region_id, &purger).await;
-    assert_eq!(
-        old.entry(),
-        reopened.current().samples[&old.entry().file_id].entry()
-    );
     engine.stop().await.unwrap();
 }

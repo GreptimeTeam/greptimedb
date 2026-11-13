@@ -326,6 +326,21 @@ fn scan_input(
         .build()
 }
 
+/// The engine's per-series scanner, kept concrete so tests can reach scanner-wide preparation.
+///
+/// `handle_query` boxes this same scanner behind `dyn RegionScanner`, whose only preparation
+/// entry point is `scan_series_partition`.
+async fn series_scanner(
+    engine: &MitoEngine,
+    region_id: store_api::storage::RegionId,
+    request: ScanRequest,
+) -> SeriesScan {
+    match engine.scanner(region_id, request).await.unwrap() {
+        crate::read::scan_region::Scanner::Series(scan) => scan,
+        _ => panic!("expected a per-series scanner"),
+    }
+}
+
 fn rows(chunks: &[RawSeriesChunk]) -> Vec<(Vec<u8>, i64, f64)> {
     chunks
         .iter()
@@ -388,6 +403,28 @@ async fn all_raw_samples(
     collected
 }
 
+/// Scanner-wide preparation, composed exactly the way `SeriesScan::scan_series_partition` does.
+///
+/// Production reaches scanner-wide preparation only from inside a partition stream. These tests
+/// need the prepared source handle before any partition is read, so they repeat that composition
+/// here instead of keeping an unused scanner-wide entry point alive in the scanner.
+async fn prepare_scanner_wide(
+    scan: &SeriesScan,
+    ctx: &QueryScanContext,
+    metrics_set: &ExecutionPlanMetricsSet,
+    label_source: &RawLabelSource,
+) -> Result<Option<Arc<dyn PreparedSeriesSource>>, BoxedError> {
+    if !scan.uses_columnar() {
+        return Ok(None);
+    }
+    let preparation = scan
+        .check_scan_limit()
+        .map_err(BoxedError::new)
+        .and_then(|_| scan.prepare_raw_scan(label_source));
+    scan.prepare_series_with_raw(ctx, metrics_set, label_source, preparation)
+        .await
+}
+
 #[tokio::test]
 async fn prepared_sources_share_discovery_and_read_independently() {
     let (_env, engine, region) = fixture().await;
@@ -435,8 +472,8 @@ async fn prepared_sources_share_discovery_and_read_independently() {
     let ctx = QueryScanContext::default();
     let metrics = ExecutionPlanMetricsSet::new();
     let (a, b) = tokio::join!(
-        scanner.prepare_series(&ctx, &metrics, &binding),
-        scanner.prepare_series(&ctx, &metrics, &binding)
+        prepare_scanner_wide(&scanner, &ctx, &metrics, &binding),
+        prepare_scanner_wide(&scanner, &ctx, &metrics, &binding)
     );
     let source = a.unwrap().unwrap();
     assert!(Arc::ptr_eq(&source, &b.unwrap().unwrap()));
@@ -462,11 +499,6 @@ async fn prepared_sources_share_discovery_and_read_independently() {
     let left = source.read_series(0..2).unwrap();
     assert!(left.label_decode_spec().is_none());
     assert!(same_labels(left.label_source(), &binding));
-    for ordinal in 0..source.num_series() {
-        let info = source.series_info(ordinal).unwrap();
-        assert_eq!(info.primary_key, prepared.candidates[ordinal].key);
-        assert_eq!(info.metric, prepared.candidates[ordinal].metric);
-    }
     let right = source.read_series(0..2).unwrap();
     assert!(
         !reads
@@ -477,6 +509,20 @@ async fn prepared_sources_share_discovery_and_read_independently() {
     );
     let (left, right) = tokio::join!(left.try_collect::<Vec<_>>(), right.try_collect::<Vec<_>>());
     let left = left.unwrap();
+    // Served chunks carry the identity preparation selected for their ordinal: the
+    // region-qualified key, never a bare TSID or hash.
+    let candidate_keys = prepared
+        .candidates
+        .iter()
+        .map(|candidate| candidate.key.clone())
+        .collect::<Vec<_>>();
+    assert!(!left.is_empty());
+    for chunk in &left {
+        assert!(
+            candidate_keys.contains(&chunk.primary_key),
+            "chunk identity belongs to no prepared candidate"
+        );
+    }
     let mut decoder = mito_codec::labels::PrimaryKeyLabelDecoder::from_decode_spec(
         &common_query::series_frame::label_decode_spec(&legacy_binding).unwrap(),
     )
@@ -577,8 +623,7 @@ async fn two_phase_raw_fallback_preserves_key_then_time_order() {
     let ctx = QueryScanContext::default();
     let metrics = ExecutionPlanMetricsSet::new();
     assert!(
-        scanner
-            .prepare_series(&ctx, &metrics, &binding)
+        prepare_scanner_wide(&scanner, &ctx, &metrics, &binding)
             .await
             .unwrap()
             .is_none()
@@ -653,10 +698,7 @@ async fn native_scan_falls_back_to_raw_sources_until_columnar_coverage(#[case] v
     let metrics = ExecutionPlanMetricsSet::new();
     // The three flushed SSTs only have columnar artifacts after `build`.
     let fallback_ordering = SeriesOrdering::KeyThenTime;
-    let raw_scanner = engine
-        .handle_query(region.region_id, request.clone())
-        .await
-        .unwrap();
+    let raw_scanner = series_scanner(&engine, region.region_id, request.clone()).await;
     let binding = labels(raw_scanner.metadata());
     assert_eq!(
         fallback_ordering,
@@ -665,19 +707,11 @@ async fn native_scan_falls_back_to_raw_sources_until_columnar_coverage(#[case] v
     assert!(raw_scanner.raw_series_schema(&binding).unwrap().is_some());
     assert_eq!(
         vec![(1000, 1.0), (2000, 1.0)],
-        all_raw_samples(
-            raw_scanner.as_ref(),
-            &ctx,
-            &metrics,
-            &binding,
-            fallback_ordering
-        )
-        .await
+        all_raw_samples(&raw_scanner, &ctx, &metrics, &binding, fallback_ordering).await
     );
     // Known unready coverage selects the ordinary scan instead of a prepared source.
     assert!(
-        raw_scanner
-            .prepare_series(&ctx, &metrics, &binding)
+        prepare_scanner_wide(&raw_scanner, &ctx, &metrics, &binding)
             .await
             .unwrap()
             .is_none()
@@ -689,13 +723,9 @@ async fn native_scan_falls_back_to_raw_sources_until_columnar_coverage(#[case] v
     bounded_request.filters.push(col("ts").gt_eq(lit(
         datafusion_common::ScalarValue::TimestampMillisecond(Some(1500), None),
     )));
-    let bounded = engine
-        .handle_query(region.region_id, bounded_request)
-        .await
-        .unwrap();
+    let bounded = series_scanner(&engine, region.region_id, bounded_request).await;
     let bounded_labels = labels(bounded.metadata());
-    let prepared = bounded
-        .prepare_series(&ctx, &metrics, &bounded_labels)
+    let prepared = prepare_scanner_wide(&bounded, &ctx, &metrics, &bounded_labels)
         .await
         .unwrap()
         .expect("time-pruned daily sources remain prepared");
@@ -707,10 +737,7 @@ async fn native_scan_falls_back_to_raw_sources_until_columnar_coverage(#[case] v
         .unwrap();
     assert_eq!(samples(&chunks), vec![(2000, 1.0)]);
 
-    let mut raw_scanner = engine
-        .handle_query(region.region_id, request.clone())
-        .await
-        .unwrap();
+    let mut raw_scanner = series_scanner(&engine, region.region_id, request.clone()).await;
     // Move every assigned range into a new last partition: readiness, the ordering guarantee and
     // the reader must all follow the new assignment, not the pre-prepare partition list.
     let assigned = raw_scanner
@@ -729,8 +756,7 @@ async fn native_scan_falls_back_to_raw_sources_until_columnar_coverage(#[case] v
         SeriesOrdering::KeyThenTime,
         raw_scanner.raw_series_ordering().unwrap()
     );
-    let source = raw_scanner
-        .prepare_series(&ctx, &metrics, &binding)
+    let source = prepare_scanner_wide(&raw_scanner, &ctx, &metrics, &binding)
         .await
         .unwrap()
         .unwrap();
@@ -739,7 +765,7 @@ async fn native_scan_falls_back_to_raw_sources_until_columnar_coverage(#[case] v
     assert_eq!(
         vec![(1000, 1.0), (2000, 1.0)],
         all_raw_samples(
-            raw_scanner.as_ref(),
+            &raw_scanner,
             &ctx,
             &metrics,
             &binding,
@@ -747,7 +773,7 @@ async fn native_scan_falls_back_to_raw_sources_until_columnar_coverage(#[case] v
         )
         .await
     );
-    let plan = Arc::new(RegionScanExec::new(raw_scanner, request.clone(), None).unwrap())
+    let plan = Arc::new(RegionScanExec::new(Box::new(raw_scanner), request.clone(), None).unwrap())
         .try_to_series_scan(binding.clone())
         .unwrap()
         .unwrap();
@@ -764,10 +790,7 @@ async fn native_scan_falls_back_to_raw_sources_until_columnar_coverage(#[case] v
     // An assigned memtable is known unready, so the raw path keeps the ordinary scan and must
     // still return the new row.
     write(&engine, &region, 0, 3000, Some(4.0)).await;
-    let raw_scanner = engine
-        .handle_query(region.region_id, request)
-        .await
-        .unwrap();
+    let raw_scanner = series_scanner(&engine, region.region_id, request).await;
     let binding = labels(raw_scanner.metadata());
     assert_eq!(
         fallback_ordering,
@@ -775,22 +798,14 @@ async fn native_scan_falls_back_to_raw_sources_until_columnar_coverage(#[case] v
     );
     assert!(raw_scanner.raw_series_schema(&binding).unwrap().is_some());
     assert!(
-        raw_scanner
-            .prepare_series(&ctx, &metrics, &binding)
+        prepare_scanner_wide(&raw_scanner, &ctx, &metrics, &binding)
             .await
             .unwrap()
             .is_none()
     );
     assert_eq!(
         vec![(1000, 1.0), (2000, 1.0), (3000, 4.0)],
-        all_raw_samples(
-            raw_scanner.as_ref(),
-            &ctx,
-            &metrics,
-            &binding,
-            fallback_ordering
-        )
-        .await
+        all_raw_samples(&raw_scanner, &ctx, &metrics, &binding, fallback_ordering).await
     );
     engine.stop().await.unwrap();
 }
@@ -853,15 +868,15 @@ async fn manual_build_covers_unknown_sequences_without_a_compaction_window() {
     assert_eq!(0, reconcile(true, true).await.unwrap().built_series);
     let scanner = scanner(&region, store.clone());
     let binding = labels(scanner.metadata());
-    let source = scanner
-        .prepare_series(
-            &QueryScanContext::default(),
-            &ExecutionPlanMetricsSet::new(),
-            &binding,
-        )
-        .await
-        .unwrap()
-        .unwrap();
+    let source = prepare_scanner_wide(
+        &scanner,
+        &QueryScanContext::default(),
+        &ExecutionPlanMetricsSet::new(),
+        &binding,
+    )
+    .await
+    .unwrap()
+    .unwrap();
     let chunks = source
         .read_series(0..source.num_series())
         .unwrap()
@@ -919,15 +934,15 @@ async fn manual_build_repairs_schema_changes(#[case] semantic_type: SemanticType
         )
     };
     let scan = query();
-    let source = scan
-        .prepare_series(
-            &QueryScanContext::default(),
-            &ExecutionPlanMetricsSet::new(),
-            &labels(scan.metadata()),
-        )
-        .await
-        .unwrap()
-        .unwrap();
+    let source = prepare_scanner_wide(
+        &scan,
+        &QueryScanContext::default(),
+        &ExecutionPlanMetricsSet::new(),
+        &labels(scan.metadata()),
+    )
+    .await
+    .unwrap()
+    .unwrap();
     let expected = rows(
         &source
             .read_series(0..source.num_series())
@@ -963,15 +978,15 @@ async fn manual_build_repairs_schema_changes(#[case] semantic_type: SemanticType
         .unwrap();
     // Even a projection containing only the original fields must reject stale sidecars.
     let scan = query();
-    let error = scan
-        .prepare_series(
-            &QueryScanContext::default(),
-            &ExecutionPlanMetricsSet::new(),
-            &labels(scan.metadata()),
-        )
-        .await
-        .err()
-        .unwrap();
+    let error = prepare_scanner_wide(
+        &scan,
+        &QueryScanContext::default(),
+        &ExecutionPlanMetricsSet::new(),
+        &labels(scan.metadata()),
+    )
+    .await
+    .err()
+    .unwrap();
     assert!(
         error
             .output_msg()
@@ -1040,15 +1055,15 @@ async fn manual_build_repairs_schema_changes(#[case] semantic_type: SemanticType
             == rebuilt.series_indexes.keys().collect::<HashSet<_>>()
     );
     let scan = query();
-    let source = scan
-        .prepare_series(
-            &QueryScanContext::default(),
-            &ExecutionPlanMetricsSet::new(),
-            &labels(scan.metadata()),
-        )
-        .await
-        .unwrap()
-        .unwrap();
+    let source = prepare_scanner_wide(
+        &scan,
+        &QueryScanContext::default(),
+        &ExecutionPlanMetricsSet::new(),
+        &labels(scan.metadata()),
+    )
+    .await
+    .unwrap()
+    .unwrap();
     let actual = source
         .read_series(0..source.num_series())
         .unwrap()
@@ -1140,7 +1155,7 @@ async fn ordinal_range_batches_sample_requests_and_pushes_time_bounds() {
         .await
         .unwrap();
     let scan = make_scan(SelectedFormat::Columnar);
-    scan.prepare_series(&ctx, &metrics, &labels(scan.metadata()))
+    prepare_scanner_wide(&scan, &ctx, &metrics, &labels(scan.metadata()))
         .await
         .unwrap()
         .unwrap();
@@ -1223,6 +1238,8 @@ async fn ordinal_range_batches_sample_requests_and_pushes_time_bounds() {
     );
     assert!(requests.lock().unwrap().is_empty());
     assert!(source.read_series(0..source.num_series() + 1).is_err());
+    // An invalid range is refused before any sample payload is requested.
+    assert!(requests.lock().unwrap().is_empty());
     let chunks = source
         .read_series(1..3)
         .unwrap()
@@ -1521,7 +1538,8 @@ async fn preflight_rejects_unsupported_assignments_without_artifact_io() {
     // The raw path stays available for the ordinary scan and preparation is skipped.
     assert!(scan.raw_series_schema(&binding).unwrap().is_some());
     assert!(
-        scan.prepare_series(
+        prepare_scanner_wide(
+            &scan,
             &QueryScanContext::default(),
             &ExecutionPlanMetricsSet::new(),
             &binding
@@ -1561,15 +1579,15 @@ async fn series_artifact_read_failure_propagates() {
     let scan = SeriesScan::new(context.input, false);
     let binding = labels(scan.metadata());
     assert!(scan.raw_series_schema(&binding).unwrap().is_some());
-    let error = scan
-        .prepare_series(
-            &QueryScanContext::default(),
-            &ExecutionPlanMetricsSet::new(),
-            &binding,
-        )
-        .await
-        .err()
-        .expect("a failed artifact read must not report a not-ready source");
+    let error = prepare_scanner_wide(
+        &scan,
+        &QueryScanContext::default(),
+        &ExecutionPlanMetricsSet::new(),
+        &binding,
+    )
+    .await
+    .err()
+    .expect("a failed artifact read must not report a not-ready source");
     assert!(error.output_msg().contains("injected"), "{error}");
     engine.stop().await.unwrap();
 }
@@ -1822,15 +1840,15 @@ async fn native_preparation_metadata_benchmark() {
                 let scanner = SeriesScan::new(input, false);
                 let binding = labels(scanner.metadata());
                 let start = Instant::now();
-                let source = scanner
-                    .prepare_series(
-                        &QueryScanContext::default(),
-                        &ExecutionPlanMetricsSet::new(),
-                        &binding,
-                    )
-                    .await
-                    .unwrap()
-                    .unwrap();
+                let source = prepare_scanner_wide(
+                    &scanner,
+                    &QueryScanContext::default(),
+                    &ExecutionPlanMetricsSet::new(),
+                    &binding,
+                )
+                .await
+                .unwrap()
+                .unwrap();
                 let elapsed = start.elapsed().as_secs_f64() * 1000.0;
                 assert_eq!(series_count as usize, source.num_series());
                 if iteration == 0 {
@@ -2352,7 +2370,8 @@ async fn overlapping_buckets_retain_only_new_label_rows() {
     build(&engine, &region).await;
     assert!(region.series_index_version().series_indexes.len() >= 2);
     let scan = scanner(&region, region.series_index_store.clone().unwrap());
-    scan.prepare_series(
+    prepare_scanner_wide(
+        &scan,
         &QueryScanContext::default(),
         &ExecutionPlanMetricsSet::new(),
         &labels(scan.metadata()),
@@ -2433,7 +2452,8 @@ async fn overlapping_buckets_keep_colliding_physical_tags(#[case] mixed: bool) {
         // The conflict is in an unbound physical tag, which must still be checked.
         *logical_tags = logical_tags[..1].to_vec().into();
     }
-    scan.prepare_series(
+    prepare_scanner_wide(
+        &scan,
         &QueryScanContext::default(),
         &ExecutionPlanMetricsSet::new(),
         &binding,
@@ -2443,16 +2463,18 @@ async fn overlapping_buckets_keep_colliding_physical_tags(#[case] mixed: bool) {
     let source = scan.prepared.source.get().unwrap().as_ref().unwrap();
     // Same `(table_id, tsid)`, different physical tags: two series, never one merged row.
     assert_eq!(2, source.num_series());
-    let keys: HashSet<Vec<u8>> = (0..source.num_series())
-        .map(|ordinal| source.series_info(ordinal).unwrap().primary_key.to_vec())
-        .collect();
-    assert_eq!(2, keys.len());
     let chunks = source
         .read_series(0..source.num_series())
         .unwrap()
         .try_collect::<Vec<_>>()
         .await
         .unwrap();
+    // Preparation and the stream agree on identity: the colliding pair reports two keys.
+    let keys: HashSet<Vec<u8>> = chunks
+        .iter()
+        .map(|chunk| chunk.primary_key.to_vec())
+        .collect();
+    assert_eq!(2, keys.len());
     // The differing physical tag is unbound here, so only the exact key separates the
     // two candidates; the previous code compared labels and failed preparation.
     let identities: HashSet<Vec<u8>> = source
@@ -2471,17 +2493,10 @@ async fn overlapping_buckets_keep_colliding_physical_tags(#[case] mixed: bool) {
                 .map(|label| (label.name.to_string(), label.value.to_string()))
                 .collect::<Vec<_>>()
         };
-        let expected: HashSet<Vec<(String, String)>> = (0..source.num_series())
-            .map(|ordinal| {
-                labels(
-                    source
-                        .series_info(ordinal)
-                        .unwrap()
-                        .metric
-                        .as_ref()
-                        .unwrap(),
-                )
-            })
+        let expected: HashSet<Vec<(String, String)>> = source
+            .candidates
+            .iter()
+            .map(|candidate| labels(candidate.metric.as_ref().unwrap()))
             .collect();
         for chunk in &chunks {
             let actual = labels(chunk.metric.as_ref().expect("explicit labels"));
@@ -2539,7 +2554,7 @@ async fn colliding_tsids_isolate_samples_and_labels_per_candidate() {
     let ctx = QueryScanContext::default();
     let metrics = ExecutionPlanMetricsSet::new();
     let binding = labels(scan.metadata());
-    scan.prepare_series(&ctx, &metrics, &binding)
+    prepare_scanner_wide(&scan, &ctx, &metrics, &binding)
         .await
         .unwrap()
         .unwrap();
@@ -2580,7 +2595,7 @@ async fn colliding_tsids_isolate_samples_and_labels_per_candidate() {
         ),
     );
     let binding = labels(scan.metadata());
-    scan.prepare_series(&ctx, &metrics, &binding)
+    prepare_scanner_wide(&scan, &ctx, &metrics, &binding)
         .await
         .unwrap()
         .unwrap();
@@ -2631,7 +2646,7 @@ async fn long_keys_prepare_and_read() {
     let ctx = QueryScanContext::default();
     let metrics = ExecutionPlanMetricsSet::new();
     let binding = labels(scan.metadata());
-    scan.prepare_series(&ctx, &metrics, &binding)
+    prepare_scanner_wide(&scan, &ctx, &metrics, &binding)
         .await
         .unwrap()
         .unwrap();
@@ -2640,11 +2655,10 @@ async fn long_keys_prepare_and_read() {
     // byte for byte and own its samples. Served samples make `primary_key` region-qualified.
     let mut expected = metadata.region_id.as_u64().to_be_bytes().to_vec();
     expected.extend_from_slice(&key);
-    let ordinal = (0..source.num_series())
-        .find(|ordinal| {
-            source.series_info(*ordinal).unwrap().primary_key.as_ref() as &[u8]
-                == expected.as_slice()
-        })
+    let ordinal = source
+        .candidates
+        .iter()
+        .position(|candidate| candidate.key.as_slice() == expected.as_slice())
         .expect("preparation must keep the series whose key is longer than 8 KiB");
     let chunks = source
         .read_series(ordinal..ordinal + 1)

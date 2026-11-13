@@ -512,7 +512,7 @@ impl SeriesScan {
         preparation: Result<Option<(RawScanPreparation, bool)>, BoxedError>,
     ) -> futures::future::BoxFuture<
         'static,
-        Result<Option<Arc<dyn store_api::region_engine::PreparedSeriesSource>>, BoxedError>,
+        Result<Option<Arc<dyn prepared::PreparedSeriesSource>>, BoxedError>,
     > {
         let state = self.prepared.clone();
         let stream_ctx = self.stream_ctx.clone();
@@ -1031,25 +1031,6 @@ impl RegionScanner for SeriesScan {
             preparation.predicates,
             SeriesOrdering::KeyThenTime,
         )))
-    }
-
-    fn prepare_series(
-        &self,
-        ctx: &QueryScanContext,
-        metrics_set: &ExecutionPlanMetricsSet,
-        label_source: &RawLabelSource,
-    ) -> futures::future::BoxFuture<
-        'static,
-        Result<Option<Arc<dyn store_api::region_engine::PreparedSeriesSource>>, BoxedError>,
-    > {
-        if !self.uses_columnar() {
-            return Box::pin(async { Ok(None) });
-        }
-        let preparation = self
-            .check_scan_limit()
-            .map_err(BoxedError::new)
-            .and_then(|_| self.prepare_raw_scan(label_source));
-        self.prepare_series_with_raw(ctx, metrics_set, label_source, preparation)
     }
 
     fn prepare(&mut self, request: PrepareRequest) -> Result<(), BoxedError> {

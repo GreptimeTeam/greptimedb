@@ -46,9 +46,7 @@ use snafu::{IntoError, ResultExt};
 use store_api::metric_engine_consts::{
     DATA_SCHEMA_TABLE_ID_COLUMN_NAME, DATA_SCHEMA_TSID_COLUMN_NAME,
 };
-use store_api::region_engine::{
-    PartitionRange, PreparedSeriesSource, RawLabelSource, SendableRawSeriesStream, SeriesInfo,
-};
+use store_api::region_engine::{PartitionRange, RawLabelSource, SendableRawSeriesStream};
 use store_api::storage::consts::{ReservedColumnId, SEQUENCE_COLUMN_NAME};
 use store_api::storage::{FileId, SequenceRange};
 use table::predicate::Predicate;
@@ -75,6 +73,35 @@ fn invalid(reason: impl Into<String>) -> Error {
         reason: reason.into(),
     }
     .build()
+}
+
+/// An immutable, finite selected set of series prepared for independent range reads.
+///
+/// The count may include series with no samples after filtering. Ordinals are stable local
+/// indexes, not protocol identifiers. Every reader exposes the same fixed schema, label binding,
+/// and ordering before polling, including for an empty range, and describes labels independently
+/// of this source's lifetime. Key-encoded output has `metric: None`; explicit-label output has a
+/// complete `Some(metric)` matching each chunk, independently of its scan binding.
+/// Ordering describes the stream, not ordinal enumeration.
+///
+/// Preparation and reader creation do not load sample payloads or perform hidden blocking I/O.
+/// The selected set is bound to the scanner's immutable MVCC view, predicates, authorization,
+/// projection, labels, and existing scan resources. Readers own resources needed to continue
+/// after this source or scanner is dropped. Dropping one reader does not cancel sibling readers;
+/// normal ownership cleanup applies without detached work.
+///
+/// A range must satisfy `start <= end <= num_series()`. An invalid range returns an error; an
+/// empty in-bounds range returns an ordinary empty stream. Repeated and overlapping reads are
+/// independent and do not consume shared iteration state.
+pub(crate) trait PreparedSeriesSource: Send + Sync {
+    /// Returns the exact, stable number of selected local series ordinals.
+    fn num_series(&self) -> usize;
+
+    /// Creates an independent reader for the half-open ordinal range.
+    fn read_series(
+        &self,
+        range: Range<usize>,
+    ) -> std::result::Result<SendableRawSeriesStream, BoxedError>;
 }
 
 /// Errors are shared too: a failed execution must not restart discovery in another partition.
@@ -742,19 +769,6 @@ impl ColumnarPreparedSource {
 impl PreparedSeriesSource for ColumnarPreparedSource {
     fn num_series(&self) -> usize {
         self.candidates.len()
-    }
-    fn label_source(&self) -> &RawLabelSource {
-        &self.labels
-    }
-    fn series_info(&self, ordinal: usize) -> std::result::Result<SeriesInfo, BoxedError> {
-        let candidate = self
-            .candidates
-            .get(ordinal)
-            .ok_or_else(|| BoxedError::new(invalid("series ordinal out of bounds")))?;
-        Ok(SeriesInfo {
-            primary_key: candidate.key.clone(),
-            metric: candidate.metric.clone(),
-        })
     }
     fn read_series(
         &self,
