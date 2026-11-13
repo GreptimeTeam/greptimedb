@@ -442,11 +442,10 @@ impl EntityGraphProviderImpl {
                     && (is_trace || !table_declarations.is_empty())
                     && !self.authorize_sources(
                         query_ctx,
-                        PermissionTableTargets::resolved(vec![PermissionTableTarget::new(
-                            catalog,
-                            &schema,
-                            &table_info.name,
-                        )]),
+                        PermissionTableTargets::resolved(vec![
+                            PermissionTableTarget::new(catalog, &schema, &table_info.name)
+                                .with_physical_metric_table(table_info.is_physical_table()),
+                        ]),
                     )?
                 {
                     debug!(
@@ -617,13 +616,17 @@ impl EntityGraphProviderImpl {
         else {
             return Ok(None);
         };
+        let table_info = table.table_info();
         if !self.authorize_sources(
             query_ctx,
-            PermissionTableTargets::resolved(vec![PermissionTableTarget::new(
-                catalog,
-                DEFAULT_PRIVATE_SCHEMA_NAME,
-                SEMANTIC_RELATIONSHIPS_DECLARED_TABLE_NAME,
-            )]),
+            PermissionTableTargets::resolved(vec![
+                PermissionTableTarget::new(
+                    catalog,
+                    DEFAULT_PRIVATE_SCHEMA_NAME,
+                    SEMANTIC_RELATIONSHIPS_DECLARED_TABLE_NAME,
+                )
+                .with_physical_metric_table(table_info.is_physical_table()),
+            ]),
         )? {
             debug!(
                 "Excluding declared edges: caller lacks read permission on \
@@ -631,7 +634,6 @@ impl EntityGraphProviderImpl {
             );
             return Ok(None);
         }
-        let table_info = table.table_info();
         if !declared_relationships_schema_matches(&table_info) {
             return Err(BoxedError::new(
                 error::InvalidSqlSnafu {
@@ -796,6 +798,77 @@ mod tests {
     use table::requests::{TABLE_DATA_MODEL, TABLE_DATA_MODEL_TRACE_V1, TableOptions};
 
     use super::*;
+
+    struct DenyPhysicalTables;
+
+    impl PermissionChecker for DenyPhysicalTables {
+        fn check_permission(
+            &self,
+            _: auth::UserInfoRef,
+            _: PermissionReq,
+        ) -> auth::error::Result<auth::PermissionResp> {
+            Ok(auth::PermissionResp::Allow)
+        }
+
+        fn check_permission_with_table_targets(
+            &self,
+            _: auth::UserInfoRef,
+            _: PermissionReq,
+            targets: PermissionTableTargets,
+        ) -> auth::error::Result<auth::PermissionResp> {
+            let PermissionTableTargets::Resolved(targets) = targets else {
+                panic!("entity graph must resolve its sources");
+            };
+            Ok(
+                if targets.iter().any(|target| target.is_physical_metric_table) {
+                    auth::PermissionResp::Reject
+                } else {
+                    auth::PermissionResp::Allow
+                },
+            )
+        }
+    }
+
+    #[tokio::test]
+    async fn test_enumerate_authorizes_physical_tables() {
+        for physical in [false, true] {
+            let mut options = vec![("greptime.semantic.entity.service.id", "service_name")];
+            if physical {
+                options.push((PHYSICAL_TABLE_METADATA_KEY, ""));
+            }
+            let info = table_info(&["service_name"], &options);
+            let batch = common_recordbatch::RecordBatch::new_empty(info.meta.schema.clone());
+            let source = table::test_util::MemTable::table("t1", batch);
+            let table = Arc::new(table::Table::new(
+                Arc::new(info),
+                table::metadata::FilterPushDownType::Unsupported,
+                source.data_source(),
+            ));
+            let catalog: Arc<dyn CatalogManager> =
+                catalog::memory::MemoryCatalogManager::new_with_table(table);
+            let engine = query::QueryEngineFactory::new(
+                catalog.clone(),
+                None,
+                None,
+                None,
+                None,
+                false,
+                query::options::QueryOptions::default(),
+            )
+            .query_engine();
+            let provider = EntityGraphProviderImpl::new(
+                engine,
+                Arc::downgrade(&catalog),
+                Some(Arc::new(DenyPhysicalTables)),
+            );
+            let ctx = QueryContext::arc();
+            let (sources, _) = provider
+                .enumerate(DEFAULT_CATALOG_NAME, Some(&ctx))
+                .await
+                .unwrap();
+            assert_eq!(sources.len(), usize::from(!physical));
+        }
+    }
 
     fn table_info(columns: &[&str], extra: &[(&str, &str)]) -> TableInfo {
         let mut column_schemas = vec![
