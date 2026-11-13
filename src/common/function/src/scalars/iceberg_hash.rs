@@ -39,7 +39,7 @@ use datafusion::arrow::array::ArrayRef;
 use datafusion::arrow::datatypes::DataType;
 use datafusion_common::{DataFusionError, ScalarValue};
 use datafusion_expr::{ColumnarValue, ScalarFunctionArgs, Signature, Volatility};
-use partition::function::{iceberg_hash_udf, iceberg_hash_values};
+use partition::function::{IcebergHash, iceberg_hash_udf};
 
 use crate::function::Function;
 use crate::function_registry::FunctionRegistry;
@@ -469,7 +469,8 @@ fn into_hashed_scalar(
     scalar: &ScalarValue,
 ) -> datafusion_common::Result<i32> {
     let array: ArrayRef = scalar.to_array()?;
-    let hashed = iceberg_hash_values(array.as_ref()).map_err(|error| {
+    // Hash through the array form a partition rule evaluates, one value per row.
+    let hashed = IcebergHash::evaluate_array(array.as_ref()).map_err(|error| {
         DataFusionError::Execution(format!("{name} argument {position}: {error}"))
     })?;
     let value = ScalarValue::try_from_array(&hashed, 0)?;
@@ -509,8 +510,6 @@ mod tests {
     use datafusion::arrow::array::{Array, AsArray, Int64Array};
     use datafusion::arrow::datatypes::{DataType, Field, Int32Type};
     use datatypes::value::Value;
-
-    use partition::function::IcebergHash;
 
     use super::*;
     use crate::function_registry::FUNCTION_REGISTRY;

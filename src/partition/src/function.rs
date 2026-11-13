@@ -117,14 +117,6 @@ pub fn iceberg_hash_udf() -> ScalarUDF {
     ScalarUDF::new_from_impl(IcebergHashUdf::default())
 }
 
-/// Hashes `array` with [`IcebergHash`], one `INT32` per value.
-///
-/// Public so the SQL helper functions hash their constants through exactly the
-/// code a partition rule evaluates.
-pub fn iceberg_hash_values(array: &dyn Array) -> datafusion_common::Result<ArrayRef> {
-    iceberg_hash_array(array)
-}
-
 fn is_signed_integer(data_type: &ConcreteDataType) -> bool {
     matches!(
         data_type,
