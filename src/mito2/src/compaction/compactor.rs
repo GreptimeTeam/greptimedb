@@ -23,6 +23,7 @@ use common_meta::key::SchemaMetadataManagerRef;
 use common_telemetry::{info, warn};
 use common_time::TimeToLive;
 use either::Either;
+use futures::{StreamExt, stream};
 use itertools::Itertools;
 use object_store::manager::ObjectStoreManagerRef;
 use partition::expr::PartitionExpr;
@@ -456,34 +457,25 @@ impl CompactionContext {
     /// Checks each physical input once before output tasks begin. Missing inputs
     /// disable imported summaries without changing the reader's tolerant behavior.
     async fn prepare_index_inputs<'a>(&mut self, inputs: impl Iterator<Item = &'a FileHandle>) {
-        if !self.index_plan.needs_input_reuse()
-            || self
-                .region_metadata
-                .partition_expr
-                .as_deref()
-                .is_some_and(|expr| !expr.is_empty())
-        {
+        if !self.index_plan.needs_input_reuse() {
             return;
         }
-        let mut seen = HashSet::new();
-        let mut existing = HashSet::new();
-        for input in inputs {
-            let id = input.file_id();
-            if !seen.insert(id) {
-                continue;
-            }
-            let path = crate::sst::location::sst_file_path(
-                self.access_layer.table_dir(),
-                id,
-                self.access_layer.path_type(),
-            );
-            if matches!(
-                self.access_layer.object_store().exists(&path).await,
-                Ok(true)
-            ) {
-                existing.insert(id);
-            }
-        }
+        let ids: HashSet<_> = inputs.map(FileHandle::file_id).collect();
+        // Bound remote existence checks across this unit, not once per output.
+        let access_layer = &self.access_layer;
+        let existing = stream::iter(ids)
+            .map(|id| async move {
+                let path = crate::sst::location::sst_file_path(
+                    access_layer.table_dir(),
+                    id,
+                    access_layer.path_type(),
+                );
+                matches!(access_layer.object_store().exists(&path).await, Ok(true)).then_some(id)
+            })
+            .buffer_unordered(8)
+            .filter_map(|id| async move { id })
+            .collect::<HashSet<_>>()
+            .await;
         // FileHandles protect ordinary purge; external object-store deletion can race.
         self.existing_index_inputs = Some(Arc::new(existing));
     }
@@ -742,15 +734,21 @@ impl SstMerger for DefaultSstMerger {
             merge_mode,
             read_parallelism: write_opts.encode_parallelism,
         };
-        // A region filter, rollover or time slice requires output-scoped accumulation.
-        let no_region_filter = context
-            .region_metadata
-            .partition_expr
-            .as_deref()
-            .is_none_or(str::is_empty);
+        // Reuse only whole inputs: matching file scopes need no region filtering.
+        let partition_expr = match context.region_metadata.partition_expr.as_deref() {
+            None | Some("") => None,
+            Some(expr) => {
+                PartitionExpr::from_json_str(expr).with_context(|_| InvalidPartitionExprSnafu {
+                    expr: expr.to_string(),
+                })?
+            }
+        };
         let can_merge_inputs = write_opts.max_file_size.is_none()
             && output.output_time_range.is_none()
-            && no_region_filter
+            && output.inputs.iter().all(|input| {
+                partition_expr.is_none()
+                    || input.meta_ref().partition_expr.as_ref() == partition_expr.as_ref()
+            })
             && context
                 .existing_index_inputs
                 .as_ref()
