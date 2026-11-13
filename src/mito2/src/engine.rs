@@ -1204,7 +1204,7 @@ impl EngineInner {
             // A retiring merge source can keep its old scope. Scope comparison alone
             // cannot fence it, so reject reads during staging as well.
             ensure!(
-                !region.is_staging_or_staged_edit() && !region.is_enter_staging(),
+                !region.in_staging_session() && !region.is_enter_staging(),
                 crate::error::ReadRegionNotReadySnafu {
                     region_id,
                     reason: "repartition is in progress".to_string(),

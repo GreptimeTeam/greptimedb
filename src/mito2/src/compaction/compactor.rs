@@ -747,7 +747,7 @@ impl SstMerger for DefaultSstMerger {
             && output.output_time_range.is_none()
             && output.inputs.iter().all(|input| {
                 partition_expr.is_none()
-                    || input.meta_ref().partition_expr.as_ref() == partition_expr.as_ref()
+                    || input.meta_ref().partition_expr.as_deref() == partition_expr.as_ref()
             })
             && context
                 .existing_index_inputs

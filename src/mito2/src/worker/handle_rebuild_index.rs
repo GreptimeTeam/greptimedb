@@ -250,7 +250,10 @@ impl<S> RegionWorkerLoop<S> {
         )
         .and_then(|registry| {
             registry
-                .validate_required_kinds(&snapshot.metadata, manifest.files.values())
+                .validate_required_kinds(
+                    &snapshot.metadata,
+                    manifest.files.values().map(AsRef::as_ref),
+                )
                 .with_context(|_| ExternalSnafu {
                     context: "checking required index handlers for rebuild".to_string(),
                 })?;

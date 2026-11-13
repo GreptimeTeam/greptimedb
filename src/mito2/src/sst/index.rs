@@ -3598,7 +3598,7 @@ mod tests {
             assert_eq!(result.is_err(), with_builtin);
             let published = manifest_ctx.manifest().await.files[&file_meta.file_id].clone();
             if with_builtin {
-                assert_eq!(published, file_meta);
+                assert_eq!(published.as_ref(), &file_meta);
             } else {
                 assert_eq!(
                     published.available_indexes.as_slice(),
@@ -3696,7 +3696,7 @@ mod tests {
             let version = mock_version_control(
                 metadata.clone(),
                 file_purger.clone(),
-                HashMap::from([(old.file_id, old.clone())]),
+                HashMap::from([(old.file_id, old.as_ref().clone())]),
             )
             .await;
             let mut builder = mock_indexer_builder(metadata.clone(), &env).await;
@@ -3718,7 +3718,7 @@ mod tests {
                     );
             }
             task.file = FileHandle::new(old.clone(), file_purger);
-            task.source = IndexBuildSource::new(old.clone(), metadata.schema_version);
+            task.source = IndexBuildSource::new(old.as_ref().clone(), metadata.schema_version);
             task.indexer_builder = builder;
             let result = task.index_build(version).await;
             let published = manifest_ctx.manifest().await.files[&old.file_id].clone();
@@ -3920,8 +3920,8 @@ mod tests {
             let mut task = task;
             assert!(task.index_build(version_control.clone()).await.is_err());
             assert_eq!(
-                manifest_ctx.manifest().await.files[&file_meta.file_id],
-                file_meta
+                manifest_ctx.manifest().await.files[&file_meta.file_id].as_ref(),
+                &file_meta
             );
             return;
         }
