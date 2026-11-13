@@ -42,7 +42,7 @@ use parquet::errors::ParquetError;
 use parquet::file::metadata::{FileMetaData, KeyValue, ParquetMetaData};
 use parquet::file::properties::WriterProperties;
 use smallvec::smallvec;
-use snafu::{OptionExt, ResultExt, ensure};
+use snafu::{IntoError, OptionExt, ResultExt, ensure};
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::{FileId, SequenceNumber};
 
@@ -516,7 +516,7 @@ where
                 })?
                 .flush()
                 .await
-                .context(WriteParquetSnafu)?;
+                .map_err(map_write_error)?;
             self.check_cancelled()?;
             // Keep the upload owned until finalization succeeds, so an error
             // still reaches the common abort path.
@@ -528,7 +528,7 @@ where
                 })?
                 .finish()
                 .await
-                .context(WriteParquetSnafu)?;
+                .map_err(map_write_error)?;
             self.writer.take();
             let file_size = self.bytes_written.load(Ordering::Relaxed) as u64;
             if self.memory.limits.is_some() {
@@ -733,7 +733,7 @@ where
                 .await?
                 .write(&arrow_batch)
                 .await
-                .context(WriteParquetSnafu)?;
+                .map_err(map_write_error)?;
             self.metrics.write_batch += start.elapsed();
 
             self.check_cancelled()?;
@@ -845,13 +845,13 @@ where
                         opts.encode_parallelism,
                         opts.encode_runtime,
                     )
-                    .context(WriteParquetSnafu)?
+                    .map_err(map_write_error)?
                     .with_cancellation(self.cancellation.clone()),
                 )
             } else {
                 SstArrowWriter::Serial(
                     AsyncArrowWriter::try_new(writer, schema, Some(writer_props))
-                        .context(WriteParquetSnafu)?,
+                        .map_err(map_write_error)?,
                 )
             };
             self.writer = Some(arrow_writer);
@@ -872,6 +872,18 @@ where
             // safety: self.writer is assigned above
             Ok(self.writer.as_mut().unwrap())
         }
+    }
+}
+
+/// Keeps encoder cancellation inside the SST write error contract.
+fn map_write_error(error: ParquetError) -> crate::error::Error {
+    match error {
+        ParquetError::External(ref source)
+            if source.is::<common_base::cancellation::Cancelled>() =>
+        {
+            crate::error::SstWriteCancelledSnafu.build()
+        }
+        error => WriteParquetSnafu.into_error(error),
     }
 }
 
@@ -1023,6 +1035,85 @@ mod tests {
     use crate::sst::parquet::tests::NoopIndexBuilder;
     use crate::test_util::TestEnv;
     use crate::test_util::sst_util::{new_record_batch_by_range, sst_region_metadata};
+
+    #[rstest::rstest]
+    #[case::flat(FormatType::Flat)]
+    #[case::primary_key(FormatType::PrimaryKey)]
+    #[tokio::test]
+    async fn test_encoding_error_classification(
+        #[case] format: FormatType,
+        #[values(false, true)] finish_file: bool,
+        #[values(false, true)] cancelled: bool,
+    ) {
+        let mut env = TestEnv::new().await;
+        let metadata = Arc::new(sst_region_metadata());
+        let mut metrics = Metrics::new(WriteType::Compaction);
+        let mut writer = ParquetWriter::new_with_object_store(
+            env.init_object_store_manager(),
+            metadata.clone(),
+            IndexConfig::default(),
+            NoopIndexBuilder,
+            RegionFilePathFactory::new(String::new(), PathType::Bare),
+            &mut metrics,
+        )
+        .await;
+        let batch = new_record_batch_by_range(&["a", "b"], 0, 4);
+        let converter = match format {
+            FormatType::Flat => FlatBatchConverter::Flat(FlatWriteFormat::new(
+                metadata.clone(),
+                &FlatSchemaOptions::default(),
+            )),
+            FormatType::PrimaryKey => FlatBatchConverter::PrimaryKey {
+                format: PrimaryKeyWriteFormat::new(metadata.clone()),
+                num_fields: metadata.field_columns().count(),
+            },
+        };
+        let schema = converter.convert_batch(&batch).unwrap().schema();
+        let opts = WriteOptions {
+            // A full row group joins the previous task in append_flat_batch;
+            // a partial group joins it in finish_current_file instead.
+            row_group_size: batch.num_rows() + usize::from(finish_file),
+            encode_parallelism: 2,
+            ..Default::default()
+        };
+        let SstArrowWriter::Parallel(parallel) =
+            writer.maybe_init_writer(&schema, &opts).await.unwrap()
+        else {
+            panic!("expected parallel encoding");
+        };
+        let task = common_runtime::spawn_blocking_compact(move || {
+            let source: Box<dyn std::error::Error + Send + Sync> = if cancelled {
+                Box::new(common_base::cancellation::Cancelled)
+            } else {
+                Box::new(std::io::Error::other("encoding failed"))
+            };
+            Err(ParquetError::External(source))
+        });
+        // No SST-level cancellation handle: only the encoder's error can report cancellation.
+        parallel.set_encoding_tasks_for_test(vec![task]);
+        let source =
+            FlatSource::new_stream(batch.schema(), Box::pin(futures::stream::iter([Ok(batch)])));
+        let error = match format {
+            FormatType::Flat => writer.write_all_flat(source, None, &opts).await,
+            FormatType::PrimaryKey => {
+                writer
+                    .write_all_flat_as_primary_key(source, None, &opts)
+                    .await
+            }
+        }
+        .unwrap_err();
+        if cancelled {
+            assert!(matches!(error, Error::SstWriteCancelled { .. }));
+        } else {
+            assert!(
+                matches!(error, Error::WriteParquet { error: ParquetError::External(ref source), .. }
+                if source.downcast_ref::<std::io::Error>().is_some_and(|error| error.to_string() == "encoding failed"))
+            );
+        }
+        assert!(writer.writer.is_none());
+        assert!(writer.current_indexer.is_none());
+        assert_eq!(0, writer.bytes_written.load(Ordering::Relaxed));
+    }
 
     #[rstest::rstest]
     #[case::flat(FormatType::Flat)]

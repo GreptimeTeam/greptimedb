@@ -721,12 +721,6 @@ impl SstMerger for DefaultSstMerger {
         }
         match result {
             Err(error::Error::SstWriteCancelled { .. }) => error::CompactionCancelledSnafu.fail(),
-            Err(error::Error::WriteParquet {
-                error: parquet::errors::ParquetError::External(ref source),
-                ..
-            }) if source.is::<common_base::cancellation::Cancelled>() => {
-                error::CompactionCancelledSnafu.fail()
-            }
             result => result,
         }
     }
