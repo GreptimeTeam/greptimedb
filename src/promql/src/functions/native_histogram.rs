@@ -3364,6 +3364,41 @@ mod tests {
     }
 
     #[test]
+    fn sum_aggregate_keeps_the_start_timestamp_of_a_single_sample() {
+        let mut histogram = sample_histogram(2.0, 3.0, vec![2.0]);
+        histogram.start_timestamp = Some(1_234);
+
+        let mut accumulator =
+            NativeHistogramAggregateAccumulator::new(NativeHistogramAggregateKind::Sum, None);
+        accumulator.push_histogram(histogram, 1).unwrap();
+
+        assert_eq!(
+            accumulator.value.unwrap().start_timestamp,
+            Some(1_234),
+            "the first sample is passed through untouched, so its start timestamp survives"
+        );
+    }
+
+    #[test]
+    fn sum_aggregate_clears_the_start_timestamp_once_it_combines_two_samples() {
+        let mut first = sample_histogram(2.0, 3.0, vec![2.0]);
+        first.start_timestamp = Some(1_234);
+        let mut second = sample_histogram(2.0, 3.0, vec![2.0]);
+        second.start_timestamp = Some(5_678);
+
+        let mut accumulator =
+            NativeHistogramAggregateAccumulator::new(NativeHistogramAggregateKind::Sum, None);
+        accumulator.push_histogram(first, 1).unwrap();
+        accumulator.push_histogram(second, 1).unwrap();
+
+        assert_eq!(
+            accumulator.value.unwrap().start_timestamp,
+            None,
+            "a derived sum carries no start timestamp of its own"
+        );
+    }
+
+    #[test]
     fn comparison_observes_explicit_sparse_zero_buckets() {
         let mut left = sample_histogram(1.0, 1.0, vec![1.0, 0.0]);
         left.reset_hint = COUNTER_RESET_HINT;
@@ -3957,6 +3992,41 @@ mod tests {
         .unwrap();
         assert_eq!(increase.count, 4.0);
         assert_eq!(increase.sum, 4.0);
+    }
+
+    /// The raw range functions report a derived difference or quotient, so none of them keeps the
+    /// start timestamp of the samples it read: the field names the start of the window one sample
+    /// belongs to, and a result that spans several samples has no single such window.
+    #[test]
+    fn raw_range_functions_clear_the_start_timestamp() {
+        let mut first = sample_histogram(2.0, 2.0, vec![2.0]);
+        first.start_timestamp = Some(1_000);
+        let mut last = sample_histogram(4.0, 4.0, vec![4.0]);
+        last.start_timestamp = Some(2_000);
+
+        for udf in [
+            NativeHistogramRate::scalar_udf(),
+            NativeHistogramIncrease::scalar_udf(),
+            NativeHistogramDelta::scalar_udf(),
+        ] {
+            let name = udf.name().to_string();
+            let result = run_extrapolated_histogram_udf(udf, vec![first.clone(), last.clone()]);
+            assert_eq!(
+                result.start_timestamp, None,
+                "{name}: the range functions derive a value of their own"
+            );
+        }
+        for udf in [
+            NativeHistogramIDelta::scalar_udf(),
+            NativeHistogramIRate::scalar_udf(),
+        ] {
+            let name = udf.name().to_string();
+            let result = run_histogram_range_udf(udf, vec![first.clone(), last.clone()]);
+            assert_eq!(
+                result.start_timestamp, None,
+                "{name}: the range functions derive a value of their own"
+            );
+        }
     }
 
     #[test]

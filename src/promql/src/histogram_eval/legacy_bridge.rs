@@ -173,8 +173,23 @@ fn bucket_total(histogram: &NativeHistogram) -> f64 {
 /// A view borrows the offsets and lengths it needs from two temporary slices, so the copy happens
 /// here and the `FloatHistogram` owns the counts that result.
 fn float_histogram(histogram: &NativeHistogram) -> Result<FloatHistogram> {
+    if steps_backwards(&histogram.positive_spans) || steps_backwards(&histogram.negative_spans) {
+        return Err(datafusion::error::DataFusionError::Execution(
+            "native histogram has an invalid layout".into(),
+        ));
+    }
     let view = LegacyView::new(histogram);
     FloatHistogram::try_from_view(&view.view())
+}
+
+/// Whether a span list steps backwards, which the legacy `bucket_indices` refused.
+///
+/// The kernel's `side_from_view` adds each offset to a running index and accepts a later span that
+/// steps backwards, so the expanded indices repeat or go negative. Legacy refused such a list
+/// outright, so the bridge refuses it too: `add`/`sub` answer `None` as they did, and
+/// `scale`/`divide_by` keep their field-by-field fallback.
+fn steps_backwards(spans: &[Span]) -> bool {
+    spans.iter().skip(1).any(|span| span.offset < 0)
 }
 
 /// The legacy representation of `histogram`, with the span layout it carries.
@@ -324,7 +339,10 @@ mod tests {
     };
     use datatypes::series::histogram::{BucketSideView, HistogramView};
 
-    use super::{add, float_histogram, fraction_with_info, quantile_with_info, sub};
+    use super::{
+        add, divide_by, float_histogram, fraction_with_info, legacy_histogram, quantile_with_info,
+        scale, sub,
+    };
     use crate::histogram_eval::float_histogram::FloatHistogram;
     use crate::histogram_eval::native;
 
@@ -345,6 +363,13 @@ mod tests {
         nan_sum.positive_spans = vec![span(0, 1)];
         nan_sum.positive_buckets = vec![8.0];
 
+        // With more than one bucket, the kernel's NaN branch walks the remaining buckets and leaves
+        // the last one behind for the interpolation, so the chosen bucket is not the one the rank
+        // fell into. A single-bucket fixture cannot reach that path.
+        let mut nan_sum_multi_bucket = empty(0, 0.0, 10.0, f64::NAN, 0.0);
+        nan_sum_multi_bucket.positive_spans = vec![span(0, 2)];
+        nan_sum_multi_bucket.positive_buckets = vec![8.0, 1.0];
+
         let mut both_sides = empty(2, 0.5, 20.0, -3.0, 3.0);
         both_sides.positive_spans = vec![span(0, 3)];
         both_sides.positive_buckets = vec![4.0, 2.0, 5.0];
@@ -360,6 +385,7 @@ mod tests {
             ("custom", custom),
             ("spaced", spaced),
             ("nan_sum", nan_sum),
+            ("nan_sum_multi_bucket", nan_sum_multi_bucket),
             ("both_sides", both_sides),
             ("zero_bucket_only", zero_bucket_only),
             ("empty", empty_histogram),
@@ -459,6 +485,102 @@ mod tests {
         }
     }
 
+    /// Prometheus's NaN branch walks the remaining buckets and leaves the last one for the
+    /// interpolation, so a multi-bucket `sum = NaN` histogram answers with the top bucket rather
+    /// than the bucket the rank fell into. Pinning the number here, rather than only comparing
+    /// against the kernel, keeps a future kernel change from silently re-deciding it.
+    #[test]
+    fn quantile_with_nan_sum_uses_the_last_bucket() {
+        let mut histogram = empty(0, 0.0, 10.0, f64::NAN, 0.0);
+        histogram.positive_spans = vec![span(0, 2)];
+        histogram.positive_buckets = vec![8.0, 1.0];
+
+        // The nine observations the buckets hold are fewer than the count of ten and the sum is
+        // NaN, so the note reports the skew: the rank still falls inside what the buckets carry.
+        let (value, info) = quantile_with_info(&histogram, 0.5);
+        assert_eq!(
+            value.to_bits(),
+            32.0f64.to_bits(),
+            "rank 5 lands in (0.5, 1] (0.7711), but the NaN walk leaves (1, 2] behind and \
+             fraction 5 / 1 puts the answer at 2^5"
+        );
+        assert_eq!(
+            info,
+            Some(NativeHistogramQuantileInfo::NaNSkew),
+            "a rank inside the bucket total is still an estimate"
+        );
+    }
+
+    /// The other half of the same note: a rank past the total the buckets carry is no estimate at
+    /// all, because the observations the buckets cannot hold were the highest ones.
+    #[test]
+    fn quantile_with_nan_sum_below_the_rank_is_nan() {
+        let mut histogram = empty(0, 0.0, 10.0, f64::NAN, 0.0);
+        histogram.positive_spans = vec![span(0, 2)];
+        histogram.positive_buckets = vec![8.0, 1.0];
+
+        // The rank 0.95 * 10 = 9.5 lies past the 9 observations the buckets hold, so the forward
+        // walk never reaches it and the estimate is NaN rather than the last bucket's bound.
+        let (value, info) = quantile_with_info(&histogram, 0.95);
+        assert!(
+            value.is_nan(),
+            "a rank the buckets cannot reach has no estimate, got {value}"
+        );
+        assert_eq!(
+            info,
+            Some(NativeHistogramQuantileInfo::NaNResult),
+            "the note says the NaN observations were the highest ones"
+        );
+
+        // The single-bucket fixture the earlier note test uses reaches the same branch: the rank
+        // 0.9 * 10 = 9 lies past the 8 observations the one bucket holds.
+        let mut single = empty(0, 0.0, 10.0, f64::NAN, 0.0);
+        single.positive_spans = vec![span(0, 1)];
+        single.positive_buckets = vec![8.0];
+        assert!(quantile_with_info(&single, 0.9).0.is_nan());
+        assert_eq!(
+            quantile_with_info(&single, 0.9).1,
+            Some(NativeHistogramQuantileInfo::NaNResult)
+        );
+    }
+
+    /// A tie between two buckets that do not touch resolves differently in the two walks, and that
+    /// difference is why the kernel replaced the estimator: the legacy walk goes up from the lowest
+    /// bucket and stops at the first one the rank fits in, while the kernel walks a finite-sum
+    /// histogram at or above the median down from the highest. Both numbers are pinned as literals,
+    /// the legacy one computed through the estimator still in `common/query`, so that a later
+    /// change to either walk shows up as an arithmetic difference instead of a quiet one.
+    #[test]
+    fn exact_tie_answers_one_from_the_legacy_walk_and_two_from_the_kernel() {
+        let mut tie = empty(0, 0.0, 2.0, 3.75, 0.0);
+        // Index 0 and index 2 hold one observation each, and index 1 is empty, so the two buckets
+        // do not touch and nothing interpolates across the gap.
+        tie.positive_spans = vec![span(0, 1), span(1, 1)];
+        tie.positive_buckets = vec![1.0, 1.0];
+
+        // `NativeHistogram::quantile_with_info` is the estimator the legacy UDF used before the
+        // kernel replaced it and is still in the workspace: rank 0.5 * 2 = 1 fills the bucket at
+        // index 0 exactly, whose fraction is 1, so the answer is that bucket's upper bound.
+        assert_eq!(
+            tie.quantile_with_info(0.5),
+            (1.0, None),
+            "the legacy walk answers with the upper bound of (0.5, 1]"
+        );
+
+        // The kernel's backwards walk meets the bucket at index 2 first, and the rank inside it is
+        // 0, so the answer is the lower bound of (2, 4].
+        let (value, info) = quantile_with_info(&tie, 0.5);
+        assert_eq!(
+            value.to_bits(),
+            2.0f64.to_bits(),
+            "the kernel's walk answers with the lower bound of (2, 4]"
+        );
+        assert_eq!(
+            info, None,
+            "a tie between two buckets is not a NaN observation"
+        );
+    }
+
     /// The same agreement for `histogram_fraction`, whose legacy wrapper also returns a note.
     #[test]
     fn fraction_with_info_is_the_native_fraction() {
@@ -537,6 +659,19 @@ mod tests {
         nan_right.positive_spans = vec![span(0, 1)];
         nan_right.positive_buckets = vec![2.0];
 
+        // Every operand carries a start timestamp of its own, because the arithmetic is expected to
+        // clear it: a sum differs from both samples it was derived from, so it names no start.
+        same_left.start_timestamp = Some(1_000);
+        same_right.start_timestamp = Some(2_000);
+        fine.start_timestamp = Some(3_001);
+        coarse.start_timestamp = Some(3_002);
+        narrow_zero.start_timestamp = Some(3_003);
+        wide_zero.start_timestamp = Some(3_004);
+        custom_left.start_timestamp = Some(3_005);
+        custom_right.start_timestamp = Some(3_006);
+        nan_left.start_timestamp = Some(3_007);
+        nan_right.start_timestamp = Some(3_008);
+
         vec![
             ("same_layout", same_left, same_right),
             ("schema_reduction", fine, coarse),
@@ -576,29 +711,104 @@ mod tests {
             .collect()
     }
 
-    fn assert_same_payload(name: &str, legacy: &NativeHistogram, native: &FloatHistogram) {
-        assert_eq!(legacy.schema, native.schema, "{name}");
+    /// Bucket counts by their exact bit patterns, so a comparison also holds for a NaN or a signed
+    /// zero a scaling left behind.
+    fn count_bits(counts: &[f64]) -> Vec<u64> {
+        counts.iter().map(|count| count.to_bits()).collect()
+    }
+
+    fn side_count_bits(side: &[(i32, f64)]) -> Vec<u64> {
+        side.iter().map(|&(_, count)| count.to_bits()).collect()
+    }
+
+    /// A span list as the `(offset, length)` pairs [`FloatHistogram::spans`] reports.
+    fn segments(spans: &[Span]) -> Vec<(i32, i32)> {
+        spans
+            .iter()
+            .map(|span| (span.offset, span.length))
+            .collect()
+    }
+
+    /// Every field of the legacy payload against the kernel's, span segmentation included: a
+    /// comparison of the populated buckets alone cannot tell one span of two buckets from two
+    /// spans of one bucket each, and says nothing about the metadata beside the counts.
+    ///
+    /// `expected_start_timestamp` states the policy of the operation that produced the payload. One
+    /// that derives a histogram from its input -- `add`, `sub`, `scale`, `divide_by` -- clears the
+    /// start timestamp, because the field names the start of the sample the payload was read from
+    /// and a derived value is not that sample; the kernel clears it in the same step, so both sides
+    /// must carry the value passed here. `scale` and `divide_by` keep a field-by-field fallback for
+    /// a layout the kernel cannot read, which derives nothing and copies the field, and the test
+    /// that exercises it asserts `Some(..)` where it belongs. `quantile_with_info` and
+    /// `fraction_with_info` return no payload and leave their input untouched, so they have no
+    /// start timestamp to compare here.
+    fn assert_same_payload(
+        name: &str,
+        legacy: &NativeHistogram,
+        native: &FloatHistogram,
+        expected_start_timestamp: Option<i64>,
+    ) {
+        assert_eq!(legacy.schema, native.schema, "{name} schema");
         assert_eq!(
             legacy.zero_threshold.to_bits(),
             native.zero_threshold.to_bits(),
-            "{name}"
+            "{name} zero_threshold"
         );
-        assert_eq!(legacy.count.to_bits(), native.count.to_bits(), "{name}");
-        assert_eq!(legacy.sum.to_bits(), native.sum.to_bits(), "{name}");
+        assert_eq!(
+            legacy.count.to_bits(),
+            native.count.to_bits(),
+            "{name} count"
+        );
+        assert_eq!(legacy.sum.to_bits(), native.sum.to_bits(), "{name} sum");
         assert_eq!(
             legacy.zero_count.to_bits(),
             native.zero_count.to_bits(),
-            "{name}"
+            "{name} zero_count"
+        );
+        assert_eq!(legacy.reset_hint, native.reset_hint, "{name} reset_hint");
+        assert_eq!(
+            legacy.custom_values, native.custom_values,
+            "{name} custom_values"
+        );
+        assert_eq!(
+            legacy.start_timestamp, expected_start_timestamp,
+            "{name} start_timestamp"
+        );
+        assert_eq!(
+            native.start_timestamp, expected_start_timestamp,
+            "{name} kernel start_timestamp"
+        );
+
+        let [positive, negative] = native.spans();
+        assert_eq!(
+            segments(&legacy.positive_spans),
+            positive,
+            "{name} positive spans"
+        );
+        assert_eq!(
+            segments(&legacy.negative_spans),
+            negative,
+            "{name} negative spans"
+        );
+        assert_eq!(
+            count_bits(&legacy.positive_buckets),
+            side_count_bits(&native.positive),
+            "{name} positive buckets"
+        );
+        assert_eq!(
+            count_bits(&legacy.negative_buckets),
+            side_count_bits(&native.negative),
+            "{name} negative buckets"
         );
         assert_eq!(
             populated_buckets(&legacy.positive_spans, &legacy.positive_buckets),
             populated(&native.positive),
-            "{name} positive"
+            "{name} positive bucket indices"
         );
         assert_eq!(
             populated_buckets(&legacy.negative_spans, &legacy.negative_buckets),
             populated(&native.negative),
-            "{name} negative"
+            "{name} negative bucket indices"
         );
     }
 
@@ -609,7 +819,11 @@ mod tests {
             let combined = add(&left, &right).unwrap();
             let mut native = float_histogram(&left).unwrap();
             native.add(&float_histogram(&right).unwrap()).unwrap();
-            assert_same_payload(name, &combined, &native);
+            // The bridge compacts a sum, dropping the buckets the two sides left empty, so the
+            // kernel's own addition needs the same step before the two payloads can be compared
+            // bucket for bucket.
+            native.compact();
+            assert_same_payload(name, &combined, &native, None);
         }
     }
 
@@ -622,7 +836,8 @@ mod tests {
             let mut native = float_histogram(&left).unwrap();
             native.sub(&float_histogram(&right).unwrap()).unwrap();
             native.reset_hint = CounterResetHint::Gauge;
-            assert_same_payload(name, &combined, &native);
+            native.compact();
+            assert_same_payload(name, &combined, &native, None);
         }
     }
 
@@ -632,15 +847,15 @@ mod tests {
     fn scale_and_divide_by_are_the_native_mul_and_div() {
         for (name, histogram, _) in pairs() {
             for factor in [2.0, 0.5, -1.0, 0.0, f64::INFINITY] {
-                let scaled = super::scale(&histogram, factor);
+                let scaled = scale(&histogram, factor);
                 let mut native = float_histogram(&histogram).unwrap();
                 native.mul(factor);
-                assert_same_payload(name, &scaled, &native);
+                assert_same_payload(name, &scaled, &native, None);
 
-                let divided = super::divide_by(&histogram, factor);
+                let divided = divide_by(&histogram, factor);
                 let mut native = float_histogram(&histogram).unwrap();
                 native.div(factor);
-                assert_same_payload(name, &divided, &native);
+                assert_same_payload(name, &divided, &native, None);
             }
         }
     }
@@ -674,5 +889,453 @@ mod tests {
         assert!(!fraction_with_info(&nan_sum, f64::NAN, 1.0).1);
         assert!(!fraction_with_info(&nan_sum, 1.0, 1.0).1);
         assert!(!fraction_with_info(&nan_sum, 2.0, 1.0).1);
+    }
+
+    /// The two conversions are inverse: the payload survives `NativeHistogram` to
+    /// [`FloatHistogram`] and back field for field, including the parts a comparison of the counts
+    /// alone would not see.
+    #[test]
+    fn round_trip_preserves_the_payload_and_its_span_layout() {
+        let mut exponential = empty(2, 0.5, 12.0, -7.5, 1.0);
+        exponential.reset_hint = CounterResetHint::NotCounterReset;
+        exponential.start_timestamp = Some(1_234_567);
+        // A zero-length span carries nothing but its offset, and the two gaps between the three
+        // populated segments are part of the layout the legacy representation reports: the counts
+        // live at indices 2 and 3 and then 5, with nothing at 4.
+        exponential.positive_spans = vec![span(0, 0), span(2, 2), span(1, 1)];
+        exponential.positive_buckets = vec![1.0, 3.0, 2.0];
+        exponential.negative_spans = vec![span(-2, 2)];
+        exponential.negative_buckets = vec![2.5, 1.5];
+
+        let mut custom = empty(CUSTOM_BUCKETS_SCHEMA, 0.0, 6.0, 9.0, 0.0);
+        custom.reset_hint = CounterResetHint::Gauge;
+        custom.start_timestamp = Some(42);
+        custom.custom_values = vec![1.0, 2.0, 4.0, 8.0];
+        custom.positive_spans = vec![span(0, 1), span(1, 2)];
+        custom.positive_buckets = vec![1.0, 2.0, 3.0];
+
+        for (name, original) in [("exponential", exponential), ("custom", custom)] {
+            let round_tripped = legacy_histogram(&float_histogram(&original).unwrap());
+
+            assert_eq!(
+                round_tripped.reset_hint, original.reset_hint,
+                "{name} reset_hint"
+            );
+            assert_eq!(
+                round_tripped.start_timestamp, original.start_timestamp,
+                "{name} start_timestamp"
+            );
+            assert_eq!(
+                round_tripped.custom_values, original.custom_values,
+                "{name} custom_values"
+            );
+            assert_eq!(
+                round_tripped.positive_spans, original.positive_spans,
+                "{name} positive spans, zero-length and gapped segments included"
+            );
+            assert_eq!(
+                round_tripped.negative_spans, original.negative_spans,
+                "{name} negative spans"
+            );
+            assert_eq!(
+                count_bits(&round_tripped.positive_buckets),
+                count_bits(&original.positive_buckets),
+                "{name} positive buckets"
+            );
+            assert_eq!(
+                count_bits(&round_tripped.negative_buckets),
+                count_bits(&original.negative_buckets),
+                "{name} negative buckets"
+            );
+            // Everything else the payload holds -- schema, zero threshold, count, sum and the zero
+            // count -- is compared in one place above.
+            assert_eq!(
+                round_tripped, original,
+                "{name}: the round trip changed the histogram"
+            );
+        }
+    }
+
+    /// A histogram an operation derived carries no start timestamp: the field names the start of
+    /// the sample the payload was read from, and a sum, a difference, a product or a quotient is
+    /// not that sample.
+    #[test]
+    fn the_arithmetic_clears_the_start_timestamp() {
+        let mut left = empty(0, 0.0, 2.0, 3.0, 0.0);
+        left.start_timestamp = Some(1_000);
+        left.positive_spans = vec![span(0, 1)];
+        left.positive_buckets = vec![2.0];
+        let mut right = empty(0, 0.0, 1.0, 1.0, 0.0);
+        right.start_timestamp = Some(2_000);
+        right.positive_spans = vec![span(0, 1)];
+        right.positive_buckets = vec![1.0];
+
+        for (name, derived) in [
+            ("add", add(&left, &right).unwrap()),
+            ("sub", sub(&left, &right).unwrap()),
+            ("scale", scale(&left, 2.0)),
+            ("divide_by", divide_by(&left, 2.0)),
+        ] {
+            assert_eq!(
+                derived.start_timestamp, None,
+                "{name}: a derived histogram names no start"
+            );
+        }
+        // Reading the operands is not deriving from them.
+        assert_eq!(left.start_timestamp, Some(1_000));
+        assert_eq!(right.start_timestamp, Some(2_000));
+    }
+
+    /// The estimators read the buckets rather than the sample's start timestamp, and neither of
+    /// them hands back a payload, so the field neither changes the answer nor changes itself.
+    #[test]
+    fn the_estimators_leave_the_start_timestamp_alone() {
+        let mut timed = empty(2, 0.5, 20.0, -3.0, 3.0);
+        timed.start_timestamp = Some(1_700_000_000_000);
+        timed.positive_spans = vec![span(0, 3)];
+        timed.positive_buckets = vec![4.0, 2.0, 5.0];
+        timed.negative_spans = vec![span(0, 2)];
+        timed.negative_buckets = vec![3.0, 3.0];
+        let mut untimed = timed.clone();
+        untimed.start_timestamp = None;
+
+        for q in [0.0, 0.25, 0.5, 0.75, 1.0] {
+            assert_eq!(
+                quantile_with_info(&timed, q).0.to_bits(),
+                quantile_with_info(&untimed, q).0.to_bits(),
+                "q {q}: the start timestamp takes no part in the estimate"
+            );
+        }
+        for (lower, upper) in [(-1.0, 2.0), (0.0, 1.0)] {
+            assert_eq!(
+                fraction_with_info(&timed, lower, upper).0.to_bits(),
+                fraction_with_info(&untimed, lower, upper).0.to_bits(),
+                "[{lower}, {upper}]: the start timestamp takes no part in the estimate"
+            );
+        }
+        assert_eq!(
+            timed.start_timestamp,
+            Some(1_700_000_000_000),
+            "estimating from a histogram must not rewrite it"
+        );
+    }
+
+    /// The arithmetic reconciles what the two operands disagree about, and reports it in the
+    /// payload: the reset hint combination and the custom bounds.
+    #[test]
+    fn add_and_sub_reconcile_the_reset_hint_and_the_custom_bounds() {
+        // A reset and a confirmation contradict each other, so a sum of the two cannot claim
+        // either: the kernel answers with the hint that must be inspected.
+        let mut reset = empty(0, 0.0, 2.0, 2.0, 0.0);
+        reset.reset_hint = CounterResetHint::CounterReset;
+        reset.positive_spans = vec![span(0, 1)];
+        reset.positive_buckets = vec![2.0];
+        let mut confirmed = empty(0, 0.0, 1.0, 1.0, 0.0);
+        confirmed.reset_hint = CounterResetHint::NotCounterReset;
+        confirmed.positive_spans = vec![span(0, 1)];
+        confirmed.positive_buckets = vec![1.0];
+
+        let sum = add(&reset, &confirmed).unwrap();
+        assert_eq!(
+            sum.reset_hint,
+            CounterResetHint::Unknown,
+            "a contradiction the payload has to be inspected for"
+        );
+        assert_eq!(sum.count.to_bits(), 3.0f64.to_bits());
+        assert_eq!(sum.sum.to_bits(), 3.0f64.to_bits());
+        assert_eq!(sum.positive_buckets, vec![3.0]);
+        assert_eq!(
+            add(&confirmed, &reset).unwrap().reset_hint,
+            CounterResetHint::Unknown,
+            "the same contradiction in the other order"
+        );
+        assert_eq!(
+            add(&confirmed, &confirmed).unwrap().reset_hint,
+            CounterResetHint::NotCounterReset,
+            "two counters that agree keep their agreement"
+        );
+        assert_eq!(
+            sub(&reset, &confirmed).unwrap().reset_hint,
+            CounterResetHint::Gauge,
+            "subtraction is a gauge operation whatever the operands said"
+        );
+
+        // Custom bounds that disagree leave the result with the bounds both sides carry.
+        let mut left = empty(CUSTOM_BUCKETS_SCHEMA, 0.0, 6.0, 12.0, 0.0);
+        left.custom_values = vec![1.0, 2.0, 4.0];
+        left.positive_spans = vec![span(0, 3)];
+        left.positive_buckets = vec![1.0, 3.0, 2.0];
+        let mut right = empty(CUSTOM_BUCKETS_SCHEMA, 0.0, 6.0, 14.0, 0.0);
+        right.custom_values = vec![2.0, 3.0, 4.0];
+        right.positive_spans = vec![span(0, 3)];
+        right.positive_buckets = vec![4.0, 1.0, 1.0];
+
+        let combined = add(&left, &right).unwrap();
+        assert_eq!(
+            combined.custom_values,
+            vec![2.0, 4.0],
+            "the intersection of (1, 2, 4) and (2, 3, 4)"
+        );
+        assert_eq!(combined.count.to_bits(), 12.0f64.to_bits());
+        assert_eq!(combined.sum.to_bits(), 26.0f64.to_bits());
+        // Each side's buckets land in the interval of the merged bounds they fall in: `(-inf, 2]`
+        // takes 1 + 3 from the left and 4 from the right, and `(2, 4]` takes 2 from the left and
+        // 1 + 1 from the right. The empty `(4, inf)` bucket is dropped before it reaches a span.
+        assert_eq!(combined.positive_buckets, vec![8.0, 4.0]);
+        assert_eq!(combined.positive_spans, vec![span(0, 2)]);
+    }
+
+    /// A bucket the two sides cancel out of leaves no span behind, and `promql_eq` reads the
+    /// buckets the spans expand to rather than the span list they are written with.
+    #[test]
+    fn sub_compacts_the_buckets_it_cancels_and_promql_eq_expands_the_spans() {
+        let mut left = empty(2, 0.5, 4.0, 6.0, 0.0);
+        left.positive_spans = vec![span(0, 2)];
+        left.positive_buckets = vec![2.0, 1.5];
+        left.negative_spans = vec![span(0, 1)];
+        left.negative_buckets = vec![0.5];
+
+        let difference = sub(&left, &left).unwrap();
+        assert_eq!(difference.count.to_bits(), 0.0f64.to_bits());
+        assert_eq!(difference.sum.to_bits(), 0.0f64.to_bits());
+        assert_eq!(difference.zero_count.to_bits(), 0.0f64.to_bits());
+        assert!(
+            difference.positive_spans.is_empty(),
+            "a cancelled bucket leaves no span behind, got {:?}",
+            difference.positive_spans
+        );
+        assert!(difference.positive_buckets.is_empty());
+        assert!(difference.negative_spans.is_empty());
+        assert!(difference.negative_buckets.is_empty());
+        // The same histogram as no histogram at all.
+        assert!(
+            difference.promql_eq(&empty(2, 0.5, 0.0, 0.0, 0.0)),
+            "the cancelling subtraction is the empty histogram"
+        );
+
+        // Two spans of one bucket each describe the same buckets as one span of two: the first
+        // span's offset is the bucket index, and each later offset is the gap after the previous
+        // span, so `(0, 1), (0, 1)` puts the second bucket at index 1 while `(0, 1), (1, 1)`
+        // leaves index 1 empty and puts it at index 2.
+        let mut one_span = empty(0, 0.0, 3.0, 3.0, 0.0);
+        one_span.positive_spans = vec![span(0, 2)];
+        one_span.positive_buckets = vec![1.0, 2.0];
+        let mut two_spans = empty(0, 0.0, 3.0, 3.0, 0.0);
+        two_spans.positive_spans = vec![span(0, 1), span(0, 1)];
+        two_spans.positive_buckets = vec![1.0, 2.0];
+        assert!(
+            one_span.promql_eq(&two_spans),
+            "the same indices and counts under a different segmentation"
+        );
+
+        let mut gapped = empty(0, 0.0, 3.0, 3.0, 0.0);
+        gapped.positive_spans = vec![span(0, 1), span(1, 1)];
+        gapped.positive_buckets = vec![1.0, 2.0];
+        assert!(
+            !one_span.promql_eq(&gapped),
+            "the same counts at indices 0 and 2 are not the same histogram"
+        );
+        let mut other_counts = two_spans.clone();
+        other_counts.positive_buckets = vec![2.0, 1.0];
+        assert!(
+            !one_span.promql_eq(&other_counts),
+            "the same indices with other counts are not the same histogram"
+        );
+    }
+
+    /// Payloads the legacy caller could still produce and the kernel refuses to read: a span whose
+    /// length disagrees with the counts, a span list that steps backwards, an index that leaves
+    /// `i32` once expanded, and a negative span length. All four carry the same numbers, so the
+    /// field-by-field answers below are the same for each of them.
+    fn unreadable_layouts() -> Vec<(&'static str, NativeHistogram, Option<i64>)> {
+        // The span claims one bucket and the counts hold two.
+        let mut short_counts = empty(0, 0.0, 3.0, 5.0, 1.0);
+        short_counts.reset_hint = CounterResetHint::NotCounterReset;
+        short_counts.positive_spans = vec![span(0, 1)];
+        short_counts.positive_buckets = vec![1.0, 2.0];
+        let mut backwards = short_counts.clone();
+        backwards.positive_spans = vec![span(0, 1), span(-1, 1)];
+        let mut overflow = short_counts.clone();
+        overflow.positive_spans = vec![span(i32::MAX, 2)];
+        let mut negative_length = short_counts.clone();
+        negative_length.positive_spans = vec![span(0, -1)];
+
+        vec![
+            ("short_counts", short_counts, Some(4_242)),
+            ("backwards", backwards, Some(4_243)),
+            ("overflow", overflow, Some(4_244)),
+            ("negative_length", negative_length, Some(4_245)),
+        ]
+        .into_iter()
+        .map(|(name, mut histogram, start_timestamp)| {
+            histogram.start_timestamp = start_timestamp;
+            (name, histogram, start_timestamp)
+        })
+        .collect()
+    }
+
+    /// A layout the kernel cannot walk keeps the field-by-field scaling and division the legacy
+    /// caller had, so such a histogram is still multiplied instead of dropped, and keeps the start
+    /// timestamp it was stored with.
+    #[test]
+    fn scale_and_divide_fall_back_to_the_fields_for_an_unreadable_layout() {
+        for (name, histogram, start_timestamp) in unreadable_layouts() {
+            // A negative factor turns the histogram into a gauge; the untouched hint otherwise.
+            let negated = scale(&histogram, -0.5);
+            assert_eq!(negated.count, -1.5, "{name} count");
+            assert_eq!(negated.sum, -2.5, "{name} sum");
+            assert_eq!(negated.zero_count, -0.5, "{name} zero_count");
+            assert_eq!(
+                negated.positive_buckets,
+                vec![-0.5, -1.0],
+                "{name} positive"
+            );
+            assert_eq!(negated.reset_hint, CounterResetHint::Gauge, "{name} hint");
+            assert_eq!(
+                negated.start_timestamp, start_timestamp,
+                "{name}: the field-by-field fallback copies the payload, so the start timestamp \
+                 survives where the kernel path clears it"
+            );
+            assert_eq!(
+                negated.positive_spans, histogram.positive_spans,
+                "{name}: the fallback keeps the layout it cannot expand"
+            );
+
+            let doubled = scale(&histogram, 2.0);
+            assert_eq!(doubled.count, 6.0, "{name} count");
+            assert_eq!(doubled.sum, 10.0, "{name} sum");
+            assert_eq!(doubled.zero_count, 2.0, "{name} zero_count");
+            assert_eq!(doubled.positive_buckets, vec![2.0, 4.0], "{name} positive");
+            assert_eq!(
+                doubled.reset_hint,
+                CounterResetHint::NotCounterReset,
+                "{name}: a positive factor leaves a hint alone"
+            );
+            assert_eq!(doubled.start_timestamp, start_timestamp, "{name}");
+
+            let quartered = divide_by(&histogram, 4.0);
+            assert_eq!(quartered.count, 0.75, "{name} count");
+            assert_eq!(quartered.sum, 1.25, "{name} sum");
+            assert_eq!(quartered.zero_count, 0.25, "{name} zero_count");
+            assert_eq!(
+                quartered.positive_buckets,
+                vec![0.25, 0.5],
+                "{name} positive"
+            );
+            assert_eq!(
+                quartered.reset_hint,
+                CounterResetHint::NotCounterReset,
+                "{name}: a positive divisor leaves a hint alone"
+            );
+            assert_eq!(quartered.start_timestamp, start_timestamp, "{name}");
+
+            // A zero divisor empties the buckets on this path too.
+            let over_zero = divide_by(&histogram, 0.0);
+            assert_eq!(over_zero.count, f64::INFINITY, "{name} count");
+            assert_eq!(over_zero.sum, f64::INFINITY, "{name} sum");
+            assert_eq!(over_zero.zero_count, f64::INFINITY, "{name} zero_count");
+            assert!(over_zero.positive_spans.is_empty(), "{name}");
+            assert!(over_zero.positive_buckets.is_empty(), "{name}");
+            assert_eq!(over_zero.start_timestamp, start_timestamp, "{name}");
+
+            // The addition and the subtraction refuse the same layout outright, as the legacy
+            // arithmetic did, rather than answering with a payload the kernel never built.
+            assert!(
+                add(&histogram, &histogram).is_none(),
+                "{name}: a layout the kernel cannot read has no sum"
+            );
+            assert!(
+                sub(&histogram, &histogram).is_none(),
+                "{name}: a layout the kernel cannot read has no difference"
+            );
+        }
+    }
+
+    /// The factors that are not a plain finite number, on a layout the kernel can walk: a zero
+    /// divisor leaves no bucket, a NaN factor reaches every count, and a negative one turns the
+    /// histogram into a gauge.
+    #[test]
+    fn scale_and_divide_by_the_edge_factors() {
+        let mut histogram = empty(0, 0.0, 4.0, 6.0, 0.0);
+        histogram.reset_hint = CounterResetHint::NotCounterReset;
+        histogram.start_timestamp = Some(7);
+        histogram.positive_spans = vec![span(0, 2)];
+        histogram.positive_buckets = vec![3.0, 1.0];
+        histogram.negative_spans = vec![span(0, 1)];
+        histogram.negative_buckets = vec![1.0];
+
+        let over_zero = divide_by(&histogram, 0.0);
+        assert_eq!(over_zero.count, f64::INFINITY, "a positive count over zero");
+        assert_eq!(over_zero.sum, f64::INFINITY, "a positive sum over zero");
+        assert!(
+            over_zero.zero_count.is_nan(),
+            "a zero count over zero is NaN"
+        );
+        assert!(over_zero.positive_spans.is_empty());
+        assert!(over_zero.positive_buckets.is_empty());
+        assert!(over_zero.negative_spans.is_empty());
+        assert!(over_zero.negative_buckets.is_empty());
+        assert_eq!(over_zero.start_timestamp, None);
+        assert_eq!(
+            over_zero.reset_hint,
+            CounterResetHint::NotCounterReset,
+            "a zero divisor is not a negative one"
+        );
+
+        // A negative zero is still zero, so the buckets go the same way, and the quotients it
+        // leaves behind are the negative infinities.
+        let over_negative_zero = divide_by(&histogram, -0.0);
+        assert_eq!(
+            over_negative_zero.count,
+            f64::NEG_INFINITY,
+            "a positive count over negative zero"
+        );
+        assert_eq!(
+            over_negative_zero.sum,
+            f64::NEG_INFINITY,
+            "a positive sum over negative zero"
+        );
+        assert!(over_negative_zero.zero_count.is_nan());
+        assert!(over_negative_zero.positive_spans.is_empty());
+        assert!(over_negative_zero.positive_buckets.is_empty());
+        assert_eq!(over_negative_zero.start_timestamp, None);
+        assert_eq!(
+            over_negative_zero.reset_hint,
+            CounterResetHint::NotCounterReset,
+            "negative zero is not a negative factor"
+        );
+
+        let over_nan = scale(&histogram, f64::NAN);
+        assert!(over_nan.count.is_nan() && over_nan.sum.is_nan());
+        assert!(over_nan.positive_buckets.iter().all(|count| count.is_nan()));
+        assert!(over_nan.negative_buckets.iter().all(|count| count.is_nan()));
+        assert_eq!(
+            over_nan.positive_spans,
+            vec![span(0, 2)],
+            "a NaN factor moves the counts, not the layout"
+        );
+        assert_eq!(over_nan.start_timestamp, None);
+        assert_eq!(
+            over_nan.reset_hint,
+            CounterResetHint::NotCounterReset,
+            "a NaN factor is not a negative one"
+        );
+
+        let negated = scale(&histogram, -2.0);
+        assert_eq!(negated.count, -8.0);
+        assert_eq!(negated.sum, -12.0);
+        assert_eq!(negated.positive_buckets, vec![-6.0, -2.0]);
+        assert_eq!(negated.negative_buckets, vec![-2.0]);
+        assert_eq!(negated.positive_spans, vec![span(0, 2)]);
+        assert_eq!(negated.reset_hint, CounterResetHint::Gauge);
+        assert_eq!(negated.start_timestamp, None);
+
+        let negated_division = divide_by(&histogram, -2.0);
+        assert_eq!(negated_division.count, -2.0);
+        assert_eq!(negated_division.sum, -3.0);
+        assert_eq!(negated_division.positive_buckets, vec![-1.5, -0.5]);
+        assert_eq!(negated_division.negative_buckets, vec![-0.5]);
+        assert_eq!(negated_division.reset_hint, CounterResetHint::Gauge);
+        assert_eq!(negated_division.start_timestamp, None);
     }
 }
