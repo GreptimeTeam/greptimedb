@@ -21,7 +21,10 @@ INSERT INTO TABLE host VALUES
 -- SQLNESS TEMPLATE
 SELECT count(*) FROM ({% for i in range(256) %}{% if not loop.first %} UNION ALL {% endif %}SELECT 1 AS a{% endfor %});
 
+-- Only the first branch returns rows. 256 branches that all scan `host` can
+-- take over 30s in a debug build, which records a slow query and creates the
+-- `greptime_private.slow_queries` table.
 -- SQLNESS TEMPLATE
-SELECT ts, host, min(val) RANGE '5s' FROM ({% for i in range(256) %}{% if not loop.first %} UNION ALL {% endif %}SELECT ts, host, val FROM host{% endfor %}) ALIGN '5s' BY (host) ORDER BY host, ts;
+SELECT ts, host, min(val) RANGE '5s' FROM (SELECT ts, host, val FROM host{% for i in range(255) %} UNION ALL SELECT ts, host, val FROM host WHERE false{% endfor %}) ALIGN '5s' BY (host) ORDER BY host, ts;
 
 DROP TABLE host;
