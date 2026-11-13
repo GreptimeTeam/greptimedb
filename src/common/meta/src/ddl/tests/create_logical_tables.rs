@@ -23,11 +23,17 @@ use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_procedure::{Context as ProcedureContext, Procedure, ProcedureId, Status};
 use common_procedure_test::MockContextProvider;
+use datatypes::prelude::ConcreteDataType;
+use datatypes::schema::{ColumnSchema, Schema};
 use store_api::metadata::ColumnMetadata;
-use store_api::metric_engine_consts::{ALTER_PHYSICAL_EXTENSION_KEY, MANIFEST_INFO_EXTENSION_KEY};
+use store_api::metric_engine_consts::{
+    ALTER_PHYSICAL_EXTENSION_KEY, DATA_SCHEMA_TABLE_ID_COLUMN_NAME, MANIFEST_INFO_EXTENSION_KEY,
+    is_metric_engine_internal_column,
+};
 use store_api::region_engine::RegionManifestInfo;
 use store_api::storage::RegionId;
 use store_api::storage::consts::ReservedColumnId;
+use table::metadata::TableInfo;
 use tokio::sync::mpsc;
 
 use crate::ddl::TableMetadata;
@@ -565,4 +571,137 @@ async fn test_on_submit_create_request() {
             ..
         })
     );
+}
+
+/// Appends a column to the table schema and returns its index.
+fn push_column(
+    table_info: &mut TableInfo,
+    name: &str,
+    data_type: ConcreteDataType,
+    is_nullable: bool,
+) -> usize {
+    let mut columns = table_info.meta.schema.column_schemas().to_vec();
+    columns.push(ColumnSchema::new(name, data_type, is_nullable));
+    table_info.meta.schema = Arc::new(Schema::new(columns));
+    table_info.meta.schema.column_schemas().len() - 1
+}
+
+#[tokio::test]
+async fn test_on_prepare_skips_internal_partition_columns() {
+    let (tx, mut rx) = mpsc::channel(8);
+    let node_manager = Arc::new(MockDatanodeManager::new(DatanodeWatcher::new(tx)));
+    let ddl_context = new_ddl_context(node_manager);
+
+    // The physical table owns the engine identity column and has been repartitioned by
+    // both it and a user tag that no logical table declares.
+    let mut create_physical_table_task = test_create_physical_table_task("phy_table");
+    let table_id_column_index = push_column(
+        &mut create_physical_table_task.table_info,
+        DATA_SCHEMA_TABLE_ID_COLUMN_NAME,
+        ConcreteDataType::uint32_datatype(),
+        false,
+    );
+    let extra_tag_column_index = push_column(
+        &mut create_physical_table_task.table_info,
+        "extra_tag",
+        ConcreteDataType::string_datatype(),
+        true,
+    );
+    create_physical_table_task
+        .table_info
+        .meta
+        .partition_key_indices = vec![extra_tag_column_index, table_id_column_index];
+
+    let TableMetadata {
+        table_id,
+        table_route,
+        ..
+    } = ddl_context
+        .table_metadata_allocator
+        .create(&create_physical_table_task)
+        .await
+        .unwrap();
+    create_physical_table_task.set_table_id(table_id);
+    create_physical_table_metadata(
+        &ddl_context,
+        create_physical_table_task.table_info.clone(),
+        TableRouteValue::Physical(table_route),
+    )
+    .await;
+
+    let mut procedure = CreateLogicalTablesProcedure::new(
+        vec![test_create_logical_table_task("foo")],
+        table_id,
+        ddl_context.clone(),
+    );
+    let status = procedure.on_prepare().await.unwrap();
+    assert_matches!(
+        status,
+        Status::Executing {
+            persist: true,
+            clean_poisons: false
+        }
+    );
+
+    let ctx = ProcedureContext {
+        procedure_id: ProcedureId::random(),
+        provider: Arc::new(MockContextProvider::default()),
+        event_context: None,
+    };
+    procedure.execute(&ctx).await.unwrap();
+    let status = procedure.execute(&ctx).await.unwrap();
+    let table_ids = status.downcast_output_ref::<Vec<u32>>().unwrap().clone();
+
+    // The engine rejects a request that occupies a reserved identity column.
+    let mut creates = None;
+    while let Ok((_, request)) = rx.try_recv() {
+        if let Some(region_request::Body::Creates(body)) = request.body {
+            creates = Some(body);
+        }
+    }
+    let creates = creates.unwrap();
+    assert_eq!(creates.requests.len(), 1);
+    let requested_columns = creates.requests[0]
+        .column_defs
+        .iter()
+        .map(|def| def.column_def.as_ref().unwrap().name.as_str())
+        .collect::<Vec<_>>();
+    assert!(
+        !requested_columns
+            .iter()
+            .any(|name| is_metric_engine_internal_column(name)),
+        "logical region request must not occupy internal columns: {requested_columns:?}"
+    );
+    assert!(requested_columns.contains(&"extra_tag"));
+
+    let logical_table_info = get_raw_table_info(&ddl_context, table_ids[0]).await;
+    let column_names = logical_table_info
+        .meta
+        .schema
+        .column_schemas()
+        .iter()
+        .map(|column| column.name.as_str())
+        .collect::<Vec<_>>();
+    assert!(
+        !column_names.contains(&DATA_SCHEMA_TABLE_ID_COLUMN_NAME),
+        "internal identity column must not be merged into the logical schema: {column_names:?}"
+    );
+    assert!(column_names.contains(&"extra_tag"));
+
+    // The user partition column is still merged as a nullable string tag of the primary key.
+    let extra_tag_index = logical_table_info
+        .meta
+        .schema
+        .column_index_by_name("extra_tag")
+        .unwrap();
+    assert!(
+        logical_table_info
+            .meta
+            .primary_key_indices
+            .contains(&extra_tag_index),
+        "merged partition column must be part of the primary key"
+    );
+    let extra_tag = &logical_table_info.meta.schema.column_schemas()[extra_tag_index];
+    assert_eq!(extra_tag.data_type, ConcreteDataType::string_datatype());
+    assert!(extra_tag.is_nullable());
 }

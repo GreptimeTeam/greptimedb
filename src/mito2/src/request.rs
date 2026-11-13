@@ -58,7 +58,7 @@ use crate::error::{
     Result, UnexpectedSnafu,
 };
 use crate::flush::FlushReason;
-use crate::manifest::action::{RegionEdit, TruncateKind};
+use crate::manifest::action::{PendingTail, RegionEdit, TruncateKind};
 use crate::memtable::MemtableId;
 use crate::memtable::bulk::part::BulkPart;
 use crate::metrics::COMPACTION_ELAPSED_TOTAL;
@@ -1143,6 +1143,9 @@ pub(crate) enum BackgroundNotify {
     RegionEdit(RegionEditResult),
     /// Enter staging result.
     EnterStaging(EnterStagingResult),
+    /// The region left [RegionLeaderState::EndingStaging](crate::region::RegionLeaderState::EndingStaging),
+    /// so writes stalled meanwhile can be handled. The sender is notified once they are.
+    StagingEnded(oneshot::Sender<()>),
     /// Copy region result.
     CopyRegionFromFinished(CopyRegionFromFinished),
     /// A commit outside the worker fenced the region until it is reloaded.
@@ -1154,6 +1157,19 @@ pub(crate) enum BackgroundNotify {
         /// The reloaded instance.
         result: Result<MitoRegionRef>,
     },
+    /// The region became writable and may have pending tails to replay.
+    RegionBecameWritable,
+    /// A tail replay published its result in the manifest.
+    TailReplayCommitted {
+        /// The instance the replay ran for.
+        region: MitoRegionRef,
+        /// The published edit.
+        edit: RegionEdit,
+        /// The tails the replay read, which the manifest recorded when the edit was published.
+        tails: Vec<PendingTail>,
+    },
+    /// A tail replay ended.
+    TailReplayEnded,
 }
 
 /// Notifies a flush job is finished.
@@ -1204,6 +1220,8 @@ impl OnFailure for FlushFinished {
 pub(crate) struct FlushFailed {
     /// The error source of the failure.
     pub(crate) err: Arc<Error>,
+    /// Flush result senders.
+    pub(crate) senders: Vec<OutputTx>,
 }
 
 impl FlushFailed {

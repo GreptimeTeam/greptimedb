@@ -343,7 +343,7 @@ pub async fn metasrv_builder(
             )
             .await?;
 
-            let kv_backend = build_postgres_kv_backend(
+            let kv_backend: KvBackendRef = build_postgres_kv_backend(
                 &opts.store_addrs,
                 Some(cfg),
                 opts.backend_tls.clone(),
@@ -364,7 +364,7 @@ pub async fn metasrv_builder(
 
             use crate::utils::mysql::{build_mysql_election, build_mysql_kv_backend};
 
-            let kv_backend = build_mysql_kv_backend(
+            let kv_backend: KvBackendRef = build_mysql_kv_backend(
                 &opts.store_addrs,
                 opts.backend_tls.as_ref(),
                 &opts.meta_table_name,
