@@ -745,6 +745,73 @@ async fn test_blob_metadata_rejects_duplicate_keys() {
     let reader = manager.reader(&file).await.unwrap();
     let error = reader.blob_metadata("duplicate").await.unwrap_err();
     assert!(matches!(error, crate::error::Error::AmbiguousBlob { .. }));
+    let error = reader
+        .read_uncompressed_blobs(&["duplicate"], 100)
+        .await
+        .unwrap_err();
+    assert!(matches!(error, crate::error::Error::AmbiguousBlob { .. }));
     assert!(reader.blob_metadata("missing").await.unwrap().is_none());
     check_blob(&file, "duplicate", b"first", &stager, &reader, false).await;
+}
+
+#[tokio::test]
+async fn test_bounded_blob_batch() {
+    use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+
+    let (_dir, stager) = new_bounded_stager("bounded_blob_batch", 1024 * 1024).await;
+    let reads = Arc::new(AtomicUsize::new(0));
+    let accessor = Arc::new(FooterGuardAccessor {
+        inner: MockFileAccessor::new("bounded_blob_batch"),
+        blob_end: Arc::new(AtomicU64::new(u64::MAX)),
+        reads: reads.clone(),
+    });
+    let manager = FsPuffinManager::new(stager, accessor);
+    let file = "batch".to_string();
+    let mut writer = manager.writer(&file).await.unwrap();
+    for (key, data, compression) in [
+        ("a", b"first".as_slice(), None),
+        ("b", b"second".as_slice(), None),
+        (
+            "compressed",
+            b"compressed".as_slice(),
+            Some(CompressionCodec::Zstd),
+        ),
+    ] {
+        put_blob(key, data, compression, &mut writer).await;
+    }
+    writer.finish().await.unwrap();
+    let reader = manager.reader(&file).await.unwrap();
+    reader.metadata().await.unwrap();
+    reads.store(0, Ordering::Relaxed);
+    for (keys, budget) in [
+        (vec!["a", "b"], 10),
+        (vec!["a", "missing"], 100),
+        (vec!["a", "compressed"], 100),
+    ] {
+        assert!(reader.read_uncompressed_blobs(&keys, budget).await.is_err());
+        assert_eq!(reads.load(Ordering::Relaxed), 0);
+    }
+    assert!(
+        reader
+            .read_uncompressed_blobs(&[], 0)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let result = reader
+        .read_uncompressed_blobs(&["b", "a", "a"], 16)
+        .await
+        .unwrap();
+    let actual: Vec<_> = result
+        .iter()
+        .map(|(meta, bytes)| (meta.blob_type.as_str(), bytes.as_ref()))
+        .collect();
+    assert_eq!(
+        actual,
+        vec![
+            ("b", b"second".as_slice()),
+            ("a", b"first".as_slice()),
+            ("a", b"first".as_slice())
+        ]
+    );
 }

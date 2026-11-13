@@ -81,6 +81,68 @@ where
         self.puffin_file_accessor.file_key(&self.handle)
     }
 
+    /// Reads complete uncompressed blobs in request order through one range-read batch.
+    /// Missing or ambiguous keys, compressed blobs and an excessive total payload
+    /// size are rejected before payload I/O. Metadata reads are outside `max_bytes`.
+    /// The underlying range reader controls coalescing and concurrency.
+    pub async fn read_uncompressed_blobs(
+        &self,
+        keys: &[&str],
+        max_bytes: usize,
+    ) -> Result<Vec<(BlobMetadata, Bytes)>>
+    where
+        S: Stager<FileHandle = F::FileHandle>,
+    {
+        if keys.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut blobs = Vec::with_capacity(keys.len());
+        let mut ranges = Vec::with_capacity(keys.len());
+        let mut total = 0_u64;
+        for key in keys {
+            let blob = self
+                .blob_metadata(key)
+                .await?
+                .context(BlobNotFoundSnafu { blob: *key })?;
+            if let Some(codec) = blob.compression_codec {
+                return UnsupportedDecompressionSnafu {
+                    decompression: codec.to_string(),
+                }
+                .fail();
+            }
+            let range = (|| {
+                let start = u64::try_from(blob.offset).ok()?;
+                let length = u64::try_from(blob.length).ok()?;
+                total = total.checked_add(length)?;
+                (total <= max_bytes as u64).then_some(start..start.checked_add(length)?)
+            })()
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "Invalid blob range or batch exceeds byte budget",
+                )
+            })
+            .context(ReadSnafu)?;
+            ranges.push(range);
+            blobs.push(blob);
+        }
+        let reader = self.puffin_file_accessor.reader(&self.handle).await?;
+        let payloads = reader.read_vec(&ranges).await.context(ReadSnafu)?;
+        if payloads.len() != ranges.len()
+            || payloads
+                .iter()
+                .zip(&ranges)
+                .any(|(bytes, range)| bytes.len() as u64 != range.end - range.start)
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "Incomplete blob batch",
+            ))
+            .context(ReadSnafu);
+        }
+        Ok(blobs.into_iter().zip(payloads).collect())
+    }
+
     pub(crate) fn new(
         handle: F::FileHandle,
         stager: S,
