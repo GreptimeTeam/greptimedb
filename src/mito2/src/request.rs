@@ -1207,6 +1207,8 @@ impl OnFailure for FlushFinished {
 pub(crate) struct FlushFailed {
     /// The error source of the failure.
     pub(crate) err: Arc<Error>,
+    /// Flush result senders.
+    pub(crate) senders: Vec<OutputTx>,
 }
 
 impl FlushFailed {
