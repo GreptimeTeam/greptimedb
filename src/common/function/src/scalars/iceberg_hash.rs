@@ -24,12 +24,14 @@
 //! numbers; it does not create or change partitions.
 //!
 //! `iceberg_hash_breakpoints(v1, v2, ...)` hashes the given constant values
-//! (any order, one shared hashable type) and prints them sorted, for building
-//! buckets around known key values instead of around equal widths.
+//! (any order, all from one hash encoding: strings, or integers) and prints them
+//! sorted, for building buckets around known key values instead of around equal
+//! widths.
 //!
 //! `iceberg_hash_ranges_sql(column, n)` renders the whole rule list for
 //! `PARTITION ON COLUMNS` from an equal-width split, so it can be pasted
-//! without expanding the breakpoints by hand.
+//! without expanding the breakpoints by hand. The column name is quoted, so
+//! names that are not plain lowercase identifiers round-trip.
 
 use std::fmt;
 
@@ -203,10 +205,14 @@ impl fmt::Display for IcebergHashBoundsFunction {
 /// values of the given constant values, as `INT32` literals.
 ///
 /// The values do not need to be sorted; the output is. Every value must be a
-/// hashable constant of one shared type, exactly like the values a partition
-/// rule compares the hashed column against. NULL values hash to NULL and are
-/// dropped, and so is an empty argument list, so the output never contains a
-/// NULL entry: those inputs are rejected as unusable breakpoints.
+/// constant from one hash encoding, exactly like the values a partition rule
+/// compares the hashed column against: all strings, or all integers. Mixing a
+/// string with an integer is rejected because the two hash differently, so the
+/// result would not describe the target column.
+///
+/// NULL values hash to NULL and can never match a comparison bound, so they are
+/// rejected rather than silently dropped; an empty argument list is rejected
+/// too.
 #[derive(Debug)]
 pub(crate) struct IcebergHashBreakpointsFunction {
     signature: Signature,
@@ -234,6 +240,7 @@ impl IcebergHashBreakpointsFunction {
                 self.name()
             )));
         }
+        let mut domain: Option<HashDomain> = None;
         let mut scalars: Vec<i32> = Vec::with_capacity(args.args.len());
         for (position, arg) in args.args.iter().enumerate() {
             let scalar = match arg {
@@ -256,6 +263,26 @@ impl IcebergHashBreakpointsFunction {
                     position + 1
                 )));
             } else {
+                let value_domain = HashDomain::of(scalar).ok_or_else(|| {
+                    DataFusionError::Execution(format!(
+                        "{} expects string or integer values, argument {} is {scalar:?}",
+                        self.name(),
+                        position + 1
+                    ))
+                })?;
+                match domain {
+                    Some(expected) if expected != value_domain => {
+                        return Err(DataFusionError::Execution(format!(
+                            "{} expects values with one hash encoding, argument {} is {} but earlier values are {}",
+                            self.name(),
+                            position + 1,
+                            value_domain,
+                            expected
+                        )));
+                    }
+                    Some(_) => {}
+                    None => domain = Some(value_domain),
+                }
                 into_hashed_scalar(self.name(), position + 1, scalar)?
             };
             scalars.push(hashed);
@@ -367,6 +394,10 @@ impl IcebergHashRangesSqlFunction {
             )));
         }
         let bounds = IcebergHashBoundsFunction::default().breakpoints_of(buckets)?;
+        // `column` is a raw name, not SQL text: quote it so names with dashes,
+        // spaces, dots, quotes or upper case stay a single identifier when the
+        // rendered rules are pasted into `PARTITION ON COLUMNS`.
+        let column = quoted_identifier(column);
         let mut rules = Vec::with_capacity(bounds.len() + 1);
         for (index, bound) in bounds.iter().copied().enumerate() {
             if index == 0 {
@@ -415,6 +446,50 @@ impl fmt::Display for IcebergHashRangesSqlFunction {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("ICEBERG_HASH_RANGES_SQL")
     }
+}
+
+/// The hash encoding a constant goes through. Integer widths share one
+/// encoding (`INT32`, `UINT8`, ... all hash as Iceberg longs), while strings use
+/// their UTF-8 bytes, so mixing the two produces breakpoints that do not
+/// describe a single column.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HashDomain {
+    String,
+    Integer,
+}
+
+impl HashDomain {
+    fn of(scalar: &ScalarValue) -> Option<Self> {
+        match scalar {
+            ScalarValue::Utf8(_) | ScalarValue::LargeUtf8(_) | ScalarValue::Utf8View(_) => {
+                Some(Self::String)
+            }
+            ScalarValue::Int8(_)
+            | ScalarValue::Int16(_)
+            | ScalarValue::Int32(_)
+            | ScalarValue::Int64(_)
+            | ScalarValue::UInt8(_)
+            | ScalarValue::UInt16(_)
+            | ScalarValue::UInt32(_)
+            | ScalarValue::UInt64(_) => Some(Self::Integer),
+            _ => None,
+        }
+    }
+}
+
+impl fmt::Display for HashDomain {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::String => f.write_str("string"),
+            Self::Integer => f.write_str("integer"),
+        }
+    }
+}
+
+/// Quotes a column name as a SQL identifier: wrap it in double quotes and
+/// double every embedded quote.
+fn quoted_identifier(column: &str) -> String {
+    format!("\"{}\"", column.replace('"', "\"\""))
 }
 
 /// Hashes one constant by evaluating it through the shared array form, so the
@@ -631,7 +706,7 @@ mod tests {
         };
         assert_eq!(into_scalar(bounds), ScalarValue::Utf8(Some(expected)));
 
-        // Integers hash as longs and mix with the same rules.
+        // Integer widths share one encoding, so they mix.
         let bounds = invoke(
             &function,
             vec![
@@ -696,11 +771,26 @@ mod tests {
         .to_string();
         assert!(err.contains("constant values, not a column"), "{err}");
 
-        // Unsupported value type names the shared hash error.
+        // Unsupported value type is named explicitly.
         let err = call(vec![ColumnarValue::Scalar(ScalarValue::Float64(Some(1.0)))])
             .unwrap_err()
             .to_string();
-        assert!(err.contains("does not support type"), "{err}");
+        assert!(err.contains("expects string or integer values"), "{err}");
+
+        // A string and an integer hash through different encodings, so mixing
+        // them cannot describe one column.
+        let err = call(vec![
+            ColumnarValue::Scalar(ScalarValue::Utf8(Some("iceberg".to_string()))),
+            ColumnarValue::Scalar(ScalarValue::Int64(Some(34))),
+        ])
+        .unwrap_err()
+        .to_string();
+        assert!(
+            err.contains("one hash encoding")
+                && err.contains("argument 2 is integer")
+                && err.contains("earlier values are string"),
+            "{err}"
+        );
     }
 
     #[test]
@@ -770,17 +860,32 @@ mod tests {
         };
 
         let four_buckets = [
-            "iceberg_hash(host) < -1073741824",
-            "iceberg_hash(host) >= -1073741824 AND iceberg_hash(host) < 0",
-            "iceberg_hash(host) >= 0 AND iceberg_hash(host) < 1073741824",
-            "iceberg_hash(host) >= 1073741824",
+            "iceberg_hash(\"host\") < -1073741824",
+            "iceberg_hash(\"host\") >= -1073741824 AND iceberg_hash(\"host\") < 0",
+            "iceberg_hash(\"host\") >= 0 AND iceberg_hash(\"host\") < 1073741824",
+            "iceberg_hash(\"host\") >= 1073741824",
         ]
         .join(",\n");
         assert_eq!(render("host", 4), ScalarValue::Utf8(Some(four_buckets)));
         assert_eq!(
             render("tenant", 2),
             ScalarValue::Utf8(Some(
-                "iceberg_hash(tenant) < 0,\niceberg_hash(tenant) >= 0".to_string()
+                "iceberg_hash(\"tenant\") < 0,\niceberg_hash(\"tenant\") >= 0".to_string()
+            ))
+        );
+
+        // Names that are not plain lowercase identifiers must stay one
+        // identifier: dashes, spaces and embedded quotes are quoted/escaped.
+        assert_eq!(
+            render("host-name", 2),
+            ScalarValue::Utf8(Some(
+                "iceberg_hash(\"host-name\") < 0,\niceberg_hash(\"host-name\") >= 0".to_string()
+            ))
+        );
+        assert_eq!(
+            render("he\"llo", 2),
+            ScalarValue::Utf8(Some(
+                "iceberg_hash(\"he\"\"llo\") < 0,\niceberg_hash(\"he\"\"llo\") >= 0".to_string()
             ))
         );
 
@@ -811,6 +916,43 @@ mod tests {
             ]),
             ScalarValue::Utf8(None)
         );
+    }
+
+    /// Rendered rules must be valid partition expressions for the quoted
+    /// column, including names that need quoting.
+    #[test]
+    fn test_ranges_sql_output_parses_as_partition_rule() {
+        use sql::dialect::GreptimeDbDialect;
+        use sql::parser::{ParseOptions, ParserContext};
+
+        for column in ["host", "host-name", "HOST", "he\"llo", "a b"] {
+            let rendered = into_scalar(invoke(
+                &IcebergHashRangesSqlFunction::default(),
+                vec![
+                    ColumnarValue::Scalar(ScalarValue::Utf8(Some(column.to_string()))),
+                    ColumnarValue::Scalar(ScalarValue::Int64(Some(4))),
+                ],
+                1,
+                DataType::Utf8,
+            ));
+            let ScalarValue::Utf8(Some(rules)) = rendered else {
+                panic!("expected rendered rules for {column}");
+            };
+            let quoted = quoted_identifier(column);
+            let ddl = format!(
+                "CREATE TABLE t ({quoted} STRING, ts TIMESTAMP TIME INDEX, PRIMARY KEY ({quoted})) \
+                 PARTITION ON COLUMNS ({quoted}) ({rules})"
+            );
+            let statements = ParserContext::create_with_dialect(
+                &ddl,
+                &GreptimeDbDialect {},
+                ParseOptions::default(),
+            )
+            .unwrap_or_else(|error| {
+                panic!("generated rules must parse for {column}: {error}\n{ddl}")
+            });
+            assert_eq!(1, statements.len(), "{column}");
+        }
     }
 
     #[test]
@@ -986,8 +1128,8 @@ mod tests {
                 "SELECT iceberg_hash('iceberg') AS h, iceberg_hash(34) AS i, \
                  iceberg_hash(NULL) AS n, iceberg_hash_bounds(4) AS b, \
                  iceberg_hash_bounds(CAST(4 AS SMALLINT)) AS sb, \
-                 iceberg_hash_breakpoints('iceberg', 34) AS bp, \
-                 iceberg_hash_ranges_sql('host', 2) AS rs",
+                 iceberg_hash_breakpoints('iceberg', 'a') AS bp, \
+                 iceberg_hash_ranges_sql('host-name', 2) AS rs",
             )
             .await
             .unwrap()
@@ -1013,15 +1155,28 @@ mod tests {
             batches[0].column(4).as_string::<i32>().value(0),
             "-1073741824, 0, 1073741824"
         );
-        // Sorted hash values of 'iceberg' (1210000089) and 34 (2017239379).
+        // Sorted hash values of the two strings, computed by the shared hash.
+        let iceberg = IcebergHash::evaluate_value(&Value::String("iceberg".into()))
+            .unwrap()
+            .as_i64()
+            .unwrap() as i32;
+        let a = IcebergHash::evaluate_value(&Value::String("a".into()))
+            .unwrap()
+            .as_i64()
+            .unwrap() as i32;
+        let expected_breakpoints = if iceberg < a {
+            format!("{iceberg}, {a}")
+        } else {
+            format!("{a}, {iceberg}")
+        };
         assert_eq!(
             batches[0].column(5).as_string::<i32>().value(0),
-            "1210000089, 2017239379"
+            expected_breakpoints
         );
-        // Ready-to-paste rule list; a newline separates one rule per bucket.
+        // Ready-to-paste rule list, with the column name quoted.
         assert_eq!(
             batches[0].column(6).as_string::<i32>().value(0),
-            "iceberg_hash(host) < 0,\niceberg_hash(host) >= 0"
+            "iceberg_hash(\"host-name\") < 0,\niceberg_hash(\"host-name\") >= 0"
         );
     }
 
