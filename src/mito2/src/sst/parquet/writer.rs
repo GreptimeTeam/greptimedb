@@ -22,7 +22,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
 use bytes::Bytes;
-use common_base::cancellation::{CancellationHandle, Cancelled};
+use common_base::cancellation::Cancelled;
 use common_telemetry::debug;
 use common_time::Timestamp;
 use datatypes::arrow::array::{
@@ -45,6 +45,7 @@ use smallvec::smallvec;
 use snafu::{IntoError, OptionExt, ResultExt, ensure};
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::{FileId, SequenceNumber};
+use tokio_util::sync::CancellationToken;
 
 use crate::access_layer::{FilePathProvider, Metrics, SstInfoArray, TempFileCleaner};
 use crate::config::{IndexBuildMode, IndexConfig};
@@ -64,6 +65,7 @@ use crate::sst::parquet::{
     COLUMN_INDEX_TRUNCATE_LENGTH, PARQUET_METADATA_KEY, SstInfo, WriteOptions,
     apply_column_compression, apply_float_field_encoding, apply_internal_column_encoding,
 };
+use crate::sst::upload::{self, UploadError};
 use crate::sst::{
     DEFAULT_WRITE_CONCURRENCY, FlatSchemaOptions, SeriesEstimator, maybe_wrap_schema,
 };
@@ -248,7 +250,7 @@ pub struct ParquetWriter<'a, F: WriterFactory, I: IndexerBuilder, P: FilePathPro
     /// Write metrics
     metrics: &'a mut Metrics,
     write_guard: Option<Arc<dyn SstWriteGuard>>,
-    cancellation: Option<Arc<CancellationHandle>>,
+    cancellation: Option<CancellationToken>,
     memory: WriteMemory,
 }
 
@@ -266,16 +268,19 @@ pub(crate) struct SstWriteContext {
     /// Resource bounds enforced by the direct writer, with one upload at a time.
     /// The write cache does not enforce these limits, so bounded writes bypass it.
     pub(crate) limits: Option<SstWriteLimits>,
-    /// Stops writing cooperatively and aborts unfinished output.
-    pub(crate) cancellation: Option<Arc<CancellationHandle>>,
+    /// Signals cancellation; the writer still drains encoders and aborts unfinished output.
+    pub(crate) cancellation: Option<CancellationToken>,
 }
 
 pub trait WriterFactory {
     type Writer: AsyncFileWriter;
+
+    /// Opens output with the same cancellation signal as its encoders.
     fn create(
         &mut self,
         file_path: &str,
         write_buffer_size: usize,
+        cancellation: Option<&CancellationToken>,
     ) -> impl Future<Output = Result<Self::Writer>>;
 
     /// Aborts unfinished output after all encoders have stopped using it.
@@ -287,13 +292,21 @@ pub trait WriterFactory {
 pub struct ObjectStoreWriter {
     inner: Writer,
     output_bytes: u64,
+    write_buffer_size: usize,
+    cancellation: Option<CancellationToken>,
 }
 
 impl ObjectStoreWriter {
-    pub(crate) fn new(inner: Writer) -> Self {
+    pub(crate) fn new(
+        inner: Writer,
+        write_buffer_size: usize,
+        cancellation: Option<CancellationToken>,
+    ) -> Self {
         Self {
             inner,
             output_bytes: 0,
+            write_buffer_size,
+            cancellation,
         }
     }
 
@@ -309,12 +322,20 @@ impl ObjectStoreWriter {
 impl AsyncFileWriter for ObjectStoreWriter {
     fn write(&mut self, bytes: Bytes) -> BoxFuture<'_, parquet::errors::Result<()>> {
         Box::pin(async move {
-            let len = bytes.len() as u64;
-            self.inner
-                .write(bytes)
-                .await
-                .map_err(|error| ParquetError::External(Box::new(error)))?;
-            self.output_bytes += len;
+            let written = upload::write(
+                &mut self.inner,
+                bytes.into(),
+                self.write_buffer_size,
+                self.cancellation.as_ref(),
+            )
+            .await
+            .map_err(|error| match error {
+                UploadError::Cancelled => ParquetError::External(Box::new(Cancelled)),
+                UploadError::Read { source } | UploadError::Write { source } => {
+                    ParquetError::External(Box::new(source))
+                }
+            })?;
+            self.output_bytes += written;
             Ok(())
         })
     }
@@ -338,13 +359,18 @@ pub struct ObjectStoreWriterFactory {
 impl WriterFactory for ObjectStoreWriterFactory {
     type Writer = ObjectStoreWriter;
 
-    async fn create(&mut self, file_path: &str, write_buffer_size: usize) -> Result<Self::Writer> {
+    async fn create(
+        &mut self,
+        file_path: &str,
+        write_buffer_size: usize,
+        cancellation: Option<&CancellationToken>,
+    ) -> Result<Self::Writer> {
         self.object_store
             .writer_with(file_path)
             .chunk(write_buffer_size)
             .concurrent(self.concurrency)
             .await
-            .map(ObjectStoreWriter::new)
+            .map(|writer| ObjectStoreWriter::new(writer, write_buffer_size, cancellation.cloned()))
             .context(OpenDalSnafu)
     }
 
@@ -427,10 +453,7 @@ where
         }
     }
 
-    pub(crate) fn with_cancellation(
-        mut self,
-        cancellation: Option<Arc<CancellationHandle>>,
-    ) -> Self {
+    pub(crate) fn with_cancellation(mut self, cancellation: Option<CancellationToken>) -> Self {
         self.cancellation = cancellation;
         self
     }
@@ -828,7 +851,11 @@ where
             }
             let writer = SizeAwareWriter::new(
                 self.writer_factory
-                    .create(&sst_file_path, opts.write_buffer_size.as_bytes() as usize)
+                    .create(
+                        &sst_file_path,
+                        opts.write_buffer_size.as_bytes() as usize,
+                        self.cancellation.as_ref(),
+                    )
                     .await?,
                 self.bytes_written.clone(),
             );
@@ -1015,10 +1042,16 @@ impl<W: AsyncFileWriter> AsyncFileWriter for SizeAwareWriter<W> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Mutex;
     use std::sync::atomic::AtomicBool;
     use std::time::Duration;
 
     use common_runtime::runtime::{BuilderBuild, RuntimeTrait};
+    use object_store::layers::mock::{
+        Metadata, MockLayerBuilder, ObservedWriter, WriterObservations, oio,
+    };
+    use object_store::services::Memory;
+    use object_store::{Buffer, Result as ObjectStoreResult};
     use parquet::arrow::ArrowWriter;
     use parquet::errors::ParquetError;
     use store_api::region_request::PathType;
@@ -1032,6 +1065,109 @@ mod tests {
     use crate::sst::parquet::tests::NoopIndexBuilder;
     use crate::test_util::TestEnv;
     use crate::test_util::sst_util::{new_record_batch_by_range, sst_region_metadata};
+
+    struct GatedObjectStoreWriter {
+        inner: oio::Writer,
+        started: Option<oneshot::Sender<()>>,
+        release: Option<oneshot::Receiver<()>>,
+        completed: Arc<AtomicUsize>,
+    }
+
+    impl oio::Write for GatedObjectStoreWriter {
+        async fn write(&mut self, bytes: Buffer) -> ObjectStoreResult<()> {
+            if let Some(started) = self.started.take() {
+                started.send(()).unwrap();
+                self.release.take().unwrap().await.unwrap();
+            }
+            self.inner.write(bytes).await?;
+            self.completed.fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        }
+
+        async fn close(&mut self) -> ObjectStoreResult<Metadata> {
+            self.inner.close().await
+        }
+
+        async fn abort(&mut self) -> ObjectStoreResult<()> {
+            self.inner.abort().await
+        }
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn test_object_store_writer_cancellation_between_chunks(
+        #[values(false, true)] observe_cancellation: bool,
+    ) {
+        let cancellation = CancellationToken::new();
+        let observations = Arc::new(Mutex::new(WriterObservations::default()));
+        let completed = Arc::new(AtomicUsize::new(0));
+        let (started_tx, started_rx) = oneshot::channel();
+        let (release_tx, release_rx) = oneshot::channel();
+        let gate = Mutex::new(Some((started_tx, release_rx)));
+        let observed = observations.clone();
+        let completed_writes = completed.clone();
+        let layer = MockLayerBuilder::default()
+            .writer_factory(Arc::new(move |_, _, inner| {
+                let (started, release) = gate.lock().unwrap().take().unwrap();
+                Box::new(ObservedWriter::new(
+                    Box::new(GatedObjectStoreWriter {
+                        inner,
+                        started: Some(started),
+                        release: Some(release),
+                        completed: completed_writes.clone(),
+                    }),
+                    observed.clone(),
+                ))
+            }))
+            .build()
+            .unwrap();
+        let store = ObjectStore::new(Memory::default()).unwrap().layer(layer);
+        let inner = store
+            .writer_with("output.parquet")
+            .chunk(4)
+            .concurrent(1)
+            .await
+            .unwrap();
+        let mut writer =
+            ObjectStoreWriter::new(inner, 4, observe_cancellation.then(|| cancellation.clone()));
+        let data = Bytes::from(vec![42; 32]);
+        let mut write = Box::pin(writer.write(data.clone()));
+        assert!(futures::poll!(write.as_mut()).is_pending());
+        timeout(Duration::from_secs(5), started_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        cancellation.cancel();
+        // A started storage write retains its owner until it completes.
+        assert!(futures::poll!(write.as_mut()).is_pending());
+        assert_eq!(0, completed.load(Ordering::Relaxed));
+        release_tx.send(()).unwrap();
+        let result = timeout(Duration::from_secs(5), write).await.unwrap();
+        {
+            let observed = observations.lock().unwrap();
+            assert_eq!(0, observed.abort_calls);
+            assert_eq!(0, observed.close_calls);
+        }
+        if observe_cancellation {
+            assert!(
+                matches!(result, Err(ParquetError::External(ref source)) if source.is::<Cancelled>())
+            );
+            assert_eq!(1, completed.load(Ordering::Relaxed));
+            assert_eq!(vec![4], observations.lock().unwrap().write_sizes);
+            // The caller owns abort; the adapter only reports cancellation.
+            writer.into_inner().abort().await.unwrap();
+            assert_eq!(1, observations.lock().unwrap().abort_calls);
+            assert!(!store.exists("output.parquet").await.unwrap());
+        } else {
+            result.unwrap();
+            writer.complete().await.unwrap();
+            assert_eq!(data, store.read("output.parquet").await.unwrap().to_bytes());
+            let observed = observations.lock().unwrap();
+            assert_eq!(1, observed.close_calls);
+            assert_eq!(0, observed.abort_calls);
+            assert_eq!(vec![4; 8], observed.write_sizes);
+        }
+    }
 
     #[rstest::rstest]
     #[case::flat(FormatType::Flat)]
@@ -1122,7 +1258,7 @@ mod tests {
     ) {
         let mut env = TestEnv::new().await;
         let metadata = Arc::new(sst_region_metadata());
-        let cancellation = Arc::new(CancellationHandle::default());
+        let cancellation = CancellationToken::new();
         let mut metrics = Metrics::new(WriteType::Compaction);
         let mut writer = ParquetWriter::new_with_object_store(
             env.init_object_store_manager(),
@@ -1180,7 +1316,7 @@ mod tests {
     ) {
         for enabled in [false, true] {
             let mut env = TestEnv::new().await;
-            let cancellation = Arc::new(CancellationHandle::default());
+            let cancellation = CancellationToken::new();
             let mut metrics = Metrics::new(WriteType::Compaction);
             let mut writer = ParquetWriter::new_with_object_store(
                 env.init_object_store_manager(),
@@ -1246,7 +1382,7 @@ mod tests {
     ) {
         let mut env = TestEnv::new().await;
         let metadata = Arc::new(sst_region_metadata());
-        let cancellation = Arc::new(CancellationHandle::default());
+        let cancellation = CancellationToken::new();
         let mut metrics = Metrics::new(WriteType::Compaction);
         let mut writer = ParquetWriter::new_with_object_store(
             env.init_object_store_manager(),

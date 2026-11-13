@@ -115,7 +115,7 @@ pub(crate) struct SharedSource {
     pub(crate) limits: MemoryLimits,
     pub(crate) index_plans: BTreeMap<RegionId, Arc<IndexBuildPlan>>,
     peak_group_bytes: AtomicU64,
-    cancellation: Arc<common_base::cancellation::CancellationHandle>,
+    cancellation: CancellationToken,
     stop: CancellationToken,
     counters: Arc<SourceCounters>,
 }

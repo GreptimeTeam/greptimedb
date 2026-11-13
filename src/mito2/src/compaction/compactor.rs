@@ -18,7 +18,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use common_base::Plugins;
-use common_base::cancellation::CancellationHandle;
 use common_meta::key::SchemaMetadataManagerRef;
 use common_telemetry::{info, warn};
 use common_time::TimeToLive;
@@ -33,6 +32,7 @@ use store_api::ManifestVersion;
 use store_api::metadata::RegionMetadataRef;
 use store_api::region_request::PathType;
 use store_api::storage::{RegionId, SequenceNumber};
+use tokio_util::sync::CancellationToken;
 
 use crate::access_layer::{
     AccessLayer, AccessLayerRef, Metrics, OperationType, SstWriteRequest, WriteType,
@@ -645,7 +645,7 @@ pub trait SstMerger: Send + Sync + 'static {
         context: CompactionContext,
         output: CompactionOutput,
         write_opts: WriteOptions,
-        cancellation: Arc<CancellationHandle>,
+        cancellation: CancellationToken,
     ) -> Result<(Vec<FileMeta>, Vec<SstInfo>)>;
 }
 
@@ -704,7 +704,7 @@ impl SstMerger for DefaultSstMerger {
         context: CompactionContext,
         output: CompactionOutput,
         write_opts: WriteOptions,
-        cancellation: Arc<CancellationHandle>,
+        cancellation: CancellationToken,
     ) -> Result<(Vec<FileMeta>, Vec<SstInfo>)> {
         let uncommitted = UncommittedSsts::new(
             context.region_id,
@@ -734,7 +734,7 @@ impl DefaultSstMerger {
         output: CompactionOutput,
         write_opts: WriteOptions,
         uncommitted: &UncommittedSsts,
-        cancellation: Arc<CancellationHandle>,
+        cancellation: CancellationToken,
     ) -> Result<(Vec<FileMeta>, Vec<SstInfo>)> {
         let region_id = context.region_id;
         validate_region_compaction_output(region_id, &output)?;
@@ -912,7 +912,7 @@ impl DefaultSstMerger {
 /// implementations in tests.
 pub struct DefaultCompactor<M = DefaultSstMerger> {
     merger: M,
-    cancel_handle: Arc<CancellationHandle>,
+    cancel_token: CancellationToken,
     uncommitted: Option<UncommittedSsts>,
 }
 
@@ -921,14 +921,14 @@ impl<M: SstMerger> DefaultCompactor<M> {
     pub fn with_merger(merger: M) -> Self {
         Self {
             merger,
-            cancel_handle: Arc::new(CancellationHandle::default()),
+            cancel_token: CancellationToken::new(),
             uncommitted: None,
         }
     }
 }
 
 impl DefaultCompactor {
-    /// Creates a new `DefaultCompactor` with the given cancel handle and no
+    /// Creates a new `DefaultCompactor` with the given cancellation token and no
     /// uncommitted SSTs tracking.
     ///
     /// This is the public entry point for external crates that want a
@@ -937,21 +937,21 @@ impl DefaultCompactor {
     /// Cancellation stops new output batches and interrupts active outputs at
     /// batch and upload-chunk boundaries. Successful complete outputs remain in
     /// the returned [`MergeOutput`]; incomplete outputs are cleaned up.
-    pub fn new_with_cancel_handle(cancel_handle: Arc<CancellationHandle>) -> Self {
+    pub fn new_with_cancel_token(cancel_token: CancellationToken) -> Self {
         Self {
             merger: DefaultSstMerger,
-            cancel_handle,
+            cancel_token,
             uncommitted: None,
         }
     }
 
-    pub(crate) fn with_cancel_handle(
-        cancel_handle: Arc<CancellationHandle>,
+    pub(crate) fn with_cancel_token(
+        cancel_token: CancellationToken,
         uncommitted: UncommittedSsts,
     ) -> Self {
         Self {
             merger: DefaultSstMerger,
-            cancel_handle,
+            cancel_token,
             uncommitted: Some(uncommitted),
         }
     }
@@ -980,7 +980,7 @@ impl<M: SstMerger> DefaultCompactor<M> {
             ..Default::default()
         };
         for output in &unit.outputs {
-            if self.cancel_handle.is_cancelled() {
+            if self.cancel_token.is_cancelled() {
                 return error::CompactionCancelledSnafu.fail();
             }
             // The merger observes cancellation and drains its writers before returning.
@@ -1004,7 +1004,7 @@ impl<M: SstMerger> DefaultCompactor<M> {
                             ),
                         encode_runtime: EncodeRuntime::Compact,
                     },
-                    self.cancel_handle.clone(),
+                    self.cancel_token.clone(),
                 )
                 .await?;
             if let Some(uncommitted) = &self.uncommitted {
@@ -1013,7 +1013,7 @@ impl<M: SstMerger> DefaultCompactor<M> {
             result.files_to_add.extend(files);
             result.sst_infos.extend(infos);
         }
-        if self.cancel_handle.is_cancelled() {
+        if self.cancel_token.is_cancelled() {
             return error::CompactionCancelledSnafu.fail();
         }
         Ok(result)
@@ -1089,7 +1089,7 @@ where
             let merger = self.merger.clone();
             let context = context.clone();
             let uncommitted = self.uncommitted.clone();
-            let cancellation = self.cancel_handle.clone();
+            let cancellation = self.cancel_token.clone();
             let fut = async move {
                 let result = merger
                     .merge_single_output(context, output, write_opts, cancellation)
@@ -1110,7 +1110,7 @@ where
                 + picker_output.expired_ssts.len(),
         );
 
-        while !tasks.is_empty() && !self.cancel_handle.is_cancelled() {
+        while !tasks.is_empty() && !self.cancel_token.is_cancelled() {
             let mut chunk: Vec<(Vec<FileMeta>, _)> = Vec::with_capacity(internal_parallelism);
             for _ in 0..internal_parallelism {
                 if let Some(task) = tasks.pop() {
@@ -1161,7 +1161,7 @@ where
                 return Err(e).context(error::JoinSnafu);
             }
 
-            if self.cancel_handle.is_cancelled() {
+            if self.cancel_token.is_cancelled() {
                 info!("Compaction merge cancelled for region: {}", region_id);
                 break;
             }
@@ -1419,7 +1419,7 @@ mod tests {
             result = &mut merge => panic!("merge returned before cancellation: {result:?}"),
             _ = tokio::time::sleep(Duration::from_secs(10)) => panic!("merge did not reach the reader"),
         }
-        compactor.cancel_handle.cancel();
+        compactor.cancel_token.cancel();
         let result = timeout(Duration::from_secs(10), merge).await.unwrap();
         if merge_unit {
             assert!(matches!(
@@ -1833,7 +1833,7 @@ mod tests {
                 context,
                 output,
                 WriteOptions::default(),
-                Arc::new(CancellationHandle::default()),
+                CancellationToken::new(),
             )
             .await
             .unwrap();
@@ -1895,7 +1895,7 @@ mod tests {
             _context: CompactionContext,
             _output: CompactionOutput,
             _write_opts: WriteOptions,
-            _cancellation: Arc<CancellationHandle>,
+            _cancellation: CancellationToken,
         ) -> Result<(Vec<FileMeta>, Vec<SstInfo>)> {
             let idx = self.call_idx.fetch_add(1, Ordering::SeqCst);
             match self.results.lock().unwrap().get(idx) {
@@ -2229,7 +2229,7 @@ mod tests {
             _context: CompactionContext,
             output: CompactionOutput,
             _write_opts: WriteOptions,
-            _cancellation: Arc<CancellationHandle>,
+            _cancellation: CancellationToken,
         ) -> Result<(Vec<FileMeta>, Vec<SstInfo>)> {
             let input_id = output.inputs[0].meta_ref().file_id;
             let mut file = dummy_file_meta();
@@ -2282,7 +2282,7 @@ mod tests {
                 .collect(),
             ..Default::default()
         };
-        let cancel_handle = Arc::new(CancellationHandle::default());
+        let cancel_token = CancellationToken::new();
         let (started_tx, mut started_rx) = mpsc::unbounded_channel();
         let compactor = DefaultCompactor {
             merger: GatedEncodingMerger {
@@ -2290,7 +2290,7 @@ mod tests {
                 // Outputs are popped from the back, then joined in reverse order.
                 panic_input: panic_merge.then_some(inputs[1].file_id),
             },
-            cancel_handle: cancel_handle.clone(),
+            cancel_token: cancel_token.clone(),
             uncommitted: None,
         };
         let memory = new_compaction_memory_manager(1024 * 1024);
@@ -2309,7 +2309,7 @@ mod tests {
                     .unwrap(),
             );
         }
-        cancel_handle.cancel();
+        cancel_token.cancel();
         assert!(futures::poll!(merge.as_mut()).is_pending());
         assert!(memory.try_acquire(memory.limit_bytes()).is_none());
         assert!(
@@ -2372,7 +2372,7 @@ mod tests {
         let merger = MockMerger::new(vec![Ok(vec![dummy_file_meta()])]);
         let calls = merger.call_idx.clone();
         let compactor = DefaultCompactor::with_merger(merger);
-        compactor.cancel_handle.cancel();
+        compactor.cancel_token.cancel();
         let picker_output = PickerOutput {
             outputs: vec![CompactionOutput {
                 output_level: 1,

@@ -1117,7 +1117,7 @@ mod tests {
         use crate::read::FlatSource;
         use crate::sst::file::UncommittedSsts;
         use crate::test_util::sst_util::{new_record_batch_by_range, sst_region_metadata};
-        use common_base::cancellation::CancellationHandle;
+        use tokio_util::sync::CancellationToken;
 
         let mut env = TestEnv::new().await;
         let store = env.init_object_store_manager();
@@ -1142,7 +1142,7 @@ mod tests {
         let metadata = Arc::new(sst_region_metadata());
         let uncommitted =
             UncommittedSsts::new(metadata.region_id, layer.clone(), Some(cache.clone()));
-        let cancellation = Arc::new(CancellationHandle::default());
+        let cancellation = CancellationToken::new();
         let signal = cancellation.clone();
         let tracked = uncommitted.clone();
         let schema = new_record_batch_by_range(&["a", "b"], 0, 8).schema();
