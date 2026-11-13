@@ -107,6 +107,7 @@ pub(crate) fn nop_action() -> RegionMetaActionList {
         flushed_sequence: None,
         committed_sequence: None,
         wal_recovery: Default::default(),
+        last_invalid_seq: None,
     })])
 }
 

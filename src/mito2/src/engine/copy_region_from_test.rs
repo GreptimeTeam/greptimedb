@@ -26,8 +26,14 @@ use store_api::storage::{RegionId, ScanRequest};
 
 use crate::config::MitoConfig;
 use crate::error::Error;
+use crate::region::{MitoRegionRef, RegionLeaderState, RegionRoleState};
 use crate::test_util::{CreateRequestBuilder, TestEnv, build_rows, put_rows, rows_schema};
 
+/// A copy must publish the shared references it installs inside the publish window it
+/// holds, exactly like physically copied files. Handing them to the region edit lane
+/// instead queues them behind that window (the region is `Editing` for the whole copy) and
+/// waits for a completion the worker only produces after the window is released, which
+/// deadlocked both copy cases below.
 #[cfg(feature = "enterprise")]
 #[rstest::rstest]
 #[case::shared_only(false, false)]
@@ -626,19 +632,26 @@ async fn test_copy_region_from_clears_preserve_row_sequence_marker() {
             .all(|meta| !meta.preserve_row_sequence),
         "copied files must have the preserve_row_sequence marker cleared"
     );
+    // The source-domain hint is replaced — not kept — by the target's own barrier, so
+    // the copied rows are virtualized at `B` and the file is never skipped as
+    // "proven disjoint" under a source-domain bound.
+    let target_boundary = engine
+        .get_region(target_region_id)
+        .unwrap()
+        .version()
+        .last_invalid_seq();
     assert!(
         target_manifest
             .files
             .values()
-            .all(|meta| meta.sequence.is_none()),
-        "copied files must have their source-domain sequence hint cleared"
+            .all(|meta| meta.sequence.map(|sequence| sequence.get()) == Some(target_boundary)),
+        "copied files must carry the target's backfilled barrier"
     );
 
-    // An exact sequence-range request intersecting the copied rows' sequences
-    // (rows 3..=7 in the source domain) must fail closed with
-    // `SequenceRangeUnsupported` instead of replaying source-domain rows.
-    let err = engine
-        .scanner(
+    // An exact sequence-range request above the target barrier therefore excludes the
+    // copied rows instead of replaying them as target-domain sequences.
+    let stream = engine
+        .scan_to_stream(
             target_region_id,
             ScanRequest {
                 memtable_min_sequence: Some(2),
@@ -648,13 +661,13 @@ async fn test_copy_region_from_clears_preserve_row_sequence_marker() {
             },
         )
         .await
-        .err()
-        .expect("expected sequence-range unsupported error");
-    assert!(
-        matches!(err, Error::SequenceRangeUnsupported { .. }),
-        "unexpected err: {err}"
+        .unwrap();
+    let batches = RecordBatches::try_collect(stream).await.unwrap();
+    assert_eq!(
+        0,
+        batches.iter().map(|batch| batch.num_rows()).sum::<usize>(),
+        "copied rows are virtualized at the target barrier and stay out of (2, 7]"
     );
-    assert_eq!(err.status_code(), StatusCode::Unsupported);
 
     // Sanity: the source region keeps the marker and still serves the same
     // exact range with its own row-level sequences (3..=7, 5 rows).
@@ -675,5 +688,308 @@ async fn test_copy_region_from_clears_preserve_row_sequence_marker() {
     assert_eq!(
         5, row_count,
         "source exact range should return rows with sequence 3..=7"
+    );
+}
+
+/// `copy_region_from` moves rows into the target region's sequence domain, so the
+/// target must allocate an edit boundary (`last_sequence + 1`) exactly
+/// like a generic edit does: a stale cursor is rejected and the boundary is
+/// persisted in the target manifest.
+#[tokio::test]
+async fn test_copy_region_from_advances_invalid_seq_boundary() {
+    common_telemetry::init_default_ut_logging();
+
+    let mut env = TestEnv::with_prefix("copy-region-from-edit-boundary").await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+
+    let source_region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new()
+        .insert_option("append_mode", "true")
+        .insert_option("preserve_row_sequence", "true")
+        .build();
+    let column_schemas = rows_schema(&request);
+
+    engine
+        .handle_request(source_region_id, RegionRequest::Create(request.clone()))
+        .await
+        .unwrap();
+    put_rows(
+        &engine,
+        source_region_id,
+        Rows {
+            schema: column_schemas,
+            rows: build_rows(0, 5),
+        },
+    )
+    .await;
+    engine
+        .handle_request(
+            source_region_id,
+            RegionRequest::Flush(RegionFlushRequest::default()),
+        )
+        .await
+        .unwrap();
+
+    // The source region's own data ownership never changed.
+    assert_eq!(
+        0,
+        engine
+            .get_region(source_region_id)
+            .unwrap()
+            .version()
+            .last_invalid_seq()
+    );
+
+    let target_region_id = RegionId::new(1, 2);
+    engine
+        .handle_request(target_region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+    let target_last_sequence = engine
+        .get_region(target_region_id)
+        .unwrap()
+        .version_control
+        .current()
+        .last_sequence;
+    let boundary = target_last_sequence + 1;
+
+    engine
+        .copy_region_from(
+            target_region_id,
+            MitoCopyRegionFromRequest {
+                source_region_id,
+                parallelism: 1,
+            },
+        )
+        .await
+        .unwrap();
+
+    let region = engine.get_region(target_region_id).unwrap();
+    let version = region.version();
+    assert_eq!(
+        boundary,
+        version.last_invalid_seq(),
+        "a region copy must allocate the target's next sequence as the boundary"
+    );
+    // The copy holds the publish window while it allocates, persists and publishes, so a
+    // racing write is queued instead of being admitted with a sequence at or below the
+    // boundary. The in-memory `last_sequence` is only raised by the publish itself, so a
+    // failed copy cannot leave an advanced allocation behind; every write admitted after
+    // the copy therefore obtains `boundary + 1` or later.
+    assert_eq!(
+        boundary,
+        region.version_control.current().last_sequence,
+        "the copy must publish the boundary without reserving a slot above it"
+    );
+    assert_eq!(
+        boundary,
+        region.version_control.current().committed_sequence,
+        "the publish must raise the commit watermark to the boundary"
+    );
+    let manifest = region.manifest_ctx.manifest().await;
+    assert_eq!(
+        Some(boundary),
+        manifest.last_invalid_seq,
+        "the copy boundary must be persisted in the target manifest"
+    );
+    assert_eq!(
+        Some(boundary),
+        manifest.committed_sequence,
+        "the published commit watermark must cover the boundary"
+    );
+
+    // A cursor below the copy boundary belonged to the pre-copy layout.
+    let err = engine
+        .scanner(
+            target_region_id,
+            ScanRequest {
+                memtable_min_sequence: Some(boundary - 1),
+                memtable_max_sequence: Some(boundary + 1),
+                exact_sequence_range: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .err()
+        .expect("a cursor below the copy boundary must be rejected");
+    assert_eq!(StatusCode::RequestOutdated, err.status_code());
+    let err_msg = err.to_string();
+    assert!(
+        err_msg.starts_with("sequence range cursor invalid:"),
+        "unexpected err msg: {err_msg}"
+    );
+    assert!(
+        matches!(
+            err,
+            Error::IncrementalQueryStale {
+                given_seq,
+                min_readable_seq,
+                ..
+            } if given_seq == boundary - 1 && min_readable_seq == boundary
+        ),
+        "unexpected err msg: {err_msg}"
+    );
+
+    // The copy backfills the barrier on the copied files in the same publish, so at
+    // the boundary they are provably consumed: the exact delta is available and empty
+    // instead of failing closed forever on a barrier-less file.
+    let stream = engine
+        .scan_to_stream(
+            target_region_id,
+            ScanRequest {
+                memtable_min_sequence: Some(boundary),
+                memtable_max_sequence: Some(boundary + 1),
+                exact_sequence_range: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let batches = RecordBatches::try_collect(stream).await.unwrap();
+    assert_eq!(
+        0,
+        batches.iter().map(|batch| batch.num_rows()).sum::<usize>(),
+        "the copied rows are fully consumed at the boundary"
+    );
+
+    // Recovery discovery therefore sees a provably complete candidate set rather than
+    // reporting the region as barrier-less on every round.
+    let scanner = engine
+        .scanner(
+            target_region_id,
+            ScanRequest {
+                memtable_min_sequence: Some(boundary - 1),
+                exact_sequence_range: true,
+                repair_discovery_scan: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("discovery must find the copied file as a candidate");
+    assert_eq!(
+        1,
+        scanner.num_files(),
+        "the copied file is a candidate at its own barrier"
+    );
+}
+
+/// Waits until `region` reaches `state`.
+async fn wait_until_region_state(region: &MitoRegionRef, state: RegionLeaderState) {
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while region.state() != RegionRoleState::Leader(state) {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("region did not reach the expected state in time");
+}
+
+/// The copy holds the worker-coordinated publish window from the moment it is admitted in
+/// the worker loop until the copied files are visible, so the boundary it allocates is above
+/// every sequence already attributed to a row and ordinary writes arriving meanwhile are
+/// queued instead of being admitted at or below that boundary.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_copy_region_from_publish_window_queues_writes() {
+    common_telemetry::init_default_ut_logging();
+
+    let mut env = TestEnv::with_prefix("copy-region-from-publish-window").await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+
+    let source_region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new()
+        .insert_option("append_mode", "true")
+        .insert_option("preserve_row_sequence", "true")
+        .build();
+    let column_schemas = rows_schema(&request);
+    engine
+        .handle_request(source_region_id, RegionRequest::Create(request.clone()))
+        .await
+        .unwrap();
+    put_rows(
+        &engine,
+        source_region_id,
+        Rows {
+            schema: column_schemas.clone(),
+            rows: build_rows(0, 5),
+        },
+    )
+    .await;
+    engine
+        .handle_request(
+            source_region_id,
+            RegionRequest::Flush(RegionFlushRequest::default()),
+        )
+        .await
+        .unwrap();
+
+    let target_region_id = RegionId::new(1, 2);
+    engine
+        .handle_request(target_region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+
+    let target = engine.get_region(target_region_id).unwrap();
+    let last_sequence_before_copy = target.version_control.current().last_sequence;
+
+    // Holding the target's manifest write lock keeps the copy inside its publish window: the
+    // worker loop opens the window when it admits the copy, and the background task then
+    // blocks on the lock while persisting the copied files.
+    let manifest_guard = target.manifest_ctx.manifest_manager.write().await;
+    let copy_engine = engine.clone();
+    let copy_task = tokio::spawn(async move {
+        copy_engine
+            .copy_region_from(
+                target_region_id,
+                MitoCopyRegionFromRequest {
+                    source_region_id,
+                    parallelism: 1,
+                },
+            )
+            .await
+    });
+    wait_until_region_state(&target, RegionLeaderState::Editing).await;
+
+    // A write that arrives during the copy is queued, not attributed a sequence.
+    let write_engine = engine.clone();
+    let write_rows = Rows {
+        schema: column_schemas.clone(),
+        rows: build_rows(5, 7),
+    };
+    let write_task =
+        tokio::spawn(async move { put_rows(&write_engine, target_region_id, write_rows).await });
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    assert!(
+        !write_task.is_finished(),
+        "a write must be queued while the copy publish window is open"
+    );
+    assert_eq!(
+        last_sequence_before_copy,
+        target.version_control.current().last_sequence,
+        "a queued write must not allocate a sequence during the copy"
+    );
+
+    // Releasing the lock lets the copied files become visible; the window then closes and the
+    // queued write is admitted.
+    drop(manifest_guard);
+    copy_task.await.unwrap().unwrap();
+    write_task.await.unwrap();
+
+    let boundary = target.version().last_invalid_seq();
+    assert_eq!(
+        last_sequence_before_copy + 1,
+        boundary,
+        "the copy must publish at last_sequence + 1"
+    );
+    assert_eq!(
+        RegionRoleState::Leader(RegionLeaderState::Writable),
+        target.state(),
+        "the copy publish window must be released after the publish"
+    );
+    assert!(
+        target.version_control.current().last_sequence > boundary,
+        "the queued write must be attributed a sequence above the published boundary, \
+         last_sequence: {}, boundary: {}",
+        target.version_control.current().last_sequence,
+        boundary
     );
 }

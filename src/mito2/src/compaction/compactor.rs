@@ -453,6 +453,7 @@ impl CompactionContext {
             flushed_sequence: None,
             committed_sequence: None,
             wal_recovery: Default::default(),
+            last_invalid_seq: None,
         };
 
         let action_list = RegionMetaActionList::with_action(RegionMetaAction::Edit(edit.clone()));
@@ -1140,6 +1141,7 @@ mod tests {
                 .update(
                     RegionMetaActionList::with_action(RegionMetaAction::Edit(RegionEdit {
                         committed_sequence: Some(committed_sequence),
+                        last_invalid_seq: None,
                         files_to_add: vec![],
                         files_to_remove: vec![],
                         timestamp_ms: None,

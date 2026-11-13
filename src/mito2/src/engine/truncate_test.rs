@@ -142,6 +142,69 @@ async fn test_engine_truncate_region_basic_with_format(flat_format: bool) {
     assert_eq!(expected, batches.pretty_print().unwrap());
 }
 
+/// A truncation removes rows owned by the region, so it records an edit
+/// boundary strictly above every sequence allocated so far. The boundary is
+/// persisted in the manifest, so a Flow checkpoint that predates the truncation
+/// stays rejected after a reopen.
+#[tokio::test]
+async fn test_engine_truncate_records_invalid_seq_boundary() {
+    let mut env = TestEnv::with_prefix("truncate-edit-boundary").await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new().build();
+    let column_schemas = rows_schema(&request);
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+
+    put_rows(
+        &engine,
+        region_id,
+        Rows {
+            schema: column_schemas,
+            rows: build_rows(0, 5),
+        },
+    )
+    .await;
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::Flush(RegionFlushRequest::default()),
+        )
+        .await
+        .unwrap();
+
+    let before = engine
+        .get_region(region_id)
+        .unwrap()
+        .version_control
+        .current();
+    assert_eq!(0, before.version.last_invalid_seq());
+    let boundary = before.last_sequence + 1;
+
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::Truncate(RegionTruncateRequest::All),
+        )
+        .await
+        .unwrap();
+
+    let region = engine.get_region(region_id).unwrap();
+    assert_eq!(
+        boundary,
+        region.version().last_invalid_seq(),
+        "a truncation allocates last_sequence + 1 as the boundary"
+    );
+    assert_eq!(
+        Some(boundary),
+        region.manifest_ctx.manifest().await.last_invalid_seq,
+        "the truncation boundary must be persisted"
+    );
+}
+
 #[tokio::test]
 async fn test_engine_put_data_after_truncate() {
     test_engine_put_data_after_truncate_with_format(false).await;
@@ -304,6 +367,128 @@ async fn test_engine_truncate_after_flush_with_format(flat_format: bool) {
 | 7     | 7.0     | 1970-01-01T00:00:07 |
 +-------+---------+---------------------+";
     assert_eq!(expected, batches.pretty_print().unwrap());
+}
+
+/// `Truncate::Unflushed` discards unflushed rows through a flush-shaped edit
+/// (`handle_manifest_discard_unflushed_action`) that carries no `files_to_remove`,
+/// so the boundary cannot be inferred from the edit shape: the path sets it
+/// explicitly. It must advance the boundary, persist it, and keep rejecting a
+/// pre-truncation cursor after a restart.
+#[tokio::test]
+async fn test_engine_truncate_unflushed_records_invalid_seq_boundary() {
+    let mut env = TestEnv::with_prefix("truncate-unflushed-invalidation-boundary").await;
+    let config = MitoConfig::default();
+    let engine = env.create_engine(config.clone()).await;
+
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new().build();
+    let column_schemas = rows_schema(&request);
+    let table_dir = request.table_dir.clone();
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+
+    // Only unflushed rows: that is what `Unflushed` discards.
+    put_rows(
+        &engine,
+        region_id,
+        Rows {
+            schema: column_schemas,
+            rows: build_rows(0, 5),
+        },
+    )
+    .await;
+    let checkpoint = engine
+        .get_region(region_id)
+        .unwrap()
+        .version_control
+        .current()
+        .last_sequence;
+    let boundary = checkpoint + 1;
+
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::Truncate(RegionTruncateRequest::Unflushed),
+        )
+        .await
+        .unwrap();
+
+    let region = engine.get_region(region_id).unwrap();
+    assert_eq!(
+        boundary,
+        region.version().last_invalid_seq(),
+        "discarding unflushed data must publish a boundary"
+    );
+    assert_eq!(
+        Some(boundary),
+        region.manifest_ctx.manifest().await.last_invalid_seq,
+        "the discard must persist the boundary"
+    );
+
+    // A cursor at the pre-discard watermark can no longer explain the data.
+    let err = engine
+        .scanner(
+            region_id,
+            ScanRequest {
+                memtable_min_sequence: Some(checkpoint),
+                memtable_max_sequence: Some(boundary + 1),
+                exact_sequence_range: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .err()
+        .expect("a cursor below the discard boundary must be rejected");
+    assert!(
+        matches!(err, crate::error::Error::IncrementalQueryStale { .. }),
+        "unexpected err: {err}"
+    );
+
+    // Reopen: the boundary survives and the stale cursor is still rejected.
+    let engine = env.reopen_engine(engine, config).await;
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::Open(RegionOpenRequest {
+                engine: String::new(),
+                table_dir,
+                path_type: PathType::Bare,
+                options: HashMap::default(),
+                skip_wal_replay: false,
+                checkpoint: None,
+                requirements: Default::default(),
+            }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        boundary,
+        engine
+            .get_region(region_id)
+            .unwrap()
+            .version()
+            .last_invalid_seq(),
+        "reopen must restore the persisted boundary"
+    );
+    let err = engine
+        .scanner(
+            region_id,
+            ScanRequest {
+                memtable_min_sequence: Some(checkpoint),
+                memtable_max_sequence: Some(boundary + 1),
+                exact_sequence_range: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .err()
+        .expect("a stale cursor must stay rejected after reopen");
+    assert!(
+        matches!(err, crate::error::Error::IncrementalQueryStale { .. }),
+        "unexpected err: {err}"
+    );
 }
 
 #[tokio::test]

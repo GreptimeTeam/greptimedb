@@ -156,8 +156,30 @@ impl VersionControl {
         memtables_to_remove: &[MemtableId],
         purger: FilePurgerRef,
     ) {
+        self.apply_edit_with_metadata(None, edit, memtables_to_remove, purger);
+    }
+
+    /// Applies an optional metadata update and an optional edit as **one**
+    /// [Version] publish.
+    ///
+    /// Publishing both together keeps a concurrent reader from observing the
+    /// new metadata (e.g. a changed partition expression) together with the
+    /// previous file set or sequence boundary, which would break the invariant
+    /// that one scan sees one consistent file set and partition rule.
+    pub(crate) fn apply_edit_with_metadata(
+        &self,
+        metadata: Option<RegionMetadataRef>,
+        edit: Option<RegionEdit>,
+        memtables_to_remove: &[MemtableId],
+        purger: FilePurgerRef,
+    ) {
         let version = self.current().version;
         let builder = VersionBuilder::from_version(version);
+        let builder = if let Some(metadata) = metadata {
+            builder.metadata(metadata)
+        } else {
+            builder
+        };
         let committed_sequence = edit.as_ref().and_then(|e| e.committed_sequence);
         let builder = if let Some(edit) = edit {
             builder.apply_edit(edit, purger)
@@ -217,6 +239,11 @@ impl VersionControl {
     }
 
     /// Alter metadata of the region without rebuilding memtables.
+    ///
+    /// Production paths that must keep metadata and files consistent publish both
+    /// through [Self::apply_edit_with_metadata]; this metadata-only helper is kept
+    /// for tests that need an isolated metadata publish.
+    #[cfg(test)]
     pub(crate) fn alter_metadata(&self, metadata: RegionMetadataRef) {
         let version = self.current().version;
         let new_version = Arc::new(
@@ -258,8 +285,26 @@ impl VersionControl {
     }
 
     /// Truncate current version.
-    pub(crate) fn truncate(&self, truncate_kind: TruncateKind) {
-        let version = self.current().version;
+    ///
+    /// Truncation drops rows from the region, which changes which rows it owns, so
+    /// the truncate action carries the edit boundary allocated from
+    /// `last_sequence + 1`. The manifest records the same value, so a reopened
+    /// region keeps rejecting cursors that predate the truncation. When the action
+    /// carries no boundary (an action written before the field existed) the
+    /// boundary is allocated here.
+    pub(crate) fn truncate(
+        &self,
+        truncate_kind: TruncateKind,
+        last_invalid_seq: Option<SequenceNumber>,
+    ) {
+        let current = self.current();
+        let version = current.version;
+        // An action written before the field existed carries no boundary: derive
+        // one through the shared policy.
+        let edit_sequence = last_invalid_seq.unwrap_or_else(|| {
+            invalid_seq_boundary(SequenceDomainChange::Truncate, current.last_sequence + 1)
+                .unwrap_or_default()
+        });
 
         match truncate_kind {
             TruncateKind::All {
@@ -279,34 +324,65 @@ impl VersionControl {
                         .flushed_entry_id(truncated_entry_id)
                         .flushed_sequence(truncated_sequence)
                         .truncated_entry_id(Some(truncated_entry_id))
+                        .last_invalid_seq(edit_sequence)
                         .build(),
                 );
 
                 let mut version_data = self.data.write().unwrap();
                 version_data.version.ssts.mark_all_deleted();
+                // Publish the boundary and the commit watermark in one step: a reader
+                // that observes the new `Version` must also observe `H >= B`,
+                // otherwise its recovery round would immediately invalidate itself.
+                version_data.committed_sequence =
+                    version_data.committed_sequence.max(edit_sequence);
+                version_data.last_sequence = version_data
+                    .last_sequence
+                    .max(version_data.committed_sequence);
                 version_data.version = new_version;
             }
             TruncateKind::Partial { files_to_remove } => {
                 let new_version = Arc::new(
                     VersionBuilder::from_version(version)
                         .remove_files(files_to_remove.into_iter())
+                        .last_invalid_seq(edit_sequence)
                         .build(),
                 );
 
                 let mut version_data = self.data.write().unwrap();
                 // notice since it's partial, no need to mark all files as deleted
+                version_data.committed_sequence =
+                    version_data.committed_sequence.max(edit_sequence);
+                version_data.last_sequence = version_data
+                    .last_sequence
+                    .max(version_data.committed_sequence);
                 version_data.version = new_version;
             }
         };
     }
 
     /// Discards all memtables while preserving persisted SST files.
+    ///
+    /// Like [Self::truncate] this drops rows, so it allocates an edit boundary
+    /// from `last_sequence + 1`. The allocation is in-memory only: the
+    /// persisted discard action is flush-shaped and carries no boundary, so after
+    /// a reload the boundary falls back to the manifest value (unknown => 0).
     pub(crate) fn discard_unflushed(
         &self,
         discarded_entry_id: EntryId,
         discarded_sequence: SequenceNumber,
+        last_invalid_seq: Option<SequenceNumber>,
     ) {
-        let version = self.current().version;
+        let current = self.current();
+        let version = current.version;
+        // The discard action records the boundary through the shared policy; fall
+        // back to the policy allocation when the action carries none.
+        let edit_sequence = last_invalid_seq.unwrap_or_else(|| {
+            invalid_seq_boundary(
+                SequenceDomainChange::DiscardUnflushed,
+                current.last_sequence + 1,
+            )
+            .unwrap_or_default()
+        });
         let memtable_builder = version.memtables.mutable.memtable_builder().clone();
         let new_mutable =
             Self::new_mutable_from_version(&version, version.metadata.clone(), memtable_builder);
@@ -315,10 +391,17 @@ impl VersionControl {
                 .memtables(MemtableVersion::new(new_mutable))
                 .flushed_entry_id(discarded_entry_id)
                 .flushed_sequence(discarded_sequence)
+                .last_invalid_seq(edit_sequence)
                 .build(),
         );
 
         let mut version_data = self.data.write().unwrap();
+        // Publish the boundary and the commit watermark together, so a recovery round
+        // that observes the new `Version` also observes `H >= B`.
+        version_data.committed_sequence = version_data.committed_sequence.max(edit_sequence);
+        version_data.last_sequence = version_data
+            .last_sequence
+            .max(version_data.committed_sequence);
         version_data.version = new_version;
     }
 
@@ -402,6 +485,23 @@ pub(crate) struct Version {
     pub(crate) options: RegionOptions,
     /// WAL ranges the region still has to recover.
     pub(crate) pending_tails: Vec<PendingTail>,
+    /// `last_invalid_seq`: latest publication boundary after which an old
+    /// checkpoint can no longer explain the currently visible data.
+    ///
+    /// Advanced on row re-homing (a generic region edit such as `ingest_sst`, a
+    /// staging apply, a region copy), data deletion or replacement (truncation,
+    /// discarding unflushed rows, an edit that replaces an existing file id), and a
+    /// visible partition-range change. Not advanced by flush, compaction, index
+    /// updates, or pure new-data writes. Exact incremental reads require
+    /// `C >= last_invalid_seq`.
+    ///
+    /// It is kept apart from [VersionControlData::committed_sequence], which
+    /// ordinary writes advance. Publishing paths allocate `B = last_sequence + 1`
+    /// so it is strictly above every sequence already allocated or published, and
+    /// the region manifest keeps the max value, so the boundary survives an
+    /// open/reload. Zero means unknown or never published, which never invalidates
+    /// a cursor.
+    pub(crate) last_invalid_seq: SequenceNumber,
 }
 
 impl Version {
@@ -418,9 +518,79 @@ impl Version {
         );
         Ok(())
     }
+
+    /// Returns [Version::last_invalid_seq]: `B`.
+    ///
+    /// Zero means unknown or never published since the region was created. An exact
+    /// incremental read requires `C >= B`; a reader below it cannot resume.
+    pub(crate) fn last_invalid_seq(&self) -> SequenceNumber {
+        self.last_invalid_seq
+    }
 }
 
 pub(crate) type VersionRef = Arc<Version>;
+
+/// A region-mutating operation that may change which sequence domain the rows of
+/// a region belong to.
+///
+/// Only used by [marks_sequence_domain_change], which keeps the whole policy in
+/// one place. Flush, write and compaction are deliberately **absent**: they never
+/// reassign row sequences and must never invalidate a cursor.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum SequenceDomainChange {
+    /// A generic region edit, i.e. any request served by `handle_region_edit`:
+    /// an import such as `ingest_sst`, a repartition, a staging apply.
+    RegionEdit,
+    /// A truncation of all or part of the region's data.
+    Truncate,
+    /// A discard of unflushed data.
+    DiscardUnflushed,
+    /// A partition-expression (partition range) change.
+    PartitionExprChange,
+}
+
+/// Single decision point: does `change` reassign which sequence domain the
+/// region's rows belong to, so that every reader cursor below the boundary it
+/// allocates must be invalidated?
+///
+/// **This function is the only place that answers that question.** Callers that
+/// publish such a change route the decision through here and record the boundary
+/// only when it returns `true`. Refining the policy is a change to this function
+/// only.
+///
+/// Conservative policy: the generic edit interface cannot prove that newly added
+/// data was never consumed elsewhere (a locally re-added file keeps its physical
+/// row sequences; an existing file id can be replaced by an add-only edit). Until
+/// that proof is expressible, every generic region edit advances the boundary.
+///
+/// The edit shape is not a substitute for that proof: `files_to_remove` may be
+/// empty for a destructive replacement, an assigned file `sequence` only proves
+/// the rows are readable in the target domain, and `preserve_row_sequence` only
+/// describes whether the physical sequence column may be trusted, not whether the
+/// rows were already consumed. The price is one full rebuild on the Flow side
+/// after an edit that happened to be benign.
+pub(crate) fn marks_sequence_domain_change(change: SequenceDomainChange) -> bool {
+    matches!(
+        change,
+        SequenceDomainChange::RegionEdit
+            | SequenceDomainChange::Truncate
+            | SequenceDomainChange::DiscardUnflushed
+            | SequenceDomainChange::PartitionExprChange
+    )
+}
+
+/// Returns the boundary `change` must record, given the sequence number it already
+/// allocated (`last_sequence + 1`), or `None` when it leaves the region's
+/// sequence domain alone.
+///
+/// Keeps the allocation next to the policy above so every publishing path derives
+/// both from one place.
+pub(crate) fn invalid_seq_boundary(
+    change: SequenceDomainChange,
+    allocated_sequence: SequenceNumber,
+) -> Option<SequenceNumber> {
+    marks_sequence_domain_change(change).then_some(allocated_sequence)
+}
 
 /// Version builder.
 pub(crate) struct VersionBuilder {
@@ -433,6 +603,7 @@ pub(crate) struct VersionBuilder {
     compaction_time_window: Option<Duration>,
     options: RegionOptions,
     pending_tails: Vec<PendingTail>,
+    last_invalid_seq: SequenceNumber,
 }
 
 impl VersionBuilder {
@@ -448,6 +619,7 @@ impl VersionBuilder {
             compaction_time_window: None,
             options: RegionOptions::default(),
             pending_tails: Vec::new(),
+            last_invalid_seq: 0,
         }
     }
 
@@ -463,6 +635,7 @@ impl VersionBuilder {
             compaction_time_window: version.compaction_time_window,
             options: version.options.clone(),
             pending_tails: version.pending_tails.clone(),
+            last_invalid_seq: version.last_invalid_seq,
         }
     }
 
@@ -516,6 +689,16 @@ impl VersionBuilder {
         self
     }
 
+    /// Sets [Version::last_invalid_seq].
+    ///
+    /// Callers pass the boundary an edit/truncation/copy allocated, never a
+    /// flush, write or compaction watermark. The value is absorbed with `max`, so
+    /// replaying an older boundary cannot lower it.
+    pub(crate) fn last_invalid_seq(mut self, sequence: SequenceNumber) -> Self {
+        self.last_invalid_seq = self.last_invalid_seq.max(sequence);
+        self
+    }
+
     /// Apply edit to the builder.
     pub(crate) fn apply_edit(mut self, edit: RegionEdit, file_purger: FilePurgerRef) -> Self {
         if let Some(entry_id) = edit.flushed_entry_id {
@@ -523,6 +706,13 @@ impl VersionBuilder {
         }
         if let Some(sequence) = edit.flushed_sequence {
             self.flushed_sequence = self.flushed_sequence.max(sequence);
+        }
+        if let Some(sequence) = edit.last_invalid_seq {
+            // Only edits that may reassign row sequences record this field: flush,
+            // write and compaction edits leave it `None`, so they can never
+            // invalidate a cursor. Take the max so replaying an older edit cannot
+            // lower it.
+            self.last_invalid_seq = self.last_invalid_seq.max(sequence);
         }
         if let Some(window) = edit.compaction_time_window {
             self.compaction_time_window = Some(window);
@@ -604,6 +794,7 @@ impl VersionBuilder {
             compaction_time_window,
             options: self.options,
             pending_tails: self.pending_tails,
+            last_invalid_seq: self.last_invalid_seq,
         }
     }
 }
@@ -653,6 +844,7 @@ mod tests {
                     flushed_sequence: None,
                     committed_sequence: Some(sequence),
                     wal_recovery: Default::default(),
+                    last_invalid_seq: None,
                 }),
                 &[],
                 builder.file_purger(),
@@ -663,5 +855,95 @@ mod tests {
             );
             assert_eq!(vc.current().last_entry_id, 6);
         }
+    }
+
+    #[test]
+    fn test_last_invalid_seq_tracks_edits_only() {
+        let builder = VersionControlBuilder::new();
+        let mut version = builder.build_version();
+        version.flushed_sequence = 8;
+        let vc = VersionControl::new(version);
+        assert_eq!(0, vc.current().version.last_invalid_seq());
+
+        // Ordinary write watermarks and flushes never advance the boundary.
+        vc.update_last_sequence(20);
+        vc.set_committed_sequence(30);
+        assert_eq!(0, vc.current().version.last_invalid_seq());
+
+        // Truncation drops rows, so it allocates `last_sequence + 1` (31) when the
+        // action carries no boundary.
+        vc.truncate(
+            TruncateKind::Partial {
+                files_to_remove: vec![],
+            },
+            None,
+        );
+        assert_eq!(31, vc.current().version.last_invalid_seq());
+        // The publish also raises the live watermark to the boundary, so a reader
+        // that observes the new version observes `H >= B`.
+        assert_eq!(31, vc.current().last_sequence);
+
+        // A commit watermark alone never records a boundary: only the explicit
+        // `last_invalid_seq` field of an edit does.
+        vc.apply_edit(
+            Some(RegionEdit {
+                files_to_add: vec![],
+                files_to_remove: vec![],
+                timestamp_ms: None,
+                compaction_time_window: None,
+                flushed_entry_id: None,
+                flushed_sequence: None,
+                committed_sequence: Some(50),
+                wal_recovery: Default::default(),
+                last_invalid_seq: None,
+            }),
+            &[],
+            builder.file_purger(),
+        );
+        assert_eq!(31, vc.current().version.last_invalid_seq());
+        assert_eq!(50, vc.committed_sequence());
+
+        // Edits record it monotonically: a smaller later value cannot lower it.
+        for sequence in [25, 11] {
+            vc.apply_edit(
+                Some(RegionEdit {
+                    files_to_add: vec![],
+                    files_to_remove: vec![],
+                    timestamp_ms: None,
+                    compaction_time_window: None,
+                    flushed_entry_id: None,
+                    flushed_sequence: None,
+                    committed_sequence: Some(sequence),
+                    wal_recovery: Default::default(),
+                    last_invalid_seq: Some(sequence),
+                }),
+                &[],
+                builder.file_purger(),
+            );
+        }
+        assert_eq!(31, vc.current().version.last_invalid_seq());
+
+        // A later, larger allocation advances it.
+        vc.apply_edit(
+            Some(RegionEdit {
+                files_to_add: vec![],
+                files_to_remove: vec![],
+                timestamp_ms: None,
+                compaction_time_window: None,
+                flushed_entry_id: None,
+                flushed_sequence: None,
+                committed_sequence: Some(40),
+                wal_recovery: Default::default(),
+                last_invalid_seq: Some(40),
+            }),
+            &[],
+            builder.file_purger(),
+        );
+        assert_eq!(40, vc.current().version.last_invalid_seq());
+
+        // Advancing the live watermark afterwards leaves the boundary alone.
+        vc.set_committed_sequence(60);
+        assert_eq!(40, vc.current().version.last_invalid_seq());
+        assert_eq!(60, vc.committed_sequence());
     }
 }

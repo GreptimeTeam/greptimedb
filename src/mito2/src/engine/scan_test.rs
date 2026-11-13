@@ -56,7 +56,7 @@ use store_api::metric_engine_consts::PRIMARY_KEY_ENCODING;
 use store_api::region_engine::{PrepareRequest, RegionEngine, RegionScanner};
 use store_api::region_request::{
     AlterKind, RegionAlterRequest, RegionBulkInsertsRequest, RegionCompactRequest,
-    RegionOpenRequest, RegionPutRequest, RegionRequest, SetRegionOption,
+    RegionOpenRequest, RegionPutRequest, RegionRequest, RegionTruncateRequest, SetRegionOption,
 };
 use store_api::storage::consts::PRIMARY_KEY_COLUMN_NAME;
 use store_api::storage::{
@@ -3058,8 +3058,19 @@ async fn test_exact_sequence_range_unsupported_when_legacy_file() {
         flushed_sequence: None,
         committed_sequence: None,
         wal_recovery: Default::default(),
+        last_invalid_seq: None,
     };
-    engine.edit_region(region_id, edit).await.unwrap();
+    // Absorb the file through a flush-shaped edit (no `last_invalid_seq`), which
+    // is how a legacy unmarked SST appears without any edit boundary.
+    let region = engine.get_region(region_id).unwrap();
+    region
+        .version_control
+        .apply_edit(Some(edit), &[], region.file_purger.clone());
+    assert_eq!(
+        0,
+        region.version().last_invalid_seq(),
+        "a flush-shaped edit must not allocate an edit boundary"
+    );
 
     let err = engine
         .scanner(
@@ -3083,11 +3094,13 @@ async fn test_exact_sequence_range_unsupported_when_legacy_file() {
 
 /// Region edit assigns a target-local barrier to an imported foreign SST, so
 /// exact sequence-range capability can admit it without trusting its source
-/// region marker.
+/// region marker. The same edit may have renumbered rows, which the edit layer
+/// cannot disprove, so it also records an edit boundary that gates the cursors
+/// below it.
 #[tokio::test]
-async fn test_exact_sequence_range_accepts_foreign_file_with_target_barrier() {
+async fn test_exact_sequence_range_edit_boundary_gates_foreign_file_with_barrier() {
     let mut env =
-        TestEnv::with_prefix("test_exact_sequence_range_accepts_foreign_file_with_target_barrier")
+        TestEnv::with_prefix("test_exact_sequence_range_invalid_seq_boundary_gates_foreign_file")
             .await;
     let engine = env.create_engine(MitoConfig::default()).await;
 
@@ -3146,6 +3159,7 @@ async fn test_exact_sequence_range_accepts_foreign_file_with_target_barrier() {
                 flushed_sequence: None,
                 committed_sequence: None,
                 wal_recovery: Default::default(),
+                last_invalid_seq: None,
             },
         )
         .await
@@ -3164,18 +3178,44 @@ async fn test_exact_sequence_range_accepts_foreign_file_with_target_barrier() {
         "region edit must assign a target-local barrier"
     );
 
-    engine
+    // The edit allocated `last_sequence + 1` = 4 as both the file barrier and the
+    // region's edit boundary: a cursor at 3 predates the edit and cannot trust
+    // its position any more.
+    let boundary = version.last_invalid_seq();
+    assert_eq!(4, boundary);
+    let err = engine
         .scanner(
             region_id,
             ScanRequest {
-                memtable_min_sequence: Some(3),
-                memtable_max_sequence: Some(4),
+                memtable_min_sequence: Some(boundary - 1),
+                memtable_max_sequence: Some(boundary),
                 exact_sequence_range: true,
                 ..Default::default()
             },
         )
         .await
-        .expect("foreign file with target barrier should be exact-capable");
+        .err()
+        .expect("a cursor below the edit boundary must be rejected");
+    assert!(
+        matches!(err, Error::IncrementalQueryStale { .. }),
+        "unexpected err: {err}"
+    );
+    assert_eq!(StatusCode::RequestOutdated, err.status_code());
+
+    // At the boundary the foreign file is provably fully consumed, so it cannot
+    // break the exact capability even though its source marker is foreign.
+    engine
+        .scanner(
+            region_id,
+            ScanRequest {
+                memtable_min_sequence: Some(boundary),
+                memtable_max_sequence: Some(boundary + 1),
+                exact_sequence_range: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("foreign file with target barrier should be exact-capable at the boundary");
 }
 
 /// Exact sequence-range reads only require preserved row sequences in the
@@ -4247,6 +4287,7 @@ async fn test_compaction_output_non_preserve_not_laundered_from_legacy_input(
                 flushed_sequence: None,
                 committed_sequence: None,
                 wal_recovery: Default::default(),
+                last_invalid_seq: None,
             },
         )
         .await
@@ -4401,10 +4442,21 @@ async fn test_compaction_output_non_preserve_not_laundered_from_legacy_input(
             "unexpected error: {err:?}"
         );
     } else {
+        // No flush after the edit, so the flushed frontier cannot fire: the
+        // cursor sits below the edit boundary (7) the seeding edit allocated and
+        // is rejected as stale for that reason.
         assert!(
-            matches!(err, Error::SequenceRangeUnsupported { .. }),
+            matches!(
+                err,
+                Error::IncrementalQueryStale {
+                    given_seq: 6,
+                    min_readable_seq: 7,
+                    ..
+                }
+            ),
             "unexpected error: {err:?}"
         );
+        assert_eq!(StatusCode::RequestOutdated, err.status_code());
     }
 
     // Once C reaches the barrier the untrusted file is skipped, so exact
@@ -5389,4 +5441,987 @@ fn scan_field_values(batches: &[common_recordbatch::RecordBatch]) -> Vec<f64> {
             (0..batch.num_rows()).map(move |row| fields.value(row))
         })
         .collect()
+}
+
+/// Ordinary writes, flushes and sequence-preserving compactions advance the live
+/// committed watermark and the flushed frontier, but never the edit boundary: no
+/// cursor is invalidated without an edit.
+#[tokio::test]
+async fn test_last_invalid_seq_ignores_writes_flush_and_compaction() {
+    let mut env =
+        TestEnv::with_prefix("test_last_invalid_seq_ignores_writes_flush_and_compaction").await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new()
+        .insert_option("append_mode", "true")
+        .insert_option("preserve_row_sequence", "true")
+        .insert_option("compaction.type", "twcs")
+        .insert_option("compaction.twcs.trigger_file_num", "100")
+        .build();
+    let column_schemas = test_util::rows_schema(&request);
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+
+    let boundary = |engine: &crate::engine::MitoEngine| {
+        engine
+            .get_region(region_id)
+            .unwrap()
+            .version()
+            .last_invalid_seq()
+    };
+    assert_eq!(0, boundary(&engine), "a fresh region has no boundary");
+
+    test_util::put_rows(
+        &engine,
+        region_id,
+        Rows {
+            schema: column_schemas,
+            rows: test_util::build_rows(0, 3),
+        },
+    )
+    .await;
+    assert_eq!(0, boundary(&engine), "writes must not advance it");
+
+    test_util::flush_region(&engine, region_id, None).await;
+    let version = engine.get_region(region_id).unwrap().version();
+    assert!(version.flushed_sequence > 0);
+    assert_eq!(
+        0,
+        version.last_invalid_seq(),
+        "flush must not advance the edit boundary"
+    );
+
+    // A sequence-preserving compaction keeps every row sequence intact, so it is
+    // not a sequence-domain change either.
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::Compact(RegionCompactRequest {
+                options: compact_request::Options::StrictWindow(StrictWindow {
+                    window_seconds: 60,
+                }),
+                parallelism: None,
+                time_range: None,
+            }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        0,
+        boundary(&engine),
+        "compaction must not advance the edit boundary"
+    );
+
+    // Without an edit the exact delta is still served.
+    let stream = engine
+        .scan_to_stream(
+            region_id,
+            ScanRequest {
+                memtable_min_sequence: Some(0),
+                memtable_max_sequence: Some(3),
+                exact_sequence_range: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let batches = RecordBatches::try_collect(stream).await.unwrap();
+    assert_eq!(
+        3,
+        batches.iter().map(|batch| batch.num_rows()).sum::<usize>()
+    );
+}
+
+/// An edit that may reassign row sequences (here: a truncation, which drops rows
+/// the region owned) allocates `B = last_sequence + 1` and records it on the
+/// region. A Flow checkpoint equal to the previous high watermark is still below
+/// `B`, so the exact read is rejected with the identifiable stale-cursor error
+/// (`RequestOutdated` + `sequence range cursor invalid:` prefix) instead of
+/// serving a partial `(C, H]` delta.
+///
+/// The check reads the recorded boundary, not the file provenance: it keeps
+/// working after a compaction rewrote every file, and a full-snapshot round
+/// (absent cursor) is never blocked while it returns `H >= B`.
+#[tokio::test]
+async fn test_last_invalid_seq_rejects_stale_exact_cursor() {
+    let mut env = TestEnv::with_prefix("test_last_invalid_seq_rejects_stale_exact_cursor").await;
+    let config = MitoConfig::default();
+    let engine = env.create_engine(config.clone()).await;
+
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new()
+        .insert_option("append_mode", "true")
+        .insert_option("preserve_row_sequence", "true")
+        .build();
+    let column_schemas = test_util::rows_schema(&request);
+    let table_dir = request.table_dir.clone();
+    let region_options = request.options.clone();
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+
+    test_util::put_rows(
+        &engine,
+        region_id,
+        Rows {
+            schema: column_schemas.clone(),
+            rows: test_util::build_rows(0, 3),
+        },
+    )
+    .await;
+    test_util::flush_region(&engine, region_id, None).await;
+
+    // The Flow checkpoint that consumed everything written so far.
+    let checkpoint = engine
+        .get_region(region_id)
+        .unwrap()
+        .version_control
+        .current()
+        .last_sequence;
+    // Truncation changes the row sequence domain: the rows it drops were owned by
+    // this region, so a checkpoint at the previous high watermark cannot resume.
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::Truncate(RegionTruncateRequest::All),
+        )
+        .await
+        .unwrap();
+
+    // `B` is strictly above every sequence allocated before the edit, so a
+    // checkpoint that merely equals the previous high watermark is still stale.
+    let boundary = checkpoint + 1;
+    assert_eq!(
+        boundary,
+        engine
+            .get_region(region_id)
+            .unwrap()
+            .version()
+            .last_invalid_seq(),
+        "an edit allocates last_sequence + 1"
+    );
+
+    // Post-edit rows advance the live watermark only.
+    test_util::put_rows(
+        &engine,
+        region_id,
+        Rows {
+            schema: column_schemas,
+            rows: test_util::build_rows(3, 5),
+        },
+    )
+    .await;
+    test_util::flush_region(&engine, region_id, None).await;
+
+    // A compaction rewrites every file, so the detection cannot rely on file
+    // provenance: the boundary lives on the version.
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::Compact(RegionCompactRequest {
+                options: compact_request::Options::StrictWindow(StrictWindow {
+                    window_seconds: 60,
+                }),
+                parallelism: None,
+                time_range: None,
+            }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        boundary,
+        engine
+            .get_region(region_id)
+            .unwrap()
+            .version()
+            .last_invalid_seq(),
+        "compaction must keep the recorded boundary"
+    );
+
+    // Cursor at the previous high watermark: stale, no partial delta.
+    let err = engine
+        .scanner(
+            region_id,
+            ScanRequest {
+                memtable_min_sequence: Some(checkpoint),
+                memtable_max_sequence: Some(boundary + 2),
+                exact_sequence_range: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .err()
+        .expect("a cursor below the edit boundary must be rejected");
+    assert_eq!(StatusCode::RequestOutdated, err.status_code());
+    let err_msg = err.to_string();
+    assert!(
+        err_msg.starts_with("sequence range cursor invalid:"),
+        "unexpected err msg: {err_msg}"
+    );
+    assert!(err_msg.contains(&region_id.to_string()));
+    assert!(
+        matches!(
+            err,
+            Error::IncrementalQueryStale {
+                given_seq,
+                min_readable_seq,
+                ..
+            } if given_seq == checkpoint && min_readable_seq == boundary
+        ),
+        "unexpected err msg: {err_msg}"
+    );
+
+    // A full-snapshot round carries no cursor, so it is never blocked, and it
+    // reports a watermark at or above `B` so the next round can go incremental
+    // without falling back on the same boundary.
+    // A full-snapshot round requests no exact sequence delta.
+    let stream = engine
+        .scan_to_stream(region_id, ScanRequest::default())
+        .await
+        .unwrap();
+    let batches = RecordBatches::try_collect(stream).await.unwrap();
+    assert_eq!(
+        2,
+        batches.iter().map(|batch| batch.num_rows()).sum::<usize>(),
+        "a full rebuild must see every surviving row"
+    );
+    assert!(
+        engine.get_committed_sequence(region_id).await.unwrap() >= boundary,
+        "the full round must report a watermark at or above the boundary"
+    );
+
+    // Cursor at the boundary: the post-edit delta is exact and complete.
+    let stream = engine
+        .scan_to_stream(
+            region_id,
+            ScanRequest {
+                memtable_min_sequence: Some(boundary),
+                memtable_max_sequence: Some(boundary + 2),
+                exact_sequence_range: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let batches = RecordBatches::try_collect(stream).await.unwrap();
+    assert_eq!(
+        2,
+        batches.iter().map(|batch| batch.num_rows()).sum::<usize>(),
+        "the (boundary, H] delta holds exactly the rows published after the boundary"
+    );
+
+    // The boundary is persisted in the region manifest, so reopening the region
+    // restores it and a stale cursor stays rejected.
+    let manifest = engine
+        .get_region(region_id)
+        .unwrap()
+        .manifest_ctx
+        .manifest()
+        .await;
+    assert_eq!(Some(boundary), manifest.last_invalid_seq);
+
+    let engine = env.reopen_engine(engine, config).await;
+    reopen_region(&engine, region_id, table_dir, false, region_options).await;
+    let reopened = engine.get_region(region_id).unwrap();
+    assert_eq!(
+        boundary,
+        reopened.version().last_invalid_seq(),
+        "reopen must restore the edit boundary from the manifest"
+    );
+    let err = engine
+        .scanner(
+            region_id,
+            ScanRequest {
+                memtable_min_sequence: Some(checkpoint),
+                memtable_max_sequence: Some(boundary + 2),
+                exact_sequence_range: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .err()
+        .expect("a stale cursor must stay rejected after reopen");
+    assert!(
+        matches!(err, Error::IncrementalQueryStale { .. }),
+        "unexpected err: {err}"
+    );
+}
+
+/// An import whose admission barrier sits just above the consumer's cursor is the
+/// dangerous case: the physical row sequences may stay in the source domain (an
+/// `sst-convert` output keeps its non-zero sequences, a locally re-added file
+/// keeps its old ones) while the file is admitted at the barrier.
+///
+/// Two layers cover it, and this test pins both: the boundary rejects `C < B`,
+/// and at `C >= B` the file is provably consumed so the capability check never
+/// has to trust its row sequences. A second, add-only edit that re-adds the same
+/// file id (an in-place replacement) advances the boundary again, because the edit
+/// interface cannot prove the replaced rows were never consumed.
+#[tokio::test]
+async fn test_last_invalid_seq_rejects_import_above_old_cursor() {
+    let mut env =
+        TestEnv::with_prefix("test_last_invalid_seq_rejects_import_above_old_cursor").await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new()
+        .insert_option("append_mode", "true")
+        .insert_option("preserve_row_sequence", "true")
+        .build();
+    let column_schemas = test_util::rows_schema(&request);
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+
+    // A consumer that has consumed everything written so far.
+    test_util::put_rows(
+        &engine,
+        region_id,
+        Rows {
+            schema: column_schemas,
+            rows: test_util::build_rows(0, 100),
+        },
+    )
+    .await;
+    test_util::flush_region(&engine, region_id, None).await;
+    let checkpoint = engine
+        .get_region(region_id)
+        .unwrap()
+        .version_control
+        .current()
+        .last_sequence;
+    assert_eq!(100, checkpoint);
+
+    // A locally produced (e.g. `sst-convert`) import: the physical rows keep their
+    // old sequences, and the edit clears `preserve_row_sequence` and admits the
+    // file at the next sequence.
+    let file_id = FileId::random();
+    let import = |file_id: FileId| RegionEdit {
+        files_to_add: vec![FileMeta {
+            region_id,
+            file_id,
+            time_range: (
+                Timestamp::new_millisecond(0),
+                Timestamp::new_millisecond(1000),
+            ),
+            level: 0,
+            file_size: 0,
+            max_row_group_uncompressed_size: 0,
+            available_indexes: Default::default(),
+            indexes: vec![],
+            index_file_size: 0,
+            index_version: 0,
+            num_rows: 0,
+            num_row_groups: 0,
+            sequence: None,
+            partition_expr: None,
+            num_series: 0,
+            preserve_row_sequence: false,
+            ..Default::default()
+        }],
+        files_to_remove: vec![],
+        timestamp_ms: None,
+        compaction_time_window: None,
+        flushed_entry_id: None,
+        flushed_sequence: None,
+        committed_sequence: None,
+        last_invalid_seq: None,
+        wal_recovery: Default::default(),
+    };
+    engine
+        .edit_region(region_id, import(file_id))
+        .await
+        .unwrap();
+
+    let region = engine.get_region(region_id).unwrap();
+    let version = region.version();
+    let boundary = version.last_invalid_seq();
+    assert_eq!(
+        checkpoint + 1,
+        boundary,
+        "an import must publish the next sequence as the boundary"
+    );
+    let imported = version
+        .ssts
+        .levels()
+        .iter()
+        .flat_map(|level| level.files.values())
+        .find(|file| file.meta_ref().file_id == file_id)
+        .expect("imported file");
+    assert_eq!(
+        Some(boundary),
+        imported.meta_ref().sequence.map(|sequence| sequence.get()),
+        "the edit admits the file at the boundary"
+    );
+    assert!(!imported.meta_ref().preserve_row_sequence);
+
+    // Cursor below the boundary: the import may have leaked old row sequences, so
+    // the delta is rejected.
+    let err = engine
+        .scanner(
+            region_id,
+            ScanRequest {
+                memtable_min_sequence: Some(checkpoint),
+                memtable_max_sequence: Some(boundary + 1),
+                exact_sequence_range: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .err()
+        .expect("a cursor below the import boundary must be rejected");
+    assert_eq!(StatusCode::RequestOutdated, err.status_code());
+    let err_msg = err.to_string();
+    assert!(
+        err_msg.starts_with("sequence range cursor invalid:"),
+        "unexpected err msg: {err_msg}"
+    );
+
+    // Cursor at the boundary: the admitted file is provably consumed and skipped,
+    // so the exact delta stays available without trusting its row sequences.
+    let stream = engine
+        .scan_to_stream(
+            region_id,
+            ScanRequest {
+                memtable_min_sequence: Some(boundary),
+                memtable_max_sequence: Some(boundary + 1),
+                exact_sequence_range: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let batches = RecordBatches::try_collect(stream).await.unwrap();
+    assert_eq!(
+        0,
+        batches.iter().map(|batch| batch.num_rows()).sum::<usize>(),
+        "the (B, H] delta holds no rows"
+    );
+
+    // An add-only edit that re-adds the same file id replaces already visible rows,
+    // so it advances the boundary as well.
+    engine
+        .edit_region(region_id, import(file_id))
+        .await
+        .unwrap();
+    let version = engine.get_region(region_id).unwrap().version();
+    let replaced = version.last_invalid_seq();
+    assert!(
+        replaced > boundary,
+        "replacing an existing file id must advance the boundary, previous: {boundary}, current: {replaced}"
+    );
+    let err = engine
+        .scanner(
+            region_id,
+            ScanRequest {
+                memtable_min_sequence: Some(boundary),
+                memtable_max_sequence: Some(replaced + 1),
+                exact_sequence_range: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .err()
+        .expect("a cursor below the replacement boundary must be rejected");
+    assert!(
+        matches!(err, Error::IncrementalQueryStale { .. }),
+        "unexpected err: {err}"
+    );
+}
+
+/// Recovery window discovery (`repair_discovery_scan`) must survive the state an
+/// ordinary incremental delta is rejected in: the region was edited, so
+/// `last_invalid_seq` sits above the cursor, and the admitted files cannot be
+/// trusted row by row.
+///
+/// It prunes at file granularity only: a local file already consumed at the cursor
+/// is skipped, an edit-admitted file above the cursor is read even though its row
+/// sequences were renumbered.
+#[tokio::test]
+async fn test_repair_discovery_scan_reads_across_boundary() {
+    let mut env = TestEnv::with_prefix("test_repair_discovery_scan_reads_across_boundary").await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new()
+        .insert_option("append_mode", "true")
+        .insert_option("preserve_row_sequence", "true")
+        .build();
+    let column_schemas = test_util::rows_schema(&request);
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+
+    // Local history: rows 0..3 -> sequences 1..=3, flushed into a marked SST.
+    test_util::put_rows(
+        &engine,
+        region_id,
+        Rows {
+            schema: column_schemas.clone(),
+            rows: test_util::build_rows(0, 3),
+        },
+    )
+    .await;
+    test_util::flush_region(&engine, region_id, None).await;
+    let checkpoint = engine
+        .get_region(region_id)
+        .unwrap()
+        .version_control
+        .current()
+        .last_sequence;
+    assert_eq!(3, checkpoint);
+
+    // A migrated file admitted by an edit at `B = checkpoint + 1`. The edit clears
+    // `preserve_row_sequence`, so an ordinary exact delta can no longer trust it.
+    engine
+        .edit_region(
+            region_id,
+            RegionEdit {
+                files_to_add: vec![FileMeta {
+                    region_id,
+                    file_id: FileId::random(),
+                    time_range: (
+                        Timestamp::new_millisecond(0),
+                        Timestamp::new_millisecond(1_000),
+                    ),
+                    level: 0,
+                    file_size: 0,
+                    max_row_group_uncompressed_size: 0,
+                    available_indexes: Default::default(),
+                    indexes: vec![],
+                    index_file_size: 0,
+                    index_version: 0,
+                    num_rows: 0,
+                    num_row_groups: 0,
+                    sequence: None,
+                    partition_expr: None,
+                    num_series: 0,
+                    preserve_row_sequence: true,
+                    ..Default::default()
+                }],
+                files_to_remove: vec![],
+                timestamp_ms: None,
+                compaction_time_window: None,
+                flushed_entry_id: None,
+                flushed_sequence: None,
+                committed_sequence: None,
+                last_invalid_seq: None,
+                wal_recovery: Default::default(),
+            },
+        )
+        .await
+        .unwrap();
+    let version = engine.get_region(region_id).unwrap().version();
+    let boundary = version.last_invalid_seq();
+    assert_eq!(checkpoint + 1, boundary);
+
+    // The ordinary incremental delta is rejected: the cursor predates the edit.
+    let err = engine
+        .scanner(
+            region_id,
+            ScanRequest {
+                memtable_min_sequence: Some(checkpoint),
+                memtable_max_sequence: Some(boundary + 1),
+                exact_sequence_range: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .err()
+        .expect("an ordinary delta must stay rejected");
+    assert!(
+        matches!(err, Error::IncrementalQueryStale { .. }),
+        "unexpected err: {err}"
+    );
+
+    // Discovery is not rejected, does not demand row-level exactness, and prunes the
+    // already consumed local file at file granularity.
+    let scanner = engine
+        .scanner(
+            region_id,
+            ScanRequest {
+                memtable_min_sequence: Some(checkpoint),
+                exact_sequence_range: true,
+                repair_discovery_scan: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("discovery must not be rejected after an edit");
+    // Only the edit-admitted file survives the file-level pruning: the flushed local
+    // SST is already consumed at the cursor.
+    assert_eq!(
+        1,
+        scanner.num_files(),
+        "discovery prunes files the cursor already consumed"
+    );
+
+    // The same request without the discovery flag still fails closed, so the
+    // ordinary paths keep their guarantees.
+    let err = engine
+        .scanner(
+            region_id,
+            ScanRequest {
+                memtable_min_sequence: Some(checkpoint),
+                memtable_max_sequence: Some(boundary + 1),
+                exact_sequence_range: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .err()
+        .expect("the non-discovery path must stay rejected");
+    assert!(matches!(err, Error::IncrementalQueryStale { .. }));
+}
+
+/// Recovery discovery virtualizes every selected file's rows at the file's own
+/// admission barrier, even for a local file whose `preserve_row_sequence` marker is
+/// off: discovery must not depend on the file's row-level sequences being trusted.
+#[tokio::test]
+async fn test_repair_discovery_scan_forces_sequence_override() {
+    let mut env = TestEnv::with_prefix("test_repair_discovery_scan_forces_sequence_override").await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new()
+        .insert_option("append_mode", "true")
+        .insert_option("preserve_row_sequence", "true")
+        .build();
+    let column_schemas = test_util::rows_schema(&request);
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+
+    test_util::put_rows(
+        &engine,
+        region_id,
+        Rows {
+            schema: column_schemas,
+            rows: test_util::build_rows(0, 3),
+        },
+    )
+    .await;
+    test_util::flush_region(&engine, region_id, None).await;
+
+    // Re-admit the same file id unmarked: the edit clears `preserve_row_sequence`
+    // and moves the barrier to the next sequence.
+    let region = engine.get_region(region_id).unwrap();
+    let file_meta = region
+        .version()
+        .ssts
+        .levels()
+        .iter()
+        .flat_map(|level| level.files.values())
+        .next()
+        .expect("flushed SST")
+        .meta_ref()
+        .clone();
+    let mut readmit = file_meta;
+    readmit.preserve_row_sequence = false;
+    readmit.sequence = None;
+    engine
+        .edit_region(
+            region_id,
+            RegionEdit {
+                files_to_add: vec![readmit],
+                files_to_remove: vec![],
+                timestamp_ms: None,
+                compaction_time_window: None,
+                flushed_entry_id: None,
+                flushed_sequence: None,
+                committed_sequence: None,
+                last_invalid_seq: None,
+                wal_recovery: Default::default(),
+            },
+        )
+        .await
+        .unwrap();
+    let version = engine.get_region(region_id).unwrap().version();
+    let boundary = version.last_invalid_seq();
+    let file_barrier = version
+        .ssts
+        .levels()
+        .iter()
+        .flat_map(|level| level.files.values())
+        .next()
+        .expect("admitted SST")
+        .meta_ref()
+        .sequence
+        .expect("edit assigns a barrier")
+        .get();
+    assert_eq!(boundary, file_barrier);
+    assert!(
+        !version
+            .ssts
+            .levels()
+            .iter()
+            .flat_map(|level| level.files.values())
+            .all(|file| file.meta_ref().preserve_row_sequence)
+    );
+
+    // Discovery reads the file anyway and every row's sequence is the barrier.
+    let stream = engine
+        .scan_to_stream(
+            region_id,
+            ScanRequest {
+                memtable_min_sequence: Some(file_barrier - 1),
+                exact_sequence_range: true,
+                repair_discovery_scan: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("discovery must admit an unmarked file");
+    let batches = RecordBatches::try_collect(stream).await.unwrap();
+    assert_eq!(
+        3,
+        batches.iter().map(|batch| batch.num_rows()).sum::<usize>(),
+        "discovery reads every row of the unmarked file instead of failing closed"
+    );
+}
+
+/// A repair read may cross `last_invalid_seq`, but it must not be allowed to commit
+/// a result whose upper bound `H` predates the current publication: the layout it
+/// read is not the one `H` was taken from.
+#[tokio::test]
+async fn test_repair_read_rejects_upper_bound_below_boundary() {
+    let mut env = TestEnv::with_prefix("test_repair_read_rejects_upper_bound_below_boundary").await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new()
+        .insert_option("append_mode", "true")
+        .insert_option("preserve_row_sequence", "true")
+        .build();
+    let column_schemas = test_util::rows_schema(&request);
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+
+    test_util::put_rows(
+        &engine,
+        region_id,
+        Rows {
+            schema: column_schemas,
+            rows: test_util::build_rows(0, 3),
+        },
+    )
+    .await;
+    test_util::flush_region(&engine, region_id, None).await;
+    let checkpoint = engine
+        .get_region(region_id)
+        .unwrap()
+        .version_control
+        .current()
+        .last_sequence;
+
+    // An edit that re-admits a file at the next sequence publishes a boundary above
+    // the previous watermark, so the repair read below exercises the boundary check.
+    engine
+        .edit_region(
+            region_id,
+            RegionEdit {
+                files_to_add: vec![FileMeta {
+                    region_id,
+                    file_id: FileId::random(),
+                    time_range: (
+                        Timestamp::new_millisecond(0),
+                        Timestamp::new_millisecond(1_000),
+                    ),
+                    level: 0,
+                    file_size: 0,
+                    max_row_group_uncompressed_size: 0,
+                    available_indexes: Default::default(),
+                    indexes: vec![],
+                    index_file_size: 0,
+                    index_version: 0,
+                    num_rows: 0,
+                    num_row_groups: 0,
+                    sequence: None,
+                    partition_expr: None,
+                    num_series: 0,
+                    preserve_row_sequence: false,
+                    ..Default::default()
+                }],
+                files_to_remove: vec![],
+                timestamp_ms: None,
+                compaction_time_window: None,
+                flushed_entry_id: None,
+                flushed_sequence: None,
+                committed_sequence: None,
+                last_invalid_seq: None,
+                wal_recovery: Default::default(),
+            },
+        )
+        .await
+        .unwrap();
+    let boundary = engine
+        .get_region(region_id)
+        .unwrap()
+        .version()
+        .last_invalid_seq();
+    assert_eq!(
+        checkpoint + 1,
+        boundary,
+        "the edit publishes the next sequence as the boundary"
+    );
+
+    // `H` below the boundary: the repair result must not be committed.
+    let err = engine
+        .scanner(
+            region_id,
+            ScanRequest {
+                memtable_min_sequence: Some(checkpoint),
+                memtable_max_sequence: Some(boundary - 1),
+                exact_sequence_range: true,
+                repair_discovery_scan: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .err()
+        .expect("a repair read with H below the boundary must be rejected");
+    assert!(
+        matches!(
+            err,
+            Error::IncrementalQueryStale {
+                given_seq,
+                min_readable_seq,
+                ..
+            } if given_seq == boundary - 1 && min_readable_seq == boundary
+        ),
+        "unexpected err: {err}"
+    );
+
+    // `H` at the boundary is accepted, so recovery can still make progress.
+    engine
+        .scanner(
+            region_id,
+            ScanRequest {
+                memtable_min_sequence: Some(checkpoint),
+                memtable_max_sequence: Some(boundary),
+                exact_sequence_range: true,
+                repair_discovery_scan: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("a repair read at the boundary is allowed");
+}
+
+/// Discovery must report an empty candidate set instead of silently reporting "no
+/// window"; the caller decides whether to accept it or advance the cursor instead.
+#[tokio::test]
+async fn test_repair_discovery_scan_reports_empty_candidates() {
+    let mut env = TestEnv::with_prefix("test_repair_discovery_scan_reports_empty_candidates").await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new()
+        .insert_option("append_mode", "true")
+        .insert_option("preserve_row_sequence", "true")
+        .build();
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+
+    let err = engine
+        .scanner(
+            region_id,
+            ScanRequest {
+                memtable_min_sequence: Some(0),
+                exact_sequence_range: true,
+                repair_discovery_scan: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .err()
+        .expect("an empty candidate set must be reported");
+    assert!(
+        matches!(err, Error::SequenceRangeUnsupported { .. }),
+        "unexpected err: {err}"
+    );
+    let msg = err.to_string();
+    assert!(
+        msg.starts_with("exact sequence range unavailable:"),
+        "unexpected err msg: {msg}"
+    );
+    assert!(msg.contains("no candidate file above the cursor"), "{msg}");
+}
+
+/// A fenced repair DML has no incremental lower bound and no exact sequence-range
+/// mode, so `H` bounds memtables only. If `H` is behind the flushed frontier, a
+/// flush that landed after `H` was frozen would be aggregated into the repaired
+/// window and counted again by the next round; the SST upper-bound fence must stay
+/// in force even though the boundary check passes.
+#[tokio::test]
+async fn test_fenced_repair_rejects_upper_bound_behind_flushed_frontier() {
+    let mut env =
+        TestEnv::with_prefix("test_fenced_repair_rejects_upper_bound_behind_flushed").await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new()
+        .insert_option("append_mode", "true")
+        .insert_option("preserve_row_sequence", "true")
+        .build();
+    let column_schemas = test_util::rows_schema(&request);
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+
+    // A high watermark frozen before the write, then the write is flushed.
+    test_util::put_rows(
+        &engine,
+        region_id,
+        Rows {
+            schema: column_schemas.clone(),
+            rows: test_util::build_rows(0, 3),
+        },
+    )
+    .await;
+    test_util::flush_region(&engine, region_id, None).await;
+    let frozen_high = 2;
+    let flushed_sequence = engine
+        .get_region(region_id)
+        .unwrap()
+        .version()
+        .flushed_sequence;
+    assert!(flushed_sequence > frozen_high);
+
+    let err = engine
+        .scanner(
+            region_id,
+            ScanRequest {
+                memtable_max_sequence: Some(frozen_high),
+                fenced_repair_scan: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .err()
+        .expect("a fenced repair behind the flushed frontier must be rejected");
+    assert!(
+        matches!(
+            err,
+            Error::SnapshotFenceStale {
+                given_seq,
+                min_enforceable_seq,
+                ..
+            } if given_seq == frozen_high && min_enforceable_seq == flushed_sequence
+        ),
+        "unexpected err: {err}"
+    );
+    assert_eq!(StatusCode::RequestOutdated, err.status_code());
 }

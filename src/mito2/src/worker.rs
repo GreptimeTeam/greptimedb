@@ -76,8 +76,8 @@ use crate::memtable::bulk::CompactDispatcher;
 use crate::metrics::{REGION_COUNT, REQUEST_WAIT_TIME, WRITE_STALLING};
 use crate::region::opener::PartitionExprFetcherRef;
 use crate::region::{
-    CatchupRegions, CatchupRegionsRef, MitoRegionRef, OpeningRegions, OpeningRegionsRef, RegionMap,
-    RegionMapRef,
+    CatchupRegions, CatchupRegionsRef, MitoRegionRef, OpeningRegions, OpeningRegionsRef,
+    RegionLeaderState, RegionMap, RegionMapRef,
 };
 use crate::request::{
     BackgroundNotify, BulkInsertRequest, DdlRequest, OptionOutputTx, SenderBulkRequest,
@@ -1641,7 +1641,11 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             }
             BackgroundNotify::RegionEdit(req) => self.handle_region_edit_result(req).await,
             BackgroundNotify::CopyRegionFromFinished(req) => {
-                self.handle_copy_region_from_finished(req)
+                self.handle_copy_region_from_finished(req).await
+            }
+            BackgroundNotify::ExitStaging(req) => self.handle_exit_staging_request(req),
+            BackgroundNotify::EditingWindowClosed => {
+                self.handle_editing_window_closed(region_id).await
             }
             BackgroundNotify::RegionFenced => {}
             BackgroundNotify::RegionReloaded { old, result } => {
@@ -1652,6 +1656,21 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         if !is_reload_result {
             self.maybe_reload_region(region_id);
         }
+    }
+
+    /// Admits the writes queued by a publish window that has been released.
+    ///
+    /// The window has already restored the region role state (writable when the publish
+    /// is visible, staging when it failed), so the queued writes and the region edits
+    /// queued behind the window can be handled now.
+    async fn handle_editing_window_closed(&mut self, region_id: RegionId) {
+        if self.regions.get_region(region_id).is_none() {
+            self.fail_region_stalled_requests_as_not_found(&region_id);
+            self.reject_region_edit_queue_as_not_found(region_id);
+            return;
+        }
+        self.handle_region_stalled_requests(&region_id, false).await;
+        self.dispatch_pending_region_requests(region_id).await;
     }
 
     /// Handles `set_region_role_gracefully`.
@@ -1672,6 +1691,24 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 // promotions issued before.
                 region.manifest_ctx.begin_downgrade(region_id);
             }
+            // A staging exit published from here reassigns which rows the region owns, so
+            // it must hold the publish window: open it now, in the loop, where no write
+            // context is in flight. The background task then publishes inside the opened
+            // window and every write the loop handles meanwhile is queued until the new
+            // layout is visible.
+            let publish_window =
+                if region_role_state == SettableRegionRoleState::Leader && region.is_staging() {
+                    if let Err(e) = region.begin_publish_window(RegionLeaderState::Staging) {
+                        let _ = sender.send(SetRegionRoleStateResponse::invalid_transition(
+                            BoxedError::new(e),
+                        ));
+                        return;
+                    }
+                    true
+                } else {
+                    false
+                };
+            let worker_sender = self.sender.clone();
             #[cfg(feature = "hdfs-object-store")]
             let sweep_older_than = self.config.gc.unknown_file_lingering_time;
             #[cfg(feature = "hdfs-object-store")]
@@ -1680,10 +1717,22 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             // We need to do this in background as we need the manifest lock.
             common_runtime::spawn_global(async move {
                 let drain = drain_ended_staging(&request_sender, region_id);
-                match region
-                    .set_role_state_gracefully(region_role_state, drain)
-                    .await
-                {
+                let result = if publish_window {
+                    // The window is already open, so the publish released it and this call
+                    // admits the writes the loop queued: nothing is left to drain.
+                    region
+                        .set_role_state_gracefully_in_publish_window(region_role_state)
+                        .await
+                } else {
+                    region
+                        .set_role_state_gracefully(region_role_state, drain)
+                        .await
+                };
+                // Never leave writes queued behind a window that has been released.
+                if publish_window {
+                    resume_queued_writes(&worker_sender, region_id).await;
+                }
+                match result {
                     Ok(()) => {
                         let last_entry_id = region.version_control.current().last_entry_id;
                         let _ = sender.send(SetRegionRoleStateResponse::success(
@@ -1737,6 +1786,31 @@ impl<S> RegionWorkerLoop<S> {
         let _ = self.flush_sender.send(());
         // Marks the receiver in current worker as seen so the loop won't be waked up immediately.
         self.flush_receiver.borrow_and_update();
+    }
+}
+
+/// Asks the worker loop to admit the writes a released publish window queued.
+///
+/// A publish window (see `MitoRegion::begin_publish_window`) turns ordinary writes into
+/// stalled requests. The background task that releases the window cannot admit them
+/// itself, so it sends this notification: the worker loop then handles the stalled
+/// requests of the region, which is where the sequence ordering between the publish and
+/// the queued writes is decided.
+pub(crate) async fn resume_queued_writes(
+    sender: &Sender<WorkerRequestWithTime>,
+    region_id: RegionId,
+) {
+    if let Err(e) = sender
+        .send(WorkerRequestWithTime::new(WorkerRequest::Background {
+            region_id,
+            notify: BackgroundNotify::EditingWindowClosed,
+        }))
+        .await
+    {
+        warn!(
+            "Failed to send the editing window closed notification to the worker, region_id: {}, error: {}",
+            region_id, e
+        );
     }
 }
 

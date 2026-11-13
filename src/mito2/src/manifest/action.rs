@@ -95,6 +95,15 @@ pub struct RegionEdit {
     pub flushed_entry_id: Option<EntryId>,
     pub flushed_sequence: Option<SequenceNumber>,
     pub committed_sequence: Option<SequenceNumber>,
+    /// `last_invalid_seq`: latest publication boundary after which an old
+    /// checkpoint can no longer explain the visible data.
+    ///
+    /// See [Version::last_invalid_seq](crate::region::version::Version::last_invalid_seq)
+    /// for the full semantics: an exact incremental read requires `C >= B`. `None`
+    /// means the edit records no boundary, and manifests written before the field
+    /// existed deserialize to `None`, which readers treat as unknown (0).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_invalid_seq: Option<SequenceNumber>,
     #[serde(flatten)]
     pub wal_recovery: WalRecoveryEdit,
 }
@@ -193,6 +202,13 @@ pub struct RegionTruncate {
     /// event unix timestamp in milliseconds, help to determine file deletion time.
     #[serde(default)]
     pub timestamp_ms: Option<i64>,
+    /// Sequence boundary allocated by this truncation.
+    ///
+    /// Truncation removes rows from the region, so it is a data-ownership change:
+    /// the truncated action records the boundary like an edit does.
+    /// Old manifests do not carry the field (`None` = unknown).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_invalid_seq: Option<SequenceNumber>,
 }
 
 /// The kind of truncate operation.
@@ -234,6 +250,17 @@ pub struct RegionManifest {
     /// Last sequence of flushed data.
     pub flushed_sequence: SequenceNumber,
     pub committed_sequence: Option<SequenceNumber>,
+    /// `last_invalid_seq`: latest publication boundary after which an old
+    /// checkpoint can no longer explain the visible data.
+    ///
+    /// Persisted so a reopened region keeps rejecting cursors that predate the
+    /// publication. See
+    /// [Version::last_invalid_seq](crate::region::version::Version::last_invalid_seq).
+    /// Missing in manifests written before the field existed, which reads as
+    /// unknown (0) and therefore never invalidates a cursor: a publication that
+    /// happened before the upgrade cannot be traced.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_invalid_seq: Option<SequenceNumber>,
     /// Current manifest version.
     pub manifest_version: ManifestVersion,
     /// Last WAL entry id of truncated data.
@@ -294,6 +321,7 @@ impl PartialEq for RegionManifest {
             && self.committed_sequence == other.committed_sequence
             && self.pending_tails == other.pending_tails
             && self.handoff_floors == other.handoff_floors
+            && self.last_invalid_seq == other.last_invalid_seq
     }
 }
 
@@ -317,6 +345,7 @@ pub struct RegionManifestBuilder {
     truncated_entry_id: Option<EntryId>,
     compaction_time_window: Option<Duration>,
     committed_sequence: Option<SequenceNumber>,
+    last_invalid_seq: Option<SequenceNumber>,
     sst_format: FormatType,
     append_mode: Option<bool>,
     pending_tails: Vec<PendingTail>,
@@ -346,6 +375,7 @@ impl RegionManifestBuilder {
                 truncated_entry_id: s.truncated_entry_id,
                 compaction_time_window: s.compaction_time_window,
                 committed_sequence: s.committed_sequence,
+                last_invalid_seq: s.last_invalid_seq,
                 sst_format: s.sst_format,
                 append_mode: s.append_mode,
                 pending_tails: s.pending_tails,
@@ -426,6 +456,14 @@ impl RegionManifestBuilder {
                     .map_or(committed_sequence, |exist| exist.max(committed_sequence)),
             );
         }
+        if let Some(edit_sequence) = edit.last_invalid_seq {
+            // Take the max: replaying or merging an older edit must never lower
+            // the recorded boundary.
+            self.last_invalid_seq = Some(
+                self.last_invalid_seq
+                    .map_or(edit_sequence, |exist| exist.max(edit_sequence)),
+            );
+        }
         if let Some(window) = edit.compaction_time_window {
             self.compaction_time_window = Some(window);
         }
@@ -439,6 +477,12 @@ impl RegionManifestBuilder {
 
     pub fn apply_truncate(&mut self, manifest_version: ManifestVersion, truncate: RegionTruncate) {
         self.manifest_version = manifest_version;
+        if let Some(edit_sequence) = truncate.last_invalid_seq {
+            self.last_invalid_seq = Some(
+                self.last_invalid_seq
+                    .map_or(edit_sequence, |exist| exist.max(edit_sequence)),
+            );
+        }
         match truncate.kind {
             TruncateKind::All {
                 truncated_entry_id,
@@ -501,6 +545,7 @@ impl RegionManifestBuilder {
             flushed_entry_id: self.flushed_entry_id,
             flushed_sequence: self.flushed_sequence,
             committed_sequence: self.committed_sequence,
+            last_invalid_seq: self.last_invalid_seq,
             manifest_version: self.manifest_version,
             truncated_entry_id: self.truncated_entry_id,
             compaction_time_window: self.compaction_time_window,
@@ -703,6 +748,7 @@ impl RegionMetaActionList {
             flushed_sequence: None,
             committed_sequence: None,
             wal_recovery: Default::default(),
+            last_invalid_seq: None,
         };
         let mut partition_expr_change = None;
         let mut region_change = None;
@@ -730,6 +776,12 @@ impl RegionMetaActionList {
                     if let Some(seq) = region_edit.committed_sequence {
                         edit.committed_sequence =
                             Some(edit.committed_sequence.map_or(seq, |v| v.max(seq)));
+                    }
+                    // Merging staged edits must keep the highest repartition
+                    // boundary, otherwise a staging exit loses it.
+                    if let Some(seq) = region_edit.last_invalid_seq {
+                        edit.last_invalid_seq =
+                            Some(edit.last_invalid_seq.map_or(seq, |v| v.max(seq)));
                     }
                     // Prefer the latest non-none time window
                     if region_edit.compaction_time_window.is_some() {
@@ -827,7 +879,10 @@ mod tests {
             {"region_id":4402341478400,"file_id":"34b6ebb9-b8a5-4a4b-b744-56f67defad02","time_range":[{"value":1451609210000,"unit":"Millisecond"},{"value":1451609520000,"unit":"Millisecond"}],"level":0,"file_size":100}
             ]
         }"#;
-        let _ = serde_json::from_str::<RegionEdit>(region_edit).unwrap();
+        // An edit written before `last_invalid_seq` existed must still
+        // deserialize; the missing boundary reads as unknown (0).
+        let legacy_edit: RegionEdit = serde_json::from_str(region_edit).unwrap();
+        assert_eq!(None, legacy_edit.last_invalid_seq);
 
         let region_edit = r#"{
             "flushed_entry_id":10,
@@ -1084,6 +1139,7 @@ mod tests {
             flushed_entry_id: 0,
             flushed_sequence: 0,
             committed_sequence: None,
+            last_invalid_seq: None,
             manifest_version: 0,
             truncated_entry_id: None,
             compaction_time_window: None,
@@ -1136,6 +1192,7 @@ mod tests {
                 flushed_sequence: None,
                 committed_sequence: None,
                 wal_recovery: Default::default(),
+                last_invalid_seq: None,
             },
         );
         builder.apply_edit(
@@ -1149,6 +1206,7 @@ mod tests {
                 flushed_sequence: None,
                 committed_sequence: None,
                 wal_recovery: Default::default(),
+                last_invalid_seq: None,
             },
         );
 
@@ -1169,6 +1227,7 @@ mod tests {
                 flushed_sequence: None,
                 committed_sequence: None,
                 wal_recovery: Default::default(),
+                last_invalid_seq: None,
             },
         );
         builder.apply_truncate(
@@ -1179,6 +1238,7 @@ mod tests {
                     files_to_remove: vec![stale],
                 },
                 timestamp_ms: Some(42),
+                last_invalid_seq: None,
             },
         );
 
@@ -1278,6 +1338,7 @@ mod tests {
                 flushed_entry_id: 0,
                 flushed_sequence: 0,
                 committed_sequence: None,
+                last_invalid_seq: None,
                 manifest_version: 0,
                 truncated_entry_id: None,
                 compaction_time_window: None,
@@ -1295,6 +1356,7 @@ mod tests {
             flushed_entry_id: 0,
             flushed_sequence: 0,
             committed_sequence: None,
+            last_invalid_seq: None,
             manifest_version: 0,
             truncated_entry_id: None,
             compaction_time_window: None,
@@ -1347,6 +1409,7 @@ mod tests {
                 flushed_sequence: None,
                 committed_sequence: None,
                 wal_recovery: Default::default(),
+                last_invalid_seq: None,
             },
             new_from_old
         );
@@ -1361,6 +1424,7 @@ mod tests {
             flushed_sequence: None,
             committed_sequence: None,
             wal_recovery: Default::default(),
+            last_invalid_seq: None,
         };
 
         let new_json = serde_json::to_string(&new).unwrap();
@@ -1544,6 +1608,7 @@ mod tests {
             flushed_sequence: None,
             committed_sequence: None,
             wal_recovery,
+            last_invalid_seq: None,
         }
     }
 
@@ -1636,6 +1701,7 @@ mod tests {
                     truncated_sequence: 20,
                 },
                 timestamp_ms: None,
+                last_invalid_seq: None,
             },
         );
 

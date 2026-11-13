@@ -295,6 +295,7 @@ async fn test_reconcile_range_index_disabled(
             flushed_sequence: None,
             committed_sequence: None,
             wal_recovery: Default::default(),
+            last_invalid_seq: None,
         }),
         &[],
         crate::test_util::new_noop_file_purger(),
@@ -405,6 +406,7 @@ async fn test_reconcile_range_only_build_and_removal() {
             flushed_sequence: None,
             committed_sequence: None,
             wal_recovery: Default::default(),
+            last_invalid_seq: None,
         }),
         &[],
         crate::test_util::new_noop_file_purger(),
@@ -458,6 +460,7 @@ async fn test_reconcile_replaces_whole_bucket_after_failure(#[case] failure: &st
         flushed_sequence: None,
         committed_sequence: None,
         wal_recovery: Default::default(),
+        last_invalid_seq: None,
     };
     region.version_control.apply_edit(
         Some(edit(false)),

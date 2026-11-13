@@ -19,16 +19,23 @@ use store_api::region_request::ApplyStagingManifestRequest;
 use store_api::storage::RegionId;
 use tokio::sync::oneshot;
 
-use crate::error::{RegionStateSnafu, Result, StagingPartitionExprMismatchSnafu, UnexpectedSnafu};
+use crate::error::{
+    RegionNotFoundSnafu, RegionStateSnafu, Result, StagingPartitionExprMismatchSnafu,
+    UnexpectedSnafu,
+};
 use crate::manifest::action::{RegionEdit, RegionManifest};
 use crate::manifest::storage::manifest_dir;
 use crate::manifest::storage::staging::{StagingBlobStorage, staging_blob_path};
 use crate::region::{MitoRegionRef, RegionLeaderState, RegionRoleState};
-use crate::request::{OptionOutputTx, RegionEditRequest, WorkerRequest, WorkerRequestWithTime};
+use crate::request::{
+    BackgroundNotify, ExitStagingRequest, OptionOutputTx, RegionEditRequest, WorkerRequest,
+    WorkerRequestWithTime,
+};
 use crate::sst::location::region_dir_from_table_dir;
 use crate::worker::RegionWorkerLoop;
 use crate::worker::drain_ended_staging;
 use crate::worker::handle_reload::notify_if_fenced;
+use crate::worker::resume_queued_writes;
 
 impl<S: LogStore> RegionWorkerLoop<S> {
     pub(crate) async fn handle_apply_staging_manifest_request(
@@ -127,6 +134,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 flushed_sequence: None,
                 committed_sequence: None,
                 wal_recovery: Default::default(),
+                last_invalid_seq: None,
             };
 
             let (tx, rx) = oneshot::channel();
@@ -152,20 +160,19 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                     sender.send(result.map(|_| 0));
                     return;
                 };
-                let manager = region.manifest_ctx.manifest_manager.write().await;
-                let drain = drain_ended_staging(&worker_sender, region_id);
-                let hook_payload = match region.end_staging(manager, drain).await {
-                    Ok(payload) => payload,
-                    Err(e) => {
-                        notify_if_fenced(&worker_sender, &region).await;
-                        sender.send(Err(e));
-                        return;
-                    }
-                };
-                if let Some(pending) = hook_payload {
-                    pending.fire().await;
-                }
-                sender.send(Ok(0));
+                // The staged layout must be published inside the worker's publish window,
+                // which only the worker loop can open: forwarding the exit back to the
+                // loop keeps the boundary above every sequence already attributed to a
+                // row and keeps ordinary writes queued until the layout is visible.
+                let _ = worker_sender
+                    .send(WorkerRequestWithTime::new(WorkerRequest::Background {
+                        region_id,
+                        notify: BackgroundNotify::ExitStaging(ExitStagingRequest {
+                            region_id,
+                            sender,
+                        }),
+                    }))
+                    .await;
             } else {
                 sender.send(
                     UnexpectedSnafu {
@@ -174,6 +181,48 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                     .fail(),
                 );
             }
+        });
+    }
+
+    /// Handles a staging exit whose staging edit has landed: opens the publish window in
+    /// the worker loop and publishes the merged layout in the background.
+    pub(crate) fn handle_exit_staging_request(&mut self, request: ExitStagingRequest) {
+        let region_id = request.region_id;
+        let sender = request.sender;
+        let Some(region) = self.regions.get_region(region_id) else {
+            sender.send(Err(RegionNotFoundSnafu { region_id }.build()));
+            return;
+        };
+
+        // Opening the window here, in the loop, is what makes the boundary the publish
+        // allocates a barrier: the loop is the only place that can prove no write context
+        // is in flight, and every write it handles from now on is queued until the window
+        // is released (see `handle_write.rs`).
+        if let Err(e) = region.begin_publish_window(RegionLeaderState::Staging) {
+            sender.send(Err(e));
+            return;
+        }
+
+        let worker_sender = self.sender.clone();
+        common_runtime::spawn_global(async move {
+            let manager = region.manifest_ctx.manifest_manager.write().await;
+            let drain = drain_ended_staging(&worker_sender, region_id);
+            let hook_payload = match region.end_staging(manager, drain).await {
+                Ok(payload) => payload,
+                Err(e) => {
+                    // The publish released the window back to `Staging`; the writes it
+                    // queued must still be admitted and forwarded to their waiters.
+                    notify_if_fenced(&worker_sender, &region).await;
+                    resume_queued_writes(&worker_sender, region_id).await;
+                    sender.send(Err(e));
+                    return;
+                }
+            };
+            if let Some(pending) = hook_payload {
+                pending.fire().await;
+            }
+            resume_queued_writes(&worker_sender, region_id).await;
+            sender.send(Ok(0));
         });
     }
 

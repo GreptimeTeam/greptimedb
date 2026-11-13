@@ -814,6 +814,11 @@ pub(crate) fn version_builder_from_manifest(
         .add_files(file_purger, manifest.files.values().cloned())
         .flushed_entry_id(manifest.flushed_entry_id)
         .flushed_sequence(manifest.flushed_sequence)
+        // The manifest keeps the max edit boundary any edit recorded, so a reopened
+        // region keeps rejecting cursors that predate the edit. A manifest written
+        // before the field existed reads as unknown (0), which never invalidates a
+        // cursor: an older edit cannot be traced.
+        .last_invalid_seq(manifest.last_invalid_seq.unwrap_or_default())
         .truncated_entry_id(manifest.truncated_entry_id)
         .compaction_time_window(manifest.compaction_time_window)
         .options(region_options)
@@ -1543,6 +1548,7 @@ mod tests {
             flushed_entry_id: 0,
             flushed_sequence: 0,
             committed_sequence: None,
+            last_invalid_seq: None,
             manifest_version: 0,
             truncated_entry_id: None,
             compaction_time_window: None,

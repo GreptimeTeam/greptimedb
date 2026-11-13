@@ -45,7 +45,7 @@ use table::table::adapter::{dictionary_encode_string_columns, supports_pk_dictio
 use table::table::scan::RegionScanExec;
 
 use crate::error::{GetRegionMetadataSnafu, Result};
-use crate::options::{FlowIncrementalMode, FlowQueryExtensions};
+use crate::options::{FlowIncrementalMode, FlowQueryExtensions, FlowRepairMode};
 
 /// Resolve to the given region (specified by [RegionId]) unconditionally.
 #[derive(Clone, Debug)]
@@ -365,6 +365,13 @@ struct FlowScanDecision {
     skip_sst_files: bool,
     /// Whether this source scan must enforce the exact sequence range.
     exact_sequence_range: bool,
+    /// Whether this is a Flow dirty-window discovery read: it prunes at file
+    /// granularity and forces the file barrier as each row's sequence.
+    repair_discovery_scan: bool,
+    /// Whether this is the fenced repair DML: it must read the selected windows
+    /// completely, so it gets no file pruning and no forced override. Both repair
+    /// kinds are allowed to read across `last_invalid_seq`.
+    fenced_repair_scan: bool,
 }
 
 impl FlowScanDecision {
@@ -376,6 +383,8 @@ impl FlowScanDecision {
             memtable_max_sequence: None,
             skip_sst_files: false,
             exact_sequence_range: false,
+            repair_discovery_scan: false,
+            fenced_repair_scan: false,
         }
     }
 }
@@ -391,6 +400,8 @@ fn decide_flow_scan(query_ctx: &QueryContext, region_id: RegionId) -> Result<Flo
             memtable_max_sequence: query_ctx.get_snapshot(region_id.as_u64()),
             skip_sst_files: false,
             exact_sequence_range: false,
+            repair_discovery_scan: false,
+            fenced_repair_scan: false,
         });
     };
 
@@ -435,6 +446,14 @@ fn decide_flow_scan(query_ctx: &QueryContext, region_id: RegionId) -> Result<Flo
         skip_sst_files,
         exact_sequence_range: apply_incremental
             && flow_extensions.incremental_mode == Some(FlowIncrementalMode::SequenceRange),
+        // Repair reads are decided by the repair mode alone, never by
+        // `apply_incremental`: a fenced repair DML advances no checkpoint, yet it must
+        // still read across `last_invalid_seq` or recovery can never make progress.
+        repair_discovery_scan: flow_extensions.repair_mode == Some(FlowRepairMode::Discovery),
+        // The fenced repair DML reads the selected windows completely: no file-level
+        // pruning and no forced sequence override, only the stale-cursor bypass and
+        // the `B <= H` proof.
+        fenced_repair_scan: flow_extensions.repair_mode == Some(FlowRepairMode::Fenced),
     })
 }
 
@@ -453,6 +472,8 @@ fn build_scan_request(
         skip_sst_files: decision.skip_sst_files,
         snapshot_on_scan: decision.snapshot_on_scan,
         exact_sequence_range: decision.exact_sequence_range,
+        repair_discovery_scan: decision.repair_discovery_scan,
+        fenced_repair_scan: decision.fenced_repair_scan,
         memtable_min_sequence: decision.memtable_min_sequence,
         memtable_max_sequence: decision.memtable_max_sequence,
         ..Default::default()

@@ -29,6 +29,23 @@ use crate::error::{Error, InvalidQueryContextExtensionSnafu, Result};
 pub const FLOW_INCREMENTAL_AFTER_SEQS: &str = "flow.incremental_after_seqs";
 pub const FLOW_INCREMENTAL_MODE: &str = "flow.incremental_mode";
 pub const FLOW_RETURN_REGION_SEQ: &str = "flow.return_region_seq";
+/// Marks a Flow repair read. Such a query only discovers or overwrites time windows,
+/// so it must be allowed to read rows across `last_invalid_seq`: it is the query
+/// that repairs the state a stale cursor can no longer explain. Ordinary incremental
+/// deltas must not set it.
+///
+/// The value selects the mode, because the two repair reads need different scans:
+/// - [`FLOW_REPAIR_MODE_DISCOVERY`]: dirty-window discovery. It may prune at file
+///   granularity and force every row's sequence to the file barrier, because it only
+///   needs the timestamps of the rows a stale cursor may have missed.
+/// - [`FLOW_REPAIR_MODE_FENCED`]: the fenced repair DML. It must read the selected
+///   windows completely, so it gets no file pruning and no forced override; it only
+///   skips the `C < B` rejection and must still prove `B <= H`.
+pub const FLOW_REPAIR_MODE: &str = "flow.repair_mode";
+/// `flow.repair_mode` value: recovery dirty-window discovery.
+pub const FLOW_REPAIR_MODE_DISCOVERY: &str = "discovery";
+/// `flow.repair_mode` value: fenced repair DML.
+pub const FLOW_REPAIR_MODE_FENCED: &str = "fenced";
 pub const FLOW_SINK_TABLE_ID: &str = "flow.sink_table_id";
 /// Flow scheduler binding for the logical time of one scheduled attempt.
 /// Query planning, SQL/TQL parsing, range-select rewrite and DataFusion
@@ -37,6 +54,29 @@ pub const FLOW_SCHEDULED_TIME_MILLIS: &str = "flow.scheduled_time_millis";
 /// Enable by default, set to false to explicitly disable.
 pub const QUERY_ENABLE_REMOTE_DYNAMIC_FILTER_PUSHDOWN: &str =
     "query.enable_remote_dynamic_filter_pushdown";
+
+/// The kind of Flow repair read requested through [FLOW_REPAIR_MODE].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FlowRepairMode {
+    /// Dirty-window discovery: prunes at file granularity and forces the file
+    /// barrier as every row's sequence.
+    Discovery,
+    /// Fenced repair DML: reads the selected windows completely.
+    Fenced,
+}
+
+impl FlowRepairMode {
+    fn parse(value: &str) -> Result<Self> {
+        match value {
+            v if v.eq_ignore_ascii_case(FLOW_REPAIR_MODE_DISCOVERY) => Ok(Self::Discovery),
+            v if v.eq_ignore_ascii_case(FLOW_REPAIR_MODE_FENCED) => Ok(Self::Fenced),
+            _ => Err(invalid_query_context_extension(format!(
+                "Invalid value for {}: {}, expected {} or {}",
+                FLOW_REPAIR_MODE, value, FLOW_REPAIR_MODE_DISCOVERY, FLOW_REPAIR_MODE_FENCED
+            ))),
+        }
+    }
+}
 
 pub const FLOW_INCREMENTAL_MODE_MEMTABLE_ONLY: &str = "memtable_only";
 pub const FLOW_INCREMENTAL_MODE_SEQUENCE_RANGE: &str = "sequence_range";
@@ -143,6 +183,8 @@ pub struct FlowQueryExtensions {
     pub incremental_mode: Option<FlowIncrementalMode>,
     /// Whether the caller expects per-region watermark metadata in terminal metrics.
     pub return_region_seq: bool,
+    /// Which kind of Flow repair read this is, if any (see [FLOW_REPAIR_MODE]).
+    pub repair_mode: Option<FlowRepairMode>,
     /// Optional sink table id used to distinguish source scans from sink reads.
     pub sink_table_id: Option<TableId>,
 }
@@ -157,6 +199,7 @@ impl FlowQueryExtensions {
         let has_flow_context = extensions.contains_key(FLOW_INCREMENTAL_AFTER_SEQS)
             || extensions.contains_key(FLOW_INCREMENTAL_MODE)
             || extensions.contains_key(FLOW_RETURN_REGION_SEQ)
+            || extensions.contains_key(FLOW_REPAIR_MODE)
             || extensions.contains_key(FLOW_SINK_TABLE_ID);
 
         if !has_flow_context {
@@ -189,6 +232,11 @@ impl FlowQueryExtensions {
             .map(|value| parse_bool(FLOW_RETURN_REGION_SEQ, value.as_str()))
             .transpose()?
             .unwrap_or(false);
+
+        let repair_mode = extensions
+            .get(FLOW_REPAIR_MODE)
+            .map(|value| FlowRepairMode::parse(value.as_str()))
+            .transpose()?;
 
         let sink_table_id = extensions
             .get(FLOW_SINK_TABLE_ID)
@@ -229,6 +277,7 @@ impl FlowQueryExtensions {
             incremental_after_seqs,
             incremental_mode,
             return_region_seq,
+            repair_mode,
             sink_table_id,
         }))
     }
