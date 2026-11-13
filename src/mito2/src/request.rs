@@ -1172,6 +1172,44 @@ pub(crate) enum BackgroundNotify {
     TailReplayEnded,
 }
 
+impl BackgroundNotify {
+    /// Whether the worker dispatches pending requests after handling this notification.
+    ///
+    /// Dispatch consumes queued requests and can determine their terminal errors. A fenced
+    /// region must let reload reject its old requests as not found, rather than dispatching
+    /// them against the fenced instance and returning busy.
+    /// Keep this exhaustive so new notifications must declare their scheduling effect.
+    pub(crate) fn should_dispatch_pending(&self) -> bool {
+        match self {
+            Self::CompactionUnit(_)
+            | Self::CompactionDdlComplete { .. }
+            | Self::CompactionPickFinished(_)
+            | Self::FlushFinished(_)
+            | Self::FlushFailed(_)
+            | Self::CompactionFinished(_)
+            | Self::CompactionFailed(_)
+            | Self::RegionChange(_)
+            | Self::StagingEnded(_)
+            | Self::EnterStaging(_) => true,
+            // Edit completion dispatches before scheduling compaction, after stalled writes.
+            // A completion from an old instance must not dispatch the new instance's queue.
+            Self::RegionEdit(_) => false,
+            Self::RegionOpened { .. }
+            | Self::IndexBuildFinished(_)
+            | Self::IndexBuildStopped(_)
+            | Self::IndexBuildRetry(_)
+            | Self::Truncate(_)
+            | Self::DiscardUnflushed(_)
+            | Self::CopyRegionFromFinished(_)
+            | Self::RegionFenced
+            | Self::RegionReloaded { .. }
+            | Self::RegionBecameWritable
+            | Self::TailReplayCommitted { .. }
+            | Self::TailReplayEnded => false,
+        }
+    }
+}
+
 /// Notifies a flush job is finished.
 #[derive(Debug)]
 pub(crate) struct FlushFinished {
