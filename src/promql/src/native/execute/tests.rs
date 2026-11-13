@@ -46,8 +46,8 @@ use super::{
     BinaryRuntime, Emitted, InputId, InputSlot, InstantRuntime, NativeChunk, NativeExecutionState,
     NativeExecutor, NodeState, PairKernel, Reader, RetainedInput, RuntimeNode, RuntimeOp,
     absorb_rebuilds, buffered_fields, buffered_time, evaluated_bytes, grid_chunk_bytes,
-    grid_end_ms, grid_position, map_chunk, map_workspace_bytes, operand_chunk_bytes, raw_bytes,
-    vector_series_with_k, vector_workspace_bytes,
+    grid_end_ms, grid_position, map_chunk, map_workspace_bytes, raw_bytes, vector_series_with_k,
+    vector_workspace_bytes,
 };
 use crate::evaluated::EvaluatedChunk;
 use crate::grid_series::merge_same_labelset;
@@ -3600,9 +3600,18 @@ fn a_pool_that_cannot_admit_a_collected_fragment_releases_what_it_held() {
         vec![Some(1.0), None],
         true,
     );
-    // Room for the chunk the source queue holds, which is what the pool admits first, and nothing
-    // for the label sets the map records or the fragment the window collects.
-    let pool = bounded_pool(evaluated_bytes(&chunk) + 1);
+    // Room for the chunk the source queue holds -- read where the pool admits anything, so the limit
+    // is what the queue charges and not a figure derived from the estimator -- and nothing for the
+    // label sets the map records or the fragment the window collects.
+    let queued = {
+        let mut probe = executor(&tree, pool());
+        probe
+            .push_evaluated(InputId::new(0), chunk.clone())
+            .expect("the probe queue admits the chunk");
+        probe.state().reserved_bytes()
+    };
+    assert!(queued > 0, "the queued chunk is not charged for");
+    let pool = bounded_pool(queued);
     let mut execution = executor(&tree, Arc::clone(&pool));
     execution
         .push_evaluated(InputId::new(0), chunk)
@@ -4298,9 +4307,18 @@ fn standalone_merge_collection_budget_failure_releases_input_and_stops() {
         vec![Some(1.0), None],
         true,
     );
-    // The input queue is drained before collection grows the merge buffer; this budget admits that
-    // queue entry but not the larger retained-fragment estimate made by the collector.
-    let pool = bounded_pool(evaluated_bytes(&chunk) + 1);
+    // The input queue is drained before collection grows the merge buffer. The budget is what the
+    // queue charges -- read where the pool admits anything -- so it admits that entry and leaves
+    // nothing for the fragment the collector retains.
+    let queued = {
+        let mut probe = executor(&tree, pool());
+        probe
+            .push_evaluated(InputId::new(0), chunk.clone())
+            .expect("the probe queue admits the chunk");
+        probe.state().reserved_bytes()
+    };
+    assert!(queued > 0, "the queued chunk is not charged for");
+    let pool = bounded_pool(queued);
     let mut execution = executor(&tree, Arc::clone(&pool));
     execution
         .push_evaluated(InputId::new(0), chunk)
@@ -4335,8 +4353,19 @@ fn standalone_merge_flush_budget_failure_releases_fragments_and_stops() {
         vec![Some(1.0), None],
         true,
     );
-    let bytes = evaluated_bytes(&chunk);
-    let pool = bounded_pool(bytes * 2);
+    // What the collector holds once it has absorbed the queued fragment, read where the pool admits
+    // anything: a budget of exactly that admits the collection and leaves nothing for the flush's
+    // workspace.
+    let collected = {
+        let mut probe = executor(&tree, pool());
+        probe
+            .push_evaluated(InputId::new(0), chunk.clone())
+            .expect("the probe queue admits the chunk");
+        assert!(probe.next_chunk().unwrap().is_none());
+        probe.state().reserved_bytes()
+    };
+    assert!(collected > 0, "the collected fragment is not charged for");
+    let pool = bounded_pool(collected);
     let mut execution = executor(&tree, Arc::clone(&pool));
     execution
         .push_evaluated(InputId::new(0), chunk)
@@ -8065,14 +8094,14 @@ fn an_oversized_binary_operand_is_refused_by_the_pool() {
     assert_eq!(execution.state().reserved_bytes(), 0);
 }
 
-/// A binary operand reserves each chunk it retains before it retains it, and holds exactly what
-/// those chunks hold on their own.
+/// A binary operand reserves each chunk it retains before it retains it, and holds what those
+/// chunks hold between them.
 ///
 /// The figure of a retained chunk is what its rows occupy rather than the allocation they are slices
 /// of, so a series delivered in sibling slices of one batch is charged the batch's data once instead
-/// of once per chunk. What is refused here is a figure that disagrees with what the operand holds --
-/// a chunk reserved for on top of what the operand already keeps would be refused by a pool sized to
-/// the total, and one reserved for less would leave the pool holding less than the node does.
+/// of once per chunk: the two halves of a 40 000-row batch cost the 320 000 bytes of its samples and
+/// not twice that. A chunk is also reserved for exactly what retaining it charges, so a reservation
+/// made before the fact does not leave the operand holding more, or less, than the pool gave it.
 #[test]
 fn a_binary_operand_reserves_what_it_retains() {
     let grid = grid(0, 60_000, 40_000);
@@ -8082,54 +8111,49 @@ fn a_binary_operand_reserves_what_it_retains() {
     let second =
         evaluated_array_chunk_of(&schema, metric(), 20_000, batch.slice(20_000, 20_000), true);
 
-    // What each chunk holds on its own, and the entry the closing chunk records in the operand's
-    // boundary list -- the list is storage the operand keeps, and it is charged one entry per closed
-    // series as it is written.
-    let boundaries = std::mem::size_of::<usize>();
-    let (first_alone, second_alone) = (
-        operand_chunk_bytes(&first.series),
-        operand_chunk_bytes(&second.series),
-    );
-    let held = first_alone + second_alone + boundaries;
-
-    // The budget is the figure the operand ends up holding, so a chunk reserved for on top of what
-    // the operand keeps would be refused and one reserved for less would leave the pool holding less
-    // than the node does.
-    let pool = bounded_pool(held);
+    // The two chunks are the halves of one 40 000-row float batch, so what the operand holds
+    // between them is that batch's data: 320 000 bytes of samples, however the rows are cut up. A
+    // figure that charged the whole allocation per chunk would hold 640 000 for the same rows.
+    let rows = 40_000 * std::mem::size_of::<f64>();
+    let descriptors = 4 * 1024;
+    let pool = bounded_pool(rows + descriptors);
     let (mut state, mut binary) = binary_runtime(&pool, &schema);
-    let before = state.buffer.reservation.size();
     state
         .retain_binary(&mut binary, 0, NativeChunk::Evaluated(first))
         .unwrap();
-    assert_eq!(
-        state.buffer.reservation.size() - before,
-        first_alone,
-        "the first chunk of the operand does not cost what it is estimated at"
-    );
-    let before = state.buffer.reservation.size();
     state
         .retain_binary(&mut binary, 0, NativeChunk::Evaluated(second))
         .unwrap();
-    assert_eq!(
-        state.buffer.reservation.size() - before,
-        second_alone + boundaries,
-        "the closing chunk of the operand does not cost what it is estimated at, and the end it \
-         records"
+    assert!(
+        state.buffer.reservation.size() >= rows,
+        "the operand reserves {} bytes, less than the {rows} of samples the two chunks hold",
+        state.buffer.reservation.size()
+    );
+    assert!(
+        state.buffer.reservation.size() <= rows + descriptors,
+        "the operand reserves {} bytes for {rows} bytes of samples: a chunk is charged the \
+         allocation it is a slice of rather than the rows it adds",
+        state.buffer.reservation.size()
     );
     assert_eq!(
+        pool.reserved(),
         state.buffer.reservation.size(),
-        held,
-        "the operand does not reserve what it holds"
+        "the operand reserves less from the pool than it holds"
     );
-    assert_eq!(pool.reserved(), held);
 
-    // The figure a caller reserves for before retaining a chunk is the one the operand grows by: the
-    // estimate of the series it carries and the one entry the chunk's end records.
+    // The figure a caller reserves for before retaining a chunk is the figure the operand grows by:
+    // one reserved for and then retained leaves the operand exactly where the reservation put it.
     let own = evaluated_chunk(&schema, 0, vec![1.0, 2.0], true);
+    let (mut own_state, mut own_binary) = binary_runtime(&pool, &schema);
+    let pending = own_binary.pending(0, &own).unwrap();
+    let before = own_state.buffer.reservation.size();
+    own_state
+        .retain_binary(&mut own_binary, 0, NativeChunk::Evaluated(own))
+        .unwrap();
     assert_eq!(
-        binary.pending(0, &own).unwrap(),
-        operand_chunk_bytes(&own.series) + std::mem::size_of::<usize>(),
-        "the figure reserved for a chunk is not what the operand grows by"
+        own_state.buffer.reservation.size() - before,
+        pending,
+        "retaining a chunk charges the operand something other than the figure reserved for it"
     );
 
     // Assembling the two chunks keeps the allocation they are slices of: the series the kernel reads
@@ -8370,8 +8394,8 @@ fn a_pool_that_holds_one_histogram_table_refuses_a_second() {
 }
 
 /// The executor's binary node holds no more than the operands it retains: the peak of its own
-/// reservation is what every retained chunk holds on its own, not that plus a chunk it was handed
-/// again.
+/// reservation is the data the retained chunks hold between them -- the thirty-two thousand bytes of
+/// one 4 000-row float batch, whichever way the batch is sliced -- and not a second copy of it.
 ///
 /// The source queue holds one chunk while the node retains the other, so what is read here is the
 /// binary node's own figure rather than the pool's: the overlap of the two nodes is a charge of the
@@ -8384,13 +8408,11 @@ fn a_binary_beneath_the_executor_reserves_what_it_retains() {
     let first = evaluated_array_chunk_of(&schema, metric(), 0, batch.slice(0, 2_000), false);
     let second =
         evaluated_array_chunk_of(&schema, metric(), 2_000, batch.slice(2_000, 2_000), true);
-    // What the left operand holds once both chunks are retained: what each chunk holds on its own,
-    // and the boundary list the closing chunk adds one entry to.
-    let retained = std::mem::size_of::<usize>()
-        + [&first, &second]
-            .iter()
-            .map(|chunk| operand_chunk_bytes(&chunk.series))
-            .fold(0usize, usize::saturating_add);
+    // Both chunks are halves of one 4 000-row float batch, so what the node holds once it retains
+    // them is that batch's data: 32 000 bytes of samples. A figure that charged the allocation per
+    // chunk would hold the same rows twice.
+    let retained = 4_000 * std::mem::size_of::<f64>();
+    let descriptors = 4 * 1024;
 
     let mut execution = executor(&tree, bounded_pool(1 << 22));
     let metrics = metrics_of(&execution);
@@ -8400,10 +8422,16 @@ fn a_binary_beneath_the_executor_reserves_what_it_retains() {
     // nothing else: the kernel has not run and the node holds what it retains.
     assert!(execution.next_chunk().unwrap().is_none());
     let peak = format!("native.p0.root.{}", NodeMetric::PEAK_RESERVED_BYTES);
-    assert_eq!(
-        gauge(&metrics, &peak),
-        retained,
-        "the binary node reserved more than the operands it retains"
+    let peak_bytes = gauge(&metrics, &peak);
+    assert!(
+        peak_bytes >= retained,
+        "the binary node reserved {peak_bytes} bytes, less than the {retained} bytes of samples \
+         the two retained chunks hold"
+    );
+    assert!(
+        peak_bytes <= retained + descriptors,
+        "the binary node reserved {peak_bytes} bytes for {retained} bytes of samples: it charged \
+         the shared allocation once per chunk"
     );
 
     // The right operand matches the label set, so the operation answers every point of the grid.

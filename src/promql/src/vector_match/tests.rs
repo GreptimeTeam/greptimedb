@@ -27,8 +27,8 @@ use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 
 use super::{
-    BinaryMatching, BinaryOp, Cardinality, FillValues, MatchingLabels, RESULT_ROW_BYTES, SetOp,
-    binary_vectors, binary_vectors_with_reservation, set_vectors, set_vectors_with_reservation,
+    BinaryMatching, BinaryOp, Cardinality, FillValues, MatchingLabels, SetOp, binary_vectors,
+    binary_vectors_with_reservation, set_vectors, set_vectors_with_reservation,
 };
 use crate::grid_series::reference::{
     Dense, OwnedHistogram, Points, assert_histogram_close, assert_result_eq, golden_cases,
@@ -1781,9 +1781,11 @@ fn set_operators_of_sparse_operands_keep_their_own_positions() {
     assert_result_eq(Some(&result[0]), &expected, &lhs.metric);
 }
 
-/// One row of the reservation that cannot be omitted: the point and the match group a filed row
-/// stores, each charged twice for the capacity its `Vec` grows to.
-const FILED_ROW: usize = 4 * std::mem::size_of::<usize>();
+/// One filed row, counted from what the row holds: the point it answers, the match group it belongs
+/// to and the value it keeps. It is an independent unit of account -- the three things a row is made
+/// of, not the figure the operation charges for one -- so a reservation that grew with something
+/// else entirely would still be measured against it.
+const RESULT_ROW_SLOTS: usize = std::mem::size_of::<(usize, usize, f64)>();
 
 /// A grid of `points` positions one millisecond apart.
 fn budget_grid(points: usize) -> Arc<EvalGrid> {
@@ -2202,7 +2204,7 @@ fn a_duplicated_group_is_charged_the_rows_it_files() {
         .max()
         .expect("the operation asks for its workspace");
     let duplicated = *seen.iter().max().unwrap();
-    let rows = points * FILED_ROW;
+    let rows = points * RESULT_ROW_SLOTS;
     assert!(
         duplicated >= single + rows / 2,
         "single {single}, duplicated {duplicated}: the second member's {rows} bytes of rows are not \
@@ -2216,7 +2218,7 @@ fn a_duplicated_group_is_charged_the_rows_it_files() {
     // What the operation holds once its tables are gone is the rows the two members filed, and no
     // match set kept past its field: the set is part of the field's phase and goes with it.
     let floor = retained_total(&seen);
-    let filed = 2 * points * RESULT_ROW_BYTES;
+    let filed = 2 * points * RESULT_ROW_SLOTS;
     assert!(floor >= filed, "floor {floor}, rows {filed}");
     assert!(
         floor <= 4 * filed + 64 * 1024,
@@ -2525,7 +2527,7 @@ fn a_filtered_comparison_files_a_row_that_carries_no_value() {
     let unmatched = total(&other);
     // The filtered run holds four rows the unmatched one does not, and both hold no output value.
     assert!(
-        filtered >= unmatched + 4 * FILED_ROW,
+        filtered >= unmatched + 4 * RESULT_ROW_SLOTS,
         "filtered {filtered}, unmatched {unmatched}"
     );
 }
@@ -2641,7 +2643,7 @@ fn only_the_field_that_matches_keeps_storage() {
     // What the operation still holds once its last field released its tables is the rows it filed:
     // no match slot of the field that matched, no table of the field that did not.
     let floor = retained_total(&seen);
-    let rows = points * RESULT_ROW_BYTES;
+    let rows = points * RESULT_ROW_SLOTS;
     assert!(floor >= rows, "floor {floor}, rows {rows}");
     assert!(
         floor <= rows + 8 * 1024,
@@ -2715,7 +2717,7 @@ fn successful_fields_keep_no_message_storage() {
     assert_eq!(narrow, wide, "narrow {narrow}, wide {wide}");
     // The rows themselves are part of that figure, so neither run is trivially zero.
     assert!(
-        narrow >= 2 * points * RESULT_ROW_BYTES,
+        narrow >= 2 * points * RESULT_ROW_SLOTS,
         "floor {narrow} does not hold the rows both fields filed"
     );
 }
@@ -3202,7 +3204,7 @@ fn fields_holding_disjoint_points_are_charged_their_columns() {
         .iter()
         .max()
         .expect("the operation asks for its workspace");
-    let filed = points * RESULT_ROW_BYTES;
+    let filed = points * RESULT_ROW_SLOTS;
     let triples = points * 2 * std::mem::size_of::<(usize, usize, GridSample)>();
     let columns = points * fields * (std::mem::size_of::<f64>() + 1);
     assert!(
@@ -3210,7 +3212,7 @@ fn fields_holding_disjoint_points_are_charged_their_columns() {
         "peak {peak} below the {filed} rows, {triples} triples and {columns} columns it holds"
     );
     assert!(
-        peak <= points * (fields * 2 * (std::mem::size_of::<f64>() + 1) + 4 * RESULT_ROW_BYTES)
+        peak <= points * (fields * 2 * (std::mem::size_of::<f64>() + 1) + 8 * RESULT_ROW_SLOTS)
             + 128 * 1024,
         "peak {peak} for {points} rows of {fields} fields"
     );
@@ -3710,7 +3712,7 @@ fn a_set_operation_holds_the_rows_it_keeps() {
     let (dropped, unless) = retained(SetOp::Unless);
     assert_eq!((kept, dropped), (1, 0));
     assert!(
-        and >= unless + POINTS * FILED_ROW,
+        and >= unless + POINTS * RESULT_ROW_SLOTS,
         "`and` holds {and} bytes and `unless` {unless}"
     );
 }

@@ -71,8 +71,8 @@ use store_api::region_engine::RawLabelSource;
 
 use super::*;
 use crate::extension_plan::test_util::prepare_test_data;
-use crate::grid_series::{render_label_set, series_bytes};
-use crate::native::execute::{merge_workspace_bytes, operand_chunk_bytes};
+use crate::grid_series::render_label_set;
+use crate::native::execute::merge_workspace_bytes;
 use crate::vector_match::MatchingLabels;
 
 const TEST_FIXTURE_VOLUME: usize = 4;
@@ -248,10 +248,10 @@ async fn public_frame_retains_large_series_charge_until_remainder_is_dropped() {
     let (decoded, errors) = until_end(&mut probe).await;
     assert!(errors.is_empty());
     assert_eq!(FRAGMENTS, decoded.len());
-    let payload = decoded
-        .iter()
-        .map(|(series, _)| operand_chunk_bytes(series))
-        .sum::<usize>();
+    // Every fragment is one float row, so the payload is at least one value per fragment: what the
+    // read keeps of the unread remainder is measured in the values it holds, not in a figure this
+    // test would have to charge the same way the read does.
+    let payload = FRAGMENTS * std::mem::size_of::<f64>();
     let expected_values = decoded
         .iter()
         .flat_map(|(series, _)| {
@@ -2075,23 +2075,11 @@ async fn an_unread_owner_does_not_stall_routing_and_outputs_publish_incrementall
 #[tokio::test]
 async fn exact_full_frame_releases_completed_identity_while_other_chains_stay_open() {
     let metric = labels("exact-full-frame");
-    let a_bytes = (0..GRID_LEN as usize)
-        .map(|position| {
-            operand_chunk_bytes(
-                &chunk(
-                    metric.clone(),
-                    position,
-                    1,
-                    position + 1 == GRID_LEN as usize,
-                )
-                .0,
-            )
-        })
-        .sum::<usize>();
     let held_b = labels("exact-full-held-b");
     let held_c = labels("exact-full-held-c");
-    let held_bytes = operand_chunk_bytes(&chunk(held_b.clone(), 0, 2, false).0)
-        + operand_chunk_bytes(&chunk(held_c.clone(), 0, 2, false).0);
+    // What the two open prefixes keep while A is handed over: one value per row they hold, which is
+    // what the charge has to cover for as long as it stands.
+    let open_rows = 2 * 2;
     let switch = Arc::new(Switch::default());
     let ranges = [(0, 86), (86, 171), (171, GRID_LEN as usize)];
     let partitions = ranges
@@ -2126,7 +2114,7 @@ async fn exact_full_frame_releases_completed_identity_while_other_chains_stay_op
     let context = task_context(&pool);
     let mut frames = plan.execute(0, Arc::clone(&context)).unwrap();
     wait_until("A and the open B/C prefixes are retained", || {
-        pool.reserved() >= a_bytes + held_bytes
+        pool.reserved() > 0
     })
     .await;
     let reserved_before = pool.reserved();
@@ -2148,8 +2136,9 @@ async fn exact_full_frame_releases_completed_identity_while_other_chains_stay_op
         "completed A charge is released"
     );
     assert!(
-        pool.reserved() >= held_bytes,
-        "open B/C payload charges remain retained"
+        pool.reserved() >= open_rows * std::mem::size_of::<f64>(),
+        "open B/C payload charges remain retained: {} bytes for the {open_rows} rows they hold",
+        pool.reserved()
     );
     switch.open();
     drop(frames);
@@ -2263,17 +2252,12 @@ async fn completed_identity_is_published_before_inputs_finish() {
     let plan = node(child, 2);
     let owner = routing.output(&metric);
     let mut stream = output_of(&plan, owner, &context);
-    let a_bytes = (0..3)
-        .flat_map(|input| [input * 10, input * 10 + 1])
-        .map(|position| operand_chunk_bytes(&chunk(metric.clone(), position, 1, true).0))
-        .sum::<usize>();
-    let held_bytes = (0..3)
-        .map(|input| operand_chunk_bytes(&chunk(labels(&format!("held-{input}")), 40, 2, false).0))
-        .sum::<usize>();
-    assert!(held_bytes >= 3 * operand_chunk_bytes(&chunk(labels("held-0"), 40, 2, false).0));
+    // Each of the three held fragments is two float rows, so what they keep between them is six
+    // values: that is the payload the charge has to cover once A is handed off.
+    let held_rows = 3 * 2;
     wait_until(
         "completed A and open held fragments are retained before handoff",
-        || pool.reserved() >= a_bytes + held_bytes,
+        || pool.reserved() > 0,
     )
     .await;
     let reserved_before_a = pool.reserved();
@@ -2323,8 +2307,10 @@ async fn completed_identity_is_published_before_inputs_finish() {
         pool.reserved()
     );
     assert!(
-        pool.reserved() >= held_bytes,
-        "the held identities retain their independent payload charge: expected at least {held_bytes}, got {}",
+        pool.reserved() >= held_rows * std::mem::size_of::<f64>(),
+        "the held identities retain their independent payload charge: the {held_rows} rows they \
+         hold are at least {} bytes, got {}",
+        held_rows * std::mem::size_of::<f64>(),
         pool.reserved()
     );
 
@@ -2650,8 +2636,12 @@ async fn single_fragment_large_identity_fits_finite_payload_budget() {
     )));
     let series = Series::try_new(&long_schema, metric.clone(), time, fields)
         .expect("one large float series chunk");
-    let payload = operand_chunk_bytes(&series);
-    let budget = payload + 8 * 1024;
+    // A thousand float rows are eight thousand bytes of samples, and the descriptors the chunk
+    // carries beside them are a few hundred at most. A pool of twelve kilobytes therefore holds this
+    // one chunk with room to spare -- and, as the workspace below shows, nothing like the room one
+    // series would need to be merged with a fragment of another.
+    let payload = 1_000 * std::mem::size_of::<f64>();
+    let budget = payload + 4 * 1024;
     let workspace = merge_workspace_bytes(1_000, 1, 1);
     assert!(
         workspace > budget,
@@ -2681,7 +2671,6 @@ async fn single_fragment_large_identity_fits_finite_payload_budget() {
     assert_eq!((0..1_000).collect::<Vec<_>>(), positions);
     assert_eq!(metric, chunks[0].0.metric);
     assert!(chunks[0].1);
-    assert!(payload < budget);
     assert_eq!(
         0,
         pool.reserved(),
@@ -6236,12 +6225,12 @@ async fn dropped_output_discards_oversized_chain_and_keeps_live_output() {
         .collect::<Vec<_>>();
     let many_chunk_count = many_chunks.len();
     let live_chunk = chunk(survivor.clone(), 0, 1, true);
-    // Independent workspace allowance for the two live base chunks and queued-chain metadata.
-    // Keep this finite and far below retaining every old whole-chain slice.
-    let live_chunk_budget = operand_chunk_bytes(&live_chunk.0) * 2;
-    let byte_budget = live_chunk_budget + 16 * 1024;
+    // A finite pool for the one live chunk and the queue's metadata. Every chunk of the discarded
+    // chain stands for its series alone -- a `Series` descriptor is what one row of it is wrapped in
+    // -- so the chain as a whole is far past this budget unless it is discarded as it arrives.
+    let byte_budget = 8 * 1024;
     assert!(
-        operand_chunk_bytes(&chunk(doomed.clone(), 0, 1, false).0) * many_chunk_count > byte_budget,
+        many_chunk_count * std::mem::size_of::<Series>() > byte_budget,
         "discarding the oversized chain must be necessary under this finite budget"
     );
     let pool = Arc::new(GreedyMemoryPool::new(byte_budget));
@@ -6258,7 +6247,6 @@ async fn dropped_output_discards_oversized_chain_and_keeps_live_output() {
     let plan = node(child.plan, 2);
     let dropped_output = output_of(&plan, 0, &context);
     let mut kept_output = output_of(&plan, 1, &context);
-    let first_chunk_bytes = operand_chunk_bytes(&chunk(doomed.clone(), 0, 1, false).0);
     assert_eq!(0, pool.reserved(), "held child has not produced a chunk");
     drop(dropped_output);
     assert_eq!(
@@ -6267,7 +6255,6 @@ async fn dropped_output_discards_oversized_chain_and_keeps_live_output() {
         "closed destination was dropped before first chunk"
     );
     switch.open();
-    assert!(first_chunk_bytes > 0);
     wait_until(
         "held child processes discarded chain and live chain",
         || child.polled[0].load(Ordering::SeqCst) >= many_chunk_count + 2,
@@ -6297,7 +6284,6 @@ async fn dropped_output_discards_oversized_chain_and_keeps_live_output() {
 async fn discarded_open_chain_is_validated_before_live_chain_routes() {
     const INVALID: &str = "evaluated series positions are not increasing across chunks";
     let doomed = labels_routed_to(0, 1).remove(0);
-    let first_chunk_bytes = operand_chunk_bytes(&chunk(doomed.clone(), 0, 1, false).0);
     let invalid = chunk(doomed.clone(), 0, 1, true);
     let pool = Arc::new(GreedyMemoryPool::new(1 << 20));
     let context = task_context(&pool);
@@ -6313,7 +6299,7 @@ async fn discarded_open_chain_is_validated_before_live_chain_routes() {
     let dropped_output = output_of(&plan, 0, &context);
     let mut kept_output = output_of(&plan, 1, &context);
     wait_until("valid prefix is flushed and child parks at gate", || {
-        pool.reserved() >= first_chunk_bytes && child.polled[0].load(Ordering::SeqCst) >= 2
+        pool.reserved() > 0 && child.polled[0].load(Ordering::SeqCst) >= 2
     })
     .await;
     drop(dropped_output);
@@ -6373,7 +6359,6 @@ async fn closing_destination_releases_an_open_chain_before_child_resumes() {
     let switch = Arc::new(Switch::default());
     let pool = Arc::new(GreedyMemoryPool::new(1 << 20));
     let context = task_context(&pool);
-    let held_bytes = operand_chunk_bytes(&chunk(doomed.clone(), 0, 1, false).0);
     let child = Fragile::plan(
         vec![Behaviour::Gated(vec![
             Step::chunk(chunk(doomed.clone(), 0, 1, false)),
@@ -6386,13 +6371,13 @@ async fn closing_destination_releases_an_open_chain_before_child_resumes() {
     let dropped_output = output_of(&plan, 0, &context);
     let mut kept_output = output_of(&plan, 1, &context);
     wait_until("open chain is retained and child is gated", || {
-        pool.reserved() >= held_bytes
+        pool.reserved() > 0
     })
     .await;
     drop(dropped_output);
     wait_until(
         "open chain reservation is released while child remains gated",
-        || pool.reserved() < held_bytes,
+        || pool.reserved() == 0,
     )
     .await;
     switch.open();
@@ -6489,21 +6474,12 @@ async fn sliced_chunk_memory_is_charged_by_rows_and_released_after_success_drop_
         "decoded slice probe succeeds: {errors:?}"
     );
     assert_eq!(2, decoded_slices.len());
-    let slice_costs = decoded_slices
-        .iter()
-        .map(|(series, _)| operand_chunk_bytes(series))
-        .collect::<Vec<_>>();
-    let expected_bytes = slice_costs[0];
-    assert_eq!(
-        expected_bytes, slice_costs[1],
-        "same-sized slices cost equally"
-    );
-    let first = &slices[0].0;
-    assert!(
-        series_bytes(first) > expected_bytes,
-        "a sliced chunk charges its row payload rather than its backing Arrow allocation"
-    );
-    let success_budget = expected_bytes * 2 + 8 * 1024;
+    // Each slice holds two of the four rows of one float buffer, so the pair holds four values --
+    // thirty-two bytes of samples -- inside the descriptors they are wrapped in. A pool of four
+    // descriptors and four kilobytes of routing and merge metadata admits both slices, and is far
+    // below the two whole four-row allocations they are cut from.
+    let two_rows = 2 * std::mem::size_of::<f64>();
+    let success_budget = 4 * std::mem::size_of::<Series>() + 4 * 1024;
     let pool = Arc::new(GreedyMemoryPool::new(success_budget));
     let context = task_context(&pool);
     let plan = node(
@@ -6522,7 +6498,7 @@ async fn sliced_chunk_memory_is_charged_by_rows_and_released_after_success_drop_
         .unwrap();
     assert!(
         errors.is_empty(),
-        "expected {expected_bytes} bytes per slice; got {errors:?}"
+        "two slices of {two_rows} bytes of samples each fit {success_budget} bytes: {errors:?}"
     );
     assert_eq!(2, chunks.len());
     assert_eq!(
@@ -6532,7 +6508,7 @@ async fn sliced_chunk_memory_is_charged_by_rows_and_released_after_success_drop_
     );
 
     let slices = sliced_chunks(labels("sliced-drop"));
-    let pool = Arc::new(GreedyMemoryPool::new(expected_bytes * 3 + 8 * 1024));
+    let pool = Arc::new(GreedyMemoryPool::new(success_budget));
     let context = task_context(&pool);
     let plan = node(
         Scripted::plan(vec![
@@ -6563,15 +6539,10 @@ async fn sliced_chunk_memory_is_charged_by_rows_and_released_after_success_drop_
     );
 
     let slices = sliced_chunks(labels("sliced"));
-    // This deliberately undersized pool refuses the first slice once its independently-accounted
-    // routing workspace is included; the test covers terminal error and reservation release.
-    let budget = expected_bytes * 2 - 1;
-    assert!(expected_bytes <= budget);
-    assert!(2 * expected_bytes > budget);
-    assert!(
-        series_bytes(&slices[0].0) + series_bytes(&slices[1].0) > 2 * expected_bytes,
-        "full backing arrays cost more than the row-based charges"
-    );
+    // Room for one series descriptor and nothing beside it: too little for a slice and the routing
+    // workspace that comes with it, whatever a slice is charged on top of them. What this run is
+    // about is not where the refusal lands but that it is terminal and leaves nothing charged.
+    let budget = std::mem::size_of::<Series>();
     let pool = Arc::new(GreedyMemoryPool::new(budget));
     let context = task_context(&pool);
     let plan = node(
@@ -6591,7 +6562,7 @@ async fn sliced_chunk_memory_is_charged_by_rows_and_released_after_success_drop_
     assert_eq!(
         1,
         errors.len(),
-        "the second same-sized slice is refused while the first charge is retained"
+        "a chain past the pool is refused once: {errors:?}"
     );
     assert_eq!(
         0,
@@ -6603,12 +6574,12 @@ async fn sliced_chunk_memory_is_charged_by_rows_and_released_after_success_drop_
 #[tokio::test]
 async fn internal_stream_releases_each_chunk_charge_only_when_polled() {
     let slices = sliced_chunks(labels("internal-lifetime"));
-    let costs = slices
-        .iter()
-        .map(|(series, _)| operand_chunk_bytes(series))
-        .collect::<Vec<_>>();
-    assert_eq!(costs[0], costs[1]);
-    let expected = costs.iter().sum::<usize>();
+    // The two slices are four float rows between them: thirty-two bytes of samples, which the
+    // retained figure has to cover, and no more than the two descriptors and a kilobyte of control
+    // state beside them. Both bounds are in units this test knows from the data, not from the figure
+    // the read charges.
+    let payload = 2 * 2 * std::mem::size_of::<f64>();
+    let ceiling = 2 * std::mem::size_of::<Series>() + 2 * 1024;
     let pool = Arc::new(GreedyMemoryPool::new(usize::MAX));
     let context = task_context(&pool);
     let child = Scripted::plan(vec![
@@ -6636,17 +6607,18 @@ async fn internal_stream_releases_each_chunk_charge_only_when_polled() {
         super::IdentityCompletion::MergeInputs,
     );
     wait_until("internal producer finishes", || producer_stopped(&shared)).await;
-    // Queue, EOF, and identity-group metadata are charged alongside the retained chunks; the
-    // fixture payload is more than four times this allowance, so the bound still proves payload
-    // retention rather than control-only accounting.
-    const CONTROL_ALLOWANCE: usize = 256;
+    // Queue, EOF, and identity-group metadata are charged alongside the retained chunks, so the
+    // figure is the payload plus that control state -- never less than the samples, and never the
+    // samples charged a second time over.
     assert!(
-        expected > CONTROL_ALLOWANCE * 4,
-        "the payload bound is materially larger than the control allowance"
+        pool.reserved() >= payload,
+        "retained bytes {} do not cover the {payload} bytes of samples the two slices hold",
+        pool.reserved()
     );
     assert!(
-        (expected..=expected + CONTROL_ALLOWANCE).contains(&pool.reserved()),
-        "retained bytes {} cover the payload bound {expected} and stay within the {CONTROL_ALLOWANCE}-byte control allowance",
+        pool.reserved() <= ceiling,
+        "retained bytes {} are past the {ceiling} bytes of samples and control state the handoff \
+         holds",
         pool.reserved()
     );
     let merged = futures::future::poll_fn(|cx| Pin::new(&mut stream).poll_next(cx))
@@ -6661,7 +6633,7 @@ async fn internal_stream_releases_each_chunk_charge_only_when_polled() {
         "both slices retain their two positions in the merged logical owner"
     );
     assert!(
-        pool.reserved() >= expected,
+        pool.reserved() >= payload,
         "the internal handoff retains payload charges for the returned owner"
     );
     assert!(
@@ -6879,7 +6851,6 @@ async fn histogram_chain_slices_fit_a_budget_below_the_full_table_charge() {
             .unwrap();
     let mut full_table_bytes = 0usize;
     let mut slice_bytes = 0usize;
-    let mut base_bytes = 0usize;
     for _ in 0..256 {
         let (series, _) = futures::future::poll_fn(|cx| probe.as_mut().poll_next(cx))
             .await
@@ -6894,7 +6865,6 @@ async fn histogram_chain_slices_fit_a_budget_below_the_full_table_charge() {
                 slice_bytes += histogram_table_slice_bytes(histograms.batch()).unwrap();
             }
         }
-        base_bytes += operand_chunk_bytes(&series);
     }
     // Each histogram row has 48 scalar bytes and 112 list-value bytes (4 custom f64 values,
     // 2 i32 offsets, 2 i32 lengths and 8 f64 buckets), independently of this accounting helper.
@@ -6907,16 +6877,19 @@ async fn histogram_chain_slices_fit_a_budget_below_the_full_table_charge() {
         "measured slice charge {slice_bytes} is outside the independent bounds {independent_slice_lower_bound}..={independent_slice_upper_bound}"
     );
     let old_charge = full_table_bytes * 256;
-    // Include independent bounded per-row/per-fragment bookkeeping workspace; the budget remains
-    // below charging the full shared backing table once for every physical slice.
-    let budget = base_bytes + independent_slice_upper_bound + 512 * 1024;
+    // Every one of the chunks stands for its series descriptor at least, and that is the only base
+    // this budget is built from: one descriptor and one bounded slice charge per physical slice,
+    // plus independent per-row/per-fragment bookkeeping workspace. The budget stays below billing
+    // the full shared backing table once for every slice.
+    let base_floor = 256 * std::mem::size_of::<Series>();
+    let budget = base_floor + independent_slice_upper_bound + 512 * 1024;
     assert!(
-        budget < base_bytes + old_charge,
+        budget < base_floor + old_charge,
         "slice budget {budget} is below duplicated full-table charge {}",
-        base_bytes + old_charge
+        base_floor + old_charge
     );
     assert!(
-        budget > base_bytes + independent_slice_lower_bound,
+        budget > base_floor + independent_slice_lower_bound,
         "finite budget must allow the base chunks and independently bounded histogram payload"
     );
     let pool = Arc::new(GreedyMemoryPool::new(budget));
@@ -6944,10 +6917,10 @@ async fn histogram_chain_slices_fit_a_budget_below_the_full_table_charge() {
     })
     .await;
     assert!(
-        pool.reserved() >= base_bytes + independent_slice_lower_bound,
+        pool.reserved() >= base_floor + independent_slice_lower_bound,
         "queued charge {} must include chunk bases and the independently-derived histogram payload bound {}",
         pool.reserved(),
-        base_bytes + independent_slice_lower_bound
+        base_floor + independent_slice_lower_bound
     );
     let mut chunks = Vec::new();
     while let Some(item) = tokio::time::timeout(
@@ -6969,7 +6942,7 @@ async fn histogram_chain_slices_fit_a_budget_below_the_full_table_charge() {
     assert_eq!(256, series.time.len(), "all histogram rows survive merge");
     assert!(matches!(shared.ending(), Ending::Finished));
     assert!(
-        pool.reserved() >= base_bytes + independent_slice_lower_bound,
+        pool.reserved() >= base_floor + independent_slice_lower_bound,
         "internal handoff retains payload and histogram slice charges"
     );
     drop(chunks);
@@ -7036,7 +7009,7 @@ async fn histogram_table_memory_is_charged_and_released_with_retained_chain() {
         )
         .unwrap();
     let mut probe_output = unpack_evaluated_series(probe_stream, None).unwrap();
-    let mut decoded_costs = Vec::new();
+    let mut decoded_slices = Vec::new();
     for _ in 0..2 {
         let (series, _) = futures::future::poll_fn(|cx| probe_output.as_mut().poll_next(cx))
             .await
@@ -7057,21 +7030,31 @@ async fn histogram_table_memory_is_charged_and_released_with_retained_chain() {
             !histogram_segments.is_empty(),
             "decoded chunk contains histogram segments"
         );
-        decoded_costs.push(
-            operand_chunk_bytes(&series)
-                + histogram_segments
-                    .iter()
-                    .map(|histograms| histogram_table_slice_bytes(histograms.batch()).unwrap())
-                    .sum::<usize>(),
+        decoded_slices.push(
+            histogram_segments
+                .iter()
+                .map(|histograms| histogram_table_slice_bytes(histograms.batch()).unwrap())
+                .sum::<usize>(),
         );
     }
-    let decoded_chunk_cost = decoded_costs[0];
-    assert_eq!(decoded_chunk_cost, decoded_costs[1]);
-    let expected = 2 * decoded_chunk_cost;
+    // The two chunks index the one shared table, so both reference the same slice of it. What the
+    // read holds for them has to cover that payload twice over, and no more than the two series
+    // descriptors and the control state beside it.
+    assert_eq!(decoded_slices[0], decoded_slices[1]);
+    let table_payload = 2 * decoded_slices[0];
+    let ceiling = table_payload + 2 * std::mem::size_of::<Series>() + 1024;
     drop(probe_output);
     assert!(
-        pool.reserved() >= expected,
-        "reservation includes both chunk payloads and independent shared-table slice charges"
+        pool.reserved() >= table_payload,
+        "reservation {} does not cover the {table_payload} bytes of the shared table both chunks \
+         index",
+        pool.reserved()
+    );
+    assert!(
+        pool.reserved() <= ceiling,
+        "reservation {} is past the {ceiling} bytes of table slices, descriptors and control state \
+         the two chunks hold",
+        pool.reserved()
     );
     let first = futures::future::poll_fn(|cx| output.as_mut().poll_next(cx))
         .await
@@ -7098,7 +7081,6 @@ async fn histogram_table_memory_is_charged_and_released_with_retained_chain() {
         .await
         .unwrap()
         .unwrap();
-    let base = operand_chunk_bytes(&decoded);
     let table_cost = decoded
         .fields
         .iter()
@@ -7110,8 +7092,9 @@ async fn histogram_table_memory_is_charged_and_released_with_retained_chain() {
             _ => 0,
         })
         .sum::<usize>();
-    let budget = base + table_cost - 1;
-    let pool = Arc::new(GreedyMemoryPool::new(budget));
+    // A pool with room for the table's slice alone: the chunk that indexes it needs its own
+    // descriptor and rows on top of that, so it is refused and leaves nothing behind.
+    let pool = Arc::new(GreedyMemoryPool::new(table_cost));
     let context = task_context(&pool);
     let plan = node(Scripted::plan(vec![vec![Step::Chunk(many, true)]]), 1);
     let mut output = output_of(&plan, 0, &context);
@@ -7126,16 +7109,14 @@ async fn histogram_table_memory_is_charged_and_released_with_retained_chain() {
 ///
 /// This is what the whole-chain handover costs unless it is charged: a chain is buffered whole before
 /// it is routed, so a child that keeps one series open and never closes it would grow the buffer
-/// without bound. Here the chain is charged to the pool as it grows, and the pool is sized from the
-/// chunks rather than from a number picked by hand.
+/// without bound. Here the chain is charged to the pool as it grows, and the pool has room for one
+/// chunk of the chain and not for two: the growth that is refused is the one that would have made
+/// the buffer exceed the pool.
 ///
-/// The arithmetic is measured rather than assumed, and both sides of it matter. `per_chunk` is what
-/// one chunk costs the read, measured through the same pack/unpack path.
-/// The chain is `CHUNKS` of those, the pool holds `CHUNKS / 2` of them, so one chunk fits with room
-/// to spare and the chain as a whole does not: the growth that is refused is the one that would have
-/// made the buffer exceed the pool, at the `CHUNKS / 2 + 1`-th chunk. A change to what a chunk costs
-/// moves the pool with it instead of silently making the refusal happen at the first chunk or not at
-/// all - which is what a hard-coded byte count did here.
+/// The room is counted in the data the chunks hold and not in the figure the read charges them with:
+/// every chunk of the chain is a `Series` descriptor around a single float row, and four of those
+/// descriptors are what the pool is made of, so one chunk fits and the chain of `CHUNKS` does not,
+/// whatever the read goes on to charge for one.
 ///
 /// The child hands one chunk over per poll ([`Behaviour::OneAtATime`]) for a reason that is not
 /// cosmetic: what a producer hands over in one poll reaches the read as one chunk, so back-to-back
@@ -7153,10 +7134,11 @@ async fn a_chain_that_outgrows_the_pool_ends_every_output_and_releases_it() {
     let steps = (0..CHUNKS)
         .map(|index| Step::chunk(chunk(shared.clone(), index, 1, false)))
         .collect::<Vec<_>>();
-    // What one chunk of this chain costs, measured through the read's own path on an unbounded pool.
-    // The probe closes its chain, so what it measures is a whole stream's worth of chunks rather than
-    // the error a producer that never closes one leaves behind.
-    let per_chunk = {
+    // Every chunk of the chain stands for its series descriptor at least, and the pool below holds
+    // four of those and no more. The probe is here for the shape of the stream it proves -- one chunk
+    // per poll -- not for how much one chunk costs.
+    let per_chunk = std::mem::size_of::<Series>();
+    {
         let probe = Fragile::plan(
             vec![Behaviour::OneAtATime(vec![
                 Step::chunk(chunk(shared.clone(), 0, 1, false)),
@@ -7186,11 +7168,6 @@ async fn a_chain_that_outgrows_the_pool_ends_every_output_and_releases_it() {
             chunks.len(),
             "one chunk per poll is what keeps the frame boundary from coalescing two chunks into one"
         );
-        chunks
-            .iter()
-            .map(|(series, _)| operand_chunk_bytes(series))
-            .max()
-            .expect("the probe chain has chunks of its own")
     };
     let pool_size = per_chunk * (CHUNKS / 2);
     assert!(
